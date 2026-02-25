@@ -6,7 +6,7 @@ use anyhow::Result;
 use clap::Parser;
 use firehose_parquet::config::{BlockMetadata, Compression, Config, Partition};
 use firehose_parquet::grpc::FirehoseClient;
-use firehose_parquet::traits::{BlockIdentity, BlockMapper};
+use firehose_parquet::traits::{fork_step_name, BlockIdentity, BlockMapper};
 use firehose_parquet::writer::OutputWriter;
 use mapper::BitcoinBlockMapper;
 use std::path::PathBuf;
@@ -111,7 +111,9 @@ async fn main() -> Result<()> {
 
     info!(?config, "starting Bitcoin pipeline");
 
-    let mut mapper = BitcoinBlockMapper::new();
+    let final_blocks_only = config.final_blocks_only;
+    let include_fork_step = !final_blocks_only;
+    let mut mapper = BitcoinBlockMapper::new(include_fork_step);
     let mut writer = OutputWriter::new(&config.output, config.partition.clone(), config.compression);
     let flush_rows = config.flush_rows as usize;
     let flush_interval_secs = config.flush_interval_secs;
@@ -127,7 +129,12 @@ async fn main() -> Result<()> {
     let client = FirehoseClient::new(config);
 
     client
-        .stream_blocks(|block_bytes, _cursor, identity: BlockIdentity| {
+        .stream_blocks(|block_bytes, _cursor, identity: BlockIdentity, step: i32| {
+            let fork_step_str = fork_step_name(step);
+            if final_blocks_only && step == 2 {
+                return Ok(());
+            }
+
             let block_height = identity.block_num;
             let ts = identity.timestamp.unwrap_or(0);
             min_block = Some(min_block.map_or(block_height, |s: u64| s.min(block_height)));
@@ -135,7 +142,7 @@ async fn main() -> Result<()> {
             min_timestamp = Some(min_timestamp.map_or(ts, |s: i64| s.min(ts)));
             max_timestamp = Some(max_timestamp.map_or(ts, |s: i64| s.max(ts)));
 
-            mapper.map_block(&block_bytes, &identity)?;
+            mapper.map_block(&block_bytes, &identity, fork_step_str)?;
             blocks_processed += 1;
 
             if blocks_processed % 100 == 0 {

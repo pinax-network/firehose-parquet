@@ -14,6 +14,8 @@ pub struct BlockIdentity {
     pub parent_id: String,
     pub lib_num: u64,
     pub timestamp: Option<i64>, // unix seconds
+    /// Fork step: None when final_blocks_only=true, Some("NEW"/"UNDO"/"FINAL") otherwise.
+    pub fork_step: Option<String>,
 }
 
 /// Returns the 6 canonical identity fields to prepend to every schema.
@@ -78,14 +80,52 @@ impl CanonicalBuilder {
     }
 }
 
+/// Convert a Firehose ForkStep integer to a human-readable string.
+pub fn fork_step_name(step: i32) -> Option<&'static str> {
+    match step {
+        1 => Some("NEW"),
+        2 => Some("UNDO"),
+        3 => Some("FINAL"),
+        _ => None,
+    }
+}
+
+/// Returns the fork_step field definition.
+pub fn fork_step_field() -> Field {
+    Field::new("fork_step", DataType::Utf8, false)
+}
+
+/// Builder for the fork_step column (a simple StringBuilder wrapper).
+pub struct ForkStepBuilder {
+    inner: StringBuilder,
+}
+
+impl ForkStepBuilder {
+    pub fn new() -> Self {
+        Self {
+            inner: StringBuilder::new(),
+        }
+    }
+
+    pub fn append(&mut self, value: &str) {
+        self.inner.append_value(value);
+    }
+
+    pub fn finish(&mut self) -> Arc<dyn arrow::array::Array> {
+        Arc::new(self.inner.finish())
+    }
+
+    pub fn len(&self) -> usize {
+        self.inner.len()
+    }
+}
+
 /// Trait for mapping raw protobuf block bytes into Arrow RecordBatches.
-/// Implement this for each chain type (Solana, EVM, etc.).
 pub trait BlockMapper {
     /// Map raw protobuf bytes (from Any.value) into internal builders.
-    fn map_block(&mut self, block_bytes: &[u8], identity: &BlockIdentity) -> anyhow::Result<()>;
+    fn map_block(&mut self, block_bytes: &[u8], identity: &BlockIdentity, fork_step: Option<&str>) -> anyhow::Result<()>;
 
     /// Flush all buffered data into RecordBatches.
-    /// Returns a map of table_name -> RecordBatch.
     fn flush(&mut self) -> anyhow::Result<HashMap<String, RecordBatch>>;
 
     /// Get current max rows across all tables.

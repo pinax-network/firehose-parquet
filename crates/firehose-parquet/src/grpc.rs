@@ -49,7 +49,7 @@ impl FirehoseClient {
     /// unrecoverable error occurs.
     pub async fn stream_blocks<F>(&self, mut handler: F) -> Result<()>
     where
-        F: FnMut(Vec<u8>, String, BlockIdentity) -> Result<()>,
+        F: FnMut(Vec<u8>, String, BlockIdentity, i32) -> Result<()>,
     {
         let mut cursor: Option<String> = self.config.cursor.clone();
         let backoff_config = ExponentialBackoffBuilder::default()
@@ -129,11 +129,16 @@ impl FirehoseClient {
                         let new_cursor = resp.cursor.clone();
                         debug!(cursor = %new_cursor, step = ?resp.step, "received response");
 
-                        // Only process NEW and FINAL steps
-                        if resp.step == firehose::ForkStep::StepUndo as i32 {
-                            cursor = Some(new_cursor);
-                            continue;
-                        }
+                        let fork_step = if self.config.final_blocks_only {
+                            None
+                        } else {
+                            Some(match resp.step {
+                                1 => "NEW".to_string(),
+                                2 => "UNDO".to_string(),
+                                3 => "FINAL".to_string(),
+                                other => format!("UNKNOWN_{other}"),
+                            })
+                        };
 
                         let identity = resp.metadata.as_ref().map(|m| {
                             BlockIdentity {
@@ -143,11 +148,12 @@ impl FirehoseClient {
                                 parent_id: m.parent_id.clone(),
                                 lib_num: m.lib_num,
                                 timestamp: m.time.as_ref().map(|t| t.seconds),
+                                fork_step: fork_step.clone(),
                             }
                         }).unwrap_or_default();
 
                         if let Some(any) = resp.block {
-                            handler(any.value, new_cursor.clone(), identity)?;
+                            handler(any.value, new_cursor.clone(), identity, resp.step)?;
                         }
 
                         cursor = Some(new_cursor);
