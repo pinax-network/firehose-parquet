@@ -1,8 +1,14 @@
 use arrow::datatypes::{DataType, Field, Schema};
-use firehose_parquet::traits::canonical_fields;
+use firehose_parquet::traits::{canonical_fields, fork_step_field};
 use std::sync::Arc;
 
-pub fn blocks_schema() -> Schema {
+fn maybe_fork_step(fields: &mut Vec<Field>, include: bool) {
+    if include {
+        fields.push(fork_step_field());
+    }
+}
+
+pub fn blocks_schema(include_fork_step: bool) -> Schema {
     let mut fields = canonical_fields();
     fields.extend(vec![
         Field::new("slot", DataType::UInt64, false),
@@ -14,10 +20,11 @@ pub fn blocks_schema() -> Schema {
         Field::new("num_transactions", DataType::UInt32, false),
         Field::new("num_rewards", DataType::UInt32, false),
     ]);
+    maybe_fork_step(&mut fields, include_fork_step);
     Schema::new(fields)
 }
 
-pub fn transactions_schema() -> Schema {
+pub fn transactions_schema(include_fork_step: bool) -> Schema {
     let mut fields = canonical_fields();
     fields.extend(vec![
         Field::new("slot", DataType::UInt64, false),
@@ -44,10 +51,11 @@ pub fn transactions_schema() -> Schema {
             true,
         ),
     ]);
+    maybe_fork_step(&mut fields, include_fork_step);
     Schema::new(fields)
 }
 
-pub fn messages_schema() -> Schema {
+pub fn messages_schema(include_fork_step: bool) -> Schema {
     let mut fields = canonical_fields();
     fields.extend(vec![
         Field::new("slot", DataType::UInt64, false),
@@ -64,10 +72,11 @@ pub fn messages_schema() -> Schema {
             false,
         ),
     ]);
+    maybe_fork_step(&mut fields, include_fork_step);
     Schema::new(fields)
 }
 
-pub fn instructions_schema() -> Schema {
+pub fn instructions_schema(include_fork_step: bool) -> Schema {
     let mut fields = canonical_fields();
     fields.extend(vec![
         Field::new("slot", DataType::UInt64, false),
@@ -80,10 +89,11 @@ pub fn instructions_schema() -> Schema {
         Field::new("inner_index", DataType::UInt32, true),
         Field::new("stack_height", DataType::UInt32, true),
     ]);
+    maybe_fork_step(&mut fields, include_fork_step);
     Schema::new(fields)
 }
 
-pub fn rewards_schema() -> Schema {
+pub fn rewards_schema(include_fork_step: bool) -> Schema {
     let mut fields = canonical_fields();
     fields.extend(vec![
         Field::new("slot", DataType::UInt64, false),
@@ -94,6 +104,7 @@ pub fn rewards_schema() -> Schema {
         Field::new("reward_type", DataType::Int32, false),
         Field::new("commission", DataType::Utf8, true),
     ]);
+    maybe_fork_step(&mut fields, include_fork_step);
     Schema::new(fields)
 }
 

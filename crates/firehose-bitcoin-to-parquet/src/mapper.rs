@@ -9,11 +9,28 @@ use std::collections::HashMap;
 use arrow::array::Array;
 use std::sync::Arc;
 
+fn append_fork_step(builder: &mut Option<StringBuilder>, fork_step: Option<&str>) {
+    if let Some(ref mut b) = builder {
+        b.append_value(fork_step.unwrap_or("UNKNOWN"));
+    }
+}
+
+fn finish_fork_step(builder: &mut Option<StringBuilder>, columns: &mut Vec<Arc<dyn Array>>) {
+    if let Some(ref mut b) = builder {
+        columns.push(Arc::new(b.finish()) as Arc<dyn Array>);
+    }
+}
+
+fn mk_fork_step(include: bool) -> Option<StringBuilder> {
+    if include { Some(StringBuilder::new()) } else { None }
+}
+
 // ---------------------------------------------------------------------------
 // Bitcoin BlockMapper
 // ---------------------------------------------------------------------------
 
 pub struct BitcoinBlockMapper {
+    include_fork_step: bool,
     blocks: BlocksBuilder,
     transactions: TransactionsBuilder,
     inputs: InputsBuilder,
@@ -25,25 +42,25 @@ pub struct BitcoinBlockMapper {
 }
 
 impl BitcoinBlockMapper {
-    pub fn new() -> Self {
+    pub fn new(include_fork_step: bool) -> Self {
         Self {
-            blocks: BlocksBuilder::new(),
-            transactions: TransactionsBuilder::new(),
-            inputs: InputsBuilder::new(),
-            outputs: OutputsBuilder::new(),
-            blocks_schema: schema::blocks_schema(),
-            transactions_schema: schema::transactions_schema(),
-            inputs_schema: schema::inputs_schema(),
-            outputs_schema: schema::outputs_schema(),
+            include_fork_step,
+            blocks: BlocksBuilder::new(include_fork_step),
+            transactions: TransactionsBuilder::new(include_fork_step),
+            inputs: InputsBuilder::new(include_fork_step),
+            outputs: OutputsBuilder::new(include_fork_step),
+            blocks_schema: schema::blocks_schema(include_fork_step),
+            transactions_schema: schema::transactions_schema(include_fork_step),
+            inputs_schema: schema::inputs_schema(include_fork_step),
+            outputs_schema: schema::outputs_schema(include_fork_step),
         }
     }
 
-    fn map_btc_block(&mut self, block: &btc::Block, identity: &BlockIdentity) {
+    fn map_btc_block(&mut self, block: &btc::Block, identity: &BlockIdentity, fork_step: Option<&str>) {
         let height = block.height;
         let block_hash = &block.hash;
         let block_time = block.time;
 
-        // -- blocks table --
         self.blocks.canonical.append(identity);
         self.blocks.hash.append_value(&block.hash);
         self.blocks.height.append_value(height);
@@ -60,10 +77,10 @@ impl BitcoinBlockMapper {
         self.blocks.n_tx.append_value(block.n_tx);
         self.blocks.mediantime.append_value(block.mediantime);
         self.blocks.chainwork.append_value(&block.chainwork);
+        append_fork_step(&mut self.blocks.fork_step, fork_step);
 
-        // -- transactions, inputs, outputs --
         for (tx_index, tx) in block.tx.iter().enumerate() {
-            self.map_transaction(height, block_hash, block_time, tx_index as u32, tx, identity);
+            self.map_transaction(height, block_hash, block_time, tx_index as u32, tx, identity, fork_step);
         }
     }
 
@@ -75,6 +92,7 @@ impl BitcoinBlockMapper {
         tx_index: u32,
         tx: &btc::Transaction,
         identity: &BlockIdentity,
+        fork_step: Option<&str>,
     ) {
         let tx_hash = &tx.txid;
 
@@ -90,8 +108,8 @@ impl BitcoinBlockMapper {
         self.transactions.block_height.append_value(block_height);
         self.transactions.block_time.append_value(block_time);
         self.transactions.tx_index.append_value(tx_index);
+        append_fork_step(&mut self.transactions.fork_step, fork_step);
 
-        // -- inputs --
         for (i, vin) in tx.vin.iter().enumerate() {
             let script_sig = vin.script_sig.as_ref();
             self.inputs.canonical.append(identity);
@@ -105,15 +123,14 @@ impl BitcoinBlockMapper {
             self.inputs.script_sig_hex.append_value(script_sig.map_or("", |s| &s.hex));
             self.inputs.coinbase.append_value(&vin.coinbase);
 
-            // witness: List<Utf8>
             let witness_values = self.inputs.witness.values();
             for w in &vin.txinwitness {
                 witness_values.append_value(w);
             }
             self.inputs.witness.append(true);
+            append_fork_step(&mut self.inputs.fork_step, fork_step);
         }
 
-        // -- outputs --
         for vout in &tx.vout {
             let script = vout.script_pub_key.as_ref();
             self.outputs.canonical.append(identity);
@@ -125,14 +142,15 @@ impl BitcoinBlockMapper {
             self.outputs.script_pubkey_hex.append_value(script.map_or("", |s| &s.hex));
             self.outputs.script_pubkey_type.append_value(script.map_or("", |s| &s.r#type));
             self.outputs.script_pubkey_address.append_value(script.map_or("", |s| &s.address));
+            append_fork_step(&mut self.outputs.fork_step, fork_step);
         }
     }
 }
 
 impl BlockMapper for BitcoinBlockMapper {
-    fn map_block(&mut self, block_bytes: &[u8], identity: &BlockIdentity) -> anyhow::Result<()> {
+    fn map_block(&mut self, block_bytes: &[u8], identity: &BlockIdentity, fork_step: Option<&str>) -> anyhow::Result<()> {
         let block = btc::Block::decode(block_bytes)?;
-        self.map_btc_block(&block, identity);
+        self.map_btc_block(&block, identity, fork_step);
         Ok(())
     }
 
@@ -178,10 +196,11 @@ struct BlocksBuilder {
     n_tx: UInt32Builder,
     mediantime: Int64Builder,
     chainwork: StringBuilder,
+    fork_step: Option<StringBuilder>,
 }
 
 impl BlocksBuilder {
-    fn new() -> Self {
+    fn new(include_fork_step: bool) -> Self {
         Self {
             canonical: CanonicalBuilder::new(),
             hash: StringBuilder::new(),
@@ -199,6 +218,7 @@ impl BlocksBuilder {
             n_tx: UInt32Builder::new(),
             mediantime: Int64Builder::new(),
             chainwork: StringBuilder::new(),
+            fork_step: mk_fork_step(include_fork_step),
         }
     }
 
@@ -221,6 +241,7 @@ impl BlocksBuilder {
             Arc::new(self.mediantime.finish()) as Arc<dyn Array>,
             Arc::new(self.chainwork.finish()) as Arc<dyn Array>,
         ]);
+        finish_fork_step(&mut self.fork_step, &mut columns);
         Ok(RecordBatch::try_new(Arc::new(schema.clone()), columns)?)
     }
 }
@@ -238,10 +259,11 @@ struct TransactionsBuilder {
     block_height: Int64Builder,
     block_time: Int64Builder,
     tx_index: UInt32Builder,
+    fork_step: Option<StringBuilder>,
 }
 
 impl TransactionsBuilder {
-    fn new() -> Self {
+    fn new(include_fork_step: bool) -> Self {
         Self {
             canonical: CanonicalBuilder::new(),
             txid: StringBuilder::new(),
@@ -255,6 +277,7 @@ impl TransactionsBuilder {
             block_height: Int64Builder::new(),
             block_time: Int64Builder::new(),
             tx_index: UInt32Builder::new(),
+            fork_step: mk_fork_step(include_fork_step),
         }
     }
 
@@ -273,6 +296,7 @@ impl TransactionsBuilder {
             Arc::new(self.block_time.finish()) as Arc<dyn Array>,
             Arc::new(self.tx_index.finish()) as Arc<dyn Array>,
         ]);
+        finish_fork_step(&mut self.fork_step, &mut columns);
         Ok(RecordBatch::try_new(Arc::new(schema.clone()), columns)?)
     }
 }
@@ -289,10 +313,11 @@ struct InputsBuilder {
     script_sig_hex: StringBuilder,
     coinbase: StringBuilder,
     witness: ListBuilder<StringBuilder>,
+    fork_step: Option<StringBuilder>,
 }
 
 impl InputsBuilder {
-    fn new() -> Self {
+    fn new(include_fork_step: bool) -> Self {
         Self {
             canonical: CanonicalBuilder::new(),
             tx_hash: StringBuilder::new(),
@@ -305,6 +330,7 @@ impl InputsBuilder {
             script_sig_hex: StringBuilder::new(),
             coinbase: StringBuilder::new(),
             witness: ListBuilder::new(StringBuilder::new()),
+            fork_step: mk_fork_step(include_fork_step),
         }
     }
 
@@ -322,6 +348,7 @@ impl InputsBuilder {
             Arc::new(self.coinbase.finish()) as Arc<dyn Array>,
             Arc::new(self.witness.finish()) as Arc<dyn Array>,
         ]);
+        finish_fork_step(&mut self.fork_step, &mut columns);
         Ok(RecordBatch::try_new(Arc::new(schema.clone()), columns)?)
     }
 }
@@ -336,10 +363,11 @@ struct OutputsBuilder {
     script_pubkey_hex: StringBuilder,
     script_pubkey_type: StringBuilder,
     script_pubkey_address: StringBuilder,
+    fork_step: Option<StringBuilder>,
 }
 
 impl OutputsBuilder {
-    fn new() -> Self {
+    fn new(include_fork_step: bool) -> Self {
         Self {
             canonical: CanonicalBuilder::new(),
             tx_hash: StringBuilder::new(),
@@ -350,6 +378,7 @@ impl OutputsBuilder {
             script_pubkey_hex: StringBuilder::new(),
             script_pubkey_type: StringBuilder::new(),
             script_pubkey_address: StringBuilder::new(),
+            fork_step: mk_fork_step(include_fork_step),
         }
     }
 
@@ -365,6 +394,7 @@ impl OutputsBuilder {
             Arc::new(self.script_pubkey_type.finish()) as Arc<dyn Array>,
             Arc::new(self.script_pubkey_address.finish()) as Arc<dyn Array>,
         ]);
+        finish_fork_step(&mut self.fork_step, &mut columns);
         Ok(RecordBatch::try_new(Arc::new(schema.clone()), columns)?)
     }
 }
@@ -437,8 +467,8 @@ mod tests {
     fn test_map_and_flush() {
         let block = make_test_block(0);
         let block_bytes = prost::Message::encode_to_vec(&block);
-        let mut mapper = BitcoinBlockMapper::new();
-        mapper.map_block(&block_bytes, &BlockIdentity::default()).unwrap();
+        let mut mapper = BitcoinBlockMapper::new(false);
+        mapper.map_block(&block_bytes, &BlockIdentity::default(), None).unwrap();
 
         let batches = mapper.flush().unwrap();
         assert_eq!(batches["blocks"].num_rows(), 1);
@@ -469,8 +499,8 @@ mod tests {
             mediantime: 0,
         };
         let block_bytes = prost::Message::encode_to_vec(&block);
-        let mut mapper = BitcoinBlockMapper::new();
-        mapper.map_block(&block_bytes, &BlockIdentity::default()).unwrap();
+        let mut mapper = BitcoinBlockMapper::new(false);
+        mapper.map_block(&block_bytes, &BlockIdentity::default(), None).unwrap();
         let batches = mapper.flush().unwrap();
         assert_eq!(batches["blocks"].num_rows(), 1);
         assert_eq!(batches["transactions"].num_rows(), 0);
@@ -482,19 +512,34 @@ mod tests {
     fn test_flush_resets() {
         let block = make_test_block(1);
         let block_bytes = prost::Message::encode_to_vec(&block);
-        let mut mapper = BitcoinBlockMapper::new();
-        mapper.map_block(&block_bytes, &BlockIdentity::default()).unwrap();
+        let mut mapper = BitcoinBlockMapper::new(false);
+        mapper.map_block(&block_bytes, &BlockIdentity::default(), None).unwrap();
         let _ = mapper.flush().unwrap();
         assert_eq!(mapper.max_table_rows(), 0);
     }
 
     #[test]
     fn test_table_names() {
-        let mapper = BitcoinBlockMapper::new();
+        let mapper = BitcoinBlockMapper::new(false);
         assert_eq!(mapper.table_names().len(), 4);
         assert!(mapper.table_names().contains(&"blocks"));
         assert!(mapper.table_names().contains(&"transactions"));
         assert!(mapper.table_names().contains(&"inputs"));
         assert!(mapper.table_names().contains(&"outputs"));
+    }
+
+    #[test]
+    fn test_fork_step_column_included() {
+        let block = make_test_block(0);
+        let block_bytes = prost::Message::encode_to_vec(&block);
+        let mut mapper = BitcoinBlockMapper::new(true);
+        mapper.map_block(&block_bytes, &BlockIdentity::default(), Some("FINAL")).unwrap();
+
+        let batches = mapper.flush().unwrap();
+        let blocks_batch = &batches["blocks"];
+        let last_col = blocks_batch.num_columns() - 1;
+        assert_eq!(blocks_batch.schema().field(last_col).name(), "fork_step");
+        let fork_col = blocks_batch.column(last_col).as_any().downcast_ref::<StringArray>().unwrap();
+        assert_eq!(fork_col.value(0), "FINAL");
     }
 }

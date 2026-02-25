@@ -8,7 +8,20 @@ use prost::Message;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+fn append_fork_step(builder: &mut Option<StringBuilder>, fork_step: Option<&str>) {
+    if let Some(ref mut b) = builder {
+        b.append_value(fork_step.unwrap_or("UNKNOWN"));
+    }
+}
+
+fn finish_fork_step(builder: &mut Option<StringBuilder>, columns: &mut Vec<Arc<dyn Array>>) {
+    if let Some(ref mut b) = builder {
+        columns.push(Arc::new(b.finish()) as Arc<dyn Array>);
+    }
+}
+
 pub struct SolanaBlockMapper {
+    include_fork_step: bool,
     blocks: BlocksBuilder,
     transactions: TransactionsBuilder,
     messages: MessagesBuilder,
@@ -22,22 +35,23 @@ pub struct SolanaBlockMapper {
 }
 
 impl SolanaBlockMapper {
-    pub fn new() -> Self {
+    pub fn new(include_fork_step: bool) -> Self {
         Self {
-            blocks: BlocksBuilder::new(),
-            transactions: TransactionsBuilder::new(),
-            messages: MessagesBuilder::new(),
-            instructions: InstructionsBuilder::new(),
-            rewards: RewardsBuilder::new(),
-            blocks_schema: schema::blocks_schema(),
-            transactions_schema: schema::transactions_schema(),
-            messages_schema: schema::messages_schema(),
-            instructions_schema: schema::instructions_schema(),
-            rewards_schema: schema::rewards_schema(),
+            include_fork_step,
+            blocks: BlocksBuilder::new(include_fork_step),
+            transactions: TransactionsBuilder::new(include_fork_step),
+            messages: MessagesBuilder::new(include_fork_step),
+            instructions: InstructionsBuilder::new(include_fork_step),
+            rewards: RewardsBuilder::new(include_fork_step),
+            blocks_schema: schema::blocks_schema(include_fork_step),
+            transactions_schema: schema::transactions_schema(include_fork_step),
+            messages_schema: schema::messages_schema(include_fork_step),
+            instructions_schema: schema::instructions_schema(include_fork_step),
+            rewards_schema: schema::rewards_schema(include_fork_step),
         }
     }
 
-    fn map_solana_block(&mut self, block: &solana::Block, identity: &BlockIdentity) {
+    fn map_solana_block(&mut self, block: &solana::Block, identity: &BlockIdentity, fork_step: Option<&str>) {
         let slot = block.slot;
 
         self.blocks.canonical.append(identity);
@@ -55,17 +69,18 @@ impl SolanaBlockMapper {
         }
         self.blocks.num_transactions.append_value(block.transactions.len() as u32);
         self.blocks.num_rewards.append_value(block.rewards.len() as u32);
+        append_fork_step(&mut self.blocks.fork_step, fork_step);
 
         for (tx_idx, confirmed_tx) in block.transactions.iter().enumerate() {
-            self.map_transaction(slot, tx_idx as u32, confirmed_tx, identity);
+            self.map_transaction(slot, tx_idx as u32, confirmed_tx, identity, fork_step);
         }
 
         for (reward_idx, reward) in block.rewards.iter().enumerate() {
-            self.map_reward(slot, reward_idx as u32, reward, identity);
+            self.map_reward(slot, reward_idx as u32, reward, identity, fork_step);
         }
     }
 
-    fn map_transaction(&mut self, slot: u64, tx_idx: u32, confirmed: &solana::ConfirmedTransaction, identity: &BlockIdentity) {
+    fn map_transaction(&mut self, slot: u64, tx_idx: u32, confirmed: &solana::ConfirmedTransaction, identity: &BlockIdentity, fork_step: Option<&str>) {
         let tx = match confirmed.transaction.as_ref() {
             Some(t) => t,
             None => return,
@@ -129,6 +144,7 @@ impl SolanaBlockMapper {
             self.transactions.pre_balances.append(false);
             self.transactions.post_balances.append(false);
         }
+        append_fork_step(&mut self.transactions.fork_step, fork_step);
 
         // messages
         self.messages.canonical.append(identity);
@@ -153,6 +169,7 @@ impl SolanaBlockMapper {
             }
             self.messages.account_keys.append(true);
         }
+        append_fork_step(&mut self.messages.fork_step, fork_step);
 
         // instructions (top-level)
         let mut global_instr_idx = 0u32;
@@ -167,6 +184,7 @@ impl SolanaBlockMapper {
             self.instructions.is_inner.append_value(false);
             self.instructions.inner_index.append_null();
             self.instructions.stack_height.append_null();
+            append_fork_step(&mut self.instructions.fork_step, fork_step);
             global_instr_idx += 1;
         }
 
@@ -187,13 +205,14 @@ impl SolanaBlockMapper {
                         Some(sh) => self.instructions.stack_height.append_value(sh),
                         None => self.instructions.stack_height.append_null(),
                     }
+                    append_fork_step(&mut self.instructions.fork_step, fork_step);
                     global_instr_idx += 1;
                 }
             }
         }
     }
 
-    fn map_reward(&mut self, slot: u64, idx: u32, reward: &solana::Reward, identity: &BlockIdentity) {
+    fn map_reward(&mut self, slot: u64, idx: u32, reward: &solana::Reward, identity: &BlockIdentity, fork_step: Option<&str>) {
         self.rewards.canonical.append(identity);
         self.rewards.slot.append_value(slot);
         self.rewards.reward_index.append_value(idx);
@@ -206,19 +225,14 @@ impl SolanaBlockMapper {
         } else {
             self.rewards.commission.append_value(&reward.commission);
         }
-    }
-}
-
-impl Default for SolanaBlockMapper {
-    fn default() -> Self {
-        Self::new()
+        append_fork_step(&mut self.rewards.fork_step, fork_step);
     }
 }
 
 impl BlockMapper for SolanaBlockMapper {
-    fn map_block(&mut self, block_bytes: &[u8], identity: &BlockIdentity) -> anyhow::Result<()> {
+    fn map_block(&mut self, block_bytes: &[u8], identity: &BlockIdentity, fork_step: Option<&str>) -> anyhow::Result<()> {
         let block = solana::Block::decode(block_bytes)?;
-        self.map_solana_block(&block, identity);
+        self.map_solana_block(&block, identity, fork_step);
         Ok(())
     }
 
@@ -264,10 +278,11 @@ struct BlocksBuilder {
     block_time: Int64Builder,
     num_transactions: UInt32Builder,
     num_rewards: UInt32Builder,
+    fork_step: Option<StringBuilder>,
 }
 
 impl BlocksBuilder {
-    fn new() -> Self {
+    fn new(include_fork_step: bool) -> Self {
         Self {
             canonical: CanonicalBuilder::new(),
             slot: UInt64Builder::new(),
@@ -278,6 +293,7 @@ impl BlocksBuilder {
             block_time: Int64Builder::new(),
             num_transactions: UInt32Builder::new(),
             num_rewards: UInt32Builder::new(),
+            fork_step: if include_fork_step { Some(StringBuilder::new()) } else { None },
         }
     }
 
@@ -293,6 +309,7 @@ impl BlocksBuilder {
             Arc::new(self.num_transactions.finish()) as Arc<dyn Array>,
             Arc::new(self.num_rewards.finish()) as Arc<dyn Array>,
         ]);
+        finish_fork_step(&mut self.fork_step, &mut columns);
         Ok(RecordBatch::try_new(Arc::new(schema.clone()), columns)?)
     }
 }
@@ -310,10 +327,11 @@ struct TransactionsBuilder {
     log_messages: ListBuilder<StringBuilder>,
     pre_balances: ListBuilder<UInt64Builder>,
     post_balances: ListBuilder<UInt64Builder>,
+    fork_step: Option<StringBuilder>,
 }
 
 impl TransactionsBuilder {
-    fn new() -> Self {
+    fn new(include_fork_step: bool) -> Self {
         Self {
             canonical: CanonicalBuilder::new(),
             slot: UInt64Builder::new(),
@@ -327,6 +345,7 @@ impl TransactionsBuilder {
             log_messages: ListBuilder::new(StringBuilder::new()),
             pre_balances: ListBuilder::new(UInt64Builder::new()),
             post_balances: ListBuilder::new(UInt64Builder::new()),
+            fork_step: if include_fork_step { Some(StringBuilder::new()) } else { None },
         }
     }
 
@@ -345,6 +364,7 @@ impl TransactionsBuilder {
             Arc::new(self.pre_balances.finish()) as Arc<dyn Array>,
             Arc::new(self.post_balances.finish()) as Arc<dyn Array>,
         ]);
+        finish_fork_step(&mut self.fork_step, &mut columns);
         Ok(RecordBatch::try_new(Arc::new(schema.clone()), columns)?)
     }
 }
@@ -360,10 +380,11 @@ struct MessagesBuilder {
     recent_blockhash: BinaryBuilder,
     versioned: BooleanBuilder,
     account_keys: ListBuilder<BinaryBuilder>,
+    fork_step: Option<StringBuilder>,
 }
 
 impl MessagesBuilder {
-    fn new() -> Self {
+    fn new(include_fork_step: bool) -> Self {
         Self {
             canonical: CanonicalBuilder::new(),
             slot: UInt64Builder::new(),
@@ -375,6 +396,7 @@ impl MessagesBuilder {
             recent_blockhash: BinaryBuilder::new(),
             versioned: BooleanBuilder::new(),
             account_keys: ListBuilder::new(BinaryBuilder::new()),
+            fork_step: if include_fork_step { Some(StringBuilder::new()) } else { None },
         }
     }
 
@@ -391,6 +413,7 @@ impl MessagesBuilder {
             Arc::new(self.versioned.finish()) as Arc<dyn Array>,
             Arc::new(self.account_keys.finish()) as Arc<dyn Array>,
         ]);
+        finish_fork_step(&mut self.fork_step, &mut columns);
         Ok(RecordBatch::try_new(Arc::new(schema.clone()), columns)?)
     }
 }
@@ -406,10 +429,11 @@ struct InstructionsBuilder {
     is_inner: BooleanBuilder,
     inner_index: UInt32Builder,
     stack_height: UInt32Builder,
+    fork_step: Option<StringBuilder>,
 }
 
 impl InstructionsBuilder {
-    fn new() -> Self {
+    fn new(include_fork_step: bool) -> Self {
         Self {
             canonical: CanonicalBuilder::new(),
             slot: UInt64Builder::new(),
@@ -421,6 +445,7 @@ impl InstructionsBuilder {
             is_inner: BooleanBuilder::new(),
             inner_index: UInt32Builder::new(),
             stack_height: UInt32Builder::new(),
+            fork_step: if include_fork_step { Some(StringBuilder::new()) } else { None },
         }
     }
 
@@ -437,6 +462,7 @@ impl InstructionsBuilder {
             Arc::new(self.inner_index.finish()) as Arc<dyn Array>,
             Arc::new(self.stack_height.finish()) as Arc<dyn Array>,
         ]);
+        finish_fork_step(&mut self.fork_step, &mut columns);
         Ok(RecordBatch::try_new(Arc::new(schema.clone()), columns)?)
     }
 }
@@ -450,10 +476,11 @@ struct RewardsBuilder {
     post_balance: UInt64Builder,
     reward_type: Int32Builder,
     commission: StringBuilder,
+    fork_step: Option<StringBuilder>,
 }
 
 impl RewardsBuilder {
-    fn new() -> Self {
+    fn new(include_fork_step: bool) -> Self {
         Self {
             canonical: CanonicalBuilder::new(),
             slot: UInt64Builder::new(),
@@ -463,6 +490,7 @@ impl RewardsBuilder {
             post_balance: UInt64Builder::new(),
             reward_type: Int32Builder::new(),
             commission: StringBuilder::new(),
+            fork_step: if include_fork_step { Some(StringBuilder::new()) } else { None },
         }
     }
 
@@ -477,6 +505,7 @@ impl RewardsBuilder {
             Arc::new(self.reward_type.finish()) as Arc<dyn Array>,
             Arc::new(self.commission.finish()) as Arc<dyn Array>,
         ]);
+        finish_fork_step(&mut self.fork_step, &mut columns);
         Ok(RecordBatch::try_new(Arc::new(schema.clone()), columns)?)
     }
 }
@@ -555,8 +584,8 @@ mod tests {
     fn test_map_and_flush_single_block() {
         let block = make_test_block(100);
         let block_bytes = prost::Message::encode_to_vec(&block);
-        let mut mapper = SolanaBlockMapper::new();
-        mapper.map_block(&block_bytes, &BlockIdentity::default()).unwrap();
+        let mut mapper = SolanaBlockMapper::new(false);
+        mapper.map_block(&block_bytes, &BlockIdentity::default(), None).unwrap();
 
         assert_eq!(mapper.max_table_rows(), 2); // 2 instructions
 
@@ -572,8 +601,8 @@ mod tests {
     fn test_flush_resets_builders() {
         let block = make_test_block(1);
         let block_bytes = prost::Message::encode_to_vec(&block);
-        let mut mapper = SolanaBlockMapper::new();
-        mapper.map_block(&block_bytes, &BlockIdentity::default()).unwrap();
+        let mut mapper = SolanaBlockMapper::new(false);
+        mapper.map_block(&block_bytes, &BlockIdentity::default(), None).unwrap();
         let _ = mapper.flush().unwrap();
         assert_eq!(mapper.max_table_rows(), 0);
     }
@@ -591,10 +620,25 @@ mod tests {
             rewards: vec![],
         };
         let block_bytes = prost::Message::encode_to_vec(&block);
-        let mut mapper = SolanaBlockMapper::new();
-        mapper.map_block(&block_bytes, &BlockIdentity::default()).unwrap();
+        let mut mapper = SolanaBlockMapper::new(false);
+        mapper.map_block(&block_bytes, &BlockIdentity::default(), None).unwrap();
         let batches = mapper.flush().unwrap();
         assert_eq!(batches["blocks"].num_rows(), 1);
         assert_eq!(batches["transactions"].num_rows(), 0);
+    }
+
+    #[test]
+    fn test_fork_step_column_included() {
+        let block = make_test_block(100);
+        let block_bytes = prost::Message::encode_to_vec(&block);
+        let mut mapper = SolanaBlockMapper::new(true);
+        mapper.map_block(&block_bytes, &BlockIdentity::default(), Some("NEW")).unwrap();
+
+        let batches = mapper.flush().unwrap();
+        let blocks_batch = &batches["blocks"];
+        let last_col = blocks_batch.num_columns() - 1;
+        assert_eq!(blocks_batch.schema().field(last_col).name(), "fork_step");
+        let fork_col = blocks_batch.column(last_col).as_any().downcast_ref::<StringArray>().unwrap();
+        assert_eq!(fork_col.value(0), "NEW");
     }
 }

@@ -1,8 +1,14 @@
 use arrow::datatypes::{DataType, Field, Schema};
-use firehose_parquet::traits::canonical_fields;
+use firehose_parquet::traits::{canonical_fields, fork_step_field};
 use std::sync::Arc;
 
-pub fn blocks_schema() -> Schema {
+fn maybe_fork_step(fields: &mut Vec<Field>, include: bool) {
+    if include {
+        fields.push(fork_step_field());
+    }
+}
+
+pub fn blocks_schema(include_fork_step: bool) -> Schema {
     let mut fields = canonical_fields();
     fields.extend(vec![
         Field::new("hash", DataType::Utf8, false),
@@ -21,10 +27,11 @@ pub fn blocks_schema() -> Schema {
         Field::new("mediantime", DataType::Int64, false),
         Field::new("chainwork", DataType::Utf8, false),
     ]);
+    maybe_fork_step(&mut fields, include_fork_step);
     Schema::new(fields)
 }
 
-pub fn transactions_schema() -> Schema {
+pub fn transactions_schema(include_fork_step: bool) -> Schema {
     let mut fields = canonical_fields();
     fields.extend(vec![
         Field::new("txid", DataType::Utf8, false),
@@ -39,10 +46,11 @@ pub fn transactions_schema() -> Schema {
         Field::new("block_time", DataType::Int64, false),
         Field::new("tx_index", DataType::UInt32, false),
     ]);
+    maybe_fork_step(&mut fields, include_fork_step);
     Schema::new(fields)
 }
 
-pub fn inputs_schema() -> Schema {
+pub fn inputs_schema(include_fork_step: bool) -> Schema {
     let mut fields = canonical_fields();
     fields.extend(vec![
         Field::new("tx_hash", DataType::Utf8, false),
@@ -60,10 +68,11 @@ pub fn inputs_schema() -> Schema {
             false,
         ),
     ]);
+    maybe_fork_step(&mut fields, include_fork_step);
     Schema::new(fields)
 }
 
-pub fn outputs_schema() -> Schema {
+pub fn outputs_schema(include_fork_step: bool) -> Schema {
     let mut fields = canonical_fields();
     fields.extend(vec![
         Field::new("tx_hash", DataType::Utf8, false),
@@ -75,6 +84,7 @@ pub fn outputs_schema() -> Schema {
         Field::new("script_pubkey_type", DataType::Utf8, false),
         Field::new("script_pubkey_address", DataType::Utf8, false),
     ]);
+    maybe_fork_step(&mut fields, include_fork_step);
     Schema::new(fields)
 }
 
