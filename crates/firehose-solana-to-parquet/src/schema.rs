@@ -1,4 +1,5 @@
 use arrow::datatypes::{DataType, Field, Schema};
+use firehose_parquet::encode::{bytes_data_type, BytesListColumn, EncodeBytes};
 use firehose_parquet::traits::{canonical_fields, fork_step_field};
 use std::sync::Arc;
 
@@ -24,15 +25,15 @@ pub fn blocks_schema(include_fork_step: bool) -> Schema {
     Schema::new(fields)
 }
 
-pub fn transactions_schema(include_fork_step: bool) -> Schema {
+pub fn transactions_schema(include_fork_step: bool, encoding: &EncodeBytes) -> Schema {
     let mut fields = canonical_fields();
     fields.extend(vec![
         Field::new("slot", DataType::UInt64, false),
         Field::new("transaction_index", DataType::UInt32, false),
-        Field::new("signature", DataType::Binary, false),
+        Field::new("signature", bytes_data_type(encoding), false),
         Field::new("num_signatures", DataType::UInt32, false),
         Field::new("fee", DataType::UInt64, false),
-        Field::new("err", DataType::Binary, true),
+        Field::new("err", bytes_data_type(encoding), true),
         Field::new("success", DataType::Boolean, false),
         Field::new("compute_units_consumed", DataType::UInt64, true),
         Field::new(
@@ -55,7 +56,7 @@ pub fn transactions_schema(include_fork_step: bool) -> Schema {
     Schema::new(fields)
 }
 
-pub fn messages_schema(include_fork_step: bool) -> Schema {
+pub fn messages_schema(include_fork_step: bool, encoding: &EncodeBytes) -> Schema {
     let mut fields = canonical_fields();
     fields.extend(vec![
         Field::new("slot", DataType::UInt64, false),
@@ -64,11 +65,11 @@ pub fn messages_schema(include_fork_step: bool) -> Schema {
         Field::new("num_required_signatures", DataType::UInt32, false),
         Field::new("num_readonly_signed_accounts", DataType::UInt32, false),
         Field::new("num_readonly_unsigned_accounts", DataType::UInt32, false),
-        Field::new("recent_blockhash", DataType::Binary, false),
+        Field::new("recent_blockhash", bytes_data_type(encoding), false),
         Field::new("versioned", DataType::Boolean, false),
         Field::new(
             "account_keys",
-            DataType::List(Arc::new(Field::new("item", DataType::Binary, true))),
+            BytesListColumn::data_type(encoding),
             false,
         ),
     ]);
@@ -76,15 +77,15 @@ pub fn messages_schema(include_fork_step: bool) -> Schema {
     Schema::new(fields)
 }
 
-pub fn instructions_schema(include_fork_step: bool) -> Schema {
+pub fn instructions_schema(include_fork_step: bool, encoding: &EncodeBytes) -> Schema {
     let mut fields = canonical_fields();
     fields.extend(vec![
         Field::new("slot", DataType::UInt64, false),
         Field::new("transaction_index", DataType::UInt32, false),
         Field::new("instruction_index", DataType::UInt32, false),
         Field::new("program_id_index", DataType::UInt32, false),
-        Field::new("accounts", DataType::Binary, false),
-        Field::new("data", DataType::Binary, false),
+        Field::new("accounts", bytes_data_type(encoding), false),
+        Field::new("data", bytes_data_type(encoding), false),
         Field::new("is_inner", DataType::Boolean, false),
         Field::new("inner_index", DataType::UInt32, true),
         Field::new("stack_height", DataType::UInt32, true),
