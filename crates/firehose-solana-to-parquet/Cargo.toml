@@ -1,0 +1,17 @@
+[package]
+name = "firehose-solana-to-parquet"
+version = "0.1.0"
+edition = "2021"
+description = "CLI to convert Firehose Solana gRPC stream to Apache Parquet"
+
+[[bin]]
+name = "firehose-solana-to-parquet"
+path = "src/main.rs"
+
+[dependencies]
+firehose-parquet = { path = "../firehose-parquet" }
+tokio = { version = "1", features = ["full"] }
+clap = { version = "4", features = ["derive"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+anyhow = "1"

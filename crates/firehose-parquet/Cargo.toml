@@ -1,0 +1,23 @@
+[package]
+name = "firehose-parquet"
+version = "0.1.0"
+edition = "2021"
+description = "Core library for converting Firehose Solana gRPC streams to Apache Parquet"
+
+[dependencies]
+arrow = { version = "58", features = ["prettyprint"] }
+parquet = { version = "58", features = ["arrow"] }
+tonic = { version = "0.12", features = ["tls", "tls-webpki-roots", "transport"] }
+prost = "0.13"
+prost-types = "0.13"
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+anyhow = "1"
+thiserror = "2"
+backoff = { version = "0.4", features = ["tokio"] }
+
+[build-dependencies]
+tonic-build = "0.12"
+
+[dev-dependencies]
+tempfile = "3"
