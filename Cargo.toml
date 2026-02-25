@@ -6,4 +6,7 @@ members = [
     "crates/firehose-evm-to-parquet",
     "crates/firehose-bitcoin-to-parquet",
     "crates/firehose-near-to-parquet",
+    "crates/firehose-cosmos-to-parquet",
+    "crates/firehose-tron-to-parquet",
+    "crates/firehose-beacon-to-parquet",
 ]

@@ -1,0 +1,154 @@
+syntax = "proto3";
+package sf.cosmos.type.v2;
+
+import "google/protobuf/timestamp.proto";
+import "google/protobuf/duration.proto";
+
+option go_package = "github.com/streamingfast/firehose-cosmos/cosmos/pb/sf/cosmos/type/v2;pbcomos";
+
+// Firehose-centric Block
+message Block {
+  bytes hash = 1;
+  int64 height = 2;
+
+  google.protobuf.Timestamp time = 3;
+
+  Header header = 4;
+
+  repeated Misbehavior misbehavior = 6;
+
+  repeated Event events = 7;
+
+  repeated bytes txs = 8;
+  repeated TxResults tx_results = 9;
+
+  repeated ValidatorUpdate validator_updates = 10;
+
+  ConsensusParams consensus_param_updates = 11;
+
+  reserved 12;
+  reserved 13;
+  reserved 14;
+}
+
+// Header defines the structure of a block header.
+message Header {
+  // basic block info
+  Consensus version = 1;
+  string chain_id = 2;
+  int64 height = 3;
+  google.protobuf.Timestamp time = 4;
+
+  // prev block info
+  BlockID last_block_id = 5;
+
+  // hashes of block data
+  bytes last_commit_hash = 6;
+  bytes data_hash = 7;
+
+  // hashes from the app output from the prev block
+  bytes validators_hash = 8;
+  bytes next_validators_hash = 9;
+  bytes consensus_hash = 10;
+  bytes app_hash = 11;
+  bytes last_results_hash = 12;
+
+  // consensus info
+  bytes evidence_hash = 13;
+  bytes proposer_address = 14;
+}
+
+message Consensus {
+  uint64 block = 1;
+  uint64 app = 2;
+}
+
+message BlockID {
+  bytes hash = 1;
+  PartSetHeader part_set_header = 2;
+}
+
+message PartSetHeader {
+  uint32 total = 1;
+  bytes hash = 2;
+}
+
+message Misbehavior {
+  MisbehaviorType type = 1;
+  Validator validator = 2;
+  int64 height = 3;
+  google.protobuf.Timestamp time = 4;
+  int64 total_voting_power = 5;
+}
+
+enum MisbehaviorType {
+  UNKNOWN = 0;
+  DUPLICATE_VOTE = 1;
+  LIGHT_CLIENT_ATTACK = 2;
+}
+
+message Validator {
+  bytes address = 1;
+  int64 power = 3;
+}
+
+message Event {
+  string type = 1;
+  repeated EventAttribute attributes = 2;
+}
+
+message EventAttribute {
+  string key = 1;
+  string value = 2;
+}
+
+message TxResults {
+  uint32 code = 1;
+  bytes data = 2;
+  string log = 3;
+  string info = 4;
+  int64 gas_wanted = 5;
+  int64 gas_used = 6;
+  repeated Event events = 7;
+  string codespace = 8;
+}
+
+message ValidatorUpdate {
+  PublicKey pub_key = 1;
+  int64 power = 2;
+}
+
+message PublicKey {
+  oneof sum {
+    bytes ed25519 = 1;
+    bytes secp256k1 = 2;
+  }
+}
+
+message ConsensusParams {
+  BlockParams block = 1;
+  EvidenceParams evidence = 2;
+  ValidatorParams validator = 3;
+  VersionParams version = 4;
+}
+
+message BlockParams {
+  int64 max_bytes = 1;
+  int64 max_gas = 2;
+  reserved 3;
+}
+
+message EvidenceParams {
+  int64 max_age_num_blocks = 1;
+  google.protobuf.Duration max_age_duration = 2;
+  int64 max_bytes = 3;
+}
+
+message ValidatorParams { repeated string pub_key_types = 1; }
+
+message VersionParams { uint64 app = 1; }
+
+message HashedParams {
+  int64 block_max_bytes = 1;
+  int64 block_max_gas = 2;
+}
