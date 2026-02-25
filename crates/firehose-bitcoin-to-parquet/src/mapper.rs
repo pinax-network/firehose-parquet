@@ -1,0 +1,490 @@
+use crate::proto::btc;
+use crate::schema;
+use arrow::array::*;
+use arrow::datatypes::Schema;
+use arrow::record_batch::RecordBatch;
+use firehose_parquet::traits::BlockMapper;
+use prost::Message;
+use std::collections::HashMap;
+use std::sync::Arc;
+
+// ---------------------------------------------------------------------------
+// Bitcoin BlockMapper
+// ---------------------------------------------------------------------------
+
+pub struct BitcoinBlockMapper {
+    blocks: BlocksBuilder,
+    transactions: TransactionsBuilder,
+    inputs: InputsBuilder,
+    outputs: OutputsBuilder,
+    blocks_schema: Schema,
+    transactions_schema: Schema,
+    inputs_schema: Schema,
+    outputs_schema: Schema,
+}
+
+impl BitcoinBlockMapper {
+    pub fn new() -> Self {
+        Self {
+            blocks: BlocksBuilder::new(),
+            transactions: TransactionsBuilder::new(),
+            inputs: InputsBuilder::new(),
+            outputs: OutputsBuilder::new(),
+            blocks_schema: schema::blocks_schema(),
+            transactions_schema: schema::transactions_schema(),
+            inputs_schema: schema::inputs_schema(),
+            outputs_schema: schema::outputs_schema(),
+        }
+    }
+
+    fn map_btc_block(&mut self, block: &btc::Block) {
+        let height = block.height;
+        let block_hash = &block.hash;
+        let block_time = block.time;
+
+        // -- blocks table --
+        self.blocks.hash.append_value(&block.hash);
+        self.blocks.height.append_value(height);
+        self.blocks.previous_hash.append_value(&block.previous_hash);
+        self.blocks.merkle_root.append_value(&block.merkle_root);
+        self.blocks.time.append_value(block.time);
+        self.blocks.nonce.append_value(block.nonce);
+        self.blocks.bits.append_value(&block.bits);
+        self.blocks.difficulty.append_value(block.difficulty);
+        self.blocks.size.append_value(block.size);
+        self.blocks.stripped_size.append_value(block.stripped_size);
+        self.blocks.weight.append_value(block.weight);
+        self.blocks.version.append_value(block.version);
+        self.blocks.n_tx.append_value(block.n_tx);
+        self.blocks.mediantime.append_value(block.mediantime);
+        self.blocks.chainwork.append_value(&block.chainwork);
+
+        // -- transactions, inputs, outputs --
+        for (tx_index, tx) in block.tx.iter().enumerate() {
+            self.map_transaction(height, block_hash, block_time, tx_index as u32, tx);
+        }
+    }
+
+    fn map_transaction(
+        &mut self,
+        block_height: i64,
+        block_hash: &str,
+        block_time: i64,
+        tx_index: u32,
+        tx: &btc::Transaction,
+    ) {
+        let tx_hash = &tx.txid;
+
+        self.transactions.txid.append_value(&tx.txid);
+        self.transactions.hash.append_value(&tx.hash);
+        self.transactions.size.append_value(tx.size);
+        self.transactions.vsize.append_value(tx.vsize);
+        self.transactions.weight.append_value(tx.weight);
+        self.transactions.version.append_value(tx.version);
+        self.transactions.locktime.append_value(tx.locktime);
+        self.transactions.block_hash.append_value(block_hash);
+        self.transactions.block_height.append_value(block_height);
+        self.transactions.block_time.append_value(block_time);
+        self.transactions.tx_index.append_value(tx_index);
+
+        // -- inputs --
+        for (i, vin) in tx.vin.iter().enumerate() {
+            let script_sig = vin.script_sig.as_ref();
+            self.inputs.tx_hash.append_value(tx_hash);
+            self.inputs.block_height.append_value(block_height);
+            self.inputs.input_index.append_value(i as u32);
+            self.inputs.prev_txid.append_value(&vin.txid);
+            self.inputs.prev_vout.append_value(vin.vout);
+            self.inputs.sequence.append_value(vin.sequence);
+            self.inputs.script_sig_asm.append_value(script_sig.map_or("", |s| &s.asm));
+            self.inputs.script_sig_hex.append_value(script_sig.map_or("", |s| &s.hex));
+            self.inputs.coinbase.append_value(&vin.coinbase);
+
+            // witness: List<Utf8>
+            let witness_values = self.inputs.witness.values();
+            for w in &vin.txinwitness {
+                witness_values.append_value(w);
+            }
+            self.inputs.witness.append(true);
+        }
+
+        // -- outputs --
+        for vout in &tx.vout {
+            let script = vout.script_pub_key.as_ref();
+            self.outputs.tx_hash.append_value(tx_hash);
+            self.outputs.block_height.append_value(block_height);
+            self.outputs.output_index.append_value(vout.n);
+            self.outputs.value.append_value(vout.value);
+            self.outputs.script_pubkey_asm.append_value(script.map_or("", |s| &s.asm));
+            self.outputs.script_pubkey_hex.append_value(script.map_or("", |s| &s.hex));
+            self.outputs.script_pubkey_type.append_value(script.map_or("", |s| &s.r#type));
+            self.outputs.script_pubkey_address.append_value(script.map_or("", |s| &s.address));
+        }
+    }
+}
+
+impl BlockMapper for BitcoinBlockMapper {
+    fn map_block(&mut self, block_bytes: &[u8]) -> anyhow::Result<()> {
+        let block = btc::Block::decode(block_bytes)?;
+        self.map_btc_block(&block);
+        Ok(())
+    }
+
+    fn flush(&mut self) -> anyhow::Result<HashMap<String, RecordBatch>> {
+        let mut result = HashMap::new();
+        result.insert("blocks".to_string(), self.blocks.finish(&self.blocks_schema)?);
+        result.insert("transactions".to_string(), self.transactions.finish(&self.transactions_schema)?);
+        result.insert("inputs".to_string(), self.inputs.finish(&self.inputs_schema)?);
+        result.insert("outputs".to_string(), self.outputs.finish(&self.outputs_schema)?);
+        Ok(result)
+    }
+
+    fn max_table_rows(&self) -> usize {
+        self.blocks.hash.len()
+            .max(self.transactions.txid.len())
+            .max(self.inputs.tx_hash.len())
+            .max(self.outputs.tx_hash.len())
+    }
+
+    fn table_names(&self) -> Vec<&str> {
+        schema::TABLE_NAMES.to_vec()
+    }
+}
+
+// ===========================================================================
+// Builders
+// ===========================================================================
+
+struct BlocksBuilder {
+    hash: StringBuilder,
+    height: Int64Builder,
+    previous_hash: StringBuilder,
+    merkle_root: StringBuilder,
+    time: Int64Builder,
+    nonce: UInt32Builder,
+    bits: StringBuilder,
+    difficulty: Float64Builder,
+    size: Int32Builder,
+    stripped_size: Int32Builder,
+    weight: Int32Builder,
+    version: Int32Builder,
+    n_tx: UInt32Builder,
+    mediantime: Int64Builder,
+    chainwork: StringBuilder,
+}
+
+impl BlocksBuilder {
+    fn new() -> Self {
+        Self {
+            hash: StringBuilder::new(),
+            height: Int64Builder::new(),
+            previous_hash: StringBuilder::new(),
+            merkle_root: StringBuilder::new(),
+            time: Int64Builder::new(),
+            nonce: UInt32Builder::new(),
+            bits: StringBuilder::new(),
+            difficulty: Float64Builder::new(),
+            size: Int32Builder::new(),
+            stripped_size: Int32Builder::new(),
+            weight: Int32Builder::new(),
+            version: Int32Builder::new(),
+            n_tx: UInt32Builder::new(),
+            mediantime: Int64Builder::new(),
+            chainwork: StringBuilder::new(),
+        }
+    }
+
+    fn finish(&mut self, schema: &Schema) -> anyhow::Result<RecordBatch> {
+        Ok(RecordBatch::try_new(
+            Arc::new(schema.clone()),
+            vec![
+                Arc::new(self.hash.finish()),
+                Arc::new(self.height.finish()),
+                Arc::new(self.previous_hash.finish()),
+                Arc::new(self.merkle_root.finish()),
+                Arc::new(self.time.finish()),
+                Arc::new(self.nonce.finish()),
+                Arc::new(self.bits.finish()),
+                Arc::new(self.difficulty.finish()),
+                Arc::new(self.size.finish()),
+                Arc::new(self.stripped_size.finish()),
+                Arc::new(self.weight.finish()),
+                Arc::new(self.version.finish()),
+                Arc::new(self.n_tx.finish()),
+                Arc::new(self.mediantime.finish()),
+                Arc::new(self.chainwork.finish()),
+            ],
+        )?)
+    }
+}
+
+struct TransactionsBuilder {
+    txid: StringBuilder,
+    hash: StringBuilder,
+    size: Int32Builder,
+    vsize: Int32Builder,
+    weight: Int32Builder,
+    version: UInt32Builder,
+    locktime: UInt32Builder,
+    block_hash: StringBuilder,
+    block_height: Int64Builder,
+    block_time: Int64Builder,
+    tx_index: UInt32Builder,
+}
+
+impl TransactionsBuilder {
+    fn new() -> Self {
+        Self {
+            txid: StringBuilder::new(),
+            hash: StringBuilder::new(),
+            size: Int32Builder::new(),
+            vsize: Int32Builder::new(),
+            weight: Int32Builder::new(),
+            version: UInt32Builder::new(),
+            locktime: UInt32Builder::new(),
+            block_hash: StringBuilder::new(),
+            block_height: Int64Builder::new(),
+            block_time: Int64Builder::new(),
+            tx_index: UInt32Builder::new(),
+        }
+    }
+
+    fn finish(&mut self, schema: &Schema) -> anyhow::Result<RecordBatch> {
+        Ok(RecordBatch::try_new(
+            Arc::new(schema.clone()),
+            vec![
+                Arc::new(self.txid.finish()),
+                Arc::new(self.hash.finish()),
+                Arc::new(self.size.finish()),
+                Arc::new(self.vsize.finish()),
+                Arc::new(self.weight.finish()),
+                Arc::new(self.version.finish()),
+                Arc::new(self.locktime.finish()),
+                Arc::new(self.block_hash.finish()),
+                Arc::new(self.block_height.finish()),
+                Arc::new(self.block_time.finish()),
+                Arc::new(self.tx_index.finish()),
+            ],
+        )?)
+    }
+}
+
+struct InputsBuilder {
+    tx_hash: StringBuilder,
+    block_height: Int64Builder,
+    input_index: UInt32Builder,
+    prev_txid: StringBuilder,
+    prev_vout: UInt32Builder,
+    sequence: UInt32Builder,
+    script_sig_asm: StringBuilder,
+    script_sig_hex: StringBuilder,
+    coinbase: StringBuilder,
+    witness: ListBuilder<StringBuilder>,
+}
+
+impl InputsBuilder {
+    fn new() -> Self {
+        Self {
+            tx_hash: StringBuilder::new(),
+            block_height: Int64Builder::new(),
+            input_index: UInt32Builder::new(),
+            prev_txid: StringBuilder::new(),
+            prev_vout: UInt32Builder::new(),
+            sequence: UInt32Builder::new(),
+            script_sig_asm: StringBuilder::new(),
+            script_sig_hex: StringBuilder::new(),
+            coinbase: StringBuilder::new(),
+            witness: ListBuilder::new(StringBuilder::new()),
+        }
+    }
+
+    fn finish(&mut self, schema: &Schema) -> anyhow::Result<RecordBatch> {
+        Ok(RecordBatch::try_new(
+            Arc::new(schema.clone()),
+            vec![
+                Arc::new(self.tx_hash.finish()),
+                Arc::new(self.block_height.finish()),
+                Arc::new(self.input_index.finish()),
+                Arc::new(self.prev_txid.finish()),
+                Arc::new(self.prev_vout.finish()),
+                Arc::new(self.sequence.finish()),
+                Arc::new(self.script_sig_asm.finish()),
+                Arc::new(self.script_sig_hex.finish()),
+                Arc::new(self.coinbase.finish()),
+                Arc::new(self.witness.finish()),
+            ],
+        )?)
+    }
+}
+
+struct OutputsBuilder {
+    tx_hash: StringBuilder,
+    block_height: Int64Builder,
+    output_index: UInt32Builder,
+    value: Float64Builder,
+    script_pubkey_asm: StringBuilder,
+    script_pubkey_hex: StringBuilder,
+    script_pubkey_type: StringBuilder,
+    script_pubkey_address: StringBuilder,
+}
+
+impl OutputsBuilder {
+    fn new() -> Self {
+        Self {
+            tx_hash: StringBuilder::new(),
+            block_height: Int64Builder::new(),
+            output_index: UInt32Builder::new(),
+            value: Float64Builder::new(),
+            script_pubkey_asm: StringBuilder::new(),
+            script_pubkey_hex: StringBuilder::new(),
+            script_pubkey_type: StringBuilder::new(),
+            script_pubkey_address: StringBuilder::new(),
+        }
+    }
+
+    fn finish(&mut self, schema: &Schema) -> anyhow::Result<RecordBatch> {
+        Ok(RecordBatch::try_new(
+            Arc::new(schema.clone()),
+            vec![
+                Arc::new(self.tx_hash.finish()),
+                Arc::new(self.block_height.finish()),
+                Arc::new(self.output_index.finish()),
+                Arc::new(self.value.finish()),
+                Arc::new(self.script_pubkey_asm.finish()),
+                Arc::new(self.script_pubkey_hex.finish()),
+                Arc::new(self.script_pubkey_type.finish()),
+                Arc::new(self.script_pubkey_address.finish()),
+            ],
+        )?)
+    }
+}
+
+// ===========================================================================
+// Tests
+// ===========================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_test_block(height: i64) -> btc::Block {
+        btc::Block {
+            hash: "000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f".to_string(),
+            size: 285,
+            stripped_size: 285,
+            weight: 1140,
+            height,
+            version: 1,
+            version_hex: "00000001".to_string(),
+            merkle_root: "4a5e1e4baab89f3a32518a88c31bc87f618f76673e2cc77ab2127b7afdeda33b".to_string(),
+            tx: vec![btc::Transaction {
+                hex: String::new(),
+                txid: "4a5e1e4baab89f3a32518a88c31bc87f618f76673e2cc77ab2127b7afdeda33b".to_string(),
+                hash: "4a5e1e4baab89f3a32518a88c31bc87f618f76673e2cc77ab2127b7afdeda33b".to_string(),
+                size: 204,
+                vsize: 204,
+                weight: 816,
+                version: 1,
+                locktime: 0,
+                vin: vec![btc::Vin {
+                    txid: String::new(),
+                    vout: 0xffffffff,
+                    script_sig: Some(btc::ScriptSig {
+                        asm: "OP_PUSHBYTES_4 ffff001d OP_PUSHBYTES_1 04".to_string(),
+                        hex: "04ffff001d0104".to_string(),
+                    }),
+                    sequence: 0xffffffff,
+                    txinwitness: vec!["304402200a1b".to_string(), "03abc123".to_string()],
+                    coinbase: "04ffff001d0104455468652054696d65732030332f4a616e2f32303039".to_string(),
+                }],
+                vout: vec![btc::Vout {
+                    value: 50.0,
+                    n: 0,
+                    script_pub_key: Some(btc::ScriptPubKey {
+                        asm: "04678afdb0 OP_CHECKSIG".to_string(),
+                        hex: "4104678afdb0fe5548271967f1a67130b7105cd6a828e03909a67962e0ea1f61deb649f6bc3f4cef38c4f35504e51ec112de5c384df7ba0b8d578a4c702b6bf11d5fac".to_string(),
+                        req_sigs: 1,
+                        r#type: "pubkey".to_string(),
+                        address: "1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa".to_string(),
+                        addresses: vec![],
+                    }),
+                }],
+                blockhash: "000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f".to_string(),
+                blocktime: 1231006505,
+            }],
+            time: 1231006505,
+            mediantime: 1231006505,
+            nonce: 2083236893,
+            bits: "1d00ffff".to_string(),
+            difficulty: 1.0,
+            chainwork: "0000000000000000000000000000000000000000000000000000000100010001".to_string(),
+            n_tx: 1,
+            previous_hash: "0000000000000000000000000000000000000000000000000000000000000000".to_string(),
+        }
+    }
+
+    #[test]
+    fn test_map_and_flush() {
+        let block = make_test_block(0);
+        let block_bytes = prost::Message::encode_to_vec(&block);
+        let mut mapper = BitcoinBlockMapper::new();
+        mapper.map_block(&block_bytes).unwrap();
+
+        let batches = mapper.flush().unwrap();
+        assert_eq!(batches["blocks"].num_rows(), 1);
+        assert_eq!(batches["transactions"].num_rows(), 1);
+        assert_eq!(batches["inputs"].num_rows(), 1);
+        assert_eq!(batches["outputs"].num_rows(), 1);
+    }
+
+    #[test]
+    fn test_empty_block() {
+        let block = btc::Block {
+            hash: "00000000".to_string(),
+            height: 100,
+            time: 1231006505,
+            nonce: 0,
+            bits: "1d00ffff".to_string(),
+            difficulty: 1.0,
+            chainwork: "0".to_string(),
+            n_tx: 0,
+            previous_hash: "00000000".to_string(),
+            merkle_root: String::new(),
+            tx: vec![],
+            size: 0,
+            stripped_size: 0,
+            weight: 0,
+            version: 1,
+            version_hex: String::new(),
+            mediantime: 0,
+        };
+        let block_bytes = prost::Message::encode_to_vec(&block);
+        let mut mapper = BitcoinBlockMapper::new();
+        mapper.map_block(&block_bytes).unwrap();
+        let batches = mapper.flush().unwrap();
+        assert_eq!(batches["blocks"].num_rows(), 1);
+        assert_eq!(batches["transactions"].num_rows(), 0);
+        assert_eq!(batches["inputs"].num_rows(), 0);
+        assert_eq!(batches["outputs"].num_rows(), 0);
+    }
+
+    #[test]
+    fn test_flush_resets() {
+        let block = make_test_block(1);
+        let block_bytes = prost::Message::encode_to_vec(&block);
+        let mut mapper = BitcoinBlockMapper::new();
+        mapper.map_block(&block_bytes).unwrap();
+        let _ = mapper.flush().unwrap();
+        assert_eq!(mapper.max_table_rows(), 0);
+    }
+
+    #[test]
+    fn test_table_names() {
+        let mapper = BitcoinBlockMapper::new();
+        assert_eq!(mapper.table_names().len(), 4);
+        assert!(mapper.table_names().contains(&"blocks"));
+        assert!(mapper.table_names().contains(&"transactions"));
+        assert!(mapper.table_names().contains(&"inputs"));
+        assert!(mapper.table_names().contains(&"outputs"));
+    }
+}
