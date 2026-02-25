@@ -6,7 +6,7 @@ use anyhow::Result;
 use clap::Parser;
 use firehose_parquet::config::{BlockMetadata, Compression, Config, Partition};
 use firehose_parquet::grpc::FirehoseClient;
-use firehose_parquet::traits::BlockMapper;
+use firehose_parquet::traits::{BlockIdentity, BlockMapper};
 use firehose_parquet::writer::OutputWriter;
 use mapper::EvmBlockMapper;
 use std::path::PathBuf;
@@ -132,13 +132,9 @@ async fn main() -> Result<()> {
     let client = FirehoseClient::new(config);
 
     client
-        .stream_blocks(|block_bytes, _cursor| {
-            // Quick decode for tracking
-            let block: proto::eth::Block = prost::Message::decode(block_bytes.as_slice())
-                .unwrap_or_default();
-            let block_number = block.number;
-            let ts = block.header.as_ref().and_then(|h| h.timestamp.as_ref()).map(|t| t.seconds);
-
+        .stream_blocks(|block_bytes, _cursor, identity: BlockIdentity| {
+            let block_number = identity.block_num;
+            let ts = identity.timestamp;
             min_block = Some(min_block.map_or(block_number, |s: u64| s.min(block_number)));
             max_block = Some(max_block.map_or(block_number, |s: u64| s.max(block_number)));
             if let Some(t) = ts {
@@ -146,7 +142,7 @@ async fn main() -> Result<()> {
                 max_timestamp = Some(max_timestamp.map_or(t, |s: i64| s.max(t)));
             }
 
-            mapper.map_block(&block_bytes)?;
+            mapper.map_block(&block_bytes, &identity)?;
             blocks_processed += 1;
 
             if blocks_processed % 100 == 0 {

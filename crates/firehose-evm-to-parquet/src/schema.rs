@@ -1,4 +1,5 @@
 use arrow::datatypes::{DataType, Field, Schema};
+use firehose_parquet::traits::canonical_fields;
 use std::sync::Arc;
 
 // ==========================================================================
@@ -6,7 +7,8 @@ use std::sync::Arc;
 // ==========================================================================
 
 pub fn blocks_schema() -> Schema {
-    Schema::new(vec![
+    let mut fields = canonical_fields();
+    fields.extend(vec![
         Field::new("number", DataType::UInt64, false),
         Field::new("hash", DataType::Utf8, false),
         Field::new("parent_hash", DataType::Utf8, false),
@@ -25,11 +27,13 @@ pub fn blocks_schema() -> Schema {
         Field::new("extra_data", DataType::Utf8, false),            // hex
         Field::new("num_transactions", DataType::UInt32, false),
         Field::new("detail_level", DataType::Int32, false),
-    ])
+    ]);
+    Schema::new(fields)
 }
 
 pub fn transactions_schema() -> Schema {
-    Schema::new(vec![
+    let mut fields = canonical_fields();
+    fields.extend(vec![
         Field::new("block_number", DataType::UInt64, false),
         Field::new("index", DataType::UInt32, false),
         Field::new("hash", DataType::Utf8, false),
@@ -46,11 +50,13 @@ pub fn transactions_schema() -> Schema {
         Field::new("max_fee_per_gas", DataType::Utf8, true),        // BigInt
         Field::new("max_priority_fee_per_gas", DataType::Utf8, true), // BigInt
         Field::new("cumulative_gas_used", DataType::UInt64, true),
-    ])
+    ]);
+    Schema::new(fields)
 }
 
 pub fn logs_schema() -> Schema {
-    Schema::new(vec![
+    let mut fields = canonical_fields();
+    fields.extend(vec![
         Field::new("block_number", DataType::UInt64, false),
         Field::new("tx_hash", DataType::Utf8, false),
         Field::new("tx_index", DataType::UInt32, false),
@@ -62,7 +68,8 @@ pub fn logs_schema() -> Schema {
         Field::new("topic2", DataType::Utf8, true),
         Field::new("topic3", DataType::Utf8, true),
         Field::new("data", DataType::Utf8, false),                  // hex
-    ])
+    ]);
+    Schema::new(fields)
 }
 
 // ==========================================================================
@@ -70,7 +77,8 @@ pub fn logs_schema() -> Schema {
 // ==========================================================================
 
 pub fn calls_schema() -> Schema {
-    Schema::new(vec![
+    let mut fields = canonical_fields();
+    fields.extend(vec![
         Field::new("block_number", DataType::UInt64, false),
         Field::new("tx_hash", DataType::Utf8, false),
         Field::new("tx_index", DataType::UInt32, false),
@@ -90,11 +98,13 @@ pub fn calls_schema() -> Schema {
         Field::new("state_reverted", DataType::Boolean, false),
         Field::new("executed_code", DataType::Boolean, false),
         Field::new("suicide", DataType::Boolean, false),
-    ])
+    ]);
+    Schema::new(fields)
 }
 
 pub fn balance_changes_schema() -> Schema {
-    Schema::new(vec![
+    let mut fields = canonical_fields();
+    fields.extend(vec![
         Field::new("block_number", DataType::UInt64, false),
         Field::new("tx_hash", DataType::Utf8, true),
         Field::new("ordinal", DataType::UInt64, false),
@@ -102,11 +112,13 @@ pub fn balance_changes_schema() -> Schema {
         Field::new("old_value", DataType::Utf8, false),             // BigInt
         Field::new("new_value", DataType::Utf8, false),             // BigInt
         Field::new("reason", DataType::Int32, false),
-    ])
+    ]);
+    Schema::new(fields)
 }
 
 pub fn code_changes_schema() -> Schema {
-    Schema::new(vec![
+    let mut fields = canonical_fields();
+    fields.extend(vec![
         Field::new("block_number", DataType::UInt64, false),
         Field::new("tx_hash", DataType::Utf8, true),
         Field::new("ordinal", DataType::UInt64, false),
@@ -115,11 +127,13 @@ pub fn code_changes_schema() -> Schema {
         Field::new("new_hash", DataType::Utf8, false),
         Field::new("old_code", DataType::Utf8, false),              // hex
         Field::new("new_code", DataType::Utf8, false),              // hex
-    ])
+    ]);
+    Schema::new(fields)
 }
 
 pub fn storage_changes_schema() -> Schema {
-    Schema::new(vec![
+    let mut fields = canonical_fields();
+    fields.extend(vec![
         Field::new("block_number", DataType::UInt64, false),
         Field::new("tx_hash", DataType::Utf8, false),
         Field::new("ordinal", DataType::UInt64, false),
@@ -127,38 +141,45 @@ pub fn storage_changes_schema() -> Schema {
         Field::new("key", DataType::Utf8, false),
         Field::new("old_value", DataType::Utf8, false),
         Field::new("new_value", DataType::Utf8, false),
-    ])
+    ]);
+    Schema::new(fields)
 }
 
 pub fn nonce_changes_schema() -> Schema {
-    Schema::new(vec![
+    let mut fields = canonical_fields();
+    fields.extend(vec![
         Field::new("block_number", DataType::UInt64, false),
         Field::new("tx_hash", DataType::Utf8, false),
         Field::new("ordinal", DataType::UInt64, false),
         Field::new("address", DataType::Utf8, false),
         Field::new("old_value", DataType::UInt64, false),
         Field::new("new_value", DataType::UInt64, false),
-    ])
+    ]);
+    Schema::new(fields)
 }
 
 pub fn gas_changes_schema() -> Schema {
-    Schema::new(vec![
+    let mut fields = canonical_fields();
+    fields.extend(vec![
         Field::new("block_number", DataType::UInt64, false),
         Field::new("tx_hash", DataType::Utf8, false),
         Field::new("ordinal", DataType::UInt64, false),
         Field::new("old_value", DataType::UInt64, false),
         Field::new("new_value", DataType::UInt64, false),
         Field::new("reason", DataType::Int32, false),
-    ])
+    ]);
+    Schema::new(fields)
 }
 
 pub fn account_creations_schema() -> Schema {
-    Schema::new(vec![
+    let mut fields = canonical_fields();
+    fields.extend(vec![
         Field::new("block_number", DataType::UInt64, false),
         Field::new("tx_hash", DataType::Utf8, false),
         Field::new("ordinal", DataType::UInt64, false),
         Field::new("account", DataType::Utf8, false),
-    ])
+    ]);
+    Schema::new(fields)
 }
 
 pub fn system_calls_schema() -> Schema {

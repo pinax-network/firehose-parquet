@@ -6,7 +6,7 @@ use anyhow::Result;
 use clap::Parser;
 use firehose_parquet::config::{BlockMetadata, Compression, Config, Partition};
 use firehose_parquet::grpc::FirehoseClient;
-use firehose_parquet::traits::BlockMapper;
+use firehose_parquet::traits::{BlockIdentity, BlockMapper};
 use firehose_parquet::writer::OutputWriter;
 use mapper::BitcoinBlockMapper;
 use std::path::PathBuf;
@@ -127,18 +127,15 @@ async fn main() -> Result<()> {
     let client = FirehoseClient::new(config);
 
     client
-        .stream_blocks(|block_bytes, _cursor| {
-            let block: proto::btc::Block = prost::Message::decode(block_bytes.as_slice())
-                .unwrap_or_default();
-            let block_height = block.height as u64;
-            let ts = block.time;
-
+        .stream_blocks(|block_bytes, _cursor, identity: BlockIdentity| {
+            let block_height = identity.block_num;
+            let ts = identity.timestamp.unwrap_or(0);
             min_block = Some(min_block.map_or(block_height, |s: u64| s.min(block_height)));
             max_block = Some(max_block.map_or(block_height, |s: u64| s.max(block_height)));
             min_timestamp = Some(min_timestamp.map_or(ts, |s: i64| s.min(ts)));
             max_timestamp = Some(max_timestamp.map_or(ts, |s: i64| s.max(ts)));
 
-            mapper.map_block(&block_bytes)?;
+            mapper.map_block(&block_bytes, &identity)?;
             blocks_processed += 1;
 
             if blocks_processed % 100 == 0 {

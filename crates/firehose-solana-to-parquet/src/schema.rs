@@ -1,8 +1,10 @@
 use arrow::datatypes::{DataType, Field, Schema};
+use firehose_parquet::traits::canonical_fields;
 use std::sync::Arc;
 
 pub fn blocks_schema() -> Schema {
-    Schema::new(vec![
+    let mut fields = canonical_fields();
+    fields.extend(vec![
         Field::new("slot", DataType::UInt64, false),
         Field::new("parent_slot", DataType::UInt64, false),
         Field::new("block_height", DataType::UInt64, true),
@@ -11,11 +13,13 @@ pub fn blocks_schema() -> Schema {
         Field::new("block_time", DataType::Int64, true),
         Field::new("num_transactions", DataType::UInt32, false),
         Field::new("num_rewards", DataType::UInt32, false),
-    ])
+    ]);
+    Schema::new(fields)
 }
 
 pub fn transactions_schema() -> Schema {
-    Schema::new(vec![
+    let mut fields = canonical_fields();
+    fields.extend(vec![
         Field::new("slot", DataType::UInt64, false),
         Field::new("transaction_index", DataType::UInt32, false),
         Field::new("signature", DataType::Binary, false),
@@ -39,11 +43,13 @@ pub fn transactions_schema() -> Schema {
             DataType::List(Arc::new(Field::new("item", DataType::UInt64, true))),
             true,
         ),
-    ])
+    ]);
+    Schema::new(fields)
 }
 
 pub fn messages_schema() -> Schema {
-    Schema::new(vec![
+    let mut fields = canonical_fields();
+    fields.extend(vec![
         Field::new("slot", DataType::UInt64, false),
         Field::new("transaction_index", DataType::UInt32, false),
         Field::new("message_index", DataType::UInt32, false),
@@ -57,11 +63,13 @@ pub fn messages_schema() -> Schema {
             DataType::List(Arc::new(Field::new("item", DataType::Binary, true))),
             false,
         ),
-    ])
+    ]);
+    Schema::new(fields)
 }
 
 pub fn instructions_schema() -> Schema {
-    Schema::new(vec![
+    let mut fields = canonical_fields();
+    fields.extend(vec![
         Field::new("slot", DataType::UInt64, false),
         Field::new("transaction_index", DataType::UInt32, false),
         Field::new("instruction_index", DataType::UInt32, false),
@@ -71,11 +79,13 @@ pub fn instructions_schema() -> Schema {
         Field::new("is_inner", DataType::Boolean, false),
         Field::new("inner_index", DataType::UInt32, true),
         Field::new("stack_height", DataType::UInt32, true),
-    ])
+    ]);
+    Schema::new(fields)
 }
 
 pub fn rewards_schema() -> Schema {
-    Schema::new(vec![
+    let mut fields = canonical_fields();
+    fields.extend(vec![
         Field::new("slot", DataType::UInt64, false),
         Field::new("reward_index", DataType::UInt32, false),
         Field::new("pubkey", DataType::Utf8, false),
@@ -83,7 +93,8 @@ pub fn rewards_schema() -> Schema {
         Field::new("post_balance", DataType::UInt64, false),
         Field::new("reward_type", DataType::Int32, false),
         Field::new("commission", DataType::Utf8, true),
-    ])
+    ]);
+    Schema::new(fields)
 }
 
 pub const TABLE_NAMES: [&str; 5] = ["blocks", "transactions", "messages", "instructions", "rewards"];

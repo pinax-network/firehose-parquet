@@ -3,7 +3,7 @@ use crate::schema;
 use arrow::array::*;
 use arrow::datatypes::Schema;
 use arrow::record_batch::RecordBatch;
-use firehose_parquet::traits::BlockMapper;
+use firehose_parquet::traits::{BlockIdentity, BlockMapper, CanonicalBuilder};
 use prost::Message;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -37,9 +37,10 @@ impl SolanaBlockMapper {
         }
     }
 
-    fn map_solana_block(&mut self, block: &solana::Block) {
+    fn map_solana_block(&mut self, block: &solana::Block, identity: &BlockIdentity) {
         let slot = block.slot;
 
+        self.blocks.canonical.append(identity);
         self.blocks.slot.append_value(slot);
         self.blocks.parent_slot.append_value(block.parent_slot);
         match &block.block_height {
@@ -56,15 +57,15 @@ impl SolanaBlockMapper {
         self.blocks.num_rewards.append_value(block.rewards.len() as u32);
 
         for (tx_idx, confirmed_tx) in block.transactions.iter().enumerate() {
-            self.map_transaction(slot, tx_idx as u32, confirmed_tx);
+            self.map_transaction(slot, tx_idx as u32, confirmed_tx, identity);
         }
 
         for (reward_idx, reward) in block.rewards.iter().enumerate() {
-            self.map_reward(slot, reward_idx as u32, reward);
+            self.map_reward(slot, reward_idx as u32, reward, identity);
         }
     }
 
-    fn map_transaction(&mut self, slot: u64, tx_idx: u32, confirmed: &solana::ConfirmedTransaction) {
+    fn map_transaction(&mut self, slot: u64, tx_idx: u32, confirmed: &solana::ConfirmedTransaction, identity: &BlockIdentity) {
         let tx = match confirmed.transaction.as_ref() {
             Some(t) => t,
             None => return,
@@ -75,6 +76,7 @@ impl SolanaBlockMapper {
             None => return,
         };
 
+        self.transactions.canonical.append(identity);
         self.transactions.slot.append_value(slot);
         self.transactions.transaction_index.append_value(tx_idx);
         if let Some(sig) = tx.signatures.first() {
@@ -129,6 +131,7 @@ impl SolanaBlockMapper {
         }
 
         // messages
+        self.messages.canonical.append(identity);
         self.messages.slot.append_value(slot);
         self.messages.transaction_index.append_value(tx_idx);
         self.messages.message_index.append_value(0);
@@ -154,6 +157,7 @@ impl SolanaBlockMapper {
         // instructions (top-level)
         let mut global_instr_idx = 0u32;
         for instr in &msg.instructions {
+            self.instructions.canonical.append(identity);
             self.instructions.slot.append_value(slot);
             self.instructions.transaction_index.append_value(tx_idx);
             self.instructions.instruction_index.append_value(global_instr_idx);
@@ -170,6 +174,7 @@ impl SolanaBlockMapper {
         if let Some(m) = meta {
             for inner_set in &m.inner_instructions {
                 for inner in &inner_set.instructions {
+                    self.instructions.canonical.append(identity);
                     self.instructions.slot.append_value(slot);
                     self.instructions.transaction_index.append_value(tx_idx);
                     self.instructions.instruction_index.append_value(global_instr_idx);
@@ -188,7 +193,8 @@ impl SolanaBlockMapper {
         }
     }
 
-    fn map_reward(&mut self, slot: u64, idx: u32, reward: &solana::Reward) {
+    fn map_reward(&mut self, slot: u64, idx: u32, reward: &solana::Reward, identity: &BlockIdentity) {
+        self.rewards.canonical.append(identity);
         self.rewards.slot.append_value(slot);
         self.rewards.reward_index.append_value(idx);
         self.rewards.pubkey.append_value(&reward.pubkey);
@@ -210,9 +216,9 @@ impl Default for SolanaBlockMapper {
 }
 
 impl BlockMapper for SolanaBlockMapper {
-    fn map_block(&mut self, block_bytes: &[u8]) -> anyhow::Result<()> {
+    fn map_block(&mut self, block_bytes: &[u8], identity: &BlockIdentity) -> anyhow::Result<()> {
         let block = solana::Block::decode(block_bytes)?;
-        self.map_solana_block(&block);
+        self.map_solana_block(&block, identity);
         Ok(())
     }
 
@@ -228,11 +234,11 @@ impl BlockMapper for SolanaBlockMapper {
 
     fn max_table_rows(&self) -> usize {
         [
-            self.blocks.slot.len(),
-            self.transactions.slot.len(),
-            self.messages.slot.len(),
-            self.instructions.slot.len(),
-            self.rewards.slot.len(),
+            self.blocks.canonical.len(),
+            self.transactions.canonical.len(),
+            self.messages.canonical.len(),
+            self.instructions.canonical.len(),
+            self.rewards.canonical.len(),
         ]
         .into_iter()
         .max()
@@ -249,6 +255,7 @@ impl BlockMapper for SolanaBlockMapper {
 // ---------------------------------------------------------------------------
 
 struct BlocksBuilder {
+    canonical: CanonicalBuilder,
     slot: UInt64Builder,
     parent_slot: UInt64Builder,
     block_height: UInt64Builder,
@@ -262,6 +269,7 @@ struct BlocksBuilder {
 impl BlocksBuilder {
     fn new() -> Self {
         Self {
+            canonical: CanonicalBuilder::new(),
             slot: UInt64Builder::new(),
             parent_slot: UInt64Builder::new(),
             block_height: UInt64Builder::new(),
@@ -274,23 +282,23 @@ impl BlocksBuilder {
     }
 
     fn finish(&mut self, schema: &Schema) -> anyhow::Result<RecordBatch> {
-        Ok(RecordBatch::try_new(
-            Arc::new(schema.clone()),
-            vec![
-                Arc::new(self.slot.finish()),
-                Arc::new(self.parent_slot.finish()),
-                Arc::new(self.block_height.finish()),
-                Arc::new(self.blockhash.finish()),
-                Arc::new(self.previous_blockhash.finish()),
-                Arc::new(self.block_time.finish()),
-                Arc::new(self.num_transactions.finish()),
-                Arc::new(self.num_rewards.finish()),
-            ],
-        )?)
+        let mut columns = self.canonical.finish();
+        columns.extend(vec![
+            Arc::new(self.slot.finish()) as Arc<dyn Array>,
+            Arc::new(self.parent_slot.finish()) as Arc<dyn Array>,
+            Arc::new(self.block_height.finish()) as Arc<dyn Array>,
+            Arc::new(self.blockhash.finish()) as Arc<dyn Array>,
+            Arc::new(self.previous_blockhash.finish()) as Arc<dyn Array>,
+            Arc::new(self.block_time.finish()) as Arc<dyn Array>,
+            Arc::new(self.num_transactions.finish()) as Arc<dyn Array>,
+            Arc::new(self.num_rewards.finish()) as Arc<dyn Array>,
+        ]);
+        Ok(RecordBatch::try_new(Arc::new(schema.clone()), columns)?)
     }
 }
 
 struct TransactionsBuilder {
+    canonical: CanonicalBuilder,
     slot: UInt64Builder,
     transaction_index: UInt32Builder,
     signature: BinaryBuilder,
@@ -307,6 +315,7 @@ struct TransactionsBuilder {
 impl TransactionsBuilder {
     fn new() -> Self {
         Self {
+            canonical: CanonicalBuilder::new(),
             slot: UInt64Builder::new(),
             transaction_index: UInt32Builder::new(),
             signature: BinaryBuilder::new(),
@@ -322,26 +331,26 @@ impl TransactionsBuilder {
     }
 
     fn finish(&mut self, schema: &Schema) -> anyhow::Result<RecordBatch> {
-        Ok(RecordBatch::try_new(
-            Arc::new(schema.clone()),
-            vec![
-                Arc::new(self.slot.finish()),
-                Arc::new(self.transaction_index.finish()),
-                Arc::new(self.signature.finish()),
-                Arc::new(self.num_signatures.finish()),
-                Arc::new(self.fee.finish()),
-                Arc::new(self.err.finish()),
-                Arc::new(self.success.finish()),
-                Arc::new(self.compute_units_consumed.finish()),
-                Arc::new(self.log_messages.finish()),
-                Arc::new(self.pre_balances.finish()),
-                Arc::new(self.post_balances.finish()),
-            ],
-        )?)
+        let mut columns = self.canonical.finish();
+        columns.extend(vec![
+            Arc::new(self.slot.finish()) as Arc<dyn Array>,
+            Arc::new(self.transaction_index.finish()) as Arc<dyn Array>,
+            Arc::new(self.signature.finish()) as Arc<dyn Array>,
+            Arc::new(self.num_signatures.finish()) as Arc<dyn Array>,
+            Arc::new(self.fee.finish()) as Arc<dyn Array>,
+            Arc::new(self.err.finish()) as Arc<dyn Array>,
+            Arc::new(self.success.finish()) as Arc<dyn Array>,
+            Arc::new(self.compute_units_consumed.finish()) as Arc<dyn Array>,
+            Arc::new(self.log_messages.finish()) as Arc<dyn Array>,
+            Arc::new(self.pre_balances.finish()) as Arc<dyn Array>,
+            Arc::new(self.post_balances.finish()) as Arc<dyn Array>,
+        ]);
+        Ok(RecordBatch::try_new(Arc::new(schema.clone()), columns)?)
     }
 }
 
 struct MessagesBuilder {
+    canonical: CanonicalBuilder,
     slot: UInt64Builder,
     transaction_index: UInt32Builder,
     message_index: UInt32Builder,
@@ -356,6 +365,7 @@ struct MessagesBuilder {
 impl MessagesBuilder {
     fn new() -> Self {
         Self {
+            canonical: CanonicalBuilder::new(),
             slot: UInt64Builder::new(),
             transaction_index: UInt32Builder::new(),
             message_index: UInt32Builder::new(),
@@ -369,24 +379,24 @@ impl MessagesBuilder {
     }
 
     fn finish(&mut self, schema: &Schema) -> anyhow::Result<RecordBatch> {
-        Ok(RecordBatch::try_new(
-            Arc::new(schema.clone()),
-            vec![
-                Arc::new(self.slot.finish()),
-                Arc::new(self.transaction_index.finish()),
-                Arc::new(self.message_index.finish()),
-                Arc::new(self.num_required_signatures.finish()),
-                Arc::new(self.num_readonly_signed_accounts.finish()),
-                Arc::new(self.num_readonly_unsigned_accounts.finish()),
-                Arc::new(self.recent_blockhash.finish()),
-                Arc::new(self.versioned.finish()),
-                Arc::new(self.account_keys.finish()),
-            ],
-        )?)
+        let mut columns = self.canonical.finish();
+        columns.extend(vec![
+            Arc::new(self.slot.finish()) as Arc<dyn Array>,
+            Arc::new(self.transaction_index.finish()) as Arc<dyn Array>,
+            Arc::new(self.message_index.finish()) as Arc<dyn Array>,
+            Arc::new(self.num_required_signatures.finish()) as Arc<dyn Array>,
+            Arc::new(self.num_readonly_signed_accounts.finish()) as Arc<dyn Array>,
+            Arc::new(self.num_readonly_unsigned_accounts.finish()) as Arc<dyn Array>,
+            Arc::new(self.recent_blockhash.finish()) as Arc<dyn Array>,
+            Arc::new(self.versioned.finish()) as Arc<dyn Array>,
+            Arc::new(self.account_keys.finish()) as Arc<dyn Array>,
+        ]);
+        Ok(RecordBatch::try_new(Arc::new(schema.clone()), columns)?)
     }
 }
 
 struct InstructionsBuilder {
+    canonical: CanonicalBuilder,
     slot: UInt64Builder,
     transaction_index: UInt32Builder,
     instruction_index: UInt32Builder,
@@ -401,6 +411,7 @@ struct InstructionsBuilder {
 impl InstructionsBuilder {
     fn new() -> Self {
         Self {
+            canonical: CanonicalBuilder::new(),
             slot: UInt64Builder::new(),
             transaction_index: UInt32Builder::new(),
             instruction_index: UInt32Builder::new(),
@@ -414,24 +425,24 @@ impl InstructionsBuilder {
     }
 
     fn finish(&mut self, schema: &Schema) -> anyhow::Result<RecordBatch> {
-        Ok(RecordBatch::try_new(
-            Arc::new(schema.clone()),
-            vec![
-                Arc::new(self.slot.finish()),
-                Arc::new(self.transaction_index.finish()),
-                Arc::new(self.instruction_index.finish()),
-                Arc::new(self.program_id_index.finish()),
-                Arc::new(self.accounts.finish()),
-                Arc::new(self.data.finish()),
-                Arc::new(self.is_inner.finish()),
-                Arc::new(self.inner_index.finish()),
-                Arc::new(self.stack_height.finish()),
-            ],
-        )?)
+        let mut columns = self.canonical.finish();
+        columns.extend(vec![
+            Arc::new(self.slot.finish()) as Arc<dyn Array>,
+            Arc::new(self.transaction_index.finish()) as Arc<dyn Array>,
+            Arc::new(self.instruction_index.finish()) as Arc<dyn Array>,
+            Arc::new(self.program_id_index.finish()) as Arc<dyn Array>,
+            Arc::new(self.accounts.finish()) as Arc<dyn Array>,
+            Arc::new(self.data.finish()) as Arc<dyn Array>,
+            Arc::new(self.is_inner.finish()) as Arc<dyn Array>,
+            Arc::new(self.inner_index.finish()) as Arc<dyn Array>,
+            Arc::new(self.stack_height.finish()) as Arc<dyn Array>,
+        ]);
+        Ok(RecordBatch::try_new(Arc::new(schema.clone()), columns)?)
     }
 }
 
 struct RewardsBuilder {
+    canonical: CanonicalBuilder,
     slot: UInt64Builder,
     reward_index: UInt32Builder,
     pubkey: StringBuilder,
@@ -444,6 +455,7 @@ struct RewardsBuilder {
 impl RewardsBuilder {
     fn new() -> Self {
         Self {
+            canonical: CanonicalBuilder::new(),
             slot: UInt64Builder::new(),
             reward_index: UInt32Builder::new(),
             pubkey: StringBuilder::new(),
@@ -455,18 +467,17 @@ impl RewardsBuilder {
     }
 
     fn finish(&mut self, schema: &Schema) -> anyhow::Result<RecordBatch> {
-        Ok(RecordBatch::try_new(
-            Arc::new(schema.clone()),
-            vec![
-                Arc::new(self.slot.finish()),
-                Arc::new(self.reward_index.finish()),
-                Arc::new(self.pubkey.finish()),
-                Arc::new(self.lamports.finish()),
-                Arc::new(self.post_balance.finish()),
-                Arc::new(self.reward_type.finish()),
-                Arc::new(self.commission.finish()),
-            ],
-        )?)
+        let mut columns = self.canonical.finish();
+        columns.extend(vec![
+            Arc::new(self.slot.finish()) as Arc<dyn Array>,
+            Arc::new(self.reward_index.finish()) as Arc<dyn Array>,
+            Arc::new(self.pubkey.finish()) as Arc<dyn Array>,
+            Arc::new(self.lamports.finish()) as Arc<dyn Array>,
+            Arc::new(self.post_balance.finish()) as Arc<dyn Array>,
+            Arc::new(self.reward_type.finish()) as Arc<dyn Array>,
+            Arc::new(self.commission.finish()) as Arc<dyn Array>,
+        ]);
+        Ok(RecordBatch::try_new(Arc::new(schema.clone()), columns)?)
     }
 }
 
@@ -545,7 +556,7 @@ mod tests {
         let block = make_test_block(100);
         let block_bytes = prost::Message::encode_to_vec(&block);
         let mut mapper = SolanaBlockMapper::new();
-        mapper.map_block(&block_bytes).unwrap();
+        mapper.map_block(&block_bytes, &BlockIdentity::default()).unwrap();
 
         assert_eq!(mapper.max_table_rows(), 2); // 2 instructions
 
@@ -562,7 +573,7 @@ mod tests {
         let block = make_test_block(1);
         let block_bytes = prost::Message::encode_to_vec(&block);
         let mut mapper = SolanaBlockMapper::new();
-        mapper.map_block(&block_bytes).unwrap();
+        mapper.map_block(&block_bytes, &BlockIdentity::default()).unwrap();
         let _ = mapper.flush().unwrap();
         assert_eq!(mapper.max_table_rows(), 0);
     }
@@ -581,7 +592,7 @@ mod tests {
         };
         let block_bytes = prost::Message::encode_to_vec(&block);
         let mut mapper = SolanaBlockMapper::new();
-        mapper.map_block(&block_bytes).unwrap();
+        mapper.map_block(&block_bytes, &BlockIdentity::default()).unwrap();
         let batches = mapper.flush().unwrap();
         assert_eq!(batches["blocks"].num_rows(), 1);
         assert_eq!(batches["transactions"].num_rows(), 0);

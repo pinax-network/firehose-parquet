@@ -6,7 +6,7 @@ use anyhow::Result;
 use clap::Parser;
 use firehose_parquet::config::{BlockMetadata, Compression, Config, Partition};
 use firehose_parquet::grpc::FirehoseClient;
-use firehose_parquet::traits::BlockMapper;
+use firehose_parquet::traits::{BlockIdentity, BlockMapper};
 use firehose_parquet::writer::OutputWriter;
 use mapper::SolanaBlockMapper;
 use std::path::PathBuf;
@@ -126,13 +126,9 @@ async fn main() -> Result<()> {
     let client = FirehoseClient::new(config);
 
     client
-        .stream_blocks(|block_bytes, _cursor| {
-            // Extract slot and timestamp from the raw bytes
-            let block: proto::solana::Block = prost::Message::decode(block_bytes.as_slice())
-                .unwrap_or_default();
-            let slot = block.slot;
-            let ts = block.block_time.map(|bt| bt.timestamp);
-
+        .stream_blocks(|block_bytes, _cursor, identity: BlockIdentity| {
+            let slot = identity.block_num;
+            let ts = identity.timestamp;
             min_slot = Some(min_slot.map_or(slot, |s: u64| s.min(slot)));
             max_slot = Some(max_slot.map_or(slot, |s: u64| s.max(slot)));
             if let Some(t) = ts {
@@ -140,7 +136,7 @@ async fn main() -> Result<()> {
                 max_timestamp = Some(max_timestamp.map_or(t, |s: i64| s.max(t)));
             }
 
-            mapper.map_block(&block_bytes)?;
+            mapper.map_block(&block_bytes, &identity)?;
             blocks_processed += 1;
 
             if blocks_processed % 100 == 0 {
