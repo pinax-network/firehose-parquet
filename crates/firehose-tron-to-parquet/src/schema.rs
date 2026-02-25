@@ -1,4 +1,5 @@
 use arrow::datatypes::{DataType, Field, Schema};
+use firehose_parquet::encode::{bytes_data_type, EncodeBytes};
 use firehose_parquet::traits::{canonical_fields, fork_step_field};
 
 fn maybe_fork_step(fields: &mut Vec<Field>, include: bool) {
@@ -7,16 +8,17 @@ fn maybe_fork_step(fields: &mut Vec<Field>, include: bool) {
     }
 }
 
-pub fn blocks_schema(include_fork_step: bool) -> Schema {
+pub fn blocks_schema(include_fork_step: bool, encoding: &EncodeBytes) -> Schema {
+    let bd = bytes_data_type(encoding);
     let mut fields = canonical_fields();
     fields.extend(vec![
         Field::new("number", DataType::UInt64, false),
-        Field::new("hash", DataType::Utf8, false),
-        Field::new("parent_hash", DataType::Utf8, false),
+        Field::new("hash", bd.clone(), false),
+        Field::new("parent_hash", bd.clone(), false),
         Field::new("timestamp", DataType::Int64, false),
-        Field::new("witness_address", DataType::Utf8, false),
+        Field::new("witness_address", bd.clone(), false),
         Field::new("version", DataType::UInt32, false),
-        Field::new("tx_trie_root", DataType::Utf8, false),
+        Field::new("tx_trie_root", bd, false),
         Field::new("parent_number", DataType::UInt64, false),
         Field::new("num_transactions", DataType::UInt32, false),
     ]);
@@ -24,11 +26,12 @@ pub fn blocks_schema(include_fork_step: bool) -> Schema {
     Schema::new(fields)
 }
 
-pub fn transactions_schema(include_fork_step: bool) -> Schema {
+pub fn transactions_schema(include_fork_step: bool, encoding: &EncodeBytes) -> Schema {
+    let bd = bytes_data_type(encoding);
     let mut fields = canonical_fields();
     fields.extend(vec![
         Field::new("block_number", DataType::UInt64, false),
-        Field::new("txid", DataType::Utf8, false),
+        Field::new("txid", bd, false),
         Field::new("result", DataType::Boolean, false),
         Field::new("code", DataType::Int32, false),
         Field::new("energy_used", DataType::Int64, false),
@@ -42,32 +45,34 @@ pub fn transactions_schema(include_fork_step: bool) -> Schema {
     Schema::new(fields)
 }
 
-pub fn logs_schema(include_fork_step: bool) -> Schema {
+pub fn logs_schema(include_fork_step: bool, encoding: &EncodeBytes) -> Schema {
+    let bd = bytes_data_type(encoding);
     let mut fields = canonical_fields();
     fields.extend(vec![
         Field::new("block_number", DataType::UInt64, false),
-        Field::new("tx_hash", DataType::Utf8, false),
+        Field::new("tx_hash", bd.clone(), false),
         Field::new("log_index", DataType::UInt32, false),
-        Field::new("address", DataType::Utf8, false),
-        Field::new("topic0", DataType::Utf8, true),
-        Field::new("topic1", DataType::Utf8, true),
-        Field::new("topic2", DataType::Utf8, true),
-        Field::new("topic3", DataType::Utf8, true),
-        Field::new("data", DataType::Utf8, false),
+        Field::new("address", bd.clone(), false),
+        Field::new("topic0", bd.clone(), true),
+        Field::new("topic1", bd.clone(), true),
+        Field::new("topic2", bd.clone(), true),
+        Field::new("topic3", bd.clone(), true),
+        Field::new("data", bd, false),
     ]);
     maybe_fork_step(&mut fields, include_fork_step);
     Schema::new(fields)
 }
 
-pub fn internal_transactions_schema(include_fork_step: bool) -> Schema {
+pub fn internal_transactions_schema(include_fork_step: bool, encoding: &EncodeBytes) -> Schema {
+    let bd = bytes_data_type(encoding);
     let mut fields = canonical_fields();
     fields.extend(vec![
         Field::new("block_number", DataType::UInt64, false),
-        Field::new("tx_hash", DataType::Utf8, false),
+        Field::new("tx_hash", bd.clone(), false),
         Field::new("internal_index", DataType::UInt32, false),
-        Field::new("hash", DataType::Utf8, false),
-        Field::new("caller_address", DataType::Utf8, false),
-        Field::new("transfer_to_address", DataType::Utf8, false),
+        Field::new("hash", bd.clone(), false),
+        Field::new("caller_address", bd.clone(), false),
+        Field::new("transfer_to_address", bd, false),
         Field::new("note", DataType::Utf8, false),
         Field::new("rejected", DataType::Boolean, false),
     ]);

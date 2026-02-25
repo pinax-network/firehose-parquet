@@ -3,6 +3,7 @@ use crate::schema;
 use arrow::array::*;
 use arrow::datatypes::Schema;
 use arrow::record_batch::RecordBatch;
+use firehose_parquet::encode::{BytesColumn, EncodeBytes};
 use firehose_parquet::traits::{BlockIdentity, BlockMapper, CanonicalBuilder};
 use prost::Message;
 use std::collections::HashMap;
@@ -24,16 +25,11 @@ fn mk_fork_step(include: bool) -> Option<StringBuilder> {
     if include { Some(StringBuilder::new()) } else { None }
 }
 
-/// Encode raw bytes as a hex string.
-fn hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
-}
-
-/// Convert a CryptoHash to a hex string.
-fn crypto_hash_hex(hash: &Option<near::CryptoHash>) -> String {
+/// Extract bytes from a CryptoHash option, returning empty slice for None.
+fn crypto_hash_bytes(hash: &Option<near::CryptoHash>) -> &[u8] {
     match hash {
-        Some(h) => hex(&h.bytes),
-        None => String::new(),
+        Some(h) => &h.bytes,
+        None => &[],
     }
 }
 
@@ -209,6 +205,7 @@ fn base64_encode(data: &[u8]) -> String {
 // ---------------------------------------------------------------------------
 
 pub struct NearBlockMapper {
+    encoding: EncodeBytes,
     blocks: BlocksBuilder,
     chunks: ChunksBuilder,
     transactions: TransactionsBuilder,
@@ -222,18 +219,20 @@ pub struct NearBlockMapper {
 }
 
 impl NearBlockMapper {
-    pub fn new(include_fork_step: bool) -> Self {
+    pub fn new(include_fork_step: bool, encoding: EncodeBytes) -> Self {
+        let enc = &encoding;
         Self {
-            blocks: BlocksBuilder::new(include_fork_step),
-            chunks: ChunksBuilder::new(include_fork_step),
-            transactions: TransactionsBuilder::new(include_fork_step),
-            receipts: ReceiptsBuilder::new(include_fork_step),
+            blocks: BlocksBuilder::new(include_fork_step, enc),
+            chunks: ChunksBuilder::new(include_fork_step, enc),
+            transactions: TransactionsBuilder::new(include_fork_step, enc),
+            receipts: ReceiptsBuilder::new(include_fork_step, enc),
             state_changes: StateChangesBuilder::new(include_fork_step),
-            blocks_schema: schema::blocks_schema(include_fork_step),
-            chunks_schema: schema::chunks_schema(include_fork_step),
-            transactions_schema: schema::transactions_schema(include_fork_step),
-            receipts_schema: schema::receipts_schema(include_fork_step),
-            state_changes_schema: schema::state_changes_schema(include_fork_step),
+            blocks_schema: schema::blocks_schema(include_fork_step, enc),
+            chunks_schema: schema::chunks_schema(include_fork_step, enc),
+            transactions_schema: schema::transactions_schema(include_fork_step, enc),
+            receipts_schema: schema::receipts_schema(include_fork_step, enc),
+            state_changes_schema: schema::state_changes_schema(include_fork_step, enc),
+            encoding,
         }
     }
 
@@ -246,10 +245,10 @@ impl NearBlockMapper {
         // --- blocks table ---
         self.blocks.canonical.append(identity);
         self.blocks.height.append_value(header.height);
-        self.blocks.hash.append_value(&crypto_hash_hex(&header.hash));
-        self.blocks.prev_hash.append_value(&crypto_hash_hex(&header.prev_hash));
+        self.blocks.hash.append_value(crypto_hash_bytes(&header.hash));
+        self.blocks.prev_hash.append_value(crypto_hash_bytes(&header.prev_hash));
         self.blocks.prev_height.append_value(header.prev_height);
-        self.blocks.epoch_id.append_value(&crypto_hash_hex(&header.epoch_id));
+        self.blocks.epoch_id.append_value(crypto_hash_bytes(&header.epoch_id));
         self.blocks.author.append_value(&block.author);
         self.blocks.gas_price.append_value(&bigint_to_string(&header.gas_price));
         self.blocks.total_supply.append_value(&bigint_to_string(&header.total_supply));
@@ -291,8 +290,8 @@ impl NearBlockMapper {
     ) {
         self.chunks.canonical.append(identity);
         self.chunks.shard_id.append_value(header.shard_id);
-        self.chunks.chunk_hash.append_value(&hex(&header.chunk_hash));
-        self.chunks.prev_state_root.append_value(&hex(&header.prev_state_root));
+        self.chunks.chunk_hash.append_value(&header.chunk_hash);
+        self.chunks.prev_state_root.append_value(&header.prev_state_root);
         self.chunks.gas_used.append_value(header.gas_used);
         self.chunks.gas_limit.append_value(header.gas_limit);
         self.chunks.height_created.append_value(header.height_created);
@@ -314,7 +313,7 @@ impl NearBlockMapper {
             None => return,
         };
 
-        let tx_hash = crypto_hash_hex(&tx.hash);
+        let tx_hash = crypto_hash_bytes(&tx.hash);
         let actions: Vec<&str> = tx.actions.iter().map(|a| action_type_name(a)).collect();
         let actions_str = actions.join(",");
 
@@ -327,7 +326,7 @@ impl NearBlockMapper {
             .unwrap_or(("Unknown", 0));
 
         self.transactions.canonical.append(identity);
-        self.transactions.hash.append_value(&tx_hash);
+        self.transactions.hash.append_value(tx_hash);
         self.transactions.signer_id.append_value(&tx.signer_id);
         self.transactions.receiver_id.append_value(&tx.receiver_id);
         self.transactions.shard_id.append_value(shard_id);
@@ -350,7 +349,7 @@ impl NearBlockMapper {
             None => return,
         };
 
-        let receipt_id = crypto_hash_hex(&receipt.receipt_id);
+        let receipt_id = crypto_hash_bytes(&receipt.receipt_id);
 
         let (status, gas_burnt, executor_id) = receipt_outcome
             .execution_outcome
@@ -360,7 +359,7 @@ impl NearBlockMapper {
             .unwrap_or(("Unknown", 0, ""));
 
         self.receipts.canonical.append(identity);
-        self.receipts.receipt_id.append_value(&receipt_id);
+        self.receipts.receipt_id.append_value(receipt_id);
         self.receipts.predecessor_id.append_value(&receipt.predecessor_id);
         self.receipts.receiver_id.append_value(&receipt.receiver_id);
         self.receipts.shard_id.append_value(shard_id);
@@ -432,10 +431,10 @@ impl BlockMapper for NearBlockMapper {
 struct BlocksBuilder {
     canonical: CanonicalBuilder,
     height: UInt64Builder,
-    hash: StringBuilder,
-    prev_hash: StringBuilder,
+    hash: BytesColumn,
+    prev_hash: BytesColumn,
     prev_height: UInt64Builder,
-    epoch_id: StringBuilder,
+    epoch_id: BytesColumn,
     author: StringBuilder,
     gas_price: StringBuilder,
     total_supply: StringBuilder,
@@ -445,14 +444,14 @@ struct BlocksBuilder {
 }
 
 impl BlocksBuilder {
-    fn new(include_fork_step: bool) -> Self {
+    fn new(include_fork_step: bool, encoding: &EncodeBytes) -> Self {
         Self {
             canonical: CanonicalBuilder::new(),
             height: UInt64Builder::new(),
-            hash: StringBuilder::new(),
-            prev_hash: StringBuilder::new(),
+            hash: BytesColumn::new(encoding),
+            prev_hash: BytesColumn::new(encoding),
             prev_height: UInt64Builder::new(),
-            epoch_id: StringBuilder::new(),
+            epoch_id: BytesColumn::new(encoding),
             author: StringBuilder::new(),
             gas_price: StringBuilder::new(),
             total_supply: StringBuilder::new(),
@@ -466,10 +465,10 @@ impl BlocksBuilder {
         let mut columns = self.canonical.finish();
         columns.extend(vec![
             Arc::new(self.height.finish()) as Arc<dyn Array>,
-            Arc::new(self.hash.finish()) as Arc<dyn Array>,
-            Arc::new(self.prev_hash.finish()) as Arc<dyn Array>,
+            self.hash.finish(),
+            self.prev_hash.finish(),
             Arc::new(self.prev_height.finish()) as Arc<dyn Array>,
-            Arc::new(self.epoch_id.finish()) as Arc<dyn Array>,
+            self.epoch_id.finish(),
             Arc::new(self.author.finish()) as Arc<dyn Array>,
             Arc::new(self.gas_price.finish()) as Arc<dyn Array>,
             Arc::new(self.total_supply.finish()) as Arc<dyn Array>,
@@ -484,8 +483,8 @@ impl BlocksBuilder {
 struct ChunksBuilder {
     canonical: CanonicalBuilder,
     shard_id: UInt64Builder,
-    chunk_hash: StringBuilder,
-    prev_state_root: StringBuilder,
+    chunk_hash: BytesColumn,
+    prev_state_root: BytesColumn,
     gas_used: UInt64Builder,
     gas_limit: UInt64Builder,
     height_created: UInt64Builder,
@@ -496,12 +495,12 @@ struct ChunksBuilder {
 }
 
 impl ChunksBuilder {
-    fn new(include_fork_step: bool) -> Self {
+    fn new(include_fork_step: bool, encoding: &EncodeBytes) -> Self {
         Self {
             canonical: CanonicalBuilder::new(),
             shard_id: UInt64Builder::new(),
-            chunk_hash: StringBuilder::new(),
-            prev_state_root: StringBuilder::new(),
+            chunk_hash: BytesColumn::new(encoding),
+            prev_state_root: BytesColumn::new(encoding),
             gas_used: UInt64Builder::new(),
             gas_limit: UInt64Builder::new(),
             height_created: UInt64Builder::new(),
@@ -516,8 +515,8 @@ impl ChunksBuilder {
         let mut columns = self.canonical.finish();
         columns.extend(vec![
             Arc::new(self.shard_id.finish()) as Arc<dyn Array>,
-            Arc::new(self.chunk_hash.finish()) as Arc<dyn Array>,
-            Arc::new(self.prev_state_root.finish()) as Arc<dyn Array>,
+            self.chunk_hash.finish(),
+            self.prev_state_root.finish(),
             Arc::new(self.gas_used.finish()) as Arc<dyn Array>,
             Arc::new(self.gas_limit.finish()) as Arc<dyn Array>,
             Arc::new(self.height_created.finish()) as Arc<dyn Array>,
@@ -532,7 +531,7 @@ impl ChunksBuilder {
 
 struct TransactionsBuilder {
     canonical: CanonicalBuilder,
-    hash: StringBuilder,
+    hash: BytesColumn,
     signer_id: StringBuilder,
     receiver_id: StringBuilder,
     shard_id: UInt64Builder,
@@ -544,10 +543,10 @@ struct TransactionsBuilder {
 }
 
 impl TransactionsBuilder {
-    fn new(include_fork_step: bool) -> Self {
+    fn new(include_fork_step: bool, encoding: &EncodeBytes) -> Self {
         Self {
             canonical: CanonicalBuilder::new(),
-            hash: StringBuilder::new(),
+            hash: BytesColumn::new(encoding),
             signer_id: StringBuilder::new(),
             receiver_id: StringBuilder::new(),
             shard_id: UInt64Builder::new(),
@@ -562,7 +561,7 @@ impl TransactionsBuilder {
     fn finish(&mut self, schema: &Schema) -> anyhow::Result<RecordBatch> {
         let mut columns = self.canonical.finish();
         columns.extend(vec![
-            Arc::new(self.hash.finish()) as Arc<dyn Array>,
+            self.hash.finish(),
             Arc::new(self.signer_id.finish()) as Arc<dyn Array>,
             Arc::new(self.receiver_id.finish()) as Arc<dyn Array>,
             Arc::new(self.shard_id.finish()) as Arc<dyn Array>,
@@ -578,7 +577,7 @@ impl TransactionsBuilder {
 
 struct ReceiptsBuilder {
     canonical: CanonicalBuilder,
-    receipt_id: StringBuilder,
+    receipt_id: BytesColumn,
     predecessor_id: StringBuilder,
     receiver_id: StringBuilder,
     shard_id: UInt64Builder,
@@ -589,10 +588,10 @@ struct ReceiptsBuilder {
 }
 
 impl ReceiptsBuilder {
-    fn new(include_fork_step: bool) -> Self {
+    fn new(include_fork_step: bool, encoding: &EncodeBytes) -> Self {
         Self {
             canonical: CanonicalBuilder::new(),
-            receipt_id: StringBuilder::new(),
+            receipt_id: BytesColumn::new(encoding),
             predecessor_id: StringBuilder::new(),
             receiver_id: StringBuilder::new(),
             shard_id: UInt64Builder::new(),
@@ -606,7 +605,7 @@ impl ReceiptsBuilder {
     fn finish(&mut self, schema: &Schema) -> anyhow::Result<RecordBatch> {
         let mut columns = self.canonical.finish();
         columns.extend(vec![
-            Arc::new(self.receipt_id.finish()) as Arc<dyn Array>,
+            self.receipt_id.finish(),
             Arc::new(self.predecessor_id.finish()) as Arc<dyn Array>,
             Arc::new(self.receiver_id.finish()) as Arc<dyn Array>,
             Arc::new(self.shard_id.finish()) as Arc<dyn Array>,
@@ -780,7 +779,7 @@ mod tests {
     fn test_map_and_flush() {
         let block = make_test_block(100);
         let block_bytes = prost::Message::encode_to_vec(&block);
-        let mut mapper = NearBlockMapper::new(false);
+        let mut mapper = NearBlockMapper::new(false, EncodeBytes::Hex);
         mapper.map_block(&block_bytes, &BlockIdentity::default(), None).unwrap();
 
         let batches = mapper.flush().unwrap();
@@ -807,7 +806,7 @@ mod tests {
             chunk_headers: vec![],
         };
         let block_bytes = prost::Message::encode_to_vec(&block);
-        let mut mapper = NearBlockMapper::new(false);
+        let mut mapper = NearBlockMapper::new(false, EncodeBytes::Hex);
         mapper.map_block(&block_bytes, &BlockIdentity::default(), None).unwrap();
         let batches = mapper.flush().unwrap();
         assert_eq!(batches["blocks"].num_rows(), 1);
@@ -821,7 +820,7 @@ mod tests {
     fn test_flush_resets() {
         let block = make_test_block(100);
         let block_bytes = prost::Message::encode_to_vec(&block);
-        let mut mapper = NearBlockMapper::new(false);
+        let mut mapper = NearBlockMapper::new(false, EncodeBytes::Hex);
         mapper.map_block(&block_bytes, &BlockIdentity::default(), None).unwrap();
         let _ = mapper.flush().unwrap();
         assert_eq!(mapper.max_table_rows(), 0);
@@ -829,7 +828,7 @@ mod tests {
 
     #[test]
     fn test_table_names() {
-        let mapper = NearBlockMapper::new(false);
+        let mapper = NearBlockMapper::new(false, EncodeBytes::Hex);
         assert_eq!(mapper.table_names().len(), 5);
         assert!(mapper.table_names().contains(&"blocks"));
         assert!(mapper.table_names().contains(&"chunks"));
@@ -842,7 +841,7 @@ mod tests {
     fn test_fork_step_column_included() {
         let block = make_test_block(100);
         let block_bytes = prost::Message::encode_to_vec(&block);
-        let mut mapper = NearBlockMapper::new(true);
+        let mut mapper = NearBlockMapper::new(true, EncodeBytes::Hex);
         mapper.map_block(&block_bytes, &BlockIdentity::default(), Some("FINAL")).unwrap();
 
         let batches = mapper.flush().unwrap();
@@ -886,7 +885,7 @@ mod tests {
             chunk_headers: vec![],
         };
         let block_bytes = prost::Message::encode_to_vec(&block);
-        let mut mapper = NearBlockMapper::new(false);
+        let mut mapper = NearBlockMapper::new(false, EncodeBytes::Hex);
         mapper.map_block(&block_bytes, &BlockIdentity::default(), None).unwrap();
         let batches = mapper.flush().unwrap();
         let sc_batch = &batches["state_changes"];
@@ -915,6 +914,14 @@ mod tests {
         assert_eq!(bigint_to_string(&Some(near::BigInt { bytes: vec![0x01, 0x00] })), "256");
         // 100_000_000 = 0x05F5E100
         assert_eq!(bigint_to_string(&Some(near::BigInt { bytes: vec![0x05, 0xF5, 0xE1, 0x00] })), "100000000");
+    }
+
+    fn hex(bytes: &[u8]) -> String {
+        bytes.iter().map(|b| format!("{b:02x}")).collect()
+    }
+
+    fn crypto_hash_hex(hash: &Option<near::CryptoHash>) -> String {
+        hex(crypto_hash_bytes(hash))
     }
 
     #[test]

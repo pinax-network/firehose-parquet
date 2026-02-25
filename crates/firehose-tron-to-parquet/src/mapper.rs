@@ -3,6 +3,7 @@ use crate::schema;
 use arrow::array::*;
 use arrow::datatypes::Schema;
 use arrow::record_batch::RecordBatch;
+use firehose_parquet::encode::{BytesColumn, EncodeBytes};
 use firehose_parquet::traits::{BlockIdentity, BlockMapper, CanonicalBuilder};
 use prost::Message;
 use std::collections::HashMap;
@@ -24,20 +25,13 @@ fn mk_fork_step(include: bool) -> Option<StringBuilder> {
     if include { Some(StringBuilder::new()) } else { None }
 }
 
-fn bytes_to_hex(bytes: &[u8]) -> String {
-    format!("0x{}", hex_encode(bytes))
-}
-
-fn hex_encode(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
-}
-
 // ---------------------------------------------------------------------------
 // Tron BlockMapper
 // ---------------------------------------------------------------------------
 
 pub struct TronBlockMapper {
     include_fork_step: bool,
+    encoding: EncodeBytes,
     blocks: BlocksBuilder,
     transactions: TransactionsBuilder,
     logs: LogsBuilder,
@@ -49,33 +43,34 @@ pub struct TronBlockMapper {
 }
 
 impl TronBlockMapper {
-    pub fn new(include_fork_step: bool) -> Self {
+    pub fn new(include_fork_step: bool, encoding: EncodeBytes) -> Self {
+        let enc = &encoding;
         Self {
             include_fork_step,
-            blocks: BlocksBuilder::new(include_fork_step),
-            transactions: TransactionsBuilder::new(include_fork_step),
-            logs: LogsBuilder::new(include_fork_step),
-            internal_transactions: InternalTransactionsBuilder::new(include_fork_step),
-            blocks_schema: schema::blocks_schema(include_fork_step),
-            transactions_schema: schema::transactions_schema(include_fork_step),
-            logs_schema: schema::logs_schema(include_fork_step),
-            internal_transactions_schema: schema::internal_transactions_schema(include_fork_step),
+            blocks: BlocksBuilder::new(include_fork_step, enc),
+            transactions: TransactionsBuilder::new(include_fork_step, enc),
+            logs: LogsBuilder::new(include_fork_step, enc),
+            internal_transactions: InternalTransactionsBuilder::new(include_fork_step, enc),
+            blocks_schema: schema::blocks_schema(include_fork_step, enc),
+            transactions_schema: schema::transactions_schema(include_fork_step, enc),
+            logs_schema: schema::logs_schema(include_fork_step, enc),
+            internal_transactions_schema: schema::internal_transactions_schema(include_fork_step, enc),
+            encoding,
         }
     }
 
     fn map_tron_block(&mut self, block: &tron::Block, identity: &BlockIdentity, fork_step: Option<&str>) {
         let header = block.header.as_ref();
         let block_number = header.map_or(0, |h| h.number);
-        let block_hash = bytes_to_hex(&block.id);
 
         self.blocks.canonical.append(identity);
         self.blocks.number.append_value(block_number);
-        self.blocks.hash.append_value(&block_hash);
-        self.blocks.parent_hash.append_value(header.map_or_else(String::new, |h| bytes_to_hex(&h.parent_hash)));
+        self.blocks.hash.append_value(&block.id);
+        self.blocks.parent_hash.append_value(header.map(|h| h.parent_hash.as_slice()).unwrap_or(&[]));
         self.blocks.timestamp.append_value(header.map_or(0, |h| h.timestamp));
-        self.blocks.witness_address.append_value(header.map_or_else(String::new, |h| bytes_to_hex(&h.witness_address)));
+        self.blocks.witness_address.append_value(header.map(|h| h.witness_address.as_slice()).unwrap_or(&[]));
         self.blocks.version.append_value(header.map_or(0, |h| h.version));
-        self.blocks.tx_trie_root.append_value(header.map_or_else(String::new, |h| bytes_to_hex(&h.tx_trie_root)));
+        self.blocks.tx_trie_root.append_value(header.map(|h| h.tx_trie_root.as_slice()).unwrap_or(&[]));
         self.blocks.parent_number.append_value(header.map_or(0, |h| h.parent_number));
         self.blocks.num_transactions.append_value(block.transactions.len() as u32);
         append_fork_step(&mut self.blocks.fork_step, fork_step);
@@ -92,14 +87,13 @@ impl TronBlockMapper {
         identity: &BlockIdentity,
         fork_step: Option<&str>,
     ) {
-        let tx_hash = bytes_to_hex(&tx.txid);
         let info = tx.info.as_ref();
         let fee = info.map_or(0, |i| i.fee);
         let contract_type = tx.contracts.first().map_or(0, |c| c.r#type);
 
         self.transactions.canonical.append(identity);
         self.transactions.block_number.append_value(block_number);
-        self.transactions.txid.append_value(&tx_hash);
+        self.transactions.txid.append_value(&tx.txid);
         self.transactions.result.append_value(tx.result);
         self.transactions.code.append_value(tx.code);
         self.transactions.energy_used.append_value(tx.energy_used);
@@ -115,16 +109,16 @@ impl TronBlockMapper {
             for (log_index, log) in info.log.iter().enumerate() {
                 self.logs.canonical.append(identity);
                 self.logs.block_number.append_value(block_number);
-                self.logs.tx_hash.append_value(&tx_hash);
+                self.logs.tx_hash.append_value(&tx.txid);
                 self.logs.log_index.append_value(log_index as u32);
-                self.logs.address.append_value(bytes_to_hex(&log.address));
+                self.logs.address.append_value(&log.address);
 
                 let topics = &log.topics;
-                self.logs.topic0.append_option(topics.first().map(|t| bytes_to_hex(t)));
-                self.logs.topic1.append_option(topics.get(1).map(|t| bytes_to_hex(t)));
-                self.logs.topic2.append_option(topics.get(2).map(|t| bytes_to_hex(t)));
-                self.logs.topic3.append_option(topics.get(3).map(|t| bytes_to_hex(t)));
-                self.logs.data.append_value(bytes_to_hex(&log.data));
+                if let Some(t) = topics.first() { self.logs.topic0.append_value(t); } else { self.logs.topic0.append_null(); }
+                if let Some(t) = topics.get(1) { self.logs.topic1.append_value(t); } else { self.logs.topic1.append_null(); }
+                if let Some(t) = topics.get(2) { self.logs.topic2.append_value(t); } else { self.logs.topic2.append_null(); }
+                if let Some(t) = topics.get(3) { self.logs.topic3.append_value(t); } else { self.logs.topic3.append_null(); }
+                self.logs.data.append_value(&log.data);
                 append_fork_step(&mut self.logs.fork_step, fork_step);
             }
 
@@ -132,11 +126,11 @@ impl TronBlockMapper {
             for (internal_index, itx) in info.internal_transactions.iter().enumerate() {
                 self.internal_transactions.canonical.append(identity);
                 self.internal_transactions.block_number.append_value(block_number);
-                self.internal_transactions.tx_hash.append_value(&tx_hash);
+                self.internal_transactions.tx_hash.append_value(&tx.txid);
                 self.internal_transactions.internal_index.append_value(internal_index as u32);
-                self.internal_transactions.hash.append_value(bytes_to_hex(&itx.hash));
-                self.internal_transactions.caller_address.append_value(bytes_to_hex(&itx.caller_address));
-                self.internal_transactions.transfer_to_address.append_value(bytes_to_hex(&itx.transfer_to_address));
+                self.internal_transactions.hash.append_value(&itx.hash);
+                self.internal_transactions.caller_address.append_value(&itx.caller_address);
+                self.internal_transactions.transfer_to_address.append_value(&itx.transfer_to_address);
                 self.internal_transactions.note.append_value(String::from_utf8_lossy(&itx.note).as_ref());
                 self.internal_transactions.rejected.append_value(itx.rejected);
                 append_fork_step(&mut self.internal_transactions.fork_step, fork_step);
@@ -180,28 +174,28 @@ impl BlockMapper for TronBlockMapper {
 struct BlocksBuilder {
     canonical: CanonicalBuilder,
     number: UInt64Builder,
-    hash: StringBuilder,
-    parent_hash: StringBuilder,
+    hash: BytesColumn,
+    parent_hash: BytesColumn,
     timestamp: Int64Builder,
-    witness_address: StringBuilder,
+    witness_address: BytesColumn,
     version: UInt32Builder,
-    tx_trie_root: StringBuilder,
+    tx_trie_root: BytesColumn,
     parent_number: UInt64Builder,
     num_transactions: UInt32Builder,
     fork_step: Option<StringBuilder>,
 }
 
 impl BlocksBuilder {
-    fn new(include_fork_step: bool) -> Self {
+    fn new(include_fork_step: bool, encoding: &EncodeBytes) -> Self {
         Self {
             canonical: CanonicalBuilder::new(),
             number: UInt64Builder::new(),
-            hash: StringBuilder::new(),
-            parent_hash: StringBuilder::new(),
+            hash: BytesColumn::new(encoding),
+            parent_hash: BytesColumn::new(encoding),
             timestamp: Int64Builder::new(),
-            witness_address: StringBuilder::new(),
+            witness_address: BytesColumn::new(encoding),
             version: UInt32Builder::new(),
-            tx_trie_root: StringBuilder::new(),
+            tx_trie_root: BytesColumn::new(encoding),
             parent_number: UInt64Builder::new(),
             num_transactions: UInt32Builder::new(),
             fork_step: mk_fork_step(include_fork_step),
@@ -212,12 +206,12 @@ impl BlocksBuilder {
         let mut columns = self.canonical.finish();
         columns.extend(vec![
             Arc::new(self.number.finish()) as Arc<dyn Array>,
-            Arc::new(self.hash.finish()) as Arc<dyn Array>,
-            Arc::new(self.parent_hash.finish()) as Arc<dyn Array>,
+            self.hash.finish(),
+            self.parent_hash.finish(),
             Arc::new(self.timestamp.finish()) as Arc<dyn Array>,
-            Arc::new(self.witness_address.finish()) as Arc<dyn Array>,
+            self.witness_address.finish(),
             Arc::new(self.version.finish()) as Arc<dyn Array>,
-            Arc::new(self.tx_trie_root.finish()) as Arc<dyn Array>,
+            self.tx_trie_root.finish(),
             Arc::new(self.parent_number.finish()) as Arc<dyn Array>,
             Arc::new(self.num_transactions.finish()) as Arc<dyn Array>,
         ]);
@@ -229,7 +223,7 @@ impl BlocksBuilder {
 struct TransactionsBuilder {
     canonical: CanonicalBuilder,
     block_number: UInt64Builder,
-    txid: StringBuilder,
+    txid: BytesColumn,
     result: BooleanBuilder,
     code: Int32Builder,
     energy_used: Int64Builder,
@@ -242,11 +236,11 @@ struct TransactionsBuilder {
 }
 
 impl TransactionsBuilder {
-    fn new(include_fork_step: bool) -> Self {
+    fn new(include_fork_step: bool, encoding: &EncodeBytes) -> Self {
         Self {
             canonical: CanonicalBuilder::new(),
             block_number: UInt64Builder::new(),
-            txid: StringBuilder::new(),
+            txid: BytesColumn::new(encoding),
             result: BooleanBuilder::new(),
             code: Int32Builder::new(),
             energy_used: Int64Builder::new(),
@@ -263,7 +257,7 @@ impl TransactionsBuilder {
         let mut columns = self.canonical.finish();
         columns.extend(vec![
             Arc::new(self.block_number.finish()) as Arc<dyn Array>,
-            Arc::new(self.txid.finish()) as Arc<dyn Array>,
+            self.txid.finish(),
             Arc::new(self.result.finish()) as Arc<dyn Array>,
             Arc::new(self.code.finish()) as Arc<dyn Array>,
             Arc::new(self.energy_used.finish()) as Arc<dyn Array>,
@@ -281,30 +275,30 @@ impl TransactionsBuilder {
 struct LogsBuilder {
     canonical: CanonicalBuilder,
     block_number: UInt64Builder,
-    tx_hash: StringBuilder,
+    tx_hash: BytesColumn,
     log_index: UInt32Builder,
-    address: StringBuilder,
-    topic0: StringBuilder,
-    topic1: StringBuilder,
-    topic2: StringBuilder,
-    topic3: StringBuilder,
-    data: StringBuilder,
+    address: BytesColumn,
+    topic0: BytesColumn,
+    topic1: BytesColumn,
+    topic2: BytesColumn,
+    topic3: BytesColumn,
+    data: BytesColumn,
     fork_step: Option<StringBuilder>,
 }
 
 impl LogsBuilder {
-    fn new(include_fork_step: bool) -> Self {
+    fn new(include_fork_step: bool, encoding: &EncodeBytes) -> Self {
         Self {
             canonical: CanonicalBuilder::new(),
             block_number: UInt64Builder::new(),
-            tx_hash: StringBuilder::new(),
+            tx_hash: BytesColumn::new(encoding),
             log_index: UInt32Builder::new(),
-            address: StringBuilder::new(),
-            topic0: StringBuilder::new(),
-            topic1: StringBuilder::new(),
-            topic2: StringBuilder::new(),
-            topic3: StringBuilder::new(),
-            data: StringBuilder::new(),
+            address: BytesColumn::new(encoding),
+            topic0: BytesColumn::new(encoding),
+            topic1: BytesColumn::new(encoding),
+            topic2: BytesColumn::new(encoding),
+            topic3: BytesColumn::new(encoding),
+            data: BytesColumn::new(encoding),
             fork_step: mk_fork_step(include_fork_step),
         }
     }
@@ -313,14 +307,14 @@ impl LogsBuilder {
         let mut columns = self.canonical.finish();
         columns.extend(vec![
             Arc::new(self.block_number.finish()) as Arc<dyn Array>,
-            Arc::new(self.tx_hash.finish()) as Arc<dyn Array>,
+            self.tx_hash.finish(),
             Arc::new(self.log_index.finish()) as Arc<dyn Array>,
-            Arc::new(self.address.finish()) as Arc<dyn Array>,
-            Arc::new(self.topic0.finish()) as Arc<dyn Array>,
-            Arc::new(self.topic1.finish()) as Arc<dyn Array>,
-            Arc::new(self.topic2.finish()) as Arc<dyn Array>,
-            Arc::new(self.topic3.finish()) as Arc<dyn Array>,
-            Arc::new(self.data.finish()) as Arc<dyn Array>,
+            self.address.finish(),
+            self.topic0.finish(),
+            self.topic1.finish(),
+            self.topic2.finish(),
+            self.topic3.finish(),
+            self.data.finish(),
         ]);
         finish_fork_step(&mut self.fork_step, &mut columns);
         Ok(RecordBatch::try_new(Arc::new(schema.clone()), columns)?)
@@ -330,26 +324,26 @@ impl LogsBuilder {
 struct InternalTransactionsBuilder {
     canonical: CanonicalBuilder,
     block_number: UInt64Builder,
-    tx_hash: StringBuilder,
+    tx_hash: BytesColumn,
     internal_index: UInt32Builder,
-    hash: StringBuilder,
-    caller_address: StringBuilder,
-    transfer_to_address: StringBuilder,
+    hash: BytesColumn,
+    caller_address: BytesColumn,
+    transfer_to_address: BytesColumn,
     note: StringBuilder,
     rejected: BooleanBuilder,
     fork_step: Option<StringBuilder>,
 }
 
 impl InternalTransactionsBuilder {
-    fn new(include_fork_step: bool) -> Self {
+    fn new(include_fork_step: bool, encoding: &EncodeBytes) -> Self {
         Self {
             canonical: CanonicalBuilder::new(),
             block_number: UInt64Builder::new(),
-            tx_hash: StringBuilder::new(),
+            tx_hash: BytesColumn::new(encoding),
             internal_index: UInt32Builder::new(),
-            hash: StringBuilder::new(),
-            caller_address: StringBuilder::new(),
-            transfer_to_address: StringBuilder::new(),
+            hash: BytesColumn::new(encoding),
+            caller_address: BytesColumn::new(encoding),
+            transfer_to_address: BytesColumn::new(encoding),
             note: StringBuilder::new(),
             rejected: BooleanBuilder::new(),
             fork_step: mk_fork_step(include_fork_step),
@@ -360,11 +354,11 @@ impl InternalTransactionsBuilder {
         let mut columns = self.canonical.finish();
         columns.extend(vec![
             Arc::new(self.block_number.finish()) as Arc<dyn Array>,
-            Arc::new(self.tx_hash.finish()) as Arc<dyn Array>,
+            self.tx_hash.finish(),
             Arc::new(self.internal_index.finish()) as Arc<dyn Array>,
-            Arc::new(self.hash.finish()) as Arc<dyn Array>,
-            Arc::new(self.caller_address.finish()) as Arc<dyn Array>,
-            Arc::new(self.transfer_to_address.finish()) as Arc<dyn Array>,
+            self.hash.finish(),
+            self.caller_address.finish(),
+            self.transfer_to_address.finish(),
             Arc::new(self.note.finish()) as Arc<dyn Array>,
             Arc::new(self.rejected.finish()) as Arc<dyn Array>,
         ]);
@@ -464,7 +458,7 @@ mod tests {
     fn test_map_and_flush() {
         let block = make_test_block(100);
         let block_bytes = prost::Message::encode_to_vec(&block);
-        let mut mapper = TronBlockMapper::new(false);
+        let mut mapper = TronBlockMapper::new(false, EncodeBytes::Hex);
         mapper.map_block(&block_bytes, &BlockIdentity::default(), None).unwrap();
 
         let batches = mapper.flush().unwrap();
@@ -491,7 +485,7 @@ mod tests {
             transactions: vec![],
         };
         let block_bytes = prost::Message::encode_to_vec(&block);
-        let mut mapper = TronBlockMapper::new(false);
+        let mut mapper = TronBlockMapper::new(false, EncodeBytes::Hex);
         mapper.map_block(&block_bytes, &BlockIdentity::default(), None).unwrap();
         let batches = mapper.flush().unwrap();
         assert_eq!(batches["blocks"].num_rows(), 1);
@@ -504,7 +498,7 @@ mod tests {
     fn test_flush_resets() {
         let block = make_test_block(1);
         let block_bytes = prost::Message::encode_to_vec(&block);
-        let mut mapper = TronBlockMapper::new(false);
+        let mut mapper = TronBlockMapper::new(false, EncodeBytes::Hex);
         mapper.map_block(&block_bytes, &BlockIdentity::default(), None).unwrap();
         let _ = mapper.flush().unwrap();
         assert_eq!(mapper.max_table_rows(), 0);
@@ -512,7 +506,7 @@ mod tests {
 
     #[test]
     fn test_table_names() {
-        let mapper = TronBlockMapper::new(false);
+        let mapper = TronBlockMapper::new(false, EncodeBytes::Hex);
         assert_eq!(mapper.table_names().len(), 4);
         assert!(mapper.table_names().contains(&"blocks"));
         assert!(mapper.table_names().contains(&"transactions"));
@@ -524,7 +518,7 @@ mod tests {
     fn test_fork_step_column_included() {
         let block = make_test_block(0);
         let block_bytes = prost::Message::encode_to_vec(&block);
-        let mut mapper = TronBlockMapper::new(true);
+        let mut mapper = TronBlockMapper::new(true, EncodeBytes::Hex);
         mapper.map_block(&block_bytes, &BlockIdentity::default(), Some("FINAL")).unwrap();
 
         let batches = mapper.flush().unwrap();

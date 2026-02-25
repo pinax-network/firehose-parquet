@@ -740,6 +740,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "firehose-beacon-to-parquet"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "arrow",
+ "clap",
+ "firehose-parquet",
+ "parquet",
+ "prost",
+ "prost-types",
+ "tempfile",
+ "tokio",
+ "tonic-build",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "firehose-bitcoin-to-parquet"
 version = "0.1.0"
 dependencies = [

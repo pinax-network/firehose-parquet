@@ -3,6 +3,7 @@ use crate::schema;
 use arrow::array::*;
 use arrow::datatypes::Schema;
 use arrow::record_batch::RecordBatch;
+use firehose_parquet::encode::{BytesColumn, EncodeBytes};
 use firehose_parquet::traits::{BlockIdentity, BlockMapper, CanonicalBuilder};
 use prost::Message;
 use std::collections::HashMap;
@@ -11,16 +12,6 @@ use std::sync::Arc;
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-fn hex(bytes: &[u8]) -> String {
-    let mut s = String::with_capacity(2 + bytes.len() * 2);
-    s.push_str("0x");
-    for b in bytes {
-        use std::fmt::Write;
-        let _ = write!(s, "{:02x}", b);
-    }
-    s
-}
 
 fn spec_name(spec: i32) -> &'static str {
     match spec {
@@ -222,6 +213,7 @@ fn extract_body_fields(block: &beacon::Block) -> BodyFields<'_> {
 
 pub struct BeaconBlockMapper {
     include_fork_step: bool,
+    encoding: EncodeBytes,
     blocks: BlocksBuilder,
     attestations: AttestationsBuilder,
     deposits: DepositsBuilder,
@@ -241,25 +233,27 @@ pub struct BeaconBlockMapper {
 }
 
 impl BeaconBlockMapper {
-    pub fn new(include_fork_step: bool) -> Self {
+    pub fn new(include_fork_step: bool, encoding: EncodeBytes) -> Self {
+        let enc = &encoding;
         Self {
             include_fork_step,
-            blocks: BlocksBuilder::new(include_fork_step),
-            attestations: AttestationsBuilder::new(include_fork_step),
-            deposits: DepositsBuilder::new(include_fork_step),
-            proposer_slashings: ProposerSlashingsBuilder::new(include_fork_step),
-            attester_slashings: AttesterSlashingsBuilder::new(include_fork_step),
-            voluntary_exits: VoluntaryExitsBuilder::new(include_fork_step),
-            execution_payload: ExecutionPayloadBuilder::new(include_fork_step),
-            blob_sidecars: BlobSidecarsBuilder::new(include_fork_step),
-            blocks_schema: schema::blocks_schema(include_fork_step),
-            attestations_schema: schema::attestations_schema(include_fork_step),
-            deposits_schema: schema::deposits_schema(include_fork_step),
-            proposer_slashings_schema: schema::proposer_slashings_schema(include_fork_step),
-            attester_slashings_schema: schema::attester_slashings_schema(include_fork_step),
-            voluntary_exits_schema: schema::voluntary_exits_schema(include_fork_step),
-            execution_payload_schema: schema::execution_payload_schema(include_fork_step),
-            blob_sidecars_schema: schema::blob_sidecars_schema(include_fork_step),
+            blocks: BlocksBuilder::new(include_fork_step, enc),
+            attestations: AttestationsBuilder::new(include_fork_step, enc),
+            deposits: DepositsBuilder::new(include_fork_step, enc),
+            proposer_slashings: ProposerSlashingsBuilder::new(include_fork_step, enc),
+            attester_slashings: AttesterSlashingsBuilder::new(include_fork_step, enc),
+            voluntary_exits: VoluntaryExitsBuilder::new(include_fork_step, enc),
+            execution_payload: ExecutionPayloadBuilder::new(include_fork_step, enc),
+            blob_sidecars: BlobSidecarsBuilder::new(include_fork_step, enc),
+            blocks_schema: schema::blocks_schema(include_fork_step, enc),
+            attestations_schema: schema::attestations_schema(include_fork_step, enc),
+            deposits_schema: schema::deposits_schema(include_fork_step, enc),
+            proposer_slashings_schema: schema::proposer_slashings_schema(include_fork_step, enc),
+            attester_slashings_schema: schema::attester_slashings_schema(include_fork_step, enc),
+            voluntary_exits_schema: schema::voluntary_exits_schema(include_fork_step, enc),
+            execution_payload_schema: schema::execution_payload_schema(include_fork_step, enc),
+            blob_sidecars_schema: schema::blob_sidecars_schema(include_fork_step, enc),
+            encoding,
         }
     }
 
@@ -271,11 +265,11 @@ impl BeaconBlockMapper {
         self.blocks.slot.append_value(slot);
         self.blocks.parent_slot.append_value(block.parent_slot);
         self.blocks.proposer_index.append_value(block.proposer_index);
-        self.blocks.root.append_value(hex(&block.root));
-        self.blocks.parent_root.append_value(hex(&block.parent_root));
-        self.blocks.state_root.append_value(hex(&block.state_root));
-        self.blocks.body_root.append_value(hex(&block.body_root));
-        self.blocks.signature.append_value(hex(&block.signature));
+        self.blocks.root.append_value(&block.root);
+        self.blocks.parent_root.append_value(&block.parent_root);
+        self.blocks.state_root.append_value(&block.state_root);
+        self.blocks.body_root.append_value(&block.body_root);
+        self.blocks.signature.append_value(&block.signature);
         self.blocks.spec.append_value(spec_name(block.spec));
         append_fork_step(&mut self.blocks.fork_step, fork_step);
 
@@ -288,8 +282,8 @@ impl BeaconBlockMapper {
             self.attestations.attestation_index.append_value(i as u32);
             match att {
                 AttestationFields::Standard(a) => {
-                    self.attestations.aggregation_bits.append_value(hex(&a.aggregation_bits));
-                    self.attestations.signature.append_value(hex(&a.signature));
+                    self.attestations.aggregation_bits.append_value(&a.aggregation_bits);
+                    self.attestations.signature.append_value(&a.signature);
                     if let Some(data) = &a.data {
                         self.append_attestation_data(data);
                     } else {
@@ -297,8 +291,8 @@ impl BeaconBlockMapper {
                     }
                 }
                 AttestationFields::Electra(a) => {
-                    self.attestations.aggregation_bits.append_value(hex(&a.aggregation_bits));
-                    self.attestations.signature.append_value(hex(&a.signature));
+                    self.attestations.aggregation_bits.append_value(&a.aggregation_bits);
+                    self.attestations.signature.append_value(&a.signature);
                     if let Some(data) = &a.data {
                         self.append_attestation_data(data);
                     } else {
@@ -315,15 +309,15 @@ impl BeaconBlockMapper {
             self.deposits.block_slot.append_value(slot);
             self.deposits.deposit_index.append_value(i as u32);
             if let Some(data) = &deposit.data {
-                self.deposits.pubkey.append_value(hex(&data.public_key));
-                self.deposits.withdrawal_credentials.append_value(hex(&data.withdrawal_credentials));
+                self.deposits.pubkey.append_value(&data.public_key);
+                self.deposits.withdrawal_credentials.append_value(&data.withdrawal_credentials);
                 self.deposits.amount.append_value(data.gwei);
-                self.deposits.signature.append_value(hex(&data.signature));
+                self.deposits.signature.append_value(&data.signature);
             } else {
-                self.deposits.pubkey.append_value("");
-                self.deposits.withdrawal_credentials.append_value("");
+                self.deposits.pubkey.append_value(&[]);
+                self.deposits.withdrawal_credentials.append_value(&[]);
                 self.deposits.amount.append_value(0);
-                self.deposits.signature.append_value("");
+                self.deposits.signature.append_value(&[]);
             }
             append_fork_step(&mut self.deposits.fork_step, fork_step);
         }
@@ -353,7 +347,7 @@ impl BeaconBlockMapper {
             self.voluntary_exits.canonical.append(identity);
             self.voluntary_exits.block_slot.append_value(slot);
             self.voluntary_exits.exit_index.append_value(i as u32);
-            self.voluntary_exits.signature.append_value(hex(&exit.signature));
+            self.voluntary_exits.signature.append_value(&exit.signature);
             if let Some(msg) = &exit.message {
                 self.voluntary_exits.epoch.append_value(msg.epoch);
                 self.voluntary_exits.validator_index.append_value(msg.validator_index);
@@ -368,11 +362,11 @@ impl BeaconBlockMapper {
         if let Some(ep) = body.execution_payload {
             self.execution_payload.canonical.append(identity);
             self.execution_payload.block_slot.append_value(slot);
-            self.execution_payload.parent_hash.append_value(hex(ep.parent_hash));
-            self.execution_payload.fee_recipient.append_value(hex(ep.fee_recipient));
-            self.execution_payload.state_root.append_value(hex(ep.state_root));
-            self.execution_payload.receipts_root.append_value(hex(ep.receipts_root));
-            self.execution_payload.prev_randao.append_value(hex(ep.prev_randao));
+            self.execution_payload.parent_hash.append_value(ep.parent_hash);
+            self.execution_payload.fee_recipient.append_value(ep.fee_recipient);
+            self.execution_payload.state_root.append_value(ep.state_root);
+            self.execution_payload.receipts_root.append_value(ep.receipts_root);
+            self.execution_payload.prev_randao.append_value(ep.prev_randao);
             self.execution_payload.block_number.append_value(ep.block_number);
             self.execution_payload.gas_limit.append_value(ep.gas_limit);
             self.execution_payload.gas_used.append_value(ep.gas_used);
@@ -380,8 +374,8 @@ impl BeaconBlockMapper {
                 Some(ts) => self.execution_payload.payload_timestamp.append_value(ts.seconds),
                 None => self.execution_payload.payload_timestamp.append_null(),
             }
-            self.execution_payload.block_hash.append_value(hex(ep.block_hash));
-            self.execution_payload.base_fee_per_gas.append_value(hex(ep.base_fee_per_gas));
+            self.execution_payload.block_hash.append_value(ep.block_hash);
+            self.execution_payload.base_fee_per_gas.append_value(ep.base_fee_per_gas);
             match ep.blob_gas_used {
                 Some(v) => self.execution_payload.blob_gas_used.append_value(v),
                 None => self.execution_payload.blob_gas_used.append_null(),
@@ -398,9 +392,9 @@ impl BeaconBlockMapper {
             self.blob_sidecars.canonical.append(identity);
             self.blob_sidecars.block_slot.append_value(slot);
             self.blob_sidecars.blob_index.append_value(blob.index);
-            self.blob_sidecars.blob.append_value(hex(&blob.blob));
-            self.blob_sidecars.kzg_commitment.append_value(hex(&blob.kzg_commitment));
-            self.blob_sidecars.kzg_proof.append_value(hex(&blob.kzg_proof));
+            self.blob_sidecars.blob.append_value(&blob.blob);
+            self.blob_sidecars.kzg_commitment.append_value(&blob.kzg_commitment);
+            self.blob_sidecars.kzg_proof.append_value(&blob.kzg_proof);
             append_fork_step(&mut self.blob_sidecars.fork_step, fork_step);
         }
     }
@@ -408,31 +402,31 @@ impl BeaconBlockMapper {
     fn append_attestation_data(&mut self, data: &beacon::AttestationData) {
         self.attestations.slot.append_value(data.slot);
         self.attestations.committee_index.append_value(data.committee_index);
-        self.attestations.beacon_block_root.append_value(hex(&data.beacon_block_root));
+        self.attestations.beacon_block_root.append_value(&data.beacon_block_root);
         if let Some(src) = &data.source {
             self.attestations.source_epoch.append_value(src.epoch);
-            self.attestations.source_root.append_value(hex(&src.root));
+            self.attestations.source_root.append_value(&src.root);
         } else {
             self.attestations.source_epoch.append_value(0);
-            self.attestations.source_root.append_value("");
+            self.attestations.source_root.append_value(&[]);
         }
         if let Some(tgt) = &data.target {
             self.attestations.target_epoch.append_value(tgt.epoch);
-            self.attestations.target_root.append_value(hex(&tgt.root));
+            self.attestations.target_root.append_value(&tgt.root);
         } else {
             self.attestations.target_epoch.append_value(0);
-            self.attestations.target_root.append_value("");
+            self.attestations.target_root.append_value(&[]);
         }
     }
 
     fn append_empty_attestation_data(&mut self) {
         self.attestations.slot.append_value(0);
         self.attestations.committee_index.append_value(0);
-        self.attestations.beacon_block_root.append_value("");
+        self.attestations.beacon_block_root.append_value(&[]);
         self.attestations.source_epoch.append_value(0);
-        self.attestations.source_root.append_value("");
+        self.attestations.source_root.append_value(&[]);
         self.attestations.target_epoch.append_value(0);
-        self.attestations.target_root.append_value("");
+        self.attestations.target_root.append_value(&[]);
     }
 
     fn append_proposer_slashing_header(&mut self, signed: Option<&beacon::SignedBeaconBlockHeader>, is_first: bool) {
@@ -457,15 +451,15 @@ impl BeaconBlockMapper {
         if let Some(hdr) = signed.and_then(|s| s.message.as_ref()) {
             slot_b.append_value(hdr.slot);
             pi_b.append_value(hdr.proposer_index);
-            pr_b.append_value(hex(&hdr.parent_root));
-            sr_b.append_value(hex(&hdr.state_root));
-            br_b.append_value(hex(&hdr.body_root));
+            pr_b.append_value(&hdr.parent_root);
+            sr_b.append_value(&hdr.state_root);
+            br_b.append_value(&hdr.body_root);
         } else {
             slot_b.append_value(0);
             pi_b.append_value(0);
-            pr_b.append_value("");
-            sr_b.append_value("");
-            br_b.append_value("");
+            pr_b.append_value(&[]);
+            sr_b.append_value(&[]);
+            br_b.append_value(&[]);
         }
     }
 
@@ -495,29 +489,29 @@ impl BeaconBlockMapper {
         if let Some(data) = att.and_then(|a| a.data.as_ref()) {
             slot_b.append_value(data.slot);
             ci_b.append_value(data.committee_index);
-            bbr_b.append_value(hex(&data.beacon_block_root));
+            bbr_b.append_value(&data.beacon_block_root);
             if let Some(src) = &data.source {
                 se_b.append_value(src.epoch);
-                sr_b.append_value(hex(&src.root));
+                sr_b.append_value(&src.root);
             } else {
                 se_b.append_value(0);
-                sr_b.append_value("");
+                sr_b.append_value(&[]);
             }
             if let Some(tgt) = &data.target {
                 te_b.append_value(tgt.epoch);
-                tr_b.append_value(hex(&tgt.root));
+                tr_b.append_value(&tgt.root);
             } else {
                 te_b.append_value(0);
-                tr_b.append_value("");
+                tr_b.append_value(&[]);
             }
         } else {
             slot_b.append_value(0);
             ci_b.append_value(0);
-            bbr_b.append_value("");
+            bbr_b.append_value(&[]);
             se_b.append_value(0);
-            sr_b.append_value("");
+            sr_b.append_value(&[]);
             te_b.append_value(0);
-            tr_b.append_value("");
+            tr_b.append_value(&[]);
         }
     }
 }
@@ -567,27 +561,27 @@ struct BlocksBuilder {
     slot: UInt64Builder,
     parent_slot: UInt64Builder,
     proposer_index: UInt64Builder,
-    root: StringBuilder,
-    parent_root: StringBuilder,
-    state_root: StringBuilder,
-    body_root: StringBuilder,
-    signature: StringBuilder,
+    root: BytesColumn,
+    parent_root: BytesColumn,
+    state_root: BytesColumn,
+    body_root: BytesColumn,
+    signature: BytesColumn,
     spec: StringBuilder,
     fork_step: Option<StringBuilder>,
 }
 
 impl BlocksBuilder {
-    fn new(include_fork_step: bool) -> Self {
+    fn new(include_fork_step: bool, encoding: &EncodeBytes) -> Self {
         Self {
             canonical: CanonicalBuilder::new(),
             slot: UInt64Builder::new(),
             parent_slot: UInt64Builder::new(),
             proposer_index: UInt64Builder::new(),
-            root: StringBuilder::new(),
-            parent_root: StringBuilder::new(),
-            state_root: StringBuilder::new(),
-            body_root: StringBuilder::new(),
-            signature: StringBuilder::new(),
+            root: BytesColumn::new(encoding),
+            parent_root: BytesColumn::new(encoding),
+            state_root: BytesColumn::new(encoding),
+            body_root: BytesColumn::new(encoding),
+            signature: BytesColumn::new(encoding),
             spec: StringBuilder::new(),
             fork_step: mk_fork_step(include_fork_step),
         }
@@ -599,11 +593,11 @@ impl BlocksBuilder {
             Arc::new(self.slot.finish()) as Arc<dyn Array>,
             Arc::new(self.parent_slot.finish()) as Arc<dyn Array>,
             Arc::new(self.proposer_index.finish()) as Arc<dyn Array>,
-            Arc::new(self.root.finish()) as Arc<dyn Array>,
-            Arc::new(self.parent_root.finish()) as Arc<dyn Array>,
-            Arc::new(self.state_root.finish()) as Arc<dyn Array>,
-            Arc::new(self.body_root.finish()) as Arc<dyn Array>,
-            Arc::new(self.signature.finish()) as Arc<dyn Array>,
+            self.root.finish(),
+            self.parent_root.finish(),
+            self.state_root.finish(),
+            self.body_root.finish(),
+            self.signature.finish(),
             Arc::new(self.spec.finish()) as Arc<dyn Array>,
         ]);
         finish_fork_step(&mut self.fork_step, &mut columns);
@@ -617,31 +611,31 @@ struct AttestationsBuilder {
     attestation_index: UInt32Builder,
     slot: UInt64Builder,
     committee_index: UInt64Builder,
-    aggregation_bits: StringBuilder,
-    beacon_block_root: StringBuilder,
+    aggregation_bits: BytesColumn,
+    beacon_block_root: BytesColumn,
     source_epoch: UInt64Builder,
-    source_root: StringBuilder,
+    source_root: BytesColumn,
     target_epoch: UInt64Builder,
-    target_root: StringBuilder,
-    signature: StringBuilder,
+    target_root: BytesColumn,
+    signature: BytesColumn,
     fork_step: Option<StringBuilder>,
 }
 
 impl AttestationsBuilder {
-    fn new(include_fork_step: bool) -> Self {
+    fn new(include_fork_step: bool, encoding: &EncodeBytes) -> Self {
         Self {
             canonical: CanonicalBuilder::new(),
             block_slot: UInt64Builder::new(),
             attestation_index: UInt32Builder::new(),
             slot: UInt64Builder::new(),
             committee_index: UInt64Builder::new(),
-            aggregation_bits: StringBuilder::new(),
-            beacon_block_root: StringBuilder::new(),
+            aggregation_bits: BytesColumn::new(encoding),
+            beacon_block_root: BytesColumn::new(encoding),
             source_epoch: UInt64Builder::new(),
-            source_root: StringBuilder::new(),
+            source_root: BytesColumn::new(encoding),
             target_epoch: UInt64Builder::new(),
-            target_root: StringBuilder::new(),
-            signature: StringBuilder::new(),
+            target_root: BytesColumn::new(encoding),
+            signature: BytesColumn::new(encoding),
             fork_step: mk_fork_step(include_fork_step),
         }
     }
@@ -653,13 +647,13 @@ impl AttestationsBuilder {
             Arc::new(self.attestation_index.finish()) as Arc<dyn Array>,
             Arc::new(self.slot.finish()) as Arc<dyn Array>,
             Arc::new(self.committee_index.finish()) as Arc<dyn Array>,
-            Arc::new(self.aggregation_bits.finish()) as Arc<dyn Array>,
-            Arc::new(self.beacon_block_root.finish()) as Arc<dyn Array>,
+            self.aggregation_bits.finish(),
+            self.beacon_block_root.finish(),
             Arc::new(self.source_epoch.finish()) as Arc<dyn Array>,
-            Arc::new(self.source_root.finish()) as Arc<dyn Array>,
+            self.source_root.finish(),
             Arc::new(self.target_epoch.finish()) as Arc<dyn Array>,
-            Arc::new(self.target_root.finish()) as Arc<dyn Array>,
-            Arc::new(self.signature.finish()) as Arc<dyn Array>,
+            self.target_root.finish(),
+            self.signature.finish(),
         ]);
         finish_fork_step(&mut self.fork_step, &mut columns);
         Ok(RecordBatch::try_new(Arc::new(schema.clone()), columns)?)
@@ -670,23 +664,23 @@ struct DepositsBuilder {
     canonical: CanonicalBuilder,
     block_slot: UInt64Builder,
     deposit_index: UInt32Builder,
-    pubkey: StringBuilder,
-    withdrawal_credentials: StringBuilder,
+    pubkey: BytesColumn,
+    withdrawal_credentials: BytesColumn,
     amount: UInt64Builder,
-    signature: StringBuilder,
+    signature: BytesColumn,
     fork_step: Option<StringBuilder>,
 }
 
 impl DepositsBuilder {
-    fn new(include_fork_step: bool) -> Self {
+    fn new(include_fork_step: bool, encoding: &EncodeBytes) -> Self {
         Self {
             canonical: CanonicalBuilder::new(),
             block_slot: UInt64Builder::new(),
             deposit_index: UInt32Builder::new(),
-            pubkey: StringBuilder::new(),
-            withdrawal_credentials: StringBuilder::new(),
+            pubkey: BytesColumn::new(encoding),
+            withdrawal_credentials: BytesColumn::new(encoding),
             amount: UInt64Builder::new(),
-            signature: StringBuilder::new(),
+            signature: BytesColumn::new(encoding),
             fork_step: mk_fork_step(include_fork_step),
         }
     }
@@ -696,10 +690,10 @@ impl DepositsBuilder {
         columns.extend(vec![
             Arc::new(self.block_slot.finish()) as Arc<dyn Array>,
             Arc::new(self.deposit_index.finish()) as Arc<dyn Array>,
-            Arc::new(self.pubkey.finish()) as Arc<dyn Array>,
-            Arc::new(self.withdrawal_credentials.finish()) as Arc<dyn Array>,
+            self.pubkey.finish(),
+            self.withdrawal_credentials.finish(),
             Arc::new(self.amount.finish()) as Arc<dyn Array>,
-            Arc::new(self.signature.finish()) as Arc<dyn Array>,
+            self.signature.finish(),
         ]);
         finish_fork_step(&mut self.fork_step, &mut columns);
         Ok(RecordBatch::try_new(Arc::new(schema.clone()), columns)?)
@@ -712,33 +706,33 @@ struct ProposerSlashingsBuilder {
     slashing_index: UInt32Builder,
     header_1_slot: UInt64Builder,
     header_1_proposer_index: UInt64Builder,
-    header_1_parent_root: StringBuilder,
-    header_1_state_root: StringBuilder,
-    header_1_body_root: StringBuilder,
+    header_1_parent_root: BytesColumn,
+    header_1_state_root: BytesColumn,
+    header_1_body_root: BytesColumn,
     header_2_slot: UInt64Builder,
     header_2_proposer_index: UInt64Builder,
-    header_2_parent_root: StringBuilder,
-    header_2_state_root: StringBuilder,
-    header_2_body_root: StringBuilder,
+    header_2_parent_root: BytesColumn,
+    header_2_state_root: BytesColumn,
+    header_2_body_root: BytesColumn,
     fork_step: Option<StringBuilder>,
 }
 
 impl ProposerSlashingsBuilder {
-    fn new(include_fork_step: bool) -> Self {
+    fn new(include_fork_step: bool, encoding: &EncodeBytes) -> Self {
         Self {
             canonical: CanonicalBuilder::new(),
             block_slot: UInt64Builder::new(),
             slashing_index: UInt32Builder::new(),
             header_1_slot: UInt64Builder::new(),
             header_1_proposer_index: UInt64Builder::new(),
-            header_1_parent_root: StringBuilder::new(),
-            header_1_state_root: StringBuilder::new(),
-            header_1_body_root: StringBuilder::new(),
+            header_1_parent_root: BytesColumn::new(encoding),
+            header_1_state_root: BytesColumn::new(encoding),
+            header_1_body_root: BytesColumn::new(encoding),
             header_2_slot: UInt64Builder::new(),
             header_2_proposer_index: UInt64Builder::new(),
-            header_2_parent_root: StringBuilder::new(),
-            header_2_state_root: StringBuilder::new(),
-            header_2_body_root: StringBuilder::new(),
+            header_2_parent_root: BytesColumn::new(encoding),
+            header_2_state_root: BytesColumn::new(encoding),
+            header_2_body_root: BytesColumn::new(encoding),
             fork_step: mk_fork_step(include_fork_step),
         }
     }
@@ -750,14 +744,14 @@ impl ProposerSlashingsBuilder {
             Arc::new(self.slashing_index.finish()) as Arc<dyn Array>,
             Arc::new(self.header_1_slot.finish()) as Arc<dyn Array>,
             Arc::new(self.header_1_proposer_index.finish()) as Arc<dyn Array>,
-            Arc::new(self.header_1_parent_root.finish()) as Arc<dyn Array>,
-            Arc::new(self.header_1_state_root.finish()) as Arc<dyn Array>,
-            Arc::new(self.header_1_body_root.finish()) as Arc<dyn Array>,
+            self.header_1_parent_root.finish(),
+            self.header_1_state_root.finish(),
+            self.header_1_body_root.finish(),
             Arc::new(self.header_2_slot.finish()) as Arc<dyn Array>,
             Arc::new(self.header_2_proposer_index.finish()) as Arc<dyn Array>,
-            Arc::new(self.header_2_parent_root.finish()) as Arc<dyn Array>,
-            Arc::new(self.header_2_state_root.finish()) as Arc<dyn Array>,
-            Arc::new(self.header_2_body_root.finish()) as Arc<dyn Array>,
+            self.header_2_parent_root.finish(),
+            self.header_2_state_root.finish(),
+            self.header_2_body_root.finish(),
         ]);
         finish_fork_step(&mut self.fork_step, &mut columns);
         Ok(RecordBatch::try_new(Arc::new(schema.clone()), columns)?)
@@ -770,41 +764,41 @@ struct AttesterSlashingsBuilder {
     slashing_index: UInt32Builder,
     attestation_1_slot: UInt64Builder,
     attestation_1_committee_index: UInt64Builder,
-    attestation_1_beacon_block_root: StringBuilder,
+    attestation_1_beacon_block_root: BytesColumn,
     attestation_1_source_epoch: UInt64Builder,
-    attestation_1_source_root: StringBuilder,
+    attestation_1_source_root: BytesColumn,
     attestation_1_target_epoch: UInt64Builder,
-    attestation_1_target_root: StringBuilder,
+    attestation_1_target_root: BytesColumn,
     attestation_2_slot: UInt64Builder,
     attestation_2_committee_index: UInt64Builder,
-    attestation_2_beacon_block_root: StringBuilder,
+    attestation_2_beacon_block_root: BytesColumn,
     attestation_2_source_epoch: UInt64Builder,
-    attestation_2_source_root: StringBuilder,
+    attestation_2_source_root: BytesColumn,
     attestation_2_target_epoch: UInt64Builder,
-    attestation_2_target_root: StringBuilder,
+    attestation_2_target_root: BytesColumn,
     fork_step: Option<StringBuilder>,
 }
 
 impl AttesterSlashingsBuilder {
-    fn new(include_fork_step: bool) -> Self {
+    fn new(include_fork_step: bool, encoding: &EncodeBytes) -> Self {
         Self {
             canonical: CanonicalBuilder::new(),
             block_slot: UInt64Builder::new(),
             slashing_index: UInt32Builder::new(),
             attestation_1_slot: UInt64Builder::new(),
             attestation_1_committee_index: UInt64Builder::new(),
-            attestation_1_beacon_block_root: StringBuilder::new(),
+            attestation_1_beacon_block_root: BytesColumn::new(encoding),
             attestation_1_source_epoch: UInt64Builder::new(),
-            attestation_1_source_root: StringBuilder::new(),
+            attestation_1_source_root: BytesColumn::new(encoding),
             attestation_1_target_epoch: UInt64Builder::new(),
-            attestation_1_target_root: StringBuilder::new(),
+            attestation_1_target_root: BytesColumn::new(encoding),
             attestation_2_slot: UInt64Builder::new(),
             attestation_2_committee_index: UInt64Builder::new(),
-            attestation_2_beacon_block_root: StringBuilder::new(),
+            attestation_2_beacon_block_root: BytesColumn::new(encoding),
             attestation_2_source_epoch: UInt64Builder::new(),
-            attestation_2_source_root: StringBuilder::new(),
+            attestation_2_source_root: BytesColumn::new(encoding),
             attestation_2_target_epoch: UInt64Builder::new(),
-            attestation_2_target_root: StringBuilder::new(),
+            attestation_2_target_root: BytesColumn::new(encoding),
             fork_step: mk_fork_step(include_fork_step),
         }
     }
@@ -816,18 +810,18 @@ impl AttesterSlashingsBuilder {
             Arc::new(self.slashing_index.finish()) as Arc<dyn Array>,
             Arc::new(self.attestation_1_slot.finish()) as Arc<dyn Array>,
             Arc::new(self.attestation_1_committee_index.finish()) as Arc<dyn Array>,
-            Arc::new(self.attestation_1_beacon_block_root.finish()) as Arc<dyn Array>,
+            self.attestation_1_beacon_block_root.finish(),
             Arc::new(self.attestation_1_source_epoch.finish()) as Arc<dyn Array>,
-            Arc::new(self.attestation_1_source_root.finish()) as Arc<dyn Array>,
+            self.attestation_1_source_root.finish(),
             Arc::new(self.attestation_1_target_epoch.finish()) as Arc<dyn Array>,
-            Arc::new(self.attestation_1_target_root.finish()) as Arc<dyn Array>,
+            self.attestation_1_target_root.finish(),
             Arc::new(self.attestation_2_slot.finish()) as Arc<dyn Array>,
             Arc::new(self.attestation_2_committee_index.finish()) as Arc<dyn Array>,
-            Arc::new(self.attestation_2_beacon_block_root.finish()) as Arc<dyn Array>,
+            self.attestation_2_beacon_block_root.finish(),
             Arc::new(self.attestation_2_source_epoch.finish()) as Arc<dyn Array>,
-            Arc::new(self.attestation_2_source_root.finish()) as Arc<dyn Array>,
+            self.attestation_2_source_root.finish(),
             Arc::new(self.attestation_2_target_epoch.finish()) as Arc<dyn Array>,
-            Arc::new(self.attestation_2_target_root.finish()) as Arc<dyn Array>,
+            self.attestation_2_target_root.finish(),
         ]);
         finish_fork_step(&mut self.fork_step, &mut columns);
         Ok(RecordBatch::try_new(Arc::new(schema.clone()), columns)?)
@@ -840,19 +834,19 @@ struct VoluntaryExitsBuilder {
     exit_index: UInt32Builder,
     epoch: UInt64Builder,
     validator_index: UInt64Builder,
-    signature: StringBuilder,
+    signature: BytesColumn,
     fork_step: Option<StringBuilder>,
 }
 
 impl VoluntaryExitsBuilder {
-    fn new(include_fork_step: bool) -> Self {
+    fn new(include_fork_step: bool, encoding: &EncodeBytes) -> Self {
         Self {
             canonical: CanonicalBuilder::new(),
             block_slot: UInt64Builder::new(),
             exit_index: UInt32Builder::new(),
             epoch: UInt64Builder::new(),
             validator_index: UInt64Builder::new(),
-            signature: StringBuilder::new(),
+            signature: BytesColumn::new(encoding),
             fork_step: mk_fork_step(include_fork_step),
         }
     }
@@ -864,7 +858,7 @@ impl VoluntaryExitsBuilder {
             Arc::new(self.exit_index.finish()) as Arc<dyn Array>,
             Arc::new(self.epoch.finish()) as Arc<dyn Array>,
             Arc::new(self.validator_index.finish()) as Arc<dyn Array>,
-            Arc::new(self.signature.finish()) as Arc<dyn Array>,
+            self.signature.finish(),
         ]);
         finish_fork_step(&mut self.fork_step, &mut columns);
         Ok(RecordBatch::try_new(Arc::new(schema.clone()), columns)?)
@@ -874,38 +868,38 @@ impl VoluntaryExitsBuilder {
 struct ExecutionPayloadBuilder {
     canonical: CanonicalBuilder,
     block_slot: UInt64Builder,
-    parent_hash: StringBuilder,
-    fee_recipient: StringBuilder,
-    state_root: StringBuilder,
-    receipts_root: StringBuilder,
-    prev_randao: StringBuilder,
+    parent_hash: BytesColumn,
+    fee_recipient: BytesColumn,
+    state_root: BytesColumn,
+    receipts_root: BytesColumn,
+    prev_randao: BytesColumn,
     block_number: UInt64Builder,
     gas_limit: UInt64Builder,
     gas_used: UInt64Builder,
     payload_timestamp: Int64Builder,
-    block_hash: StringBuilder,
-    base_fee_per_gas: StringBuilder,
+    block_hash: BytesColumn,
+    base_fee_per_gas: BytesColumn,
     blob_gas_used: UInt64Builder,
     excess_blob_gas: UInt64Builder,
     fork_step: Option<StringBuilder>,
 }
 
 impl ExecutionPayloadBuilder {
-    fn new(include_fork_step: bool) -> Self {
+    fn new(include_fork_step: bool, encoding: &EncodeBytes) -> Self {
         Self {
             canonical: CanonicalBuilder::new(),
             block_slot: UInt64Builder::new(),
-            parent_hash: StringBuilder::new(),
-            fee_recipient: StringBuilder::new(),
-            state_root: StringBuilder::new(),
-            receipts_root: StringBuilder::new(),
-            prev_randao: StringBuilder::new(),
+            parent_hash: BytesColumn::new(encoding),
+            fee_recipient: BytesColumn::new(encoding),
+            state_root: BytesColumn::new(encoding),
+            receipts_root: BytesColumn::new(encoding),
+            prev_randao: BytesColumn::new(encoding),
             block_number: UInt64Builder::new(),
             gas_limit: UInt64Builder::new(),
             gas_used: UInt64Builder::new(),
             payload_timestamp: Int64Builder::new(),
-            block_hash: StringBuilder::new(),
-            base_fee_per_gas: StringBuilder::new(),
+            block_hash: BytesColumn::new(encoding),
+            base_fee_per_gas: BytesColumn::new(encoding),
             blob_gas_used: UInt64Builder::new(),
             excess_blob_gas: UInt64Builder::new(),
             fork_step: mk_fork_step(include_fork_step),
@@ -916,17 +910,17 @@ impl ExecutionPayloadBuilder {
         let mut columns = self.canonical.finish();
         columns.extend(vec![
             Arc::new(self.block_slot.finish()) as Arc<dyn Array>,
-            Arc::new(self.parent_hash.finish()) as Arc<dyn Array>,
-            Arc::new(self.fee_recipient.finish()) as Arc<dyn Array>,
-            Arc::new(self.state_root.finish()) as Arc<dyn Array>,
-            Arc::new(self.receipts_root.finish()) as Arc<dyn Array>,
-            Arc::new(self.prev_randao.finish()) as Arc<dyn Array>,
+            self.parent_hash.finish(),
+            self.fee_recipient.finish(),
+            self.state_root.finish(),
+            self.receipts_root.finish(),
+            self.prev_randao.finish(),
             Arc::new(self.block_number.finish()) as Arc<dyn Array>,
             Arc::new(self.gas_limit.finish()) as Arc<dyn Array>,
             Arc::new(self.gas_used.finish()) as Arc<dyn Array>,
             Arc::new(self.payload_timestamp.finish()) as Arc<dyn Array>,
-            Arc::new(self.block_hash.finish()) as Arc<dyn Array>,
-            Arc::new(self.base_fee_per_gas.finish()) as Arc<dyn Array>,
+            self.block_hash.finish(),
+            self.base_fee_per_gas.finish(),
             Arc::new(self.blob_gas_used.finish()) as Arc<dyn Array>,
             Arc::new(self.excess_blob_gas.finish()) as Arc<dyn Array>,
         ]);
@@ -939,21 +933,21 @@ struct BlobSidecarsBuilder {
     canonical: CanonicalBuilder,
     block_slot: UInt64Builder,
     blob_index: UInt64Builder,
-    blob: StringBuilder,
-    kzg_commitment: StringBuilder,
-    kzg_proof: StringBuilder,
+    blob: BytesColumn,
+    kzg_commitment: BytesColumn,
+    kzg_proof: BytesColumn,
     fork_step: Option<StringBuilder>,
 }
 
 impl BlobSidecarsBuilder {
-    fn new(include_fork_step: bool) -> Self {
+    fn new(include_fork_step: bool, encoding: &EncodeBytes) -> Self {
         Self {
             canonical: CanonicalBuilder::new(),
             block_slot: UInt64Builder::new(),
             blob_index: UInt64Builder::new(),
-            blob: StringBuilder::new(),
-            kzg_commitment: StringBuilder::new(),
-            kzg_proof: StringBuilder::new(),
+            blob: BytesColumn::new(encoding),
+            kzg_commitment: BytesColumn::new(encoding),
+            kzg_proof: BytesColumn::new(encoding),
             fork_step: mk_fork_step(include_fork_step),
         }
     }
@@ -963,9 +957,9 @@ impl BlobSidecarsBuilder {
         columns.extend(vec![
             Arc::new(self.block_slot.finish()) as Arc<dyn Array>,
             Arc::new(self.blob_index.finish()) as Arc<dyn Array>,
-            Arc::new(self.blob.finish()) as Arc<dyn Array>,
-            Arc::new(self.kzg_commitment.finish()) as Arc<dyn Array>,
-            Arc::new(self.kzg_proof.finish()) as Arc<dyn Array>,
+            self.blob.finish(),
+            self.kzg_commitment.finish(),
+            self.kzg_proof.finish(),
         ]);
         finish_fork_step(&mut self.fork_step, &mut columns);
         Ok(RecordBatch::try_new(Arc::new(schema.clone()), columns)?)
@@ -1094,7 +1088,7 @@ mod tests {
     fn test_map_and_flush() {
         let block = make_test_block(100);
         let block_bytes = prost::Message::encode_to_vec(&block);
-        let mut mapper = BeaconBlockMapper::new(false);
+        let mut mapper = BeaconBlockMapper::new(false, EncodeBytes::Hex);
         mapper.map_block(&block_bytes, &BlockIdentity::default(), None).unwrap();
 
         let batches = mapper.flush().unwrap();
@@ -1125,7 +1119,7 @@ mod tests {
             body: None,
         };
         let block_bytes = prost::Message::encode_to_vec(&block);
-        let mut mapper = BeaconBlockMapper::new(false);
+        let mut mapper = BeaconBlockMapper::new(false, EncodeBytes::Hex);
         mapper.map_block(&block_bytes, &BlockIdentity::default(), None).unwrap();
 
         let batches = mapper.flush().unwrap();
@@ -1143,7 +1137,7 @@ mod tests {
     fn test_flush_resets() {
         let block = make_test_block(1);
         let block_bytes = prost::Message::encode_to_vec(&block);
-        let mut mapper = BeaconBlockMapper::new(false);
+        let mut mapper = BeaconBlockMapper::new(false, EncodeBytes::Hex);
         mapper.map_block(&block_bytes, &BlockIdentity::default(), None).unwrap();
         let _ = mapper.flush().unwrap();
         assert_eq!(mapper.max_table_rows(), 0);
@@ -1151,7 +1145,7 @@ mod tests {
 
     #[test]
     fn test_table_names() {
-        let mapper = BeaconBlockMapper::new(false);
+        let mapper = BeaconBlockMapper::new(false, EncodeBytes::Hex);
         assert_eq!(mapper.table_names().len(), 8);
         assert!(mapper.table_names().contains(&"blocks"));
         assert!(mapper.table_names().contains(&"attestations"));
@@ -1167,7 +1161,7 @@ mod tests {
     fn test_fork_step_column_included() {
         let block = make_test_block(0);
         let block_bytes = prost::Message::encode_to_vec(&block);
-        let mut mapper = BeaconBlockMapper::new(true);
+        let mut mapper = BeaconBlockMapper::new(true, EncodeBytes::Hex);
         mapper.map_block(&block_bytes, &BlockIdentity::default(), Some("FINAL")).unwrap();
 
         let batches = mapper.flush().unwrap();
@@ -1182,7 +1176,7 @@ mod tests {
     fn test_deneb_execution_payload_and_blobs() {
         let block = make_deneb_block(200);
         let block_bytes = prost::Message::encode_to_vec(&block);
-        let mut mapper = BeaconBlockMapper::new(false);
+        let mut mapper = BeaconBlockMapper::new(false, EncodeBytes::Hex);
         mapper.map_block(&block_bytes, &BlockIdentity::default(), None).unwrap();
 
         let batches = mapper.flush().unwrap();
