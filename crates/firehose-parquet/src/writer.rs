@@ -1,4 +1,4 @@
-use crate::config::{Compression, Partition};
+use crate::config::{BlockMetadata, Compression, Partition};
 use anyhow::{Context, Result};
 use arrow::record_batch::RecordBatch;
 use parquet::arrow::ArrowWriter;
@@ -8,6 +8,7 @@ use parquet::file::properties::WriterProperties;
 use std::collections::HashMap;
 use std::fs::{self, File};
 use std::path::{Path, PathBuf};
+use time::OffsetDateTime;
 use tracing::info;
 
 /// Writes Arrow RecordBatches to Parquet files, handling partitioning and
@@ -31,14 +32,11 @@ impl ParquetTableWriter {
     }
 
     /// Write a single RecordBatch for `table` to a new Parquet part file.
-    ///
-    /// `block_range` is `(min_block, max_block)` of the data in the batch and is
-    /// used for block-range partitioning.
     pub fn write_batch(
         &mut self,
         table: &str,
         batch: &RecordBatch,
-        block_range: Option<(u64, u64)>,
+        metadata: &BlockMetadata,
     ) -> Result<PathBuf> {
         if batch.num_rows() == 0 {
             let dir = self.output_dir.join(table);
@@ -46,7 +44,7 @@ impl ParquetTableWriter {
             return Ok(dir);
         }
 
-        let dir = self.partition_dir(table, block_range);
+        let dir = self.partition_dir(table, metadata);
         fs::create_dir_all(&dir).with_context(|| format!("creating dir {}", dir.display()))?;
 
         let counter_key = dir.to_string_lossy().to_string();
@@ -70,15 +68,28 @@ impl ParquetTableWriter {
         Ok(path)
     }
 
-    fn partition_dir(&self, table: &str, block_range: Option<(u64, u64)>) -> PathBuf {
+    fn partition_dir(&self, table: &str, metadata: &BlockMetadata) -> PathBuf {
         let base = self.output_dir.join(table);
         match &self.partition {
             Partition::None => base,
             Partition::BlockRange(size) => {
-                if let Some((min_block, _)) = block_range {
-                    let start = (min_block / size) * size;
-                    let end = start + size - 1;
-                    base.join(format!("block_range={start}-{end}"))
+                let start = (metadata.min_block_number / size) * size;
+                let end = start + size - 1;
+                base.join(format!("block_range={start}-{end}"))
+            }
+            Partition::Date => {
+                if let Some(ts) = metadata.min_timestamp {
+                    let dt = OffsetDateTime::from_unix_timestamp(ts).unwrap_or(OffsetDateTime::UNIX_EPOCH);
+                    base.join(format!("date={:04}-{:02}-{:02}", dt.year(), dt.month() as u8, dt.day()))
+                } else {
+                    base
+                }
+            }
+            Partition::Hour => {
+                if let Some(ts) = metadata.min_timestamp {
+                    let dt = OffsetDateTime::from_unix_timestamp(ts).unwrap_or(OffsetDateTime::UNIX_EPOCH);
+                    base.join(format!("date={:04}-{:02}-{:02}", dt.year(), dt.month() as u8, dt.day()))
+                        .join(format!("hour={:02}", dt.hour()))
                 } else {
                     base
                 }
@@ -116,10 +127,10 @@ impl OutputWriter {
     pub fn write_all(
         &mut self,
         batches: &HashMap<String, RecordBatch>,
-        block_range: Option<(u64, u64)>,
+        metadata: &BlockMetadata,
     ) -> Result<()> {
         for (table, batch) in batches {
-            self.inner.write_batch(table, batch, block_range)?;
+            self.inner.write_batch(table, batch, metadata)?;
         }
         Ok(())
     }
@@ -138,7 +149,7 @@ pub fn read_parquet(path: &Path) -> Result<Vec<RecordBatch>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{Compression, Partition};
+    use crate::config::{BlockMetadata, Compression, Partition};
     use arrow::array::UInt64Builder;
     use arrow::datatypes::{DataType, Field, Schema};
     use std::sync::Arc;
@@ -152,13 +163,23 @@ mod tests {
         RecordBatch::try_new(schema, vec![Arc::new(builder.finish())]).unwrap()
     }
 
+    fn default_metadata() -> BlockMetadata {
+        BlockMetadata {
+            min_block_number: 0,
+            max_block_number: 0,
+            min_timestamp: None,
+            max_timestamp: None,
+        }
+    }
+
     #[test]
     fn test_parquet_round_trip() {
         let dir = tempfile::tempdir().unwrap();
         let batch = make_test_batch();
         let mut writer =
             ParquetTableWriter::new(dir.path(), Partition::None, Compression::Snappy);
-        let path = writer.write_batch("blocks", &batch, None).unwrap();
+        let meta = default_metadata();
+        let path = writer.write_batch("blocks", &batch, &meta).unwrap();
 
         let read_batches = read_parquet(&path).unwrap();
         assert_eq!(read_batches.len(), 1);
@@ -171,10 +192,68 @@ mod tests {
         let batch = make_test_batch();
         let mut writer =
             ParquetTableWriter::new(dir.path(), Partition::BlockRange(100), Compression::None);
-        let path = writer
-            .write_batch("blocks", &batch, Some((150, 150)))
-            .unwrap();
+        let meta = BlockMetadata {
+            min_block_number: 150,
+            max_block_number: 150,
+            min_timestamp: None,
+            max_timestamp: None,
+        };
+        let path = writer.write_batch("blocks", &batch, &meta).unwrap();
         assert!(path.to_string_lossy().contains("block_range=100-199"));
+    }
+
+    #[test]
+    fn test_date_partitioning() {
+        let dir = tempfile::tempdir().unwrap();
+        let batch = make_test_batch();
+        let mut writer =
+            ParquetTableWriter::new(dir.path(), Partition::Date, Compression::None);
+        // 2024-01-15 12:00:00 UTC = 1705320000
+        let meta = BlockMetadata {
+            min_block_number: 100,
+            max_block_number: 200,
+            min_timestamp: Some(1705320000),
+            max_timestamp: Some(1705320000),
+        };
+        let path = writer.write_batch("blocks", &batch, &meta).unwrap();
+        assert!(path.to_string_lossy().contains("date=2024-01-15"), "path: {}", path.display());
+    }
+
+    #[test]
+    fn test_hour_partitioning() {
+        let dir = tempfile::tempdir().unwrap();
+        let batch = make_test_batch();
+        let mut writer =
+            ParquetTableWriter::new(dir.path(), Partition::Hour, Compression::None);
+        // 2024-01-15 14:30:00 UTC = 1705329000
+        let meta = BlockMetadata {
+            min_block_number: 100,
+            max_block_number: 200,
+            min_timestamp: Some(1705329000),
+            max_timestamp: Some(1705329000),
+        };
+        let path = writer.write_batch("blocks", &batch, &meta).unwrap();
+        let path_str = path.to_string_lossy();
+        assert!(path_str.contains("date=2024-01-15"), "path: {}", path_str);
+        assert!(path_str.contains("hour=14"), "path: {}", path_str);
+    }
+
+    #[test]
+    fn test_rollover_part_counter() {
+        let dir = tempfile::tempdir().unwrap();
+        let batch = make_test_batch();
+        let mut writer =
+            ParquetTableWriter::new(dir.path(), Partition::Date, Compression::None);
+        let meta = BlockMetadata {
+            min_block_number: 100,
+            max_block_number: 200,
+            min_timestamp: Some(1705320000),
+            max_timestamp: Some(1705320000),
+        };
+        let path1 = writer.write_batch("blocks", &batch, &meta).unwrap();
+        let path2 = writer.write_batch("blocks", &batch, &meta).unwrap();
+        assert!(path1.to_string_lossy().contains("part-000001"));
+        assert!(path2.to_string_lossy().contains("part-000002"));
     }
 
     #[test]
@@ -185,7 +264,8 @@ mod tests {
         batches.insert("blocks".to_string(), batch);
 
         let mut out = OutputWriter::new(dir.path(), Partition::None, Compression::Zstd);
-        out.write_all(&batches, None).unwrap();
+        let meta = default_metadata();
+        out.write_all(&batches, &meta).unwrap();
         assert!(dir.path().join("blocks").exists());
     }
 }
