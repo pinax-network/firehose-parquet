@@ -4,12 +4,13 @@ mod schema;
 
 use anyhow::Result;
 use clap::Parser;
-use firehose_parquet::config::{Compression, Config, Partition};
+use firehose_parquet::config::{BlockMetadata, Compression, Config, Partition};
 use firehose_parquet::grpc::FirehoseClient;
 use firehose_parquet::traits::BlockMapper;
 use firehose_parquet::writer::OutputWriter;
 use mapper::EvmBlockMapper;
 use std::path::PathBuf;
+use std::time::Instant;
 use tracing::info;
 
 #[derive(Parser, Debug)]
@@ -49,6 +50,9 @@ struct Cli {
     #[arg(long, default_value = "134217728")]
     flush_bytes: u64,
 
+    #[arg(long)]
+    flush_interval_secs: Option<u64>,
+
     #[arg(long, default_value = "zstd")]
     compression: String,
 
@@ -78,6 +82,8 @@ fn parse_compression(s: &str) -> Compression {
 fn parse_partition(s: &str, block_range_size: u64) -> Partition {
     match s.to_lowercase().as_str() {
         "block_range" => Partition::BlockRange(block_range_size),
+        "date" => Partition::Date,
+        "hour" => Partition::Hour,
         _ => Partition::None,
     }
 }
@@ -102,6 +108,7 @@ async fn main() -> Result<()> {
         partition: parse_partition(&cli.partition, cli.block_range_size),
         flush_rows: cli.flush_rows,
         flush_bytes: cli.flush_bytes,
+        flush_interval_secs: cli.flush_interval_secs,
         compression: parse_compression(&cli.compression),
         final_blocks_only: cli.final_blocks_only,
         dry_run: cli.dry_run,
@@ -112,22 +119,32 @@ async fn main() -> Result<()> {
     let mut mapper = EvmBlockMapper::new(extended);
     let mut writer = OutputWriter::new(&config.output, config.partition.clone(), config.compression);
     let flush_rows = config.flush_rows as usize;
+    let flush_interval_secs = config.flush_interval_secs;
     let dry_run = config.dry_run;
 
     let mut blocks_processed: u64 = 0;
     let mut min_block: Option<u64> = None;
     let mut max_block: Option<u64> = None;
+    let mut min_timestamp: Option<i64> = None;
+    let mut max_timestamp: Option<i64> = None;
+    let mut last_flush_time = Instant::now();
 
     let client = FirehoseClient::new(config);
 
     client
         .stream_blocks(|block_bytes, _cursor| {
-            // Quick decode just block number for tracking
-            let block_number = prost::Message::decode(block_bytes.as_slice())
-                .map(|b: proto::eth::Block| b.number)
-                .unwrap_or(0);
+            // Quick decode for tracking
+            let block: proto::eth::Block = prost::Message::decode(block_bytes.as_slice())
+                .unwrap_or_default();
+            let block_number = block.number;
+            let ts = block.header.as_ref().and_then(|h| h.timestamp.as_ref()).map(|t| t.seconds);
+
             min_block = Some(min_block.map_or(block_number, |s: u64| s.min(block_number)));
             max_block = Some(max_block.map_or(block_number, |s: u64| s.max(block_number)));
+            if let Some(t) = ts {
+                min_timestamp = Some(min_timestamp.map_or(t, |s: i64| s.min(t)));
+                max_timestamp = Some(max_timestamp.map_or(t, |s: i64| s.max(t)));
+            }
 
             mapper.map_block(&block_bytes)?;
             blocks_processed += 1;
@@ -136,14 +153,26 @@ async fn main() -> Result<()> {
                 info!(blocks_processed, block_number, buffered_rows = mapper.max_table_rows(), "progress");
             }
 
-            if mapper.max_table_rows() >= flush_rows {
+            let time_to_flush = flush_interval_secs
+                .map(|secs| last_flush_time.elapsed().as_secs() >= secs)
+                .unwrap_or(false);
+
+            if mapper.max_table_rows() >= flush_rows || time_to_flush {
                 let batches = mapper.flush()?;
                 if !dry_run {
-                    let block_range = min_block.zip(max_block);
-                    writer.write_all(&batches, block_range)?;
+                    let metadata = BlockMetadata {
+                        min_block_number: min_block.unwrap_or(0),
+                        max_block_number: max_block.unwrap_or(0),
+                        min_timestamp,
+                        max_timestamp,
+                    };
+                    writer.write_all(&batches, &metadata)?;
                 }
                 min_block = None;
                 max_block = None;
+                min_timestamp = None;
+                max_timestamp = None;
+                last_flush_time = Instant::now();
             }
 
             Ok(())
@@ -153,8 +182,13 @@ async fn main() -> Result<()> {
     if mapper.max_table_rows() > 0 {
         let batches = mapper.flush()?;
         if !dry_run {
-            let block_range = min_block.zip(max_block);
-            writer.write_all(&batches, block_range)?;
+            let metadata = BlockMetadata {
+                min_block_number: min_block.unwrap_or(0),
+                max_block_number: max_block.unwrap_or(0),
+                min_timestamp,
+                max_timestamp,
+            };
+            writer.write_all(&batches, &metadata)?;
         }
     }
 
