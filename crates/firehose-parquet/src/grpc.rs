@@ -1,9 +1,7 @@
 use crate::config::Config;
 use crate::firehose;
-use crate::solana;
 use anyhow::{Context, Result};
 use backoff::ExponentialBackoffBuilder;
-use prost::Message;
 use std::time::Duration;
 use tonic::transport::{Channel, ClientTlsConfig, Endpoint};
 use tracing::{debug, info, warn};
@@ -39,15 +37,18 @@ impl FirehoseClient {
         Ok(channel)
     }
 
-    /// Start streaming blocks.  Calls `handler` for every decoded Solana
-    /// block.  On stream errors the client will retry with exponential back-off
+    /// Start streaming blocks. Calls `handler` for every block received as
+    /// raw bytes (the `Any.value` field). The handler receives the raw bytes
+    /// and the cursor string.
+    ///
+    /// On stream errors the client will retry with exponential back-off
     /// and resume from the last cursor.
     ///
     /// Returns when the stream is cleanly exhausted (stop block reached) or an
     /// unrecoverable error occurs.
     pub async fn stream_blocks<F>(&self, mut handler: F) -> Result<()>
     where
-        F: FnMut(solana::Block, String) -> Result<()>,
+        F: FnMut(Vec<u8>, String) -> Result<()>,
     {
         let mut cursor: Option<String> = self.config.cursor.clone();
         let backoff_config = ExponentialBackoffBuilder::default()
@@ -84,8 +85,6 @@ impl FirehoseClient {
             let mut client = firehose::stream_client::StreamClient::new(channel);
 
             let start_block_num = match &cursor {
-                // When we have a cursor the server ignores start_block_num, but
-                // we still provide it as a hint.
                 Some(_) => self.config.start_block.unwrap_or(0) as i64,
                 None => self.config.start_block.unwrap_or(0) as i64,
             };
@@ -121,7 +120,6 @@ impl FirehoseClient {
                 }
             };
 
-            // Use a pinned stream for iteration
             let mut stream = stream;
 
             loop {
@@ -137,9 +135,7 @@ impl FirehoseClient {
                         }
 
                         if let Some(any) = resp.block {
-                            let block = solana::Block::decode(any.value.as_ref())
-                                .context("decoding Solana block from Any")?;
-                            handler(block, new_cursor.clone())?;
+                            handler(any.value, new_cursor.clone())?;
                         }
 
                         cursor = Some(new_cursor);
@@ -150,12 +146,11 @@ impl FirehoseClient {
                     }
                     Err(e) => {
                         warn!(error = %e, "stream error, will reconnect");
-                        break; // break inner loop to reconnect
+                        break;
                     }
                 }
             }
 
-            // Small delay before reconnecting
             tokio::time::sleep(Duration::from_secs(1)).await;
         }
     }

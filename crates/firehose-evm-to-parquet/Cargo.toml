@@ -1,11 +1,11 @@
 [package]
-name = "firehose-solana-to-parquet"
+name = "firehose-evm-to-parquet"
 version = "0.1.0"
 edition = "2021"
-description = "CLI to convert Firehose Solana gRPC stream to Apache Parquet"
+description = "CLI to convert Firehose EVM gRPC stream to Apache Parquet"
 
 [[bin]]
-name = "firehose-solana-to-parquet"
+name = "firehose-evm-to-parquet"
 path = "src/main.rs"
 
 [dependencies]
@@ -13,6 +13,7 @@ firehose-parquet = { path = "../firehose-parquet" }
 arrow = { version = "58", features = ["prettyprint"] }
 parquet = { version = "58", features = ["arrow"] }
 prost = "0.13"
+prost-types = "0.13"
 tokio = { version = "1", features = ["full"] }
 clap = { version = "4", features = ["derive", "env"] }
 tracing = "0.1"
