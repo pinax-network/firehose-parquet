@@ -99,7 +99,13 @@ impl FirehoseClient {
             };
 
             let mut request = tonic::Request::new(req);
-            if let Some(ref token) = self.config.api_token {
+            if let Some(ref key) = self.config.api_key {
+                request.metadata_mut().insert(
+                    "x-api-key",
+                    key.parse().unwrap(),
+                );
+            }
+            if let Some(ref token) = self.config.jwt_token {
                 request.metadata_mut().insert(
                     "authorization",
                     format!("Bearer {token}").parse().unwrap(),

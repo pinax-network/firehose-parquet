@@ -64,8 +64,8 @@ The `build.rs` in `crates/firehose-parquet` automatically compiles the `.proto` 
 
 ```bash
 cargo run --release --bin firehose-solana-to-parquet -- \
-  --endpoint https://mainnet.sol.streamingfast.io:443 \
-  --api-token "$SF_API_TOKEN" \
+  --endpoint https://solana.firehose.pinax.network:443 \
+  --api-key "$PINAX_KEY" \
   --start-block 200000000 \
   --stop-block  200001000 \
   --output ./output \
@@ -74,12 +74,37 @@ cargo run --release --bin firehose-solana-to-parquet -- \
   --final-blocks-only
 ```
 
+### Authentication
+
+Two authentication methods are supported:
+
+**API Key** — a long-lived key sent as the `X-Api-Key` gRPC metadata header. Used by Pinax and other providers.
+
+```bash
+# via flag
+--api-key "$PINAX_KEY"
+# or via environment variable
+export FIREHOSE_API_KEY="$PINAX_KEY"
+```
+
+**API Token (JWT)** — allows you to generate short-lived tokens with a configurable lifespan (e.g. 30 minutes) for more secure deployments. This improves security as tokens cannot be reused once expired, reducing the attack time window, but requires more code on the consumer side to handle token refresh. Sent as `Authorization: Bearer` header.
+
+```bash
+# via flag
+--jwt-token "$SUBSTREAMS_API_TOKEN"
+# or via environment variable
+export SUBSTREAMS_API_TOKEN="your-jwt-token"
+```
+
+Both methods can be used simultaneously. When both are set, both headers are sent.
+
 ### All CLI flags
 
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--endpoint` | *(required)* | Firehose gRPC endpoint URL |
-| `--api-token` | — | Bearer token for auth |
+| `--api-key` | — | API key (`X-Api-Key` header). Env: `FIREHOSE_API_KEY` |
+| `--jwt-token` | — | JWT bearer token. Env: `SUBSTREAMS_API_TOKEN` |
 | `--start-block` | — | Start block (inclusive) |
 | `--stop-block` | — | Stop block (inclusive, 0 = stream forever) |
 | `--cursor` | — | Resume from an opaque Firehose cursor |

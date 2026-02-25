@@ -16,9 +16,15 @@ struct Cli {
     #[arg(long)]
     endpoint: String,
 
-    /// Optional bearer token for authentication.
-    #[arg(long)]
-    api_token: Option<String>,
+    /// API key for authentication (sent as X-Api-Key header).
+    /// Can also be set via FIREHOSE_API_KEY env var.
+    #[arg(long, env = "FIREHOSE_API_KEY")]
+    api_key: Option<String>,
+
+    /// JWT bearer token for authentication (sent as Authorization: Bearer header).
+    /// Can also be set via SUBSTREAMS_API_TOKEN env var.
+    #[arg(long, env = "SUBSTREAMS_API_TOKEN")]
+    jwt_token: Option<String>,
 
     /// Start block number (inclusive).
     #[arg(long)]
@@ -96,7 +102,8 @@ async fn main() -> Result<()> {
 
     let config = Config {
         endpoint: cli.endpoint,
-        api_token: cli.api_token,
+        api_key: cli.api_key,
+        jwt_token: cli.jwt_token,
         start_block: cli.start_block,
         stop_block: cli.stop_block,
         cursor: cli.cursor,

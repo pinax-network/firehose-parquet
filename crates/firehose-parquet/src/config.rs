@@ -22,7 +22,8 @@ pub enum Compression {
 #[derive(Debug, Clone)]
 pub struct Config {
     pub endpoint: String,
-    pub api_token: Option<String>,
+    pub api_key: Option<String>,
+    pub jwt_token: Option<String>,
     pub start_block: Option<u64>,
     pub stop_block: Option<u64>,
     pub cursor: Option<String>,
@@ -39,7 +40,8 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             endpoint: "https://mainnet.sol.streamingfast.io:443".to_string(),
-            api_token: None,
+            api_key: None,
+            jwt_token: None,
             start_block: None,
             stop_block: None,
             cursor: None,
