@@ -1,8 +1,10 @@
 use arrow::datatypes::{DataType, Field, Schema};
+use firehose_parquet::traits::canonical_fields;
 use std::sync::Arc;
 
 pub fn blocks_schema() -> Schema {
-    Schema::new(vec![
+    let mut fields = canonical_fields();
+    fields.extend(vec![
         Field::new("hash", DataType::Utf8, false),
         Field::new("height", DataType::Int64, false),
         Field::new("previous_hash", DataType::Utf8, false),
@@ -18,11 +20,13 @@ pub fn blocks_schema() -> Schema {
         Field::new("n_tx", DataType::UInt32, false),
         Field::new("mediantime", DataType::Int64, false),
         Field::new("chainwork", DataType::Utf8, false),
-    ])
+    ]);
+    Schema::new(fields)
 }
 
 pub fn transactions_schema() -> Schema {
-    Schema::new(vec![
+    let mut fields = canonical_fields();
+    fields.extend(vec![
         Field::new("txid", DataType::Utf8, false),
         Field::new("hash", DataType::Utf8, false),
         Field::new("size", DataType::Int32, false),
@@ -34,11 +38,13 @@ pub fn transactions_schema() -> Schema {
         Field::new("block_height", DataType::Int64, false),
         Field::new("block_time", DataType::Int64, false),
         Field::new("tx_index", DataType::UInt32, false),
-    ])
+    ]);
+    Schema::new(fields)
 }
 
 pub fn inputs_schema() -> Schema {
-    Schema::new(vec![
+    let mut fields = canonical_fields();
+    fields.extend(vec![
         Field::new("tx_hash", DataType::Utf8, false),
         Field::new("block_height", DataType::Int64, false),
         Field::new("input_index", DataType::UInt32, false),
@@ -53,11 +59,13 @@ pub fn inputs_schema() -> Schema {
             DataType::List(Arc::new(Field::new("item", DataType::Utf8, true))),
             false,
         ),
-    ])
+    ]);
+    Schema::new(fields)
 }
 
 pub fn outputs_schema() -> Schema {
-    Schema::new(vec![
+    let mut fields = canonical_fields();
+    fields.extend(vec![
         Field::new("tx_hash", DataType::Utf8, false),
         Field::new("block_height", DataType::Int64, false),
         Field::new("output_index", DataType::UInt32, false),
@@ -66,7 +74,8 @@ pub fn outputs_schema() -> Schema {
         Field::new("script_pubkey_hex", DataType::Utf8, false),
         Field::new("script_pubkey_type", DataType::Utf8, false),
         Field::new("script_pubkey_address", DataType::Utf8, false),
-    ])
+    ]);
+    Schema::new(fields)
 }
 
 pub const TABLE_NAMES: [&str; 4] = ["blocks", "transactions", "inputs", "outputs"];

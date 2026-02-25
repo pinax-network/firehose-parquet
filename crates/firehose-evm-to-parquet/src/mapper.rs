@@ -3,7 +3,7 @@ use crate::schema;
 use arrow::array::*;
 use arrow::datatypes::Schema;
 use arrow::record_batch::RecordBatch;
-use firehose_parquet::traits::BlockMapper;
+use firehose_parquet::traits::{BlockIdentity, BlockMapper, CanonicalBuilder};
 use prost::Message;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -85,12 +85,13 @@ impl EvmBlockMapper {
         }
     }
 
-    fn map_evm_block(&mut self, block: &eth::Block) {
+    fn map_evm_block(&mut self, block: &eth::Block, identity: &BlockIdentity) {
         let number = block.number;
         let block_hash = hex(&block.hash);
         let header = block.header.as_ref();
 
         // -- blocks table --
+        self.blocks.canonical.append(identity);
         self.blocks.number.append_value(number);
         self.blocks.hash.append_value(&block_hash);
         self.blocks.parent_hash.append_value(hex(&header.map_or(&[][..], |h| &h.parent_hash)));
@@ -124,37 +125,38 @@ impl EvmBlockMapper {
 
         // -- transaction traces --
         for tx in &block.transaction_traces {
-            self.map_transaction(number, &block_hash, tx);
+            self.map_transaction(number, &block_hash, tx, identity);
         }
 
         // -- block-level balance changes (EXTENDED) --
         if self.extended {
             for bc in &block.balance_changes {
                 if let Some(ref mut builder) = self.balance_changes {
-                    builder.append(number, "", bc);
+                    builder.append(number, "", bc, identity);
                 }
             }
             // -- block-level code changes --
             for cc in &block.code_changes {
                 if let Some(ref mut builder) = self.code_changes {
-                    builder.append(number, "", cc);
+                    builder.append(number, "", cc, identity);
                 }
             }
             // -- system calls --
             for call in &block.system_calls {
                 if let Some(ref mut builder) = self.calls {
-                    builder.append(number, "", 0, call);
+                    builder.append(number, "", 0, call, identity);
                 }
                 // Also extract nested state changes from system calls
-                self.extract_call_state_changes(number, "", call);
+                self.extract_call_state_changes(number, "", call, identity);
             }
         }
     }
 
-    fn map_transaction(&mut self, block_number: u64, block_hash: &str, tx: &eth::TransactionTrace) {
+    fn map_transaction(&mut self, block_number: u64, block_hash: &str, tx: &eth::TransactionTrace, identity: &BlockIdentity) {
         let tx_hash = hex(&tx.hash);
         let _ = block_hash; // available if needed
 
+        self.transactions.canonical.append(identity);
         self.transactions.block_number.append_value(block_number);
         self.transactions.index.append_value(tx.index);
         self.transactions.hash.append_value(&tx_hash);
@@ -186,7 +188,7 @@ impl EvmBlockMapper {
             self.transactions.cumulative_gas_used.append_value(receipt.cumulative_gas_used);
             // Logs from receipt
             for log in &receipt.logs {
-                self.map_log(block_number, &tx_hash, tx.index, log);
+                self.map_log(block_number, &tx_hash, tx.index, log, identity);
             }
         } else {
             self.transactions.cumulative_gas_used.append_null();
@@ -196,14 +198,15 @@ impl EvmBlockMapper {
         if self.extended {
             for call in &tx.calls {
                 if let Some(ref mut builder) = self.calls {
-                    builder.append(block_number, &tx_hash, tx.index, call);
+                    builder.append(block_number, &tx_hash, tx.index, call, identity);
                 }
-                self.extract_call_state_changes(block_number, &tx_hash, call);
+                self.extract_call_state_changes(block_number, &tx_hash, call, identity);
             }
         }
     }
 
-    fn map_log(&mut self, block_number: u64, tx_hash: &str, tx_index: u32, log: &eth::Log) {
+    fn map_log(&mut self, block_number: u64, tx_hash: &str, tx_index: u32, log: &eth::Log, identity: &BlockIdentity) {
+        self.logs.canonical.append(identity);
         self.logs.block_number.append_value(block_number);
         self.logs.tx_hash.append_value(tx_hash);
         self.logs.tx_index.append_value(tx_index);
@@ -229,49 +232,49 @@ impl EvmBlockMapper {
         self.logs.data.append_value(hex(&log.data));
     }
 
-    fn extract_call_state_changes(&mut self, block_number: u64, tx_hash: &str, call: &eth::Call) {
+    fn extract_call_state_changes(&mut self, block_number: u64, tx_hash: &str, call: &eth::Call, identity: &BlockIdentity) {
         if !self.extended {
             return;
         }
 
         for bc in &call.balance_changes {
             if let Some(ref mut builder) = self.balance_changes {
-                builder.append(block_number, tx_hash, bc);
+                builder.append(block_number, tx_hash, bc, identity);
             }
         }
         for cc in &call.code_changes {
             if let Some(ref mut builder) = self.code_changes {
-                builder.append(block_number, tx_hash, cc);
+                builder.append(block_number, tx_hash, cc, identity);
             }
         }
         for sc in &call.storage_changes {
             if let Some(ref mut builder) = self.storage_changes {
-                builder.append(block_number, tx_hash, sc);
+                builder.append(block_number, tx_hash, sc, identity);
             }
         }
         for nc in &call.nonce_changes {
             if let Some(ref mut builder) = self.nonce_changes {
-                builder.append(block_number, tx_hash, nc);
+                builder.append(block_number, tx_hash, nc, identity);
             }
         }
         for gc in &call.gas_changes {
             if let Some(ref mut builder) = self.gas_changes {
-                builder.append(block_number, tx_hash, gc);
+                builder.append(block_number, tx_hash, gc, identity);
             }
         }
         #[allow(deprecated)]
         for ac in &call.account_creations {
             if let Some(ref mut builder) = self.account_creations {
-                builder.append(block_number, tx_hash, ac);
+                builder.append(block_number, tx_hash, ac, identity);
             }
         }
     }
 }
 
 impl BlockMapper for EvmBlockMapper {
-    fn map_block(&mut self, block_bytes: &[u8]) -> anyhow::Result<()> {
+    fn map_block(&mut self, block_bytes: &[u8], identity: &BlockIdentity) -> anyhow::Result<()> {
         let block = eth::Block::decode(block_bytes)?;
-        self.map_evm_block(&block);
+        self.map_evm_block(&block, identity);
         Ok(())
     }
 
@@ -308,16 +311,16 @@ impl BlockMapper for EvmBlockMapper {
     }
 
     fn max_table_rows(&self) -> usize {
-        let mut max = self.blocks.number.len()
-            .max(self.transactions.block_number.len())
-            .max(self.logs.block_number.len());
-        if let Some(ref b) = self.calls { max = max.max(b.block_number.len()); }
-        if let Some(ref b) = self.balance_changes { max = max.max(b.block_number.len()); }
-        if let Some(ref b) = self.storage_changes { max = max.max(b.block_number.len()); }
-        if let Some(ref b) = self.nonce_changes { max = max.max(b.block_number.len()); }
-        if let Some(ref b) = self.gas_changes { max = max.max(b.block_number.len()); }
-        if let Some(ref b) = self.code_changes { max = max.max(b.block_number.len()); }
-        if let Some(ref b) = self.account_creations { max = max.max(b.block_number.len()); }
+        let mut max = self.blocks.canonical.len()
+            .max(self.transactions.canonical.len())
+            .max(self.logs.canonical.len());
+        if let Some(ref b) = self.calls { max = max.max(b.canonical.len()); }
+        if let Some(ref b) = self.balance_changes { max = max.max(b.canonical.len()); }
+        if let Some(ref b) = self.storage_changes { max = max.max(b.canonical.len()); }
+        if let Some(ref b) = self.nonce_changes { max = max.max(b.canonical.len()); }
+        if let Some(ref b) = self.gas_changes { max = max.max(b.canonical.len()); }
+        if let Some(ref b) = self.code_changes { max = max.max(b.canonical.len()); }
+        if let Some(ref b) = self.account_creations { max = max.max(b.canonical.len()); }
         max
     }
 
@@ -335,6 +338,7 @@ impl BlockMapper for EvmBlockMapper {
 // ===========================================================================
 
 struct EvmBlocksBuilder {
+    canonical: CanonicalBuilder,
     number: UInt64Builder,
     hash: StringBuilder,
     parent_hash: StringBuilder,
@@ -358,6 +362,7 @@ struct EvmBlocksBuilder {
 impl EvmBlocksBuilder {
     fn new() -> Self {
         Self {
+            canonical: CanonicalBuilder::new(),
             number: UInt64Builder::new(),
             hash: StringBuilder::new(),
             parent_hash: StringBuilder::new(),
@@ -380,33 +385,33 @@ impl EvmBlocksBuilder {
     }
 
     fn finish(&mut self, schema: &Schema) -> anyhow::Result<RecordBatch> {
-        Ok(RecordBatch::try_new(
-            Arc::new(schema.clone()),
-            vec![
-                Arc::new(self.number.finish()),
-                Arc::new(self.hash.finish()),
-                Arc::new(self.parent_hash.finish()),
-                Arc::new(self.timestamp.finish()),
-                Arc::new(self.gas_used.finish()),
-                Arc::new(self.gas_limit.finish()),
-                Arc::new(self.base_fee_per_gas.finish()),
-                Arc::new(self.coinbase.finish()),
-                Arc::new(self.size.finish()),
-                Arc::new(self.nonce.finish()),
-                Arc::new(self.state_root.finish()),
-                Arc::new(self.transactions_root.finish()),
-                Arc::new(self.receipt_root.finish()),
-                Arc::new(self.difficulty.finish()),
-                Arc::new(self.mix_hash.finish()),
-                Arc::new(self.extra_data.finish()),
-                Arc::new(self.num_transactions.finish()),
-                Arc::new(self.detail_level.finish()),
-            ],
-        )?)
+        let mut columns = self.canonical.finish();
+        columns.extend(vec![
+            Arc::new(self.number.finish()) as Arc<dyn arrow::array::Array>,
+            Arc::new(self.hash.finish()),
+            Arc::new(self.parent_hash.finish()),
+            Arc::new(self.timestamp.finish()),
+            Arc::new(self.gas_used.finish()),
+            Arc::new(self.gas_limit.finish()),
+            Arc::new(self.base_fee_per_gas.finish()),
+            Arc::new(self.coinbase.finish()),
+            Arc::new(self.size.finish()),
+            Arc::new(self.nonce.finish()),
+            Arc::new(self.state_root.finish()),
+            Arc::new(self.transactions_root.finish()),
+            Arc::new(self.receipt_root.finish()),
+            Arc::new(self.difficulty.finish()),
+            Arc::new(self.mix_hash.finish()),
+            Arc::new(self.extra_data.finish()),
+            Arc::new(self.num_transactions.finish()),
+            Arc::new(self.detail_level.finish()),
+        ]);
+        Ok(RecordBatch::try_new(Arc::new(schema.clone()), columns)?)
     }
 }
 
 struct EvmTransactionsBuilder {
+    canonical: CanonicalBuilder,
     block_number: UInt64Builder,
     index: UInt32Builder,
     hash: StringBuilder,
@@ -428,6 +433,7 @@ struct EvmTransactionsBuilder {
 impl EvmTransactionsBuilder {
     fn new() -> Self {
         Self {
+            canonical: CanonicalBuilder::new(),
             block_number: UInt64Builder::new(),
             index: UInt32Builder::new(),
             hash: StringBuilder::new(),
@@ -448,31 +454,31 @@ impl EvmTransactionsBuilder {
     }
 
     fn finish(&mut self, schema: &Schema) -> anyhow::Result<RecordBatch> {
-        Ok(RecordBatch::try_new(
-            Arc::new(schema.clone()),
-            vec![
-                Arc::new(self.block_number.finish()),
-                Arc::new(self.index.finish()),
-                Arc::new(self.hash.finish()),
-                Arc::new(self.from.finish()),
-                Arc::new(self.to.finish()),
-                Arc::new(self.value.finish()),
-                Arc::new(self.gas_limit.finish()),
-                Arc::new(self.gas_used.finish()),
-                Arc::new(self.gas_price.finish()),
-                Arc::new(self.r#type.finish()),
-                Arc::new(self.status.finish()),
-                Arc::new(self.nonce.finish()),
-                Arc::new(self.input.finish()),
-                Arc::new(self.max_fee_per_gas.finish()),
-                Arc::new(self.max_priority_fee_per_gas.finish()),
-                Arc::new(self.cumulative_gas_used.finish()),
-            ],
-        )?)
+        let mut columns = self.canonical.finish();
+        columns.extend(vec![
+            Arc::new(self.block_number.finish()) as Arc<dyn arrow::array::Array>,
+            Arc::new(self.index.finish()),
+            Arc::new(self.hash.finish()),
+            Arc::new(self.from.finish()),
+            Arc::new(self.to.finish()),
+            Arc::new(self.value.finish()),
+            Arc::new(self.gas_limit.finish()),
+            Arc::new(self.gas_used.finish()),
+            Arc::new(self.gas_price.finish()),
+            Arc::new(self.r#type.finish()),
+            Arc::new(self.status.finish()),
+            Arc::new(self.nonce.finish()),
+            Arc::new(self.input.finish()),
+            Arc::new(self.max_fee_per_gas.finish()),
+            Arc::new(self.max_priority_fee_per_gas.finish()),
+            Arc::new(self.cumulative_gas_used.finish()),
+        ]);
+        Ok(RecordBatch::try_new(Arc::new(schema.clone()), columns)?)
     }
 }
 
 struct EvmLogsBuilder {
+    canonical: CanonicalBuilder,
     block_number: UInt64Builder,
     tx_hash: StringBuilder,
     tx_index: UInt32Builder,
@@ -489,6 +495,7 @@ struct EvmLogsBuilder {
 impl EvmLogsBuilder {
     fn new() -> Self {
         Self {
+            canonical: CanonicalBuilder::new(),
             block_number: UInt64Builder::new(),
             tx_hash: StringBuilder::new(),
             tx_index: UInt32Builder::new(),
@@ -504,26 +511,26 @@ impl EvmLogsBuilder {
     }
 
     fn finish(&mut self, schema: &Schema) -> anyhow::Result<RecordBatch> {
-        Ok(RecordBatch::try_new(
-            Arc::new(schema.clone()),
-            vec![
-                Arc::new(self.block_number.finish()),
-                Arc::new(self.tx_hash.finish()),
-                Arc::new(self.tx_index.finish()),
-                Arc::new(self.log_index.finish()),
-                Arc::new(self.block_index.finish()),
-                Arc::new(self.address.finish()),
-                Arc::new(self.topic0.finish()),
-                Arc::new(self.topic1.finish()),
-                Arc::new(self.topic2.finish()),
-                Arc::new(self.topic3.finish()),
-                Arc::new(self.data.finish()),
-            ],
-        )?)
+        let mut columns = self.canonical.finish();
+        columns.extend(vec![
+            Arc::new(self.block_number.finish()) as Arc<dyn arrow::array::Array>,
+            Arc::new(self.tx_hash.finish()),
+            Arc::new(self.tx_index.finish()),
+            Arc::new(self.log_index.finish()),
+            Arc::new(self.block_index.finish()),
+            Arc::new(self.address.finish()),
+            Arc::new(self.topic0.finish()),
+            Arc::new(self.topic1.finish()),
+            Arc::new(self.topic2.finish()),
+            Arc::new(self.topic3.finish()),
+            Arc::new(self.data.finish()),
+        ]);
+        Ok(RecordBatch::try_new(Arc::new(schema.clone()), columns)?)
     }
 }
 
 struct EvmCallsBuilder {
+    canonical: CanonicalBuilder,
     block_number: UInt64Builder,
     tx_hash: StringBuilder,
     tx_index: UInt32Builder,
@@ -548,6 +555,7 @@ struct EvmCallsBuilder {
 impl EvmCallsBuilder {
     fn new() -> Self {
         Self {
+            canonical: CanonicalBuilder::new(),
             block_number: UInt64Builder::new(),
             tx_hash: StringBuilder::new(),
             tx_index: UInt32Builder::new(),
@@ -570,7 +578,8 @@ impl EvmCallsBuilder {
         }
     }
 
-    fn append(&mut self, block_number: u64, tx_hash: &str, tx_index: u32, call: &eth::Call) {
+    fn append(&mut self, block_number: u64, tx_hash: &str, tx_index: u32, call: &eth::Call, identity: &BlockIdentity) {
+        self.canonical.append(identity);
         self.block_number.append_value(block_number);
         self.tx_hash.append_value(tx_hash);
         self.tx_index.append_value(tx_index);
@@ -593,34 +602,34 @@ impl EvmCallsBuilder {
     }
 
     fn finish(&mut self, schema: &Schema) -> anyhow::Result<RecordBatch> {
-        Ok(RecordBatch::try_new(
-            Arc::new(schema.clone()),
-            vec![
-                Arc::new(self.block_number.finish()),
-                Arc::new(self.tx_hash.finish()),
-                Arc::new(self.tx_index.finish()),
-                Arc::new(self.call_index.finish()),
-                Arc::new(self.parent_index.finish()),
-                Arc::new(self.depth.finish()),
-                Arc::new(self.call_type.finish()),
-                Arc::new(self.caller.finish()),
-                Arc::new(self.address.finish()),
-                Arc::new(self.value.finish()),
-                Arc::new(self.gas_limit.finish()),
-                Arc::new(self.gas_consumed.finish()),
-                Arc::new(self.input.finish()),
-                Arc::new(self.output.finish()),
-                Arc::new(self.status_failed.finish()),
-                Arc::new(self.status_reverted.finish()),
-                Arc::new(self.state_reverted.finish()),
-                Arc::new(self.executed_code.finish()),
-                Arc::new(self.suicide.finish()),
-            ],
-        )?)
+        let mut columns = self.canonical.finish();
+        columns.extend(vec![
+            Arc::new(self.block_number.finish()) as Arc<dyn arrow::array::Array>,
+            Arc::new(self.tx_hash.finish()),
+            Arc::new(self.tx_index.finish()),
+            Arc::new(self.call_index.finish()),
+            Arc::new(self.parent_index.finish()),
+            Arc::new(self.depth.finish()),
+            Arc::new(self.call_type.finish()),
+            Arc::new(self.caller.finish()),
+            Arc::new(self.address.finish()),
+            Arc::new(self.value.finish()),
+            Arc::new(self.gas_limit.finish()),
+            Arc::new(self.gas_consumed.finish()),
+            Arc::new(self.input.finish()),
+            Arc::new(self.output.finish()),
+            Arc::new(self.status_failed.finish()),
+            Arc::new(self.status_reverted.finish()),
+            Arc::new(self.state_reverted.finish()),
+            Arc::new(self.executed_code.finish()),
+            Arc::new(self.suicide.finish()),
+        ]);
+        Ok(RecordBatch::try_new(Arc::new(schema.clone()), columns)?)
     }
 }
 
 struct EvmBalanceChangesBuilder {
+    canonical: CanonicalBuilder,
     block_number: UInt64Builder,
     tx_hash: StringBuilder,
     ordinal: UInt64Builder,
@@ -633,6 +642,7 @@ struct EvmBalanceChangesBuilder {
 impl EvmBalanceChangesBuilder {
     fn new() -> Self {
         Self {
+            canonical: CanonicalBuilder::new(),
             block_number: UInt64Builder::new(),
             tx_hash: StringBuilder::new(),
             ordinal: UInt64Builder::new(),
@@ -643,7 +653,8 @@ impl EvmBalanceChangesBuilder {
         }
     }
 
-    fn append(&mut self, block_number: u64, tx_hash: &str, bc: &eth::BalanceChange) {
+    fn append(&mut self, block_number: u64, tx_hash: &str, bc: &eth::BalanceChange, identity: &BlockIdentity) {
+        self.canonical.append(identity);
         self.block_number.append_value(block_number);
         if tx_hash.is_empty() {
             self.tx_hash.append_null();
@@ -658,22 +669,22 @@ impl EvmBalanceChangesBuilder {
     }
 
     fn finish(&mut self, schema: &Schema) -> anyhow::Result<RecordBatch> {
-        Ok(RecordBatch::try_new(
-            Arc::new(schema.clone()),
-            vec![
-                Arc::new(self.block_number.finish()),
-                Arc::new(self.tx_hash.finish()),
-                Arc::new(self.ordinal.finish()),
-                Arc::new(self.address.finish()),
-                Arc::new(self.old_value.finish()),
-                Arc::new(self.new_value.finish()),
-                Arc::new(self.reason.finish()),
-            ],
-        )?)
+        let mut columns = self.canonical.finish();
+        columns.extend(vec![
+            Arc::new(self.block_number.finish()) as Arc<dyn arrow::array::Array>,
+            Arc::new(self.tx_hash.finish()),
+            Arc::new(self.ordinal.finish()),
+            Arc::new(self.address.finish()),
+            Arc::new(self.old_value.finish()),
+            Arc::new(self.new_value.finish()),
+            Arc::new(self.reason.finish()),
+        ]);
+        Ok(RecordBatch::try_new(Arc::new(schema.clone()), columns)?)
     }
 }
 
 struct EvmCodeChangesBuilder {
+    canonical: CanonicalBuilder,
     block_number: UInt64Builder,
     tx_hash: StringBuilder,
     ordinal: UInt64Builder,
@@ -687,6 +698,7 @@ struct EvmCodeChangesBuilder {
 impl EvmCodeChangesBuilder {
     fn new() -> Self {
         Self {
+            canonical: CanonicalBuilder::new(),
             block_number: UInt64Builder::new(),
             tx_hash: StringBuilder::new(),
             ordinal: UInt64Builder::new(),
@@ -698,7 +710,8 @@ impl EvmCodeChangesBuilder {
         }
     }
 
-    fn append(&mut self, block_number: u64, tx_hash: &str, cc: &eth::CodeChange) {
+    fn append(&mut self, block_number: u64, tx_hash: &str, cc: &eth::CodeChange, identity: &BlockIdentity) {
+        self.canonical.append(identity);
         self.block_number.append_value(block_number);
         if tx_hash.is_empty() {
             self.tx_hash.append_null();
@@ -714,23 +727,23 @@ impl EvmCodeChangesBuilder {
     }
 
     fn finish(&mut self, schema: &Schema) -> anyhow::Result<RecordBatch> {
-        Ok(RecordBatch::try_new(
-            Arc::new(schema.clone()),
-            vec![
-                Arc::new(self.block_number.finish()),
-                Arc::new(self.tx_hash.finish()),
-                Arc::new(self.ordinal.finish()),
-                Arc::new(self.address.finish()),
-                Arc::new(self.old_hash.finish()),
-                Arc::new(self.new_hash.finish()),
-                Arc::new(self.old_code.finish()),
-                Arc::new(self.new_code.finish()),
-            ],
-        )?)
+        let mut columns = self.canonical.finish();
+        columns.extend(vec![
+            Arc::new(self.block_number.finish()) as Arc<dyn arrow::array::Array>,
+            Arc::new(self.tx_hash.finish()),
+            Arc::new(self.ordinal.finish()),
+            Arc::new(self.address.finish()),
+            Arc::new(self.old_hash.finish()),
+            Arc::new(self.new_hash.finish()),
+            Arc::new(self.old_code.finish()),
+            Arc::new(self.new_code.finish()),
+        ]);
+        Ok(RecordBatch::try_new(Arc::new(schema.clone()), columns)?)
     }
 }
 
 struct EvmStorageChangesBuilder {
+    canonical: CanonicalBuilder,
     block_number: UInt64Builder,
     tx_hash: StringBuilder,
     ordinal: UInt64Builder,
@@ -743,6 +756,7 @@ struct EvmStorageChangesBuilder {
 impl EvmStorageChangesBuilder {
     fn new() -> Self {
         Self {
+            canonical: CanonicalBuilder::new(),
             block_number: UInt64Builder::new(),
             tx_hash: StringBuilder::new(),
             ordinal: UInt64Builder::new(),
@@ -753,7 +767,8 @@ impl EvmStorageChangesBuilder {
         }
     }
 
-    fn append(&mut self, block_number: u64, tx_hash: &str, sc: &eth::StorageChange) {
+    fn append(&mut self, block_number: u64, tx_hash: &str, sc: &eth::StorageChange, identity: &BlockIdentity) {
+        self.canonical.append(identity);
         self.block_number.append_value(block_number);
         self.tx_hash.append_value(tx_hash);
         self.ordinal.append_value(sc.ordinal);
@@ -764,22 +779,22 @@ impl EvmStorageChangesBuilder {
     }
 
     fn finish(&mut self, schema: &Schema) -> anyhow::Result<RecordBatch> {
-        Ok(RecordBatch::try_new(
-            Arc::new(schema.clone()),
-            vec![
-                Arc::new(self.block_number.finish()),
-                Arc::new(self.tx_hash.finish()),
-                Arc::new(self.ordinal.finish()),
-                Arc::new(self.address.finish()),
-                Arc::new(self.key.finish()),
-                Arc::new(self.old_value.finish()),
-                Arc::new(self.new_value.finish()),
-            ],
-        )?)
+        let mut columns = self.canonical.finish();
+        columns.extend(vec![
+            Arc::new(self.block_number.finish()) as Arc<dyn arrow::array::Array>,
+            Arc::new(self.tx_hash.finish()),
+            Arc::new(self.ordinal.finish()),
+            Arc::new(self.address.finish()),
+            Arc::new(self.key.finish()),
+            Arc::new(self.old_value.finish()),
+            Arc::new(self.new_value.finish()),
+        ]);
+        Ok(RecordBatch::try_new(Arc::new(schema.clone()), columns)?)
     }
 }
 
 struct EvmNonceChangesBuilder {
+    canonical: CanonicalBuilder,
     block_number: UInt64Builder,
     tx_hash: StringBuilder,
     ordinal: UInt64Builder,
@@ -791,6 +806,7 @@ struct EvmNonceChangesBuilder {
 impl EvmNonceChangesBuilder {
     fn new() -> Self {
         Self {
+            canonical: CanonicalBuilder::new(),
             block_number: UInt64Builder::new(),
             tx_hash: StringBuilder::new(),
             ordinal: UInt64Builder::new(),
@@ -800,7 +816,8 @@ impl EvmNonceChangesBuilder {
         }
     }
 
-    fn append(&mut self, block_number: u64, tx_hash: &str, nc: &eth::NonceChange) {
+    fn append(&mut self, block_number: u64, tx_hash: &str, nc: &eth::NonceChange, identity: &BlockIdentity) {
+        self.canonical.append(identity);
         self.block_number.append_value(block_number);
         self.tx_hash.append_value(tx_hash);
         self.ordinal.append_value(nc.ordinal);
@@ -810,21 +827,21 @@ impl EvmNonceChangesBuilder {
     }
 
     fn finish(&mut self, schema: &Schema) -> anyhow::Result<RecordBatch> {
-        Ok(RecordBatch::try_new(
-            Arc::new(schema.clone()),
-            vec![
-                Arc::new(self.block_number.finish()),
-                Arc::new(self.tx_hash.finish()),
-                Arc::new(self.ordinal.finish()),
-                Arc::new(self.address.finish()),
-                Arc::new(self.old_value.finish()),
-                Arc::new(self.new_value.finish()),
-            ],
-        )?)
+        let mut columns = self.canonical.finish();
+        columns.extend(vec![
+            Arc::new(self.block_number.finish()) as Arc<dyn arrow::array::Array>,
+            Arc::new(self.tx_hash.finish()),
+            Arc::new(self.ordinal.finish()),
+            Arc::new(self.address.finish()),
+            Arc::new(self.old_value.finish()),
+            Arc::new(self.new_value.finish()),
+        ]);
+        Ok(RecordBatch::try_new(Arc::new(schema.clone()), columns)?)
     }
 }
 
 struct EvmGasChangesBuilder {
+    canonical: CanonicalBuilder,
     block_number: UInt64Builder,
     tx_hash: StringBuilder,
     ordinal: UInt64Builder,
@@ -836,6 +853,7 @@ struct EvmGasChangesBuilder {
 impl EvmGasChangesBuilder {
     fn new() -> Self {
         Self {
+            canonical: CanonicalBuilder::new(),
             block_number: UInt64Builder::new(),
             tx_hash: StringBuilder::new(),
             ordinal: UInt64Builder::new(),
@@ -845,7 +863,8 @@ impl EvmGasChangesBuilder {
         }
     }
 
-    fn append(&mut self, block_number: u64, tx_hash: &str, gc: &eth::GasChange) {
+    fn append(&mut self, block_number: u64, tx_hash: &str, gc: &eth::GasChange, identity: &BlockIdentity) {
+        self.canonical.append(identity);
         self.block_number.append_value(block_number);
         self.tx_hash.append_value(tx_hash);
         self.ordinal.append_value(gc.ordinal);
@@ -855,21 +874,21 @@ impl EvmGasChangesBuilder {
     }
 
     fn finish(&mut self, schema: &Schema) -> anyhow::Result<RecordBatch> {
-        Ok(RecordBatch::try_new(
-            Arc::new(schema.clone()),
-            vec![
-                Arc::new(self.block_number.finish()),
-                Arc::new(self.tx_hash.finish()),
-                Arc::new(self.ordinal.finish()),
-                Arc::new(self.old_value.finish()),
-                Arc::new(self.new_value.finish()),
-                Arc::new(self.reason.finish()),
-            ],
-        )?)
+        let mut columns = self.canonical.finish();
+        columns.extend(vec![
+            Arc::new(self.block_number.finish()) as Arc<dyn arrow::array::Array>,
+            Arc::new(self.tx_hash.finish()),
+            Arc::new(self.ordinal.finish()),
+            Arc::new(self.old_value.finish()),
+            Arc::new(self.new_value.finish()),
+            Arc::new(self.reason.finish()),
+        ]);
+        Ok(RecordBatch::try_new(Arc::new(schema.clone()), columns)?)
     }
 }
 
 struct EvmAccountCreationsBuilder {
+    canonical: CanonicalBuilder,
     block_number: UInt64Builder,
     tx_hash: StringBuilder,
     ordinal: UInt64Builder,
@@ -879,6 +898,7 @@ struct EvmAccountCreationsBuilder {
 impl EvmAccountCreationsBuilder {
     fn new() -> Self {
         Self {
+            canonical: CanonicalBuilder::new(),
             block_number: UInt64Builder::new(),
             tx_hash: StringBuilder::new(),
             ordinal: UInt64Builder::new(),
@@ -886,7 +906,8 @@ impl EvmAccountCreationsBuilder {
         }
     }
 
-    fn append(&mut self, block_number: u64, tx_hash: &str, ac: &eth::AccountCreation) {
+    fn append(&mut self, block_number: u64, tx_hash: &str, ac: &eth::AccountCreation, identity: &BlockIdentity) {
+        self.canonical.append(identity);
         self.block_number.append_value(block_number);
         self.tx_hash.append_value(tx_hash);
         self.ordinal.append_value(ac.ordinal);
@@ -894,15 +915,14 @@ impl EvmAccountCreationsBuilder {
     }
 
     fn finish(&mut self, schema: &Schema) -> anyhow::Result<RecordBatch> {
-        Ok(RecordBatch::try_new(
-            Arc::new(schema.clone()),
-            vec![
-                Arc::new(self.block_number.finish()),
-                Arc::new(self.tx_hash.finish()),
-                Arc::new(self.ordinal.finish()),
-                Arc::new(self.account.finish()),
-            ],
-        )?)
+        let mut columns = self.canonical.finish();
+        columns.extend(vec![
+            Arc::new(self.block_number.finish()) as Arc<dyn arrow::array::Array>,
+            Arc::new(self.tx_hash.finish()),
+            Arc::new(self.ordinal.finish()),
+            Arc::new(self.account.finish()),
+        ]);
+        Ok(RecordBatch::try_new(Arc::new(schema.clone()), columns)?)
     }
 }
 
@@ -1114,7 +1134,7 @@ mod tests {
         let block = make_test_evm_block(100);
         let block_bytes = prost::Message::encode_to_vec(&block);
         let mut mapper = EvmBlockMapper::new(false);
-        mapper.map_block(&block_bytes).unwrap();
+        mapper.map_block(&block_bytes, &BlockIdentity::default()).unwrap();
 
         let batches = mapper.flush().unwrap();
         assert_eq!(batches["blocks"].num_rows(), 1);
@@ -1128,7 +1148,7 @@ mod tests {
         let block = make_test_evm_block(200);
         let block_bytes = prost::Message::encode_to_vec(&block);
         let mut mapper = EvmBlockMapper::new(true);
-        mapper.map_block(&block_bytes).unwrap();
+        mapper.map_block(&block_bytes, &BlockIdentity::default()).unwrap();
 
         let batches = mapper.flush().unwrap();
         assert_eq!(batches["blocks"].num_rows(), 1);
@@ -1145,7 +1165,7 @@ mod tests {
         let block = make_test_evm_block(1);
         let block_bytes = prost::Message::encode_to_vec(&block);
         let mut mapper = EvmBlockMapper::new(true);
-        mapper.map_block(&block_bytes).unwrap();
+        mapper.map_block(&block_bytes, &BlockIdentity::default()).unwrap();
         let _ = mapper.flush().unwrap();
         assert_eq!(mapper.max_table_rows(), 0);
     }
@@ -1193,7 +1213,7 @@ mod tests {
         };
         let block_bytes = prost::Message::encode_to_vec(&block);
         let mut mapper = EvmBlockMapper::new(false);
-        mapper.map_block(&block_bytes).unwrap();
+        mapper.map_block(&block_bytes, &BlockIdentity::default()).unwrap();
         let batches = mapper.flush().unwrap();
         assert_eq!(batches["blocks"].num_rows(), 1);
         assert_eq!(batches["transactions"].num_rows(), 0);

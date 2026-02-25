@@ -1,5 +1,6 @@
 use crate::config::Config;
 use crate::firehose;
+use crate::traits::BlockIdentity;
 use anyhow::{Context, Result};
 use backoff::ExponentialBackoffBuilder;
 use std::time::Duration;
@@ -48,7 +49,7 @@ impl FirehoseClient {
     /// unrecoverable error occurs.
     pub async fn stream_blocks<F>(&self, mut handler: F) -> Result<()>
     where
-        F: FnMut(Vec<u8>, String) -> Result<()>,
+        F: FnMut(Vec<u8>, String, BlockIdentity) -> Result<()>,
     {
         let mut cursor: Option<String> = self.config.cursor.clone();
         let backoff_config = ExponentialBackoffBuilder::default()
@@ -134,8 +135,19 @@ impl FirehoseClient {
                             continue;
                         }
 
+                        let identity = resp.metadata.as_ref().map(|m| {
+                            BlockIdentity {
+                                block_num: m.num,
+                                block_id: m.id.clone(),
+                                parent_num: m.parent_num,
+                                parent_id: m.parent_id.clone(),
+                                lib_num: m.lib_num,
+                                timestamp: m.time.as_ref().map(|t| t.seconds),
+                            }
+                        }).unwrap_or_default();
+
                         if let Some(any) = resp.block {
-                            handler(any.value, new_cursor.clone())?;
+                            handler(any.value, new_cursor.clone(), identity)?;
                         }
 
                         cursor = Some(new_cursor);

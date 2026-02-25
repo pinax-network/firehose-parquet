@@ -3,9 +3,10 @@ use crate::schema;
 use arrow::array::*;
 use arrow::datatypes::Schema;
 use arrow::record_batch::RecordBatch;
-use firehose_parquet::traits::BlockMapper;
+use firehose_parquet::traits::{BlockIdentity, BlockMapper, CanonicalBuilder};
 use prost::Message;
 use std::collections::HashMap;
+use arrow::array::Array;
 use std::sync::Arc;
 
 // ---------------------------------------------------------------------------
@@ -37,12 +38,13 @@ impl BitcoinBlockMapper {
         }
     }
 
-    fn map_btc_block(&mut self, block: &btc::Block) {
+    fn map_btc_block(&mut self, block: &btc::Block, identity: &BlockIdentity) {
         let height = block.height;
         let block_hash = &block.hash;
         let block_time = block.time;
 
         // -- blocks table --
+        self.blocks.canonical.append(identity);
         self.blocks.hash.append_value(&block.hash);
         self.blocks.height.append_value(height);
         self.blocks.previous_hash.append_value(&block.previous_hash);
@@ -61,7 +63,7 @@ impl BitcoinBlockMapper {
 
         // -- transactions, inputs, outputs --
         for (tx_index, tx) in block.tx.iter().enumerate() {
-            self.map_transaction(height, block_hash, block_time, tx_index as u32, tx);
+            self.map_transaction(height, block_hash, block_time, tx_index as u32, tx, identity);
         }
     }
 
@@ -72,9 +74,11 @@ impl BitcoinBlockMapper {
         block_time: i64,
         tx_index: u32,
         tx: &btc::Transaction,
+        identity: &BlockIdentity,
     ) {
         let tx_hash = &tx.txid;
 
+        self.transactions.canonical.append(identity);
         self.transactions.txid.append_value(&tx.txid);
         self.transactions.hash.append_value(&tx.hash);
         self.transactions.size.append_value(tx.size);
@@ -90,6 +94,7 @@ impl BitcoinBlockMapper {
         // -- inputs --
         for (i, vin) in tx.vin.iter().enumerate() {
             let script_sig = vin.script_sig.as_ref();
+            self.inputs.canonical.append(identity);
             self.inputs.tx_hash.append_value(tx_hash);
             self.inputs.block_height.append_value(block_height);
             self.inputs.input_index.append_value(i as u32);
@@ -111,6 +116,7 @@ impl BitcoinBlockMapper {
         // -- outputs --
         for vout in &tx.vout {
             let script = vout.script_pub_key.as_ref();
+            self.outputs.canonical.append(identity);
             self.outputs.tx_hash.append_value(tx_hash);
             self.outputs.block_height.append_value(block_height);
             self.outputs.output_index.append_value(vout.n);
@@ -124,9 +130,9 @@ impl BitcoinBlockMapper {
 }
 
 impl BlockMapper for BitcoinBlockMapper {
-    fn map_block(&mut self, block_bytes: &[u8]) -> anyhow::Result<()> {
+    fn map_block(&mut self, block_bytes: &[u8], identity: &BlockIdentity) -> anyhow::Result<()> {
         let block = btc::Block::decode(block_bytes)?;
-        self.map_btc_block(&block);
+        self.map_btc_block(&block, identity);
         Ok(())
     }
 
@@ -140,10 +146,10 @@ impl BlockMapper for BitcoinBlockMapper {
     }
 
     fn max_table_rows(&self) -> usize {
-        self.blocks.hash.len()
-            .max(self.transactions.txid.len())
-            .max(self.inputs.tx_hash.len())
-            .max(self.outputs.tx_hash.len())
+        self.blocks.canonical.len()
+            .max(self.transactions.canonical.len())
+            .max(self.inputs.canonical.len())
+            .max(self.outputs.canonical.len())
     }
 
     fn table_names(&self) -> Vec<&str> {
@@ -156,6 +162,7 @@ impl BlockMapper for BitcoinBlockMapper {
 // ===========================================================================
 
 struct BlocksBuilder {
+    canonical: CanonicalBuilder,
     hash: StringBuilder,
     height: Int64Builder,
     previous_hash: StringBuilder,
@@ -176,6 +183,7 @@ struct BlocksBuilder {
 impl BlocksBuilder {
     fn new() -> Self {
         Self {
+            canonical: CanonicalBuilder::new(),
             hash: StringBuilder::new(),
             height: Int64Builder::new(),
             previous_hash: StringBuilder::new(),
@@ -195,30 +203,30 @@ impl BlocksBuilder {
     }
 
     fn finish(&mut self, schema: &Schema) -> anyhow::Result<RecordBatch> {
-        Ok(RecordBatch::try_new(
-            Arc::new(schema.clone()),
-            vec![
-                Arc::new(self.hash.finish()),
-                Arc::new(self.height.finish()),
-                Arc::new(self.previous_hash.finish()),
-                Arc::new(self.merkle_root.finish()),
-                Arc::new(self.time.finish()),
-                Arc::new(self.nonce.finish()),
-                Arc::new(self.bits.finish()),
-                Arc::new(self.difficulty.finish()),
-                Arc::new(self.size.finish()),
-                Arc::new(self.stripped_size.finish()),
-                Arc::new(self.weight.finish()),
-                Arc::new(self.version.finish()),
-                Arc::new(self.n_tx.finish()),
-                Arc::new(self.mediantime.finish()),
-                Arc::new(self.chainwork.finish()),
-            ],
-        )?)
+        let mut columns = self.canonical.finish();
+        columns.extend(vec![
+            Arc::new(self.hash.finish()) as Arc<dyn Array>,
+            Arc::new(self.height.finish()) as Arc<dyn Array>,
+            Arc::new(self.previous_hash.finish()) as Arc<dyn Array>,
+            Arc::new(self.merkle_root.finish()) as Arc<dyn Array>,
+            Arc::new(self.time.finish()) as Arc<dyn Array>,
+            Arc::new(self.nonce.finish()) as Arc<dyn Array>,
+            Arc::new(self.bits.finish()) as Arc<dyn Array>,
+            Arc::new(self.difficulty.finish()) as Arc<dyn Array>,
+            Arc::new(self.size.finish()) as Arc<dyn Array>,
+            Arc::new(self.stripped_size.finish()) as Arc<dyn Array>,
+            Arc::new(self.weight.finish()) as Arc<dyn Array>,
+            Arc::new(self.version.finish()) as Arc<dyn Array>,
+            Arc::new(self.n_tx.finish()) as Arc<dyn Array>,
+            Arc::new(self.mediantime.finish()) as Arc<dyn Array>,
+            Arc::new(self.chainwork.finish()) as Arc<dyn Array>,
+        ]);
+        Ok(RecordBatch::try_new(Arc::new(schema.clone()), columns)?)
     }
 }
 
 struct TransactionsBuilder {
+    canonical: CanonicalBuilder,
     txid: StringBuilder,
     hash: StringBuilder,
     size: Int32Builder,
@@ -235,6 +243,7 @@ struct TransactionsBuilder {
 impl TransactionsBuilder {
     fn new() -> Self {
         Self {
+            canonical: CanonicalBuilder::new(),
             txid: StringBuilder::new(),
             hash: StringBuilder::new(),
             size: Int32Builder::new(),
@@ -250,26 +259,26 @@ impl TransactionsBuilder {
     }
 
     fn finish(&mut self, schema: &Schema) -> anyhow::Result<RecordBatch> {
-        Ok(RecordBatch::try_new(
-            Arc::new(schema.clone()),
-            vec![
-                Arc::new(self.txid.finish()),
-                Arc::new(self.hash.finish()),
-                Arc::new(self.size.finish()),
-                Arc::new(self.vsize.finish()),
-                Arc::new(self.weight.finish()),
-                Arc::new(self.version.finish()),
-                Arc::new(self.locktime.finish()),
-                Arc::new(self.block_hash.finish()),
-                Arc::new(self.block_height.finish()),
-                Arc::new(self.block_time.finish()),
-                Arc::new(self.tx_index.finish()),
-            ],
-        )?)
+        let mut columns = self.canonical.finish();
+        columns.extend(vec![
+            Arc::new(self.txid.finish()) as Arc<dyn Array>,
+            Arc::new(self.hash.finish()) as Arc<dyn Array>,
+            Arc::new(self.size.finish()) as Arc<dyn Array>,
+            Arc::new(self.vsize.finish()) as Arc<dyn Array>,
+            Arc::new(self.weight.finish()) as Arc<dyn Array>,
+            Arc::new(self.version.finish()) as Arc<dyn Array>,
+            Arc::new(self.locktime.finish()) as Arc<dyn Array>,
+            Arc::new(self.block_hash.finish()) as Arc<dyn Array>,
+            Arc::new(self.block_height.finish()) as Arc<dyn Array>,
+            Arc::new(self.block_time.finish()) as Arc<dyn Array>,
+            Arc::new(self.tx_index.finish()) as Arc<dyn Array>,
+        ]);
+        Ok(RecordBatch::try_new(Arc::new(schema.clone()), columns)?)
     }
 }
 
 struct InputsBuilder {
+    canonical: CanonicalBuilder,
     tx_hash: StringBuilder,
     block_height: Int64Builder,
     input_index: UInt32Builder,
@@ -285,6 +294,7 @@ struct InputsBuilder {
 impl InputsBuilder {
     fn new() -> Self {
         Self {
+            canonical: CanonicalBuilder::new(),
             tx_hash: StringBuilder::new(),
             block_height: Int64Builder::new(),
             input_index: UInt32Builder::new(),
@@ -299,25 +309,25 @@ impl InputsBuilder {
     }
 
     fn finish(&mut self, schema: &Schema) -> anyhow::Result<RecordBatch> {
-        Ok(RecordBatch::try_new(
-            Arc::new(schema.clone()),
-            vec![
-                Arc::new(self.tx_hash.finish()),
-                Arc::new(self.block_height.finish()),
-                Arc::new(self.input_index.finish()),
-                Arc::new(self.prev_txid.finish()),
-                Arc::new(self.prev_vout.finish()),
-                Arc::new(self.sequence.finish()),
-                Arc::new(self.script_sig_asm.finish()),
-                Arc::new(self.script_sig_hex.finish()),
-                Arc::new(self.coinbase.finish()),
-                Arc::new(self.witness.finish()),
-            ],
-        )?)
+        let mut columns = self.canonical.finish();
+        columns.extend(vec![
+            Arc::new(self.tx_hash.finish()) as Arc<dyn Array>,
+            Arc::new(self.block_height.finish()) as Arc<dyn Array>,
+            Arc::new(self.input_index.finish()) as Arc<dyn Array>,
+            Arc::new(self.prev_txid.finish()) as Arc<dyn Array>,
+            Arc::new(self.prev_vout.finish()) as Arc<dyn Array>,
+            Arc::new(self.sequence.finish()) as Arc<dyn Array>,
+            Arc::new(self.script_sig_asm.finish()) as Arc<dyn Array>,
+            Arc::new(self.script_sig_hex.finish()) as Arc<dyn Array>,
+            Arc::new(self.coinbase.finish()) as Arc<dyn Array>,
+            Arc::new(self.witness.finish()) as Arc<dyn Array>,
+        ]);
+        Ok(RecordBatch::try_new(Arc::new(schema.clone()), columns)?)
     }
 }
 
 struct OutputsBuilder {
+    canonical: CanonicalBuilder,
     tx_hash: StringBuilder,
     block_height: Int64Builder,
     output_index: UInt32Builder,
@@ -331,6 +341,7 @@ struct OutputsBuilder {
 impl OutputsBuilder {
     fn new() -> Self {
         Self {
+            canonical: CanonicalBuilder::new(),
             tx_hash: StringBuilder::new(),
             block_height: Int64Builder::new(),
             output_index: UInt32Builder::new(),
@@ -343,19 +354,18 @@ impl OutputsBuilder {
     }
 
     fn finish(&mut self, schema: &Schema) -> anyhow::Result<RecordBatch> {
-        Ok(RecordBatch::try_new(
-            Arc::new(schema.clone()),
-            vec![
-                Arc::new(self.tx_hash.finish()),
-                Arc::new(self.block_height.finish()),
-                Arc::new(self.output_index.finish()),
-                Arc::new(self.value.finish()),
-                Arc::new(self.script_pubkey_asm.finish()),
-                Arc::new(self.script_pubkey_hex.finish()),
-                Arc::new(self.script_pubkey_type.finish()),
-                Arc::new(self.script_pubkey_address.finish()),
-            ],
-        )?)
+        let mut columns = self.canonical.finish();
+        columns.extend(vec![
+            Arc::new(self.tx_hash.finish()) as Arc<dyn Array>,
+            Arc::new(self.block_height.finish()) as Arc<dyn Array>,
+            Arc::new(self.output_index.finish()) as Arc<dyn Array>,
+            Arc::new(self.value.finish()) as Arc<dyn Array>,
+            Arc::new(self.script_pubkey_asm.finish()) as Arc<dyn Array>,
+            Arc::new(self.script_pubkey_hex.finish()) as Arc<dyn Array>,
+            Arc::new(self.script_pubkey_type.finish()) as Arc<dyn Array>,
+            Arc::new(self.script_pubkey_address.finish()) as Arc<dyn Array>,
+        ]);
+        Ok(RecordBatch::try_new(Arc::new(schema.clone()), columns)?)
     }
 }
 
@@ -428,7 +438,7 @@ mod tests {
         let block = make_test_block(0);
         let block_bytes = prost::Message::encode_to_vec(&block);
         let mut mapper = BitcoinBlockMapper::new();
-        mapper.map_block(&block_bytes).unwrap();
+        mapper.map_block(&block_bytes, &BlockIdentity::default()).unwrap();
 
         let batches = mapper.flush().unwrap();
         assert_eq!(batches["blocks"].num_rows(), 1);
@@ -460,7 +470,7 @@ mod tests {
         };
         let block_bytes = prost::Message::encode_to_vec(&block);
         let mut mapper = BitcoinBlockMapper::new();
-        mapper.map_block(&block_bytes).unwrap();
+        mapper.map_block(&block_bytes, &BlockIdentity::default()).unwrap();
         let batches = mapper.flush().unwrap();
         assert_eq!(batches["blocks"].num_rows(), 1);
         assert_eq!(batches["transactions"].num_rows(), 0);
@@ -473,7 +483,7 @@ mod tests {
         let block = make_test_block(1);
         let block_bytes = prost::Message::encode_to_vec(&block);
         let mut mapper = BitcoinBlockMapper::new();
-        mapper.map_block(&block_bytes).unwrap();
+        mapper.map_block(&block_bytes, &BlockIdentity::default()).unwrap();
         let _ = mapper.flush().unwrap();
         assert_eq!(mapper.max_table_rows(), 0);
     }
