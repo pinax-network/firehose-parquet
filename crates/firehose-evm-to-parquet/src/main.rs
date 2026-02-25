@@ -8,13 +8,14 @@ use firehose_parquet::config::{Compression, Config, Partition};
 use firehose_parquet::grpc::FirehoseClient;
 use firehose_parquet::traits::BlockMapper;
 use firehose_parquet::writer::OutputWriter;
-use mapper::SolanaBlockMapper;
+use mapper::EvmBlockMapper;
 use std::path::PathBuf;
 use tracing::info;
 
 #[derive(Parser, Debug)]
-#[command(name = "firehose-solana-to-parquet", version, about)]
+#[command(name = "firehose-evm-to-parquet", version, about = "Convert Firehose EVM gRPC stream to Apache Parquet")]
 struct Cli {
+    /// Firehose gRPC endpoint URL
     #[arg(long)]
     endpoint: String,
 
@@ -59,6 +60,10 @@ struct Cli {
 
     #[arg(long, default_value = "true")]
     final_blocks_only: bool,
+
+    /// Enable extended detail level (calls, balance_changes, etc.)
+    #[arg(long, default_value = "false")]
+    extended: bool,
 }
 
 fn parse_compression(s: &str) -> Compression {
@@ -85,6 +90,7 @@ async fn main() -> Result<()> {
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
     tracing_subscriber::fmt().with_env_filter(filter).init();
 
+    let extended = cli.extended;
     let config = Config {
         endpoint: cli.endpoint,
         api_key: cli.api_key,
@@ -101,44 +107,43 @@ async fn main() -> Result<()> {
         dry_run: cli.dry_run,
     };
 
-    info!(?config, "starting Solana pipeline");
+    info!(?config, extended, "starting EVM pipeline");
 
-    let mut mapper = SolanaBlockMapper::new();
+    let mut mapper = EvmBlockMapper::new(extended);
     let mut writer = OutputWriter::new(&config.output, config.partition.clone(), config.compression);
     let flush_rows = config.flush_rows as usize;
     let dry_run = config.dry_run;
 
     let mut blocks_processed: u64 = 0;
-    let mut min_slot: Option<u64> = None;
-    let mut max_slot: Option<u64> = None;
+    let mut min_block: Option<u64> = None;
+    let mut max_block: Option<u64> = None;
 
     let client = FirehoseClient::new(config);
 
     client
         .stream_blocks(|block_bytes, _cursor| {
-            // Extract slot from the raw bytes for tracking (decode just the block)
-            let block = prost::Message::decode(block_bytes.as_slice())
-                .map(|b: proto::solana::Block| b.slot)
+            // Quick decode just block number for tracking
+            let block_number = prost::Message::decode(block_bytes.as_slice())
+                .map(|b: proto::eth::Block| b.number)
                 .unwrap_or(0);
-            let slot = block;
-            min_slot = Some(min_slot.map_or(slot, |s: u64| s.min(slot)));
-            max_slot = Some(max_slot.map_or(slot, |s: u64| s.max(slot)));
+            min_block = Some(min_block.map_or(block_number, |s: u64| s.min(block_number)));
+            max_block = Some(max_block.map_or(block_number, |s: u64| s.max(block_number)));
 
             mapper.map_block(&block_bytes)?;
             blocks_processed += 1;
 
             if blocks_processed % 100 == 0 {
-                info!(blocks_processed, slot, buffered_rows = mapper.max_table_rows(), "progress");
+                info!(blocks_processed, block_number, buffered_rows = mapper.max_table_rows(), "progress");
             }
 
             if mapper.max_table_rows() >= flush_rows {
                 let batches = mapper.flush()?;
                 if !dry_run {
-                    let slot_range = min_slot.zip(max_slot);
-                    writer.write_all(&batches, slot_range)?;
+                    let block_range = min_block.zip(max_block);
+                    writer.write_all(&batches, block_range)?;
                 }
-                min_slot = None;
-                max_slot = None;
+                min_block = None;
+                max_block = None;
             }
 
             Ok(())
@@ -148,11 +153,11 @@ async fn main() -> Result<()> {
     if mapper.max_table_rows() > 0 {
         let batches = mapper.flush()?;
         if !dry_run {
-            let slot_range = min_slot.zip(max_slot);
-            writer.write_all(&batches, slot_range)?;
+            let block_range = min_block.zip(max_block);
+            writer.write_all(&batches, block_range)?;
         }
     }
 
-    info!(blocks_processed, "pipeline finished");
+    info!(blocks_processed, "EVM pipeline finished");
     Ok(())
 }

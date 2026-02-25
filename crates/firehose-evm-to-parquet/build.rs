@@ -12,7 +12,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .build_server(false)
         .protoc_arg("--experimental_allow_proto3_optional")
         .compile_protos(
-            &[proto_root.join("sf/firehose/v2/firehose.proto")],
+            &[proto_root.join("sf/ethereum/type/v2/type.proto")],
             &[&proto_root],
         )?;
 

@@ -1,7 +1,6 @@
 use arrow::datatypes::{DataType, Field, Schema};
 use std::sync::Arc;
 
-/// Arrow schema for the **blocks** table (one row per block).
 pub fn blocks_schema() -> Schema {
     Schema::new(vec![
         Field::new("slot", DataType::UInt64, false),
@@ -15,7 +14,6 @@ pub fn blocks_schema() -> Schema {
     ])
 }
 
-/// Arrow schema for the **transactions** table (one row per confirmed transaction).
 pub fn transactions_schema() -> Schema {
     Schema::new(vec![
         Field::new("slot", DataType::UInt64, false),
@@ -44,7 +42,6 @@ pub fn transactions_schema() -> Schema {
     ])
 }
 
-/// Arrow schema for the **messages** table (one row per transaction message).
 pub fn messages_schema() -> Schema {
     Schema::new(vec![
         Field::new("slot", DataType::UInt64, false),
@@ -63,7 +60,6 @@ pub fn messages_schema() -> Schema {
     ])
 }
 
-/// Arrow schema for the **instructions** table (one row per instruction, top-level or inner).
 pub fn instructions_schema() -> Schema {
     Schema::new(vec![
         Field::new("slot", DataType::UInt64, false),
@@ -78,7 +74,6 @@ pub fn instructions_schema() -> Schema {
     ])
 }
 
-/// Arrow schema for the **rewards** table (one row per reward entry).
 pub fn rewards_schema() -> Schema {
     Schema::new(vec![
         Field::new("slot", DataType::UInt64, false),
@@ -91,5 +86,4 @@ pub fn rewards_schema() -> Schema {
     ])
 }
 
-/// All table names.
 pub const TABLE_NAMES: [&str; 5] = ["blocks", "transactions", "messages", "instructions", "rewards"];
