@@ -5,6 +5,7 @@ mod schema;
 use anyhow::Result;
 use clap::Parser;
 use firehose_parquet::config::{BlockMetadata, Compression, Config, Partition};
+use firehose_parquet::encode::{parse_encode_bytes, EncodeBytes};
 use firehose_parquet::grpc::FirehoseClient;
 use firehose_parquet::traits::{fork_step_name, BlockIdentity, BlockMapper};
 use firehose_parquet::writer::OutputWriter;
@@ -68,6 +69,11 @@ struct Cli {
     /// Enable extended detail level (calls, balance_changes, etc.)
     #[arg(long, default_value = "false")]
     extended: bool,
+
+    /// Byte encoding strategy for binary fields (hashes, addresses, etc.)
+    /// Options: binary (raw bytes), hex (default, 0x-prefixed), base58, tron_base58, auto (chain-appropriate = hex for EVM)
+    #[arg(long, default_value = "hex")]
+    encode_bytes: String,
 }
 
 fn parse_compression(s: &str) -> Compression {
@@ -118,7 +124,9 @@ async fn main() -> Result<()> {
 
     let final_blocks_only = config.final_blocks_only;
     let include_fork_step = !final_blocks_only;
-    let mut mapper = EvmBlockMapper::new(extended, include_fork_step);
+    let encode_bytes = parse_encode_bytes(&cli.encode_bytes)
+        .unwrap_or(EncodeBytes::Hex); // "auto" → hex for EVM
+    let mut mapper = EvmBlockMapper::new(extended, include_fork_step, encode_bytes);
     let mut writer = OutputWriter::new(&config.output, config.partition.clone(), config.compression);
     let flush_rows = config.flush_rows as usize;
     let flush_interval_secs = config.flush_interval_secs;
