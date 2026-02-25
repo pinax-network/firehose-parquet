@@ -1,0 +1,27 @@
+[package]
+name = "firehose-beacon-to-parquet"
+version = "0.1.0"
+edition = "2021"
+description = "CLI to convert Firehose Ethereum Beacon gRPC stream to Apache Parquet"
+
+[[bin]]
+name = "firehose-beacon-to-parquet"
+path = "src/main.rs"
+
+[dependencies]
+firehose-parquet = { path = "../firehose-parquet" }
+arrow = { version = "58", features = ["prettyprint"] }
+parquet = { version = "58", features = ["arrow"] }
+prost = "0.13"
+prost-types = "0.13"
+tokio = { version = "1", features = ["full"] }
+clap = { version = "4", features = ["derive", "env"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+anyhow = "1"
+
+[build-dependencies]
+tonic-build = "0.12"
+
+[dev-dependencies]
+tempfile = "3"
