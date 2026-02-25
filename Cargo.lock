@@ -747,6 +747,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "firehose-tron-to-parquet"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "arrow",
+ "clap",
+ "firehose-parquet",
+ "parquet",
+ "prost",
+ "prost-types",
+ "tempfile",
+ "tokio",
+ "tonic-build",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "fixedbitset"
 version = "0.5.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
