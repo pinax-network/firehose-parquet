@@ -3,6 +3,7 @@ use crate::schema;
 use arrow::array::*;
 use arrow::datatypes::Schema;
 use arrow::record_batch::RecordBatch;
+use firehose_parquet::encode::{BytesColumn, EncodeBytes};
 use firehose_parquet::traits::{BlockIdentity, BlockMapper, CanonicalBuilder};
 use prost::Message;
 use std::collections::HashMap;
@@ -11,10 +12,6 @@ use std::sync::Arc;
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-fn hex(bytes: &[u8]) -> String {
-    format!("0x{}", hex::encode(bytes))
-}
 
 fn bigint_to_string(bi: &Option<eth::BigInt>) -> String {
     match bi {
@@ -49,6 +46,7 @@ fn mk_fork_step(include: bool) -> Option<StringBuilder> {
 pub struct EvmBlockMapper {
     extended: bool,
     include_fork_step: bool,
+    encoding: EncodeBytes,
     // Standard builders
     blocks: EvmBlocksBuilder,
     transactions: EvmTransactionsBuilder,
@@ -75,44 +73,45 @@ pub struct EvmBlockMapper {
 }
 
 impl EvmBlockMapper {
-    pub fn new(extended: bool, include_fork_step: bool) -> Self {
+    pub fn new(extended: bool, include_fork_step: bool, encoding: EncodeBytes) -> Self {
         let ifs = include_fork_step;
+        let enc = &encoding;
         Self {
             extended,
             include_fork_step,
-            blocks: EvmBlocksBuilder::new(ifs),
-            transactions: EvmTransactionsBuilder::new(ifs),
-            logs: EvmLogsBuilder::new(ifs),
-            calls: if extended { Some(EvmCallsBuilder::new(ifs)) } else { None },
-            balance_changes: if extended { Some(EvmBalanceChangesBuilder::new(ifs)) } else { None },
-            code_changes: if extended { Some(EvmCodeChangesBuilder::new(ifs)) } else { None },
-            storage_changes: if extended { Some(EvmStorageChangesBuilder::new(ifs)) } else { None },
-            nonce_changes: if extended { Some(EvmNonceChangesBuilder::new(ifs)) } else { None },
-            gas_changes: if extended { Some(EvmGasChangesBuilder::new(ifs)) } else { None },
-            account_creations: if extended { Some(EvmAccountCreationsBuilder::new(ifs)) } else { None },
-            blocks_schema: schema::blocks_schema(ifs),
-            transactions_schema: schema::transactions_schema(ifs),
-            logs_schema: schema::logs_schema(ifs),
-            calls_schema: schema::calls_schema(ifs),
-            balance_changes_schema: schema::balance_changes_schema(ifs),
-            code_changes_schema: schema::code_changes_schema(ifs),
-            storage_changes_schema: schema::storage_changes_schema(ifs),
-            nonce_changes_schema: schema::nonce_changes_schema(ifs),
-            gas_changes_schema: schema::gas_changes_schema(ifs),
-            account_creations_schema: schema::account_creations_schema(ifs),
+            encoding: encoding.clone(),
+            blocks: EvmBlocksBuilder::new(ifs, enc),
+            transactions: EvmTransactionsBuilder::new(ifs, enc),
+            logs: EvmLogsBuilder::new(ifs, enc),
+            calls: if extended { Some(EvmCallsBuilder::new(ifs, enc)) } else { None },
+            balance_changes: if extended { Some(EvmBalanceChangesBuilder::new(ifs, enc)) } else { None },
+            code_changes: if extended { Some(EvmCodeChangesBuilder::new(ifs, enc)) } else { None },
+            storage_changes: if extended { Some(EvmStorageChangesBuilder::new(ifs, enc)) } else { None },
+            nonce_changes: if extended { Some(EvmNonceChangesBuilder::new(ifs, enc)) } else { None },
+            gas_changes: if extended { Some(EvmGasChangesBuilder::new(ifs, enc)) } else { None },
+            account_creations: if extended { Some(EvmAccountCreationsBuilder::new(ifs, enc)) } else { None },
+            blocks_schema: schema::blocks_schema(ifs, enc),
+            transactions_schema: schema::transactions_schema(ifs, enc),
+            logs_schema: schema::logs_schema(ifs, enc),
+            calls_schema: schema::calls_schema(ifs, enc),
+            balance_changes_schema: schema::balance_changes_schema(ifs, enc),
+            code_changes_schema: schema::code_changes_schema(ifs, enc),
+            storage_changes_schema: schema::storage_changes_schema(ifs, enc),
+            nonce_changes_schema: schema::nonce_changes_schema(ifs, enc),
+            gas_changes_schema: schema::gas_changes_schema(ifs, enc),
+            account_creations_schema: schema::account_creations_schema(ifs, enc),
         }
     }
 
     fn map_evm_block(&mut self, block: &eth::Block, identity: &BlockIdentity, fork_step: Option<&str>) {
         let number = block.number;
-        let block_hash = hex(&block.hash);
         let header = block.header.as_ref();
 
         // -- blocks table --
         self.blocks.canonical.append(identity);
         self.blocks.number.append_value(number);
-        self.blocks.hash.append_value(&block_hash);
-        self.blocks.parent_hash.append_value(hex(&header.map_or(&[][..], |h| &h.parent_hash)));
+        self.blocks.hash.append_value(&block.hash);
+        self.blocks.parent_hash.append_value(header.map_or(&[][..], |h| &h.parent_hash));
         self.blocks.timestamp.append_value(
             header.and_then(|h| h.timestamp.as_ref()).map_or(0, |t| t.seconds),
         );
@@ -124,60 +123,59 @@ impl EvmBlockMapper {
         } else {
             self.blocks.base_fee_per_gas.append_null();
         }
-        self.blocks.coinbase.append_value(hex(header.map_or(&[][..], |h| &h.coinbase)));
+        self.blocks.coinbase.append_value(header.map_or(&[][..], |h| &h.coinbase));
         self.blocks.size.append_value(block.size);
         self.blocks.nonce.append_value(header.map_or(0, |h| h.nonce));
-        self.blocks.state_root.append_value(hex(header.map_or(&[][..], |h| &h.state_root)));
-        self.blocks.transactions_root.append_value(hex(header.map_or(&[][..], |h| &h.transactions_root)));
-        self.blocks.receipt_root.append_value(hex(header.map_or(&[][..], |h| &h.receipt_root)));
+        self.blocks.state_root.append_value(header.map_or(&[][..], |h| &h.state_root));
+        self.blocks.transactions_root.append_value(header.map_or(&[][..], |h| &h.transactions_root));
+        self.blocks.receipt_root.append_value(header.map_or(&[][..], |h| &h.receipt_root));
         let difficulty = header.and_then(|h| h.difficulty.as_ref());
         if difficulty.is_some() {
             self.blocks.difficulty.append_value(bigint_to_string(&header.and_then(|h| h.difficulty.clone())));
         } else {
             self.blocks.difficulty.append_null();
         }
-        self.blocks.mix_hash.append_value(hex(header.map_or(&[][..], |h| &h.mix_hash)));
-        self.blocks.extra_data.append_value(hex(header.map_or(&[][..], |h| &h.extra_data)));
+        self.blocks.mix_hash.append_value(header.map_or(&[][..], |h| &h.mix_hash));
+        self.blocks.extra_data.append_value(header.map_or(&[][..], |h| &h.extra_data));
         self.blocks.num_transactions.append_value(block.transaction_traces.len() as u32);
         self.blocks.detail_level.append_value(block.detail_level);
         append_fork_step(&mut self.blocks.fork_step, fork_step);
 
         // -- transaction traces --
         for tx in &block.transaction_traces {
-            self.map_transaction(number, &block_hash, tx, identity, fork_step);
+            self.map_transaction(number, tx, identity, fork_step);
         }
 
         // -- block-level balance changes (EXTENDED) --
         if self.extended {
             for bc in &block.balance_changes {
                 if let Some(ref mut builder) = self.balance_changes {
-                    builder.append(number, "", bc, identity, fork_step);
+                    builder.append(number, &[], bc, identity, fork_step);
                 }
             }
             for cc in &block.code_changes {
                 if let Some(ref mut builder) = self.code_changes {
-                    builder.append(number, "", cc, identity, fork_step);
+                    builder.append(number, &[], cc, identity, fork_step);
                 }
             }
             for call in &block.system_calls {
                 if let Some(ref mut builder) = self.calls {
-                    builder.append(number, "", 0, call, identity, fork_step);
+                    builder.append(number, &[], 0, call, identity, fork_step);
                 }
-                self.extract_call_state_changes(number, "", call, identity, fork_step);
+                self.extract_call_state_changes(number, &[], call, identity, fork_step);
             }
         }
     }
 
-    fn map_transaction(&mut self, block_number: u64, block_hash: &str, tx: &eth::TransactionTrace, identity: &BlockIdentity, fork_step: Option<&str>) {
-        let tx_hash = hex(&tx.hash);
-        let _ = block_hash;
+    fn map_transaction(&mut self, block_number: u64, tx: &eth::TransactionTrace, identity: &BlockIdentity, fork_step: Option<&str>) {
+        let tx_hash = &tx.hash;
 
         self.transactions.canonical.append(identity);
         self.transactions.block_number.append_value(block_number);
         self.transactions.index.append_value(tx.index);
-        self.transactions.hash.append_value(&tx_hash);
-        self.transactions.from.append_value(hex(&tx.from));
-        self.transactions.to.append_value(hex(&tx.to));
+        self.transactions.hash.append_value(tx_hash);
+        self.transactions.from.append_value(&tx.from);
+        self.transactions.to.append_value(&tx.to);
         self.transactions.value.append_value(bigint_to_string(&tx.value));
         self.transactions.gas_limit.append_value(tx.gas_limit);
         self.transactions.gas_used.append_value(tx.gas_used);
@@ -189,7 +187,7 @@ impl EvmBlockMapper {
         self.transactions.r#type.append_value(tx.r#type);
         self.transactions.status.append_value(tx.status);
         self.transactions.nonce.append_value(tx.nonce);
-        self.transactions.input.append_value(hex(&tx.input));
+        self.transactions.input.append_value(&tx.input);
         if let Some(ref mfpg) = tx.max_fee_per_gas {
             self.transactions.max_fee_per_gas.append_value(bigint_to_string(&Some(mfpg.clone())));
         } else {
@@ -203,7 +201,7 @@ impl EvmBlockMapper {
         if let Some(ref receipt) = tx.receipt {
             self.transactions.cumulative_gas_used.append_value(receipt.cumulative_gas_used);
             for log in &receipt.logs {
-                self.map_log(block_number, &tx_hash, tx.index, log, identity, fork_step);
+                self.map_log(block_number, tx_hash, tx.index, log, identity, fork_step);
             }
         } else {
             self.transactions.cumulative_gas_used.append_null();
@@ -214,21 +212,21 @@ impl EvmBlockMapper {
         if self.extended {
             for call in &tx.calls {
                 if let Some(ref mut builder) = self.calls {
-                    builder.append(block_number, &tx_hash, tx.index, call, identity, fork_step);
+                    builder.append(block_number, tx_hash, tx.index, call, identity, fork_step);
                 }
-                self.extract_call_state_changes(block_number, &tx_hash, call, identity, fork_step);
+                self.extract_call_state_changes(block_number, tx_hash, call, identity, fork_step);
             }
         }
     }
 
-    fn map_log(&mut self, block_number: u64, tx_hash: &str, tx_index: u32, log: &eth::Log, identity: &BlockIdentity, fork_step: Option<&str>) {
+    fn map_log(&mut self, block_number: u64, tx_hash: &[u8], tx_index: u32, log: &eth::Log, identity: &BlockIdentity, fork_step: Option<&str>) {
         self.logs.canonical.append(identity);
         self.logs.block_number.append_value(block_number);
         self.logs.tx_hash.append_value(tx_hash);
         self.logs.tx_index.append_value(tx_index);
         self.logs.log_index.append_value(log.index);
         self.logs.block_index.append_value(log.block_index);
-        self.logs.address.append_value(hex(&log.address));
+        self.logs.address.append_value(&log.address);
 
         let topics = &log.topics;
         for i in 0..4 {
@@ -240,16 +238,16 @@ impl EvmBlockMapper {
                 _ => unreachable!(),
             };
             if i < topics.len() {
-                builder.append_value(hex(&topics[i]));
+                builder.append_value(&topics[i]);
             } else {
                 builder.append_null();
             }
         }
-        self.logs.data.append_value(hex(&log.data));
+        self.logs.data.append_value(&log.data);
         append_fork_step(&mut self.logs.fork_step, fork_step);
     }
 
-    fn extract_call_state_changes(&mut self, block_number: u64, tx_hash: &str, call: &eth::Call, identity: &BlockIdentity, fork_step: Option<&str>) {
+    fn extract_call_state_changes(&mut self, block_number: u64, tx_hash: &[u8], call: &eth::Call, identity: &BlockIdentity, fork_step: Option<&str>) {
         if !self.extended {
             return;
         }
@@ -357,46 +355,46 @@ impl BlockMapper for EvmBlockMapper {
 struct EvmBlocksBuilder {
     canonical: CanonicalBuilder,
     number: UInt64Builder,
-    hash: StringBuilder,
-    parent_hash: StringBuilder,
+    hash: BytesColumn,
+    parent_hash: BytesColumn,
     timestamp: Int64Builder,
     gas_used: UInt64Builder,
     gas_limit: UInt64Builder,
     base_fee_per_gas: StringBuilder,
-    coinbase: StringBuilder,
+    coinbase: BytesColumn,
     size: UInt64Builder,
     nonce: UInt64Builder,
-    state_root: StringBuilder,
-    transactions_root: StringBuilder,
-    receipt_root: StringBuilder,
+    state_root: BytesColumn,
+    transactions_root: BytesColumn,
+    receipt_root: BytesColumn,
     difficulty: StringBuilder,
-    mix_hash: StringBuilder,
-    extra_data: StringBuilder,
+    mix_hash: BytesColumn,
+    extra_data: BytesColumn,
     num_transactions: UInt32Builder,
     detail_level: Int32Builder,
     fork_step: Option<StringBuilder>,
 }
 
 impl EvmBlocksBuilder {
-    fn new(include_fork_step: bool) -> Self {
+    fn new(include_fork_step: bool, encoding: &EncodeBytes) -> Self {
         Self {
             canonical: CanonicalBuilder::new(),
             number: UInt64Builder::new(),
-            hash: StringBuilder::new(),
-            parent_hash: StringBuilder::new(),
+            hash: BytesColumn::new(encoding),
+            parent_hash: BytesColumn::new(encoding),
             timestamp: Int64Builder::new(),
             gas_used: UInt64Builder::new(),
             gas_limit: UInt64Builder::new(),
             base_fee_per_gas: StringBuilder::new(),
-            coinbase: StringBuilder::new(),
+            coinbase: BytesColumn::new(encoding),
             size: UInt64Builder::new(),
             nonce: UInt64Builder::new(),
-            state_root: StringBuilder::new(),
-            transactions_root: StringBuilder::new(),
-            receipt_root: StringBuilder::new(),
+            state_root: BytesColumn::new(encoding),
+            transactions_root: BytesColumn::new(encoding),
+            receipt_root: BytesColumn::new(encoding),
             difficulty: StringBuilder::new(),
-            mix_hash: StringBuilder::new(),
-            extra_data: StringBuilder::new(),
+            mix_hash: BytesColumn::new(encoding),
+            extra_data: BytesColumn::new(encoding),
             num_transactions: UInt32Builder::new(),
             detail_level: Int32Builder::new(),
             fork_step: mk_fork_step(include_fork_step),
@@ -407,21 +405,21 @@ impl EvmBlocksBuilder {
         let mut columns = self.canonical.finish();
         columns.extend(vec![
             Arc::new(self.number.finish()) as Arc<dyn arrow::array::Array>,
-            Arc::new(self.hash.finish()),
-            Arc::new(self.parent_hash.finish()),
+            self.hash.finish(),
+            self.parent_hash.finish(),
             Arc::new(self.timestamp.finish()),
             Arc::new(self.gas_used.finish()),
             Arc::new(self.gas_limit.finish()),
             Arc::new(self.base_fee_per_gas.finish()),
-            Arc::new(self.coinbase.finish()),
+            self.coinbase.finish(),
             Arc::new(self.size.finish()),
             Arc::new(self.nonce.finish()),
-            Arc::new(self.state_root.finish()),
-            Arc::new(self.transactions_root.finish()),
-            Arc::new(self.receipt_root.finish()),
+            self.state_root.finish(),
+            self.transactions_root.finish(),
+            self.receipt_root.finish(),
             Arc::new(self.difficulty.finish()),
-            Arc::new(self.mix_hash.finish()),
-            Arc::new(self.extra_data.finish()),
+            self.mix_hash.finish(),
+            self.extra_data.finish(),
             Arc::new(self.num_transactions.finish()),
             Arc::new(self.detail_level.finish()),
         ]);
@@ -434,9 +432,9 @@ struct EvmTransactionsBuilder {
     canonical: CanonicalBuilder,
     block_number: UInt64Builder,
     index: UInt32Builder,
-    hash: StringBuilder,
-    from: StringBuilder,
-    to: StringBuilder,
+    hash: BytesColumn,
+    from: BytesColumn,
+    to: BytesColumn,
     value: StringBuilder,
     gas_limit: UInt64Builder,
     gas_used: UInt64Builder,
@@ -444,7 +442,7 @@ struct EvmTransactionsBuilder {
     r#type: Int32Builder,
     status: Int32Builder,
     nonce: UInt64Builder,
-    input: StringBuilder,
+    input: BytesColumn,
     max_fee_per_gas: StringBuilder,
     max_priority_fee_per_gas: StringBuilder,
     cumulative_gas_used: UInt64Builder,
@@ -452,14 +450,14 @@ struct EvmTransactionsBuilder {
 }
 
 impl EvmTransactionsBuilder {
-    fn new(include_fork_step: bool) -> Self {
+    fn new(include_fork_step: bool, encoding: &EncodeBytes) -> Self {
         Self {
             canonical: CanonicalBuilder::new(),
             block_number: UInt64Builder::new(),
             index: UInt32Builder::new(),
-            hash: StringBuilder::new(),
-            from: StringBuilder::new(),
-            to: StringBuilder::new(),
+            hash: BytesColumn::new(encoding),
+            from: BytesColumn::new(encoding),
+            to: BytesColumn::new(encoding),
             value: StringBuilder::new(),
             gas_limit: UInt64Builder::new(),
             gas_used: UInt64Builder::new(),
@@ -467,7 +465,7 @@ impl EvmTransactionsBuilder {
             r#type: Int32Builder::new(),
             status: Int32Builder::new(),
             nonce: UInt64Builder::new(),
-            input: StringBuilder::new(),
+            input: BytesColumn::new(encoding),
             max_fee_per_gas: StringBuilder::new(),
             max_priority_fee_per_gas: StringBuilder::new(),
             cumulative_gas_used: UInt64Builder::new(),
@@ -480,9 +478,9 @@ impl EvmTransactionsBuilder {
         columns.extend(vec![
             Arc::new(self.block_number.finish()) as Arc<dyn arrow::array::Array>,
             Arc::new(self.index.finish()),
-            Arc::new(self.hash.finish()),
-            Arc::new(self.from.finish()),
-            Arc::new(self.to.finish()),
+            self.hash.finish(),
+            self.from.finish(),
+            self.to.finish(),
             Arc::new(self.value.finish()),
             Arc::new(self.gas_limit.finish()),
             Arc::new(self.gas_used.finish()),
@@ -490,7 +488,7 @@ impl EvmTransactionsBuilder {
             Arc::new(self.r#type.finish()),
             Arc::new(self.status.finish()),
             Arc::new(self.nonce.finish()),
-            Arc::new(self.input.finish()),
+            self.input.finish(),
             Arc::new(self.max_fee_per_gas.finish()),
             Arc::new(self.max_priority_fee_per_gas.finish()),
             Arc::new(self.cumulative_gas_used.finish()),
@@ -503,34 +501,34 @@ impl EvmTransactionsBuilder {
 struct EvmLogsBuilder {
     canonical: CanonicalBuilder,
     block_number: UInt64Builder,
-    tx_hash: StringBuilder,
+    tx_hash: BytesColumn,
     tx_index: UInt32Builder,
     log_index: UInt32Builder,
     block_index: UInt32Builder,
-    address: StringBuilder,
-    topic0: StringBuilder,
-    topic1: StringBuilder,
-    topic2: StringBuilder,
-    topic3: StringBuilder,
-    data: StringBuilder,
+    address: BytesColumn,
+    topic0: BytesColumn,
+    topic1: BytesColumn,
+    topic2: BytesColumn,
+    topic3: BytesColumn,
+    data: BytesColumn,
     fork_step: Option<StringBuilder>,
 }
 
 impl EvmLogsBuilder {
-    fn new(include_fork_step: bool) -> Self {
+    fn new(include_fork_step: bool, encoding: &EncodeBytes) -> Self {
         Self {
             canonical: CanonicalBuilder::new(),
             block_number: UInt64Builder::new(),
-            tx_hash: StringBuilder::new(),
+            tx_hash: BytesColumn::new(encoding),
             tx_index: UInt32Builder::new(),
             log_index: UInt32Builder::new(),
             block_index: UInt32Builder::new(),
-            address: StringBuilder::new(),
-            topic0: StringBuilder::new(),
-            topic1: StringBuilder::new(),
-            topic2: StringBuilder::new(),
-            topic3: StringBuilder::new(),
-            data: StringBuilder::new(),
+            address: BytesColumn::new(encoding),
+            topic0: BytesColumn::new(encoding),
+            topic1: BytesColumn::new(encoding),
+            topic2: BytesColumn::new(encoding),
+            topic3: BytesColumn::new(encoding),
+            data: BytesColumn::new(encoding),
             fork_step: mk_fork_step(include_fork_step),
         }
     }
@@ -539,16 +537,16 @@ impl EvmLogsBuilder {
         let mut columns = self.canonical.finish();
         columns.extend(vec![
             Arc::new(self.block_number.finish()) as Arc<dyn arrow::array::Array>,
-            Arc::new(self.tx_hash.finish()),
+            self.tx_hash.finish(),
             Arc::new(self.tx_index.finish()),
             Arc::new(self.log_index.finish()),
             Arc::new(self.block_index.finish()),
-            Arc::new(self.address.finish()),
-            Arc::new(self.topic0.finish()),
-            Arc::new(self.topic1.finish()),
-            Arc::new(self.topic2.finish()),
-            Arc::new(self.topic3.finish()),
-            Arc::new(self.data.finish()),
+            self.address.finish(),
+            self.topic0.finish(),
+            self.topic1.finish(),
+            self.topic2.finish(),
+            self.topic3.finish(),
+            self.data.finish(),
         ]);
         finish_fork_step(&mut self.fork_step, &mut columns);
         Ok(RecordBatch::try_new(Arc::new(schema.clone()), columns)?)
@@ -558,19 +556,19 @@ impl EvmLogsBuilder {
 struct EvmCallsBuilder {
     canonical: CanonicalBuilder,
     block_number: UInt64Builder,
-    tx_hash: StringBuilder,
+    tx_hash: BytesColumn,
     tx_index: UInt32Builder,
     call_index: UInt32Builder,
     parent_index: UInt32Builder,
     depth: UInt32Builder,
     call_type: Int32Builder,
-    caller: StringBuilder,
-    address: StringBuilder,
+    caller: BytesColumn,
+    address: BytesColumn,
     value: StringBuilder,
     gas_limit: UInt64Builder,
     gas_consumed: UInt64Builder,
-    input: StringBuilder,
-    output: StringBuilder,
+    input: BytesColumn,
+    output: BytesColumn,
     status_failed: BooleanBuilder,
     status_reverted: BooleanBuilder,
     state_reverted: BooleanBuilder,
@@ -580,23 +578,23 @@ struct EvmCallsBuilder {
 }
 
 impl EvmCallsBuilder {
-    fn new(include_fork_step: bool) -> Self {
+    fn new(include_fork_step: bool, encoding: &EncodeBytes) -> Self {
         Self {
             canonical: CanonicalBuilder::new(),
             block_number: UInt64Builder::new(),
-            tx_hash: StringBuilder::new(),
+            tx_hash: BytesColumn::new(encoding),
             tx_index: UInt32Builder::new(),
             call_index: UInt32Builder::new(),
             parent_index: UInt32Builder::new(),
             depth: UInt32Builder::new(),
             call_type: Int32Builder::new(),
-            caller: StringBuilder::new(),
-            address: StringBuilder::new(),
+            caller: BytesColumn::new(encoding),
+            address: BytesColumn::new(encoding),
             value: StringBuilder::new(),
             gas_limit: UInt64Builder::new(),
             gas_consumed: UInt64Builder::new(),
-            input: StringBuilder::new(),
-            output: StringBuilder::new(),
+            input: BytesColumn::new(encoding),
+            output: BytesColumn::new(encoding),
             status_failed: BooleanBuilder::new(),
             status_reverted: BooleanBuilder::new(),
             state_reverted: BooleanBuilder::new(),
@@ -606,22 +604,26 @@ impl EvmCallsBuilder {
         }
     }
 
-    fn append(&mut self, block_number: u64, tx_hash: &str, tx_index: u32, call: &eth::Call, identity: &BlockIdentity, fork_step: Option<&str>) {
+    fn append(&mut self, block_number: u64, tx_hash: &[u8], tx_index: u32, call: &eth::Call, identity: &BlockIdentity, fork_step: Option<&str>) {
         self.canonical.append(identity);
         self.block_number.append_value(block_number);
-        self.tx_hash.append_value(tx_hash);
+        if tx_hash.is_empty() {
+            self.tx_hash.append_null();
+        } else {
+            self.tx_hash.append_value(tx_hash);
+        }
         self.tx_index.append_value(tx_index);
         self.call_index.append_value(call.index);
         self.parent_index.append_value(call.parent_index);
         self.depth.append_value(call.depth);
         self.call_type.append_value(call.call_type);
-        self.caller.append_value(hex(&call.caller));
-        self.address.append_value(hex(&call.address));
+        self.caller.append_value(&call.caller);
+        self.address.append_value(&call.address);
         self.value.append_value(bigint_to_string(&call.value));
         self.gas_limit.append_value(call.gas_limit);
         self.gas_consumed.append_value(call.gas_consumed);
-        self.input.append_value(hex(&call.input));
-        self.output.append_value(hex(&call.return_data));
+        self.input.append_value(&call.input);
+        self.output.append_value(&call.return_data);
         self.status_failed.append_value(call.status_failed);
         self.status_reverted.append_value(call.status_reverted);
         self.state_reverted.append_value(call.state_reverted);
@@ -634,19 +636,19 @@ impl EvmCallsBuilder {
         let mut columns = self.canonical.finish();
         columns.extend(vec![
             Arc::new(self.block_number.finish()) as Arc<dyn arrow::array::Array>,
-            Arc::new(self.tx_hash.finish()),
+            self.tx_hash.finish(),
             Arc::new(self.tx_index.finish()),
             Arc::new(self.call_index.finish()),
             Arc::new(self.parent_index.finish()),
             Arc::new(self.depth.finish()),
             Arc::new(self.call_type.finish()),
-            Arc::new(self.caller.finish()),
-            Arc::new(self.address.finish()),
+            self.caller.finish(),
+            self.address.finish(),
             Arc::new(self.value.finish()),
             Arc::new(self.gas_limit.finish()),
             Arc::new(self.gas_consumed.finish()),
-            Arc::new(self.input.finish()),
-            Arc::new(self.output.finish()),
+            self.input.finish(),
+            self.output.finish(),
             Arc::new(self.status_failed.finish()),
             Arc::new(self.status_reverted.finish()),
             Arc::new(self.state_reverted.finish()),
@@ -661,9 +663,9 @@ impl EvmCallsBuilder {
 struct EvmBalanceChangesBuilder {
     canonical: CanonicalBuilder,
     block_number: UInt64Builder,
-    tx_hash: StringBuilder,
+    tx_hash: BytesColumn,
     ordinal: UInt64Builder,
-    address: StringBuilder,
+    address: BytesColumn,
     old_value: StringBuilder,
     new_value: StringBuilder,
     reason: Int32Builder,
@@ -671,13 +673,13 @@ struct EvmBalanceChangesBuilder {
 }
 
 impl EvmBalanceChangesBuilder {
-    fn new(include_fork_step: bool) -> Self {
+    fn new(include_fork_step: bool, encoding: &EncodeBytes) -> Self {
         Self {
             canonical: CanonicalBuilder::new(),
             block_number: UInt64Builder::new(),
-            tx_hash: StringBuilder::new(),
+            tx_hash: BytesColumn::new(encoding),
             ordinal: UInt64Builder::new(),
-            address: StringBuilder::new(),
+            address: BytesColumn::new(encoding),
             old_value: StringBuilder::new(),
             new_value: StringBuilder::new(),
             reason: Int32Builder::new(),
@@ -685,7 +687,7 @@ impl EvmBalanceChangesBuilder {
         }
     }
 
-    fn append(&mut self, block_number: u64, tx_hash: &str, bc: &eth::BalanceChange, identity: &BlockIdentity, fork_step: Option<&str>) {
+    fn append(&mut self, block_number: u64, tx_hash: &[u8], bc: &eth::BalanceChange, identity: &BlockIdentity, fork_step: Option<&str>) {
         self.canonical.append(identity);
         self.block_number.append_value(block_number);
         if tx_hash.is_empty() {
@@ -694,7 +696,7 @@ impl EvmBalanceChangesBuilder {
             self.tx_hash.append_value(tx_hash);
         }
         self.ordinal.append_value(bc.ordinal);
-        self.address.append_value(hex(&bc.address));
+        self.address.append_value(&bc.address);
         self.old_value.append_value(bigint_to_string(&bc.old_value));
         self.new_value.append_value(bigint_to_string(&bc.new_value));
         self.reason.append_value(bc.reason);
@@ -705,9 +707,9 @@ impl EvmBalanceChangesBuilder {
         let mut columns = self.canonical.finish();
         columns.extend(vec![
             Arc::new(self.block_number.finish()) as Arc<dyn arrow::array::Array>,
-            Arc::new(self.tx_hash.finish()),
+            self.tx_hash.finish(),
             Arc::new(self.ordinal.finish()),
-            Arc::new(self.address.finish()),
+            self.address.finish(),
             Arc::new(self.old_value.finish()),
             Arc::new(self.new_value.finish()),
             Arc::new(self.reason.finish()),
@@ -720,33 +722,33 @@ impl EvmBalanceChangesBuilder {
 struct EvmCodeChangesBuilder {
     canonical: CanonicalBuilder,
     block_number: UInt64Builder,
-    tx_hash: StringBuilder,
+    tx_hash: BytesColumn,
     ordinal: UInt64Builder,
-    address: StringBuilder,
-    old_hash: StringBuilder,
-    new_hash: StringBuilder,
-    old_code: StringBuilder,
-    new_code: StringBuilder,
+    address: BytesColumn,
+    old_hash: BytesColumn,
+    new_hash: BytesColumn,
+    old_code: BytesColumn,
+    new_code: BytesColumn,
     fork_step: Option<StringBuilder>,
 }
 
 impl EvmCodeChangesBuilder {
-    fn new(include_fork_step: bool) -> Self {
+    fn new(include_fork_step: bool, encoding: &EncodeBytes) -> Self {
         Self {
             canonical: CanonicalBuilder::new(),
             block_number: UInt64Builder::new(),
-            tx_hash: StringBuilder::new(),
+            tx_hash: BytesColumn::new(encoding),
             ordinal: UInt64Builder::new(),
-            address: StringBuilder::new(),
-            old_hash: StringBuilder::new(),
-            new_hash: StringBuilder::new(),
-            old_code: StringBuilder::new(),
-            new_code: StringBuilder::new(),
+            address: BytesColumn::new(encoding),
+            old_hash: BytesColumn::new(encoding),
+            new_hash: BytesColumn::new(encoding),
+            old_code: BytesColumn::new(encoding),
+            new_code: BytesColumn::new(encoding),
             fork_step: mk_fork_step(include_fork_step),
         }
     }
 
-    fn append(&mut self, block_number: u64, tx_hash: &str, cc: &eth::CodeChange, identity: &BlockIdentity, fork_step: Option<&str>) {
+    fn append(&mut self, block_number: u64, tx_hash: &[u8], cc: &eth::CodeChange, identity: &BlockIdentity, fork_step: Option<&str>) {
         self.canonical.append(identity);
         self.block_number.append_value(block_number);
         if tx_hash.is_empty() {
@@ -755,11 +757,11 @@ impl EvmCodeChangesBuilder {
             self.tx_hash.append_value(tx_hash);
         }
         self.ordinal.append_value(cc.ordinal);
-        self.address.append_value(hex(&cc.address));
-        self.old_hash.append_value(hex(&cc.old_hash));
-        self.new_hash.append_value(hex(&cc.new_hash));
-        self.old_code.append_value(hex(&cc.old_code));
-        self.new_code.append_value(hex(&cc.new_code));
+        self.address.append_value(&cc.address);
+        self.old_hash.append_value(&cc.old_hash);
+        self.new_hash.append_value(&cc.new_hash);
+        self.old_code.append_value(&cc.old_code);
+        self.new_code.append_value(&cc.new_code);
         append_fork_step(&mut self.fork_step, fork_step);
     }
 
@@ -767,13 +769,13 @@ impl EvmCodeChangesBuilder {
         let mut columns = self.canonical.finish();
         columns.extend(vec![
             Arc::new(self.block_number.finish()) as Arc<dyn arrow::array::Array>,
-            Arc::new(self.tx_hash.finish()),
+            self.tx_hash.finish(),
             Arc::new(self.ordinal.finish()),
-            Arc::new(self.address.finish()),
-            Arc::new(self.old_hash.finish()),
-            Arc::new(self.new_hash.finish()),
-            Arc::new(self.old_code.finish()),
-            Arc::new(self.new_code.finish()),
+            self.address.finish(),
+            self.old_hash.finish(),
+            self.new_hash.finish(),
+            self.old_code.finish(),
+            self.new_code.finish(),
         ]);
         finish_fork_step(&mut self.fork_step, &mut columns);
         Ok(RecordBatch::try_new(Arc::new(schema.clone()), columns)?)
@@ -783,39 +785,39 @@ impl EvmCodeChangesBuilder {
 struct EvmStorageChangesBuilder {
     canonical: CanonicalBuilder,
     block_number: UInt64Builder,
-    tx_hash: StringBuilder,
+    tx_hash: BytesColumn,
     ordinal: UInt64Builder,
-    address: StringBuilder,
-    key: StringBuilder,
-    old_value: StringBuilder,
-    new_value: StringBuilder,
+    address: BytesColumn,
+    key: BytesColumn,
+    old_value: BytesColumn,
+    new_value: BytesColumn,
     fork_step: Option<StringBuilder>,
 }
 
 impl EvmStorageChangesBuilder {
-    fn new(include_fork_step: bool) -> Self {
+    fn new(include_fork_step: bool, encoding: &EncodeBytes) -> Self {
         Self {
             canonical: CanonicalBuilder::new(),
             block_number: UInt64Builder::new(),
-            tx_hash: StringBuilder::new(),
+            tx_hash: BytesColumn::new(encoding),
             ordinal: UInt64Builder::new(),
-            address: StringBuilder::new(),
-            key: StringBuilder::new(),
-            old_value: StringBuilder::new(),
-            new_value: StringBuilder::new(),
+            address: BytesColumn::new(encoding),
+            key: BytesColumn::new(encoding),
+            old_value: BytesColumn::new(encoding),
+            new_value: BytesColumn::new(encoding),
             fork_step: mk_fork_step(include_fork_step),
         }
     }
 
-    fn append(&mut self, block_number: u64, tx_hash: &str, sc: &eth::StorageChange, identity: &BlockIdentity, fork_step: Option<&str>) {
+    fn append(&mut self, block_number: u64, tx_hash: &[u8], sc: &eth::StorageChange, identity: &BlockIdentity, fork_step: Option<&str>) {
         self.canonical.append(identity);
         self.block_number.append_value(block_number);
         self.tx_hash.append_value(tx_hash);
         self.ordinal.append_value(sc.ordinal);
-        self.address.append_value(hex(&sc.address));
-        self.key.append_value(hex(&sc.key));
-        self.old_value.append_value(hex(&sc.old_value));
-        self.new_value.append_value(hex(&sc.new_value));
+        self.address.append_value(&sc.address);
+        self.key.append_value(&sc.key);
+        self.old_value.append_value(&sc.old_value);
+        self.new_value.append_value(&sc.new_value);
         append_fork_step(&mut self.fork_step, fork_step);
     }
 
@@ -823,12 +825,12 @@ impl EvmStorageChangesBuilder {
         let mut columns = self.canonical.finish();
         columns.extend(vec![
             Arc::new(self.block_number.finish()) as Arc<dyn arrow::array::Array>,
-            Arc::new(self.tx_hash.finish()),
+            self.tx_hash.finish(),
             Arc::new(self.ordinal.finish()),
-            Arc::new(self.address.finish()),
-            Arc::new(self.key.finish()),
-            Arc::new(self.old_value.finish()),
-            Arc::new(self.new_value.finish()),
+            self.address.finish(),
+            self.key.finish(),
+            self.old_value.finish(),
+            self.new_value.finish(),
         ]);
         finish_fork_step(&mut self.fork_step, &mut columns);
         Ok(RecordBatch::try_new(Arc::new(schema.clone()), columns)?)
@@ -838,34 +840,34 @@ impl EvmStorageChangesBuilder {
 struct EvmNonceChangesBuilder {
     canonical: CanonicalBuilder,
     block_number: UInt64Builder,
-    tx_hash: StringBuilder,
+    tx_hash: BytesColumn,
     ordinal: UInt64Builder,
-    address: StringBuilder,
+    address: BytesColumn,
     old_value: UInt64Builder,
     new_value: UInt64Builder,
     fork_step: Option<StringBuilder>,
 }
 
 impl EvmNonceChangesBuilder {
-    fn new(include_fork_step: bool) -> Self {
+    fn new(include_fork_step: bool, encoding: &EncodeBytes) -> Self {
         Self {
             canonical: CanonicalBuilder::new(),
             block_number: UInt64Builder::new(),
-            tx_hash: StringBuilder::new(),
+            tx_hash: BytesColumn::new(encoding),
             ordinal: UInt64Builder::new(),
-            address: StringBuilder::new(),
+            address: BytesColumn::new(encoding),
             old_value: UInt64Builder::new(),
             new_value: UInt64Builder::new(),
             fork_step: mk_fork_step(include_fork_step),
         }
     }
 
-    fn append(&mut self, block_number: u64, tx_hash: &str, nc: &eth::NonceChange, identity: &BlockIdentity, fork_step: Option<&str>) {
+    fn append(&mut self, block_number: u64, tx_hash: &[u8], nc: &eth::NonceChange, identity: &BlockIdentity, fork_step: Option<&str>) {
         self.canonical.append(identity);
         self.block_number.append_value(block_number);
         self.tx_hash.append_value(tx_hash);
         self.ordinal.append_value(nc.ordinal);
-        self.address.append_value(hex(&nc.address));
+        self.address.append_value(&nc.address);
         self.old_value.append_value(nc.old_value);
         self.new_value.append_value(nc.new_value);
         append_fork_step(&mut self.fork_step, fork_step);
@@ -875,9 +877,9 @@ impl EvmNonceChangesBuilder {
         let mut columns = self.canonical.finish();
         columns.extend(vec![
             Arc::new(self.block_number.finish()) as Arc<dyn arrow::array::Array>,
-            Arc::new(self.tx_hash.finish()),
+            self.tx_hash.finish(),
             Arc::new(self.ordinal.finish()),
-            Arc::new(self.address.finish()),
+            self.address.finish(),
             Arc::new(self.old_value.finish()),
             Arc::new(self.new_value.finish()),
         ]);
@@ -889,7 +891,7 @@ impl EvmNonceChangesBuilder {
 struct EvmGasChangesBuilder {
     canonical: CanonicalBuilder,
     block_number: UInt64Builder,
-    tx_hash: StringBuilder,
+    tx_hash: BytesColumn,
     ordinal: UInt64Builder,
     old_value: UInt64Builder,
     new_value: UInt64Builder,
@@ -898,11 +900,11 @@ struct EvmGasChangesBuilder {
 }
 
 impl EvmGasChangesBuilder {
-    fn new(include_fork_step: bool) -> Self {
+    fn new(include_fork_step: bool, encoding: &EncodeBytes) -> Self {
         Self {
             canonical: CanonicalBuilder::new(),
             block_number: UInt64Builder::new(),
-            tx_hash: StringBuilder::new(),
+            tx_hash: BytesColumn::new(encoding),
             ordinal: UInt64Builder::new(),
             old_value: UInt64Builder::new(),
             new_value: UInt64Builder::new(),
@@ -911,7 +913,7 @@ impl EvmGasChangesBuilder {
         }
     }
 
-    fn append(&mut self, block_number: u64, tx_hash: &str, gc: &eth::GasChange, identity: &BlockIdentity, fork_step: Option<&str>) {
+    fn append(&mut self, block_number: u64, tx_hash: &[u8], gc: &eth::GasChange, identity: &BlockIdentity, fork_step: Option<&str>) {
         self.canonical.append(identity);
         self.block_number.append_value(block_number);
         self.tx_hash.append_value(tx_hash);
@@ -926,7 +928,7 @@ impl EvmGasChangesBuilder {
         let mut columns = self.canonical.finish();
         columns.extend(vec![
             Arc::new(self.block_number.finish()) as Arc<dyn arrow::array::Array>,
-            Arc::new(self.tx_hash.finish()),
+            self.tx_hash.finish(),
             Arc::new(self.ordinal.finish()),
             Arc::new(self.old_value.finish()),
             Arc::new(self.new_value.finish()),
@@ -940,30 +942,30 @@ impl EvmGasChangesBuilder {
 struct EvmAccountCreationsBuilder {
     canonical: CanonicalBuilder,
     block_number: UInt64Builder,
-    tx_hash: StringBuilder,
+    tx_hash: BytesColumn,
     ordinal: UInt64Builder,
-    account: StringBuilder,
+    account: BytesColumn,
     fork_step: Option<StringBuilder>,
 }
 
 impl EvmAccountCreationsBuilder {
-    fn new(include_fork_step: bool) -> Self {
+    fn new(include_fork_step: bool, encoding: &EncodeBytes) -> Self {
         Self {
             canonical: CanonicalBuilder::new(),
             block_number: UInt64Builder::new(),
-            tx_hash: StringBuilder::new(),
+            tx_hash: BytesColumn::new(encoding),
             ordinal: UInt64Builder::new(),
-            account: StringBuilder::new(),
+            account: BytesColumn::new(encoding),
             fork_step: mk_fork_step(include_fork_step),
         }
     }
 
-    fn append(&mut self, block_number: u64, tx_hash: &str, ac: &eth::AccountCreation, identity: &BlockIdentity, fork_step: Option<&str>) {
+    fn append(&mut self, block_number: u64, tx_hash: &[u8], ac: &eth::AccountCreation, identity: &BlockIdentity, fork_step: Option<&str>) {
         self.canonical.append(identity);
         self.block_number.append_value(block_number);
         self.tx_hash.append_value(tx_hash);
         self.ordinal.append_value(ac.ordinal);
-        self.account.append_value(hex(&ac.account));
+        self.account.append_value(&ac.account);
         append_fork_step(&mut self.fork_step, fork_step);
     }
 
@@ -971,28 +973,12 @@ impl EvmAccountCreationsBuilder {
         let mut columns = self.canonical.finish();
         columns.extend(vec![
             Arc::new(self.block_number.finish()) as Arc<dyn arrow::array::Array>,
-            Arc::new(self.tx_hash.finish()),
+            self.tx_hash.finish(),
             Arc::new(self.ordinal.finish()),
-            Arc::new(self.account.finish()),
+            self.account.finish(),
         ]);
         finish_fork_step(&mut self.fork_step, &mut columns);
         Ok(RecordBatch::try_new(Arc::new(schema.clone()), columns)?)
-    }
-}
-
-// ===========================================================================
-// Hex encoding module
-// ===========================================================================
-mod hex {
-    const HEX_CHARS: &[u8; 16] = b"0123456789abcdef";
-
-    pub fn encode(bytes: &[u8]) -> String {
-        let mut s = String::with_capacity(bytes.len() * 2);
-        for &b in bytes {
-            s.push(HEX_CHARS[(b >> 4) as usize] as char);
-            s.push(HEX_CHARS[(b & 0x0f) as usize] as char);
-        }
-        s
     }
 }
 
@@ -1183,7 +1169,7 @@ mod tests {
     fn test_base_map_and_flush() {
         let block = make_test_evm_block(100);
         let block_bytes = prost::Message::encode_to_vec(&block);
-        let mut mapper = EvmBlockMapper::new(false, false);
+        let mut mapper = EvmBlockMapper::new(false, false, EncodeBytes::Hex);
         mapper.map_block(&block_bytes, &BlockIdentity::default(), None).unwrap();
 
         let batches = mapper.flush().unwrap();
@@ -1197,7 +1183,7 @@ mod tests {
     fn test_extended_map_and_flush() {
         let block = make_test_evm_block(200);
         let block_bytes = prost::Message::encode_to_vec(&block);
-        let mut mapper = EvmBlockMapper::new(true, false);
+        let mut mapper = EvmBlockMapper::new(true, false, EncodeBytes::Hex);
         mapper.map_block(&block_bytes, &BlockIdentity::default(), None).unwrap();
 
         let batches = mapper.flush().unwrap();
@@ -1214,7 +1200,7 @@ mod tests {
     fn test_flush_resets() {
         let block = make_test_evm_block(1);
         let block_bytes = prost::Message::encode_to_vec(&block);
-        let mut mapper = EvmBlockMapper::new(true, false);
+        let mut mapper = EvmBlockMapper::new(true, false, EncodeBytes::Hex);
         mapper.map_block(&block_bytes, &BlockIdentity::default(), None).unwrap();
         let _ = mapper.flush().unwrap();
         assert_eq!(mapper.max_table_rows(), 0);
@@ -1262,7 +1248,7 @@ mod tests {
             withdrawals: vec![],
         };
         let block_bytes = prost::Message::encode_to_vec(&block);
-        let mut mapper = EvmBlockMapper::new(false, false);
+        let mut mapper = EvmBlockMapper::new(false, false, EncodeBytes::Hex);
         mapper.map_block(&block_bytes, &BlockIdentity::default(), None).unwrap();
         let batches = mapper.flush().unwrap();
         assert_eq!(batches["blocks"].num_rows(), 1);
@@ -1283,9 +1269,9 @@ mod tests {
 
     #[test]
     fn test_table_names() {
-        let mapper_base = EvmBlockMapper::new(false, false);
+        let mapper_base = EvmBlockMapper::new(false, false, EncodeBytes::Hex);
         assert_eq!(mapper_base.table_names().len(), 3);
-        let mapper_ext = EvmBlockMapper::new(true, false);
+        let mapper_ext = EvmBlockMapper::new(true, false, EncodeBytes::Hex);
         assert_eq!(mapper_ext.table_names().len(), 10);
     }
 
@@ -1293,7 +1279,7 @@ mod tests {
     fn test_fork_step_column_included() {
         let block = make_test_evm_block(100);
         let block_bytes = prost::Message::encode_to_vec(&block);
-        let mut mapper = EvmBlockMapper::new(false, true);
+        let mut mapper = EvmBlockMapper::new(false, true, EncodeBytes::Hex);
         mapper.map_block(&block_bytes, &BlockIdentity::default(), Some("NEW")).unwrap();
 
         let batches = mapper.flush().unwrap();
@@ -1302,5 +1288,30 @@ mod tests {
         assert_eq!(blocks_batch.schema().field(last_col).name(), "fork_step");
         let fork_col = blocks_batch.column(last_col).as_any().downcast_ref::<StringArray>().unwrap();
         assert_eq!(fork_col.value(0), "NEW");
+    }
+
+    #[test]
+    fn test_encode_bytes_binary() {
+        let block = make_test_evm_block(100);
+        let block_bytes = prost::Message::encode_to_vec(&block);
+        let mut mapper = EvmBlockMapper::new(false, false, EncodeBytes::Binary);
+        mapper.map_block(&block_bytes, &BlockIdentity::default(), None).unwrap();
+        let batches = mapper.flush().unwrap();
+        assert_eq!(batches["blocks"].num_rows(), 1);
+        // hash is after canonical fields (6 fields) and number field: index 7
+        let hash_col = batches["blocks"].column(7);
+        assert_eq!(*hash_col.data_type(), arrow::datatypes::DataType::Binary);
+    }
+
+    #[test]
+    fn test_encode_bytes_base58() {
+        let block = make_test_evm_block(100);
+        let block_bytes = prost::Message::encode_to_vec(&block);
+        let mut mapper = EvmBlockMapper::new(false, false, EncodeBytes::Base58);
+        mapper.map_block(&block_bytes, &BlockIdentity::default(), None).unwrap();
+        let batches = mapper.flush().unwrap();
+        assert_eq!(batches["blocks"].num_rows(), 1);
+        let hash_col = batches["blocks"].column(7);
+        assert_eq!(*hash_col.data_type(), arrow::datatypes::DataType::Utf8);
     }
 }
