@@ -3,6 +3,7 @@ use crate::schema;
 use arrow::array::*;
 use arrow::datatypes::Schema;
 use arrow::record_batch::RecordBatch;
+use firehose_parquet::encode::{BytesColumn, BytesListColumn, EncodeBytes};
 use firehose_parquet::traits::{BlockIdentity, BlockMapper, CanonicalBuilder};
 use prost::Message;
 use std::collections::HashMap;
@@ -22,6 +23,7 @@ fn finish_fork_step(builder: &mut Option<StringBuilder>, columns: &mut Vec<Arc<d
 
 pub struct SolanaBlockMapper {
     include_fork_step: bool,
+    encoding: EncodeBytes,
     blocks: BlocksBuilder,
     transactions: TransactionsBuilder,
     messages: MessagesBuilder,
@@ -35,19 +37,20 @@ pub struct SolanaBlockMapper {
 }
 
 impl SolanaBlockMapper {
-    pub fn new(include_fork_step: bool) -> Self {
+    pub fn new(include_fork_step: bool, encoding: EncodeBytes) -> Self {
         Self {
             include_fork_step,
             blocks: BlocksBuilder::new(include_fork_step),
-            transactions: TransactionsBuilder::new(include_fork_step),
-            messages: MessagesBuilder::new(include_fork_step),
-            instructions: InstructionsBuilder::new(include_fork_step),
+            transactions: TransactionsBuilder::new(include_fork_step, &encoding),
+            messages: MessagesBuilder::new(include_fork_step, &encoding),
+            instructions: InstructionsBuilder::new(include_fork_step, &encoding),
             rewards: RewardsBuilder::new(include_fork_step),
             blocks_schema: schema::blocks_schema(include_fork_step),
-            transactions_schema: schema::transactions_schema(include_fork_step),
-            messages_schema: schema::messages_schema(include_fork_step),
-            instructions_schema: schema::instructions_schema(include_fork_step),
+            transactions_schema: schema::transactions_schema(include_fork_step, &encoding),
+            messages_schema: schema::messages_schema(include_fork_step, &encoding),
+            instructions_schema: schema::instructions_schema(include_fork_step, &encoding),
             rewards_schema: schema::rewards_schema(include_fork_step),
+            encoding,
         }
     }
 
@@ -162,13 +165,10 @@ impl SolanaBlockMapper {
         }
         self.messages.recent_blockhash.append_value(&msg.recent_blockhash);
         self.messages.versioned.append_value(msg.versioned);
-        {
-            let vals = self.messages.account_keys.values();
-            for key in &msg.account_keys {
-                vals.append_value(key);
-            }
-            self.messages.account_keys.append(true);
+        for key in &msg.account_keys {
+            self.messages.account_keys.append_value(key);
         }
+        self.messages.account_keys.append(true);
         append_fork_step(&mut self.messages.fork_step, fork_step);
 
         // instructions (top-level)
@@ -318,10 +318,10 @@ struct TransactionsBuilder {
     canonical: CanonicalBuilder,
     slot: UInt64Builder,
     transaction_index: UInt32Builder,
-    signature: BinaryBuilder,
+    signature: BytesColumn,
     num_signatures: UInt32Builder,
     fee: UInt64Builder,
-    err: BinaryBuilder,
+    err: BytesColumn,
     success: BooleanBuilder,
     compute_units_consumed: UInt64Builder,
     log_messages: ListBuilder<StringBuilder>,
@@ -331,15 +331,15 @@ struct TransactionsBuilder {
 }
 
 impl TransactionsBuilder {
-    fn new(include_fork_step: bool) -> Self {
+    fn new(include_fork_step: bool, encoding: &EncodeBytes) -> Self {
         Self {
             canonical: CanonicalBuilder::new(),
             slot: UInt64Builder::new(),
             transaction_index: UInt32Builder::new(),
-            signature: BinaryBuilder::new(),
+            signature: BytesColumn::new(encoding),
             num_signatures: UInt32Builder::new(),
             fee: UInt64Builder::new(),
-            err: BinaryBuilder::new(),
+            err: BytesColumn::new(encoding),
             success: BooleanBuilder::new(),
             compute_units_consumed: UInt64Builder::new(),
             log_messages: ListBuilder::new(StringBuilder::new()),
@@ -354,10 +354,10 @@ impl TransactionsBuilder {
         columns.extend(vec![
             Arc::new(self.slot.finish()) as Arc<dyn Array>,
             Arc::new(self.transaction_index.finish()) as Arc<dyn Array>,
-            Arc::new(self.signature.finish()) as Arc<dyn Array>,
+            self.signature.finish(),
             Arc::new(self.num_signatures.finish()) as Arc<dyn Array>,
             Arc::new(self.fee.finish()) as Arc<dyn Array>,
-            Arc::new(self.err.finish()) as Arc<dyn Array>,
+            self.err.finish(),
             Arc::new(self.success.finish()) as Arc<dyn Array>,
             Arc::new(self.compute_units_consumed.finish()) as Arc<dyn Array>,
             Arc::new(self.log_messages.finish()) as Arc<dyn Array>,
@@ -377,14 +377,14 @@ struct MessagesBuilder {
     num_required_signatures: UInt32Builder,
     num_readonly_signed_accounts: UInt32Builder,
     num_readonly_unsigned_accounts: UInt32Builder,
-    recent_blockhash: BinaryBuilder,
+    recent_blockhash: BytesColumn,
     versioned: BooleanBuilder,
-    account_keys: ListBuilder<BinaryBuilder>,
+    account_keys: BytesListColumn,
     fork_step: Option<StringBuilder>,
 }
 
 impl MessagesBuilder {
-    fn new(include_fork_step: bool) -> Self {
+    fn new(include_fork_step: bool, encoding: &EncodeBytes) -> Self {
         Self {
             canonical: CanonicalBuilder::new(),
             slot: UInt64Builder::new(),
@@ -393,9 +393,9 @@ impl MessagesBuilder {
             num_required_signatures: UInt32Builder::new(),
             num_readonly_signed_accounts: UInt32Builder::new(),
             num_readonly_unsigned_accounts: UInt32Builder::new(),
-            recent_blockhash: BinaryBuilder::new(),
+            recent_blockhash: BytesColumn::new(encoding),
             versioned: BooleanBuilder::new(),
-            account_keys: ListBuilder::new(BinaryBuilder::new()),
+            account_keys: BytesListColumn::new(encoding),
             fork_step: if include_fork_step { Some(StringBuilder::new()) } else { None },
         }
     }
@@ -409,9 +409,9 @@ impl MessagesBuilder {
             Arc::new(self.num_required_signatures.finish()) as Arc<dyn Array>,
             Arc::new(self.num_readonly_signed_accounts.finish()) as Arc<dyn Array>,
             Arc::new(self.num_readonly_unsigned_accounts.finish()) as Arc<dyn Array>,
-            Arc::new(self.recent_blockhash.finish()) as Arc<dyn Array>,
+            self.recent_blockhash.finish(),
             Arc::new(self.versioned.finish()) as Arc<dyn Array>,
-            Arc::new(self.account_keys.finish()) as Arc<dyn Array>,
+            self.account_keys.finish(),
         ]);
         finish_fork_step(&mut self.fork_step, &mut columns);
         Ok(RecordBatch::try_new(Arc::new(schema.clone()), columns)?)
@@ -424,8 +424,8 @@ struct InstructionsBuilder {
     transaction_index: UInt32Builder,
     instruction_index: UInt32Builder,
     program_id_index: UInt32Builder,
-    accounts: BinaryBuilder,
-    data: BinaryBuilder,
+    accounts: BytesColumn,
+    data: BytesColumn,
     is_inner: BooleanBuilder,
     inner_index: UInt32Builder,
     stack_height: UInt32Builder,
@@ -433,15 +433,15 @@ struct InstructionsBuilder {
 }
 
 impl InstructionsBuilder {
-    fn new(include_fork_step: bool) -> Self {
+    fn new(include_fork_step: bool, encoding: &EncodeBytes) -> Self {
         Self {
             canonical: CanonicalBuilder::new(),
             slot: UInt64Builder::new(),
             transaction_index: UInt32Builder::new(),
             instruction_index: UInt32Builder::new(),
             program_id_index: UInt32Builder::new(),
-            accounts: BinaryBuilder::new(),
-            data: BinaryBuilder::new(),
+            accounts: BytesColumn::new(encoding),
+            data: BytesColumn::new(encoding),
             is_inner: BooleanBuilder::new(),
             inner_index: UInt32Builder::new(),
             stack_height: UInt32Builder::new(),
@@ -456,8 +456,8 @@ impl InstructionsBuilder {
             Arc::new(self.transaction_index.finish()) as Arc<dyn Array>,
             Arc::new(self.instruction_index.finish()) as Arc<dyn Array>,
             Arc::new(self.program_id_index.finish()) as Arc<dyn Array>,
-            Arc::new(self.accounts.finish()) as Arc<dyn Array>,
-            Arc::new(self.data.finish()) as Arc<dyn Array>,
+            self.accounts.finish(),
+            self.data.finish(),
             Arc::new(self.is_inner.finish()) as Arc<dyn Array>,
             Arc::new(self.inner_index.finish()) as Arc<dyn Array>,
             Arc::new(self.stack_height.finish()) as Arc<dyn Array>,
@@ -584,7 +584,7 @@ mod tests {
     fn test_map_and_flush_single_block() {
         let block = make_test_block(100);
         let block_bytes = prost::Message::encode_to_vec(&block);
-        let mut mapper = SolanaBlockMapper::new(false);
+        let mut mapper = SolanaBlockMapper::new(false, EncodeBytes::Binary);
         mapper.map_block(&block_bytes, &BlockIdentity::default(), None).unwrap();
 
         assert_eq!(mapper.max_table_rows(), 2); // 2 instructions
@@ -601,7 +601,7 @@ mod tests {
     fn test_flush_resets_builders() {
         let block = make_test_block(1);
         let block_bytes = prost::Message::encode_to_vec(&block);
-        let mut mapper = SolanaBlockMapper::new(false);
+        let mut mapper = SolanaBlockMapper::new(false, EncodeBytes::Binary);
         mapper.map_block(&block_bytes, &BlockIdentity::default(), None).unwrap();
         let _ = mapper.flush().unwrap();
         assert_eq!(mapper.max_table_rows(), 0);
@@ -620,7 +620,7 @@ mod tests {
             rewards: vec![],
         };
         let block_bytes = prost::Message::encode_to_vec(&block);
-        let mut mapper = SolanaBlockMapper::new(false);
+        let mut mapper = SolanaBlockMapper::new(false, EncodeBytes::Binary);
         mapper.map_block(&block_bytes, &BlockIdentity::default(), None).unwrap();
         let batches = mapper.flush().unwrap();
         assert_eq!(batches["blocks"].num_rows(), 1);
@@ -631,7 +631,7 @@ mod tests {
     fn test_fork_step_column_included() {
         let block = make_test_block(100);
         let block_bytes = prost::Message::encode_to_vec(&block);
-        let mut mapper = SolanaBlockMapper::new(true);
+        let mut mapper = SolanaBlockMapper::new(true, EncodeBytes::Binary);
         mapper.map_block(&block_bytes, &BlockIdentity::default(), Some("NEW")).unwrap();
 
         let batches = mapper.flush().unwrap();
@@ -640,5 +640,32 @@ mod tests {
         assert_eq!(blocks_batch.schema().field(last_col).name(), "fork_step");
         let fork_col = blocks_batch.column(last_col).as_any().downcast_ref::<StringArray>().unwrap();
         assert_eq!(fork_col.value(0), "NEW");
+    }
+
+    #[test]
+    fn test_encode_bytes_hex() {
+        let block = make_test_block(100);
+        let block_bytes = prost::Message::encode_to_vec(&block);
+        let mut mapper = SolanaBlockMapper::new(false, EncodeBytes::Hex);
+        mapper.map_block(&block_bytes, &BlockIdentity::default(), None).unwrap();
+        let batches = mapper.flush().unwrap();
+        assert_eq!(batches["transactions"].num_rows(), 1);
+        // signature column should be Utf8 when encoding is Hex
+        let sig_idx = batches["transactions"].schema().index_of("signature").unwrap();
+        let sig_col = batches["transactions"].column(sig_idx);
+        assert_eq!(*sig_col.data_type(), arrow::datatypes::DataType::Utf8);
+    }
+
+    #[test]
+    fn test_encode_bytes_base58() {
+        let block = make_test_block(100);
+        let block_bytes = prost::Message::encode_to_vec(&block);
+        let mut mapper = SolanaBlockMapper::new(false, EncodeBytes::Base58);
+        mapper.map_block(&block_bytes, &BlockIdentity::default(), None).unwrap();
+        let batches = mapper.flush().unwrap();
+        assert_eq!(batches["transactions"].num_rows(), 1);
+        let sig_idx = batches["transactions"].schema().index_of("signature").unwrap();
+        let sig_col = batches["transactions"].column(sig_idx);
+        assert_eq!(*sig_col.data_type(), arrow::datatypes::DataType::Utf8);
     }
 }
