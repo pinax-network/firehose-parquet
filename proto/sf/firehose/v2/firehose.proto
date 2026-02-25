@@ -1,0 +1,75 @@
+syntax = "proto3";
+
+package sf.firehose.v2;
+
+import "google/protobuf/any.proto";
+import "google/protobuf/timestamp.proto";
+
+option go_package = "github.com/streamingfast/pbgo/sf/firehose/v2;pbfirehose";
+
+service Stream {
+  rpc Blocks(Request) returns (stream Response);
+}
+
+service Fetch {
+  rpc Block(SingleBlockRequest) returns (SingleBlockResponse);
+}
+
+message SingleBlockRequest {
+  message BlockNumber {
+    uint64 num = 1;
+  }
+
+  message BlockHashAndNumber {
+    uint64 num = 1;
+    string hash = 2;
+  }
+
+  message Cursor {
+    string cursor = 1;
+  }
+
+  oneof reference {
+    BlockNumber block_number = 3;
+    BlockHashAndNumber block_hash_and_number = 4;
+    Cursor cursor = 5;
+  }
+
+  repeated google.protobuf.Any transforms = 6;
+}
+
+message SingleBlockResponse {
+  google.protobuf.Any block = 1;
+  BlockMetadata metadata = 2;
+}
+
+message Request {
+  int64 start_block_num = 1;
+  string cursor = 2;
+  uint64 stop_block_num = 3;
+  bool final_blocks_only = 4;
+  repeated google.protobuf.Any transforms = 10;
+}
+
+message Response {
+  google.protobuf.Any block = 1;
+  ForkStep step = 6;
+  string cursor = 10;
+  BlockMetadata metadata = 12;
+}
+
+message BlockMetadata {
+  uint64 num = 1;
+  string id = 2;
+  uint64 parent_num = 3;
+  string parent_id = 4;
+  uint64 lib_num = 5;
+  google.protobuf.Timestamp time = 6;
+}
+
+enum ForkStep {
+  STEP_UNSET = 0;
+  STEP_NEW = 1;
+  STEP_UNDO = 2;
+  STEP_FINAL = 3;
+}
