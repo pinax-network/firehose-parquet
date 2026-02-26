@@ -162,8 +162,7 @@ impl BlockMapper for TronBlockMapper {
     }
 
     fn estimated_bytes(&mut self) -> usize {
-        // blocks
-        self.blocks.canonical.estimated_bytes()
+        let blocks = self.blocks.canonical.estimated_bytes()
             + est_u64(&self.blocks.number)
             + self.blocks.hash.estimated_bytes()
             + self.blocks.parent_hash.estimated_bytes()
@@ -173,9 +172,8 @@ impl BlockMapper for TronBlockMapper {
             + self.blocks.tx_trie_root.estimated_bytes()
             + est_u64(&self.blocks.parent_number)
             + est_u32(&self.blocks.num_transactions)
-            + est_opt_str(&self.blocks.fork_step)
-        // transactions
-            + self.transactions.canonical.estimated_bytes()
+            + est_opt_str(&self.blocks.fork_step);
+        let transactions = self.transactions.canonical.estimated_bytes()
             + est_u64(&self.transactions.block_number)
             + self.transactions.txid.estimated_bytes()
             + est_bool(&self.transactions.result)
@@ -186,9 +184,8 @@ impl BlockMapper for TronBlockMapper {
             + est_i32(&self.transactions.contract_type)
             + est_i64(&self.transactions.expiration)
             + est_i64(&self.transactions.timestamp)
-            + est_opt_str(&self.transactions.fork_step)
-        // logs
-            + self.logs.canonical.estimated_bytes()
+            + est_opt_str(&self.transactions.fork_step);
+        let logs = self.logs.canonical.estimated_bytes()
             + est_u64(&self.logs.block_number)
             + self.logs.tx_hash.estimated_bytes()
             + est_u32(&self.logs.log_index)
@@ -198,9 +195,8 @@ impl BlockMapper for TronBlockMapper {
             + self.logs.topic2.estimated_bytes()
             + self.logs.topic3.estimated_bytes()
             + self.logs.data.estimated_bytes()
-            + est_opt_str(&self.logs.fork_step)
-        // internal_transactions
-            + self.internal_transactions.canonical.estimated_bytes()
+            + est_opt_str(&self.logs.fork_step);
+        let internal_transactions = self.internal_transactions.canonical.estimated_bytes()
             + est_u64(&self.internal_transactions.block_number)
             + self.internal_transactions.tx_hash.estimated_bytes()
             + est_u32(&self.internal_transactions.internal_index)
@@ -209,7 +205,11 @@ impl BlockMapper for TronBlockMapper {
             + self.internal_transactions.transfer_to_address.estimated_bytes()
             + est_str(&self.internal_transactions.note)
             + est_bool(&self.internal_transactions.rejected)
-            + est_opt_str(&self.internal_transactions.fork_step)
+            + est_opt_str(&self.internal_transactions.fork_step);
+        [blocks, transactions, logs, internal_transactions]
+            .into_iter()
+            .max()
+            .unwrap_or(0)
     }
 
     fn table_names(&self) -> Vec<&str> {

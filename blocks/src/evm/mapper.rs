@@ -442,7 +442,7 @@ impl BlockMapper for EvmBlockMapper {
 
     fn estimated_bytes(&mut self) -> usize {
         // blocks
-        let mut total = self.blocks.canonical.estimated_bytes()
+        let blocks = self.blocks.canonical.estimated_bytes()
             + est_u64(&self.blocks.number)
             + self.blocks.hash.estimated_bytes()
             + self.blocks.parent_hash.estimated_bytes()
@@ -463,7 +463,7 @@ impl BlockMapper for EvmBlockMapper {
             + est_i32(&self.blocks.detail_level)
             + est_opt_str(&self.blocks.fork_step);
         // transactions
-        total += self.transactions.canonical.estimated_bytes()
+        let transactions = self.transactions.canonical.estimated_bytes()
             + est_u64(&self.transactions.block_number)
             + est_u32(&self.transactions.index)
             + self.transactions.hash.estimated_bytes()
@@ -482,7 +482,7 @@ impl BlockMapper for EvmBlockMapper {
             + est_u64(&self.transactions.cumulative_gas_used)
             + est_opt_str(&self.transactions.fork_step);
         // logs
-        total += self.logs.canonical.estimated_bytes()
+        let logs = self.logs.canonical.estimated_bytes()
             + est_u64(&self.logs.block_number)
             + self.logs.tx_hash.estimated_bytes()
             + est_u32(&self.logs.tx_index)
@@ -495,6 +495,7 @@ impl BlockMapper for EvmBlockMapper {
             + self.logs.topic3.estimated_bytes()
             + self.logs.data.estimated_bytes()
             + est_opt_str(&self.logs.fork_step);
+        let mut tables = vec![blocks, transactions, logs];
         // calls (tx-level)
         macro_rules! est_calls {
             ($b:expr) => {
@@ -687,21 +688,21 @@ impl BlockMapper for EvmBlockMapper {
                     + est_opt_str(&$b.fork_step)
             };
         }
-        if let Some(ref b) = self.calls { total += est_calls!(b); }
-        if let Some(ref b) = self.balance_changes { total += est_balance_changes!(b); }
-        if let Some(ref b) = self.code_changes { total += est_code_changes!(b); }
-        if let Some(ref b) = self.storage_changes { total += est_storage_changes!(b); }
-        if let Some(ref b) = self.nonce_changes { total += est_nonce_changes!(b); }
-        if let Some(ref b) = self.gas_changes { total += est_gas_changes!(b); }
-        if let Some(ref b) = self.account_creations { total += est_account_creations!(b); }
-        if let Some(ref b) = self.system_calls { total += est_sys_calls!(b); }
-        if let Some(ref b) = self.system_balance_changes { total += est_sys_balance_changes!(b); }
-        if let Some(ref b) = self.system_code_changes { total += est_sys_code_changes!(b); }
-        if let Some(ref b) = self.system_storage_changes { total += est_sys_storage_changes!(b); }
-        if let Some(ref b) = self.system_nonce_changes { total += est_sys_nonce_changes!(b); }
-        if let Some(ref b) = self.system_gas_changes { total += est_sys_gas_changes!(b); }
-        if let Some(ref b) = self.system_account_creations { total += est_sys_account_creations!(b); }
-        total
+        if let Some(ref b) = self.calls { tables.push(est_calls!(b)); }
+        if let Some(ref b) = self.balance_changes { tables.push(est_balance_changes!(b)); }
+        if let Some(ref b) = self.code_changes { tables.push(est_code_changes!(b)); }
+        if let Some(ref b) = self.storage_changes { tables.push(est_storage_changes!(b)); }
+        if let Some(ref b) = self.nonce_changes { tables.push(est_nonce_changes!(b)); }
+        if let Some(ref b) = self.gas_changes { tables.push(est_gas_changes!(b)); }
+        if let Some(ref b) = self.account_creations { tables.push(est_account_creations!(b)); }
+        if let Some(ref b) = self.system_calls { tables.push(est_sys_calls!(b)); }
+        if let Some(ref b) = self.system_balance_changes { tables.push(est_sys_balance_changes!(b)); }
+        if let Some(ref b) = self.system_code_changes { tables.push(est_sys_code_changes!(b)); }
+        if let Some(ref b) = self.system_storage_changes { tables.push(est_sys_storage_changes!(b)); }
+        if let Some(ref b) = self.system_nonce_changes { tables.push(est_sys_nonce_changes!(b)); }
+        if let Some(ref b) = self.system_gas_changes { tables.push(est_sys_gas_changes!(b)); }
+        if let Some(ref b) = self.system_account_creations { tables.push(est_sys_account_creations!(b)); }
+        tables.into_iter().max().unwrap_or(0)
     }
 
     fn table_names(&self) -> Vec<&str> {

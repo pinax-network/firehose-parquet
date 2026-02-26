@@ -208,7 +208,12 @@ pub trait BlockMapper {
     /// Get current max rows across all tables.
     fn max_table_rows(&self) -> usize;
 
-    /// Estimate total in-memory byte usage across all Arrow builders.
+    /// Estimate the in-memory byte usage of the largest single table.
+    ///
+    /// Returns the **maximum** across all per-table estimates so that
+    /// `flush_bytes` controls the size of the biggest output file rather
+    /// than the sum across all tables (which would produce many small files
+    /// after per-table splitting and compression).
     fn estimated_bytes(&mut self) -> usize;
 
     /// Get table names.

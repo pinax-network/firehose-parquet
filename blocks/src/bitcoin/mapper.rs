@@ -172,8 +172,7 @@ impl BlockMapper for BitcoinBlockMapper {
     }
 
     fn estimated_bytes(&mut self) -> usize {
-        // blocks
-        self.blocks.canonical.estimated_bytes()
+        let blocks = self.blocks.canonical.estimated_bytes()
             + est_str(&self.blocks.hash)
             + est_i64(&self.blocks.height)
             + est_str(&self.blocks.previous_hash)
@@ -189,9 +188,8 @@ impl BlockMapper for BitcoinBlockMapper {
             + est_u32(&self.blocks.n_tx)
             + est_i64(&self.blocks.mediantime)
             + est_str(&self.blocks.chainwork)
-            + est_opt_str(&self.blocks.fork_step)
-        // transactions
-            + self.transactions.canonical.estimated_bytes()
+            + est_opt_str(&self.blocks.fork_step);
+        let transactions = self.transactions.canonical.estimated_bytes()
             + est_str(&self.transactions.txid)
             + est_str(&self.transactions.hash)
             + est_i32(&self.transactions.size)
@@ -203,9 +201,8 @@ impl BlockMapper for BitcoinBlockMapper {
             + est_i64(&self.transactions.block_height)
             + est_i64(&self.transactions.block_time)
             + est_u32(&self.transactions.tx_index)
-            + est_opt_str(&self.transactions.fork_step)
-        // inputs
-            + self.inputs.canonical.estimated_bytes()
+            + est_opt_str(&self.transactions.fork_step);
+        let inputs = self.inputs.canonical.estimated_bytes()
             + est_str(&self.inputs.tx_hash)
             + est_i64(&self.inputs.block_height)
             + est_u32(&self.inputs.input_index)
@@ -216,9 +213,8 @@ impl BlockMapper for BitcoinBlockMapper {
             + est_str(&self.inputs.script_sig_hex)
             + est_str(&self.inputs.coinbase)
             + est_list_str(&mut self.inputs.witness)
-            + est_opt_str(&self.inputs.fork_step)
-        // outputs
-            + self.outputs.canonical.estimated_bytes()
+            + est_opt_str(&self.inputs.fork_step);
+        let outputs = self.outputs.canonical.estimated_bytes()
             + est_str(&self.outputs.tx_hash)
             + est_i64(&self.outputs.block_height)
             + est_u32(&self.outputs.output_index)
@@ -227,7 +223,11 @@ impl BlockMapper for BitcoinBlockMapper {
             + est_str(&self.outputs.script_pubkey_hex)
             + est_str(&self.outputs.script_pubkey_type)
             + est_str(&self.outputs.script_pubkey_address)
-            + est_opt_str(&self.outputs.fork_step)
+            + est_opt_str(&self.outputs.fork_step);
+        [blocks, transactions, inputs, outputs]
+            .into_iter()
+            .max()
+            .unwrap_or(0)
     }
 
     fn table_names(&self) -> Vec<&str> {

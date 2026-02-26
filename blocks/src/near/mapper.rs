@@ -421,8 +421,7 @@ impl BlockMapper for NearBlockMapper {
     }
 
     fn estimated_bytes(&mut self) -> usize {
-        // blocks
-        self.blocks.canonical.estimated_bytes()
+        let blocks = self.blocks.canonical.estimated_bytes()
             + est_u64(&self.blocks.height)
             + self.blocks.hash.estimated_bytes()
             + self.blocks.prev_hash.estimated_bytes()
@@ -433,9 +432,8 @@ impl BlockMapper for NearBlockMapper {
             + est_str(&self.blocks.total_supply)
             + est_u64(&self.blocks.chunks_included)
             + est_u32(&self.blocks.latest_protocol_version)
-            + est_opt_str(&self.blocks.fork_step)
-        // chunks
-            + self.chunks.canonical.estimated_bytes()
+            + est_opt_str(&self.blocks.fork_step);
+        let chunks = self.chunks.canonical.estimated_bytes()
             + est_u64(&self.chunks.shard_id)
             + self.chunks.chunk_hash.estimated_bytes()
             + self.chunks.prev_state_root.estimated_bytes()
@@ -445,9 +443,8 @@ impl BlockMapper for NearBlockMapper {
             + est_u64(&self.chunks.height_included)
             + est_u64(&self.chunks.encoded_length)
             + est_str(&self.chunks.author)
-            + est_opt_str(&self.chunks.fork_step)
-        // transactions
-            + self.transactions.canonical.estimated_bytes()
+            + est_opt_str(&self.chunks.fork_step);
+        let transactions = self.transactions.canonical.estimated_bytes()
             + self.transactions.hash.estimated_bytes()
             + est_str(&self.transactions.signer_id)
             + est_str(&self.transactions.receiver_id)
@@ -456,9 +453,8 @@ impl BlockMapper for NearBlockMapper {
             + est_str(&self.transactions.actions)
             + est_str(&self.transactions.status)
             + est_u64(&self.transactions.gas_burnt)
-            + est_opt_str(&self.transactions.fork_step)
-        // receipts
-            + self.receipts.canonical.estimated_bytes()
+            + est_opt_str(&self.transactions.fork_step);
+        let receipts = self.receipts.canonical.estimated_bytes()
             + self.receipts.receipt_id.estimated_bytes()
             + est_str(&self.receipts.predecessor_id)
             + est_str(&self.receipts.receiver_id)
@@ -466,15 +462,18 @@ impl BlockMapper for NearBlockMapper {
             + est_str(&self.receipts.status)
             + est_u64(&self.receipts.gas_burnt)
             + est_str(&self.receipts.executor_id)
-            + est_opt_str(&self.receipts.fork_step)
-        // state_changes
-            + self.state_changes.canonical.estimated_bytes()
+            + est_opt_str(&self.receipts.fork_step);
+        let state_changes = self.state_changes.canonical.estimated_bytes()
             + est_str(&self.state_changes.r#type)
             + est_str(&self.state_changes.cause)
             + est_str(&self.state_changes.account_id)
             + est_str(&self.state_changes.key_base64)
             + est_str(&self.state_changes.value_base64)
-            + est_opt_str(&self.state_changes.fork_step)
+            + est_opt_str(&self.state_changes.fork_step);
+        [blocks, chunks, transactions, receipts, state_changes]
+            .into_iter()
+            .max()
+            .unwrap_or(0)
     }
 
     fn table_names(&self) -> Vec<&str> {

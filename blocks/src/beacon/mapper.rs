@@ -547,8 +547,7 @@ impl BlockMapper for BeaconBlockMapper {
     }
 
     fn estimated_bytes(&mut self) -> usize {
-        // blocks
-        self.blocks.canonical.estimated_bytes()
+        let blocks = self.blocks.canonical.estimated_bytes()
             + est_u64(&self.blocks.slot)
             + est_u64(&self.blocks.parent_slot)
             + est_u64(&self.blocks.proposer_index)
@@ -558,9 +557,8 @@ impl BlockMapper for BeaconBlockMapper {
             + self.blocks.body_root.estimated_bytes()
             + self.blocks.signature.estimated_bytes()
             + est_str(&self.blocks.spec)
-            + est_opt_str(&self.blocks.fork_step)
-        // attestations
-            + self.attestations.canonical.estimated_bytes()
+            + est_opt_str(&self.blocks.fork_step);
+        let attestations = self.attestations.canonical.estimated_bytes()
             + est_u64(&self.attestations.block_slot)
             + est_u32(&self.attestations.attestation_index)
             + est_u64(&self.attestations.slot)
@@ -572,18 +570,16 @@ impl BlockMapper for BeaconBlockMapper {
             + est_u64(&self.attestations.target_epoch)
             + self.attestations.target_root.estimated_bytes()
             + self.attestations.signature.estimated_bytes()
-            + est_opt_str(&self.attestations.fork_step)
-        // deposits
-            + self.deposits.canonical.estimated_bytes()
+            + est_opt_str(&self.attestations.fork_step);
+        let deposits = self.deposits.canonical.estimated_bytes()
             + est_u64(&self.deposits.block_slot)
             + est_u32(&self.deposits.deposit_index)
             + self.deposits.pubkey.estimated_bytes()
             + self.deposits.withdrawal_credentials.estimated_bytes()
             + est_u64(&self.deposits.amount)
             + self.deposits.signature.estimated_bytes()
-            + est_opt_str(&self.deposits.fork_step)
-        // proposer_slashings
-            + self.proposer_slashings.canonical.estimated_bytes()
+            + est_opt_str(&self.deposits.fork_step);
+        let proposer_slashings = self.proposer_slashings.canonical.estimated_bytes()
             + est_u64(&self.proposer_slashings.block_slot)
             + est_u32(&self.proposer_slashings.slashing_index)
             + est_u64(&self.proposer_slashings.header_1_slot)
@@ -596,9 +592,8 @@ impl BlockMapper for BeaconBlockMapper {
             + self.proposer_slashings.header_2_parent_root.estimated_bytes()
             + self.proposer_slashings.header_2_state_root.estimated_bytes()
             + self.proposer_slashings.header_2_body_root.estimated_bytes()
-            + est_opt_str(&self.proposer_slashings.fork_step)
-        // attester_slashings
-            + self.attester_slashings.canonical.estimated_bytes()
+            + est_opt_str(&self.proposer_slashings.fork_step);
+        let attester_slashings = self.attester_slashings.canonical.estimated_bytes()
             + est_u64(&self.attester_slashings.block_slot)
             + est_u32(&self.attester_slashings.slashing_index)
             + est_u64(&self.attester_slashings.attestation_1_slot)
@@ -615,17 +610,15 @@ impl BlockMapper for BeaconBlockMapper {
             + self.attester_slashings.attestation_2_source_root.estimated_bytes()
             + est_u64(&self.attester_slashings.attestation_2_target_epoch)
             + self.attester_slashings.attestation_2_target_root.estimated_bytes()
-            + est_opt_str(&self.attester_slashings.fork_step)
-        // voluntary_exits
-            + self.voluntary_exits.canonical.estimated_bytes()
+            + est_opt_str(&self.attester_slashings.fork_step);
+        let voluntary_exits = self.voluntary_exits.canonical.estimated_bytes()
             + est_u64(&self.voluntary_exits.block_slot)
             + est_u32(&self.voluntary_exits.exit_index)
             + est_u64(&self.voluntary_exits.epoch)
             + est_u64(&self.voluntary_exits.validator_index)
             + self.voluntary_exits.signature.estimated_bytes()
-            + est_opt_str(&self.voluntary_exits.fork_step)
-        // execution_payload
-            + self.execution_payload.canonical.estimated_bytes()
+            + est_opt_str(&self.voluntary_exits.fork_step);
+        let execution_payload = self.execution_payload.canonical.estimated_bytes()
             + est_u64(&self.execution_payload.block_slot)
             + self.execution_payload.parent_hash.estimated_bytes()
             + self.execution_payload.fee_recipient.estimated_bytes()
@@ -640,15 +633,18 @@ impl BlockMapper for BeaconBlockMapper {
             + self.execution_payload.base_fee_per_gas.estimated_bytes()
             + est_u64(&self.execution_payload.blob_gas_used)
             + est_u64(&self.execution_payload.excess_blob_gas)
-            + est_opt_str(&self.execution_payload.fork_step)
-        // blob_sidecars
-            + self.blob_sidecars.canonical.estimated_bytes()
+            + est_opt_str(&self.execution_payload.fork_step);
+        let blob_sidecars = self.blob_sidecars.canonical.estimated_bytes()
             + est_u64(&self.blob_sidecars.block_slot)
             + est_u64(&self.blob_sidecars.blob_index)
             + self.blob_sidecars.blob.estimated_bytes()
             + self.blob_sidecars.kzg_commitment.estimated_bytes()
             + self.blob_sidecars.kzg_proof.estimated_bytes()
-            + est_opt_str(&self.blob_sidecars.fork_step)
+            + est_opt_str(&self.blob_sidecars.fork_step);
+        [blocks, attestations, deposits, proposer_slashings, attester_slashings, voluntary_exits, execution_payload, blob_sidecars]
+            .into_iter()
+            .max()
+            .unwrap_or(0)
     }
 
     fn table_names(&self) -> Vec<&str> {

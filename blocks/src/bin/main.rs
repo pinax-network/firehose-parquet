@@ -234,7 +234,7 @@ async fn main() -> Result<()> {
             blocks_processed += 1;
 
             if blocks_processed % 100 == 0 {
-                info!(blocks_processed, block_number, buffered_rows = m.max_table_rows(), buffered_bytes = m.estimated_bytes(), "progress");
+                info!(blocks_processed, block_number, buffered_rows = m.max_table_rows(), max_table_bytes = m.estimated_bytes(), "progress");
             }
 
             let time_to_flush = flush_interval_secs

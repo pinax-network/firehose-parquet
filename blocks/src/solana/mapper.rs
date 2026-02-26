@@ -259,8 +259,7 @@ impl BlockMapper for SolanaBlockMapper {
     }
 
     fn estimated_bytes(&mut self) -> usize {
-        // blocks
-        self.blocks.canonical.estimated_bytes()
+        let blocks = self.blocks.canonical.estimated_bytes()
             + est_u64(&self.blocks.slot)
             + est_u64(&self.blocks.parent_slot)
             + est_u64(&self.blocks.block_height)
@@ -269,9 +268,8 @@ impl BlockMapper for SolanaBlockMapper {
             + est_i64(&self.blocks.block_time)
             + est_u32(&self.blocks.num_transactions)
             + est_u32(&self.blocks.num_rewards)
-            + est_opt_str(&self.blocks.fork_step)
-        // transactions
-            + self.transactions.canonical.estimated_bytes()
+            + est_opt_str(&self.blocks.fork_step);
+        let transactions = self.transactions.canonical.estimated_bytes()
             + est_u64(&self.transactions.slot)
             + est_u32(&self.transactions.transaction_index)
             + self.transactions.signature.estimated_bytes()
@@ -283,9 +281,8 @@ impl BlockMapper for SolanaBlockMapper {
             + est_list_str(&mut self.transactions.log_messages)
             + est_list_u64(&mut self.transactions.pre_balances)
             + est_list_u64(&mut self.transactions.post_balances)
-            + est_opt_str(&self.transactions.fork_step)
-        // messages
-            + self.messages.canonical.estimated_bytes()
+            + est_opt_str(&self.transactions.fork_step);
+        let messages = self.messages.canonical.estimated_bytes()
             + est_u64(&self.messages.slot)
             + est_u32(&self.messages.transaction_index)
             + est_u32(&self.messages.message_index)
@@ -295,9 +292,8 @@ impl BlockMapper for SolanaBlockMapper {
             + self.messages.recent_blockhash.estimated_bytes()
             + est_bool(&self.messages.versioned)
             + self.messages.account_keys.estimated_bytes()
-            + est_opt_str(&self.messages.fork_step)
-        // instructions
-            + self.instructions.canonical.estimated_bytes()
+            + est_opt_str(&self.messages.fork_step);
+        let instructions = self.instructions.canonical.estimated_bytes()
             + est_u64(&self.instructions.slot)
             + est_u32(&self.instructions.transaction_index)
             + est_u32(&self.instructions.instruction_index)
@@ -307,9 +303,8 @@ impl BlockMapper for SolanaBlockMapper {
             + est_bool(&self.instructions.is_inner)
             + est_u32(&self.instructions.inner_index)
             + est_u32(&self.instructions.stack_height)
-            + est_opt_str(&self.instructions.fork_step)
-        // rewards
-            + self.rewards.canonical.estimated_bytes()
+            + est_opt_str(&self.instructions.fork_step);
+        let rewards = self.rewards.canonical.estimated_bytes()
             + est_u64(&self.rewards.slot)
             + est_u32(&self.rewards.reward_index)
             + est_str(&self.rewards.pubkey)
@@ -317,7 +312,11 @@ impl BlockMapper for SolanaBlockMapper {
             + est_u64(&self.rewards.post_balance)
             + est_i32(&self.rewards.reward_type)
             + est_str(&self.rewards.commission)
-            + est_opt_str(&self.rewards.fork_step)
+            + est_opt_str(&self.rewards.fork_step);
+        [blocks, transactions, messages, instructions, rewards]
+            .into_iter()
+            .max()
+            .unwrap_or(0)
     }
 
     fn table_names(&self) -> Vec<&str> {

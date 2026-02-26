@@ -171,25 +171,22 @@ impl BlockMapper for AntelopeBlockMapper {
     }
 
     fn estimated_bytes(&mut self) -> usize {
-        // blocks
-        self.blocks.canonical.estimated_bytes()
+        let blocks = self.blocks.canonical.estimated_bytes()
             + est_u32(&self.blocks.number)
             + est_str(&self.blocks.hash)
             + est_str(&self.blocks.producer)
             + est_u32(&self.blocks.confirmed)
             + est_u32(&self.blocks.schedule_version)
-            + est_opt_str(&self.blocks.fork_step)
-        // transactions
-            + self.transactions.canonical.estimated_bytes()
+            + est_opt_str(&self.blocks.fork_step);
+        let transactions = self.transactions.canonical.estimated_bytes()
             + est_str(&self.transactions.tx_hash)
             + est_u64(&self.transactions.index)
             + est_i32(&self.transactions.status)
             + est_u32(&self.transactions.cpu_usage_us)
             + est_u64(&self.transactions.net_usage)
             + est_i64(&self.transactions.elapsed)
-            + est_opt_str(&self.transactions.fork_step)
-        // actions
-            + self.actions.canonical.estimated_bytes()
+            + est_opt_str(&self.transactions.fork_step);
+        let actions = self.actions.canonical.estimated_bytes()
             + est_str(&self.actions.tx_hash)
             + est_u32(&self.actions.action_ordinal)
             + est_str(&self.actions.receiver)
@@ -198,9 +195,8 @@ impl BlockMapper for AntelopeBlockMapper {
             + est_str(&self.actions.authorization)
             + est_bin(&self.actions.data)
             + est_str(&self.actions.console)
-            + est_opt_str(&self.actions.fork_step)
-        // db_ops
-            + self.db_ops.canonical.estimated_bytes()
+            + est_opt_str(&self.actions.fork_step);
+        let db_ops = self.db_ops.canonical.estimated_bytes()
             + est_str(&self.db_ops.tx_hash)
             + est_u32(&self.db_ops.action_index)
             + est_i32(&self.db_ops.operation)
@@ -210,7 +206,11 @@ impl BlockMapper for AntelopeBlockMapper {
             + est_str(&self.db_ops.primary_key)
             + est_bin(&self.db_ops.old_data)
             + est_bin(&self.db_ops.new_data)
-            + est_opt_str(&self.db_ops.fork_step)
+            + est_opt_str(&self.db_ops.fork_step);
+        [blocks, transactions, actions, db_ops]
+            .into_iter()
+            .max()
+            .unwrap_or(0)
     }
 
     fn table_names(&self) -> Vec<&str> {

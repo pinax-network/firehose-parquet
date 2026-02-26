@@ -193,8 +193,7 @@ impl BlockMapper for CosmosBlockMapper {
     }
 
     fn estimated_bytes(&mut self) -> usize {
-        // blocks
-        self.blocks.canonical.estimated_bytes()
+        let blocks = self.blocks.canonical.estimated_bytes()
             + est_i64(&self.blocks.height)
             + self.blocks.hash.estimated_bytes()
             + est_i64(&self.blocks.time)
@@ -204,9 +203,8 @@ impl BlockMapper for CosmosBlockMapper {
             + self.blocks.validators_hash.estimated_bytes()
             + self.blocks.next_validators_hash.estimated_bytes()
             + est_u32(&self.blocks.num_txs)
-            + est_opt_str(&self.blocks.fork_step)
-        // transactions
-            + self.transactions.canonical.estimated_bytes()
+            + est_opt_str(&self.blocks.fork_step);
+        let transactions = self.transactions.canonical.estimated_bytes()
             + self.transactions.tx_hash.estimated_bytes()
             + est_u32(&self.transactions.index)
             + est_u32(&self.transactions.code)
@@ -215,9 +213,8 @@ impl BlockMapper for CosmosBlockMapper {
             + est_str(&self.transactions.log)
             + est_str(&self.transactions.info)
             + est_str(&self.transactions.codespace)
-            + est_opt_str(&self.transactions.fork_step)
-        // events
-            + self.events.canonical.estimated_bytes()
+            + est_opt_str(&self.transactions.fork_step);
+        let events = self.events.canonical.estimated_bytes()
             + est_str(&self.events.source)
             + self.events.tx_hash.estimated_bytes()
             + est_i32(&self.events.tx_index)
@@ -225,15 +222,18 @@ impl BlockMapper for CosmosBlockMapper {
             + est_str(&self.events.r#type)
             + est_str(&self.events.key)
             + est_str(&self.events.value)
-            + est_opt_str(&self.events.fork_step)
-        // messages
-            + self.messages.canonical.estimated_bytes()
+            + est_opt_str(&self.events.fork_step);
+        let messages = self.messages.canonical.estimated_bytes()
             + self.messages.tx_hash.estimated_bytes()
             + est_u32(&self.messages.tx_index)
             + est_u32(&self.messages.message_index)
             + est_str(&self.messages.type_url)
             + est_bin(&self.messages.value)
-            + est_opt_str(&self.messages.fork_step)
+            + est_opt_str(&self.messages.fork_step);
+        [blocks, transactions, events, messages]
+            .into_iter()
+            .max()
+            .unwrap_or(0)
     }
 
     fn table_names(&self) -> Vec<&str> {
