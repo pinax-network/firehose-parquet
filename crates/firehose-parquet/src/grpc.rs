@@ -1,8 +1,8 @@
 use crate::config::Config;
-use crate::firehose;
 use crate::traits::BlockIdentity;
 use anyhow::{Context, Result};
 use backoff::ExponentialBackoffBuilder;
+use firehose_protos::firehose;
 use std::time::Duration;
 use tonic::transport::{Channel, ClientTlsConfig, Endpoint};
 use tracing::{debug, info, warn};
