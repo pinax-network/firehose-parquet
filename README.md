@@ -89,8 +89,8 @@ PARTITIONING:
   --block-range-size <NUM>   Block range size when partition=block_range (default: 10000)
 
 FILE ROLLOVER:
-  --flush-rows <NUM>         Max rows per file (default: 50000)
-  --flush-bytes <NUM>        Max bytes per file (default: 268435456 = 256MB)
+  --flush-rows <NUM>         Max rows per file (disabled by default)
+  --flush-bytes <NUM>        Max bytes per file (default: 134217728 = 128MB)
   --flush-interval-secs <N>  Time-based flush interval (disabled by default)
 
 ENCODING:

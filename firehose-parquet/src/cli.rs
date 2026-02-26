@@ -53,12 +53,12 @@ pub struct CommonArgs {
     #[arg(long, env = "BLOCK_RANGE_SIZE", default_value = "10000")]
     pub block_range_size: u64,
 
-    /// Max rows per file before flush
-    #[arg(long, env = "FLUSH_ROWS", default_value = "50000")]
-    pub flush_rows: u32,
+    /// Max rows per file before flush (disabled by default)
+    #[arg(long, env = "FLUSH_ROWS")]
+    pub flush_rows: Option<u32>,
 
     /// Max bytes per file before flush
-    #[arg(long, env = "FLUSH_BYTES", default_value = "268435456")]
+    #[arg(long, env = "FLUSH_BYTES", default_value = "134217728")]
     pub flush_bytes: u64,
 
     /// Time-based flush interval in seconds (disabled by default)
@@ -242,8 +242,8 @@ mod tests {
         assert_eq!(cli.common.output, PathBuf::from("output"));
         assert_eq!(cli.common.partition, "none");
         assert_eq!(cli.common.block_range_size, 10000);
-        assert_eq!(cli.common.flush_rows, 50000);
-        assert_eq!(cli.common.flush_bytes, 268435456);
+        assert!(cli.common.flush_rows.is_none());
+        assert_eq!(cli.common.flush_bytes, 134217728);
         assert_eq!(cli.common.compression, "zstd");
         assert_eq!(cli.common.log_level, "info");
         assert!(!cli.common.dry_run);
@@ -292,7 +292,7 @@ mod tests {
         assert_eq!(cli.common.output, PathBuf::from("/tmp/out"));
         assert_eq!(cli.common.partition, "date");
         assert_eq!(cli.common.block_range_size, 5000);
-        assert_eq!(cli.common.flush_rows, 10000);
+        assert_eq!(cli.common.flush_rows, Some(10000));
         assert_eq!(cli.common.flush_bytes, 1000000);
         assert_eq!(cli.common.flush_interval_secs, Some(60));
         assert_eq!(cli.common.compression, "snappy");
@@ -337,7 +337,7 @@ mod tests {
         assert_eq!(config.start_block, Some(100));
         assert_eq!(config.compression, Compression::Gzip);
         assert_eq!(config.partition, Partition::Date);
-        assert_eq!(config.flush_rows, 50000);
+        assert!(config.flush_rows.is_none());
         assert!(config.final_blocks_only);
     }
 

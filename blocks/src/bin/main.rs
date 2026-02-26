@@ -168,7 +168,7 @@ async fn main() -> Result<()> {
 
     let final_blocks_only = config.final_blocks_only;
     let include_fork_step = !final_blocks_only;
-    let flush_rows = config.flush_rows as usize;
+    let flush_rows = config.flush_rows.map(|r| r as usize);
     let flush_interval_secs = config.flush_interval_secs;
     let dry_run = config.dry_run;
 
@@ -240,7 +240,11 @@ async fn main() -> Result<()> {
                 .map(|secs| last_flush_time.elapsed().as_secs() >= secs)
                 .unwrap_or(false);
 
-            if m.max_table_rows() >= flush_rows || time_to_flush {
+            let rows_to_flush = flush_rows
+                .map(|limit| m.max_table_rows() >= limit)
+                .unwrap_or(false);
+
+            if rows_to_flush || time_to_flush {
                 let batches = m.flush()?;
                 if !dry_run {
                     let metadata = BlockMetadata {

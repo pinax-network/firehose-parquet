@@ -45,7 +45,7 @@ pub struct Config {
     pub public: bool,
     pub output: PathBuf,
     pub partition: Partition,
-    pub flush_rows: u32,
+    pub flush_rows: Option<u32>,
     pub flush_bytes: u64,
     pub flush_interval_secs: Option<u64>,
     pub compression: Compression,
@@ -124,7 +124,9 @@ impl std::fmt::Display for Config {
         writeln!(f, "  output             {}", self.output.display())?;
         writeln!(f, "  partition          {}", self.partition)?;
         writeln!(f, "  compression        {}", self.compression)?;
-        writeln!(f, "  flush_rows         {}", self.flush_rows)?;
+        if let Some(rows) = self.flush_rows {
+            writeln!(f, "  flush_rows         {rows}")?;
+        }
         writeln!(f, "  flush_bytes        {flush_bytes}")?;
         if let Some(secs) = self.flush_interval_secs {
             writeln!(f, "  flush_interval     {secs}s")?;
@@ -149,7 +151,7 @@ impl Default for Config {
             public: false,
             output: PathBuf::from("output"),
             partition: Partition::None,
-            flush_rows: 50_000,
+            flush_rows: None,
             flush_bytes: 128 * 1024 * 1024, // 128 MB
             flush_interval_secs: None,
             compression: Compression::Zstd,
@@ -194,7 +196,7 @@ mod tests {
         assert!(display.contains("stop_block         stream forever"));
         assert!(display.contains("partition          none"));
         assert!(display.contains("compression        zstd"));
-        assert!(display.contains("flush_rows         50000"));
+        assert!(!display.contains("flush_rows"));
         assert!(display.contains("128 MiB"));
         assert!(display.contains("final_blocks_only  true"));
         // dry_run defaults to false, so it should not appear
