@@ -121,7 +121,7 @@ pub fn balance_changes_schema(include_fork_step: bool, encoding: &EncodeBytes) -
     let mut fields = canonical_fields();
     fields.extend(vec![
         Field::new("block_number", DataType::UInt64, false),
-        Field::new("tx_hash", bd.clone(), true),
+        Field::new("tx_hash", bd.clone(), false),
         Field::new("ordinal", DataType::UInt64, false),
         Field::new("address", bd, false),
         Field::new("old_value", DataType::Utf8, false),
@@ -137,7 +137,7 @@ pub fn code_changes_schema(include_fork_step: bool, encoding: &EncodeBytes) -> S
     let mut fields = canonical_fields();
     fields.extend(vec![
         Field::new("block_number", DataType::UInt64, false),
-        Field::new("tx_hash", bd.clone(), true),
+        Field::new("tx_hash", bd.clone(), false),
         Field::new("ordinal", DataType::UInt64, false),
         Field::new("address", bd.clone(), false),
         Field::new("old_hash", bd.clone(), false),
@@ -208,15 +208,126 @@ pub fn account_creations_schema(include_fork_step: bool, encoding: &EncodeBytes)
     Schema::new(fields)
 }
 
+// ==========================================================================
+// System tables (block-level events without tx_hash)
+// ==========================================================================
+
 pub fn system_calls_schema(include_fork_step: bool, encoding: &EncodeBytes) -> Schema {
-    calls_schema(include_fork_step, encoding)
+    let bd = bytes_data_type(encoding);
+    let mut fields = canonical_fields();
+    fields.extend(vec![
+        Field::new("block_number", DataType::UInt64, false),
+        Field::new("call_index", DataType::UInt32, false),
+        Field::new("parent_index", DataType::UInt32, false),
+        Field::new("depth", DataType::UInt32, false),
+        Field::new("call_type", DataType::Int32, false),
+        Field::new("caller", bd.clone(), false),
+        Field::new("address", bd.clone(), false),
+        Field::new("value", DataType::Utf8, false),
+        Field::new("gas_limit", DataType::UInt64, false),
+        Field::new("gas_consumed", DataType::UInt64, false),
+        Field::new("input", bd.clone(), false),
+        Field::new("output", bd, false),
+        Field::new("status_failed", DataType::Boolean, false),
+        Field::new("status_reverted", DataType::Boolean, false),
+        Field::new("state_reverted", DataType::Boolean, false),
+        Field::new("executed_code", DataType::Boolean, false),
+        Field::new("suicide", DataType::Boolean, false),
+    ]);
+    maybe_fork_step(&mut fields, include_fork_step);
+    Schema::new(fields)
+}
+
+pub fn system_balance_changes_schema(include_fork_step: bool, encoding: &EncodeBytes) -> Schema {
+    let bd = bytes_data_type(encoding);
+    let mut fields = canonical_fields();
+    fields.extend(vec![
+        Field::new("block_number", DataType::UInt64, false),
+        Field::new("ordinal", DataType::UInt64, false),
+        Field::new("address", bd, false),
+        Field::new("old_value", DataType::Utf8, false),
+        Field::new("new_value", DataType::Utf8, false),
+        Field::new("reason", DataType::Int32, false),
+    ]);
+    maybe_fork_step(&mut fields, include_fork_step);
+    Schema::new(fields)
+}
+
+pub fn system_code_changes_schema(include_fork_step: bool, encoding: &EncodeBytes) -> Schema {
+    let bd = bytes_data_type(encoding);
+    let mut fields = canonical_fields();
+    fields.extend(vec![
+        Field::new("block_number", DataType::UInt64, false),
+        Field::new("ordinal", DataType::UInt64, false),
+        Field::new("address", bd.clone(), false),
+        Field::new("old_hash", bd.clone(), false),
+        Field::new("new_hash", bd.clone(), false),
+        Field::new("old_code", bd.clone(), false),
+        Field::new("new_code", bd, false),
+    ]);
+    maybe_fork_step(&mut fields, include_fork_step);
+    Schema::new(fields)
+}
+
+pub fn system_storage_changes_schema(include_fork_step: bool, encoding: &EncodeBytes) -> Schema {
+    let bd = bytes_data_type(encoding);
+    let mut fields = canonical_fields();
+    fields.extend(vec![
+        Field::new("block_number", DataType::UInt64, false),
+        Field::new("ordinal", DataType::UInt64, false),
+        Field::new("address", bd.clone(), false),
+        Field::new("key", bd.clone(), false),
+        Field::new("old_value", bd.clone(), false),
+        Field::new("new_value", bd, false),
+    ]);
+    maybe_fork_step(&mut fields, include_fork_step);
+    Schema::new(fields)
+}
+
+pub fn system_nonce_changes_schema(include_fork_step: bool, encoding: &EncodeBytes) -> Schema {
+    let bd = bytes_data_type(encoding);
+    let mut fields = canonical_fields();
+    fields.extend(vec![
+        Field::new("block_number", DataType::UInt64, false),
+        Field::new("ordinal", DataType::UInt64, false),
+        Field::new("address", bd, false),
+        Field::new("old_value", DataType::UInt64, false),
+        Field::new("new_value", DataType::UInt64, false),
+    ]);
+    maybe_fork_step(&mut fields, include_fork_step);
+    Schema::new(fields)
+}
+
+pub fn system_gas_changes_schema(include_fork_step: bool, encoding: &EncodeBytes) -> Schema {
+    let mut fields = canonical_fields();
+    fields.extend(vec![
+        Field::new("block_number", DataType::UInt64, false),
+        Field::new("ordinal", DataType::UInt64, false),
+        Field::new("old_value", DataType::UInt64, false),
+        Field::new("new_value", DataType::UInt64, false),
+        Field::new("reason", DataType::Int32, false),
+    ]);
+    maybe_fork_step(&mut fields, include_fork_step);
+    Schema::new(fields)
+}
+
+pub fn system_account_creations_schema(include_fork_step: bool, encoding: &EncodeBytes) -> Schema {
+    let bd = bytes_data_type(encoding);
+    let mut fields = canonical_fields();
+    fields.extend(vec![
+        Field::new("block_number", DataType::UInt64, false),
+        Field::new("ordinal", DataType::UInt64, false),
+        Field::new("account", bd, false),
+    ]);
+    maybe_fork_step(&mut fields, include_fork_step);
+    Schema::new(fields)
 }
 
 /// Standard table names (available at BASE detail level).
 pub const BASE_TABLE_NAMES: [&str; 3] = ["blocks", "transactions", "logs"];
 
 /// Extended table names (available at EXTENDED detail level).
-pub const EXTENDED_TABLE_NAMES: [&str; 10] = [
+pub const EXTENDED_TABLE_NAMES: [&str; 17] = [
     "blocks",
     "transactions",
     "logs",
@@ -227,4 +338,11 @@ pub const EXTENDED_TABLE_NAMES: [&str; 10] = [
     "nonce_changes",
     "gas_changes",
     "account_creations",
+    "system_calls",
+    "system_balance_changes",
+    "system_code_changes",
+    "system_storage_changes",
+    "system_nonce_changes",
+    "system_gas_changes",
+    "system_account_creations",
 ];
