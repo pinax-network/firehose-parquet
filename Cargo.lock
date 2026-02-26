@@ -464,6 +464,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "blocks"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "arrow",
+ "clap",
+ "firehose-parquet",
+ "firehose-protos",
+ "prost",
+ "prost-types",
+ "sha2",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "brotli"
 version = "8.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -722,101 +739,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5baebc0774151f905a1a2cc41989300b1e6fbb29aff0ceffa1064fdd3088d582"
 
 [[package]]
-name = "firehose-antelope-to-parquet"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "arrow",
- "clap",
- "firehose-parquet",
- "firehose-protos",
- "prost",
- "prost-types",
- "tokio",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "firehose-beacon-to-parquet"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "arrow",
- "clap",
- "firehose-parquet",
- "firehose-protos",
- "prost",
- "prost-types",
- "tokio",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "firehose-bitcoin-to-parquet"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "arrow",
- "clap",
- "firehose-parquet",
- "firehose-protos",
- "prost",
- "tokio",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "firehose-cosmos-to-parquet"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "arrow",
- "clap",
- "firehose-parquet",
- "firehose-protos",
- "prost",
- "prost-types",
- "sha2",
- "tokio",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "firehose-evm-to-parquet"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "arrow",
- "clap",
- "firehose-parquet",
- "firehose-protos",
- "prost",
- "prost-types",
- "tokio",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "firehose-near-to-parquet"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "arrow",
- "clap",
- "firehose-parquet",
- "firehose-protos",
- "prost",
- "tokio",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
 name = "firehose-parquet"
 version = "0.1.0"
 dependencies = [
@@ -846,36 +768,6 @@ dependencies = [
  "prost-types",
  "tonic",
  "tonic-build",
-]
-
-[[package]]
-name = "firehose-solana-to-parquet"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "arrow",
- "clap",
- "firehose-parquet",
- "firehose-protos",
- "prost",
- "tokio",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "firehose-tron-to-parquet"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "arrow",
- "clap",
- "firehose-parquet",
- "firehose-protos",
- "prost",
- "tokio",
- "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]
