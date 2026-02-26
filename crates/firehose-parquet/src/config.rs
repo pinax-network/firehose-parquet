@@ -42,6 +42,7 @@ pub struct Config {
     pub start_block: Option<u64>,
     pub stop_block: Option<u64>,
     pub cursor_path: Option<PathBuf>,
+    pub public: bool,
     pub output: PathBuf,
     pub partition: Partition,
     pub flush_rows: u32,
@@ -50,6 +51,12 @@ pub struct Config {
     pub compression: Compression,
     pub final_blocks_only: bool,
     pub dry_run: bool,
+    // AWS S3 credentials (used when output is an s3:// URL)
+    pub aws_access_key_id: Option<String>,
+    pub aws_secret_access_key: Option<String>,
+    pub aws_session_token: Option<String>,
+    pub aws_region: Option<String>,
+    pub aws_endpoint_url: Option<String>,
 }
 
 impl Default for Config {
@@ -61,6 +68,7 @@ impl Default for Config {
             start_block: None,
             stop_block: None,
             cursor_path: None,
+            public: false,
             output: PathBuf::from("output"),
             partition: Partition::None,
             flush_rows: 50_000,
@@ -69,6 +77,11 @@ impl Default for Config {
             compression: Compression::Zstd,
             final_blocks_only: true,
             dry_run: false,
+            aws_access_key_id: None,
+            aws_secret_access_key: None,
+            aws_session_token: None,
+            aws_region: None,
+            aws_endpoint_url: None,
         }
     }
 }
