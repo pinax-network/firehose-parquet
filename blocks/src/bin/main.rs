@@ -235,7 +235,17 @@ async fn main() -> Result<()> {
             blocks_processed += 1;
 
             if blocks_processed % 100 == 0 {
-                info!(blocks_processed, block_number, buffered_rows = m.max_table_rows(), max_table_bytes = m.estimated_bytes(), "progress");
+                let arrow_bytes = m.estimated_bytes();
+                let ratio = writer.compression_ratio();
+                info!(
+                    blocks_processed,
+                    block_number,
+                    buffered_rows = m.max_table_rows(),
+                    max_table_bytes = arrow_bytes,
+                    estimated_compressed = (arrow_bytes as f64 * ratio) as u64,
+                    compression_ratio = format!("{:.3}", ratio),
+                    "progress"
+                );
             }
 
             let time_to_flush = flush_interval_secs

@@ -83,18 +83,19 @@ impl ParquetTableWriter {
     }
 
     /// Write a single RecordBatch for `table` to a new Parquet part file.
+    /// Returns the file path and the compressed (on-disk) byte size.
     pub fn write_batch(
         &mut self,
         table: &str,
         batch: &RecordBatch,
         metadata: &BlockMetadata,
-    ) -> Result<PathBuf> {
+    ) -> Result<(PathBuf, usize)> {
         if batch.num_rows() == 0 {
             let dir = self.output_dir.join(table);
             if self.s3_client.is_none() {
                 fs::create_dir_all(&dir)?;
             }
-            return Ok(dir);
+            return Ok((dir, 0));
         }
 
         let dir = self.partition_dir(table, metadata);
@@ -105,6 +106,8 @@ impl ParquetTableWriter {
         let filename = format!("part-{:06}.parquet", counter);
         let path = dir.join(&filename);
 
+        let compressed_bytes;
+
         if let Some(ref s3) = self.s3_client {
             // Write to in-memory buffer, then upload to S3.
             let props = self.writer_properties();
@@ -112,6 +115,7 @@ impl ParquetTableWriter {
             let mut writer = ArrowWriter::try_new(&mut buf, batch.schema(), Some(props))?;
             writer.write(batch)?;
             writer.close()?;
+            compressed_bytes = buf.len();
 
             let s3_key = self.s3_object_key(table, metadata, &filename);
             let s3_path = object_store::path::Path::from(s3_key.as_str());
@@ -130,6 +134,7 @@ impl ParquetTableWriter {
                 table,
                 path = %s3_key,
                 rows = batch.num_rows(),
+                compressed_bytes,
                 "wrote parquet part to S3"
             );
         } else {
@@ -142,16 +147,18 @@ impl ParquetTableWriter {
             let mut writer = ArrowWriter::try_new(file, batch.schema(), Some(props))?;
             writer.write(batch)?;
             writer.close()?;
+            compressed_bytes = fs::metadata(&path)?.len() as usize;
 
             info!(
                 table,
                 path = %path.display(),
                 rows = batch.num_rows(),
+                compressed_bytes,
                 "wrote parquet part"
             );
         }
 
-        Ok(path)
+        Ok((path, compressed_bytes))
     }
 
     /// Compute the S3 object key for a partition + filename.
@@ -238,6 +245,20 @@ impl ParquetTableWriter {
     }
 }
 
+/// Default compression ratio (compressed/uncompressed) estimate for initial
+/// buffering decisions before real data is observed. These are conservative:
+/// slightly higher values mean the writer buffers more data initially,
+/// producing larger first files. The ratio converges to the real value after
+/// a few writes via exponential moving average.
+fn default_compression_ratio(compression: &Compression) -> f64 {
+    match compression {
+        Compression::None => 0.50,   // Parquet encoding alone: ~2×
+        Compression::Snappy => 0.25, // Parquet + Snappy: ~4×
+        Compression::Gzip => 0.12,   // Parquet + Gzip: ~8×
+        Compression::Zstd => 0.12,   // Parquet + Zstd: ~8×
+    }
+}
+
 /// Buffered state for a single output table.
 struct TableBuffer {
     batches: Vec<RecordBatch>,
@@ -249,17 +270,23 @@ struct TableBuffer {
     partition_key: String,
 }
 
-/// High-level writer that buffers small RecordBatches per table and only
-/// writes to disk when the accumulated size reaches `flush_bytes`, the
-/// partition key changes, or the pipeline ends. This prevents many tiny
-/// Parquet files for tables that have few rows per block (e.g. `blocks`).
+/// High-level writer that buffers RecordBatches per table and writes to disk
+/// when the estimated **compressed** size reaches `flush_bytes`. The
+/// compression ratio is tracked with an exponential moving average (EMA)
+/// updated after each real write, starting from a conservative default.
+///
+/// This prevents many tiny Parquet files for tables that have few rows per
+/// block (e.g. `blocks`). Small batches are concatenated into a single large
+/// RecordBatch before writing.
 pub struct OutputWriter {
     pub inner: ParquetTableWriter,
-    /// Per-table buffer for accumulating small batches before writing.
+    /// Per-table buffer for accumulating batches before writing.
     buffers: HashMap<String, TableBuffer>,
-    /// Target Arrow memory per output file. Tables are buffered until their
-    /// accumulated size reaches this threshold.
+    /// Target **compressed** output file size in bytes.
     flush_bytes: u64,
+    /// Observed compression ratio (compressed_bytes / arrow_bytes).
+    /// Updated via EMA after each table write.
+    compression_ratio: f64,
 }
 
 impl OutputWriter {
@@ -269,10 +296,12 @@ impl OutputWriter {
         compression: Compression,
         flush_bytes: u64,
     ) -> Self {
+        let compression_ratio = default_compression_ratio(&compression);
         Self {
             inner: ParquetTableWriter::new(output_dir, partition, compression),
             buffers: HashMap::new(),
             flush_bytes,
+            compression_ratio,
         }
     }
 
@@ -284,17 +313,24 @@ impl OutputWriter {
         config: &Config,
         flush_bytes: u64,
     ) -> Result<Self> {
+        let compression_ratio = default_compression_ratio(&compression);
         Ok(Self {
             inner: ParquetTableWriter::new_s3(output_path, partition, compression, config)?,
             buffers: HashMap::new(),
             flush_bytes,
+            compression_ratio,
         })
+    }
+
+    /// Current observed compression ratio (compressed / uncompressed).
+    pub fn compression_ratio(&self) -> f64 {
+        self.compression_ratio
     }
 
     /// Write all table batches produced by a BlockMapper::flush().
     ///
-    /// Small tables are buffered until they reach `flush_bytes` in accumulated
-    /// Arrow memory, or the partition changes. This prevents tiny files for
+    /// Small tables are buffered until the estimated compressed size reaches
+    /// `flush_bytes`, or the partition changes. This prevents tiny files for
     /// low-row-count tables like `blocks`.
     pub fn write_all(
         &mut self,
@@ -311,7 +347,7 @@ impl OutputWriter {
     }
 
     /// Buffer a single batch, flushing to disk if the partition changes or
-    /// the accumulated size exceeds the threshold.
+    /// the estimated compressed size exceeds the threshold.
     fn buffer_or_write(
         &mut self,
         table: &str,
@@ -346,11 +382,22 @@ impl OutputWriter {
             buf.metadata.merge(metadata);
         }
 
-        // Write if buffer is large enough.
+        // Coalesce many small batches into one to keep memory compact.
+        if let Some(buf) = self.buffers.get_mut(table) {
+            if buf.batches.len() >= 100 {
+                let schema = buf.batches[0].schema();
+                let merged = arrow::compute::concat_batches(&schema, &buf.batches)?;
+                buf.batches = vec![merged];
+            }
+        }
+
+        // Flush when estimated compressed size reaches the target.
         let needs_size_flush = self
             .buffers
             .get(table)
-            .map_or(false, |buf| buf.total_bytes as u64 >= self.flush_bytes);
+            .map_or(false, |buf| {
+                (buf.total_bytes as f64 * self.compression_ratio) >= self.flush_bytes as f64
+            });
         if needs_size_flush {
             self.flush_table(table)?;
         }
@@ -359,14 +406,30 @@ impl OutputWriter {
     }
 
     /// Concatenate and write all buffered batches for a single table.
+    /// Updates the compression ratio from the actual write.
     fn flush_table(&mut self, table: &str) -> Result<()> {
         let buf = match self.buffers.remove(table) {
             Some(buf) if !buf.batches.is_empty() => buf,
             _ => return Ok(()),
         };
+        let arrow_bytes = buf.total_bytes;
         let schema = buf.batches[0].schema();
         let merged = arrow::compute::concat_batches(&schema, &buf.batches)?;
-        self.inner.write_batch(table, &merged, &buf.metadata)?;
+        let (_, compressed_bytes) = self.inner.write_batch(table, &merged, &buf.metadata)?;
+
+        // Update compression ratio with exponential moving average (α=0.3).
+        if arrow_bytes > 0 && compressed_bytes > 0 {
+            let observed = compressed_bytes as f64 / arrow_bytes as f64;
+            self.compression_ratio = 0.7 * self.compression_ratio + 0.3 * observed;
+            info!(
+                observed_ratio = format!("{:.3}", observed),
+                ema_ratio = format!("{:.3}", self.compression_ratio),
+                arrow_bytes,
+                compressed_bytes,
+                "updated compression ratio"
+            );
+        }
+
         Ok(())
     }
 
@@ -448,8 +511,9 @@ mod tests {
         let mut writer =
             ParquetTableWriter::new(dir.path(), Partition::None, Compression::Snappy);
         let meta = default_metadata();
-        let path = writer.write_batch("blocks", &batch, &meta).unwrap();
+        let (path, compressed_bytes) = writer.write_batch("blocks", &batch, &meta).unwrap();
 
+        assert!(compressed_bytes > 0);
         let read_batches = read_parquet(&path).unwrap();
         assert_eq!(read_batches.len(), 1);
         assert_eq!(read_batches[0].num_rows(), 1);
@@ -467,7 +531,7 @@ mod tests {
             min_timestamp: None,
             max_timestamp: None,
         };
-        let path = writer.write_batch("blocks", &batch, &meta).unwrap();
+        let (path, _) = writer.write_batch("blocks", &batch, &meta).unwrap();
         assert!(path.to_string_lossy().contains("block_range=100-199"));
     }
 
@@ -484,7 +548,7 @@ mod tests {
             min_timestamp: Some(1705320000),
             max_timestamp: Some(1705320000),
         };
-        let path = writer.write_batch("blocks", &batch, &meta).unwrap();
+        let (path, _) = writer.write_batch("blocks", &batch, &meta).unwrap();
         assert!(path.to_string_lossy().contains("date=2024-01-15"), "path: {}", path.display());
     }
 
@@ -501,7 +565,7 @@ mod tests {
             min_timestamp: Some(1705329000),
             max_timestamp: Some(1705329000),
         };
-        let path = writer.write_batch("blocks", &batch, &meta).unwrap();
+        let (path, _) = writer.write_batch("blocks", &batch, &meta).unwrap();
         let path_str = path.to_string_lossy();
         assert!(path_str.contains("date=2024-01-15"), "path: {}", path_str);
         assert!(path_str.contains("hour=14"), "path: {}", path_str);
@@ -519,8 +583,8 @@ mod tests {
             min_timestamp: Some(1705320000),
             max_timestamp: Some(1705320000),
         };
-        let path1 = writer.write_batch("blocks", &batch, &meta).unwrap();
-        let path2 = writer.write_batch("blocks", &batch, &meta).unwrap();
+        let (path1, _) = writer.write_batch("blocks", &batch, &meta).unwrap();
+        let (path2, _) = writer.write_batch("blocks", &batch, &meta).unwrap();
         assert!(path1.to_string_lossy().contains("part-000001"));
         assert!(path2.to_string_lossy().contains("part-000002"));
     }
