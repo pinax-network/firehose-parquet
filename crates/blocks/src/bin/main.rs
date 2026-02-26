@@ -3,9 +3,10 @@ use clap::Parser;
 use firehose_parquet::cli::{build_config, init_tracing, load_dotenv, Commands, CommonArgs};
 use firehose_parquet::config::BlockMetadata;
 use firehose_parquet::encode::{parse_encode_bytes, EncodeBytes};
-use firehose_parquet::grpc::FirehoseClient;
+use firehose_parquet::grpc::{EndpointInfo, FirehoseClient};
 use firehose_parquet::traits::{fork_step_name, BlockIdentity, BlockMapper};
 use firehose_parquet::writer::OutputWriter;
+use std::path::PathBuf;
 use std::time::Instant;
 use tracing::info;
 
@@ -78,6 +79,36 @@ fn default_encode_bytes(block_type: &str) -> EncodeBytes {
     }
 }
 
+/// Resolve `EncodeBytes` from the endpoint info `block_id_encoding` field.
+///
+/// Encoding values (from `InfoResponse.BlockIdEncoding`):
+///   0 = UNSET, 1 = HEX, 2 = 0X_HEX, 3 = BASE58
+fn encode_bytes_from_block_id_encoding(encoding: i32) -> Option<EncodeBytes> {
+    match encoding {
+        1 => Some(EncodeBytes::Hex),       // BLOCK_ID_ENCODING_HEX
+        2 => Some(EncodeBytes::Hex),       // BLOCK_ID_ENCODING_0X_HEX
+        3 => Some(EncodeBytes::Base58),    // BLOCK_ID_ENCODING_BASE58
+        _ => None,                         // UNSET or unknown
+    }
+}
+
+/// Resolve the output directory, prepending `chain_name` when available.
+fn resolve_output(base: &PathBuf, endpoint_info: &Option<EndpointInfo>) -> PathBuf {
+    if let Some(ref ei) = endpoint_info {
+        if !ei.chain_name.is_empty() {
+            return base.join(&ei.chain_name);
+        }
+    }
+    base.clone()
+}
+
+/// Check if the endpoint supports `extended` block features.
+fn supports_extended(endpoint_info: &Option<EndpointInfo>) -> bool {
+    endpoint_info.as_ref().map_or(false, |ei| {
+        ei.block_features.iter().any(|f| f == "extended")
+    })
+}
+
 /// Create a `Box<dyn BlockMapper>` for the given block type.
 fn create_mapper(
     block_type: &str,
@@ -115,9 +146,23 @@ async fn main() -> Result<()> {
         return Err(anyhow!("unsupported block type: {block_type}. Supported: {}", BLOCK_TYPES.join(", ")));
     }
 
-    let extended = cli.extended;
+    let mut extended = cli.extended;
     let bytes_encoding_str = cli.bytes_encoding.clone();
-    let config = build_config(&cli.common)?;
+    let mut config = build_config(&cli.common)?;
+
+    // Fetch endpoint info for auto-detection of encoding, extended features,
+    // and chain_name-based output directory.
+    let client = FirehoseClient::new(config.clone());
+    let endpoint_info = client.info().await;
+
+    // Use chain_name as a subdirectory under the output path.
+    config.output = resolve_output(&config.output, &endpoint_info);
+
+    // Auto-detect extended block features if not explicitly set by user.
+    if !extended && supports_extended(&endpoint_info) {
+        info!("auto-detected extended block features from endpoint info");
+        extended = true;
+    }
 
     info!(?config, block_type, extended, "starting pipeline");
 
@@ -142,6 +187,7 @@ async fn main() -> Result<()> {
     // If "auto", defer until first block arrives.
     let mut mapper: Option<Box<dyn BlockMapper>> = if block_type != "auto" {
         let encode_bytes = parse_encode_bytes(&bytes_encoding_str)
+            .or_else(|| endpoint_info.as_ref().and_then(|ei| encode_bytes_from_block_id_encoding(ei.block_id_encoding)))
             .unwrap_or_else(|| default_encode_bytes(&block_type));
         Some(create_mapper(&block_type, extended, include_fork_step, encode_bytes)?)
     } else {
@@ -155,8 +201,6 @@ async fn main() -> Result<()> {
     let mut max_timestamp: Option<i64> = None;
     let mut last_flush_time = Instant::now();
 
-    let client = FirehoseClient::new(config);
-
     client
         .stream_blocks(|block_bytes, type_url, _cursor, identity: BlockIdentity, step: i32| {
             let fork_step_str = fork_step_name(step);
@@ -169,6 +213,7 @@ async fn main() -> Result<()> {
                 let detected = detect_block_type(&type_url)?;
                 info!(detected_type = %detected, type_url = %type_url, "auto-detected block type");
                 let encode_bytes = parse_encode_bytes(&bytes_encoding_str)
+                    .or_else(|| endpoint_info.as_ref().and_then(|ei| encode_bytes_from_block_id_encoding(ei.block_id_encoding)))
                     .unwrap_or_else(|| default_encode_bytes(&detected));
                 mapper = Some(create_mapper(&detected, extended, include_fork_step, encode_bytes)?);
             }
@@ -323,5 +368,95 @@ mod tests {
         assert!(BLOCK_TYPES.contains(&"tron"));
         assert!(BLOCK_TYPES.contains(&"beacon"));
         assert_eq!(BLOCK_TYPES.len(), 9); // auto + 8 chains
+    }
+
+    #[test]
+    fn test_encode_bytes_from_block_id_encoding_hex() {
+        assert_eq!(encode_bytes_from_block_id_encoding(1), Some(EncodeBytes::Hex));
+    }
+
+    #[test]
+    fn test_encode_bytes_from_block_id_encoding_0x_hex() {
+        assert_eq!(encode_bytes_from_block_id_encoding(2), Some(EncodeBytes::Hex));
+    }
+
+    #[test]
+    fn test_encode_bytes_from_block_id_encoding_base58() {
+        assert_eq!(encode_bytes_from_block_id_encoding(3), Some(EncodeBytes::Base58));
+    }
+
+    #[test]
+    fn test_encode_bytes_from_block_id_encoding_unset() {
+        assert_eq!(encode_bytes_from_block_id_encoding(0), None);
+    }
+
+    #[test]
+    fn test_encode_bytes_from_block_id_encoding_unknown() {
+        assert_eq!(encode_bytes_from_block_id_encoding(99), None);
+    }
+
+    #[test]
+    fn test_resolve_output_with_chain_name() {
+        let base = PathBuf::from("output");
+        let ei = Some(EndpointInfo {
+            chain_name: "mainnet".to_string(),
+            chain_name_aliases: vec![],
+            first_streamable_block_num: 0,
+            first_streamable_block_id: String::new(),
+            block_id_encoding: 0,
+            block_features: vec![],
+        });
+        assert_eq!(resolve_output(&base, &ei), PathBuf::from("output/mainnet"));
+    }
+
+    #[test]
+    fn test_resolve_output_without_endpoint_info() {
+        let base = PathBuf::from("output");
+        assert_eq!(resolve_output(&base, &None), PathBuf::from("output"));
+    }
+
+    #[test]
+    fn test_resolve_output_empty_chain_name() {
+        let base = PathBuf::from("output");
+        let ei = Some(EndpointInfo {
+            chain_name: String::new(),
+            chain_name_aliases: vec![],
+            first_streamable_block_num: 0,
+            first_streamable_block_id: String::new(),
+            block_id_encoding: 0,
+            block_features: vec![],
+        });
+        assert_eq!(resolve_output(&base, &ei), PathBuf::from("output"));
+    }
+
+    #[test]
+    fn test_supports_extended_true() {
+        let ei = Some(EndpointInfo {
+            chain_name: "mainnet".to_string(),
+            chain_name_aliases: vec![],
+            first_streamable_block_num: 0,
+            first_streamable_block_id: String::new(),
+            block_id_encoding: 1,
+            block_features: vec!["extended".to_string()],
+        });
+        assert!(supports_extended(&ei));
+    }
+
+    #[test]
+    fn test_supports_extended_false() {
+        let ei = Some(EndpointInfo {
+            chain_name: "solana-mainnet-beta".to_string(),
+            chain_name_aliases: vec![],
+            first_streamable_block_num: 0,
+            first_streamable_block_id: String::new(),
+            block_id_encoding: 3,
+            block_features: vec![],
+        });
+        assert!(!supports_extended(&ei));
+    }
+
+    #[test]
+    fn test_supports_extended_none() {
+        assert!(!supports_extended(&None));
     }
 }
