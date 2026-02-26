@@ -169,6 +169,7 @@ async fn main() -> Result<()> {
     let final_blocks_only = config.final_blocks_only;
     let include_fork_step = !final_blocks_only;
     let flush_rows = config.flush_rows.map(|r| r as usize);
+    let flush_bytes = config.flush_bytes;
     let flush_interval_secs = config.flush_interval_secs;
     let dry_run = config.dry_run;
 
@@ -195,6 +196,7 @@ async fn main() -> Result<()> {
     };
 
     let mut blocks_processed: u64 = 0;
+    let mut cumulative_bytes: u64 = 0;
     let mut min_block: Option<u64> = None;
     let mut max_block: Option<u64> = None;
     let mut min_timestamp: Option<i64> = None;
@@ -231,9 +233,10 @@ async fn main() -> Result<()> {
 
             m.map_block(&block_bytes, &identity, fork_step_str)?;
             blocks_processed += 1;
+            cumulative_bytes += block_bytes.len() as u64;
 
             if blocks_processed % 100 == 0 {
-                info!(blocks_processed, block_number, buffered_rows = m.max_table_rows(), "progress");
+                info!(blocks_processed, block_number, buffered_rows = m.max_table_rows(), buffered_bytes = cumulative_bytes, "progress");
             }
 
             let time_to_flush = flush_interval_secs
@@ -244,7 +247,9 @@ async fn main() -> Result<()> {
                 .map(|limit| m.max_table_rows() >= limit)
                 .unwrap_or(false);
 
-            if rows_to_flush || time_to_flush {
+            let bytes_to_flush = cumulative_bytes >= flush_bytes;
+
+            if rows_to_flush || time_to_flush || bytes_to_flush {
                 let batches = m.flush()?;
                 if !dry_run {
                     let metadata = BlockMetadata {
@@ -259,6 +264,7 @@ async fn main() -> Result<()> {
                 max_block = None;
                 min_timestamp = None;
                 max_timestamp = None;
+                cumulative_bytes = 0;
                 last_flush_time = Instant::now();
             }
 
