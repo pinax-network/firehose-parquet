@@ -114,9 +114,11 @@ impl ParquetTableWriter {
             writer.close()?;
 
             let s3_key = self.s3_object_key(table, metadata, &filename);
-            let s3_path = object_store::path::Path::from(s3_key.clone());
+            let s3_path = object_store::path::Path::from(s3_key.as_str());
             let s3_client = Arc::clone(s3);
             let payload = object_store::PutPayload::from(bytes::Bytes::from(buf));
+            // block_in_place is needed because this sync writer is called from
+            // within a tokio multi-threaded runtime (the gRPC stream handler).
             tokio::task::block_in_place(|| {
                 tokio::runtime::Handle::current().block_on(async {
                     s3_client.put(&s3_path, payload).await
