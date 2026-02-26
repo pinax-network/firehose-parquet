@@ -5,6 +5,7 @@ mod schema;
 use anyhow::Result;
 use clap::Parser;
 use firehose_parquet::config::{BlockMetadata, Compression, Config, Partition};
+use firehose_parquet::encode::{parse_encode_bytes, EncodeBytes};
 use firehose_parquet::grpc::FirehoseClient;
 use firehose_parquet::traits::{fork_step_name, BlockIdentity, BlockMapper};
 use firehose_parquet::writer::OutputWriter;
@@ -63,6 +64,11 @@ struct Cli {
 
     #[arg(long, default_value = "true")]
     final_blocks_only: bool,
+
+    /// Byte encoding for binary fields (hashes, keys, etc.)
+    /// Options: binary (default raw bytes), hex, base58, tron_base58, auto (chain-appropriate = base58 for Solana)
+    #[arg(long, default_value = "binary")]
+    encode_bytes: String,
 }
 
 fn parse_compression(s: &str) -> Compression {
@@ -112,7 +118,9 @@ async fn main() -> Result<()> {
 
     let include_fork_step = !config.final_blocks_only;
     let final_blocks_only = config.final_blocks_only;
-    let mut mapper = SolanaBlockMapper::new(include_fork_step);
+    let encode_bytes = parse_encode_bytes(&cli.encode_bytes)
+        .unwrap_or(EncodeBytes::Base58); // "auto" → base58 for Solana
+    let mut mapper = SolanaBlockMapper::new(include_fork_step, encode_bytes);
     let mut writer = OutputWriter::new(&config.output, config.partition.clone(), config.compression);
     let flush_rows = config.flush_rows as usize;
     let flush_interval_secs = config.flush_interval_secs;

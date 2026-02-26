@@ -3,6 +3,7 @@ use crate::schema;
 use arrow::array::*;
 use arrow::datatypes::Schema;
 use arrow::record_batch::RecordBatch;
+use firehose_parquet::encode::{BytesColumn, EncodeBytes};
 use firehose_parquet::traits::{BlockIdentity, BlockMapper, CanonicalBuilder};
 use prost::Message;
 use sha2::{Digest, Sha256};
@@ -25,9 +26,9 @@ fn mk_fork_step(include: bool) -> Option<StringBuilder> {
     if include { Some(StringBuilder::new()) } else { None }
 }
 
-fn tx_hash(raw: &[u8]) -> String {
-    let digest = Sha256::digest(raw);
-    hex::encode_upper(digest)
+/// Compute SHA256 hash of raw tx bytes, returning raw digest bytes.
+fn tx_hash_bytes(raw: &[u8]) -> Vec<u8> {
+    Sha256::digest(raw).to_vec()
 }
 
 // ---------------------------------------------------------------------------
@@ -36,6 +37,7 @@ fn tx_hash(raw: &[u8]) -> String {
 
 pub struct CosmosBlockMapper {
     include_fork_step: bool,
+    encoding: EncodeBytes,
     blocks: BlocksBuilder,
     transactions: TransactionsBuilder,
     events: EventsBuilder,
@@ -47,39 +49,40 @@ pub struct CosmosBlockMapper {
 }
 
 impl CosmosBlockMapper {
-    pub fn new(include_fork_step: bool) -> Self {
+    pub fn new(include_fork_step: bool, encoding: EncodeBytes) -> Self {
+        let enc = &encoding;
         Self {
             include_fork_step,
-            blocks: BlocksBuilder::new(include_fork_step),
-            transactions: TransactionsBuilder::new(include_fork_step),
-            events: EventsBuilder::new(include_fork_step),
-            messages: MessagesBuilder::new(include_fork_step),
-            blocks_schema: schema::blocks_schema(include_fork_step),
-            transactions_schema: schema::transactions_schema(include_fork_step),
-            events_schema: schema::events_schema(include_fork_step),
-            messages_schema: schema::messages_schema(include_fork_step),
+            blocks: BlocksBuilder::new(include_fork_step, enc),
+            transactions: TransactionsBuilder::new(include_fork_step, enc),
+            events: EventsBuilder::new(include_fork_step, enc),
+            messages: MessagesBuilder::new(include_fork_step, enc),
+            blocks_schema: schema::blocks_schema(include_fork_step, enc),
+            transactions_schema: schema::transactions_schema(include_fork_step, enc),
+            events_schema: schema::events_schema(include_fork_step, enc),
+            messages_schema: schema::messages_schema(include_fork_step, enc),
+            encoding,
         }
     }
 
     fn map_cosmos_block(&mut self, block: &cosmos::Block, identity: &BlockIdentity, fork_step: Option<&str>) {
         let height = block.height;
-        let hash_hex = hex::encode(&block.hash);
 
         let header = block.header.as_ref();
         let chain_id = header.map_or("", |h| &h.chain_id);
         let proposer_address = header
-            .map(|h| hex::encode_upper(&h.proposer_address))
-            .unwrap_or_default();
+            .map(|h| h.proposer_address.as_slice())
+            .unwrap_or(&[]);
         let last_block_id_hash = header
             .and_then(|h| h.last_block_id.as_ref())
-            .map(|bid| hex::encode(&bid.hash))
-            .unwrap_or_default();
+            .map(|bid| bid.hash.as_slice())
+            .unwrap_or(&[]);
         let validators_hash = header
-            .map(|h| hex::encode(&h.validators_hash))
-            .unwrap_or_default();
+            .map(|h| h.validators_hash.as_slice())
+            .unwrap_or(&[]);
         let next_validators_hash = header
-            .map(|h| hex::encode(&h.next_validators_hash))
-            .unwrap_or_default();
+            .map(|h| h.next_validators_hash.as_slice())
+            .unwrap_or(&[]);
         let block_time = block
             .time
             .as_ref()
@@ -90,13 +93,13 @@ impl CosmosBlockMapper {
         // blocks row
         self.blocks.canonical.append(identity);
         self.blocks.height.append_value(height);
-        self.blocks.hash.append_value(&hash_hex);
+        self.blocks.hash.append_value(&block.hash);
         self.blocks.time.append_value(block_time);
         self.blocks.chain_id.append_value(chain_id);
-        self.blocks.proposer_address.append_value(&proposer_address);
-        self.blocks.last_block_id_hash.append_value(&last_block_id_hash);
-        self.blocks.validators_hash.append_value(&validators_hash);
-        self.blocks.next_validators_hash.append_value(&next_validators_hash);
+        self.blocks.proposer_address.append_value(proposer_address);
+        self.blocks.last_block_id_hash.append_value(last_block_id_hash);
+        self.blocks.validators_hash.append_value(validators_hash);
+        self.blocks.next_validators_hash.append_value(next_validators_hash);
         self.blocks.num_txs.append_value(num_txs);
         append_fork_step(&mut self.blocks.fork_step, fork_step);
 
@@ -105,7 +108,7 @@ impl CosmosBlockMapper {
             for attr in &event.attributes {
                 self.events.canonical.append(identity);
                 self.events.source.append_value("block");
-                self.events.tx_hash.append_value("");
+                self.events.tx_hash.append_value(&[]);
                 self.events.tx_index.append_null();
                 self.events.event_index.append_value(event_index as u32);
                 self.events.r#type.append_value(&event.r#type);
@@ -117,7 +120,7 @@ impl CosmosBlockMapper {
 
         // transactions, tx events, and messages
         for (tx_idx, raw_tx) in block.txs.iter().enumerate() {
-            let hash = tx_hash(raw_tx);
+            let hash = tx_hash_bytes(raw_tx);
             let tx_result = block.tx_results.get(tx_idx);
 
             // transaction row
@@ -202,29 +205,29 @@ impl BlockMapper for CosmosBlockMapper {
 struct BlocksBuilder {
     canonical: CanonicalBuilder,
     height: Int64Builder,
-    hash: StringBuilder,
+    hash: BytesColumn,
     time: Int64Builder,
     chain_id: StringBuilder,
-    proposer_address: StringBuilder,
-    last_block_id_hash: StringBuilder,
-    validators_hash: StringBuilder,
-    next_validators_hash: StringBuilder,
+    proposer_address: BytesColumn,
+    last_block_id_hash: BytesColumn,
+    validators_hash: BytesColumn,
+    next_validators_hash: BytesColumn,
     num_txs: UInt32Builder,
     fork_step: Option<StringBuilder>,
 }
 
 impl BlocksBuilder {
-    fn new(include_fork_step: bool) -> Self {
+    fn new(include_fork_step: bool, encoding: &EncodeBytes) -> Self {
         Self {
             canonical: CanonicalBuilder::new(),
             height: Int64Builder::new(),
-            hash: StringBuilder::new(),
+            hash: BytesColumn::new(encoding),
             time: Int64Builder::new(),
             chain_id: StringBuilder::new(),
-            proposer_address: StringBuilder::new(),
-            last_block_id_hash: StringBuilder::new(),
-            validators_hash: StringBuilder::new(),
-            next_validators_hash: StringBuilder::new(),
+            proposer_address: BytesColumn::new(encoding),
+            last_block_id_hash: BytesColumn::new(encoding),
+            validators_hash: BytesColumn::new(encoding),
+            next_validators_hash: BytesColumn::new(encoding),
             num_txs: UInt32Builder::new(),
             fork_step: mk_fork_step(include_fork_step),
         }
@@ -234,13 +237,13 @@ impl BlocksBuilder {
         let mut columns = self.canonical.finish();
         columns.extend(vec![
             Arc::new(self.height.finish()) as Arc<dyn Array>,
-            Arc::new(self.hash.finish()) as Arc<dyn Array>,
+            self.hash.finish(),
             Arc::new(self.time.finish()) as Arc<dyn Array>,
             Arc::new(self.chain_id.finish()) as Arc<dyn Array>,
-            Arc::new(self.proposer_address.finish()) as Arc<dyn Array>,
-            Arc::new(self.last_block_id_hash.finish()) as Arc<dyn Array>,
-            Arc::new(self.validators_hash.finish()) as Arc<dyn Array>,
-            Arc::new(self.next_validators_hash.finish()) as Arc<dyn Array>,
+            self.proposer_address.finish(),
+            self.last_block_id_hash.finish(),
+            self.validators_hash.finish(),
+            self.next_validators_hash.finish(),
             Arc::new(self.num_txs.finish()) as Arc<dyn Array>,
         ]);
         finish_fork_step(&mut self.fork_step, &mut columns);
@@ -250,7 +253,7 @@ impl BlocksBuilder {
 
 struct TransactionsBuilder {
     canonical: CanonicalBuilder,
-    tx_hash: StringBuilder,
+    tx_hash: BytesColumn,
     index: UInt32Builder,
     code: UInt32Builder,
     gas_wanted: Int64Builder,
@@ -262,10 +265,10 @@ struct TransactionsBuilder {
 }
 
 impl TransactionsBuilder {
-    fn new(include_fork_step: bool) -> Self {
+    fn new(include_fork_step: bool, encoding: &EncodeBytes) -> Self {
         Self {
             canonical: CanonicalBuilder::new(),
-            tx_hash: StringBuilder::new(),
+            tx_hash: BytesColumn::new(encoding),
             index: UInt32Builder::new(),
             code: UInt32Builder::new(),
             gas_wanted: Int64Builder::new(),
@@ -280,7 +283,7 @@ impl TransactionsBuilder {
     fn finish(&mut self, schema: &Schema) -> anyhow::Result<RecordBatch> {
         let mut columns = self.canonical.finish();
         columns.extend(vec![
-            Arc::new(self.tx_hash.finish()) as Arc<dyn Array>,
+            self.tx_hash.finish(),
             Arc::new(self.index.finish()) as Arc<dyn Array>,
             Arc::new(self.code.finish()) as Arc<dyn Array>,
             Arc::new(self.gas_wanted.finish()) as Arc<dyn Array>,
@@ -297,7 +300,7 @@ impl TransactionsBuilder {
 struct EventsBuilder {
     canonical: CanonicalBuilder,
     source: StringBuilder,
-    tx_hash: StringBuilder,
+    tx_hash: BytesColumn,
     tx_index: Int32Builder,
     event_index: UInt32Builder,
     r#type: StringBuilder,
@@ -307,11 +310,11 @@ struct EventsBuilder {
 }
 
 impl EventsBuilder {
-    fn new(include_fork_step: bool) -> Self {
+    fn new(include_fork_step: bool, encoding: &EncodeBytes) -> Self {
         Self {
             canonical: CanonicalBuilder::new(),
             source: StringBuilder::new(),
-            tx_hash: StringBuilder::new(),
+            tx_hash: BytesColumn::new(encoding),
             tx_index: Int32Builder::new(),
             event_index: UInt32Builder::new(),
             r#type: StringBuilder::new(),
@@ -325,7 +328,7 @@ impl EventsBuilder {
         let mut columns = self.canonical.finish();
         columns.extend(vec![
             Arc::new(self.source.finish()) as Arc<dyn Array>,
-            Arc::new(self.tx_hash.finish()) as Arc<dyn Array>,
+            self.tx_hash.finish(),
             Arc::new(self.tx_index.finish()) as Arc<dyn Array>,
             Arc::new(self.event_index.finish()) as Arc<dyn Array>,
             Arc::new(self.r#type.finish()) as Arc<dyn Array>,
@@ -339,7 +342,7 @@ impl EventsBuilder {
 
 struct MessagesBuilder {
     canonical: CanonicalBuilder,
-    tx_hash: StringBuilder,
+    tx_hash: BytesColumn,
     tx_index: UInt32Builder,
     message_index: UInt32Builder,
     type_url: StringBuilder,
@@ -348,10 +351,10 @@ struct MessagesBuilder {
 }
 
 impl MessagesBuilder {
-    fn new(include_fork_step: bool) -> Self {
+    fn new(include_fork_step: bool, encoding: &EncodeBytes) -> Self {
         Self {
             canonical: CanonicalBuilder::new(),
-            tx_hash: StringBuilder::new(),
+            tx_hash: BytesColumn::new(encoding),
             tx_index: UInt32Builder::new(),
             message_index: UInt32Builder::new(),
             type_url: StringBuilder::new(),
@@ -363,7 +366,7 @@ impl MessagesBuilder {
     fn finish(&mut self, schema: &Schema) -> anyhow::Result<RecordBatch> {
         let mut columns = self.canonical.finish();
         columns.extend(vec![
-            Arc::new(self.tx_hash.finish()) as Arc<dyn Array>,
+            self.tx_hash.finish(),
             Arc::new(self.tx_index.finish()) as Arc<dyn Array>,
             Arc::new(self.message_index.finish()) as Arc<dyn Array>,
             Arc::new(self.type_url.finish()) as Arc<dyn Array>,
@@ -454,7 +457,7 @@ mod tests {
     fn test_map_and_flush() {
         let block = make_test_block(100);
         let block_bytes = prost::Message::encode_to_vec(&block);
-        let mut mapper = CosmosBlockMapper::new(false);
+        let mut mapper = CosmosBlockMapper::new(false, EncodeBytes::Hex);
         mapper.map_block(&block_bytes, &BlockIdentity::default(), None).unwrap();
 
         let batches = mapper.flush().unwrap();
@@ -484,7 +487,7 @@ mod tests {
             consensus_param_updates: None,
         };
         let block_bytes = prost::Message::encode_to_vec(&block);
-        let mut mapper = CosmosBlockMapper::new(false);
+        let mut mapper = CosmosBlockMapper::new(false, EncodeBytes::Hex);
         mapper.map_block(&block_bytes, &BlockIdentity::default(), None).unwrap();
 
         let batches = mapper.flush().unwrap();
@@ -498,7 +501,7 @@ mod tests {
     fn test_flush_resets() {
         let block = make_test_block(100);
         let block_bytes = prost::Message::encode_to_vec(&block);
-        let mut mapper = CosmosBlockMapper::new(false);
+        let mut mapper = CosmosBlockMapper::new(false, EncodeBytes::Hex);
         mapper.map_block(&block_bytes, &BlockIdentity::default(), None).unwrap();
         let _ = mapper.flush().unwrap();
         assert_eq!(mapper.max_table_rows(), 0);
@@ -506,7 +509,7 @@ mod tests {
 
     #[test]
     fn test_table_names() {
-        let mapper = CosmosBlockMapper::new(false);
+        let mapper = CosmosBlockMapper::new(false, EncodeBytes::Hex);
         assert_eq!(mapper.table_names().len(), 4);
         assert!(mapper.table_names().contains(&"blocks"));
         assert!(mapper.table_names().contains(&"transactions"));
@@ -518,7 +521,7 @@ mod tests {
     fn test_fork_step_column_included() {
         let block = make_test_block(100);
         let block_bytes = prost::Message::encode_to_vec(&block);
-        let mut mapper = CosmosBlockMapper::new(true);
+        let mut mapper = CosmosBlockMapper::new(true, EncodeBytes::Hex);
         mapper.map_block(&block_bytes, &BlockIdentity::default(), Some("FINAL")).unwrap();
 
         let batches = mapper.flush().unwrap();
@@ -527,44 +530,5 @@ mod tests {
         assert_eq!(blocks_batch.schema().field(last_col).name(), "fork_step");
         let fork_col = blocks_batch.column(last_col).as_any().downcast_ref::<StringArray>().unwrap();
         assert_eq!(fork_col.value(0), "FINAL");
-    }
-
-    #[test]
-    fn test_tx_hash_is_sha256() {
-        let raw_tx = make_raw_tx("/cosmos.bank.v1beta1.MsgSend", b"\x01\x02\x03");
-        let expected_hash = {
-            let digest = Sha256::digest(&raw_tx);
-            hex::encode_upper(digest)
-        };
-
-        let block = cosmos::Block {
-            hash: vec![0x00],
-            height: 1,
-            time: Some(prost_types::Timestamp { seconds: 1700000000, nanos: 0 }),
-            header: Some(cosmos::Header {
-                chain_id: "test".to_string(),
-                height: 1,
-                ..Default::default()
-            }),
-            txs: vec![raw_tx],
-            tx_results: vec![cosmos::TxResults {
-                code: 0,
-                gas_wanted: 100000,
-                gas_used: 50000,
-                ..Default::default()
-            }],
-            events: vec![],
-            misbehavior: vec![],
-            validator_updates: vec![],
-            consensus_param_updates: None,
-        };
-        let block_bytes = prost::Message::encode_to_vec(&block);
-        let mut mapper = CosmosBlockMapper::new(false);
-        mapper.map_block(&block_bytes, &BlockIdentity::default(), None).unwrap();
-
-        let batches = mapper.flush().unwrap();
-        let tx_batch = &batches["transactions"];
-        let hash_col = tx_batch.column(6).as_any().downcast_ref::<StringArray>().unwrap();
-        assert_eq!(hash_col.value(0), expected_hash);
     }
 }

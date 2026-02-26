@@ -5,6 +5,7 @@ mod schema;
 use anyhow::Result;
 use clap::Parser;
 use firehose_parquet::config::{BlockMetadata, Compression, Config, Partition};
+use firehose_parquet::encode::{parse_encode_bytes, EncodeBytes};
 use firehose_parquet::grpc::FirehoseClient;
 use firehose_parquet::traits::{fork_step_name, BlockIdentity, BlockMapper};
 use firehose_parquet::writer::OutputWriter;
@@ -64,6 +65,13 @@ struct Cli {
 
     #[arg(long, default_value = "true")]
     final_blocks_only: bool,
+
+    /// Byte encoding strategy for binary fields (hashes, addresses, etc.)
+    /// Options: binary, hex (default), base58, tron_base58, auto (chain-appropriate = hex for Bitcoin)
+    /// Note: Bitcoin proto data arrives pre-encoded as hex strings; this flag
+    /// is accepted for CLI consistency but does not change output.
+    #[arg(long, default_value = "hex")]
+    encode_bytes: String,
 }
 
 fn parse_compression(s: &str) -> Compression {
@@ -110,6 +118,9 @@ async fn main() -> Result<()> {
     };
 
     info!(?config, "starting Bitcoin pipeline");
+
+    let _encode_bytes = parse_encode_bytes(&cli.encode_bytes)
+        .unwrap_or(EncodeBytes::Hex); // "auto" → hex for Bitcoin
 
     let final_blocks_only = config.final_blocks_only;
     let include_fork_step = !final_blocks_only;

@@ -5,6 +5,7 @@ mod schema;
 use anyhow::Result;
 use clap::Parser;
 use firehose_parquet::config::{BlockMetadata, Compression, Config, Partition};
+use firehose_parquet::encode::{parse_encode_bytes, EncodeBytes};
 use firehose_parquet::grpc::FirehoseClient;
 use firehose_parquet::traits::{fork_step_name, BlockIdentity, BlockMapper};
 use firehose_parquet::writer::OutputWriter;
@@ -63,6 +64,10 @@ struct Cli {
 
     #[arg(long, default_value = "true")]
     final_blocks_only: bool,
+
+    /// Byte encoding: hex, base58, base64, tron_base58, binary
+    #[arg(long, default_value = "hex")]
+    encode_bytes: String,
 }
 
 fn parse_compression(s: &str) -> Compression {
@@ -112,7 +117,8 @@ async fn main() -> Result<()> {
 
     let include_fork_step = !config.final_blocks_only;
     let final_blocks_only = config.final_blocks_only;
-    let mut mapper = AntelopeBlockMapper::new(include_fork_step);
+    let encode_bytes = parse_encode_bytes(&cli.encode_bytes).unwrap_or(EncodeBytes::Hex);
+    let mut mapper = AntelopeBlockMapper::new(include_fork_step, encode_bytes);
     let mut writer = OutputWriter::new(&config.output, config.partition.clone(), config.compression);
     let flush_rows = config.flush_rows as usize;
     let flush_interval_secs = config.flush_interval_secs;

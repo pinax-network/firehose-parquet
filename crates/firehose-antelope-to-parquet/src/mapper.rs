@@ -3,6 +3,7 @@ use crate::schema;
 use arrow::array::*;
 use arrow::datatypes::Schema;
 use arrow::record_batch::RecordBatch;
+use firehose_parquet::encode::EncodeBytes;
 use firehose_parquet::traits::{BlockIdentity, BlockMapper, CanonicalBuilder};
 use prost::Message;
 use std::collections::HashMap;
@@ -27,6 +28,7 @@ fn format_authorization(auth: &[antelope::PermissionLevel]) -> String {
 
 pub struct AntelopeBlockMapper {
     include_fork_step: bool,
+    encoding: EncodeBytes,
     blocks: BlocksBuilder,
     transactions: TransactionsBuilder,
     actions: ActionsBuilder,
@@ -38,17 +40,19 @@ pub struct AntelopeBlockMapper {
 }
 
 impl AntelopeBlockMapper {
-    pub fn new(include_fork_step: bool) -> Self {
+    pub fn new(include_fork_step: bool, encoding: EncodeBytes) -> Self {
+        let enc = &encoding;
         Self {
             include_fork_step,
             blocks: BlocksBuilder::new(include_fork_step),
             transactions: TransactionsBuilder::new(include_fork_step),
             actions: ActionsBuilder::new(include_fork_step),
             db_ops: DbOpsBuilder::new(include_fork_step),
-            blocks_schema: schema::blocks_schema(include_fork_step),
-            transactions_schema: schema::transactions_schema(include_fork_step),
-            actions_schema: schema::actions_schema(include_fork_step),
-            db_ops_schema: schema::db_ops_schema(include_fork_step),
+            blocks_schema: schema::blocks_schema(include_fork_step, enc),
+            transactions_schema: schema::transactions_schema(include_fork_step, enc),
+            actions_schema: schema::actions_schema(include_fork_step, enc),
+            db_ops_schema: schema::db_ops_schema(include_fork_step, enc),
+            encoding,
         }
     }
 
@@ -527,7 +531,7 @@ mod tests {
     fn test_map_and_flush_single_block() {
         let block = make_test_block(100);
         let block_bytes = prost::Message::encode_to_vec(&block);
-        let mut mapper = AntelopeBlockMapper::new(false);
+        let mut mapper = AntelopeBlockMapper::new(false, EncodeBytes::Hex);
         mapper.map_block(&block_bytes, &BlockIdentity::default(), None).unwrap();
 
         assert_eq!(mapper.max_table_rows(), 2); // 2 actions
@@ -543,7 +547,7 @@ mod tests {
     fn test_flush_resets_builders() {
         let block = make_test_block(1);
         let block_bytes = prost::Message::encode_to_vec(&block);
-        let mut mapper = AntelopeBlockMapper::new(false);
+        let mut mapper = AntelopeBlockMapper::new(false, EncodeBytes::Hex);
         mapper.map_block(&block_bytes, &BlockIdentity::default(), None).unwrap();
         let _ = mapper.flush().unwrap();
         assert_eq!(mapper.max_table_rows(), 0);
@@ -563,7 +567,7 @@ mod tests {
             ..Default::default()
         };
         let block_bytes = prost::Message::encode_to_vec(&block);
-        let mut mapper = AntelopeBlockMapper::new(false);
+        let mut mapper = AntelopeBlockMapper::new(false, EncodeBytes::Hex);
         mapper.map_block(&block_bytes, &BlockIdentity::default(), None).unwrap();
         let batches = mapper.flush().unwrap();
         assert_eq!(batches["blocks"].num_rows(), 1);
@@ -576,7 +580,7 @@ mod tests {
     fn test_fork_step_column_included() {
         let block = make_test_block(100);
         let block_bytes = prost::Message::encode_to_vec(&block);
-        let mut mapper = AntelopeBlockMapper::new(true);
+        let mut mapper = AntelopeBlockMapper::new(true, EncodeBytes::Hex);
         mapper.map_block(&block_bytes, &BlockIdentity::default(), Some("NEW")).unwrap();
 
         let batches = mapper.flush().unwrap();

@@ -1,4 +1,5 @@
 use arrow::datatypes::{DataType, Field, Schema};
+use firehose_parquet::encode::EncodeBytes;
 use firehose_parquet::traits::{canonical_fields, fork_step_field};
 
 fn maybe_fork_step(fields: &mut Vec<Field>, include: bool) {
@@ -7,7 +8,7 @@ fn maybe_fork_step(fields: &mut Vec<Field>, include: bool) {
     }
 }
 
-pub fn blocks_schema(include_fork_step: bool) -> Schema {
+pub fn blocks_schema(include_fork_step: bool, _encoding: &EncodeBytes) -> Schema {
     let mut fields = canonical_fields();
     fields.extend(vec![
         Field::new("number", DataType::UInt32, false),
@@ -20,7 +21,7 @@ pub fn blocks_schema(include_fork_step: bool) -> Schema {
     Schema::new(fields)
 }
 
-pub fn transactions_schema(include_fork_step: bool) -> Schema {
+pub fn transactions_schema(include_fork_step: bool, _encoding: &EncodeBytes) -> Schema {
     let mut fields = canonical_fields();
     fields.extend(vec![
         Field::new("tx_hash", DataType::Utf8, false),
@@ -34,7 +35,7 @@ pub fn transactions_schema(include_fork_step: bool) -> Schema {
     Schema::new(fields)
 }
 
-pub fn actions_schema(include_fork_step: bool) -> Schema {
+pub fn actions_schema(include_fork_step: bool, _encoding: &EncodeBytes) -> Schema {
     let mut fields = canonical_fields();
     fields.extend(vec![
         Field::new("tx_hash", DataType::Utf8, false),
@@ -50,7 +51,7 @@ pub fn actions_schema(include_fork_step: bool) -> Schema {
     Schema::new(fields)
 }
 
-pub fn db_ops_schema(include_fork_step: bool) -> Schema {
+pub fn db_ops_schema(include_fork_step: bool, _encoding: &EncodeBytes) -> Schema {
     let mut fields = canonical_fields();
     fields.extend(vec![
         Field::new("tx_hash", DataType::Utf8, false),
