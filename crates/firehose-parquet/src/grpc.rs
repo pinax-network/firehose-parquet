@@ -73,13 +73,13 @@ impl FirehoseClient {
         if let Some(ref key) = self.config.api_key {
             request.metadata_mut().insert(
                 "x-api-key",
-                key.parse().unwrap(),
+                key.parse().expect("API key must be valid ASCII metadata value"),
             );
         }
         if let Some(ref token) = self.config.jwt_token {
             request.metadata_mut().insert(
                 "authorization",
-                format!("Bearer {token}").parse().unwrap(),
+                format!("Bearer {token}").parse().expect("JWT token must be valid ASCII metadata value"),
             );
         }
 
