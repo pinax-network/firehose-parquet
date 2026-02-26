@@ -1,3 +1,4 @@
+pub mod cli;
 pub mod config;
 pub mod encode;
 pub mod grpc;

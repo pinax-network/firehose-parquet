@@ -470,6 +470,7 @@ dependencies = [
  "anyhow",
  "arrow",
  "clap",
+ "clap_complete",
  "firehose-parquet",
  "firehose-protos",
  "prost",
@@ -577,6 +578,15 @@ dependencies = [
  "anstyle",
  "clap_lex",
  "strsim",
+]
+
+[[package]]
+name = "clap_complete"
+version = "4.5.66"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c757a3b7e39161a4e56f9365141ada2a6c915a8622c408ab6bb4b5d047371031"
+dependencies = [
+ "clap",
 ]
 
 [[package]]
@@ -746,6 +756,8 @@ dependencies = [
  "arrow",
  "backoff",
  "bs58",
+ "clap",
+ "clap_complete",
  "firehose-protos",
  "hex",
  "parquet",
@@ -758,6 +770,7 @@ dependencies = [
  "tokio",
  "tonic",
  "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
