@@ -1,232 +1,219 @@
 # firehose-parquet
 
-A production-grade Rust CLI that consumes a [StreamingFast Firehose](https://firehose.streamingfast.io/) v2 gRPC stream of **Solana** blocks and writes **Apache Parquet** files using Apache Arrow RecordBatches as the intermediate format.
+A production-grade Rust toolkit that consumes [StreamingFast Firehose](https://firehose.streamingfast.io/) v2 gRPC streams and writes **Apache Parquet** files. Supports multiple blockchain types with a shared core architecture.
+
+## Supported Chains
+
+| Chain | Binary | Endpoint Example | Tables |
+|---|---|---|---|
+| **Solana** | `firehose-solana-to-parquet` | `solana.firehose.pinax.network:443` | blocks, transactions, messages, instructions, rewards |
+| **EVM** | `firehose-evm-to-parquet` | `eth.firehose.pinax.network:443` | blocks, transactions, logs (+7 extended tables) |
+| **Bitcoin** | `firehose-bitcoin-to-parquet` | `btc.firehose.pinax.network:443` | blocks, transactions, inputs, outputs |
+| **Beacon** | `firehose-beacon-to-parquet` | `beacon.firehose.pinax.network:443` | blocks, attestations, deposits, voluntary_exits, blob_sidecars, ... |
+| **Tron** | `firehose-tron-to-parquet` | `tron.firehose.pinax.network:443` | blocks, transactions, logs, internal_transactions |
+| **Cosmos** | `firehose-cosmos-to-parquet` | `cosmoshub.firehose.pinax.network:443` | blocks, transactions, events, messages |
+| **Antelope** | `firehose-antelope-to-parquet` | `eos.firehose.pinax.network:443` | blocks, transactions, actions, db_ops |
+| **NEAR** | `firehose-near-to-parquet` | `near.firehose.pinax.network:443` | blocks, chunks, transactions, receipts, state_changes |
 
 ## Features
 
-- **gRPC streaming** — connects to any Firehose v2 endpoint via tonic, with TLS and bearer-token auth.
-- **Automatic retry / resume** — exponential back-off on connection errors; resumes from the last cursor.
-- **Five normalised output tables** — `blocks`, `transactions`, `messages`, `instructions`, `rewards`.
-- **Arrow-native pipeline** — per-table column builders produce `RecordBatch`es that flush to Parquet at configurable row/byte thresholds.
-- **Partitioning** — flat or block-range based directory layouts (`output/<table>/block_range=…/part-000001.parquet`).
-- **Compression** — zstd (default), snappy, gzip, or none.
-- **Structured logging** via `tracing`.
+- **Multi-chain** — pluggable `BlockMapper` trait with per-chain binary crates
+- **Canonical identity columns** — `block_num`, `block_id`, `parent_num`, `parent_id`, `lib_num`, `timestamp` on every table (from Firehose `BlockMetadata`)
+- **gRPC streaming** — connects to any Firehose v2 endpoint via tonic, with TLS and API key / JWT auth
+- **Automatic retry / resume** — exponential back-off on connection errors; resumes from the last cursor
+- **Partitioning** — `none`, `block_range`, `date`, or `hour` layouts
+- **File rollover** — flush by row count, byte size, or time interval
+- **Fork handling** — `--final-blocks-only` (default) or include `fork_step` column (`NEW`/`UNDO`/`FINAL`)
+- **Byte encoding** — configurable encoding for binary fields: `binary` (raw), `hex`, `base58`, `tron_base58`, `auto`
+- **Compression** — zstd (default), snappy, gzip, or none
+- **Arrow-native pipeline** — column builders produce `RecordBatch`es that flush to Parquet
 
-## Repository structure
+## Quick Start
+
+```bash
+# Build all binaries
+cargo build --release --workspace
+
+# Stream Solana blocks to Parquet
+./target/release/firehose-solana-to-parquet \
+  --endpoint https://solana.firehose.pinax.network:443 \
+  --api-key $FIREHOSE_API_KEY \
+  --start-block 200000000 \
+  --stop-block 200001000 \
+  --output ./output \
+  --partition date \
+  --compression zstd
+
+# Stream EVM blocks with extended traces
+./target/release/firehose-evm-to-parquet \
+  --endpoint https://eth.firehose.pinax.network:443 \
+  --api-key $FIREHOSE_API_KEY \
+  --start-block 19000000 \
+  --stop-block 19001000 \
+  --extended \
+  --encode-bytes hex
+```
+
+## CLI Reference
+
+All binaries share these common flags:
+
+```
+REQUIRED:
+  --endpoint <URL>           Firehose gRPC endpoint URL
+
+AUTHENTICATION (one of):
+  --api-key <KEY>            API key (also: FIREHOSE_API_KEY env var)
+  --jwt-token <TOKEN>        JWT bearer token (also: SUBSTREAMS_API_TOKEN env var)
+
+BLOCK RANGE:
+  --start-block <NUM>        Start block number (inclusive)
+  --stop-block <NUM>         Stop block number (inclusive, 0 = stream forever)
+  --cursor <STRING>          Resume cursor from a previous session
+
+OUTPUT:
+  --output <DIR>             Output directory (default: "output")
+  --compression <CODEC>      zstd (default) | snappy | gzip | none
+
+PARTITIONING:
+  --partition <MODE>         none (default) | block_range | date | hour
+  --block-range-size <NUM>   Block range size when partition=block_range (default: 10000)
+
+FILE ROLLOVER:
+  --flush-rows <NUM>         Max rows per file (default: 50000)
+  --flush-bytes <NUM>        Max bytes per file (default: 134217728 = 128MB)
+  --flush-interval-secs <N>  Time-based flush interval (disabled by default)
+
+ENCODING:
+  --encode-bytes <MODE>      binary | hex | base58 | tron_base58 | auto
+                             Default varies by chain (hex for EVM, binary for Solana)
+
+FORK HANDLING:
+  --final-blocks-only        Only process finalized blocks (default: true)
+                             When false, adds fork_step column to all tables
+
+OTHER:
+  --dry-run                  Decode and map but don't write files
+  --log-level <LEVEL>        info (default) | debug | trace
+```
+
+### Chain-Specific Flags
+
+| Binary | Extra Flags |
+|---|---|
+| `firehose-evm-to-parquet` | `--extended` — enable extended trace tables (calls, balance_changes, etc.) |
+
+## Output Directory Layout
+
+```
+output/
+├── blocks/
+│   ├── date=2026-02-25/
+│   │   ├── part-000001.parquet
+│   │   └── part-000002.parquet
+│   └── date=2026-02-26/
+│       └── part-000001.parquet
+├── transactions/
+│   └── ...
+└── logs/
+    └── ...
+```
+
+## Canonical Identity Columns
+
+Every table across all chains includes these 6 columns (from Firehose `BlockMetadata`):
+
+| Column | Type | Description |
+|---|---|---|
+| `block_num` | UInt64 | Block number |
+| `block_id` | Utf8 | Block ID (hex for EVM, base58 for Solana) |
+| `parent_num` | UInt64 | Parent block number |
+| `parent_id` | Utf8 | Parent block ID |
+| `lib_num` | UInt64 | Last irreversible block number |
+| `timestamp` | Int64 | Block time (unix seconds) |
+
+## Byte Encoding
+
+| Mode | Description | Best For |
+|---|---|---|
+| `binary` | Raw bytes (Arrow `Binary`) | Parquet-native workflows (DuckDB, Spark) |
+| `hex` | `0x`-prefixed hex strings | EVM ecosystem tools |
+| `base58` | Base58 strings | Solana ecosystem tools |
+| `tron_base58` | Tron Base58Check addresses (hex fallback) | Tron-specific tools |
+| `auto` | Chain-appropriate default | General use |
+
+### Auto Encoding Per Chain
+
+| Chain | `auto` resolves to |
+|---|---|
+| EVM | `hex` |
+| Solana | `base58` |
+| Bitcoin | `hex` |
+| Tron | `tron_base58` |
+| Beacon | `hex` |
+| Cosmos | `hex` |
+| Antelope | `hex` |
+| NEAR | `base58` |
+
+## Environment Variables
+
+Copy `.env.example` to `.env`:
+
+```bash
+# Authentication (one of these is typically required)
+FIREHOSE_API_KEY=your-api-key-here
+SUBSTREAMS_API_TOKEN=your-jwt-token-here
+```
+
+## Repository Structure
 
 ```
 firehose-parquet/
-├── Cargo.toml                          # workspace root
-├── proto/
-│   ├── sf/firehose/v2/firehose.proto   # Firehose v2 service definition
-│   └── sf/solana/type/v1/type.proto    # Solana block types
+├── Cargo.toml                              # workspace root
+├── .env.example                            # environment variables template
+├── proto/                                  # Protobuf definitions
+│   └── sf/
+│       ├── firehose/v2/firehose.proto      # Firehose streaming protocol
+│       ├── solana/type/v1/type.proto
+│       ├── ethereum/type/v2/type.proto
+│       ├── bitcoin/type/v1/type.proto
+│       ├── beacon/type/v1/type.proto
+│       ├── tron/type/v1/block.proto
+│       ├── cosmos/type/v2/type.proto
+│       ├── antelope/type/v1/type.proto
+│       └── near/type/v1/type.proto
 ├── crates/
-│   ├── firehose-parquet/               # library crate (core pipeline)
-│   │   ├── build.rs                    # tonic-build proto codegen
+│   ├── firehose-parquet/                   # Core library
 │   │   └── src/
-│   │       ├── lib.rs                  # re-exports + generated proto modules
-│   │       ├── config.rs               # Config / Partition / Compression types
-│   │       ├── grpc.rs                 # Firehose gRPC client with retry
-│   │       ├── schema.rs              # Arrow schema definitions (5 tables)
-│   │       ├── mapper.rs              # Protobuf → Arrow builder mapping
-│   │       └── writer.rs             # Parquet writer with partitioning
-│   └── firehose-solana-to-parquet/    # binary crate (CLI)
-│       └── src/main.rs
-└── README.md
+│   │       ├── config.rs                   # Config, Partition, Compression enums
+│   │       ├── encode.rs                   # BytesColumn, encoding helpers
+│   │       ├── grpc.rs                     # Firehose gRPC client
+│   │       ├── traits.rs                   # BlockMapper trait, BlockIdentity
+│   │       └── writer.rs                   # Parquet writer, partitioning
+│   ├── firehose-solana-to-parquet/         # Solana binary
+│   ├── firehose-evm-to-parquet/            # EVM binary
+│   ├── firehose-bitcoin-to-parquet/        # Bitcoin binary
+│   ├── firehose-beacon-to-parquet/         # Ethereum Beacon binary
+│   ├── firehose-tron-to-parquet/           # Tron binary
+│   ├── firehose-cosmos-to-parquet/         # Cosmos binary
+│   ├── firehose-antelope-to-parquet/       # Antelope (EOS/WAX) binary
+│   └── firehose-near-to-parquet/           # NEAR binary
+└── target/                                 # build output
 ```
 
-## Prerequisites
-
-| Tool | Version |
-|------|---------|
-| Rust | stable (≥ 1.75) |
-| `protoc` | ≥ 3.21 |
-
-Install `protoc`:
+## Development
 
 ```bash
-# Ubuntu / Debian
-sudo apt-get install -y protobuf-compiler
+# Build
+cargo build --workspace
 
-# macOS
-brew install protobuf
+# Test
+cargo test --workspace
+
+# Build release
+cargo build --release --workspace
 ```
-
-## Build
-
-```bash
-cargo build --release
-```
-
-The `build.rs` in `crates/firehose-parquet` automatically compiles the `.proto` files under `proto/` via `tonic-build` + `prost`.
-
-## Run
-
-```bash
-cargo run --release --bin firehose-solana-to-parquet -- \
-  --endpoint https://solana.firehose.pinax.network:443 \
-  --api-key "$PINAX_KEY" \
-  --start-block 200000000 \
-  --stop-block  200001000 \
-  --output ./output \
-  --compression zstd \
-  --flush-rows 50000 \
-  --final-blocks-only
-```
-
-### Authentication
-
-Two authentication methods are supported:
-
-**API Key** — a long-lived key sent as the `X-Api-Key` gRPC metadata header. Used by Pinax and other providers.
-
-```bash
-# via flag
---api-key "$PINAX_KEY"
-# or via environment variable
-export FIREHOSE_API_KEY="$PINAX_KEY"
-```
-
-**API Token (JWT)** — allows you to generate short-lived tokens with a configurable lifespan (e.g. 30 minutes) for more secure deployments. This improves security as tokens cannot be reused once expired, reducing the attack time window, but requires more code on the consumer side to handle token refresh. Sent as `Authorization: Bearer` header.
-
-```bash
-# via flag
---jwt-token "$SUBSTREAMS_API_TOKEN"
-# or via environment variable
-export SUBSTREAMS_API_TOKEN="your-jwt-token"
-```
-
-Both methods can be used simultaneously. When both are set, both headers are sent.
-
-### All CLI flags
-
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--endpoint` | *(required)* | Firehose gRPC endpoint URL |
-| `--api-key` | — | API key (`X-Api-Key` header). Env: `FIREHOSE_API_KEY` |
-| `--jwt-token` | — | JWT bearer token. Env: `SUBSTREAMS_API_TOKEN` |
-| `--start-block` | — | Start block (inclusive) |
-| `--stop-block` | — | Stop block (inclusive, 0 = stream forever) |
-| `--cursor` | — | Resume from an opaque Firehose cursor |
-| `--output` | `output` | Root directory for Parquet files |
-| `--partition` | `none` | `none` or `block_range` |
-| `--block-range-size` | `10000` | Range size when `--partition=block_range` |
-| `--flush-rows` | `50000` | Flush when any table exceeds this row count |
-| `--flush-bytes` | `134217728` (128 MB) | *(reserved for future use)* |
-| `--compression` | `zstd` | `zstd`, `snappy`, `gzip`, `none` |
-| `--log-level` | `info` | `info`, `debug`, `trace` |
-| `--dry-run` | `false` | Decode + map without writing files |
-| `--final-blocks-only` | `true` | Only process irreversible blocks |
-
-## Output tables & schemas
-
-### `blocks`
-
-| Column | Arrow type | Nullable | Notes |
-|--------|-----------|----------|-------|
-| `slot` | UInt64 | no | Primary key |
-| `parent_slot` | UInt64 | no | |
-| `block_height` | UInt64 | yes | From `BlockHeight` message |
-| `blockhash` | Utf8 | no | Base-58 encoded |
-| `previous_blockhash` | Utf8 | no | |
-| `block_time` | Int64 | yes | Unix timestamp (seconds) |
-| `num_transactions` | UInt32 | no | |
-| `num_rewards` | UInt32 | no | |
-
-### `transactions`
-
-| Column | Arrow type | Nullable | Notes |
-|--------|-----------|----------|-------|
-| `slot` | UInt64 | no | FK → blocks |
-| `transaction_index` | UInt32 | no | Position within block |
-| `signature` | Binary | no | First signature (64 bytes) |
-| `num_signatures` | UInt32 | no | |
-| `fee` | UInt64 | no | Lamports |
-| `err` | Binary | yes | Serialised `TransactionError` |
-| `success` | Boolean | no | `true` when `err` is null |
-| `compute_units_consumed` | UInt64 | yes | |
-| `log_messages` | List\<Utf8\> | yes | Program log lines |
-| `pre_balances` | List\<UInt64\> | yes | |
-| `post_balances` | List\<UInt64\> | yes | |
-
-### `messages`
-
-| Column | Arrow type | Nullable | Notes |
-|--------|-----------|----------|-------|
-| `slot` | UInt64 | no | FK → blocks |
-| `transaction_index` | UInt32 | no | FK → transactions |
-| `message_index` | UInt32 | no | Always 0 (Solana has 1 msg/tx) |
-| `num_required_signatures` | UInt32 | no | |
-| `num_readonly_signed_accounts` | UInt32 | no | |
-| `num_readonly_unsigned_accounts` | UInt32 | no | |
-| `recent_blockhash` | Binary | no | 32 bytes |
-| `versioned` | Boolean | no | |
-| `account_keys` | List\<Binary\> | no | 32-byte public keys |
-
-### `instructions`
-
-| Column | Arrow type | Nullable | Notes |
-|--------|-----------|----------|-------|
-| `slot` | UInt64 | no | FK → blocks |
-| `transaction_index` | UInt32 | no | FK → transactions |
-| `instruction_index` | UInt32 | no | Global index within tx (top-level + inner) |
-| `program_id_index` | UInt32 | no | Index into `account_keys` |
-| `accounts` | Binary | no | Byte array of account indices |
-| `data` | Binary | no | Instruction payload |
-| `is_inner` | Boolean | no | `false` = top-level, `true` = CPI |
-| `inner_index` | UInt32 | yes | Parent instruction index (for inner) |
-| `stack_height` | UInt32 | yes | CPI stack depth |
-
-### `rewards`
-
-| Column | Arrow type | Nullable | Notes |
-|--------|-----------|----------|-------|
-| `slot` | UInt64 | no | FK → blocks |
-| `reward_index` | UInt32 | no | Position within block |
-| `pubkey` | Utf8 | no | Base-58 public key |
-| `lamports` | Int64 | no | Reward amount (can be negative for rent) |
-| `post_balance` | UInt64 | no | Balance after reward |
-| `reward_type` | Int32 | no | Enum: 0=Unspecified, 1=Fee, 2=Rent, 3=Staking, 4=Voting |
-| `commission` | Utf8 | yes | Validator commission string |
-
-## Schema mapping rules
-
-| Protobuf type | Arrow type | Notes |
-|---------------|-----------|-------|
-| `bytes` | `Binary` | Raw byte arrays |
-| `string` | `Utf8` | |
-| `uint64` | `UInt64` | |
-| `int64` | `Int64` | |
-| `uint32` | `UInt32` | |
-| `int32` | `Int32` | |
-| `bool` | `Boolean` | |
-| `repeated T` | `List<T>` | For inline repeated fields |
-| `optional T` | nullable column | Arrow nullability |
-| nested message | normalised table | Flattened into the 5 output tables |
-| `enum` | `Int32` | Stored as the i32 wire value |
-
-## Tests
-
-```bash
-cargo test
-```
-
-Tests cover:
-- Schema column counts for all 5 tables
-- Mapping a synthetic block end-to-end (correct row counts per table)
-- Flush/reset cycle (builders are reusable)
-- Empty block edge case
-- Parquet round-trip (write → read back, schema equality)
-- Block-range partitioning directory layout
-- OutputWriter writes all 5 tables
-
-## Proto sources
-
-The `.proto` files under `proto/` are sourced from:
-
-- **Firehose v2**: <https://buf.build/streamingfast/firehose/docs/main:sf.firehose.v2>
-- **Solana types**: <https://buf.build/streamingfast/firehose-solana/docs/main:sf.solana.type.v1>
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+[MIT](LICENSE)
