@@ -63,7 +63,7 @@ REQUIRED:
   -e, --endpoint <URL>       Firehose gRPC endpoint URL
 
 CHAIN SELECTION:
-  --block-type <TYPE>        auto (default) | evm | bitcoin | solana | near | antelope | cosmos | tron | beacon
+  --block-type <TYPE>        auto (default) | evm | solana | bitcoin | beacon | tron | cosmos | antelope | near
                              "auto" detects the chain from the Firehose stream
 
 AUTHENTICATION:
@@ -162,7 +162,7 @@ Every table across all chains includes these 6 columns (from Firehose `BlockMeta
 
 ## Environment Variables
 
-All CLI flags can be set via environment variables. Copy `.env.example` to `.env`:
+CLI flags can also be set via environment variables. Copy `.env.example` to `.env`:
 
 ```bash
 # Authentication — set the env vars that the CLI reads by default
