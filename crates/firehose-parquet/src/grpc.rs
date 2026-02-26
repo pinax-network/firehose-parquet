@@ -258,7 +258,9 @@ async fn connect_insecure(endpoint: Endpoint) -> Result<Channel> {
     let connector = tower::service_fn(move |uri: http::Uri| {
         let tls = tls_connector.clone();
         async move {
-            let host = uri.host().unwrap_or("localhost").to_string();
+            let host = uri.host()
+                .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "URI has no host"))?
+                .to_string();
             let port = uri.port_u16().unwrap_or(443);
             let addr = format!("{host}:{port}");
 
