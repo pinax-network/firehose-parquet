@@ -1,8 +1,75 @@
-use arrow::array::{ArrayBuilder, Int64Builder, StringBuilder, UInt64Builder};
+use arrow::array::{
+    ArrayBuilder, BinaryBuilder, BooleanBuilder, Float64Builder, Int32Builder, Int64Builder,
+    ListBuilder, StringBuilder, UInt32Builder, UInt64Builder,
+};
 use arrow::datatypes::{DataType, Field};
 use arrow::record_batch::RecordBatch;
 use std::collections::HashMap;
 use std::sync::Arc;
+
+// ---------------------------------------------------------------------------
+// Arrow builder memory estimation helpers
+// ---------------------------------------------------------------------------
+
+/// Estimate memory usage of a `UInt64Builder`.
+pub fn est_u64(b: &UInt64Builder) -> usize {
+    b.len() * 8
+}
+
+/// Estimate memory usage of a `UInt32Builder`.
+pub fn est_u32(b: &UInt32Builder) -> usize {
+    b.len() * 4
+}
+
+/// Estimate memory usage of an `Int64Builder`.
+pub fn est_i64(b: &Int64Builder) -> usize {
+    b.len() * 8
+}
+
+/// Estimate memory usage of an `Int32Builder`.
+pub fn est_i32(b: &Int32Builder) -> usize {
+    b.len() * 4
+}
+
+/// Estimate memory usage of a `Float64Builder`.
+pub fn est_f64(b: &Float64Builder) -> usize {
+    b.len() * 8
+}
+
+/// Estimate memory usage of a `BooleanBuilder`.
+pub fn est_bool(b: &BooleanBuilder) -> usize {
+    (b.len() + 7) / 8
+}
+
+/// Estimate memory usage of a `StringBuilder` (offsets + values).
+pub fn est_str(b: &StringBuilder) -> usize {
+    b.values_slice().len() + (b.len() + 1) * 4
+}
+
+/// Estimate memory usage of an `Option<StringBuilder>`.
+pub fn est_opt_str(b: &Option<StringBuilder>) -> usize {
+    b.as_ref().map_or(0, est_str)
+}
+
+/// Estimate memory usage of a `BinaryBuilder` (offsets + values).
+pub fn est_bin(b: &BinaryBuilder) -> usize {
+    b.values_slice().len() + (b.len() + 1) * 4
+}
+
+/// Estimate memory usage of a `ListBuilder<StringBuilder>` (offsets + inner).
+pub fn est_list_str(b: &mut ListBuilder<StringBuilder>) -> usize {
+    (b.len() + 1) * 4 + est_str(b.values())
+}
+
+/// Estimate memory usage of a `ListBuilder<UInt64Builder>` (offsets + inner).
+pub fn est_list_u64(b: &mut ListBuilder<UInt64Builder>) -> usize {
+    (b.len() + 1) * 4 + est_u64(b.values())
+}
+
+/// Estimate memory usage of a `ListBuilder<BinaryBuilder>` (offsets + inner).
+pub fn est_list_bin(b: &mut ListBuilder<BinaryBuilder>) -> usize {
+    (b.len() + 1) * 4 + est_bin(b.values())
+}
 
 /// Canonical block identity from Firehose BlockMetadata.
 /// Added to every output table for chain-agnostic identification.
@@ -78,6 +145,16 @@ impl CanonicalBuilder {
     pub fn len(&self) -> usize {
         self.block_num.len()
     }
+
+    /// Estimate in-memory byte usage of all canonical columns.
+    pub fn estimated_bytes(&self) -> usize {
+        est_u64(&self.block_num)
+            + est_str(&self.block_id)
+            + est_u64(&self.parent_num)
+            + est_str(&self.parent_id)
+            + est_u64(&self.lib_num)
+            + est_i64(&self.timestamp)
+    }
 }
 
 /// Convert a Firehose ForkStep integer to a human-readable string.
@@ -130,6 +207,9 @@ pub trait BlockMapper {
 
     /// Get current max rows across all tables.
     fn max_table_rows(&self) -> usize;
+
+    /// Estimate total in-memory byte usage across all Arrow builders.
+    fn estimated_bytes(&mut self) -> usize;
 
     /// Get table names.
     fn table_names(&self) -> Vec<&str>;

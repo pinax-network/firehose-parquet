@@ -4,7 +4,10 @@ use arrow::array::*;
 use arrow::datatypes::Schema;
 use arrow::record_batch::RecordBatch;
 use firehose_parquet::encode::{BytesColumn, EncodeBytes};
-use firehose_parquet::traits::{BlockIdentity, BlockMapper, CanonicalBuilder};
+use firehose_parquet::traits::{
+    est_bool, est_i32, est_i64, est_opt_str, est_str, est_u32, est_u64,
+    BlockIdentity, BlockMapper, CanonicalBuilder,
+};
 use prost::Message;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -156,6 +159,57 @@ impl BlockMapper for TronBlockMapper {
             .max(self.transactions.canonical.len())
             .max(self.logs.canonical.len())
             .max(self.internal_transactions.canonical.len())
+    }
+
+    fn estimated_bytes(&mut self) -> usize {
+        // blocks
+        self.blocks.canonical.estimated_bytes()
+            + est_u64(&self.blocks.number)
+            + self.blocks.hash.estimated_bytes()
+            + self.blocks.parent_hash.estimated_bytes()
+            + est_i64(&self.blocks.timestamp)
+            + self.blocks.witness_address.estimated_bytes()
+            + est_u32(&self.blocks.version)
+            + self.blocks.tx_trie_root.estimated_bytes()
+            + est_u64(&self.blocks.parent_number)
+            + est_u32(&self.blocks.num_transactions)
+            + est_opt_str(&self.blocks.fork_step)
+        // transactions
+            + self.transactions.canonical.estimated_bytes()
+            + est_u64(&self.transactions.block_number)
+            + self.transactions.txid.estimated_bytes()
+            + est_bool(&self.transactions.result)
+            + est_i32(&self.transactions.code)
+            + est_i64(&self.transactions.energy_used)
+            + est_i64(&self.transactions.energy_penalty)
+            + est_i64(&self.transactions.fee)
+            + est_i32(&self.transactions.contract_type)
+            + est_i64(&self.transactions.expiration)
+            + est_i64(&self.transactions.timestamp)
+            + est_opt_str(&self.transactions.fork_step)
+        // logs
+            + self.logs.canonical.estimated_bytes()
+            + est_u64(&self.logs.block_number)
+            + self.logs.tx_hash.estimated_bytes()
+            + est_u32(&self.logs.log_index)
+            + self.logs.address.estimated_bytes()
+            + self.logs.topic0.estimated_bytes()
+            + self.logs.topic1.estimated_bytes()
+            + self.logs.topic2.estimated_bytes()
+            + self.logs.topic3.estimated_bytes()
+            + self.logs.data.estimated_bytes()
+            + est_opt_str(&self.logs.fork_step)
+        // internal_transactions
+            + self.internal_transactions.canonical.estimated_bytes()
+            + est_u64(&self.internal_transactions.block_number)
+            + self.internal_transactions.tx_hash.estimated_bytes()
+            + est_u32(&self.internal_transactions.internal_index)
+            + self.internal_transactions.hash.estimated_bytes()
+            + self.internal_transactions.caller_address.estimated_bytes()
+            + self.internal_transactions.transfer_to_address.estimated_bytes()
+            + est_str(&self.internal_transactions.note)
+            + est_bool(&self.internal_transactions.rejected)
+            + est_opt_str(&self.internal_transactions.fork_step)
     }
 
     fn table_names(&self) -> Vec<&str> {

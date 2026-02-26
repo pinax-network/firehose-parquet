@@ -4,7 +4,10 @@ use arrow::array::*;
 use arrow::datatypes::Schema;
 use arrow::record_batch::RecordBatch;
 use firehose_parquet::encode::{BytesColumn, EncodeBytes};
-use firehose_parquet::traits::{BlockIdentity, BlockMapper, CanonicalBuilder};
+use firehose_parquet::traits::{
+    est_bool, est_i32, est_i64, est_opt_str, est_str, est_u32, est_u64,
+    BlockIdentity, BlockMapper, CanonicalBuilder,
+};
 use prost::Message;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -435,6 +438,270 @@ impl BlockMapper for EvmBlockMapper {
         if let Some(ref b) = self.system_gas_changes { max = max.max(b.canonical.len()); }
         if let Some(ref b) = self.system_account_creations { max = max.max(b.canonical.len()); }
         max
+    }
+
+    fn estimated_bytes(&mut self) -> usize {
+        // blocks
+        let mut total = self.blocks.canonical.estimated_bytes()
+            + est_u64(&self.blocks.number)
+            + self.blocks.hash.estimated_bytes()
+            + self.blocks.parent_hash.estimated_bytes()
+            + est_i64(&self.blocks.timestamp)
+            + est_u64(&self.blocks.gas_used)
+            + est_u64(&self.blocks.gas_limit)
+            + est_str(&self.blocks.base_fee_per_gas)
+            + self.blocks.coinbase.estimated_bytes()
+            + est_u64(&self.blocks.size)
+            + est_u64(&self.blocks.nonce)
+            + self.blocks.state_root.estimated_bytes()
+            + self.blocks.transactions_root.estimated_bytes()
+            + self.blocks.receipt_root.estimated_bytes()
+            + est_str(&self.blocks.difficulty)
+            + self.blocks.mix_hash.estimated_bytes()
+            + self.blocks.extra_data.estimated_bytes()
+            + est_u32(&self.blocks.num_transactions)
+            + est_i32(&self.blocks.detail_level)
+            + est_opt_str(&self.blocks.fork_step);
+        // transactions
+        total += self.transactions.canonical.estimated_bytes()
+            + est_u64(&self.transactions.block_number)
+            + est_u32(&self.transactions.index)
+            + self.transactions.hash.estimated_bytes()
+            + self.transactions.from.estimated_bytes()
+            + self.transactions.to.estimated_bytes()
+            + est_str(&self.transactions.value)
+            + est_u64(&self.transactions.gas_limit)
+            + est_u64(&self.transactions.gas_used)
+            + est_str(&self.transactions.gas_price)
+            + est_i32(&self.transactions.r#type)
+            + est_i32(&self.transactions.status)
+            + est_u64(&self.transactions.nonce)
+            + self.transactions.input.estimated_bytes()
+            + est_str(&self.transactions.max_fee_per_gas)
+            + est_str(&self.transactions.max_priority_fee_per_gas)
+            + est_u64(&self.transactions.cumulative_gas_used)
+            + est_opt_str(&self.transactions.fork_step);
+        // logs
+        total += self.logs.canonical.estimated_bytes()
+            + est_u64(&self.logs.block_number)
+            + self.logs.tx_hash.estimated_bytes()
+            + est_u32(&self.logs.tx_index)
+            + est_u32(&self.logs.log_index)
+            + est_u32(&self.logs.block_index)
+            + self.logs.address.estimated_bytes()
+            + self.logs.topic0.estimated_bytes()
+            + self.logs.topic1.estimated_bytes()
+            + self.logs.topic2.estimated_bytes()
+            + self.logs.topic3.estimated_bytes()
+            + self.logs.data.estimated_bytes()
+            + est_opt_str(&self.logs.fork_step);
+        // calls (tx-level)
+        macro_rules! est_calls {
+            ($b:expr) => {
+                $b.canonical.estimated_bytes()
+                    + est_u64(&$b.block_number)
+                    + $b.tx_hash.estimated_bytes()
+                    + est_u32(&$b.tx_index)
+                    + est_u32(&$b.call_index)
+                    + est_u32(&$b.parent_index)
+                    + est_u32(&$b.depth)
+                    + est_i32(&$b.call_type)
+                    + $b.caller.estimated_bytes()
+                    + $b.address.estimated_bytes()
+                    + est_str(&$b.value)
+                    + est_u64(&$b.gas_limit)
+                    + est_u64(&$b.gas_consumed)
+                    + $b.input.estimated_bytes()
+                    + $b.output.estimated_bytes()
+                    + est_bool(&$b.status_failed)
+                    + est_bool(&$b.status_reverted)
+                    + est_bool(&$b.state_reverted)
+                    + est_bool(&$b.executed_code)
+                    + est_bool(&$b.suicide)
+                    + est_opt_str(&$b.fork_step)
+            };
+        }
+        // system_calls (block-level, no tx_hash/tx_index)
+        macro_rules! est_sys_calls {
+            ($b:expr) => {
+                $b.canonical.estimated_bytes()
+                    + est_u64(&$b.block_number)
+                    + est_u32(&$b.call_index)
+                    + est_u32(&$b.parent_index)
+                    + est_u32(&$b.depth)
+                    + est_i32(&$b.call_type)
+                    + $b.caller.estimated_bytes()
+                    + $b.address.estimated_bytes()
+                    + est_str(&$b.value)
+                    + est_u64(&$b.gas_limit)
+                    + est_u64(&$b.gas_consumed)
+                    + $b.input.estimated_bytes()
+                    + $b.output.estimated_bytes()
+                    + est_bool(&$b.status_failed)
+                    + est_bool(&$b.status_reverted)
+                    + est_bool(&$b.state_reverted)
+                    + est_bool(&$b.executed_code)
+                    + est_bool(&$b.suicide)
+                    + est_opt_str(&$b.fork_step)
+            };
+        }
+        macro_rules! est_balance_changes {
+            ($b:expr) => {
+                $b.canonical.estimated_bytes()
+                    + est_u64(&$b.block_number)
+                    + $b.tx_hash.estimated_bytes()
+                    + est_u64(&$b.ordinal)
+                    + $b.address.estimated_bytes()
+                    + est_str(&$b.old_value)
+                    + est_str(&$b.new_value)
+                    + est_i32(&$b.reason)
+                    + est_opt_str(&$b.fork_step)
+            };
+        }
+        macro_rules! est_sys_balance_changes {
+            ($b:expr) => {
+                $b.canonical.estimated_bytes()
+                    + est_u64(&$b.block_number)
+                    + est_u64(&$b.ordinal)
+                    + $b.address.estimated_bytes()
+                    + est_str(&$b.old_value)
+                    + est_str(&$b.new_value)
+                    + est_i32(&$b.reason)
+                    + est_opt_str(&$b.fork_step)
+            };
+        }
+        macro_rules! est_code_changes {
+            ($b:expr) => {
+                $b.canonical.estimated_bytes()
+                    + est_u64(&$b.block_number)
+                    + $b.tx_hash.estimated_bytes()
+                    + est_u64(&$b.ordinal)
+                    + $b.address.estimated_bytes()
+                    + $b.old_hash.estimated_bytes()
+                    + $b.new_hash.estimated_bytes()
+                    + $b.old_code.estimated_bytes()
+                    + $b.new_code.estimated_bytes()
+                    + est_opt_str(&$b.fork_step)
+            };
+        }
+        macro_rules! est_sys_code_changes {
+            ($b:expr) => {
+                $b.canonical.estimated_bytes()
+                    + est_u64(&$b.block_number)
+                    + est_u64(&$b.ordinal)
+                    + $b.address.estimated_bytes()
+                    + $b.old_hash.estimated_bytes()
+                    + $b.new_hash.estimated_bytes()
+                    + $b.old_code.estimated_bytes()
+                    + $b.new_code.estimated_bytes()
+                    + est_opt_str(&$b.fork_step)
+            };
+        }
+        macro_rules! est_storage_changes {
+            ($b:expr) => {
+                $b.canonical.estimated_bytes()
+                    + est_u64(&$b.block_number)
+                    + $b.tx_hash.estimated_bytes()
+                    + est_u64(&$b.ordinal)
+                    + $b.address.estimated_bytes()
+                    + $b.key.estimated_bytes()
+                    + $b.old_value.estimated_bytes()
+                    + $b.new_value.estimated_bytes()
+                    + est_opt_str(&$b.fork_step)
+            };
+        }
+        macro_rules! est_sys_storage_changes {
+            ($b:expr) => {
+                $b.canonical.estimated_bytes()
+                    + est_u64(&$b.block_number)
+                    + est_u64(&$b.ordinal)
+                    + $b.address.estimated_bytes()
+                    + $b.key.estimated_bytes()
+                    + $b.old_value.estimated_bytes()
+                    + $b.new_value.estimated_bytes()
+                    + est_opt_str(&$b.fork_step)
+            };
+        }
+        macro_rules! est_nonce_changes {
+            ($b:expr) => {
+                $b.canonical.estimated_bytes()
+                    + est_u64(&$b.block_number)
+                    + $b.tx_hash.estimated_bytes()
+                    + est_u64(&$b.ordinal)
+                    + $b.address.estimated_bytes()
+                    + est_u64(&$b.old_value)
+                    + est_u64(&$b.new_value)
+                    + est_opt_str(&$b.fork_step)
+            };
+        }
+        macro_rules! est_sys_nonce_changes {
+            ($b:expr) => {
+                $b.canonical.estimated_bytes()
+                    + est_u64(&$b.block_number)
+                    + est_u64(&$b.ordinal)
+                    + $b.address.estimated_bytes()
+                    + est_u64(&$b.old_value)
+                    + est_u64(&$b.new_value)
+                    + est_opt_str(&$b.fork_step)
+            };
+        }
+        macro_rules! est_gas_changes {
+            ($b:expr) => {
+                $b.canonical.estimated_bytes()
+                    + est_u64(&$b.block_number)
+                    + $b.tx_hash.estimated_bytes()
+                    + est_u64(&$b.ordinal)
+                    + est_u64(&$b.old_value)
+                    + est_u64(&$b.new_value)
+                    + est_i32(&$b.reason)
+                    + est_opt_str(&$b.fork_step)
+            };
+        }
+        macro_rules! est_sys_gas_changes {
+            ($b:expr) => {
+                $b.canonical.estimated_bytes()
+                    + est_u64(&$b.block_number)
+                    + est_u64(&$b.ordinal)
+                    + est_u64(&$b.old_value)
+                    + est_u64(&$b.new_value)
+                    + est_i32(&$b.reason)
+                    + est_opt_str(&$b.fork_step)
+            };
+        }
+        macro_rules! est_account_creations {
+            ($b:expr) => {
+                $b.canonical.estimated_bytes()
+                    + est_u64(&$b.block_number)
+                    + $b.tx_hash.estimated_bytes()
+                    + est_u64(&$b.ordinal)
+                    + $b.account.estimated_bytes()
+                    + est_opt_str(&$b.fork_step)
+            };
+        }
+        macro_rules! est_sys_account_creations {
+            ($b:expr) => {
+                $b.canonical.estimated_bytes()
+                    + est_u64(&$b.block_number)
+                    + est_u64(&$b.ordinal)
+                    + $b.account.estimated_bytes()
+                    + est_opt_str(&$b.fork_step)
+            };
+        }
+        if let Some(ref b) = self.calls { total += est_calls!(b); }
+        if let Some(ref b) = self.balance_changes { total += est_balance_changes!(b); }
+        if let Some(ref b) = self.code_changes { total += est_code_changes!(b); }
+        if let Some(ref b) = self.storage_changes { total += est_storage_changes!(b); }
+        if let Some(ref b) = self.nonce_changes { total += est_nonce_changes!(b); }
+        if let Some(ref b) = self.gas_changes { total += est_gas_changes!(b); }
+        if let Some(ref b) = self.account_creations { total += est_account_creations!(b); }
+        if let Some(ref b) = self.system_calls { total += est_sys_calls!(b); }
+        if let Some(ref b) = self.system_balance_changes { total += est_sys_balance_changes!(b); }
+        if let Some(ref b) = self.system_code_changes { total += est_sys_code_changes!(b); }
+        if let Some(ref b) = self.system_storage_changes { total += est_sys_storage_changes!(b); }
+        if let Some(ref b) = self.system_nonce_changes { total += est_sys_nonce_changes!(b); }
+        if let Some(ref b) = self.system_gas_changes { total += est_sys_gas_changes!(b); }
+        if let Some(ref b) = self.system_account_creations { total += est_sys_account_creations!(b); }
+        total
     }
 
     fn table_names(&self) -> Vec<&str> {

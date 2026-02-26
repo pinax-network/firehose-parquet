@@ -3,7 +3,10 @@ use super::schema;
 use arrow::array::*;
 use arrow::datatypes::Schema;
 use arrow::record_batch::RecordBatch;
-use firehose_parquet::traits::{BlockIdentity, BlockMapper, CanonicalBuilder};
+use firehose_parquet::traits::{
+    est_f64, est_i32, est_i64, est_list_str, est_opt_str, est_str, est_u32,
+    BlockIdentity, BlockMapper, CanonicalBuilder,
+};
 use prost::Message;
 use std::collections::HashMap;
 use arrow::array::Array;
@@ -166,6 +169,65 @@ impl BlockMapper for BitcoinBlockMapper {
             .max(self.transactions.canonical.len())
             .max(self.inputs.canonical.len())
             .max(self.outputs.canonical.len())
+    }
+
+    fn estimated_bytes(&mut self) -> usize {
+        // blocks
+        self.blocks.canonical.estimated_bytes()
+            + est_str(&self.blocks.hash)
+            + est_i64(&self.blocks.height)
+            + est_str(&self.blocks.previous_hash)
+            + est_str(&self.blocks.merkle_root)
+            + est_i64(&self.blocks.time)
+            + est_u32(&self.blocks.nonce)
+            + est_str(&self.blocks.bits)
+            + est_f64(&self.blocks.difficulty)
+            + est_i32(&self.blocks.size)
+            + est_i32(&self.blocks.stripped_size)
+            + est_i32(&self.blocks.weight)
+            + est_i32(&self.blocks.version)
+            + est_u32(&self.blocks.n_tx)
+            + est_i64(&self.blocks.mediantime)
+            + est_str(&self.blocks.chainwork)
+            + est_opt_str(&self.blocks.fork_step)
+        // transactions
+            + self.transactions.canonical.estimated_bytes()
+            + est_str(&self.transactions.txid)
+            + est_str(&self.transactions.hash)
+            + est_i32(&self.transactions.size)
+            + est_i32(&self.transactions.vsize)
+            + est_i32(&self.transactions.weight)
+            + est_u32(&self.transactions.version)
+            + est_u32(&self.transactions.locktime)
+            + est_str(&self.transactions.block_hash)
+            + est_i64(&self.transactions.block_height)
+            + est_i64(&self.transactions.block_time)
+            + est_u32(&self.transactions.tx_index)
+            + est_opt_str(&self.transactions.fork_step)
+        // inputs
+            + self.inputs.canonical.estimated_bytes()
+            + est_str(&self.inputs.tx_hash)
+            + est_i64(&self.inputs.block_height)
+            + est_u32(&self.inputs.input_index)
+            + est_str(&self.inputs.prev_txid)
+            + est_u32(&self.inputs.prev_vout)
+            + est_u32(&self.inputs.sequence)
+            + est_str(&self.inputs.script_sig_asm)
+            + est_str(&self.inputs.script_sig_hex)
+            + est_str(&self.inputs.coinbase)
+            + est_list_str(&mut self.inputs.witness)
+            + est_opt_str(&self.inputs.fork_step)
+        // outputs
+            + self.outputs.canonical.estimated_bytes()
+            + est_str(&self.outputs.tx_hash)
+            + est_i64(&self.outputs.block_height)
+            + est_u32(&self.outputs.output_index)
+            + est_f64(&self.outputs.value)
+            + est_str(&self.outputs.script_pubkey_asm)
+            + est_str(&self.outputs.script_pubkey_hex)
+            + est_str(&self.outputs.script_pubkey_type)
+            + est_str(&self.outputs.script_pubkey_address)
+            + est_opt_str(&self.outputs.fork_step)
     }
 
     fn table_names(&self) -> Vec<&str> {

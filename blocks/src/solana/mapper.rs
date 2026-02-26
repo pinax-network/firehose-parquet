@@ -4,7 +4,10 @@ use arrow::array::*;
 use arrow::datatypes::Schema;
 use arrow::record_batch::RecordBatch;
 use firehose_parquet::encode::{BytesColumn, BytesListColumn, EncodeBytes};
-use firehose_parquet::traits::{BlockIdentity, BlockMapper, CanonicalBuilder};
+use firehose_parquet::traits::{
+    est_bool, est_i32, est_i64, est_list_str, est_list_u64, est_opt_str, est_str, est_u32, est_u64,
+    BlockIdentity, BlockMapper, CanonicalBuilder,
+};
 use prost::Message;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -253,6 +256,68 @@ impl BlockMapper for SolanaBlockMapper {
         .into_iter()
         .max()
         .unwrap_or(0)
+    }
+
+    fn estimated_bytes(&mut self) -> usize {
+        // blocks
+        self.blocks.canonical.estimated_bytes()
+            + est_u64(&self.blocks.slot)
+            + est_u64(&self.blocks.parent_slot)
+            + est_u64(&self.blocks.block_height)
+            + est_str(&self.blocks.blockhash)
+            + est_str(&self.blocks.previous_blockhash)
+            + est_i64(&self.blocks.block_time)
+            + est_u32(&self.blocks.num_transactions)
+            + est_u32(&self.blocks.num_rewards)
+            + est_opt_str(&self.blocks.fork_step)
+        // transactions
+            + self.transactions.canonical.estimated_bytes()
+            + est_u64(&self.transactions.slot)
+            + est_u32(&self.transactions.transaction_index)
+            + self.transactions.signature.estimated_bytes()
+            + est_u32(&self.transactions.num_signatures)
+            + est_u64(&self.transactions.fee)
+            + self.transactions.err.estimated_bytes()
+            + est_bool(&self.transactions.success)
+            + est_u64(&self.transactions.compute_units_consumed)
+            + est_list_str(&mut self.transactions.log_messages)
+            + est_list_u64(&mut self.transactions.pre_balances)
+            + est_list_u64(&mut self.transactions.post_balances)
+            + est_opt_str(&self.transactions.fork_step)
+        // messages
+            + self.messages.canonical.estimated_bytes()
+            + est_u64(&self.messages.slot)
+            + est_u32(&self.messages.transaction_index)
+            + est_u32(&self.messages.message_index)
+            + est_u32(&self.messages.num_required_signatures)
+            + est_u32(&self.messages.num_readonly_signed_accounts)
+            + est_u32(&self.messages.num_readonly_unsigned_accounts)
+            + self.messages.recent_blockhash.estimated_bytes()
+            + est_bool(&self.messages.versioned)
+            + self.messages.account_keys.estimated_bytes()
+            + est_opt_str(&self.messages.fork_step)
+        // instructions
+            + self.instructions.canonical.estimated_bytes()
+            + est_u64(&self.instructions.slot)
+            + est_u32(&self.instructions.transaction_index)
+            + est_u32(&self.instructions.instruction_index)
+            + est_u32(&self.instructions.program_id_index)
+            + self.instructions.accounts.estimated_bytes()
+            + self.instructions.data.estimated_bytes()
+            + est_bool(&self.instructions.is_inner)
+            + est_u32(&self.instructions.inner_index)
+            + est_u32(&self.instructions.stack_height)
+            + est_opt_str(&self.instructions.fork_step)
+        // rewards
+            + self.rewards.canonical.estimated_bytes()
+            + est_u64(&self.rewards.slot)
+            + est_u32(&self.rewards.reward_index)
+            + est_str(&self.rewards.pubkey)
+            + est_i64(&self.rewards.lamports)
+            + est_u64(&self.rewards.post_balance)
+            + est_i32(&self.rewards.reward_type)
+            + est_str(&self.rewards.commission)
+            + est_opt_str(&self.rewards.fork_step)
     }
 
     fn table_names(&self) -> Vec<&str> {

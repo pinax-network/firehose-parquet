@@ -162,6 +162,14 @@ impl BytesColumn {
             BytesColumn::String(b, _) => b.len(),
         }
     }
+
+    /// Estimate in-memory byte usage (offsets + values).
+    pub fn estimated_bytes(&self) -> usize {
+        match self {
+            BytesColumn::Binary(b) => b.values_slice().len() + (b.len() + 1) * 4,
+            BytesColumn::String(b, _) => b.values_slice().len() + (b.len() + 1) * 4,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -213,6 +221,25 @@ impl BytesListColumn {
     pub fn data_type(encoding: &EncodeBytes) -> DataType {
         use arrow::datatypes::Field;
         DataType::List(Arc::new(Field::new("item", bytes_data_type(encoding), true)))
+    }
+
+    /// Estimate in-memory byte usage (offsets + inner builder).
+    pub fn estimated_bytes(&mut self) -> usize {
+        let inner = match self {
+            BytesListColumn::Binary(b) => {
+                let v = b.values();
+                v.values_slice().len() + (v.len() + 1) * 4
+            }
+            BytesListColumn::String(b, _) => {
+                let v = b.values();
+                v.values_slice().len() + (v.len() + 1) * 4
+            }
+        };
+        let len = match self {
+            BytesListColumn::Binary(b) => b.len(),
+            BytesListColumn::String(b, _) => b.len(),
+        };
+        (len + 1) * 4 + inner
     }
 }
 

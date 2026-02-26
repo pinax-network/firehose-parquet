@@ -4,7 +4,10 @@ use arrow::array::*;
 use arrow::datatypes::Schema;
 use arrow::record_batch::RecordBatch;
 use firehose_parquet::encode::{BytesColumn, EncodeBytes};
-use firehose_parquet::traits::{BlockIdentity, BlockMapper, CanonicalBuilder};
+use firehose_parquet::traits::{
+    est_bin, est_i32, est_i64, est_opt_str, est_str, est_u32,
+    BlockIdentity, BlockMapper, CanonicalBuilder,
+};
 use prost::Message;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
@@ -187,6 +190,50 @@ impl BlockMapper for CosmosBlockMapper {
             .max(self.transactions.canonical.len())
             .max(self.events.canonical.len())
             .max(self.messages.canonical.len())
+    }
+
+    fn estimated_bytes(&mut self) -> usize {
+        // blocks
+        self.blocks.canonical.estimated_bytes()
+            + est_i64(&self.blocks.height)
+            + self.blocks.hash.estimated_bytes()
+            + est_i64(&self.blocks.time)
+            + est_str(&self.blocks.chain_id)
+            + self.blocks.proposer_address.estimated_bytes()
+            + self.blocks.last_block_id_hash.estimated_bytes()
+            + self.blocks.validators_hash.estimated_bytes()
+            + self.blocks.next_validators_hash.estimated_bytes()
+            + est_u32(&self.blocks.num_txs)
+            + est_opt_str(&self.blocks.fork_step)
+        // transactions
+            + self.transactions.canonical.estimated_bytes()
+            + self.transactions.tx_hash.estimated_bytes()
+            + est_u32(&self.transactions.index)
+            + est_u32(&self.transactions.code)
+            + est_i64(&self.transactions.gas_wanted)
+            + est_i64(&self.transactions.gas_used)
+            + est_str(&self.transactions.log)
+            + est_str(&self.transactions.info)
+            + est_str(&self.transactions.codespace)
+            + est_opt_str(&self.transactions.fork_step)
+        // events
+            + self.events.canonical.estimated_bytes()
+            + est_str(&self.events.source)
+            + self.events.tx_hash.estimated_bytes()
+            + est_i32(&self.events.tx_index)
+            + est_u32(&self.events.event_index)
+            + est_str(&self.events.r#type)
+            + est_str(&self.events.key)
+            + est_str(&self.events.value)
+            + est_opt_str(&self.events.fork_step)
+        // messages
+            + self.messages.canonical.estimated_bytes()
+            + self.messages.tx_hash.estimated_bytes()
+            + est_u32(&self.messages.tx_index)
+            + est_u32(&self.messages.message_index)
+            + est_str(&self.messages.type_url)
+            + est_bin(&self.messages.value)
+            + est_opt_str(&self.messages.fork_step)
     }
 
     fn table_names(&self) -> Vec<&str> {
