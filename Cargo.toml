@@ -1,7 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/firehose-protos",
-    "crates/firehose-parquet",
-    "crates/blocks",
+    "firehose-protos",
+    "firehose-parquet",
+    "blocks",
 ]
