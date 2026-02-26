@@ -37,7 +37,6 @@ cargo build --release --workspace
 # Stream Solana blocks to Parquet
 ./target/release/firehose-solana-to-parquet \
   --endpoint https://solana.firehose.pinax.network:443 \
-  --api-key $FIREHOSE_API_KEY \
   --start-block 200000000 \
   --stop-block 200001000 \
   --output ./output \
@@ -47,11 +46,10 @@ cargo build --release --workspace
 # Stream EVM blocks with extended traces
 ./target/release/firehose-evm-to-parquet \
   --endpoint https://eth.firehose.pinax.network:443 \
-  --api-key $FIREHOSE_API_KEY \
   --start-block 19000000 \
   --stop-block 19001000 \
   --extended \
-  --encode-bytes hex
+  --bytes-encoding hex
 ```
 
 ## CLI Reference
@@ -60,16 +58,20 @@ All binaries share these common flags:
 
 ```
 REQUIRED:
-  --endpoint <URL>           Firehose gRPC endpoint URL
+  -e, --endpoint <URL>       Firehose gRPC endpoint URL
 
-AUTHENTICATION (one of):
-  --api-key <KEY>            API key (also: FIREHOSE_API_KEY env var)
-  --jwt-token <TOKEN>        JWT bearer token (also: SUBSTREAMS_API_TOKEN env var)
+AUTHENTICATION:
+  --api-key-envvar <NAME>    Env var name for API key (default: SUBSTREAMS_API_KEY)
+  --api-token-envvar <NAME>  Env var name for JWT token (default: SUBSTREAMS_API_TOKEN)
+
+CONNECTION:
+  --insecure                 Skip certificate validation on gRPC connection
+  --plaintext                Use plaintext connection (no TLS)
 
 BLOCK RANGE:
-  --start-block <NUM>        Start block number (inclusive)
-  --stop-block <NUM>         Stop block number (inclusive, 0 = stream forever)
-  --cursor <STRING>          Resume cursor from a previous session
+  -s, --start-block <NUM>    Start block number (inclusive)
+  -t, --stop-block <NUM>     Stop block number (inclusive, 0 = stream forever)
+  -c, --cursor <STRING>      Resume cursor from a previous session
 
 OUTPUT:
   --output <DIR>             Output directory (default: "output")
@@ -85,8 +87,8 @@ FILE ROLLOVER:
   --flush-interval-secs <N>  Time-based flush interval (disabled by default)
 
 ENCODING:
-  --encode-bytes <MODE>      binary | hex | base58 | tron_base58 | auto
-                             Default varies by chain (hex for EVM, binary for Solana)
+  --bytes-encoding <MODE>    binary | hex | base58 | tron_base58 | auto
+                             Default varies by chain (hex for EVM, base58 for Solana)
 
 FORK HANDLING:
   --final-blocks-only        Only process finalized blocks (default: true)
@@ -160,8 +162,8 @@ Every table across all chains includes these 6 columns (from Firehose `BlockMeta
 Copy `.env.example` to `.env`:
 
 ```bash
-# Authentication (one of these is typically required)
-FIREHOSE_API_KEY=your-api-key-here
+# Authentication — set the env vars that the CLI reads by default
+SUBSTREAMS_API_KEY=your-api-key-here
 SUBSTREAMS_API_TOKEN=your-jwt-token-here
 ```
 

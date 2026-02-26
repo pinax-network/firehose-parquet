@@ -42,8 +42,8 @@ struct Cli {
 
     /// Byte encoding strategy for binary fields (hashes, addresses, etc.)
     /// Options: binary (raw bytes), hex (0x-prefixed), base58, tron_base58, auto (chain-appropriate)
-    #[arg(long, env = "ENCODE_BYTES", default_value = "auto")]
-    encode_bytes: String,
+    #[arg(long, env = "BYTES_ENCODING", default_value = "auto")]
+    bytes_encoding: String,
 }
 
 /// Detect block type from a protobuf `Any.type_url`.
@@ -116,7 +116,7 @@ async fn main() -> Result<()> {
     }
 
     let extended = cli.extended;
-    let encode_bytes_str = cli.encode_bytes.clone();
+    let bytes_encoding_str = cli.bytes_encoding.clone();
     let config = build_config(&cli.common)?;
 
     info!(?config, block_type, extended, "starting pipeline");
@@ -132,7 +132,7 @@ async fn main() -> Result<()> {
     // If block type is known upfront, resolve encode_bytes and create mapper immediately.
     // If "auto", defer until first block arrives.
     let mut mapper: Option<Box<dyn BlockMapper>> = if block_type != "auto" {
-        let encode_bytes = parse_encode_bytes(&encode_bytes_str)
+        let encode_bytes = parse_encode_bytes(&bytes_encoding_str)
             .unwrap_or_else(|| default_encode_bytes(&block_type));
         Some(create_mapper(&block_type, extended, include_fork_step, encode_bytes)?)
     } else {
@@ -159,7 +159,7 @@ async fn main() -> Result<()> {
             if mapper.is_none() {
                 let detected = detect_block_type(&type_url)?;
                 info!(detected_type = %detected, type_url = %type_url, "auto-detected block type");
-                let encode_bytes = parse_encode_bytes(&encode_bytes_str)
+                let encode_bytes = parse_encode_bytes(&bytes_encoding_str)
                     .unwrap_or_else(|| default_encode_bytes(&detected));
                 mapper = Some(create_mapper(&detected, extended, include_fork_step, encode_bytes)?);
             }
