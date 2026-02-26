@@ -22,8 +22,6 @@ fn finish_fork_step(builder: &mut Option<StringBuilder>, columns: &mut Vec<Arc<d
 }
 
 pub struct SolanaBlockMapper {
-    include_fork_step: bool,
-    encoding: EncodeBytes,
     blocks: BlocksBuilder,
     transactions: TransactionsBuilder,
     messages: MessagesBuilder,
@@ -39,7 +37,6 @@ pub struct SolanaBlockMapper {
 impl SolanaBlockMapper {
     pub fn new(include_fork_step: bool, encoding: EncodeBytes) -> Self {
         Self {
-            include_fork_step,
             blocks: BlocksBuilder::new(include_fork_step),
             transactions: TransactionsBuilder::new(include_fork_step, &encoding),
             messages: MessagesBuilder::new(include_fork_step, &encoding),
@@ -50,7 +47,6 @@ impl SolanaBlockMapper {
             messages_schema: schema::messages_schema(include_fork_step, &encoding),
             instructions_schema: schema::instructions_schema(include_fork_step, &encoding),
             rewards_schema: schema::rewards_schema(include_fork_step),
-            encoding,
         }
     }
 

@@ -45,8 +45,6 @@ fn mk_fork_step(include: bool) -> Option<StringBuilder> {
 
 pub struct EvmBlockMapper {
     extended: bool,
-    include_fork_step: bool,
-    encoding: EncodeBytes,
     // Standard builders
     blocks: EvmBlocksBuilder,
     transactions: EvmTransactionsBuilder,
@@ -78,8 +76,6 @@ impl EvmBlockMapper {
         let enc = &encoding;
         Self {
             extended,
-            include_fork_step,
-            encoding: encoding.clone(),
             blocks: EvmBlocksBuilder::new(ifs, enc),
             transactions: EvmTransactionsBuilder::new(ifs, enc),
             logs: EvmLogsBuilder::new(ifs, enc),

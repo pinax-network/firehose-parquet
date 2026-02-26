@@ -27,8 +27,6 @@ fn format_authorization(auth: &[antelope::PermissionLevel]) -> String {
 }
 
 pub struct AntelopeBlockMapper {
-    include_fork_step: bool,
-    encoding: EncodeBytes,
     blocks: BlocksBuilder,
     transactions: TransactionsBuilder,
     actions: ActionsBuilder,
@@ -43,7 +41,6 @@ impl AntelopeBlockMapper {
     pub fn new(include_fork_step: bool, encoding: EncodeBytes) -> Self {
         let enc = &encoding;
         Self {
-            include_fork_step,
             blocks: BlocksBuilder::new(include_fork_step),
             transactions: TransactionsBuilder::new(include_fork_step),
             actions: ActionsBuilder::new(include_fork_step),
@@ -52,7 +49,6 @@ impl AntelopeBlockMapper {
             transactions_schema: schema::transactions_schema(include_fork_step, enc),
             actions_schema: schema::actions_schema(include_fork_step, enc),
             db_ops_schema: schema::db_ops_schema(include_fork_step, enc),
-            encoding,
         }
     }
 

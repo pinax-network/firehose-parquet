@@ -205,7 +205,6 @@ fn base64_encode(data: &[u8]) -> String {
 // ---------------------------------------------------------------------------
 
 pub struct NearBlockMapper {
-    encoding: EncodeBytes,
     blocks: BlocksBuilder,
     chunks: ChunksBuilder,
     transactions: TransactionsBuilder,
@@ -232,7 +231,6 @@ impl NearBlockMapper {
             transactions_schema: schema::transactions_schema(include_fork_step, enc),
             receipts_schema: schema::receipts_schema(include_fork_step, enc),
             state_changes_schema: schema::state_changes_schema(include_fork_step, enc),
-            encoding,
         }
     }
 

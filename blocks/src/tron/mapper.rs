@@ -30,8 +30,6 @@ fn mk_fork_step(include: bool) -> Option<StringBuilder> {
 // ---------------------------------------------------------------------------
 
 pub struct TronBlockMapper {
-    include_fork_step: bool,
-    encoding: EncodeBytes,
     blocks: BlocksBuilder,
     transactions: TransactionsBuilder,
     logs: LogsBuilder,
@@ -46,7 +44,6 @@ impl TronBlockMapper {
     pub fn new(include_fork_step: bool, encoding: EncodeBytes) -> Self {
         let enc = &encoding;
         Self {
-            include_fork_step,
             blocks: BlocksBuilder::new(include_fork_step, enc),
             transactions: TransactionsBuilder::new(include_fork_step, enc),
             logs: LogsBuilder::new(include_fork_step, enc),
@@ -55,7 +52,6 @@ impl TronBlockMapper {
             transactions_schema: schema::transactions_schema(include_fork_step, enc),
             logs_schema: schema::logs_schema(include_fork_step, enc),
             internal_transactions_schema: schema::internal_transactions_schema(include_fork_step, enc),
-            encoding,
         }
     }
 

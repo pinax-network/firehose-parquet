@@ -30,7 +30,6 @@ fn mk_fork_step(include: bool) -> Option<StringBuilder> {
 // ---------------------------------------------------------------------------
 
 pub struct BitcoinBlockMapper {
-    include_fork_step: bool,
     blocks: BlocksBuilder,
     transactions: TransactionsBuilder,
     inputs: InputsBuilder,
@@ -44,7 +43,6 @@ pub struct BitcoinBlockMapper {
 impl BitcoinBlockMapper {
     pub fn new(include_fork_step: bool) -> Self {
         Self {
-            include_fork_step,
             blocks: BlocksBuilder::new(include_fork_step),
             transactions: TransactionsBuilder::new(include_fork_step),
             inputs: InputsBuilder::new(include_fork_step),

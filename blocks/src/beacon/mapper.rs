@@ -212,8 +212,6 @@ fn extract_body_fields(block: &beacon::Block) -> BodyFields<'_> {
 // ---------------------------------------------------------------------------
 
 pub struct BeaconBlockMapper {
-    include_fork_step: bool,
-    encoding: EncodeBytes,
     blocks: BlocksBuilder,
     attestations: AttestationsBuilder,
     deposits: DepositsBuilder,
@@ -236,7 +234,6 @@ impl BeaconBlockMapper {
     pub fn new(include_fork_step: bool, encoding: EncodeBytes) -> Self {
         let enc = &encoding;
         Self {
-            include_fork_step,
             blocks: BlocksBuilder::new(include_fork_step, enc),
             attestations: AttestationsBuilder::new(include_fork_step, enc),
             deposits: DepositsBuilder::new(include_fork_step, enc),
@@ -253,7 +250,6 @@ impl BeaconBlockMapper {
             voluntary_exits_schema: schema::voluntary_exits_schema(include_fork_step, enc),
             execution_payload_schema: schema::execution_payload_schema(include_fork_step, enc),
             blob_sidecars_schema: schema::blob_sidecars_schema(include_fork_step, enc),
-            encoding,
         }
     }
 

@@ -36,8 +36,6 @@ fn tx_hash_bytes(raw: &[u8]) -> Vec<u8> {
 // ---------------------------------------------------------------------------
 
 pub struct CosmosBlockMapper {
-    include_fork_step: bool,
-    encoding: EncodeBytes,
     blocks: BlocksBuilder,
     transactions: TransactionsBuilder,
     events: EventsBuilder,
@@ -52,7 +50,6 @@ impl CosmosBlockMapper {
     pub fn new(include_fork_step: bool, encoding: EncodeBytes) -> Self {
         let enc = &encoding;
         Self {
-            include_fork_step,
             blocks: BlocksBuilder::new(include_fork_step, enc),
             transactions: TransactionsBuilder::new(include_fork_step, enc),
             events: EventsBuilder::new(include_fork_step, enc),
@@ -61,7 +58,6 @@ impl CosmosBlockMapper {
             transactions_schema: schema::transactions_schema(include_fork_step, enc),
             events_schema: schema::events_schema(include_fork_step, enc),
             messages_schema: schema::messages_schema(include_fork_step, enc),
-            encoding,
         }
     }
 
