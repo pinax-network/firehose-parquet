@@ -73,21 +73,9 @@ jobs:
       - name: Package binaries
         shell: bash
         run: |
-          BINS=(
-            firehose-evm-to-parquet
-            firehose-bitcoin-to-parquet
-            firehose-solana-to-parquet
-            firehose-near-to-parquet
-            firehose-antelope-to-parquet
-            firehose-cosmos-to-parquet
-            firehose-tron-to-parquet
-            firehose-beacon-to-parquet
-          )
           STAGING="firehose-parquet-${{ matrix.suffix }}"
           mkdir -p "$STAGING"
-          for bin in "${BINS[@]}"; do
-            cp "target/${{ matrix.target }}/release/${bin}" "$STAGING/"
-          done
+          cp "target/${{ matrix.target }}/release/firehose-to-parquet" "$STAGING/"
           tar czf "${STAGING}.tar.gz" "$STAGING"
           echo "ASSET=${STAGING}.tar.gz" >> "$GITHUB_ENV"
 

@@ -50,7 +50,7 @@ impl FirehoseClient {
     /// unrecoverable error occurs.
     pub async fn stream_blocks<F>(&self, mut handler: F) -> Result<()>
     where
-        F: FnMut(Vec<u8>, String, BlockIdentity, i32) -> Result<()>,
+        F: FnMut(Vec<u8>, String, String, BlockIdentity, i32) -> Result<()>,
     {
         let mut cursor: Option<String> = self
             .config
@@ -158,7 +158,7 @@ impl FirehoseClient {
                         }).unwrap_or_default();
 
                         if let Some(any) = resp.block {
-                            handler(any.value, new_cursor.clone(), identity, resp.step)?;
+                            handler(any.value, any.type_url, new_cursor.clone(), identity, resp.step)?;
                         }
 
                         cursor = Some(new_cursor.clone());
