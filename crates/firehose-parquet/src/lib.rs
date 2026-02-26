@@ -1,5 +1,6 @@
 pub mod cli;
 pub mod config;
+pub mod cursor;
 pub mod encode;
 pub mod grpc;
 pub mod traits;

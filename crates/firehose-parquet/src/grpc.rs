@@ -1,4 +1,5 @@
 use crate::config::Config;
+use crate::cursor::{load_cursor, save_cursor};
 use crate::traits::BlockIdentity;
 use anyhow::{Context, Result};
 use backoff::ExponentialBackoffBuilder;
@@ -51,7 +52,11 @@ impl FirehoseClient {
     where
         F: FnMut(Vec<u8>, String, BlockIdentity, i32) -> Result<()>,
     {
-        let mut cursor: Option<String> = self.config.cursor.clone();
+        let mut cursor: Option<String> = self
+            .config
+            .cursor_path
+            .as_deref()
+            .and_then(load_cursor);
         let backoff_config = ExponentialBackoffBuilder::default()
             .with_initial_interval(Duration::from_secs(1))
             .with_max_interval(Duration::from_secs(60))
@@ -156,7 +161,13 @@ impl FirehoseClient {
                             handler(any.value, new_cursor.clone(), identity, resp.step)?;
                         }
 
-                        cursor = Some(new_cursor);
+                        cursor = Some(new_cursor.clone());
+
+                        if let Some(ref path) = self.config.cursor_path {
+                            if let Err(e) = save_cursor(path, &new_cursor) {
+                                warn!(error = %e, path = %path.display(), "failed to save cursor to file");
+                            }
+                        }
                     }
                     Ok(None) => {
                         info!("stream ended (stop block reached or server closed)");
