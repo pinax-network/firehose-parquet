@@ -70,6 +70,7 @@ CHAIN SELECTION:
 AUTHENTICATION:
   --api-key-envvar <NAME>    Env var name for API key (default: SUBSTREAMS_API_KEY)
   --api-token-envvar <NAME>  Env var name for JWT token (default: SUBSTREAMS_API_TOKEN)
+  --public                   Skip authentication (for public endpoints)
 
 CONNECTION:
   (TLS is automatically enabled for https:// endpoints, disabled for http://)
@@ -106,6 +107,14 @@ EVM-SPECIFIC:
 OTHER:
   --dry-run                  Decode and map but don't write files
   --log-level <LEVEL>        info (default) | debug | trace
+
+AWS S3 OUTPUT:
+  --output s3://bucket/path  Write Parquet files to an S3 bucket
+  --aws-access-key-id <KEY>  AWS access key ID
+  --aws-secret-access-key <SECRET>  AWS secret access key
+  --aws-session-token <TOKEN>       AWS session token (optional)
+  --aws-region <REGION>             AWS region (e.g. us-east-1)
+  --aws-endpoint-url <URL>          Custom S3 endpoint (for S3-compatible services)
 ```
 
 ## Output Directory Layout
@@ -168,6 +177,11 @@ CLI flags can also be set via environment variables. Copy `.env.example` to `.en
 # Authentication — set the env vars that the CLI reads by default
 SUBSTREAMS_API_KEY=your-api-key-here
 SUBSTREAMS_API_TOKEN=your-jwt-token-here
+
+# AWS S3 output (optional)
+# AWS_ACCESS_KEY_ID=...
+# AWS_SECRET_ACCESS_KEY=...
+# AWS_REGION=us-east-1
 ```
 
 See `.env.example` for the full list of supported environment variables.

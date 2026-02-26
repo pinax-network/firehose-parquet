@@ -127,7 +127,16 @@ async fn main() -> Result<()> {
     let flush_interval_secs = config.flush_interval_secs;
     let dry_run = config.dry_run;
 
-    let mut writer = OutputWriter::new(&config.output, config.partition.clone(), config.compression);
+    let mut writer = if firehose_parquet::writer::is_s3_output(&config.output) {
+        OutputWriter::new_s3(
+            &config.output.to_string_lossy(),
+            config.partition.clone(),
+            config.compression,
+            &config,
+        )?
+    } else {
+        OutputWriter::new(&config.output, config.partition.clone(), config.compression)
+    };
 
     // If block type is known upfront, resolve encode_bytes and create mapper immediately.
     // If "auto", defer until first block arrives.

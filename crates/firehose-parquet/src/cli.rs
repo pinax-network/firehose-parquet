@@ -80,6 +80,30 @@ pub struct CommonArgs {
     /// Only process finalized blocks (when false, adds fork_step column)
     #[arg(long, env = "FINAL_BLOCKS_ONLY", default_value = "true")]
     pub final_blocks_only: bool,
+
+    /// Public endpoint (skip authentication)
+    #[arg(long, env = "PUBLIC", default_value = "false")]
+    pub public: bool,
+
+    /// AWS access key ID (for S3 output)
+    #[arg(long, env = "AWS_ACCESS_KEY_ID")]
+    pub aws_access_key_id: Option<String>,
+
+    /// AWS secret access key (for S3 output)
+    #[arg(long, env = "AWS_SECRET_ACCESS_KEY")]
+    pub aws_secret_access_key: Option<String>,
+
+    /// AWS session token (for S3 output)
+    #[arg(long, env = "AWS_SESSION_TOKEN")]
+    pub aws_session_token: Option<String>,
+
+    /// AWS region (for S3 output)
+    #[arg(long, env = "AWS_REGION")]
+    pub aws_region: Option<String>,
+
+    /// AWS endpoint URL (for S3-compatible services)
+    #[arg(long, env = "AWS_ENDPOINT_URL")]
+    pub aws_endpoint_url: Option<String>,
 }
 
 /// Subcommands shared by all binaries.
@@ -122,10 +146,16 @@ pub fn build_config(args: &CommonArgs) -> anyhow::Result<Config> {
         .clone()
         .ok_or_else(|| anyhow::anyhow!("--endpoint is required"))?;
 
-    // Resolve the actual API key / JWT token by reading the environment variable
-    // whose *name* is given by `--api-key-envvar` / `--api-token-envvar`.
-    let api_key = std::env::var(&args.api_key_envvar).ok().filter(|v| !v.is_empty());
-    let jwt_token = std::env::var(&args.api_token_envvar).ok().filter(|v| !v.is_empty());
+    // When `--public` is set, skip authentication.
+    let (api_key, jwt_token) = if args.public {
+        (None, None)
+    } else {
+        // Resolve the actual API key / JWT token by reading the environment variable
+        // whose *name* is given by `--api-key-envvar` / `--api-token-envvar`.
+        let api_key = std::env::var(&args.api_key_envvar).ok().filter(|v| !v.is_empty());
+        let jwt_token = std::env::var(&args.api_token_envvar).ok().filter(|v| !v.is_empty());
+        (api_key, jwt_token)
+    };
 
     Ok(Config {
         endpoint,
@@ -134,6 +164,7 @@ pub fn build_config(args: &CommonArgs) -> anyhow::Result<Config> {
         start_block: args.start_block,
         stop_block: args.stop_block,
         cursor_path: args.cursor.clone(),
+        public: args.public,
         output: args.output.clone(),
         partition: parse_partition(&args.partition, args.block_range_size),
         flush_rows: args.flush_rows,
@@ -142,6 +173,11 @@ pub fn build_config(args: &CommonArgs) -> anyhow::Result<Config> {
         compression: parse_compression(&args.compression),
         final_blocks_only: args.final_blocks_only,
         dry_run: args.dry_run,
+        aws_access_key_id: args.aws_access_key_id.clone(),
+        aws_secret_access_key: args.aws_secret_access_key.clone(),
+        aws_session_token: args.aws_session_token.clone(),
+        aws_region: args.aws_region.clone(),
+        aws_endpoint_url: args.aws_endpoint_url.clone(),
     })
 }
 
@@ -212,6 +248,12 @@ mod tests {
         assert!(cli.common.stop_block.is_none());
         assert!(cli.common.cursor.is_none());
         assert!(cli.common.flush_interval_secs.is_none());
+        assert!(!cli.common.public);
+        assert!(cli.common.aws_access_key_id.is_none());
+        assert!(cli.common.aws_secret_access_key.is_none());
+        assert!(cli.common.aws_session_token.is_none());
+        assert!(cli.common.aws_region.is_none());
+        assert!(cli.common.aws_endpoint_url.is_none());
     }
 
     #[test]
@@ -379,5 +421,73 @@ mod tests {
         unsafe {
             std::env::remove_var("MY_CUSTOM_KEY");
         }
+    }
+
+    #[test]
+    fn test_public_flag_default() {
+        let cli = parse(&["test-cli", "--endpoint", "http://localhost:9000"]);
+        assert!(!cli.common.public);
+    }
+
+    #[test]
+    fn test_public_flag_set() {
+        let cli = parse(&["test-cli", "--endpoint", "http://localhost:9000", "--public"]);
+        assert!(cli.common.public);
+    }
+
+    #[test]
+    fn test_public_flag_skips_auth() {
+        // When --public is set, API key and JWT token should be None even
+        // if the corresponding env vars are defined.
+        unsafe {
+            std::env::set_var("SUBSTREAMS_API_KEY", "should-be-skipped");
+            std::env::set_var("SUBSTREAMS_API_TOKEN", "should-be-skipped");
+        }
+
+        let cli = parse(&["test-cli", "--endpoint", "https://example.com:443", "--public"]);
+        let config = build_config(&cli.common).expect("build_config should succeed");
+        assert!(config.public);
+        assert!(config.api_key.is_none());
+        assert!(config.jwt_token.is_none());
+
+        unsafe {
+            std::env::remove_var("SUBSTREAMS_API_KEY");
+            std::env::remove_var("SUBSTREAMS_API_TOKEN");
+        }
+    }
+
+    #[test]
+    fn test_aws_credentials_flags() {
+        let cli = parse(&[
+            "test-cli",
+            "--endpoint", "https://example.com:443",
+            "--aws-access-key-id", "AKID123",
+            "--aws-secret-access-key", "secret456",
+            "--aws-session-token", "token789",
+            "--aws-region", "us-east-1",
+            "--aws-endpoint-url", "https://s3.custom.endpoint",
+        ]);
+        assert_eq!(cli.common.aws_access_key_id.as_deref(), Some("AKID123"));
+        assert_eq!(cli.common.aws_secret_access_key.as_deref(), Some("secret456"));
+        assert_eq!(cli.common.aws_session_token.as_deref(), Some("token789"));
+        assert_eq!(cli.common.aws_region.as_deref(), Some("us-east-1"));
+        assert_eq!(cli.common.aws_endpoint_url.as_deref(), Some("https://s3.custom.endpoint"));
+
+        let config = build_config(&cli.common).expect("build_config should succeed");
+        assert_eq!(config.aws_access_key_id.as_deref(), Some("AKID123"));
+        assert_eq!(config.aws_secret_access_key.as_deref(), Some("secret456"));
+        assert_eq!(config.aws_session_token.as_deref(), Some("token789"));
+        assert_eq!(config.aws_region.as_deref(), Some("us-east-1"));
+        assert_eq!(config.aws_endpoint_url.as_deref(), Some("https://s3.custom.endpoint"));
+    }
+
+    #[test]
+    fn test_aws_credentials_defaults_none() {
+        let cli = parse(&["test-cli", "--endpoint", "http://localhost:9000"]);
+        assert!(cli.common.aws_access_key_id.is_none());
+        assert!(cli.common.aws_secret_access_key.is_none());
+        assert!(cli.common.aws_session_token.is_none());
+        assert!(cli.common.aws_region.is_none());
+        assert!(cli.common.aws_endpoint_url.is_none());
     }
 }
