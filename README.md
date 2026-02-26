@@ -90,7 +90,7 @@ PARTITIONING:
 
 FILE ROLLOVER:
   --flush-rows <NUM>         Max rows per file (default: 50000)
-  --flush-bytes <NUM>        Max bytes per file (default: 134217728 = 128MB)
+  --flush-bytes <NUM>        Max bytes per file (default: 268435456 = 256MB)
   --flush-interval-secs <N>  Time-based flush interval (disabled by default)
 
 ENCODING:

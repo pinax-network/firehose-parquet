@@ -58,7 +58,7 @@ pub struct CommonArgs {
     pub flush_rows: u32,
 
     /// Max bytes per file before flush
-    #[arg(long, env = "FLUSH_BYTES", default_value = "134217728")]
+    #[arg(long, env = "FLUSH_BYTES", default_value = "268435456")]
     pub flush_bytes: u64,
 
     /// Time-based flush interval in seconds (disabled by default)
@@ -243,7 +243,7 @@ mod tests {
         assert_eq!(cli.common.partition, "none");
         assert_eq!(cli.common.block_range_size, 10000);
         assert_eq!(cli.common.flush_rows, 50000);
-        assert_eq!(cli.common.flush_bytes, 134217728);
+        assert_eq!(cli.common.flush_bytes, 268435456);
         assert_eq!(cli.common.compression, "zstd");
         assert_eq!(cli.common.log_level, "info");
         assert!(!cli.common.dry_run);
