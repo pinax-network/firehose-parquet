@@ -1,23 +1,26 @@
 # firehose-parquet
 
-A production-grade Rust toolkit that consumes [StreamingFast Firehose](https://firehose.streamingfast.io/) v2 gRPC streams and writes **Apache Parquet** files. Supports multiple blockchain types with a shared core architecture.
+A production-grade Rust toolkit that consumes [StreamingFast Firehose](https://firehose.streamingfast.io/) v2 gRPC streams and writes **Apache Parquet** files. A single unified binary (`firehose-to-parquet`) supports multiple blockchain types with automatic chain detection.
 
 ## Supported Chains
 
-| Chain | Binary | Endpoint Example | Tables |
+| Chain | `--block-type` | Endpoint Example | Tables |
 |---|---|---|---|
-| **Solana** | `firehose-solana-to-parquet` | `solana.firehose.pinax.network:443` | blocks, transactions, messages, instructions, rewards |
-| **EVM** | `firehose-evm-to-parquet` | `eth.firehose.pinax.network:443` | blocks, transactions, logs (+7 extended tables) |
-| **Bitcoin** | `firehose-bitcoin-to-parquet` | `btc.firehose.pinax.network:443` | blocks, transactions, inputs, outputs |
-| **Beacon** | `firehose-beacon-to-parquet` | `beacon.firehose.pinax.network:443` | blocks, attestations, deposits, voluntary_exits, blob_sidecars, ... |
-| **Tron** | `firehose-tron-to-parquet` | `tron.firehose.pinax.network:443` | blocks, transactions, logs, internal_transactions |
-| **Cosmos** | `firehose-cosmos-to-parquet` | `cosmoshub.firehose.pinax.network:443` | blocks, transactions, events, messages |
-| **Antelope** | `firehose-antelope-to-parquet` | `eos.firehose.pinax.network:443` | blocks, transactions, actions, db_ops |
-| **NEAR** | `firehose-near-to-parquet` | `near.firehose.pinax.network:443` | blocks, chunks, transactions, receipts, state_changes |
+| **EVM** | `evm` | `eth.firehose.pinax.network:443` | blocks, transactions, logs (+7 extended tables) |
+| **Solana** | `solana` | `solana.firehose.pinax.network:443` | blocks, transactions, messages, instructions, rewards |
+| **Bitcoin** | `bitcoin` | `btc.firehose.pinax.network:443` | blocks, transactions, inputs, outputs |
+| **Beacon** | `beacon` | `beacon.firehose.pinax.network:443` | blocks, attestations, deposits, voluntary_exits, blob_sidecars, ... |
+| **Tron** | `tron` | `tron.firehose.pinax.network:443` | blocks, transactions, logs, internal_transactions |
+| **Cosmos** | `cosmos` | `cosmoshub.firehose.pinax.network:443` | blocks, transactions, events, messages |
+| **Antelope** | `antelope` | `eos.firehose.pinax.network:443` | blocks, transactions, actions, db_ops |
+| **NEAR** | `near` | `near.firehose.pinax.network:443` | blocks, chunks, transactions, receipts, state_changes |
+
+> **Tip:** Use `--block-type auto` (the default) to auto-detect the chain from the Firehose stream's protobuf `type_url`.
 
 ## Features
 
-- **Multi-chain** — pluggable `BlockMapper` trait with per-chain binary crates
+- **Single binary** — one `firehose-to-parquet` binary handles all chains via `--block-type` with auto-detection
+- **Multi-chain** — pluggable `BlockMapper` trait with per-chain mapper modules
 - **Canonical identity columns** — `block_num`, `block_id`, `parent_num`, `parent_id`, `lib_num`, `timestamp` on every table (from Firehose `BlockMetadata`)
 - **gRPC streaming** — connects to any Firehose v2 endpoint via tonic, with TLS and API key / JWT auth
 - **Automatic retry / resume** — exponential back-off on connection errors; resumes from the last cursor
@@ -31,11 +34,11 @@ A production-grade Rust toolkit that consumes [StreamingFast Firehose](https://f
 ## Quick Start
 
 ```bash
-# Build all binaries
+# Build
 cargo build --release --workspace
 
-# Stream Solana blocks to Parquet
-./target/release/firehose-solana-to-parquet \
+# Stream Solana blocks to Parquet (auto-detect chain)
+./target/release/firehose-to-parquet \
   --endpoint https://solana.firehose.pinax.network:443 \
   --start-block 200000000 \
   --stop-block 200001000 \
@@ -43,8 +46,9 @@ cargo build --release --workspace
   --partition date \
   --compression zstd
 
-# Stream EVM blocks with extended traces
-./target/release/firehose-evm-to-parquet \
+# Stream EVM blocks with extended traces (explicit block type)
+./target/release/firehose-to-parquet \
+  --block-type evm \
   --endpoint https://eth.firehose.pinax.network:443 \
   --start-block 19000000 \
   --stop-block 19001000 \
@@ -54,11 +58,13 @@ cargo build --release --workspace
 
 ## CLI Reference
 
-All binaries share these common flags:
-
 ```
 REQUIRED:
   -e, --endpoint <URL>       Firehose gRPC endpoint URL
+
+CHAIN SELECTION:
+  --block-type <TYPE>        auto (default) | evm | bitcoin | solana | near | antelope | cosmos | tron | beacon
+                             "auto" detects the chain from the Firehose stream
 
 AUTHENTICATION:
   --api-key-envvar <NAME>    Env var name for API key (default: SUBSTREAMS_API_KEY)
@@ -71,7 +77,7 @@ CONNECTION:
 BLOCK RANGE:
   -s, --start-block <NUM>    Start block number (inclusive)
   -t, --stop-block <NUM>     Stop block number (inclusive, 0 = stream forever)
-  -c, --cursor <STRING>      Resume cursor from a previous session
+  -c, --cursor <PATH>        Path to cursor file for resuming a previous session
 
 OUTPUT:
   --output <DIR>             Output directory (default: "output")
@@ -88,22 +94,19 @@ FILE ROLLOVER:
 
 ENCODING:
   --bytes-encoding <MODE>    binary | hex | base58 | tron_base58 | auto
-                             Default varies by chain (hex for EVM, base58 for Solana)
+                             "auto" resolves to a chain-appropriate default (hex for EVM, base58 for Solana, etc.)
 
 FORK HANDLING:
   --final-blocks-only        Only process finalized blocks (default: true)
                              When false, adds fork_step column to all tables
 
+EVM-SPECIFIC:
+  --extended                 Enable extended trace tables (calls, balance_changes, etc.)
+
 OTHER:
   --dry-run                  Decode and map but don't write files
   --log-level <LEVEL>        info (default) | debug | trace
 ```
-
-### Chain-Specific Flags
-
-| Binary | Extra Flags |
-|---|---|
-| `firehose-evm-to-parquet` | `--extended` — enable extended trace tables (calls, balance_changes, etc.) |
 
 ## Output Directory Layout
 
@@ -155,11 +158,11 @@ Every table across all chains includes these 6 columns (from Firehose `BlockMeta
 | Beacon | `hex` |
 | Cosmos | `hex` |
 | Antelope | `hex` |
-| NEAR | `base58` |
+| NEAR | `hex` |
 
 ## Environment Variables
 
-Copy `.env.example` to `.env`:
+All CLI flags can be set via environment variables. Copy `.env.example` to `.env`:
 
 ```bash
 # Authentication — set the env vars that the CLI reads by default
@@ -167,9 +170,11 @@ SUBSTREAMS_API_KEY=your-api-key-here
 SUBSTREAMS_API_TOKEN=your-jwt-token-here
 ```
 
+See `.env.example` for the full list of supported environment variables.
+
 ## CLI Architecture
 
-All binaries are built with [`clap`](https://docs.rs/clap) v4 using derive macros, chosen for its idiomatic Rust approach, excellent documentation, built-in shell completion support, and widespread community adoption.
+The binary is built with [`clap`](https://docs.rs/clap) v4 using derive macros, chosen for its idiomatic Rust approach, excellent documentation, built-in shell completion support, and widespread community adoption.
 
 ### Key crates
 
@@ -197,23 +202,23 @@ struct Cli {
     #[command(flatten)]
     common: CommonArgs,
 
-    // chain-specific flags here …
+    // binary-specific flags (block_type, extended, bytes_encoding)
 }
 ```
 
 ### Shell completions
 
-Every binary supports the `completions` subcommand:
+The binary supports the `completions` subcommand:
 
 ```bash
 # Bash
-firehose-evm-to-parquet completions bash > ~/.local/share/bash-completion/completions/firehose-evm-to-parquet
+firehose-to-parquet completions bash > ~/.local/share/bash-completion/completions/firehose-to-parquet
 
 # Zsh
-firehose-evm-to-parquet completions zsh > ~/.zfunc/_firehose-evm-to-parquet
+firehose-to-parquet completions zsh > ~/.zfunc/_firehose-to-parquet
 
 # Fish
-firehose-evm-to-parquet completions fish > ~/.config/fish/completions/firehose-evm-to-parquet.fish
+firehose-to-parquet completions fish > ~/.config/fish/completions/firehose-to-parquet.fish
 ```
 
 ## Repository Structure
@@ -223,18 +228,18 @@ firehose-parquet/
 ├── Cargo.toml                              # workspace root
 ├── .env.example                            # environment variables template
 ├── .github/workflows/ci.yml               # CI pipeline (build + test)
-├── proto/                                  # Protobuf definitions
-│   └── sf/
-│       ├── firehose/v2/firehose.proto      # Firehose streaming protocol
-│       ├── solana/type/v1/type.proto
-│       ├── ethereum/type/v2/type.proto
-│       ├── bitcoin/type/v1/type.proto
-│       ├── beacon/type/v1/type.proto
-│       ├── tron/type/v1/block.proto
-│       ├── cosmos/type/v2/type.proto
-│       ├── antelope/type/v1/type.proto
-│       └── near/type/v1/type.proto
+├── proto/                                  # Protobuf definitions (flat layout)
+│   ├── firehose.proto                      # Firehose streaming protocol
+│   ├── ethereum.proto
+│   ├── solana.proto
+│   ├── bitcoin.proto
+│   ├── beacon.proto
+│   ├── tron.proto
+│   ├── cosmos.proto
+│   ├── antelope.proto
+│   └── near.proto
 ├── crates/
+│   ├── firehose-protos/                    # Centralized proto compilation
 │   ├── firehose-parquet/                   # Core library
 │   │   └── src/
 │   │       ├── cli.rs                      # Shared CLI args, completions, helpers
@@ -243,19 +248,11 @@ firehose-parquet/
 │   │       ├── grpc.rs                     # Firehose gRPC client
 │   │       ├── traits.rs                   # BlockMapper trait, BlockIdentity
 │   │       └── writer.rs                   # Parquet writer, partitioning
-│   ├── firehose-protos/                    # Centralized proto compilation
-│   └── blocks/                             # Block type definitions + binary targets
+│   └── blocks/                             # Block type definitions + unified binary
 │       └── src/
-│           ├── bin/                         # Per-chain CLI binaries
-│           │   ├── evm.rs
-│           │   ├── solana.rs
-│           │   ├── bitcoin.rs
-│           │   ├── beacon.rs
-│           │   ├── tron.rs
-│           │   ├── cosmos.rs
-│           │   ├── antelope.rs
-│           │   └── near.rs
-│           ├── evm/                         # Per-chain mapper, schema, proto
+│           ├── bin/
+│           │   └── main.rs                 # Single unified binary (firehose-to-parquet)
+│           ├── evm/                        # Per-chain mapper, schema, proto
 │           ├── solana/
 │           ├── bitcoin/
 │           ├── beacon/
@@ -278,8 +275,8 @@ cargo test --workspace
 # Build release
 cargo build --release --workspace
 
-# Install a specific binary
-cargo install --path crates/blocks --bin firehose-evm-to-parquet
+# Install
+cargo install --path crates/blocks
 ```
 
 ## License
