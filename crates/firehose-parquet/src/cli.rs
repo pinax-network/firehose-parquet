@@ -37,9 +37,9 @@ pub struct CommonArgs {
     #[arg(long, env = "STOP_BLOCK")]
     pub stop_block: Option<u64>,
 
-    /// Resume cursor from a previous session
+    /// Path to cursor file for resuming a previous session
     #[arg(long, env = "CURSOR")]
-    pub cursor: Option<String>,
+    pub cursor: Option<PathBuf>,
 
     /// Output directory
     #[arg(long, env = "OUTPUT", default_value = "output")]
@@ -127,7 +127,7 @@ pub fn build_config(args: &CommonArgs) -> anyhow::Result<Config> {
         jwt_token: args.jwt_token.clone(),
         start_block: args.start_block,
         stop_block: args.stop_block,
-        cursor: args.cursor.clone(),
+        cursor_path: args.cursor.clone(),
         output: args.output.clone(),
         partition: parse_partition(&args.partition, args.block_range_size),
         flush_rows: args.flush_rows,
@@ -216,7 +216,7 @@ mod tests {
             "--api-key", "my-key",
             "--start-block", "100",
             "--stop-block", "200",
-            "--cursor", "abc123",
+            "--cursor", "cursor.txt",
             "--output", "/tmp/out",
             "--partition", "date",
             "--block-range-size", "5000",
@@ -231,7 +231,7 @@ mod tests {
         assert_eq!(cli.common.api_key.as_deref(), Some("my-key"));
         assert_eq!(cli.common.start_block, Some(100));
         assert_eq!(cli.common.stop_block, Some(200));
-        assert_eq!(cli.common.cursor.as_deref(), Some("abc123"));
+        assert_eq!(cli.common.cursor.as_deref(), Some(std::path::Path::new("cursor.txt")));
         assert_eq!(cli.common.output, PathBuf::from("/tmp/out"));
         assert_eq!(cli.common.partition, "date");
         assert_eq!(cli.common.block_range_size, 5000);
