@@ -41,14 +41,6 @@ pub struct CommonArgs {
     #[arg(short = 'c', long, env = "CURSOR")]
     pub cursor: Option<PathBuf>,
 
-    /// Skip certificate validation on gRPC connection
-    #[arg(long, env = "INSECURE", default_value = "false")]
-    pub insecure: bool,
-
-    /// Use plaintext connection (no TLS)
-    #[arg(long, env = "PLAINTEXT", default_value = "false")]
-    pub plaintext: bool,
-
     /// Output directory
     #[arg(long, env = "OUTPUT", default_value = "output")]
     pub output: PathBuf,
@@ -142,8 +134,6 @@ pub fn build_config(args: &CommonArgs) -> anyhow::Result<Config> {
         start_block: args.start_block,
         stop_block: args.stop_block,
         cursor_path: args.cursor.clone(),
-        insecure: args.insecure,
-        plaintext: args.plaintext,
         output: args.output.clone(),
         partition: parse_partition(&args.partition, args.block_range_size),
         flush_rows: args.flush_rows,
@@ -218,8 +208,6 @@ mod tests {
         assert!(cli.common.final_blocks_only);
         assert_eq!(cli.common.api_key_envvar, "SUBSTREAMS_API_KEY");
         assert_eq!(cli.common.api_token_envvar, "SUBSTREAMS_API_TOKEN");
-        assert!(!cli.common.insecure);
-        assert!(!cli.common.plaintext);
         assert!(cli.common.start_block.is_none());
         assert!(cli.common.stop_block.is_none());
         assert!(cli.common.cursor.is_none());
@@ -245,8 +233,6 @@ mod tests {
             "--compression", "snappy",
             "--log-level", "debug",
             "--dry-run",
-            "--insecure",
-            "--plaintext",
         ]);
         assert_eq!(cli.common.endpoint.as_deref(), Some("https://eth.firehose.pinax.network:443"));
         assert_eq!(cli.common.api_key_envvar, "MY_KEY_VAR");
@@ -263,8 +249,6 @@ mod tests {
         assert_eq!(cli.common.compression, "snappy");
         assert_eq!(cli.common.log_level, "debug");
         assert!(cli.common.dry_run);
-        assert!(cli.common.insecure);
-        assert!(cli.common.plaintext);
     }
 
     #[test]
@@ -295,7 +279,6 @@ mod tests {
             "--start-block", "100",
             "--compression", "gzip",
             "--partition", "date",
-            "--insecure",
         ]);
         let config = build_config(&cli.common).expect("build_config should succeed");
         assert_eq!(config.endpoint, "https://example.com:443");
@@ -304,8 +287,6 @@ mod tests {
         assert_eq!(config.partition, Partition::Date);
         assert_eq!(config.flush_rows, 50000);
         assert!(config.final_blocks_only);
-        assert!(config.insecure);
-        assert!(!config.plaintext);
     }
 
     #[test]
