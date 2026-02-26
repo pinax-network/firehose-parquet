@@ -204,6 +204,7 @@ mod tests {
     use super::*;
     use crate::config::{Compression, Partition};
     use clap::{CommandFactory, Parser};
+    use serial_test::serial;
 
     /// Minimal CLI wrapper used only for testing CommonArgs parsing.
     #[derive(Parser, Debug)]
@@ -221,6 +222,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_required_endpoint() {
         // endpoint is optional at the clap level (for subcommands like completions)
         // but build_config will fail without it
@@ -230,6 +232,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_defaults() {
         let cli = parse(&["test-cli", "--endpoint", "http://localhost:9000"]);
         assert_eq!(cli.common.endpoint.as_deref(), Some("http://localhost:9000"));
@@ -257,6 +260,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_all_flags() {
         let cli = parse(&[
             "test-cli",
@@ -294,6 +298,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_parse_compression() {
         assert_eq!(parse_compression("zstd"), Compression::Zstd);
         assert_eq!(parse_compression("snappy"), Compression::Snappy);
@@ -304,6 +309,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_parse_partition() {
         assert_eq!(parse_partition("none", 10000), Partition::None);
         assert_eq!(parse_partition("date", 10000), Partition::Date);
@@ -314,6 +320,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_build_config() {
         let cli = parse(&[
             "test-cli",
@@ -332,6 +339,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_completions_subcommand_parse() {
         let cli = parse(&["test-cli", "completions", "bash"]);
         assert!(cli.command.is_some());
@@ -341,6 +349,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_completions_generation() {
         // Verify that shell completion generation runs without panicking
         // for each supported shell type.
@@ -354,6 +363,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_env_var_fallback() {
         // Verify that env vars are picked up when no CLI flags are given.
         // We set a few env vars and then parse with no CLI arguments.
@@ -387,6 +397,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_api_key_envvar_resolution() {
         // Set up an env var with the actual API key
         unsafe {
@@ -407,6 +418,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_custom_api_key_envvar() {
         // Test using a custom envvar name
         unsafe {
@@ -424,18 +436,21 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_public_flag_default() {
         let cli = parse(&["test-cli", "--endpoint", "http://localhost:9000"]);
         assert!(!cli.common.public);
     }
 
     #[test]
+    #[serial]
     fn test_public_flag_set() {
         let cli = parse(&["test-cli", "--endpoint", "http://localhost:9000", "--public"]);
         assert!(cli.common.public);
     }
 
     #[test]
+    #[serial]
     fn test_public_flag_skips_auth() {
         // When --public is set, API key and JWT token should be None even
         // if the corresponding env vars are defined.
@@ -457,6 +472,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_aws_credentials_flags() {
         let cli = parse(&[
             "test-cli",
@@ -482,6 +498,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_aws_credentials_defaults_none() {
         let cli = parse(&["test-cli", "--endpoint", "http://localhost:9000"]);
         assert!(cli.common.aws_access_key_id.is_none());
