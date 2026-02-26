@@ -8,6 +8,17 @@ use std::time::Duration;
 use tonic::transport::{Channel, ClientTlsConfig, Endpoint};
 use tracing::{debug, info, warn};
 
+/// Information about the Firehose endpoint, returned by the `EndpointInfo/Info` RPC.
+#[derive(Debug, Clone)]
+pub struct EndpointInfo {
+    pub chain_name: String,
+    pub chain_name_aliases: Vec<String>,
+    pub first_streamable_block_num: u64,
+    pub first_streamable_block_id: String,
+    pub block_id_encoding: i32,
+    pub block_features: Vec<String>,
+}
+
 /// A thin wrapper around the Firehose v2 gRPC `Stream` client that handles
 /// connection, authentication, and streaming with automatic retry/resume.
 pub struct FirehoseClient {
@@ -41,6 +52,61 @@ impl FirehoseClient {
             .with_context(|| format!("connecting to {uri}"))?;
         info!(endpoint = %uri, tls = use_tls, "connected to Firehose");
         Ok(channel)
+    }
+
+    /// Fetch endpoint information from the `EndpointInfo/Info` RPC.
+    ///
+    /// Returns `None` if the endpoint does not support this RPC
+    /// (e.g. older servers), logging a warning instead of failing.
+    pub async fn info(&self) -> Option<EndpointInfo> {
+        let channel = match self.connect().await {
+            Ok(ch) => ch,
+            Err(e) => {
+                warn!(error = %e, "failed to connect for EndpointInfo; skipping");
+                return None;
+            }
+        };
+
+        let mut client = firehose::endpoint_info_client::EndpointInfoClient::new(channel);
+
+        let mut request = tonic::Request::new(firehose::InfoRequest {});
+        if let Some(ref key) = self.config.api_key {
+            request.metadata_mut().insert(
+                "x-api-key",
+                key.parse().expect("API key must be valid ASCII metadata value"),
+            );
+        }
+        if let Some(ref token) = self.config.jwt_token {
+            request.metadata_mut().insert(
+                "authorization",
+                format!("Bearer {token}").parse().expect("JWT token must be valid ASCII metadata value"),
+            );
+        }
+
+        match client.info(request).await {
+            Ok(resp) => {
+                let r = resp.into_inner();
+                let ei = EndpointInfo {
+                    chain_name: r.chain_name,
+                    chain_name_aliases: r.chain_name_aliases,
+                    first_streamable_block_num: r.first_streamable_block_num,
+                    first_streamable_block_id: r.first_streamable_block_id,
+                    block_id_encoding: r.block_id_encoding,
+                    block_features: r.block_features,
+                };
+                info!(
+                    chain_name = %ei.chain_name,
+                    block_id_encoding = ei.block_id_encoding,
+                    block_features = ?ei.block_features,
+                    "received endpoint info"
+                );
+                Some(ei)
+            }
+            Err(e) => {
+                warn!(error = %e, "EndpointInfo/Info RPC not available; skipping");
+                None
+            }
+        }
     }
 
     /// Start streaming blocks. Calls `handler` for every block received as
