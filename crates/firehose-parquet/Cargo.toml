@@ -16,6 +16,7 @@ clap = { version = "4", features = ["derive", "env"] }
 clap_complete = "4"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+dotenvy = "0.15"
 anyhow = "1"
 time = "0.3"
 thiserror = "2"
