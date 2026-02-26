@@ -1,6 +1,6 @@
 use anyhow::Result;
 use clap::Parser;
-use firehose_parquet::cli::{build_config, init_tracing, Commands, CommonArgs};
+use firehose_parquet::cli::{build_config, init_tracing, load_dotenv, Commands, CommonArgs};
 use firehose_parquet::config::BlockMetadata;
 use firehose_parquet::encode::{parse_encode_bytes, EncodeBytes};
 use firehose_parquet::grpc::FirehoseClient;
@@ -21,12 +21,13 @@ struct Cli {
 
     /// Byte encoding for binary fields (hashes, keys, etc.)
     /// Options: binary (default raw bytes), hex, base58, tron_base58, auto (chain-appropriate = base58 for Solana)
-    #[arg(long, default_value = "binary")]
+    #[arg(long, env = "ENCODE_BYTES", default_value = "binary")]
     encode_bytes: String,
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    load_dotenv();
     let cli = Cli::parse();
 
     if let Some(Commands::Completions { shell }) = cli.command {

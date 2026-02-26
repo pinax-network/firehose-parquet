@@ -1,6 +1,6 @@
 use anyhow::Result;
 use clap::Parser;
-use firehose_parquet::cli::{build_config, init_tracing, Commands, CommonArgs};
+use firehose_parquet::cli::{build_config, init_tracing, load_dotenv, Commands, CommonArgs};
 use firehose_parquet::config::BlockMetadata;
 use firehose_parquet::encode::{parse_encode_bytes, EncodeBytes};
 use firehose_parquet::grpc::FirehoseClient;
@@ -20,17 +20,18 @@ struct Cli {
     common: CommonArgs,
 
     /// Enable extended detail level (calls, balance_changes, etc.)
-    #[arg(long, default_value = "false")]
+    #[arg(long, env = "EXTENDED", default_value = "false")]
     extended: bool,
 
     /// Byte encoding strategy for binary fields (hashes, addresses, etc.)
     /// Options: binary (raw bytes), hex (default, 0x-prefixed), base58, tron_base58, auto (chain-appropriate = hex for EVM)
-    #[arg(long, default_value = "hex")]
+    #[arg(long, env = "ENCODE_BYTES", default_value = "hex")]
     encode_bytes: String,
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    load_dotenv();
     let cli = Cli::parse();
 
     if let Some(Commands::Completions { shell }) = cli.command {

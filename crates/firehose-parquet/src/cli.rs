@@ -4,13 +4,21 @@ use clap_complete::{generate, Shell};
 use std::io;
 use std::path::PathBuf;
 
+/// Load environment variables from `.env` file (if present).
+///
+/// Call this **before** [`clap::Parser::parse`] so that `env` attributes
+/// on CLI arguments pick up the values.
+pub fn load_dotenv() {
+    dotenvy::dotenv().ok();
+}
+
 // Shared CLI arguments for all firehose-to-parquet binaries.
 //
 // Embed in a per-chain `#[derive(Parser)]` struct with `#[command(flatten)]`.
 #[derive(Args, Debug, Clone)]
 pub struct CommonArgs {
     /// Firehose gRPC endpoint URL
-    #[arg(long)]
+    #[arg(long, env = "ENDPOINT")]
     pub endpoint: Option<String>,
 
     /// API key for authentication
@@ -22,55 +30,55 @@ pub struct CommonArgs {
     pub jwt_token: Option<String>,
 
     /// Start block number (inclusive)
-    #[arg(long)]
+    #[arg(long, env = "START_BLOCK")]
     pub start_block: Option<u64>,
 
     /// Stop block number (inclusive, 0 = stream forever)
-    #[arg(long)]
+    #[arg(long, env = "STOP_BLOCK")]
     pub stop_block: Option<u64>,
 
     /// Resume cursor from a previous session
-    #[arg(long)]
+    #[arg(long, env = "CURSOR")]
     pub cursor: Option<String>,
 
     /// Output directory
-    #[arg(long, default_value = "output")]
+    #[arg(long, env = "OUTPUT", default_value = "output")]
     pub output: PathBuf,
 
     /// Partitioning mode: none, block_range, date, hour
-    #[arg(long, default_value = "none")]
+    #[arg(long, env = "PARTITION", default_value = "none")]
     pub partition: String,
 
     /// Block range size when partition=block_range
-    #[arg(long, default_value = "10000")]
+    #[arg(long, env = "BLOCK_RANGE_SIZE", default_value = "10000")]
     pub block_range_size: u64,
 
     /// Max rows per file before flush
-    #[arg(long, default_value = "50000")]
+    #[arg(long, env = "FLUSH_ROWS", default_value = "50000")]
     pub flush_rows: u32,
 
     /// Max bytes per file before flush
-    #[arg(long, default_value = "134217728")]
+    #[arg(long, env = "FLUSH_BYTES", default_value = "134217728")]
     pub flush_bytes: u64,
 
     /// Time-based flush interval in seconds (disabled by default)
-    #[arg(long)]
+    #[arg(long, env = "FLUSH_INTERVAL_SECS")]
     pub flush_interval_secs: Option<u64>,
 
     /// Compression codec: zstd, snappy, gzip, none
-    #[arg(long, default_value = "zstd")]
+    #[arg(long, env = "COMPRESSION", default_value = "zstd")]
     pub compression: String,
 
     /// Log level: trace, debug, info, warn, error
-    #[arg(long, default_value = "info")]
+    #[arg(long, env = "LOG_LEVEL", default_value = "info")]
     pub log_level: String,
 
     /// Decode and map but don't write files
-    #[arg(long, default_value = "false")]
+    #[arg(long, env = "DRY_RUN", default_value = "false")]
     pub dry_run: bool,
 
     /// Only process finalized blocks (when false, adds fork_step column)
-    #[arg(long, default_value = "true")]
+    #[arg(long, env = "FINAL_BLOCKS_ONLY", default_value = "true")]
     pub final_blocks_only: bool,
 }
 
@@ -292,6 +300,39 @@ mod tests {
             let mut buf = Vec::new();
             generate(shell, &mut cmd, name, &mut buf);
             assert!(!buf.is_empty(), "completions for {shell:?} should not be empty");
+        }
+    }
+
+    #[test]
+    fn test_env_var_fallback() {
+        // Verify that env vars are picked up when no CLI flags are given.
+        // We set a few env vars and then parse with no CLI arguments.
+        // Safety: test-only; concurrent tests that also touch these env vars
+        // could race, but cargo test runs tests in separate processes for
+        // integration tests and the clap env lookup is point-in-time.
+        unsafe {
+            std::env::set_var("ENDPOINT", "https://from-env.example.com:443");
+            std::env::set_var("START_BLOCK", "42");
+            std::env::set_var("COMPRESSION", "snappy");
+        }
+
+        let cli = parse(&["test-cli"]);
+        assert_eq!(cli.common.endpoint.as_deref(), Some("https://from-env.example.com:443"));
+        assert_eq!(cli.common.start_block, Some(42));
+        assert_eq!(cli.common.compression, "snappy");
+
+        // CLI flags take precedence over env vars
+        let cli = parse(&["test-cli", "--endpoint", "https://from-cli.example.com:443", "--compression", "gzip"]);
+        assert_eq!(cli.common.endpoint.as_deref(), Some("https://from-cli.example.com:443"));
+        assert_eq!(cli.common.compression, "gzip");
+        // env var still applies for start_block since no CLI flag overrides it
+        assert_eq!(cli.common.start_block, Some(42));
+
+        // Clean up
+        unsafe {
+            std::env::remove_var("ENDPOINT");
+            std::env::remove_var("START_BLOCK");
+            std::env::remove_var("COMPRESSION");
         }
     }
 }
