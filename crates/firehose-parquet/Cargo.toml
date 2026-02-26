@@ -9,12 +9,6 @@ firehose-protos = { path = "../firehose-protos" }
 arrow = { version = "58", features = ["prettyprint"] }
 parquet = { version = "58", features = ["arrow"] }
 tonic = { version = "0.12", features = ["tls", "tls-webpki-roots", "transport"] }
-rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
-rustls-pki-types = "1"
-tokio-rustls = "0.26"
-hyper-util = { version = "0.1", features = ["tokio"] }
-http = "1"
-tower = { version = "0.5", features = ["util"] }
 prost = "0.13"
 prost-types = "0.13"
 tokio = { version = "1", features = ["full"] }

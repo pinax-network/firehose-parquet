@@ -65,8 +65,7 @@ AUTHENTICATION:
   --api-token-envvar <NAME>  Env var name for JWT token (default: SUBSTREAMS_API_TOKEN)
 
 CONNECTION:
-  --insecure                 Skip certificate validation on gRPC connection
-  --plaintext                Use plaintext connection (no TLS)
+  (TLS is automatically enabled for https:// endpoints, disabled for http://)
 
 BLOCK RANGE:
   -s, --start-block <NUM>    Start block number (inclusive)
