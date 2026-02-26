@@ -1,114 +1,41 @@
 use anyhow::Result;
 use clap::Parser;
-use firehose_parquet::config::{BlockMetadata, Compression, Config, Partition};
+use firehose_parquet::cli::{build_config, init_tracing, Commands, CommonArgs};
+use firehose_parquet::config::BlockMetadata;
 use firehose_parquet::encode::{parse_encode_bytes, EncodeBytes};
 use firehose_parquet::grpc::FirehoseClient;
 use firehose_parquet::traits::{fork_step_name, BlockIdentity, BlockMapper};
 use firehose_parquet::writer::OutputWriter;
 use blocks::near::mapper::NearBlockMapper;
-use std::path::PathBuf;
 use std::time::Instant;
 use tracing::info;
 
 #[derive(Parser, Debug)]
 #[command(name = "firehose-near-to-parquet", version, about = "Convert Firehose NEAR gRPC stream to Apache Parquet")]
 struct Cli {
-    /// Firehose gRPC endpoint URL
-    #[arg(long)]
-    endpoint: String,
+    #[command(subcommand)]
+    command: Option<Commands>,
 
-    #[arg(long, env = "FIREHOSE_API_KEY")]
-    api_key: Option<String>,
-
-    #[arg(long, env = "SUBSTREAMS_API_TOKEN")]
-    jwt_token: Option<String>,
-
-    #[arg(long)]
-    start_block: Option<u64>,
-
-    #[arg(long)]
-    stop_block: Option<u64>,
-
-    #[arg(long)]
-    cursor: Option<String>,
-
-    #[arg(long, default_value = "output")]
-    output: PathBuf,
-
-    #[arg(long, default_value = "none")]
-    partition: String,
-
-    #[arg(long, default_value = "10000")]
-    block_range_size: u64,
-
-    #[arg(long, default_value = "50000")]
-    flush_rows: u32,
-
-    #[arg(long, default_value = "134217728")]
-    flush_bytes: u64,
-
-    #[arg(long)]
-    flush_interval_secs: Option<u64>,
-
-    #[arg(long, default_value = "zstd")]
-    compression: String,
-
-    #[arg(long, default_value = "info")]
-    log_level: String,
-
-    #[arg(long, default_value = "false")]
-    dry_run: bool,
-
-    #[arg(long, default_value = "true")]
-    final_blocks_only: bool,
+    #[command(flatten)]
+    common: CommonArgs,
 
     /// Byte encoding: hex, base58, base64, tron_base58, binary
     #[arg(long, default_value = "hex")]
     encode_bytes: String,
 }
 
-fn parse_compression(s: &str) -> Compression {
-    match s.to_lowercase().as_str() {
-        "snappy" => Compression::Snappy,
-        "gzip" => Compression::Gzip,
-        "none" => Compression::None,
-        _ => Compression::Zstd,
-    }
-}
-
-fn parse_partition(s: &str, block_range_size: u64) -> Partition {
-    match s.to_lowercase().as_str() {
-        "block_range" => Partition::BlockRange(block_range_size),
-        "date" => Partition::Date,
-        "hour" => Partition::Hour,
-        _ => Partition::None,
-    }
-}
-
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
 
-    let filter = tracing_subscriber::EnvFilter::try_new(&cli.log_level)
-        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
-    tracing_subscriber::fmt().with_env_filter(filter).init();
+    if let Some(Commands::Completions { shell }) = cli.command {
+        firehose_parquet::cli::generate_completions::<Cli>(shell);
+        return Ok(());
+    }
 
-    let config = Config {
-        endpoint: cli.endpoint,
-        api_key: cli.api_key,
-        jwt_token: cli.jwt_token,
-        start_block: cli.start_block,
-        stop_block: cli.stop_block,
-        cursor: cli.cursor,
-        output: cli.output.clone(),
-        partition: parse_partition(&cli.partition, cli.block_range_size),
-        flush_rows: cli.flush_rows,
-        flush_bytes: cli.flush_bytes,
-        flush_interval_secs: cli.flush_interval_secs,
-        compression: parse_compression(&cli.compression),
-        final_blocks_only: cli.final_blocks_only,
-        dry_run: cli.dry_run,
-    };
+    init_tracing(&cli.common.log_level);
+
+    let config = build_config(&cli.common)?;
 
     info!(?config, "starting NEAR pipeline");
 
