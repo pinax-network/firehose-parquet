@@ -1,0 +1,13 @@
+version: v2
+deps:
+  # Firehose core
+  - buf.build/streamingfast/firehose
+  # Chain-specific block types
+  - buf.build/streamingfast/firehose-ethereum
+  - buf.build/streamingfast/firehose-bitcoin
+  - buf.build/streamingfast/firehose-solana
+  - buf.build/streamingfast/firehose-near
+  - buf.build/streamingfast/firehose-cosmos
+  - buf.build/streamingfast/firehose-tron
+  - buf.build/pinax/firehose-antelope
+  - buf.build/pinax/firehose-beacon

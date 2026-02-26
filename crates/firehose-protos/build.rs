@@ -14,24 +14,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .compile_protos(
             &[
                 // Firehose core
-                proto_root.join("sf/firehose/v2/firehose.proto"),
+                proto_root.join("firehose.proto"),
                 // Solana
-                proto_root.join("sf/solana/type/v1/type.proto"),
+                proto_root.join("solana.proto"),
                 // Ethereum (EVM)
-                proto_root.join("sf/ethereum/type/v2/type.proto"),
+                proto_root.join("ethereum.proto"),
                 // Bitcoin
-                proto_root.join("sf/bitcoin/type/v1/type.proto"),
+                proto_root.join("bitcoin.proto"),
                 // NEAR
-                proto_root.join("sf/near/type/v1/type.proto"),
+                proto_root.join("near.proto"),
                 // Antelope
-                proto_root.join("sf/antelope/type/v1/type.proto"),
+                proto_root.join("antelope.proto"),
                 // Cosmos
-                proto_root.join("sf/cosmos/type/v2/type.proto"),
-                proto_root.join("cosmos/tx/v1beta1/tx.proto"),
+                proto_root.join("cosmos.proto"),
+                proto_root.join("cosmos_tx.proto"),
                 // Tron
-                proto_root.join("sf/tron/type/v1/block.proto"),
+                proto_root.join("tron.proto"),
                 // Beacon
-                proto_root.join("sf/beacon/type/v1/type.proto"),
+                proto_root.join("beacon.proto"),
             ],
             &[&proto_root],
         )?;
