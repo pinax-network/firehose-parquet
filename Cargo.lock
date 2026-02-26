@@ -470,8 +470,6 @@ dependencies = [
  "anyhow",
  "arrow",
  "clap",
- "clap_complete",
- "dotenvy",
  "firehose-parquet",
  "firehose-protos",
  "prost",
@@ -479,7 +477,6 @@ dependencies = [
  "sha2",
  "tokio",
  "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]

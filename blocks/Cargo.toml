@@ -15,14 +15,11 @@ path = "src/bin/main.rs"
 [dependencies]
 firehose-parquet = { path = "../firehose-parquet" }
 firehose-protos = { path = "../firehose-protos" }
-arrow = { version = "58", features = ["prettyprint"] }
-prost = "0.13"
-prost-types = "0.13"
-tokio = { version = "1", features = ["full"] }
-clap = { version = "4", features = ["derive", "env"] }
-clap_complete = "4"
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
-dotenvy = "0.15"
-anyhow = "1"
-sha2 = "0.10"
+arrow.workspace = true
+prost.workspace = true
+prost-types.workspace = true
+tokio.workspace = true
+clap.workspace = true
+tracing.workspace = true
+anyhow.workspace = true
+sha2.workspace = true
