@@ -123,7 +123,7 @@ impl EvmBlockMapper {
             system_code_changes_schema: schema::system_code_changes_schema(ifs, enc),
             system_storage_changes_schema: schema::system_storage_changes_schema(ifs, enc),
             system_nonce_changes_schema: schema::system_nonce_changes_schema(ifs, enc),
-            system_gas_changes_schema: schema::system_gas_changes_schema(ifs, enc),
+            system_gas_changes_schema: schema::system_gas_changes_schema(ifs),
             system_account_creations_schema: schema::system_account_creations_schema(ifs, enc),
         }
     }

@@ -298,7 +298,7 @@ pub fn system_nonce_changes_schema(include_fork_step: bool, encoding: &EncodeByt
     Schema::new(fields)
 }
 
-pub fn system_gas_changes_schema(include_fork_step: bool, encoding: &EncodeBytes) -> Schema {
+pub fn system_gas_changes_schema(include_fork_step: bool) -> Schema {
     let mut fields = canonical_fields();
     fields.extend(vec![
         Field::new("block_number", DataType::UInt64, false),
