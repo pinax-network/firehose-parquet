@@ -68,7 +68,8 @@ impl FirehoseClient {
         };
 
         let mut client = firehose::endpoint_info_client::EndpointInfoClient::new(channel)
-            .accept_compressed(tonic::codec::CompressionEncoding::Gzip);
+            .accept_compressed(tonic::codec::CompressionEncoding::Gzip)
+            .max_decoding_message_size(128 * 1024 * 1024);
 
         let mut request = tonic::Request::new(firehose::InfoRequest {});
         if let Some(ref key) = self.config.api_key {
@@ -160,7 +161,8 @@ impl FirehoseClient {
             };
 
             let mut client = firehose::stream_client::StreamClient::new(channel)
-                .accept_compressed(tonic::codec::CompressionEncoding::Gzip);
+                .accept_compressed(tonic::codec::CompressionEncoding::Gzip)
+                .max_decoding_message_size(128 * 1024 * 1024);
 
             let start_block_num = match &cursor {
                 Some(_) => self.config.start_block.unwrap_or(0) as i64,
