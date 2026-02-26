@@ -43,7 +43,7 @@ impl FirehoseClient {
         let use_tls = self.config.endpoint.starts_with("https");
 
         if use_tls {
-            endpoint = endpoint.tls_config(ClientTlsConfig::new())?;
+            endpoint = endpoint.tls_config(ClientTlsConfig::new().with_native_roots())?;
         }
 
         let channel = endpoint
@@ -67,7 +67,8 @@ impl FirehoseClient {
             }
         };
 
-        let mut client = firehose::endpoint_info_client::EndpointInfoClient::new(channel);
+        let mut client = firehose::endpoint_info_client::EndpointInfoClient::new(channel)
+            .accept_compressed(tonic::codec::CompressionEncoding::Gzip);
 
         let mut request = tonic::Request::new(firehose::InfoRequest {});
         if let Some(ref key) = self.config.api_key {
@@ -158,7 +159,8 @@ impl FirehoseClient {
                 }
             };
 
-            let mut client = firehose::stream_client::StreamClient::new(channel);
+            let mut client = firehose::stream_client::StreamClient::new(channel)
+                .accept_compressed(tonic::codec::CompressionEncoding::Gzip);
 
             let start_block_num = match &cursor {
                 Some(_) => self.config.start_block.unwrap_or(0) as i64,
