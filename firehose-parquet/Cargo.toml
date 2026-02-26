@@ -8,7 +8,7 @@ description = "Core library for converting Firehose gRPC streams to Apache Parqu
 firehose-protos = { path = "../firehose-protos" }
 arrow.workspace = true
 parquet = { version = "58", features = ["arrow"] }
-tonic = { workspace = true, features = ["tls", "tls-webpki-roots", "transport"] }
+tonic = { workspace = true, features = ["tls-ring", "tls-webpki-roots", "transport"] }
 prost.workspace = true
 prost-types.workspace = true
 tokio.workspace = true
