@@ -4,16 +4,17 @@ A production-grade Rust toolkit that consumes [StreamingFast Firehose](https://f
 
 ## Supported Chains
 
-| Chain | `--block-type` | Endpoint Example | Tables |
-|---|---|---|---|
-| **EVM** | `evm` | `eth.firehose.pinax.network:443` | blocks, transactions, logs (+7 extended tables) |
-| **Solana** | `solana` | `solana.firehose.pinax.network:443` | blocks, transactions, messages, instructions, rewards |
-| **Bitcoin** | `bitcoin` | `btc.firehose.pinax.network:443` | blocks, transactions, inputs, outputs |
-| **Beacon** | `beacon` | `beacon.firehose.pinax.network:443` | blocks, attestations, deposits, voluntary_exits, blob_sidecars, ... |
-| **Tron** | `tron` | `tron.firehose.pinax.network:443` | blocks, transactions, logs, internal_transactions |
-| **Cosmos** | `cosmos` | `cosmoshub.firehose.pinax.network:443` | blocks, transactions, events, messages |
-| **Antelope** | `antelope` | `eos.firehose.pinax.network:443` | blocks, transactions, actions, db_ops |
-| **NEAR** | `near` | `near.firehose.pinax.network:443` | blocks, chunks, transactions, receipts, state_changes |
+| `--block-type` | Endpoint Example | Tables |
+|---|---|---|
+| `evm` | `eth.firehose.pinax.network:443` | blocks, transactions, logs |
+| `evm --extended` | | + calls, balance_changes, code_changes, storage_changes, nonce_changes, gas_changes, account_creations |
+| `solana` | `solana.firehose.pinax.network:443` | blocks, transactions, messages, instructions, rewards |
+| `bitcoin` | `btc.firehose.pinax.network:443` | blocks, transactions, inputs, outputs |
+| `beacon` | `beacon.firehose.pinax.network:443` | blocks, attestations, deposits, proposer_slashings, attester_slashings, voluntary_exits, execution_payload, blob_sidecars |
+| `tron` | `tron.firehose.pinax.network:443` | blocks, transactions, logs, internal_transactions |
+| `cosmos` | `cosmoshub.firehose.pinax.network:443` | blocks, transactions, events, messages |
+| `antelope` | `eos.firehose.pinax.network:443` | blocks, transactions, actions, db_ops |
+| `near` | `near.firehose.pinax.network:443` | blocks, chunks, transactions, receipts, state_changes |
 
 > **Tip:** Use `--block-type auto` (the default) to auto-detect the chain from the Firehose stream's protobuf `type_url`.
 
