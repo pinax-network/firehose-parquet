@@ -33,6 +33,22 @@ pub struct BlockMetadata {
     pub max_timestamp: Option<i64>,
 }
 
+impl BlockMetadata {
+    /// Merge another metadata range into this one, expanding min/max bounds.
+    pub fn merge(&mut self, other: &BlockMetadata) {
+        self.min_block_number = self.min_block_number.min(other.min_block_number);
+        self.max_block_number = self.max_block_number.max(other.max_block_number);
+        self.min_timestamp = match (self.min_timestamp, other.min_timestamp) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        };
+        self.max_timestamp = match (self.max_timestamp, other.max_timestamp) {
+            (Some(a), Some(b)) => Some(a.max(b)),
+            (a, b) => a.or(b),
+        };
+    }
+}
+
 /// Pipeline configuration.
 #[derive(Debug, Clone)]
 pub struct Config {

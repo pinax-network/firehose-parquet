@@ -179,9 +179,10 @@ async fn main() -> Result<()> {
             config.partition.clone(),
             config.compression,
             &config,
+            flush_bytes,
         )?
     } else {
-        OutputWriter::new(&config.output, config.partition.clone(), config.compression)
+        OutputWriter::new(&config.output, config.partition.clone(), config.compression, flush_bytes)
     };
 
     // If block type is known upfront, resolve encode_bytes and create mapper immediately.
@@ -282,6 +283,11 @@ async fn main() -> Result<()> {
                 writer.write_all(&batches, &metadata)?;
             }
         }
+    }
+
+    // Flush any remaining buffered data in the writer.
+    if !dry_run {
+        writer.flush_remaining()?;
     }
 
     info!(blocks_processed, "pipeline finished");

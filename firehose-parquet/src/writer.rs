@@ -166,7 +166,7 @@ impl ParquetTableWriter {
     }
 
     /// Return the partition-relative path component (e.g. `blocks/date=2024-01-15`).
-    fn partition_suffix(&self, table: &str, metadata: &BlockMetadata) -> String {
+    pub fn partition_suffix(&self, table: &str, metadata: &BlockMetadata) -> String {
         match &self.partition {
             Partition::None => table.to_string(),
             Partition::BlockRange(size) => {
@@ -238,16 +238,41 @@ impl ParquetTableWriter {
     }
 }
 
-/// High-level writer that accepts a generic HashMap<String, RecordBatch>
-/// produced by any BlockMapper implementation.
+/// Buffered state for a single output table.
+struct TableBuffer {
+    batches: Vec<RecordBatch>,
+    /// Accumulated Arrow memory across all buffered batches.
+    total_bytes: usize,
+    /// Merged metadata across all contributing flushes.
+    metadata: BlockMetadata,
+    /// Partition suffix for this buffer (used to detect partition changes).
+    partition_key: String,
+}
+
+/// High-level writer that buffers small RecordBatches per table and only
+/// writes to disk when the accumulated size reaches `flush_bytes`, the
+/// partition key changes, or the pipeline ends. This prevents many tiny
+/// Parquet files for tables that have few rows per block (e.g. `blocks`).
 pub struct OutputWriter {
     pub inner: ParquetTableWriter,
+    /// Per-table buffer for accumulating small batches before writing.
+    buffers: HashMap<String, TableBuffer>,
+    /// Target Arrow memory per output file. Tables are buffered until their
+    /// accumulated size reaches this threshold.
+    flush_bytes: u64,
 }
 
 impl OutputWriter {
-    pub fn new(output_dir: impl Into<PathBuf>, partition: Partition, compression: Compression) -> Self {
+    pub fn new(
+        output_dir: impl Into<PathBuf>,
+        partition: Partition,
+        compression: Compression,
+        flush_bytes: u64,
+    ) -> Self {
         Self {
             inner: ParquetTableWriter::new(output_dir, partition, compression),
+            buffers: HashMap::new(),
+            flush_bytes,
         }
     }
 
@@ -257,20 +282,99 @@ impl OutputWriter {
         partition: Partition,
         compression: Compression,
         config: &Config,
+        flush_bytes: u64,
     ) -> Result<Self> {
         Ok(Self {
             inner: ParquetTableWriter::new_s3(output_path, partition, compression, config)?,
+            buffers: HashMap::new(),
+            flush_bytes,
         })
     }
 
     /// Write all table batches produced by a BlockMapper::flush().
+    ///
+    /// Small tables are buffered until they reach `flush_bytes` in accumulated
+    /// Arrow memory, or the partition changes. This prevents tiny files for
+    /// low-row-count tables like `blocks`.
     pub fn write_all(
         &mut self,
         batches: &HashMap<String, RecordBatch>,
         metadata: &BlockMetadata,
     ) -> Result<()> {
         for (table, batch) in batches {
-            self.inner.write_batch(table, batch, metadata)?;
+            if batch.num_rows() == 0 {
+                continue;
+            }
+            self.buffer_or_write(table, batch, metadata)?;
+        }
+        Ok(())
+    }
+
+    /// Buffer a single batch, flushing to disk if the partition changes or
+    /// the accumulated size exceeds the threshold.
+    fn buffer_or_write(
+        &mut self,
+        table: &str,
+        batch: &RecordBatch,
+        metadata: &BlockMetadata,
+    ) -> Result<()> {
+        let partition_key = self.inner.partition_suffix(table, metadata);
+        let batch_bytes = batch.get_array_memory_size();
+
+        // Flush existing buffer if the partition changed.
+        let needs_partition_flush = self
+            .buffers
+            .get(table)
+            .map_or(false, |buf| buf.partition_key != partition_key);
+        if needs_partition_flush {
+            self.flush_table(table)?;
+        }
+
+        // Add to buffer.
+        {
+            let buf = self
+                .buffers
+                .entry(table.to_string())
+                .or_insert_with(|| TableBuffer {
+                    batches: Vec::new(),
+                    total_bytes: 0,
+                    metadata: metadata.clone(),
+                    partition_key,
+                });
+            buf.batches.push(batch.clone());
+            buf.total_bytes += batch_bytes;
+            buf.metadata.merge(metadata);
+        }
+
+        // Write if buffer is large enough.
+        let needs_size_flush = self
+            .buffers
+            .get(table)
+            .map_or(false, |buf| buf.total_bytes as u64 >= self.flush_bytes);
+        if needs_size_flush {
+            self.flush_table(table)?;
+        }
+
+        Ok(())
+    }
+
+    /// Concatenate and write all buffered batches for a single table.
+    fn flush_table(&mut self, table: &str) -> Result<()> {
+        let buf = match self.buffers.remove(table) {
+            Some(buf) if !buf.batches.is_empty() => buf,
+            _ => return Ok(()),
+        };
+        let schema = buf.batches[0].schema();
+        let merged = arrow::compute::concat_batches(&schema, &buf.batches)?;
+        self.inner.write_batch(table, &merged, &buf.metadata)?;
+        Ok(())
+    }
+
+    /// Flush all remaining buffered data. Call at pipeline end.
+    pub fn flush_remaining(&mut self) -> Result<()> {
+        let tables: Vec<String> = self.buffers.keys().cloned().collect();
+        for table in tables {
+            self.flush_table(&table)?;
         }
         Ok(())
     }
@@ -428,7 +532,8 @@ mod tests {
         let mut batches = HashMap::new();
         batches.insert("blocks".to_string(), batch);
 
-        let mut out = OutputWriter::new(dir.path(), Partition::None, Compression::Zstd);
+        // Use flush_bytes=0 so that every write_all flushes immediately.
+        let mut out = OutputWriter::new(dir.path(), Partition::None, Compression::Zstd, 0);
         let meta = default_metadata();
         out.write_all(&batches, &meta).unwrap();
         assert!(dir.path().join("blocks").exists());
@@ -466,5 +571,97 @@ mod tests {
         assert!(is_s3_output(Path::new("s3://bucket/prefix")));
         assert!(!is_s3_output(Path::new("output")));
         assert!(!is_s3_output(Path::new("/tmp/local")));
+    }
+
+    #[test]
+    fn test_buffered_writer_accumulates_small_batches() {
+        let dir = tempfile::tempdir().unwrap();
+        let batch = make_test_batch();
+        let mut batches = HashMap::new();
+        batches.insert("blocks".to_string(), batch);
+
+        // flush_bytes large enough that a tiny batch won't trigger a write.
+        let mut out = OutputWriter::new(dir.path(), Partition::None, Compression::None, 1_000_000);
+        let meta = default_metadata();
+
+        // Write twice — both should be buffered, not written to disk yet.
+        out.write_all(&batches, &meta).unwrap();
+        out.write_all(&batches, &meta).unwrap();
+        assert!(!dir.path().join("blocks").exists(), "should still be buffered");
+
+        // flush_remaining writes the concatenated data.
+        out.flush_remaining().unwrap();
+        assert!(dir.path().join("blocks").exists(), "should be written after flush");
+
+        // Verify the file has 2 rows (from the 2 batches).
+        let parts: Vec<_> = std::fs::read_dir(dir.path().join("blocks"))
+            .unwrap()
+            .collect();
+        assert_eq!(parts.len(), 1, "should be a single part file");
+
+        let file_path = parts[0].as_ref().unwrap().path();
+        let read_batches = read_parquet(&file_path).unwrap();
+        let total_rows: usize = read_batches.iter().map(|b| b.num_rows()).sum();
+        assert_eq!(total_rows, 2, "concatenated batch should have 2 rows");
+    }
+
+    #[test]
+    fn test_buffered_writer_flushes_on_partition_change() {
+        let dir = tempfile::tempdir().unwrap();
+        let batch = make_test_batch();
+        let mut batches = HashMap::new();
+        batches.insert("blocks".to_string(), batch);
+
+        let mut out = OutputWriter::new(dir.path(), Partition::Date, Compression::None, 1_000_000);
+
+        // First write: date=2024-01-15
+        let meta1 = BlockMetadata {
+            min_block_number: 100,
+            max_block_number: 200,
+            min_timestamp: Some(1705320000), // 2024-01-15 12:00:00 UTC
+            max_timestamp: Some(1705320000),
+        };
+        out.write_all(&batches, &meta1).unwrap();
+
+        // Second write: different date — should flush the first.
+        let meta2 = BlockMetadata {
+            min_block_number: 300,
+            max_block_number: 400,
+            min_timestamp: Some(1705406400), // 2024-01-16 12:00:00 UTC
+            max_timestamp: Some(1705406400),
+        };
+        out.write_all(&batches, &meta2).unwrap();
+
+        // The 2024-01-15 partition should have been written (partition change).
+        let jan15 = dir.path().join("blocks/date=2024-01-15");
+        assert!(jan15.exists(), "old partition should be flushed on date change");
+
+        // The 2024-01-16 data is still buffered.
+        let jan16 = dir.path().join("blocks/date=2024-01-16");
+        assert!(!jan16.exists(), "new partition should still be buffered");
+
+        out.flush_remaining().unwrap();
+        assert!(jan16.exists(), "new partition should be written after flush");
+    }
+
+    #[test]
+    fn test_metadata_merge() {
+        let mut a = BlockMetadata {
+            min_block_number: 100,
+            max_block_number: 200,
+            min_timestamp: Some(1000),
+            max_timestamp: Some(2000),
+        };
+        let b = BlockMetadata {
+            min_block_number: 50,
+            max_block_number: 300,
+            min_timestamp: Some(500),
+            max_timestamp: Some(2500),
+        };
+        a.merge(&b);
+        assert_eq!(a.min_block_number, 50);
+        assert_eq!(a.max_block_number, 300);
+        assert_eq!(a.min_timestamp, Some(500));
+        assert_eq!(a.max_timestamp, Some(2500));
     }
 }
