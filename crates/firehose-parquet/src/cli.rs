@@ -18,28 +18,36 @@ pub fn load_dotenv() {
 #[derive(Args, Debug, Clone)]
 pub struct CommonArgs {
     /// Firehose gRPC endpoint URL
-    #[arg(long, env = "ENDPOINT")]
+    #[arg(short = 'e', long, env = "ENDPOINT")]
     pub endpoint: Option<String>,
 
-    /// API key for authentication
-    #[arg(long, env = "FIREHOSE_API_KEY")]
-    pub api_key: Option<String>,
+    /// Name of environment variable containing the API key for authentication
+    #[arg(long, env = "API_KEY_ENVVAR", default_value = "SUBSTREAMS_API_KEY")]
+    pub api_key_envvar: String,
 
-    /// JWT bearer token for authentication
-    #[arg(long, env = "SUBSTREAMS_API_TOKEN")]
-    pub jwt_token: Option<String>,
+    /// Name of environment variable containing the JWT bearer token for authentication
+    #[arg(long, env = "API_TOKEN_ENVVAR", default_value = "SUBSTREAMS_API_TOKEN")]
+    pub api_token_envvar: String,
 
     /// Start block number (inclusive)
-    #[arg(long, env = "START_BLOCK")]
+    #[arg(short = 's', long, env = "START_BLOCK")]
     pub start_block: Option<u64>,
 
     /// Stop block number (inclusive, 0 = stream forever)
-    #[arg(long, env = "STOP_BLOCK")]
+    #[arg(short = 't', long, env = "STOP_BLOCK")]
     pub stop_block: Option<u64>,
 
     /// Path to cursor file for resuming a previous session
-    #[arg(long, env = "CURSOR")]
+    #[arg(short = 'c', long, env = "CURSOR")]
     pub cursor: Option<PathBuf>,
+
+    /// Skip certificate validation on gRPC connection
+    #[arg(long, env = "INSECURE", default_value = "false")]
+    pub insecure: bool,
+
+    /// Use plaintext connection (no TLS)
+    #[arg(long, env = "PLAINTEXT", default_value = "false")]
+    pub plaintext: bool,
 
     /// Output directory
     #[arg(long, env = "OUTPUT", default_value = "output")]
@@ -121,13 +129,21 @@ pub fn build_config(args: &CommonArgs) -> anyhow::Result<Config> {
         .endpoint
         .clone()
         .ok_or_else(|| anyhow::anyhow!("--endpoint is required"))?;
+
+    // Resolve the actual API key / JWT token by reading the environment variable
+    // whose *name* is given by `--api-key-envvar` / `--api-token-envvar`.
+    let api_key = std::env::var(&args.api_key_envvar).ok().filter(|v| !v.is_empty());
+    let jwt_token = std::env::var(&args.api_token_envvar).ok().filter(|v| !v.is_empty());
+
     Ok(Config {
         endpoint,
-        api_key: args.api_key.clone(),
-        jwt_token: args.jwt_token.clone(),
+        api_key,
+        jwt_token,
         start_block: args.start_block,
         stop_block: args.stop_block,
         cursor_path: args.cursor.clone(),
+        insecure: args.insecure,
+        plaintext: args.plaintext,
         output: args.output.clone(),
         partition: parse_partition(&args.partition, args.block_range_size),
         flush_rows: args.flush_rows,
@@ -200,8 +216,10 @@ mod tests {
         assert_eq!(cli.common.log_level, "info");
         assert!(!cli.common.dry_run);
         assert!(cli.common.final_blocks_only);
-        assert!(cli.common.api_key.is_none());
-        assert!(cli.common.jwt_token.is_none());
+        assert_eq!(cli.common.api_key_envvar, "SUBSTREAMS_API_KEY");
+        assert_eq!(cli.common.api_token_envvar, "SUBSTREAMS_API_TOKEN");
+        assert!(!cli.common.insecure);
+        assert!(!cli.common.plaintext);
         assert!(cli.common.start_block.is_none());
         assert!(cli.common.stop_block.is_none());
         assert!(cli.common.cursor.is_none());
@@ -212,11 +230,12 @@ mod tests {
     fn test_all_flags() {
         let cli = parse(&[
             "test-cli",
-            "--endpoint", "https://eth.firehose.pinax.network:443",
-            "--api-key", "my-key",
-            "--start-block", "100",
-            "--stop-block", "200",
-            "--cursor", "cursor.txt",
+            "-e", "https://eth.firehose.pinax.network:443",
+            "--api-key-envvar", "MY_KEY_VAR",
+            "--api-token-envvar", "MY_TOKEN_VAR",
+            "-s", "100",
+            "-t", "200",
+            "-c", "cursor.txt",
             "--output", "/tmp/out",
             "--partition", "date",
             "--block-range-size", "5000",
@@ -226,9 +245,12 @@ mod tests {
             "--compression", "snappy",
             "--log-level", "debug",
             "--dry-run",
+            "--insecure",
+            "--plaintext",
         ]);
         assert_eq!(cli.common.endpoint.as_deref(), Some("https://eth.firehose.pinax.network:443"));
-        assert_eq!(cli.common.api_key.as_deref(), Some("my-key"));
+        assert_eq!(cli.common.api_key_envvar, "MY_KEY_VAR");
+        assert_eq!(cli.common.api_token_envvar, "MY_TOKEN_VAR");
         assert_eq!(cli.common.start_block, Some(100));
         assert_eq!(cli.common.stop_block, Some(200));
         assert_eq!(cli.common.cursor.as_deref(), Some(std::path::Path::new("cursor.txt")));
@@ -241,6 +263,8 @@ mod tests {
         assert_eq!(cli.common.compression, "snappy");
         assert_eq!(cli.common.log_level, "debug");
         assert!(cli.common.dry_run);
+        assert!(cli.common.insecure);
+        assert!(cli.common.plaintext);
     }
 
     #[test]
@@ -271,6 +295,7 @@ mod tests {
             "--start-block", "100",
             "--compression", "gzip",
             "--partition", "date",
+            "--insecure",
         ]);
         let config = build_config(&cli.common).expect("build_config should succeed");
         assert_eq!(config.endpoint, "https://example.com:443");
@@ -279,6 +304,8 @@ mod tests {
         assert_eq!(config.partition, Partition::Date);
         assert_eq!(config.flush_rows, 50000);
         assert!(config.final_blocks_only);
+        assert!(config.insecure);
+        assert!(!config.plaintext);
     }
 
     #[test]
@@ -322,7 +349,7 @@ mod tests {
         assert_eq!(cli.common.compression, "snappy");
 
         // CLI flags take precedence over env vars
-        let cli = parse(&["test-cli", "--endpoint", "https://from-cli.example.com:443", "--compression", "gzip"]);
+        let cli = parse(&["test-cli", "-e", "https://from-cli.example.com:443", "--compression", "gzip"]);
         assert_eq!(cli.common.endpoint.as_deref(), Some("https://from-cli.example.com:443"));
         assert_eq!(cli.common.compression, "gzip");
         // env var still applies for start_block since no CLI flag overrides it
@@ -333,6 +360,43 @@ mod tests {
             std::env::remove_var("ENDPOINT");
             std::env::remove_var("START_BLOCK");
             std::env::remove_var("COMPRESSION");
+        }
+    }
+
+    #[test]
+    fn test_api_key_envvar_resolution() {
+        // Set up an env var with the actual API key
+        unsafe {
+            std::env::set_var("SUBSTREAMS_API_KEY", "my-test-key");
+            std::env::set_var("SUBSTREAMS_API_TOKEN", "my-test-token");
+        }
+
+        let cli = parse(&["test-cli", "--endpoint", "https://example.com:443"]);
+        let config = build_config(&cli.common).expect("build_config should succeed");
+        assert_eq!(config.api_key.as_deref(), Some("my-test-key"));
+        assert_eq!(config.jwt_token.as_deref(), Some("my-test-token"));
+
+        // Clean up
+        unsafe {
+            std::env::remove_var("SUBSTREAMS_API_KEY");
+            std::env::remove_var("SUBSTREAMS_API_TOKEN");
+        }
+    }
+
+    #[test]
+    fn test_custom_api_key_envvar() {
+        // Test using a custom envvar name
+        unsafe {
+            std::env::set_var("MY_CUSTOM_KEY", "custom-key-value");
+        }
+
+        let cli = parse(&["test-cli", "--endpoint", "https://example.com:443", "--api-key-envvar", "MY_CUSTOM_KEY"]);
+        let config = build_config(&cli.common).expect("build_config should succeed");
+        assert_eq!(config.api_key.as_deref(), Some("custom-key-value"));
+
+        // Clean up
+        unsafe {
+            std::env::remove_var("MY_CUSTOM_KEY");
         }
     }
 }

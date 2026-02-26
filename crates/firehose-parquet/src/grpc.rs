@@ -4,6 +4,7 @@ use crate::traits::BlockIdentity;
 use anyhow::{Context, Result};
 use backoff::ExponentialBackoffBuilder;
 use firehose_protos::firehose;
+use std::sync::Arc;
 use std::time::Duration;
 use tonic::transport::{Channel, ClientTlsConfig, Endpoint};
 use tracing::{debug, info, warn};
@@ -27,7 +28,19 @@ impl FirehoseClient {
             .timeout(Duration::from_secs(300))
             .connect_timeout(Duration::from_secs(30));
 
-        if self.config.endpoint.starts_with("https") {
+        // Determine if TLS should be used:
+        // --plaintext forces no TLS regardless of scheme.
+        // Otherwise, TLS is enabled for https:// endpoints.
+        let use_tls = !self.config.plaintext && self.config.endpoint.starts_with("https");
+
+        if use_tls {
+            if self.config.insecure {
+                // Use custom connector that skips certificate validation.
+                let channel = connect_insecure(endpoint).await
+                    .with_context(|| format!("connecting (insecure) to {uri}"))?;
+                info!(endpoint = %uri, insecure = true, "connected to Firehose");
+                return Ok(channel);
+            }
             endpoint = endpoint.tls_config(ClientTlsConfig::new())?;
         }
 
@@ -35,7 +48,7 @@ impl FirehoseClient {
             .connect()
             .await
             .with_context(|| format!("connecting to {uri}"))?;
-        info!(endpoint = %uri, "connected to Firehose");
+        info!(endpoint = %uri, tls = use_tls, "connected to Firehose");
         Ok(channel)
     }
 
@@ -183,4 +196,84 @@ impl FirehoseClient {
             tokio::time::sleep(Duration::from_secs(1)).await;
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Insecure TLS connection (--insecure flag)
+// ---------------------------------------------------------------------------
+
+use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
+use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
+use rustls::DigitallySignedStruct;
+
+/// A certificate verifier that accepts any server certificate without validation.
+#[derive(Debug)]
+struct NoCertificateVerification(Arc<rustls::crypto::CryptoProvider>);
+
+impl ServerCertVerifier for NoCertificateVerification {
+    fn verify_server_cert(
+        &self,
+        _end_entity: &CertificateDer<'_>,
+        _intermediates: &[CertificateDer<'_>],
+        _server_name: &ServerName<'_>,
+        _ocsp: &[u8],
+        _now: UnixTime,
+    ) -> std::result::Result<ServerCertVerified, rustls::Error> {
+        Ok(ServerCertVerified::assertion())
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        _message: &[u8],
+        _cert: &CertificateDer<'_>,
+        _dss: &DigitallySignedStruct,
+    ) -> std::result::Result<HandshakeSignatureValid, rustls::Error> {
+        Ok(HandshakeSignatureValid::assertion())
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        _message: &[u8],
+        _cert: &CertificateDer<'_>,
+        _dss: &DigitallySignedStruct,
+    ) -> std::result::Result<HandshakeSignatureValid, rustls::Error> {
+        Ok(HandshakeSignatureValid::assertion())
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+        self.0.signature_verification_algorithms.supported_schemes()
+    }
+}
+
+/// Connect to an endpoint with TLS but without certificate verification.
+async fn connect_insecure(endpoint: Endpoint) -> Result<Channel> {
+    let provider = Arc::new(rustls::crypto::ring::default_provider());
+    let tls_config = rustls::ClientConfig::builder()
+        .dangerous()
+        .with_custom_certificate_verifier(Arc::new(NoCertificateVerification(provider)))
+        .with_no_client_auth();
+
+    let tls_connector = tokio_rustls::TlsConnector::from(Arc::new(tls_config));
+
+    let connector = tower::service_fn(move |uri: http::Uri| {
+        let tls = tls_connector.clone();
+        async move {
+            let host = uri.host()
+                .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "URI has no host"))?
+                .to_string();
+            let port = uri.port_u16().unwrap_or(443);
+            let addr = format!("{host}:{port}");
+
+            let tcp = tokio::net::TcpStream::connect(addr).await?;
+            let domain = ServerName::try_from(host)
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
+            let tls_stream = tls.connect(domain, tcp).await?;
+            Ok::<_, std::io::Error>(hyper_util::rt::TokioIo::new(tls_stream))
+        }
+    });
+
+    endpoint
+        .connect_with_connector(connector)
+        .await
+        .map_err(Into::into)
 }
