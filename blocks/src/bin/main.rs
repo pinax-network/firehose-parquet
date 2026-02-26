@@ -164,7 +164,7 @@ async fn main() -> Result<()> {
         extended = true;
     }
 
-    info!(?config, block_type, extended, "starting pipeline");
+    info!(block_type, extended, "starting pipeline\n{config}");
 
     let final_blocks_only = config.final_blocks_only;
     let include_fork_step = !final_blocks_only;

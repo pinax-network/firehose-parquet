@@ -185,7 +185,10 @@ pub fn build_config(args: &CommonArgs) -> anyhow::Result<Config> {
 pub fn init_tracing(log_level: &str) {
     let filter = tracing_subscriber::EnvFilter::try_new(log_level)
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
-    tracing_subscriber::fmt().with_env_filter(filter).init();
+    tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_target(false)
+        .init();
 }
 
 /// Generate shell completions for the given command and write to stdout.
