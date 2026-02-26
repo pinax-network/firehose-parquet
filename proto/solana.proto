@@ -6,6 +6,8 @@ import "google/protobuf/timestamp.proto";
 
 option go_package = "github.com/streamingfast/firehose-solana/pb/sf/solana/type/v1;pbsol";
 
+// This Block is backwards compatible with solana.storage.ConfirmedBlock.ConfirmedBlock from
+// the Solana Labs repositories.
 message Block {
   string previous_blockhash = 1;
   string blockhash = 2;
@@ -14,6 +16,8 @@ message Block {
   repeated Reward rewards = 5;
   UnixTimestamp block_time = 6;
   BlockHeight block_height = 7;
+
+  // StreamingFast additions
   uint64 slot = 20;
 }
 
@@ -31,6 +35,8 @@ message Message {
   MessageHeader header = 1;
   repeated bytes account_keys = 2;
   bytes recent_blockhash = 3;
+  // Top-level instructions
+  // T instructions (?)
   repeated CompiledInstruction instructions = 4;
   bool versioned = 5;
   repeated MessageAddressTableLookup address_table_lookups = 6;
@@ -53,15 +59,26 @@ message TransactionStatusMeta {
   uint64 fee = 2;
   repeated uint64 pre_balances = 3;
   repeated uint64 post_balances = 4;
+  // InnerInstructions are instructions made to external programs as part of the transaction.
+  //
+  // Count == len(I)
   repeated InnerInstructions inner_instructions = 5;
+  //    bool inner_instructions_none = 10;
   repeated string log_messages = 6;
+  //    bool log_messages_none = 11;
   repeated TokenBalance pre_token_balances = 7;
   repeated TokenBalance post_token_balances = 8;
   repeated Reward rewards = 9;
   repeated bytes loaded_writable_addresses = 12;
   repeated bytes loaded_readonly_addresses = 13;
   ReturnData return_data = 14;
+  //    bool return_data_none = 15;
+
+  // Sum of compute units consumed by all instructions.
+  // Available since Solana v1.10.35 / v1.11.6.
+  // Set to `None` for txs executed on earlier versions.
   optional uint64 compute_units_consumed = 16;
+  optional uint64 cost_units = 17;
 }
 
 message TransactionError {
@@ -77,6 +94,10 @@ message InnerInstruction {
   uint32 program_id_index = 1;
   bytes accounts = 2;
   bytes data = 3;
+
+  // Invocation stack height of an inner instruction.
+  // Available since Solana v1.14.6
+  // Set to `None` for txs executed on earlier versions.
   optional uint32 stack_height = 4;
 }
 

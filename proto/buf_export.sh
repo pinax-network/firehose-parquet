@@ -48,17 +48,18 @@ echo "  ✓ antelope.proto"
 
 # ── Cosmos ────────────────────────────────────────────────
 buf export buf.build/streamingfast/firehose-cosmos -o "$TMP_DIR/cosmos"
-cp "$TMP_DIR/cosmos/sf/cosmos/type/v2/type.proto" "$PROTO_DIR/cosmos.proto"
+cp "$TMP_DIR/cosmos/sf/cosmos/type/v2/block.proto" "$PROTO_DIR/cosmos.proto"
 echo "  ✓ cosmos.proto"
+
 
 # ── Tron ──────────────────────────────────────────────────
 buf export buf.build/streamingfast/firehose-tron -o "$TMP_DIR/tron"
 cp "$TMP_DIR/tron/sf/tron/type/v1/block.proto" "$PROTO_DIR/tron.proto"
 # Tron depends on core protocol protos
-mkdir -p "$PROTO_DIR/core/contract"
+mkdir -p "$PROTO_DIR/core"
 cp "$TMP_DIR/tron/core/Tron.proto"             "$PROTO_DIR/core/Tron.proto"
 cp "$TMP_DIR/tron/core/Discover.proto"          "$PROTO_DIR/core/Discover.proto"
-cp "$TMP_DIR/tron/core/contract/common.proto"   "$PROTO_DIR/core/contract/common.proto"
+cp "$TMP_DIR/tron/core/common.proto"            "$PROTO_DIR/core/common.proto"
 echo "  ✓ tron.proto (+ core/)"
 
 # ── Beacon ────────────────────────────────────────────────
