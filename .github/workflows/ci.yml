@@ -42,6 +42,6 @@ jobs:
 
       - name: Verify shell completions
         run: |
-          cargo run --bin firehose-evm-to-parquet -- completions bash > /dev/null
-          cargo run --bin firehose-evm-to-parquet -- completions zsh > /dev/null
-          cargo run --bin firehose-evm-to-parquet -- completions fish > /dev/null
+          cargo run --bin firehose-to-parquet -- completions bash > /dev/null
+          cargo run --bin firehose-to-parquet -- completions zsh > /dev/null
+          cargo run --bin firehose-to-parquet -- completions fish > /dev/null

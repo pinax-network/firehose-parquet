@@ -9,36 +9,8 @@ name = "blocks"
 path = "src/lib.rs"
 
 [[bin]]
-name = "firehose-evm-to-parquet"
-path = "src/bin/evm.rs"
-
-[[bin]]
-name = "firehose-bitcoin-to-parquet"
-path = "src/bin/bitcoin.rs"
-
-[[bin]]
-name = "firehose-solana-to-parquet"
-path = "src/bin/solana.rs"
-
-[[bin]]
-name = "firehose-near-to-parquet"
-path = "src/bin/near.rs"
-
-[[bin]]
-name = "firehose-antelope-to-parquet"
-path = "src/bin/antelope.rs"
-
-[[bin]]
-name = "firehose-cosmos-to-parquet"
-path = "src/bin/cosmos.rs"
-
-[[bin]]
-name = "firehose-tron-to-parquet"
-path = "src/bin/tron.rs"
-
-[[bin]]
-name = "firehose-beacon-to-parquet"
-path = "src/bin/beacon.rs"
+name = "firehose-to-parquet"
+path = "src/bin/main.rs"
 
 [dependencies]
 firehose-parquet = { path = "../firehose-parquet" }
