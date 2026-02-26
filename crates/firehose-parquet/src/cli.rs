@@ -4,9 +4,9 @@ use clap_complete::{generate, Shell};
 use std::io;
 use std::path::PathBuf;
 
-/// Shared CLI arguments for all firehose-to-parquet binaries.
-///
-/// Embed in a per-chain `#[derive(Parser)]` struct with `#[command(flatten)]`.
+// Shared CLI arguments for all firehose-to-parquet binaries.
+//
+// Embed in a per-chain `#[derive(Parser)]` struct with `#[command(flatten)]`.
 #[derive(Args, Debug, Clone)]
 pub struct CommonArgs {
     /// Firehose gRPC endpoint URL

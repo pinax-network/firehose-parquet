@@ -11,7 +11,7 @@ use std::time::Instant;
 use tracing::info;
 
 #[derive(Parser, Debug)]
-#[command(name = "firehose-solana-to-parquet", version, about)]
+#[command(name = "firehose-solana-to-parquet", version, about = "Convert Firehose Solana gRPC stream to Apache Parquet")]
 struct Cli {
     #[command(subcommand)]
     command: Option<Commands>,

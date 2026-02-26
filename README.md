@@ -165,12 +165,62 @@ FIREHOSE_API_KEY=your-api-key-here
 SUBSTREAMS_API_TOKEN=your-jwt-token-here
 ```
 
+## CLI Architecture
+
+All binaries are built with [`clap`](https://docs.rs/clap) v4 using derive macros, chosen for its idiomatic Rust approach, excellent documentation, built-in shell completion support, and widespread community adoption.
+
+### Key crates
+
+| Crate | Purpose |
+|---|---|
+| `clap` (derive) | `#[derive(Parser)]` / `#[derive(Args)]` argument parsing with type-safe enums and defaults |
+| `clap_complete` | Generates shell completions for Bash, Zsh, Fish, Elvish, and PowerShell |
+| `anyhow` | Ergonomic error handling with context in binary crates |
+| `thiserror` | Structured error types in the core library |
+| `tracing` / `tracing-subscriber` | Structured, filterable logging |
+| `tokio` | Async runtime for gRPC streaming |
+
+### Shared CLI module
+
+Common arguments, parsing helpers, and completions are defined once in `firehose-parquet::cli`:
+
+```rust
+use firehose_parquet::cli::{CommonArgs, Commands, build_config, init_tracing};
+
+#[derive(Parser)]
+struct Cli {
+    #[command(subcommand)]
+    command: Option<Commands>,
+
+    #[command(flatten)]
+    common: CommonArgs,
+
+    // chain-specific flags here …
+}
+```
+
+### Shell completions
+
+Every binary supports the `completions` subcommand:
+
+```bash
+# Bash
+firehose-evm-to-parquet completions bash > ~/.local/share/bash-completion/completions/firehose-evm-to-parquet
+
+# Zsh
+firehose-evm-to-parquet completions zsh > ~/.zfunc/_firehose-evm-to-parquet
+
+# Fish
+firehose-evm-to-parquet completions fish > ~/.config/fish/completions/firehose-evm-to-parquet.fish
+```
+
 ## Repository Structure
 
 ```
 firehose-parquet/
 ├── Cargo.toml                              # workspace root
 ├── .env.example                            # environment variables template
+├── .github/workflows/ci.yml               # CI pipeline (build + test)
 ├── proto/                                  # Protobuf definitions
 │   └── sf/
 │       ├── firehose/v2/firehose.proto      # Firehose streaming protocol
@@ -185,19 +235,32 @@ firehose-parquet/
 ├── crates/
 │   ├── firehose-parquet/                   # Core library
 │   │   └── src/
+│   │       ├── cli.rs                      # Shared CLI args, completions, helpers
 │   │       ├── config.rs                   # Config, Partition, Compression enums
 │   │       ├── encode.rs                   # BytesColumn, encoding helpers
 │   │       ├── grpc.rs                     # Firehose gRPC client
 │   │       ├── traits.rs                   # BlockMapper trait, BlockIdentity
 │   │       └── writer.rs                   # Parquet writer, partitioning
-│   ├── firehose-solana-to-parquet/         # Solana binary
-│   ├── firehose-evm-to-parquet/            # EVM binary
-│   ├── firehose-bitcoin-to-parquet/        # Bitcoin binary
-│   ├── firehose-beacon-to-parquet/         # Ethereum Beacon binary
-│   ├── firehose-tron-to-parquet/           # Tron binary
-│   ├── firehose-cosmos-to-parquet/         # Cosmos binary
-│   ├── firehose-antelope-to-parquet/       # Antelope (EOS/WAX) binary
-│   └── firehose-near-to-parquet/           # NEAR binary
+│   ├── firehose-protos/                    # Centralized proto compilation
+│   └── blocks/                             # Block type definitions + binary targets
+│       └── src/
+│           ├── bin/                         # Per-chain CLI binaries
+│           │   ├── evm.rs
+│           │   ├── solana.rs
+│           │   ├── bitcoin.rs
+│           │   ├── beacon.rs
+│           │   ├── tron.rs
+│           │   ├── cosmos.rs
+│           │   ├── antelope.rs
+│           │   └── near.rs
+│           ├── evm/                         # Per-chain mapper, schema, proto
+│           ├── solana/
+│           ├── bitcoin/
+│           ├── beacon/
+│           ├── tron/
+│           ├── cosmos/
+│           ├── antelope/
+│           └── near/
 └── target/                                 # build output
 ```
 
@@ -212,6 +275,9 @@ cargo test --workspace
 
 # Build release
 cargo build --release --workspace
+
+# Install a specific binary
+cargo install --path crates/blocks --bin firehose-evm-to-parquet
 ```
 
 ## License
