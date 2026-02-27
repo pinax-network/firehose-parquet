@@ -85,7 +85,7 @@ OUTPUT:
   --compression <CODEC>      zstd (default) | snappy | gzip | none
 
 PARTITIONING:
-  --partition <MODE>         none (default) | block_range | date | hour
+  --partition <MODE>         none (default) | block_range | date | hour | minute | second
   --block-range-size <NUM>   Block range size when partition=block_range (default: 10000)
 
 FILE ROLLOVER:
