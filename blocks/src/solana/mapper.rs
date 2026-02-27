@@ -5,8 +5,8 @@ use arrow::datatypes::Schema;
 use arrow::record_batch::RecordBatch;
 use firehose_parquet::encode::{BytesColumn, BytesListColumn, EncodeBytes};
 use firehose_parquet::traits::{
-    est_bool, est_i32, est_i64, est_list_str, est_list_u64, est_opt_str, est_str, est_u32, est_u64,
-    BlockIdentity, BlockMapper, CanonicalBuilder,
+    est_bool, est_f64, est_i32, est_i64, est_list_str, est_list_u64, est_opt_str, est_str, est_u32,
+    est_u64, BlockIdentity, BlockMapper, CanonicalBuilder,
 };
 use prost::Message;
 use std::collections::HashMap;
@@ -63,6 +63,10 @@ fn append_transaction(
         Some(cu) => builder.compute_units_consumed.append_value(cu),
         None => builder.compute_units_consumed.append_null(),
     }
+    match meta.cost_units {
+        Some(cu) => builder.cost_units.append_value(cu),
+        None => builder.cost_units.append_null(),
+    }
     {
         let vals = builder.log_messages.values();
         for log in &meta.log_messages {
@@ -84,6 +88,17 @@ fn append_transaction(
         }
         builder.post_balances.append(true);
     }
+    // return_data (program_id + data) from meta
+    match &meta.return_data {
+        Some(rd) => {
+            builder.return_data_program_id.append_value(&rd.program_id);
+            builder.return_data.append_value(&rd.data);
+        }
+        None => {
+            builder.return_data_program_id.append_null();
+            builder.return_data.append_null();
+        }
+    }
     append_fork_step(&mut builder.fork_step, fork_step);
 }
 
@@ -94,12 +109,16 @@ pub struct SolanaBlockMapper {
     messages: MessagesBuilder,
     instructions: InstructionsBuilder,
     rewards: RewardsBuilder,
+    token_balances: TokenBalancesBuilder,
+    account_lookups: AccountLookupsBuilder,
     blocks_schema: Schema,
     transactions_schema: Schema,
     vote_transactions_schema: Schema,
     messages_schema: Schema,
     instructions_schema: Schema,
     rewards_schema: Schema,
+    token_balances_schema: Schema,
+    account_lookups_schema: Schema,
 }
 
 impl SolanaBlockMapper {
@@ -111,12 +130,16 @@ impl SolanaBlockMapper {
             messages: MessagesBuilder::new(include_fork_step, &encoding),
             instructions: InstructionsBuilder::new(include_fork_step, &encoding),
             rewards: RewardsBuilder::new(include_fork_step),
+            token_balances: TokenBalancesBuilder::new(include_fork_step),
+            account_lookups: AccountLookupsBuilder::new(include_fork_step, &encoding),
             blocks_schema: schema::blocks_schema(include_fork_step),
             transactions_schema: schema::transactions_schema(include_fork_step, &encoding),
             vote_transactions_schema: schema::transactions_schema(include_fork_step, &encoding),
             messages_schema: schema::messages_schema(include_fork_step, &encoding),
             instructions_schema: schema::instructions_schema(include_fork_step, &encoding),
             rewards_schema: schema::rewards_schema(include_fork_step),
+            token_balances_schema: schema::token_balances_schema(include_fork_step),
+            account_lookups_schema: schema::account_lookups_schema(include_fork_step, &encoding),
         }
     }
 
@@ -196,6 +219,23 @@ impl SolanaBlockMapper {
             self.messages.account_keys.append_value(key);
         }
         self.messages.account_keys.append(true);
+        // loaded addresses from meta (resolved from address table lookups)
+        if meta.loaded_writable_addresses.is_empty() {
+            self.messages.loaded_writable_addresses.append(false);
+        } else {
+            for addr in &meta.loaded_writable_addresses {
+                self.messages.loaded_writable_addresses.append_value(addr);
+            }
+            self.messages.loaded_writable_addresses.append(true);
+        }
+        if meta.loaded_readonly_addresses.is_empty() {
+            self.messages.loaded_readonly_addresses.append(false);
+        } else {
+            for addr in &meta.loaded_readonly_addresses {
+                self.messages.loaded_readonly_addresses.append_value(addr);
+            }
+            self.messages.loaded_readonly_addresses.append(true);
+        }
         append_fork_step(&mut self.messages.fork_step, fork_step);
 
         // instructions (top-level)
@@ -235,9 +275,79 @@ impl SolanaBlockMapper {
                 global_instr_idx += 1;
             }
         }
+
+        // token balances (pre + post)
+        self.map_token_balances(slot, tx_idx, "pre", &meta.pre_token_balances, identity, fork_step);
+        self.map_token_balances(slot, tx_idx, "post", &meta.post_token_balances, identity, fork_step);
+
+        // address table lookups from the message
+        for (lookup_idx, lookup) in msg.address_table_lookups.iter().enumerate() {
+            self.account_lookups.canonical.append(identity);
+            self.account_lookups.slot.append_value(slot);
+            self.account_lookups.transaction_index.append_value(tx_idx);
+            self.account_lookups.lookup_index.append_value(lookup_idx as u32);
+            self.account_lookups.account_key.append_value(&lookup.account_key);
+            self.account_lookups.writable_indexes.append_value(&lookup.writable_indexes);
+            self.account_lookups.readonly_indexes.append_value(&lookup.readonly_indexes);
+            append_fork_step(&mut self.account_lookups.fork_step, fork_step);
+        }
+
+        // per-transaction rewards
+        let reward_base = self.rewards.canonical.len() as u32;
+        for (i, reward) in meta.rewards.iter().enumerate() {
+            self.append_reward(slot, reward_base + i as u32, reward, "transaction", Some(tx_idx), identity, fork_step);
+        }
+    }
+
+    fn map_token_balances(
+        &mut self,
+        slot: u64,
+        tx_idx: u32,
+        balance_type: &str,
+        balances: &[solana::TokenBalance],
+        identity: &BlockIdentity,
+        fork_step: Option<&str>,
+    ) {
+        for (i, tb) in balances.iter().enumerate() {
+            self.token_balances.canonical.append(identity);
+            self.token_balances.slot.append_value(slot);
+            self.token_balances.transaction_index.append_value(tx_idx);
+            self.token_balances.balance_index.append_value(i as u32);
+            self.token_balances.balance_type.append_value(balance_type);
+            self.token_balances.account_index.append_value(tb.account_index);
+            self.token_balances.mint.append_value(&tb.mint);
+            self.token_balances.owner.append_value(&tb.owner);
+            self.token_balances.program_id.append_value(&tb.program_id);
+            // UiTokenAmount fields
+            if let Some(ref ui) = tb.ui_token_amount {
+                self.token_balances.amount.append_value(&ui.amount);
+                self.token_balances.ui_amount.append_value(ui.ui_amount);
+                self.token_balances.decimals.append_value(ui.decimals);
+                self.token_balances.ui_amount_string.append_value(&ui.ui_amount_string);
+            } else {
+                self.token_balances.amount.append_value("");
+                self.token_balances.ui_amount.append_null();
+                self.token_balances.decimals.append_value(0);
+                self.token_balances.ui_amount_string.append_value("");
+            }
+            append_fork_step(&mut self.token_balances.fork_step, fork_step);
+        }
     }
 
     fn map_reward(&mut self, slot: u64, idx: u32, reward: &solana::Reward, identity: &BlockIdentity, fork_step: Option<&str>) {
+        self.append_reward(slot, idx, reward, "block", None, identity, fork_step);
+    }
+
+    fn append_reward(
+        &mut self,
+        slot: u64,
+        idx: u32,
+        reward: &solana::Reward,
+        source: &str,
+        tx_idx: Option<u32>,
+        identity: &BlockIdentity,
+        fork_step: Option<&str>,
+    ) {
         self.rewards.canonical.append(identity);
         self.rewards.slot.append_value(slot);
         self.rewards.reward_index.append_value(idx);
@@ -249,6 +359,11 @@ impl SolanaBlockMapper {
             self.rewards.commission.append_null();
         } else {
             self.rewards.commission.append_value(&reward.commission);
+        }
+        self.rewards.source.append_value(source);
+        match tx_idx {
+            Some(i) => self.rewards.transaction_index.append_value(i),
+            None => self.rewards.transaction_index.append_null(),
         }
         append_fork_step(&mut self.rewards.fork_step, fork_step);
     }
@@ -269,6 +384,8 @@ impl BlockMapper for SolanaBlockMapper {
         result.insert("messages".to_string(), self.messages.finish(&self.messages_schema)?);
         result.insert("instructions".to_string(), self.instructions.finish(&self.instructions_schema)?);
         result.insert("rewards".to_string(), self.rewards.finish(&self.rewards_schema)?);
+        result.insert("token_balances".to_string(), self.token_balances.finish(&self.token_balances_schema)?);
+        result.insert("account_lookups".to_string(), self.account_lookups.finish(&self.account_lookups_schema)?);
         Ok(result)
     }
 
@@ -280,6 +397,8 @@ impl BlockMapper for SolanaBlockMapper {
             self.messages.canonical.len(),
             self.instructions.canonical.len(),
             self.rewards.canonical.len(),
+            self.token_balances.canonical.len(),
+            self.account_lookups.canonical.len(),
         ]
         .into_iter()
         .max()
@@ -309,6 +428,8 @@ impl BlockMapper for SolanaBlockMapper {
             + self.messages.recent_blockhash.estimated_bytes()
             + est_bool(&self.messages.versioned)
             + self.messages.account_keys.estimated_bytes()
+            + self.messages.loaded_writable_addresses.estimated_bytes()
+            + self.messages.loaded_readonly_addresses.estimated_bytes()
             + est_opt_str(&self.messages.fork_step);
         let instructions = self.instructions.canonical.estimated_bytes()
             + est_u64(&self.instructions.slot)
@@ -329,8 +450,32 @@ impl BlockMapper for SolanaBlockMapper {
             + est_u64(&self.rewards.post_balance)
             + est_i32(&self.rewards.reward_type)
             + est_str(&self.rewards.commission)
+            + est_str(&self.rewards.source)
+            + est_u32(&self.rewards.transaction_index)
             + est_opt_str(&self.rewards.fork_step);
-        [blocks, transactions, vote_transactions, messages, instructions, rewards]
+        let token_balances = self.token_balances.canonical.estimated_bytes()
+            + est_u64(&self.token_balances.slot)
+            + est_u32(&self.token_balances.transaction_index)
+            + est_u32(&self.token_balances.balance_index)
+            + est_str(&self.token_balances.balance_type)
+            + est_u32(&self.token_balances.account_index)
+            + est_str(&self.token_balances.mint)
+            + est_str(&self.token_balances.owner)
+            + est_str(&self.token_balances.program_id)
+            + est_str(&self.token_balances.amount)
+            + est_f64(&self.token_balances.ui_amount)
+            + est_u32(&self.token_balances.decimals)
+            + est_str(&self.token_balances.ui_amount_string)
+            + est_opt_str(&self.token_balances.fork_step);
+        let account_lookups = self.account_lookups.canonical.estimated_bytes()
+            + est_u64(&self.account_lookups.slot)
+            + est_u32(&self.account_lookups.transaction_index)
+            + est_u32(&self.account_lookups.lookup_index)
+            + self.account_lookups.account_key.estimated_bytes()
+            + self.account_lookups.writable_indexes.estimated_bytes()
+            + self.account_lookups.readonly_indexes.estimated_bytes()
+            + est_opt_str(&self.account_lookups.fork_step);
+        [blocks, transactions, vote_transactions, messages, instructions, rewards, token_balances, account_lookups]
             .into_iter()
             .max()
             .unwrap_or(0)
@@ -401,9 +546,12 @@ struct TransactionsBuilder {
     err: BytesColumn,
     success: BooleanBuilder,
     compute_units_consumed: UInt64Builder,
+    cost_units: UInt64Builder,
     log_messages: ListBuilder<StringBuilder>,
     pre_balances: ListBuilder<UInt64Builder>,
     post_balances: ListBuilder<UInt64Builder>,
+    return_data_program_id: BytesColumn,
+    return_data: BytesColumn,
     fork_step: Option<StringBuilder>,
 }
 
@@ -419,9 +567,12 @@ impl TransactionsBuilder {
             err: BytesColumn::new(encoding),
             success: BooleanBuilder::new(),
             compute_units_consumed: UInt64Builder::new(),
+            cost_units: UInt64Builder::new(),
             log_messages: ListBuilder::new(StringBuilder::new()),
             pre_balances: ListBuilder::new(UInt64Builder::new()),
             post_balances: ListBuilder::new(UInt64Builder::new()),
+            return_data_program_id: BytesColumn::new(encoding),
+            return_data: BytesColumn::new(encoding),
             fork_step: if include_fork_step { Some(StringBuilder::new()) } else { None },
         }
     }
@@ -440,6 +591,9 @@ impl TransactionsBuilder {
             Arc::new(self.log_messages.finish()) as Arc<dyn Array>,
             Arc::new(self.pre_balances.finish()) as Arc<dyn Array>,
             Arc::new(self.post_balances.finish()) as Arc<dyn Array>,
+            Arc::new(self.cost_units.finish()) as Arc<dyn Array>,
+            self.return_data_program_id.finish(),
+            self.return_data.finish(),
         ]);
         finish_fork_step(&mut self.fork_step, &mut columns);
         Ok(RecordBatch::try_new(Arc::new(schema.clone()), columns)?)
@@ -455,9 +609,12 @@ impl TransactionsBuilder {
             + self.err.estimated_bytes()
             + est_bool(&self.success)
             + est_u64(&self.compute_units_consumed)
+            + est_u64(&self.cost_units)
             + est_list_str(&mut self.log_messages)
             + est_list_u64(&mut self.pre_balances)
             + est_list_u64(&mut self.post_balances)
+            + self.return_data_program_id.estimated_bytes()
+            + self.return_data.estimated_bytes()
             + est_opt_str(&self.fork_step)
     }
 }
@@ -473,6 +630,8 @@ struct MessagesBuilder {
     recent_blockhash: BytesColumn,
     versioned: BooleanBuilder,
     account_keys: BytesListColumn,
+    loaded_writable_addresses: BytesListColumn,
+    loaded_readonly_addresses: BytesListColumn,
     fork_step: Option<StringBuilder>,
 }
 
@@ -489,6 +648,8 @@ impl MessagesBuilder {
             recent_blockhash: BytesColumn::new(encoding),
             versioned: BooleanBuilder::new(),
             account_keys: BytesListColumn::new(encoding),
+            loaded_writable_addresses: BytesListColumn::new(encoding),
+            loaded_readonly_addresses: BytesListColumn::new(encoding),
             fork_step: if include_fork_step { Some(StringBuilder::new()) } else { None },
         }
     }
@@ -505,6 +666,8 @@ impl MessagesBuilder {
             self.recent_blockhash.finish(),
             Arc::new(self.versioned.finish()) as Arc<dyn Array>,
             self.account_keys.finish(),
+            self.loaded_writable_addresses.finish(),
+            self.loaded_readonly_addresses.finish(),
         ]);
         finish_fork_step(&mut self.fork_step, &mut columns);
         Ok(RecordBatch::try_new(Arc::new(schema.clone()), columns)?)
@@ -569,6 +732,8 @@ struct RewardsBuilder {
     post_balance: UInt64Builder,
     reward_type: Int32Builder,
     commission: StringBuilder,
+    source: StringBuilder,
+    transaction_index: UInt32Builder,
     fork_step: Option<StringBuilder>,
 }
 
@@ -583,6 +748,8 @@ impl RewardsBuilder {
             post_balance: UInt64Builder::new(),
             reward_type: Int32Builder::new(),
             commission: StringBuilder::new(),
+            source: StringBuilder::new(),
+            transaction_index: UInt32Builder::new(),
             fork_step: if include_fork_step { Some(StringBuilder::new()) } else { None },
         }
     }
@@ -597,6 +764,106 @@ impl RewardsBuilder {
             Arc::new(self.post_balance.finish()) as Arc<dyn Array>,
             Arc::new(self.reward_type.finish()) as Arc<dyn Array>,
             Arc::new(self.commission.finish()) as Arc<dyn Array>,
+            Arc::new(self.source.finish()) as Arc<dyn Array>,
+            Arc::new(self.transaction_index.finish()) as Arc<dyn Array>,
+        ]);
+        finish_fork_step(&mut self.fork_step, &mut columns);
+        Ok(RecordBatch::try_new(Arc::new(schema.clone()), columns)?)
+    }
+}
+
+struct TokenBalancesBuilder {
+    canonical: CanonicalBuilder,
+    slot: UInt64Builder,
+    transaction_index: UInt32Builder,
+    balance_index: UInt32Builder,
+    balance_type: StringBuilder,
+    account_index: UInt32Builder,
+    mint: StringBuilder,
+    owner: StringBuilder,
+    program_id: StringBuilder,
+    amount: StringBuilder,
+    ui_amount: Float64Builder,
+    decimals: UInt32Builder,
+    ui_amount_string: StringBuilder,
+    fork_step: Option<StringBuilder>,
+}
+
+impl TokenBalancesBuilder {
+    fn new(include_fork_step: bool) -> Self {
+        Self {
+            canonical: CanonicalBuilder::new(),
+            slot: UInt64Builder::new(),
+            transaction_index: UInt32Builder::new(),
+            balance_index: UInt32Builder::new(),
+            balance_type: StringBuilder::new(),
+            account_index: UInt32Builder::new(),
+            mint: StringBuilder::new(),
+            owner: StringBuilder::new(),
+            program_id: StringBuilder::new(),
+            amount: StringBuilder::new(),
+            ui_amount: Float64Builder::new(),
+            decimals: UInt32Builder::new(),
+            ui_amount_string: StringBuilder::new(),
+            fork_step: if include_fork_step { Some(StringBuilder::new()) } else { None },
+        }
+    }
+
+    fn finish(&mut self, schema: &Schema) -> anyhow::Result<RecordBatch> {
+        let mut columns = self.canonical.finish();
+        columns.extend(vec![
+            Arc::new(self.slot.finish()) as Arc<dyn Array>,
+            Arc::new(self.transaction_index.finish()) as Arc<dyn Array>,
+            Arc::new(self.balance_index.finish()) as Arc<dyn Array>,
+            Arc::new(self.balance_type.finish()) as Arc<dyn Array>,
+            Arc::new(self.account_index.finish()) as Arc<dyn Array>,
+            Arc::new(self.mint.finish()) as Arc<dyn Array>,
+            Arc::new(self.owner.finish()) as Arc<dyn Array>,
+            Arc::new(self.program_id.finish()) as Arc<dyn Array>,
+            Arc::new(self.amount.finish()) as Arc<dyn Array>,
+            Arc::new(self.ui_amount.finish()) as Arc<dyn Array>,
+            Arc::new(self.decimals.finish()) as Arc<dyn Array>,
+            Arc::new(self.ui_amount_string.finish()) as Arc<dyn Array>,
+        ]);
+        finish_fork_step(&mut self.fork_step, &mut columns);
+        Ok(RecordBatch::try_new(Arc::new(schema.clone()), columns)?)
+    }
+}
+
+struct AccountLookupsBuilder {
+    canonical: CanonicalBuilder,
+    slot: UInt64Builder,
+    transaction_index: UInt32Builder,
+    lookup_index: UInt32Builder,
+    account_key: BytesColumn,
+    writable_indexes: BytesColumn,
+    readonly_indexes: BytesColumn,
+    fork_step: Option<StringBuilder>,
+}
+
+impl AccountLookupsBuilder {
+    fn new(include_fork_step: bool, encoding: &EncodeBytes) -> Self {
+        Self {
+            canonical: CanonicalBuilder::new(),
+            slot: UInt64Builder::new(),
+            transaction_index: UInt32Builder::new(),
+            lookup_index: UInt32Builder::new(),
+            account_key: BytesColumn::new(encoding),
+            writable_indexes: BytesColumn::new(encoding),
+            readonly_indexes: BytesColumn::new(encoding),
+            fork_step: if include_fork_step { Some(StringBuilder::new()) } else { None },
+        }
+    }
+
+    fn finish(&mut self, schema: &Schema) -> anyhow::Result<RecordBatch> {
+        let mut columns = self.canonical.finish();
+        columns.extend(vec![
+            Arc::new(self.slot.finish()) as Arc<dyn Array>,
+            Arc::new(self.transaction_index.finish()) as Arc<dyn Array>,
+            Arc::new(self.lookup_index.finish()) as Arc<dyn Array>,
+            self.account_key.finish(),
+            self.writable_indexes.finish(),
+            self.readonly_indexes.finish(),
         ]);
         finish_fork_step(&mut self.fork_step, &mut columns);
         Ok(RecordBatch::try_new(Arc::new(schema.clone()), columns)?)
@@ -635,8 +902,12 @@ mod tests {
                             accounts: vec![0],
                             data: vec![5, 6, 7],
                         }],
-                        versioned: false,
-                        address_table_lookups: vec![],
+                        versioned: true,
+                        address_table_lookups: vec![solana::MessageAddressTableLookup {
+                            account_key: vec![10u8; 32],
+                            writable_indexes: vec![0, 1],
+                            readonly_indexes: vec![2],
+                        }],
                     }),
                 }),
                 meta: Some(solana::TransactionStatusMeta {
@@ -654,14 +925,45 @@ mod tests {
                         }],
                     }],
                     log_messages: vec!["Program log: hello".to_string()],
-                    pre_token_balances: vec![],
-                    post_token_balances: vec![],
-                    rewards: vec![],
-                    loaded_writable_addresses: vec![],
-                    loaded_readonly_addresses: vec![],
-                    return_data: None,
+                    pre_token_balances: vec![solana::TokenBalance {
+                        account_index: 1,
+                        mint: "So11111111111111111111111111111111111111112".into(),
+                        ui_token_amount: Some(solana::UiTokenAmount {
+                            ui_amount: 1.5,
+                            decimals: 9,
+                            amount: "1500000000".into(),
+                            ui_amount_string: "1.5".into(),
+                        }),
+                        owner: "OwnerPubkey".into(),
+                        program_id: "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA".into(),
+                    }],
+                    post_token_balances: vec![solana::TokenBalance {
+                        account_index: 1,
+                        mint: "So11111111111111111111111111111111111111112".into(),
+                        ui_token_amount: Some(solana::UiTokenAmount {
+                            ui_amount: 0.5,
+                            decimals: 9,
+                            amount: "500000000".into(),
+                            ui_amount_string: "0.5".into(),
+                        }),
+                        owner: "OwnerPubkey".into(),
+                        program_id: "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA".into(),
+                    }],
+                    rewards: vec![solana::Reward {
+                        pubkey: "TxRewardPubkey".into(),
+                        lamports: 10,
+                        post_balance: 500,
+                        reward_type: 1,
+                        commission: String::new(),
+                    }],
+                    loaded_writable_addresses: vec![vec![20u8; 32]],
+                    loaded_readonly_addresses: vec![vec![21u8; 32], vec![22u8; 32]],
+                    return_data: Some(solana::ReturnData {
+                        program_id: vec![3u8; 32],
+                        data: vec![42, 43, 44],
+                    }),
                     compute_units_consumed: Some(1234),
-                    cost_units: None,
+                    cost_units: Some(5678),
                 }),
             }],
             rewards: vec![solana::Reward {
@@ -681,14 +983,17 @@ mod tests {
         let mut mapper = SolanaBlockMapper::new(false, EncodeBytes::Binary);
         mapper.map_block(&block_bytes, &BlockIdentity::default(), None).unwrap();
 
-        assert_eq!(mapper.max_table_rows(), 2); // 2 instructions
-
         let batches = mapper.flush().unwrap();
         assert_eq!(batches["blocks"].num_rows(), 1);
         assert_eq!(batches["transactions"].num_rows(), 1);
         assert_eq!(batches["messages"].num_rows(), 1);
         assert_eq!(batches["instructions"].num_rows(), 2);
-        assert_eq!(batches["rewards"].num_rows(), 1);
+        // 1 block-level reward + 1 per-tx reward
+        assert_eq!(batches["rewards"].num_rows(), 2);
+        // 1 pre + 1 post token balance
+        assert_eq!(batches["token_balances"].num_rows(), 2);
+        // 1 address table lookup
+        assert_eq!(batches["account_lookups"].num_rows(), 1);
     }
 
     #[test]
@@ -827,6 +1132,8 @@ mod tests {
         let batches = mapper.flush().unwrap();
         assert_eq!(batches["blocks"].num_rows(), 1);
         assert_eq!(batches["transactions"].num_rows(), 0);
+        assert_eq!(batches["token_balances"].num_rows(), 0);
+        assert_eq!(batches["account_lookups"].num_rows(), 0);
     }
 
     #[test]
@@ -869,5 +1176,116 @@ mod tests {
         let sig_idx = batches["transactions"].schema().index_of("signature").unwrap();
         let sig_col = batches["transactions"].column(sig_idx);
         assert_eq!(*sig_col.data_type(), arrow::datatypes::DataType::Utf8);
+    }
+
+    #[test]
+    fn test_token_balances_content() {
+        let block = make_test_block(100);
+        let block_bytes = prost::Message::encode_to_vec(&block);
+        let mut mapper = SolanaBlockMapper::new(false, EncodeBytes::Binary);
+        mapper.map_block(&block_bytes, &BlockIdentity::default(), None).unwrap();
+        let batches = mapper.flush().unwrap();
+
+        let tb = &batches["token_balances"];
+        assert_eq!(tb.num_rows(), 2);
+        // Check balance_type column: first row = "pre", second = "post"
+        let bt_idx = tb.schema().index_of("balance_type").unwrap();
+        let bt_col = tb.column(bt_idx).as_any().downcast_ref::<StringArray>().unwrap();
+        assert_eq!(bt_col.value(0), "pre");
+        assert_eq!(bt_col.value(1), "post");
+        // Check mint column
+        let mint_idx = tb.schema().index_of("mint").unwrap();
+        let mint_col = tb.column(mint_idx).as_any().downcast_ref::<StringArray>().unwrap();
+        assert_eq!(mint_col.value(0), "So11111111111111111111111111111111111111112");
+        // Check ui_amount
+        let ua_idx = tb.schema().index_of("ui_amount").unwrap();
+        let ua_col = tb.column(ua_idx).as_any().downcast_ref::<Float64Array>().unwrap();
+        assert!((ua_col.value(0) - 1.5).abs() < f64::EPSILON);
+        assert!((ua_col.value(1) - 0.5).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_account_lookups_content() {
+        let block = make_test_block(100);
+        let block_bytes = prost::Message::encode_to_vec(&block);
+        let mut mapper = SolanaBlockMapper::new(false, EncodeBytes::Binary);
+        mapper.map_block(&block_bytes, &BlockIdentity::default(), None).unwrap();
+        let batches = mapper.flush().unwrap();
+
+        let al = &batches["account_lookups"];
+        assert_eq!(al.num_rows(), 1);
+        let li_idx = al.schema().index_of("lookup_index").unwrap();
+        let li_col = al.column(li_idx).as_any().downcast_ref::<UInt32Array>().unwrap();
+        assert_eq!(li_col.value(0), 0);
+    }
+
+    #[test]
+    fn test_rewards_source_column() {
+        let block = make_test_block(100);
+        let block_bytes = prost::Message::encode_to_vec(&block);
+        let mut mapper = SolanaBlockMapper::new(false, EncodeBytes::Binary);
+        mapper.map_block(&block_bytes, &BlockIdentity::default(), None).unwrap();
+        let batches = mapper.flush().unwrap();
+
+        let rw = &batches["rewards"];
+        assert_eq!(rw.num_rows(), 2);
+        let src_idx = rw.schema().index_of("source").unwrap();
+        let src_col = rw.column(src_idx).as_any().downcast_ref::<StringArray>().unwrap();
+        // per-tx rewards come first (from map_transaction), then block rewards (from map_reward)
+        assert_eq!(src_col.value(0), "transaction");
+        assert_eq!(src_col.value(1), "block");
+        // transaction_index: 0 for per-tx reward, null for block reward
+        let ti_idx = rw.schema().index_of("transaction_index").unwrap();
+        let ti_col = rw.column(ti_idx).as_any().downcast_ref::<UInt32Array>().unwrap();
+        assert_eq!(ti_col.value(0), 0);
+        assert!(ti_col.is_null(1));
+    }
+
+    #[test]
+    fn test_return_data_and_cost_units() {
+        let block = make_test_block(100);
+        let block_bytes = prost::Message::encode_to_vec(&block);
+        let mut mapper = SolanaBlockMapper::new(false, EncodeBytes::Binary);
+        mapper.map_block(&block_bytes, &BlockIdentity::default(), None).unwrap();
+        let batches = mapper.flush().unwrap();
+
+        let txs = &batches["transactions"];
+        // cost_units should be present
+        let cu_idx = txs.schema().index_of("cost_units").unwrap();
+        let cu_col = txs.column(cu_idx).as_any().downcast_ref::<UInt64Array>().unwrap();
+        assert_eq!(cu_col.value(0), 5678);
+        // return_data should be non-null
+        let rd_idx = txs.schema().index_of("return_data").unwrap();
+        let rd_col = txs.column(rd_idx);
+        assert!(!rd_col.is_null(0));
+    }
+
+    #[test]
+    fn test_loaded_addresses() {
+        let block = make_test_block(100);
+        let block_bytes = prost::Message::encode_to_vec(&block);
+        let mut mapper = SolanaBlockMapper::new(false, EncodeBytes::Binary);
+        mapper.map_block(&block_bytes, &BlockIdentity::default(), None).unwrap();
+        let batches = mapper.flush().unwrap();
+
+        let msgs = &batches["messages"];
+        assert_eq!(msgs.num_rows(), 1);
+        // loaded_writable_addresses should not be null (has 1 address)
+        let lw_idx = msgs.schema().index_of("loaded_writable_addresses").unwrap();
+        let lw_col = msgs.column(lw_idx);
+        assert!(!lw_col.is_null(0));
+        // loaded_readonly_addresses should not be null (has 2 addresses)
+        let lr_idx = msgs.schema().index_of("loaded_readonly_addresses").unwrap();
+        let lr_col = msgs.column(lr_idx);
+        assert!(!lr_col.is_null(0));
+    }
+
+    #[test]
+    fn test_table_names() {
+        let mapper = SolanaBlockMapper::new(false, EncodeBytes::Binary);
+        let names = mapper.table_names();
+        assert_eq!(names.len(), 8);
+        assert!(names.contains(&"token_balances"));
+        assert!(names.contains(&"account_lookups"));
     }
 }
