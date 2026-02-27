@@ -109,4 +109,4 @@ pub fn rewards_schema(include_fork_step: bool) -> Schema {
     Schema::new(fields)
 }
 
-pub const TABLE_NAMES: [&str; 5] = ["blocks", "transactions", "messages", "instructions", "rewards"];
+pub const TABLE_NAMES: [&str; 6] = ["blocks", "transactions", "vote_transactions", "messages", "instructions", "rewards"];
