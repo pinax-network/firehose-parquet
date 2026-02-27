@@ -115,6 +115,17 @@ pub enum Commands {
         #[arg(value_enum)]
         shell: Shell,
     },
+    /// Read and inspect Parquet files (schema, row counts, sample rows)
+    Scan {
+        /// Path to a .parquet file or directory containing parquet files
+        path: PathBuf,
+        /// Number of sample rows to display per file (0 = schema only)
+        #[arg(short = 'n', long, default_value = "20")]
+        rows: usize,
+        /// Only show file metadata (schema, row count, size) without data
+        #[arg(long, default_value = "false")]
+        schema_only: bool,
+    },
 }
 
 /// Parse a compression string into a [`Compression`] variant.
@@ -196,6 +207,140 @@ pub fn generate_completions<C: clap::CommandFactory>(shell: Shell) {
     let mut cmd = C::command();
     let name = cmd.get_name().to_string();
     generate(shell, &mut cmd, name, &mut io::stdout());
+}
+
+/// Scan and display parquet files at the given path.
+///
+/// If `path` is a file, inspects that single file.
+/// If `path` is a directory, recursively finds all `.parquet` files.
+pub fn scan_parquet(path: &PathBuf, rows: usize, schema_only: bool) -> anyhow::Result<()> {
+    use arrow::util::pretty::print_batches;
+    use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+    use std::fs;
+
+    let mut files: Vec<PathBuf> = Vec::new();
+    if path.is_file() {
+        files.push(path.clone());
+    } else if path.is_dir() {
+        collect_parquet_files(path, &mut files)?;
+        files.sort();
+    } else {
+        anyhow::bail!("path does not exist: {}", path.display());
+    }
+
+    if files.is_empty() {
+        println!("No .parquet files found in {}", path.display());
+        return Ok(());
+    }
+
+    for file_path in &files {
+        let file = fs::File::open(file_path)?;
+        let file_size = file.metadata()?.len();
+        let builder = ParquetRecordBatchReaderBuilder::try_new(file)?;
+        let metadata = builder.metadata();
+
+        let total_rows: i64 = metadata
+            .row_groups()
+            .iter()
+            .map(|rg| rg.num_rows())
+            .sum();
+        let num_row_groups = metadata.num_row_groups();
+        let num_columns = metadata.file_metadata().schema().get_fields().len();
+        let schema = builder.schema();
+
+        // Relative path for cleaner display.
+        let display_path = file_path
+            .strip_prefix(path)
+            .unwrap_or(file_path);
+
+        println!("\n{}", "═".repeat(72));
+        println!("  {}", display_path.display());
+        println!("{}", "─".repeat(72));
+        println!(
+            "  rows: {}  row_groups: {}  columns: {}  size: {}",
+            total_rows,
+            num_row_groups,
+            num_columns,
+            format_bytes(file_size),
+        );
+        println!("{}", "─".repeat(72));
+
+        // Print schema fields.
+        for field in schema.fields() {
+            let nullable = if field.is_nullable() { "nullable" } else { "not null" };
+            println!("  {:30} {:20} {}", field.name(), field.data_type(), nullable);
+        }
+
+        // Print sample rows.
+        if !schema_only && rows > 0 {
+            println!("{}", "─".repeat(72));
+
+            let file = fs::File::open(file_path)?;
+            let builder = ParquetRecordBatchReaderBuilder::try_new(file)?;
+            let reader = builder.build()?;
+
+            let mut collected_rows = 0usize;
+            let mut display_batches = Vec::new();
+
+            for batch_result in reader {
+                let batch = batch_result?;
+                let take = rows.saturating_sub(collected_rows).min(batch.num_rows());
+                if take == 0 {
+                    break;
+                }
+                let sliced = batch.slice(0, take);
+                collected_rows += take;
+                display_batches.push(sliced);
+            }
+
+            if display_batches.is_empty() {
+                println!("  (empty)");
+            } else {
+                print_batches(&display_batches)?;
+                if (rows as i64) < total_rows {
+                    println!("  ... showing {rows} of {total_rows} rows");
+                }
+            }
+        }
+    }
+
+    // Summary.
+    if files.len() > 1 {
+        println!("\n{}", "═".repeat(72));
+        println!("  {} parquet files scanned", files.len());
+    }
+
+    Ok(())
+}
+
+/// Recursively collect `.parquet` files from a directory.
+fn collect_parquet_files(dir: &PathBuf, out: &mut Vec<PathBuf>) -> anyhow::Result<()> {
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.is_dir() {
+            collect_parquet_files(&path, out)?;
+        } else if path.extension().map_or(false, |ext| ext == "parquet") {
+            out.push(path);
+        }
+    }
+    Ok(())
+}
+
+/// Human-readable byte size formatting.
+fn format_bytes(bytes: u64) -> String {
+    const KB: u64 = 1024;
+    const MB: u64 = 1024 * KB;
+    const GB: u64 = 1024 * MB;
+    if bytes >= GB {
+        format!("{:.2} GB", bytes as f64 / GB as f64)
+    } else if bytes >= MB {
+        format!("{:.2} MB", bytes as f64 / MB as f64)
+    } else if bytes >= KB {
+        format!("{:.2} KB", bytes as f64 / KB as f64)
+    } else {
+        format!("{bytes} B")
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -348,6 +493,7 @@ mod tests {
         assert!(cli.command.is_some());
         match cli.command.unwrap() {
             Commands::Completions { shell } => assert_eq!(shell, Shell::Bash),
+            _ => panic!("expected Completions subcommand"),
         }
     }
 

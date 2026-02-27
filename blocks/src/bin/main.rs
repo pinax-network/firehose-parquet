@@ -134,9 +134,17 @@ async fn main() -> Result<()> {
     load_dotenv();
     let cli = Cli::parse();
 
-    if let Some(Commands::Completions { shell }) = cli.command {
-        firehose_parquet::cli::generate_completions::<Cli>(shell);
-        return Ok(());
+    if let Some(ref cmd) = cli.command {
+        match cmd {
+            Commands::Completions { shell } => {
+                firehose_parquet::cli::generate_completions::<Cli>(*shell);
+                return Ok(());
+            }
+            Commands::Scan { path, rows, schema_only } => {
+                firehose_parquet::cli::scan_parquet(path, *rows, *schema_only)?;
+                return Ok(());
+            }
+        }
     }
 
     init_tracing(&cli.common.log_level);
