@@ -214,7 +214,6 @@ pub fn generate_completions<C: clap::CommandFactory>(shell: Shell) {
 /// If `path` is a file, inspects that single file.
 /// If `path` is a directory, recursively finds all `.parquet` files.
 pub fn scan_parquet(path: &PathBuf, rows: usize, schema_only: bool) -> anyhow::Result<()> {
-    use arrow::util::pretty::print_batches;
     use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
     use std::fs;
 
@@ -271,35 +270,39 @@ pub fn scan_parquet(path: &PathBuf, rows: usize, schema_only: bool) -> anyhow::R
             println!("  {:30} {:20} {}", field.name(), field.data_type(), nullable);
         }
 
-        // Print sample rows.
+        // Print sample rows (vertical format like ClickHouse's \G).
         if !schema_only && rows > 0 {
-            println!("{}", "─".repeat(72));
-
             let file = fs::File::open(file_path)?;
             let builder = ParquetRecordBatchReaderBuilder::try_new(file)?;
             let reader = builder.build()?;
 
-            let mut collected_rows = 0usize;
-            let mut display_batches = Vec::new();
+            // Compute max field name width for alignment.
+            let max_name_len = schema.fields().iter().map(|f| f.name().len()).max().unwrap_or(0);
 
-            for batch_result in reader {
+            let mut row_number = 0usize;
+
+            'outer: for batch_result in reader {
                 let batch = batch_result?;
-                let take = rows.saturating_sub(collected_rows).min(batch.num_rows());
-                if take == 0 {
-                    break;
+                for row_idx in 0..batch.num_rows() {
+                    if row_number >= rows {
+                        break 'outer;
+                    }
+                    row_number += 1;
+
+                    println!("\nRow {}:", row_number);
+                    println!("{}", "──────");
+                    for (col_idx, field) in schema.fields().iter().enumerate() {
+                        let col = batch.column(col_idx);
+                        let value = format_array_value(col.as_ref(), row_idx);
+                        println!("  {:width$}  {}", field.name(), value, width = max_name_len);
+                    }
                 }
-                let sliced = batch.slice(0, take);
-                collected_rows += take;
-                display_batches.push(sliced);
             }
 
-            if display_batches.is_empty() {
-                println!("  (empty)");
-            } else {
-                print_batches(&display_batches)?;
-                if (rows as i64) < total_rows {
-                    println!("  ... showing {rows} of {total_rows} rows");
-                }
+            if row_number == 0 {
+                println!("\n  (empty)");
+            } else if (rows as i64) < total_rows {
+                println!("\n  ... showing {rows} of {total_rows} rows");
             }
         }
     }
@@ -311,6 +314,122 @@ pub fn scan_parquet(path: &PathBuf, rows: usize, schema_only: bool) -> anyhow::R
     }
 
     Ok(())
+}
+
+/// Format a single cell value from an Arrow array for vertical display.
+fn format_array_value(array: &dyn arrow::array::Array, row: usize) -> String {
+    use arrow::array::*;
+    use arrow::datatypes::DataType;
+
+    if array.is_null(row) {
+        return "NULL".to_string();
+    }
+
+    match array.data_type() {
+        DataType::UInt64 => {
+            let v = array.as_any().downcast_ref::<UInt64Array>().unwrap().value(row);
+            format_number_with_hint(v as i128)
+        }
+        DataType::UInt32 => {
+            let v = array.as_any().downcast_ref::<UInt32Array>().unwrap().value(row);
+            v.to_string()
+        }
+        DataType::Int64 => {
+            let v = array.as_any().downcast_ref::<Int64Array>().unwrap().value(row);
+            format_number_with_hint(v as i128)
+        }
+        DataType::Int32 => {
+            let v = array.as_any().downcast_ref::<Int32Array>().unwrap().value(row);
+            v.to_string()
+        }
+        DataType::Float64 => {
+            let v = array.as_any().downcast_ref::<Float64Array>().unwrap().value(row);
+            format!("{v}")
+        }
+        DataType::Boolean => {
+            let v = array.as_any().downcast_ref::<BooleanArray>().unwrap().value(row);
+            v.to_string()
+        }
+        DataType::Utf8 => {
+            let v = array.as_any().downcast_ref::<StringArray>().unwrap().value(row);
+            truncate_str(v, 80)
+        }
+        DataType::LargeUtf8 => {
+            let v = array.as_any().downcast_ref::<LargeStringArray>().unwrap().value(row);
+            truncate_str(v, 80)
+        }
+        DataType::Binary => {
+            let v = array.as_any().downcast_ref::<BinaryArray>().unwrap().value(row);
+            truncate_str(&format!("0x{}", hex::encode(v)), 80)
+        }
+        DataType::LargeBinary => {
+            let v = array.as_any().downcast_ref::<LargeBinaryArray>().unwrap().value(row);
+            truncate_str(&format!("0x{}", hex::encode(v)), 80)
+        }
+        DataType::List(_) => {
+            let list = array.as_any().downcast_ref::<ListArray>().unwrap();
+            let inner = list.value(row);
+            let items = format_list_items(inner.as_ref(), 5);
+            let total = inner.len();
+            if total > 5 {
+                format!("[{items} ...] ({total} items)")
+            } else {
+                format!("[{items}]")
+            }
+        }
+        DataType::LargeList(_) => {
+            let list = array.as_any().downcast_ref::<LargeListArray>().unwrap();
+            let inner = list.value(row);
+            let items = format_list_items(inner.as_ref(), 5);
+            let total = inner.len();
+            if total > 5 {
+                format!("[{items} ...] ({total} items)")
+            } else {
+                format!("[{items}]")
+            }
+        }
+        _ => {
+            // Fallback: use Arrow's Display formatting.
+            let formatter = arrow::util::display::ArrayFormatter::try_new(array, &Default::default());
+            match formatter {
+                Ok(fmt) => fmt.value(row).to_string(),
+                Err(_) => "<unsupported>".to_string(),
+            }
+        }
+    }
+}
+
+/// Format list items (up to `max`) from an inner array.
+fn format_list_items(array: &dyn arrow::array::Array, max: usize) -> String {
+    let n = array.len().min(max);
+    let items: Vec<String> = (0..n)
+        .map(|i| format_array_value(array, i))
+        .collect();
+    items.join(", ")
+}
+
+/// Truncate long strings and add ellipsis.
+fn truncate_str(s: &str, max_len: usize) -> String {
+    if s.len() <= max_len {
+        s.to_string()
+    } else {
+        format!("{}…", &s[..max_len])
+    }
+}
+
+/// Format a large number with a human-readable hint (e.g. "397234292 -- 397.23M").
+fn format_number_with_hint(v: i128) -> String {
+    let abs = v.unsigned_abs();
+    let hint = if abs >= 1_000_000_000_000 {
+        format!(" -- {:.2}T", v as f64 / 1_000_000_000_000.0)
+    } else if abs >= 1_000_000_000 {
+        format!(" -- {:.2}B", v as f64 / 1_000_000_000.0)
+    } else if abs >= 1_000_000 {
+        format!(" -- {:.2}M", v as f64 / 1_000_000.0)
+    } else {
+        return v.to_string();
+    };
+    format!("{v}{hint}")
 }
 
 /// Recursively collect `.parquet` files from a directory.
