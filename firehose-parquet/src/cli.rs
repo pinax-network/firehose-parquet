@@ -45,7 +45,7 @@ pub struct CommonArgs {
     #[arg(long, env = "OUTPUT", default_value = "output")]
     pub output: PathBuf,
 
-    /// Partitioning mode: none, block_range, date, hour
+    /// Partitioning mode: none, block_range, date, hour, minute
     #[arg(long, env = "PARTITION", default_value = "none")]
     pub partition: String,
 
@@ -129,22 +129,25 @@ pub enum Commands {
 }
 
 /// Parse a compression string into a [`Compression`] variant.
-pub fn parse_compression(s: &str) -> Compression {
+pub fn parse_compression(s: &str) -> anyhow::Result<Compression> {
     match s.to_lowercase().as_str() {
-        "snappy" => Compression::Snappy,
-        "gzip" => Compression::Gzip,
-        "none" => Compression::None,
-        _ => Compression::Zstd,
+        "zstd" => Ok(Compression::Zstd),
+        "snappy" => Ok(Compression::Snappy),
+        "gzip" => Ok(Compression::Gzip),
+        "none" => Ok(Compression::None),
+        other => anyhow::bail!("invalid --compression '{other}': expected one of: zstd, snappy, gzip, none"),
     }
 }
 
 /// Parse a partition string into a [`Partition`] variant.
-pub fn parse_partition(s: &str, block_range_size: u64) -> Partition {
+pub fn parse_partition(s: &str, block_range_size: u64) -> anyhow::Result<Partition> {
     match s.to_lowercase().as_str() {
-        "block_range" => Partition::BlockRange(block_range_size),
-        "date" => Partition::Date,
-        "hour" => Partition::Hour,
-        _ => Partition::None,
+        "none" => Ok(Partition::None),
+        "block_range" => Ok(Partition::BlockRange(block_range_size)),
+        "date" => Ok(Partition::Date),
+        "hour" => Ok(Partition::Hour),
+        "minute" => Ok(Partition::Minute),
+        other => anyhow::bail!("invalid --partition '{other}': expected one of: none, block_range, date, hour, minute"),
     }
 }
 
@@ -177,11 +180,11 @@ pub fn build_config(args: &CommonArgs) -> anyhow::Result<Config> {
         cursor_path: args.cursor.clone(),
         public: args.public,
         output: args.output.clone(),
-        partition: parse_partition(&args.partition, args.block_range_size),
+        partition: parse_partition(&args.partition, args.block_range_size)?,
         flush_rows: args.flush_rows,
         flush_bytes: args.flush_bytes,
         flush_interval_secs: args.flush_interval_secs,
-        compression: parse_compression(&args.compression),
+        compression: parse_compression(&args.compression)?,
         final_blocks_only: args.final_blocks_only,
         dry_run: args.dry_run,
         aws_access_key_id: args.aws_access_key_id.clone(),
@@ -567,23 +570,24 @@ mod tests {
     #[test]
     #[serial]
     fn test_parse_compression() {
-        assert_eq!(parse_compression("zstd"), Compression::Zstd);
-        assert_eq!(parse_compression("snappy"), Compression::Snappy);
-        assert_eq!(parse_compression("gzip"), Compression::Gzip);
-        assert_eq!(parse_compression("none"), Compression::None);
-        assert_eq!(parse_compression("ZSTD"), Compression::Zstd);
-        assert_eq!(parse_compression("unknown"), Compression::Zstd);
+        assert_eq!(parse_compression("zstd").unwrap(), Compression::Zstd);
+        assert_eq!(parse_compression("snappy").unwrap(), Compression::Snappy);
+        assert_eq!(parse_compression("gzip").unwrap(), Compression::Gzip);
+        assert_eq!(parse_compression("none").unwrap(), Compression::None);
+        assert_eq!(parse_compression("ZSTD").unwrap(), Compression::Zstd);
+        assert!(parse_compression("unknown").is_err());
     }
 
     #[test]
     #[serial]
     fn test_parse_partition() {
-        assert_eq!(parse_partition("none", 10000), Partition::None);
-        assert_eq!(parse_partition("date", 10000), Partition::Date);
-        assert_eq!(parse_partition("hour", 10000), Partition::Hour);
-        assert_eq!(parse_partition("block_range", 5000), Partition::BlockRange(5000));
-        assert_eq!(parse_partition("BLOCK_RANGE", 20000), Partition::BlockRange(20000));
-        assert_eq!(parse_partition("unknown", 10000), Partition::None);
+        assert_eq!(parse_partition("none", 10000).unwrap(), Partition::None);
+        assert_eq!(parse_partition("date", 10000).unwrap(), Partition::Date);
+        assert_eq!(parse_partition("hour", 10000).unwrap(), Partition::Hour);
+        assert_eq!(parse_partition("minute", 10000).unwrap(), Partition::Minute);
+        assert_eq!(parse_partition("block_range", 5000).unwrap(), Partition::BlockRange(5000));
+        assert_eq!(parse_partition("BLOCK_RANGE", 20000).unwrap(), Partition::BlockRange(20000));
+        assert!(parse_partition("unknown", 10000).is_err());
     }
 
     #[test]

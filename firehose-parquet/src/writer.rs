@@ -200,6 +200,17 @@ impl ParquetTableWriter {
                     table.to_string()
                 }
             }
+            Partition::Minute => {
+                if let Some(ts) = metadata.min_timestamp {
+                    let dt = OffsetDateTime::from_unix_timestamp(ts).unwrap_or(OffsetDateTime::UNIX_EPOCH);
+                    format!(
+                        "{table}/date={:04}-{:02}-{:02}/hour={:02}/minute={:02}",
+                        dt.year(), dt.month() as u8, dt.day(), dt.hour(), dt.minute()
+                    )
+                } else {
+                    table.to_string()
+                }
+            }
         }
     }
 
@@ -225,6 +236,16 @@ impl ParquetTableWriter {
                     let dt = OffsetDateTime::from_unix_timestamp(ts).unwrap_or(OffsetDateTime::UNIX_EPOCH);
                     base.join(format!("date={:04}-{:02}-{:02}", dt.year(), dt.month() as u8, dt.day()))
                         .join(format!("hour={:02}", dt.hour()))
+                } else {
+                    base
+                }
+            }
+            Partition::Minute => {
+                if let Some(ts) = metadata.min_timestamp {
+                    let dt = OffsetDateTime::from_unix_timestamp(ts).unwrap_or(OffsetDateTime::UNIX_EPOCH);
+                    base.join(format!("date={:04}-{:02}-{:02}", dt.year(), dt.month() as u8, dt.day()))
+                        .join(format!("hour={:02}", dt.hour()))
+                        .join(format!("minute={:02}", dt.minute()))
                 } else {
                     base
                 }
