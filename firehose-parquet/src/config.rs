@@ -13,6 +13,8 @@ pub enum Partition {
     Hour,
     /// Partition by minute (YYYY-MM-DD/HH/MM).
     Minute,
+    /// Partition by second (YYYY-MM-DD/HH/MM/SS).
+    Second,
 }
 
 /// Compression codec for Parquet files.
@@ -85,6 +87,7 @@ impl std::fmt::Display for Partition {
             Partition::Date => write!(f, "date"),
             Partition::Hour => write!(f, "hour"),
             Partition::Minute => write!(f, "minute"),
+            Partition::Second => write!(f, "second"),
         }
     }
 }
