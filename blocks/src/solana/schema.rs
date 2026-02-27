@@ -51,6 +51,9 @@ pub fn transactions_schema(include_fork_step: bool, encoding: &EncodeBytes) -> S
             DataType::List(Arc::new(Field::new("item", DataType::UInt64, true))),
             true,
         ),
+        Field::new("cost_units", DataType::UInt64, true),
+        Field::new("return_data_program_id", bytes_data_type(encoding), true),
+        Field::new("return_data", bytes_data_type(encoding), true),
     ]);
     maybe_fork_step(&mut fields, include_fork_step);
     Schema::new(fields)
@@ -71,6 +74,16 @@ pub fn messages_schema(include_fork_step: bool, encoding: &EncodeBytes) -> Schem
             "account_keys",
             BytesListColumn::data_type(encoding),
             false,
+        ),
+        Field::new(
+            "loaded_writable_addresses",
+            BytesListColumn::data_type(encoding),
+            true,
+        ),
+        Field::new(
+            "loaded_readonly_addresses",
+            BytesListColumn::data_type(encoding),
+            true,
         ),
     ]);
     maybe_fork_step(&mut fields, include_fork_step);
@@ -104,9 +117,58 @@ pub fn rewards_schema(include_fork_step: bool) -> Schema {
         Field::new("post_balance", DataType::UInt64, false),
         Field::new("reward_type", DataType::Int32, false),
         Field::new("commission", DataType::Utf8, true),
+        // "block" for block-level rewards, "transaction" for per-tx rewards
+        Field::new("source", DataType::Utf8, false),
+        Field::new("transaction_index", DataType::UInt32, true),
     ]);
     maybe_fork_step(&mut fields, include_fork_step);
     Schema::new(fields)
 }
 
-pub const TABLE_NAMES: [&str; 6] = ["blocks", "transactions", "vote_transactions", "messages", "instructions", "rewards"];
+/// Token balance changes (pre/post) per transaction.
+pub fn token_balances_schema(include_fork_step: bool) -> Schema {
+    let mut fields = canonical_fields();
+    fields.extend(vec![
+        Field::new("slot", DataType::UInt64, false),
+        Field::new("transaction_index", DataType::UInt32, false),
+        Field::new("balance_index", DataType::UInt32, false),
+        // "pre" or "post"
+        Field::new("balance_type", DataType::Utf8, false),
+        Field::new("account_index", DataType::UInt32, false),
+        Field::new("mint", DataType::Utf8, false),
+        Field::new("owner", DataType::Utf8, false),
+        Field::new("program_id", DataType::Utf8, false),
+        Field::new("amount", DataType::Utf8, false),
+        Field::new("ui_amount", DataType::Float64, true),
+        Field::new("decimals", DataType::UInt32, false),
+        Field::new("ui_amount_string", DataType::Utf8, false),
+    ]);
+    maybe_fork_step(&mut fields, include_fork_step);
+    Schema::new(fields)
+}
+
+/// Address table lookups from versioned transactions.
+pub fn account_lookups_schema(include_fork_step: bool, encoding: &EncodeBytes) -> Schema {
+    let mut fields = canonical_fields();
+    fields.extend(vec![
+        Field::new("slot", DataType::UInt64, false),
+        Field::new("transaction_index", DataType::UInt32, false),
+        Field::new("lookup_index", DataType::UInt32, false),
+        Field::new("account_key", bytes_data_type(encoding), false),
+        Field::new("writable_indexes", bytes_data_type(encoding), false),
+        Field::new("readonly_indexes", bytes_data_type(encoding), false),
+    ]);
+    maybe_fork_step(&mut fields, include_fork_step);
+    Schema::new(fields)
+}
+
+pub const TABLE_NAMES: [&str; 8] = [
+    "blocks",
+    "transactions",
+    "vote_transactions",
+    "messages",
+    "instructions",
+    "rewards",
+    "token_balances",
+    "account_lookups",
+];
