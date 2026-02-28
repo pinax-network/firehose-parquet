@@ -2,13 +2,14 @@ use anyhow::{anyhow, Result};
 use clap::Parser;
 use firehose_parquet::cli::{build_config, init_tracing, load_dotenv, Commands, CommonArgs};
 use firehose_parquet::config::BlockMetadata;
+use firehose_parquet::cursor::save_cursor;
 use firehose_parquet::encode::{parse_encode_bytes, EncodeBytes};
 use firehose_parquet::grpc::{EndpointInfo, FirehoseClient};
 use firehose_parquet::traits::{fork_step_name, BlockIdentity, BlockMapper};
 use firehose_parquet::writer::OutputWriter;
 use std::path::PathBuf;
 use std::time::Instant;
-use tracing::info;
+use tracing::{info, warn};
 
 use blocks::antelope::mapper::AntelopeBlockMapper;
 use blocks::beacon::mapper::BeaconBlockMapper;
@@ -215,15 +216,17 @@ async fn main() -> Result<()> {
         None
     };
 
+    let cursor_path = config.cursor_path.clone();
     let mut blocks_processed: u64 = 0;
     let mut min_block: Option<u64> = None;
     let mut max_block: Option<u64> = None;
     let mut min_timestamp: Option<i64> = None;
     let mut max_timestamp: Option<i64> = None;
     let mut last_flush_time = Instant::now();
+    let mut last_cursor: Option<String> = None;
 
     client
-        .stream_blocks(|block_bytes, type_url, _cursor, identity: BlockIdentity, step: i32| {
+        .stream_blocks(|block_bytes, type_url, cursor_str, identity: BlockIdentity, step: i32| {
             let fork_step_str = fork_step_name(step);
             if final_blocks_only && step == 2 {
                 return Ok(());
@@ -250,6 +253,7 @@ async fn main() -> Result<()> {
 
             m.map_block(&block_bytes, &identity, fork_step_str)?;
             blocks_processed += 1;
+            last_cursor = Some(cursor_str);
 
             if blocks_processed % 100 == 0 {
                 let arrow_bytes = m.estimated_bytes();
@@ -284,7 +288,16 @@ async fn main() -> Result<()> {
                         min_timestamp,
                         max_timestamp,
                     };
-                    writer.write_all(&batches, &metadata)?;
+                    let wrote = writer.write_all(&batches, &metadata)?;
+
+                    // Only update cursor after all tables have been written.
+                    if wrote {
+                        if let (Some(ref path), Some(ref cursor)) = (&cursor_path, &last_cursor) {
+                            if let Err(e) = save_cursor(path, cursor) {
+                                warn!(error = %e, path = %path.display(), "failed to save cursor");
+                            }
+                        }
+                    }
                 }
                 min_block = None;
                 max_block = None;
@@ -314,7 +327,16 @@ async fn main() -> Result<()> {
 
     // Flush any remaining buffered data in the writer.
     if !dry_run {
-        writer.flush_remaining()?;
+        let wrote = writer.flush_remaining()?;
+
+        // Save cursor after final flush.
+        if wrote {
+            if let (Some(ref path), Some(ref cursor)) = (&cursor_path, &last_cursor) {
+                if let Err(e) = save_cursor(path, cursor) {
+                    warn!(error = %e, path = %path.display(), "failed to save cursor");
+                }
+            }
+        }
     }
 
     info!(blocks_processed, "pipeline finished");

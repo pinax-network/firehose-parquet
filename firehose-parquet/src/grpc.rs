@@ -1,5 +1,5 @@
 use crate::config::Config;
-use crate::cursor::{load_cursor, save_cursor};
+use crate::cursor::load_cursor;
 use crate::traits::BlockIdentity;
 use anyhow::{Context, Result};
 use backoff::ExponentialBackoffBuilder;
@@ -236,12 +236,6 @@ impl FirehoseClient {
                         }
 
                         cursor = Some(new_cursor.clone());
-
-                        if let Some(ref path) = self.config.cursor_path {
-                            if let Err(e) = save_cursor(path, &new_cursor) {
-                                warn!(error = %e, path = %path.display(), "failed to save cursor to file");
-                            }
-                        }
                     }
                     Ok(None) => {
                         info!("stream ended (stop block reached or server closed)");

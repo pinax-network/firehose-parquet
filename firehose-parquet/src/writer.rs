@@ -301,6 +301,14 @@ fn compression_ratio(compression: &Compression) -> f64 {
     }
 }
 
+/// A batch that needs to be re-buffered after a global flush (partition change).
+struct PendingBatch {
+    table: String,
+    batch: RecordBatch,
+    metadata: BlockMetadata,
+    partition_key: String,
+}
+
 /// Buffered state for a single output table.
 struct TableBuffer {
     batches: Vec<RecordBatch>,
@@ -331,6 +339,8 @@ pub struct OutputWriter {
     flush_bytes: u64,
     /// Fixed compression ratio (compressed_bytes / arrow_bytes).
     compression_ratio: f64,
+    /// Batches that need to be re-buffered after a global flush (from partition changes).
+    pending_after_flush: Vec<PendingBatch>,
 }
 
 impl OutputWriter {
@@ -346,6 +356,7 @@ impl OutputWriter {
             buffers: HashMap::new(),
             flush_bytes,
             compression_ratio: cr,
+            pending_after_flush: Vec::new(),
         }
     }
 
@@ -363,6 +374,7 @@ impl OutputWriter {
             buffers: HashMap::new(),
             flush_bytes,
             compression_ratio: cr,
+            pending_after_flush: Vec::new(),
         })
     }
 
@@ -376,101 +388,163 @@ impl OutputWriter {
     /// Small tables are buffered until the estimated compressed size reaches
     /// `flush_bytes`, or the partition changes. This prevents tiny files for
     /// low-row-count tables like `blocks`.
+    ///
+    /// When any table triggers a rollover (partition change or size threshold),
+    /// **all** tables are flushed together so every table starts fresh for the
+    /// next block range. This keeps file boundaries deterministic and aligned.
+    ///
+    /// Returns `true` if data was actually written to disk (any table flushed).
     pub fn write_all(
         &mut self,
         batches: &HashMap<String, RecordBatch>,
         metadata: &BlockMetadata,
-    ) -> Result<()> {
+    ) -> Result<bool> {
+        let mut needs_global_flush = false;
+
         for (table, batch) in batches {
             if batch.num_rows() == 0 {
                 continue;
             }
-            self.buffer_or_write(table, batch, metadata)?;
+            if self.buffer_batch(table, batch, metadata)? {
+                needs_global_flush = true;
+            }
         }
-        Ok(())
+
+        if needs_global_flush {
+            self.flush_remaining()?;
+            return Ok(true);
+        }
+
+        Ok(false)
     }
 
-    /// Buffer a single batch, flushing to disk if the partition changes or
-    /// the estimated compressed size exceeds the threshold.
-    fn buffer_or_write(
+    /// Buffer a single batch. Returns `true` if a global flush is needed
+    /// (partition change or size threshold reached for this table).
+    fn buffer_batch(
         &mut self,
         table: &str,
         batch: &RecordBatch,
         metadata: &BlockMetadata,
-    ) -> Result<()> {
+    ) -> Result<bool> {
         let partition_key = self.inner.partition_suffix(table, metadata);
         let batch_bytes = batch.get_array_memory_size();
 
-        // Flush existing buffer if the partition changed.
+        // Check if the partition changed for this table.
         let needs_partition_flush = self
             .buffers
             .get(table)
             .map_or(false, |buf| buf.partition_key != partition_key);
-        if needs_partition_flush {
-            self.flush_table(table)?;
-        }
 
         // Add to buffer.
         {
-            let buf = self
-                .buffers
-                .entry(table.to_string())
-                .or_insert_with(|| TableBuffer {
-                    batches: Vec::new(),
-                    total_bytes: 0,
-                    metadata: metadata.clone(),
-                    partition_key,
-                });
-            buf.batches.push(batch.clone());
-            buf.total_bytes += batch_bytes;
-            buf.metadata.merge(metadata);
-        }
+            // If partition changed, we'll flush everything via the global flush,
+            // but we still need to buffer the new batch under the new partition key.
+            // First, mark that we need a flush (don't clear the old buffer yet).
+            if needs_partition_flush {
+                // The old data will be flushed by the caller via flush_remaining().
+                // We don't add the new batch yet — it will be added after the flush.
+            }
 
-        // Coalesce many small batches into one to keep memory compact.
-        if let Some(buf) = self.buffers.get_mut(table) {
-            if buf.batches.len() >= 100 {
-                let schema = buf.batches[0].schema();
-                let merged = arrow::compute::concat_batches(&schema, &buf.batches)?;
-                buf.batches = vec![merged];
+            if !needs_partition_flush {
+                let buf = self
+                    .buffers
+                    .entry(table.to_string())
+                    .or_insert_with(|| TableBuffer {
+                        batches: Vec::new(),
+                        total_bytes: 0,
+                        metadata: metadata.clone(),
+                        partition_key,
+                    });
+                buf.batches.push(batch.clone());
+                buf.total_bytes += batch_bytes;
+                buf.metadata.merge(metadata);
             }
         }
 
-        // Flush when estimated compressed size reaches the target.
-        // When flush_bytes is 0, size-based rollover is disabled.
-        let needs_size_flush = self.flush_bytes > 0
+        // Coalesce many small batches into one to keep memory compact.
+        if !needs_partition_flush {
+            if let Some(buf) = self.buffers.get_mut(table) {
+                if buf.batches.len() >= 100 {
+                    let schema = buf.batches[0].schema();
+                    let merged = arrow::compute::concat_batches(&schema, &buf.batches)?;
+                    buf.batches = vec![merged];
+                }
+            }
+        }
+
+        // Check if estimated compressed size reaches the target.
+        let needs_size_flush = !needs_partition_flush
+            && self.flush_bytes > 0
             && self
                 .buffers
                 .get(table)
                 .map_or(false, |buf| {
                     (buf.total_bytes as f64 * self.compression_ratio) >= self.flush_bytes as f64
                 });
-        if needs_size_flush {
-            self.flush_table(table)?;
+
+        if needs_partition_flush || needs_size_flush {
+            // If partition changed, we need to re-buffer the new batch after flush.
+            if needs_partition_flush {
+                // Store the pending batch info for re-buffering after flush.
+                self.pending_after_flush.push(PendingBatch {
+                    table: table.to_string(),
+                    batch: batch.clone(),
+                    metadata: metadata.clone(),
+                    partition_key,
+                });
+            }
+            return Ok(true);
         }
 
-        Ok(())
+        Ok(false)
     }
 
     /// Concatenate and write all buffered batches for a single table.
-    fn flush_table(&mut self, table: &str) -> Result<()> {
+    /// Returns `true` if data was written.
+    fn flush_table(&mut self, table: &str) -> Result<bool> {
         let buf = match self.buffers.remove(table) {
             Some(buf) if !buf.batches.is_empty() => buf,
-            _ => return Ok(()),
+            _ => return Ok(false),
         };
         let schema = buf.batches[0].schema();
         let merged = arrow::compute::concat_batches(&schema, &buf.batches)?;
         self.inner.write_batch(table, &merged, &buf.metadata)?;
 
-        Ok(())
+        Ok(true)
     }
 
-    /// Flush all remaining buffered data. Call at pipeline end.
-    pub fn flush_remaining(&mut self) -> Result<()> {
+    /// Flush all remaining buffered data to disk, then re-buffer any
+    /// pending batches from partition changes.
+    ///
+    /// Returns `true` if any data was written.
+    pub fn flush_remaining(&mut self) -> Result<bool> {
         let tables: Vec<String> = self.buffers.keys().cloned().collect();
+        let mut wrote = false;
         for table in tables {
-            self.flush_table(&table)?;
+            if self.flush_table(&table)? {
+                wrote = true;
+            }
         }
-        Ok(())
+
+        // Re-buffer any batches that arrived during a partition change.
+        let pending = std::mem::take(&mut self.pending_after_flush);
+        for p in pending {
+            let buf = self
+                .buffers
+                .entry(p.table)
+                .or_insert_with(|| TableBuffer {
+                    batches: Vec::new(),
+                    total_bytes: 0,
+                    metadata: p.metadata.clone(),
+                    partition_key: p.partition_key,
+                });
+            let batch_bytes = p.batch.get_array_memory_size();
+            buf.batches.push(p.batch);
+            buf.total_bytes += batch_bytes;
+            buf.metadata.merge(&p.metadata);
+        }
+
+        Ok(wrote)
     }
 }
 
