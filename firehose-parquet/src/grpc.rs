@@ -226,7 +226,7 @@ impl FirehoseClient {
                                 parent_num: m.parent_num,
                                 parent_id: m.parent_id.clone(),
                                 lib_num: m.lib_num,
-                                timestamp: m.time.as_ref().map(|t| t.seconds),
+                                timestamp: m.time.as_ref().map_or(0, |t| t.seconds),
                                 fork_step: fork_step.clone(),
                             }
                         }).unwrap_or_default();

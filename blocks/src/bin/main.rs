@@ -245,10 +245,8 @@ async fn main() -> Result<()> {
             let ts = identity.timestamp;
             min_block = Some(min_block.map_or(block_number, |s: u64| s.min(block_number)));
             max_block = Some(max_block.map_or(block_number, |s: u64| s.max(block_number)));
-            if let Some(t) = ts {
-                min_timestamp = Some(min_timestamp.map_or(t, |s: i64| s.min(t)));
-                max_timestamp = Some(max_timestamp.map_or(t, |s: i64| s.max(t)));
-            }
+            min_timestamp = Some(min_timestamp.map_or(ts, |s: i64| s.min(ts)));
+            max_timestamp = Some(max_timestamp.map_or(ts, |s: i64| s.max(ts)));
 
             m.map_block(&block_bytes, &identity, fork_step_str)?;
             blocks_processed += 1;
