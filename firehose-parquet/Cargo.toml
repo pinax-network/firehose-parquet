@@ -18,7 +18,7 @@ tracing.workspace = true
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 dotenvy = "0.15"
 anyhow.workspace = true
-time = "0.3"
+time = { version = "0.3", features = ["formatting"] }
 thiserror = "2"
 backoff = { version = "0.4", features = ["tokio"] }
 hex = "0.4"

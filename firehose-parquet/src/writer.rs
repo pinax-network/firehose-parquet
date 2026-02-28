@@ -732,9 +732,11 @@ mod tests {
 
         let parts: Vec<_> = std::fs::read_dir(dir.path().join("blocks"))
             .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.path().extension().map_or(false, |ext| ext == "parquet"))
             .collect();
         assert_eq!(parts.len(), 1, "should be a single part file");
-        let file_path = parts[0].as_ref().unwrap().path();
+        let file_path = parts[0].path();
         let read_batches = read_parquet(&file_path).unwrap();
         let total_rows: usize = read_batches.iter().map(|b| b.num_rows()).sum();
         assert_eq!(total_rows, 1, "should contain the single row from the batch");
@@ -797,10 +799,12 @@ mod tests {
         // Verify the file has 2 rows (from the 2 batches).
         let parts: Vec<_> = std::fs::read_dir(dir.path().join("blocks"))
             .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.path().extension().map_or(false, |ext| ext == "parquet"))
             .collect();
         assert_eq!(parts.len(), 1, "should be a single part file");
 
-        let file_path = parts[0].as_ref().unwrap().path();
+        let file_path = parts[0].path();
         let read_batches = read_parquet(&file_path).unwrap();
         let total_rows: usize = read_batches.iter().map(|b| b.num_rows()).sum();
         assert_eq!(total_rows, 2, "concatenated batch should have 2 rows");
@@ -890,9 +894,11 @@ mod tests {
         // Should produce a single part file with all 50 rows.
         let parts: Vec<_> = std::fs::read_dir(dir.path().join("blocks"))
             .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.path().extension().map_or(false, |ext| ext == "parquet"))
             .collect();
         assert_eq!(parts.len(), 1, "should be a single part file");
-        let file_path = parts[0].as_ref().unwrap().path();
+        let file_path = parts[0].path();
         let read_batches = read_parquet(&file_path).unwrap();
         let total_rows: usize = read_batches.iter().map(|b| b.num_rows()).sum();
         assert_eq!(total_rows, 50);
