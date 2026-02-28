@@ -157,6 +157,32 @@ impl std::fmt::Display for Config {
         if self.dry_run {
             writeln!(f, "  dry_run            true")?;
         }
+        // AWS / S3 section — only shown when at least one credential is set
+        if self.aws_access_key_id.is_some()
+            || self.aws_secret_access_key.is_some()
+            || self.aws_endpoint_url.is_some()
+            || self.aws_region.is_some()
+            || self.s3_bucket.is_some()
+        {
+            if let Some(ref bucket) = self.s3_bucket {
+                writeln!(f, "  s3_bucket          {bucket}")?;
+            }
+            if let Some(ref region) = self.aws_region {
+                writeln!(f, "  aws_region         {region}")?;
+            }
+            if let Some(ref endpoint) = self.aws_endpoint_url {
+                writeln!(f, "  aws_endpoint       {endpoint}")?;
+            }
+            if self.aws_access_key_id.is_some() {
+                writeln!(f, "  aws_access_key     ***")?;
+            }
+            if self.aws_secret_access_key.is_some() {
+                writeln!(f, "  aws_secret_key     ***")?;
+            }
+            if self.aws_session_token.is_some() {
+                writeln!(f, "  aws_session_token  ***")?;
+            }
+        }
         Ok(())
     }
 }
@@ -170,7 +196,7 @@ impl Default for Config {
             start_block: None,
             stop_block: None,
             cursor_path: None,
-            output: PathBuf::from("output"),
+            output: PathBuf::from("."),
             partition: Partition::None,
             flush_rows: None,
             flush_bytes: 128 * 1024 * 1024, // 128 MiB; set to 0 to disable size-based rollover
@@ -297,6 +323,44 @@ mod tests {
         };
         let display = config.to_string();
         assert!(display.contains("dry_run            true"));
+    }
+
+    #[test]
+    fn test_config_display_aws_credentials() {
+        let config = Config {
+            s3_bucket: Some("my-bucket".to_string()),
+            aws_region: Some("us-east-1".to_string()),
+            aws_endpoint_url: Some("https://t3.storage.dev".to_string()),
+            aws_access_key_id: Some("AKID123456".to_string()),
+            aws_secret_access_key: Some("super-secret".to_string()),
+            aws_session_token: Some("tok-secret".to_string()),
+            ..Config::default()
+        };
+        let display = config.to_string();
+        // Non-secrets shown in clear
+        assert!(display.contains("s3_bucket          my-bucket"));
+        assert!(display.contains("aws_region         us-east-1"));
+        assert!(display.contains("aws_endpoint       https://t3.storage.dev"));
+        // Secrets masked
+        assert!(display.contains("aws_access_key     ***"));
+        assert!(display.contains("aws_secret_key     ***"));
+        assert!(display.contains("aws_session_token  ***"));
+        // Actual secret values never appear
+        assert!(!display.contains("AKID123456"));
+        assert!(!display.contains("super-secret"));
+        assert!(!display.contains("tok-secret"));
+    }
+
+    #[test]
+    fn test_config_display_no_aws_when_unset() {
+        let config = Config::default();
+        let display = config.to_string();
+        assert!(!display.contains("s3_bucket"));
+        assert!(!display.contains("aws_region"));
+        assert!(!display.contains("aws_endpoint"));
+        assert!(!display.contains("aws_access_key"));
+        assert!(!display.contains("aws_secret_key"));
+        assert!(!display.contains("aws_session_token"));
     }
 
     #[test]

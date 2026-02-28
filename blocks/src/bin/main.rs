@@ -437,7 +437,7 @@ mod tests {
 
     #[test]
     fn test_resolve_output_with_chain_name() {
-        let base = PathBuf::from("output");
+        let base = PathBuf::from(".");
         let ei = Some(EndpointInfo {
             chain_name: "mainnet".to_string(),
             chain_name_aliases: vec![],
@@ -446,18 +446,18 @@ mod tests {
             block_id_encoding: 0,
             block_features: vec![],
         });
-        assert_eq!(resolve_output(&base, &ei), PathBuf::from("output/mainnet"));
+        assert_eq!(resolve_output(&base, &ei), PathBuf::from("./mainnet"));
     }
 
     #[test]
     fn test_resolve_output_without_endpoint_info() {
-        let base = PathBuf::from("output");
-        assert_eq!(resolve_output(&base, &None), PathBuf::from("output"));
+        let base = PathBuf::from(".");
+        assert_eq!(resolve_output(&base, &None), PathBuf::from("."));
     }
 
     #[test]
     fn test_resolve_output_empty_chain_name() {
-        let base = PathBuf::from("output");
+        let base = PathBuf::from(".");
         let ei = Some(EndpointInfo {
             chain_name: String::new(),
             chain_name_aliases: vec![],
@@ -466,7 +466,7 @@ mod tests {
             block_id_encoding: 0,
             block_features: vec![],
         });
-        assert_eq!(resolve_output(&base, &ei), PathBuf::from("output"));
+        assert_eq!(resolve_output(&base, &ei), PathBuf::from("."));
     }
 
     #[test]
