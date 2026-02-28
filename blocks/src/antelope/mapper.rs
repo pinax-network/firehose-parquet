@@ -30,10 +30,11 @@ fn format_authorization(auth: &[antelope::PermissionLevel]) -> String {
 }
 
 pub struct AntelopeBlockMapper {
+    extended: bool,
     blocks: BlocksBuilder,
     transactions: TransactionsBuilder,
     actions: ActionsBuilder,
-    db_ops: DbOpsBuilder,
+    db_ops: Option<DbOpsBuilder>,
     blocks_schema: Schema,
     transactions_schema: Schema,
     actions_schema: Schema,
@@ -41,13 +42,14 @@ pub struct AntelopeBlockMapper {
 }
 
 impl AntelopeBlockMapper {
-    pub fn new(include_fork_step: bool, encoding: EncodeBytes) -> Self {
+    pub fn new(extended: bool, include_fork_step: bool, encoding: EncodeBytes) -> Self {
         let enc = &encoding;
         Self {
+            extended,
             blocks: BlocksBuilder::new(include_fork_step),
             transactions: TransactionsBuilder::new(include_fork_step),
             actions: ActionsBuilder::new(include_fork_step),
-            db_ops: DbOpsBuilder::new(include_fork_step),
+            db_ops: if extended { Some(DbOpsBuilder::new(include_fork_step)) } else { None },
             blocks_schema: schema::blocks_schema(include_fork_step, enc),
             transactions_schema: schema::transactions_schema(include_fork_step, enc),
             actions_schema: schema::actions_schema(include_fork_step, enc),
@@ -97,9 +99,11 @@ impl AntelopeBlockMapper {
             self.map_action(action_trace, &trace.id, identity, fork_step);
         }
 
-        // db_ops table
+        // db_ops table (extended only)
         for db_op in &trace.db_ops {
-            self.map_db_op(db_op, &trace.id, identity, fork_step);
+            if let Some(ref mut db_ops) = self.db_ops {
+                Self::map_db_op(db_ops, db_op, &trace.id, identity, fork_step);
+            }
         }
     }
 
@@ -119,26 +123,26 @@ impl AntelopeBlockMapper {
         append_fork_step(&mut self.actions.fork_step, fork_step);
     }
 
-    fn map_db_op(&mut self, db_op: &antelope::DbOp, tx_hash: &str, identity: &BlockIdentity, fork_step: Option<&str>) {
-        self.db_ops.canonical.append(identity);
-        self.db_ops.tx_hash.append_value(tx_hash);
-        self.db_ops.action_index.append_value(db_op.action_index);
-        self.db_ops.operation.append_value(db_op.operation);
-        self.db_ops.code.append_value(&db_op.code);
-        self.db_ops.scope.append_value(&db_op.scope);
-        self.db_ops.table_name.append_value(&db_op.table_name);
-        self.db_ops.primary_key.append_value(&db_op.primary_key);
+    fn map_db_op(db_ops: &mut DbOpsBuilder, db_op: &antelope::DbOp, tx_hash: &str, identity: &BlockIdentity, fork_step: Option<&str>) {
+        db_ops.canonical.append(identity);
+        db_ops.tx_hash.append_value(tx_hash);
+        db_ops.action_index.append_value(db_op.action_index);
+        db_ops.operation.append_value(db_op.operation);
+        db_ops.code.append_value(&db_op.code);
+        db_ops.scope.append_value(&db_op.scope);
+        db_ops.table_name.append_value(&db_op.table_name);
+        db_ops.primary_key.append_value(&db_op.primary_key);
         if db_op.old_data.is_empty() {
-            self.db_ops.old_data.append_null();
+            db_ops.old_data.append_null();
         } else {
-            self.db_ops.old_data.append_value(&db_op.old_data);
+            db_ops.old_data.append_value(&db_op.old_data);
         }
         if db_op.new_data.is_empty() {
-            self.db_ops.new_data.append_null();
+            db_ops.new_data.append_null();
         } else {
-            self.db_ops.new_data.append_value(&db_op.new_data);
+            db_ops.new_data.append_value(&db_op.new_data);
         }
-        append_fork_step(&mut self.db_ops.fork_step, fork_step);
+        append_fork_step(&mut db_ops.fork_step, fork_step);
     }
 }
 
@@ -154,20 +158,18 @@ impl BlockMapper for AntelopeBlockMapper {
         result.insert("blocks".to_string(), self.blocks.finish(&self.blocks_schema)?);
         result.insert("transactions".to_string(), self.transactions.finish(&self.transactions_schema)?);
         result.insert("actions".to_string(), self.actions.finish(&self.actions_schema)?);
-        result.insert("db_ops".to_string(), self.db_ops.finish(&self.db_ops_schema)?);
+        if let Some(ref mut db_ops) = self.db_ops {
+            result.insert("db_ops".to_string(), db_ops.finish(&self.db_ops_schema)?);
+        }
         Ok(result)
     }
 
     fn max_table_rows(&self) -> usize {
-        [
-            self.blocks.canonical.len(),
-            self.transactions.canonical.len(),
-            self.actions.canonical.len(),
-            self.db_ops.canonical.len(),
-        ]
-        .into_iter()
-        .max()
-        .unwrap_or(0)
+        let mut max = self.blocks.canonical.len()
+            .max(self.transactions.canonical.len())
+            .max(self.actions.canonical.len());
+        if let Some(ref db_ops) = self.db_ops { max = max.max(db_ops.canonical.len()); }
+        max
     }
 
     fn estimated_bytes(&mut self) -> usize {
@@ -196,25 +198,31 @@ impl BlockMapper for AntelopeBlockMapper {
             + est_bin(&self.actions.data)
             + est_str(&self.actions.console)
             + est_opt_str(&self.actions.fork_step);
-        let db_ops = self.db_ops.canonical.estimated_bytes()
-            + est_str(&self.db_ops.tx_hash)
-            + est_u32(&self.db_ops.action_index)
-            + est_i32(&self.db_ops.operation)
-            + est_str(&self.db_ops.code)
-            + est_str(&self.db_ops.scope)
-            + est_str(&self.db_ops.table_name)
-            + est_str(&self.db_ops.primary_key)
-            + est_bin(&self.db_ops.old_data)
-            + est_bin(&self.db_ops.new_data)
-            + est_opt_str(&self.db_ops.fork_step);
-        [blocks, transactions, actions, db_ops]
-            .into_iter()
-            .max()
-            .unwrap_or(0)
+        let mut tables = vec![blocks, transactions, actions];
+        if let Some(ref db_ops) = self.db_ops {
+            tables.push(
+                db_ops.canonical.estimated_bytes()
+                    + est_str(&db_ops.tx_hash)
+                    + est_u32(&db_ops.action_index)
+                    + est_i32(&db_ops.operation)
+                    + est_str(&db_ops.code)
+                    + est_str(&db_ops.scope)
+                    + est_str(&db_ops.table_name)
+                    + est_str(&db_ops.primary_key)
+                    + est_bin(&db_ops.old_data)
+                    + est_bin(&db_ops.new_data)
+                    + est_opt_str(&db_ops.fork_step),
+            );
+        }
+        tables.into_iter().max().unwrap_or(0)
     }
 
     fn table_names(&self) -> Vec<&str> {
-        schema::TABLE_NAMES.to_vec()
+        if self.extended {
+            schema::EXTENDED_TABLE_NAMES.to_vec()
+        } else {
+            schema::BASE_TABLE_NAMES.to_vec()
+        }
     }
 }
 
@@ -573,7 +581,7 @@ mod tests {
     fn test_map_and_flush_single_block() {
         let block = make_test_block(100);
         let block_bytes = prost::Message::encode_to_vec(&block);
-        let mut mapper = AntelopeBlockMapper::new(false, EncodeBytes::Hex);
+        let mut mapper = AntelopeBlockMapper::new(true, false, EncodeBytes::Hex);
         mapper.map_block(&block_bytes, &BlockIdentity::default(), None).unwrap();
 
         assert_eq!(mapper.max_table_rows(), 2); // 2 actions
@@ -589,7 +597,7 @@ mod tests {
     fn test_flush_resets_builders() {
         let block = make_test_block(1);
         let block_bytes = prost::Message::encode_to_vec(&block);
-        let mut mapper = AntelopeBlockMapper::new(false, EncodeBytes::Hex);
+        let mut mapper = AntelopeBlockMapper::new(true, false, EncodeBytes::Hex);
         mapper.map_block(&block_bytes, &BlockIdentity::default(), None).unwrap();
         let _ = mapper.flush().unwrap();
         assert_eq!(mapper.max_table_rows(), 0);
@@ -609,7 +617,7 @@ mod tests {
             ..Default::default()
         };
         let block_bytes = prost::Message::encode_to_vec(&block);
-        let mut mapper = AntelopeBlockMapper::new(false, EncodeBytes::Hex);
+        let mut mapper = AntelopeBlockMapper::new(true, false, EncodeBytes::Hex);
         mapper.map_block(&block_bytes, &BlockIdentity::default(), None).unwrap();
         let batches = mapper.flush().unwrap();
         assert_eq!(batches["blocks"].num_rows(), 1);
@@ -622,7 +630,7 @@ mod tests {
     fn test_fork_step_column_included() {
         let block = make_test_block(100);
         let block_bytes = prost::Message::encode_to_vec(&block);
-        let mut mapper = AntelopeBlockMapper::new(true, EncodeBytes::Hex);
+        let mut mapper = AntelopeBlockMapper::new(true, true, EncodeBytes::Hex);
         mapper.map_block(&block_bytes, &BlockIdentity::default(), Some("NEW")).unwrap();
 
         let batches = mapper.flush().unwrap();
@@ -631,5 +639,41 @@ mod tests {
         assert_eq!(blocks_batch.schema().field(last_col).name(), "fork_step");
         let fork_col = blocks_batch.column(last_col).as_any().downcast_ref::<StringArray>().unwrap();
         assert_eq!(fork_col.value(0), "NEW");
+    }
+
+    #[test]
+    fn test_table_names_base() {
+        let mapper = AntelopeBlockMapper::new(false, false, EncodeBytes::Hex);
+        let names = mapper.table_names();
+        assert_eq!(names.len(), 3);
+        assert!(names.contains(&"blocks"));
+        assert!(names.contains(&"transactions"));
+        assert!(names.contains(&"actions"));
+        assert!(!names.contains(&"db_ops"));
+    }
+
+    #[test]
+    fn test_table_names_extended() {
+        let mapper = AntelopeBlockMapper::new(true, false, EncodeBytes::Hex);
+        let names = mapper.table_names();
+        assert_eq!(names.len(), 4);
+        assert!(names.contains(&"blocks"));
+        assert!(names.contains(&"transactions"));
+        assert!(names.contains(&"actions"));
+        assert!(names.contains(&"db_ops"));
+    }
+
+    #[test]
+    fn test_base_excludes_db_ops() {
+        let block = make_test_block(100);
+        let block_bytes = prost::Message::encode_to_vec(&block);
+        let mut mapper = AntelopeBlockMapper::new(false, false, EncodeBytes::Hex);
+        mapper.map_block(&block_bytes, &BlockIdentity::default(), None).unwrap();
+
+        let batches = mapper.flush().unwrap();
+        assert_eq!(batches["blocks"].num_rows(), 1);
+        assert_eq!(batches["transactions"].num_rows(), 1);
+        assert_eq!(batches["actions"].num_rows(), 2);
+        assert!(!batches.contains_key("db_ops"));
     }
 }
