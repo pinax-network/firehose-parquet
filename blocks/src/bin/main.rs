@@ -37,7 +37,7 @@ struct Cli {
     #[arg(long, env = "BLOCK_TYPE", default_value = "auto", hide_env_values = true, help_heading = "Chain")]
     block_type: String,
 
-    /// Enable extended detail level (EVM only: calls, balance_changes, etc.)
+    /// Enable extended detail level (extra tables: EVM calls/balance_changes/etc., Antelope db_ops, Solana vote_transactions)
     #[arg(long, env = "EXTENDED", default_value = "false", hide_env_values = true, help_heading = "Chain")]
     extended: bool,
 
@@ -119,9 +119,9 @@ fn create_mapper(
     match block_type {
         "evm" => Ok(Box::new(EvmBlockMapper::new(extended, include_fork_step, encode_bytes))),
         "bitcoin" => Ok(Box::new(BitcoinBlockMapper::new(include_fork_step))),
-        "solana" => Ok(Box::new(SolanaBlockMapper::new(include_fork_step, encode_bytes))),
+        "solana" => Ok(Box::new(SolanaBlockMapper::new(extended, include_fork_step, encode_bytes))),
         "near" => Ok(Box::new(NearBlockMapper::new(include_fork_step, encode_bytes))),
-        "antelope" => Ok(Box::new(AntelopeBlockMapper::new(include_fork_step, encode_bytes))),
+        "antelope" => Ok(Box::new(AntelopeBlockMapper::new(extended, include_fork_step, encode_bytes))),
         "cosmos" => Ok(Box::new(CosmosBlockMapper::new(include_fork_step, encode_bytes))),
         "tron" => Ok(Box::new(TronBlockMapper::new(include_fork_step, encode_bytes))),
         "beacon" => Ok(Box::new(BeaconBlockMapper::new(include_fork_step, encode_bytes))),

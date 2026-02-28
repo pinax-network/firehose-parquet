@@ -162,7 +162,19 @@ pub fn account_lookups_schema(include_fork_step: bool, encoding: &EncodeBytes) -
     Schema::new(fields)
 }
 
-pub const TABLE_NAMES: [&str; 8] = [
+/// Standard table names (available at BASE detail level).
+pub const BASE_TABLE_NAMES: [&str; 7] = [
+    "blocks",
+    "transactions",
+    "messages",
+    "instructions",
+    "rewards",
+    "token_balances",
+    "account_lookups",
+];
+
+/// Extended table names (available at EXTENDED detail level).
+pub const EXTENDED_TABLE_NAMES: [&str; 8] = [
     "blocks",
     "transactions",
     "vote_transactions",
