@@ -546,7 +546,7 @@ impl BlockMapper for BeaconBlockMapper {
             .max(self.blob_sidecars.canonical.len())
     }
 
-    fn estimated_bytes(&mut self) -> usize {
+    fn largest_table(&mut self) -> (&str, usize) {
         let blocks = self.blocks.canonical.estimated_bytes()
             + est_u64(&self.blocks.slot)
             + est_u64(&self.blocks.parent_slot)
@@ -641,10 +641,10 @@ impl BlockMapper for BeaconBlockMapper {
             + self.blob_sidecars.kzg_commitment.estimated_bytes()
             + self.blob_sidecars.kzg_proof.estimated_bytes()
             + est_opt_str(&self.blob_sidecars.fork_step);
-        [blocks, attestations, deposits, proposer_slashings, attester_slashings, voluntary_exits, execution_payload, blob_sidecars]
+        [("blocks", blocks), ("attestations", attestations), ("deposits", deposits), ("proposer_slashings", proposer_slashings), ("attester_slashings", attester_slashings), ("voluntary_exits", voluntary_exits), ("execution_payload", execution_payload), ("blob_sidecars", blob_sidecars)]
             .into_iter()
-            .max()
-            .unwrap_or(0)
+            .max_by_key(|&(_, s)| s)
+            .unwrap_or(("blocks", 0))
     }
 
     fn table_names(&self) -> Vec<&str> {

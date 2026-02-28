@@ -407,7 +407,7 @@ impl BlockMapper for SolanaBlockMapper {
         max
     }
 
-    fn estimated_bytes(&mut self) -> usize {
+    fn largest_table(&mut self) -> (&str, usize) {
         let blocks = self.blocks.canonical.estimated_bytes()
             + est_u64(&self.blocks.slot)
             + est_u64(&self.blocks.parent_slot)
@@ -480,10 +480,10 @@ impl BlockMapper for SolanaBlockMapper {
             + self.account_lookups.writable_indexes.estimated_bytes()
             + self.account_lookups.readonly_indexes.estimated_bytes()
             + est_opt_str(&self.account_lookups.fork_step);
-        [blocks, transactions, vote_transactions, messages, instructions, rewards, token_balances, account_lookups]
+        [("blocks", blocks), ("transactions", transactions), ("vote_transactions", vote_transactions), ("messages", messages), ("instructions", instructions), ("rewards", rewards), ("token_balances", token_balances), ("account_lookups", account_lookups)]
             .into_iter()
-            .max()
-            .unwrap_or(0)
+            .max_by_key(|&(_, s)| s)
+            .unwrap_or(("blocks", 0))
     }
 
     fn table_names(&self) -> Vec<&str> {

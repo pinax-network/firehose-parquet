@@ -627,7 +627,7 @@ fn collect_parquet_files(dir: &PathBuf, out: &mut Vec<PathBuf>) -> anyhow::Resul
 }
 
 /// Human-readable byte size formatting.
-fn format_bytes(bytes: u64) -> String {
+pub fn format_bytes(bytes: u64) -> String {
     const KB: u64 = 1024;
     const MB: u64 = 1024 * KB;
     const GB: u64 = 1024 * MB;

@@ -440,7 +440,7 @@ impl BlockMapper for EvmBlockMapper {
         max
     }
 
-    fn estimated_bytes(&mut self) -> usize {
+    fn largest_table(&mut self) -> (&str, usize) {
         // blocks
         let blocks = self.blocks.canonical.estimated_bytes()
             + est_u64(&self.blocks.number)
@@ -495,7 +495,7 @@ impl BlockMapper for EvmBlockMapper {
             + self.logs.topic3.estimated_bytes()
             + self.logs.data.estimated_bytes()
             + est_opt_str(&self.logs.fork_step);
-        let mut tables = vec![blocks, transactions, logs];
+        let mut tables: Vec<(&str, usize)> = vec![("blocks", blocks), ("transactions", transactions), ("logs", logs)];
         // calls (tx-level)
         macro_rules! est_calls {
             ($b:expr) => {
@@ -688,21 +688,21 @@ impl BlockMapper for EvmBlockMapper {
                     + est_opt_str(&$b.fork_step)
             };
         }
-        if let Some(ref b) = self.calls { tables.push(est_calls!(b)); }
-        if let Some(ref b) = self.balance_changes { tables.push(est_balance_changes!(b)); }
-        if let Some(ref b) = self.code_changes { tables.push(est_code_changes!(b)); }
-        if let Some(ref b) = self.storage_changes { tables.push(est_storage_changes!(b)); }
-        if let Some(ref b) = self.nonce_changes { tables.push(est_nonce_changes!(b)); }
-        if let Some(ref b) = self.gas_changes { tables.push(est_gas_changes!(b)); }
-        if let Some(ref b) = self.account_creations { tables.push(est_account_creations!(b)); }
-        if let Some(ref b) = self.system_calls { tables.push(est_sys_calls!(b)); }
-        if let Some(ref b) = self.system_balance_changes { tables.push(est_sys_balance_changes!(b)); }
-        if let Some(ref b) = self.system_code_changes { tables.push(est_sys_code_changes!(b)); }
-        if let Some(ref b) = self.system_storage_changes { tables.push(est_sys_storage_changes!(b)); }
-        if let Some(ref b) = self.system_nonce_changes { tables.push(est_sys_nonce_changes!(b)); }
-        if let Some(ref b) = self.system_gas_changes { tables.push(est_sys_gas_changes!(b)); }
-        if let Some(ref b) = self.system_account_creations { tables.push(est_sys_account_creations!(b)); }
-        tables.into_iter().max().unwrap_or(0)
+        if let Some(ref b) = self.calls { tables.push(("calls", est_calls!(b))); }
+        if let Some(ref b) = self.balance_changes { tables.push(("balance_changes", est_balance_changes!(b))); }
+        if let Some(ref b) = self.code_changes { tables.push(("code_changes", est_code_changes!(b))); }
+        if let Some(ref b) = self.storage_changes { tables.push(("storage_changes", est_storage_changes!(b))); }
+        if let Some(ref b) = self.nonce_changes { tables.push(("nonce_changes", est_nonce_changes!(b))); }
+        if let Some(ref b) = self.gas_changes { tables.push(("gas_changes", est_gas_changes!(b))); }
+        if let Some(ref b) = self.account_creations { tables.push(("account_creations", est_account_creations!(b))); }
+        if let Some(ref b) = self.system_calls { tables.push(("system_calls", est_sys_calls!(b))); }
+        if let Some(ref b) = self.system_balance_changes { tables.push(("system_balance_changes", est_sys_balance_changes!(b))); }
+        if let Some(ref b) = self.system_code_changes { tables.push(("system_code_changes", est_sys_code_changes!(b))); }
+        if let Some(ref b) = self.system_storage_changes { tables.push(("system_storage_changes", est_sys_storage_changes!(b))); }
+        if let Some(ref b) = self.system_nonce_changes { tables.push(("system_nonce_changes", est_sys_nonce_changes!(b))); }
+        if let Some(ref b) = self.system_gas_changes { tables.push(("system_gas_changes", est_sys_gas_changes!(b))); }
+        if let Some(ref b) = self.system_account_creations { tables.push(("system_account_creations", est_sys_account_creations!(b))); }
+        tables.into_iter().max_by_key(|&(_, s)| s).unwrap_or(("blocks", 0))
     }
 
     fn table_names(&self) -> Vec<&str> {

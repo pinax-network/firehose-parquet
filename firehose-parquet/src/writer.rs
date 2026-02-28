@@ -453,7 +453,7 @@ impl OutputWriter {
                         batches: Vec::new(),
                         total_bytes: 0,
                         metadata: metadata.clone(),
-                        partition_key,
+                        partition_key: partition_key.clone(),
                     });
                 buf.batches.push(batch.clone());
                 buf.total_bytes += batch_bytes;

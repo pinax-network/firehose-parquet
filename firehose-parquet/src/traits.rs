@@ -205,13 +205,18 @@ pub trait BlockMapper {
     /// Get current max rows across all tables.
     fn max_table_rows(&self) -> usize;
 
-    /// Estimate the in-memory byte usage of the largest single table.
+    /// Return the name and estimated in-memory byte size of the largest table.
     ///
-    /// Returns the **maximum** across all per-table estimates so that
+    /// The size is the **maximum** across all per-table estimates so that
     /// `flush_bytes` controls the size of the biggest output file rather
     /// than the sum across all tables (which would produce many small files
     /// after per-table splitting and compression).
-    fn estimated_bytes(&mut self) -> usize;
+    fn largest_table(&mut self) -> (&str, usize);
+
+    /// Estimate the in-memory byte usage of the largest single table.
+    fn estimated_bytes(&mut self) -> usize {
+        self.largest_table().1
+    }
 
     /// Get table names.
     fn table_names(&self) -> Vec<&str>;

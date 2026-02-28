@@ -256,15 +256,17 @@ async fn main() -> Result<()> {
             last_cursor = Some(cursor_str);
 
             if blocks_processed % 100 == 0 {
-                let arrow_bytes = m.estimated_bytes();
+                let (table, arrow_bytes) = m.largest_table();
+                let table = table.to_string();
                 let ratio = writer.compression_ratio();
+                let estimated = (arrow_bytes as f64 * ratio) as u64;
                 info!(
                     blocks_processed,
                     block_number,
+                    table,
                     buffered_rows = m.max_table_rows(),
-                    max_table_bytes = arrow_bytes,
-                    estimated_compressed = (arrow_bytes as f64 * ratio) as u64,
-                    compression_ratio = format!("{:.3}", ratio),
+                    buffered = firehose_parquet::cli::format_bytes(arrow_bytes as u64),
+                    estimated = firehose_parquet::cli::format_bytes(estimated),
                     "progress"
                 );
             }

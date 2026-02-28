@@ -420,7 +420,7 @@ impl BlockMapper for NearBlockMapper {
             .max(self.state_changes.canonical.len())
     }
 
-    fn estimated_bytes(&mut self) -> usize {
+    fn largest_table(&mut self) -> (&str, usize) {
         let blocks = self.blocks.canonical.estimated_bytes()
             + est_u64(&self.blocks.height)
             + self.blocks.hash.estimated_bytes()
@@ -470,10 +470,10 @@ impl BlockMapper for NearBlockMapper {
             + est_str(&self.state_changes.key_base64)
             + est_str(&self.state_changes.value_base64)
             + est_opt_str(&self.state_changes.fork_step);
-        [blocks, chunks, transactions, receipts, state_changes]
+        [("blocks", blocks), ("chunks", chunks), ("transactions", transactions), ("receipts", receipts), ("state_changes", state_changes)]
             .into_iter()
-            .max()
-            .unwrap_or(0)
+            .max_by_key(|&(_, s)| s)
+            .unwrap_or(("blocks", 0))
     }
 
     fn table_names(&self) -> Vec<&str> {
