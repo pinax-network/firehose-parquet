@@ -45,7 +45,7 @@ pub struct CommonArgs {
     #[arg(long, env = "OUTPUT", default_value = "output")]
     pub output: PathBuf,
 
-    /// Partitioning mode: none, block_range, date, hour, minute
+    /// Partitioning mode: none, block_range, date, hour, minute, second
     #[arg(long, env = "PARTITION", default_value = "none")]
     pub partition: String,
 
@@ -147,7 +147,8 @@ pub fn parse_partition(s: &str, block_range_size: u64) -> anyhow::Result<Partiti
         "date" => Ok(Partition::Date),
         "hour" => Ok(Partition::Hour),
         "minute" => Ok(Partition::Minute),
-        other => anyhow::bail!("invalid --partition '{other}': expected one of: none, block_range, date, hour, minute"),
+        "second" => Ok(Partition::Second),
+        other => anyhow::bail!("invalid --partition '{other}': expected one of: none, block_range, date, hour, minute, second"),
     }
 }
 
@@ -585,6 +586,7 @@ mod tests {
         assert_eq!(parse_partition("date", 10000).unwrap(), Partition::Date);
         assert_eq!(parse_partition("hour", 10000).unwrap(), Partition::Hour);
         assert_eq!(parse_partition("minute", 10000).unwrap(), Partition::Minute);
+        assert_eq!(parse_partition("second", 10000).unwrap(), Partition::Second);
         assert_eq!(parse_partition("block_range", 5000).unwrap(), Partition::BlockRange(5000));
         assert_eq!(parse_partition("BLOCK_RANGE", 20000).unwrap(), Partition::BlockRange(20000));
         assert!(parse_partition("unknown", 10000).is_err());
