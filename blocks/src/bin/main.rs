@@ -224,6 +224,8 @@ async fn main() -> Result<()> {
     let mut max_timestamp: Option<i64> = None;
     let mut last_flush_time = Instant::now();
     let mut last_cursor: Option<String> = None;
+    let mut bytes_read: u64 = 0;
+    let progress_start = Instant::now();
 
     client
         .stream_blocks(|block_bytes, type_url, cursor_str, identity: BlockIdentity, step: i32| {
@@ -253,20 +255,22 @@ async fn main() -> Result<()> {
 
             m.map_block(&block_bytes, &identity, fork_step_str)?;
             blocks_processed += 1;
+            bytes_read += block_bytes.len() as u64;
             last_cursor = Some(cursor_str);
 
             if blocks_processed % 100 == 0 {
-                let (table, arrow_bytes) = m.largest_table();
-                let table = table.to_string();
-                let ratio = writer.compression_ratio();
-                let estimated = (arrow_bytes as f64 * ratio) as u64;
+                let elapsed_secs = progress_start.elapsed().as_secs_f64();
+                let speed_per_min = if elapsed_secs > 0.0 {
+                    (bytes_read as f64 / elapsed_secs) * 60.0
+                } else {
+                    0.0
+                };
                 info!(
                     blocks_processed,
                     block_number,
-                    table,
-                    buffered_rows = m.max_table_rows(),
-                    buffered = firehose_parquet::cli::format_bytes(arrow_bytes as u64),
-                    estimated = firehose_parquet::cli::format_bytes(estimated),
+                    total_rows = m.total_rows(),
+                    bytes_read = firehose_parquet::cli::format_bytes(bytes_read),
+                    speed = format!("{}/min", firehose_parquet::cli::format_bytes(speed_per_min as u64)),
                     "progress"
                 );
             }

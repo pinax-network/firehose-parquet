@@ -161,6 +161,13 @@ impl BlockMapper for TronBlockMapper {
             .max(self.internal_transactions.canonical.len())
     }
 
+    fn total_rows(&self) -> usize {
+        self.blocks.canonical.len()
+            + self.transactions.canonical.len()
+            + self.logs.canonical.len()
+            + self.internal_transactions.canonical.len()
+    }
+
     fn largest_table(&mut self) -> (&str, usize) {
         let blocks = self.blocks.canonical.estimated_bytes()
             + est_u64(&self.blocks.number)

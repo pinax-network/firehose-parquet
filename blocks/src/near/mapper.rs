@@ -420,6 +420,14 @@ impl BlockMapper for NearBlockMapper {
             .max(self.state_changes.canonical.len())
     }
 
+    fn total_rows(&self) -> usize {
+        self.blocks.canonical.len()
+            + self.chunks.canonical.len()
+            + self.transactions.canonical.len()
+            + self.receipts.canonical.len()
+            + self.state_changes.canonical.len()
+    }
+
     fn largest_table(&mut self) -> (&str, usize) {
         let blocks = self.blocks.canonical.estimated_bytes()
             + est_u64(&self.blocks.height)

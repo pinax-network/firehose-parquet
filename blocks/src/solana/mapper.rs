@@ -407,6 +407,18 @@ impl BlockMapper for SolanaBlockMapper {
         max
     }
 
+    fn total_rows(&self) -> usize {
+        let mut total = self.blocks.canonical.len()
+            + self.transactions.canonical.len()
+            + self.messages.canonical.len()
+            + self.instructions.canonical.len()
+            + self.rewards.canonical.len()
+            + self.token_balances.canonical.len()
+            + self.account_lookups.canonical.len();
+        if let Some(ref vote_txs) = self.vote_transactions { total += vote_txs.canonical.len(); }
+        total
+    }
+
     fn largest_table(&mut self) -> (&str, usize) {
         let blocks = self.blocks.canonical.estimated_bytes()
             + est_u64(&self.blocks.slot)

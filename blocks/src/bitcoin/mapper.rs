@@ -171,6 +171,13 @@ impl BlockMapper for BitcoinBlockMapper {
             .max(self.outputs.canonical.len())
     }
 
+    fn total_rows(&self) -> usize {
+        self.blocks.canonical.len()
+            + self.transactions.canonical.len()
+            + self.inputs.canonical.len()
+            + self.outputs.canonical.len()
+    }
+
     fn largest_table(&mut self) -> (&str, usize) {
         let blocks = self.blocks.canonical.estimated_bytes()
             + est_str(&self.blocks.hash)

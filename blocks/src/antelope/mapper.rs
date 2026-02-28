@@ -172,6 +172,14 @@ impl BlockMapper for AntelopeBlockMapper {
         max
     }
 
+    fn total_rows(&self) -> usize {
+        let mut total = self.blocks.canonical.len()
+            + self.transactions.canonical.len()
+            + self.actions.canonical.len();
+        if let Some(ref db_ops) = self.db_ops { total += db_ops.canonical.len(); }
+        total
+    }
+
     fn largest_table(&mut self) -> (&str, usize) {
         let blocks = self.blocks.canonical.estimated_bytes()
             + est_u32(&self.blocks.number)

@@ -440,6 +440,27 @@ impl BlockMapper for EvmBlockMapper {
         max
     }
 
+    fn total_rows(&self) -> usize {
+        let mut total = self.blocks.canonical.len()
+            + self.transactions.canonical.len()
+            + self.logs.canonical.len();
+        if let Some(ref b) = self.calls { total += b.canonical.len(); }
+        if let Some(ref b) = self.balance_changes { total += b.canonical.len(); }
+        if let Some(ref b) = self.storage_changes { total += b.canonical.len(); }
+        if let Some(ref b) = self.nonce_changes { total += b.canonical.len(); }
+        if let Some(ref b) = self.gas_changes { total += b.canonical.len(); }
+        if let Some(ref b) = self.code_changes { total += b.canonical.len(); }
+        if let Some(ref b) = self.account_creations { total += b.canonical.len(); }
+        if let Some(ref b) = self.system_calls { total += b.canonical.len(); }
+        if let Some(ref b) = self.system_balance_changes { total += b.canonical.len(); }
+        if let Some(ref b) = self.system_code_changes { total += b.canonical.len(); }
+        if let Some(ref b) = self.system_storage_changes { total += b.canonical.len(); }
+        if let Some(ref b) = self.system_nonce_changes { total += b.canonical.len(); }
+        if let Some(ref b) = self.system_gas_changes { total += b.canonical.len(); }
+        if let Some(ref b) = self.system_account_creations { total += b.canonical.len(); }
+        total
+    }
+
     fn largest_table(&mut self) -> (&str, usize) {
         // blocks
         let blocks = self.blocks.canonical.estimated_bytes()

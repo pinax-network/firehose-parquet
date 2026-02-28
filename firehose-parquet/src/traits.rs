@@ -205,6 +205,9 @@ pub trait BlockMapper {
     /// Get current max rows across all tables.
     fn max_table_rows(&self) -> usize;
 
+    /// Get total rows across all tables (sum).
+    fn total_rows(&self) -> usize;
+
     /// Return the name and estimated in-memory byte size of the largest table.
     ///
     /// The size is the **maximum** across all per-table estimates so that

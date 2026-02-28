@@ -546,6 +546,17 @@ impl BlockMapper for BeaconBlockMapper {
             .max(self.blob_sidecars.canonical.len())
     }
 
+    fn total_rows(&self) -> usize {
+        self.blocks.canonical.len()
+            + self.attestations.canonical.len()
+            + self.deposits.canonical.len()
+            + self.proposer_slashings.canonical.len()
+            + self.attester_slashings.canonical.len()
+            + self.voluntary_exits.canonical.len()
+            + self.execution_payload.canonical.len()
+            + self.blob_sidecars.canonical.len()
+    }
+
     fn largest_table(&mut self) -> (&str, usize) {
         let blocks = self.blocks.canonical.estimated_bytes()
             + est_u64(&self.blocks.slot)

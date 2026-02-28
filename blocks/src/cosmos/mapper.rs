@@ -192,6 +192,13 @@ impl BlockMapper for CosmosBlockMapper {
             .max(self.messages.canonical.len())
     }
 
+    fn total_rows(&self) -> usize {
+        self.blocks.canonical.len()
+            + self.transactions.canonical.len()
+            + self.events.canonical.len()
+            + self.messages.canonical.len()
+    }
+
     fn largest_table(&mut self) -> (&str, usize) {
         let blocks = self.blocks.canonical.estimated_bytes()
             + est_i64(&self.blocks.height)
