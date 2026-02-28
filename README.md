@@ -94,7 +94,7 @@ Block Range:
 
 Output:
       --output <OUTPUT>
-          Output directory [env: OUTPUT] [default: output]
+          Output directory [env: OUTPUT] [default: .]
       --partition <PARTITION>
           Partitioning mode: none, block_range, date, hour, minute, second [env: PARTITION] [default: none]
       --block-range-size <BLOCK_RANGE_SIZE>
@@ -138,7 +138,7 @@ Chain:
 ## Output Directory Layout
 
 ```
-output/
+<chain_name>/
 ├── blocks/
 │   ├── date=2026-02-25/
 │   │   ├── part-000001.parquet
