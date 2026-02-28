@@ -7,31 +7,12 @@ use parquet::arrow::ArrowWriter;
 use parquet::basic::Compression as PqCompression;
 use parquet::basic::ZstdLevel;
 use parquet::file::properties::WriterProperties;
-use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs::{self, File};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use time::OffsetDateTime;
 use tracing::info;
-
-/// Summary metadata for a table folder, written as `_summary.json`.
-///
-/// Updated after each parquet file write so that external tools (e.g. the
-/// object-browser UI) can read folder sizes without listing all objects.
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct FolderSummary {
-    /// Total compressed size in bytes across all parquet files.
-    pub total_bytes: u64,
-    /// Number of parquet files in the folder.
-    pub file_count: u64,
-    /// Total number of rows across all parquet files.
-    pub total_rows: u64,
-    /// ISO 8601 timestamp of the last update.
-    pub last_updated: String,
-}
-
-const SUMMARY_FILENAME: &str = "_summary.json";
 
 /// Writes Arrow RecordBatches to Parquet files, handling partitioning and
 /// file naming. Supports local filesystem and S3 output.
@@ -156,9 +137,6 @@ impl ParquetTableWriter {
                 compressed_bytes,
                 "wrote parquet part to S3"
             );
-
-            // Update folder summary on S3.
-            self.update_s3_summary(table, compressed_bytes, batch.num_rows())?;
         } else {
             // Write to local filesystem.
             fs::create_dir_all(&dir).with_context(|| format!("creating dir {}", dir.display()))?;
@@ -178,83 +156,9 @@ impl ParquetTableWriter {
                 compressed_bytes,
                 "wrote parquet part"
             );
-
-            // Update folder summary on local filesystem.
-            self.update_local_summary(table, compressed_bytes, batch.num_rows())?;
         }
 
         Ok((path, compressed_bytes))
-    }
-
-    /// Update the `_summary.json` file on the local filesystem for a table.
-    fn update_local_summary(&self, table: &str, compressed_bytes: usize, rows: usize) -> Result<()> {
-        let summary_path = self.output_dir.join(table).join(SUMMARY_FILENAME);
-        let mut summary = if summary_path.exists() {
-            let data = fs::read_to_string(&summary_path).unwrap_or_default();
-            serde_json::from_str(&data).unwrap_or_default()
-        } else {
-            FolderSummary::default()
-        };
-
-        summary.total_bytes += compressed_bytes as u64;
-        summary.file_count += 1;
-        summary.total_rows += rows as u64;
-        summary.last_updated = OffsetDateTime::now_utc()
-            .format(&time::format_description::well_known::Rfc3339)
-            .unwrap_or_default();
-
-        fs::create_dir_all(self.output_dir.join(table))?;
-        let json = serde_json::to_string_pretty(&summary)?;
-        fs::write(&summary_path, json)?;
-        Ok(())
-    }
-
-    /// Update the `_summary.json` file on S3 for a table.
-    fn update_s3_summary(&self, table: &str, compressed_bytes: usize, rows: usize) -> Result<()> {
-        let s3 = match self.s3_client {
-            Some(ref c) => Arc::clone(c),
-            None => return Ok(()),
-        };
-        let prefix = self.s3_prefix.as_deref().unwrap_or("");
-        let summary_key = if prefix.is_empty() {
-            format!("{table}/{SUMMARY_FILENAME}")
-        } else {
-            format!("{prefix}/{table}/{SUMMARY_FILENAME}")
-        };
-        let s3_path = object_store::path::Path::from(summary_key.as_str());
-
-        // Read existing summary (if any).
-        let mut summary = tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(async {
-                match s3.get(&s3_path).await {
-                    Ok(result) => {
-                        let bytes = result.bytes().await.unwrap_or_default();
-                        serde_json::from_slice::<FolderSummary>(&bytes).unwrap_or_default()
-                    }
-                    Err(_) => FolderSummary::default(),
-                }
-            })
-        });
-
-        summary.total_bytes += compressed_bytes as u64;
-        summary.file_count += 1;
-        summary.total_rows += rows as u64;
-        summary.last_updated = OffsetDateTime::now_utc()
-            .format(&time::format_description::well_known::Rfc3339)
-            .unwrap_or_default();
-
-        let json = serde_json::to_vec_pretty(&summary)?;
-        let payload = object_store::PutPayload::from(bytes::Bytes::from(json));
-
-        tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(async {
-                s3.put(&s3_path, payload).await
-            })
-        })
-        .with_context(|| format!("uploading summary to S3: {summary_key}"))?;
-
-        info!(table, path = %summary_key, "updated folder summary");
-        Ok(())
     }
 
     /// Compute the S3 object key for a partition + filename.
@@ -902,30 +806,6 @@ mod tests {
         let read_batches = read_parquet(&file_path).unwrap();
         let total_rows: usize = read_batches.iter().map(|b| b.num_rows()).sum();
         assert_eq!(total_rows, 50);
-    }
-
-    #[test]
-    fn test_folder_summary_local() {
-        let dir = tempfile::tempdir().unwrap();
-        let batch = make_test_batch();
-        let mut writer =
-            ParquetTableWriter::new(dir.path(), Partition::None, Compression::Snappy);
-        let meta = default_metadata();
-
-        // Write two batches.
-        writer.write_batch("blocks", &batch, &meta).unwrap();
-        writer.write_batch("blocks", &batch, &meta).unwrap();
-
-        // Check _summary.json was created.
-        let summary_path = dir.path().join("blocks").join("_summary.json");
-        assert!(summary_path.exists(), "_summary.json should exist");
-
-        let data = fs::read_to_string(&summary_path).unwrap();
-        let summary: FolderSummary = serde_json::from_str(&data).unwrap();
-        assert_eq!(summary.file_count, 2);
-        assert_eq!(summary.total_rows, 2);
-        assert!(summary.total_bytes > 0);
-        assert!(!summary.last_updated.is_empty());
     }
 
     #[test]
