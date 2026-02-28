@@ -29,10 +29,6 @@ pub struct CommonArgs {
     #[arg(long, env = "API_TOKEN_ENVVAR", default_value = "SUBSTREAMS_API_TOKEN", hide_env_values = true, help_heading = "Connection")]
     pub api_token_envvar: String,
 
-    /// Public endpoint (skip authentication)
-    #[arg(long, env = "PUBLIC", default_value = "false", hide_env_values = true, help_heading = "Connection")]
-    pub public: bool,
-
     /// Start block number (inclusive)
     #[arg(short = 's', long, env = "START_BLOCK", hide_env_values = true, help_heading = "Block Range")]
     pub start_block: Option<u64>,
@@ -177,16 +173,10 @@ pub fn build_config(args: &CommonArgs) -> anyhow::Result<Config> {
         .clone()
         .ok_or_else(|| anyhow::anyhow!("--endpoint is required"))?;
 
-    // When `--public` is set, skip authentication.
-    let (api_key, jwt_token) = if args.public {
-        (None, None)
-    } else {
-        // Resolve the actual API key / JWT token by reading the environment variable
-        // whose *name* is given by `--api-key-envvar` / `--api-token-envvar`.
-        let api_key = std::env::var(&args.api_key_envvar).ok().filter(|v| !v.is_empty());
-        let jwt_token = std::env::var(&args.api_token_envvar).ok().filter(|v| !v.is_empty());
-        (api_key, jwt_token)
-    };
+    // Resolve the actual API key / JWT token by reading the environment variable
+    // whose *name* is given by `--api-key-envvar` / `--api-token-envvar`.
+    let api_key = std::env::var(&args.api_key_envvar).ok().filter(|v| !v.is_empty());
+    let jwt_token = std::env::var(&args.api_token_envvar).ok().filter(|v| !v.is_empty());
 
     Ok(Config {
         endpoint,
@@ -195,7 +185,6 @@ pub fn build_config(args: &CommonArgs) -> anyhow::Result<Config> {
         start_block: args.start_block,
         stop_block: args.stop_block,
         cursor_path: args.cursor.clone(),
-        public: args.public,
         output: args.output.clone(),
         partition: parse_partition(&args.partition, args.block_range_size)?,
         flush_rows: args.flush_rows,
@@ -696,7 +685,6 @@ mod tests {
         assert!(cli.common.stop_block.is_none());
         assert!(cli.common.cursor.is_none());
         assert!(cli.common.flush_interval_secs.is_none());
-        assert!(!cli.common.public);
         assert!(cli.common.aws_access_key_id.is_none());
         assert!(cli.common.aws_secret_access_key.is_none());
         assert!(cli.common.aws_session_token.is_none());
@@ -880,42 +868,6 @@ mod tests {
         // Clean up
         unsafe {
             std::env::remove_var("MY_CUSTOM_KEY");
-        }
-    }
-
-    #[test]
-    #[serial]
-    fn test_public_flag_default() {
-        let cli = parse(&["test-cli", "--endpoint", "http://localhost:9000"]);
-        assert!(!cli.common.public);
-    }
-
-    #[test]
-    #[serial]
-    fn test_public_flag_set() {
-        let cli = parse(&["test-cli", "--endpoint", "http://localhost:9000", "--public"]);
-        assert!(cli.common.public);
-    }
-
-    #[test]
-    #[serial]
-    fn test_public_flag_skips_auth() {
-        // When --public is set, API key and JWT token should be None even
-        // if the corresponding env vars are defined.
-        unsafe {
-            std::env::set_var("SUBSTREAMS_API_KEY", "should-be-skipped");
-            std::env::set_var("SUBSTREAMS_API_TOKEN", "should-be-skipped");
-        }
-
-        let cli = parse(&["test-cli", "--endpoint", "https://example.com:443", "--public"]);
-        let config = build_config(&cli.common).expect("build_config should succeed");
-        assert!(config.public);
-        assert!(config.api_key.is_none());
-        assert!(config.jwt_token.is_none());
-
-        unsafe {
-            std::env::remove_var("SUBSTREAMS_API_KEY");
-            std::env::remove_var("SUBSTREAMS_API_TOKEN");
         }
     }
 

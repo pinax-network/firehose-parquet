@@ -85,8 +85,6 @@ Connection:
           Name of environment variable containing the API key for authentication [env: API_KEY_ENVVAR] [default: SUBSTREAMS_API_KEY]
       --api-token-envvar <API_TOKEN_ENVVAR>
           Name of environment variable containing the JWT bearer token for authentication [env: API_TOKEN_ENVVAR] [default: SUBSTREAMS_API_TOKEN]
-      --public
-          Public endpoint (skip authentication) [env: PUBLIC]
 
 Block Range:
   -s, --start-block <START_BLOCK>  Start block number (inclusive) [env: START_BLOCK]

@@ -62,7 +62,6 @@ pub struct Config {
     pub start_block: Option<u64>,
     pub stop_block: Option<u64>,
     pub cursor_path: Option<PathBuf>,
-    pub public: bool,
     pub output: PathBuf,
     pub partition: Partition,
     pub flush_rows: Option<u32>,
@@ -105,9 +104,7 @@ impl std::fmt::Display for Compression {
 
 impl std::fmt::Display for Config {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let auth = if self.public {
-            "public"
-        } else if self.api_key.is_some() {
+        let auth = if self.api_key.is_some() {
             "api_key (***)"
         } else if self.jwt_token.is_some() {
             "bearer (***)"
@@ -172,7 +169,6 @@ impl Default for Config {
             start_block: None,
             stop_block: None,
             cursor_path: None,
-            public: false,
             output: PathBuf::from("output"),
             partition: Partition::None,
             flush_rows: None,
@@ -247,16 +243,6 @@ mod tests {
         let display = config.to_string();
         assert!(display.contains("bearer (***)"));
         assert!(!display.contains("super-secret-token"));
-    }
-
-    #[test]
-    fn test_config_display_public_auth() {
-        let config = Config {
-            public: true,
-            ..Config::default()
-        };
-        let display = config.to_string();
-        assert!(display.contains("auth               public"));
     }
 
     #[test]
