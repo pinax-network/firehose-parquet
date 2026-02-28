@@ -76,6 +76,7 @@ pub struct Config {
     pub aws_session_token: Option<String>,
     pub aws_region: Option<String>,
     pub aws_endpoint_url: Option<String>,
+    pub s3_bucket: Option<String>,
 }
 
 impl std::fmt::Display for Partition {
@@ -182,6 +183,7 @@ impl Default for Config {
             aws_session_token: None,
             aws_region: None,
             aws_endpoint_url: None,
+            s3_bucket: None,
         }
     }
 }

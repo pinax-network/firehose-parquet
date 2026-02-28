@@ -100,6 +100,10 @@ pub struct CommonArgs {
     /// AWS endpoint URL (for S3-compatible services)
     #[arg(long, env = "AWS_ENDPOINT_URL", hide_env_values = true, help_heading = "AWS / S3")]
     pub aws_endpoint_url: Option<String>,
+
+    /// S3 bucket name (when set, output is written to s3://<bucket>/<output>)
+    #[arg(long, env = "S3_BUCKET", hide_env_values = true, help_heading = "AWS / S3")]
+    pub s3_bucket: Option<String>,
 }
 
 /// Subcommands shared by all binaries.
@@ -178,6 +182,19 @@ pub fn build_config(args: &CommonArgs) -> anyhow::Result<Config> {
     let api_key = std::env::var(&args.api_key_envvar).ok().filter(|v| !v.is_empty());
     let jwt_token = std::env::var(&args.api_token_envvar).ok().filter(|v| !v.is_empty());
 
+    // When S3_BUCKET is set and output isn't already an s3:// URL,
+    // build the S3 path automatically: s3://<bucket>/<output>
+    let output = if let Some(ref bucket) = args.s3_bucket {
+        let path = args.output.to_string_lossy();
+        if path.starts_with("s3://") {
+            args.output.clone()
+        } else {
+            PathBuf::from(format!("s3://{bucket}/{path}"))
+        }
+    } else {
+        args.output.clone()
+    };
+
     Ok(Config {
         endpoint,
         api_key,
@@ -185,7 +202,7 @@ pub fn build_config(args: &CommonArgs) -> anyhow::Result<Config> {
         start_block: args.start_block,
         stop_block: args.stop_block,
         cursor_path: args.cursor.clone(),
-        output: args.output.clone(),
+        output,
         partition: parse_partition(&args.partition, args.block_range_size)?,
         flush_rows: args.flush_rows,
         flush_bytes: args.flush_bytes,
@@ -198,6 +215,7 @@ pub fn build_config(args: &CommonArgs) -> anyhow::Result<Config> {
         aws_session_token: args.aws_session_token.clone(),
         aws_region: args.aws_region.clone(),
         aws_endpoint_url: args.aws_endpoint_url.clone(),
+        s3_bucket: args.s3_bucket.clone(),
     })
 }
 
@@ -667,6 +685,7 @@ mod tests {
             std::env::remove_var("AWS_SESSION_TOKEN");
             std::env::remove_var("AWS_REGION");
             std::env::remove_var("AWS_ENDPOINT_URL");
+            std::env::remove_var("S3_BUCKET");
         }
         let cli = parse(&["test-cli", "--endpoint", "http://localhost:9000"]);
         assert_eq!(cli.common.endpoint.as_deref(), Some("http://localhost:9000"));
@@ -690,6 +709,7 @@ mod tests {
         assert!(cli.common.aws_session_token.is_none());
         assert!(cli.common.aws_region.is_none());
         assert!(cli.common.aws_endpoint_url.is_none());
+        assert!(cli.common.s3_bucket.is_none());
     }
 
     #[test]
@@ -907,6 +927,7 @@ mod tests {
             std::env::remove_var("AWS_SESSION_TOKEN");
             std::env::remove_var("AWS_REGION");
             std::env::remove_var("AWS_ENDPOINT_URL");
+            std::env::remove_var("S3_BUCKET");
         }
         let cli = parse(&["test-cli", "--endpoint", "http://localhost:9000"]);
         assert!(cli.common.aws_access_key_id.is_none());
@@ -914,5 +935,73 @@ mod tests {
         assert!(cli.common.aws_session_token.is_none());
         assert!(cli.common.aws_region.is_none());
         assert!(cli.common.aws_endpoint_url.is_none());
+        assert!(cli.common.s3_bucket.is_none());
+    }
+
+    #[test]
+    #[serial]
+    fn test_s3_bucket_constructs_output() {
+        unsafe {
+            std::env::remove_var("AWS_ACCESS_KEY_ID");
+            std::env::remove_var("AWS_SECRET_ACCESS_KEY");
+            std::env::remove_var("AWS_SESSION_TOKEN");
+            std::env::remove_var("AWS_REGION");
+            std::env::remove_var("AWS_ENDPOINT_URL");
+            std::env::remove_var("S3_BUCKET");
+        }
+        // When --s3-bucket is set, output should become s3://bucket/output
+        let cli = parse(&[
+            "test-cli",
+            "--endpoint", "https://example.com:443",
+            "--s3-bucket", "my-bucket",
+            "--output", "my-prefix",
+        ]);
+        let config = build_config(&cli.common).expect("build_config should succeed");
+        assert_eq!(config.output, PathBuf::from("s3://my-bucket/my-prefix"));
+        assert_eq!(config.s3_bucket.as_deref(), Some("my-bucket"));
+    }
+
+    #[test]
+    #[serial]
+    fn test_s3_bucket_no_double_prefix() {
+        unsafe {
+            std::env::remove_var("AWS_ACCESS_KEY_ID");
+            std::env::remove_var("AWS_SECRET_ACCESS_KEY");
+            std::env::remove_var("AWS_SESSION_TOKEN");
+            std::env::remove_var("AWS_REGION");
+            std::env::remove_var("AWS_ENDPOINT_URL");
+            std::env::remove_var("S3_BUCKET");
+        }
+        // When output already starts with s3://, s3_bucket should not double-prefix
+        let cli = parse(&[
+            "test-cli",
+            "--endpoint", "https://example.com:443",
+            "--s3-bucket", "my-bucket",
+            "--output", "s3://other-bucket/prefix",
+        ]);
+        let config = build_config(&cli.common).expect("build_config should succeed");
+        assert_eq!(config.output, PathBuf::from("s3://other-bucket/prefix"));
+    }
+
+    #[test]
+    #[serial]
+    fn test_s3_bucket_default_output() {
+        unsafe {
+            std::env::remove_var("AWS_ACCESS_KEY_ID");
+            std::env::remove_var("AWS_SECRET_ACCESS_KEY");
+            std::env::remove_var("AWS_SESSION_TOKEN");
+            std::env::remove_var("AWS_REGION");
+            std::env::remove_var("AWS_ENDPOINT_URL");
+            std::env::remove_var("S3_BUCKET");
+            std::env::remove_var("OUTPUT");
+        }
+        // When --s3-bucket is set but output uses default "output"
+        let cli = parse(&[
+            "test-cli",
+            "--endpoint", "https://example.com:443",
+            "--s3-bucket", "my-bucket",
+        ]);
+        let config = build_config(&cli.common).expect("build_config should succeed");
+        assert_eq!(config.output, PathBuf::from("s3://my-bucket/output"));
     }
 }

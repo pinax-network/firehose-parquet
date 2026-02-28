@@ -121,6 +121,8 @@ AWS / S3:
           AWS region (for S3 output) [env: AWS_REGION]
       --aws-endpoint-url <AWS_ENDPOINT_URL>
           AWS endpoint URL (for S3-compatible services) [env: AWS_ENDPOINT_URL]
+      --s3-bucket <S3_BUCKET>
+          S3 bucket name (when set, output is written to s3://<bucket>/<output>) [env: S3_BUCKET]
 
 Chain:
       --block-type <BLOCK_TYPE>
