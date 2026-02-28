@@ -288,12 +288,11 @@ impl ParquetTableWriter {
     }
 }
 
-/// Default compression ratio (compressed/uncompressed) estimate for initial
-/// buffering decisions before real data is observed. These are conservative:
-/// slightly higher values mean the writer buffers more data initially,
-/// producing larger first files. The ratio converges to the real value after
-/// a few writes via exponential moving average.
-fn default_compression_ratio(compression: &Compression) -> f64 {
+/// Fixed compression ratio (compressed/uncompressed) used for estimating
+/// when the buffered data will reach the target file size. These are
+/// hard-coded to keep file rollover deterministic: given identical input
+/// and configuration, the writer will produce consistent rollover behavior.
+fn compression_ratio(compression: &Compression) -> f64 {
     match compression {
         Compression::None => 0.50,   // Parquet encoding alone: ~2×
         Compression::Snappy => 0.25, // Parquet + Snappy: ~4×
@@ -315,8 +314,11 @@ struct TableBuffer {
 
 /// High-level writer that buffers RecordBatches per table and writes to disk
 /// when the estimated **compressed** size reaches `flush_bytes`. The
-/// compression ratio is tracked with an exponential moving average (EMA)
-/// updated after each real write, starting from a conservative default.
+/// compression ratio is a fixed hard-coded value per codec to keep file
+/// rollover deterministic.
+///
+/// When `flush_bytes` is `0`, size-based file rollover is disabled and data
+/// is only flushed on partition changes or when `flush_remaining()` is called.
 ///
 /// This prevents many tiny Parquet files for tables that have few rows per
 /// block (e.g. `blocks`). Small batches are concatenated into a single large
@@ -325,10 +327,9 @@ pub struct OutputWriter {
     pub inner: ParquetTableWriter,
     /// Per-table buffer for accumulating batches before writing.
     buffers: HashMap<String, TableBuffer>,
-    /// Target **compressed** output file size in bytes.
+    /// Target **compressed** output file size in bytes. `0` disables size-based rollover.
     flush_bytes: u64,
-    /// Observed compression ratio (compressed_bytes / arrow_bytes).
-    /// Updated via EMA after each table write.
+    /// Fixed compression ratio (compressed_bytes / arrow_bytes).
     compression_ratio: f64,
 }
 
@@ -339,12 +340,12 @@ impl OutputWriter {
         compression: Compression,
         flush_bytes: u64,
     ) -> Self {
-        let compression_ratio = default_compression_ratio(&compression);
+        let cr = compression_ratio(&compression);
         Self {
             inner: ParquetTableWriter::new(output_dir, partition, compression),
             buffers: HashMap::new(),
             flush_bytes,
-            compression_ratio,
+            compression_ratio: cr,
         }
     }
 
@@ -356,12 +357,12 @@ impl OutputWriter {
         config: &Config,
         flush_bytes: u64,
     ) -> Result<Self> {
-        let compression_ratio = default_compression_ratio(&compression);
+        let cr = compression_ratio(&compression);
         Ok(Self {
             inner: ParquetTableWriter::new_s3(output_path, partition, compression, config)?,
             buffers: HashMap::new(),
             flush_bytes,
-            compression_ratio,
+            compression_ratio: cr,
         })
     }
 
@@ -435,12 +436,14 @@ impl OutputWriter {
         }
 
         // Flush when estimated compressed size reaches the target.
-        let needs_size_flush = self
-            .buffers
-            .get(table)
-            .map_or(false, |buf| {
-                (buf.total_bytes as f64 * self.compression_ratio) >= self.flush_bytes as f64
-            });
+        // When flush_bytes is 0, size-based rollover is disabled.
+        let needs_size_flush = self.flush_bytes > 0
+            && self
+                .buffers
+                .get(table)
+                .map_or(false, |buf| {
+                    (buf.total_bytes as f64 * self.compression_ratio) >= self.flush_bytes as f64
+                });
         if needs_size_flush {
             self.flush_table(table)?;
         }
@@ -449,29 +452,14 @@ impl OutputWriter {
     }
 
     /// Concatenate and write all buffered batches for a single table.
-    /// Updates the compression ratio from the actual write.
     fn flush_table(&mut self, table: &str) -> Result<()> {
         let buf = match self.buffers.remove(table) {
             Some(buf) if !buf.batches.is_empty() => buf,
             _ => return Ok(()),
         };
-        let arrow_bytes = buf.total_bytes;
         let schema = buf.batches[0].schema();
         let merged = arrow::compute::concat_batches(&schema, &buf.batches)?;
-        let (_, compressed_bytes) = self.inner.write_batch(table, &merged, &buf.metadata)?;
-
-        // Update compression ratio with exponential moving average (α=0.3).
-        if arrow_bytes > 0 && compressed_bytes > 0 {
-            let observed = compressed_bytes as f64 / arrow_bytes as f64;
-            self.compression_ratio = 0.7 * self.compression_ratio + 0.3 * observed;
-            info!(
-                observed_ratio = format!("{:.3}", observed),
-                ema_ratio = format!("{:.3}", self.compression_ratio),
-                arrow_bytes,
-                compressed_bytes,
-                "updated compression ratio"
-            );
-        }
+        self.inner.write_batch(table, &merged, &buf.metadata)?;
 
         Ok(())
     }
@@ -639,11 +627,21 @@ mod tests {
         let mut batches = HashMap::new();
         batches.insert("blocks".to_string(), batch);
 
-        // Use flush_bytes=0 so that every write_all flushes immediately.
+        // flush_bytes=0 disables size-based rollover; data is written on flush_remaining().
         let mut out = OutputWriter::new(dir.path(), Partition::None, Compression::Zstd, 0);
         let meta = default_metadata();
         out.write_all(&batches, &meta).unwrap();
+        out.flush_remaining().unwrap();
         assert!(dir.path().join("blocks").exists());
+
+        let parts: Vec<_> = std::fs::read_dir(dir.path().join("blocks"))
+            .unwrap()
+            .collect();
+        assert_eq!(parts.len(), 1, "should be a single part file");
+        let file_path = parts[0].as_ref().unwrap().path();
+        let read_batches = read_parquet(&file_path).unwrap();
+        let total_rows: usize = read_batches.iter().map(|b| b.num_rows()).sum();
+        assert_eq!(total_rows, 1, "should contain the single row from the batch");
     }
 
     #[test]
@@ -770,5 +768,54 @@ mod tests {
         assert_eq!(a.max_block_number, 300);
         assert_eq!(a.min_timestamp, Some(500));
         assert_eq!(a.max_timestamp, Some(2500));
+    }
+
+    #[test]
+    fn test_flush_bytes_zero_disables_size_rollover() {
+        let dir = tempfile::tempdir().unwrap();
+        let batch = make_test_batch();
+        let mut batches = HashMap::new();
+        batches.insert("blocks".to_string(), batch);
+
+        // flush_bytes=0 disables size-based rollover.
+        let mut out = OutputWriter::new(dir.path(), Partition::None, Compression::None, 0);
+        let meta = default_metadata();
+
+        // Write many times — nothing should be flushed to disk.
+        for _ in 0..50 {
+            out.write_all(&batches, &meta).unwrap();
+        }
+        assert!(!dir.path().join("blocks").exists(), "size rollover should be disabled");
+
+        // Explicit flush writes the accumulated data.
+        out.flush_remaining().unwrap();
+        assert!(dir.path().join("blocks").exists(), "flush_remaining should write data");
+
+        // Should produce a single part file with all 50 rows.
+        let parts: Vec<_> = std::fs::read_dir(dir.path().join("blocks"))
+            .unwrap()
+            .collect();
+        assert_eq!(parts.len(), 1, "should be a single part file");
+        let file_path = parts[0].as_ref().unwrap().path();
+        let read_batches = read_parquet(&file_path).unwrap();
+        let total_rows: usize = read_batches.iter().map(|b| b.num_rows()).sum();
+        assert_eq!(total_rows, 50);
+    }
+
+    #[test]
+    fn test_compression_ratio_is_fixed() {
+        let dir = tempfile::tempdir().unwrap();
+        let batch = make_test_batch();
+        let mut batches = HashMap::new();
+        batches.insert("blocks".to_string(), batch);
+
+        let mut out = OutputWriter::new(dir.path(), Partition::None, Compression::Zstd, 1_000_000);
+        let initial_ratio = out.compression_ratio();
+        let meta = default_metadata();
+
+        // Write and flush — the ratio should remain unchanged.
+        out.write_all(&batches, &meta).unwrap();
+        out.flush_remaining().unwrap();
+        assert_eq!(out.compression_ratio(), initial_ratio, "ratio should not change after writes");
     }
 }

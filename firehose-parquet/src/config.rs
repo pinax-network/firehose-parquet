@@ -126,7 +126,9 @@ impl std::fmt::Display for Config {
             }
         });
 
-        let flush_bytes = if self.flush_bytes >= 1024 * 1024 * 1024 {
+        let flush_bytes = if self.flush_bytes == 0 {
+            "disabled".to_string()
+        } else if self.flush_bytes >= 1024 * 1024 * 1024 {
             format!("{} GiB", self.flush_bytes / (1024 * 1024 * 1024))
         } else if self.flush_bytes >= 1024 * 1024 {
             format!("{} MiB", self.flush_bytes / (1024 * 1024))
@@ -174,7 +176,7 @@ impl Default for Config {
             output: PathBuf::from("output"),
             partition: Partition::None,
             flush_rows: None,
-            flush_bytes: 128 * 1024 * 1024, // 128 MB
+            flush_bytes: 128 * 1024 * 1024, // 128 MiB; set to 0 to disable size-based rollover
             flush_interval_secs: None,
             compression: Compression::Zstd,
             final_blocks_only: true,
@@ -331,5 +333,12 @@ mod tests {
             ..Config::default()
         };
         assert!(config.to_string().contains("500 B"));
+
+        // Disabled (0)
+        let config = Config {
+            flush_bytes: 0,
+            ..Config::default()
+        };
+        assert!(config.to_string().contains("disabled"));
     }
 }
