@@ -776,6 +776,7 @@ dependencies = [
  "clap_complete",
  "dotenvy",
  "firehose-protos",
+ "futures",
  "hex",
  "object_store",
  "parquet",
