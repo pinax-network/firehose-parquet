@@ -291,7 +291,7 @@ impl ParquetTableWriter {
 /// Fixed compression ratio (compressed/uncompressed) used for estimating
 /// when the buffered data will reach the target file size. These are
 /// hard-coded to keep file rollover deterministic: given identical input
-/// the writer will always produce the same part files.
+/// and configuration, the writer will produce consistent rollover behavior.
 fn compression_ratio(compression: &Compression) -> f64 {
     match compression {
         Compression::None => 0.50,   // Parquet encoding alone: ~2×
@@ -633,6 +633,15 @@ mod tests {
         out.write_all(&batches, &meta).unwrap();
         out.flush_remaining().unwrap();
         assert!(dir.path().join("blocks").exists());
+
+        let parts: Vec<_> = std::fs::read_dir(dir.path().join("blocks"))
+            .unwrap()
+            .collect();
+        assert_eq!(parts.len(), 1, "should be a single part file");
+        let file_path = parts[0].as_ref().unwrap().path();
+        let read_batches = read_parquet(&file_path).unwrap();
+        let total_rows: usize = read_batches.iter().map(|b| b.num_rows()).sum();
+        assert_eq!(total_rows, 1, "should contain the single row from the batch");
     }
 
     #[test]
