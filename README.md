@@ -60,61 +60,79 @@ cargo build --release --workspace
 ## CLI Reference
 
 ```
-REQUIRED:
-  -e, --endpoint <URL>       Firehose gRPC endpoint URL
+$ firehose-to-parquet --help
 
-CHAIN SELECTION:
-  --block-type <TYPE>        auto (default) | evm | solana | bitcoin | beacon | tron | cosmos | antelope | near
-                             "auto" detects the chain from the Firehose stream
+Convert Firehose gRPC stream to Apache Parquet
 
-AUTHENTICATION:
-  --api-key-envvar <NAME>    Env var name for API key (default: SUBSTREAMS_API_KEY)
-  --api-token-envvar <NAME>  Env var name for JWT token (default: SUBSTREAMS_API_TOKEN)
-  --public                   Skip authentication (for public endpoints)
+Usage: firehose-to-parquet [OPTIONS] [COMMAND]
 
-CONNECTION:
-  (TLS is automatically enabled for https:// endpoints, disabled for http://)
+Commands:
+  completions  Generate shell completions for the given shell
+  scan         Read and inspect Parquet files (schema, row counts, sample rows)
+               Supports local paths and S3 URIs (s3://bucket/prefix)
+  help         Print this message or the help of the given subcommand(s)
 
-BLOCK RANGE:
-  -s, --start-block <NUM>    Start block number (inclusive)
-  -t, --stop-block <NUM>     Stop block number (inclusive, 0 = stream forever)
-  -c, --cursor <PATH>        Path to cursor file for resuming a previous session
+Options:
+      --log-level <LOG_LEVEL>  Log level: trace, debug, info, warn, error [env: LOG_LEVEL] [default: info]
+      --dry-run                Decode and map but don't write files [env: DRY_RUN]
+  -h, --help                   Print help
+  -V, --version                Print version
 
-OUTPUT:
-  --output <DIR>             Output directory (default: "output")
-  --compression <CODEC>      zstd (default) | snappy | gzip | none
+Connection:
+  -e, --endpoint <ENDPOINT>
+          Firehose gRPC endpoint URL [env: ENDPOINT]
+      --api-key-envvar <API_KEY_ENVVAR>
+          Name of environment variable containing the API key for authentication [env: API_KEY_ENVVAR] [default: SUBSTREAMS_API_KEY]
+      --api-token-envvar <API_TOKEN_ENVVAR>
+          Name of environment variable containing the JWT bearer token for authentication [env: API_TOKEN_ENVVAR] [default: SUBSTREAMS_API_TOKEN]
+      --public
+          Public endpoint (skip authentication) [env: PUBLIC]
 
-PARTITIONING:
-  --partition <MODE>         none (default) | block_range | date | hour | minute | second
-  --block-range-size <NUM>   Block range size when partition=block_range (default: 10000)
+Block Range:
+  -s, --start-block <START_BLOCK>  Start block number (inclusive) [env: START_BLOCK]
+  -t, --stop-block <STOP_BLOCK>    Stop block number (inclusive, 0 = stream forever) [env: STOP_BLOCK]
+  -c, --cursor <CURSOR>            Path to cursor file for resuming a previous session [env: CURSOR]
+      --final-blocks-only          Only process finalized blocks (when false, adds fork_step column) [env: FINAL_BLOCKS_ONLY]
 
-FILE ROLLOVER:
-  --flush-rows <NUM>         Max rows per file (disabled by default)
-  --flush-bytes <NUM>        Max bytes per file (default: 134217728 = 128MB)
-  --flush-interval-secs <N>  Time-based flush interval (disabled by default)
+Output:
+      --output <OUTPUT>
+          Output directory [env: OUTPUT] [default: output]
+      --partition <PARTITION>
+          Partitioning mode: none, block_range, date, hour, minute, second [env: PARTITION] [default: none]
+      --block-range-size <BLOCK_RANGE_SIZE>
+          Block range size when partition=block_range [env: BLOCK_RANGE_SIZE] [default: 10000]
+      --compression <COMPRESSION>
+          Compression codec: zstd, snappy, gzip, none [env: COMPRESSION] [default: zstd]
 
-ENCODING:
-  --bytes-encoding <MODE>    binary | hex | base58 | tron_base58 | auto
-                             "auto" resolves to a chain-appropriate default (hex for EVM, base58 for Solana, etc.)
+Flush:
+      --flush-rows <FLUSH_ROWS>
+          Max rows per file before flush (disabled by default) [env: FLUSH_ROWS]
+      --flush-bytes <FLUSH_BYTES>
+          Max bytes per file before flush [env: FLUSH_BYTES] [default: 134217728]
+      --flush-interval-secs <FLUSH_INTERVAL_SECS>
+          Time-based flush interval in seconds (disabled by default) [env: FLUSH_INTERVAL_SECS]
 
-FORK HANDLING:
-  --final-blocks-only        Only process finalized blocks (default: true)
-                             When false, adds fork_step column to all tables
+AWS / S3:
+      --aws-access-key-id <AWS_ACCESS_KEY_ID>
+          AWS access key ID (for S3 output) [env: AWS_ACCESS_KEY_ID]
+      --aws-secret-access-key <AWS_SECRET_ACCESS_KEY>
+          AWS secret access key (for S3 output) [env: AWS_SECRET_ACCESS_KEY]
+      --aws-session-token <AWS_SESSION_TOKEN>
+          AWS session token (for S3 output) [env: AWS_SESSION_TOKEN]
+      --aws-region <AWS_REGION>
+          AWS region (for S3 output) [env: AWS_REGION]
+      --aws-endpoint-url <AWS_ENDPOINT_URL>
+          AWS endpoint URL (for S3-compatible services) [env: AWS_ENDPOINT_URL]
 
-EVM-SPECIFIC:
-  --extended                 Enable extended trace tables (calls, balance_changes, etc.)
-
-OTHER:
-  --dry-run                  Decode and map but don't write files
-  --log-level <LEVEL>        info (default) | debug | trace
-
-AWS S3 OUTPUT:
-  --output s3://bucket/path  Write Parquet files to an S3 bucket
-  --aws-access-key-id <KEY>  AWS access key ID
-  --aws-secret-access-key <SECRET>  AWS secret access key
-  --aws-session-token <TOKEN>       AWS session token (optional)
-  --aws-region <REGION>             AWS region (e.g. us-east-1)
-  --aws-endpoint-url <URL>          Custom S3 endpoint (for S3-compatible services)
+Chain:
+      --block-type <BLOCK_TYPE>
+          Block type to process. Use "auto" to detect from the Firehose stream.
+          Options: auto, evm, bitcoin, solana, near, antelope, cosmos, tron, beacon [env: BLOCK_TYPE] [default: auto]
+      --extended
+          Enable extended detail level (EVM only: calls, balance_changes, etc.) [env: EXTENDED]
+      --bytes-encoding <BYTES_ENCODING>
+          Byte encoding strategy for binary fields (hashes, addresses, etc.)
+          Options: binary (raw bytes), hex (0x-prefixed), base58, tron_base58, auto (chain-appropriate) [env: BYTES_ENCODING] [default: auto]
 ```
 
 ## Output Directory Layout

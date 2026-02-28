@@ -34,16 +34,16 @@ struct Cli {
     /// Block type to process.
     /// Use "auto" to detect from the Firehose stream.
     /// Options: auto, evm, bitcoin, solana, near, antelope, cosmos, tron, beacon
-    #[arg(long, env = "BLOCK_TYPE", default_value = "auto")]
+    #[arg(long, env = "BLOCK_TYPE", default_value = "auto", hide_env_values = true, help_heading = "Chain")]
     block_type: String,
 
     /// Enable extended detail level (EVM only: calls, balance_changes, etc.)
-    #[arg(long, env = "EXTENDED", default_value = "false")]
+    #[arg(long, env = "EXTENDED", default_value = "false", hide_env_values = true, help_heading = "Chain")]
     extended: bool,
 
     /// Byte encoding strategy for binary fields (hashes, addresses, etc.)
     /// Options: binary (raw bytes), hex (0x-prefixed), base58, tron_base58, auto (chain-appropriate)
-    #[arg(long, env = "BYTES_ENCODING", default_value = "auto")]
+    #[arg(long, env = "BYTES_ENCODING", default_value = "auto", hide_env_values = true, help_heading = "Chain")]
     bytes_encoding: String,
 }
 

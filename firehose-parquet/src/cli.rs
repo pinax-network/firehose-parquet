@@ -18,91 +18,91 @@ pub fn load_dotenv() {
 #[derive(Args, Debug, Clone)]
 pub struct CommonArgs {
     /// Firehose gRPC endpoint URL
-    #[arg(short = 'e', long, env = "ENDPOINT")]
+    #[arg(short = 'e', long, env = "ENDPOINT", hide_env_values = true, help_heading = "Connection")]
     pub endpoint: Option<String>,
 
     /// Name of environment variable containing the API key for authentication
-    #[arg(long, env = "API_KEY_ENVVAR", default_value = "SUBSTREAMS_API_KEY")]
+    #[arg(long, env = "API_KEY_ENVVAR", default_value = "SUBSTREAMS_API_KEY", hide_env_values = true, help_heading = "Connection")]
     pub api_key_envvar: String,
 
     /// Name of environment variable containing the JWT bearer token for authentication
-    #[arg(long, env = "API_TOKEN_ENVVAR", default_value = "SUBSTREAMS_API_TOKEN")]
+    #[arg(long, env = "API_TOKEN_ENVVAR", default_value = "SUBSTREAMS_API_TOKEN", hide_env_values = true, help_heading = "Connection")]
     pub api_token_envvar: String,
 
+    /// Public endpoint (skip authentication)
+    #[arg(long, env = "PUBLIC", default_value = "false", hide_env_values = true, help_heading = "Connection")]
+    pub public: bool,
+
     /// Start block number (inclusive)
-    #[arg(short = 's', long, env = "START_BLOCK")]
+    #[arg(short = 's', long, env = "START_BLOCK", hide_env_values = true, help_heading = "Block Range")]
     pub start_block: Option<u64>,
 
     /// Stop block number (inclusive, 0 = stream forever)
-    #[arg(short = 't', long, env = "STOP_BLOCK")]
+    #[arg(short = 't', long, env = "STOP_BLOCK", hide_env_values = true, help_heading = "Block Range")]
     pub stop_block: Option<u64>,
 
     /// Path to cursor file for resuming a previous session
-    #[arg(short = 'c', long, env = "CURSOR")]
+    #[arg(short = 'c', long, env = "CURSOR", hide_env_values = true, help_heading = "Block Range")]
     pub cursor: Option<PathBuf>,
 
+    /// Only process finalized blocks (when false, adds fork_step column)
+    #[arg(long, env = "FINAL_BLOCKS_ONLY", default_value = "true", hide_env_values = true, help_heading = "Block Range")]
+    pub final_blocks_only: bool,
+
     /// Output directory
-    #[arg(long, env = "OUTPUT", default_value = "output")]
+    #[arg(long, env = "OUTPUT", default_value = "output", hide_env_values = true, help_heading = "Output")]
     pub output: PathBuf,
 
     /// Partitioning mode: none, block_range, date, hour, minute, second
-    #[arg(long, env = "PARTITION", default_value = "none")]
+    #[arg(long, env = "PARTITION", default_value = "none", hide_env_values = true, help_heading = "Output")]
     pub partition: String,
 
     /// Block range size when partition=block_range
-    #[arg(long, env = "BLOCK_RANGE_SIZE", default_value = "10000")]
+    #[arg(long, env = "BLOCK_RANGE_SIZE", default_value = "10000", hide_env_values = true, help_heading = "Output")]
     pub block_range_size: u64,
 
+    /// Compression codec: zstd, snappy, gzip, none
+    #[arg(long, env = "COMPRESSION", default_value = "zstd", hide_env_values = true, help_heading = "Output")]
+    pub compression: String,
+
     /// Max rows per file before flush (disabled by default)
-    #[arg(long, env = "FLUSH_ROWS")]
+    #[arg(long, env = "FLUSH_ROWS", hide_env_values = true, help_heading = "Flush")]
     pub flush_rows: Option<u32>,
 
     /// Max bytes per file before flush
-    #[arg(long, env = "FLUSH_BYTES", default_value = "134217728")]
+    #[arg(long, env = "FLUSH_BYTES", default_value = "134217728", hide_env_values = true, help_heading = "Flush")]
     pub flush_bytes: u64,
 
     /// Time-based flush interval in seconds (disabled by default)
-    #[arg(long, env = "FLUSH_INTERVAL_SECS")]
+    #[arg(long, env = "FLUSH_INTERVAL_SECS", hide_env_values = true, help_heading = "Flush")]
     pub flush_interval_secs: Option<u64>,
 
-    /// Compression codec: zstd, snappy, gzip, none
-    #[arg(long, env = "COMPRESSION", default_value = "zstd")]
-    pub compression: String,
-
     /// Log level: trace, debug, info, warn, error
-    #[arg(long, env = "LOG_LEVEL", default_value = "info")]
+    #[arg(long, env = "LOG_LEVEL", default_value = "info", hide_env_values = true)]
     pub log_level: String,
 
     /// Decode and map but don't write files
-    #[arg(long, env = "DRY_RUN", default_value = "false")]
+    #[arg(long, env = "DRY_RUN", default_value = "false", hide_env_values = true)]
     pub dry_run: bool,
 
-    /// Only process finalized blocks (when false, adds fork_step column)
-    #[arg(long, env = "FINAL_BLOCKS_ONLY", default_value = "true")]
-    pub final_blocks_only: bool,
-
-    /// Public endpoint (skip authentication)
-    #[arg(long, env = "PUBLIC", default_value = "false")]
-    pub public: bool,
-
     /// AWS access key ID (for S3 output)
-    #[arg(long, env = "AWS_ACCESS_KEY_ID")]
+    #[arg(long, env = "AWS_ACCESS_KEY_ID", hide_env_values = true, help_heading = "AWS / S3")]
     pub aws_access_key_id: Option<String>,
 
     /// AWS secret access key (for S3 output)
-    #[arg(long, env = "AWS_SECRET_ACCESS_KEY")]
+    #[arg(long, env = "AWS_SECRET_ACCESS_KEY", hide_env_values = true, help_heading = "AWS / S3")]
     pub aws_secret_access_key: Option<String>,
 
     /// AWS session token (for S3 output)
-    #[arg(long, env = "AWS_SESSION_TOKEN")]
+    #[arg(long, env = "AWS_SESSION_TOKEN", hide_env_values = true, help_heading = "AWS / S3")]
     pub aws_session_token: Option<String>,
 
     /// AWS region (for S3 output)
-    #[arg(long, env = "AWS_REGION")]
+    #[arg(long, env = "AWS_REGION", hide_env_values = true, help_heading = "AWS / S3")]
     pub aws_region: Option<String>,
 
     /// AWS endpoint URL (for S3-compatible services)
-    #[arg(long, env = "AWS_ENDPOINT_URL")]
+    #[arg(long, env = "AWS_ENDPOINT_URL", hide_env_values = true, help_heading = "AWS / S3")]
     pub aws_endpoint_url: Option<String>,
 }
 
@@ -127,19 +127,19 @@ pub enum Commands {
         #[arg(long, default_value = "false")]
         schema_only: bool,
         /// AWS access key ID (for S3 paths)
-        #[arg(long, env = "AWS_ACCESS_KEY_ID")]
+        #[arg(long, env = "AWS_ACCESS_KEY_ID", hide_env_values = true)]
         aws_access_key_id: Option<String>,
         /// AWS secret access key (for S3 paths)
-        #[arg(long, env = "AWS_SECRET_ACCESS_KEY")]
+        #[arg(long, env = "AWS_SECRET_ACCESS_KEY", hide_env_values = true)]
         aws_secret_access_key: Option<String>,
         /// AWS session token (for S3 paths)
-        #[arg(long, env = "AWS_SESSION_TOKEN")]
+        #[arg(long, env = "AWS_SESSION_TOKEN", hide_env_values = true)]
         aws_session_token: Option<String>,
         /// AWS region (for S3 paths)
-        #[arg(long, env = "AWS_REGION")]
+        #[arg(long, env = "AWS_REGION", hide_env_values = true)]
         aws_region: Option<String>,
         /// AWS endpoint URL (for S3-compatible services)
-        #[arg(long, env = "AWS_ENDPOINT_URL")]
+        #[arg(long, env = "AWS_ENDPOINT_URL", hide_env_values = true)]
         aws_endpoint_url: Option<String>,
     },
 }
