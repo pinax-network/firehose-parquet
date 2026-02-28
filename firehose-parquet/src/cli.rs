@@ -69,7 +69,7 @@ pub struct CommonArgs {
     #[arg(long, env = "FLUSH_ROWS", hide_env_values = true, help_heading = "Flush")]
     pub flush_rows: Option<u32>,
 
-    /// Max bytes per file before flush
+    /// Max bytes per file before flush (0 = disabled)
     #[arg(long, env = "FLUSH_BYTES", default_value = "134217728", hide_env_values = true, help_heading = "Flush")]
     pub flush_bytes: u64,
 
