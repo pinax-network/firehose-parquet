@@ -13,7 +13,7 @@ use std::fs::{self, File};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use time::OffsetDateTime;
-use tracing::{info, warn};
+use tracing::info;
 
 /// Summary metadata for a table folder, written as `_summary.json`.
 ///

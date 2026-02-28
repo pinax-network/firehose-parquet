@@ -1778,6 +1778,7 @@ mod num_bigint {
 mod tests {
     use super::*;
 
+    #[allow(deprecated)]
     fn make_test_evm_block(number: u64) -> eth::Block {
         eth::Block {
             ver: 4,
@@ -1953,6 +1954,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(deprecated)]
     fn test_empty_block() {
         let block = eth::Block {
             ver: 4,

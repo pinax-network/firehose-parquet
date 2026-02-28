@@ -671,6 +671,14 @@ mod tests {
     #[test]
     #[serial]
     fn test_defaults() {
+        // Clear any AWS env vars that may leak from .env
+        unsafe {
+            std::env::remove_var("AWS_ACCESS_KEY_ID");
+            std::env::remove_var("AWS_SECRET_ACCESS_KEY");
+            std::env::remove_var("AWS_SESSION_TOKEN");
+            std::env::remove_var("AWS_REGION");
+            std::env::remove_var("AWS_ENDPOINT_URL");
+        }
         let cli = parse(&["test-cli", "--endpoint", "http://localhost:9000"]);
         assert_eq!(cli.common.endpoint.as_deref(), Some("http://localhost:9000"));
         assert_eq!(cli.common.output, PathBuf::from("output"));
@@ -940,6 +948,14 @@ mod tests {
     #[test]
     #[serial]
     fn test_aws_credentials_defaults_none() {
+        // Clear any AWS env vars that may leak from .env
+        unsafe {
+            std::env::remove_var("AWS_ACCESS_KEY_ID");
+            std::env::remove_var("AWS_SECRET_ACCESS_KEY");
+            std::env::remove_var("AWS_SESSION_TOKEN");
+            std::env::remove_var("AWS_REGION");
+            std::env::remove_var("AWS_ENDPOINT_URL");
+        }
         let cli = parse(&["test-cli", "--endpoint", "http://localhost:9000"]);
         assert!(cli.common.aws_access_key_id.is_none());
         assert!(cli.common.aws_secret_access_key.is_none());
