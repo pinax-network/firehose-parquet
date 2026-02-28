@@ -98,7 +98,7 @@ pub struct CommonArgs {
     pub aws_region: Option<String>,
 
     /// AWS endpoint URL (for S3-compatible services)
-    #[arg(long, env = "AWS_ENDPOINT_URL", hide_env_values = true, help_heading = "AWS / S3")]
+    #[arg(long, env = "AWS_ENDPOINT_URL_S3", hide_env_values = true, help_heading = "AWS / S3")]
     pub aws_endpoint_url: Option<String>,
 
     /// S3 bucket name (when set, output is written to s3://<bucket>/<output>)
@@ -139,7 +139,7 @@ pub enum Commands {
         #[arg(long, env = "AWS_REGION", hide_env_values = true)]
         aws_region: Option<String>,
         /// AWS endpoint URL (for S3-compatible services)
-        #[arg(long, env = "AWS_ENDPOINT_URL", hide_env_values = true)]
+        #[arg(long, env = "AWS_ENDPOINT_URL_S3", hide_env_values = true)]
         aws_endpoint_url: Option<String>,
     },
 }
@@ -687,7 +687,7 @@ mod tests {
             std::env::remove_var("AWS_SECRET_ACCESS_KEY");
             std::env::remove_var("AWS_SESSION_TOKEN");
             std::env::remove_var("AWS_REGION");
-            std::env::remove_var("AWS_ENDPOINT_URL");
+            std::env::remove_var("AWS_ENDPOINT_URL_S3");
             std::env::remove_var("S3_BUCKET");
         }
         let cli = parse(&["test-cli", "--endpoint", "http://localhost:9000"]);
@@ -929,7 +929,7 @@ mod tests {
             std::env::remove_var("AWS_SECRET_ACCESS_KEY");
             std::env::remove_var("AWS_SESSION_TOKEN");
             std::env::remove_var("AWS_REGION");
-            std::env::remove_var("AWS_ENDPOINT_URL");
+            std::env::remove_var("AWS_ENDPOINT_URL_S3");
             std::env::remove_var("S3_BUCKET");
         }
         let cli = parse(&["test-cli", "--endpoint", "http://localhost:9000"]);
@@ -949,7 +949,7 @@ mod tests {
             std::env::remove_var("AWS_SECRET_ACCESS_KEY");
             std::env::remove_var("AWS_SESSION_TOKEN");
             std::env::remove_var("AWS_REGION");
-            std::env::remove_var("AWS_ENDPOINT_URL");
+            std::env::remove_var("AWS_ENDPOINT_URL_S3");
             std::env::remove_var("S3_BUCKET");
         }
         // When --s3-bucket is set, output should become s3://bucket/output
@@ -972,7 +972,7 @@ mod tests {
             std::env::remove_var("AWS_SECRET_ACCESS_KEY");
             std::env::remove_var("AWS_SESSION_TOKEN");
             std::env::remove_var("AWS_REGION");
-            std::env::remove_var("AWS_ENDPOINT_URL");
+            std::env::remove_var("AWS_ENDPOINT_URL_S3");
             std::env::remove_var("S3_BUCKET");
         }
         // When output already starts with s3://, s3_bucket should not double-prefix
@@ -994,7 +994,7 @@ mod tests {
             std::env::remove_var("AWS_SECRET_ACCESS_KEY");
             std::env::remove_var("AWS_SESSION_TOKEN");
             std::env::remove_var("AWS_REGION");
-            std::env::remove_var("AWS_ENDPOINT_URL");
+            std::env::remove_var("AWS_ENDPOINT_URL_S3");
             std::env::remove_var("S3_BUCKET");
             std::env::remove_var("OUTPUT");
         }
