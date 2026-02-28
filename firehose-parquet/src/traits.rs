@@ -80,7 +80,7 @@ pub struct BlockIdentity {
     pub parent_num: u64,
     pub parent_id: String,
     pub lib_num: u64,
-    pub timestamp: Option<i64>, // unix seconds
+    pub timestamp: i64, // unix seconds
     /// Fork step: None when final_blocks_only=true, Some("NEW"/"UNDO"/"FINAL") otherwise.
     pub fork_step: Option<String>,
 }
@@ -93,7 +93,7 @@ pub fn canonical_fields() -> Vec<Field> {
         Field::new("parent_num", DataType::UInt64, false),
         Field::new("parent_id", DataType::Utf8, false),
         Field::new("lib_num", DataType::UInt64, false),
-        Field::new("timestamp", DataType::Int64, true),
+        Field::new("timestamp", DataType::Int64, false),
     ]
 }
 
@@ -125,10 +125,7 @@ impl CanonicalBuilder {
         self.parent_num.append_value(id.parent_num);
         self.parent_id.append_value(&id.parent_id);
         self.lib_num.append_value(id.lib_num);
-        match id.timestamp {
-            Some(ts) => self.timestamp.append_value(ts),
-            None => self.timestamp.append_null(),
-        }
+        self.timestamp.append_value(id.timestamp);
     }
 
     pub fn finish(&mut self) -> Vec<Arc<dyn arrow::array::Array>> {
