@@ -140,8 +140,19 @@ async fn main() -> Result<()> {
                 firehose_parquet::cli::generate_completions::<Cli>(*shell);
                 return Ok(());
             }
-            Commands::Scan { path, rows, schema_only } => {
-                firehose_parquet::cli::scan_parquet(path, *rows, *schema_only)?;
+            Commands::Scan {
+                path, rows, schema_only,
+                aws_access_key_id, aws_secret_access_key, aws_session_token,
+                aws_region, aws_endpoint_url,
+            } => {
+                let aws = firehose_parquet::cli::AwsConfig {
+                    aws_access_key_id: aws_access_key_id.clone(),
+                    aws_secret_access_key: aws_secret_access_key.clone(),
+                    aws_session_token: aws_session_token.clone(),
+                    aws_region: aws_region.clone(),
+                    aws_endpoint_url: aws_endpoint_url.clone(),
+                };
+                firehose_parquet::cli::scan_parquet(path, *rows, *schema_only, Some(&aws))?;
                 return Ok(());
             }
         }
