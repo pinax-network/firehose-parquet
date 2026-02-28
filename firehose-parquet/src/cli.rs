@@ -116,15 +116,31 @@ pub enum Commands {
         shell: Shell,
     },
     /// Read and inspect Parquet files (schema, row counts, sample rows)
+    /// Supports local paths and S3 URIs (s3://bucket/prefix)
     Scan {
-        /// Path to a .parquet file or directory containing parquet files
-        path: PathBuf,
+        /// Path to a .parquet file or directory, or an S3 URI (s3://bucket/prefix)
+        path: String,
         /// Number of sample rows to display per file (0 = schema only)
         #[arg(short = 'n', long, default_value = "20")]
         rows: usize,
         /// Only show file metadata (schema, row count, size) without data
         #[arg(long, default_value = "false")]
         schema_only: bool,
+        /// AWS access key ID (for S3 paths)
+        #[arg(long, env = "AWS_ACCESS_KEY_ID")]
+        aws_access_key_id: Option<String>,
+        /// AWS secret access key (for S3 paths)
+        #[arg(long, env = "AWS_SECRET_ACCESS_KEY")]
+        aws_secret_access_key: Option<String>,
+        /// AWS session token (for S3 paths)
+        #[arg(long, env = "AWS_SESSION_TOKEN")]
+        aws_session_token: Option<String>,
+        /// AWS region (for S3 paths)
+        #[arg(long, env = "AWS_REGION")]
+        aws_region: Option<String>,
+        /// AWS endpoint URL (for S3-compatible services)
+        #[arg(long, env = "AWS_ENDPOINT_URL")]
+        aws_endpoint_url: Option<String>,
     },
 }
 
@@ -213,11 +229,30 @@ pub fn generate_completions<C: clap::CommandFactory>(shell: Shell) {
     generate(shell, &mut cmd, name, &mut io::stdout());
 }
 
+/// AWS credentials for building an S3 client in the `scan` subcommand.
+pub struct AwsConfig {
+    pub aws_access_key_id: Option<String>,
+    pub aws_secret_access_key: Option<String>,
+    pub aws_session_token: Option<String>,
+    pub aws_region: Option<String>,
+    pub aws_endpoint_url: Option<String>,
+}
+
 /// Scan and display parquet files at the given path.
 ///
+/// Supports local filesystem paths and S3 URIs (`s3://bucket/prefix`).
 /// If `path` is a file, inspects that single file.
 /// If `path` is a directory, recursively finds all `.parquet` files.
-pub fn scan_parquet(path: &PathBuf, rows: usize, schema_only: bool) -> anyhow::Result<()> {
+pub fn scan_parquet(path: &str, rows: usize, schema_only: bool, aws: Option<&AwsConfig>) -> anyhow::Result<()> {
+    if path.starts_with("s3://") {
+        scan_parquet_s3(path, rows, schema_only, aws.ok_or_else(|| anyhow::anyhow!("AWS config required for S3 paths"))?)
+    } else {
+        scan_parquet_local(&PathBuf::from(path), rows, schema_only)
+    }
+}
+
+/// Scan parquet files from the local filesystem.
+fn scan_parquet_local(path: &PathBuf, rows: usize, schema_only: bool) -> anyhow::Result<()> {
     use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
     use std::fs;
 
@@ -280,34 +315,7 @@ pub fn scan_parquet(path: &PathBuf, rows: usize, schema_only: bool) -> anyhow::R
             let builder = ParquetRecordBatchReaderBuilder::try_new(file)?;
             let reader = builder.build()?;
 
-            // Compute max field name width for alignment.
-            let max_name_len = schema.fields().iter().map(|f| f.name().len()).max().unwrap_or(0);
-
-            let mut row_number = 0usize;
-
-            'outer: for batch_result in reader {
-                let batch = batch_result?;
-                for row_idx in 0..batch.num_rows() {
-                    if row_number >= rows {
-                        break 'outer;
-                    }
-                    row_number += 1;
-
-                    println!("\nRow {}:", row_number);
-                    println!("{}", "──────");
-                    for (col_idx, field) in schema.fields().iter().enumerate() {
-                        let col = batch.column(col_idx);
-                        let value = format_array_value(col.as_ref(), row_idx);
-                        println!("  {:width$}  {}", field.name(), value, width = max_name_len);
-                    }
-                }
-            }
-
-            if row_number == 0 {
-                println!("\n  (empty)");
-            } else if (rows as i64) < total_rows {
-                println!("\n  ... showing {rows} of {total_rows} rows");
-            }
+            print_sample_rows(&schema, reader, rows, total_rows);
         }
     }
 
@@ -318,6 +326,164 @@ pub fn scan_parquet(path: &PathBuf, rows: usize, schema_only: bool) -> anyhow::R
     }
 
     Ok(())
+}
+
+/// Scan parquet files from an S3 bucket.
+fn scan_parquet_s3(path: &str, rows: usize, schema_only: bool, aws: &AwsConfig) -> anyhow::Result<()> {
+    use crate::writer::parse_s3_url;
+    use object_store::aws::AmazonS3Builder;
+    use object_store::ObjectStore;
+    use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+
+    let (bucket, prefix) = parse_s3_url(path)?;
+
+    let mut builder = AmazonS3Builder::new()
+        .with_bucket_name(&bucket);
+
+    if let Some(ref key) = aws.aws_access_key_id {
+        builder = builder.with_access_key_id(key);
+    }
+    if let Some(ref secret) = aws.aws_secret_access_key {
+        builder = builder.with_secret_access_key(secret);
+    }
+    if let Some(ref token) = aws.aws_session_token {
+        builder = builder.with_token(token);
+    }
+    if let Some(ref region) = aws.aws_region {
+        builder = builder.with_region(region);
+    }
+    if let Some(ref endpoint_url) = aws.aws_endpoint_url {
+        builder = builder.with_endpoint(endpoint_url);
+    }
+
+    let client = builder.build()
+        .map_err(|e| anyhow::anyhow!("building S3 client for bucket {bucket}: {e}"))?;
+
+    // Use a runtime for async S3 operations.
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+
+    // List all .parquet objects under the prefix.
+    let list_prefix = if prefix.is_empty() {
+        None
+    } else {
+        Some(object_store::path::Path::from(prefix.as_str()))
+    };
+
+    let objects: Vec<object_store::ObjectMeta> = rt.block_on(async {
+        use futures::TryStreamExt;
+        let stream = client.list(list_prefix.as_ref());
+        stream.try_collect().await
+    }).map_err(|e| anyhow::anyhow!("listing S3 objects: {e}"))?;
+
+    let mut parquet_objects: Vec<_> = objects
+        .into_iter()
+        .filter(|obj| obj.location.as_ref().ends_with(".parquet"))
+        .collect();
+    parquet_objects.sort_by(|a, b| a.location.cmp(&b.location));
+
+    if parquet_objects.is_empty() {
+        println!("No .parquet files found in {path}");
+        return Ok(());
+    }
+
+    for obj in &parquet_objects {
+        // Download the object into memory.
+        let data = rt.block_on(async {
+            client.get(&obj.location).await?.bytes().await
+        }).map_err(|e| anyhow::anyhow!("reading s3://{bucket}/{}: {e}", obj.location))?;
+
+        let file_size = data.len() as u64;
+        let builder = ParquetRecordBatchReaderBuilder::try_new(data.clone())?;
+        let metadata = builder.metadata();
+
+        let total_rows: i64 = metadata
+            .row_groups()
+            .iter()
+            .map(|rg| rg.num_rows())
+            .sum();
+        let num_row_groups = metadata.num_row_groups();
+        let num_columns = metadata.file_metadata().schema().get_fields().len();
+        let schema = builder.schema().clone();
+
+        // Strip prefix for cleaner display.
+        let display_key = obj.location.as_ref()
+            .strip_prefix(&prefix)
+            .map(|s| s.trim_start_matches('/'))
+            .unwrap_or(obj.location.as_ref());
+
+        println!("\n{}", "═".repeat(72));
+        println!("  {}", display_key);
+        println!("{}", "─".repeat(72));
+        println!(
+            "  rows: {}  row_groups: {}  columns: {}  size: {}",
+            total_rows,
+            num_row_groups,
+            num_columns,
+            format_bytes(file_size),
+        );
+        println!("{}", "─".repeat(72));
+
+        for field in schema.fields() {
+            let nullable = if field.is_nullable() { "nullable" } else { "not null" };
+            println!("  {:30} {:20} {}", field.name(), field.data_type(), nullable);
+        }
+
+        if !schema_only && rows > 0 {
+            let builder = ParquetRecordBatchReaderBuilder::try_new(data)?;
+            let reader = builder.build()?;
+            print_sample_rows(&schema, reader, rows, total_rows);
+        }
+    }
+
+    if parquet_objects.len() > 1 {
+        println!("\n{}", "═".repeat(72));
+        println!("  {} parquet files scanned", parquet_objects.len());
+    }
+
+    Ok(())
+}
+
+/// Print sample rows in vertical format (shared between local and S3 scan).
+fn print_sample_rows(
+    schema: &arrow::datatypes::SchemaRef,
+    reader: impl Iterator<Item = Result<arrow::record_batch::RecordBatch, arrow::error::ArrowError>>,
+    rows: usize,
+    total_rows: i64,
+) {
+    let max_name_len = schema.fields().iter().map(|f| f.name().len()).max().unwrap_or(0);
+    let mut row_number = 0usize;
+
+    'outer: for batch_result in reader {
+        let batch = match batch_result {
+            Ok(b) => b,
+            Err(e) => {
+                eprintln!("  error reading batch: {e}");
+                break;
+            }
+        };
+        for row_idx in 0..batch.num_rows() {
+            if row_number >= rows {
+                break 'outer;
+            }
+            row_number += 1;
+
+            println!("\nRow {}:", row_number);
+            println!("{}", "──────");
+            for (col_idx, field) in schema.fields().iter().enumerate() {
+                let col = batch.column(col_idx);
+                let value = format_array_value(col.as_ref(), row_idx);
+                println!("  {:width$}  {}", field.name(), value, width = max_name_len);
+            }
+        }
+    }
+
+    if row_number == 0 {
+        println!("\n  (empty)");
+    } else if (rows as i64) < total_rows {
+        println!("\n  ... showing {rows} of {total_rows} rows");
+    }
 }
 
 /// Format a single cell value from an Arrow array for vertical display.
