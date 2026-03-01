@@ -237,6 +237,37 @@ pub enum Commands {
         #[arg(long, env = "CACHE_CONTROL", default_value = "public, max-age=31536000, immutable")]
         cache_control: String,
     },
+    /// Delete parquet files from local filesystem or S3, with optional partition filtering.
+    ///
+    /// Deletes only .parquet files. Never deletes buckets or non-parquet files.
+    /// Use --partition to target specific partitions (supports glob patterns).
+    Truncate {
+        /// Path to a directory or S3 URI containing .parquet files
+        path: String,
+        /// Partition filter(s) — only delete files matching these partition segments.
+        /// Use a key name to match all values (e.g. "date" matches all date=* partitions),
+        /// or a key=value with optional glob (e.g. "date=2026-01-*"). Repeatable.
+        #[arg(long, short = 'p')]
+        partition: Vec<String>,
+        /// Show what would be deleted without actually deleting
+        #[arg(long, default_value = "false")]
+        dry_run: bool,
+        /// AWS access key ID (for S3 paths)
+        #[arg(long, env = "AWS_ACCESS_KEY_ID", hide_env_values = true)]
+        aws_access_key_id: Option<String>,
+        /// AWS secret access key (for S3 paths)
+        #[arg(long, env = "AWS_SECRET_ACCESS_KEY", hide_env_values = true)]
+        aws_secret_access_key: Option<String>,
+        /// AWS session token (for S3 paths)
+        #[arg(long, env = "AWS_SESSION_TOKEN", hide_env_values = true)]
+        aws_session_token: Option<String>,
+        /// AWS region (for S3 paths)
+        #[arg(long, env = "AWS_REGION", hide_env_values = true)]
+        aws_region: Option<String>,
+        /// AWS endpoint URL (for S3-compatible services)
+        #[arg(long, env = "AWS_ENDPOINT_URL_S3", hide_env_values = true)]
+        aws_endpoint_url: Option<String>,
+    },
 }
 
 /// Parse a compression string into a [`Compression`] variant.

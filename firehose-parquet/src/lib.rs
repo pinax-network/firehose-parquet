@@ -5,4 +5,5 @@ pub mod encode;
 pub mod grpc;
 pub mod rollup;
 pub mod traits;
+pub mod truncate;
 pub mod writer;
