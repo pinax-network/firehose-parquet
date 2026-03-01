@@ -104,6 +104,10 @@ pub struct CommonArgs {
     /// S3 bucket name (when set, output is written to s3://<bucket>/<output>)
     #[arg(long, env = "S3_BUCKET", hide_env_values = true, help_heading = "AWS / S3")]
     pub s3_bucket: Option<String>,
+
+    /// Cache-Control header for S3 uploads (empty string = no header)
+    #[arg(long, env = "CACHE_CONTROL", default_value = "public, max-age=31536000, immutable", hide_env_values = true, help_heading = "AWS / S3")]
+    pub cache_control: String,
 }
 
 /// Subcommands shared by all binaries.
@@ -211,6 +215,9 @@ pub enum Commands {
         /// AWS endpoint URL (for S3-compatible services)
         #[arg(long, env = "AWS_ENDPOINT_URL_S3", hide_env_values = true)]
         aws_endpoint_url: Option<String>,
+        /// Cache-Control header for S3 uploads (empty string = no header)
+        #[arg(long, env = "CACHE_CONTROL", default_value = "public, max-age=31536000, immutable")]
+        cache_control: String,
     },
 }
 
@@ -289,6 +296,7 @@ pub fn build_config(args: &CommonArgs) -> anyhow::Result<Config> {
         aws_region: args.aws_region.clone(),
         aws_endpoint_url: args.aws_endpoint_url.clone(),
         s3_bucket: args.s3_bucket.clone(),
+        cache_control: if args.cache_control.is_empty() { None } else { Some(args.cache_control.clone()) },
     })
 }
 

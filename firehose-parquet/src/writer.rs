@@ -26,6 +26,8 @@ pub struct ParquetTableWriter {
     s3_client: Option<Arc<dyn ObjectStore>>,
     /// S3 key prefix (bucket path after `s3://bucket/`).
     s3_prefix: Option<String>,
+    /// Cache-Control header value for S3 uploads (empty = omit).
+    cache_control: String,
 }
 
 impl ParquetTableWriter {
@@ -37,6 +39,7 @@ impl ParquetTableWriter {
             part_counters: HashMap::new(),
             s3_client: None,
             s3_prefix: None,
+            cache_control: String::new(),
         }
     }
 
@@ -79,6 +82,7 @@ impl ParquetTableWriter {
             part_counters: HashMap::new(),
             s3_client: Some(Arc::new(client)),
             s3_prefix: Some(prefix),
+            cache_control: config.cache_control.clone().unwrap_or_default(),
         })
     }
 
@@ -125,7 +129,7 @@ impl ParquetTableWriter {
             // within a tokio multi-threaded runtime (the gRPC stream handler).
             tokio::task::block_in_place(|| {
                 tokio::runtime::Handle::current().block_on(async {
-                    s3_client.put(&s3_path, payload).await
+                    s3_client.put_opts(&s3_path, payload, s3_put_options(&self.cache_control)).await
                 })
             })
             .with_context(|| format!("uploading to S3: {s3_key}"))?;
@@ -566,6 +570,27 @@ pub fn parse_s3_url(url: &str) -> Result<(String, String)> {
         return Err(anyhow::anyhow!("S3 URL missing bucket name: {url}"));
     }
     Ok((bucket, prefix))
+}
+
+/// Returns [`object_store::PutOptions`] with cache and content-type headers.
+///
+/// When `cache_control` is non-empty, sets the `Cache-Control` header so that
+/// Tigris / CloudFront / any CDN caches accordingly.
+pub fn s3_put_options(cache_control: &str) -> object_store::PutOptions {
+    use object_store::Attribute;
+
+    let mut attrs = object_store::Attributes::new();
+    if !cache_control.is_empty() {
+        attrs.insert(Attribute::CacheControl, cache_control.to_string().into());
+    }
+    attrs.insert(
+        Attribute::ContentType,
+        "application/vnd.apache.parquet".into(),
+    );
+    object_store::PutOptions {
+        attributes: attrs,
+        ..Default::default()
+    }
 }
 
 /// Returns `true` if the output path is an S3 URL.

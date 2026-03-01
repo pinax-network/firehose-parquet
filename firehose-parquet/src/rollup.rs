@@ -49,6 +49,7 @@ pub struct RollupConfig {
     pub flush_bytes: u64,
     pub delete_source: bool,
     pub aws: Option<AwsConfig>,
+    pub cache_control: String,
 }
 
 /// Run the rollup operation.
@@ -467,6 +468,7 @@ fn run_rollup_s3(config: &RollupConfig) -> Result<()> {
             &merged,
             config.compression,
             config.flush_bytes,
+            &config.cache_control,
         )?;
         total_output_files += written;
 
@@ -505,6 +507,7 @@ fn write_merged_batches_s3(
     batch: &RecordBatch,
     compression: Compression,
     flush_bytes: u64,
+    cache_control: &str,
 ) -> Result<usize> {
     let props = writer_properties(compression);
 
@@ -530,7 +533,8 @@ fn write_merged_batches_s3(
         let path = object_store::path::Path::from(key);
         let payload = object_store::PutPayload::from(bytes::Bytes::from(data));
         let client = Arc::clone(client);
-        rt.block_on(async { client.put(&path, payload).await })
+        let cc = cache_control.to_string();
+        rt.block_on(async { client.put_opts(&path, payload, crate::writer::s3_put_options(&cc)).await })
             .map_err(|e| anyhow::anyhow!("uploading s3://{bucket}/{key}: {e}"))?;
         info!(path = %key, size = %format_bytes(size as u64), "wrote merged file to S3");
         Ok(())
@@ -683,6 +687,7 @@ mod tests {
             flush_bytes: 0,
             delete_source: false,
             aws: None,
+            cache_control: String::new(),
         };
 
         run_rollup(&config).unwrap();
@@ -723,6 +728,7 @@ mod tests {
             flush_bytes: 0,
             delete_source: false,
             aws: None,
+            cache_control: String::new(),
         };
 
         run_rollup(&config).unwrap();
@@ -757,6 +763,7 @@ mod tests {
             flush_bytes: 1024, // Very small — should force splitting.
             delete_source: false,
             aws: None,
+            cache_control: String::new(),
         };
 
         run_rollup(&config).unwrap();
@@ -791,6 +798,7 @@ mod tests {
             flush_bytes: 0,
             delete_source: true,
             aws: None,
+            cache_control: String::new(),
         };
 
         run_rollup(&config).unwrap();
