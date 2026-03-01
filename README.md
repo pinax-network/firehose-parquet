@@ -123,6 +123,8 @@ AWS / S3:
           AWS endpoint URL (for S3-compatible services) [env: AWS_ENDPOINT_URL_S3]
       --s3-bucket <S3_BUCKET>
           S3 bucket name (when set, output is written to s3://<bucket>/<output>) [env: S3_BUCKET]
+      --cache-control <CACHE_CONTROL>
+          Cache-Control header for S3 uploads (empty string = no header) [env: CACHE_CONTROL] [default: "public, max-age=31536000, immutable"]
 
 Chain:
       --block-type <BLOCK_TYPE>
