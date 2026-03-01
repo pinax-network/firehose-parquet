@@ -1,6 +1,6 @@
 use arrow::datatypes::{DataType, Field, Schema};
 use firehose_parquet::encode::{bytes_data_type, EncodeBytes};
-use firehose_parquet::traits::{canonical_fields, fork_step_field};
+use firehose_parquet::traits::{canonical_fields_with_encoding, fork_step_field};
 
 fn maybe_fork_step(fields: &mut Vec<Field>, include: bool) {
     if include {
@@ -10,12 +10,11 @@ fn maybe_fork_step(fields: &mut Vec<Field>, include: bool) {
 
 pub fn blocks_schema(include_fork_step: bool, encoding: &EncodeBytes) -> Schema {
     let bd = bytes_data_type(encoding);
-    let mut fields = canonical_fields();
+    let mut fields = canonical_fields_with_encoding(encoding);
     fields.extend(vec![
         Field::new("number", DataType::UInt64, false),
         Field::new("hash", bd.clone(), false),
         Field::new("parent_hash", bd.clone(), false),
-        Field::new("timestamp", DataType::Int64, false),
         Field::new("witness_address", bd.clone(), false),
         Field::new("version", DataType::UInt32, false),
         Field::new("tx_trie_root", bd, false),
@@ -28,7 +27,7 @@ pub fn blocks_schema(include_fork_step: bool, encoding: &EncodeBytes) -> Schema 
 
 pub fn transactions_schema(include_fork_step: bool, encoding: &EncodeBytes) -> Schema {
     let bd = bytes_data_type(encoding);
-    let mut fields = canonical_fields();
+    let mut fields = canonical_fields_with_encoding(encoding);
     fields.extend(vec![
         Field::new("block_number", DataType::UInt64, false),
         Field::new("txid", bd, false),
@@ -47,7 +46,7 @@ pub fn transactions_schema(include_fork_step: bool, encoding: &EncodeBytes) -> S
 
 pub fn logs_schema(include_fork_step: bool, encoding: &EncodeBytes) -> Schema {
     let bd = bytes_data_type(encoding);
-    let mut fields = canonical_fields();
+    let mut fields = canonical_fields_with_encoding(encoding);
     fields.extend(vec![
         Field::new("block_number", DataType::UInt64, false),
         Field::new("tx_hash", bd.clone(), false),
@@ -65,7 +64,7 @@ pub fn logs_schema(include_fork_step: bool, encoding: &EncodeBytes) -> Schema {
 
 pub fn internal_transactions_schema(include_fork_step: bool, encoding: &EncodeBytes) -> Schema {
     let bd = bytes_data_type(encoding);
-    let mut fields = canonical_fields();
+    let mut fields = canonical_fields_with_encoding(encoding);
     fields.extend(vec![
         Field::new("block_number", DataType::UInt64, false),
         Field::new("tx_hash", bd.clone(), false),

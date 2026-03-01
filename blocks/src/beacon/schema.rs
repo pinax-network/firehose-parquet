@@ -1,6 +1,6 @@
 use arrow::datatypes::{DataType, Field, Schema};
 use firehose_parquet::encode::{bytes_data_type, EncodeBytes};
-use firehose_parquet::traits::{canonical_fields, fork_step_field};
+use firehose_parquet::traits::{canonical_fields_with_encoding, fork_step_field};
 
 fn maybe_fork_step(fields: &mut Vec<Field>, include: bool) {
     if include {
@@ -10,7 +10,7 @@ fn maybe_fork_step(fields: &mut Vec<Field>, include: bool) {
 
 pub fn blocks_schema(include_fork_step: bool, encoding: &EncodeBytes) -> Schema {
     let bd = bytes_data_type(encoding);
-    let mut fields = canonical_fields();
+    let mut fields = canonical_fields_with_encoding(encoding);
     fields.extend(vec![
         Field::new("slot", DataType::UInt64, false),
         Field::new("parent_slot", DataType::UInt64, false),
@@ -28,7 +28,7 @@ pub fn blocks_schema(include_fork_step: bool, encoding: &EncodeBytes) -> Schema 
 
 pub fn attestations_schema(include_fork_step: bool, encoding: &EncodeBytes) -> Schema {
     let bd = bytes_data_type(encoding);
-    let mut fields = canonical_fields();
+    let mut fields = canonical_fields_with_encoding(encoding);
     fields.extend(vec![
         Field::new("block_slot", DataType::UInt64, false),
         Field::new("attestation_index", DataType::UInt32, false),
@@ -48,7 +48,7 @@ pub fn attestations_schema(include_fork_step: bool, encoding: &EncodeBytes) -> S
 
 pub fn deposits_schema(include_fork_step: bool, encoding: &EncodeBytes) -> Schema {
     let bd = bytes_data_type(encoding);
-    let mut fields = canonical_fields();
+    let mut fields = canonical_fields_with_encoding(encoding);
     fields.extend(vec![
         Field::new("block_slot", DataType::UInt64, false),
         Field::new("deposit_index", DataType::UInt32, false),
@@ -63,7 +63,7 @@ pub fn deposits_schema(include_fork_step: bool, encoding: &EncodeBytes) -> Schem
 
 pub fn proposer_slashings_schema(include_fork_step: bool, encoding: &EncodeBytes) -> Schema {
     let bd = bytes_data_type(encoding);
-    let mut fields = canonical_fields();
+    let mut fields = canonical_fields_with_encoding(encoding);
     fields.extend(vec![
         Field::new("block_slot", DataType::UInt64, false),
         Field::new("slashing_index", DataType::UInt32, false),
@@ -84,7 +84,7 @@ pub fn proposer_slashings_schema(include_fork_step: bool, encoding: &EncodeBytes
 
 pub fn attester_slashings_schema(include_fork_step: bool, encoding: &EncodeBytes) -> Schema {
     let bd = bytes_data_type(encoding);
-    let mut fields = canonical_fields();
+    let mut fields = canonical_fields_with_encoding(encoding);
     fields.extend(vec![
         Field::new("block_slot", DataType::UInt64, false),
         Field::new("slashing_index", DataType::UInt32, false),
@@ -109,7 +109,7 @@ pub fn attester_slashings_schema(include_fork_step: bool, encoding: &EncodeBytes
 
 pub fn voluntary_exits_schema(include_fork_step: bool, encoding: &EncodeBytes) -> Schema {
     let bd = bytes_data_type(encoding);
-    let mut fields = canonical_fields();
+    let mut fields = canonical_fields_with_encoding(encoding);
     fields.extend(vec![
         Field::new("block_slot", DataType::UInt64, false),
         Field::new("exit_index", DataType::UInt32, false),
@@ -123,7 +123,7 @@ pub fn voluntary_exits_schema(include_fork_step: bool, encoding: &EncodeBytes) -
 
 pub fn execution_payload_schema(include_fork_step: bool, encoding: &EncodeBytes) -> Schema {
     let bd = bytes_data_type(encoding);
-    let mut fields = canonical_fields();
+    let mut fields = canonical_fields_with_encoding(encoding);
     fields.extend(vec![
         Field::new("block_slot", DataType::UInt64, false),
         Field::new("parent_hash", bd.clone(), false),
@@ -146,7 +146,7 @@ pub fn execution_payload_schema(include_fork_step: bool, encoding: &EncodeBytes)
 
 pub fn blob_sidecars_schema(include_fork_step: bool, encoding: &EncodeBytes) -> Schema {
     let bd = bytes_data_type(encoding);
-    let mut fields = canonical_fields();
+    let mut fields = canonical_fields_with_encoding(encoding);
     fields.extend(vec![
         Field::new("block_slot", DataType::UInt64, false),
         Field::new("blob_index", DataType::UInt64, false),

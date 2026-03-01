@@ -66,7 +66,7 @@ impl TronBlockMapper {
         self.blocks.number.append_value(block_number);
         self.blocks.hash.append_value(&block.id);
         self.blocks.parent_hash.append_value(header.map(|h| h.parent_hash.as_slice()).unwrap_or(&[]));
-        self.blocks.timestamp.append_value(header.map_or(0, |h| h.timestamp));
+
         self.blocks.witness_address.append_value(header.map(|h| h.witness_address.as_slice()).unwrap_or(&[]));
         self.blocks.version.append_value(header.map_or(0, |h| h.version));
         self.blocks.tx_trie_root.append_value(header.map(|h| h.tx_trie_root.as_slice()).unwrap_or(&[]));
@@ -173,7 +173,7 @@ impl BlockMapper for TronBlockMapper {
             + est_u64(&self.blocks.number)
             + self.blocks.hash.estimated_bytes()
             + self.blocks.parent_hash.estimated_bytes()
-            + est_i64(&self.blocks.timestamp)
+
             + self.blocks.witness_address.estimated_bytes()
             + est_u32(&self.blocks.version)
             + self.blocks.tx_trie_root.estimated_bytes()
@@ -233,7 +233,6 @@ struct BlocksBuilder {
     number: UInt64Builder,
     hash: BytesColumn,
     parent_hash: BytesColumn,
-    timestamp: Int64Builder,
     witness_address: BytesColumn,
     version: UInt32Builder,
     tx_trie_root: BytesColumn,
@@ -249,7 +248,6 @@ impl BlocksBuilder {
             number: UInt64Builder::new(),
             hash: BytesColumn::new(encoding),
             parent_hash: BytesColumn::new(encoding),
-            timestamp: Int64Builder::new(),
             witness_address: BytesColumn::new(encoding),
             version: UInt32Builder::new(),
             tx_trie_root: BytesColumn::new(encoding),
@@ -265,7 +263,6 @@ impl BlocksBuilder {
             Arc::new(self.number.finish()) as Arc<dyn Array>,
             self.hash.finish(),
             self.parent_hash.finish(),
-            Arc::new(self.timestamp.finish()) as Arc<dyn Array>,
             self.witness_address.finish(),
             Arc::new(self.version.finish()) as Arc<dyn Array>,
             self.tx_trie_root.finish(),

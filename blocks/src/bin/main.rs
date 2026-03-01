@@ -144,7 +144,7 @@ fn create_mapper(
 ) -> Result<Box<dyn BlockMapper>> {
     match block_type {
         "evm" => Ok(Box::new(EvmBlockMapper::new(extended, include_fork_step, encode_bytes))),
-        "bitcoin" => Ok(Box::new(BitcoinBlockMapper::new(include_fork_step))),
+        "bitcoin" => Ok(Box::new(BitcoinBlockMapper::new(include_fork_step, encode_bytes.clone()))),
         "solana" => Ok(Box::new(SolanaBlockMapper::new(extended, include_fork_step, encode_bytes))),
         "near" => Ok(Box::new(NearBlockMapper::new(include_fork_step, encode_bytes))),
         "antelope" => Ok(Box::new(AntelopeBlockMapper::new(extended, include_fork_step, encode_bytes))),
@@ -292,7 +292,7 @@ async fn main() -> Result<()> {
         extended = true;
     }
 
-    info!(block_type, extended, "starting pipeline\n{config}");
+    info!(block_type, extended, bytes_encoding = %bytes_encoding_str, "starting pipeline\n{config}");
 
     let final_blocks_only = config.final_blocks_only;
     let include_fork_step = !final_blocks_only;

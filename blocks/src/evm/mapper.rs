@@ -5,7 +5,7 @@ use arrow::datatypes::Schema;
 use arrow::record_batch::RecordBatch;
 use firehose_parquet::encode::{BytesColumn, EncodeBytes};
 use firehose_parquet::traits::{
-    est_bool, est_i32, est_i64, est_opt_str, est_str, est_u32, est_u64,
+    est_bool, est_i32, est_opt_str, est_str, est_u32, est_u64,
     BlockIdentity, BlockMapper, CanonicalBuilder,
 };
 use prost::Message;
@@ -126,7 +126,7 @@ impl EvmBlockMapper {
             system_code_changes_schema: schema::system_code_changes_schema(ifs, enc),
             system_storage_changes_schema: schema::system_storage_changes_schema(ifs, enc),
             system_nonce_changes_schema: schema::system_nonce_changes_schema(ifs, enc),
-            system_gas_changes_schema: schema::system_gas_changes_schema(ifs),
+            system_gas_changes_schema: schema::system_gas_changes_schema(ifs, &encoding),
             system_account_creations_schema: schema::system_account_creations_schema(ifs, enc),
         }
     }
@@ -140,9 +140,7 @@ impl EvmBlockMapper {
         self.blocks.number.append_value(number);
         self.blocks.hash.append_value(&block.hash);
         self.blocks.parent_hash.append_value(header.map_or(&[][..], |h| &h.parent_hash));
-        self.blocks.timestamp.append_value(
-            header.and_then(|h| h.timestamp.as_ref()).map_or(0, |t| t.seconds),
-        );
+
         self.blocks.gas_used.append_value(header.map_or(0, |h| h.gas_used));
         self.blocks.gas_limit.append_value(header.map_or(0, |h| h.gas_limit));
         let base_fee = header.and_then(|h| h.base_fee_per_gas.as_ref());
@@ -467,7 +465,7 @@ impl BlockMapper for EvmBlockMapper {
             + est_u64(&self.blocks.number)
             + self.blocks.hash.estimated_bytes()
             + self.blocks.parent_hash.estimated_bytes()
-            + est_i64(&self.blocks.timestamp)
+
             + est_u64(&self.blocks.gas_used)
             + est_u64(&self.blocks.gas_limit)
             + est_str(&self.blocks.base_fee_per_gas)
@@ -744,7 +742,6 @@ struct EvmBlocksBuilder {
     number: UInt64Builder,
     hash: BytesColumn,
     parent_hash: BytesColumn,
-    timestamp: Int64Builder,
     gas_used: UInt64Builder,
     gas_limit: UInt64Builder,
     base_fee_per_gas: StringBuilder,
@@ -769,7 +766,6 @@ impl EvmBlocksBuilder {
             number: UInt64Builder::new(),
             hash: BytesColumn::new(encoding),
             parent_hash: BytesColumn::new(encoding),
-            timestamp: Int64Builder::new(),
             gas_used: UInt64Builder::new(),
             gas_limit: UInt64Builder::new(),
             base_fee_per_gas: StringBuilder::new(),
@@ -794,7 +790,6 @@ impl EvmBlocksBuilder {
             Arc::new(self.number.finish()) as Arc<dyn arrow::array::Array>,
             self.hash.finish(),
             self.parent_hash.finish(),
-            Arc::new(self.timestamp.finish()),
             Arc::new(self.gas_used.finish()),
             Arc::new(self.gas_limit.finish()),
             Arc::new(self.base_fee_per_gas.finish()),
