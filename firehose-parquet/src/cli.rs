@@ -237,6 +237,42 @@ pub enum Commands {
         #[arg(long, env = "CACHE_CONTROL", default_value = "public, max-age=31536000, immutable")]
         cache_control: String,
     },
+    /// Merge small parquet part files within each partition into larger files.
+    ///
+    /// Unlike rollup (which changes partition granularity), merge consolidates
+    /// multiple small parts within each existing partition directory into fewer,
+    /// larger files. Source parts are deleted after successful merge.
+    Merge {
+        /// Path to a directory of partitioned .parquet files or an S3 URI
+        path: String,
+        /// Compression codec: zstd, snappy, gzip, none
+        #[arg(long, default_value = "zstd")]
+        compression: String,
+        /// Max compressed bytes per output file
+        #[arg(long, default_value = "268435456")]
+        flush_bytes: u64,
+        /// Show what would be merged without writing
+        #[arg(long, default_value = "false")]
+        dry_run: bool,
+        /// AWS access key ID (for S3 paths)
+        #[arg(long, env = "AWS_ACCESS_KEY_ID", hide_env_values = true)]
+        aws_access_key_id: Option<String>,
+        /// AWS secret access key (for S3 paths)
+        #[arg(long, env = "AWS_SECRET_ACCESS_KEY", hide_env_values = true)]
+        aws_secret_access_key: Option<String>,
+        /// AWS session token (for S3 paths)
+        #[arg(long, env = "AWS_SESSION_TOKEN", hide_env_values = true)]
+        aws_session_token: Option<String>,
+        /// AWS region (for S3 paths)
+        #[arg(long, env = "AWS_REGION", hide_env_values = true)]
+        aws_region: Option<String>,
+        /// AWS endpoint URL (for S3-compatible services)
+        #[arg(long, env = "AWS_ENDPOINT_URL_S3", hide_env_values = true)]
+        aws_endpoint_url: Option<String>,
+        /// Cache-Control header for S3 uploads
+        #[arg(long, env = "CACHE_CONTROL", default_value = "public, max-age=31536000, immutable")]
+        cache_control: String,
+    },
 }
 
 /// Parse a compression string into a [`Compression`] variant.
