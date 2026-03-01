@@ -159,7 +159,7 @@ async fn main() -> Result<()> {
                 return Ok(());
             }
             Commands::Validate {
-                path,
+                path, cross_partition,
                 aws_access_key_id, aws_secret_access_key, aws_session_token,
                 aws_region, aws_endpoint_url,
             } => {
@@ -170,7 +170,10 @@ async fn main() -> Result<()> {
                     aws_region: aws_region.clone(),
                     aws_endpoint_url: aws_endpoint_url.clone(),
                 };
-                let result = firehose_parquet::cli::validate_parquet(path, Some(&aws))?;
+                let opts = firehose_parquet::cli::ValidateOptions {
+                    cross_partition: *cross_partition,
+                };
+                let result = firehose_parquet::cli::validate_parquet(path, Some(&aws), &opts)?;
                 result.print(path);
                 if !result.is_valid() {
                     std::process::exit(1);

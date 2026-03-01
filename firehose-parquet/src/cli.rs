@@ -148,9 +148,16 @@ pub enum Commands {
     /// - Gaps in block_num sequence
     /// - Parent hash chain continuity (parent_id of N+1 == block_id of N)
     /// - Monotonically increasing block_num ordering
+    /// - Timestamp monotonicity (non-decreasing timestamps)
+    /// - Schema consistency across files
+    /// - Empty partitions (warning)
+    /// - Cross-partition continuity (with --cross-partition)
     Validate {
         /// Path to a directory of .parquet files or an S3 URI (s3://bucket/prefix)
         path: String,
+        /// Check continuity across partition boundaries
+        #[arg(long, default_value = "false")]
+        cross_partition: bool,
         /// AWS access key ID (for S3 paths)
         #[arg(long, env = "AWS_ACCESS_KEY_ID", hide_env_values = true)]
         aws_access_key_id: Option<String>,
@@ -731,6 +738,39 @@ pub struct DuplicateBlock {
     pub count: u64,
 }
 
+/// A timestamp reversal between consecutive blocks.
+#[derive(Debug)]
+pub struct TimestampReversal {
+    pub block_num: u64,
+    pub timestamp: i64,
+    pub prev_block_num: u64,
+    pub prev_timestamp: i64,
+}
+
+/// An empty partition (no files or 0 rows).
+#[derive(Debug)]
+pub struct EmptyPartition {
+    pub partition: String,
+    pub files: usize,
+    pub reason: &'static str,
+}
+
+/// A schema mismatch between files.
+#[derive(Debug)]
+pub struct SchemaMismatch {
+    pub file: String,
+    pub details: Vec<String>,
+}
+
+/// Cross-partition boundary issue.
+#[derive(Debug)]
+pub struct CrossPartitionIssue {
+    pub from_partition: String,
+    pub to_partition: String,
+    pub gap: Option<BlockGap>,
+    pub parent_mismatch: Option<ParentMismatch>,
+}
+
 /// Per-partition validation result.
 #[derive(Debug)]
 pub struct PartitionResult {
@@ -743,12 +783,19 @@ pub struct PartitionResult {
     pub parent_mismatches: Vec<ParentMismatch>,
     pub duplicates: Vec<DuplicateBlock>,
     pub ordering_errors: u64,
+    pub timestamp_reversals: Vec<TimestampReversal>,
 }
 
 impl PartitionResult {
     pub fn is_valid(&self) -> bool {
         self.gaps.is_empty() && self.parent_mismatches.is_empty() && self.duplicates.is_empty() && self.ordering_errors == 0
     }
+}
+
+/// Options for validate.
+#[derive(Debug, Default)]
+pub struct ValidateOptions {
+    pub cross_partition: bool,
 }
 
 /// Summary of a validate run (with per-partition breakdown).
@@ -762,8 +809,15 @@ pub struct ValidateResult {
     pub parent_mismatches: Vec<ParentMismatch>,
     pub duplicates: Vec<DuplicateBlock>,
     pub ordering_errors: u64,
+    pub timestamp_reversals: Vec<TimestampReversal>,
     /// Per-partition results (empty when data is not partitioned).
     pub partitions: Vec<PartitionResult>,
+    /// Empty partitions (warning, not failure).
+    pub empty_partitions: Vec<EmptyPartition>,
+    /// Schema mismatches across files.
+    pub schema_mismatches: Vec<SchemaMismatch>,
+    /// Cross-partition boundary issues (only when --cross-partition).
+    pub cross_partition_issues: Vec<CrossPartitionIssue>,
 }
 
 impl ValidateResult {
@@ -772,6 +826,8 @@ impl ValidateResult {
             && self.parent_mismatches.is_empty()
             && self.duplicates.is_empty()
             && self.ordering_errors == 0
+            && self.schema_mismatches.is_empty()
+            && self.cross_partition_issues.is_empty()
             && self.partitions.iter().all(|p| p.is_valid())
     }
 
@@ -805,6 +861,54 @@ impl ValidateResult {
                 }
                 if pr.ordering_errors > 0 {
                     println!("    ordering errors: {}", pr.ordering_errors);
+                }
+                for tr in &pr.timestamp_reversals {
+                    println!(
+                        "    timestamp reversal at block {}: {} < previous block {} timestamp {}",
+                        tr.block_num, tr.timestamp, tr.prev_block_num, tr.prev_timestamp
+                    );
+                }
+            }
+            println!();
+        }
+
+        // Schema mismatches.
+        if !self.schema_mismatches.is_empty() {
+            println!("  Schema mismatches: {}", self.schema_mismatches.len());
+            for sm in &self.schema_mismatches {
+                println!("    {}:", sm.file);
+                for detail in &sm.details {
+                    println!("      {}", detail);
+                }
+            }
+            println!();
+        }
+
+        // Empty partitions (warnings).
+        if !self.empty_partitions.is_empty() {
+            println!("  Empty partitions:  {} (warning)", self.empty_partitions.len());
+            for ep in &self.empty_partitions {
+                println!("    {} ({})", ep.partition, ep.reason);
+            }
+            println!();
+        }
+
+        // Cross-partition issues.
+        if !self.cross_partition_issues.is_empty() {
+            println!("  Cross-partition issues: {}", self.cross_partition_issues.len());
+            for cpi in &self.cross_partition_issues {
+                if let Some(ref gap) = cpi.gap {
+                    let missing = gap.to - gap.from;
+                    println!(
+                        "    between {} and {}: gap {} — {} ({} blocks missing)",
+                        cpi.from_partition, cpi.to_partition, gap.from, gap.to - 1, missing
+                    );
+                }
+                if let Some(ref mm) = cpi.parent_mismatch {
+                    println!(
+                        "    between {} and {}: parent mismatch at block {}",
+                        cpi.from_partition, cpi.to_partition, mm.block_num
+                    );
                 }
             }
             println!();
@@ -846,24 +950,42 @@ impl ValidateResult {
             }
         }
 
+        println!("  Timestamp reversals: {}", self.timestamp_reversals.len());
+        if self.partitions.is_empty() {
+            for tr in &self.timestamp_reversals {
+                println!(
+                    "    block {}: timestamp {} < previous block {} timestamp {}",
+                    tr.block_num, tr.timestamp, tr.prev_block_num, tr.prev_timestamp
+                );
+            }
+        }
+
         println!();
         if self.is_valid() {
             println!("  ✓ All blocks valid");
         } else {
             println!("  ✗ Validation failed");
         }
+
+        // Warnings after the pass/fail line.
+        if !self.empty_partitions.is_empty() && self.is_valid() {
+            println!("  ⚠ {} empty partition(s) detected (see above)", self.empty_partitions.len());
+        }
     }
 }
 
-/// Extract (block_num, block_id, parent_id) tuples from a parquet record batch reader,
-/// using column projection for only the canonical fields we need.
+/// A block tuple: (block_num, block_id, parent_id, timestamp).
+type BlockTuple = (u64, String, String, i64);
+
+/// Extract block tuples from a parquet record batch reader.
 fn extract_block_tuples(
     reader: impl Iterator<Item = Result<arrow::record_batch::RecordBatch, arrow::error::ArrowError>>,
     block_num_idx: usize,
     block_id_idx: usize,
     parent_id_idx: usize,
-) -> anyhow::Result<Vec<(u64, String, String)>> {
-    use arrow::array::{StringArray, UInt64Array};
+    timestamp_idx: Option<usize>,
+) -> anyhow::Result<Vec<BlockTuple>> {
+    use arrow::array::{Int64Array, StringArray, UInt64Array};
 
     let mut tuples = Vec::new();
     for batch_result in reader {
@@ -877,58 +999,118 @@ fn extract_block_tuples(
         let parent_ids = batch.column(parent_id_idx)
             .as_any().downcast_ref::<StringArray>()
             .ok_or_else(|| anyhow::anyhow!("parent_id column is not Utf8"))?;
+        let timestamps = timestamp_idx.map(|idx| {
+            batch.column(idx).as_any().downcast_ref::<Int64Array>()
+        }).flatten();
 
         for i in 0..batch.num_rows() {
+            let ts = timestamps.map(|a| a.value(i)).unwrap_or(0);
             tuples.push((
                 block_nums.value(i),
                 block_ids.value(i).to_string(),
                 parent_ids.value(i).to_string(),
+                ts,
             ));
         }
     }
     Ok(tuples)
 }
 
-/// Find column indices for block_num, block_id, parent_id in a schema.
-fn find_canonical_indices(schema: &arrow::datatypes::Schema) -> anyhow::Result<(usize, usize, usize)> {
-    let block_num_idx = schema.index_of("block_num")
+/// Column indices for validation.
+struct CanonicalIndices {
+    block_num: usize,
+    block_id: usize,
+    parent_id: usize,
+    timestamp: Option<usize>,
+}
+
+/// Find column indices for canonical fields in a schema.
+fn find_canonical_indices(schema: &arrow::datatypes::Schema) -> anyhow::Result<CanonicalIndices> {
+    let block_num = schema.index_of("block_num")
         .map_err(|_| anyhow::anyhow!("missing 'block_num' column — is this a blocks table?"))?;
-    let block_id_idx = schema.index_of("block_id")
+    let block_id = schema.index_of("block_id")
         .map_err(|_| anyhow::anyhow!("missing 'block_id' column"))?;
-    let parent_id_idx = schema.index_of("parent_id")
+    let parent_id = schema.index_of("parent_id")
         .map_err(|_| anyhow::anyhow!("missing 'parent_id' column"))?;
-    Ok((block_num_idx, block_id_idx, parent_id_idx))
+    let timestamp = schema.index_of("timestamp").ok();
+    Ok(CanonicalIndices { block_num, block_id, parent_id, timestamp })
+}
+
+/// Compare two schemas and return a list of differences.
+fn compare_schemas(reference: &arrow::datatypes::Schema, other: &arrow::datatypes::Schema) -> Vec<String> {
+    use std::collections::HashMap;
+
+    let ref_fields: HashMap<&str, &arrow::datatypes::Field> = reference.fields().iter()
+        .map(|f| (f.name().as_str(), f.as_ref()))
+        .collect();
+    let other_fields: HashMap<&str, &arrow::datatypes::Field> = other.fields().iter()
+        .map(|f| (f.name().as_str(), f.as_ref()))
+        .collect();
+
+    let mut diffs = Vec::new();
+
+    // Check for missing columns and type mismatches.
+    for (name, ref_field) in &ref_fields {
+        match other_fields.get(name) {
+            None => diffs.push(format!("missing column: {}", name)),
+            Some(other_field) => {
+                if ref_field.data_type() != other_field.data_type() {
+                    diffs.push(format!(
+                        "type mismatch: {} ({} vs {})",
+                        name, ref_field.data_type(), other_field.data_type()
+                    ));
+                }
+            }
+        }
+    }
+
+    // Check for extra columns.
+    for name in other_fields.keys() {
+        if !ref_fields.contains_key(name) {
+            diffs.push(format!("extra column: {}", name));
+        }
+    }
+
+    diffs
 }
 
 /// Validate parquet files at the given path (local or S3).
-pub fn validate_parquet(path: &str, aws: Option<&AwsConfig>) -> anyhow::Result<ValidateResult> {
+pub fn validate_parquet(path: &str, aws: Option<&AwsConfig>, opts: &ValidateOptions) -> anyhow::Result<ValidateResult> {
     if path.starts_with("s3://") {
-        validate_parquet_s3(path, aws.ok_or_else(|| anyhow::anyhow!("AWS config required for S3 paths"))?)
+        validate_parquet_s3(path, aws.ok_or_else(|| anyhow::anyhow!("AWS config required for S3 paths"))?, opts)
     } else {
-        validate_parquet_local(&PathBuf::from(path))
+        validate_parquet_local(&PathBuf::from(path), opts)
     }
 }
 
-/// Check a sorted list of block tuples for gaps, ordering, and parent hash chain issues.
-fn check_tuples(tuples: &[(u64, String, String)]) -> (Vec<BlockGap>, Vec<ParentMismatch>, Vec<DuplicateBlock>, u64) {
+/// Check results from check_tuples.
+struct CheckResult {
+    gaps: Vec<BlockGap>,
+    parent_mismatches: Vec<ParentMismatch>,
+    duplicates: Vec<DuplicateBlock>,
+    ordering_errors: u64,
+    timestamp_reversals: Vec<TimestampReversal>,
+}
+
+/// Check a sorted list of block tuples for gaps, ordering, parent hash chain, and timestamp issues.
+fn check_tuples(tuples: &[BlockTuple]) -> CheckResult {
     let mut gaps = Vec::new();
     let mut parent_mismatches = Vec::new();
     let mut duplicates = Vec::new();
+    let mut timestamp_reversals = Vec::new();
     let mut ordering_errors = 0u64;
 
     // Track runs of duplicate block_num.
     let mut dup_start = 0usize;
 
     for i in 1..tuples.len() {
-        let (prev_num, ref prev_block_id, _) = tuples[i - 1];
-        let (curr_num, _, ref curr_parent_id) = tuples[i];
+        let (prev_num, ref prev_block_id, _, prev_ts) = tuples[i - 1];
+        let (curr_num, _, ref curr_parent_id, curr_ts) = tuples[i];
 
         if curr_num == prev_num {
-            // Still in a duplicate run — continue.
             continue;
         }
 
-        // End of a run — check if it was a duplicate.
         let run_len = i - dup_start;
         if run_len > 1 {
             duplicates.push(DuplicateBlock {
@@ -954,6 +1136,15 @@ fn check_tuples(tuples: &[(u64, String, String)]) -> (Vec<BlockGap>, Vec<ParentM
                 actual_parent_id: curr_parent_id.clone(),
             });
         }
+        // Timestamp monotonicity check (#87).
+        if curr_ts < prev_ts && curr_num > prev_num {
+            timestamp_reversals.push(TimestampReversal {
+                block_num: curr_num,
+                timestamp: curr_ts,
+                prev_block_num: prev_num,
+                prev_timestamp: prev_ts,
+            });
+        }
     }
 
     // Final run check.
@@ -967,7 +1158,7 @@ fn check_tuples(tuples: &[(u64, String, String)]) -> (Vec<BlockGap>, Vec<ParentM
         }
     }
 
-    (gaps, parent_mismatches, duplicates, ordering_errors)
+    CheckResult { gaps, parent_mismatches, duplicates, ordering_errors, timestamp_reversals }
 }
 
 /// Detect the partition key from a file path by looking for Hive-style directories
@@ -991,39 +1182,149 @@ fn detect_partition(file_path: &str, base_path: &str) -> String {
     }
 }
 
-fn validate_from_grouped(
-    groups: std::collections::BTreeMap<String, (Vec<(u64, String, String)>, usize)>,
+/// Per-file metadata collected during scanning.
+struct FileInfo {
+    path: String,
+    partition: String,
+    schema: arrow::datatypes::Schema,
+    tuples: Vec<BlockTuple>,
+    row_count: u64,
+}
+
+fn validate_from_files(
+    files: Vec<FileInfo>,
+    opts: &ValidateOptions,
 ) -> ValidateResult {
+    // Schema consistency check (#90).
+    let mut schema_mismatches = Vec::new();
+    if let Some(first) = files.first() {
+        let ref_schema = &first.schema;
+        for f in files.iter().skip(1) {
+            let diffs = compare_schemas(ref_schema, &f.schema);
+            if !diffs.is_empty() {
+                schema_mismatches.push(SchemaMismatch {
+                    file: f.path.clone(),
+                    details: diffs,
+                });
+            }
+        }
+    }
+
+    // Group by partition.
+    let mut groups: std::collections::BTreeMap<String, (Vec<BlockTuple>, usize, u64)> = std::collections::BTreeMap::new();
+    for fi in files {
+        let entry = groups.entry(fi.partition).or_insert_with(|| (Vec::new(), 0, 0));
+        entry.0.extend(fi.tuples);
+        entry.1 += 1;
+        entry.2 += fi.row_count;
+    }
+
+    // Detect empty partitions (#89).
+    let mut empty_partitions = Vec::new();
     let mut partitions = Vec::new();
-    let mut all_tuples: Vec<(u64, String, String)> = Vec::new();
+    let mut all_tuples: Vec<BlockTuple> = Vec::new();
     let mut total_files = 0usize;
 
-    for (partition_name, (mut tuples, file_count)) in groups {
-        tuples.sort_by_key(|t| t.0);
+    for (partition_name, (tuples, file_count, row_count)) in &groups {
+        let mut tuples = tuples.clone();
         total_files += file_count;
 
-        let (gaps, parent_mismatches, duplicates, ordering_errors) = check_tuples(&tuples);
+        if *file_count == 0 {
+            empty_partitions.push(EmptyPartition {
+                partition: partition_name.clone(),
+                files: 0,
+                reason: "no files",
+            });
+            continue;
+        }
+        if *row_count == 0 {
+            empty_partitions.push(EmptyPartition {
+                partition: partition_name.clone(),
+                files: *file_count,
+                reason: &"0 rows across all files",
+            });
+            continue;
+        }
+
+        tuples.sort_by_key(|t| t.0);
+        let cr = check_tuples(&tuples);
         let min_block = tuples.first().map(|t| t.0);
         let max_block = tuples.last().map(|t| t.0);
 
         partitions.push(PartitionResult {
-            partition: partition_name,
-            files_scanned: file_count,
+            partition: partition_name.clone(),
+            files_scanned: *file_count,
             total_blocks: tuples.len() as u64,
             min_block,
             max_block,
-            gaps,
-            parent_mismatches,
-            duplicates,
-            ordering_errors,
+            gaps: cr.gaps,
+            parent_mismatches: cr.parent_mismatches,
+            duplicates: cr.duplicates,
+            ordering_errors: cr.ordering_errors,
+            timestamp_reversals: cr.timestamp_reversals,
         });
 
-        all_tuples.append(&mut tuples);
+        all_tuples.extend(tuples.iter().cloned());
+    }
+
+    // Cross-partition continuity (#88).
+    let mut cross_partition_issues = Vec::new();
+    if opts.cross_partition && partitions.len() > 1 {
+        // Sort partitions by their min_block.
+        let mut sorted_parts: Vec<&PartitionResult> = partitions.iter()
+            .filter(|p| p.min_block.is_some())
+            .collect();
+        sorted_parts.sort_by_key(|p| p.min_block);
+
+        for i in 1..sorted_parts.len() {
+            let prev = sorted_parts[i - 1];
+            let curr = sorted_parts[i];
+
+            if let (Some(prev_max), Some(curr_min)) = (prev.max_block, curr.min_block) {
+                // Find the actual last and first tuples.
+                // We need the block_id of prev's last block and parent_id of curr's first block.
+                // We already have all_tuples, but let's check from the group data.
+                let gap = if curr_min > prev_max + 1 {
+                    Some(BlockGap { from: prev_max + 1, to: curr_min })
+                } else {
+                    None
+                };
+
+                // For parent mismatch, we need the actual block_id/parent_id.
+                // Find them from all_tuples (sorted later).
+                let parent_mismatch = if curr_min == prev_max + 1 {
+                    // Find prev's last block and curr's first block in all_tuples.
+                    let prev_last = all_tuples.iter().rfind(|t| t.0 == prev_max);
+                    let curr_first = all_tuples.iter().find(|t| t.0 == curr_min);
+                    match (prev_last, curr_first) {
+                        (Some(pl), Some(cf)) if cf.2 != pl.1 => {
+                            Some(ParentMismatch {
+                                block_num: cf.0,
+                                expected_parent_id: pl.1.clone(),
+                                actual_parent_id: cf.2.clone(),
+                            })
+                        }
+                        _ => None,
+                    }
+                } else {
+                    None
+                };
+
+                if gap.is_some() || parent_mismatch.is_some() {
+                    cross_partition_issues.push(CrossPartitionIssue {
+                        from_partition: prev.partition.clone(),
+                        to_partition: curr.partition.clone(),
+                        gap,
+                        parent_mismatch,
+                    });
+                }
+            }
+        }
     }
 
     // Global validation across all partitions.
     all_tuples.sort_by_key(|t| t.0);
-    let (gaps, parent_mismatches, duplicates, ordering_errors) = check_tuples(&all_tuples);
+    let cr = check_tuples(&all_tuples);
 
     // Only include per-partition breakdown if there are multiple partitions.
     let show_partitions = partitions.len() > 1;
@@ -1033,57 +1334,71 @@ fn validate_from_grouped(
         total_blocks: all_tuples.len() as u64,
         min_block: all_tuples.first().map(|t| t.0),
         max_block: all_tuples.last().map(|t| t.0),
-        gaps,
-        parent_mismatches,
-        duplicates,
-        ordering_errors,
+        gaps: cr.gaps,
+        parent_mismatches: cr.parent_mismatches,
+        duplicates: cr.duplicates,
+        ordering_errors: cr.ordering_errors,
+        timestamp_reversals: cr.timestamp_reversals,
         partitions: if show_partitions { partitions } else { vec![] },
+        empty_partitions,
+        schema_mismatches,
+        cross_partition_issues,
     }
 }
 
-fn validate_parquet_local(path: &PathBuf) -> anyhow::Result<ValidateResult> {
+fn validate_parquet_local(path: &PathBuf, opts: &ValidateOptions) -> anyhow::Result<ValidateResult> {
     use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
-    use std::collections::BTreeMap;
 
-    let mut files: Vec<PathBuf> = Vec::new();
+    let mut paths: Vec<PathBuf> = Vec::new();
     if path.is_file() {
-        files.push(path.clone());
+        paths.push(path.clone());
     } else if path.is_dir() {
-        collect_parquet_files(path, &mut files)?;
-        files.sort();
+        collect_parquet_files(path, &mut paths)?;
+        paths.sort();
     } else {
         anyhow::bail!("path does not exist: {}", path.display());
     }
 
-    if files.is_empty() {
+    if paths.is_empty() {
         println!("No .parquet files found in {}", path.display());
         return Ok(ValidateResult {
             files_scanned: 0, total_blocks: 0, min_block: None, max_block: None,
-            gaps: vec![], parent_mismatches: vec![], duplicates: vec![], ordering_errors: 0, partitions: vec![],
+            gaps: vec![], parent_mismatches: vec![], duplicates: vec![], ordering_errors: 0,
+            timestamp_reversals: vec![], partitions: vec![], empty_partitions: vec![],
+            schema_mismatches: vec![], cross_partition_issues: vec![],
         });
     }
 
     let base = path.to_string_lossy().to_string();
-    let mut groups: BTreeMap<String, (Vec<(u64, String, String)>, usize)> = BTreeMap::new();
+    let mut file_infos = Vec::new();
 
-    for file_path in &files {
+    for file_path in &paths {
         let file = std::fs::File::open(file_path)?;
         let builder = ParquetRecordBatchReaderBuilder::try_new(file)?;
-        let schema = builder.schema().clone();
-        let (bn_idx, bi_idx, pi_idx) = find_canonical_indices(&schema)?;
+        let schema = builder.schema();
+        let arrow_schema: arrow::datatypes::Schema = (**schema).clone();
+        let indices = find_canonical_indices(&arrow_schema)?;
+        let metadata = builder.metadata().clone();
+        let row_count: u64 = metadata.row_groups().iter().map(|rg| rg.num_rows() as u64).sum();
         let reader = builder.build()?;
-        let tuples = extract_block_tuples(reader, bn_idx, bi_idx, pi_idx)?;
+        let tuples = extract_block_tuples(reader, indices.block_num, indices.block_id, indices.parent_id, indices.timestamp)?;
 
         let partition_key = detect_partition(&file_path.to_string_lossy(), &base);
-        let entry = groups.entry(partition_key).or_insert_with(|| (Vec::new(), 0));
-        entry.0.extend(tuples);
-        entry.1 += 1;
+        let display = file_path.strip_prefix(path).unwrap_or(file_path).to_string_lossy().to_string();
+
+        file_infos.push(FileInfo {
+            path: display,
+            partition: partition_key,
+            schema: arrow_schema,
+            tuples,
+            row_count,
+        });
     }
 
-    Ok(validate_from_grouped(groups))
+    Ok(validate_from_files(file_infos, opts))
 }
 
-fn validate_parquet_s3(path: &str, aws: &AwsConfig) -> anyhow::Result<ValidateResult> {
+fn validate_parquet_s3(path: &str, aws: &AwsConfig, opts: &ValidateOptions) -> anyhow::Result<ValidateResult> {
     use crate::writer::parse_s3_url;
     use object_store::aws::AmazonS3Builder;
     use object_store::ObjectStore;
@@ -1119,11 +1434,13 @@ fn validate_parquet_s3(path: &str, aws: &AwsConfig) -> anyhow::Result<ValidateRe
         println!("No .parquet files found in {path}");
         return Ok(ValidateResult {
             files_scanned: 0, total_blocks: 0, min_block: None, max_block: None,
-            gaps: vec![], parent_mismatches: vec![], duplicates: vec![], ordering_errors: 0, partitions: vec![],
+            gaps: vec![], parent_mismatches: vec![], duplicates: vec![], ordering_errors: 0,
+            timestamp_reversals: vec![], partitions: vec![], empty_partitions: vec![],
+            schema_mismatches: vec![], cross_partition_issues: vec![],
         });
     }
 
-    let mut groups: std::collections::BTreeMap<String, (Vec<(u64, String, String)>, usize)> = std::collections::BTreeMap::new();
+    let mut file_infos = Vec::new();
 
     for obj in &parquet_objects {
         let data = rt.block_on(async {
@@ -1131,18 +1448,31 @@ fn validate_parquet_s3(path: &str, aws: &AwsConfig) -> anyhow::Result<ValidateRe
         }).map_err(|e| anyhow::anyhow!("reading s3://{bucket}/{}: {e}", obj.location))?;
 
         let builder = ParquetRecordBatchReaderBuilder::try_new(data)?;
-        let schema = builder.schema().clone();
-        let (bn_idx, bi_idx, pi_idx) = find_canonical_indices(&schema)?;
+        let schema = builder.schema();
+        let arrow_schema: arrow::datatypes::Schema = (**schema).clone();
+        let indices = find_canonical_indices(&arrow_schema)?;
+        let metadata = builder.metadata().clone();
+        let row_count: u64 = metadata.row_groups().iter().map(|rg| rg.num_rows() as u64).sum();
         let reader = builder.build()?;
-        let tuples = extract_block_tuples(reader, bn_idx, bi_idx, pi_idx)?;
+        let tuples = extract_block_tuples(reader, indices.block_num, indices.block_id, indices.parent_id, indices.timestamp)?;
 
         let partition_key = detect_partition(obj.location.as_ref(), &prefix);
-        let entry = groups.entry(partition_key).or_insert_with(|| (Vec::new(), 0));
-        entry.0.extend(tuples);
-        entry.1 += 1;
+        let display = obj.location.as_ref()
+            .strip_prefix(&prefix)
+            .map(|s| s.trim_start_matches('/'))
+            .unwrap_or(obj.location.as_ref())
+            .to_string();
+
+        file_infos.push(FileInfo {
+            path: display,
+            partition: partition_key,
+            schema: arrow_schema,
+            tuples,
+            row_count,
+        });
     }
 
-    Ok(validate_from_grouped(groups))
+    Ok(validate_from_files(file_infos, opts))
 }
 
 // ---------------------------------------------------------------------------
