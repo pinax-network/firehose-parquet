@@ -1,6 +1,6 @@
 [package]
 name = "firehose-parquet"
-version = "0.2.3"
+version = "0.2.4"
 edition = "2021"
 description = "Core library for converting Firehose gRPC streams to Apache Parquet"
 
