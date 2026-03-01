@@ -55,7 +55,13 @@ fn matches_partition(path: &str, filters: &[String]) -> bool {
     if filters.is_empty() {
         return true;
     }
-    for filter in filters {
+    for raw_filter in filters {
+        // If filter is just a key name (e.g. "date"), expand to "date=*"
+        let filter = if !raw_filter.contains('=') && !raw_filter.contains('*') {
+            format!("{}=*", raw_filter)
+        } else {
+            raw_filter.clone()
+        };
         if filter.contains('*') {
             // Glob matching: convert to a simple prefix/suffix match.
             let parts: Vec<&str> = filter.split('*').collect();
@@ -72,7 +78,7 @@ fn matches_partition(path: &str, filters: &[String]) -> bool {
         } else {
             // Exact match on a path segment.
             for segment in path.split('/') {
-                if segment == filter {
+                if segment == filter.as_str() {
                     return true;
                 }
             }

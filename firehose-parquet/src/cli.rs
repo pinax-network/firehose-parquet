@@ -245,7 +245,8 @@ pub enum Commands {
         /// Path to a directory or S3 URI containing .parquet files
         path: String,
         /// Partition filter(s) — only delete files matching these partition segments.
-        /// Supports glob patterns (e.g. "date=2026-01-*"). Repeatable.
+        /// Use a key name to match all values (e.g. "date" matches all date=* partitions),
+        /// or a key=value with optional glob (e.g. "date=2026-01-*"). Repeatable.
         #[arg(long, short = 'p')]
         partition: Vec<String>,
         /// Show what would be deleted without actually deleting
