@@ -193,8 +193,9 @@ async fn main() -> Result<()> {
 
     // Install graceful shutdown handler for SIGINT (Ctrl-C) and SIGTERM.
     // When a signal is received, the flag is set and the streaming loop
-    // will break after the current block, allowing buffered data to be
-    // flushed to disk before the process exits.
+    // will break after the current block.  Partial (incomplete partition)
+    // buffers are discarded so that only fully-written partitions survive
+    // on disk, keeping file creation deterministic.
     let shutdown = Arc::new(AtomicBool::new(false));
     {
         let shutdown = Arc::clone(&shutdown);
@@ -217,7 +218,7 @@ async fn main() -> Result<()> {
                 ctrl_c.await.ok();
             }
 
-            info!("shutdown signal received, finishing current block and flushing...");
+            info!("shutdown signal received, finishing current block...");
             shutdown.store(true, Ordering::SeqCst);
         });
     }
@@ -384,40 +385,51 @@ async fn main() -> Result<()> {
         .await;
 
     // Distinguish graceful shutdown from real errors.
-    match &stream_result {
+    let is_shutdown = match &stream_result {
         Err(e) if format!("{e}").contains("__shutdown__") => {
             info!("graceful shutdown initiated");
+            true
         }
         Err(e) => {
             warn!(error = %e, "stream ended with error, flushing buffered data before exit");
+            false
         }
-        Ok(()) => {}
-    }
+        Ok(()) => false,
+    };
 
-    if let Some(m) = mapper.as_mut() {
-        if m.max_table_rows() > 0 {
-            let batches = m.flush()?;
-            if !dry_run {
-                let metadata = BlockMetadata {
-                    min_block_number: min_block.unwrap_or(0),
-                    max_block_number: max_block.unwrap_or(0),
-                    min_timestamp,
-                    max_timestamp,
-                };
-                writer.write_all(&batches, &metadata)?;
+    // On graceful shutdown, do not write partial buffers — this avoids
+    // non-deterministic extra part files.  Only complete partitions that
+    // were already flushed during normal processing are preserved.  On
+    // restart the stream will resume from the last saved cursor, which
+    // corresponds to the last fully-written partition.
+    if is_shutdown {
+        info!("skipping partial buffer flush to preserve partition determinism");
+    } else {
+        if let Some(m) = mapper.as_mut() {
+            if m.max_table_rows() > 0 {
+                let batches = m.flush()?;
+                if !dry_run {
+                    let metadata = BlockMetadata {
+                        min_block_number: min_block.unwrap_or(0),
+                        max_block_number: max_block.unwrap_or(0),
+                        min_timestamp,
+                        max_timestamp,
+                    };
+                    writer.write_all(&batches, &metadata)?;
+                }
             }
         }
-    }
 
-    // Flush any remaining buffered data in the writer.
-    if !dry_run {
-        let wrote = writer.flush_remaining()?;
+        // Flush any remaining buffered data in the writer.
+        if !dry_run {
+            let wrote = writer.flush_remaining()?;
 
-        // Save cursor after final flush.
-        if wrote {
-            if let (Some(ref path), Some(ref cursor)) = (&cursor_path, &last_cursor) {
-                if let Err(e) = save_cursor(path, cursor) {
-                    warn!(error = %e, path = %path.display(), "failed to save cursor");
+            // Save cursor after final flush.
+            if wrote {
+                if let (Some(ref path), Some(ref cursor)) = (&cursor_path, &last_cursor) {
+                    if let Err(e) = save_cursor(path, cursor) {
+                        warn!(error = %e, path = %path.display(), "failed to save cursor");
+                    }
                 }
             }
         }
@@ -427,7 +439,7 @@ async fn main() -> Result<()> {
 
     // Propagate real (non-shutdown) errors after flushing.
     if let Err(e) = stream_result {
-        if !format!("{e}").contains("__shutdown__") {
+        if !is_shutdown {
             return Err(e);
         }
     }
