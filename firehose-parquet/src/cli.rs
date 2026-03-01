@@ -724,6 +724,13 @@ pub struct ParentMismatch {
     pub actual_parent_id: String,
 }
 
+/// A duplicate block_num found during validation.
+#[derive(Debug)]
+pub struct DuplicateBlock {
+    pub block_num: u64,
+    pub count: u64,
+}
+
 /// Per-partition validation result.
 #[derive(Debug)]
 pub struct PartitionResult {
@@ -734,12 +741,13 @@ pub struct PartitionResult {
     pub max_block: Option<u64>,
     pub gaps: Vec<BlockGap>,
     pub parent_mismatches: Vec<ParentMismatch>,
+    pub duplicates: Vec<DuplicateBlock>,
     pub ordering_errors: u64,
 }
 
 impl PartitionResult {
     pub fn is_valid(&self) -> bool {
-        self.gaps.is_empty() && self.parent_mismatches.is_empty() && self.ordering_errors == 0
+        self.gaps.is_empty() && self.parent_mismatches.is_empty() && self.duplicates.is_empty() && self.ordering_errors == 0
     }
 }
 
@@ -752,6 +760,7 @@ pub struct ValidateResult {
     pub max_block: Option<u64>,
     pub gaps: Vec<BlockGap>,
     pub parent_mismatches: Vec<ParentMismatch>,
+    pub duplicates: Vec<DuplicateBlock>,
     pub ordering_errors: u64,
     /// Per-partition results (empty when data is not partitioned).
     pub partitions: Vec<PartitionResult>,
@@ -761,6 +770,7 @@ impl ValidateResult {
     pub fn is_valid(&self) -> bool {
         self.gaps.is_empty()
             && self.parent_mismatches.is_empty()
+            && self.duplicates.is_empty()
             && self.ordering_errors == 0
             && self.partitions.iter().all(|p| p.is_valid())
     }
@@ -789,6 +799,9 @@ impl ValidateResult {
                         "    parent mismatch at block {}: expected {} got {}",
                         mm.block_num, mm.expected_parent_id, mm.actual_parent_id
                     );
+                }
+                for dup in &pr.duplicates {
+                    println!("    duplicate block {} ({} occurrences)", dup.block_num, dup.count);
                 }
                 if pr.ordering_errors > 0 {
                     println!("    ordering errors: {}", pr.ordering_errors);
@@ -823,6 +836,13 @@ impl ValidateResult {
                     "    block {}: expected parent_id {} but got {}",
                     mm.block_num, mm.expected_parent_id, mm.actual_parent_id
                 );
+            }
+        }
+
+        println!("  Duplicates:        {}", self.duplicates.len());
+        if self.partitions.is_empty() {
+            for dup in &self.duplicates {
+                println!("    block {} ({} occurrences)", dup.block_num, dup.count);
             }
         }
 
@@ -890,16 +910,35 @@ pub fn validate_parquet(path: &str, aws: Option<&AwsConfig>) -> anyhow::Result<V
 }
 
 /// Check a sorted list of block tuples for gaps, ordering, and parent hash chain issues.
-fn check_tuples(tuples: &[(u64, String, String)]) -> (Vec<BlockGap>, Vec<ParentMismatch>, u64) {
+fn check_tuples(tuples: &[(u64, String, String)]) -> (Vec<BlockGap>, Vec<ParentMismatch>, Vec<DuplicateBlock>, u64) {
     let mut gaps = Vec::new();
     let mut parent_mismatches = Vec::new();
+    let mut duplicates = Vec::new();
     let mut ordering_errors = 0u64;
+
+    // Track runs of duplicate block_num.
+    let mut dup_start = 0usize;
 
     for i in 1..tuples.len() {
         let (prev_num, ref prev_block_id, _) = tuples[i - 1];
         let (curr_num, _, ref curr_parent_id) = tuples[i];
 
-        if curr_num <= prev_num {
+        if curr_num == prev_num {
+            // Still in a duplicate run — continue.
+            continue;
+        }
+
+        // End of a run — check if it was a duplicate.
+        let run_len = i - dup_start;
+        if run_len > 1 {
+            duplicates.push(DuplicateBlock {
+                block_num: tuples[dup_start].0,
+                count: run_len as u64,
+            });
+        }
+        dup_start = i;
+
+        if curr_num < prev_num {
             ordering_errors += 1;
         }
         if curr_num > prev_num + 1 {
@@ -917,7 +956,18 @@ fn check_tuples(tuples: &[(u64, String, String)]) -> (Vec<BlockGap>, Vec<ParentM
         }
     }
 
-    (gaps, parent_mismatches, ordering_errors)
+    // Final run check.
+    if !tuples.is_empty() {
+        let run_len = tuples.len() - dup_start;
+        if run_len > 1 {
+            duplicates.push(DuplicateBlock {
+                block_num: tuples[dup_start].0,
+                count: run_len as u64,
+            });
+        }
+    }
+
+    (gaps, parent_mismatches, duplicates, ordering_errors)
 }
 
 /// Detect the partition key from a file path by looking for Hive-style directories
@@ -952,7 +1002,7 @@ fn validate_from_grouped(
         tuples.sort_by_key(|t| t.0);
         total_files += file_count;
 
-        let (gaps, parent_mismatches, ordering_errors) = check_tuples(&tuples);
+        let (gaps, parent_mismatches, duplicates, ordering_errors) = check_tuples(&tuples);
         let min_block = tuples.first().map(|t| t.0);
         let max_block = tuples.last().map(|t| t.0);
 
@@ -964,6 +1014,7 @@ fn validate_from_grouped(
             max_block,
             gaps,
             parent_mismatches,
+            duplicates,
             ordering_errors,
         });
 
@@ -972,7 +1023,7 @@ fn validate_from_grouped(
 
     // Global validation across all partitions.
     all_tuples.sort_by_key(|t| t.0);
-    let (gaps, parent_mismatches, ordering_errors) = check_tuples(&all_tuples);
+    let (gaps, parent_mismatches, duplicates, ordering_errors) = check_tuples(&all_tuples);
 
     // Only include per-partition breakdown if there are multiple partitions.
     let show_partitions = partitions.len() > 1;
@@ -984,6 +1035,7 @@ fn validate_from_grouped(
         max_block: all_tuples.last().map(|t| t.0),
         gaps,
         parent_mismatches,
+        duplicates,
         ordering_errors,
         partitions: if show_partitions { partitions } else { vec![] },
     }
@@ -1007,7 +1059,7 @@ fn validate_parquet_local(path: &PathBuf) -> anyhow::Result<ValidateResult> {
         println!("No .parquet files found in {}", path.display());
         return Ok(ValidateResult {
             files_scanned: 0, total_blocks: 0, min_block: None, max_block: None,
-            gaps: vec![], parent_mismatches: vec![], ordering_errors: 0, partitions: vec![],
+            gaps: vec![], parent_mismatches: vec![], duplicates: vec![], ordering_errors: 0, partitions: vec![],
         });
     }
 
@@ -1067,7 +1119,7 @@ fn validate_parquet_s3(path: &str, aws: &AwsConfig) -> anyhow::Result<ValidateRe
         println!("No .parquet files found in {path}");
         return Ok(ValidateResult {
             files_scanned: 0, total_blocks: 0, min_block: None, max_block: None,
-            gaps: vec![], parent_mismatches: vec![], ordering_errors: 0, partitions: vec![],
+            gaps: vec![], parent_mismatches: vec![], duplicates: vec![], ordering_errors: 0, partitions: vec![],
         });
     }
 
