@@ -77,6 +77,7 @@ pub struct Config {
     pub aws_region: Option<String>,
     pub aws_endpoint_url: Option<String>,
     pub s3_bucket: Option<String>,
+    pub cache_control: Option<String>,
 }
 
 impl std::fmt::Display for Partition {
@@ -210,6 +211,7 @@ impl Default for Config {
             aws_region: None,
             aws_endpoint_url: None,
             s3_bucket: None,
+            cache_control: None,
         }
     }
 }

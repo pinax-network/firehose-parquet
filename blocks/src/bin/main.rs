@@ -183,7 +183,7 @@ async fn main() -> Result<()> {
             Commands::Rollup {
                 source, output, target_partition, compression, flush_bytes, delete_source,
                 aws_access_key_id, aws_secret_access_key, aws_session_token,
-                aws_region, aws_endpoint_url,
+                aws_region, aws_endpoint_url, cache_control,
             } => {
                 init_tracing(&cli.common.log_level);
                 let target = firehose_parquet::rollup::parse_rollup_target(target_partition)?;
@@ -204,6 +204,7 @@ async fn main() -> Result<()> {
                     flush_bytes: *flush_bytes,
                     delete_source: *delete_source,
                     aws,
+                    cache_control: cache_control.clone(),
                 };
                 firehose_parquet::rollup::run_rollup(&rollup_config)?;
                 return Ok(());
