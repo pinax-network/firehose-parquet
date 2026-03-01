@@ -26,7 +26,25 @@ use blocks::tron::mapper::TronBlockMapper;
 const BLOCK_TYPES: &[&str] = &["auto", "evm", "bitcoin", "solana", "near", "antelope", "cosmos", "tron", "beacon"];
 
 #[derive(Parser, Debug)]
-#[command(name = "firehose-to-parquet", version, about = "Convert Firehose gRPC stream to Apache Parquet")]
+#[command(name = "firehose-to-parquet", version, about = "Convert Firehose gRPC stream to Apache Parquet", after_long_help = "\
+Examples:
+  # Stream EVM blocks to local Parquet (auto-detect chain)
+  firehose-to-parquet --endpoint https://eth.firehose.pinax.network:443 \\
+    --start-block 20000000 --stop-block 20001000
+
+  # Stream Solana with date partitioning to S3
+  firehose-to-parquet --endpoint https://solana.firehose.pinax.network:443 \\
+    --start-block 250000000 --stop-block 250100000 \\
+    --partition date --s3-bucket my-bucket
+
+  # Stream with hex encoding and extended tables
+  firehose-to-parquet --endpoint https://eth.firehose.pinax.network:443 \\
+    --start-block 20000000 --bytes-encoding hex --extended
+
+  # Resume from cursor
+  firehose-to-parquet --endpoint https://eth.firehose.pinax.network:443 \\
+    --cursor cursor.txt --partition date
+")]
 struct Cli {
     #[command(subcommand)]
     command: Option<Commands>,
@@ -230,6 +248,32 @@ async fn main() -> Result<()> {
                     cache_control: cache_control.clone(),
                 };
                 firehose_parquet::rollup::run_rollup(&rollup_config)?;
+                return Ok(());
+            }
+            Commands::Merge {
+                path, compression, flush_bytes, dry_run,
+                aws_access_key_id, aws_secret_access_key, aws_session_token,
+                aws_region, aws_endpoint_url, cache_control,
+            } => {
+                init_tracing(&cli.common.log_level);
+                let compression = firehose_parquet::cli::parse_compression(compression)?;
+                let aws = Some(firehose_parquet::cli::AwsConfig {
+                    aws_access_key_id: aws_access_key_id.clone(),
+                    aws_secret_access_key: aws_secret_access_key.clone(),
+                    aws_session_token: aws_session_token.clone(),
+                    aws_region: aws_region.clone(),
+                    aws_endpoint_url: aws_endpoint_url.clone(),
+                });
+                let merge_config = firehose_parquet::merge::MergeConfig {
+                    path: path.clone(),
+                    compression,
+                    flush_bytes: *flush_bytes,
+                    dry_run: *dry_run,
+                    aws,
+                    cache_control: cache_control.clone(),
+                };
+                let result = firehose_parquet::merge::run_merge(&merge_config)?;
+                result.print();
                 return Ok(());
             }
             Commands::Truncate {

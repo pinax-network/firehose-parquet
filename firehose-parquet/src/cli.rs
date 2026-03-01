@@ -137,8 +137,25 @@ pub enum Commands {
         #[arg(value_enum)]
         shell: Shell,
     },
-    /// Read and inspect Parquet files (schema, row counts, sample rows)
-    /// Supports local paths and S3 URIs (s3://bucket/prefix)
+    /// Read and inspect Parquet files (schema, row counts, sample rows).
+    /// Supports local paths and S3 URIs (s3://bucket/prefix).
+    #[command(after_long_help = "\
+Examples:
+  # Inspect a local parquet file
+  firehose-to-parquet scan ./output/blocks/part-000001.parquet
+
+  # Scan all files in a directory (20 sample rows each)
+  firehose-to-parquet scan ./output/blocks/
+
+  # Schema only, no data preview
+  firehose-to-parquet scan ./output/blocks/ --schema-only
+
+  # Scan S3 files
+  firehose-to-parquet scan s3://bucket/eth-mainnet/blocks/
+
+  # Show 50 sample rows per file
+  firehose-to-parquet scan ./output/blocks/ -n 50
+")]
     Scan {
         /// Path to a .parquet file or directory, or an S3 URI (s3://bucket/prefix)
         path: String,
@@ -166,14 +183,19 @@ pub enum Commands {
     },
     /// Validate block sequence integrity of Parquet files.
     ///
-    /// Scans blocks parquet files and checks for:
-    /// - Gaps in block_num sequence
-    /// - Parent hash chain continuity (parent_id of N+1 == block_id of N)
-    /// - Monotonically increasing block_num ordering
-    /// - Timestamp monotonicity (non-decreasing timestamps)
-    /// - Schema consistency across files
-    /// - Empty partitions (warning)
-    /// - Cross-partition continuity (with --cross-partition)
+    /// Checks for gaps, parent hash chain, ordering, timestamps, schema
+    /// consistency, empty partitions, and cross-partition continuity.
+    #[command(after_long_help = "\
+Examples:
+  # Validate local blocks directory
+  firehose-to-parquet validate ./output/blocks/
+
+  # Validate S3 path
+  firehose-to-parquet validate s3://bucket/eth-mainnet/blocks/
+
+  # Check continuity across partition boundaries
+  firehose-to-parquet validate ./output/blocks/ --cross-partition
+")]
     Validate {
         /// Path to a directory of .parquet files or an S3 URI (s3://bucket/prefix)
         path: String,
@@ -200,6 +222,20 @@ pub enum Commands {
     ///
     /// Reads minute/hour-partitioned files and merges them into hourly or daily
     /// partitions, respecting --flush-bytes for file size limits.
+    #[command(after_long_help = "\
+Examples:
+  # Roll up minute partitions into daily (in-place)
+  firehose-to-parquet rollup ./output/blocks/
+
+  # Roll up to hourly partitions with a separate output
+  firehose-to-parquet rollup ./output/blocks/ -o ./merged/ -p hour
+
+  # Roll up S3 data, delete source files after
+  firehose-to-parquet rollup s3://bucket/blocks/ --delete-source
+
+  # Custom file size limit (256 MB)
+  firehose-to-parquet rollup ./output/blocks/ --flush-bytes 268435456
+")]
     Rollup {
         /// Source path (local directory or S3 URI) containing partitioned Parquet files
         source: String,
@@ -237,10 +273,83 @@ pub enum Commands {
         #[arg(long, env = "CACHE_CONTROL", default_value = "public, max-age=31536000, immutable")]
         cache_control: String,
     },
+    /// Merge small parquet part files within each partition into larger files.
+    ///
+    /// Unlike rollup (which changes partition granularity), merge consolidates
+    /// multiple small parts within each existing partition directory into fewer,
+    /// larger files. Source parts are deleted after successful merge.
+    #[command(after_long_help = "\
+Examples:
+  # Merge parts within each partition (local)
+  firehose-to-parquet merge ./output/blocks/
+
+  # Merge S3 data
+  firehose-to-parquet merge s3://bucket/eth-mainnet/blocks/
+
+  # Custom target file size (512 MB)
+  firehose-to-parquet merge ./output/blocks/ --flush-bytes 536870912
+
+  # Preview what would be merged
+  firehose-to-parquet merge ./output/blocks/ --dry-run
+
+  # Use snappy compression
+  firehose-to-parquet merge ./output/blocks/ --compression snappy
+")]
+    Merge {
+        /// Path to a directory of partitioned .parquet files or an S3 URI
+        path: String,
+        /// Compression codec: zstd, snappy, gzip, none
+        #[arg(long, default_value = "zstd")]
+        compression: String,
+        /// Max compressed bytes per output file
+        #[arg(long, default_value = "268435456")]
+        flush_bytes: u64,
+        /// Show what would be merged without writing
+        #[arg(long, default_value = "false")]
+        dry_run: bool,
+        /// AWS access key ID (for S3 paths)
+        #[arg(long, env = "AWS_ACCESS_KEY_ID", hide_env_values = true)]
+        aws_access_key_id: Option<String>,
+        /// AWS secret access key (for S3 paths)
+        #[arg(long, env = "AWS_SECRET_ACCESS_KEY", hide_env_values = true)]
+        aws_secret_access_key: Option<String>,
+        /// AWS session token (for S3 paths)
+        #[arg(long, env = "AWS_SESSION_TOKEN", hide_env_values = true)]
+        aws_session_token: Option<String>,
+        /// AWS region (for S3 paths)
+        #[arg(long, env = "AWS_REGION", hide_env_values = true)]
+        aws_region: Option<String>,
+        /// AWS endpoint URL (for S3-compatible services)
+        #[arg(long, env = "AWS_ENDPOINT_URL_S3", hide_env_values = true)]
+        aws_endpoint_url: Option<String>,
+        /// Cache-Control header for S3 uploads
+        #[arg(long, env = "CACHE_CONTROL", default_value = "public, max-age=31536000, immutable")]
+        cache_control: String,
+    },
     /// Delete parquet files from local filesystem or S3, with optional partition filtering.
     ///
     /// Deletes only .parquet files. Never deletes buckets or non-parquet files.
     /// Use --partition to target specific partitions (supports glob patterns).
+    #[command(after_long_help = "\
+Examples:
+  # Delete all parquet files under a path
+  firehose-to-parquet truncate ./output/blocks/
+
+  # Delete only a specific date partition
+  firehose-to-parquet truncate ./output/blocks/ -p \"date=2026-01-01\"
+
+  # Delete with glob pattern (all January dates)
+  firehose-to-parquet truncate s3://bucket/blocks/ -p \"date=2026-01-*\"
+
+  # Delete multiple partitions
+  firehose-to-parquet truncate ./output/ -p \"date=2026-01-01\" -p \"date=2026-01-02\"
+
+  # Delete all minute-level partitions (key-only filter)
+  firehose-to-parquet truncate ./output/blocks/ -p minute
+
+  # Preview what would be deleted
+  firehose-to-parquet truncate ./output/blocks/ --dry-run
+")]
     Truncate {
         /// Path to a directory or S3 URI containing .parquet files
         path: String,
