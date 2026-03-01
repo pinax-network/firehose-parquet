@@ -306,6 +306,9 @@ async fn main() -> Result<()> {
     let mut max_block: Option<u64> = None;
     let mut min_timestamp: Option<i64> = None;
     let mut max_timestamp: Option<i64> = None;
+    // Global accumulators (not reset on flush) for final summary.
+    let mut global_min_block: Option<u64> = None;
+    let mut global_max_block: Option<u64> = None;
     let mut last_flush_time = Instant::now();
     let mut last_cursor: Option<String> = None;
     let mut bytes_read: u64 = 0;
@@ -334,6 +337,8 @@ async fn main() -> Result<()> {
             let ts = identity.timestamp;
             min_block = Some(min_block.map_or(block_number, |s: u64| s.min(block_number)));
             max_block = Some(max_block.map_or(block_number, |s: u64| s.max(block_number)));
+            global_min_block = Some(global_min_block.map_or(block_number, |s: u64| s.min(block_number)));
+            global_max_block = Some(global_max_block.map_or(block_number, |s: u64| s.max(block_number)));
             min_timestamp = Some(min_timestamp.map_or(ts, |s: i64| s.min(ts)));
             max_timestamp = Some(max_timestamp.map_or(ts, |s: i64| s.max(ts)));
 
@@ -463,7 +468,42 @@ async fn main() -> Result<()> {
         }
     }
 
-    info!(blocks_processed, "pipeline finished");
+    // Final metrics.
+    let elapsed = progress_start.elapsed();
+    let elapsed_secs = elapsed.as_secs_f64();
+    let blocks_per_sec = if elapsed_secs > 0.0 { blocks_processed as f64 / elapsed_secs } else { 0.0 };
+    let throughput = if elapsed_secs > 0.0 { bytes_read as f64 / elapsed_secs } else { 0.0 };
+
+    // Format elapsed as human-readable duration.
+    let elapsed_display = {
+        let total_secs = elapsed.as_secs();
+        let hours = total_secs / 3600;
+        let minutes = (total_secs % 3600) / 60;
+        let secs = total_secs % 60;
+        if hours > 0 {
+            format!("{}h{}m{}s", hours, minutes, secs)
+        } else if minutes > 0 {
+            format!("{}m{}s", minutes, secs)
+        } else {
+            format!("{}.{}s", secs, (elapsed.subsec_millis() / 100))
+        }
+    };
+
+    // Format block range.
+    let block_range = match (global_min_block, global_max_block) {
+        (Some(min), Some(max)) => format!("{} — {}", min, max),
+        _ => "N/A".to_string(),
+    };
+
+    info!(
+        blocks_processed,
+        block_range = %block_range,
+        elapsed = %elapsed_display,
+        blocks_per_sec = format!("{:.1}", blocks_per_sec),
+        bytes_read = firehose_parquet::cli::format_bytes(bytes_read),
+        throughput = format!("{}/s", firehose_parquet::cli::format_bytes(throughput as u64)),
+        "pipeline finished",
+    );
 
     // Propagate real (non-shutdown) errors after flushing.
     if let Err(e) = stream_result {
