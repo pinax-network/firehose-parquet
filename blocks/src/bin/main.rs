@@ -8,6 +8,8 @@ use firehose_parquet::grpc::{EndpointInfo, FirehoseClient};
 use firehose_parquet::traits::{fork_step_name, BlockIdentity, BlockMapper};
 use firehose_parquet::writer::OutputWriter;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::Instant;
 use tracing::{info, warn};
 
@@ -161,6 +163,37 @@ async fn main() -> Result<()> {
 
     init_tracing(&cli.common.log_level);
 
+    // Install graceful shutdown handler for SIGINT (Ctrl-C) and SIGTERM.
+    // When a signal is received, the flag is set and the streaming loop
+    // will break after the current block, allowing buffered data to be
+    // flushed to disk before the process exits.
+    let shutdown = Arc::new(AtomicBool::new(false));
+    {
+        let shutdown = Arc::clone(&shutdown);
+        tokio::spawn(async move {
+            let ctrl_c = tokio::signal::ctrl_c();
+
+            #[cfg(unix)]
+            {
+                use tokio::signal::unix::{signal, SignalKind};
+                let mut sigterm = signal(SignalKind::terminate())
+                    .expect("failed to install SIGTERM handler");
+                tokio::select! {
+                    _ = ctrl_c => {}
+                    _ = sigterm.recv() => {}
+                }
+            }
+
+            #[cfg(not(unix))]
+            {
+                ctrl_c.await.ok();
+            }
+
+            info!("shutdown signal received, finishing current block and flushing...");
+            shutdown.store(true, Ordering::SeqCst);
+        });
+    }
+
     let block_type = cli.block_type.to_lowercase();
     if block_type != "auto" && !BLOCK_TYPES.contains(&block_type.as_str()) {
         return Err(anyhow!("unsupported block type: {block_type}. Supported: {}", BLOCK_TYPES.join(", ")));
@@ -227,7 +260,7 @@ async fn main() -> Result<()> {
     let mut bytes_read: u64 = 0;
     let progress_start = Instant::now();
 
-    client
+    let stream_result = client
         .stream_blocks(|block_bytes, type_url, cursor_str, identity: BlockIdentity, step: i32| {
             let fork_step_str = fork_step_name(step);
             if final_blocks_only && step == 2 {
@@ -257,6 +290,12 @@ async fn main() -> Result<()> {
             blocks_processed += 1;
             bytes_read += block_bytes.len() as u64;
             last_cursor = Some(cursor_str);
+
+            // Check for graceful shutdown after processing the current block.
+            if shutdown.load(Ordering::SeqCst) {
+                info!(blocks_processed, block_number, "shutdown requested, breaking out of stream");
+                return Err(anyhow!("__shutdown__"));
+            }
 
             if blocks_processed % 100 == 0 {
                 let elapsed_secs = progress_start.elapsed().as_secs_f64();
@@ -314,7 +353,18 @@ async fn main() -> Result<()> {
 
             Ok(())
         })
-        .await?;
+        .await;
+
+    // Distinguish graceful shutdown from real errors.
+    match &stream_result {
+        Err(e) if format!("{e}").contains("__shutdown__") => {
+            info!("graceful shutdown initiated");
+        }
+        Err(e) => {
+            warn!(error = %e, "stream ended with error, flushing buffered data before exit");
+        }
+        Ok(()) => {}
+    }
 
     if let Some(m) = mapper.as_mut() {
         if m.max_table_rows() > 0 {
@@ -346,6 +396,14 @@ async fn main() -> Result<()> {
     }
 
     info!(blocks_processed, "pipeline finished");
+
+    // Propagate real (non-shutdown) errors after flushing.
+    if let Err(e) = stream_result {
+        if !format!("{e}").contains("__shutdown__") {
+            return Err(e);
+        }
+    }
+
     Ok(())
 }
 
