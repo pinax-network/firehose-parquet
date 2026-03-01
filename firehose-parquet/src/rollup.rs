@@ -14,6 +14,7 @@ use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use parquet::arrow::ArrowWriter;
 use parquet::basic::Compression as PqCompression;
 use parquet::basic::ZstdLevel;
+use parquet::file::metadata::KeyValue;
 use parquet::file::properties::WriterProperties;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -103,10 +104,14 @@ fn run_rollup_local(config: &RollupConfig) -> Result<()> {
 
         // Read all batches from all files in this group.
         let mut all_batches: Vec<RecordBatch> = Vec::new();
+        let mut file_kv_metadata: Option<Vec<KeyValue>> = None;
         for file_path in group_files {
             let file = std::fs::File::open(file_path)
                 .with_context(|| format!("opening {}", file_path.display()))?;
             let builder = ParquetRecordBatchReaderBuilder::try_new(file)?;
+            if file_kv_metadata.is_none() {
+                file_kv_metadata = builder.metadata().file_metadata().key_value_metadata().cloned();
+            }
             let reader = builder.build()?;
             for batch_result in reader {
                 let batch = batch_result?;
@@ -137,6 +142,7 @@ fn run_rollup_local(config: &RollupConfig) -> Result<()> {
             &merged,
             config.compression,
             config.flush_bytes,
+            file_kv_metadata.as_deref(),
         )?;
         total_output_files += written;
 
@@ -175,8 +181,9 @@ fn write_merged_batches_local(
     batch: &RecordBatch,
     compression: Compression,
     flush_bytes: u64,
+    kv_metadata: Option<&[KeyValue]>,
 ) -> Result<usize> {
-    let props = writer_properties(compression);
+    let props = writer_properties(compression, kv_metadata);
 
     if flush_bytes == 0 {
         // No size limit — write everything to a single file.
@@ -348,16 +355,21 @@ fn cleanup_empty_dirs(dir: &Path) -> Result<()> {
     Ok(())
 }
 
-fn writer_properties(compression: Compression) -> WriterProperties {
+fn writer_properties(compression: Compression, kv_metadata: Option<&[KeyValue]>) -> WriterProperties {
     let pq_compression = match compression {
         Compression::None => PqCompression::UNCOMPRESSED,
         Compression::Snappy => PqCompression::SNAPPY,
         Compression::Gzip => PqCompression::GZIP(Default::default()),
         Compression::Zstd => PqCompression::ZSTD(ZstdLevel::try_new(3).unwrap()),
     };
-    WriterProperties::builder()
-        .set_compression(pq_compression)
-        .build()
+    let mut builder = WriterProperties::builder()
+        .set_compression(pq_compression);
+    if let Some(kvs) = kv_metadata {
+        if !kvs.is_empty() {
+            builder = builder.set_key_value_metadata(Some(kvs.to_vec()));
+        }
+    }
+    builder.build()
 }
 
 // ---------------------------------------------------------------------------
@@ -427,8 +439,9 @@ fn run_rollup_s3(config: &RollupConfig) -> Result<()> {
     for (group_key, group_keys) in &groups {
         info!(group = %group_key, files = group_keys.len(), "processing group");
 
-        // Read all batches.
+        // Read all batches and extract file-level metadata from the first file.
         let mut all_batches: Vec<RecordBatch> = Vec::new();
+        let mut file_kv_metadata: Option<Vec<KeyValue>> = None;
         for s3_key in group_keys {
             let data = block_on_async(async {
                 let path = object_store::path::Path::from(s3_key.as_str());
@@ -436,6 +449,9 @@ fn run_rollup_s3(config: &RollupConfig) -> Result<()> {
             }).map_err(|e| anyhow::anyhow!("reading s3://{src_bucket}/{s3_key}: {e}"))?;
 
             let builder = ParquetRecordBatchReaderBuilder::try_new(data)?;
+            if file_kv_metadata.is_none() {
+                file_kv_metadata = builder.metadata().file_metadata().key_value_metadata().cloned();
+            }
             let reader = builder.build()?;
             for batch_result in reader {
                 let batch = batch_result?;
@@ -466,6 +482,7 @@ fn run_rollup_s3(config: &RollupConfig) -> Result<()> {
             config.compression,
             config.flush_bytes,
             &config.cache_control,
+            file_kv_metadata.as_deref(),
         )?;
         total_output_files += written;
 
@@ -504,8 +521,9 @@ fn write_merged_batches_s3(
     compression: Compression,
     flush_bytes: u64,
     cache_control: &str,
+    kv_metadata: Option<&[KeyValue]>,
 ) -> Result<usize> {
-    let props = writer_properties(compression);
+    let props = writer_properties(compression, kv_metadata);
 
     // Write full batch to buffer to check size.
     let mut buf = Vec::new();
@@ -809,5 +827,104 @@ mod tests {
         let mut writer = ArrowWriter::try_new(file, batch.schema(), None).unwrap();
         writer.write(batch).unwrap();
         writer.close().unwrap();
+    }
+
+    fn write_test_parquet_with_metadata(path: &Path, batch: &RecordBatch, kvs: Vec<KeyValue>) {
+        let props = WriterProperties::builder()
+            .set_key_value_metadata(Some(kvs))
+            .build();
+        let file = std::fs::File::create(path).unwrap();
+        let mut writer = ArrowWriter::try_new(file, batch.schema(), Some(props)).unwrap();
+        writer.write(batch).unwrap();
+        writer.close().unwrap();
+    }
+
+    fn read_parquet_kv_metadata(path: &Path) -> Option<Vec<KeyValue>> {
+        let file = std::fs::File::open(path).unwrap();
+        let builder = ParquetRecordBatchReaderBuilder::try_new(file).unwrap();
+        builder.metadata().file_metadata().key_value_metadata().cloned()
+    }
+
+    #[test]
+    fn test_rollup_preserves_metadata() {
+        let source = tempfile::tempdir().unwrap();
+        let output = tempfile::tempdir().unwrap();
+
+        let dir1 = source.path().join("blocks/date=2024-01-15/hour=14/minute=30");
+        let dir2 = source.path().join("blocks/date=2024-01-15/hour=14/minute=31");
+        std::fs::create_dir_all(&dir1).unwrap();
+        std::fs::create_dir_all(&dir2).unwrap();
+
+        let kvs = vec![
+            KeyValue::new("firehose-parquet.version".to_string(), Some("0.1.0".to_string())),
+            KeyValue::new("firehose-parquet.chain_name".to_string(), Some("eth".to_string())),
+        ];
+
+        write_test_parquet_with_metadata(&dir1.join("part-000001.parquet"), &make_test_batch(10), kvs.clone());
+        write_test_parquet_with_metadata(&dir2.join("part-000001.parquet"), &make_test_batch(20), kvs.clone());
+
+        let config = RollupConfig {
+            source: source.path().to_string_lossy().to_string(),
+            output: output.path().to_string_lossy().to_string(),
+            target: RollupTarget::Hour,
+            compression: Compression::None,
+            flush_bytes: 0,
+            delete_source: false,
+            aws: None,
+            cache_control: String::new(),
+        };
+
+        run_rollup(&config).unwrap();
+
+        let out_dir = output.path().join("blocks/date=2024-01-15/hour=14");
+        let mut out_files = Vec::new();
+        collect_parquet_files_recursive(&out_dir, &mut out_files).unwrap();
+        assert_eq!(out_files.len(), 1);
+
+        // Verify metadata is preserved.
+        let out_kvs = read_parquet_kv_metadata(&out_files[0]).expect("metadata should be present");
+        let find = |key: &str| out_kvs.iter().find(|kv| kv.key == key).and_then(|kv| kv.value.clone());
+        assert_eq!(find("firehose-parquet.version"), Some("0.1.0".to_string()));
+        assert_eq!(find("firehose-parquet.chain_name"), Some("eth".to_string()));
+    }
+
+    #[test]
+    fn test_rollup_flush_bytes_split_preserves_metadata() {
+        let source = tempfile::tempdir().unwrap();
+        let output = tempfile::tempdir().unwrap();
+
+        let dir = source.path().join("blocks/date=2024-01-15/hour=14/minute=00");
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let kvs = vec![
+            KeyValue::new("firehose-parquet.version".to_string(), Some("0.1.0".to_string())),
+        ];
+
+        write_test_parquet_with_metadata(&dir.join("part-000001.parquet"), &make_test_batch(10000), kvs);
+
+        let config = RollupConfig {
+            source: source.path().to_string_lossy().to_string(),
+            output: output.path().to_string_lossy().to_string(),
+            target: RollupTarget::Hour,
+            compression: Compression::None,
+            flush_bytes: 1024,
+            delete_source: false,
+            aws: None,
+            cache_control: String::new(),
+        };
+
+        run_rollup(&config).unwrap();
+
+        let out_dir = output.path().join("blocks/date=2024-01-15/hour=14");
+        let mut out_files = Vec::new();
+        collect_parquet_files_recursive(&out_dir, &mut out_files).unwrap();
+        assert!(out_files.len() > 1, "should have split into multiple files");
+
+        // Verify all output files have metadata.
+        for f in &out_files {
+            let out_kvs = read_parquet_kv_metadata(f).expect("metadata should be present");
+            let find = |key: &str| out_kvs.iter().find(|kv| kv.key == key).and_then(|kv| kv.value.clone());
+            assert_eq!(find("firehose-parquet.version"), Some("0.1.0".to_string()));
+        }
     }
 }
