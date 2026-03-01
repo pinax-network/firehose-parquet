@@ -6,7 +6,7 @@ use firehose_parquet::cursor::save_cursor;
 use firehose_parquet::encode::{parse_encode_bytes, EncodeBytes};
 use firehose_parquet::grpc::{EndpointInfo, FirehoseClient};
 use firehose_parquet::traits::{fork_step_name, BlockIdentity, BlockMapper};
-use firehose_parquet::writer::OutputWriter;
+use firehose_parquet::writer::{OutputWriter, ParquetFileMetadata};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -51,6 +51,29 @@ struct Cli {
 }
 
 /// Detect block type from a protobuf `Any.type_url`.
+/// Build Parquet file-level metadata with pipeline context.
+fn build_file_metadata(
+    block_type: &str,
+    encoding: &firehose_parquet::encode::EncodeBytes,
+    endpoint: &str,
+    endpoint_info: &Option<EndpointInfo>,
+) -> ParquetFileMetadata {
+    let mut meta = ParquetFileMetadata::new();
+    meta.add("firehose-parquet.version", env!("CARGO_PKG_VERSION"));
+    meta.add("firehose-parquet.block_type", block_type);
+    meta.add("firehose-parquet.bytes_encoding", format!("{:?}", encoding).to_lowercase());
+    meta.add("firehose-parquet.endpoint", endpoint);
+    if let Some(ref ei) = endpoint_info {
+        if !ei.chain_name.is_empty() {
+            meta.add("firehose-parquet.chain_name", &ei.chain_name);
+        }
+        if ei.first_streamable_block_num > 0 {
+            meta.add("firehose-parquet.first_streamable_block", ei.first_streamable_block_num.to_string());
+        }
+    }
+    meta
+}
+
 fn detect_block_type(type_url: &str) -> Result<String> {
     if type_url.contains("ethereum") {
         Ok("evm".to_string())
@@ -296,6 +319,7 @@ async fn main() -> Result<()> {
         let encode_bytes = parse_encode_bytes(&bytes_encoding_str)
             .or_else(|| endpoint_info.as_ref().and_then(|ei| encode_bytes_from_block_id_encoding(ei.block_id_encoding)))
             .unwrap_or_else(|| default_encode_bytes(&block_type));
+        writer.inner.set_file_metadata(build_file_metadata(&block_type, &encode_bytes, &config.endpoint, &endpoint_info));
         Some(create_mapper(&block_type, extended, include_fork_step, encode_bytes)?)
     } else {
         None
@@ -329,6 +353,7 @@ async fn main() -> Result<()> {
                 let encode_bytes = parse_encode_bytes(&bytes_encoding_str)
                     .or_else(|| endpoint_info.as_ref().and_then(|ei| encode_bytes_from_block_id_encoding(ei.block_id_encoding)))
                     .unwrap_or_else(|| default_encode_bytes(&detected));
+                writer.inner.set_file_metadata(build_file_metadata(&detected, &encode_bytes, &config.endpoint, &endpoint_info));
                 mapper = Some(create_mapper(&detected, extended, include_fork_step, encode_bytes)?);
             }
 
