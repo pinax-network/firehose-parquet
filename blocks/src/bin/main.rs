@@ -158,6 +158,34 @@ async fn main() -> Result<()> {
                 firehose_parquet::cli::scan_parquet(path, *rows, *schema_only, Some(&aws))?;
                 return Ok(());
             }
+            Commands::Rollup {
+                source, output, target_partition, compression, flush_bytes, delete_source,
+                aws_access_key_id, aws_secret_access_key, aws_session_token,
+                aws_region, aws_endpoint_url,
+            } => {
+                init_tracing(&cli.common.log_level);
+                let target = firehose_parquet::rollup::parse_rollup_target(target_partition)?;
+                let compression = firehose_parquet::cli::parse_compression(compression)?;
+                let output_path = output.clone().unwrap_or_else(|| source.clone());
+                let aws = Some(firehose_parquet::cli::AwsConfig {
+                    aws_access_key_id: aws_access_key_id.clone(),
+                    aws_secret_access_key: aws_secret_access_key.clone(),
+                    aws_session_token: aws_session_token.clone(),
+                    aws_region: aws_region.clone(),
+                    aws_endpoint_url: aws_endpoint_url.clone(),
+                });
+                let rollup_config = firehose_parquet::rollup::RollupConfig {
+                    source: source.clone(),
+                    output: output_path,
+                    target,
+                    compression,
+                    flush_bytes: *flush_bytes,
+                    delete_source: *delete_source,
+                    aws,
+                };
+                firehose_parquet::rollup::run_rollup(&rollup_config)?;
+                return Ok(());
+            }
         }
     }
 
