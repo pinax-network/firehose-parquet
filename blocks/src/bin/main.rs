@@ -232,32 +232,6 @@ async fn main() -> Result<()> {
                 firehose_parquet::rollup::run_rollup(&rollup_config)?;
                 return Ok(());
             }
-            Commands::Merge {
-                path, compression, flush_bytes, dry_run,
-                aws_access_key_id, aws_secret_access_key, aws_session_token,
-                aws_region, aws_endpoint_url, cache_control,
-            } => {
-                init_tracing(&cli.common.log_level);
-                let compression = firehose_parquet::cli::parse_compression(compression)?;
-                let aws = Some(firehose_parquet::cli::AwsConfig {
-                    aws_access_key_id: aws_access_key_id.clone(),
-                    aws_secret_access_key: aws_secret_access_key.clone(),
-                    aws_session_token: aws_session_token.clone(),
-                    aws_region: aws_region.clone(),
-                    aws_endpoint_url: aws_endpoint_url.clone(),
-                });
-                let merge_config = firehose_parquet::merge::MergeConfig {
-                    path: path.clone(),
-                    compression,
-                    flush_bytes: *flush_bytes,
-                    dry_run: *dry_run,
-                    aws,
-                    cache_control: cache_control.clone(),
-                };
-                let result = firehose_parquet::merge::run_merge(&merge_config)?;
-                result.print();
-                return Ok(());
-            }
         }
     }
 

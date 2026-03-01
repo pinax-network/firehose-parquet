@@ -69,7 +69,9 @@ Usage: firehose-to-parquet [OPTIONS] [COMMAND]
 Commands:
   completions  Generate shell completions for the given shell
   scan         Read and inspect Parquet files (schema, row counts, sample rows)
-               Supports local paths and S3 URIs (s3://bucket/prefix)
+  validate     Check partition integrity (gaps, ordering, duplicates)
+  rollup       Roll up fine-grained partitions into coarser ones (e.g. minute → date)
+  merge        Consolidate small part files within each partition into larger files
   help         Print this message or the help of the given subcommand(s)
 
 Options:
@@ -136,6 +138,77 @@ Chain:
           Byte encoding strategy for binary fields (hashes, addresses, etc.)
           Options: binary (raw bytes), hex (0x-prefixed), base58, tron_base58, auto (chain-appropriate) [env: BYTES_ENCODING] [default: auto]
 ```
+
+## Subcommands
+
+### `scan` — Inspect Parquet Files
+
+Read and inspect Parquet files: shows schema, row counts, and sample rows. Supports local paths and S3 URIs.
+
+```bash
+firehose-to-parquet scan ./output/blocks/
+firehose-to-parquet scan s3://my-bucket/evm/blocks/
+```
+
+### `validate` — Check Partition Integrity
+
+Validates partitioned Parquet data for gaps, ordering errors, duplicates, parent hash mismatches, and timestamp reversals. Only partitions with issues are printed; valid ones are silently counted.
+
+```bash
+firehose-to-parquet validate ./output/blocks/
+firehose-to-parquet validate s3://my-bucket/evm/blocks/
+```
+
+### `rollup` — Roll Up Partitions
+
+Rolls up fine-grained partitions (e.g. `minute` or `hour`) into coarser ones (e.g. `date`). Reads source files, concatenates them by target partition, and writes new files respecting `--flush-bytes`.
+
+```bash
+# Roll up minute-partitioned data into daily partitions
+firehose-to-parquet rollup ./output/blocks/ -p date
+
+# Roll up to a different output directory
+firehose-to-parquet rollup ./output/blocks/ -o ./rolled-up/blocks/ -p date
+
+# Delete source files after successful rollup
+firehose-to-parquet rollup ./output/blocks/ -p date --delete-source
+```
+
+| Flag | Default | Description |
+|---|---|---|
+| `-o, --output` | same as source | Output path (local or S3 URI) |
+| `-p, --target-partition` | `date` | Target partition interval: `hour` or `date` |
+| `--compression` | `zstd` | Compression codec: zstd, snappy, gzip, none |
+| `--flush-bytes` | 128 MB | Max compressed bytes per output file |
+| `--delete-source` | `false` | Delete source files after successful rollup |
+
+### `merge` — Consolidate Part Files
+
+Consolidates multiple small part files within each partition directory into fewer, larger files. Unlike `rollup` (which changes partition granularity), `merge` keeps the same partition layout but reduces file count.
+
+All parts in a partition are read into memory, sorted by `block_num`, and written back as new files respecting `--flush-bytes`. Original parts are deleted after successful merge.
+
+```bash
+# Merge small parts within each partition (default 256 MB per file)
+firehose-to-parquet merge ./output/blocks/
+
+# Dry run — show what would be merged without writing
+firehose-to-parquet merge ./output/blocks/ --dry-run
+
+# Merge with custom file size limit
+firehose-to-parquet merge ./output/blocks/ --flush-bytes 536870912
+
+# Merge S3-hosted data
+firehose-to-parquet merge s3://my-bucket/evm/blocks/
+```
+
+| Flag | Default | Description |
+|---|---|---|
+| `--compression` | `zstd` | Compression codec: zstd, snappy, gzip, none |
+| `--flush-bytes` | 256 MB | Max compressed bytes per output file |
+| `--dry-run` | `false` | Show what would be merged without writing |
+
+> **Memory note:** Merge reads all parts in a partition at once. Ensure sufficient memory for the largest partition.
 
 ## Output Directory Layout
 
