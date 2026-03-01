@@ -232,6 +232,29 @@ async fn main() -> Result<()> {
                 firehose_parquet::rollup::run_rollup(&rollup_config)?;
                 return Ok(());
             }
+            Commands::Truncate {
+                path, partition, dry_run,
+                aws_access_key_id, aws_secret_access_key, aws_session_token,
+                aws_region, aws_endpoint_url,
+            } => {
+                init_tracing(&cli.common.log_level);
+                let aws = Some(firehose_parquet::cli::AwsConfig {
+                    aws_access_key_id: aws_access_key_id.clone(),
+                    aws_secret_access_key: aws_secret_access_key.clone(),
+                    aws_session_token: aws_session_token.clone(),
+                    aws_region: aws_region.clone(),
+                    aws_endpoint_url: aws_endpoint_url.clone(),
+                });
+                let truncate_config = firehose_parquet::truncate::TruncateConfig {
+                    path: path.clone(),
+                    partitions: partition.clone(),
+                    dry_run: *dry_run,
+                    aws,
+                };
+                let result = firehose_parquet::truncate::run_truncate(&truncate_config)?;
+                result.print(path, *dry_run);
+                return Ok(());
+            }
         }
     }
 
