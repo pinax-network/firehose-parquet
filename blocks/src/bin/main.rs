@@ -370,8 +370,7 @@ async fn main() -> Result<()> {
                     block_number,
                     total_rows = m.total_rows(),
                     bytes_read = firehose_parquet::cli::format_bytes(bytes_read),
-                    speed = format!("{}/s", firehose_parquet::cli::format_bytes(speed_per_sec as u64)),
-                    blocks_per_sec = format!("{:.1}", blocks_per_sec),
+                    speed = format!("{}/s | {:.0} blocks/s", firehose_parquet::cli::format_bytes(speed_per_sec as u64), blocks_per_sec),
                     "progress"
                 );
             }
