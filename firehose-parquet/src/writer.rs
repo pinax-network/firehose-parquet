@@ -14,6 +14,23 @@ use std::sync::Arc;
 use time::OffsetDateTime;
 use tracing::info;
 
+/// Key-value metadata to embed in every Parquet file's footer.
+#[derive(Debug, Clone, Default)]
+pub struct ParquetFileMetadata {
+    /// Key-value pairs to store in the Parquet file metadata.
+    pub entries: Vec<(String, String)>,
+}
+
+impl ParquetFileMetadata {
+    pub fn new() -> Self {
+        Self { entries: Vec::new() }
+    }
+
+    pub fn add(&mut self, key: impl Into<String>, value: impl Into<String>) {
+        self.entries.push((key.into(), value.into()));
+    }
+}
+
 /// Writes Arrow RecordBatches to Parquet files, handling partitioning and
 /// file naming. Supports local filesystem and S3 output.
 pub struct ParquetTableWriter {
@@ -28,6 +45,8 @@ pub struct ParquetTableWriter {
     s3_prefix: Option<String>,
     /// Cache-Control header value for S3 uploads (empty = omit).
     cache_control: String,
+    /// File-level metadata embedded in every Parquet file footer.
+    file_metadata: ParquetFileMetadata,
 }
 
 impl ParquetTableWriter {
@@ -40,6 +59,7 @@ impl ParquetTableWriter {
             s3_client: None,
             s3_prefix: None,
             cache_control: String::new(),
+            file_metadata: ParquetFileMetadata::new(),
         }
     }
 
@@ -83,6 +103,7 @@ impl ParquetTableWriter {
             s3_client: Some(Arc::new(client)),
             s3_prefix: Some(prefix),
             cache_control: config.cache_control.clone().unwrap_or_default(),
+            file_metadata: ParquetFileMetadata::new(),
         })
     }
 
@@ -279,16 +300,31 @@ impl ParquetTableWriter {
         }
     }
 
+    /// Set file-level metadata to embed in every Parquet file footer.
+    pub fn set_file_metadata(&mut self, metadata: ParquetFileMetadata) {
+        self.file_metadata = metadata;
+    }
+
     fn writer_properties(&self) -> WriterProperties {
+        use parquet::file::metadata::KeyValue;
+
         let compression = match self.compression {
             Compression::None => PqCompression::UNCOMPRESSED,
             Compression::Snappy => PqCompression::SNAPPY,
             Compression::Gzip => PqCompression::GZIP(Default::default()),
             Compression::Zstd => PqCompression::ZSTD(ZstdLevel::try_new(3).unwrap()),
         };
-        WriterProperties::builder()
-            .set_compression(compression)
-            .build()
+        let mut builder = WriterProperties::builder()
+            .set_compression(compression);
+
+        if !self.file_metadata.entries.is_empty() {
+            let kvs: Vec<KeyValue> = self.file_metadata.entries.iter()
+                .map(|(k, v)| KeyValue::new(k.clone(), Some(v.clone())))
+                .collect();
+            builder = builder.set_key_value_metadata(Some(kvs));
+        }
+
+        builder.build()
     }
 }
 
