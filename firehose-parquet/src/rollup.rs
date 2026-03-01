@@ -367,9 +367,7 @@ fn writer_properties(compression: Compression) -> WriterProperties {
 fn run_rollup_s3(config: &RollupConfig) -> Result<()> {
     use crate::writer::parse_s3_url;
 
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()?;
+    use crate::cli::block_on_async;
 
     let aws = config.aws.as_ref()
         .ok_or_else(|| anyhow::anyhow!("AWS config required for S3 rollup"))?;
@@ -387,7 +385,7 @@ fn run_rollup_s3(config: &RollupConfig) -> Result<()> {
     };
 
     // List all .parquet objects under source prefix.
-    let objects: Vec<object_store::ObjectMeta> = rt.block_on(async {
+    let objects: Vec<object_store::ObjectMeta> = block_on_async(async {
         use futures::TryStreamExt;
         let prefix = if src_prefix.is_empty() {
             None
@@ -432,7 +430,7 @@ fn run_rollup_s3(config: &RollupConfig) -> Result<()> {
         // Read all batches.
         let mut all_batches: Vec<RecordBatch> = Vec::new();
         for s3_key in group_keys {
-            let data = rt.block_on(async {
+            let data = block_on_async(async {
                 let path = object_store::path::Path::from(s3_key.as_str());
                 src_client.get(&path).await?.bytes().await
             }).map_err(|e| anyhow::anyhow!("reading s3://{src_bucket}/{s3_key}: {e}"))?;
@@ -460,7 +458,6 @@ fn run_rollup_s3(config: &RollupConfig) -> Result<()> {
 
         // Write merged data to S3.
         let written = write_merged_batches_s3(
-            &rt,
             &out_client,
             &out_bucket,
             &out_prefix,
@@ -481,7 +478,7 @@ fn run_rollup_s3(config: &RollupConfig) -> Result<()> {
     if config.delete_source && !source_keys_to_delete.is_empty() {
         info!(files = source_keys_to_delete.len(), "deleting source files from S3");
         for key in &source_keys_to_delete {
-            rt.block_on(async {
+            block_on_async(async {
                 let path = object_store::path::Path::from(key.as_str());
                 src_client.delete(&path).await
             }).map_err(|e| anyhow::anyhow!("deleting s3://{src_bucket}/{key}: {e}"))?;
@@ -499,7 +496,6 @@ fn run_rollup_s3(config: &RollupConfig) -> Result<()> {
 }
 
 fn write_merged_batches_s3(
-    rt: &tokio::runtime::Runtime,
     client: &Arc<dyn ObjectStore>,
     bucket: &str,
     prefix: &str,
@@ -529,12 +525,13 @@ fn write_merged_batches_s3(
     };
 
     let upload = |key: &str, data: Vec<u8>| -> Result<()> {
+        use crate::cli::block_on_async;
         let size = data.len();
         let path = object_store::path::Path::from(key);
         let payload = object_store::PutPayload::from(bytes::Bytes::from(data));
         let client = Arc::clone(client);
         let cc = cache_control.to_string();
-        rt.block_on(async { client.put_opts(&path, payload, crate::writer::s3_put_options(&cc)).await })
+        block_on_async(async { client.put_opts(&path, payload, crate::writer::s3_put_options(&cc)).await })
             .map_err(|e| anyhow::anyhow!("uploading s3://{bucket}/{key}: {e}"))?;
         info!(path = %key, size = %format_bytes(size as u64), "wrote merged file to S3");
         Ok(())

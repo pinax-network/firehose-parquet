@@ -12,6 +12,24 @@ pub fn load_dotenv() {
     dotenvy::dotenv().ok();
 }
 
+/// Run a future to completion, working both inside and outside of a tokio runtime.
+///
+/// When called from within `#[tokio::main]` (or any active runtime), uses
+/// `block_in_place` + the current runtime handle.  When no runtime is active,
+/// spins up a lightweight current-thread runtime.
+pub fn block_on_async<F: std::future::Future>(f: F) -> F::Output {
+    match tokio::runtime::Handle::try_current() {
+        Ok(handle) => tokio::task::block_in_place(|| handle.block_on(f)),
+        Err(_) => {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("failed to create tokio runtime");
+            rt.block_on(f)
+        }
+    }
+}
+
 // Shared CLI arguments for all firehose-to-parquet binaries.
 //
 // Embed in a per-chain `#[derive(Parser)]` struct with `#[command(flatten)]`.
@@ -447,11 +465,6 @@ fn scan_parquet_s3(path: &str, rows: usize, schema_only: bool, aws: &AwsConfig) 
     let client = builder.build()
         .map_err(|e| anyhow::anyhow!("building S3 client for bucket {bucket}: {e}"))?;
 
-    // Use a runtime for async S3 operations.
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()?;
-
     // List all .parquet objects under the prefix.
     let list_prefix = if prefix.is_empty() {
         None
@@ -459,7 +472,7 @@ fn scan_parquet_s3(path: &str, rows: usize, schema_only: bool, aws: &AwsConfig) 
         Some(object_store::path::Path::from(prefix.as_str()))
     };
 
-    let objects: Vec<object_store::ObjectMeta> = rt.block_on(async {
+    let objects: Vec<object_store::ObjectMeta> = block_on_async(async {
         use futures::TryStreamExt;
         let stream = client.list(list_prefix.as_ref());
         stream.try_collect().await
@@ -478,7 +491,7 @@ fn scan_parquet_s3(path: &str, rows: usize, schema_only: bool, aws: &AwsConfig) 
 
     for obj in &parquet_objects {
         // Download the object into memory.
-        let data = rt.block_on(async {
+        let data = block_on_async(async {
             client.get(&obj.location).await?.bytes().await
         }).map_err(|e| anyhow::anyhow!("reading s3://{bucket}/{}: {e}", obj.location))?;
 
@@ -1424,11 +1437,9 @@ fn validate_parquet_s3(path: &str, aws: &AwsConfig, opts: &ValidateOptions) -> a
     let client = builder.build()
         .map_err(|e| anyhow::anyhow!("building S3 client for bucket {bucket}: {e}"))?;
 
-    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
-
     let list_prefix = if prefix.is_empty() { None } else { Some(object_store::path::Path::from(prefix.as_str())) };
 
-    let objects: Vec<object_store::ObjectMeta> = rt.block_on(async {
+    let objects: Vec<object_store::ObjectMeta> = block_on_async(async {
         use futures::TryStreamExt;
         client.list(list_prefix.as_ref()).try_collect().await
     }).map_err(|e| anyhow::anyhow!("listing S3 objects: {e}"))?;
@@ -1451,7 +1462,7 @@ fn validate_parquet_s3(path: &str, aws: &AwsConfig, opts: &ValidateOptions) -> a
     let mut file_infos = Vec::new();
 
     for obj in &parquet_objects {
-        let data = rt.block_on(async {
+        let data = block_on_async(async {
             client.get(&obj.location).await?.bytes().await
         }).map_err(|e| anyhow::anyhow!("reading s3://{bucket}/{}: {e}", obj.location))?;
 
