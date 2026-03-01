@@ -327,8 +327,13 @@ async fn main() -> Result<()> {
 
             if blocks_processed % 100 == 0 {
                 let elapsed_secs = progress_start.elapsed().as_secs_f64();
-                let speed_per_min = if elapsed_secs > 0.0 {
-                    (bytes_read as f64 / elapsed_secs) * 60.0
+                let speed_per_sec = if elapsed_secs > 0.0 {
+                    bytes_read as f64 / elapsed_secs
+                } else {
+                    0.0
+                };
+                let blocks_per_sec = if elapsed_secs > 0.0 {
+                    blocks_processed as f64 / elapsed_secs
                 } else {
                     0.0
                 };
@@ -337,7 +342,8 @@ async fn main() -> Result<()> {
                     block_number,
                     total_rows = m.total_rows(),
                     bytes_read = firehose_parquet::cli::format_bytes(bytes_read),
-                    speed = format!("{}/min", firehose_parquet::cli::format_bytes(speed_per_min as u64)),
+                    speed = format!("{}/s", firehose_parquet::cli::format_bytes(speed_per_sec as u64)),
+                    blocks_per_sec = format!("{:.1}", blocks_per_sec),
                     "progress"
                 );
             }
