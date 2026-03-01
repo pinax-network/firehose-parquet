@@ -856,15 +856,24 @@ impl ValidateResult {
         println!("Validating blocks in {} ...\n", path);
 
         // Per-partition breakdown (if partitioned).
+        // Only show partitions with issues; valid ones are counted in the summary.
         if !self.partitions.is_empty() {
-            println!("  Partitions found:  {}\n", self.partitions.len());
+            let valid_count = self.partitions.iter().filter(|p| p.is_valid()).count();
+            let invalid_count = self.partitions.len() - valid_count;
+
+            println!("  Partitions:        {} total, {} valid, {} with issues\n",
+                self.partitions.len(), valid_count, invalid_count);
+
             for pr in &self.partitions {
+                if pr.is_valid() {
+                    continue; // skip valid partitions to keep output compact
+                }
+
                 let range = match (pr.min_block, pr.max_block) {
                     (Some(min), Some(max)) => format!("{} — {}", min, max),
                     _ => "N/A".to_string(),
                 };
-                let status = if pr.is_valid() { "✓" } else { "✗" };
-                println!("  {} {}", status, pr.partition);
+                println!("  ✗ {}", pr.partition);
                 println!("    files: {}  blocks: {}  range: {}", pr.files_scanned, pr.total_blocks, range);
 
                 for gap in &pr.gaps {
@@ -890,7 +899,9 @@ impl ValidateResult {
                     );
                 }
             }
-            println!();
+            if invalid_count > 0 {
+                println!();
+            }
         }
 
         // Schema mismatches.
