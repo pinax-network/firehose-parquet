@@ -579,7 +579,7 @@ struct TransactionsBuilder {
 impl TransactionsBuilder {
     fn new(include_fork_step: bool, encoding: &EncodeBytes) -> Self {
         Self {
-            canonical: CanonicalBuilder::new(),
+            canonical: CanonicalBuilder::with_encoding(encoding),
             slot: UInt64Builder::new(),
             transaction_index: UInt32Builder::new(),
             signature: BytesColumn::new(encoding),
@@ -659,7 +659,7 @@ struct MessagesBuilder {
 impl MessagesBuilder {
     fn new(include_fork_step: bool, encoding: &EncodeBytes) -> Self {
         Self {
-            canonical: CanonicalBuilder::new(),
+            canonical: CanonicalBuilder::with_encoding(encoding),
             slot: UInt64Builder::new(),
             transaction_index: UInt32Builder::new(),
             message_index: UInt32Builder::new(),
@@ -712,7 +712,7 @@ struct InstructionsBuilder {
 impl InstructionsBuilder {
     fn new(include_fork_step: bool, encoding: &EncodeBytes) -> Self {
         Self {
-            canonical: CanonicalBuilder::new(),
+            canonical: CanonicalBuilder::with_encoding(encoding),
             slot: UInt64Builder::new(),
             transaction_index: UInt32Builder::new(),
             instruction_index: UInt32Builder::new(),
@@ -865,7 +865,7 @@ struct AccountLookupsBuilder {
 impl AccountLookupsBuilder {
     fn new(include_fork_step: bool, encoding: &EncodeBytes) -> Self {
         Self {
-            canonical: CanonicalBuilder::new(),
+            canonical: CanonicalBuilder::with_encoding(encoding),
             slot: UInt64Builder::new(),
             transaction_index: UInt32Builder::new(),
             lookup_index: UInt32Builder::new(),

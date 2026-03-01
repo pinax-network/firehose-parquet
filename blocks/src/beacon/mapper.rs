@@ -684,7 +684,7 @@ struct BlocksBuilder {
 impl BlocksBuilder {
     fn new(include_fork_step: bool, encoding: &EncodeBytes) -> Self {
         Self {
-            canonical: CanonicalBuilder::new(),
+            canonical: CanonicalBuilder::with_encoding(encoding),
             slot: UInt64Builder::new(),
             parent_slot: UInt64Builder::new(),
             proposer_index: UInt64Builder::new(),
@@ -735,7 +735,7 @@ struct AttestationsBuilder {
 impl AttestationsBuilder {
     fn new(include_fork_step: bool, encoding: &EncodeBytes) -> Self {
         Self {
-            canonical: CanonicalBuilder::new(),
+            canonical: CanonicalBuilder::with_encoding(encoding),
             block_slot: UInt64Builder::new(),
             attestation_index: UInt32Builder::new(),
             slot: UInt64Builder::new(),
@@ -785,7 +785,7 @@ struct DepositsBuilder {
 impl DepositsBuilder {
     fn new(include_fork_step: bool, encoding: &EncodeBytes) -> Self {
         Self {
-            canonical: CanonicalBuilder::new(),
+            canonical: CanonicalBuilder::with_encoding(encoding),
             block_slot: UInt64Builder::new(),
             deposit_index: UInt32Builder::new(),
             pubkey: BytesColumn::new(encoding),
@@ -831,7 +831,7 @@ struct ProposerSlashingsBuilder {
 impl ProposerSlashingsBuilder {
     fn new(include_fork_step: bool, encoding: &EncodeBytes) -> Self {
         Self {
-            canonical: CanonicalBuilder::new(),
+            canonical: CanonicalBuilder::with_encoding(encoding),
             block_slot: UInt64Builder::new(),
             slashing_index: UInt32Builder::new(),
             header_1_slot: UInt64Builder::new(),
@@ -893,7 +893,7 @@ struct AttesterSlashingsBuilder {
 impl AttesterSlashingsBuilder {
     fn new(include_fork_step: bool, encoding: &EncodeBytes) -> Self {
         Self {
-            canonical: CanonicalBuilder::new(),
+            canonical: CanonicalBuilder::with_encoding(encoding),
             block_slot: UInt64Builder::new(),
             slashing_index: UInt32Builder::new(),
             attestation_1_slot: UInt64Builder::new(),
@@ -952,7 +952,7 @@ struct VoluntaryExitsBuilder {
 impl VoluntaryExitsBuilder {
     fn new(include_fork_step: bool, encoding: &EncodeBytes) -> Self {
         Self {
-            canonical: CanonicalBuilder::new(),
+            canonical: CanonicalBuilder::with_encoding(encoding),
             block_slot: UInt64Builder::new(),
             exit_index: UInt32Builder::new(),
             epoch: UInt64Builder::new(),
@@ -998,7 +998,7 @@ struct ExecutionPayloadBuilder {
 impl ExecutionPayloadBuilder {
     fn new(include_fork_step: bool, encoding: &EncodeBytes) -> Self {
         Self {
-            canonical: CanonicalBuilder::new(),
+            canonical: CanonicalBuilder::with_encoding(encoding),
             block_slot: UInt64Builder::new(),
             parent_hash: BytesColumn::new(encoding),
             fee_recipient: BytesColumn::new(encoding),
@@ -1053,7 +1053,7 @@ struct BlobSidecarsBuilder {
 impl BlobSidecarsBuilder {
     fn new(include_fork_step: bool, encoding: &EncodeBytes) -> Self {
         Self {
-            canonical: CanonicalBuilder::new(),
+            canonical: CanonicalBuilder::with_encoding(encoding),
             block_slot: UInt64Builder::new(),
             blob_index: UInt64Builder::new(),
             blob: BytesColumn::new(encoding),

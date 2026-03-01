@@ -7,6 +7,8 @@ use arrow::record_batch::RecordBatch;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use crate::encode::{encode_id, EncodeBytes};
+
 // ---------------------------------------------------------------------------
 // Arrow builder memory estimation helpers
 // ---------------------------------------------------------------------------
@@ -105,6 +107,7 @@ pub struct CanonicalBuilder {
     pub parent_id: StringBuilder,
     pub lib_num: UInt64Builder,
     pub timestamp: Int64Builder,
+    encoding: EncodeBytes,
 }
 
 impl CanonicalBuilder {
@@ -116,14 +119,23 @@ impl CanonicalBuilder {
             parent_id: StringBuilder::new(),
             lib_num: UInt64Builder::new(),
             timestamp: Int64Builder::new(),
+            encoding: EncodeBytes::Binary,
+        }
+    }
+
+    /// Create a builder that re-encodes block_id/parent_id through the given encoding.
+    pub fn with_encoding(encoding: &EncodeBytes) -> Self {
+        Self {
+            encoding: encoding.clone(),
+            ..Self::new()
         }
     }
 
     pub fn append(&mut self, id: &BlockIdentity) {
         self.block_num.append_value(id.block_num);
-        self.block_id.append_value(&id.block_id);
+        self.block_id.append_value(encode_id(&id.block_id, &self.encoding));
         self.parent_num.append_value(id.parent_num);
-        self.parent_id.append_value(&id.parent_id);
+        self.parent_id.append_value(encode_id(&id.parent_id, &self.encoding));
         self.lib_num.append_value(id.lib_num);
         self.timestamp.append_value(id.timestamp);
     }

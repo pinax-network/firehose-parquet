@@ -269,7 +269,7 @@ struct BlocksBuilder {
 impl BlocksBuilder {
     fn new(include_fork_step: bool, encoding: &EncodeBytes) -> Self {
         Self {
-            canonical: CanonicalBuilder::new(),
+            canonical: CanonicalBuilder::with_encoding(encoding),
             height: Int64Builder::new(),
             hash: BytesColumn::new(encoding),
             time: Int64Builder::new(),
@@ -317,7 +317,7 @@ struct TransactionsBuilder {
 impl TransactionsBuilder {
     fn new(include_fork_step: bool, encoding: &EncodeBytes) -> Self {
         Self {
-            canonical: CanonicalBuilder::new(),
+            canonical: CanonicalBuilder::with_encoding(encoding),
             tx_hash: BytesColumn::new(encoding),
             index: UInt32Builder::new(),
             code: UInt32Builder::new(),
@@ -362,7 +362,7 @@ struct EventsBuilder {
 impl EventsBuilder {
     fn new(include_fork_step: bool, encoding: &EncodeBytes) -> Self {
         Self {
-            canonical: CanonicalBuilder::new(),
+            canonical: CanonicalBuilder::with_encoding(encoding),
             source: StringBuilder::new(),
             tx_hash: BytesColumn::new(encoding),
             tx_index: Int32Builder::new(),
@@ -403,7 +403,7 @@ struct MessagesBuilder {
 impl MessagesBuilder {
     fn new(include_fork_step: bool, encoding: &EncodeBytes) -> Self {
         Self {
-            canonical: CanonicalBuilder::new(),
+            canonical: CanonicalBuilder::with_encoding(encoding),
             tx_hash: BytesColumn::new(encoding),
             tx_index: UInt32Builder::new(),
             message_index: UInt32Builder::new(),

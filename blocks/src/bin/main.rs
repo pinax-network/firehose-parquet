@@ -45,7 +45,7 @@ struct Cli {
     extended: bool,
 
     /// Byte encoding strategy for binary fields (hashes, addresses, etc.)
-    /// Options: binary (raw bytes), hex (0x-prefixed), base58, tron_base58, auto (chain-appropriate)
+    /// Options: binary (raw bytes), hex (0x-prefixed), hex_no_prefix, base58, tron_base58, auto (chain-appropriate)
     #[arg(long, env = "BYTES_ENCODING", default_value = "auto", hide_env_values = true, help_heading = "Chain")]
     bytes_encoding: String,
 }

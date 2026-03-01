@@ -14,6 +14,8 @@ pub enum EncodeBytes {
     Binary,
     /// Hex-encoded strings (0x-prefixed).
     Hex,
+    /// Hex-encoded strings (no prefix).
+    HexNoPrefix,
     /// Base58-encoded strings.
     Base58,
     /// Tron Base58Check-encoded strings (addresses only; falls back to hex for non-address sizes).
@@ -33,6 +35,7 @@ pub fn parse_encode_bytes(s: &str) -> Option<EncodeBytes> {
     match s.to_lowercase().as_str() {
         "binary" => Some(EncodeBytes::Binary),
         "hex" => Some(EncodeBytes::Hex),
+        "hex_no_prefix" => Some(EncodeBytes::HexNoPrefix),
         "base58" => Some(EncodeBytes::Base58),
         "tron_base58" => Some(EncodeBytes::TronBase58),
         _ => None, // "auto" or unknown → caller resolves
@@ -46,6 +49,11 @@ pub fn parse_encode_bytes(s: &str) -> Option<EncodeBytes> {
 /// Encode bytes to a 0x-prefixed hex string.
 pub fn encode_hex(bytes: &[u8]) -> String {
     format!("0x{}", hex::encode(bytes))
+}
+
+/// Encode bytes to a hex string without prefix.
+pub fn encode_hex_no_prefix(bytes: &[u8]) -> String {
+    hex::encode(bytes)
 }
 
 /// Encode bytes to a base58 string.
@@ -93,8 +101,30 @@ pub fn encode_bytes(bytes: &[u8], encoding: &EncodeBytes) -> String {
     match encoding {
         EncodeBytes::Binary => unreachable!("encode_bytes should not be called for Binary encoding"),
         EncodeBytes::Hex => encode_hex(bytes),
+        EncodeBytes::HexNoPrefix => encode_hex_no_prefix(bytes),
         EncodeBytes::Base58 => encode_base58(bytes),
         EncodeBytes::TronBase58 => encode_tron_base58(bytes),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ID re-encoding (block_id / parent_id from Firehose metadata)
+// ---------------------------------------------------------------------------
+
+/// Re-encode a hex ID string (from Firehose metadata) through the chosen encoding.
+/// For Binary mode, returns the string as-is (canonical fields are always Utf8).
+/// For string modes, decodes the hex string to bytes and re-encodes.
+/// If the hex string has a `0x` prefix, it is stripped before decoding.
+pub fn encode_id(id: &str, encoding: &EncodeBytes) -> String {
+    match encoding {
+        EncodeBytes::Binary => id.to_string(),
+        _ => {
+            let hex_str = id.strip_prefix("0x").unwrap_or(id);
+            match hex::decode(hex_str) {
+                Ok(bytes) => encode_bytes(&bytes, encoding),
+                Err(_) => id.to_string(), // not valid hex, keep as-is
+            }
+        }
     }
 }
 
@@ -297,9 +327,48 @@ mod tests {
     }
 
     #[test]
+    fn test_encode_hex_no_prefix() {
+        assert_eq!(encode_hex_no_prefix(&[0xde, 0xad, 0xbe, 0xef]), "deadbeef");
+        assert_eq!(encode_hex_no_prefix(&[]), "");
+    }
+
+    #[test]
+    fn test_encode_id_hex() {
+        // Without 0x prefix in input
+        assert_eq!(encode_id("deadbeef", &EncodeBytes::Hex), "0xdeadbeef");
+        // With 0x prefix in input
+        assert_eq!(encode_id("0xdeadbeef", &EncodeBytes::Hex), "0xdeadbeef");
+    }
+
+    #[test]
+    fn test_encode_id_hex_no_prefix() {
+        assert_eq!(encode_id("0xdeadbeef", &EncodeBytes::HexNoPrefix), "deadbeef");
+        assert_eq!(encode_id("deadbeef", &EncodeBytes::HexNoPrefix), "deadbeef");
+    }
+
+    #[test]
+    fn test_encode_id_binary_passthrough() {
+        assert_eq!(encode_id("deadbeef", &EncodeBytes::Binary), "deadbeef");
+        assert_eq!(encode_id("0xdeadbeef", &EncodeBytes::Binary), "0xdeadbeef");
+    }
+
+    #[test]
+    fn test_encode_id_invalid_hex() {
+        // Non-hex string should be returned as-is
+        assert_eq!(encode_id("not_hex!", &EncodeBytes::Hex), "not_hex!");
+    }
+
+    #[test]
+    fn test_parse_encode_bytes_hex_no_prefix() {
+        assert_eq!(parse_encode_bytes("hex_no_prefix"), Some(EncodeBytes::HexNoPrefix));
+        assert_eq!(parse_encode_bytes("HEX_NO_PREFIX"), Some(EncodeBytes::HexNoPrefix));
+    }
+
+    #[test]
     fn test_bytes_data_type() {
         assert_eq!(bytes_data_type(&EncodeBytes::Binary), DataType::Binary);
         assert_eq!(bytes_data_type(&EncodeBytes::Hex), DataType::Utf8);
+        assert_eq!(bytes_data_type(&EncodeBytes::HexNoPrefix), DataType::Utf8);
         assert_eq!(bytes_data_type(&EncodeBytes::Base58), DataType::Utf8);
         assert_eq!(bytes_data_type(&EncodeBytes::TronBase58), DataType::Utf8);
     }

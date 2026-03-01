@@ -511,7 +511,7 @@ struct BlocksBuilder {
 impl BlocksBuilder {
     fn new(include_fork_step: bool, encoding: &EncodeBytes) -> Self {
         Self {
-            canonical: CanonicalBuilder::new(),
+            canonical: CanonicalBuilder::with_encoding(encoding),
             height: UInt64Builder::new(),
             hash: BytesColumn::new(encoding),
             prev_hash: BytesColumn::new(encoding),
@@ -562,7 +562,7 @@ struct ChunksBuilder {
 impl ChunksBuilder {
     fn new(include_fork_step: bool, encoding: &EncodeBytes) -> Self {
         Self {
-            canonical: CanonicalBuilder::new(),
+            canonical: CanonicalBuilder::with_encoding(encoding),
             shard_id: UInt64Builder::new(),
             chunk_hash: BytesColumn::new(encoding),
             prev_state_root: BytesColumn::new(encoding),
@@ -610,7 +610,7 @@ struct TransactionsBuilder {
 impl TransactionsBuilder {
     fn new(include_fork_step: bool, encoding: &EncodeBytes) -> Self {
         Self {
-            canonical: CanonicalBuilder::new(),
+            canonical: CanonicalBuilder::with_encoding(encoding),
             hash: BytesColumn::new(encoding),
             signer_id: StringBuilder::new(),
             receiver_id: StringBuilder::new(),
@@ -655,7 +655,7 @@ struct ReceiptsBuilder {
 impl ReceiptsBuilder {
     fn new(include_fork_step: bool, encoding: &EncodeBytes) -> Self {
         Self {
-            canonical: CanonicalBuilder::new(),
+            canonical: CanonicalBuilder::with_encoding(encoding),
             receipt_id: BytesColumn::new(encoding),
             predecessor_id: StringBuilder::new(),
             receiver_id: StringBuilder::new(),
