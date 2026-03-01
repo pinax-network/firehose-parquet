@@ -724,9 +724,10 @@ pub struct ParentMismatch {
     pub actual_parent_id: String,
 }
 
-/// Summary of a validate run.
+/// Per-partition validation result.
 #[derive(Debug)]
-pub struct ValidateResult {
+pub struct PartitionResult {
+    pub partition: String,
     pub files_scanned: usize,
     pub total_blocks: u64,
     pub min_block: Option<u64>,
@@ -736,14 +737,67 @@ pub struct ValidateResult {
     pub ordering_errors: u64,
 }
 
-impl ValidateResult {
+impl PartitionResult {
     pub fn is_valid(&self) -> bool {
         self.gaps.is_empty() && self.parent_mismatches.is_empty() && self.ordering_errors == 0
+    }
+}
+
+/// Summary of a validate run (with per-partition breakdown).
+#[derive(Debug)]
+pub struct ValidateResult {
+    pub files_scanned: usize,
+    pub total_blocks: u64,
+    pub min_block: Option<u64>,
+    pub max_block: Option<u64>,
+    pub gaps: Vec<BlockGap>,
+    pub parent_mismatches: Vec<ParentMismatch>,
+    pub ordering_errors: u64,
+    /// Per-partition results (empty when data is not partitioned).
+    pub partitions: Vec<PartitionResult>,
+}
+
+impl ValidateResult {
+    pub fn is_valid(&self) -> bool {
+        self.gaps.is_empty()
+            && self.parent_mismatches.is_empty()
+            && self.ordering_errors == 0
+            && self.partitions.iter().all(|p| p.is_valid())
     }
 
     pub fn print(&self, path: &str) {
         println!("Validating blocks in {} ...\n", path);
 
+        // Per-partition breakdown (if partitioned).
+        if !self.partitions.is_empty() {
+            println!("  Partitions found:  {}\n", self.partitions.len());
+            for pr in &self.partitions {
+                let range = match (pr.min_block, pr.max_block) {
+                    (Some(min), Some(max)) => format!("{} — {}", min, max),
+                    _ => "N/A".to_string(),
+                };
+                let status = if pr.is_valid() { "✓" } else { "✗" };
+                println!("  {} {}", status, pr.partition);
+                println!("    files: {}  blocks: {}  range: {}", pr.files_scanned, pr.total_blocks, range);
+
+                for gap in &pr.gaps {
+                    let missing = gap.to - gap.from;
+                    println!("    gap: {} — {} ({} blocks missing)", gap.from, gap.to - 1, missing);
+                }
+                for mm in &pr.parent_mismatches {
+                    println!(
+                        "    parent mismatch at block {}: expected {} got {}",
+                        mm.block_num, mm.expected_parent_id, mm.actual_parent_id
+                    );
+                }
+                if pr.ordering_errors > 0 {
+                    println!("    ordering errors: {}", pr.ordering_errors);
+                }
+            }
+            println!();
+        }
+
+        // Global summary.
         let range = match (self.min_block, self.max_block) {
             (Some(min), Some(max)) => format!("{} — {}", min, max),
             _ => "N/A".to_string(),
@@ -755,17 +809,21 @@ impl ValidateResult {
         println!("  Ordering errors:   {}", self.ordering_errors);
         println!("  Gaps:              {}", self.gaps.len());
 
-        for gap in &self.gaps {
-            let missing = gap.to - gap.from;
-            println!("    gap: {} — {} ({} blocks missing)", gap.from, gap.to - 1, missing);
+        if self.partitions.is_empty() {
+            for gap in &self.gaps {
+                let missing = gap.to - gap.from;
+                println!("    gap: {} — {} ({} blocks missing)", gap.from, gap.to - 1, missing);
+            }
         }
 
         println!("  Parent mismatches: {}", self.parent_mismatches.len());
-        for mm in &self.parent_mismatches {
-            println!(
-                "    block {}: expected parent_id {} but got {}",
-                mm.block_num, mm.expected_parent_id, mm.actual_parent_id
-            );
+        if self.partitions.is_empty() {
+            for mm in &self.parent_mismatches {
+                println!(
+                    "    block {}: expected parent_id {} but got {}",
+                    mm.block_num, mm.expected_parent_id, mm.actual_parent_id
+                );
+            }
         }
 
         println!();
@@ -831,45 +889,25 @@ pub fn validate_parquet(path: &str, aws: Option<&AwsConfig>) -> anyhow::Result<V
     }
 }
 
-fn validate_from_tuples(all_tuples: Vec<(u64, String, String)>, files_scanned: usize) -> ValidateResult {
-    if all_tuples.is_empty() {
-        return ValidateResult {
-            files_scanned,
-            total_blocks: 0,
-            min_block: None,
-            max_block: None,
-            gaps: vec![],
-            parent_mismatches: vec![],
-            ordering_errors: 0,
-        };
-    }
-
-    let total_blocks = all_tuples.len() as u64;
-    let min_block = Some(all_tuples.first().unwrap().0);
-    let max_block = Some(all_tuples.last().unwrap().0);
-
+/// Check a sorted list of block tuples for gaps, ordering, and parent hash chain issues.
+fn check_tuples(tuples: &[(u64, String, String)]) -> (Vec<BlockGap>, Vec<ParentMismatch>, u64) {
     let mut gaps = Vec::new();
     let mut parent_mismatches = Vec::new();
     let mut ordering_errors = 0u64;
 
-    for i in 1..all_tuples.len() {
-        let (prev_num, ref prev_block_id, _) = all_tuples[i - 1];
-        let (curr_num, _, ref curr_parent_id) = all_tuples[i];
+    for i in 1..tuples.len() {
+        let (prev_num, ref prev_block_id, _) = tuples[i - 1];
+        let (curr_num, _, ref curr_parent_id) = tuples[i];
 
-        // Check ordering
         if curr_num <= prev_num {
             ordering_errors += 1;
         }
-
-        // Check gaps
         if curr_num > prev_num + 1 {
             gaps.push(BlockGap {
                 from: prev_num + 1,
                 to: curr_num,
             });
         }
-
-        // Check parent hash chain (only when sequential)
         if curr_num == prev_num + 1 && curr_parent_id != prev_block_id {
             parent_mismatches.push(ParentMismatch {
                 block_num: curr_num,
@@ -879,19 +917,81 @@ fn validate_from_tuples(all_tuples: Vec<(u64, String, String)>, files_scanned: u
         }
     }
 
+    (gaps, parent_mismatches, ordering_errors)
+}
+
+/// Detect the partition key from a file path by looking for Hive-style directories
+/// (e.g. `date=2026-01-01`, `block_range=0-10000`). Returns the partition directory
+/// path relative to the base, or "(root)" if no partition structure is detected.
+fn detect_partition(file_path: &str, base_path: &str) -> String {
+    let relative = file_path
+        .strip_prefix(base_path)
+        .unwrap_or(file_path)
+        .trim_start_matches('/');
+
+    // Walk directory components, collect Hive-style partition segments.
+    let parts: Vec<&str> = relative.split('/')
+        .filter(|seg| seg.contains('=') && !seg.ends_with(".parquet"))
+        .collect();
+
+    if parts.is_empty() {
+        "(root)".to_string()
+    } else {
+        parts.join("/")
+    }
+}
+
+fn validate_from_grouped(
+    groups: std::collections::BTreeMap<String, (Vec<(u64, String, String)>, usize)>,
+) -> ValidateResult {
+    let mut partitions = Vec::new();
+    let mut all_tuples: Vec<(u64, String, String)> = Vec::new();
+    let mut total_files = 0usize;
+
+    for (partition_name, (mut tuples, file_count)) in groups {
+        tuples.sort_by_key(|t| t.0);
+        total_files += file_count;
+
+        let (gaps, parent_mismatches, ordering_errors) = check_tuples(&tuples);
+        let min_block = tuples.first().map(|t| t.0);
+        let max_block = tuples.last().map(|t| t.0);
+
+        partitions.push(PartitionResult {
+            partition: partition_name,
+            files_scanned: file_count,
+            total_blocks: tuples.len() as u64,
+            min_block,
+            max_block,
+            gaps,
+            parent_mismatches,
+            ordering_errors,
+        });
+
+        all_tuples.append(&mut tuples);
+    }
+
+    // Global validation across all partitions.
+    all_tuples.sort_by_key(|t| t.0);
+    let (gaps, parent_mismatches, ordering_errors) = check_tuples(&all_tuples);
+
+    // Only include per-partition breakdown if there are multiple partitions.
+    let show_partitions = partitions.len() > 1;
+
     ValidateResult {
-        files_scanned,
-        total_blocks,
-        min_block,
-        max_block,
+        files_scanned: total_files,
+        total_blocks: all_tuples.len() as u64,
+        min_block: all_tuples.first().map(|t| t.0),
+        max_block: all_tuples.last().map(|t| t.0),
         gaps,
         parent_mismatches,
         ordering_errors,
+        partitions: if show_partitions { partitions } else { vec![] },
     }
 }
 
 fn validate_parquet_local(path: &PathBuf) -> anyhow::Result<ValidateResult> {
     use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+    use std::collections::BTreeMap;
 
     let mut files: Vec<PathBuf> = Vec::new();
     if path.is_file() {
@@ -907,11 +1007,12 @@ fn validate_parquet_local(path: &PathBuf) -> anyhow::Result<ValidateResult> {
         println!("No .parquet files found in {}", path.display());
         return Ok(ValidateResult {
             files_scanned: 0, total_blocks: 0, min_block: None, max_block: None,
-            gaps: vec![], parent_mismatches: vec![], ordering_errors: 0,
+            gaps: vec![], parent_mismatches: vec![], ordering_errors: 0, partitions: vec![],
         });
     }
 
-    let mut all_tuples: Vec<(u64, String, String)> = Vec::new();
+    let base = path.to_string_lossy().to_string();
+    let mut groups: BTreeMap<String, (Vec<(u64, String, String)>, usize)> = BTreeMap::new();
 
     for file_path in &files {
         let file = std::fs::File::open(file_path)?;
@@ -919,14 +1020,15 @@ fn validate_parquet_local(path: &PathBuf) -> anyhow::Result<ValidateResult> {
         let schema = builder.schema().clone();
         let (bn_idx, bi_idx, pi_idx) = find_canonical_indices(&schema)?;
         let reader = builder.build()?;
-        let mut tuples = extract_block_tuples(reader, bn_idx, bi_idx, pi_idx)?;
-        all_tuples.append(&mut tuples);
+        let tuples = extract_block_tuples(reader, bn_idx, bi_idx, pi_idx)?;
+
+        let partition_key = detect_partition(&file_path.to_string_lossy(), &base);
+        let entry = groups.entry(partition_key).or_insert_with(|| (Vec::new(), 0));
+        entry.0.extend(tuples);
+        entry.1 += 1;
     }
 
-    // Sort by block_num to handle files that may not be perfectly ordered
-    all_tuples.sort_by_key(|t| t.0);
-
-    Ok(validate_from_tuples(all_tuples, files.len()))
+    Ok(validate_from_grouped(groups))
 }
 
 fn validate_parquet_s3(path: &str, aws: &AwsConfig) -> anyhow::Result<ValidateResult> {
@@ -965,12 +1067,11 @@ fn validate_parquet_s3(path: &str, aws: &AwsConfig) -> anyhow::Result<ValidateRe
         println!("No .parquet files found in {path}");
         return Ok(ValidateResult {
             files_scanned: 0, total_blocks: 0, min_block: None, max_block: None,
-            gaps: vec![], parent_mismatches: vec![], ordering_errors: 0,
+            gaps: vec![], parent_mismatches: vec![], ordering_errors: 0, partitions: vec![],
         });
     }
 
-    let mut all_tuples: Vec<(u64, String, String)> = Vec::new();
-    let file_count = parquet_objects.len();
+    let mut groups: std::collections::BTreeMap<String, (Vec<(u64, String, String)>, usize)> = std::collections::BTreeMap::new();
 
     for obj in &parquet_objects {
         let data = rt.block_on(async {
@@ -981,13 +1082,15 @@ fn validate_parquet_s3(path: &str, aws: &AwsConfig) -> anyhow::Result<ValidateRe
         let schema = builder.schema().clone();
         let (bn_idx, bi_idx, pi_idx) = find_canonical_indices(&schema)?;
         let reader = builder.build()?;
-        let mut tuples = extract_block_tuples(reader, bn_idx, bi_idx, pi_idx)?;
-        all_tuples.append(&mut tuples);
+        let tuples = extract_block_tuples(reader, bn_idx, bi_idx, pi_idx)?;
+
+        let partition_key = detect_partition(obj.location.as_ref(), &prefix);
+        let entry = groups.entry(partition_key).or_insert_with(|| (Vec::new(), 0));
+        entry.0.extend(tuples);
+        entry.1 += 1;
     }
 
-    all_tuples.sort_by_key(|t| t.0);
-
-    Ok(validate_from_tuples(all_tuples, file_count))
+    Ok(validate_from_grouped(groups))
 }
 
 // ---------------------------------------------------------------------------
