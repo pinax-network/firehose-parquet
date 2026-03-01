@@ -7,7 +7,7 @@ use arrow::record_batch::RecordBatch;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::encode::{encode_id, EncodeBytes};
+use crate::encode::{bytes_data_type, BytesColumn, EncodeBytes};
 
 // ---------------------------------------------------------------------------
 // Arrow builder memory estimation helpers
@@ -88,64 +88,77 @@ pub struct BlockIdentity {
 }
 
 /// Returns the 6 canonical identity fields to prepend to every schema.
-pub fn canonical_fields() -> Vec<Field> {
+/// Uses the given encoding to determine the data type of block_id/parent_id.
+pub fn canonical_fields_with_encoding(encoding: &EncodeBytes) -> Vec<Field> {
+    let id_type = bytes_data_type(encoding);
     vec![
         Field::new("block_num", DataType::UInt64, false),
-        Field::new("block_id", DataType::Utf8, false),
+        Field::new("block_id", id_type.clone(), false),
         Field::new("parent_num", DataType::UInt64, false),
-        Field::new("parent_id", DataType::Utf8, false),
+        Field::new("parent_id", id_type, false),
         Field::new("lib_num", DataType::UInt64, false),
         Field::new("timestamp", DataType::Int64, false),
     ]
 }
 
+/// Returns the 6 canonical identity fields (Utf8 block_id/parent_id).
+/// Use `canonical_fields_with_encoding` when encoding matters.
+pub fn canonical_fields() -> Vec<Field> {
+    canonical_fields_with_encoding(&EncodeBytes::Hex)
+}
+
+/// Decode a hex block ID string to raw bytes.
+fn decode_id_bytes(id: &str) -> Vec<u8> {
+    let hex_str = id.strip_prefix("0x").unwrap_or(id);
+    hex::decode(hex_str).unwrap_or_else(|_| id.as_bytes().to_vec())
+}
+
 /// Builder for canonical identity columns. Embed in each table builder.
 pub struct CanonicalBuilder {
     pub block_num: UInt64Builder,
-    pub block_id: StringBuilder,
+    block_id: BytesColumn,
     pub parent_num: UInt64Builder,
-    pub parent_id: StringBuilder,
+    parent_id: BytesColumn,
     pub lib_num: UInt64Builder,
     pub timestamp: Int64Builder,
-    encoding: EncodeBytes,
 }
 
 impl CanonicalBuilder {
     pub fn new() -> Self {
-        Self {
-            block_num: UInt64Builder::new(),
-            block_id: StringBuilder::new(),
-            parent_num: UInt64Builder::new(),
-            parent_id: StringBuilder::new(),
-            lib_num: UInt64Builder::new(),
-            timestamp: Int64Builder::new(),
-            encoding: EncodeBytes::Binary,
-        }
+        Self::with_encoding(&EncodeBytes::Hex)
     }
 
-    /// Create a builder that re-encodes block_id/parent_id through the given encoding.
+    /// Create a builder that encodes block_id/parent_id with the given strategy.
     pub fn with_encoding(encoding: &EncodeBytes) -> Self {
         Self {
-            encoding: encoding.clone(),
-            ..Self::new()
+            block_num: UInt64Builder::new(),
+            block_id: BytesColumn::new(encoding),
+            parent_num: UInt64Builder::new(),
+            parent_id: BytesColumn::new(encoding),
+            lib_num: UInt64Builder::new(),
+            timestamp: Int64Builder::new(),
         }
     }
 
     pub fn append(&mut self, id: &BlockIdentity) {
         self.block_num.append_value(id.block_num);
-        self.block_id.append_value(encode_id(&id.block_id, &self.encoding));
         self.parent_num.append_value(id.parent_num);
-        self.parent_id.append_value(encode_id(&id.parent_id, &self.encoding));
         self.lib_num.append_value(id.lib_num);
         self.timestamp.append_value(id.timestamp);
+
+        // Decode hex ID strings to bytes, then encode through BytesColumn.
+        let block_id_bytes = decode_id_bytes(&id.block_id);
+        let parent_id_bytes = decode_id_bytes(&id.parent_id);
+        self.block_id.append_value(&block_id_bytes);
+        self.parent_id.append_value(&parent_id_bytes);
     }
 
     pub fn finish(&mut self) -> Vec<Arc<dyn arrow::array::Array>> {
         vec![
             Arc::new(self.block_num.finish()),
-            Arc::new(self.block_id.finish()),
+            self.block_id.finish(),
             Arc::new(self.parent_num.finish()),
-            Arc::new(self.parent_id.finish()),
+            self.parent_id.finish(),
             Arc::new(self.lib_num.finish()),
             Arc::new(self.timestamp.finish()),
         ]
@@ -158,9 +171,9 @@ impl CanonicalBuilder {
     /// Estimate in-memory byte usage of all canonical columns.
     pub fn estimated_bytes(&self) -> usize {
         est_u64(&self.block_num)
-            + est_str(&self.block_id)
+            + self.block_id.estimated_bytes()
             + est_u64(&self.parent_num)
-            + est_str(&self.parent_id)
+            + self.parent_id.estimated_bytes()
             + est_u64(&self.lib_num)
             + est_i64(&self.timestamp)
     }

@@ -3,6 +3,7 @@ use super::schema;
 use arrow::array::*;
 use arrow::datatypes::Schema;
 use arrow::record_batch::RecordBatch;
+use firehose_parquet::encode::EncodeBytes;
 use firehose_parquet::traits::{
     est_f64, est_i32, est_i64, est_list_str, est_opt_str, est_str, est_u32,
     BlockIdentity, BlockMapper, CanonicalBuilder,
@@ -44,16 +45,16 @@ pub struct BitcoinBlockMapper {
 }
 
 impl BitcoinBlockMapper {
-    pub fn new(include_fork_step: bool) -> Self {
+    pub fn new(include_fork_step: bool, encoding: EncodeBytes) -> Self {
         Self {
-            blocks: BlocksBuilder::new(include_fork_step),
-            transactions: TransactionsBuilder::new(include_fork_step),
-            inputs: InputsBuilder::new(include_fork_step),
-            outputs: OutputsBuilder::new(include_fork_step),
-            blocks_schema: schema::blocks_schema(include_fork_step),
-            transactions_schema: schema::transactions_schema(include_fork_step),
-            inputs_schema: schema::inputs_schema(include_fork_step),
-            outputs_schema: schema::outputs_schema(include_fork_step),
+            blocks: BlocksBuilder::new(include_fork_step, &encoding),
+            transactions: TransactionsBuilder::new(include_fork_step, &encoding),
+            inputs: InputsBuilder::new(include_fork_step, &encoding),
+            outputs: OutputsBuilder::new(include_fork_step, &encoding),
+            blocks_schema: schema::blocks_schema(include_fork_step, &encoding),
+            transactions_schema: schema::transactions_schema(include_fork_step, &encoding),
+            inputs_schema: schema::inputs_schema(include_fork_step, &encoding),
+            outputs_schema: schema::outputs_schema(include_fork_step, &encoding),
         }
     }
 
@@ -267,9 +268,9 @@ struct BlocksBuilder {
 }
 
 impl BlocksBuilder {
-    fn new(include_fork_step: bool) -> Self {
+    fn new(include_fork_step: bool, encoding: &EncodeBytes) -> Self {
         Self {
-            canonical: CanonicalBuilder::new(),
+            canonical: CanonicalBuilder::with_encoding(encoding),
             hash: StringBuilder::new(),
             height: Int64Builder::new(),
             previous_hash: StringBuilder::new(),
@@ -330,9 +331,9 @@ struct TransactionsBuilder {
 }
 
 impl TransactionsBuilder {
-    fn new(include_fork_step: bool) -> Self {
+    fn new(include_fork_step: bool, encoding: &EncodeBytes) -> Self {
         Self {
-            canonical: CanonicalBuilder::new(),
+            canonical: CanonicalBuilder::with_encoding(encoding),
             txid: StringBuilder::new(),
             hash: StringBuilder::new(),
             size: Int32Builder::new(),
@@ -384,9 +385,9 @@ struct InputsBuilder {
 }
 
 impl InputsBuilder {
-    fn new(include_fork_step: bool) -> Self {
+    fn new(include_fork_step: bool, encoding: &EncodeBytes) -> Self {
         Self {
-            canonical: CanonicalBuilder::new(),
+            canonical: CanonicalBuilder::with_encoding(encoding),
             tx_hash: StringBuilder::new(),
             block_height: Int64Builder::new(),
             input_index: UInt32Builder::new(),
@@ -434,9 +435,9 @@ struct OutputsBuilder {
 }
 
 impl OutputsBuilder {
-    fn new(include_fork_step: bool) -> Self {
+    fn new(include_fork_step: bool, encoding: &EncodeBytes) -> Self {
         Self {
-            canonical: CanonicalBuilder::new(),
+            canonical: CanonicalBuilder::with_encoding(encoding),
             tx_hash: StringBuilder::new(),
             block_height: Int64Builder::new(),
             output_index: UInt32Builder::new(),
@@ -534,7 +535,7 @@ mod tests {
     fn test_map_and_flush() {
         let block = make_test_block(0);
         let block_bytes = prost::Message::encode_to_vec(&block);
-        let mut mapper = BitcoinBlockMapper::new(false);
+        let mut mapper = BitcoinBlockMapper::new(false, EncodeBytes::Hex);
         mapper.map_block(&block_bytes, &BlockIdentity::default(), None).unwrap();
 
         let batches = mapper.flush().unwrap();
@@ -566,7 +567,7 @@ mod tests {
             mediantime: 0,
         };
         let block_bytes = prost::Message::encode_to_vec(&block);
-        let mut mapper = BitcoinBlockMapper::new(false);
+        let mut mapper = BitcoinBlockMapper::new(false, EncodeBytes::Hex);
         mapper.map_block(&block_bytes, &BlockIdentity::default(), None).unwrap();
         let batches = mapper.flush().unwrap();
         assert_eq!(batches["blocks"].num_rows(), 1);
@@ -579,7 +580,7 @@ mod tests {
     fn test_flush_resets() {
         let block = make_test_block(1);
         let block_bytes = prost::Message::encode_to_vec(&block);
-        let mut mapper = BitcoinBlockMapper::new(false);
+        let mut mapper = BitcoinBlockMapper::new(false, EncodeBytes::Hex);
         mapper.map_block(&block_bytes, &BlockIdentity::default(), None).unwrap();
         let _ = mapper.flush().unwrap();
         assert_eq!(mapper.max_table_rows(), 0);
@@ -587,7 +588,7 @@ mod tests {
 
     #[test]
     fn test_table_names() {
-        let mapper = BitcoinBlockMapper::new(false);
+        let mapper = BitcoinBlockMapper::new(false, EncodeBytes::Hex);
         assert_eq!(mapper.table_names().len(), 4);
         assert!(mapper.table_names().contains(&"blocks"));
         assert!(mapper.table_names().contains(&"transactions"));
@@ -599,7 +600,7 @@ mod tests {
     fn test_fork_step_column_included() {
         let block = make_test_block(0);
         let block_bytes = prost::Message::encode_to_vec(&block);
-        let mut mapper = BitcoinBlockMapper::new(true);
+        let mut mapper = BitcoinBlockMapper::new(true, EncodeBytes::Hex);
         mapper.map_block(&block_bytes, &BlockIdentity::default(), Some("FINAL")).unwrap();
 
         let batches = mapper.flush().unwrap();

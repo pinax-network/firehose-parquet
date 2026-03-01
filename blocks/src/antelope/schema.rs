@@ -1,6 +1,6 @@
 use arrow::datatypes::{DataType, Field, Schema};
 use firehose_parquet::encode::EncodeBytes;
-use firehose_parquet::traits::{canonical_fields, fork_step_field};
+use firehose_parquet::traits::{canonical_fields_with_encoding, fork_step_field};
 
 fn maybe_fork_step(fields: &mut Vec<Field>, include: bool) {
     if include {
@@ -8,8 +8,8 @@ fn maybe_fork_step(fields: &mut Vec<Field>, include: bool) {
     }
 }
 
-pub fn blocks_schema(include_fork_step: bool, _encoding: &EncodeBytes) -> Schema {
-    let mut fields = canonical_fields();
+pub fn blocks_schema(include_fork_step: bool, encoding: &EncodeBytes) -> Schema {
+    let mut fields = canonical_fields_with_encoding(encoding);
     fields.extend(vec![
         Field::new("number", DataType::UInt32, false),
         Field::new("hash", DataType::Utf8, false),
@@ -21,8 +21,8 @@ pub fn blocks_schema(include_fork_step: bool, _encoding: &EncodeBytes) -> Schema
     Schema::new(fields)
 }
 
-pub fn transactions_schema(include_fork_step: bool, _encoding: &EncodeBytes) -> Schema {
-    let mut fields = canonical_fields();
+pub fn transactions_schema(include_fork_step: bool, encoding: &EncodeBytes) -> Schema {
+    let mut fields = canonical_fields_with_encoding(encoding);
     fields.extend(vec![
         Field::new("tx_hash", DataType::Utf8, false),
         Field::new("index", DataType::UInt64, false),
@@ -35,8 +35,8 @@ pub fn transactions_schema(include_fork_step: bool, _encoding: &EncodeBytes) -> 
     Schema::new(fields)
 }
 
-pub fn actions_schema(include_fork_step: bool, _encoding: &EncodeBytes) -> Schema {
-    let mut fields = canonical_fields();
+pub fn actions_schema(include_fork_step: bool, encoding: &EncodeBytes) -> Schema {
+    let mut fields = canonical_fields_with_encoding(encoding);
     fields.extend(vec![
         Field::new("tx_hash", DataType::Utf8, false),
         Field::new("action_ordinal", DataType::UInt32, false),
@@ -51,8 +51,8 @@ pub fn actions_schema(include_fork_step: bool, _encoding: &EncodeBytes) -> Schem
     Schema::new(fields)
 }
 
-pub fn db_ops_schema(include_fork_step: bool, _encoding: &EncodeBytes) -> Schema {
-    let mut fields = canonical_fields();
+pub fn db_ops_schema(include_fork_step: bool, encoding: &EncodeBytes) -> Schema {
+    let mut fields = canonical_fields_with_encoding(encoding);
     fields.extend(vec![
         Field::new("tx_hash", DataType::Utf8, false),
         Field::new("action_index", DataType::UInt32, false),

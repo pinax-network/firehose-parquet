@@ -126,21 +126,21 @@ impl SolanaBlockMapper {
     pub fn new(extended: bool, include_fork_step: bool, encoding: EncodeBytes) -> Self {
         Self {
             extended,
-            blocks: BlocksBuilder::new(include_fork_step),
+            blocks: BlocksBuilder::new(include_fork_step, &encoding),
             transactions: TransactionsBuilder::new(include_fork_step, &encoding),
             vote_transactions: if extended { Some(TransactionsBuilder::new(include_fork_step, &encoding)) } else { None },
             messages: MessagesBuilder::new(include_fork_step, &encoding),
             instructions: InstructionsBuilder::new(include_fork_step, &encoding),
-            rewards: RewardsBuilder::new(include_fork_step),
-            token_balances: TokenBalancesBuilder::new(include_fork_step),
+            rewards: RewardsBuilder::new(include_fork_step, &encoding),
+            token_balances: TokenBalancesBuilder::new(include_fork_step, &encoding),
             account_lookups: AccountLookupsBuilder::new(include_fork_step, &encoding),
-            blocks_schema: schema::blocks_schema(include_fork_step),
+            blocks_schema: schema::blocks_schema(include_fork_step, &encoding),
             transactions_schema: schema::transactions_schema(include_fork_step, &encoding),
             vote_transactions_schema: schema::transactions_schema(include_fork_step, &encoding),
             messages_schema: schema::messages_schema(include_fork_step, &encoding),
             instructions_schema: schema::instructions_schema(include_fork_step, &encoding),
-            rewards_schema: schema::rewards_schema(include_fork_step),
-            token_balances_schema: schema::token_balances_schema(include_fork_step),
+            rewards_schema: schema::rewards_schema(include_fork_step, &encoding),
+            token_balances_schema: schema::token_balances_schema(include_fork_step, &encoding),
             account_lookups_schema: schema::account_lookups_schema(include_fork_step, &encoding),
         }
     }
@@ -525,9 +525,9 @@ struct BlocksBuilder {
 }
 
 impl BlocksBuilder {
-    fn new(include_fork_step: bool) -> Self {
+    fn new(include_fork_step: bool, encoding: &EncodeBytes) -> Self {
         Self {
-            canonical: CanonicalBuilder::new(),
+            canonical: CanonicalBuilder::with_encoding(encoding),
             slot: UInt64Builder::new(),
             parent_slot: UInt64Builder::new(),
             block_height: UInt64Builder::new(),
@@ -759,9 +759,9 @@ struct RewardsBuilder {
 }
 
 impl RewardsBuilder {
-    fn new(include_fork_step: bool) -> Self {
+    fn new(include_fork_step: bool, encoding: &EncodeBytes) -> Self {
         Self {
-            canonical: CanonicalBuilder::new(),
+            canonical: CanonicalBuilder::with_encoding(encoding),
             slot: UInt64Builder::new(),
             reward_index: UInt32Builder::new(),
             pubkey: StringBuilder::new(),
@@ -811,9 +811,9 @@ struct TokenBalancesBuilder {
 }
 
 impl TokenBalancesBuilder {
-    fn new(include_fork_step: bool) -> Self {
+    fn new(include_fork_step: bool, encoding: &EncodeBytes) -> Self {
         Self {
-            canonical: CanonicalBuilder::new(),
+            canonical: CanonicalBuilder::with_encoding(encoding),
             slot: UInt64Builder::new(),
             transaction_index: UInt32Builder::new(),
             balance_index: UInt32Builder::new(),

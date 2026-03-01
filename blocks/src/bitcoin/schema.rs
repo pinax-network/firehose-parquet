@@ -1,5 +1,6 @@
 use arrow::datatypes::{DataType, Field, Schema};
-use firehose_parquet::traits::{canonical_fields, fork_step_field};
+use firehose_parquet::encode::EncodeBytes;
+use firehose_parquet::traits::{canonical_fields_with_encoding, fork_step_field};
 use std::sync::Arc;
 
 fn maybe_fork_step(fields: &mut Vec<Field>, include: bool) {
@@ -8,8 +9,8 @@ fn maybe_fork_step(fields: &mut Vec<Field>, include: bool) {
     }
 }
 
-pub fn blocks_schema(include_fork_step: bool) -> Schema {
-    let mut fields = canonical_fields();
+pub fn blocks_schema(include_fork_step: bool, encoding: &EncodeBytes) -> Schema {
+    let mut fields = canonical_fields_with_encoding(encoding);
     fields.extend(vec![
         Field::new("hash", DataType::Utf8, false),
         Field::new("height", DataType::Int64, false),
@@ -31,8 +32,8 @@ pub fn blocks_schema(include_fork_step: bool) -> Schema {
     Schema::new(fields)
 }
 
-pub fn transactions_schema(include_fork_step: bool) -> Schema {
-    let mut fields = canonical_fields();
+pub fn transactions_schema(include_fork_step: bool, encoding: &EncodeBytes) -> Schema {
+    let mut fields = canonical_fields_with_encoding(encoding);
     fields.extend(vec![
         Field::new("txid", DataType::Utf8, false),
         Field::new("hash", DataType::Utf8, false),
@@ -50,8 +51,8 @@ pub fn transactions_schema(include_fork_step: bool) -> Schema {
     Schema::new(fields)
 }
 
-pub fn inputs_schema(include_fork_step: bool) -> Schema {
-    let mut fields = canonical_fields();
+pub fn inputs_schema(include_fork_step: bool, encoding: &EncodeBytes) -> Schema {
+    let mut fields = canonical_fields_with_encoding(encoding);
     fields.extend(vec![
         Field::new("tx_hash", DataType::Utf8, false),
         Field::new("block_height", DataType::Int64, false),
@@ -72,8 +73,8 @@ pub fn inputs_schema(include_fork_step: bool) -> Schema {
     Schema::new(fields)
 }
 
-pub fn outputs_schema(include_fork_step: bool) -> Schema {
-    let mut fields = canonical_fields();
+pub fn outputs_schema(include_fork_step: bool, encoding: &EncodeBytes) -> Schema {
+    let mut fields = canonical_fields_with_encoding(encoding);
     fields.extend(vec![
         Field::new("tx_hash", DataType::Utf8, false),
         Field::new("block_height", DataType::Int64, false),

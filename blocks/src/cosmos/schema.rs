@@ -1,6 +1,6 @@
 use arrow::datatypes::{DataType, Field, Schema};
 use firehose_parquet::encode::{bytes_data_type, EncodeBytes};
-use firehose_parquet::traits::{canonical_fields, fork_step_field};
+use firehose_parquet::traits::{canonical_fields_with_encoding, fork_step_field};
 
 fn maybe_fork_step(fields: &mut Vec<Field>, include: bool) {
     if include {
@@ -10,7 +10,7 @@ fn maybe_fork_step(fields: &mut Vec<Field>, include: bool) {
 
 pub fn blocks_schema(include_fork_step: bool, encoding: &EncodeBytes) -> Schema {
     let bd = bytes_data_type(encoding);
-    let mut fields = canonical_fields();
+    let mut fields = canonical_fields_with_encoding(encoding);
     fields.extend(vec![
         Field::new("height", DataType::Int64, false),
         Field::new("hash", bd.clone(), false),
@@ -28,7 +28,7 @@ pub fn blocks_schema(include_fork_step: bool, encoding: &EncodeBytes) -> Schema 
 
 pub fn transactions_schema(include_fork_step: bool, encoding: &EncodeBytes) -> Schema {
     let bd = bytes_data_type(encoding);
-    let mut fields = canonical_fields();
+    let mut fields = canonical_fields_with_encoding(encoding);
     fields.extend(vec![
         Field::new("tx_hash", bd, false),
         Field::new("index", DataType::UInt32, false),
@@ -45,7 +45,7 @@ pub fn transactions_schema(include_fork_step: bool, encoding: &EncodeBytes) -> S
 
 pub fn events_schema(include_fork_step: bool, encoding: &EncodeBytes) -> Schema {
     let bd = bytes_data_type(encoding);
-    let mut fields = canonical_fields();
+    let mut fields = canonical_fields_with_encoding(encoding);
     fields.extend(vec![
         Field::new("source", DataType::Utf8, false),
         Field::new("tx_hash", bd, false),
@@ -61,7 +61,7 @@ pub fn events_schema(include_fork_step: bool, encoding: &EncodeBytes) -> Schema 
 
 pub fn messages_schema(include_fork_step: bool, encoding: &EncodeBytes) -> Schema {
     let bd = bytes_data_type(encoding);
-    let mut fields = canonical_fields();
+    let mut fields = canonical_fields_with_encoding(encoding);
     fields.extend(vec![
         Field::new("tx_hash", bd, false),
         Field::new("tx_index", DataType::UInt32, false),

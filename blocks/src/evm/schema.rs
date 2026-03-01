@@ -1,6 +1,6 @@
 use arrow::datatypes::{DataType, Field, Schema};
 use firehose_parquet::encode::{bytes_data_type, EncodeBytes};
-use firehose_parquet::traits::{canonical_fields, fork_step_field};
+use firehose_parquet::traits::{canonical_fields_with_encoding, fork_step_field};
 
 fn maybe_fork_step(fields: &mut Vec<Field>, include: bool) {
     if include {
@@ -14,12 +14,11 @@ fn maybe_fork_step(fields: &mut Vec<Field>, include: bool) {
 
 pub fn blocks_schema(include_fork_step: bool, encoding: &EncodeBytes) -> Schema {
     let bd = bytes_data_type(encoding);
-    let mut fields = canonical_fields();
+    let mut fields = canonical_fields_with_encoding(encoding);
     fields.extend(vec![
         Field::new("number", DataType::UInt64, false),
         Field::new("hash", bd.clone(), false),
         Field::new("parent_hash", bd.clone(), false),
-        Field::new("timestamp", DataType::Int64, false),
         Field::new("gas_used", DataType::UInt64, false),
         Field::new("gas_limit", DataType::UInt64, false),
         Field::new("base_fee_per_gas", DataType::Utf8, true),
@@ -41,7 +40,7 @@ pub fn blocks_schema(include_fork_step: bool, encoding: &EncodeBytes) -> Schema 
 
 pub fn transactions_schema(include_fork_step: bool, encoding: &EncodeBytes) -> Schema {
     let bd = bytes_data_type(encoding);
-    let mut fields = canonical_fields();
+    let mut fields = canonical_fields_with_encoding(encoding);
     fields.extend(vec![
         Field::new("block_number", DataType::UInt64, false),
         Field::new("index", DataType::UInt32, false),
@@ -66,7 +65,7 @@ pub fn transactions_schema(include_fork_step: bool, encoding: &EncodeBytes) -> S
 
 pub fn logs_schema(include_fork_step: bool, encoding: &EncodeBytes) -> Schema {
     let bd = bytes_data_type(encoding);
-    let mut fields = canonical_fields();
+    let mut fields = canonical_fields_with_encoding(encoding);
     fields.extend(vec![
         Field::new("block_number", DataType::UInt64, false),
         Field::new("tx_hash", bd.clone(), false),
@@ -90,7 +89,7 @@ pub fn logs_schema(include_fork_step: bool, encoding: &EncodeBytes) -> Schema {
 
 pub fn calls_schema(include_fork_step: bool, encoding: &EncodeBytes) -> Schema {
     let bd = bytes_data_type(encoding);
-    let mut fields = canonical_fields();
+    let mut fields = canonical_fields_with_encoding(encoding);
     fields.extend(vec![
         Field::new("block_number", DataType::UInt64, false),
         Field::new("tx_hash", bd.clone(), false),
@@ -118,7 +117,7 @@ pub fn calls_schema(include_fork_step: bool, encoding: &EncodeBytes) -> Schema {
 
 pub fn balance_changes_schema(include_fork_step: bool, encoding: &EncodeBytes) -> Schema {
     let bd = bytes_data_type(encoding);
-    let mut fields = canonical_fields();
+    let mut fields = canonical_fields_with_encoding(encoding);
     fields.extend(vec![
         Field::new("block_number", DataType::UInt64, false),
         Field::new("tx_hash", bd.clone(), false),
@@ -134,7 +133,7 @@ pub fn balance_changes_schema(include_fork_step: bool, encoding: &EncodeBytes) -
 
 pub fn code_changes_schema(include_fork_step: bool, encoding: &EncodeBytes) -> Schema {
     let bd = bytes_data_type(encoding);
-    let mut fields = canonical_fields();
+    let mut fields = canonical_fields_with_encoding(encoding);
     fields.extend(vec![
         Field::new("block_number", DataType::UInt64, false),
         Field::new("tx_hash", bd.clone(), false),
@@ -151,7 +150,7 @@ pub fn code_changes_schema(include_fork_step: bool, encoding: &EncodeBytes) -> S
 
 pub fn storage_changes_schema(include_fork_step: bool, encoding: &EncodeBytes) -> Schema {
     let bd = bytes_data_type(encoding);
-    let mut fields = canonical_fields();
+    let mut fields = canonical_fields_with_encoding(encoding);
     fields.extend(vec![
         Field::new("block_number", DataType::UInt64, false),
         Field::new("tx_hash", bd.clone(), false),
@@ -167,7 +166,7 @@ pub fn storage_changes_schema(include_fork_step: bool, encoding: &EncodeBytes) -
 
 pub fn nonce_changes_schema(include_fork_step: bool, encoding: &EncodeBytes) -> Schema {
     let bd = bytes_data_type(encoding);
-    let mut fields = canonical_fields();
+    let mut fields = canonical_fields_with_encoding(encoding);
     fields.extend(vec![
         Field::new("block_number", DataType::UInt64, false),
         Field::new("tx_hash", bd.clone(), false),
@@ -182,7 +181,7 @@ pub fn nonce_changes_schema(include_fork_step: bool, encoding: &EncodeBytes) -> 
 
 pub fn gas_changes_schema(include_fork_step: bool, encoding: &EncodeBytes) -> Schema {
     let bd = bytes_data_type(encoding);
-    let mut fields = canonical_fields();
+    let mut fields = canonical_fields_with_encoding(encoding);
     fields.extend(vec![
         Field::new("block_number", DataType::UInt64, false),
         Field::new("tx_hash", bd, false),
@@ -197,7 +196,7 @@ pub fn gas_changes_schema(include_fork_step: bool, encoding: &EncodeBytes) -> Sc
 
 pub fn account_creations_schema(include_fork_step: bool, encoding: &EncodeBytes) -> Schema {
     let bd = bytes_data_type(encoding);
-    let mut fields = canonical_fields();
+    let mut fields = canonical_fields_with_encoding(encoding);
     fields.extend(vec![
         Field::new("block_number", DataType::UInt64, false),
         Field::new("tx_hash", bd.clone(), false),
@@ -214,7 +213,7 @@ pub fn account_creations_schema(include_fork_step: bool, encoding: &EncodeBytes)
 
 pub fn system_calls_schema(include_fork_step: bool, encoding: &EncodeBytes) -> Schema {
     let bd = bytes_data_type(encoding);
-    let mut fields = canonical_fields();
+    let mut fields = canonical_fields_with_encoding(encoding);
     fields.extend(vec![
         Field::new("block_number", DataType::UInt64, false),
         Field::new("call_index", DataType::UInt32, false),
@@ -240,7 +239,7 @@ pub fn system_calls_schema(include_fork_step: bool, encoding: &EncodeBytes) -> S
 
 pub fn system_balance_changes_schema(include_fork_step: bool, encoding: &EncodeBytes) -> Schema {
     let bd = bytes_data_type(encoding);
-    let mut fields = canonical_fields();
+    let mut fields = canonical_fields_with_encoding(encoding);
     fields.extend(vec![
         Field::new("block_number", DataType::UInt64, false),
         Field::new("ordinal", DataType::UInt64, false),
@@ -255,7 +254,7 @@ pub fn system_balance_changes_schema(include_fork_step: bool, encoding: &EncodeB
 
 pub fn system_code_changes_schema(include_fork_step: bool, encoding: &EncodeBytes) -> Schema {
     let bd = bytes_data_type(encoding);
-    let mut fields = canonical_fields();
+    let mut fields = canonical_fields_with_encoding(encoding);
     fields.extend(vec![
         Field::new("block_number", DataType::UInt64, false),
         Field::new("ordinal", DataType::UInt64, false),
@@ -271,7 +270,7 @@ pub fn system_code_changes_schema(include_fork_step: bool, encoding: &EncodeByte
 
 pub fn system_storage_changes_schema(include_fork_step: bool, encoding: &EncodeBytes) -> Schema {
     let bd = bytes_data_type(encoding);
-    let mut fields = canonical_fields();
+    let mut fields = canonical_fields_with_encoding(encoding);
     fields.extend(vec![
         Field::new("block_number", DataType::UInt64, false),
         Field::new("ordinal", DataType::UInt64, false),
@@ -286,7 +285,7 @@ pub fn system_storage_changes_schema(include_fork_step: bool, encoding: &EncodeB
 
 pub fn system_nonce_changes_schema(include_fork_step: bool, encoding: &EncodeBytes) -> Schema {
     let bd = bytes_data_type(encoding);
-    let mut fields = canonical_fields();
+    let mut fields = canonical_fields_with_encoding(encoding);
     fields.extend(vec![
         Field::new("block_number", DataType::UInt64, false),
         Field::new("ordinal", DataType::UInt64, false),
@@ -298,8 +297,8 @@ pub fn system_nonce_changes_schema(include_fork_step: bool, encoding: &EncodeByt
     Schema::new(fields)
 }
 
-pub fn system_gas_changes_schema(include_fork_step: bool) -> Schema {
-    let mut fields = canonical_fields();
+pub fn system_gas_changes_schema(include_fork_step: bool, encoding: &EncodeBytes) -> Schema {
+    let mut fields = canonical_fields_with_encoding(encoding);
     fields.extend(vec![
         Field::new("block_number", DataType::UInt64, false),
         Field::new("ordinal", DataType::UInt64, false),
@@ -313,7 +312,7 @@ pub fn system_gas_changes_schema(include_fork_step: bool) -> Schema {
 
 pub fn system_account_creations_schema(include_fork_step: bool, encoding: &EncodeBytes) -> Schema {
     let bd = bytes_data_type(encoding);
-    let mut fields = canonical_fields();
+    let mut fields = canonical_fields_with_encoding(encoding);
     fields.extend(vec![
         Field::new("block_number", DataType::UInt64, false),
         Field::new("ordinal", DataType::UInt64, false),

@@ -1,6 +1,6 @@
 use arrow::datatypes::{DataType, Field, Schema};
 use firehose_parquet::encode::{bytes_data_type, EncodeBytes};
-use firehose_parquet::traits::{canonical_fields, fork_step_field};
+use firehose_parquet::traits::{canonical_fields_with_encoding, fork_step_field};
 
 fn maybe_fork_step(fields: &mut Vec<Field>, include: bool) {
     if include {
@@ -10,7 +10,7 @@ fn maybe_fork_step(fields: &mut Vec<Field>, include: bool) {
 
 pub fn blocks_schema(include_fork_step: bool, encoding: &EncodeBytes) -> Schema {
     let bd = bytes_data_type(encoding);
-    let mut fields = canonical_fields();
+    let mut fields = canonical_fields_with_encoding(encoding);
     fields.extend(vec![
         Field::new("height", DataType::UInt64, false),
         Field::new("hash", bd.clone(), false),
@@ -29,7 +29,7 @@ pub fn blocks_schema(include_fork_step: bool, encoding: &EncodeBytes) -> Schema 
 
 pub fn chunks_schema(include_fork_step: bool, encoding: &EncodeBytes) -> Schema {
     let bd = bytes_data_type(encoding);
-    let mut fields = canonical_fields();
+    let mut fields = canonical_fields_with_encoding(encoding);
     fields.extend(vec![
         Field::new("shard_id", DataType::UInt64, false),
         Field::new("chunk_hash", bd.clone(), false),
@@ -47,7 +47,7 @@ pub fn chunks_schema(include_fork_step: bool, encoding: &EncodeBytes) -> Schema 
 
 pub fn transactions_schema(include_fork_step: bool, encoding: &EncodeBytes) -> Schema {
     let bd = bytes_data_type(encoding);
-    let mut fields = canonical_fields();
+    let mut fields = canonical_fields_with_encoding(encoding);
     fields.extend(vec![
         Field::new("hash", bd, false),
         Field::new("signer_id", DataType::Utf8, false),
@@ -64,7 +64,7 @@ pub fn transactions_schema(include_fork_step: bool, encoding: &EncodeBytes) -> S
 
 pub fn receipts_schema(include_fork_step: bool, encoding: &EncodeBytes) -> Schema {
     let bd = bytes_data_type(encoding);
-    let mut fields = canonical_fields();
+    let mut fields = canonical_fields_with_encoding(encoding);
     fields.extend(vec![
         Field::new("receipt_id", bd, false),
         Field::new("predecessor_id", DataType::Utf8, false),
@@ -78,8 +78,8 @@ pub fn receipts_schema(include_fork_step: bool, encoding: &EncodeBytes) -> Schem
     Schema::new(fields)
 }
 
-pub fn state_changes_schema(include_fork_step: bool, _encoding: &EncodeBytes) -> Schema {
-    let mut fields = canonical_fields();
+pub fn state_changes_schema(include_fork_step: bool, encoding: &EncodeBytes) -> Schema {
+    let mut fields = canonical_fields_with_encoding(encoding);
     fields.extend(vec![
         Field::new("type", DataType::Utf8, false),
         Field::new("cause", DataType::Utf8, false),
