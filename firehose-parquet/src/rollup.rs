@@ -530,7 +530,7 @@ fn write_merged_batches_s3(
         let path = object_store::path::Path::from(key);
         let payload = object_store::PutPayload::from(bytes::Bytes::from(data));
         let client = Arc::clone(client);
-        rt.block_on(async { client.put(&path, payload).await })
+        rt.block_on(async { client.put_opts(&path, payload, crate::writer::s3_put_options()).await })
             .map_err(|e| anyhow::anyhow!("uploading s3://{bucket}/{key}: {e}"))?;
         info!(path = %key, size = %format_bytes(size as u64), "wrote merged file to S3");
         Ok(())

@@ -125,7 +125,7 @@ impl ParquetTableWriter {
             // within a tokio multi-threaded runtime (the gRPC stream handler).
             tokio::task::block_in_place(|| {
                 tokio::runtime::Handle::current().block_on(async {
-                    s3_client.put(&s3_path, payload).await
+                    s3_client.put_opts(&s3_path, payload, s3_put_options()).await
                 })
             })
             .with_context(|| format!("uploading to S3: {s3_key}"))?;
@@ -566,6 +566,28 @@ pub fn parse_s3_url(url: &str) -> Result<(String, String)> {
         return Err(anyhow::anyhow!("S3 URL missing bucket name: {url}"));
     }
     Ok((bucket, prefix))
+}
+
+/// Returns [`object_store::PutOptions`] with immutable cache headers.
+///
+/// Sets `Cache-Control: public, max-age=31536000, immutable` so that
+/// Tigris / CloudFront / any CDN knows the file will never change.
+pub fn s3_put_options() -> object_store::PutOptions {
+    use object_store::Attribute;
+
+    let mut attrs = object_store::Attributes::new();
+    attrs.insert(
+        Attribute::CacheControl,
+        "public, max-age=31536000, immutable".into(),
+    );
+    attrs.insert(
+        Attribute::ContentType,
+        "application/vnd.apache.parquet".into(),
+    );
+    object_store::PutOptions {
+        attributes: attrs,
+        ..Default::default()
+    }
 }
 
 /// Returns `true` if the output path is an S3 URL.
