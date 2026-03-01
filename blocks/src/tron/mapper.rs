@@ -245,7 +245,7 @@ struct BlocksBuilder {
 impl BlocksBuilder {
     fn new(include_fork_step: bool, encoding: &EncodeBytes) -> Self {
         Self {
-            canonical: CanonicalBuilder::new(),
+            canonical: CanonicalBuilder::with_encoding(encoding),
             number: UInt64Builder::new(),
             hash: BytesColumn::new(encoding),
             parent_hash: BytesColumn::new(encoding),
@@ -295,7 +295,7 @@ struct TransactionsBuilder {
 impl TransactionsBuilder {
     fn new(include_fork_step: bool, encoding: &EncodeBytes) -> Self {
         Self {
-            canonical: CanonicalBuilder::new(),
+            canonical: CanonicalBuilder::with_encoding(encoding),
             block_number: UInt64Builder::new(),
             txid: BytesColumn::new(encoding),
             result: BooleanBuilder::new(),
@@ -346,7 +346,7 @@ struct LogsBuilder {
 impl LogsBuilder {
     fn new(include_fork_step: bool, encoding: &EncodeBytes) -> Self {
         Self {
-            canonical: CanonicalBuilder::new(),
+            canonical: CanonicalBuilder::with_encoding(encoding),
             block_number: UInt64Builder::new(),
             tx_hash: BytesColumn::new(encoding),
             log_index: UInt32Builder::new(),
@@ -394,7 +394,7 @@ struct InternalTransactionsBuilder {
 impl InternalTransactionsBuilder {
     fn new(include_fork_step: bool, encoding: &EncodeBytes) -> Self {
         Self {
-            canonical: CanonicalBuilder::new(),
+            canonical: CanonicalBuilder::with_encoding(encoding),
             block_number: UInt64Builder::new(),
             tx_hash: BytesColumn::new(encoding),
             internal_index: UInt32Builder::new(),

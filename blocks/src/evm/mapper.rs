@@ -765,7 +765,7 @@ struct EvmBlocksBuilder {
 impl EvmBlocksBuilder {
     fn new(include_fork_step: bool, encoding: &EncodeBytes) -> Self {
         Self {
-            canonical: CanonicalBuilder::new(),
+            canonical: CanonicalBuilder::with_encoding(encoding),
             number: UInt64Builder::new(),
             hash: BytesColumn::new(encoding),
             parent_hash: BytesColumn::new(encoding),
@@ -839,7 +839,7 @@ struct EvmTransactionsBuilder {
 impl EvmTransactionsBuilder {
     fn new(include_fork_step: bool, encoding: &EncodeBytes) -> Self {
         Self {
-            canonical: CanonicalBuilder::new(),
+            canonical: CanonicalBuilder::with_encoding(encoding),
             block_number: UInt64Builder::new(),
             index: UInt32Builder::new(),
             hash: BytesColumn::new(encoding),
@@ -904,7 +904,7 @@ struct EvmLogsBuilder {
 impl EvmLogsBuilder {
     fn new(include_fork_step: bool, encoding: &EncodeBytes) -> Self {
         Self {
-            canonical: CanonicalBuilder::new(),
+            canonical: CanonicalBuilder::with_encoding(encoding),
             block_number: UInt64Builder::new(),
             tx_hash: BytesColumn::new(encoding),
             tx_index: UInt32Builder::new(),
@@ -967,7 +967,7 @@ struct EvmCallsBuilder {
 impl EvmCallsBuilder {
     fn new(include_fork_step: bool, encoding: &EncodeBytes) -> Self {
         Self {
-            canonical: CanonicalBuilder::new(),
+            canonical: CanonicalBuilder::with_encoding(encoding),
             block_number: UInt64Builder::new(),
             tx_hash: BytesColumn::new(encoding),
             tx_index: UInt32Builder::new(),
@@ -1058,7 +1058,7 @@ struct EvmBalanceChangesBuilder {
 impl EvmBalanceChangesBuilder {
     fn new(include_fork_step: bool, encoding: &EncodeBytes) -> Self {
         Self {
-            canonical: CanonicalBuilder::new(),
+            canonical: CanonicalBuilder::with_encoding(encoding),
             block_number: UInt64Builder::new(),
             tx_hash: BytesColumn::new(encoding),
             ordinal: UInt64Builder::new(),
@@ -1114,7 +1114,7 @@ struct EvmCodeChangesBuilder {
 impl EvmCodeChangesBuilder {
     fn new(include_fork_step: bool, encoding: &EncodeBytes) -> Self {
         Self {
-            canonical: CanonicalBuilder::new(),
+            canonical: CanonicalBuilder::with_encoding(encoding),
             block_number: UInt64Builder::new(),
             tx_hash: BytesColumn::new(encoding),
             ordinal: UInt64Builder::new(),
@@ -1172,7 +1172,7 @@ struct EvmStorageChangesBuilder {
 impl EvmStorageChangesBuilder {
     fn new(include_fork_step: bool, encoding: &EncodeBytes) -> Self {
         Self {
-            canonical: CanonicalBuilder::new(),
+            canonical: CanonicalBuilder::with_encoding(encoding),
             block_number: UInt64Builder::new(),
             tx_hash: BytesColumn::new(encoding),
             ordinal: UInt64Builder::new(),
@@ -1226,7 +1226,7 @@ struct EvmNonceChangesBuilder {
 impl EvmNonceChangesBuilder {
     fn new(include_fork_step: bool, encoding: &EncodeBytes) -> Self {
         Self {
-            canonical: CanonicalBuilder::new(),
+            canonical: CanonicalBuilder::with_encoding(encoding),
             block_number: UInt64Builder::new(),
             tx_hash: BytesColumn::new(encoding),
             ordinal: UInt64Builder::new(),
@@ -1277,7 +1277,7 @@ struct EvmGasChangesBuilder {
 impl EvmGasChangesBuilder {
     fn new(include_fork_step: bool, encoding: &EncodeBytes) -> Self {
         Self {
-            canonical: CanonicalBuilder::new(),
+            canonical: CanonicalBuilder::with_encoding(encoding),
             block_number: UInt64Builder::new(),
             tx_hash: BytesColumn::new(encoding),
             ordinal: UInt64Builder::new(),
@@ -1326,7 +1326,7 @@ struct EvmAccountCreationsBuilder {
 impl EvmAccountCreationsBuilder {
     fn new(include_fork_step: bool, encoding: &EncodeBytes) -> Self {
         Self {
-            canonical: CanonicalBuilder::new(),
+            canonical: CanonicalBuilder::with_encoding(encoding),
             block_number: UInt64Builder::new(),
             tx_hash: BytesColumn::new(encoding),
             ordinal: UInt64Builder::new(),
@@ -1386,7 +1386,7 @@ struct SystemCallsBuilder {
 impl SystemCallsBuilder {
     fn new(include_fork_step: bool, encoding: &EncodeBytes) -> Self {
         Self {
-            canonical: CanonicalBuilder::new(),
+            canonical: CanonicalBuilder::with_encoding(encoding),
             block_number: UInt64Builder::new(),
             call_index: UInt32Builder::new(),
             parent_index: UInt32Builder::new(),
@@ -1470,7 +1470,7 @@ struct SystemBalanceChangesBuilder {
 impl SystemBalanceChangesBuilder {
     fn new(include_fork_step: bool, encoding: &EncodeBytes) -> Self {
         Self {
-            canonical: CanonicalBuilder::new(),
+            canonical: CanonicalBuilder::with_encoding(encoding),
             block_number: UInt64Builder::new(),
             ordinal: UInt64Builder::new(),
             address: BytesColumn::new(encoding),
@@ -1522,7 +1522,7 @@ struct SystemCodeChangesBuilder {
 impl SystemCodeChangesBuilder {
     fn new(include_fork_step: bool, encoding: &EncodeBytes) -> Self {
         Self {
-            canonical: CanonicalBuilder::new(),
+            canonical: CanonicalBuilder::with_encoding(encoding),
             block_number: UInt64Builder::new(),
             ordinal: UInt64Builder::new(),
             address: BytesColumn::new(encoding),
@@ -1576,7 +1576,7 @@ struct SystemStorageChangesBuilder {
 impl SystemStorageChangesBuilder {
     fn new(include_fork_step: bool, encoding: &EncodeBytes) -> Self {
         Self {
-            canonical: CanonicalBuilder::new(),
+            canonical: CanonicalBuilder::with_encoding(encoding),
             block_number: UInt64Builder::new(),
             ordinal: UInt64Builder::new(),
             address: BytesColumn::new(encoding),
@@ -1626,7 +1626,7 @@ struct SystemNonceChangesBuilder {
 impl SystemNonceChangesBuilder {
     fn new(include_fork_step: bool, encoding: &EncodeBytes) -> Self {
         Self {
-            canonical: CanonicalBuilder::new(),
+            canonical: CanonicalBuilder::with_encoding(encoding),
             block_number: UInt64Builder::new(),
             ordinal: UInt64Builder::new(),
             address: BytesColumn::new(encoding),
@@ -1671,9 +1671,9 @@ struct SystemGasChangesBuilder {
 }
 
 impl SystemGasChangesBuilder {
-    fn new(include_fork_step: bool, _encoding: &EncodeBytes) -> Self {
+    fn new(include_fork_step: bool, encoding: &EncodeBytes) -> Self {
         Self {
-            canonical: CanonicalBuilder::new(),
+            canonical: CanonicalBuilder::with_encoding(encoding),
             block_number: UInt64Builder::new(),
             ordinal: UInt64Builder::new(),
             old_value: UInt64Builder::new(),
@@ -1718,7 +1718,7 @@ struct SystemAccountCreationsBuilder {
 impl SystemAccountCreationsBuilder {
     fn new(include_fork_step: bool, encoding: &EncodeBytes) -> Self {
         Self {
-            canonical: CanonicalBuilder::new(),
+            canonical: CanonicalBuilder::with_encoding(encoding),
             block_number: UInt64Builder::new(),
             ordinal: UInt64Builder::new(),
             account: BytesColumn::new(encoding),
