@@ -1149,6 +1149,18 @@ impl ValidateResult {
 /// A block tuple: (block_num, block_id, parent_id, timestamp).
 type BlockTuple = (u64, String, String, i64);
 
+/// Read a string value from a column that may be Utf8 or Binary.
+fn read_id_string(col: &dyn arrow::array::Array, row: usize, col_name: &str) -> anyhow::Result<String> {
+    use arrow::array::{BinaryArray, StringArray};
+    if let Some(s) = col.as_any().downcast_ref::<StringArray>() {
+        Ok(s.value(row).to_string())
+    } else if let Some(b) = col.as_any().downcast_ref::<BinaryArray>() {
+        Ok(hex::encode(b.value(row)))
+    } else {
+        Err(anyhow::anyhow!("{} column is not Utf8 or Binary", col_name))
+    }
+}
+
 /// Extract block tuples from a parquet record batch reader.
 fn extract_block_tuples(
     reader: impl Iterator<Item = Result<arrow::record_batch::RecordBatch, arrow::error::ArrowError>>,
@@ -1157,7 +1169,7 @@ fn extract_block_tuples(
     parent_id_idx: usize,
     timestamp_idx: Option<usize>,
 ) -> anyhow::Result<Vec<BlockTuple>> {
-    use arrow::array::{Int64Array, StringArray, UInt64Array};
+    use arrow::array::{Int64Array, UInt64Array};
 
     let mut tuples = Vec::new();
     for batch_result in reader {
@@ -1165,12 +1177,8 @@ fn extract_block_tuples(
         let block_nums = batch.column(block_num_idx)
             .as_any().downcast_ref::<UInt64Array>()
             .ok_or_else(|| anyhow::anyhow!("block_num column is not UInt64"))?;
-        let block_ids = batch.column(block_id_idx)
-            .as_any().downcast_ref::<StringArray>()
-            .ok_or_else(|| anyhow::anyhow!("block_id column is not Utf8"))?;
-        let parent_ids = batch.column(parent_id_idx)
-            .as_any().downcast_ref::<StringArray>()
-            .ok_or_else(|| anyhow::anyhow!("parent_id column is not Utf8"))?;
+        let block_id_col = batch.column(block_id_idx).as_ref();
+        let parent_id_col = batch.column(parent_id_idx).as_ref();
         let timestamps = timestamp_idx.map(|idx| {
             batch.column(idx).as_any().downcast_ref::<Int64Array>()
         }).flatten();
@@ -1179,8 +1187,8 @@ fn extract_block_tuples(
             let ts = timestamps.map(|a| a.value(i)).unwrap_or(0);
             tuples.push((
                 block_nums.value(i),
-                block_ids.value(i).to_string(),
-                parent_ids.value(i).to_string(),
+                read_id_string(block_id_col, i, "block_id")?,
+                read_id_string(parent_id_col, i, "parent_id")?,
                 ts,
             ));
         }
