@@ -25,11 +25,18 @@ A production-grade Rust toolkit that consumes [StreamingFast Firehose](https://f
 - **Canonical identity columns** — `block_num`, `block_id`, `parent_num`, `parent_id`, `lib_num`, `timestamp` on every table (from Firehose `BlockMetadata`)
 - **gRPC streaming** — connects to any Firehose v2 endpoint via tonic, with TLS and API key / JWT auth
 - **Automatic retry / resume** — exponential back-off on connection errors; resumes from the last cursor
-- **Partitioning** — `none`, `block_range`, `date`, or `hour` layouts
+- **Cursor persistence** — pipeline state saved as `cursor.parquet` with full parameter validation on resume
+- **S3-aware cursor** — cursor automatically stored alongside output (local or S3)
+- **Partitioning** — `none`, `block_range`, `date`, `hour`, `minute`, or `second` layouts
 - **File rollover** — flush by row count, byte size, or time interval
 - **Fork handling** — `--final-blocks-only` (default) or include `fork_step` column (`NEW`/`UNDO`/`FINAL`)
+- **Failed transaction filtering** — `--include-failed-transactions` to opt in to failed/reverted txs (excluded by default)
 - **Byte encoding** — configurable encoding for binary fields: `binary` (raw), `hex`, `base58`, `tron_base58`, `auto`
 - **Compression** — zstd (default), snappy, gzip, or none
+- **Parquet file metadata** — every file embeds pipeline provenance (`firehose-parquet.*` key-value pairs) in the Parquet footer
+- **Prometheus metrics** — opt-in `/metrics` endpoint for monitoring throughput, buffer state, and errors
+- **Graceful shutdown** — SIGINT/SIGTERM flush all buffers and save cursor before exit
+- **Docker support** — multi-stage Dockerfile, published to GHCR
 - **Arrow-native pipeline** — column builders produce `RecordBatch`es that flush to Parquet
 
 ## Quick Start
@@ -57,6 +64,96 @@ cargo build --release --workspace
   --bytes-encoding hex
 ```
 
+### Docker
+
+The image is published to GitHub Container Registry on each release:
+
+```bash
+docker pull ghcr.io/pinax-network/firehose-parquet:latest
+
+docker run --rm \
+  -e SUBSTREAMS_API_KEY=your-key \
+  -v $(pwd)/output:/output \
+  ghcr.io/pinax-network/firehose-parquet \
+  --endpoint https://eth.firehose.pinax.network:443 \
+  --start-block 19000000 \
+  --stop-block 19001000 \
+  --output /output \
+  --partition date
+```
+
+## Cursor & Resume
+
+`firehose-parquet` persists pipeline state in a `cursor.parquet` file so streams can be interrupted and resumed without re-processing blocks. The cursor system provides deterministic, crash-safe resume with full parameter validation.
+
+### How It Works
+
+1. **Synchronized flush** — when any table triggers a file rollover (partition change or size threshold), *all* tables are flushed together. This ensures every table is consistent at the cursor point.
+2. **Cursor saved after writes** — `cursor.parquet` is only updated *after* all table files have been successfully written to disk (or S3). If the process crashes mid-write, the cursor still points to the last complete flush.
+3. **Resume from cursor** — on startup, if `cursor.parquet` exists, the pipeline sends the stored Firehose cursor token to resume the gRPC stream exactly where it left off.
+
+### Cursor File Format
+
+The cursor is stored as a single-row Parquet file with two layers of data:
+
+**Row data** (essential resume state):
+
+| Column | Type | Description |
+|---|---|---|
+| `cursor` | Utf8 | Firehose opaque cursor token |
+| `last_block_num` | UInt64 | Last processed block number |
+| `last_block_id` | Binary | Last processed block ID (raw bytes) |
+| `updated_at` | Utf8 | ISO 8601 timestamp of last save |
+| `start_block` | UInt64 (nullable) | Pipeline start block |
+| `stop_block` | UInt64 (nullable) | Pipeline stop block |
+| `extended` | Boolean | Whether extended mode was enabled |
+| `final_blocks_only` | Boolean | Whether only finalized blocks were processed |
+| `include_failed_transactions` | Boolean | Whether failed txs were included |
+
+**File-level metadata** (Parquet key-value pairs in `firehose-parquet.*` namespace):
+
+Pipeline configuration and firehose endpoint metadata are embedded in the file footer — same convention as table files. This includes `endpoint`, `chain_name`, `partition`, `compression`, `bytes_encoding`, and more.
+
+### S3-Aware Cursor
+
+When output is written to S3, the cursor file is automatically placed alongside the data in the same S3 bucket/prefix — no special configuration needed:
+
+| Output | `--cursor` value | Cursor location |
+|---|---|---|
+| `./output` | *(default)* | `./cursor.parquet` |
+| `s3://bucket/prefix` | *(default)* | `s3://bucket/prefix/cursor.parquet` |
+| `s3://bucket/prefix` | `my-cursor.parquet` | `s3://bucket/prefix/my-cursor.parquet` |
+| `s3://bucket/prefix` | `s3://other/path.parquet` | `s3://other/path.parquet` |
+
+### Parameter Validation on Resume
+
+When resuming from an existing `cursor.parquet`, the pipeline validates that the current CLI parameters match those stored in the cursor. Checked parameters include:
+
+- `start_block`, `stop_block`, `extended`, `final_blocks_only`, `include_failed_transactions`
+- `endpoint`, `partition`, `block_range_size`, `compression`, `bytes_encoding` (from file metadata)
+
+If any parameter differs, the pipeline exits with a clear error showing the mismatches. Use `--cursor-override` to force resume with the current parameters (e.g. when intentionally changing `stop_block`).
+
+```bash
+# Force resume despite parameter changes
+firehose-parquet \
+  --endpoint https://eth.firehose.pinax.network:443 \
+  --cursor cursor.parquet \
+  --cursor-override \
+  --stop-block 20000000
+```
+
+### Graceful Shutdown
+
+On SIGINT (Ctrl-C) or SIGTERM, the pipeline:
+
+1. Stops consuming new blocks from the gRPC stream
+2. Flushes all in-memory buffers to Parquet files
+3. Saves the cursor for the last successfully written block
+4. Exits cleanly
+
+This prevents corrupted or partial files and ensures the next run resumes from a consistent point.
+
 ## CLI Reference
 
 ```
@@ -72,6 +169,7 @@ Commands:
   validate     Check partition integrity (gaps, ordering, duplicates)
   rollup       Roll up fine-grained partitions into coarser ones (e.g. minute → date)
   merge        Consolidate small part files within each partition into larger files
+  truncate     Delete parquet files with optional partition filtering
   help         Print this message or the help of the given subcommand(s)
 
 Options:
@@ -87,11 +185,14 @@ Connection:
           Name of environment variable containing the API key for authentication [env: API_KEY_ENVVAR] [default: SUBSTREAMS_API_KEY]
       --api-token-envvar <API_TOKEN_ENVVAR>
           Name of environment variable containing the JWT bearer token for authentication [env: API_TOKEN_ENVVAR] [default: SUBSTREAMS_API_TOKEN]
+      --metrics-port <METRICS_PORT>
+          Prometheus /metrics HTTP port [env: METRICS_PORT]
 
 Block Range:
   -s, --start-block <START_BLOCK>  Start block number (inclusive) [env: START_BLOCK]
   -t, --stop-block <STOP_BLOCK>    Stop block number (inclusive, 0 = stream forever) [env: STOP_BLOCK]
   -c, --cursor <CURSOR>            Path to cursor file for resuming a previous session [env: CURSOR]
+      --cursor-override            Override cursor parameter validation on resume [env: CURSOR_OVERRIDE]
       --final-blocks-only          Only process finalized blocks (when false, adds fork_step column) [env: FINAL_BLOCKS_ONLY]
 
 Output:
@@ -137,6 +238,8 @@ Chain:
       --bytes-encoding <BYTES_ENCODING>
           Byte encoding strategy for binary fields (hashes, addresses, etc.)
           Options: binary (raw bytes), hex (0x-prefixed), base58, tron_base58, auto (chain-appropriate) [env: BYTES_ENCODING] [default: auto]
+      --include-failed-transactions
+          Include failed/reverted transactions in output (default: false) [env: INCLUDE_FAILED_TRANSACTIONS]
 ```
 
 ## Subcommands
@@ -157,7 +260,14 @@ Validates partitioned Parquet data for gaps, ordering errors, duplicates, parent
 ```bash
 firehose-parquet validate ./output/blocks/
 firehose-parquet validate s3://my-bucket/evm/blocks/
+
+# Solana: allow skipped slots (normal chain behavior, not data corruption)
+firehose-parquet validate s3://my-bucket/solana/blocks/ --allow-gaps
 ```
+
+| Flag | Default | Description |
+|---|---|---|
+| `--allow-gaps` | `false` | Suppress gap reporting (useful for Solana skipped slots) |
 
 ### `rollup` — Roll Up Partitions
 
@@ -210,10 +320,144 @@ firehose-parquet merge s3://my-bucket/evm/blocks/
 
 > **Memory note:** Merge reads all parts in a partition at once. Ensure sufficient memory for the largest partition.
 
+> **Metadata preservation:** Both `merge` and `rollup` preserve Parquet file-level metadata (`firehose-parquet.*` keys) from the source files into the output files.
+
+### `truncate` — Delete Parquet Files
+
+Deletes `.parquet` files from local filesystem or S3 with optional partition filtering. Supports glob patterns for flexible selection.
+
+```bash
+# Delete all parquet files in a directory
+firehose-parquet truncate ./output/blocks/
+
+# Delete a specific partition
+firehose-parquet truncate ./output/blocks/ -p "date=2026-01-01"
+
+# Delete all partitions under a key
+firehose-parquet truncate ./output/blocks/ -p date
+
+# Glob pattern matching
+firehose-parquet truncate s3://bucket/prefix -p "date=2026-01-*"
+
+# Multiple partitions
+firehose-parquet truncate ./output/ -p "date=2026-01-01" -p "date=2026-01-02"
+
+# Dry run — show what would be deleted
+firehose-parquet truncate ./output/blocks/ --dry-run
+```
+
+| Flag | Default | Description |
+|---|---|---|
+| `-p, --partition` | *(none)* | Partition filter (repeatable, supports globs) |
+| `--dry-run` | `false` | Show what would be deleted without removing files |
+
+## Failed Transaction Filtering
+
+By default, failed/reverted transactions are excluded from output. Use `--include-failed-transactions` to include them.
+
+Per-chain filtering logic:
+
+| Chain | Filter condition |
+|---|---|
+| **Solana** | `meta.err` has non-empty bytes |
+| **EVM** | `status != 1` |
+| **NEAR** | `status == "Failure"` |
+| **Cosmos** | `code != 0` in `TxResult` |
+| **Tron** | `result != "SUCCESS"` |
+| **Antelope** | Filtered by action trace status |
+| **Bitcoin** | *(not applicable — Bitcoin has no failed txs)* |
+
+When failed transactions are included, chain-specific fields like Solana's `err` bytes and `success` flag reflect the actual transaction status.
+
+## Prometheus Metrics
+
+Enable the metrics server with `--metrics-port <PORT>` (env: `METRICS_PORT`). A lightweight HTTP server binds to `0.0.0.0:<PORT>` serving three endpoints:
+
+| Endpoint | Description |
+|---|---|
+| `/metrics` | Prometheus text exposition format |
+| `/health` | Returns `200 OK` (liveness check) |
+| `/ready` | Returns `200 OK` (readiness check) |
+
+### Available Metrics
+
+| Metric | Type | Labels | Description |
+|---|---|---|---|
+| `firehose_parquet_blocks_processed_total` | Counter | — | Total blocks processed since start |
+| `firehose_parquet_bytes_read_total` | Counter | — | Total protobuf bytes consumed from stream |
+| `firehose_parquet_rows_written_total` | Counter | `table` | Rows written per table |
+| `firehose_parquet_current_block_number` | Gauge | — | Most recently processed block number |
+| `firehose_parquet_min_block_number` | Gauge | — | Minimum block number seen |
+| `firehose_parquet_max_block_number` | Gauge | — | Maximum block number seen |
+| `firehose_parquet_blocks_per_second` | Gauge | — | Rolling throughput (blocks/s) |
+| `firehose_parquet_bytes_per_second` | Gauge | — | Rolling throughput (bytes/s) |
+| `firehose_parquet_elapsed_seconds` | Gauge | — | Seconds since pipeline start |
+| `firehose_parquet_files_written_total` | Counter | `table`, `partition` | Parquet files written |
+| `firehose_parquet_file_bytes_total` | Counter | `table`, `partition` | Total compressed bytes written |
+| `firehose_parquet_flushes_total` | Counter | `trigger` | Flush count by trigger type |
+| `firehose_parquet_buffer_estimated_bytes` | Gauge | `table` | Current in-memory buffer size |
+| `firehose_parquet_buffer_rows` | Gauge | `table` | Current buffered row count |
+| `firehose_parquet_cursor_saves_total` | Counter | — | Cursor persistence count |
+| `firehose_parquet_cursor_last_block_num` | Gauge | — | Block number from last saved cursor |
+| `firehose_parquet_errors_total` | Counter | `kind` | Errors by category |
+| `firehose_parquet_grpc_reconnects_total` | Counter | — | gRPC stream reconnections |
+| `firehose_parquet` | Info | *(pipeline config)* | Pipeline metadata (chain, endpoint, version) |
+
+```bash
+# Enable metrics on port 9090
+firehose-parquet \
+  --endpoint https://eth.firehose.pinax.network:443 \
+  --metrics-port 9090 \
+  --start-block 19000000
+
+# Scrape metrics
+curl http://localhost:9090/metrics
+```
+
+## Parquet File Metadata
+
+Every Parquet file written by the pipeline embeds key-value metadata in the file footer under the `firehose-parquet.*` namespace. This allows consumers to identify the source pipeline, encoding, and chain without external sidecar files.
+
+| Key | Example Value |
+|---|---|
+| `firehose-parquet.version` | `0.3.2` |
+| `firehose-parquet.block_type` | `evm` |
+| `firehose-parquet.bytes_encoding` | `hex` |
+| `firehose-parquet.endpoint` | `https://eth.firehose.pinax.network:443` |
+| `firehose-parquet.chain_name` | `eth-mainnet` |
+| `firehose-parquet.chain_name_aliases` | `ethereum,eth` |
+| `firehose-parquet.first_streamable_block_num` | `0` |
+| `firehose-parquet.first_streamable_block_id` | `0x0000...` |
+| `firehose-parquet.block_id_encoding` | `hex_0x` |
+| `firehose-parquet.block_features` | `extended,base` |
+| `firehose-parquet.compression` | `zstd` |
+| `firehose-parquet.partition` | `date` |
+| `firehose-parquet.block_range_size` | `10000` |
+
+### Reading Metadata
+
+```python
+import pyarrow.parquet as pq
+
+meta = pq.read_metadata("output/blocks/date=2026-01-15/part-000001.parquet")
+for i in range(meta.metadata.count()):
+    key = meta.metadata.keys()[i]
+    if key.startswith("firehose-parquet."):
+        print(f"{key} = {meta.metadata.values()[i]}")
+```
+
+```sql
+-- DuckDB
+SELECT key, value
+FROM parquet_kv_metadata('output/blocks/date=2026-01-15/part-000001.parquet')
+WHERE key LIKE 'firehose-parquet.%';
+```
+
 ## Output Directory Layout
 
 ```
 <chain_name>/
+├── cursor.parquet
 ├── blocks/
 │   ├── date=2026-02-25/
 │   │   ├── part-000001.parquet
@@ -271,6 +515,12 @@ CLI flags can also be set via environment variables. Copy `.env.example` to `.en
 SUBSTREAMS_API_KEY=your-api-key-here
 SUBSTREAMS_API_TOKEN=your-jwt-token-here
 
+# Prometheus metrics (optional)
+# METRICS_PORT=9090
+
+# Failed transaction filtering (optional)
+# INCLUDE_FAILED_TRANSACTIONS=true
+
 # AWS S3 output (optional)
 # AWS_ACCESS_KEY_ID=...
 # AWS_SECRET_ACCESS_KEY=...
@@ -293,6 +543,8 @@ The binary is built with [`clap`](https://docs.rs/clap) v4 using derive macros, 
 | `thiserror` | Structured error types in the core library |
 | `tracing` / `tracing-subscriber` | Structured, filterable logging |
 | `tokio` | Async runtime for gRPC streaming |
+| `prometheus-client` | Prometheus metrics exposition |
+| `object_store` | S3-compatible object storage (data + cursor) |
 
 ### Shared CLI module
 
@@ -333,8 +585,11 @@ firehose-parquet completions fish > ~/.config/fish/completions/firehose-parquet.
 ```
 firehose-parquet/
 ├── Cargo.toml                              # workspace root
+├── Dockerfile                              # multi-stage Docker build
 ├── .env.example                            # environment variables template
-├── .github/workflows/ci.yml               # CI pipeline (build + test)
+├── .github/workflows/
+│   ├── ci.yml                              # CI pipeline (build + test)
+│   └── docker-publish.yml                  # GHCR Docker image publish
 ├── proto/                                  # Protobuf definitions (flat layout)
 │   ├── firehose.proto                      # Firehose streaming protocol
 │   ├── ethereum.proto
@@ -351,8 +606,10 @@ firehose-parquet/
 │   │   └── src/
 │   │       ├── cli.rs                      # Shared CLI args, completions, helpers
 │   │       ├── config.rs                   # Config, Partition, Compression enums
+│   │       ├── cursor.rs                   # Cursor persistence (parquet format)
 │   │       ├── encode.rs                   # BytesColumn, encoding helpers
 │   │       ├── grpc.rs                     # Firehose gRPC client
+│   │       ├── metrics.rs                  # Prometheus metrics & HTTP server
 │   │       ├── traits.rs                   # BlockMapper trait, BlockIdentity
 │   │       └── writer.rs                   # Parquet writer, partitioning
 │   └── blocks/                             # Block type definitions + unified binary
