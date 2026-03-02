@@ -55,13 +55,18 @@ fn append_transaction(
     }
     builder.num_signatures.append_value(tx.signatures.len() as u32);
     builder.fee.append_value(meta.fee);
-    let has_err = meta.err.as_ref().is_some_and(|e| !e.err.is_empty());
-    if has_err {
-        builder.err.append_value(&meta.err.as_ref().unwrap().err);
+    if let Some(ref err) = meta.err {
+        if !err.err.is_empty() {
+            builder.err.append_value(&err.err);
+            builder.success.append_value(false);
+        } else {
+            builder.err.append_null();
+            builder.success.append_value(true);
+        }
     } else {
         builder.err.append_null();
+        builder.success.append_value(true);
     }
-    builder.success.append_value(!has_err);
     match meta.compute_units_consumed {
         Some(cu) => builder.compute_units_consumed.append_value(cu),
         None => builder.compute_units_consumed.append_null(),

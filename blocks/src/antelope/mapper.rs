@@ -79,7 +79,8 @@ impl AntelopeBlockMapper {
         };
 
         for trace in traces {
-            // Skip non-executed transactions (status != 1) unless flag is set
+            // Skip non-executed transactions (status != EXECUTED=1) unless flag is set.
+            // Transactions without a receipt default to NONE=0 and are also skipped.
             if !self.include_failed_transactions {
                 let status = trace.receipt.as_ref().map(|r| r.status).unwrap_or(0);
                 if status != 1 {
