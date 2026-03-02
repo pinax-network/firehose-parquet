@@ -76,6 +76,18 @@ fn log_file_metadata(meta: &ParquetFileMetadata) {
     }
 }
 
+/// Convert `InfoResponse.BlockIdEncoding` integer to a human-readable label.
+fn block_id_encoding_label(encoding: i32) -> &'static str {
+    match encoding {
+        1 => "hex",
+        2 => "hex_0x",
+        3 => "base58",
+        4 => "base64",
+        5 => "base64url",
+        _ => "0",
+    }
+}
+
 fn build_file_metadata(
     block_type: &str,
     encoding: &firehose_parquet::encode::EncodeBytes,
@@ -91,8 +103,23 @@ fn build_file_metadata(
         if !ei.chain_name.is_empty() {
             meta.add("firehose-parquet.chain_name", &ei.chain_name);
         }
-        if ei.first_streamable_block_num > 0 {
-            meta.add("firehose-parquet.first_streamable_block", ei.first_streamable_block_num.to_string());
+        if !ei.chain_name_aliases.is_empty() {
+            meta.add("firehose-parquet.chain_name_aliases", ei.chain_name_aliases.join(","));
+        }
+        if !ei.first_streamable_block_id.is_empty() {
+            meta.add("firehose-parquet.first_streamable_block_id", &ei.first_streamable_block_id);
+            // When first_streamable_block_id is present, always write
+            // first_streamable_block_num (even when 0) to confirm the
+            // endpoint explicitly provided genesis block info.
+            meta.add("firehose-parquet.first_streamable_block_num", ei.first_streamable_block_num.to_string());
+        } else if ei.first_streamable_block_num > 0 {
+            meta.add("firehose-parquet.first_streamable_block_num", ei.first_streamable_block_num.to_string());
+        }
+        if ei.block_id_encoding > 0 {
+            meta.add("firehose-parquet.block_id_encoding", block_id_encoding_label(ei.block_id_encoding));
+        }
+        if !ei.block_features.is_empty() {
+            meta.add("firehose-parquet.block_features", ei.block_features.join(","));
         }
     }
     meta
@@ -840,5 +867,130 @@ mod tests {
     #[test]
     fn test_supports_extended_none() {
         assert!(!supports_extended(&None));
+    }
+
+    // -- block_id_encoding_label tests --
+
+    #[test]
+    fn test_block_id_encoding_label() {
+        assert_eq!(block_id_encoding_label(0), "0");
+        assert_eq!(block_id_encoding_label(1), "hex");
+        assert_eq!(block_id_encoding_label(2), "hex_0x");
+        assert_eq!(block_id_encoding_label(3), "base58");
+        assert_eq!(block_id_encoding_label(4), "base64");
+        assert_eq!(block_id_encoding_label(5), "base64url");
+        assert_eq!(block_id_encoding_label(99), "0");
+    }
+
+    // -- build_file_metadata tests --
+
+    fn find_meta<'a>(meta: &'a ParquetFileMetadata, key: &str) -> Option<&'a str> {
+        meta.entries.iter().find(|(k, _)| k == key).map(|(_, v)| v.as_str())
+    }
+
+    #[test]
+    fn test_build_file_metadata_full_endpoint_info() {
+        let ei = Some(EndpointInfo {
+            chain_name: "matic".to_string(),
+            chain_name_aliases: vec!["polygon".to_string(), "matic".to_string()],
+            first_streamable_block_num: 100,
+            first_streamable_block_id: "0xabc".to_string(),
+            block_id_encoding: 2,
+            block_features: vec!["base".to_string(), "extended".to_string()],
+        });
+        let meta = build_file_metadata("evm", &EncodeBytes::Hex, "https://example.com", &ei);
+
+        assert_eq!(find_meta(&meta, "firehose-parquet.chain_name"), Some("matic"));
+        assert_eq!(find_meta(&meta, "firehose-parquet.chain_name_aliases"), Some("polygon,matic"));
+        assert_eq!(find_meta(&meta, "firehose-parquet.first_streamable_block_id"), Some("0xabc"));
+        assert_eq!(find_meta(&meta, "firehose-parquet.first_streamable_block_num"), Some("100"));
+        assert_eq!(find_meta(&meta, "firehose-parquet.block_id_encoding"), Some("hex_0x"));
+        assert_eq!(find_meta(&meta, "firehose-parquet.block_features"), Some("base,extended"));
+    }
+
+    #[test]
+    fn test_build_file_metadata_genesis_block_zero() {
+        // When first_streamable_block_id is present, first_streamable_block_num
+        // should be written even when it is 0.
+        let ei = Some(EndpointInfo {
+            chain_name: "eth".to_string(),
+            chain_name_aliases: vec![],
+            first_streamable_block_num: 0,
+            first_streamable_block_id: "0xd4e56740".to_string(),
+            block_id_encoding: 1,
+            block_features: vec![],
+        });
+        let meta = build_file_metadata("evm", &EncodeBytes::Hex, "https://example.com", &ei);
+
+        assert_eq!(find_meta(&meta, "firehose-parquet.first_streamable_block_id"), Some("0xd4e56740"));
+        assert_eq!(find_meta(&meta, "firehose-parquet.first_streamable_block_num"), Some("0"));
+    }
+
+    #[test]
+    fn test_build_file_metadata_no_block_id_skips_zero_block_num() {
+        // When first_streamable_block_id is empty and block_num is 0, neither
+        // should be written (proto default ambiguity).
+        let ei = Some(EndpointInfo {
+            chain_name: "eth".to_string(),
+            chain_name_aliases: vec![],
+            first_streamable_block_num: 0,
+            first_streamable_block_id: String::new(),
+            block_id_encoding: 0,
+            block_features: vec![],
+        });
+        let meta = build_file_metadata("evm", &EncodeBytes::Hex, "https://example.com", &ei);
+
+        assert_eq!(find_meta(&meta, "firehose-parquet.first_streamable_block_id"), None);
+        assert_eq!(find_meta(&meta, "firehose-parquet.first_streamable_block_num"), None);
+    }
+
+    #[test]
+    fn test_build_file_metadata_block_num_without_block_id() {
+        // When block_num > 0 but block_id is empty, still write block_num.
+        let ei = Some(EndpointInfo {
+            chain_name: "eth".to_string(),
+            chain_name_aliases: vec![],
+            first_streamable_block_num: 42,
+            first_streamable_block_id: String::new(),
+            block_id_encoding: 0,
+            block_features: vec![],
+        });
+        let meta = build_file_metadata("evm", &EncodeBytes::Hex, "https://example.com", &ei);
+
+        assert_eq!(find_meta(&meta, "firehose-parquet.first_streamable_block_id"), None);
+        assert_eq!(find_meta(&meta, "firehose-parquet.first_streamable_block_num"), Some("42"));
+    }
+
+    #[test]
+    fn test_build_file_metadata_no_endpoint_info() {
+        let meta = build_file_metadata("evm", &EncodeBytes::Hex, "https://example.com", &None);
+
+        assert_eq!(find_meta(&meta, "firehose-parquet.chain_name"), None);
+        assert_eq!(find_meta(&meta, "firehose-parquet.chain_name_aliases"), None);
+        assert_eq!(find_meta(&meta, "firehose-parquet.first_streamable_block_id"), None);
+        assert_eq!(find_meta(&meta, "firehose-parquet.first_streamable_block_num"), None);
+        assert_eq!(find_meta(&meta, "firehose-parquet.block_id_encoding"), None);
+        assert_eq!(find_meta(&meta, "firehose-parquet.block_features"), None);
+    }
+
+    #[test]
+    fn test_build_file_metadata_empty_optional_fields() {
+        // Empty aliases, empty block_id, unset encoding, empty features → none written.
+        let ei = Some(EndpointInfo {
+            chain_name: "eth".to_string(),
+            chain_name_aliases: vec![],
+            first_streamable_block_num: 0,
+            first_streamable_block_id: String::new(),
+            block_id_encoding: 0,
+            block_features: vec![],
+        });
+        let meta = build_file_metadata("evm", &EncodeBytes::Hex, "https://example.com", &ei);
+
+        assert_eq!(find_meta(&meta, "firehose-parquet.chain_name"), Some("eth"));
+        assert_eq!(find_meta(&meta, "firehose-parquet.chain_name_aliases"), None);
+        assert_eq!(find_meta(&meta, "firehose-parquet.first_streamable_block_id"), None);
+        assert_eq!(find_meta(&meta, "firehose-parquet.first_streamable_block_num"), None);
+        assert_eq!(find_meta(&meta, "firehose-parquet.block_id_encoding"), None);
+        assert_eq!(find_meta(&meta, "firehose-parquet.block_features"), None);
     }
 }
