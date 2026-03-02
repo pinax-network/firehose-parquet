@@ -35,6 +35,7 @@ pub struct CursorState {
     pub stop_block: Option<u64>,
     pub extended: bool,
     pub final_blocks_only: bool,
+    pub include_failed_transactions: bool,
 
     // -- File-level metadata (not stored in rows) --
     pub file_metadata: ParquetFileMetadata,
@@ -51,6 +52,7 @@ fn cursor_schema() -> Schema {
         Field::new("stop_block", DataType::UInt64, true),
         Field::new("extended", DataType::Boolean, false),
         Field::new("final_blocks_only", DataType::Boolean, false),
+        Field::new("include_failed_transactions", DataType::Boolean, false),
     ])
 }
 
@@ -69,6 +71,7 @@ impl CursorState {
                 Arc::new(UInt64Array::from(vec![self.stop_block])),
                 Arc::new(BooleanArray::from(vec![self.extended])),
                 Arc::new(BooleanArray::from(vec![self.final_blocks_only])),
+                Arc::new(BooleanArray::from(vec![self.include_failed_transactions])),
             ],
         )?;
         Ok(batch)
@@ -166,6 +169,7 @@ impl CursorState {
             stop_block: get_opt_u64("stop_block"),
             extended: get_bool("extended"),
             final_blocks_only: get_bool("final_blocks_only"),
+            include_failed_transactions: get_bool("include_failed_transactions"),
             file_metadata,
         })
     }
@@ -479,6 +483,7 @@ mod tests {
             stop_block: Some(200),
             extended: true,
             final_blocks_only: true,
+            include_failed_transactions: false,
             file_metadata: test_file_metadata(),
         };
 

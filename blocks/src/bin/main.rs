@@ -558,6 +558,7 @@ async fn main() -> Result<()> {
         stop_block: config.stop_block,
         extended,
         final_blocks_only: config.final_blocks_only,
+        include_failed_transactions,
         file_metadata: cursor_file_metadata,
         ..CursorState::default()
     };
