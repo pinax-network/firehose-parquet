@@ -33,6 +33,7 @@ fn mk_fork_step(include: bool) -> Option<StringBuilder> {
 // ---------------------------------------------------------------------------
 
 pub struct TronBlockMapper {
+    include_failed_transactions: bool,
     blocks: BlocksBuilder,
     transactions: TransactionsBuilder,
     logs: LogsBuilder,
@@ -44,9 +45,10 @@ pub struct TronBlockMapper {
 }
 
 impl TronBlockMapper {
-    pub fn new(include_fork_step: bool, encoding: EncodeBytes) -> Self {
+    pub fn new(include_fork_step: bool, encoding: EncodeBytes, include_failed_transactions: bool) -> Self {
         let enc = &encoding;
         Self {
+            include_failed_transactions,
             blocks: BlocksBuilder::new(include_fork_step, enc),
             transactions: TransactionsBuilder::new(include_fork_step, enc),
             logs: LogsBuilder::new(include_fork_step, enc),
@@ -75,6 +77,10 @@ impl TronBlockMapper {
         append_fork_step(&mut self.blocks.fork_step, fork_step);
 
         for tx in &block.transactions {
+            // Skip failed transactions (result != true) unless flag is set
+            if !self.include_failed_transactions && !tx.result {
+                continue;
+            }
             self.map_transaction(block_number, tx, identity, fork_step);
         }
     }
@@ -512,7 +518,7 @@ mod tests {
     fn test_map_and_flush() {
         let block = make_test_block(100);
         let block_bytes = prost::Message::encode_to_vec(&block);
-        let mut mapper = TronBlockMapper::new(false, EncodeBytes::Hex);
+        let mut mapper = TronBlockMapper::new(false, EncodeBytes::Hex, false);
         mapper.map_block(&block_bytes, &BlockIdentity::default(), None).unwrap();
 
         let batches = mapper.flush().unwrap();
@@ -539,7 +545,7 @@ mod tests {
             transactions: vec![],
         };
         let block_bytes = prost::Message::encode_to_vec(&block);
-        let mut mapper = TronBlockMapper::new(false, EncodeBytes::Hex);
+        let mut mapper = TronBlockMapper::new(false, EncodeBytes::Hex, false);
         mapper.map_block(&block_bytes, &BlockIdentity::default(), None).unwrap();
         let batches = mapper.flush().unwrap();
         assert_eq!(batches["blocks"].num_rows(), 1);
@@ -552,7 +558,7 @@ mod tests {
     fn test_flush_resets() {
         let block = make_test_block(1);
         let block_bytes = prost::Message::encode_to_vec(&block);
-        let mut mapper = TronBlockMapper::new(false, EncodeBytes::Hex);
+        let mut mapper = TronBlockMapper::new(false, EncodeBytes::Hex, false);
         mapper.map_block(&block_bytes, &BlockIdentity::default(), None).unwrap();
         let _ = mapper.flush().unwrap();
         assert_eq!(mapper.max_table_rows(), 0);
@@ -560,7 +566,7 @@ mod tests {
 
     #[test]
     fn test_table_names() {
-        let mapper = TronBlockMapper::new(false, EncodeBytes::Hex);
+        let mapper = TronBlockMapper::new(false, EncodeBytes::Hex, false);
         assert_eq!(mapper.table_names().len(), 4);
         assert!(mapper.table_names().contains(&"blocks"));
         assert!(mapper.table_names().contains(&"transactions"));
@@ -572,7 +578,7 @@ mod tests {
     fn test_fork_step_column_included() {
         let block = make_test_block(0);
         let block_bytes = prost::Message::encode_to_vec(&block);
-        let mut mapper = TronBlockMapper::new(true, EncodeBytes::Hex);
+        let mut mapper = TronBlockMapper::new(true, EncodeBytes::Hex, false);
         mapper.map_block(&block_bytes, &BlockIdentity::default(), Some("FINAL")).unwrap();
 
         let batches = mapper.flush().unwrap();

@@ -48,6 +48,7 @@ fn mk_fork_step(include: bool) -> Option<StringBuilder> {
 
 pub struct EvmBlockMapper {
     extended: bool,
+    include_failed_transactions: bool,
     // Standard builders
     blocks: EvmBlocksBuilder,
     transactions: EvmTransactionsBuilder,
@@ -89,10 +90,11 @@ pub struct EvmBlockMapper {
 }
 
 impl EvmBlockMapper {
-    pub fn new(extended: bool, include_fork_step: bool, encoding: EncodeBytes) -> Self {
+    pub fn new(extended: bool, include_fork_step: bool, encoding: EncodeBytes, include_failed_transactions: bool) -> Self {
         let ifs = include_fork_step;
         let enc = &encoding;
         Self {
+            include_failed_transactions,
             extended,
             blocks: EvmBlocksBuilder::new(ifs, enc),
             transactions: EvmTransactionsBuilder::new(ifs, enc),
@@ -169,6 +171,10 @@ impl EvmBlockMapper {
 
         // -- transaction traces --
         for tx in &block.transaction_traces {
+            // Skip failed transactions (status != 1) unless flag is set
+            if !self.include_failed_transactions && tx.status != 1 {
+                continue;
+            }
             self.map_transaction(number, tx, identity, fork_step);
         }
 
@@ -1929,7 +1935,7 @@ mod tests {
     fn test_base_map_and_flush() {
         let block = make_test_evm_block(100);
         let block_bytes = prost::Message::encode_to_vec(&block);
-        let mut mapper = EvmBlockMapper::new(false, false, EncodeBytes::Hex);
+        let mut mapper = EvmBlockMapper::new(false, false, EncodeBytes::Hex, false);
         mapper.map_block(&block_bytes, &BlockIdentity::default(), None).unwrap();
 
         let batches = mapper.flush().unwrap();
@@ -1943,7 +1949,7 @@ mod tests {
     fn test_extended_map_and_flush() {
         let block = make_test_evm_block(200);
         let block_bytes = prost::Message::encode_to_vec(&block);
-        let mut mapper = EvmBlockMapper::new(true, false, EncodeBytes::Hex);
+        let mut mapper = EvmBlockMapper::new(true, false, EncodeBytes::Hex, false);
         mapper.map_block(&block_bytes, &BlockIdentity::default(), None).unwrap();
 
         let batches = mapper.flush().unwrap();
@@ -1963,7 +1969,7 @@ mod tests {
     fn test_flush_resets() {
         let block = make_test_evm_block(1);
         let block_bytes = prost::Message::encode_to_vec(&block);
-        let mut mapper = EvmBlockMapper::new(true, false, EncodeBytes::Hex);
+        let mut mapper = EvmBlockMapper::new(true, false, EncodeBytes::Hex, false);
         mapper.map_block(&block_bytes, &BlockIdentity::default(), None).unwrap();
         let _ = mapper.flush().unwrap();
         assert_eq!(mapper.max_table_rows(), 0);
@@ -2012,7 +2018,7 @@ mod tests {
             withdrawals: vec![],
         };
         let block_bytes = prost::Message::encode_to_vec(&block);
-        let mut mapper = EvmBlockMapper::new(false, false, EncodeBytes::Hex);
+        let mut mapper = EvmBlockMapper::new(false, false, EncodeBytes::Hex, false);
         mapper.map_block(&block_bytes, &BlockIdentity::default(), None).unwrap();
         let batches = mapper.flush().unwrap();
         assert_eq!(batches["blocks"].num_rows(), 1);
@@ -2033,9 +2039,9 @@ mod tests {
 
     #[test]
     fn test_table_names() {
-        let mapper_base = EvmBlockMapper::new(false, false, EncodeBytes::Hex);
+        let mapper_base = EvmBlockMapper::new(false, false, EncodeBytes::Hex, false);
         assert_eq!(mapper_base.table_names().len(), 3);
-        let mapper_ext = EvmBlockMapper::new(true, false, EncodeBytes::Hex);
+        let mapper_ext = EvmBlockMapper::new(true, false, EncodeBytes::Hex, false);
         assert_eq!(mapper_ext.table_names().len(), 17);
     }
 
@@ -2043,7 +2049,7 @@ mod tests {
     fn test_fork_step_column_included() {
         let block = make_test_evm_block(100);
         let block_bytes = prost::Message::encode_to_vec(&block);
-        let mut mapper = EvmBlockMapper::new(false, true, EncodeBytes::Hex);
+        let mut mapper = EvmBlockMapper::new(false, true, EncodeBytes::Hex, false);
         mapper.map_block(&block_bytes, &BlockIdentity::default(), Some("NEW")).unwrap();
 
         let batches = mapper.flush().unwrap();
@@ -2058,7 +2064,7 @@ mod tests {
     fn test_encode_bytes_binary() {
         let block = make_test_evm_block(100);
         let block_bytes = prost::Message::encode_to_vec(&block);
-        let mut mapper = EvmBlockMapper::new(false, false, EncodeBytes::Binary);
+        let mut mapper = EvmBlockMapper::new(false, false, EncodeBytes::Binary, false);
         mapper.map_block(&block_bytes, &BlockIdentity::default(), None).unwrap();
         let batches = mapper.flush().unwrap();
         assert_eq!(batches["blocks"].num_rows(), 1);
@@ -2071,7 +2077,7 @@ mod tests {
     fn test_encode_bytes_base58() {
         let block = make_test_evm_block(100);
         let block_bytes = prost::Message::encode_to_vec(&block);
-        let mut mapper = EvmBlockMapper::new(false, false, EncodeBytes::Base58);
+        let mut mapper = EvmBlockMapper::new(false, false, EncodeBytes::Base58, false);
         mapper.map_block(&block_bytes, &BlockIdentity::default(), None).unwrap();
         let batches = mapper.flush().unwrap();
         assert_eq!(batches["blocks"].num_rows(), 1);

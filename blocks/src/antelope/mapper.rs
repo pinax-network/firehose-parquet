@@ -31,6 +31,7 @@ fn format_authorization(auth: &[antelope::PermissionLevel]) -> String {
 
 pub struct AntelopeBlockMapper {
     extended: bool,
+    include_failed_transactions: bool,
     blocks: BlocksBuilder,
     transactions: TransactionsBuilder,
     actions: ActionsBuilder,
@@ -42,10 +43,11 @@ pub struct AntelopeBlockMapper {
 }
 
 impl AntelopeBlockMapper {
-    pub fn new(extended: bool, include_fork_step: bool, encoding: EncodeBytes) -> Self {
+    pub fn new(extended: bool, include_fork_step: bool, encoding: EncodeBytes, include_failed_transactions: bool) -> Self {
         let enc = &encoding;
         Self {
             extended,
+            include_failed_transactions,
             blocks: BlocksBuilder::new(include_fork_step),
             transactions: TransactionsBuilder::new(include_fork_step),
             actions: ActionsBuilder::new(include_fork_step),
@@ -77,6 +79,14 @@ impl AntelopeBlockMapper {
         };
 
         for trace in traces {
+            // Skip non-executed transactions (status != EXECUTED=1) unless flag is set.
+            // Transactions without a receipt default to NONE=0 and are also skipped.
+            if !self.include_failed_transactions {
+                let status = trace.receipt.as_ref().map(|r| r.status).unwrap_or(0);
+                if status != 1 {
+                    continue;
+                }
+            }
             self.map_transaction(trace, identity, fork_step);
         }
     }
@@ -589,7 +599,7 @@ mod tests {
     fn test_map_and_flush_single_block() {
         let block = make_test_block(100);
         let block_bytes = prost::Message::encode_to_vec(&block);
-        let mut mapper = AntelopeBlockMapper::new(true, false, EncodeBytes::Hex);
+        let mut mapper = AntelopeBlockMapper::new(true, false, EncodeBytes::Hex, false);
         mapper.map_block(&block_bytes, &BlockIdentity::default(), None).unwrap();
 
         assert_eq!(mapper.max_table_rows(), 2); // 2 actions
@@ -605,7 +615,7 @@ mod tests {
     fn test_flush_resets_builders() {
         let block = make_test_block(1);
         let block_bytes = prost::Message::encode_to_vec(&block);
-        let mut mapper = AntelopeBlockMapper::new(true, false, EncodeBytes::Hex);
+        let mut mapper = AntelopeBlockMapper::new(true, false, EncodeBytes::Hex, false);
         mapper.map_block(&block_bytes, &BlockIdentity::default(), None).unwrap();
         let _ = mapper.flush().unwrap();
         assert_eq!(mapper.max_table_rows(), 0);
@@ -625,7 +635,7 @@ mod tests {
             ..Default::default()
         };
         let block_bytes = prost::Message::encode_to_vec(&block);
-        let mut mapper = AntelopeBlockMapper::new(true, false, EncodeBytes::Hex);
+        let mut mapper = AntelopeBlockMapper::new(true, false, EncodeBytes::Hex, false);
         mapper.map_block(&block_bytes, &BlockIdentity::default(), None).unwrap();
         let batches = mapper.flush().unwrap();
         assert_eq!(batches["blocks"].num_rows(), 1);
@@ -638,7 +648,7 @@ mod tests {
     fn test_fork_step_column_included() {
         let block = make_test_block(100);
         let block_bytes = prost::Message::encode_to_vec(&block);
-        let mut mapper = AntelopeBlockMapper::new(true, true, EncodeBytes::Hex);
+        let mut mapper = AntelopeBlockMapper::new(true, true, EncodeBytes::Hex, false);
         mapper.map_block(&block_bytes, &BlockIdentity::default(), Some("NEW")).unwrap();
 
         let batches = mapper.flush().unwrap();
@@ -651,7 +661,7 @@ mod tests {
 
     #[test]
     fn test_table_names_base() {
-        let mapper = AntelopeBlockMapper::new(false, false, EncodeBytes::Hex);
+        let mapper = AntelopeBlockMapper::new(false, false, EncodeBytes::Hex, false);
         let names = mapper.table_names();
         assert_eq!(names.len(), 3);
         assert!(names.contains(&"blocks"));
@@ -662,7 +672,7 @@ mod tests {
 
     #[test]
     fn test_table_names_extended() {
-        let mapper = AntelopeBlockMapper::new(true, false, EncodeBytes::Hex);
+        let mapper = AntelopeBlockMapper::new(true, false, EncodeBytes::Hex, false);
         let names = mapper.table_names();
         assert_eq!(names.len(), 4);
         assert!(names.contains(&"blocks"));
@@ -675,7 +685,7 @@ mod tests {
     fn test_base_excludes_db_ops() {
         let block = make_test_block(100);
         let block_bytes = prost::Message::encode_to_vec(&block);
-        let mut mapper = AntelopeBlockMapper::new(false, false, EncodeBytes::Hex);
+        let mut mapper = AntelopeBlockMapper::new(false, false, EncodeBytes::Hex, false);
         mapper.map_block(&block_bytes, &BlockIdentity::default(), None).unwrap();
 
         let batches = mapper.flush().unwrap();

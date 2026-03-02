@@ -208,6 +208,7 @@ fn base64_encode(data: &[u8]) -> String {
 // ---------------------------------------------------------------------------
 
 pub struct NearBlockMapper {
+    include_failed_transactions: bool,
     blocks: BlocksBuilder,
     chunks: ChunksBuilder,
     transactions: TransactionsBuilder,
@@ -221,9 +222,10 @@ pub struct NearBlockMapper {
 }
 
 impl NearBlockMapper {
-    pub fn new(include_fork_step: bool, encoding: EncodeBytes) -> Self {
+    pub fn new(include_fork_step: bool, encoding: EncodeBytes, include_failed_transactions: bool) -> Self {
         let enc = &encoding;
         Self {
+            include_failed_transactions,
             blocks: BlocksBuilder::new(include_fork_step, enc),
             chunks: ChunksBuilder::new(include_fork_step, enc),
             transactions: TransactionsBuilder::new(include_fork_step, enc),
@@ -325,6 +327,11 @@ impl NearBlockMapper {
             .and_then(|eo| eo.outcome.as_ref())
             .map(|outcome| (execution_status_str(outcome), outcome.gas_burnt))
             .unwrap_or(("Unknown", 0));
+
+        // Skip failed transactions unless flag is set
+        if !self.include_failed_transactions && status == "Failure" {
+            return;
+        }
 
         self.transactions.canonical.append(identity);
         self.transactions.hash.append_value(tx_hash);
@@ -844,7 +851,7 @@ mod tests {
     fn test_map_and_flush() {
         let block = make_test_block(100);
         let block_bytes = prost::Message::encode_to_vec(&block);
-        let mut mapper = NearBlockMapper::new(false, EncodeBytes::Hex);
+        let mut mapper = NearBlockMapper::new(false, EncodeBytes::Hex, false);
         mapper.map_block(&block_bytes, &BlockIdentity::default(), None).unwrap();
 
         let batches = mapper.flush().unwrap();
@@ -871,7 +878,7 @@ mod tests {
             chunk_headers: vec![],
         };
         let block_bytes = prost::Message::encode_to_vec(&block);
-        let mut mapper = NearBlockMapper::new(false, EncodeBytes::Hex);
+        let mut mapper = NearBlockMapper::new(false, EncodeBytes::Hex, false);
         mapper.map_block(&block_bytes, &BlockIdentity::default(), None).unwrap();
         let batches = mapper.flush().unwrap();
         assert_eq!(batches["blocks"].num_rows(), 1);
@@ -885,7 +892,7 @@ mod tests {
     fn test_flush_resets() {
         let block = make_test_block(100);
         let block_bytes = prost::Message::encode_to_vec(&block);
-        let mut mapper = NearBlockMapper::new(false, EncodeBytes::Hex);
+        let mut mapper = NearBlockMapper::new(false, EncodeBytes::Hex, false);
         mapper.map_block(&block_bytes, &BlockIdentity::default(), None).unwrap();
         let _ = mapper.flush().unwrap();
         assert_eq!(mapper.max_table_rows(), 0);
@@ -893,7 +900,7 @@ mod tests {
 
     #[test]
     fn test_table_names() {
-        let mapper = NearBlockMapper::new(false, EncodeBytes::Hex);
+        let mapper = NearBlockMapper::new(false, EncodeBytes::Hex, false);
         assert_eq!(mapper.table_names().len(), 5);
         assert!(mapper.table_names().contains(&"blocks"));
         assert!(mapper.table_names().contains(&"chunks"));
@@ -906,7 +913,7 @@ mod tests {
     fn test_fork_step_column_included() {
         let block = make_test_block(100);
         let block_bytes = prost::Message::encode_to_vec(&block);
-        let mut mapper = NearBlockMapper::new(true, EncodeBytes::Hex);
+        let mut mapper = NearBlockMapper::new(true, EncodeBytes::Hex, false);
         mapper.map_block(&block_bytes, &BlockIdentity::default(), Some("FINAL")).unwrap();
 
         let batches = mapper.flush().unwrap();
@@ -950,7 +957,7 @@ mod tests {
             chunk_headers: vec![],
         };
         let block_bytes = prost::Message::encode_to_vec(&block);
-        let mut mapper = NearBlockMapper::new(false, EncodeBytes::Hex);
+        let mut mapper = NearBlockMapper::new(false, EncodeBytes::Hex, false);
         mapper.map_block(&block_bytes, &BlockIdentity::default(), None).unwrap();
         let batches = mapper.flush().unwrap();
         let sc_batch = &batches["state_changes"];
