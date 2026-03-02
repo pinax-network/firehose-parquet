@@ -3,78 +3,54 @@ use std::path::Path;
 use std::sync::Arc;
 use tracing::{info, warn};
 
-use arrow::array::{Array, BooleanArray, StringArray, UInt64Array};
+use arrow::array::{Array, BinaryArray, BooleanArray, StringArray, UInt64Array};
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
 use bytes::Bytes;
 use object_store::ObjectStore;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use parquet::arrow::ArrowWriter;
+use parquet::file::metadata::KeyValue;
 use parquet::file::properties::WriterProperties;
+
+use crate::writer::ParquetFileMetadata;
 
 /// The filename used for the cursor parquet file.
 pub const CURSOR_PARQUET_FILENAME: &str = "cursor.parquet";
 
-/// Cursor state and pipeline configuration stored as a single-row Parquet file.
+/// Cursor state stored as a single-row Parquet file.
+///
+/// Row data contains only the essential resume state. Pipeline configuration
+/// and firehose endpoint metadata are stored in Parquet file-level key-value
+/// metadata under `firehose-parquet.*` keys (same convention as table files).
 #[derive(Debug, Clone, Default)]
 pub struct CursorState {
-    // -- Cursor state --
+    // -- Row data: essential resume state --
     pub cursor: String,
     pub last_block_num: u64,
-    pub last_block_id: String,
+    /// Block ID stored as raw bytes.
+    pub last_block_id: Vec<u8>,
     pub updated_at: String,
-
-    // -- Pipeline parameters --
-    pub endpoint: String,
     pub start_block: Option<u64>,
     pub stop_block: Option<u64>,
-    pub partition: String,
-    pub block_range_size: u64,
-    pub compression: String,
-    pub flush_bytes: u64,
-    pub flush_rows: Option<u64>,
-    pub bytes_encoding: String,
     pub extended: bool,
     pub final_blocks_only: bool,
 
-    // -- Firehose metadata (from InfoResponse) --
-    pub chain_name: String,
-    pub chain_name_aliases: String,
-    pub first_streamable_block_num: u64,
-    pub first_streamable_block_id: String,
-    pub block_id_encoding: String,
-    pub block_features: String,
-    pub firehose_parquet_version: String,
+    // -- File-level metadata (not stored in rows) --
+    pub file_metadata: ParquetFileMetadata,
 }
 
-/// Build the Arrow schema for the cursor.parquet file.
+/// Build the Arrow schema for the cursor.parquet row data.
 fn cursor_schema() -> Schema {
     Schema::new(vec![
-        // Cursor state
         Field::new("cursor", DataType::Utf8, false),
         Field::new("last_block_num", DataType::UInt64, false),
-        Field::new("last_block_id", DataType::Utf8, false),
+        Field::new("last_block_id", DataType::Binary, false),
         Field::new("updated_at", DataType::Utf8, false),
-        // Pipeline parameters
-        Field::new("endpoint", DataType::Utf8, false),
         Field::new("start_block", DataType::UInt64, true),
         Field::new("stop_block", DataType::UInt64, true),
-        Field::new("partition", DataType::Utf8, false),
-        Field::new("block_range_size", DataType::UInt64, false),
-        Field::new("compression", DataType::Utf8, false),
-        Field::new("flush_bytes", DataType::UInt64, false),
-        Field::new("flush_rows", DataType::UInt64, true),
-        Field::new("bytes_encoding", DataType::Utf8, false),
         Field::new("extended", DataType::Boolean, false),
         Field::new("final_blocks_only", DataType::Boolean, false),
-        // Firehose metadata
-        Field::new("chain_name", DataType::Utf8, false),
-        Field::new("chain_name_aliases", DataType::Utf8, false),
-        Field::new("first_streamable_block_num", DataType::UInt64, false),
-        Field::new("first_streamable_block_id", DataType::Utf8, false),
-        Field::new("block_id_encoding", DataType::Utf8, false),
-        Field::new("block_features", DataType::Utf8, false),
-        Field::new("firehose_parquet_version", DataType::Utf8, false),
     ])
 }
 
@@ -87,38 +63,42 @@ impl CursorState {
             vec![
                 Arc::new(StringArray::from(vec![self.cursor.as_str()])),
                 Arc::new(UInt64Array::from(vec![self.last_block_num])),
-                Arc::new(StringArray::from(vec![self.last_block_id.as_str()])),
+                Arc::new(BinaryArray::from_vec(vec![self.last_block_id.as_slice()])),
                 Arc::new(StringArray::from(vec![self.updated_at.as_str()])),
-                Arc::new(StringArray::from(vec![self.endpoint.as_str()])),
                 Arc::new(UInt64Array::from(vec![self.start_block])),
                 Arc::new(UInt64Array::from(vec![self.stop_block])),
-                Arc::new(StringArray::from(vec![self.partition.as_str()])),
-                Arc::new(UInt64Array::from(vec![self.block_range_size])),
-                Arc::new(StringArray::from(vec![self.compression.as_str()])),
-                Arc::new(UInt64Array::from(vec![self.flush_bytes])),
-                Arc::new(UInt64Array::from(vec![self.flush_rows])),
-                Arc::new(StringArray::from(vec![self.bytes_encoding.as_str()])),
                 Arc::new(BooleanArray::from(vec![self.extended])),
                 Arc::new(BooleanArray::from(vec![self.final_blocks_only])),
-                Arc::new(StringArray::from(vec![self.chain_name.as_str()])),
-                Arc::new(StringArray::from(vec![self.chain_name_aliases.as_str()])),
-                Arc::new(UInt64Array::from(vec![self.first_streamable_block_num])),
-                Arc::new(StringArray::from(vec![self.first_streamable_block_id.as_str()])),
-                Arc::new(StringArray::from(vec![self.block_id_encoding.as_str()])),
-                Arc::new(StringArray::from(vec![self.block_features.as_str()])),
-                Arc::new(StringArray::from(vec![self.firehose_parquet_version.as_str()])),
             ],
         )?;
         Ok(batch)
     }
 
-    /// Read a `CursorState` from a single-row RecordBatch.
+    /// Build `WriterProperties` that embed file-level metadata as Parquet KV pairs.
+    fn writer_properties(&self) -> WriterProperties {
+        let mut builder = WriterProperties::builder();
+        if !self.file_metadata.entries.is_empty() {
+            let kvs: Vec<KeyValue> = self
+                .file_metadata
+                .entries
+                .iter()
+                .map(|(k, v)| KeyValue::new(k.clone(), Some(v.clone())))
+                .collect();
+            builder = builder.set_key_value_metadata(Some(kvs));
+        }
+        builder.build()
+    }
+
+    /// Read a `CursorState` from a single-row RecordBatch plus optional
+    /// file-level key-value metadata.
     ///
-    /// Non-critical fields use lenient defaults (empty string, 0, false) for
-    /// forward compatibility — a file written by a newer version with extra
-    /// columns can still be read by an older version. The `cursor` field is
-    /// validated by the caller (`load_cursor_parquet`).
-    fn from_record_batch(batch: &RecordBatch) -> anyhow::Result<Self> {
+    /// Non-critical fields use lenient defaults for forward/backward
+    /// compatibility — a file written by a newer or older version can still
+    /// be read.
+    fn from_record_batch(
+        batch: &RecordBatch,
+        kv_metadata: Option<&[KeyValue]>,
+    ) -> anyhow::Result<Self> {
         use arrow::array::AsArray;
 
         if batch.num_rows() == 0 {
@@ -152,30 +132,41 @@ impl CursorState {
                 .and_then(|a| if a.is_null(0) { None } else { Some(a.value(0)) })
                 .unwrap_or(false)
         };
+        let get_bytes = |name: &str| -> Vec<u8> {
+            batch
+                .column_by_name(name)
+                .and_then(|c| c.as_binary_opt::<i32>())
+                .and_then(|a| if a.is_null(0) { None } else { Some(a.value(0).to_vec()) })
+                // Fallback: try reading as Utf8 for backward compat with old cursor files
+                .or_else(|| {
+                    batch
+                        .column_by_name(name)
+                        .and_then(|c| c.as_string_opt::<i32>())
+                        .and_then(|a| if a.is_null(0) { None } else { Some(a.value(0).as_bytes().to_vec()) })
+                })
+                .unwrap_or_default()
+        };
+
+        // Reconstruct file_metadata from KV pairs.
+        let mut file_metadata = ParquetFileMetadata::new();
+        if let Some(kvs) = kv_metadata {
+            for kv in kvs {
+                if let Some(ref v) = kv.value {
+                    file_metadata.add(kv.key.clone(), v.clone());
+                }
+            }
+        }
 
         Ok(CursorState {
             cursor: get_str("cursor"),
             last_block_num: get_u64("last_block_num"),
-            last_block_id: get_str("last_block_id"),
+            last_block_id: get_bytes("last_block_id"),
             updated_at: get_str("updated_at"),
-            endpoint: get_str("endpoint"),
             start_block: get_opt_u64("start_block"),
             stop_block: get_opt_u64("stop_block"),
-            partition: get_str("partition"),
-            block_range_size: get_u64("block_range_size"),
-            compression: get_str("compression"),
-            flush_bytes: get_u64("flush_bytes"),
-            flush_rows: get_opt_u64("flush_rows"),
-            bytes_encoding: get_str("bytes_encoding"),
             extended: get_bool("extended"),
             final_blocks_only: get_bool("final_blocks_only"),
-            chain_name: get_str("chain_name"),
-            chain_name_aliases: get_str("chain_name_aliases"),
-            first_streamable_block_num: get_u64("first_streamable_block_num"),
-            first_streamable_block_id: get_str("first_streamable_block_id"),
-            block_id_encoding: get_str("block_id_encoding"),
-            block_features: get_str("block_features"),
-            firehose_parquet_version: get_str("firehose_parquet_version"),
+            file_metadata,
         })
     }
 }
@@ -188,8 +179,8 @@ pub fn save_cursor_parquet(path: &Path, state: &CursorState) -> anyhow::Result<(
         }
     }
     let batch = state.to_record_batch()?;
+    let props = state.writer_properties();
     let file = fs::File::create(path)?;
-    let props = WriterProperties::builder().build();
     let mut writer = ArrowWriter::try_new(file, batch.schema(), Some(props))?;
     writer.write(&batch)?;
     writer.close()?;
@@ -217,6 +208,14 @@ pub fn load_cursor_parquet(path: &Path) -> Option<CursorState> {
             return None;
         }
     };
+
+    // Extract file-level KV metadata before consuming the builder.
+    let kv_metadata = reader_builder
+        .metadata()
+        .file_metadata()
+        .key_value_metadata()
+        .cloned();
+
     let reader = match reader_builder.build() {
         Ok(r) => r,
         Err(e) => {
@@ -226,7 +225,7 @@ pub fn load_cursor_parquet(path: &Path) -> Option<CursorState> {
     };
     for batch_result in reader {
         match batch_result {
-            Ok(batch) => match CursorState::from_record_batch(&batch) {
+            Ok(batch) => match CursorState::from_record_batch(&batch, kv_metadata.as_deref()) {
                 Ok(state) => {
                     if state.cursor.is_empty() {
                         info!(path = %path.display(), "cursor.parquet has empty cursor, starting fresh");
@@ -346,10 +345,10 @@ async fn save_cursor_parquet_s3(
     state: &CursorState,
 ) -> anyhow::Result<()> {
     let batch = state.to_record_batch()?;
+    let props = state.writer_properties();
 
     // Write parquet to in-memory buffer
     let mut buf = Vec::new();
-    let props = WriterProperties::builder().build();
     {
         let mut writer = ArrowWriter::try_new(&mut buf, batch.schema(), Some(props))?;
         writer.write(&batch)?;
@@ -397,6 +396,14 @@ async fn load_cursor_parquet_s3(
             return None;
         }
     };
+
+    // Extract file-level KV metadata before consuming the builder.
+    let kv_metadata = reader_builder
+        .metadata()
+        .file_metadata()
+        .key_value_metadata()
+        .cloned();
+
     let reader = match reader_builder.build() {
         Ok(r) => r,
         Err(e) => {
@@ -407,7 +414,7 @@ async fn load_cursor_parquet_s3(
 
     for batch_result in reader {
         match batch_result {
-            Ok(batch) => match CursorState::from_record_batch(&batch) {
+            Ok(batch) => match CursorState::from_record_batch(&batch, kv_metadata.as_deref()) {
                 Ok(state) => {
                     if state.cursor.is_empty() {
                         info!(key = %key, "S3 cursor.parquet has empty cursor, starting fresh");
@@ -441,6 +448,23 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
 
+    fn test_file_metadata() -> ParquetFileMetadata {
+        let mut meta = ParquetFileMetadata::new();
+        meta.add("firehose-parquet.version", "0.3.2");
+        meta.add("firehose-parquet.endpoint", "https://eth.firehose.pinax.network:443");
+        meta.add("firehose-parquet.chain_name", "eth-mainnet");
+        meta.add("firehose-parquet.chain_name_aliases", "ethereum,eth");
+        meta.add("firehose-parquet.first_streamable_block_num", "0");
+        meta.add("firehose-parquet.first_streamable_block_id", "0x0000");
+        meta.add("firehose-parquet.block_id_encoding", "hex_0x");
+        meta.add("firehose-parquet.block_features", "extended,base");
+        meta.add("firehose-parquet.bytes_encoding", "hex");
+        meta.add("firehose-parquet.compression", "zstd");
+        meta.add("firehose-parquet.partition", "date");
+        meta.add("firehose-parquet.block_range_size", "10000");
+        meta
+    }
+
     #[test]
     fn test_save_and_load_cursor_parquet() {
         let dir = TempDir::new().unwrap();
@@ -449,26 +473,13 @@ mod tests {
         let state = CursorState {
             cursor: "cursor123".to_string(),
             last_block_num: 42000,
-            last_block_id: "0xabc".to_string(),
+            last_block_id: b"\xab\xcd\xef".to_vec(),
             updated_at: "2025-01-15T12:00:00Z".to_string(),
-            endpoint: "https://eth.firehose.pinax.network:443".to_string(),
             start_block: Some(100),
             stop_block: Some(200),
-            partition: "date".to_string(),
-            block_range_size: 10000,
-            compression: "zstd".to_string(),
-            flush_bytes: 134217728,
-            flush_rows: Some(50000),
-            bytes_encoding: "hex".to_string(),
             extended: true,
             final_blocks_only: true,
-            chain_name: "eth-mainnet".to_string(),
-            chain_name_aliases: "ethereum,eth".to_string(),
-            first_streamable_block_num: 0,
-            first_streamable_block_id: "0x0000".to_string(),
-            block_id_encoding: "0x_hex".to_string(),
-            block_features: "extended,base".to_string(),
-            firehose_parquet_version: "0.2.5".to_string(),
+            file_metadata: test_file_metadata(),
         };
 
         save_cursor_parquet(&path, &state).unwrap();
@@ -476,26 +487,26 @@ mod tests {
 
         assert_eq!(loaded.cursor, "cursor123");
         assert_eq!(loaded.last_block_num, 42000);
-        assert_eq!(loaded.last_block_id, "0xabc");
+        assert_eq!(loaded.last_block_id, b"\xab\xcd\xef".to_vec());
         assert_eq!(loaded.updated_at, "2025-01-15T12:00:00Z");
-        assert_eq!(loaded.endpoint, "https://eth.firehose.pinax.network:443");
         assert_eq!(loaded.start_block, Some(100));
         assert_eq!(loaded.stop_block, Some(200));
-        assert_eq!(loaded.partition, "date");
-        assert_eq!(loaded.block_range_size, 10000);
-        assert_eq!(loaded.compression, "zstd");
-        assert_eq!(loaded.flush_bytes, 134217728);
-        assert_eq!(loaded.flush_rows, Some(50000));
-        assert_eq!(loaded.bytes_encoding, "hex");
         assert!(loaded.extended);
         assert!(loaded.final_blocks_only);
-        assert_eq!(loaded.chain_name, "eth-mainnet");
-        assert_eq!(loaded.chain_name_aliases, "ethereum,eth");
-        assert_eq!(loaded.first_streamable_block_num, 0);
-        assert_eq!(loaded.first_streamable_block_id, "0x0000");
-        assert_eq!(loaded.block_id_encoding, "0x_hex");
-        assert_eq!(loaded.block_features, "extended,base");
-        assert_eq!(loaded.firehose_parquet_version, "0.2.5");
+
+        // Verify file-level metadata was round-tripped.
+        let meta_map: std::collections::HashMap<_, _> = loaded
+            .file_metadata
+            .entries
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.as_str()))
+            .collect();
+        assert_eq!(meta_map.get("firehose-parquet.version"), Some(&"0.3.2"));
+        assert_eq!(meta_map.get("firehose-parquet.chain_name"), Some(&"eth-mainnet"));
+        assert_eq!(meta_map.get("firehose-parquet.block_features"), Some(&"extended,base"));
+        assert_eq!(meta_map.get("firehose-parquet.bytes_encoding"), Some(&"hex"));
+        assert_eq!(meta_map.get("firehose-parquet.compression"), Some(&"zstd"));
+        assert_eq!(meta_map.get("firehose-parquet.partition"), Some(&"date"));
     }
 
     #[test]
@@ -564,13 +575,28 @@ mod tests {
             cursor: "test".to_string(),
             start_block: None,
             stop_block: None,
-            flush_rows: None,
             ..CursorState::default()
         };
         save_cursor_parquet(&path, &state).unwrap();
         let loaded = load_cursor_parquet(&path).expect("should load cursor");
         assert_eq!(loaded.start_block, None);
         assert_eq!(loaded.stop_block, None);
-        assert_eq!(loaded.flush_rows, None);
+    }
+
+    #[test]
+    fn test_cursor_parquet_binary_block_id() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join(CURSOR_PARQUET_FILENAME);
+
+        // Test with a hex-like block ID stored as bytes.
+        let block_id = hex::decode("deadbeef01020304").unwrap();
+        let state = CursorState {
+            cursor: "test_binary".to_string(),
+            last_block_id: block_id.clone(),
+            ..CursorState::default()
+        };
+        save_cursor_parquet(&path, &state).unwrap();
+        let loaded = load_cursor_parquet(&path).expect("should load cursor");
+        assert_eq!(loaded.last_block_id, block_id);
     }
 }
