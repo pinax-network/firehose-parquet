@@ -1,5 +1,6 @@
 use crate::config::{BlockMetadata, Compression, Config, Partition};
 use anyhow::{Context, Result};
+use arrow::array::Int64Array;
 use arrow::record_batch::RecordBatch;
 use object_store::aws::AmazonS3Builder;
 use object_store::ObjectStore;
@@ -423,6 +424,114 @@ impl OutputWriter {
         self.compression_ratio
     }
 
+    /// Split a RecordBatch into sub-batches when the metadata spans multiple
+    /// time-based partitions. Each returned tuple contains the sub-batch and
+    /// a BlockMetadata with timestamps scoped to that subset.
+    ///
+    /// For `Partition::None` and `Partition::BlockRange` no splitting is needed
+    /// and the original batch + metadata are returned as-is.
+    fn split_batch_by_partition(
+        &self,
+        table: &str,
+        batch: &RecordBatch,
+        metadata: &BlockMetadata,
+    ) -> Result<Vec<(RecordBatch, BlockMetadata)>> {
+        // Only time-based partitions need splitting.
+        match &self.inner.partition {
+            Partition::None | Partition::BlockRange(_) => {
+                return Ok(vec![(batch.clone(), metadata.clone())]);
+            }
+            _ => {}
+        }
+
+        // If timestamps are missing, no splitting possible.
+        let (Some(min_ts), Some(max_ts)) = (metadata.min_timestamp, metadata.max_timestamp) else {
+            return Ok(vec![(batch.clone(), metadata.clone())]);
+        };
+
+        // Quick check: if min and max land in the same partition, no split needed.
+        let min_meta = BlockMetadata {
+            min_timestamp: Some(min_ts),
+            max_timestamp: Some(min_ts),
+            ..*metadata
+        };
+        let max_meta = BlockMetadata {
+            min_timestamp: Some(max_ts),
+            max_timestamp: Some(max_ts),
+            ..*metadata
+        };
+        if self.inner.partition_suffix(table, &min_meta)
+            == self.inner.partition_suffix(table, &max_meta)
+        {
+            return Ok(vec![(batch.clone(), metadata.clone())]);
+        }
+
+        // Find the timestamp column.
+        let ts_col_idx = batch
+            .schema()
+            .index_of("timestamp")
+            .map_err(|_| anyhow::anyhow!("timestamp column not found in batch schema"))?;
+        let ts_array = batch
+            .column(ts_col_idx)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .ok_or_else(|| anyhow::anyhow!("timestamp column is not Int64"))?;
+
+        // Compute the partition key for each row and group rows by partition.
+        // Use BTreeMap so partitions are ordered by time.
+        let mut partition_groups: std::collections::BTreeMap<String, Vec<usize>> =
+            std::collections::BTreeMap::new();
+        for i in 0..ts_array.len() {
+            let ts = ts_array.value(i);
+            let row_meta = BlockMetadata {
+                min_timestamp: Some(ts),
+                max_timestamp: Some(ts),
+                ..*metadata
+            };
+            let key = self.inner.partition_suffix(table, &row_meta);
+            partition_groups.entry(key).or_default().push(i);
+        }
+
+        // Build sub-batches for each partition group.
+        let mut results = Vec::with_capacity(partition_groups.len());
+        for (_key, indices) in partition_groups {
+            // Compute the range of row indices — they should be contiguous since
+            // data arrives sorted by time, but use individual indices to be safe.
+            let row_min_ts = indices.iter().map(|&i| ts_array.value(i)).min().unwrap();
+            let row_max_ts = indices.iter().map(|&i| ts_array.value(i)).max().unwrap();
+
+            // Build sub-batch by slicing. If indices are contiguous we can use
+            // RecordBatch::slice for efficiency.
+            let first = indices[0];
+            let last = *indices.last().unwrap();
+            let sub_batch = if last - first + 1 == indices.len() {
+                // Contiguous range — use zero-copy slice.
+                batch.slice(first, indices.len())
+            } else {
+                // Non-contiguous — use take (rare, but safe).
+                let idx_array = arrow::array::UInt32Array::from(
+                    indices.iter().map(|&i| i as u32).collect::<Vec<_>>(),
+                );
+                let columns: Vec<Arc<dyn arrow::array::Array>> = batch
+                    .columns()
+                    .iter()
+                    .map(|col| arrow::compute::take(col.as_ref(), &idx_array, None))
+                    .collect::<std::result::Result<Vec<_>, _>>()?;
+                RecordBatch::try_new(batch.schema(), columns)?
+            };
+
+            let sub_meta = BlockMetadata {
+                min_block_number: metadata.min_block_number,
+                max_block_number: metadata.max_block_number,
+                min_timestamp: Some(row_min_ts),
+                max_timestamp: Some(row_max_ts),
+            };
+            results.push((sub_batch, sub_meta));
+        }
+
+        Ok(results)
+    }
+
     /// Write all table batches produced by a BlockMapper::flush().
     ///
     /// Small tables are buffered until the estimated compressed size reaches
@@ -445,8 +554,13 @@ impl OutputWriter {
             if batch.num_rows() == 0 {
                 continue;
             }
-            if self.buffer_batch(table, batch, metadata)? {
-                needs_global_flush = true;
+
+            // Split batch if it spans multiple time-based partitions.
+            let sub_batches = self.split_batch_by_partition(table, batch, metadata)?;
+            for (sub_batch, sub_meta) in &sub_batches {
+                if self.buffer_batch(table, sub_batch, sub_meta)? {
+                    needs_global_flush = true;
+                }
             }
         }
 
@@ -941,6 +1055,170 @@ mod tests {
         let read_batches = read_parquet(&file_path).unwrap();
         let total_rows: usize = read_batches.iter().map(|b| b.num_rows()).sum();
         assert_eq!(total_rows, 50);
+    }
+
+    /// Helper: build a batch with block_num and timestamp columns for partition split tests.
+    fn make_timestamped_batch(timestamps: &[i64]) -> RecordBatch {
+        use arrow::array::Int64Array;
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("block_number", DataType::UInt64, false),
+            Field::new("timestamp", DataType::Int64, false),
+        ]));
+        let mut block_builder = UInt64Builder::new();
+        let mut ts_builder = arrow::array::Int64Builder::new();
+        for (i, &ts) in timestamps.iter().enumerate() {
+            block_builder.append_value(i as u64);
+            ts_builder.append_value(ts);
+        }
+        RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(block_builder.finish()),
+                Arc::new(ts_builder.finish()),
+            ],
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn test_split_batch_across_date_boundary() {
+        let dir = tempfile::tempdir().unwrap();
+        // 2024-01-15 23:59:58, 23:59:59, 2024-01-16 00:00:00, 00:00:01
+        let ts_before = 1705363198_i64; // 2024-01-15 23:59:58
+        let ts_boundary = 1705363200_i64; // 2024-01-16 00:00:00
+        let batch = make_timestamped_batch(&[ts_before, ts_before + 1, ts_boundary, ts_boundary + 1]);
+
+        let mut batches = HashMap::new();
+        batches.insert("blocks".to_string(), batch);
+
+        let mut out = OutputWriter::new(dir.path(), Partition::Date, Compression::None, 0);
+        let meta = BlockMetadata {
+            min_block_number: 0,
+            max_block_number: 3,
+            min_timestamp: Some(ts_before),
+            max_timestamp: Some(ts_boundary + 1),
+        };
+        out.write_all(&batches, &meta).unwrap();
+        out.flush_remaining().unwrap();
+
+        // Both date partitions should exist.
+        let jan15 = dir.path().join("blocks/date=2024-01-15");
+        let jan16 = dir.path().join("blocks/date=2024-01-16");
+        assert!(jan15.exists(), "2024-01-15 partition should exist");
+        assert!(jan16.exists(), "2024-01-16 partition should exist");
+
+        // Check row counts.
+        let parts15: Vec<_> = std::fs::read_dir(&jan15).unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.path().extension().map_or(false, |ext| ext == "parquet"))
+            .collect();
+        let rows15: usize = parts15.iter()
+            .flat_map(|p| read_parquet(&p.path()).unwrap())
+            .map(|b| b.num_rows())
+            .sum();
+        assert_eq!(rows15, 2, "jan15 should have 2 rows");
+
+        let parts16: Vec<_> = std::fs::read_dir(&jan16).unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.path().extension().map_or(false, |ext| ext == "parquet"))
+            .collect();
+        let rows16: usize = parts16.iter()
+            .flat_map(|p| read_parquet(&p.path()).unwrap())
+            .map(|b| b.num_rows())
+            .sum();
+        assert_eq!(rows16, 2, "jan16 should have 2 rows");
+    }
+
+    #[test]
+    fn test_split_batch_across_hour_boundary() {
+        let dir = tempfile::tempdir().unwrap();
+        // 2024-01-15 13:59:59 and 14:00:00
+        let ts1 = 1705327199_i64; // 13:59:59
+        let ts2 = 1705327200_i64; // 14:00:00
+        let batch = make_timestamped_batch(&[ts1, ts2]);
+
+        let mut batches = HashMap::new();
+        batches.insert("events".to_string(), batch);
+
+        let mut out = OutputWriter::new(dir.path(), Partition::Hour, Compression::None, 0);
+        let meta = BlockMetadata {
+            min_block_number: 0,
+            max_block_number: 1,
+            min_timestamp: Some(ts1),
+            max_timestamp: Some(ts2),
+        };
+        out.write_all(&batches, &meta).unwrap();
+        out.flush_remaining().unwrap();
+
+        let h13 = dir.path().join("events/date=2024-01-15/hour=13");
+        let h14 = dir.path().join("events/date=2024-01-15/hour=14");
+        assert!(h13.exists(), "hour=13 should exist");
+        assert!(h14.exists(), "hour=14 should exist");
+    }
+
+    #[test]
+    fn test_no_split_when_same_partition() {
+        let dir = tempfile::tempdir().unwrap();
+        // Both timestamps in 2024-01-15
+        let ts1 = 1705320000_i64;
+        let ts2 = 1705320060_i64;
+        let batch = make_timestamped_batch(&[ts1, ts2]);
+
+        let mut batches = HashMap::new();
+        batches.insert("blocks".to_string(), batch);
+
+        let mut out = OutputWriter::new(dir.path(), Partition::Date, Compression::None, 0);
+        let meta = BlockMetadata {
+            min_block_number: 0,
+            max_block_number: 1,
+            min_timestamp: Some(ts1),
+            max_timestamp: Some(ts2),
+        };
+        out.write_all(&batches, &meta).unwrap();
+        out.flush_remaining().unwrap();
+
+        let jan15 = dir.path().join("blocks/date=2024-01-15");
+        assert!(jan15.exists());
+        // Only one partition should exist
+        let dirs: Vec<_> = std::fs::read_dir(dir.path().join("blocks")).unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_type().map_or(false, |ft| ft.is_dir()))
+            .collect();
+        assert_eq!(dirs.len(), 1, "should only have one date partition");
+    }
+
+    #[test]
+    fn test_no_split_for_block_range_partition() {
+        let dir = tempfile::tempdir().unwrap();
+        let ts1 = 1705363198_i64;
+        let ts2 = 1705363200_i64;
+        let batch = make_timestamped_batch(&[ts1, ts2]);
+
+        let mut batches = HashMap::new();
+        batches.insert("blocks".to_string(), batch);
+
+        let mut out = OutputWriter::new(dir.path(), Partition::BlockRange(1000), Compression::None, 0);
+        let meta = BlockMetadata {
+            min_block_number: 100,
+            max_block_number: 101,
+            min_timestamp: Some(ts1),
+            max_timestamp: Some(ts2),
+        };
+        out.write_all(&batches, &meta).unwrap();
+        out.flush_remaining().unwrap();
+
+        // Should write to a single block_range partition
+        let br = dir.path().join("blocks/block_range=0-999");
+        assert!(br.exists());
+        let parts: Vec<_> = std::fs::read_dir(&br).unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.path().extension().map_or(false, |ext| ext == "parquet"))
+            .collect();
+        let rows: usize = parts.iter()
+            .flat_map(|p| read_parquet(&p.path()).unwrap())
+            .map(|b| b.num_rows())
+            .sum();
+        assert_eq!(rows, 2, "all rows should be in one partition");
     }
 
     #[test]
