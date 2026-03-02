@@ -183,8 +183,10 @@ impl SolanaBlockMapper {
             Some(m) => m,
             None => return,
         };
-        // Skip failed transactions
-        if meta.err.is_some() {
+        // Skip failed transactions.
+        // Some Firehose endpoints include `TransactionError { err: vec![] }` for
+        // successful txs instead of omitting the field, so check the inner bytes.
+        if meta.err.as_ref().is_some_and(|e| !e.err.is_empty()) {
             return;
         }
         let msg = match tx.message.as_ref() {
