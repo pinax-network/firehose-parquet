@@ -79,6 +79,7 @@ pub struct Config {
     pub aws_endpoint_url: Option<String>,
     pub s3_bucket: Option<String>,
     pub cache_control: Option<String>,
+    pub metrics_port: Option<u16>,
 }
 
 impl Partition {
@@ -196,6 +197,9 @@ impl std::fmt::Display for Config {
         if self.dry_run {
             writeln!(f, "  dry_run            true")?;
         }
+        if let Some(port) = self.metrics_port {
+            writeln!(f, "  metrics_port       {port}")?;
+        }
         // AWS / S3 section — only shown when at least one credential is set
         if self.aws_access_key_id.is_some()
             || self.aws_secret_access_key.is_some()
@@ -250,6 +254,7 @@ impl Default for Config {
             aws_endpoint_url: None,
             s3_bucket: None,
             cache_control: None,
+            metrics_port: None,
         }
     }
 }

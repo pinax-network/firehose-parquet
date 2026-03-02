@@ -4,6 +4,7 @@ pub mod cursor;
 pub mod encode;
 pub mod grpc;
 pub mod merge;
+pub mod metrics;
 pub mod rollup;
 pub mod traits;
 pub mod truncate;

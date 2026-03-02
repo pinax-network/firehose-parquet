@@ -99,6 +99,10 @@ pub struct CommonArgs {
     #[arg(long, env = "DRY_RUN", default_value = "false", hide_env_values = true)]
     pub dry_run: bool,
 
+    /// Prometheus /metrics HTTP port. When set, an HTTP server binds to 0.0.0.0:<PORT>/metrics.
+    #[arg(long, env = "METRICS_PORT", hide_env_values = true)]
+    pub metrics_port: Option<u16>,
+
     /// AWS access key ID (for S3 output)
     #[arg(long, env = "AWS_ACCESS_KEY_ID", hide_env_values = true, help_heading = "AWS / S3")]
     pub aws_access_key_id: Option<String>,
@@ -466,6 +470,7 @@ pub fn build_config(args: &CommonArgs) -> anyhow::Result<Config> {
         aws_endpoint_url: args.aws_endpoint_url.clone(),
         s3_bucket: args.s3_bucket.clone(),
         cache_control: if args.cache_control.is_empty() { None } else { Some(args.cache_control.clone()) },
+        metrics_port: args.metrics_port,
     })
 }
 
