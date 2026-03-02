@@ -55,9 +55,9 @@ pub struct CommonArgs {
     #[arg(short = 't', long, env = "STOP_BLOCK", hide_env_values = true, help_heading = "Block Range")]
     pub stop_block: Option<u64>,
 
-    /// Path to cursor file for resuming a previous session
-    #[arg(short = 'c', long, env = "CURSOR", hide_env_values = true, help_heading = "Block Range")]
-    pub cursor: Option<PathBuf>,
+    /// Path to cursor parquet file for resuming a previous session (must end in .parquet)
+    #[arg(short = 'c', long, env = "CURSOR", default_value = "cursor.parquet", hide_env_values = true, help_heading = "Block Range")]
+    pub cursor: PathBuf,
 
     /// Only process finalized blocks (when false, adds fork_step column)
     #[arg(long, env = "FINAL_BLOCKS_ONLY", default_value = "true", hide_env_values = true, help_heading = "Block Range")]
@@ -436,14 +436,21 @@ pub fn build_config(args: &CommonArgs) -> anyhow::Result<Config> {
         args.output.clone()
     };
 
+    // Validate that the cursor path has a .parquet extension.
+    let cursor_str = args.cursor.to_string_lossy();
+    if !cursor_str.ends_with(".parquet") {
+        return Err(anyhow::anyhow!(
+            "--cursor path must end in .parquet, got: {cursor_str}"
+        ));
+    }
+
     Ok(Config {
         endpoint,
         api_key,
         jwt_token,
         start_block: args.start_block,
         stop_block: args.stop_block,
-        cursor_path: args.cursor.clone(),
-        cursor_parquet_path: None, // set later after output is resolved
+        cursor_path: Some(args.cursor.clone()),
         output,
         partition: parse_partition(&args.partition, args.block_range_size)?,
         flush_rows: args.flush_rows,
@@ -1734,7 +1741,7 @@ mod tests {
         assert_eq!(cli.common.api_token_envvar, "SUBSTREAMS_API_TOKEN");
         assert!(cli.common.start_block.is_none());
         assert!(cli.common.stop_block.is_none());
-        assert!(cli.common.cursor.is_none());
+        assert_eq!(cli.common.cursor, PathBuf::from("cursor.parquet"));
         assert!(cli.common.flush_interval_secs.is_none());
         assert!(cli.common.aws_access_key_id.is_none());
         assert!(cli.common.aws_secret_access_key.is_none());
@@ -1754,7 +1761,7 @@ mod tests {
             "--api-token-envvar", "MY_TOKEN_VAR",
             "-s", "100",
             "-t", "200",
-            "-c", "cursor.txt",
+            "-c", "cursor-mainnet-date.parquet",
             "--output", "/tmp/out",
             "--partition", "date",
             "--block-range-size", "5000",
@@ -1770,7 +1777,7 @@ mod tests {
         assert_eq!(cli.common.api_token_envvar, "MY_TOKEN_VAR");
         assert_eq!(cli.common.start_block, Some(100));
         assert_eq!(cli.common.stop_block, Some(200));
-        assert_eq!(cli.common.cursor.as_deref(), Some(std::path::Path::new("cursor.txt")));
+        assert_eq!(cli.common.cursor, PathBuf::from("cursor-mainnet-date.parquet"));
         assert_eq!(cli.common.output, PathBuf::from("/tmp/out"));
         assert_eq!(cli.common.partition, "date");
         assert_eq!(cli.common.block_range_size, 5000);
@@ -1823,6 +1830,33 @@ mod tests {
         assert_eq!(config.partition, Partition::Date);
         assert!(config.flush_rows.is_none());
         assert!(config.final_blocks_only);
+        // cursor defaults to cursor.parquet
+        assert_eq!(config.cursor_path, Some(PathBuf::from("cursor.parquet")));
+    }
+
+    #[test]
+    #[serial]
+    fn test_cursor_must_be_parquet() {
+        let cli = parse(&[
+            "test-cli",
+            "--endpoint", "https://example.com:443",
+            "--cursor", "cursor.txt",
+        ]);
+        let result = build_config(&cli.common);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains(".parquet"));
+    }
+
+    #[test]
+    #[serial]
+    fn test_cursor_custom_parquet_name() {
+        let cli = parse(&[
+            "test-cli",
+            "--endpoint", "https://example.com:443",
+            "--cursor", "cursor-mainnet-date.parquet",
+        ]);
+        let config = build_config(&cli.common).expect("build_config should succeed");
+        assert_eq!(config.cursor_path, Some(PathBuf::from("cursor-mainnet-date.parquet")));
     }
 
     #[test]

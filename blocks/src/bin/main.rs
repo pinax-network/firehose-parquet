@@ -2,7 +2,7 @@ use anyhow::{anyhow, Result};
 use clap::Parser;
 use firehose_parquet::cli::{build_config, init_tracing, load_dotenv, Commands, CommonArgs};
 use firehose_parquet::config::BlockMetadata;
-use firehose_parquet::cursor::{save_cursor, save_cursor_parquet, CursorState, CURSOR_PARQUET_FILENAME};
+use firehose_parquet::cursor::{save_cursor_parquet, CursorState};
 use firehose_parquet::encode::{parse_encode_bytes, EncodeBytes};
 use firehose_parquet::grpc::{EndpointInfo, FirehoseClient};
 use firehose_parquet::traits::{fork_step_name, BlockIdentity, BlockMapper};
@@ -362,12 +362,6 @@ async fn main() -> Result<()> {
     // Use chain_name as a subdirectory under the output path.
     config.output = resolve_output(&config.output, &endpoint_info);
 
-    // Set cursor.parquet path in the output root (for local filesystem only).
-    // For S3 output, cursor.parquet is not yet supported.
-    if !firehose_parquet::writer::is_s3_output(&config.output) {
-        config.cursor_parquet_path = Some(config.output.join(CURSOR_PARQUET_FILENAME));
-    }
-
     // Auto-detect extended block features if not explicitly set by user.
     if !extended && supports_extended(&endpoint_info) {
         info!("auto-detected extended block features from endpoint info");
@@ -410,7 +404,6 @@ async fn main() -> Result<()> {
     };
 
     let cursor_path = config.cursor_path.clone();
-    let cursor_parquet_path = config.cursor_parquet_path.clone();
     let mut blocks_processed: u64 = 0;
     let mut min_block: Option<u64> = None;
     let mut max_block: Option<u64> = None;
@@ -504,12 +497,7 @@ async fn main() -> Result<()> {
                         };
                         let wrote = writer.write_all(&batches, &metadata)?;
                         if wrote {
-                            if let (Some(ref path), Some(ref cursor)) = (&cursor_path, &last_cursor) {
-                                if let Err(e) = save_cursor(path, cursor) {
-                                    warn!(error = %e, path = %path.display(), "failed to save cursor");
-                                }
-                            }
-                            if let (Some(ref pq_path), Some(ref cursor)) = (&cursor_parquet_path, &last_cursor) {
+                            if let (Some(ref pq_path), Some(ref cursor)) = (&cursor_path, &last_cursor) {
                                 let mut state = cursor_state_template.clone();
                                 state.cursor = cursor.clone();
                                 state.last_block_num = last_block_num;
@@ -597,12 +585,7 @@ async fn main() -> Result<()> {
 
                     // Only update cursor after all tables have been written.
                     if wrote {
-                        if let (Some(ref path), Some(ref cursor)) = (&cursor_path, &last_cursor) {
-                            if let Err(e) = save_cursor(path, cursor) {
-                                warn!(error = %e, path = %path.display(), "failed to save cursor");
-                            }
-                        }
-                        if let (Some(ref pq_path), Some(ref cursor)) = (&cursor_parquet_path, &last_cursor) {
+                        if let (Some(ref pq_path), Some(ref cursor)) = (&cursor_path, &last_cursor) {
                             let mut state = cursor_state_template.clone();
                             state.cursor = cursor.clone();
                             state.last_block_num = last_block_num;
@@ -669,12 +652,7 @@ async fn main() -> Result<()> {
 
             // Save cursor after final flush.
             if wrote {
-                if let (Some(ref path), Some(ref cursor)) = (&cursor_path, &last_cursor) {
-                    if let Err(e) = save_cursor(path, cursor) {
-                        warn!(error = %e, path = %path.display(), "failed to save cursor");
-                    }
-                }
-                if let (Some(ref pq_path), Some(ref cursor)) = (&cursor_parquet_path, &last_cursor) {
+                if let (Some(ref pq_path), Some(ref cursor)) = (&cursor_path, &last_cursor) {
                     let mut state = cursor_state_template.clone();
                     state.cursor = cursor.clone();
                     state.last_block_num = last_block_num;
