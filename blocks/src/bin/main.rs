@@ -2,7 +2,7 @@ use anyhow::{anyhow, Result};
 use clap::Parser;
 use firehose_parquet::cli::{build_config, init_tracing, load_dotenv, Commands, CommonArgs};
 use firehose_parquet::config::BlockMetadata;
-use firehose_parquet::cursor::{save_cursor_parquet, CursorState};
+use firehose_parquet::cursor::{CursorLocation, CursorState};
 use firehose_parquet::encode::{parse_encode_bytes, EncodeBytes};
 use firehose_parquet::grpc::{EndpointInfo, FirehoseClient};
 use firehose_parquet::metrics;
@@ -483,7 +483,18 @@ async fn main() -> Result<()> {
         None
     };
 
-    let cursor_path = config.cursor_path.clone();
+    // Resolve cursor location (local or S3) based on output path.
+    let cursor_location: Option<CursorLocation> = if let Some(ref cp) = config.cursor_path {
+        let output_str = config.output.to_string_lossy().to_string();
+        let s3_client = if firehose_parquet::writer::is_s3_output(&config.output) {
+            Some(firehose_parquet::s3::build_s3_client(&config)?)
+        } else {
+            None
+        };
+        Some(CursorLocation::resolve(&output_str, cp, s3_client)?)
+    } else {
+        None
+    };
     let mut blocks_processed: u64 = 0;
     let mut min_block: Option<u64> = None;
     let mut max_block: Option<u64> = None;
@@ -528,7 +539,7 @@ async fn main() -> Result<()> {
     };
 
     let stream_result = client
-        .stream_blocks(|block_bytes, type_url, cursor_str, identity: BlockIdentity, step: i32| {
+        .stream_blocks(cursor_location.as_ref(), |block_bytes, type_url, cursor_str, identity: BlockIdentity, step: i32| {
             let fork_step_str = fork_step_name(step);
             if final_blocks_only && step == 2 {
                 return Ok(());
@@ -578,7 +589,7 @@ async fn main() -> Result<()> {
                         let wrote = writer.write_all(&batches, &metadata)?;
                         if wrote {
                             pipeline_metrics.flushes_total.get_or_create(&metrics::FlushLabels { trigger: "partition_boundary".to_string() }).inc();
-                            if let (Some(ref pq_path), Some(ref cursor)) = (&cursor_path, &last_cursor) {
+                            if let (Some(ref loc), Some(ref cursor)) = (&cursor_location, &last_cursor) {
                                 let mut state = cursor_state_template.clone();
                                 state.cursor = cursor.clone();
                                 state.last_block_num = last_block_num;
@@ -586,8 +597,8 @@ async fn main() -> Result<()> {
                                 state.updated_at = time::OffsetDateTime::now_utc()
                                     .format(&time::format_description::well_known::Rfc3339)
                                     .unwrap_or_default();
-                                if let Err(e) = save_cursor_parquet(pq_path, &state) {
-                                    warn!(error = %e, path = %pq_path.display(), "failed to save cursor.parquet");
+                                if let Err(e) = loc.save(&state) {
+                                    warn!(error = %e, "failed to save cursor.parquet");
                                     pipeline_metrics.errors_total.get_or_create(&metrics::ErrorLabels { kind: "cursor_save".to_string() }).inc();
                                 } else {
                                     pipeline_metrics.cursor_saves_total.inc();
@@ -688,7 +699,7 @@ async fn main() -> Result<()> {
                     // Only update cursor after all tables have been written.
                     if wrote {
                         pipeline_metrics.flushes_total.get_or_create(&metrics::FlushLabels { trigger: flush_trigger.to_string() }).inc();
-                        if let (Some(ref pq_path), Some(ref cursor)) = (&cursor_path, &last_cursor) {
+                        if let (Some(ref loc), Some(ref cursor)) = (&cursor_location, &last_cursor) {
                             let mut state = cursor_state_template.clone();
                             state.cursor = cursor.clone();
                             state.last_block_num = last_block_num;
@@ -696,8 +707,8 @@ async fn main() -> Result<()> {
                             state.updated_at = time::OffsetDateTime::now_utc()
                                 .format(&time::format_description::well_known::Rfc3339)
                                 .unwrap_or_default();
-                            if let Err(e) = save_cursor_parquet(pq_path, &state) {
-                                warn!(error = %e, path = %pq_path.display(), "failed to save cursor.parquet");
+                            if let Err(e) = loc.save(&state) {
+                                warn!(error = %e, "failed to save cursor.parquet");
                                 pipeline_metrics.errors_total.get_or_create(&metrics::ErrorLabels { kind: "cursor_save".to_string() }).inc();
                             } else {
                                 pipeline_metrics.cursor_saves_total.inc();
@@ -760,7 +771,7 @@ async fn main() -> Result<()> {
             // Save cursor after final flush.
             if wrote {
                 pipeline_metrics.flushes_total.get_or_create(&metrics::FlushLabels { trigger: "shutdown".to_string() }).inc();
-                if let (Some(ref pq_path), Some(ref cursor)) = (&cursor_path, &last_cursor) {
+                if let (Some(ref loc), Some(ref cursor)) = (&cursor_location, &last_cursor) {
                     let mut state = cursor_state_template.clone();
                     state.cursor = cursor.clone();
                     state.last_block_num = last_block_num;
@@ -768,8 +779,8 @@ async fn main() -> Result<()> {
                     state.updated_at = time::OffsetDateTime::now_utc()
                         .format(&time::format_description::well_known::Rfc3339)
                         .unwrap_or_default();
-                    if let Err(e) = save_cursor_parquet(pq_path, &state) {
-                        warn!(error = %e, path = %pq_path.display(), "failed to save cursor.parquet");
+                    if let Err(e) = loc.save(&state) {
+                        warn!(error = %e, "failed to save cursor.parquet");
                         pipeline_metrics.errors_total.get_or_create(&metrics::ErrorLabels { kind: "cursor_save".to_string() }).inc();
                     } else {
                         pipeline_metrics.cursor_saves_total.inc();

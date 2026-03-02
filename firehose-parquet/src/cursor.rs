@@ -6,6 +6,8 @@ use tracing::{info, warn};
 use arrow::array::{Array, BooleanArray, StringArray, UInt64Array};
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
+use bytes::Bytes;
+use object_store::ObjectStore;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use parquet::arrow::ArrowWriter;
 use parquet::file::properties::WriterProperties;
@@ -250,6 +252,187 @@ pub fn load_cursor_parquet(path: &Path) -> Option<CursorState> {
         }
     }
     info!(path = %path.display(), "cursor.parquet has no data, starting fresh");
+    None
+}
+
+/// Where the cursor file lives — local filesystem or S3.
+#[derive(Debug, Clone)]
+pub enum CursorLocation {
+    Local(std::path::PathBuf),
+    S3 {
+        client: Arc<dyn ObjectStore>,
+        key: String,
+    },
+}
+
+impl CursorLocation {
+    /// Resolve cursor location from output path and cursor filename.
+    ///
+    /// If output is an S3 path, the cursor is placed alongside data in S3.
+    /// If output is local, the cursor stays local.
+    pub fn resolve(
+        output: &str,
+        cursor_filename: &str,
+        s3_client: Option<Arc<dyn ObjectStore>>,
+    ) -> anyhow::Result<Self> {
+        if cursor_filename.starts_with("s3://") {
+            // Explicit S3 cursor path
+            let (_bucket, key) = crate::writer::parse_s3_url(cursor_filename)?;
+            let client = s3_client.ok_or_else(|| {
+                anyhow::anyhow!("cursor is an S3 path but no S3 client available")
+            })?;
+            return Ok(CursorLocation::S3 { client, key });
+        }
+
+        if output.starts_with("s3://") {
+            // S3 output — place cursor alongside data
+            if cursor_filename.contains('/') || cursor_filename.contains('\\') {
+                anyhow::bail!(
+                    "S3 output with local cursor path containing directories is not supported: {cursor_filename}. \
+                     Use a bare filename (e.g. cursor.parquet) or an explicit s3:// URI."
+                );
+            }
+            let (_bucket, prefix) = crate::writer::parse_s3_url(output)?;
+            let key = if prefix.is_empty() {
+                cursor_filename.to_string()
+            } else {
+                format!("{prefix}/{cursor_filename}")
+            };
+            let client = s3_client.ok_or_else(|| {
+                anyhow::anyhow!("output is S3 but no S3 client available")
+            })?;
+            Ok(CursorLocation::S3 { client, key })
+        } else {
+            // Local output — local cursor
+            if cursor_filename.starts_with("s3://") {
+                anyhow::bail!("local output with S3 cursor path is not supported");
+            }
+            Ok(CursorLocation::Local(std::path::PathBuf::from(cursor_filename)))
+        }
+    }
+
+    /// Save cursor state (blocking — safe to call from sync code inside tokio).
+    pub fn save(&self, state: &CursorState) -> anyhow::Result<()> {
+        match self {
+            CursorLocation::Local(path) => save_cursor_parquet(path, state),
+            CursorLocation::S3 { client, key } => {
+                tokio::task::block_in_place(|| {
+                    tokio::runtime::Handle::current()
+                        .block_on(save_cursor_parquet_s3(client.as_ref(), key, state))
+                })
+            }
+        }
+    }
+
+    /// Load cursor state (blocking — safe to call from sync code inside tokio).
+    /// Returns `None` if not found or unreadable.
+    pub fn load(&self) -> Option<CursorState> {
+        match self {
+            CursorLocation::Local(path) => load_cursor_parquet(path),
+            CursorLocation::S3 { client, key } => {
+                tokio::task::block_in_place(|| {
+                    tokio::runtime::Handle::current()
+                        .block_on(load_cursor_parquet_s3(client.as_ref(), key))
+                })
+            }
+        }
+    }
+}
+
+/// Save cursor state to S3 as a parquet file.
+async fn save_cursor_parquet_s3(
+    client: &dyn ObjectStore,
+    key: &str,
+    state: &CursorState,
+) -> anyhow::Result<()> {
+    let batch = state.to_record_batch()?;
+
+    // Write parquet to in-memory buffer
+    let mut buf = Vec::new();
+    let props = WriterProperties::builder().build();
+    {
+        let mut writer = ArrowWriter::try_new(&mut buf, batch.schema(), Some(props))?;
+        writer.write(&batch)?;
+        writer.close()?;
+    }
+
+    let path = object_store::path::Path::from(key);
+    let payload = object_store::PutPayload::from(Bytes::from(buf));
+    let opts = crate::writer::s3_put_options("");
+    client.put_opts(&path, payload, opts).await?;
+    info!(key = %key, "saved cursor.parquet to S3");
+    Ok(())
+}
+
+/// Load cursor state from S3. Returns `None` if not found or unreadable.
+async fn load_cursor_parquet_s3(
+    client: &dyn ObjectStore,
+    key: &str,
+) -> Option<CursorState> {
+    let path = object_store::path::Path::from(key);
+    let result = match client.get(&path).await {
+        Ok(r) => r,
+        Err(object_store::Error::NotFound { .. }) => {
+            info!(key = %key, "cursor.parquet not found in S3, starting fresh");
+            return None;
+        }
+        Err(e) => {
+            warn!(key = %key, error = %e, "failed to read cursor.parquet from S3, starting fresh");
+            return None;
+        }
+    };
+
+    let bytes = match result.bytes().await {
+        Ok(b) => b,
+        Err(e) => {
+            warn!(key = %key, error = %e, "failed to read cursor.parquet bytes from S3");
+            return None;
+        }
+    };
+
+    let reader_builder = match ParquetRecordBatchReaderBuilder::try_new(bytes) {
+        Ok(b) => b,
+        Err(e) => {
+            warn!(key = %key, error = %e, "failed to read cursor.parquet metadata from S3");
+            return None;
+        }
+    };
+    let reader = match reader_builder.build() {
+        Ok(r) => r,
+        Err(e) => {
+            warn!(key = %key, error = %e, "failed to build parquet reader for S3 cursor.parquet");
+            return None;
+        }
+    };
+
+    for batch_result in reader {
+        match batch_result {
+            Ok(batch) => match CursorState::from_record_batch(&batch) {
+                Ok(state) => {
+                    if state.cursor.is_empty() {
+                        info!(key = %key, "S3 cursor.parquet has empty cursor, starting fresh");
+                        return None;
+                    }
+                    info!(
+                        key = %key,
+                        cursor = %state.cursor,
+                        last_block_num = state.last_block_num,
+                        "loaded cursor from S3 cursor.parquet"
+                    );
+                    return Some(state);
+                }
+                Err(e) => {
+                    warn!(key = %key, error = %e, "failed to parse S3 cursor.parquet");
+                    return None;
+                }
+            },
+            Err(e) => {
+                warn!(key = %key, error = %e, "failed to read batch from S3 cursor.parquet");
+                return None;
+            }
+        }
+    }
+    info!(key = %key, "S3 cursor.parquet has no data, starting fresh");
     None
 }
 

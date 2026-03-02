@@ -454,7 +454,7 @@ pub fn build_config(args: &CommonArgs) -> anyhow::Result<Config> {
         jwt_token,
         start_block: args.start_block,
         stop_block: args.stop_block,
-        cursor_path: Some(args.cursor.clone()),
+        cursor_path: Some(args.cursor.to_string_lossy().to_string()),
         output,
         partition: parse_partition(&args.partition, args.block_range_size)?,
         flush_rows: args.flush_rows,
@@ -1836,7 +1836,7 @@ mod tests {
         assert!(config.flush_rows.is_none());
         assert!(config.final_blocks_only);
         // cursor defaults to cursor.parquet
-        assert_eq!(config.cursor_path, Some(PathBuf::from("cursor.parquet")));
+        assert_eq!(config.cursor_path, Some("cursor.parquet".to_string()));
     }
 
     #[test]
@@ -1861,7 +1861,7 @@ mod tests {
             "--cursor", "cursor-mainnet-date.parquet",
         ]);
         let config = build_config(&cli.common).expect("build_config should succeed");
-        assert_eq!(config.cursor_path, Some(PathBuf::from("cursor-mainnet-date.parquet")));
+        assert_eq!(config.cursor_path, Some("cursor-mainnet-date.parquet".to_string()));
     }
 
     #[test]
