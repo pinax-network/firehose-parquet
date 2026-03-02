@@ -439,7 +439,7 @@ dependencies = [
 
 [[package]]
 name = "blocks"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "anyhow",
  "arrow",
@@ -773,7 +773,7 @@ checksum = "5baebc0774151f905a1a2cc41989300b1e6fbb29aff0ceffa1064fdd3088d582"
 
 [[package]]
 name = "firehose-parquet"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "anyhow",
  "arrow",
@@ -804,7 +804,7 @@ dependencies = [
 
 [[package]]
 name = "firehose-protos"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "prost",
  "prost-types",
