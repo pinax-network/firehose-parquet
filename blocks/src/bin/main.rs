@@ -405,6 +405,8 @@ async fn main() -> Result<()> {
     let mut last_cursor: Option<String> = None;
     let mut bytes_read: u64 = 0;
     let progress_start = Instant::now();
+    let mut current_partition_key: Option<String> = None;
+    let partition_config = config.partition.clone();
 
     let stream_result = client
         .stream_blocks(|block_bytes, type_url, cursor_str, identity: BlockIdentity, step: i32| {
@@ -428,6 +430,48 @@ async fn main() -> Result<()> {
 
             let block_number = identity.block_num;
             let ts = identity.timestamp;
+
+            // Flush the mapper at partition boundaries to ensure each flush
+            // produces batches belonging to exactly one partition.
+            // See: https://github.com/pinax-network/firehose-parquet/issues/110
+            let new_partition_key = partition_config.partition_key(block_number, ts);
+            if let Some(ref new_key) = new_partition_key {
+                let partition_changed = current_partition_key
+                    .as_ref()
+                    .map_or(false, |cur| cur != new_key);
+                if partition_changed && m.max_table_rows() > 0 {
+                    info!(
+                        old_partition = %current_partition_key.as_deref().unwrap_or("?"),
+                        new_partition = %new_key,
+                        block_number,
+                        "partition boundary detected, flushing mapper"
+                    );
+                    let batches = m.flush()?;
+                    if !dry_run {
+                        let metadata = BlockMetadata {
+                            min_block_number: min_block.unwrap_or(0),
+                            max_block_number: max_block.unwrap_or(0),
+                            min_timestamp,
+                            max_timestamp,
+                        };
+                        let wrote = writer.write_all(&batches, &metadata)?;
+                        if wrote {
+                            if let (Some(ref path), Some(ref cursor)) = (&cursor_path, &last_cursor) {
+                                if let Err(e) = save_cursor(path, cursor) {
+                                    warn!(error = %e, path = %path.display(), "failed to save cursor");
+                                }
+                            }
+                        }
+                    }
+                    min_block = None;
+                    max_block = None;
+                    min_timestamp = None;
+                    max_timestamp = None;
+                    last_flush_time = Instant::now();
+                }
+            }
+            current_partition_key = new_partition_key;
+
             min_block = Some(min_block.map_or(block_number, |s: u64| s.min(block_number)));
             max_block = Some(max_block.map_or(block_number, |s: u64| s.max(block_number)));
             global_min_block = Some(global_min_block.map_or(block_number, |s: u64| s.min(block_number)));
