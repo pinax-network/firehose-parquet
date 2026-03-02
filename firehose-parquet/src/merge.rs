@@ -16,6 +16,7 @@ use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use parquet::arrow::ArrowWriter;
 use parquet::basic::Compression as PqCompression;
 use parquet::basic::ZstdLevel;
+use parquet::file::metadata::KeyValue;
 use parquet::file::properties::WriterProperties;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -128,12 +129,16 @@ fn run_merge_local(config: &MergeConfig) -> Result<MergeResult> {
             .sum();
         result.bytes_before += source_bytes;
 
-        // Read all batches.
+        // Read all batches and extract file-level metadata from the first file.
         let mut all_batches: Vec<RecordBatch> = Vec::new();
+        let mut file_kv_metadata: Option<Vec<KeyValue>> = None;
         for file_path in files {
             let file = std::fs::File::open(file_path)
                 .with_context(|| format!("opening {}", file_path.display()))?;
             let builder = ParquetRecordBatchReaderBuilder::try_new(file)?;
+            if file_kv_metadata.is_none() {
+                file_kv_metadata = builder.metadata().file_metadata().key_value_metadata().cloned();
+            }
             let reader = builder.build()?;
             for batch_result in reader {
                 let batch = batch_result?;
@@ -168,6 +173,7 @@ fn run_merge_local(config: &MergeConfig) -> Result<MergeResult> {
             &merged,
             config.compression,
             config.flush_bytes,
+            file_kv_metadata.as_deref(),
         )?;
 
         let output_bytes: u64 = written_files.iter()
@@ -206,8 +212,9 @@ fn write_merged_batches(
     batch: &RecordBatch,
     compression: Compression,
     flush_bytes: u64,
+    kv_metadata: Option<&[KeyValue]>,
 ) -> Result<Vec<PathBuf>> {
-    let props = writer_properties(compression);
+    let props = writer_properties(compression, kv_metadata);
     let schema = batch.schema();
     let total_rows = batch.num_rows();
 
@@ -286,16 +293,21 @@ fn estimate_output_files(total_rows: usize, _batch: &RecordBatch, _flush_bytes: 
     if total_rows == 0 { 0 } else { 1 }
 }
 
-fn writer_properties(compression: Compression) -> WriterProperties {
+fn writer_properties(compression: Compression, kv_metadata: Option<&[KeyValue]>) -> WriterProperties {
     let pq_compression = match compression {
         Compression::None => PqCompression::UNCOMPRESSED,
         Compression::Snappy => PqCompression::SNAPPY,
         Compression::Gzip => PqCompression::GZIP(Default::default()),
         Compression::Zstd => PqCompression::ZSTD(ZstdLevel::try_new(3).unwrap()),
     };
-    WriterProperties::builder()
-        .set_compression(pq_compression)
-        .build()
+    let mut builder = WriterProperties::builder()
+        .set_compression(pq_compression);
+    if let Some(kvs) = kv_metadata {
+        if !kvs.is_empty() {
+            builder = builder.set_key_value_metadata(Some(kvs.to_vec()));
+        }
+    }
+    builder.build()
 }
 
 fn collect_parquet_files_recursive(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
@@ -385,14 +397,18 @@ fn run_merge_s3(config: &MergeConfig) -> Result<MergeResult> {
         let source_bytes: u64 = objects.iter().map(|o| o.size as u64).sum();
         result.bytes_before += source_bytes;
 
-        // Read all batches.
+        // Read all batches and extract file-level metadata from the first file.
         let mut all_batches: Vec<RecordBatch> = Vec::new();
+        let mut file_kv_metadata: Option<Vec<KeyValue>> = None;
         for obj in objects {
             let data = block_on_async(async {
                 client.get(&obj.location).await?.bytes().await
             }).map_err(|e| anyhow::anyhow!("reading s3://{bucket}/{}: {e}", obj.location))?;
 
             let builder = ParquetRecordBatchReaderBuilder::try_new(data)?;
+            if file_kv_metadata.is_none() {
+                file_kv_metadata = builder.metadata().file_metadata().key_value_metadata().cloned();
+            }
             let reader = builder.build()?;
             for batch_result in reader {
                 let batch = batch_result?;
@@ -419,7 +435,7 @@ fn run_merge_s3(config: &MergeConfig) -> Result<MergeResult> {
         }
 
         // Write merged data to S3.
-        let props = writer_properties(config.compression);
+        let props = writer_properties(config.compression, file_kv_metadata.as_deref());
         let total_rows = merged.num_rows();
         let mut part_num = 0u32;
         let mut offset = 0usize;
@@ -480,4 +496,80 @@ fn run_merge_s3(config: &MergeConfig) -> Result<MergeResult> {
     }
 
     Ok(result)
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use arrow::array::UInt64Builder;
+    use arrow::datatypes::{DataType, Field, Schema};
+
+    fn make_test_batch(rows: usize) -> RecordBatch {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("block_number", DataType::UInt64, false),
+        ]));
+        let mut builder = UInt64Builder::new();
+        for i in 0..rows {
+            builder.append_value(i as u64);
+        }
+        RecordBatch::try_new(schema, vec![Arc::new(builder.finish())]).unwrap()
+    }
+
+    fn write_test_parquet_with_metadata(path: &Path, batch: &RecordBatch, kvs: Vec<KeyValue>) {
+        let props = WriterProperties::builder()
+            .set_key_value_metadata(Some(kvs))
+            .build();
+        let file = std::fs::File::create(path).unwrap();
+        let mut writer = ArrowWriter::try_new(file, batch.schema(), Some(props)).unwrap();
+        writer.write(batch).unwrap();
+        writer.close().unwrap();
+    }
+
+    fn read_parquet_kv_metadata(path: &Path) -> Option<Vec<KeyValue>> {
+        let file = std::fs::File::open(path).unwrap();
+        let builder = ParquetRecordBatchReaderBuilder::try_new(file).unwrap();
+        builder.metadata().file_metadata().key_value_metadata().cloned()
+    }
+
+    #[test]
+    fn test_merge_preserves_metadata() {
+        let dir = tempfile::tempdir().unwrap();
+        let partition = dir.path().join("blocks/date=2024-01-15");
+        std::fs::create_dir_all(&partition).unwrap();
+
+        let kvs = vec![
+            KeyValue::new("firehose-parquet.version".to_string(), Some("0.1.0".to_string())),
+            KeyValue::new("firehose-parquet.chain_name".to_string(), Some("eth".to_string())),
+        ];
+
+        write_test_parquet_with_metadata(&partition.join("part-000001.parquet"), &make_test_batch(10), kvs.clone());
+        write_test_parquet_with_metadata(&partition.join("part-000002.parquet"), &make_test_batch(20), kvs.clone());
+
+        let config = MergeConfig {
+            path: dir.path().to_string_lossy().to_string(),
+            compression: Compression::None,
+            flush_bytes: 0,
+            dry_run: false,
+            aws: None,
+            cache_control: String::new(),
+        };
+
+        let result = run_merge(&config).unwrap();
+        assert_eq!(result.partitions_merged, 1);
+        assert_eq!(result.files_written, 1);
+
+        // Verify metadata is preserved in the merged file.
+        let mut out_files = Vec::new();
+        collect_parquet_files_recursive(dir.path(), &mut out_files).unwrap();
+        assert_eq!(out_files.len(), 1);
+
+        let out_kvs = read_parquet_kv_metadata(&out_files[0]).expect("metadata should be present");
+        let find = |key: &str| out_kvs.iter().find(|kv| kv.key == key).and_then(|kv| kv.value.clone());
+        assert_eq!(find("firehose-parquet.version"), Some("0.1.0".to_string()));
+        assert_eq!(find("firehose-parquet.chain_name"), Some("eth".to_string()));
+    }
 }
