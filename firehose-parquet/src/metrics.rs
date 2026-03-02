@@ -245,58 +245,73 @@ pub fn serve(registry: Arc<Registry>, port: u16) {
 
             let registry = Arc::clone(&registry);
             tokio::spawn(async move {
-                // Read the request (we don't parse it fully — just drain input).
-                let mut buf = [0u8; 4096];
-                let request_line = match tokio::io::AsyncReadExt::read(&mut stream, &mut buf).await
-                {
-                    Ok(n) if n > 0 => String::from_utf8_lossy(&buf[..n.min(256)]).to_string(),
-                    _ => String::new(),
-                };
-
-                // Check if the request is for /metrics or /health.
-                let path = request_line
-                    .lines()
-                    .next()
-                    .and_then(|line| line.split_whitespace().nth(1))
-                    .unwrap_or("/");
-
-                let response = if path == "/metrics" {
-                    let mut body = String::new();
-                    if encode(&mut body, &registry).is_err() {
-                        let error_body = "# error encoding metrics\n";
-                        format!(
-                            "HTTP/1.1 500 Internal Server Error\r\nContent-Type: text/plain\r\nContent-Length: {}\r\n\r\n{}",
-                            error_body.len(),
-                            error_body,
-                        )
-                    } else {
-                        format!(
-                            "HTTP/1.1 200 OK\r\nContent-Type: application/openmetrics-text; version=1.0.0; charset=utf-8\r\nContent-Length: {}\r\n\r\n{}",
-                            body.len(),
-                            body,
-                        )
-                    }
-                } else if path == "/health" || path == "/ready" {
-                    let body = "OK\n";
-                    format!(
-                        "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\n\r\n{}",
-                        body.len(),
-                        body,
-                    )
-                } else {
-                    let body = "Not Found\n";
-                    format!(
-                        "HTTP/1.1 404 Not Found\r\nContent-Type: text/plain\r\nContent-Length: {}\r\n\r\n{}",
-                        body.len(),
-                        body,
-                    )
-                };
-
-                let _ = stream.write_all(response.as_bytes()).await;
-                let _ = stream.shutdown().await;
+                // Apply a timeout to the entire request handling to prevent
+                // slow/idle connections from holding resources.
+                let result = tokio::time::timeout(
+                    std::time::Duration::from_secs(5),
+                    handle_request(&mut stream, &registry),
+                )
+                .await;
+                if result.is_err() {
+                    let _ = stream.shutdown().await;
+                }
             });
         }
     });
+}
+
+async fn handle_request(
+    stream: &mut tokio::net::TcpStream,
+    registry: &Registry,
+) {
+    // Read the request (we don't parse it fully — just drain input).
+    let mut buf = [0u8; 4096];
+    let request_line = match tokio::io::AsyncReadExt::read(stream, &mut buf).await {
+        Ok(n) if n > 0 => String::from_utf8_lossy(&buf[..n.min(256)]).to_string(),
+        _ => String::new(),
+    };
+
+    // Check if the request is for /metrics or /health.
+    let path = request_line
+        .lines()
+        .next()
+        .and_then(|line| line.split_whitespace().nth(1))
+        .unwrap_or("/");
+
+    let response = if path == "/metrics" {
+        let mut body = String::new();
+        if encode(&mut body, registry).is_err() {
+            let error_body = "# error encoding metrics\n";
+            format!(
+                "HTTP/1.1 500 Internal Server Error\r\nContent-Type: text/plain\r\nContent-Length: {}\r\n\r\n{}",
+                error_body.len(),
+                error_body,
+            )
+        } else {
+            format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/openmetrics-text; version=1.0.0; charset=utf-8\r\nContent-Length: {}\r\n\r\n{}",
+                body.len(),
+                body,
+            )
+        }
+    } else if path == "/health" || path == "/ready" {
+        let body = "OK\n";
+        format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\n\r\n{}",
+            body.len(),
+            body,
+        )
+    } else {
+        let body = "Not Found\n";
+        format!(
+            "HTTP/1.1 404 Not Found\r\nContent-Type: text/plain\r\nContent-Length: {}\r\n\r\n{}",
+            body.len(),
+            body,
+        )
+    };
+
+    let _ = stream.write_all(response.as_bytes()).await;
+    let _ = stream.shutdown().await;
 }
 
 #[cfg(test)]
