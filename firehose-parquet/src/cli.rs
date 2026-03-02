@@ -443,6 +443,7 @@ pub fn build_config(args: &CommonArgs) -> anyhow::Result<Config> {
         start_block: args.start_block,
         stop_block: args.stop_block,
         cursor_path: args.cursor.clone(),
+        cursor_parquet_path: None, // set later after output is resolved
         output,
         partition: parse_partition(&args.partition, args.block_range_size)?,
         flush_rows: args.flush_rows,
