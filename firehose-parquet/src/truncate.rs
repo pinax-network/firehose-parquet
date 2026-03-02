@@ -7,7 +7,6 @@ use object_store::aws::AmazonS3Builder;
 use object_store::ObjectStore;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use tracing::info;
 
 /// Configuration for a truncate operation.
 pub struct TruncateConfig {

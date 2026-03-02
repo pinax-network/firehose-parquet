@@ -439,7 +439,7 @@ dependencies = [
 
 [[package]]
 name = "blocks"
-version = "0.2.4"
+version = "0.2.5"
 dependencies = [
  "anyhow",
  "arrow",
@@ -795,7 +795,7 @@ dependencies = [
 
 [[package]]
 name = "firehose-protos"
-version = "0.2.4"
+version = "0.2.5"
 dependencies = [
  "prost",
  "prost-types",
