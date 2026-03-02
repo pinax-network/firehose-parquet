@@ -1150,14 +1150,14 @@ impl ValidateResult {
 type BlockTuple = (u64, String, String, i64);
 
 /// Read a string value from a column that may be Utf8 or Binary.
-fn read_id_string(col: &dyn arrow::array::Array, row: usize) -> anyhow::Result<String> {
+fn read_id_string(col: &dyn arrow::array::Array, row: usize, col_name: &str) -> anyhow::Result<String> {
     use arrow::array::{BinaryArray, StringArray};
     if let Some(s) = col.as_any().downcast_ref::<StringArray>() {
         Ok(s.value(row).to_string())
     } else if let Some(b) = col.as_any().downcast_ref::<BinaryArray>() {
         Ok(hex::encode(b.value(row)))
     } else {
-        Err(anyhow::anyhow!("column is not Utf8 or Binary"))
+        Err(anyhow::anyhow!("{} column is not Utf8 or Binary", col_name))
     }
 }
 
@@ -1187,8 +1187,8 @@ fn extract_block_tuples(
             let ts = timestamps.map(|a| a.value(i)).unwrap_or(0);
             tuples.push((
                 block_nums.value(i),
-                read_id_string(block_id_col, i)?,
-                read_id_string(parent_id_col, i)?,
+                read_id_string(block_id_col, i, "block_id")?,
+                read_id_string(parent_id_col, i, "parent_id")?,
                 ts,
             ));
         }
