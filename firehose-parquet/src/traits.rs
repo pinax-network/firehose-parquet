@@ -108,7 +108,7 @@ pub fn canonical_fields() -> Vec<Field> {
 }
 
 /// Decode a hex block ID string to raw bytes.
-fn decode_id_bytes(id: &str) -> Vec<u8> {
+pub fn decode_id_bytes(id: &str) -> Vec<u8> {
     let hex_str = id.strip_prefix("0x").unwrap_or(id);
     hex::decode(hex_str).unwrap_or_else(|_| id.as_bytes().to_vec())
 }

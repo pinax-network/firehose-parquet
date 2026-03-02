@@ -6,7 +6,7 @@ use firehose_parquet::cursor::{CursorLocation, CursorState};
 use firehose_parquet::encode::{parse_encode_bytes, EncodeBytes};
 use firehose_parquet::grpc::{EndpointInfo, FirehoseClient};
 use firehose_parquet::metrics;
-use firehose_parquet::traits::{fork_step_name, BlockIdentity, BlockMapper};
+use firehose_parquet::traits::{decode_id_bytes, fork_step_name, BlockIdentity, BlockMapper};
 use firehose_parquet::writer::{OutputWriter, ParquetFileMetadata};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -512,29 +512,54 @@ async fn main() -> Result<()> {
     let mut current_partition_key: Option<String> = None;
     let partition_config = config.partition.clone();
 
+    // Build file-level metadata for the cursor (same `firehose-parquet.*`
+    // namespace as table files). Includes version, endpoint, chain info, and
+    // pipeline parameters.
+    let cursor_file_metadata = {
+        let mut meta = ParquetFileMetadata::new();
+        meta.add("firehose-parquet.version", env!("CARGO_PKG_VERSION"));
+        if block_type != "auto" {
+            meta.add("firehose-parquet.block_type", &block_type);
+        }
+        meta.add("firehose-parquet.bytes_encoding", &bytes_encoding_str);
+        meta.add("firehose-parquet.endpoint", &config.endpoint);
+        if let Some(ref ei) = endpoint_info {
+            if !ei.chain_name.is_empty() {
+                meta.add("firehose-parquet.chain_name", &ei.chain_name);
+            }
+            if !ei.chain_name_aliases.is_empty() {
+                meta.add("firehose-parquet.chain_name_aliases", ei.chain_name_aliases.join(","));
+            }
+            if !ei.first_streamable_block_id.is_empty() {
+                meta.add("firehose-parquet.first_streamable_block_id", &ei.first_streamable_block_id);
+                meta.add("firehose-parquet.first_streamable_block_num", ei.first_streamable_block_num.to_string());
+            } else if ei.first_streamable_block_num > 0 {
+                meta.add("firehose-parquet.first_streamable_block_num", ei.first_streamable_block_num.to_string());
+            }
+            if ei.block_id_encoding > 0 {
+                meta.add("firehose-parquet.block_id_encoding", block_id_encoding_label(ei.block_id_encoding));
+            }
+            if !ei.block_features.is_empty() {
+                meta.add("firehose-parquet.block_features", ei.block_features.join(","));
+            }
+        }
+        meta.add("firehose-parquet.partition", config.partition.to_string());
+        meta.add("firehose-parquet.block_range_size", match &config.partition {
+            firehose_parquet::config::Partition::BlockRange(size) => size.to_string(),
+            _ => "0".to_string(),
+        });
+        meta.add("firehose-parquet.compression", config.compression.to_string());
+        meta
+    };
+
     // Build a template CursorState with pipeline parameters that stay constant.
     let cursor_state_template = CursorState {
-        endpoint: config.endpoint.clone(),
         start_block: config.start_block,
         stop_block: config.stop_block,
-        partition: config.partition.to_string(),
-        block_range_size: match &config.partition {
-            firehose_parquet::config::Partition::BlockRange(size) => *size,
-            _ => 0,
-        },
-        compression: config.compression.to_string(),
-        flush_bytes: config.flush_bytes,
-        flush_rows: config.flush_rows.map(|r| r as u64),
-        bytes_encoding: bytes_encoding_str.clone(),
         extended,
         final_blocks_only: config.final_blocks_only,
-        chain_name: endpoint_info.as_ref().map_or_else(String::new, |ei| ei.chain_name.clone()),
-        chain_name_aliases: endpoint_info.as_ref().map_or_else(String::new, |ei| ei.chain_name_aliases.join(",")),
-        first_streamable_block_num: endpoint_info.as_ref().map_or(0, |ei| ei.first_streamable_block_num),
-        first_streamable_block_id: endpoint_info.as_ref().map_or_else(String::new, |ei| ei.first_streamable_block_id.clone()),
-        block_id_encoding: endpoint_info.as_ref().map_or_else(String::new, |ei| ei.block_id_encoding.to_string()),
-        block_features: endpoint_info.as_ref().map_or_else(String::new, |ei| ei.block_features.join(",")),
-        firehose_parquet_version: env!("CARGO_PKG_VERSION").to_string(),
+        include_failed_transactions,
+        file_metadata: cursor_file_metadata,
         ..CursorState::default()
     };
 
@@ -593,7 +618,7 @@ async fn main() -> Result<()> {
                                 let mut state = cursor_state_template.clone();
                                 state.cursor = cursor.clone();
                                 state.last_block_num = last_block_num;
-                                state.last_block_id = last_block_id.clone();
+                                state.last_block_id = decode_id_bytes(&last_block_id);
                                 state.updated_at = time::OffsetDateTime::now_utc()
                                     .format(&time::format_description::well_known::Rfc3339)
                                     .unwrap_or_default();
@@ -703,7 +728,7 @@ async fn main() -> Result<()> {
                             let mut state = cursor_state_template.clone();
                             state.cursor = cursor.clone();
                             state.last_block_num = last_block_num;
-                            state.last_block_id = last_block_id.clone();
+                            state.last_block_id = decode_id_bytes(&last_block_id);
                             state.updated_at = time::OffsetDateTime::now_utc()
                                 .format(&time::format_description::well_known::Rfc3339)
                                 .unwrap_or_default();
@@ -775,7 +800,7 @@ async fn main() -> Result<()> {
                     let mut state = cursor_state_template.clone();
                     state.cursor = cursor.clone();
                     state.last_block_num = last_block_num;
-                    state.last_block_id = last_block_id.clone();
+                    state.last_block_id = decode_id_bytes(&last_block_id);
                     state.updated_at = time::OffsetDateTime::now_utc()
                         .format(&time::format_description::well_known::Rfc3339)
                         .unwrap_or_default();
