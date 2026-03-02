@@ -1,5 +1,5 @@
 use crate::config::Config;
-use crate::cursor::load_cursor_parquet;
+use crate::cursor::CursorLocation;
 use crate::metrics::PipelineMetrics;
 use crate::traits::BlockIdentity;
 use anyhow::{Context, Result};
@@ -127,15 +127,12 @@ impl FirehoseClient {
     ///
     /// Returns when the stream is cleanly exhausted (stop block reached) or an
     /// unrecoverable error occurs.
-    pub async fn stream_blocks<F>(&self, mut handler: F) -> Result<()>
+    pub async fn stream_blocks<F>(&self, cursor_location: Option<&CursorLocation>, mut handler: F) -> Result<()>
     where
         F: FnMut(Vec<u8>, String, String, BlockIdentity, i32) -> Result<()>,
     {
-        let mut cursor: Option<String> = self
-            .config
-            .cursor_path
-            .as_deref()
-            .and_then(load_cursor_parquet)
+        let mut cursor: Option<String> = cursor_location
+            .and_then(|loc| loc.load())
             .map(|state| state.cursor);
         let backoff_config = ExponentialBackoffBuilder::default()
             .with_initial_interval(Duration::from_secs(1))

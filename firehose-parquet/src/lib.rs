@@ -6,6 +6,7 @@ pub mod grpc;
 pub mod merge;
 pub mod metrics;
 pub mod rollup;
+pub mod s3;
 pub mod traits;
 pub mod truncate;
 pub mod writer;

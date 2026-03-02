@@ -61,8 +61,9 @@ pub struct Config {
     pub jwt_token: Option<String>,
     pub start_block: Option<u64>,
     pub stop_block: Option<u64>,
-    /// Path to the `cursor.parquet` file. Must have a `.parquet` extension.
-    pub cursor_path: Option<PathBuf>,
+    /// Resolved cursor location — either a local path or an `s3://` URI.
+    /// Must have a `.parquet` extension.
+    pub cursor_path: Option<String>,
     pub output: PathBuf,
     pub partition: Partition,
     pub flush_rows: Option<u32>,
@@ -181,7 +182,7 @@ impl std::fmt::Display for Config {
         writeln!(f, "  start_block        {start}")?;
         writeln!(f, "  stop_block         {stop}")?;
         if let Some(ref path) = self.cursor_path {
-            writeln!(f, "  cursor             {}", path.display())?;
+            writeln!(f, "  cursor             {}", path)?;
         }
         writeln!(f, "  output             {}", self.output.display())?;
         writeln!(f, "  partition          {}", self.partition)?;
@@ -343,7 +344,7 @@ mod tests {
     #[test]
     fn test_config_display_with_cursor() {
         let config = Config {
-            cursor_path: Some(PathBuf::from("cursor.parquet")),
+            cursor_path: Some("cursor.parquet".to_string()),
             ..Config::default()
         };
         let display = config.to_string();
