@@ -5,6 +5,7 @@ use firehose_parquet::config::BlockMetadata;
 use firehose_parquet::cursor::{save_cursor_parquet, CursorState};
 use firehose_parquet::encode::{parse_encode_bytes, EncodeBytes};
 use firehose_parquet::grpc::{EndpointInfo, FirehoseClient};
+use firehose_parquet::metrics;
 use firehose_parquet::traits::{fork_step_name, BlockIdentity, BlockMapper};
 use firehose_parquet::writer::{OutputWriter, ParquetFileMetadata};
 use std::path::PathBuf;
@@ -388,7 +389,7 @@ async fn main() -> Result<()> {
 
     // Fetch endpoint info for auto-detection of encoding, extended features,
     // and chain_name-based output directory.
-    let client = FirehoseClient::new(config.clone());
+    let mut client = FirehoseClient::new(config.clone());
     let endpoint_info = client.info().await;
 
     // Use chain_name as a subdirectory under the output path.
@@ -403,6 +404,48 @@ async fn main() -> Result<()> {
     let include_failed_transactions = cli.include_failed_transactions;
 
     info!(block_type, extended, bytes_encoding = %bytes_encoding_str, include_failed_transactions, "starting pipeline\n{config}");
+
+    // Initialize Prometheus metrics if --metrics-port is set.
+    let (mut metrics_registry, pipeline_metrics) = metrics::init();
+
+    // Register the info metric with endpoint metadata labels.
+    {
+        let mut labels = vec![
+            ("endpoint".to_string(), config.endpoint.clone()),
+            ("partition".to_string(), config.partition.to_string()),
+            ("compression".to_string(), config.compression.to_string()),
+            ("bytes_encoding".to_string(), bytes_encoding_str.clone()),
+            ("extended".to_string(), extended.to_string()),
+            ("final_blocks_only".to_string(), config.final_blocks_only.to_string()),
+            ("version".to_string(), env!("CARGO_PKG_VERSION").to_string()),
+        ];
+        if let Some(ref ei) = endpoint_info {
+            labels.push(("chain_name".to_string(), ei.chain_name.clone()));
+            if !ei.chain_name_aliases.is_empty() {
+                labels.push(("chain_name_aliases".to_string(), ei.chain_name_aliases.join(",")));
+            }
+            labels.push(("first_streamable_block_num".to_string(), ei.first_streamable_block_num.to_string()));
+            if !ei.first_streamable_block_id.is_empty() {
+                labels.push(("first_streamable_block_id".to_string(), ei.first_streamable_block_id.clone()));
+            }
+            if ei.block_id_encoding > 0 {
+                labels.push(("block_id_encoding".to_string(), block_id_encoding_label(ei.block_id_encoding).to_string()));
+            }
+            if !ei.block_features.is_empty() {
+                labels.push(("block_features".to_string(), ei.block_features.join(",")));
+            }
+        }
+        metrics::register_info_metric(&mut metrics_registry, labels);
+    }
+
+    // Spawn the metrics HTTP server if a port was provided.
+    let metrics_registry = Arc::new(metrics_registry);
+    if let Some(port) = config.metrics_port {
+        metrics::serve(Arc::clone(&metrics_registry), port);
+    }
+
+    // Pass metrics to the gRPC client for reconnect tracking.
+    client.set_metrics(pipeline_metrics.clone());
 
     let final_blocks_only = config.final_blocks_only;
     let include_fork_step = !final_blocks_only;
@@ -422,6 +465,9 @@ async fn main() -> Result<()> {
     } else {
         OutputWriter::new(&config.output, config.partition.clone(), config.compression, flush_bytes)
     };
+
+    // Pass metrics to the writer for file/byte/row tracking.
+    writer.set_metrics(pipeline_metrics.clone());
 
     // If block type is known upfront, resolve encode_bytes and create mapper immediately.
     // If "auto", defer until first block arrives.
@@ -531,6 +577,7 @@ async fn main() -> Result<()> {
                         };
                         let wrote = writer.write_all(&batches, &metadata)?;
                         if wrote {
+                            pipeline_metrics.flushes_total.get_or_create(&metrics::FlushLabels { trigger: "partition_boundary".to_string() }).inc();
                             if let (Some(ref pq_path), Some(ref cursor)) = (&cursor_path, &last_cursor) {
                                 let mut state = cursor_state_template.clone();
                                 state.cursor = cursor.clone();
@@ -541,6 +588,10 @@ async fn main() -> Result<()> {
                                     .unwrap_or_default();
                                 if let Err(e) = save_cursor_parquet(pq_path, &state) {
                                     warn!(error = %e, path = %pq_path.display(), "failed to save cursor.parquet");
+                                    pipeline_metrics.errors_total.get_or_create(&metrics::ErrorLabels { kind: "cursor_save".to_string() }).inc();
+                                } else {
+                                    pipeline_metrics.cursor_saves_total.inc();
+                                    pipeline_metrics.cursor_last_block_num.set(last_block_num as i64);
                                 }
                             }
                         }
@@ -568,6 +619,17 @@ async fn main() -> Result<()> {
             last_block_num = block_number;
             last_block_id = identity.block_id.clone();
 
+            // Update Prometheus metrics.
+            pipeline_metrics.blocks_processed_total.inc();
+            pipeline_metrics.bytes_read_total.inc_by(block_bytes.len() as u64);
+            pipeline_metrics.current_block_number.set(block_number as i64);
+            if global_min_block.map_or(true, |g| block_number <= g) {
+                pipeline_metrics.min_block_number.set(block_number as i64);
+            }
+            if global_max_block.map_or(true, |g| block_number >= g) {
+                pipeline_metrics.max_block_number.set(block_number as i64);
+            }
+
             // Check for graceful shutdown after processing the current block.
             if shutdown.load(Ordering::SeqCst) {
                 info!(blocks_processed, block_number, "shutdown requested, breaking out of stream");
@@ -594,6 +656,11 @@ async fn main() -> Result<()> {
                     speed = format!("{}/s | {:.0} blocks/s", firehose_parquet::cli::format_bytes(speed_per_sec as u64), blocks_per_sec),
                     "progress"
                 );
+
+                // Update rolling throughput gauges.
+                pipeline_metrics.blocks_per_second.set(blocks_per_sec);
+                pipeline_metrics.bytes_per_second.set(speed_per_sec);
+                pipeline_metrics.elapsed_seconds.set(elapsed_secs);
             }
 
             let time_to_flush = flush_interval_secs
@@ -607,6 +674,7 @@ async fn main() -> Result<()> {
             let bytes_to_flush = m.estimated_bytes() as u64 >= flush_bytes;
 
             if rows_to_flush || time_to_flush || bytes_to_flush {
+                let flush_trigger = if bytes_to_flush { "bytes" } else if rows_to_flush { "rows" } else { "interval" };
                 let batches = m.flush()?;
                 if !dry_run {
                     let metadata = BlockMetadata {
@@ -619,6 +687,7 @@ async fn main() -> Result<()> {
 
                     // Only update cursor after all tables have been written.
                     if wrote {
+                        pipeline_metrics.flushes_total.get_or_create(&metrics::FlushLabels { trigger: flush_trigger.to_string() }).inc();
                         if let (Some(ref pq_path), Some(ref cursor)) = (&cursor_path, &last_cursor) {
                             let mut state = cursor_state_template.clone();
                             state.cursor = cursor.clone();
@@ -629,6 +698,10 @@ async fn main() -> Result<()> {
                                 .unwrap_or_default();
                             if let Err(e) = save_cursor_parquet(pq_path, &state) {
                                 warn!(error = %e, path = %pq_path.display(), "failed to save cursor.parquet");
+                                pipeline_metrics.errors_total.get_or_create(&metrics::ErrorLabels { kind: "cursor_save".to_string() }).inc();
+                            } else {
+                                pipeline_metrics.cursor_saves_total.inc();
+                                pipeline_metrics.cursor_last_block_num.set(last_block_num as i64);
                             }
                         }
                     }
@@ -686,6 +759,7 @@ async fn main() -> Result<()> {
 
             // Save cursor after final flush.
             if wrote {
+                pipeline_metrics.flushes_total.get_or_create(&metrics::FlushLabels { trigger: "shutdown".to_string() }).inc();
                 if let (Some(ref pq_path), Some(ref cursor)) = (&cursor_path, &last_cursor) {
                     let mut state = cursor_state_template.clone();
                     state.cursor = cursor.clone();
@@ -696,6 +770,10 @@ async fn main() -> Result<()> {
                         .unwrap_or_default();
                     if let Err(e) = save_cursor_parquet(pq_path, &state) {
                         warn!(error = %e, path = %pq_path.display(), "failed to save cursor.parquet");
+                        pipeline_metrics.errors_total.get_or_create(&metrics::ErrorLabels { kind: "cursor_save".to_string() }).inc();
+                    } else {
+                        pipeline_metrics.cursor_saves_total.inc();
+                        pipeline_metrics.cursor_last_block_num.set(last_block_num as i64);
                     }
                 }
             }

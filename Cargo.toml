@@ -16,3 +16,4 @@ clap = { version = "4", features = ["derive", "env"] }
 tracing = "0.1"
 anyhow = "1"
 sha2 = "0.10"
+prometheus-client = "0.24"

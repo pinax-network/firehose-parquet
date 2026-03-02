@@ -23,4 +23,5 @@ clap.workspace = true
 tracing.workspace = true
 anyhow.workspace = true
 sha2.workspace = true
+prometheus-client.workspace = true
 time = { version = "0.3", features = ["formatting"] }

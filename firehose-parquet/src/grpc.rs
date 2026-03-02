@@ -1,5 +1,6 @@
 use crate::config::Config;
 use crate::cursor::load_cursor_parquet;
+use crate::metrics::PipelineMetrics;
 use crate::traits::BlockIdentity;
 use anyhow::{Context, Result};
 use backoff::ExponentialBackoffBuilder;
@@ -23,11 +24,17 @@ pub struct EndpointInfo {
 /// connection, authentication, and streaming with automatic retry/resume.
 pub struct FirehoseClient {
     config: Config,
+    metrics: Option<PipelineMetrics>,
 }
 
 impl FirehoseClient {
     pub fn new(config: Config) -> Self {
-        Self { config }
+        Self { config, metrics: None }
+    }
+
+    /// Set the pipeline metrics for Prometheus instrumentation.
+    pub fn set_metrics(&mut self, metrics: PipelineMetrics) {
+        self.metrics = Some(metrics);
     }
 
     /// Build a tonic channel to the configured endpoint.
@@ -156,6 +163,10 @@ impl FirehoseClient {
                         retry_in = ?wait,
                         "connection failed, retrying"
                     );
+                    if let Some(ref m) = self.metrics {
+                        m.grpc_reconnects_total.inc();
+                        m.errors_total.get_or_create(&crate::metrics::ErrorLabels { kind: "grpc_reconnect".to_string() }).inc();
+                    }
                     tokio::time::sleep(wait).await;
                     continue;
                 }
@@ -244,6 +255,10 @@ impl FirehoseClient {
                     }
                     Err(e) => {
                         warn!(error = %e, "stream error, will reconnect");
+                        if let Some(ref m) = self.metrics {
+                            m.grpc_reconnects_total.inc();
+                            m.errors_total.get_or_create(&crate::metrics::ErrorLabels { kind: "grpc_reconnect".to_string() }).inc();
+                        }
                         break;
                     }
                 }

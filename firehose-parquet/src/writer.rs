@@ -1,4 +1,5 @@
 use crate::config::{BlockMetadata, Compression, Config, Partition};
+use crate::metrics::PipelineMetrics;
 use anyhow::{Context, Result};
 use arrow::array::Int64Array;
 use arrow::record_batch::RecordBatch;
@@ -382,6 +383,8 @@ pub struct OutputWriter {
     compression_ratio: f64,
     /// Batches that need to be re-buffered after a global flush (from partition changes).
     pending_after_flush: Vec<PendingBatch>,
+    /// Optional pipeline metrics for Prometheus instrumentation.
+    metrics: Option<PipelineMetrics>,
 }
 
 impl OutputWriter {
@@ -398,6 +401,7 @@ impl OutputWriter {
             flush_bytes,
             compression_ratio: cr,
             pending_after_flush: Vec::new(),
+            metrics: None,
         }
     }
 
@@ -416,7 +420,13 @@ impl OutputWriter {
             flush_bytes,
             compression_ratio: cr,
             pending_after_flush: Vec::new(),
+            metrics: None,
         })
+    }
+
+    /// Set the pipeline metrics for Prometheus instrumentation.
+    pub fn set_metrics(&mut self, metrics: PipelineMetrics) {
+        self.metrics = Some(metrics);
     }
 
     /// Current observed compression ratio (compressed / uncompressed).
@@ -564,6 +574,21 @@ impl OutputWriter {
             }
         }
 
+        // Update buffer gauge metrics.
+        if let Some(ref m) = self.metrics {
+            let mut total_estimated = 0u64;
+            for (table, buf) in &self.buffers {
+                let row_count: usize = buf.batches.iter().map(|b| b.num_rows()).sum();
+                m.buffer_rows
+                    .get_or_create(&crate::metrics::TableLabels {
+                        table: table.clone(),
+                    })
+                    .set(row_count as i64);
+                total_estimated += (buf.total_bytes as f64 * self.compression_ratio) as u64;
+            }
+            m.buffer_estimated_bytes.set(total_estimated as i64);
+        }
+
         if needs_global_flush {
             self.flush_remaining()?;
             return Ok(true);
@@ -662,7 +687,30 @@ impl OutputWriter {
         };
         let schema = buf.batches[0].schema();
         let merged = arrow::compute::concat_batches(&schema, &buf.batches)?;
-        self.inner.write_batch(table, &merged, &buf.metadata)?;
+        let num_rows = merged.num_rows();
+        let partition_key = buf.partition_key.clone();
+        let (_path, compressed_bytes) = self.inner.write_batch(table, &merged, &buf.metadata)?;
+
+        // Update Prometheus metrics if available.
+        if let Some(ref m) = self.metrics {
+            use crate::metrics::{TableLabels, TablePartitionLabels};
+            m.files_written_total
+                .get_or_create(&TablePartitionLabels {
+                    table: table.to_string(),
+                    partition: partition_key,
+                })
+                .inc();
+            m.file_bytes_total
+                .get_or_create(&TableLabels {
+                    table: table.to_string(),
+                })
+                .inc_by(compressed_bytes as u64);
+            m.rows_written_total
+                .get_or_create(&TableLabels {
+                    table: table.to_string(),
+                })
+                .inc_by(num_rows as u64);
+        }
 
         Ok(true)
     }
