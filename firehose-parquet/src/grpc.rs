@@ -1,5 +1,5 @@
 use crate::config::Config;
-use crate::cursor::load_cursor;
+use crate::cursor::load_cursor_parquet;
 use crate::traits::BlockIdentity;
 use anyhow::{Context, Result};
 use backoff::ExponentialBackoffBuilder;
@@ -128,7 +128,8 @@ impl FirehoseClient {
             .config
             .cursor_path
             .as_deref()
-            .and_then(load_cursor);
+            .and_then(load_cursor_parquet)
+            .map(|state| state.cursor);
         let backoff_config = ExponentialBackoffBuilder::default()
             .with_initial_interval(Duration::from_secs(1))
             .with_max_interval(Duration::from_secs(60))

@@ -2,7 +2,7 @@ use anyhow::{anyhow, Result};
 use clap::Parser;
 use firehose_parquet::cli::{build_config, init_tracing, load_dotenv, Commands, CommonArgs};
 use firehose_parquet::config::BlockMetadata;
-use firehose_parquet::cursor::save_cursor;
+use firehose_parquet::cursor::{save_cursor_parquet, CursorState};
 use firehose_parquet::encode::{parse_encode_bytes, EncodeBytes};
 use firehose_parquet::grpc::{EndpointInfo, FirehoseClient};
 use firehose_parquet::traits::{fork_step_name, BlockIdentity, BlockMapper};
@@ -448,10 +448,38 @@ async fn main() -> Result<()> {
     let mut global_max_block: Option<u64> = None;
     let mut last_flush_time = Instant::now();
     let mut last_cursor: Option<String> = None;
+    let mut last_block_num: u64 = 0;
+    let mut last_block_id: String = String::new();
     let mut bytes_read: u64 = 0;
     let progress_start = Instant::now();
     let mut current_partition_key: Option<String> = None;
     let partition_config = config.partition.clone();
+
+    // Build a template CursorState with pipeline parameters that stay constant.
+    let cursor_state_template = CursorState {
+        endpoint: config.endpoint.clone(),
+        start_block: config.start_block,
+        stop_block: config.stop_block,
+        partition: config.partition.to_string(),
+        block_range_size: match &config.partition {
+            firehose_parquet::config::Partition::BlockRange(size) => *size,
+            _ => 0,
+        },
+        compression: config.compression.to_string(),
+        flush_bytes: config.flush_bytes,
+        flush_rows: config.flush_rows.map(|r| r as u64),
+        bytes_encoding: bytes_encoding_str.clone(),
+        extended,
+        final_blocks_only: config.final_blocks_only,
+        chain_name: endpoint_info.as_ref().map_or_else(String::new, |ei| ei.chain_name.clone()),
+        chain_name_aliases: endpoint_info.as_ref().map_or_else(String::new, |ei| ei.chain_name_aliases.join(",")),
+        first_streamable_block_num: endpoint_info.as_ref().map_or(0, |ei| ei.first_streamable_block_num),
+        first_streamable_block_id: endpoint_info.as_ref().map_or_else(String::new, |ei| ei.first_streamable_block_id.clone()),
+        block_id_encoding: endpoint_info.as_ref().map_or_else(String::new, |ei| ei.block_id_encoding.to_string()),
+        block_features: endpoint_info.as_ref().map_or_else(String::new, |ei| ei.block_features.join(",")),
+        firehose_parquet_version: env!("CARGO_PKG_VERSION").to_string(),
+        ..CursorState::default()
+    };
 
     let stream_result = client
         .stream_blocks(|block_bytes, type_url, cursor_str, identity: BlockIdentity, step: i32| {
@@ -503,9 +531,16 @@ async fn main() -> Result<()> {
                         };
                         let wrote = writer.write_all(&batches, &metadata)?;
                         if wrote {
-                            if let (Some(ref path), Some(ref cursor)) = (&cursor_path, &last_cursor) {
-                                if let Err(e) = save_cursor(path, cursor) {
-                                    warn!(error = %e, path = %path.display(), "failed to save cursor");
+                            if let (Some(ref pq_path), Some(ref cursor)) = (&cursor_path, &last_cursor) {
+                                let mut state = cursor_state_template.clone();
+                                state.cursor = cursor.clone();
+                                state.last_block_num = last_block_num;
+                                state.last_block_id = last_block_id.clone();
+                                state.updated_at = time::OffsetDateTime::now_utc()
+                                    .format(&time::format_description::well_known::Rfc3339)
+                                    .unwrap_or_default();
+                                if let Err(e) = save_cursor_parquet(pq_path, &state) {
+                                    warn!(error = %e, path = %pq_path.display(), "failed to save cursor.parquet");
                                 }
                             }
                         }
@@ -530,6 +565,8 @@ async fn main() -> Result<()> {
             blocks_processed += 1;
             bytes_read += block_bytes.len() as u64;
             last_cursor = Some(cursor_str);
+            last_block_num = block_number;
+            last_block_id = identity.block_id.clone();
 
             // Check for graceful shutdown after processing the current block.
             if shutdown.load(Ordering::SeqCst) {
@@ -582,9 +619,16 @@ async fn main() -> Result<()> {
 
                     // Only update cursor after all tables have been written.
                     if wrote {
-                        if let (Some(ref path), Some(ref cursor)) = (&cursor_path, &last_cursor) {
-                            if let Err(e) = save_cursor(path, cursor) {
-                                warn!(error = %e, path = %path.display(), "failed to save cursor");
+                        if let (Some(ref pq_path), Some(ref cursor)) = (&cursor_path, &last_cursor) {
+                            let mut state = cursor_state_template.clone();
+                            state.cursor = cursor.clone();
+                            state.last_block_num = last_block_num;
+                            state.last_block_id = last_block_id.clone();
+                            state.updated_at = time::OffsetDateTime::now_utc()
+                                .format(&time::format_description::well_known::Rfc3339)
+                                .unwrap_or_default();
+                            if let Err(e) = save_cursor_parquet(pq_path, &state) {
+                                warn!(error = %e, path = %pq_path.display(), "failed to save cursor.parquet");
                             }
                         }
                     }
@@ -642,9 +686,16 @@ async fn main() -> Result<()> {
 
             // Save cursor after final flush.
             if wrote {
-                if let (Some(ref path), Some(ref cursor)) = (&cursor_path, &last_cursor) {
-                    if let Err(e) = save_cursor(path, cursor) {
-                        warn!(error = %e, path = %path.display(), "failed to save cursor");
+                if let (Some(ref pq_path), Some(ref cursor)) = (&cursor_path, &last_cursor) {
+                    let mut state = cursor_state_template.clone();
+                    state.cursor = cursor.clone();
+                    state.last_block_num = last_block_num;
+                    state.last_block_id = last_block_id.clone();
+                    state.updated_at = time::OffsetDateTime::now_utc()
+                        .format(&time::format_description::well_known::Rfc3339)
+                        .unwrap_or_default();
+                    if let Err(e) = save_cursor_parquet(pq_path, &state) {
+                        warn!(error = %e, path = %pq_path.display(), "failed to save cursor.parquet");
                     }
                 }
             }

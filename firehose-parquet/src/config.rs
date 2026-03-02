@@ -61,6 +61,7 @@ pub struct Config {
     pub jwt_token: Option<String>,
     pub start_block: Option<u64>,
     pub stop_block: Option<u64>,
+    /// Path to the `cursor.parquet` file. Must have a `.parquet` extension.
     pub cursor_path: Option<PathBuf>,
     pub output: PathBuf,
     pub partition: Partition,
@@ -337,11 +338,11 @@ mod tests {
     #[test]
     fn test_config_display_with_cursor() {
         let config = Config {
-            cursor_path: Some(PathBuf::from("cursor.txt")),
+            cursor_path: Some(PathBuf::from("cursor.parquet")),
             ..Config::default()
         };
         let display = config.to_string();
-        assert!(display.contains("cursor             cursor.txt"));
+        assert!(display.contains("cursor             cursor.parquet"));
     }
 
     #[test]
