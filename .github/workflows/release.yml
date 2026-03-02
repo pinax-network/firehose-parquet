@@ -75,7 +75,7 @@ jobs:
         run: |
           STAGING="firehose-parquet-${{ matrix.suffix }}"
           mkdir -p "$STAGING"
-          cp "target/${{ matrix.target }}/release/firehose-to-parquet" "$STAGING/"
+          cp "target/${{ matrix.target }}/release/firehose-parquet" "$STAGING/"
           tar czf "${STAGING}.tar.gz" "$STAGING"
           echo "ASSET=${STAGING}.tar.gz" >> "$GITHUB_ENV"
 

@@ -26,23 +26,23 @@ use blocks::tron::mapper::TronBlockMapper;
 const BLOCK_TYPES: &[&str] = &["auto", "evm", "bitcoin", "solana", "near", "antelope", "cosmos", "tron", "beacon"];
 
 #[derive(Parser, Debug)]
-#[command(name = "firehose-to-parquet", version, about = "Convert Firehose gRPC stream to Apache Parquet", after_long_help = "\
+#[command(name = "firehose-parquet", version, about = "Convert Firehose gRPC stream to Apache Parquet", after_long_help = "\
 Examples:
   # Stream EVM blocks to local Parquet (auto-detect chain)
-  firehose-to-parquet --endpoint https://eth.firehose.pinax.network:443 \\
+  firehose-parquet --endpoint https://eth.firehose.pinax.network:443 \\
     --start-block 20000000 --stop-block 20001000
 
   # Stream Solana with date partitioning to S3
-  firehose-to-parquet --endpoint https://solana.firehose.pinax.network:443 \\
+  firehose-parquet --endpoint https://solana.firehose.pinax.network:443 \\
     --start-block 250000000 --stop-block 250100000 \\
     --partition date --s3-bucket my-bucket
 
   # Stream with hex encoding and extended tables
-  firehose-to-parquet --endpoint https://eth.firehose.pinax.network:443 \\
+  firehose-parquet --endpoint https://eth.firehose.pinax.network:443 \\
     --start-block 20000000 --bytes-encoding hex --extended
 
   # Resume from cursor
-  firehose-to-parquet --endpoint https://eth.firehose.pinax.network:443 \\
+  firehose-parquet --endpoint https://eth.firehose.pinax.network:443 \\
     --cursor cursor.txt --partition date
 ")]
 struct Cli {
@@ -343,7 +343,7 @@ async fn main() -> Result<()> {
 
     init_tracing(&cli.common.log_level);
 
-    info!(version = env!("CARGO_PKG_VERSION"), "firehose-to-parquet starting");
+    info!(version = env!("CARGO_PKG_VERSION"), "firehose-parquet starting");
 
     // Install graceful shutdown handler for SIGINT (Ctrl-C) and SIGTERM.
     // When a signal is received, the flag is set and the streaming loop

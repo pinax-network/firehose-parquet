@@ -1,6 +1,6 @@
 # firehose-parquet
 
-A production-grade Rust toolkit that consumes [StreamingFast Firehose](https://firehose.streamingfast.io/) v2 gRPC streams and writes **Apache Parquet** files. A single unified binary (`firehose-to-parquet`) supports multiple blockchain types with automatic chain detection.
+A production-grade Rust toolkit that consumes [StreamingFast Firehose](https://firehose.streamingfast.io/) v2 gRPC streams and writes **Apache Parquet** files. A single unified binary (`firehose-parquet`) supports multiple blockchain types with automatic chain detection.
 
 ## Supported Chains
 
@@ -20,7 +20,7 @@ A production-grade Rust toolkit that consumes [StreamingFast Firehose](https://f
 
 ## Features
 
-- **Single binary** — one `firehose-to-parquet` binary handles all chains via `--block-type` with auto-detection
+- **Single binary** — one `firehose-parquet` binary handles all chains via `--block-type` with auto-detection
 - **Multi-chain** — pluggable `BlockMapper` trait with per-chain mapper modules
 - **Canonical identity columns** — `block_num`, `block_id`, `parent_num`, `parent_id`, `lib_num`, `timestamp` on every table (from Firehose `BlockMetadata`)
 - **gRPC streaming** — connects to any Firehose v2 endpoint via tonic, with TLS and API key / JWT auth
@@ -39,7 +39,7 @@ A production-grade Rust toolkit that consumes [StreamingFast Firehose](https://f
 cargo build --release --workspace
 
 # Stream Solana blocks to Parquet (auto-detect chain)
-./target/release/firehose-to-parquet \
+./target/release/firehose-parquet \
   --endpoint https://solana.firehose.pinax.network:443 \
   --start-block 200000000 \
   --stop-block 200001000 \
@@ -48,7 +48,7 @@ cargo build --release --workspace
   --compression zstd
 
 # Stream EVM blocks with extended traces (explicit block type)
-./target/release/firehose-to-parquet \
+./target/release/firehose-parquet \
   --block-type evm \
   --endpoint https://eth.firehose.pinax.network:443 \
   --start-block 19000000 \
@@ -60,11 +60,11 @@ cargo build --release --workspace
 ## CLI Reference
 
 ```
-$ firehose-to-parquet --help
+$ firehose-parquet --help
 
 Convert Firehose gRPC stream to Apache Parquet
 
-Usage: firehose-to-parquet [OPTIONS] [COMMAND]
+Usage: firehose-parquet [OPTIONS] [COMMAND]
 
 Commands:
   completions  Generate shell completions for the given shell
@@ -146,8 +146,8 @@ Chain:
 Read and inspect Parquet files: shows schema, row counts, and sample rows. Supports local paths and S3 URIs.
 
 ```bash
-firehose-to-parquet scan ./output/blocks/
-firehose-to-parquet scan s3://my-bucket/evm/blocks/
+firehose-parquet scan ./output/blocks/
+firehose-parquet scan s3://my-bucket/evm/blocks/
 ```
 
 ### `validate` — Check Partition Integrity
@@ -155,8 +155,8 @@ firehose-to-parquet scan s3://my-bucket/evm/blocks/
 Validates partitioned Parquet data for gaps, ordering errors, duplicates, parent hash mismatches, and timestamp reversals. Only partitions with issues are printed; valid ones are silently counted.
 
 ```bash
-firehose-to-parquet validate ./output/blocks/
-firehose-to-parquet validate s3://my-bucket/evm/blocks/
+firehose-parquet validate ./output/blocks/
+firehose-parquet validate s3://my-bucket/evm/blocks/
 ```
 
 ### `rollup` — Roll Up Partitions
@@ -165,13 +165,13 @@ Rolls up fine-grained partitions (e.g. `minute` or `hour`) into coarser ones (e.
 
 ```bash
 # Roll up minute-partitioned data into daily partitions
-firehose-to-parquet rollup ./output/blocks/ -p date
+firehose-parquet rollup ./output/blocks/ -p date
 
 # Roll up to a different output directory
-firehose-to-parquet rollup ./output/blocks/ -o ./rolled-up/blocks/ -p date
+firehose-parquet rollup ./output/blocks/ -o ./rolled-up/blocks/ -p date
 
 # Delete source files after successful rollup
-firehose-to-parquet rollup ./output/blocks/ -p date --delete-source
+firehose-parquet rollup ./output/blocks/ -p date --delete-source
 ```
 
 | Flag | Default | Description |
@@ -190,16 +190,16 @@ All parts in a partition are read into memory, sorted by `block_num`, and writte
 
 ```bash
 # Merge small parts within each partition (default 256 MB per file)
-firehose-to-parquet merge ./output/blocks/
+firehose-parquet merge ./output/blocks/
 
 # Dry run — show what would be merged without writing
-firehose-to-parquet merge ./output/blocks/ --dry-run
+firehose-parquet merge ./output/blocks/ --dry-run
 
 # Merge with custom file size limit
-firehose-to-parquet merge ./output/blocks/ --flush-bytes 536870912
+firehose-parquet merge ./output/blocks/ --flush-bytes 536870912
 
 # Merge S3-hosted data
-firehose-to-parquet merge s3://my-bucket/evm/blocks/
+firehose-parquet merge s3://my-bucket/evm/blocks/
 ```
 
 | Flag | Default | Description |
@@ -319,13 +319,13 @@ The binary supports the `completions` subcommand:
 
 ```bash
 # Bash
-firehose-to-parquet completions bash > ~/.local/share/bash-completion/completions/firehose-to-parquet
+firehose-parquet completions bash > ~/.local/share/bash-completion/completions/firehose-parquet
 
 # Zsh
-firehose-to-parquet completions zsh > ~/.zfunc/_firehose-to-parquet
+firehose-parquet completions zsh > ~/.zfunc/_firehose-parquet
 
 # Fish
-firehose-to-parquet completions fish > ~/.config/fish/completions/firehose-to-parquet.fish
+firehose-parquet completions fish > ~/.config/fish/completions/firehose-parquet.fish
 ```
 
 ## Repository Structure
@@ -358,7 +358,7 @@ firehose-parquet/
 │   └── blocks/                             # Block type definitions + unified binary
 │       └── src/
 │           ├── bin/
-│           │   └── main.rs                 # Single unified binary (firehose-to-parquet)
+│           │   └── main.rs                 # Single unified binary (firehose-parquet)
 │           ├── evm/                        # Per-chain mapper, schema, proto
 │           ├── solana/
 │           ├── bitcoin/

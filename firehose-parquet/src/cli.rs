@@ -30,7 +30,7 @@ pub fn block_on_async<F: std::future::Future>(f: F) -> F::Output {
     }
 }
 
-// Shared CLI arguments for all firehose-to-parquet binaries.
+// Shared CLI arguments for all firehose-parquet binaries.
 //
 // Embed in a per-chain `#[derive(Parser)]` struct with `#[command(flatten)]`.
 #[derive(Args, Debug, Clone)]
@@ -142,19 +142,19 @@ pub enum Commands {
     #[command(after_long_help = "\
 Examples:
   # Inspect a local parquet file
-  firehose-to-parquet scan ./output/blocks/part-000001.parquet
+  firehose-parquet scan ./output/blocks/part-000001.parquet
 
   # Scan all files in a directory (20 sample rows each)
-  firehose-to-parquet scan ./output/blocks/
+  firehose-parquet scan ./output/blocks/
 
   # Schema only, no data preview
-  firehose-to-parquet scan ./output/blocks/ --schema-only
+  firehose-parquet scan ./output/blocks/ --schema-only
 
   # Scan S3 files
-  firehose-to-parquet scan s3://bucket/eth-mainnet/blocks/
+  firehose-parquet scan s3://bucket/eth-mainnet/blocks/
 
   # Show 50 sample rows per file
-  firehose-to-parquet scan ./output/blocks/ -n 50
+  firehose-parquet scan ./output/blocks/ -n 50
 ")]
     Scan {
         /// Path to a .parquet file or directory, or an S3 URI (s3://bucket/prefix)
@@ -188,13 +188,13 @@ Examples:
     #[command(after_long_help = "\
 Examples:
   # Validate local blocks directory
-  firehose-to-parquet validate ./output/blocks/
+  firehose-parquet validate ./output/blocks/
 
   # Validate S3 path
-  firehose-to-parquet validate s3://bucket/eth-mainnet/blocks/
+  firehose-parquet validate s3://bucket/eth-mainnet/blocks/
 
   # Check continuity across partition boundaries
-  firehose-to-parquet validate ./output/blocks/ --cross-partition
+  firehose-parquet validate ./output/blocks/ --cross-partition
 ")]
     Validate {
         /// Path to a directory of .parquet files or an S3 URI (s3://bucket/prefix)
@@ -228,16 +228,16 @@ Examples:
     #[command(after_long_help = "\
 Examples:
   # Roll up minute partitions into daily (in-place)
-  firehose-to-parquet rollup ./output/blocks/
+  firehose-parquet rollup ./output/blocks/
 
   # Roll up to hourly partitions with a separate output
-  firehose-to-parquet rollup ./output/blocks/ -o ./merged/ -p hour
+  firehose-parquet rollup ./output/blocks/ -o ./merged/ -p hour
 
   # Roll up S3 data, delete source files after
-  firehose-to-parquet rollup s3://bucket/blocks/ --delete-source
+  firehose-parquet rollup s3://bucket/blocks/ --delete-source
 
   # Custom file size limit (256 MB)
-  firehose-to-parquet rollup ./output/blocks/ --flush-bytes 268435456
+  firehose-parquet rollup ./output/blocks/ --flush-bytes 268435456
 ")]
     Rollup {
         /// Source path (local directory or S3 URI) containing partitioned Parquet files
@@ -284,19 +284,19 @@ Examples:
     #[command(after_long_help = "\
 Examples:
   # Merge parts within each partition (local)
-  firehose-to-parquet merge ./output/blocks/
+  firehose-parquet merge ./output/blocks/
 
   # Merge S3 data
-  firehose-to-parquet merge s3://bucket/eth-mainnet/blocks/
+  firehose-parquet merge s3://bucket/eth-mainnet/blocks/
 
   # Custom target file size (512 MB)
-  firehose-to-parquet merge ./output/blocks/ --flush-bytes 536870912
+  firehose-parquet merge ./output/blocks/ --flush-bytes 536870912
 
   # Preview what would be merged
-  firehose-to-parquet merge ./output/blocks/ --dry-run
+  firehose-parquet merge ./output/blocks/ --dry-run
 
   # Use snappy compression
-  firehose-to-parquet merge ./output/blocks/ --compression snappy
+  firehose-parquet merge ./output/blocks/ --compression snappy
 ")]
     Merge {
         /// Path to a directory of partitioned .parquet files or an S3 URI
@@ -336,22 +336,22 @@ Examples:
     #[command(after_long_help = "\
 Examples:
   # Delete all parquet files under a path
-  firehose-to-parquet truncate ./output/blocks/
+  firehose-parquet truncate ./output/blocks/
 
   # Delete only a specific date partition
-  firehose-to-parquet truncate ./output/blocks/ -p \"date=2026-01-01\"
+  firehose-parquet truncate ./output/blocks/ -p \"date=2026-01-01\"
 
   # Delete with glob pattern (all January dates)
-  firehose-to-parquet truncate s3://bucket/blocks/ -p \"date=2026-01-*\"
+  firehose-parquet truncate s3://bucket/blocks/ -p \"date=2026-01-*\"
 
   # Delete multiple partitions
-  firehose-to-parquet truncate ./output/ -p \"date=2026-01-01\" -p \"date=2026-01-02\"
+  firehose-parquet truncate ./output/ -p \"date=2026-01-01\" -p \"date=2026-01-02\"
 
   # Delete all minute-level partitions (key-only filter)
-  firehose-to-parquet truncate ./output/blocks/ -p minute
+  firehose-parquet truncate ./output/blocks/ -p minute
 
   # Preview what would be deleted
-  firehose-to-parquet truncate ./output/blocks/ --dry-run
+  firehose-parquet truncate ./output/blocks/ --dry-run
 ")]
     Truncate {
         /// Path to a directory or S3 URI containing .parquet files
