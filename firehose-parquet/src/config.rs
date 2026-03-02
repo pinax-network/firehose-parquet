@@ -80,6 +80,43 @@ pub struct Config {
     pub cache_control: Option<String>,
 }
 
+impl Partition {
+    /// Compute the partition key for a block given its number and timestamp.
+    ///
+    /// Returns a string that uniquely identifies the partition bucket this block
+    /// belongs to. Two blocks in the same partition return the same key.
+    /// Returns `None` for `Partition::None` (no partitioning).
+    pub fn partition_key(&self, block_number: u64, timestamp: i64) -> Option<String> {
+        match self {
+            Partition::None => None,
+            Partition::BlockRange(size) => {
+                let start = (block_number / size) * size;
+                Some(format!("block_range={}-{}", start, start + size - 1))
+            }
+            Partition::Date => {
+                let dt = time::OffsetDateTime::from_unix_timestamp(timestamp)
+                    .unwrap_or(time::OffsetDateTime::UNIX_EPOCH);
+                Some(format!("date={:04}-{:02}-{:02}", dt.year(), dt.month() as u8, dt.day()))
+            }
+            Partition::Hour => {
+                let dt = time::OffsetDateTime::from_unix_timestamp(timestamp)
+                    .unwrap_or(time::OffsetDateTime::UNIX_EPOCH);
+                Some(format!("date={:04}-{:02}-{:02}/hour={:02}", dt.year(), dt.month() as u8, dt.day(), dt.hour()))
+            }
+            Partition::Minute => {
+                let dt = time::OffsetDateTime::from_unix_timestamp(timestamp)
+                    .unwrap_or(time::OffsetDateTime::UNIX_EPOCH);
+                Some(format!("date={:04}-{:02}-{:02}/hour={:02}/minute={:02}", dt.year(), dt.month() as u8, dt.day(), dt.hour(), dt.minute()))
+            }
+            Partition::Second => {
+                let dt = time::OffsetDateTime::from_unix_timestamp(timestamp)
+                    .unwrap_or(time::OffsetDateTime::UNIX_EPOCH);
+                Some(format!("date={:04}-{:02}-{:02}/hour={:02}/minute={:02}/second={:02}", dt.year(), dt.month() as u8, dt.day(), dt.hour(), dt.minute(), dt.second()))
+            }
+        }
+    }
+}
+
 impl std::fmt::Display for Partition {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -394,5 +431,53 @@ mod tests {
             ..Config::default()
         };
         assert!(config.to_string().contains("disabled"));
+    }
+
+    #[test]
+    fn test_partition_key_none() {
+        assert_eq!(Partition::None.partition_key(100, 1000), None);
+    }
+
+    #[test]
+    fn test_partition_key_block_range() {
+        assert_eq!(
+            Partition::BlockRange(1000).partition_key(1500, 0),
+            Some("block_range=1000-1999".to_string())
+        );
+        assert_eq!(
+            Partition::BlockRange(1000).partition_key(2000, 0),
+            Some("block_range=2000-2999".to_string())
+        );
+    }
+
+    #[test]
+    fn test_partition_key_date() {
+        // 2024-01-15 12:00:00 UTC = 1705320000
+        assert_eq!(
+            Partition::Date.partition_key(100, 1705320000),
+            Some("date=2024-01-15".to_string())
+        );
+        // 2024-01-16 00:00:00 UTC = 1705363200
+        assert_eq!(
+            Partition::Date.partition_key(200, 1705363200),
+            Some("date=2024-01-16".to_string())
+        );
+    }
+
+    #[test]
+    fn test_partition_key_hour() {
+        // 2024-01-15 14:30:00 UTC = 1705329000
+        assert_eq!(
+            Partition::Hour.partition_key(100, 1705329000),
+            Some("date=2024-01-15/hour=14".to_string())
+        );
+    }
+
+    #[test]
+    fn test_partition_key_detects_boundary() {
+        // Last second of 2024-01-15 vs first second of 2024-01-16
+        let key1 = Partition::Date.partition_key(100, 1705363199); // 23:59:59
+        let key2 = Partition::Date.partition_key(101, 1705363200); // 00:00:00
+        assert_ne!(key1, key2);
     }
 }
