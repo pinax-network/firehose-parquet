@@ -206,7 +206,7 @@ async fn main() -> Result<()> {
                 return Ok(());
             }
             Commands::Validate {
-                path, cross_partition,
+                path, cross_partition, allow_gaps,
                 aws_access_key_id, aws_secret_access_key, aws_session_token,
                 aws_region, aws_endpoint_url,
             } => {
@@ -219,6 +219,7 @@ async fn main() -> Result<()> {
                 };
                 let opts = firehose_parquet::cli::ValidateOptions {
                     cross_partition: *cross_partition,
+                    allow_gaps: *allow_gaps,
                 };
                 let result = firehose_parquet::cli::validate_parquet(path, Some(&aws), &opts)?;
                 result.print(path);

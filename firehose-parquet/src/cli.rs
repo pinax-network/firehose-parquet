@@ -202,6 +202,9 @@ Examples:
         /// Check continuity across partition boundaries
         #[arg(long, default_value = "false")]
         cross_partition: bool,
+        /// Allow gaps in block numbers (e.g. Solana skipped slots)
+        #[arg(long, default_value = "false")]
+        allow_gaps: bool,
         /// AWS access key ID (for S3 paths)
         #[arg(long, env = "AWS_ACCESS_KEY_ID", hide_env_values = true)]
         aws_access_key_id: Option<String>,
@@ -957,6 +960,7 @@ impl PartitionResult {
 #[derive(Debug, Default)]
 pub struct ValidateOptions {
     pub cross_partition: bool,
+    pub allow_gaps: bool,
 }
 
 /// Summary of a validate run (with per-partition breakdown).
@@ -1502,6 +1506,19 @@ fn validate_from_files(
         }
     }
 
+    // When --allow-gaps is set, clear gaps from per-partition results and
+    // cross-partition issues (e.g. Solana skipped slots are expected).
+    if opts.allow_gaps {
+        for p in &mut partitions {
+            p.gaps.clear();
+        }
+        for cpi in &mut cross_partition_issues {
+            cpi.gap = None;
+        }
+        // Remove cross-partition issues that only had a gap (no parent mismatch).
+        cross_partition_issues.retain(|cpi| cpi.parent_mismatch.is_some());
+    }
+
     // Global validation across all partitions.
     all_tuples.sort_by_key(|t| t.0);
     let cr = check_tuples(&all_tuples);
@@ -1514,7 +1531,7 @@ fn validate_from_files(
         total_blocks: all_tuples.len() as u64,
         min_block: all_tuples.first().map(|t| t.0),
         max_block: all_tuples.last().map(|t| t.0),
-        gaps: cr.gaps,
+        gaps: if opts.allow_gaps { vec![] } else { cr.gaps },
         parent_mismatches: cr.parent_mismatches,
         duplicates: cr.duplicates,
         ordering_errors: cr.ordering_errors,
