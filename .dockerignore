@@ -1,0 +1,9 @@
+target/
+output/
+output-eth/
+.env
+.git/
+.github/
+*.pdb
+**/mutants.out*/
+cursor*.txt

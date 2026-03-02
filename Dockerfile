@@ -1,0 +1,10 @@
+FROM rust:1.84-bookworm AS builder
+WORKDIR /app
+RUN apt-get update && apt-get install -y protobuf-compiler && rm -rf /var/lib/apt/lists/*
+COPY . .
+RUN cargo build --release --bin firehose-to-parquet
+
+FROM debian:bookworm-slim
+RUN apt-get update && apt-get install -y ca-certificates && rm -rf /var/lib/apt/lists/*
+COPY --from=builder /app/target/release/firehose-to-parquet /usr/local/bin/
+ENTRYPOINT ["firehose-to-parquet"]
