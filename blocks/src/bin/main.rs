@@ -71,6 +71,13 @@ struct Cli {
     /// Include failed/reverted transactions in output (default: false)
     #[arg(long, env = "INCLUDE_FAILED_TRANSACTIONS", default_value = "false", hide_env_values = true, help_heading = "Chain")]
     include_failed_transactions: bool,
+
+    /// Override cursor parameter validation. When a cursor file exists and its
+    /// stored parameters differ from the current CLI arguments, the pipeline
+    /// normally exits with an error. This flag suppresses that check and
+    /// resumes with the current parameters.
+    #[arg(long, env = "CURSOR_OVERRIDE", default_value = "false", hide_env_values = true, help_heading = "Block Range")]
+    cursor_override: bool,
 }
 
 /// Detect block type from a protobuf `Any.type_url`.
@@ -562,6 +569,26 @@ async fn main() -> Result<()> {
         file_metadata: cursor_file_metadata,
         ..CursorState::default()
     };
+
+    // Validate cursor parameters against current CLI arguments.
+    if let Some(ref loc) = cursor_location {
+        if let Some(loaded) = loc.load() {
+            let mismatches = loaded.validate_params(&cursor_state_template);
+            if !mismatches.is_empty() {
+                if cli.cursor_override {
+                    warn!(
+                        "cursor parameter mismatch detected (overridden via --cursor-override):\n  {}",
+                        mismatches.join("\n  ")
+                    );
+                } else {
+                    return Err(anyhow!(
+                        "cursor parameter mismatch detected:\n  {}\n\nUse --cursor-override to force resume with current parameters.",
+                        mismatches.join("\n  ")
+                    ));
+                }
+            }
+        }
+    }
 
     let stream_result = client
         .stream_blocks(cursor_location.as_ref(), |block_bytes, type_url, cursor_str, identity: BlockIdentity, step: i32| {

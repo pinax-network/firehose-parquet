@@ -92,6 +92,79 @@ impl CursorState {
         builder.build()
     }
 
+    /// Look up a file-level metadata value by key.
+    pub fn get_metadata(&self, key: &str) -> Option<&str> {
+        self.file_metadata
+            .entries
+            .iter()
+            .find(|(k, _)| k == key)
+            .map(|(_, v)| v.as_str())
+    }
+
+    /// Validate that the current pipeline parameters match those stored in the
+    /// cursor. Returns a list of human-readable mismatch descriptions.
+    ///
+    /// Compares row-level fields (start_block, stop_block, extended,
+    /// final_blocks_only, include_failed_transactions) and file-level metadata
+    /// (endpoint, partition, block_range_size, compression, bytes_encoding).
+    pub fn validate_params(&self, current: &CursorState) -> Vec<String> {
+        let mut mismatches = Vec::new();
+
+        // Row-level fields.
+        if self.start_block != current.start_block {
+            mismatches.push(format!(
+                "start_block: cursor={:?} vs current={:?}",
+                self.start_block, current.start_block
+            ));
+        }
+        if self.stop_block != current.stop_block {
+            mismatches.push(format!(
+                "stop_block: cursor={:?} vs current={:?}",
+                self.stop_block, current.stop_block
+            ));
+        }
+        if self.extended != current.extended {
+            mismatches.push(format!(
+                "extended: cursor={} vs current={}",
+                self.extended, current.extended
+            ));
+        }
+        if self.final_blocks_only != current.final_blocks_only {
+            mismatches.push(format!(
+                "final_blocks_only: cursor={} vs current={}",
+                self.final_blocks_only, current.final_blocks_only
+            ));
+        }
+        if self.include_failed_transactions != current.include_failed_transactions {
+            mismatches.push(format!(
+                "include_failed_transactions: cursor={} vs current={}",
+                self.include_failed_transactions, current.include_failed_transactions
+            ));
+        }
+
+        // File-level metadata fields.
+        let meta_keys = [
+            "firehose-parquet.endpoint",
+            "firehose-parquet.partition",
+            "firehose-parquet.block_range_size",
+            "firehose-parquet.compression",
+            "firehose-parquet.bytes_encoding",
+        ];
+        for key in &meta_keys {
+            let stored = self.get_metadata(key).unwrap_or("");
+            let current_val = current.get_metadata(key).unwrap_or("");
+            // Skip comparison when the stored value is empty (older cursor without metadata).
+            if !stored.is_empty() && stored != current_val {
+                let short_key = key.strip_prefix("firehose-parquet.").unwrap_or(key);
+                mismatches.push(format!(
+                    "{short_key}: cursor=\"{stored}\" vs current=\"{current_val}\""
+                ));
+            }
+        }
+
+        mismatches
+    }
+
     /// Read a `CursorState` from a single-row RecordBatch plus optional
     /// file-level key-value metadata.
     ///
@@ -603,5 +676,86 @@ mod tests {
         save_cursor_parquet(&path, &state).unwrap();
         let loaded = load_cursor_parquet(&path).expect("should load cursor");
         assert_eq!(loaded.last_block_id, block_id);
+    }
+
+    #[test]
+    fn test_validate_params_no_mismatch() {
+        let meta = test_file_metadata();
+        let state = CursorState {
+            cursor: "c1".to_string(),
+            start_block: Some(100),
+            stop_block: Some(200),
+            extended: true,
+            final_blocks_only: true,
+            include_failed_transactions: false,
+            file_metadata: meta.clone(),
+            ..CursorState::default()
+        };
+        let current = CursorState {
+            start_block: Some(100),
+            stop_block: Some(200),
+            extended: true,
+            final_blocks_only: true,
+            include_failed_transactions: false,
+            file_metadata: meta,
+            ..CursorState::default()
+        };
+        assert!(state.validate_params(&current).is_empty());
+    }
+
+    #[test]
+    fn test_validate_params_detects_mismatches() {
+        let meta = test_file_metadata();
+        let state = CursorState {
+            cursor: "c1".to_string(),
+            start_block: Some(100),
+            extended: true,
+            final_blocks_only: true,
+            include_failed_transactions: false,
+            file_metadata: meta,
+            ..CursorState::default()
+        };
+
+        let mut different_meta = test_file_metadata();
+        // Change compression in metadata.
+        for entry in &mut different_meta.entries {
+            if entry.0 == "firehose-parquet.compression" {
+                entry.1 = "snappy".to_string();
+            }
+        }
+        let current = CursorState {
+            start_block: Some(500),  // different
+            extended: false,          // different
+            final_blocks_only: true,
+            include_failed_transactions: true, // different
+            file_metadata: different_meta,
+            ..CursorState::default()
+        };
+
+        let mismatches = state.validate_params(&current);
+        assert_eq!(mismatches.len(), 4);
+        assert!(mismatches.iter().any(|m| m.contains("start_block")));
+        assert!(mismatches.iter().any(|m| m.contains("extended")));
+        assert!(mismatches.iter().any(|m| m.contains("include_failed_transactions")));
+        assert!(mismatches.iter().any(|m| m.contains("compression")));
+    }
+
+    #[test]
+    fn test_validate_params_skips_empty_stored_metadata() {
+        // Old cursor without metadata should not flag mismatches on metadata keys.
+        let state = CursorState {
+            cursor: "c1".to_string(),
+            extended: true,
+            final_blocks_only: true,
+            ..CursorState::default()
+        };
+        let current = CursorState {
+            extended: true,
+            final_blocks_only: true,
+            file_metadata: test_file_metadata(),
+            ..CursorState::default()
+        };
+        // No metadata mismatches — stored is empty, so skipped.
+        assert!(state.validate_params(&current).is_empty());
     }
 }
