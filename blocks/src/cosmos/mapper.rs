@@ -39,6 +39,7 @@ fn tx_hash_bytes(raw: &[u8]) -> Vec<u8> {
 // ---------------------------------------------------------------------------
 
 pub struct CosmosBlockMapper {
+    include_failed_transactions: bool,
     blocks: BlocksBuilder,
     transactions: TransactionsBuilder,
     events: EventsBuilder,
@@ -50,9 +51,10 @@ pub struct CosmosBlockMapper {
 }
 
 impl CosmosBlockMapper {
-    pub fn new(include_fork_step: bool, encoding: EncodeBytes) -> Self {
+    pub fn new(include_fork_step: bool, encoding: EncodeBytes, include_failed_transactions: bool) -> Self {
         let enc = &encoding;
         Self {
+            include_failed_transactions,
             blocks: BlocksBuilder::new(include_fork_step, enc),
             transactions: TransactionsBuilder::new(include_fork_step, enc),
             events: EventsBuilder::new(include_fork_step, enc),
@@ -121,6 +123,11 @@ impl CosmosBlockMapper {
         for (tx_idx, raw_tx) in block.txs.iter().enumerate() {
             let hash = tx_hash_bytes(raw_tx);
             let tx_result = block.tx_results.get(tx_idx);
+
+            // Skip failed transactions (code != 0) unless flag is set
+            if !self.include_failed_transactions && tx_result.map_or(false, |r| r.code != 0) {
+                continue;
+            }
 
             // transaction row
             self.transactions.canonical.append(identity);
@@ -507,7 +514,7 @@ mod tests {
     fn test_map_and_flush() {
         let block = make_test_block(100);
         let block_bytes = prost::Message::encode_to_vec(&block);
-        let mut mapper = CosmosBlockMapper::new(false, EncodeBytes::Hex);
+        let mut mapper = CosmosBlockMapper::new(false, EncodeBytes::Hex, false);
         mapper.map_block(&block_bytes, &BlockIdentity::default(), None).unwrap();
 
         let batches = mapper.flush().unwrap();
@@ -537,7 +544,7 @@ mod tests {
             consensus_param_updates: None,
         };
         let block_bytes = prost::Message::encode_to_vec(&block);
-        let mut mapper = CosmosBlockMapper::new(false, EncodeBytes::Hex);
+        let mut mapper = CosmosBlockMapper::new(false, EncodeBytes::Hex, false);
         mapper.map_block(&block_bytes, &BlockIdentity::default(), None).unwrap();
 
         let batches = mapper.flush().unwrap();
@@ -551,7 +558,7 @@ mod tests {
     fn test_flush_resets() {
         let block = make_test_block(100);
         let block_bytes = prost::Message::encode_to_vec(&block);
-        let mut mapper = CosmosBlockMapper::new(false, EncodeBytes::Hex);
+        let mut mapper = CosmosBlockMapper::new(false, EncodeBytes::Hex, false);
         mapper.map_block(&block_bytes, &BlockIdentity::default(), None).unwrap();
         let _ = mapper.flush().unwrap();
         assert_eq!(mapper.max_table_rows(), 0);
@@ -559,7 +566,7 @@ mod tests {
 
     #[test]
     fn test_table_names() {
-        let mapper = CosmosBlockMapper::new(false, EncodeBytes::Hex);
+        let mapper = CosmosBlockMapper::new(false, EncodeBytes::Hex, false);
         assert_eq!(mapper.table_names().len(), 4);
         assert!(mapper.table_names().contains(&"blocks"));
         assert!(mapper.table_names().contains(&"transactions"));
@@ -571,7 +578,7 @@ mod tests {
     fn test_fork_step_column_included() {
         let block = make_test_block(100);
         let block_bytes = prost::Message::encode_to_vec(&block);
-        let mut mapper = CosmosBlockMapper::new(true, EncodeBytes::Hex);
+        let mut mapper = CosmosBlockMapper::new(true, EncodeBytes::Hex, false);
         mapper.map_block(&block_bytes, &BlockIdentity::default(), Some("FINAL")).unwrap();
 
         let batches = mapper.flush().unwrap();

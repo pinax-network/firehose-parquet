@@ -66,6 +66,10 @@ struct Cli {
     /// Options: binary (raw bytes), hex (0x-prefixed), hex_no_prefix, base58, tron_base58, auto (chain-appropriate)
     #[arg(long, env = "BYTES_ENCODING", default_value = "auto", hide_env_values = true, help_heading = "Chain")]
     bytes_encoding: String,
+
+    /// Include failed/reverted transactions in output (default: false)
+    #[arg(long, env = "INCLUDE_FAILED_TRANSACTIONS", default_value = "false", hide_env_values = true, help_heading = "Chain")]
+    include_failed_transactions: bool,
 }
 
 /// Detect block type from a protobuf `Any.type_url`.
@@ -165,15 +169,16 @@ fn create_mapper(
     extended: bool,
     include_fork_step: bool,
     encode_bytes: EncodeBytes,
+    include_failed_transactions: bool,
 ) -> Result<Box<dyn BlockMapper>> {
     match block_type {
-        "evm" => Ok(Box::new(EvmBlockMapper::new(extended, include_fork_step, encode_bytes))),
+        "evm" => Ok(Box::new(EvmBlockMapper::new(extended, include_fork_step, encode_bytes, include_failed_transactions))),
         "bitcoin" => Ok(Box::new(BitcoinBlockMapper::new(include_fork_step, encode_bytes.clone()))),
-        "solana" => Ok(Box::new(SolanaBlockMapper::new(extended, include_fork_step, encode_bytes))),
-        "near" => Ok(Box::new(NearBlockMapper::new(include_fork_step, encode_bytes))),
-        "antelope" => Ok(Box::new(AntelopeBlockMapper::new(extended, include_fork_step, encode_bytes))),
-        "cosmos" => Ok(Box::new(CosmosBlockMapper::new(include_fork_step, encode_bytes))),
-        "tron" => Ok(Box::new(TronBlockMapper::new(include_fork_step, encode_bytes))),
+        "solana" => Ok(Box::new(SolanaBlockMapper::new(extended, include_fork_step, encode_bytes, include_failed_transactions))),
+        "near" => Ok(Box::new(NearBlockMapper::new(include_fork_step, encode_bytes, include_failed_transactions))),
+        "antelope" => Ok(Box::new(AntelopeBlockMapper::new(extended, include_fork_step, encode_bytes, include_failed_transactions))),
+        "cosmos" => Ok(Box::new(CosmosBlockMapper::new(include_fork_step, encode_bytes, include_failed_transactions))),
+        "tron" => Ok(Box::new(TronBlockMapper::new(include_fork_step, encode_bytes, include_failed_transactions))),
         "beacon" => Ok(Box::new(BeaconBlockMapper::new(include_fork_step, encode_bytes))),
         other => Err(anyhow!("unsupported block type: {other}. Supported: {}", BLOCK_TYPES.join(", "))),
     }
@@ -368,7 +373,9 @@ async fn main() -> Result<()> {
         extended = true;
     }
 
-    info!(block_type, extended, bytes_encoding = %bytes_encoding_str, "starting pipeline\n{config}");
+    let include_failed_transactions = cli.include_failed_transactions;
+
+    info!(block_type, extended, bytes_encoding = %bytes_encoding_str, include_failed_transactions, "starting pipeline\n{config}");
 
     let final_blocks_only = config.final_blocks_only;
     let include_fork_step = !final_blocks_only;
@@ -398,7 +405,7 @@ async fn main() -> Result<()> {
         let meta = build_file_metadata(&block_type, &encode_bytes, &config.endpoint, &endpoint_info);
         log_file_metadata(&meta);
         writer.inner.set_file_metadata(meta);
-        Some(create_mapper(&block_type, extended, include_fork_step, encode_bytes)?)
+        Some(create_mapper(&block_type, extended, include_fork_step, encode_bytes, include_failed_transactions)?)
     } else {
         None
     };
@@ -436,7 +443,7 @@ async fn main() -> Result<()> {
                 let meta = build_file_metadata(&detected, &encode_bytes, &config.endpoint, &endpoint_info);
                 log_file_metadata(&meta);
                 writer.inner.set_file_metadata(meta);
-                mapper = Some(create_mapper(&detected, extended, include_fork_step, encode_bytes)?);
+                mapper = Some(create_mapper(&detected, extended, include_fork_step, encode_bytes, include_failed_transactions)?);
             }
 
             let m = mapper.as_mut().unwrap();
@@ -728,14 +735,14 @@ mod tests {
     fn test_create_mapper_all_types() {
         for block_type in &["evm", "bitcoin", "solana", "near", "antelope", "cosmos", "tron", "beacon"] {
             let encode_bytes = default_encode_bytes(block_type);
-            let mapper = create_mapper(block_type, false, false, encode_bytes);
+            let mapper = create_mapper(block_type, false, false, encode_bytes, false);
             assert!(mapper.is_ok(), "create_mapper failed for block_type: {block_type}");
         }
     }
 
     #[test]
     fn test_create_mapper_invalid_type() {
-        assert!(create_mapper("unknown", false, false, EncodeBytes::Hex).is_err());
+        assert!(create_mapper("unknown", false, false, EncodeBytes::Hex, false).is_err());
     }
 
     #[test]

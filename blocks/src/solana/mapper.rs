@@ -36,8 +36,6 @@ fn is_vote_transaction(msg: &solana::Message) -> bool {
 }
 
 /// Append a single transaction to the given [`TransactionsBuilder`].
-///
-/// Caller must guarantee that `meta` has no error (`meta.err` is `None`).
 fn append_transaction(
     builder: &mut TransactionsBuilder,
     slot: u64,
@@ -57,8 +55,13 @@ fn append_transaction(
     }
     builder.num_signatures.append_value(tx.signatures.len() as u32);
     builder.fee.append_value(meta.fee);
-    builder.err.append_null();
-    builder.success.append_value(true);
+    let has_err = meta.err.as_ref().is_some_and(|e| !e.err.is_empty());
+    if has_err {
+        builder.err.append_value(&meta.err.as_ref().unwrap().err);
+    } else {
+        builder.err.append_null();
+    }
+    builder.success.append_value(!has_err);
     match meta.compute_units_consumed {
         Some(cu) => builder.compute_units_consumed.append_value(cu),
         None => builder.compute_units_consumed.append_null(),
@@ -104,6 +107,7 @@ fn append_transaction(
 
 pub struct SolanaBlockMapper {
     extended: bool,
+    include_failed_transactions: bool,
     blocks: BlocksBuilder,
     transactions: TransactionsBuilder,
     vote_transactions: Option<TransactionsBuilder>,
@@ -123,9 +127,10 @@ pub struct SolanaBlockMapper {
 }
 
 impl SolanaBlockMapper {
-    pub fn new(extended: bool, include_fork_step: bool, encoding: EncodeBytes) -> Self {
+    pub fn new(extended: bool, include_fork_step: bool, encoding: EncodeBytes, include_failed_transactions: bool) -> Self {
         Self {
             extended,
+            include_failed_transactions,
             blocks: BlocksBuilder::new(include_fork_step, &encoding),
             transactions: TransactionsBuilder::new(include_fork_step, &encoding),
             vote_transactions: if extended { Some(TransactionsBuilder::new(include_fork_step, &encoding)) } else { None },
@@ -183,10 +188,10 @@ impl SolanaBlockMapper {
             Some(m) => m,
             None => return,
         };
-        // Skip failed transactions.
+        // Skip failed transactions unless --include-failed-transactions is set.
         // Some Firehose endpoints include `TransactionError { err: vec![] }` for
         // successful txs instead of omitting the field, so check the inner bytes.
-        if meta.err.as_ref().is_some_and(|e| !e.err.is_empty()) {
+        if !self.include_failed_transactions && meta.err.as_ref().is_some_and(|e| !e.err.is_empty()) {
             return;
         }
         let msg = match tx.message.as_ref() {
@@ -1003,7 +1008,7 @@ mod tests {
     fn test_map_and_flush_single_block() {
         let block = make_test_block(100);
         let block_bytes = prost::Message::encode_to_vec(&block);
-        let mut mapper = SolanaBlockMapper::new(false, false, EncodeBytes::Binary);
+        let mut mapper = SolanaBlockMapper::new(false, false, EncodeBytes::Binary, false);
         mapper.map_block(&block_bytes, &BlockIdentity::default(), None).unwrap();
 
         let batches = mapper.flush().unwrap();
@@ -1062,7 +1067,7 @@ mod tests {
         });
 
         let block_bytes = prost::Message::encode_to_vec(&block);
-        let mut mapper = SolanaBlockMapper::new(true, false, EncodeBytes::Binary);
+        let mut mapper = SolanaBlockMapper::new(true, false, EncodeBytes::Binary, false);
         mapper.map_block(&block_bytes, &BlockIdentity::default(), None).unwrap();
 
         let batches = mapper.flush().unwrap();
@@ -1116,7 +1121,7 @@ mod tests {
         });
 
         let block_bytes = prost::Message::encode_to_vec(&block);
-        let mut mapper = SolanaBlockMapper::new(true, false, EncodeBytes::Binary);
+        let mut mapper = SolanaBlockMapper::new(true, false, EncodeBytes::Binary, false);
         mapper.map_block(&block_bytes, &BlockIdentity::default(), None).unwrap();
 
         let batches = mapper.flush().unwrap();
@@ -1128,10 +1133,76 @@ mod tests {
     }
 
     #[test]
+    fn test_failed_transactions_included() {
+        let mut block = make_test_block(100);
+        // Add a failed transaction
+        block.transactions.push(solana::ConfirmedTransaction {
+            transaction: Some(solana::Transaction {
+                signatures: vec![vec![88u8; 64]],
+                message: Some(solana::Message {
+                    header: Some(solana::MessageHeader {
+                        num_required_signatures: 1,
+                        num_readonly_signed_accounts: 0,
+                        num_readonly_unsigned_accounts: 1,
+                    }),
+                    account_keys: vec![vec![2u8; 32], vec![3u8; 32]],
+                    recent_blockhash: vec![4u8; 32],
+                    instructions: vec![solana::CompiledInstruction {
+                        program_id_index: 1,
+                        accounts: vec![0],
+                        data: vec![9, 9, 9],
+                    }],
+                    versioned: false,
+                    address_table_lookups: vec![],
+                }),
+            }),
+            meta: Some(solana::TransactionStatusMeta {
+                err: Some(solana::TransactionError { err: vec![1, 2, 3] }),
+                fee: 5000,
+                pre_balances: vec![100_000, 0],
+                post_balances: vec![95_000, 0],
+                inner_instructions: vec![],
+                log_messages: vec![],
+                pre_token_balances: vec![],
+                post_token_balances: vec![],
+                rewards: vec![],
+                loaded_writable_addresses: vec![],
+                loaded_readonly_addresses: vec![],
+                return_data: None,
+                compute_units_consumed: Some(500),
+                cost_units: None,
+            }),
+        });
+
+        let block_bytes = prost::Message::encode_to_vec(&block);
+        // With include_failed_transactions = true, failed tx should be included
+        let mut mapper = SolanaBlockMapper::new(true, false, EncodeBytes::Binary, true);
+        mapper.map_block(&block_bytes, &BlockIdentity::default(), None).unwrap();
+
+        let batches = mapper.flush().unwrap();
+        // Failed transaction is included (1 successful + 1 failed = 2)
+        assert_eq!(batches["transactions"].num_rows(), 2);
+        assert_eq!(batches["vote_transactions"].num_rows(), 0);
+        assert_eq!(batches["messages"].num_rows(), 2);
+        assert_eq!(batches["instructions"].num_rows(), 3);
+
+        // Verify the err and success columns for the failed transaction
+        let success_col = batches["transactions"]
+            .column_by_name("success")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<BooleanArray>()
+            .unwrap();
+        // First tx is successful, second is failed
+        assert_eq!(success_col.value(0), true);
+        assert_eq!(success_col.value(1), false);
+    }
+
+    #[test]
     fn test_flush_resets_builders() {
         let block = make_test_block(1);
         let block_bytes = prost::Message::encode_to_vec(&block);
-        let mut mapper = SolanaBlockMapper::new(false, false, EncodeBytes::Binary);
+        let mut mapper = SolanaBlockMapper::new(false, false, EncodeBytes::Binary, false);
         mapper.map_block(&block_bytes, &BlockIdentity::default(), None).unwrap();
         let _ = mapper.flush().unwrap();
         assert_eq!(mapper.max_table_rows(), 0);
@@ -1150,7 +1221,7 @@ mod tests {
             rewards: vec![],
         };
         let block_bytes = prost::Message::encode_to_vec(&block);
-        let mut mapper = SolanaBlockMapper::new(false, false, EncodeBytes::Binary);
+        let mut mapper = SolanaBlockMapper::new(false, false, EncodeBytes::Binary, false);
         mapper.map_block(&block_bytes, &BlockIdentity::default(), None).unwrap();
         let batches = mapper.flush().unwrap();
         assert_eq!(batches["blocks"].num_rows(), 1);
@@ -1163,7 +1234,7 @@ mod tests {
     fn test_fork_step_column_included() {
         let block = make_test_block(100);
         let block_bytes = prost::Message::encode_to_vec(&block);
-        let mut mapper = SolanaBlockMapper::new(false, true, EncodeBytes::Binary);
+        let mut mapper = SolanaBlockMapper::new(false, true, EncodeBytes::Binary, false);
         mapper.map_block(&block_bytes, &BlockIdentity::default(), Some("NEW")).unwrap();
 
         let batches = mapper.flush().unwrap();
@@ -1178,7 +1249,7 @@ mod tests {
     fn test_encode_bytes_hex() {
         let block = make_test_block(100);
         let block_bytes = prost::Message::encode_to_vec(&block);
-        let mut mapper = SolanaBlockMapper::new(false, false, EncodeBytes::Hex);
+        let mut mapper = SolanaBlockMapper::new(false, false, EncodeBytes::Hex, false);
         mapper.map_block(&block_bytes, &BlockIdentity::default(), None).unwrap();
         let batches = mapper.flush().unwrap();
         assert_eq!(batches["transactions"].num_rows(), 1);
@@ -1192,7 +1263,7 @@ mod tests {
     fn test_encode_bytes_base58() {
         let block = make_test_block(100);
         let block_bytes = prost::Message::encode_to_vec(&block);
-        let mut mapper = SolanaBlockMapper::new(false, false, EncodeBytes::Base58);
+        let mut mapper = SolanaBlockMapper::new(false, false, EncodeBytes::Base58, false);
         mapper.map_block(&block_bytes, &BlockIdentity::default(), None).unwrap();
         let batches = mapper.flush().unwrap();
         assert_eq!(batches["transactions"].num_rows(), 1);
@@ -1205,7 +1276,7 @@ mod tests {
     fn test_token_balances_content() {
         let block = make_test_block(100);
         let block_bytes = prost::Message::encode_to_vec(&block);
-        let mut mapper = SolanaBlockMapper::new(false, false, EncodeBytes::Binary);
+        let mut mapper = SolanaBlockMapper::new(false, false, EncodeBytes::Binary, false);
         mapper.map_block(&block_bytes, &BlockIdentity::default(), None).unwrap();
         let batches = mapper.flush().unwrap();
 
@@ -1231,7 +1302,7 @@ mod tests {
     fn test_account_lookups_content() {
         let block = make_test_block(100);
         let block_bytes = prost::Message::encode_to_vec(&block);
-        let mut mapper = SolanaBlockMapper::new(false, false, EncodeBytes::Binary);
+        let mut mapper = SolanaBlockMapper::new(false, false, EncodeBytes::Binary, false);
         mapper.map_block(&block_bytes, &BlockIdentity::default(), None).unwrap();
         let batches = mapper.flush().unwrap();
 
@@ -1246,7 +1317,7 @@ mod tests {
     fn test_rewards_source_column() {
         let block = make_test_block(100);
         let block_bytes = prost::Message::encode_to_vec(&block);
-        let mut mapper = SolanaBlockMapper::new(false, false, EncodeBytes::Binary);
+        let mut mapper = SolanaBlockMapper::new(false, false, EncodeBytes::Binary, false);
         mapper.map_block(&block_bytes, &BlockIdentity::default(), None).unwrap();
         let batches = mapper.flush().unwrap();
 
@@ -1268,7 +1339,7 @@ mod tests {
     fn test_return_data_and_cost_units() {
         let block = make_test_block(100);
         let block_bytes = prost::Message::encode_to_vec(&block);
-        let mut mapper = SolanaBlockMapper::new(false, false, EncodeBytes::Binary);
+        let mut mapper = SolanaBlockMapper::new(false, false, EncodeBytes::Binary, false);
         mapper.map_block(&block_bytes, &BlockIdentity::default(), None).unwrap();
         let batches = mapper.flush().unwrap();
 
@@ -1287,7 +1358,7 @@ mod tests {
     fn test_loaded_addresses() {
         let block = make_test_block(100);
         let block_bytes = prost::Message::encode_to_vec(&block);
-        let mut mapper = SolanaBlockMapper::new(false, false, EncodeBytes::Binary);
+        let mut mapper = SolanaBlockMapper::new(false, false, EncodeBytes::Binary, false);
         mapper.map_block(&block_bytes, &BlockIdentity::default(), None).unwrap();
         let batches = mapper.flush().unwrap();
 
@@ -1305,7 +1376,7 @@ mod tests {
 
     #[test]
     fn test_table_names_base() {
-        let mapper = SolanaBlockMapper::new(false, false, EncodeBytes::Binary);
+        let mapper = SolanaBlockMapper::new(false, false, EncodeBytes::Binary, false);
         let names = mapper.table_names();
         assert_eq!(names.len(), 7);
         assert!(names.contains(&"token_balances"));
@@ -1315,7 +1386,7 @@ mod tests {
 
     #[test]
     fn test_table_names_extended() {
-        let mapper = SolanaBlockMapper::new(true, false, EncodeBytes::Binary);
+        let mapper = SolanaBlockMapper::new(true, false, EncodeBytes::Binary, false);
         let names = mapper.table_names();
         assert_eq!(names.len(), 8);
         assert!(names.contains(&"token_balances"));
@@ -1366,7 +1437,7 @@ mod tests {
         });
 
         let block_bytes = prost::Message::encode_to_vec(&block);
-        let mut mapper = SolanaBlockMapper::new(false, false, EncodeBytes::Binary);
+        let mut mapper = SolanaBlockMapper::new(false, false, EncodeBytes::Binary, false);
         mapper.map_block(&block_bytes, &BlockIdentity::default(), None).unwrap();
 
         let batches = mapper.flush().unwrap();
