@@ -111,6 +111,11 @@ impl CursorState {
     }
 
     /// Read a `CursorState` from a single-row RecordBatch.
+    ///
+    /// Non-critical fields use lenient defaults (empty string, 0, false) for
+    /// forward compatibility — a file written by a newer version with extra
+    /// columns can still be read by an older version. The `cursor` field is
+    /// validated by the caller (`load_cursor_parquet`).
     fn from_record_batch(batch: &RecordBatch) -> anyhow::Result<Self> {
         use arrow::array::AsArray;
 
