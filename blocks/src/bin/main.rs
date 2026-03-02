@@ -70,6 +70,12 @@ struct Cli {
 
 /// Detect block type from a protobuf `Any.type_url`.
 /// Build Parquet file-level metadata with pipeline context.
+fn log_file_metadata(meta: &ParquetFileMetadata) {
+    for (key, value) in &meta.entries {
+        info!(key = %key, value = %value, "parquet metadata");
+    }
+}
+
 fn build_file_metadata(
     block_type: &str,
     encoding: &firehose_parquet::encode::EncodeBytes,
@@ -304,6 +310,8 @@ async fn main() -> Result<()> {
 
     init_tracing(&cli.common.log_level);
 
+    info!(version = env!("CARGO_PKG_VERSION"), "firehose-to-parquet starting");
+
     // Install graceful shutdown handler for SIGINT (Ctrl-C) and SIGTERM.
     // When a signal is received, the flag is set and the streaming loop
     // will break after the current block.  Partial (incomplete partition)
@@ -386,7 +394,9 @@ async fn main() -> Result<()> {
         let encode_bytes = parse_encode_bytes(&bytes_encoding_str)
             .or_else(|| endpoint_info.as_ref().and_then(|ei| encode_bytes_from_block_id_encoding(ei.block_id_encoding)))
             .unwrap_or_else(|| default_encode_bytes(&block_type));
-        writer.inner.set_file_metadata(build_file_metadata(&block_type, &encode_bytes, &config.endpoint, &endpoint_info));
+        let meta = build_file_metadata(&block_type, &encode_bytes, &config.endpoint, &endpoint_info);
+        log_file_metadata(&meta);
+        writer.inner.set_file_metadata(meta);
         Some(create_mapper(&block_type, extended, include_fork_step, encode_bytes)?)
     } else {
         None
@@ -422,7 +432,9 @@ async fn main() -> Result<()> {
                 let encode_bytes = parse_encode_bytes(&bytes_encoding_str)
                     .or_else(|| endpoint_info.as_ref().and_then(|ei| encode_bytes_from_block_id_encoding(ei.block_id_encoding)))
                     .unwrap_or_else(|| default_encode_bytes(&detected));
-                writer.inner.set_file_metadata(build_file_metadata(&detected, &encode_bytes, &config.endpoint, &endpoint_info));
+                let meta = build_file_metadata(&detected, &encode_bytes, &config.endpoint, &endpoint_info);
+                log_file_metadata(&meta);
+                writer.inner.set_file_metadata(meta);
                 mapper = Some(create_mapper(&detected, extended, include_fork_step, encode_bytes)?);
             }
 
