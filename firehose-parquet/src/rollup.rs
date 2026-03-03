@@ -8,7 +8,6 @@ use crate::config::Compression;
 use anyhow::{Context, Result};
 use arrow::compute::concat_batches;
 use arrow::record_batch::RecordBatch;
-use object_store::aws::AmazonS3Builder;
 use object_store::ObjectStore;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use parquet::arrow::ArrowWriter;
@@ -589,23 +588,7 @@ fn write_merged_batches_s3(
 }
 
 fn build_s3_client(bucket: &str, aws: &AwsConfig) -> Result<Arc<dyn ObjectStore>> {
-    let mut builder = AmazonS3Builder::new().with_bucket_name(bucket);
-    if let Some(ref key) = aws.aws_access_key_id {
-        builder = builder.with_access_key_id(key);
-    }
-    if let Some(ref secret) = aws.aws_secret_access_key {
-        builder = builder.with_secret_access_key(secret);
-    }
-    if let Some(ref token) = aws.aws_session_token {
-        builder = builder.with_token(token);
-    }
-    if let Some(ref region) = aws.aws_region {
-        builder = builder.with_region(region);
-    }
-    if let Some(ref endpoint) = aws.aws_endpoint_url {
-        builder = builder.with_endpoint(endpoint);
-    }
-    Ok(Arc::new(builder.build()?))
+    Ok(Arc::new(aws.build_s3_client(bucket)?))
 }
 
 // ---------------------------------------------------------------------------

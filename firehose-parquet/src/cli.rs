@@ -491,13 +491,47 @@ pub fn generate_completions<C: clap::CommandFactory>(shell: Shell) {
     generate(shell, &mut cmd, name, &mut io::stdout());
 }
 
-/// AWS credentials for building an S3 client in the `scan` subcommand.
+/// AWS credentials for building an S3 client.
 pub struct AwsConfig {
     pub aws_access_key_id: Option<String>,
     pub aws_secret_access_key: Option<String>,
     pub aws_session_token: Option<String>,
     pub aws_region: Option<String>,
     pub aws_endpoint_url: Option<String>,
+}
+
+impl AwsConfig {
+    /// Build an `AmazonS3` client for the given bucket.
+    ///
+    /// When no access key is provided, enables anonymous (unsigned) requests
+    /// via `with_skip_signature(true)` so that public buckets can be accessed
+    /// without credentials.
+    pub fn build_s3_client(&self, bucket: &str) -> anyhow::Result<object_store::aws::AmazonS3> {
+        use object_store::aws::AmazonS3Builder;
+
+        let mut builder = AmazonS3Builder::new().with_bucket_name(bucket);
+        if let Some(ref key) = self.aws_access_key_id { builder = builder.with_access_key_id(key); }
+        if let Some(ref secret) = self.aws_secret_access_key { builder = builder.with_secret_access_key(secret); }
+        if let Some(ref token) = self.aws_session_token { builder = builder.with_token(token); }
+        if let Some(ref region) = self.aws_region { builder = builder.with_region(region); }
+        if let Some(ref endpoint_url) = self.aws_endpoint_url {
+            builder = builder.with_endpoint(endpoint_url);
+            // Enable virtual-hosted-style requests when the endpoint contains
+            // the bucket name as a subdomain (e.g. bucket.fly.storage.tigris.dev).
+            // This is required by providers like Tigris that don't support
+            // path-style access.
+            if endpoint_url.contains(&format!("{}.", bucket)) {
+                builder = builder.with_virtual_hosted_style_request(true);
+            }
+        }
+        // When no credentials are provided, use anonymous (unsigned) requests
+        // so public buckets are accessible without IMDS/IAM lookup.
+        if self.aws_access_key_id.is_none() {
+            builder = builder.with_skip_signature(true);
+        }
+        builder.build()
+            .map_err(|e| anyhow::anyhow!("building S3 client for bucket {bucket}: {e}"))
+    }
 }
 
 /// Scan and display parquet files at the given path.
@@ -593,33 +627,11 @@ fn scan_parquet_local(path: &PathBuf, rows: usize, schema_only: bool) -> anyhow:
 /// Scan parquet files from an S3 bucket.
 fn scan_parquet_s3(path: &str, rows: usize, schema_only: bool, aws: &AwsConfig) -> anyhow::Result<()> {
     use crate::writer::parse_s3_url;
-    use object_store::aws::AmazonS3Builder;
     use object_store::ObjectStore;
     use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 
     let (bucket, prefix) = parse_s3_url(path)?;
-
-    let mut builder = AmazonS3Builder::new()
-        .with_bucket_name(&bucket);
-
-    if let Some(ref key) = aws.aws_access_key_id {
-        builder = builder.with_access_key_id(key);
-    }
-    if let Some(ref secret) = aws.aws_secret_access_key {
-        builder = builder.with_secret_access_key(secret);
-    }
-    if let Some(ref token) = aws.aws_session_token {
-        builder = builder.with_token(token);
-    }
-    if let Some(ref region) = aws.aws_region {
-        builder = builder.with_region(region);
-    }
-    if let Some(ref endpoint_url) = aws.aws_endpoint_url {
-        builder = builder.with_endpoint(endpoint_url);
-    }
-
-    let client = builder.build()
-        .map_err(|e| anyhow::anyhow!("building S3 client for bucket {bucket}: {e}"))?;
+    let client = aws.build_s3_client(&bucket)?;
 
     // List all .parquet objects under the prefix.
     let list_prefix = if prefix.is_empty() {
@@ -1610,21 +1622,11 @@ fn validate_parquet_local(path: &PathBuf, opts: &ValidateOptions) -> anyhow::Res
 
 fn validate_parquet_s3(path: &str, aws: &AwsConfig, opts: &ValidateOptions) -> anyhow::Result<ValidateResult> {
     use crate::writer::parse_s3_url;
-    use object_store::aws::AmazonS3Builder;
     use object_store::ObjectStore;
     use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 
     let (bucket, prefix) = parse_s3_url(path)?;
-
-    let mut builder = AmazonS3Builder::new().with_bucket_name(&bucket);
-    if let Some(ref key) = aws.aws_access_key_id { builder = builder.with_access_key_id(key); }
-    if let Some(ref secret) = aws.aws_secret_access_key { builder = builder.with_secret_access_key(secret); }
-    if let Some(ref token) = aws.aws_session_token { builder = builder.with_token(token); }
-    if let Some(ref region) = aws.aws_region { builder = builder.with_region(region); }
-    if let Some(ref endpoint_url) = aws.aws_endpoint_url { builder = builder.with_endpoint(endpoint_url); }
-
-    let client = builder.build()
-        .map_err(|e| anyhow::anyhow!("building S3 client for bucket {bucket}: {e}"))?;
+    let client = aws.build_s3_client(&bucket)?;
 
     let list_prefix = if prefix.is_empty() { None } else { Some(object_store::path::Path::from(prefix.as_str())) };
 
