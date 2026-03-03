@@ -166,6 +166,7 @@ Usage: firehose-parquet [OPTIONS] [COMMAND]
 Commands:
   completions  Generate shell completions for the given shell
   scan         Read and inspect Parquet files (schema, row counts, sample rows)
+  inspect      Display full metadata for a single Parquet file
   validate     Check partition integrity (gaps, ordering, duplicates)
   rollup       Roll up fine-grained partitions into coarser ones (e.g. minute → date)
   merge        Consolidate small part files within each partition into larger files
@@ -252,6 +253,28 @@ Read and inspect Parquet files: shows schema, row counts, and sample rows. Suppo
 firehose-parquet scan ./output/blocks/
 firehose-parquet scan s3://my-bucket/evm/blocks/
 ```
+
+### `inspect` — Display File Metadata
+
+Displays comprehensive metadata for a single Parquet file: file-level key-value pairs (including custom `firehose-parquet.*` entries), the full Parquet schema with physical/logical types, row group statistics, and per-column chunk details (encoding, compression, sizes). Supports local paths and S3 URIs.
+
+```bash
+# Inspect a local file
+firehose-parquet inspect ./output/blocks/date=2026-01-15/part-000001.parquet
+
+# Inspect an S3 file
+firehose-parquet inspect s3://my-bucket/evm/blocks/date=2026-01-15/part-000001.parquet
+```
+
+**Output includes:**
+
+| Section | Details |
+|---|---|
+| **File info** | Total rows, row groups, columns, file size, created_by, Parquet version |
+| **File metadata** | All key-value pairs stored in the Parquet footer |
+| **Schema** | Physical types, logical types (e.g. String, Timestamp), repetition levels, nested groups |
+| **Row groups** | Per-group row count, compressed/uncompressed size, compression ratio |
+| **Column details** | Per-column encoding, compression codec, compressed/uncompressed size, ratio |
 
 ### `validate` — Check Partition Integrity
 

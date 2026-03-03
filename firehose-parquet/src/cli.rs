@@ -333,6 +333,36 @@ Examples:
         #[arg(long, env = "CACHE_CONTROL", default_value = "public, max-age=31536000, immutable")]
         cache_control: String,
     },
+    /// Inspect a single Parquet file's metadata: file-level key-value pairs,
+    /// schema, row group details, and column chunk info.
+    /// Supports local paths and S3 URIs (s3://bucket/key.parquet).
+    #[command(after_long_help = "\
+Examples:
+  # Inspect a local parquet file
+  firehose-parquet inspect ./output/blocks/part-000001.parquet
+
+  # Inspect an S3 parquet file
+  firehose-parquet inspect s3://bucket/eth-mainnet/blocks/part-000001.parquet
+")]
+    Inspect {
+        /// Path to a single .parquet file (local path or S3 URI)
+        path: String,
+        /// AWS access key ID (for S3 paths)
+        #[arg(long, env = "AWS_ACCESS_KEY_ID", hide_env_values = true)]
+        aws_access_key_id: Option<String>,
+        /// AWS secret access key (for S3 paths)
+        #[arg(long, env = "AWS_SECRET_ACCESS_KEY", hide_env_values = true)]
+        aws_secret_access_key: Option<String>,
+        /// AWS session token (for S3 paths)
+        #[arg(long, env = "AWS_SESSION_TOKEN", hide_env_values = true)]
+        aws_session_token: Option<String>,
+        /// AWS region (for S3 paths)
+        #[arg(long, env = "AWS_REGION", hide_env_values = true)]
+        aws_region: Option<String>,
+        /// AWS endpoint URL (for S3-compatible services)
+        #[arg(long, env = "AWS_ENDPOINT_URL_S3", hide_env_values = true)]
+        aws_endpoint_url: Option<String>,
+    },
     /// Delete parquet files from local filesystem or S3, with optional partition filtering.
     ///
     /// Deletes only .parquet files. Never deletes buckets or non-parquet files.
@@ -857,6 +887,228 @@ fn format_number_with_hint(v: i128) -> String {
         return v.to_string();
     };
     format!("{v}{hint}")
+}
+
+// ---------------------------------------------------------------------------
+// Inspect
+// ---------------------------------------------------------------------------
+
+/// Inspect a single parquet file's metadata.
+///
+/// Displays file-level key-value metadata, Arrow schema, row group details,
+/// and per-column chunk information.
+/// Supports local filesystem paths and S3 URIs (`s3://bucket/key.parquet`).
+pub fn inspect_parquet(path: &str, aws: Option<&AwsConfig>) -> anyhow::Result<()> {
+    if path.starts_with("s3://") {
+        inspect_parquet_s3(path, aws.ok_or_else(|| anyhow::anyhow!("AWS config required for S3 paths"))?)
+    } else {
+        inspect_parquet_local(path)
+    }
+}
+
+/// Inspect a local parquet file.
+fn inspect_parquet_local(path: &str) -> anyhow::Result<()> {
+    use parquet::file::reader::FileReader;
+    use parquet::file::serialized_reader::SerializedFileReader;
+    use std::fs;
+
+    let file = fs::File::open(path)
+        .map_err(|e| anyhow::anyhow!("opening {path}: {e}"))?;
+    let file_size = file.metadata()?.len();
+    let reader = SerializedFileReader::new(file)?;
+    let metadata = reader.metadata();
+
+    print_inspect(path, file_size, metadata);
+    Ok(())
+}
+
+/// Inspect an S3 parquet file.
+fn inspect_parquet_s3(path: &str, aws: &AwsConfig) -> anyhow::Result<()> {
+    use crate::writer::parse_s3_url;
+    use object_store::aws::AmazonS3Builder;
+    use object_store::ObjectStore;
+    use parquet::file::reader::FileReader;
+    use parquet::file::serialized_reader::SerializedFileReader;
+
+    let (bucket, key) = parse_s3_url(path)?;
+
+    let mut builder = AmazonS3Builder::new().with_bucket_name(&bucket);
+    if let Some(ref v) = aws.aws_access_key_id { builder = builder.with_access_key_id(v); }
+    if let Some(ref v) = aws.aws_secret_access_key { builder = builder.with_secret_access_key(v); }
+    if let Some(ref v) = aws.aws_session_token { builder = builder.with_token(v); }
+    if let Some(ref v) = aws.aws_region { builder = builder.with_region(v); }
+    if let Some(ref v) = aws.aws_endpoint_url { builder = builder.with_endpoint(v); }
+
+    let client = builder.build()
+        .map_err(|e| anyhow::anyhow!("building S3 client for bucket {bucket}: {e}"))?;
+
+    let obj_path = object_store::path::Path::from(key.as_str());
+    let data = block_on_async(async {
+        client.get(&obj_path).await?.bytes().await
+    }).map_err(|e| anyhow::anyhow!("reading {path}: {e}"))?;
+
+    let file_size = data.len() as u64;
+    let reader = SerializedFileReader::new(bytes::Bytes::from(data))
+        .map_err(|e| anyhow::anyhow!("parsing parquet from {path}: {e}"))?;
+    let metadata = reader.metadata();
+
+    print_inspect(path, file_size, metadata);
+    Ok(())
+}
+
+/// Print the full inspection output for a parquet file.
+fn print_inspect(path: &str, file_size: u64, metadata: &parquet::file::metadata::ParquetMetaData) {
+    let file_meta = metadata.file_metadata();
+    let num_row_groups = metadata.num_row_groups();
+    let total_rows: i64 = metadata.row_groups().iter().map(|rg| rg.num_rows()).sum();
+    let num_columns = file_meta.schema().get_fields().len();
+
+    // Header
+    println!("{}", "═".repeat(72));
+    println!("  {}", path);
+    println!("{}", "─".repeat(72));
+    println!(
+        "  rows: {}  row_groups: {}  columns: {}  size: {}",
+        total_rows, num_row_groups, num_columns, format_bytes(file_size),
+    );
+    if let Some(created_by) = file_meta.created_by() {
+        println!("  created_by: {}", created_by);
+    }
+    println!("  version: {}", file_meta.version());
+
+    // File-level key-value metadata
+    if let Some(kv_meta) = file_meta.key_value_metadata() {
+        if !kv_meta.is_empty() {
+            println!("\n{}", "─".repeat(72));
+            println!("  File Metadata ({} entries)", kv_meta.len());
+            println!("{}", "─".repeat(72));
+            let max_key_len = kv_meta.iter().map(|kv| kv.key.len()).max().unwrap_or(0);
+            for kv in kv_meta {
+                let value = kv.value.as_deref().unwrap_or("(null)");
+                // Truncate very long values (e.g. serialized Arrow schema)
+                let display_value = if value.len() > 120 {
+                    format!("{}… ({} bytes)", &value[..120], value.len())
+                } else {
+                    value.to_string()
+                };
+                println!("  {:width$}  {}", kv.key, display_value, width = max_key_len);
+            }
+        }
+    }
+
+    // Schema
+    println!("\n{}", "─".repeat(72));
+    println!("  Schema");
+    println!("{}", "─".repeat(72));
+
+    // Use the parquet schema for detailed type info.
+    let schema = file_meta.schema();
+    for field in schema.get_fields() {
+        print_schema_field(field, 1);
+    }
+
+    // Row groups
+    println!("\n{}", "─".repeat(72));
+    println!("  Row Groups");
+    println!("{}", "─".repeat(72));
+
+    for (i, rg) in metadata.row_groups().iter().enumerate() {
+        let compressed = rg.compressed_size();
+        let uncompressed = rg.total_byte_size();
+        let ratio = if uncompressed > 0 {
+            format!("{:.1}x", uncompressed as f64 / compressed as f64)
+        } else {
+            "N/A".to_string()
+        };
+        println!(
+            "  [{}]  rows: {}  compressed: {}  uncompressed: {}  ratio: {}",
+            i,
+            rg.num_rows(),
+            format_bytes(compressed as u64),
+            format_bytes(uncompressed as u64),
+            ratio,
+        );
+    }
+
+    // Column details (from first row group for encoding/compression info)
+    if num_row_groups > 0 {
+        let rg = metadata.row_groups().first().unwrap();
+        println!("\n{}", "─".repeat(72));
+        println!("  Column Details (row group 0)");
+        println!("{}", "─".repeat(72));
+
+        let max_col_name = rg.columns().iter().map(|c| c.column_path().string().len()).max().unwrap_or(0);
+
+        for col in rg.columns() {
+            let col_path = col.column_path().string();
+            let compression = format!("{:?}", col.compression());
+            let encodings: Vec<String> = col.encodings().map(|e| format!("{:?}", e)).collect();
+            let compressed = col.compressed_size();
+            let uncompressed = col.uncompressed_size();
+            let ratio = if uncompressed > 0 {
+                format!("{:.1}x", uncompressed as f64 / compressed as f64)
+            } else {
+                "N/A".to_string()
+            };
+            println!(
+                "  {:width$}  {}  {}  compressed: {}  uncompressed: {}  ratio: {}",
+                col_path,
+                compression,
+                encodings.join("+"),
+                format_bytes(compressed as u64),
+                format_bytes(uncompressed as u64),
+                ratio,
+                width = max_col_name,
+            );
+        }
+    }
+
+    println!("\n{}", "═".repeat(72));
+}
+
+/// Print a parquet schema field with indentation (supports nested types).
+fn print_schema_field(field: &parquet::schema::types::Type, indent: usize) {
+    use parquet::schema::types::Type;
+
+    let prefix = "  ".repeat(indent);
+    match field {
+        Type::PrimitiveType { basic_info, physical_type, type_length, .. } => {
+            let repetition = format!("{:?}", basic_info.repetition());
+            let logical = basic_info.logical_type_ref()
+                .map(|lt| format!(" ({:?})", lt))
+                .unwrap_or_default();
+            let len_info = if *type_length > 0 {
+                format!("({})", type_length)
+            } else {
+                String::new()
+            };
+            println!(
+                "{}{:30} {:?}{}{}  {}",
+                prefix,
+                basic_info.name(),
+                physical_type,
+                len_info,
+                logical,
+                repetition.to_lowercase(),
+            );
+        }
+        Type::GroupType { basic_info, fields, .. } => {
+            let repetition = format!("{:?}", basic_info.repetition());
+            let logical = basic_info.logical_type_ref()
+                .map(|lt| format!(" ({:?})", lt))
+                .unwrap_or_default();
+            println!(
+                "{}{:30} group{}  {}",
+                prefix,
+                basic_info.name(),
+                logical,
+                repetition.to_lowercase(),
+            );
+            for f in fields {
+                print_schema_field(f, indent + 1);
+            }
+        }
+    }
 }
 
 /// Recursively collect `.parquet` files from a directory.
