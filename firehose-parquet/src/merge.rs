@@ -538,7 +538,7 @@ mod tests {
     #[test]
     fn test_merge_preserves_metadata() {
         let dir = tempfile::tempdir().unwrap();
-        let partition = dir.path().join("blocks/date=2024-01-15");
+        let partition = dir.path().join("blocks/year=2024/month=01/date=15");
         std::fs::create_dir_all(&partition).unwrap();
 
         let kvs = vec![

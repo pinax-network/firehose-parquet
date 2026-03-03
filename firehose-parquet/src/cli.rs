@@ -343,13 +343,13 @@ Examples:
   firehose-parquet truncate ./output/blocks/
 
   # Delete only a specific date partition
-  firehose-parquet truncate ./output/blocks/ -p \"date=2026-01-01\"
+  firehose-parquet truncate ./output/blocks/ -p \"date=01\"
 
-  # Delete with glob pattern (all January dates)
-  firehose-parquet truncate s3://bucket/blocks/ -p \"date=2026-01-*\"
+  # Delete with glob pattern (all of January)
+  firehose-parquet truncate s3://bucket/blocks/ -p \"month=01\"
 
-  # Delete multiple partitions
-  firehose-parquet truncate ./output/ -p \"date=2026-01-01\" -p \"date=2026-01-02\"
+  # Delete a specific year
+  firehose-parquet truncate ./output/ -p \"year=2026\"
 
   # Delete all minute-level partitions (key-only filter)
   firehose-parquet truncate ./output/blocks/ -p minute
