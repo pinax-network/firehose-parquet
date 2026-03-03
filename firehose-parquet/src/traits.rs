@@ -1,8 +1,8 @@
 use arrow::array::{
     ArrayBuilder, BinaryBuilder, BooleanBuilder, Float64Builder, Int32Builder, Int64Builder,
-    ListBuilder, StringBuilder, UInt32Builder, UInt64Builder,
+    ListBuilder, StringBuilder, TimestampSecondBuilder, UInt32Builder, UInt64Builder,
 };
-use arrow::datatypes::{DataType, Field};
+use arrow::datatypes::{DataType, Field, TimeUnit};
 use arrow::record_batch::RecordBatch;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -25,6 +25,11 @@ pub fn est_u32(b: &UInt32Builder) -> usize {
 
 /// Estimate memory usage of an `Int64Builder`.
 pub fn est_i64(b: &Int64Builder) -> usize {
+    b.len() * 8
+}
+
+/// Estimate memory usage of a `TimestampSecondBuilder`.
+pub fn est_ts_sec(b: &TimestampSecondBuilder) -> usize {
     b.len() * 8
 }
 
@@ -97,7 +102,7 @@ pub fn canonical_fields_with_encoding(encoding: &EncodeBytes) -> Vec<Field> {
         Field::new("parent_num", DataType::UInt64, false),
         Field::new("parent_id", id_type, false),
         Field::new("lib_num", DataType::UInt64, false),
-        Field::new("timestamp", DataType::Int64, false),
+        Field::new("timestamp", DataType::Timestamp(TimeUnit::Second, Some(Arc::from("UTC"))), false),
     ]
 }
 
@@ -120,7 +125,7 @@ pub struct CanonicalBuilder {
     pub parent_num: UInt64Builder,
     parent_id: BytesColumn,
     pub lib_num: UInt64Builder,
-    pub timestamp: Int64Builder,
+    pub timestamp: TimestampSecondBuilder,
 }
 
 impl CanonicalBuilder {
@@ -136,7 +141,7 @@ impl CanonicalBuilder {
             parent_num: UInt64Builder::new(),
             parent_id: BytesColumn::new(encoding),
             lib_num: UInt64Builder::new(),
-            timestamp: Int64Builder::new(),
+            timestamp: TimestampSecondBuilder::new().with_timezone("UTC"),
         }
     }
 
@@ -175,7 +180,7 @@ impl CanonicalBuilder {
             + est_u64(&self.parent_num)
             + self.parent_id.estimated_bytes()
             + est_u64(&self.lib_num)
-            + est_i64(&self.timestamp)
+            + est_ts_sec(&self.timestamp)
     }
 }
 
