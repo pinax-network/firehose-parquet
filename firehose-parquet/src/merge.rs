@@ -10,7 +10,6 @@ use crate::writer::s3_put_options;
 use anyhow::{Context, Result};
 use arrow::compute::concat_batches;
 use arrow::record_batch::RecordBatch;
-use object_store::aws::AmazonS3Builder;
 use object_store::ObjectStore;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use parquet::arrow::ArrowWriter;
@@ -337,15 +336,7 @@ fn run_merge_s3(config: &MergeConfig) -> Result<MergeResult> {
     let (bucket, prefix) = parse_s3_url(&config.path)?;
     let aws = config.aws.as_ref().ok_or_else(|| anyhow::anyhow!("AWS config required for S3 paths"))?;
 
-    let mut builder = AmazonS3Builder::new().with_bucket_name(&bucket);
-    if let Some(ref key) = aws.aws_access_key_id { builder = builder.with_access_key_id(key); }
-    if let Some(ref secret) = aws.aws_secret_access_key { builder = builder.with_secret_access_key(secret); }
-    if let Some(ref token) = aws.aws_session_token { builder = builder.with_token(token); }
-    if let Some(ref region) = aws.aws_region { builder = builder.with_region(region); }
-    if let Some(ref endpoint_url) = aws.aws_endpoint_url { builder = builder.with_endpoint(endpoint_url); }
-
-    let client = Arc::new(builder.build()
-        .map_err(|e| anyhow::anyhow!("building S3 client for bucket {bucket}: {e}"))?);
+    let client = Arc::new(aws.build_s3_client(&bucket)?);
 
     let list_prefix = if prefix.is_empty() { None } else { Some(object_store::path::Path::from(prefix.as_str())) };
 
