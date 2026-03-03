@@ -105,7 +105,7 @@ The cursor is stored as a single-row Parquet file with two layers of data:
 | `last_block_id` | Binary | Last processed block ID (raw bytes) |
 | `updated_at` | Utf8 | ISO 8601 timestamp of last save |
 | `start_block` | UInt64 (nullable) | Pipeline start block |
-| `stop_block` | UInt64 (nullable) | Pipeline stop block |
+| `stop_block` | UInt64 (nullable) | Pipeline stop block (exclusive) |
 | `extended` | Boolean | Whether extended mode was enabled |
 | `final_blocks_only` | Boolean | Whether only finalized blocks were processed |
 | `include_failed_transactions` | Boolean | Whether failed txs were included |
@@ -190,7 +190,7 @@ Connection:
 
 Block Range:
   -s, --start-block <START_BLOCK>  Start block number (inclusive) [env: START_BLOCK]
-  -t, --stop-block <STOP_BLOCK>    Stop block number (inclusive, 0 = stream forever) [env: STOP_BLOCK]
+  -t, --stop-block <STOP_BLOCK>    Stop block number (exclusive, 0 = stream forever) [env: STOP_BLOCK]
   -c, --cursor <CURSOR>            Path to cursor file for resuming a previous session [env: CURSOR]
       --cursor-override            Override cursor parameter validation on resume [env: CURSOR_OVERRIDE]
       --final-blocks-only          Only process finalized blocks (when false, adds fork_step column) [env: FINAL_BLOCKS_ONLY]
