@@ -15,6 +15,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use time::OffsetDateTime;
 use tracing::info;
+use uuid::Uuid;
 
 /// Key-value metadata to embed in every Parquet file's footer.
 #[derive(Debug, Clone, Default)]
@@ -41,6 +42,10 @@ pub struct ParquetTableWriter {
     compression: Compression,
     /// Part counter per logical partition key (table + partition value).
     part_counters: HashMap<String, u32>,
+    /// Unique process identifier to prevent concurrent write collisions.
+    /// Each writer instance gets a short UUID prefix so two processes
+    /// streaming into the same partition produce distinct file names.
+    process_id: String,
     /// S3 object store client (set when output starts with `s3://`).
     s3_client: Option<Arc<dyn ObjectStore>>,
     /// S3 key prefix (bucket path after `s3://bucket/`).
@@ -58,6 +63,7 @@ impl ParquetTableWriter {
             partition,
             compression,
             part_counters: HashMap::new(),
+            process_id: short_uuid(),
             s3_client: None,
             s3_prefix: None,
             cache_control: String::new(),
@@ -102,6 +108,7 @@ impl ParquetTableWriter {
             partition,
             compression,
             part_counters: HashMap::new(),
+            process_id: short_uuid(),
             s3_client: Some(Arc::new(client)),
             s3_prefix: Some(prefix),
             cache_control: config.cache_control.clone().unwrap_or_default(),
@@ -130,7 +137,7 @@ impl ParquetTableWriter {
         let counter_key = dir.to_string_lossy().to_string();
         let counter = self.part_counters.entry(counter_key).or_insert(0);
         *counter += 1;
-        let filename = format!("part-{:06}.parquet", counter);
+        let filename = format!("part-{}-{:06}.parquet", self.process_id, counter);
         let path = dir.join(&filename);
 
         let compressed_bytes;
@@ -760,6 +767,12 @@ impl OutputWriter {
 
 /// Parse an S3 URL into (bucket, prefix).
 ///
+/// Generate a short 8-character hex process identifier from a UUID v4.
+/// Used to make part file names unique across concurrent processes.
+fn short_uuid() -> String {
+    Uuid::new_v4().simple().to_string()[..8].to_string()
+}
+
 /// Supports: `s3://bucket/prefix/path` → `("bucket", "prefix/path")`
 pub fn parse_s3_url(url: &str) -> Result<(String, String)> {
     let rest = url
@@ -921,8 +934,15 @@ mod tests {
         };
         let (path1, _) = writer.write_batch("blocks", &batch, &meta).unwrap();
         let (path2, _) = writer.write_batch("blocks", &batch, &meta).unwrap();
-        assert!(path1.to_string_lossy().contains("part-000001"));
-        assert!(path2.to_string_lossy().contains("part-000002"));
+        // File names now include a process UUID prefix: part-{uuid}-NNNNNN.parquet
+        let name1 = path1.file_name().unwrap().to_string_lossy();
+        let name2 = path2.file_name().unwrap().to_string_lossy();
+        assert!(name1.starts_with("part-") && name1.ends_with("-000001.parquet"), "unexpected: {name1}");
+        assert!(name2.starts_with("part-") && name2.ends_with("-000002.parquet"), "unexpected: {name2}");
+        // Both should share the same process ID prefix.
+        let prefix1 = &name1["part-".len()..name1.len() - "-000001.parquet".len()];
+        let prefix2 = &name2["part-".len()..name2.len() - "-000002.parquet".len()];
+        assert_eq!(prefix1, prefix2, "same writer should produce same process prefix");
     }
 
     #[test]
