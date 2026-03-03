@@ -279,7 +279,11 @@ impl EvmBlockMapper {
                 builder.append_null();
             }
         }
-        self.logs.data.append_value(&log.data);
+        if log.data.is_empty() {
+            self.logs.data.append_null();
+        } else {
+            self.logs.data.append_value(&log.data);
+        }
         append_fork_step(&mut self.logs.fork_step, fork_step);
     }
 

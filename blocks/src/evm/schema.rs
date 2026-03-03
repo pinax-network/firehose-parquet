@@ -77,7 +77,7 @@ pub fn logs_schema(include_fork_step: bool, encoding: &EncodeBytes) -> Schema {
         Field::new("topic1", bd.clone(), true),
         Field::new("topic2", bd.clone(), true),
         Field::new("topic3", bd.clone(), true),
-        Field::new("data", bd, false),
+        Field::new("data", bd, true),
     ]);
     maybe_fork_step(&mut fields, include_fork_step);
     Schema::new(fields)
