@@ -51,7 +51,7 @@ pub struct CommonArgs {
     #[arg(short = 's', long, env = "START_BLOCK", hide_env_values = true, help_heading = "Block Range")]
     pub start_block: Option<u64>,
 
-    /// Stop block number (inclusive, 0 = stream forever)
+    /// Stop block number (exclusive, 0 = stream forever)
     #[arg(short = 't', long, env = "STOP_BLOCK", hide_env_values = true, help_heading = "Block Range")]
     pub stop_block: Option<u64>,
 

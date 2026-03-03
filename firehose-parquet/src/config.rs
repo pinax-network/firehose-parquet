@@ -180,7 +180,7 @@ impl std::fmt::Display for Config {
         writeln!(f, "  endpoint           {}", self.endpoint)?;
         writeln!(f, "  auth               {auth}")?;
         writeln!(f, "  start_block        {start}")?;
-        writeln!(f, "  stop_block         {stop}")?;
+        writeln!(f, "  stop_block         {stop} (exclusive)")?;
         if let Some(ref path) = self.cursor_path {
             writeln!(f, "  cursor             {}", path)?;
         }
@@ -287,7 +287,7 @@ mod tests {
         assert!(display.contains("endpoint"));
         assert!(display.contains("auth               none"));
         assert!(display.contains("start_block        N/A"));
-        assert!(display.contains("stop_block         stream forever"));
+        assert!(display.contains("stop_block         stream forever (exclusive)"));
         assert!(display.contains("partition          none"));
         assert!(display.contains("compression        zstd"));
         assert!(!display.contains("flush_rows"));
@@ -328,7 +328,7 @@ mod tests {
         };
         let display = config.to_string();
         assert!(display.contains("start_block        100"));
-        assert!(display.contains("stop_block         200"));
+        assert!(display.contains("stop_block         200 (exclusive)"));
     }
 
     #[test]
@@ -338,7 +338,7 @@ mod tests {
             ..Config::default()
         };
         let display = config.to_string();
-        assert!(display.contains("stop_block         stream forever"));
+        assert!(display.contains("stop_block         stream forever (exclusive)"));
     }
 
     #[test]

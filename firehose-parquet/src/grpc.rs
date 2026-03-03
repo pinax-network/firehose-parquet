@@ -181,7 +181,9 @@ impl FirehoseClient {
             let req = firehose::Request {
                 start_block_num,
                 cursor: cursor.clone().unwrap_or_default(),
-                stop_block_num: self.config.stop_block.unwrap_or(0),
+                // CLI stop_block is exclusive; Firehose protocol is inclusive.
+                // Subtract 1 to convert (0 means stream forever in both).
+                stop_block_num: self.config.stop_block.map_or(0, |b| b.saturating_sub(1)),
                 final_blocks_only: self.config.final_blocks_only,
                 transforms: vec![],
             };
