@@ -99,22 +99,22 @@ impl Partition {
             Partition::Date => {
                 let dt = time::OffsetDateTime::from_unix_timestamp(timestamp)
                     .unwrap_or(time::OffsetDateTime::UNIX_EPOCH);
-                Some(format!("date={:04}-{:02}-{:02}", dt.year(), dt.month() as u8, dt.day()))
+                Some(format!("year={:04}/month={:02}/date={:02}", dt.year(), dt.month() as u8, dt.day()))
             }
             Partition::Hour => {
                 let dt = time::OffsetDateTime::from_unix_timestamp(timestamp)
                     .unwrap_or(time::OffsetDateTime::UNIX_EPOCH);
-                Some(format!("date={:04}-{:02}-{:02}/hour={:02}", dt.year(), dt.month() as u8, dt.day(), dt.hour()))
+                Some(format!("year={:04}/month={:02}/date={:02}/hour={:02}", dt.year(), dt.month() as u8, dt.day(), dt.hour()))
             }
             Partition::Minute => {
                 let dt = time::OffsetDateTime::from_unix_timestamp(timestamp)
                     .unwrap_or(time::OffsetDateTime::UNIX_EPOCH);
-                Some(format!("date={:04}-{:02}-{:02}/hour={:02}/minute={:02}", dt.year(), dt.month() as u8, dt.day(), dt.hour(), dt.minute()))
+                Some(format!("year={:04}/month={:02}/date={:02}/hour={:02}/minute={:02}", dt.year(), dt.month() as u8, dt.day(), dt.hour(), dt.minute()))
             }
             Partition::Second => {
                 let dt = time::OffsetDateTime::from_unix_timestamp(timestamp)
                     .unwrap_or(time::OffsetDateTime::UNIX_EPOCH);
-                Some(format!("date={:04}-{:02}-{:02}/hour={:02}/minute={:02}/second={:02}", dt.year(), dt.month() as u8, dt.day(), dt.hour(), dt.minute(), dt.second()))
+                Some(format!("year={:04}/month={:02}/date={:02}/hour={:02}/minute={:02}/second={:02}", dt.year(), dt.month() as u8, dt.day(), dt.hour(), dt.minute(), dt.second()))
             }
         }
     }
@@ -462,12 +462,12 @@ mod tests {
         // 2024-01-15 12:00:00 UTC = 1705320000
         assert_eq!(
             Partition::Date.partition_key(100, 1705320000),
-            Some("date=2024-01-15".to_string())
+            Some("year=2024/month=01/date=15".to_string())
         );
         // 2024-01-16 00:00:00 UTC = 1705363200
         assert_eq!(
             Partition::Date.partition_key(200, 1705363200),
-            Some("date=2024-01-16".to_string())
+            Some("year=2024/month=01/date=16".to_string())
         );
     }
 
@@ -476,7 +476,7 @@ mod tests {
         // 2024-01-15 14:30:00 UTC = 1705329000
         assert_eq!(
             Partition::Hour.partition_key(100, 1705329000),
-            Some("date=2024-01-15/hour=14".to_string())
+            Some("year=2024/month=01/date=15/hour=14".to_string())
         );
     }
 

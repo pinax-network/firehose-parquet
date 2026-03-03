@@ -24,9 +24,9 @@ use tracing::info;
 /// Target partition granularity for rollup.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RollupTarget {
-    /// Merge into hourly partitions: `table/date=YYYY-MM-DD/hour=HH/`
+    /// Merge into hourly partitions: `table/year=YYYY/month=MM/date=DD/hour=HH/`
     Hour,
-    /// Merge into daily partitions: `table/date=YYYY-MM-DD/`
+    /// Merge into daily partitions: `table/year=YYYY/month=MM/date=DD/`
     Date,
 }
 
@@ -248,7 +248,7 @@ fn write_merged_batches_local(
 
 /// Group source files by their target (coarser) partition key.
 ///
-/// Returns a map from output relative path (e.g. `blocks/date=2024-01-15`)
+/// Returns a map from output relative path (e.g. `blocks/year=2024/month=01/date=15`)
 /// to the list of source files that belong to that group.
 fn group_files_by_target(
     source_root: &Path,
@@ -274,12 +274,12 @@ fn group_files_by_target(
 /// Compute the group key for a relative file path given the target partition.
 ///
 /// Examples (target=Date):
-///   `blocks/date=2024-01-15/hour=14/minute=30/part-000001.parquet`
-///   → `blocks/date=2024-01-15`
+///   `blocks/year=2024/month=01/date=15/hour=14/minute=30/part-000001.parquet`
+///   → `blocks/year=2024/month=01/date=15`
 ///
 /// Examples (target=Hour):
-///   `blocks/date=2024-01-15/hour=14/minute=30/part-000001.parquet`
-///   → `blocks/date=2024-01-15/hour=14`
+///   `blocks/year=2024/month=01/date=15/hour=14/minute=30/part-000001.parquet`
+///   → `blocks/year=2024/month=01/date=15/hour=14`
 ///
 /// Files without recognized partition components keep everything except the filename.
 fn compute_group_key(rel_path: &str, target: RollupTarget) -> String {
@@ -632,28 +632,28 @@ mod tests {
     #[test]
     fn test_compute_group_key_date() {
         assert_eq!(
-            compute_group_key("blocks/date=2024-01-15/hour=14/minute=30/part-000001.parquet", RollupTarget::Date),
-            "blocks/date=2024-01-15"
+            compute_group_key("blocks/year=2024/month=01/date=15/hour=14/minute=30/part-000001.parquet", RollupTarget::Date),
+            "blocks/year=2024/month=01/date=15"
         );
         assert_eq!(
-            compute_group_key("blocks/date=2024-01-15/hour=14/part-000001.parquet", RollupTarget::Date),
-            "blocks/date=2024-01-15"
+            compute_group_key("blocks/year=2024/month=01/date=15/hour=14/part-000001.parquet", RollupTarget::Date),
+            "blocks/year=2024/month=01/date=15"
         );
         assert_eq!(
-            compute_group_key("blocks/date=2024-01-15/part-000001.parquet", RollupTarget::Date),
-            "blocks/date=2024-01-15"
+            compute_group_key("blocks/year=2024/month=01/date=15/part-000001.parquet", RollupTarget::Date),
+            "blocks/year=2024/month=01/date=15"
         );
     }
 
     #[test]
     fn test_compute_group_key_hour() {
         assert_eq!(
-            compute_group_key("blocks/date=2024-01-15/hour=14/minute=30/part-000001.parquet", RollupTarget::Hour),
-            "blocks/date=2024-01-15/hour=14"
+            compute_group_key("blocks/year=2024/month=01/date=15/hour=14/minute=30/part-000001.parquet", RollupTarget::Hour),
+            "blocks/year=2024/month=01/date=15/hour=14"
         );
         assert_eq!(
-            compute_group_key("blocks/date=2024-01-15/hour=14/part-000001.parquet", RollupTarget::Hour),
-            "blocks/date=2024-01-15/hour=14"
+            compute_group_key("blocks/year=2024/month=01/date=15/hour=14/part-000001.parquet", RollupTarget::Hour),
+            "blocks/year=2024/month=01/date=15/hour=14"
         );
     }
 
