@@ -1,4 +1,4 @@
-# Partitions CLI Migration (Phases 1-3)
+# Partitions CLI Migration (Phases 1-4)
 
 This document captures the first implementation slices for the `partitions <subcommand>` initiative.
 
@@ -8,8 +8,9 @@ Related issues:
 - #183 (CLI namespace and migration plan)
 - #184 (`partitions ls` query command)
 - #187 (partition-window ingestion mode)
+- #191 (partition-aware cursor path strategy)
 
-## What phases 1-3 ship
+## What phases 1-4 ship
 
 1. Adds a grouped CLI namespace: `firehose-parquet partitions ...`
 2. Introduces `firehose-parquet partitions resolve`
@@ -17,6 +18,7 @@ Related issues:
 4. Emits a deprecation warning in ingestion mode when those legacy flags are used to drive range resolution directly
 5. Introduces `firehose-parquet partitions ls` for querying/filtering index rows
 6. Adds ingestion-side partition window resolution via `--partition-from` + `--partition-to`
+7. Adds partition-aware cursor templating via `--cursor-template`
 
 ## Command behavior
 
@@ -35,6 +37,34 @@ Behavior:
 - Resolves all matching partition rows in `[partition_from, partition_to)`.
 - Requires contiguous/non-overlapping block bounds across resolved rows.
 - Produces one resolved `[start_block, stop_block)` range before running ingestion.
+
+### Partition-aware cursor mode
+
+Main ingestion now supports deterministic cursor-path templating:
+
+- `--cursor-template 'cursor/{chain}/{partition_type}/{partition_value}.parquet'`
+
+Supported variables:
+
+- `{chain}`
+- `{partition_type}`
+- `{partition_value}`
+- `{partition_from}`
+- `{partition_to}`
+
+Behavior:
+
+- expands against the effective partition selection mode
+- rejects unknown variables and missing required context
+- escapes literal braces via `{{` and `}}`
+- rewrites `/` and `\` in variable values to `_` to avoid path collisions
+- works for local paths and S3-relative cursor paths under the output prefix
+
+Example patterns:
+
+- single partition worker: `cursor/{chain}/{partition_type}/{partition_value}.parquet`
+- partition window worker: `cursor/{chain}/{partition_type}/{partition_from}-{partition_to}.parquet`
+- local chain-specific worker: `./cursor/{partition_type}/{partition_value}.parquet`
 
 ### New command
 
@@ -73,7 +103,7 @@ When legacy flags are used in direct ingestion mode (without explicit `--start-b
 
 `firehose-parquet partitions resolve ...`
 
-## Process used for phases 1-3
+## Process used for phases 1-4
 
 1. Branch from `main` using `codex/` prefix.
 2. Add CLI tree scaffolding in shared CLI crate (`firehose-parquet/src/cli.rs`).
@@ -99,4 +129,5 @@ When legacy flags are used in direct ingestion mode (without explicit `--start-b
 - `firehose-parquet partitions validate`
 - `firehose-parquet partitions shard`
 - optional bounded-concurrency partition window execution mode
+- shard/run-range command integration with partition-aware cursor templates
 - alias/deprecation lifecycle tests and eventual legacy removal

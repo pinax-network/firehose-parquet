@@ -1,11 +1,11 @@
 use anyhow::{anyhow, Result};
 use clap::Parser;
 use firehose_parquet::cli::{
-    build_config, init_tracing, list_partitions_from_index, load_dotenv,
-    parse_partition_selection_request, resolve_partition_bounds_from_index,
-    resolve_partition_command, resolve_partition_window_bounds_from_index, AwsConfig, Commands,
-    CommonArgs, PartitionBoundsRequest, PartitionListRequest, PartitionSelectionRequest,
-    PartitionsCommands,
+    build_config, cursor_template_context_from_selection, init_tracing, list_partitions_from_index,
+    load_dotenv, parse_partition_selection_request, resolve_cursor_template,
+    resolve_partition_bounds_from_index, resolve_partition_command,
+    resolve_partition_window_bounds_from_index, AwsConfig, Commands, CommonArgs,
+    PartitionBoundsRequest, PartitionListRequest, PartitionSelectionRequest, PartitionsCommands,
 };
 use firehose_parquet::config::BlockMetadata;
 use firehose_parquet::cursor::{CursorLocation, CursorState};
@@ -782,6 +782,22 @@ async fn main() -> Result<()> {
                 }
             }
         }
+    }
+
+    if let Some(template) = cli.common.cursor_template.as_deref() {
+        let selection_context = if has_explicit_range {
+            None
+        } else {
+            partition_selection_request.as_ref()
+        };
+        let context = cursor_template_context_from_selection(selection_context);
+        let resolved_cursor_path = resolve_cursor_template(template, &context)?;
+        config.cursor_path = Some(resolved_cursor_path.clone());
+        info!(
+            cursor_template = %template,
+            cursor_path = %resolved_cursor_path,
+            "resolved partition-aware cursor path"
+        );
     }
 
     // Fetch endpoint info for auto-detection of encoding, extended features,
