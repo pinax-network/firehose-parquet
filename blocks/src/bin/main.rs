@@ -1,15 +1,17 @@
 use anyhow::{anyhow, Result};
 use clap::Parser;
 use firehose_parquet::cli::{
-    build_config, cursor_template_context_from_selection, init_tracing, list_partitions_from_index,
-    load_dotenv, parse_partition_selection_request, parse_partition_shard_strategy,
-    resolve_cursor_template, resolve_partition_bounds_from_index, resolve_partition_command,
+    build_config, build_partitions_index_path, cursor_template_context_from_selection,
+    init_tracing, list_partitions_from_index, load_dotenv, parse_partition_build_types,
+    parse_partition_selection_request, parse_partition_shard_strategy, resolve_cursor_template,
+    resolve_partition_bounds_from_index, resolve_partition_command,
     resolve_partition_window_bounds_from_index, shard_partitions_from_index,
-    validate_partitions_index, AwsConfig, Commands, CommonArgs, PartitionBoundsRequest,
-    PartitionListRequest, PartitionResolveOptions, PartitionSelectionRequest,
-    PartitionShardRequest, PartitionValidateRequest, PartitionsCommands,
+    validate_partitions_index, write_partitions_index, AwsConfig, Commands, CommonArgs,
+    PartitionBoundsRequest, PartitionBuildResult, PartitionIndexBuilder, PartitionListRequest,
+    PartitionResolveOptions, PartitionSelectionRequest, PartitionShardRequest,
+    PartitionValidateRequest, PartitionsCommands,
 };
-use firehose_parquet::config::BlockMetadata;
+use firehose_parquet::config::{BlockMetadata, Compression, Config, Partition};
 use firehose_parquet::cursor::{CursorLocation, CursorState};
 use firehose_parquet::encode::{parse_encode_bytes, EncodeBytes};
 use firehose_parquet::grpc::{EndpointInfo, FirehoseClient};
@@ -288,6 +290,99 @@ fn resolve_output(base: &PathBuf, endpoint_info: &Option<EndpointInfo>) -> PathB
     base.clone()
 }
 
+fn read_optional_env(name: &str) -> Option<String> {
+    std::env::var(name).ok().filter(|value| !value.is_empty())
+}
+
+async fn run_partitions_build(
+    endpoint: &str,
+    api_key_envvar: &str,
+    api_token_envvar: &str,
+    chain_override: Option<&str>,
+    start_block: u64,
+    stop_block: u64,
+    partition_types_spec: &str,
+    output: &str,
+    aws: &AwsConfig,
+) -> Result<PartitionBuildResult> {
+    if stop_block <= start_block {
+        return Err(anyhow!(
+            "--stop-block must be greater than --start-block, got {stop_block} <= {start_block}"
+        ));
+    }
+
+    let config = Config {
+        endpoint: endpoint.to_string(),
+        api_key: read_optional_env(api_key_envvar),
+        jwt_token: read_optional_env(api_token_envvar),
+        start_block: Some(start_block),
+        stop_block: Some(stop_block),
+        cursor_path: None,
+        output: PathBuf::from(output),
+        partition: Partition::None,
+        flush_rows: None,
+        flush_bytes: 0,
+        flush_interval_secs: None,
+        compression: Compression::Zstd,
+        final_blocks_only: true,
+        dry_run: false,
+        aws_access_key_id: aws.aws_access_key_id.clone(),
+        aws_secret_access_key: aws.aws_secret_access_key.clone(),
+        aws_session_token: aws.aws_session_token.clone(),
+        aws_region: aws.aws_region.clone(),
+        aws_endpoint_url: aws.aws_endpoint_url.clone(),
+        s3_bucket: None,
+        cache_control: None,
+        metrics_port: None,
+        stream_idle_timeout_secs: None,
+        reconnect_stall_timeout_secs: None,
+    };
+
+    let client = FirehoseClient::new(config);
+    let endpoint_info = client.info().await;
+    let chain = chain_override
+        .map(str::to_string)
+        .or_else(|| {
+            endpoint_info
+                .as_ref()
+                .map(|info| info.chain_name.clone())
+                .filter(|name| !name.is_empty())
+        })
+        .ok_or_else(|| {
+            anyhow!("--chain is required when the endpoint does not expose chain_name")
+        })?;
+    let partition_types = parse_partition_build_types(partition_types_spec)?;
+    let mut builder = PartitionIndexBuilder::new(chain.clone(), partition_types.clone())?;
+
+    client
+        .stream_blocks(None, |_, _, _, block, _| builder.observe_block(&block))
+        .await?;
+
+    let rows = builder.finish(stop_block)?;
+    let partitions_index = build_partitions_index_path(output, &chain);
+    write_partitions_index(&partitions_index, &rows, Some(aws))?;
+
+    Ok(PartitionBuildResult {
+        partitions_index,
+        chain,
+        partition_types: partition_types
+            .into_iter()
+            .map(|partition_type| partition_type.to_string())
+            .collect(),
+        row_count: rows.len(),
+        start_block: rows
+            .iter()
+            .map(|row| row.start_block)
+            .min()
+            .unwrap_or(start_block),
+        stop_block: rows
+            .iter()
+            .map(|row| row.end_block)
+            .max()
+            .unwrap_or(stop_block),
+    })
+}
+
 /// Check if the endpoint supports `extended` block features.
 fn supports_extended(endpoint_info: &Option<EndpointInfo>) -> bool {
     endpoint_info.as_ref().map_or(false, |ei| {
@@ -364,6 +459,56 @@ async fn main() -> Result<()> {
                 return Ok(());
             }
             Commands::Partitions(subcommand) => match subcommand {
+                PartitionsCommands::Build {
+                    endpoint,
+                    api_key_envvar,
+                    api_token_envvar,
+                    chain,
+                    start_block,
+                    stop_block,
+                    partition_types,
+                    output,
+                    json,
+                    aws_access_key_id,
+                    aws_secret_access_key,
+                    aws_session_token,
+                    aws_region,
+                    aws_endpoint_url,
+                } => {
+                    init_tracing(&cli.common.log_level);
+                    let aws = AwsConfig {
+                        aws_access_key_id: aws_access_key_id.clone(),
+                        aws_secret_access_key: aws_secret_access_key.clone(),
+                        aws_session_token: aws_session_token.clone(),
+                        aws_region: aws_region.clone(),
+                        aws_endpoint_url: aws_endpoint_url.clone(),
+                    };
+                    let result = run_partitions_build(
+                        endpoint,
+                        api_key_envvar,
+                        api_token_envvar,
+                        chain.as_deref(),
+                        *start_block,
+                        *stop_block,
+                        partition_types,
+                        output,
+                        &aws,
+                    )
+                    .await?;
+
+                    if *json {
+                        println!("{}", serde_json::to_string_pretty(&result)?);
+                    } else {
+                        println!("partitions_index: {}", result.partitions_index);
+                        println!("chain:            {}", result.chain);
+                        println!("partition_types:  {}", result.partition_types.join(","));
+                        println!("row_count:        {}", result.row_count);
+                        println!("start_block:      {}", result.start_block);
+                        println!("stop_block:       {}", result.stop_block);
+                    }
+
+                    return Ok(());
+                }
                 PartitionsCommands::Validate {
                     partitions_index,
                     partition_type,
