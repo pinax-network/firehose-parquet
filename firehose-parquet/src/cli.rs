@@ -730,6 +730,81 @@ Examples:
 /// Subcommands under `firehose-parquet partitions`.
 #[derive(clap::Subcommand, Debug)]
 pub enum PartitionsCommands {
+    /// Build `partitions.parquet` directly from Firehose block timestamps.
+    #[command(after_long_help = "\
+Examples:
+  # Build a local hour/day index for one chain
+  firehose-parquet partitions build \\
+    --endpoint https://eth.firehose.pinax.network:443 \\
+    --start-block 10000000 \\
+    --stop-block 10010000 \\
+    --partition-types day,hour \\
+    --output ./output
+
+  # Build to S3 with an explicit chain override and JSON output
+  firehose-parquet partitions build \\
+    --endpoint https://eth.firehose.pinax.network:443 \\
+    --chain eth-mainnet \\
+    --start-block 10000000 \\
+    --stop-block 10010000 \\
+    --partition-types hour,minute \\
+    --output s3://my-bucket/firehose \\
+    --json
+")]
+    Build {
+        /// Firehose gRPC endpoint URL
+        #[arg(long, env = "ENDPOINT", hide_env_values = true)]
+        endpoint: String,
+        /// Name of environment variable containing the API key for authentication
+        #[arg(
+            long,
+            env = "API_KEY_ENVVAR",
+            default_value = "SUBSTREAMS_API_KEY",
+            hide_env_values = true
+        )]
+        api_key_envvar: String,
+        /// Name of environment variable containing the JWT bearer token for authentication
+        #[arg(
+            long,
+            env = "API_TOKEN_ENVVAR",
+            default_value = "SUBSTREAMS_API_TOKEN",
+            hide_env_values = true
+        )]
+        api_token_envvar: String,
+        /// Optional chain name override; otherwise inferred from endpoint info
+        #[arg(long)]
+        chain: Option<String>,
+        /// Start block number (inclusive)
+        #[arg(long)]
+        start_block: u64,
+        /// Stop block number (exclusive)
+        #[arg(long)]
+        stop_block: u64,
+        /// Comma-separated partition types to build: day,hour,minute,second
+        #[arg(long)]
+        partition_types: String,
+        /// Output root path (local directory or s3:// URI prefix)
+        #[arg(long)]
+        output: String,
+        /// Emit machine-readable JSON output
+        #[arg(long, default_value = "false")]
+        json: bool,
+        /// AWS access key ID (for S3 paths)
+        #[arg(long, env = "AWS_ACCESS_KEY_ID", hide_env_values = true)]
+        aws_access_key_id: Option<String>,
+        /// AWS secret access key (for S3 paths)
+        #[arg(long, env = "AWS_SECRET_ACCESS_KEY", hide_env_values = true)]
+        aws_secret_access_key: Option<String>,
+        /// AWS session token (for S3 paths)
+        #[arg(long, env = "AWS_SESSION_TOKEN", hide_env_values = true)]
+        aws_session_token: Option<String>,
+        /// AWS region (for S3 paths)
+        #[arg(long, env = "AWS_REGION", hide_env_values = true)]
+        aws_region: Option<String>,
+        /// AWS endpoint URL (for S3-compatible services)
+        #[arg(long, env = "AWS_ENDPOINT_URL_S3", hide_env_values = true)]
+        aws_endpoint_url: Option<String>,
+    },
     /// Validate continuity and invariants in `partitions.parquet`.
     #[command(after_long_help = "\
 Examples:
@@ -972,6 +1047,220 @@ pub struct PartitionResolveOptions {
     pub strict_single_chain: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PartitionBuildType {
+    Day,
+    Hour,
+    Minute,
+    Second,
+}
+
+impl PartitionBuildType {
+    pub fn from_cli_value(value: &str) -> anyhow::Result<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "day" | "date" => Ok(Self::Day),
+            "hour" => Ok(Self::Hour),
+            "minute" => Ok(Self::Minute),
+            "second" => Ok(Self::Second),
+            other => anyhow::bail!(
+                "invalid partition type '{other}': expected one of day, hour, minute, second"
+            ),
+        }
+    }
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Day => "day",
+            Self::Hour => "hour",
+            Self::Minute => "minute",
+            Self::Second => "second",
+        }
+    }
+
+    pub fn interval_seconds(&self) -> i64 {
+        match self {
+            Self::Day => 86_400,
+            Self::Hour => 3_600,
+            Self::Minute => 60,
+            Self::Second => 1,
+        }
+    }
+
+    pub fn round_timestamp(&self, timestamp: i64) -> anyhow::Result<i64> {
+        use time::OffsetDateTime;
+
+        let dt = OffsetDateTime::from_unix_timestamp(timestamp)
+            .map_err(|e| anyhow::anyhow!("invalid unix timestamp {timestamp}: {e}"))?;
+        let rounded = match self {
+            Self::Day => dt.replace_time(time::Time::MIDNIGHT),
+            Self::Hour => dt.replace_minute(0)?.replace_second(0)?,
+            Self::Minute => dt.replace_second(0)?,
+            Self::Second => dt,
+        };
+        Ok(rounded.unix_timestamp())
+    }
+}
+
+impl std::fmt::Display for PartitionBuildType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.as_str())
+    }
+}
+
+#[derive(Debug, Clone, serde::Serialize, PartialEq, Eq)]
+pub struct PartitionBuildRow {
+    pub partition_type: String,
+    pub partition_interval_seconds: i64,
+    pub partition_start_ts: String,
+    pub partition_value: String,
+    pub start_block: u64,
+    pub end_block: u64,
+    pub start_time: String,
+    pub end_time: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub chain: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, PartialEq, Eq)]
+pub struct PartitionBuildResult {
+    pub partitions_index: String,
+    pub chain: String,
+    pub partition_types: Vec<String>,
+    pub row_count: usize,
+    pub start_block: u64,
+    pub stop_block: u64,
+}
+
+#[derive(Debug, Clone)]
+struct ActivePartitionBuildRow {
+    partition_start_ts: i64,
+    partition_value: String,
+    start_block: u64,
+    start_time: i64,
+    last_block: u64,
+    last_time: i64,
+}
+
+#[derive(Debug, Clone)]
+pub struct PartitionIndexBuilder {
+    chain: String,
+    partition_types: Vec<PartitionBuildType>,
+    active: std::collections::BTreeMap<PartitionBuildType, ActivePartitionBuildRow>,
+    rows: Vec<PartitionBuildRow>,
+    first_seen_block: Option<u64>,
+    last_seen_block: Option<u64>,
+}
+
+impl PartitionIndexBuilder {
+    pub fn new(
+        chain: impl Into<String>,
+        partition_types: Vec<PartitionBuildType>,
+    ) -> anyhow::Result<Self> {
+        if partition_types.is_empty() {
+            anyhow::bail!("at least one partition type is required");
+        }
+
+        Ok(Self {
+            chain: chain.into(),
+            partition_types,
+            active: std::collections::BTreeMap::new(),
+            rows: Vec::new(),
+            first_seen_block: None,
+            last_seen_block: None,
+        })
+    }
+
+    pub fn observe_block(&mut self, block: &crate::traits::BlockIdentity) -> anyhow::Result<()> {
+        if let Some(last_seen_block) = self.last_seen_block {
+            if block.block_num < last_seen_block {
+                anyhow::bail!(
+                    "partition build requires non-decreasing block numbers, saw {} after {}",
+                    block.block_num,
+                    last_seen_block
+                );
+            }
+        }
+
+        self.first_seen_block.get_or_insert(block.block_num);
+        self.last_seen_block = Some(block.block_num);
+
+        for partition_type in self.partition_types.clone() {
+            let partition_start_ts = partition_type.round_timestamp(block.timestamp)?;
+            let partition_value = format_partition_timestamp(partition_start_ts)?;
+
+            match self.active.get_mut(&partition_type) {
+                Some(active) if active.partition_start_ts == partition_start_ts => {
+                    active.last_block = block.block_num;
+                    active.last_time = block.timestamp;
+                }
+                Some(active) => {
+                    let finalized = build_partition_row(
+                        &self.chain,
+                        partition_type,
+                        active.clone(),
+                        block.block_num,
+                    )?;
+                    self.rows.push(finalized);
+                    *active = ActivePartitionBuildRow {
+                        partition_start_ts,
+                        partition_value,
+                        start_block: block.block_num,
+                        start_time: block.timestamp,
+                        last_block: block.block_num,
+                        last_time: block.timestamp,
+                    };
+                }
+                None => {
+                    self.active.insert(
+                        partition_type,
+                        ActivePartitionBuildRow {
+                            partition_start_ts,
+                            partition_value,
+                            start_block: block.block_num,
+                            start_time: block.timestamp,
+                            last_block: block.block_num,
+                            last_time: block.timestamp,
+                        },
+                    );
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    pub fn finish(mut self, stop_block: u64) -> anyhow::Result<Vec<PartitionBuildRow>> {
+        if self.first_seen_block.is_none() {
+            anyhow::bail!("partition build produced no rows because the stream returned no blocks");
+        }
+        if stop_block == 0 {
+            anyhow::bail!("partition build requires a finite non-zero stop block");
+        }
+
+        for partition_type in self.partition_types.clone() {
+            if let Some(active) = self.active.remove(&partition_type) {
+                self.rows.push(build_partition_row(
+                    &self.chain,
+                    partition_type,
+                    active,
+                    stop_block,
+                )?);
+            }
+        }
+
+        self.rows.sort_by(|left, right| {
+            left.partition_type
+                .cmp(&right.partition_type)
+                .then_with(|| left.partition_start_ts.cmp(&right.partition_start_ts))
+                .then_with(|| left.start_block.cmp(&right.start_block))
+                .then_with(|| left.end_block.cmp(&right.end_block))
+        });
+
+        Ok(self.rows)
+    }
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 pub struct PartitionsLookupEntry {
     pub chain: Option<String>,
@@ -1082,6 +1371,273 @@ pub struct PartitionValidateResult {
 
 pub const PARTITIONS_SCHEMA_VERSION: &str = "1";
 const PARTITIONS_SCHEMA_VERSION_KEY: &str = "firehose-parquet.partitions.schema_version";
+const PARTITIONS_GENERATED_AT_KEY: &str = "firehose-parquet.partitions.generated_at";
+const PARTITIONS_SOURCE_KEY: &str = "firehose-parquet.partitions.source";
+const PARTITIONS_CHAIN_SCOPE_KEY: &str = "firehose-parquet.partitions.chain_scope";
+const PARTITIONS_TYPES_KEY: &str = "firehose-parquet.partitions.partition_types";
+const PARTITIONS_MIN_START_BLOCK_KEY: &str = "firehose-parquet.partitions.min_start_block";
+const PARTITIONS_MAX_END_BLOCK_KEY: &str = "firehose-parquet.partitions.max_end_block";
+
+pub fn parse_partition_build_types(spec: &str) -> anyhow::Result<Vec<PartitionBuildType>> {
+    let mut parsed = Vec::new();
+    for raw in spec.split(',') {
+        let value = raw.trim();
+        if value.is_empty() {
+            anyhow::bail!("--partition-types contains an empty value");
+        }
+        let partition_type = PartitionBuildType::from_cli_value(value)?;
+        if !parsed.contains(&partition_type) {
+            parsed.push(partition_type);
+        }
+    }
+
+    if parsed.is_empty() {
+        anyhow::bail!("--partition-types must contain at least one value");
+    }
+
+    Ok(parsed)
+}
+
+pub fn build_partitions_index_path(output_root: &str, chain: &str) -> String {
+    let normalized_root = output_root.trim_end_matches('/');
+    if normalized_root.starts_with("s3://") {
+        format!("{normalized_root}/{chain}/partitions.parquet")
+    } else {
+        std::path::PathBuf::from(normalized_root)
+            .join(chain)
+            .join("partitions.parquet")
+            .to_string_lossy()
+            .into_owned()
+    }
+}
+
+pub fn build_partition_rows_from_blocks(
+    chain: &str,
+    partition_types: Vec<PartitionBuildType>,
+    blocks: &[crate::traits::BlockIdentity],
+    stop_block: u64,
+) -> anyhow::Result<Vec<PartitionBuildRow>> {
+    let mut builder = PartitionIndexBuilder::new(chain, partition_types)?;
+    for block in blocks {
+        builder.observe_block(block)?;
+    }
+    builder.finish(stop_block)
+}
+
+fn build_partition_row(
+    chain: &str,
+    partition_type: PartitionBuildType,
+    active: ActivePartitionBuildRow,
+    end_block: u64,
+) -> anyhow::Result<PartitionBuildRow> {
+    if active.start_block >= end_block {
+        anyhow::bail!(
+            "invalid partition row for {} {}: start_block {} must be < end_block {}",
+            partition_type,
+            active.partition_value,
+            active.start_block,
+            end_block
+        );
+    }
+
+    Ok(PartitionBuildRow {
+        partition_type: partition_type.to_string(),
+        partition_interval_seconds: partition_type.interval_seconds(),
+        partition_start_ts: format_partition_timestamp(active.partition_start_ts)?,
+        partition_value: active.partition_value,
+        start_block: active.start_block,
+        end_block,
+        start_time: format_partition_timestamp(active.start_time)?,
+        end_time: format_partition_timestamp(active.last_time)?,
+        chain: Some(chain.to_string()),
+    })
+}
+
+fn format_partition_timestamp(timestamp: i64) -> anyhow::Result<String> {
+    use time::OffsetDateTime;
+
+    let dt = OffsetDateTime::from_unix_timestamp(timestamp)
+        .map_err(|e| anyhow::anyhow!("invalid unix timestamp {timestamp}: {e}"))?;
+    Ok(format!(
+        "{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
+        dt.year(),
+        dt.month() as u8,
+        dt.day(),
+        dt.hour(),
+        dt.minute(),
+        dt.second()
+    ))
+}
+
+pub fn write_partitions_index(
+    path: &str,
+    rows: &[PartitionBuildRow],
+    aws: Option<&AwsConfig>,
+) -> anyhow::Result<()> {
+    use arrow::array::{Int64Array, StringArray, UInt64Array};
+    use arrow::datatypes::{DataType, Field, Schema};
+    use arrow::record_batch::RecordBatch;
+    use parquet::arrow::ArrowWriter;
+    use parquet::file::metadata::KeyValue;
+    use parquet::file::properties::WriterProperties;
+    use std::sync::Arc;
+
+    if rows.is_empty() {
+        anyhow::bail!("cannot write an empty partitions index");
+    }
+
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("chain", DataType::Utf8, true),
+        Field::new("partition_type", DataType::Utf8, false),
+        Field::new("partition_interval_seconds", DataType::Int64, false),
+        Field::new("partition_start_ts", DataType::Utf8, false),
+        Field::new("partition_value", DataType::Utf8, false),
+        Field::new("start_block", DataType::UInt64, false),
+        Field::new("end_block", DataType::UInt64, false),
+        Field::new("start_time", DataType::Utf8, false),
+        Field::new("end_time", DataType::Utf8, false),
+    ]));
+
+    let batch = RecordBatch::try_new(
+        schema.clone(),
+        vec![
+            Arc::new(StringArray::from(
+                rows.iter().map(|row| row.chain.clone()).collect::<Vec<_>>(),
+            )),
+            Arc::new(StringArray::from(
+                rows.iter()
+                    .map(|row| row.partition_type.clone())
+                    .collect::<Vec<_>>(),
+            )),
+            Arc::new(Int64Array::from(
+                rows.iter()
+                    .map(|row| row.partition_interval_seconds)
+                    .collect::<Vec<_>>(),
+            )),
+            Arc::new(StringArray::from(
+                rows.iter()
+                    .map(|row| row.partition_start_ts.clone())
+                    .collect::<Vec<_>>(),
+            )),
+            Arc::new(StringArray::from(
+                rows.iter()
+                    .map(|row| row.partition_value.clone())
+                    .collect::<Vec<_>>(),
+            )),
+            Arc::new(UInt64Array::from(
+                rows.iter().map(|row| row.start_block).collect::<Vec<_>>(),
+            )),
+            Arc::new(UInt64Array::from(
+                rows.iter().map(|row| row.end_block).collect::<Vec<_>>(),
+            )),
+            Arc::new(StringArray::from(
+                rows.iter()
+                    .map(|row| row.start_time.clone())
+                    .collect::<Vec<_>>(),
+            )),
+            Arc::new(StringArray::from(
+                rows.iter()
+                    .map(|row| row.end_time.clone())
+                    .collect::<Vec<_>>(),
+            )),
+        ],
+    )?;
+
+    let generated_at =
+        time::OffsetDateTime::now_utc().format(&time::format_description::well_known::Rfc3339)?;
+    let min_start_block = rows.iter().map(|row| row.start_block).min().unwrap_or(0);
+    let max_end_block = rows.iter().map(|row| row.end_block).max().unwrap_or(0);
+    let chain_scope = rows
+        .iter()
+        .find_map(|row| row.chain.clone())
+        .unwrap_or_else(|| "unknown".to_string());
+    let partition_types = rows
+        .iter()
+        .map(|row| row.partition_type.clone())
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>()
+        .join(",");
+    let props = WriterProperties::builder()
+        .set_key_value_metadata(Some(vec![
+            KeyValue::new(
+                PARTITIONS_SCHEMA_VERSION_KEY.to_string(),
+                PARTITIONS_SCHEMA_VERSION.to_string(),
+            ),
+            KeyValue::new(PARTITIONS_GENERATED_AT_KEY.to_string(), generated_at),
+            KeyValue::new(PARTITIONS_SOURCE_KEY.to_string(), "firehose".to_string()),
+            KeyValue::new(PARTITIONS_CHAIN_SCOPE_KEY.to_string(), chain_scope),
+            KeyValue::new(PARTITIONS_TYPES_KEY.to_string(), partition_types),
+            KeyValue::new(
+                PARTITIONS_MIN_START_BLOCK_KEY.to_string(),
+                min_start_block.to_string(),
+            ),
+            KeyValue::new(
+                PARTITIONS_MAX_END_BLOCK_KEY.to_string(),
+                max_end_block.to_string(),
+            ),
+        ]))
+        .build();
+
+    if path.starts_with("s3://") {
+        use crate::writer::parse_s3_url;
+        use bytes::Bytes;
+        use object_store::aws::AmazonS3Builder;
+        use object_store::ObjectStore;
+
+        let aws = aws
+            .ok_or_else(|| anyhow::anyhow!("AWS config required for S3 partitions index output"))?;
+        let (bucket, key) = parse_s3_url(path)?;
+        let mut builder = AmazonS3Builder::new().with_bucket_name(&bucket);
+        if let Some(ref value) = aws.aws_access_key_id {
+            builder = builder.with_access_key_id(value);
+        }
+        if let Some(ref value) = aws.aws_secret_access_key {
+            builder = builder.with_secret_access_key(value);
+        }
+        if let Some(ref value) = aws.aws_session_token {
+            builder = builder.with_token(value);
+        }
+        if let Some(ref value) = aws.aws_region {
+            builder = builder.with_region(value);
+        }
+        if let Some(ref value) = aws.aws_endpoint_url {
+            builder = builder.with_endpoint(value);
+        }
+
+        let client = builder
+            .build()
+            .map_err(|e| anyhow::anyhow!("building S3 client for bucket {bucket}: {e}"))?;
+        let mut buf = Vec::new();
+        {
+            let mut writer = ArrowWriter::try_new(&mut buf, schema, Some(props))?;
+            writer.write(&batch)?;
+            writer.close()?;
+        }
+
+        let object_path = object_store::path::Path::from(key.as_str());
+        block_on_async(async {
+            client
+                .put(
+                    &object_path,
+                    object_store::PutPayload::from(Bytes::from(buf)),
+                )
+                .await
+        })
+        .map_err(|e| anyhow::anyhow!("writing {path}: {e}"))?;
+    } else {
+        let output_path = std::path::Path::new(path);
+        if let Some(parent) = output_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let file = std::fs::File::create(output_path)?;
+        let mut writer = ArrowWriter::try_new(file, schema, Some(props))?;
+        writer.write(&batch)?;
+        writer.close()?;
+    }
+
+    Ok(())
+}
 
 fn is_utf8_like(data_type: &arrow::datatypes::DataType) -> bool {
     matches!(
@@ -4375,6 +4931,7 @@ fn validate_parquet_s3(
 mod tests {
     use super::*;
     use crate::config::{Compression, Partition};
+    use crate::traits::BlockIdentity;
     use clap::{CommandFactory, Parser};
     use serial_test::serial;
 
@@ -4744,6 +5301,49 @@ mod tests {
                 assert!(json);
             }
             _ => panic!("expected partitions resolve subcommand"),
+        }
+    }
+
+    #[test]
+    fn test_partitions_build_subcommand_parse() {
+        let cli = parse(&[
+            "test-cli",
+            "partitions",
+            "build",
+            "--endpoint",
+            "https://eth.firehose.pinax.network:443",
+            "--chain",
+            "eth-mainnet",
+            "--start-block",
+            "100",
+            "--stop-block",
+            "200",
+            "--partition-types",
+            "day,hour",
+            "--output",
+            "./output",
+            "--json",
+        ]);
+        match cli.command.expect("command should exist") {
+            Commands::Partitions(PartitionsCommands::Build {
+                endpoint,
+                chain,
+                start_block,
+                stop_block,
+                partition_types,
+                output,
+                json,
+                ..
+            }) => {
+                assert_eq!(endpoint, "https://eth.firehose.pinax.network:443");
+                assert_eq!(chain.as_deref(), Some("eth-mainnet"));
+                assert_eq!(start_block, 100);
+                assert_eq!(stop_block, 200);
+                assert_eq!(partition_types, "day,hour");
+                assert_eq!(output, "./output");
+                assert!(json);
+            }
+            _ => panic!("expected partitions build subcommand"),
         }
     }
 
@@ -5873,5 +6473,88 @@ mod tests {
             .issues
             .iter()
             .any(|i| i.kind == PartitionValidationIssueKind::Overlap));
+    }
+
+    #[test]
+    fn test_parse_partition_build_types_accepts_aliases_and_deduplicates() {
+        let parsed = parse_partition_build_types("date,hour,day,hour").expect("parse types");
+        assert_eq!(
+            parsed,
+            vec![PartitionBuildType::Day, PartitionBuildType::Hour]
+        );
+    }
+
+    #[test]
+    fn test_build_partition_rows_from_blocks_mixed_types_and_contiguous() {
+        let blocks = vec![
+            BlockIdentity {
+                block_num: 100,
+                timestamp: 1_690_815_540,
+                ..Default::default()
+            },
+            BlockIdentity {
+                block_num: 101,
+                timestamp: 1_690_815_590,
+                ..Default::default()
+            },
+            BlockIdentity {
+                block_num: 102,
+                timestamp: 1_690_815_600,
+                ..Default::default()
+            },
+        ];
+
+        let rows = build_partition_rows_from_blocks(
+            "eth-mainnet",
+            vec![PartitionBuildType::Day, PartitionBuildType::Hour],
+            &blocks,
+            103,
+        )
+        .expect("build rows");
+
+        assert_eq!(rows.len(), 3);
+
+        let day_rows: Vec<_> = rows
+            .iter()
+            .filter(|row| row.partition_type == "day")
+            .collect();
+        assert_eq!(day_rows.len(), 1);
+        assert_eq!(day_rows[0].partition_value, "2023-07-31 00:00:00");
+        assert_eq!(day_rows[0].start_block, 100);
+        assert_eq!(day_rows[0].end_block, 103);
+
+        let hour_rows: Vec<_> = rows
+            .iter()
+            .filter(|row| row.partition_type == "hour")
+            .collect();
+        assert_eq!(hour_rows.len(), 2);
+        assert_eq!(hour_rows[0].partition_value, "2023-07-31 14:00:00");
+        assert_eq!(hour_rows[0].start_block, 100);
+        assert_eq!(hour_rows[0].end_block, 102);
+        assert_eq!(hour_rows[1].partition_value, "2023-07-31 15:00:00");
+        assert_eq!(hour_rows[1].start_block, 102);
+        assert_eq!(hour_rows[1].end_block, 103);
+    }
+
+    #[test]
+    fn test_build_partition_rows_from_blocks_handles_first_streamable_block() {
+        let blocks = vec![BlockIdentity {
+            block_num: 500,
+            timestamp: 1_690_815_540,
+            ..Default::default()
+        }];
+
+        let rows = build_partition_rows_from_blocks(
+            "eth-mainnet",
+            vec![PartitionBuildType::Hour],
+            &blocks,
+            501,
+        )
+        .expect("build rows");
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].start_block, 500);
+        assert_eq!(rows[0].end_block, 501);
+        assert_eq!(rows[0].partition_value, "2023-07-31 14:00:00");
     }
 }

@@ -251,6 +251,45 @@ Chain:
 
 ## Subcommands
 
+### `partitions build` — Generate `/<chain>/partitions.parquet`
+
+Builds a canonical partition index directly from Firehose block timestamps, without requiring a pre-existing `blocks/` table.
+
+```bash
+# Build day + hour rows locally
+firehose-parquet partitions build \
+  --endpoint https://eth.firehose.pinax.network:443 \
+  --start-block 10000000 \
+  --stop-block 10010000 \
+  --partition-types day,hour \
+  --output ./output
+
+# Build hour + minute rows to S3 with an explicit chain override
+firehose-parquet partitions build \
+  --endpoint https://eth.firehose.pinax.network:443 \
+  --chain eth-mainnet \
+  --start-block 10000000 \
+  --stop-block 10010000 \
+  --partition-types hour,minute \
+  --output s3://my-bucket/firehose \
+  --json
+```
+
+Behavior:
+
+- writes one row per discovered partition to `/<chain>/partitions.parquet`
+- preserves `[start_block, end_block)` semantics
+- supports mixed granularities in one file (`day`, `hour`, `minute`, `second`)
+- derives canonical UTC partition keys using rounded interval starts
+- writes contract metadata including schema version, chain scope, and covered block range
+
+| Flag | Default | Description |
+|---|---|---|
+| `--chain` | inferred | Optional chain override when endpoint info is unavailable |
+| `--partition-types` | none | Comma-separated partition types: `day,hour,minute,second` |
+| `--output` | none | Output root directory or `s3://` URI prefix |
+| `--json` | `false` | Emit machine-readable output |
+
 ### `partitions ls` — Query Partition Index Rows
 
 Lists rows from `partitions.parquet` with optional filters and deterministic ascending order by `partition_start_ts`.

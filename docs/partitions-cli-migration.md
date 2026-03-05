@@ -1,10 +1,11 @@
-# Partitions CLI Migration (Phases 1-6)
+# Partitions CLI Migration (Phases 1-7)
 
 This document captures the first implementation slices for the `partitions <subcommand>` initiative.
 
 Related issues:
 
 - #182 (parent roadmap)
+- #176 (`partitions build` canonical index writer)
 - #183 (CLI namespace and migration plan)
 - #184 (`partitions ls` query command)
 - #187 (partition-window ingestion mode)
@@ -12,19 +13,39 @@ Related issues:
 - #188 (deterministic partition sharding)
 - #189 (`partitions validate` integrity checks)
 
-## What phases 1-6 ship
+## What phases 1-7 ship
 
 1. Adds a grouped CLI namespace: `firehose-parquet partitions ...`
-2. Introduces `firehose-parquet partitions resolve`
-3. Keeps existing ingestion flags (`--partitions-index`, `--partition-type`, `--partition-value`) working for backward compatibility
-4. Emits a deprecation warning in ingestion mode when those legacy flags are used to drive range resolution directly
-5. Introduces `firehose-parquet partitions ls` for querying/filtering index rows
-6. Adds ingestion-side partition window resolution via `--partition-from` + `--partition-to`
-7. Adds partition-aware cursor templating via `--cursor-template`
-8. Adds deterministic partition sharding via `partitions shard`
-9. Adds partition-index integrity validation via `partitions validate`
+2. Adds `firehose-parquet partitions build` for generating canonical `partitions.parquet` artifacts directly from Firehose
+3. Introduces `firehose-parquet partitions resolve`
+4. Keeps existing ingestion flags (`--partitions-index`, `--partition-type`, `--partition-value`) working for backward compatibility
+5. Emits a deprecation warning in ingestion mode when those legacy flags are used to drive range resolution directly
+6. Introduces `firehose-parquet partitions ls` for querying/filtering index rows
+7. Adds ingestion-side partition window resolution via `--partition-from` + `--partition-to`
+8. Adds partition-aware cursor templating via `--cursor-template`
+9. Adds deterministic partition sharding via `partitions shard`
+10. Adds partition-index integrity validation via `partitions validate`
 
 ## Command behavior
+
+### Partition index builder
+
+The grouped CLI now supports writing the canonical partition index directly from Firehose:
+
+- `firehose-parquet partitions build`
+
+Current behavior:
+
+- scans the requested `[start_block, stop_block)` range from Firehose
+- computes UTC interval starts for `day`, `hour`, `minute`, and `second`
+- emits one row per discovered partition with contiguous `[start_block, end_block)` bounds
+- writes `/<chain>/partitions.parquet` under the supplied local or S3 output root
+- includes file metadata defined in `docs/partitions-parquet-contract.md`
+
+Current limitations:
+
+- requires a finite non-zero `--stop-block`
+- writes the canonical parquet artifact only; optional sidecar generation remains future work
 
 ### Ingestion window mode
 
@@ -138,20 +159,23 @@ When legacy flags are used in direct ingestion mode (without explicit `--start-b
 
 `firehose-parquet partitions resolve ...`
 
-## Process used for phases 1-6
+## Process used for phases 1-7
 
 1. Branch from `main` using `codex/` prefix.
 2. Add CLI tree scaffolding in shared CLI crate (`firehose-parquet/src/cli.rs`).
 3. Reuse existing partition index resolution logic and wrap it in command-focused result types.
-4. Add partition row query/list command implementation with streaming record-batch reads.
-5. Wire the binary entrypoint (`blocks/src/bin/main.rs`) to execute new subcommands.
-6. Add docs and examples in `README.md`.
-7. Add parsing/data-path test coverage for new commands.
-8. Run formatting + targeted checks.
+4. Add the canonical builder path that streams block identities from Firehose and finalizes partition rows.
+5. Add partition row query/list command implementation with streaming record-batch reads.
+6. Wire the binary entrypoint (`blocks/src/bin/main.rs`) to execute new subcommands.
+7. Add docs and examples in `README.md` and `docs/`.
+8. Add parsing/data-path test coverage for new commands.
+9. Run formatting + targeted checks.
 
 ## Validation run in these phases
 
 - `cargo fmt`
+- `cargo test -p firehose-parquet test_partitions_build_subcommand_parse -- --nocapture`
+- `cargo test -p firehose-parquet test_build_partition_rows_from_blocks_mixed_types_and_contiguous -- --nocapture`
 - `cargo test -p firehose-parquet test_partitions_resolve_subcommand_parse -- --nocapture`
 - `cargo test -p firehose-parquet test_partitions_ls_subcommand_parse -- --nocapture`
 - `cargo test -p firehose-parquet test_list_partitions_from_index_filters_sort_and_limit -- --nocapture`
@@ -160,7 +184,6 @@ When legacy flags are used in direct ingestion mode (without explicit `--start-b
 
 ## Follow-up phases (not included here)
 
-- `firehose-parquet partitions build`
 - `firehose-parquet partitions validate`
 - `firehose-parquet partitions shard`
 - optional bounded-concurrency partition window execution mode
