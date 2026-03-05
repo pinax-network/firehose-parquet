@@ -352,6 +352,8 @@ Helpful guard:
 
 See `docs/partitions-parquet-contract.md` for the versioned `partitions.parquet` schema and metadata compatibility contract.
 
+When present, `partitions resolve` also checks an optional `partitions.lookup.json` sidecar before falling back to a full parquet scan.
+
 ### Partition-Window Ingestion (`--partition-from/--partition-to`)
 
 Run ingestion over a partition window without explicit block math.
