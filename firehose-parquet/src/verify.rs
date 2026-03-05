@@ -168,6 +168,9 @@ struct ProtocolPartitionState {
     hash_matches_block_id: CheckAccumulator,
     parent_hash_matches_parent_id: CheckAccumulator,
     number_matches_block_num: CheckAccumulator,
+    transactions_block_number_matches_block_num: CheckAccumulator,
+    logs_block_number_matches_block_num: CheckAccumulator,
+    calls_block_number_matches_block_num: CheckAccumulator,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -563,6 +566,18 @@ fn has_protocol_failure(state: &ProtocolPartitionState) -> bool {
     state.hash_matches_block_id.first_failure.is_some()
         || state.parent_hash_matches_parent_id.first_failure.is_some()
         || state.number_matches_block_num.first_failure.is_some()
+        || state
+            .transactions_block_number_matches_block_num
+            .first_failure
+            .is_some()
+        || state
+            .logs_block_number_matches_block_num
+            .first_failure
+            .is_some()
+        || state
+            .calls_block_number_matches_block_num
+            .first_failure
+            .is_some()
 }
 
 fn finalize_protocol_findings(
@@ -579,29 +594,28 @@ fn finalize_protocol_findings(
             None => continue,
         };
 
-        add_check_finding(
-            &mut findings,
-            opts,
-            &partition,
-            "evm_hash_matches_block_id",
-            &state.hash_matches_block_id,
-        );
-        add_check_finding(
-            &mut findings,
-            opts,
-            &partition,
-            "evm_parent_hash_matches_parent_id",
-            &state.parent_hash_matches_parent_id,
-        );
-        add_check_finding(
-            &mut findings,
-            opts,
-            &partition,
-            "evm_number_matches_block_num",
-            &state.number_matches_block_num,
-        );
-
         if opts.chain.eq_ignore_ascii_case("evm") && opts.table.eq_ignore_ascii_case("blocks") {
+            add_check_finding(
+                &mut findings,
+                opts,
+                &partition,
+                "evm_hash_matches_block_id",
+                &state.hash_matches_block_id,
+            );
+            add_check_finding(
+                &mut findings,
+                opts,
+                &partition,
+                "evm_parent_hash_matches_parent_id",
+                &state.parent_hash_matches_parent_id,
+            );
+            add_check_finding(
+                &mut findings,
+                opts,
+                &partition,
+                "evm_number_matches_block_num",
+                &state.number_matches_block_num,
+            );
             findings.push(ProtocolCheckFinding {
                 chain: opts.chain.clone(),
                 table: opts.table.clone(),
@@ -631,6 +645,72 @@ fn finalize_protocol_findings(
                 block_num: None,
                 details: "requires full state transition execution and account/storage tries"
                     .to_string(),
+            });
+        } else if opts.chain.eq_ignore_ascii_case("evm")
+            && opts.table.eq_ignore_ascii_case("transactions")
+        {
+            add_check_finding(
+                &mut findings,
+                opts,
+                &partition,
+                "evm_transactions_block_number_matches_block_num",
+                &state.transactions_block_number_matches_block_num,
+            );
+            findings.push(ProtocolCheckFinding {
+                chain: opts.chain.clone(),
+                table: opts.table.clone(),
+                partition,
+                check: "evm_transactions_root_inclusion".to_string(),
+                status: ProtocolCheckStatus::NotVerifiable,
+                block_num: None,
+                details: "requires canonical transaction RLP encoding + trie indexing by transaction position".to_string(),
+            });
+        } else if opts.chain.eq_ignore_ascii_case("evm") && opts.table.eq_ignore_ascii_case("logs")
+        {
+            add_check_finding(
+                &mut findings,
+                opts,
+                &partition,
+                "evm_logs_block_number_matches_block_num",
+                &state.logs_block_number_matches_block_num,
+            );
+            findings.push(ProtocolCheckFinding {
+                chain: opts.chain.clone(),
+                table: opts.table.clone(),
+                partition,
+                check: "evm_logs_receipt_inclusion".to_string(),
+                status: ProtocolCheckStatus::NotVerifiable,
+                block_num: None,
+                details: "requires receipt reconstruction and trie inclusion proofs".to_string(),
+            });
+        } else if opts.chain.eq_ignore_ascii_case("evm") && opts.table.eq_ignore_ascii_case("calls")
+        {
+            add_check_finding(
+                &mut findings,
+                opts,
+                &partition,
+                "evm_calls_block_number_matches_block_num",
+                &state.calls_block_number_matches_block_num,
+            );
+            findings.push(ProtocolCheckFinding {
+                chain: opts.chain.clone(),
+                table: opts.table.clone(),
+                partition,
+                check: "evm_calls_receipt_correlation".to_string(),
+                status: ProtocolCheckStatus::NotVerifiable,
+                block_num: None,
+                details: "requires transaction execution traces correlated with canonical receipts"
+                    .to_string(),
+            });
+        } else {
+            findings.push(ProtocolCheckFinding {
+                chain: opts.chain.clone(),
+                table: opts.table.clone(),
+                partition,
+                check: "protocol_checks_coverage".to_string(),
+                status: ProtocolCheckStatus::NotVerifiable,
+                block_num: None,
+                details: "protocol checks are currently implemented for evm blocks/transactions/logs/calls only".to_string(),
             });
         }
     }
@@ -679,16 +759,38 @@ fn run_protocol_checks_for_batch(
     batch: &RecordBatch,
     state: &mut ProtocolPartitionState,
 ) {
-    if !opts.chain.eq_ignore_ascii_case("evm") || !opts.table.eq_ignore_ascii_case("blocks") {
-        state
-            .hash_matches_block_id
-            .mark_not_verifiable("protocol checks currently implemented for evm blocks only");
-        state
-            .parent_hash_matches_parent_id
-            .mark_not_verifiable("protocol checks currently implemented for evm blocks only");
-        state
-            .number_matches_block_num
-            .mark_not_verifiable("protocol checks currently implemented for evm blocks only");
+    if !opts.chain.eq_ignore_ascii_case("evm") {
+        return;
+    }
+
+    if opts.table.eq_ignore_ascii_case("transactions") {
+        check_block_number_alignment(
+            batch,
+            "block_number",
+            &mut state.transactions_block_number_matches_block_num,
+        );
+        return;
+    }
+
+    if opts.table.eq_ignore_ascii_case("logs") {
+        check_block_number_alignment(
+            batch,
+            "block_number",
+            &mut state.logs_block_number_matches_block_num,
+        );
+        return;
+    }
+
+    if opts.table.eq_ignore_ascii_case("calls") {
+        check_block_number_alignment(
+            batch,
+            "block_number",
+            &mut state.calls_block_number_matches_block_num,
+        );
+        return;
+    }
+
+    if !opts.table.eq_ignore_ascii_case("blocks") {
         return;
     }
 
@@ -796,6 +898,47 @@ fn run_protocol_checks_for_batch(
                 false,
                 block_num_for_error,
                 "parent_id/parent_hash is null or unsupported type",
+            ),
+        }
+    }
+}
+
+fn check_block_number_alignment(
+    batch: &RecordBatch,
+    table_column: &str,
+    acc: &mut CheckAccumulator,
+) {
+    let schema = batch.schema();
+    let idx_block_num = match schema.index_of("block_num") {
+        Ok(v) => v,
+        Err(_) => {
+            acc.mark_not_verifiable("missing required column: block_num");
+            return;
+        }
+    };
+    let idx_table_block_num = match schema.index_of(table_column) {
+        Ok(v) => v,
+        Err(_) => {
+            acc.mark_not_verifiable(format!("missing required column: {table_column}"));
+            return;
+        }
+    };
+
+    for row in 0..batch.num_rows() {
+        let canonical_num = u64_cell(batch.column(idx_block_num).as_ref(), row);
+        let table_num = u64_cell(batch.column(idx_table_block_num).as_ref(), row);
+        let block_num_for_error = canonical_num.or(table_num).unwrap_or(0);
+
+        match (canonical_num, table_num) {
+            (Some(a), Some(b)) => acc.observe(
+                a == b,
+                block_num_for_error,
+                format!("block_num={} does not match {}={}", a, table_column, b),
+            ),
+            _ => acc.observe(
+                false,
+                block_num_for_error,
+                format!("block_num/{} is null or unsupported type", table_column),
             ),
         }
     }
