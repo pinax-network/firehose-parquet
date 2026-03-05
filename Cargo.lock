@@ -449,6 +449,7 @@ dependencies = [
  "prometheus-client",
  "prost",
  "prost-types",
+ "serde_json",
  "sha2",
  "time",
  "tokio",
