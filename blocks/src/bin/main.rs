@@ -5,8 +5,8 @@ use firehose_parquet::cli::{
     load_dotenv, parse_partition_selection_request, parse_partition_shard_strategy,
     resolve_cursor_template, resolve_partition_bounds_from_index, resolve_partition_command,
     resolve_partition_window_bounds_from_index, shard_partitions_from_index, AwsConfig, Commands,
-    CommonArgs, PartitionBoundsRequest, PartitionListRequest, PartitionSelectionRequest,
-    PartitionShardRequest, PartitionsCommands,
+    CommonArgs, PartitionBoundsRequest, PartitionListRequest, PartitionResolveOptions,
+    PartitionSelectionRequest, PartitionShardRequest, PartitionsCommands,
 };
 use firehose_parquet::config::BlockMetadata;
 use firehose_parquet::cursor::{CursorLocation, CursorState};
@@ -508,6 +508,7 @@ async fn main() -> Result<()> {
                     partition_type,
                     partition_value,
                     partition_chain,
+                    strict_single_chain,
                     json,
                     aws_access_key_id,
                     aws_secret_access_key,
@@ -528,7 +529,13 @@ async fn main() -> Result<()> {
                         aws_region: aws_region.clone(),
                         aws_endpoint_url: aws_endpoint_url.clone(),
                     };
-                    let result = resolve_partition_command(request, Some(&aws))?;
+                    let result = resolve_partition_command(
+                        request,
+                        Some(&aws),
+                        &PartitionResolveOptions {
+                            strict_single_chain: *strict_single_chain,
+                        },
+                    )?;
 
                     if *json {
                         println!("{}", serde_json::to_string_pretty(&result)?);

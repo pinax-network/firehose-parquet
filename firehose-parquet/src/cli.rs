@@ -883,6 +883,9 @@ Examples:
         /// Optional chain filter (matches `chain` column)
         #[arg(long)]
         partition_chain: Option<String>,
+        /// Require that the partition resolves to exactly one chain when `--partition-chain` is omitted
+        #[arg(long, default_value = "false")]
+        strict_single_chain: bool,
         /// Emit machine-readable JSON output
         #[arg(long, default_value = "false")]
         json: bool,
@@ -913,6 +916,11 @@ pub struct PartitionResolveResult {
     pub partition_chain: Option<String>,
     pub start_block: u64,
     pub stop_block: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PartitionResolveOptions {
+    pub strict_single_chain: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -972,10 +980,122 @@ pub struct PartitionShardResult {
 }
 
 /// Resolve partition bounds and return a response payload suitable for CLI output.
-pub fn resolve_partition_command(
-    request: PartitionBoundsRequest,
+fn resolve_partition_chains(
+    request: &PartitionBoundsRequest,
     aws: Option<&AwsConfig>,
+) -> anyhow::Result<Vec<Option<String>>> {
+    use arrow::array::{Array, LargeStringArray, StringArray};
+    use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+    use std::collections::BTreeSet;
+
+    fn read_utf8_value(column: &dyn Array, row: usize) -> anyhow::Result<Option<String>> {
+        if column.is_null(row) {
+            return Ok(None);
+        }
+        if let Some(arr) = column.as_any().downcast_ref::<StringArray>() {
+            return Ok(Some(arr.value(row).to_string()));
+        }
+        if let Some(arr) = column.as_any().downcast_ref::<LargeStringArray>() {
+            return Ok(Some(arr.value(row).to_string()));
+        }
+        anyhow::bail!(
+            "expected Utf8/LargeUtf8 column, found {}",
+            column.data_type()
+        )
+    }
+
+    let mut chains = BTreeSet::new();
+    let mut collect = |batch: &arrow::record_batch::RecordBatch| -> anyhow::Result<()> {
+        let schema = batch.schema();
+        let partition_type_idx = schema
+            .index_of("partition_type")
+            .map_err(|_| anyhow::anyhow!("missing required column: partition_type"))?;
+        let partition_value_idx = schema
+            .index_of("partition_value")
+            .map_err(|_| anyhow::anyhow!("missing required column: partition_value"))?;
+        let chain_idx = schema.index_of("chain").ok();
+
+        for row in 0..batch.num_rows() {
+            let partition_type = read_utf8_value(batch.column(partition_type_idx).as_ref(), row)?;
+            let partition_value = read_utf8_value(batch.column(partition_value_idx).as_ref(), row)?;
+
+            if partition_type
+                .as_deref()
+                .map(|v| v.eq_ignore_ascii_case(&request.partition_type))
+                != Some(true)
+            {
+                continue;
+            }
+            if partition_value.as_deref() != Some(request.partition_value.as_str()) {
+                continue;
+            }
+
+            let row_chain = if let Some(idx) = chain_idx {
+                read_utf8_value(batch.column(idx).as_ref(), row)?
+            } else {
+                None
+            };
+            chains.insert(row_chain);
+        }
+        Ok(())
+    };
+
+    if request.index_path.starts_with("s3://") {
+        use crate::writer::parse_s3_url;
+        use object_store::ObjectStore;
+
+        let aws =
+            aws.ok_or_else(|| anyhow::anyhow!("AWS config required for S3 partition index"))?;
+        let (bucket, key) = parse_s3_url(&request.index_path)?;
+        let client = aws.build_s3_client(&bucket)?;
+        let obj_path = object_store::path::Path::from(key.as_str());
+        let data = block_on_async(async { client.get(&obj_path).await?.bytes().await })
+            .map_err(|e| anyhow::anyhow!("reading {}: {e}", request.index_path))?;
+        let reader = ParquetRecordBatchReaderBuilder::try_new(data)?.build()?;
+        for batch in reader {
+            collect(&batch?)?;
+        }
+    } else {
+        let file = std::fs::File::open(&request.index_path)
+            .map_err(|e| anyhow::anyhow!("opening {}: {e}", request.index_path))?;
+        let reader = ParquetRecordBatchReaderBuilder::try_new(file)?.build()?;
+        for batch in reader {
+            collect(&batch?)?;
+        }
+    }
+
+    Ok(chains.into_iter().collect())
+}
+
+pub fn resolve_partition_command(
+    mut request: PartitionBoundsRequest,
+    aws: Option<&AwsConfig>,
+    options: &PartitionResolveOptions,
 ) -> anyhow::Result<PartitionResolveResult> {
+    if options.strict_single_chain && request.chain.is_none() {
+        let chains = resolve_partition_chains(&request, aws)?;
+        match chains.as_slice() {
+            [] => {}
+            [Some(chain)] => {
+                request.chain = Some(chain.clone());
+            }
+            [None] => {}
+            _ => {
+                let labels = chains
+                    .into_iter()
+                    .map(|chain| chain.unwrap_or_else(|| "<null>".to_string()))
+                    .collect::<Vec<_>>();
+                anyhow::bail!(
+                    "partition resolves to multiple chains in {} for partition_type={}, partition_value={}: {}. Re-run with --partition-chain to disambiguate",
+                    request.index_path,
+                    request.partition_type,
+                    request.partition_value,
+                    labels.join(", ")
+                );
+            }
+        }
+    }
+
     let bounds = resolve_partition_bounds_from_index(&request, aws)?;
     Ok(PartitionResolveResult {
         partitions_index: request.index_path,
@@ -4150,6 +4270,7 @@ mod tests {
             "2015-07-30 15:00:00",
             "--partition-chain",
             "eth-mainnet",
+            "--strict-single-chain",
             "--json",
         ]);
         assert!(cli.command.is_some());
@@ -4159,6 +4280,7 @@ mod tests {
                 partition_type,
                 partition_value,
                 partition_chain,
+                strict_single_chain,
                 json,
                 ..
             }) => {
@@ -4166,6 +4288,7 @@ mod tests {
                 assert_eq!(partition_type, "hour");
                 assert_eq!(partition_value, "2015-07-30 15:00:00");
                 assert_eq!(partition_chain.as_deref(), Some("eth-mainnet"));
+                assert!(strict_single_chain);
                 assert!(json);
             }
             _ => panic!("expected partitions resolve subcommand"),
@@ -4728,6 +4851,69 @@ mod tests {
         let err = resolve_partition_bounds_from_index(&request, None)
             .expect_err("duplicate rows should be rejected");
         assert!(err.to_string().contains("ambiguous"));
+    }
+
+    #[test]
+    fn test_resolve_partition_command_strict_single_chain_rejects_multi_chain() {
+        use arrow::array::{StringArray, UInt64Array};
+        use arrow::record_batch::RecordBatch;
+        use parquet::arrow::ArrowWriter;
+        use std::fs::File;
+        use std::sync::Arc;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("partitions.parquet");
+
+        let schema = Arc::new(arrow::datatypes::Schema::new(vec![
+            arrow::datatypes::Field::new("chain", arrow::datatypes::DataType::Utf8, true),
+            arrow::datatypes::Field::new("partition_type", arrow::datatypes::DataType::Utf8, false),
+            arrow::datatypes::Field::new(
+                "partition_value",
+                arrow::datatypes::DataType::Utf8,
+                false,
+            ),
+            arrow::datatypes::Field::new("start_block", arrow::datatypes::DataType::UInt64, false),
+            arrow::datatypes::Field::new("end_block", arrow::datatypes::DataType::UInt64, false),
+        ]));
+
+        let batch = RecordBatch::try_new(
+            Arc::clone(&schema),
+            vec![
+                Arc::new(StringArray::from(vec![
+                    Some("eth-mainnet"),
+                    Some("polygon-mainnet"),
+                ])),
+                Arc::new(StringArray::from(vec!["day", "day"])),
+                Arc::new(StringArray::from(vec![
+                    "2015-07-30 00:00:00",
+                    "2015-07-30 00:00:00",
+                ])),
+                Arc::new(UInt64Array::from(vec![100_u64, 200_u64])),
+                Arc::new(UInt64Array::from(vec![200_u64, 300_u64])),
+            ],
+        )
+        .expect("record batch");
+
+        let file = File::create(&path).expect("create parquet");
+        let mut writer = ArrowWriter::try_new(file, schema, None).expect("writer");
+        writer.write(&batch).expect("write batch");
+        writer.close().expect("close writer");
+
+        let err = resolve_partition_command(
+            PartitionBoundsRequest {
+                index_path: path.to_string_lossy().to_string(),
+                partition_type: "day".to_string(),
+                partition_value: "2015-07-30 00:00:00".to_string(),
+                chain: None,
+            },
+            None,
+            &PartitionResolveOptions {
+                strict_single_chain: true,
+            },
+        )
+        .expect_err("strict single chain should fail on multi-chain match");
+        assert!(err.to_string().contains("multiple chains"));
+        assert!(err.to_string().contains("--partition-chain"));
     }
 
     #[test]

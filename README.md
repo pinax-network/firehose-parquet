@@ -337,7 +337,18 @@ firehose-parquet partitions resolve \
   --partition-value '2015-07-30 00:00:00' \
   --partition-chain eth-mainnet \
   --json
+
+# Require a unique chain match when using a global index
+firehose-parquet partitions resolve \
+  --partitions-index s3://my-bucket/partitions.parquet \
+  --partition-type day \
+  --partition-value '2015-07-30 00:00:00' \
+  --strict-single-chain
 ```
+
+Helpful guard:
+
+- `--strict-single-chain` fails fast when a global index contains multiple chain rows for the same partition descriptor and `--partition-chain` was omitted
 
 ### Partition-Window Ingestion (`--partition-from/--partition-to`)
 
