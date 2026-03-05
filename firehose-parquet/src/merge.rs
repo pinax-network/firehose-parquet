@@ -8,7 +8,6 @@ use crate::cli::{block_on_async, format_bytes, AwsConfig};
 use crate::config::Compression;
 use crate::writer::s3_put_options;
 use anyhow::{Context, Result};
-use arrow::compute::concat_batches;
 use arrow::record_batch::RecordBatch;
 use object_store::ObjectStore;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
@@ -17,6 +16,7 @@ use parquet::basic::Compression as PqCompression;
 use parquet::basic::ZstdLevel;
 use parquet::file::metadata::KeyValue;
 use parquet::file::properties::WriterProperties;
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -24,6 +24,82 @@ use tracing::{info, warn};
 
 const S3_READ_MAX_ATTEMPTS: usize = 5;
 const S3_READ_RETRY_BASE_DELAY_MS: u64 = 100;
+
+struct StreamingPartWriter {
+    schema: Arc<arrow::datatypes::Schema>,
+    props: WriterProperties,
+    flush_bytes: u64,
+    next_part_num: u32,
+    current_writer: Option<ArrowWriter<Vec<u8>>>,
+}
+
+impl StreamingPartWriter {
+    fn new(
+        schema: Arc<arrow::datatypes::Schema>,
+        props: WriterProperties,
+        flush_bytes: u64,
+        initial_part_num: u32,
+    ) -> Self {
+        Self {
+            schema,
+            props,
+            flush_bytes,
+            next_part_num: initial_part_num,
+            current_writer: None,
+        }
+    }
+
+    fn write_batch<F>(&mut self, batch: &RecordBatch, flush_part: &mut F) -> Result<()>
+    where
+        F: FnMut(u32, Vec<u8>, usize) -> Result<()>,
+    {
+        if batch.num_rows() == 0 {
+            return Ok(());
+        }
+
+        if self.current_writer.is_none() {
+            self.current_writer = Some(ArrowWriter::try_new(
+                Vec::new(),
+                self.schema.clone(),
+                Some(self.props.clone()),
+            )?);
+        }
+
+        let writer = self.current_writer.as_mut().expect("writer must exist");
+        writer.write(batch)?;
+
+        if self.flush_bytes > 0 && writer.in_progress_size() as u64 >= self.flush_bytes {
+            self.flush_current(flush_part)?;
+        }
+
+        Ok(())
+    }
+
+    fn finish<F>(&mut self, flush_part: &mut F) -> Result<()>
+    where
+        F: FnMut(u32, Vec<u8>, usize) -> Result<()>,
+    {
+        if self.current_writer.is_some() {
+            self.flush_current(flush_part)?;
+        }
+        Ok(())
+    }
+
+    fn flush_current<F>(&mut self, flush_part: &mut F) -> Result<()>
+    where
+        F: FnMut(u32, Vec<u8>, usize) -> Result<()>,
+    {
+        let writer = self
+            .current_writer
+            .take()
+            .expect("writer must exist when flushing");
+        let rows = writer.in_progress_rows();
+        let buf = writer.into_inner()?;
+        self.next_part_num += 1;
+        flush_part(self.next_part_num, buf, rows)?;
+        Ok(())
+    }
+}
 
 /// Configuration for a merge operation.
 pub struct MergeConfig {
@@ -172,8 +248,25 @@ fn process_local_partition(
         .sum();
     result.bytes_before += source_bytes;
 
-    let mut all_batches: Vec<RecordBatch> = Vec::new();
+    if config.dry_run {
+        let est_files = estimate_output_files(source_bytes, config.flush_bytes);
+        println!(
+            "  {}: {} parts → ~{} file(s) (dry run)",
+            partition_label,
+            files.len(),
+            est_files
+        );
+        result.files_read += files.len();
+        result.partitions_merged += 1;
+        return Ok(());
+    }
+
     let mut file_kv_metadata: Option<Vec<KeyValue>> = None;
+    let mut writer_state: Option<StreamingPartWriter> = None;
+    let mut written_files: Vec<PathBuf> = Vec::new();
+    let mut output_bytes = 0u64;
+    let initial_part_num = max_part_number_in_local_files(files);
+
     for file_path in files {
         let file = std::fs::File::open(file_path)
             .with_context(|| format!("opening {}", file_path.display()))?;
@@ -188,47 +281,67 @@ fn process_local_partition(
         let reader = builder.build()?;
         for batch_result in reader {
             let batch = batch_result?;
-            if batch.num_rows() > 0 {
-                all_batches.push(batch);
+            if batch.num_rows() == 0 {
+                continue;
             }
+
+            if writer_state.is_none() {
+                let props = writer_properties(config.compression, file_kv_metadata.as_deref());
+                writer_state = Some(StreamingPartWriter::new(
+                    batch.schema(),
+                    props,
+                    config.flush_bytes,
+                    initial_part_num,
+                ));
+            }
+
+            writer_state
+                .as_mut()
+                .expect("writer state must exist")
+                .write_batch(&batch, &mut |part_num, buf, rows| {
+                    let path = partition_dir.join(format!("part-{part_num:06}.parquet"));
+                    std::fs::write(&path, &buf)
+                        .with_context(|| format!("writing {}", path.display()))?;
+
+                    output_bytes += buf.len() as u64;
+                    info!(
+                        path = %path.display(),
+                        rows,
+                        bytes = buf.len(),
+                        "wrote merged part"
+                    );
+
+                    written_files.push(path);
+                    Ok(())
+                })?;
         }
     }
     result.files_read += files.len();
 
-    if all_batches.is_empty() {
+    if writer_state.is_none() {
         result.partitions_skipped += 1;
         return Ok(());
     }
 
-    let schema = all_batches[0].schema();
-    let merged = concat_batches(&schema, &all_batches)?;
-    let merged = sort_by_block_num(merged)?;
+    writer_state
+        .as_mut()
+        .expect("writer state must exist")
+        .finish(&mut |part_num, buf, rows| {
+            let path = partition_dir.join(format!("part-{part_num:06}.parquet"));
+            std::fs::write(&path, &buf).with_context(|| format!("writing {}", path.display()))?;
 
-    if config.dry_run {
-        let est_files = estimate_output_files(merged.num_rows(), &merged, config.flush_bytes);
-        println!(
-            "  {}: {} parts → ~{} file(s) (dry run)",
-            partition_label,
-            files.len(),
-            est_files
-        );
-        result.partitions_merged += 1;
-        return Ok(());
-    }
+            output_bytes += buf.len() as u64;
+            info!(
+                path = %path.display(),
+                rows,
+                bytes = buf.len(),
+                "wrote merged part"
+            );
 
-    let written_files = write_merged_batches(
-        partition_dir,
-        &merged,
-        config.compression,
-        config.flush_bytes,
-        file_kv_metadata.as_deref(),
-    )?;
+            written_files.push(path);
+            Ok(())
+        })?;
 
-    let output_bytes: u64 = written_files
-        .iter()
-        .filter_map(|f| std::fs::metadata(f).ok())
-        .map(|m| m.len())
-        .sum();
     result.bytes_after += output_bytes;
 
     println!(
@@ -265,96 +378,13 @@ fn print_local_table_header(root: &Path, partition_dir: &Path, current_table: &m
     }
 }
 
-/// Write a merged RecordBatch to part files, splitting at flush_bytes.
-/// Returns paths of written files.
-fn write_merged_batches(
-    out_dir: &Path,
-    batch: &RecordBatch,
-    compression: Compression,
-    flush_bytes: u64,
-    kv_metadata: Option<&[KeyValue]>,
-) -> Result<Vec<PathBuf>> {
-    let props = writer_properties(compression, kv_metadata);
-    let schema = batch.schema();
-    let total_rows = batch.num_rows();
-
-    if total_rows == 0 {
-        return Ok(vec![]);
-    }
-
-    let mut written_files = Vec::new();
-    let mut part_num = 0u32;
-    let mut offset = 0usize;
-
-    while offset < total_rows {
-        part_num += 1;
-        let filename = format!("part-{:06}.parquet", part_num);
-        let path = out_dir.join(&filename);
-
-        let mut buf = Vec::new();
-        let mut writer = ArrowWriter::try_new(&mut buf, schema.clone(), Some(props.clone()))?;
-
-        // Write rows until we exceed flush_bytes.
-        let chunk_size = 10_000.min(total_rows - offset);
-        let mut rows_in_file = 0usize;
-
-        loop {
-            let end = (offset + chunk_size).min(total_rows);
-            let slice = batch.slice(offset, end - offset);
-            writer.write(&slice)?;
-            rows_in_file += end - offset;
-            offset = end;
-
-            // Check estimated compressed size.
-            let est_bytes = writer.in_progress_size() as u64;
-            if est_bytes >= flush_bytes || offset >= total_rows {
-                break;
-            }
-        }
-
-        writer.close()?;
-        std::fs::write(&path, &buf).with_context(|| format!("writing {}", path.display()))?;
-
-        info!(
-            path = %path.display(),
-            rows = rows_in_file,
-            bytes = buf.len(),
-            "wrote merged part"
-        );
-
-        written_files.push(path);
-    }
-
-    Ok(written_files)
-}
-
-/// Sort a RecordBatch by `block_num` column if it exists.
-fn sort_by_block_num(batch: RecordBatch) -> Result<RecordBatch> {
-    let schema = batch.schema();
-    if schema.index_of("block_num").is_err() {
-        return Ok(batch); // No block_num column, return as-is.
-    }
-
-    use arrow::compute::{sort_to_indices, take};
-    let block_num_idx = schema.index_of("block_num").unwrap();
-    let block_num_col = batch.column(block_num_idx);
-    let indices = sort_to_indices(block_num_col, None, None)?;
-
-    let columns: Vec<Arc<dyn arrow::array::Array>> = batch
-        .columns()
-        .iter()
-        .map(|col| take(col.as_ref(), &indices, None).map(Arc::from))
-        .collect::<std::result::Result<_, _>>()?;
-
-    Ok(RecordBatch::try_new(schema, columns)?)
-}
-
-fn estimate_output_files(total_rows: usize, _batch: &RecordBatch, _flush_bytes: u64) -> usize {
-    // Rough estimate — assume 1 file unless very large.
-    if total_rows == 0 {
+fn estimate_output_files(total_bytes: u64, flush_bytes: u64) -> usize {
+    if total_bytes == 0 {
         0
-    } else {
+    } else if flush_bytes == 0 {
         1
+    } else {
+        ((total_bytes + flush_bytes - 1) / flush_bytes) as usize
     }
 }
 
@@ -391,6 +421,31 @@ fn collect_parquet_files_recursive(dir: &Path, out: &mut Vec<PathBuf>) -> Result
         }
     }
     Ok(())
+}
+
+fn parse_part_number(filename: &str) -> Option<u32> {
+    filename
+        .strip_prefix("part-")
+        .and_then(|s| s.strip_suffix(".parquet"))
+        .and_then(|s| s.parse::<u32>().ok())
+}
+
+fn max_part_number_in_local_files(files: &[PathBuf]) -> u32 {
+    files
+        .iter()
+        .filter_map(|file| file.file_name().and_then(|name| name.to_str()))
+        .filter_map(parse_part_number)
+        .max()
+        .unwrap_or(0)
+}
+
+fn max_part_number_in_s3_objects(objects: &[object_store::ObjectMeta]) -> u32 {
+    objects
+        .iter()
+        .filter_map(|obj| obj.location.as_ref().rsplit_once('/').map(|(_, name)| name))
+        .filter_map(parse_part_number)
+        .max()
+        .unwrap_or(0)
 }
 
 // ---------------------------------------------------------------------------
@@ -531,8 +586,25 @@ fn process_s3_partition(
     let source_bytes: u64 = objects.iter().map(|o| o.size as u64).sum();
     result.bytes_before += source_bytes;
 
-    let mut all_batches: Vec<RecordBatch> = Vec::new();
+    if config.dry_run {
+        let est_files = estimate_output_files(source_bytes, config.flush_bytes);
+        println!(
+            "  {}: {} parts → ~{} file(s) (dry run)",
+            partition_label,
+            objects.len(),
+            est_files,
+        );
+        result.files_read += objects.len();
+        result.partitions_merged += 1;
+        return Ok(());
+    }
+
     let mut file_kv_metadata: Option<Vec<KeyValue>> = None;
+    let mut writer_state: Option<StreamingPartWriter> = None;
+    let mut files_written = 0usize;
+    let mut output_bytes = 0u64;
+    let initial_part_num = max_part_number_in_s3_objects(objects);
+
     for obj in objects {
         let data = read_s3_bytes_with_retry(
             client,
@@ -554,72 +626,69 @@ fn process_s3_partition(
         let reader = builder.build()?;
         for batch_result in reader {
             let batch = batch_result?;
-            if batch.num_rows() > 0 {
-                all_batches.push(batch);
+            if batch.num_rows() == 0 {
+                continue;
             }
+
+            if writer_state.is_none() {
+                let props = writer_properties(config.compression, file_kv_metadata.as_deref());
+                writer_state = Some(StreamingPartWriter::new(
+                    batch.schema(),
+                    props,
+                    config.flush_bytes,
+                    initial_part_num,
+                ));
+            }
+
+            writer_state
+                .as_mut()
+                .expect("writer state must exist")
+                .write_batch(&batch, &mut |part_num, buf, _rows| {
+                    let s3_key = format!("{partition_key}/part-{part_num:06}.parquet");
+                    let s3_path = object_store::path::Path::from(s3_key.as_str());
+                    let size = buf.len();
+                    let payload = object_store::PutPayload::from(bytes::Bytes::from(buf));
+
+                    block_on_async(async {
+                        client
+                            .put_opts(&s3_path, payload, s3_put_options(&config.cache_control))
+                            .await
+                    })
+                    .map_err(|e| anyhow::anyhow!("uploading s3://{bucket}/{s3_key}: {e}"))?;
+
+                    files_written += 1;
+                    output_bytes += size as u64;
+                    Ok(())
+                })?;
         }
     }
     result.files_read += objects.len();
 
-    if all_batches.is_empty() {
+    if writer_state.is_none() {
         result.partitions_skipped += 1;
         return Ok(());
     }
 
-    let schema = all_batches[0].schema();
-    let merged = concat_batches(&schema, &all_batches)?;
-    let merged = sort_by_block_num(merged)?;
+    writer_state
+        .as_mut()
+        .expect("writer state must exist")
+        .finish(&mut |part_num, buf, _rows| {
+            let s3_key = format!("{partition_key}/part-{part_num:06}.parquet");
+            let s3_path = object_store::path::Path::from(s3_key.as_str());
+            let size = buf.len();
+            let payload = object_store::PutPayload::from(bytes::Bytes::from(buf));
 
-    if config.dry_run {
-        println!(
-            "  {}: {} parts → ~1 file(s) (dry run)",
-            partition_label,
-            objects.len()
-        );
-        result.partitions_merged += 1;
-        return Ok(());
-    }
+            block_on_async(async {
+                client
+                    .put_opts(&s3_path, payload, s3_put_options(&config.cache_control))
+                    .await
+            })
+            .map_err(|e| anyhow::anyhow!("uploading s3://{bucket}/{s3_key}: {e}"))?;
 
-    let props = writer_properties(config.compression, file_kv_metadata.as_deref());
-    let total_rows = merged.num_rows();
-    let mut part_num = 0u32;
-    let mut offset = 0usize;
-    let mut files_written = 0usize;
-    let mut output_bytes = 0u64;
-
-    while offset < total_rows {
-        part_num += 1;
-        let filename = format!("part-{:06}.parquet", part_num);
-        let s3_key = format!("{}/{}", partition_key, filename);
-
-        let mut buf = Vec::new();
-        let mut writer = ArrowWriter::try_new(&mut buf, schema.clone(), Some(props.clone()))?;
-        let chunk_size = 10_000.min(total_rows - offset);
-
-        loop {
-            let end = (offset + chunk_size).min(total_rows);
-            let slice = merged.slice(offset, end - offset);
-            writer.write(&slice)?;
-            offset = end;
-            if writer.in_progress_size() as u64 >= config.flush_bytes || offset >= total_rows {
-                break;
-            }
-        }
-
-        writer.close()?;
-        output_bytes += buf.len() as u64;
-
-        let s3_path = object_store::path::Path::from(s3_key.as_str());
-        let payload = object_store::PutPayload::from(bytes::Bytes::from(buf));
-        block_on_async(async {
-            client
-                .put_opts(&s3_path, payload, s3_put_options(&config.cache_control))
-                .await
-        })
-        .map_err(|e| anyhow::anyhow!("uploading s3://{bucket}/{s3_key}: {e}"))?;
-
-        files_written += 1;
-    }
+            files_written += 1;
+            output_bytes += size as u64;
+            Ok(())
+        })?;
 
     println!(
         "  {}: {} parts → {} file(s) ({})",
@@ -629,15 +698,13 @@ fn process_s3_partition(
         format_bytes(output_bytes),
     );
 
+    let written_keys: HashSet<String> = (initial_part_num + 1
+        ..=initial_part_num + files_written as u32)
+        .map(|part_num| format!("{partition_key}/part-{part_num:06}.parquet"))
+        .collect();
+
     for obj in objects {
-        let obj_filename = obj
-            .location
-            .as_ref()
-            .rsplit_once('/')
-            .map(|(_, f)| f)
-            .unwrap_or("");
-        let is_new = (1..=part_num).any(|n| format!("part-{:06}.parquet", n) == obj_filename);
-        if !is_new {
+        if !written_keys.contains(obj.location.as_ref()) {
             block_on_async(async { client.delete(&obj.location).await })
                 .map_err(|e| anyhow::anyhow!("deleting s3://{bucket}/{}: {e}", obj.location))?;
         }
