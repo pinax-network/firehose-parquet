@@ -25,6 +25,7 @@ A production-grade Rust toolkit that consumes [StreamingFast Firehose](https://f
 - **Canonical identity columns** — `block_num`, `block_id`, `parent_num`, `parent_id`, `lib_num`, `timestamp` on every table (from Firehose `BlockMetadata`)
 - **gRPC streaming** — connects to any Firehose v2 endpoint via tonic, with TLS and API key / JWT auth
 - **Automatic retry / resume** — exponential back-off on connection errors; resumes from the last cursor
+- **Recovery guardrails** — optional stream idle timeout and reconnect stall timeout to force self-recovery or fail-fast restarts
 - **Cursor persistence** — pipeline state saved as `cursor.parquet` with full parameter validation on resume
 - **S3-aware cursor** — cursor automatically stored alongside output (local or S3)
 - **Partitioning** — `none`, `block_range`, `date`, `hour`, `minute`, or `second` layouts
@@ -188,6 +189,10 @@ Connection:
           Name of environment variable containing the JWT bearer token for authentication [env: API_TOKEN_ENVVAR] [default: SUBSTREAMS_API_TOKEN]
       --metrics-port <METRICS_PORT>
           Prometheus /metrics HTTP port [env: METRICS_PORT]
+      --stream-idle-timeout-secs <STREAM_IDLE_TIMEOUT_SECS>
+          Force a reconnect if no stream message is received for N seconds [env: STREAM_IDLE_TIMEOUT_SECS] [default: 120]
+      --reconnect-stall-timeout-secs <RECONNECT_STALL_TIMEOUT_SECS>
+          Exit with an error if reconnecting continuously for N seconds [env: RECONNECT_STALL_TIMEOUT_SECS] [default: 900]
 
 Block Range:
   -s, --start-block <START_BLOCK>  Start block number (inclusive) [env: START_BLOCK]

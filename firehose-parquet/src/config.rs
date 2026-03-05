@@ -81,6 +81,8 @@ pub struct Config {
     pub s3_bucket: Option<String>,
     pub cache_control: Option<String>,
     pub metrics_port: Option<u16>,
+    pub stream_idle_timeout_secs: Option<u64>,
+    pub reconnect_stall_timeout_secs: Option<u64>,
 }
 
 impl Partition {
@@ -201,6 +203,12 @@ impl std::fmt::Display for Config {
         if let Some(port) = self.metrics_port {
             writeln!(f, "  metrics_port       {port}")?;
         }
+        if let Some(secs) = self.stream_idle_timeout_secs {
+            writeln!(f, "  stream_idle_timeout {secs}s")?;
+        }
+        if let Some(secs) = self.reconnect_stall_timeout_secs {
+            writeln!(f, "  reconnect_stall_timeout {secs}s")?;
+        }
         // AWS / S3 section — only shown when at least one credential is set
         if self.aws_access_key_id.is_some()
             || self.aws_secret_access_key.is_some()
@@ -256,6 +264,8 @@ impl Default for Config {
             s3_bucket: None,
             cache_control: None,
             metrics_port: None,
+            stream_idle_timeout_secs: Some(120),
+            reconnect_stall_timeout_secs: Some(900),
         }
     }
 }
