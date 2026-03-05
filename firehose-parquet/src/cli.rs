@@ -979,6 +979,111 @@ pub struct PartitionShardResult {
     pub rows: Vec<PartitionListRow>,
 }
 
+pub const PARTITIONS_SCHEMA_VERSION: &str = "1";
+const PARTITIONS_SCHEMA_VERSION_KEY: &str = "firehose-parquet.partitions.schema_version";
+
+fn is_utf8_like(data_type: &arrow::datatypes::DataType) -> bool {
+    matches!(
+        data_type,
+        arrow::datatypes::DataType::Utf8 | arrow::datatypes::DataType::LargeUtf8
+    )
+}
+
+fn is_integer_like(data_type: &arrow::datatypes::DataType) -> bool {
+    matches!(
+        data_type,
+        arrow::datatypes::DataType::UInt64
+            | arrow::datatypes::DataType::UInt32
+            | arrow::datatypes::DataType::Int64
+            | arrow::datatypes::DataType::Int32
+    )
+}
+
+fn validate_partitions_schema(schema: &arrow::datatypes::Schema) -> anyhow::Result<()> {
+    let partition_type = schema
+        .field_with_name("partition_type")
+        .map_err(|_| anyhow::anyhow!("missing required column: partition_type"))?;
+    if !is_utf8_like(partition_type.data_type()) {
+        anyhow::bail!(
+            "invalid partitions.parquet column type for partition_type: expected Utf8/LargeUtf8, got {}",
+            partition_type.data_type()
+        );
+    }
+
+    let partition_value = schema
+        .field_with_name("partition_value")
+        .map_err(|_| anyhow::anyhow!("missing required column: partition_value"))?;
+    if !is_utf8_like(partition_value.data_type()) {
+        anyhow::bail!(
+            "invalid partitions.parquet column type for partition_value: expected Utf8/LargeUtf8, got {}",
+            partition_value.data_type()
+        );
+    }
+
+    let start_block = schema
+        .field_with_name("start_block")
+        .map_err(|_| anyhow::anyhow!("missing required column: start_block"))?;
+    if !is_integer_like(start_block.data_type()) {
+        anyhow::bail!(
+            "invalid partitions.parquet column type for start_block: expected integer, got {}",
+            start_block.data_type()
+        );
+    }
+
+    let end_block = schema
+        .field_with_name("end_block")
+        .map_err(|_| anyhow::anyhow!("missing required column: end_block"))?;
+    if !is_integer_like(end_block.data_type()) {
+        anyhow::bail!(
+            "invalid partitions.parquet column type for end_block: expected integer, got {}",
+            end_block.data_type()
+        );
+    }
+
+    if let Ok(chain) = schema.field_with_name("chain") {
+        if !is_utf8_like(chain.data_type()) {
+            anyhow::bail!(
+                "invalid partitions.parquet column type for chain: expected Utf8/LargeUtf8, got {}",
+                chain.data_type()
+            );
+        }
+    }
+
+    if let Ok(partition_start_ts) = schema.field_with_name("partition_start_ts") {
+        if !is_utf8_like(partition_start_ts.data_type()) {
+            anyhow::bail!(
+                "invalid partitions.parquet column type for partition_start_ts: expected Utf8/LargeUtf8, got {}",
+                partition_start_ts.data_type()
+            );
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_partitions_metadata(
+    file_meta: &parquet::file::metadata::FileMetaData,
+) -> anyhow::Result<()> {
+    let schema_version = file_meta.key_value_metadata().and_then(|entries| {
+        entries
+            .iter()
+            .find(|entry| entry.key == PARTITIONS_SCHEMA_VERSION_KEY)
+            .and_then(|entry| entry.value.clone())
+    });
+
+    if let Some(version) = schema_version {
+        if version != PARTITIONS_SCHEMA_VERSION {
+            anyhow::bail!(
+                "unsupported partitions.parquet schema version {} (expected {})",
+                version,
+                PARTITIONS_SCHEMA_VERSION
+            );
+        }
+    }
+
+    Ok(())
+}
+
 /// Resolve partition bounds and return a response payload suitable for CLI output.
 fn resolve_partition_chains(
     request: &PartitionBoundsRequest,
@@ -1051,16 +1156,24 @@ fn resolve_partition_chains(
         let obj_path = object_store::path::Path::from(key.as_str());
         let data = block_on_async(async { client.get(&obj_path).await?.bytes().await })
             .map_err(|e| anyhow::anyhow!("reading {}: {e}", request.index_path))?;
-        let reader = ParquetRecordBatchReaderBuilder::try_new(data)?.build()?;
+        let builder = ParquetRecordBatchReaderBuilder::try_new(data)?;
+        validate_partitions_metadata(builder.metadata().file_metadata())?;
+        let reader = builder.build()?;
         for batch in reader {
-            collect(&batch?)?;
+            let batch = batch?;
+            validate_partitions_schema(batch.schema().as_ref())?;
+            collect(&batch)?;
         }
     } else {
         let file = std::fs::File::open(&request.index_path)
             .map_err(|e| anyhow::anyhow!("opening {}: {e}", request.index_path))?;
-        let reader = ParquetRecordBatchReaderBuilder::try_new(file)?.build()?;
+        let builder = ParquetRecordBatchReaderBuilder::try_new(file)?;
+        validate_partitions_metadata(builder.metadata().file_metadata())?;
+        let reader = builder.build()?;
         for batch in reader {
-            collect(&batch?)?;
+            let batch = batch?;
+            validate_partitions_schema(batch.schema().as_ref())?;
+            collect(&batch)?;
         }
     }
 
@@ -1302,9 +1415,12 @@ pub fn list_partitions_from_index(
         let obj_path = object_store::path::Path::from(key.as_str());
         let data = block_on_async(async { client.get(&obj_path).await?.bytes().await })
             .map_err(|e| anyhow::anyhow!("reading {}: {e}", request.index_path))?;
-        let reader = ParquetRecordBatchReaderBuilder::try_new(data)?.build()?;
+        let builder = ParquetRecordBatchReaderBuilder::try_new(data)?;
+        validate_partitions_metadata(builder.metadata().file_metadata())?;
+        let reader = builder.build()?;
         for batch in reader {
             let batch = batch?;
+            validate_partitions_schema(batch.schema().as_ref())?;
             collect_partition_rows(
                 &batch,
                 request,
@@ -1317,9 +1433,12 @@ pub fn list_partitions_from_index(
     } else {
         let file = std::fs::File::open(&request.index_path)
             .map_err(|e| anyhow::anyhow!("opening {}: {e}", request.index_path))?;
-        let reader = ParquetRecordBatchReaderBuilder::try_new(file)?.build()?;
+        let builder = ParquetRecordBatchReaderBuilder::try_new(file)?;
+        validate_partitions_metadata(builder.metadata().file_metadata())?;
+        let reader = builder.build()?;
         for batch in reader {
             let batch = batch?;
+            validate_partitions_schema(batch.schema().as_ref())?;
             collect_partition_rows(
                 &batch,
                 request,
@@ -1924,9 +2043,12 @@ pub fn resolve_partition_bounds_from_index(
         let obj_path = object_store::path::Path::from(key.as_str());
         let data = block_on_async(async { client.get(&obj_path).await?.bytes().await })
             .map_err(|e| anyhow::anyhow!("reading {}: {e}", request.index_path))?;
-        let reader = ParquetRecordBatchReaderBuilder::try_new(data)?.build()?;
+        let builder = ParquetRecordBatchReaderBuilder::try_new(data)?;
+        validate_partitions_metadata(builder.metadata().file_metadata())?;
+        let reader = builder.build()?;
         for batch in reader {
             let batch = batch?;
+            validate_partitions_schema(batch.schema().as_ref())?;
             collect_partition_matches(
                 &batch,
                 request,
@@ -1938,9 +2060,12 @@ pub fn resolve_partition_bounds_from_index(
     } else {
         let file = std::fs::File::open(&request.index_path)
             .map_err(|e| anyhow::anyhow!("opening {}: {e}", request.index_path))?;
-        let reader = ParquetRecordBatchReaderBuilder::try_new(file)?.build()?;
+        let builder = ParquetRecordBatchReaderBuilder::try_new(file)?;
+        validate_partitions_metadata(builder.metadata().file_metadata())?;
+        let reader = builder.build()?;
         for batch in reader {
             let batch = batch?;
+            validate_partitions_schema(batch.schema().as_ref())?;
             collect_partition_matches(
                 &batch,
                 request,
@@ -2127,16 +2252,24 @@ pub fn resolve_partition_window_bounds_from_index(
         let obj_path = object_store::path::Path::from(key.as_str());
         let data = block_on_async(async { client.get(&obj_path).await?.bytes().await })
             .map_err(|e| anyhow::anyhow!("reading {}: {e}", request.index_path))?;
-        let reader = ParquetRecordBatchReaderBuilder::try_new(data)?.build()?;
+        let builder = ParquetRecordBatchReaderBuilder::try_new(data)?;
+        validate_partitions_metadata(builder.metadata().file_metadata())?;
+        let reader = builder.build()?;
         for batch in reader {
-            collect(&batch?)?;
+            let batch = batch?;
+            validate_partitions_schema(batch.schema().as_ref())?;
+            collect(&batch)?;
         }
     } else {
         let file = std::fs::File::open(&request.index_path)
             .map_err(|e| anyhow::anyhow!("opening {}: {e}", request.index_path))?;
-        let reader = ParquetRecordBatchReaderBuilder::try_new(file)?.build()?;
+        let builder = ParquetRecordBatchReaderBuilder::try_new(file)?;
+        validate_partitions_metadata(builder.metadata().file_metadata())?;
+        let reader = builder.build()?;
         for batch in reader {
-            collect(&batch?)?;
+            let batch = batch?;
+            validate_partitions_schema(batch.schema().as_ref())?;
+            collect(&batch)?;
         }
     }
 
@@ -5158,5 +5291,72 @@ mod tests {
         }
 
         assert_eq!(seen.len(), 5);
+    }
+
+    #[test]
+    fn test_list_partitions_from_index_rejects_unsupported_schema_version() {
+        use arrow::array::{StringArray, UInt64Array};
+        use arrow::record_batch::RecordBatch;
+        use parquet::arrow::ArrowWriter;
+        use parquet::basic::Compression;
+        use parquet::file::metadata::KeyValue;
+        use parquet::file::properties::WriterProperties;
+        use std::fs::File;
+        use std::sync::Arc;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("partitions.parquet");
+
+        let schema = Arc::new(arrow::datatypes::Schema::new(vec![
+            arrow::datatypes::Field::new("partition_type", arrow::datatypes::DataType::Utf8, false),
+            arrow::datatypes::Field::new(
+                "partition_value",
+                arrow::datatypes::DataType::Utf8,
+                false,
+            ),
+            arrow::datatypes::Field::new("start_block", arrow::datatypes::DataType::UInt64, false),
+            arrow::datatypes::Field::new("end_block", arrow::datatypes::DataType::UInt64, false),
+        ]));
+
+        let batch = RecordBatch::try_new(
+            Arc::clone(&schema),
+            vec![
+                Arc::new(StringArray::from(vec!["day"])),
+                Arc::new(StringArray::from(vec!["2015-07-30 00:00:00"])),
+                Arc::new(UInt64Array::from(vec![100_u64])),
+                Arc::new(UInt64Array::from(vec![200_u64])),
+            ],
+        )
+        .expect("record batch");
+
+        let props = WriterProperties::builder()
+            .set_compression(Compression::SNAPPY)
+            .set_key_value_metadata(Some(vec![KeyValue {
+                key: PARTITIONS_SCHEMA_VERSION_KEY.to_string(),
+                value: Some("999".to_string()),
+            }]))
+            .build();
+
+        let file = File::create(&path).expect("create parquet");
+        let mut writer =
+            ArrowWriter::try_new(file, schema, Some(props)).expect("create arrow writer");
+        writer.write(&batch).expect("write batch");
+        writer.close().expect("close writer");
+
+        let err = list_partitions_from_index(
+            &PartitionListRequest {
+                index_path: path.to_string_lossy().to_string(),
+                partition_type: Some("day".to_string()),
+                chain: None,
+                from: None,
+                to: None,
+                limit: 10,
+            },
+            None,
+        )
+        .expect_err("unsupported schema version should fail");
+        assert!(err
+            .to_string()
+            .contains("unsupported partitions.parquet schema version"));
     }
 }
