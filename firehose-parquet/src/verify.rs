@@ -11,16 +11,81 @@ use object_store::ObjectStore;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use parquet::arrow::ArrowWriter;
 use serde::Serialize;
+use sha2::{Digest as ShaDigest, Sha256};
 use std::collections::{BTreeMap, HashMap};
 use std::fs::File;
 use std::path::{Path, PathBuf};
 use time::format_description::well_known::Rfc3339;
 use tiny_keccak::{Hasher, Keccak};
 
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HashStrategy {
+    Keccak256,
+    Sha256,
+}
+
+impl HashStrategy {
+    fn as_str(self) -> &'static str {
+        match self {
+            HashStrategy::Keccak256 => "keccak256",
+            HashStrategy::Sha256 => "sha256",
+        }
+    }
+
+    fn hash(self, bytes: &[u8]) -> [u8; 32] {
+        match self {
+            HashStrategy::Keccak256 => {
+                let mut output = [0u8; 32];
+                let mut hasher = Keccak::v256();
+                hasher.update(bytes);
+                hasher.finalize(&mut output);
+                output
+            }
+            HashStrategy::Sha256 => {
+                let digest = Sha256::digest(bytes);
+                let mut output = [0u8; 32];
+                output.copy_from_slice(&digest);
+                output
+            }
+        }
+    }
+}
+
+fn parse_hash_strategy(value: &str) -> Result<Option<HashStrategy>> {
+    let lowered = value.to_ascii_lowercase();
+    match lowered.as_str() {
+        "auto" => Ok(None),
+        "keccak256" => Ok(Some(HashStrategy::Keccak256)),
+        "sha256" => Ok(Some(HashStrategy::Sha256)),
+        other => Err(anyhow!(
+            "invalid hash strategy '{other}': expected auto, keccak256, or sha256"
+        )),
+    }
+}
+
+fn default_hash_strategy_for_chain(chain: &str) -> HashStrategy {
+    match chain.to_ascii_lowercase().as_str() {
+        "evm" => HashStrategy::Keccak256,
+        "bitcoin" | "solana" => HashStrategy::Sha256,
+        _ => HashStrategy::Sha256,
+    }
+}
+
+fn resolve_hash_strategy(chain: &str, configured: Option<&str>) -> Result<HashStrategy> {
+    if let Some(raw) = configured {
+        if let Some(parsed) = parse_hash_strategy(raw)? {
+            return Ok(parsed);
+        }
+    }
+    Ok(default_hash_strategy_for_chain(chain))
+}
+
 #[derive(Debug, Clone)]
 pub struct VerifyOptions {
     pub chain: String,
     pub table: String,
+    pub hash_strategy: Option<String>,
     pub no_fail_fast: bool,
     pub report_json: Option<PathBuf>,
     pub registry_path: Option<String>,
@@ -210,6 +275,9 @@ pub fn verify_parquet(
     aws: Option<&AwsConfig>,
     opts: &VerifyOptions,
 ) -> Result<VerifyReport> {
+    let hash_strategy = resolve_hash_strategy(&opts.chain, opts.hash_strategy.as_deref())?;
+    let algorithm = hash_strategy.as_str().to_string();
+
     let registry_path = opts
         .registry_path
         .clone()
@@ -217,9 +285,9 @@ pub fn verify_parquet(
 
     let scan_output = if path.starts_with("s3://") {
         let aws = aws.ok_or_else(|| anyhow!("AWS config required for S3 paths"))?;
-        collect_partition_roots_s3(path, aws, opts)?
+        collect_partition_roots_s3(path, aws, opts, hash_strategy)?
     } else {
-        collect_partition_roots_local(path, opts)?
+        collect_partition_roots_local(path, opts, hash_strategy)?
     };
 
     let partition_roots = scan_output.partition_roots;
@@ -239,6 +307,38 @@ pub fn verify_parquet(
     for (partition, computed_root) in &partition_roots {
         let key = registry_key(&opts.chain, &opts.table, partition);
         match registry.get(&key) {
+            Some(row) if row.algorithm.as_str() != algorithm.as_str() => {
+                mismatches += 1;
+                findings.push(VerifyFinding {
+                    chain: opts.chain.clone(),
+                    table: opts.table.clone(),
+                    partition: partition.clone(),
+                    status: FindingStatus::Mismatch,
+                    expected_root: Some(row.merkle_root.clone()),
+                    computed_root: computed_root.clone(),
+                    error: Some(format!(
+                        "algorithm mismatch: registry={} runtime={}",
+                        row.algorithm, algorithm
+                    )),
+                });
+                if opts.update_registry {
+                    needs_registry_write = true;
+                    registry.insert(
+                        key,
+                        RegistryRow {
+                            chain: opts.chain.clone(),
+                            table: opts.table.clone(),
+                            partition: partition.clone(),
+                            algorithm: algorithm.clone(),
+                            merkle_root: computed_root.clone(),
+                            updated_at: now_rfc3339(),
+                        },
+                    );
+                }
+                if !opts.no_fail_fast {
+                    break;
+                }
+            }
             Some(row) if row.merkle_root == *computed_root => {
                 matches += 1;
                 findings.push(VerifyFinding {
@@ -270,7 +370,7 @@ pub fn verify_parquet(
                             chain: opts.chain.clone(),
                             table: opts.table.clone(),
                             partition: partition.clone(),
-                            algorithm: "keccak256".to_string(),
+                            algorithm: algorithm.clone(),
                             merkle_root: computed_root.clone(),
                             updated_at: now_rfc3339(),
                         },
@@ -298,7 +398,7 @@ pub fn verify_parquet(
                         chain: opts.chain.clone(),
                         table: opts.table.clone(),
                         partition: partition.clone(),
-                        algorithm: "keccak256".to_string(),
+                        algorithm: algorithm.clone(),
                         merkle_root: computed_root.clone(),
                         updated_at: now_rfc3339(),
                     },
@@ -330,7 +430,7 @@ pub fn verify_parquet(
         table: opts.table.clone(),
         data_path: path.to_string(),
         registry_path,
-        algorithm: "keccak256".to_string(),
+        algorithm,
         summary: VerifySummary {
             partitions_scanned: partition_roots.len(),
             matches,
@@ -400,7 +500,11 @@ fn derive_registry_path(data_path: &str, chain: &str, table: &str) -> String {
     }
 }
 
-fn collect_partition_roots_local(path: &str, opts: &VerifyOptions) -> Result<ScanOutput> {
+fn collect_partition_roots_local(
+    path: &str,
+    opts: &VerifyOptions,
+    hash_strategy: HashStrategy,
+) -> Result<ScanOutput> {
     let pathbuf = PathBuf::from(path);
     let mut files = Vec::new();
 
@@ -427,7 +531,7 @@ fn collect_partition_roots_local(path: &str, opts: &VerifyOptions) -> Result<Sca
     for file_path in files {
         let partition = detect_partition(&file_path.to_string_lossy(), &base.to_string_lossy());
         let partition_state = protocol_state.entry(partition.clone()).or_default();
-        let leaves = read_parquet_leaves_local(&file_path, opts, partition_state)?;
+        let leaves = read_parquet_leaves_local(&file_path, opts, partition_state, hash_strategy)?;
         partition_leaves
             .entry(partition)
             .or_default()
@@ -440,7 +544,7 @@ fn collect_partition_roots_local(path: &str, opts: &VerifyOptions) -> Result<Sca
 
     let mut roots = BTreeMap::new();
     for (partition, leaves) in partition_leaves {
-        roots.insert(partition, hex::encode(merkle_root(&leaves)));
+        roots.insert(partition, hex::encode(merkle_root(&leaves, hash_strategy)));
     }
     Ok(ScanOutput {
         partition_roots: roots,
@@ -452,6 +556,7 @@ fn collect_partition_roots_s3(
     path: &str,
     aws: &AwsConfig,
     opts: &VerifyOptions,
+    hash_strategy: HashStrategy,
 ) -> Result<ScanOutput> {
     let (bucket, prefix) = parse_s3_url(path)?;
     let client = aws.build_s3_client(&bucket)?;
@@ -477,8 +582,14 @@ fn collect_partition_roots_s3(
     for obj in objects {
         let partition = detect_partition(obj.location.as_ref(), &prefix);
         let partition_state = protocol_state.entry(partition.clone()).or_default();
-        let leaves =
-            read_parquet_leaves_s3(&client, &bucket, &obj.location, opts, partition_state)?;
+        let leaves = read_parquet_leaves_s3(
+            &client,
+            &bucket,
+            &obj.location,
+            opts,
+            partition_state,
+            hash_strategy,
+        )?;
         partition_leaves
             .entry(partition)
             .or_default()
@@ -491,7 +602,7 @@ fn collect_partition_roots_s3(
 
     let mut roots = BTreeMap::new();
     for (partition, leaves) in partition_leaves {
-        roots.insert(partition, hex::encode(merkle_root(&leaves)));
+        roots.insert(partition, hex::encode(merkle_root(&leaves, hash_strategy)));
     }
     Ok(ScanOutput {
         partition_roots: roots,
@@ -503,6 +614,7 @@ fn read_parquet_leaves_local(
     path: &Path,
     opts: &VerifyOptions,
     protocol_state: &mut ProtocolPartitionState,
+    hash_strategy: HashStrategy,
 ) -> Result<Vec<[u8; 32]>> {
     let file = File::open(path).with_context(|| format!("opening {}", path.display()))?;
     let builder = ParquetRecordBatchReaderBuilder::try_new(file)?;
@@ -519,7 +631,7 @@ fn read_parquet_leaves_local(
                 let value = array_value_bytes(batch.column(idx).as_ref(), row);
                 append_len_prefixed(&mut encoded, &value);
             }
-            leaves.push(keccak256(&encoded));
+            leaves.push(hash_strategy.hash(&encoded));
         }
     }
 
@@ -532,6 +644,7 @@ fn read_parquet_leaves_s3(
     location: &object_store::path::Path,
     opts: &VerifyOptions,
     protocol_state: &mut ProtocolPartitionState,
+    hash_strategy: HashStrategy,
 ) -> Result<Vec<[u8; 32]>> {
     let data = block_on_async(async { client.get(location).await?.bytes().await })
         .map_err(|e| anyhow!("reading s3://{bucket}/{}: {e}", location))?;
@@ -550,7 +663,7 @@ fn read_parquet_leaves_s3(
                 let value = array_value_bytes(batch.column(idx).as_ref(), row);
                 append_len_prefixed(&mut encoded, &value);
             }
-            leaves.push(keccak256(&encoded));
+            leaves.push(hash_strategy.hash(&encoded));
         }
     }
 
@@ -1028,17 +1141,9 @@ fn array_value_bytes(array: &dyn Array, row: usize) -> Vec<u8> {
     }
 }
 
-fn keccak256(bytes: &[u8]) -> [u8; 32] {
-    let mut output = [0u8; 32];
-    let mut hasher = Keccak::v256();
-    hasher.update(bytes);
-    hasher.finalize(&mut output);
-    output
-}
-
-fn merkle_root(leaves: &[[u8; 32]]) -> [u8; 32] {
+fn merkle_root(leaves: &[[u8; 32]], hash_strategy: HashStrategy) -> [u8; 32] {
     if leaves.is_empty() {
-        return keccak256(&[]);
+        return hash_strategy.hash(&[]);
     }
 
     let mut level = leaves.to_vec();
@@ -1055,7 +1160,7 @@ fn merkle_root(leaves: &[[u8; 32]]) -> [u8; 32] {
             let mut combined = [0u8; 64];
             combined[..32].copy_from_slice(&left);
             combined[32..].copy_from_slice(&right);
-            next.push(keccak256(&combined));
+            next.push(hash_strategy.hash(&combined));
             i += 2;
         }
         level = next;

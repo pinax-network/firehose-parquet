@@ -421,6 +421,9 @@ Examples:
   firehose-parquet verify s3://bucket/evm/mainnet/blocks \\
     --registry-path s3://bucket/evm/mainnet/merkle_roots.parquet
 
+  # Override hash strategy (default: auto from chain)
+  firehose-parquet verify ./output/bitcoin/mainnet/blocks --chain bitcoin --hash-strategy sha256
+
   # Update mismatched registry roots (default behavior only fills missing roots)
   firehose-parquet verify ./output/evm/mainnet/blocks --update-registry
 ")]
@@ -433,6 +436,9 @@ Examples:
         /// Table name used in root registry keys
         #[arg(long, default_value = "blocks")]
         table: String,
+        /// Hash strategy used for leaf+merkle hashing (auto, keccak256, sha256)
+        #[arg(long, default_value = "auto")]
+        hash_strategy: String,
         /// Continue scanning and aggregate findings instead of failing on first mismatch
         #[arg(long, default_value = "false")]
         no_fail_fast: bool,
