@@ -103,6 +103,14 @@ pub struct CommonArgs {
     #[arg(long, env = "METRICS_PORT", hide_env_values = true)]
     pub metrics_port: Option<u16>,
 
+    /// Force a reconnect if no stream message is received for N seconds
+    #[arg(long, env = "STREAM_IDLE_TIMEOUT_SECS", default_value = "120", hide_env_values = true, help_heading = "Connection")]
+    pub stream_idle_timeout_secs: Option<u64>,
+
+    /// Exit with an error if reconnecting continuously for N seconds
+    #[arg(long, env = "RECONNECT_STALL_TIMEOUT_SECS", default_value = "900", hide_env_values = true, help_heading = "Connection")]
+    pub reconnect_stall_timeout_secs: Option<u64>,
+
     /// AWS access key ID (for S3 output)
     #[arg(long, env = "AWS_ACCESS_KEY_ID", hide_env_values = true, help_heading = "AWS / S3")]
     pub aws_access_key_id: Option<String>,
@@ -501,6 +509,8 @@ pub fn build_config(args: &CommonArgs) -> anyhow::Result<Config> {
         s3_bucket: args.s3_bucket.clone(),
         cache_control: if args.cache_control.is_empty() { None } else { Some(args.cache_control.clone()) },
         metrics_port: args.metrics_port,
+        stream_idle_timeout_secs: args.stream_idle_timeout_secs,
+        reconnect_stall_timeout_secs: args.reconnect_stall_timeout_secs,
     })
 }
 
@@ -2008,6 +2018,8 @@ mod tests {
         assert!(cli.common.aws_region.is_none());
         assert!(cli.common.aws_endpoint_url.is_none());
         assert!(cli.common.s3_bucket.is_none());
+        assert_eq!(cli.common.stream_idle_timeout_secs, Some(120));
+        assert_eq!(cli.common.reconnect_stall_timeout_secs, Some(900));
     }
 
     #[test]
@@ -2027,6 +2039,8 @@ mod tests {
             "--flush-rows", "10000",
             "--flush-bytes", "1000000",
             "--flush-interval-secs", "60",
+            "--stream-idle-timeout-secs", "45",
+            "--reconnect-stall-timeout-secs", "120",
             "--compression", "snappy",
             "--log-level", "debug",
             "--dry-run",
@@ -2043,6 +2057,8 @@ mod tests {
         assert_eq!(cli.common.flush_rows, Some(10000));
         assert_eq!(cli.common.flush_bytes, 1000000);
         assert_eq!(cli.common.flush_interval_secs, Some(60));
+        assert_eq!(cli.common.stream_idle_timeout_secs, Some(45));
+        assert_eq!(cli.common.reconnect_stall_timeout_secs, Some(120));
         assert_eq!(cli.common.compression, "snappy");
         assert_eq!(cli.common.log_level, "debug");
         assert!(cli.common.dry_run);
@@ -2089,6 +2105,8 @@ mod tests {
         assert_eq!(config.partition, Partition::Date);
         assert!(config.flush_rows.is_none());
         assert!(config.final_blocks_only);
+        assert_eq!(config.stream_idle_timeout_secs, Some(120));
+        assert_eq!(config.reconnect_stall_timeout_secs, Some(900));
         // cursor defaults to cursor.parquet
         assert_eq!(config.cursor_path, Some("cursor.parquet".to_string()));
     }

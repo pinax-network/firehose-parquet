@@ -3,9 +3,10 @@ use crate::cursor::CursorLocation;
 use crate::metrics::PipelineMetrics;
 use crate::traits::BlockIdentity;
 use anyhow::{Context, Result};
+use backoff::backoff::Backoff;
 use backoff::ExponentialBackoffBuilder;
 use firehose_protos::firehose;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tonic::transport::{Channel, ClientTlsConfig, Endpoint};
 use tracing::{debug, info, warn};
 
@@ -134,13 +135,16 @@ impl FirehoseClient {
         let mut cursor: Option<String> = cursor_location
             .and_then(|loc| loc.load())
             .map(|state| state.cursor);
-        let backoff_config = ExponentialBackoffBuilder::default()
+        let mut reconnect_backoff = ExponentialBackoffBuilder::default()
             .with_initial_interval(Duration::from_secs(1))
             .with_max_interval(Duration::from_secs(60))
             .with_max_elapsed_time(None) // retry forever
             .build();
+        let stream_idle_timeout = self.config.stream_idle_timeout_secs.map(Duration::from_secs);
+        let reconnect_stall_timeout = self.config.reconnect_stall_timeout_secs.map(Duration::from_secs);
 
         let mut attempt = 0u64;
+        let mut reconnect_stall_started_at: Option<Instant> = None;
 
         loop {
             attempt += 1;
@@ -150,14 +154,26 @@ impl FirehoseClient {
                     ch
                 }
                 Err(e) => {
-                    let wait = backoff::backoff::Backoff::next_backoff(
-                        &mut backoff_config.clone(),
-                    )
-                    .unwrap_or(Duration::from_secs(60));
+                    let stall_elapsed = reconnect_stall_started_at.get_or_insert_with(Instant::now).elapsed();
+                    if let Some(max_stall) = reconnect_stall_timeout {
+                        if stall_elapsed >= max_stall {
+                            return Err(anyhow::anyhow!(
+                                "reconnect stalled for {:?} (limit {:?}) after {} attempts; last error: {}",
+                                stall_elapsed,
+                                max_stall,
+                                attempt,
+                                e
+                            ));
+                        }
+                    }
+                    let wait = reconnect_backoff
+                        .next_backoff()
+                        .unwrap_or(Duration::from_secs(60));
                     warn!(
                         attempt,
                         error = %e,
                         retry_in = ?wait,
+                        reconnect_stall_elapsed = ?stall_elapsed,
                         "connection failed, retrying"
                     );
                     if let Some(ref m) = self.metrics {
@@ -203,10 +219,39 @@ impl FirehoseClient {
             }
 
             let stream = match client.blocks(request).await {
-                Ok(resp) => resp.into_inner(),
+                Ok(resp) => {
+                    reconnect_backoff.reset();
+                    reconnect_stall_started_at = None;
+                    resp.into_inner()
+                }
                 Err(e) => {
-                    warn!(error = %e, "Blocks RPC failed, will retry");
-                    tokio::time::sleep(Duration::from_secs(2u64.pow(attempt.min(5) as u32))).await;
+                    let stall_elapsed = reconnect_stall_started_at.get_or_insert_with(Instant::now).elapsed();
+                    if let Some(max_stall) = reconnect_stall_timeout {
+                        if stall_elapsed >= max_stall {
+                            return Err(anyhow::anyhow!(
+                                "reconnect stalled for {:?} (limit {:?}) after {} attempts; last error: {}",
+                                stall_elapsed,
+                                max_stall,
+                                attempt,
+                                e
+                            ));
+                        }
+                    }
+                    let wait = reconnect_backoff
+                        .next_backoff()
+                        .unwrap_or(Duration::from_secs(60));
+                    warn!(
+                        attempt,
+                        error = %e,
+                        retry_in = ?wait,
+                        reconnect_stall_elapsed = ?stall_elapsed,
+                        "Blocks RPC failed, will retry"
+                    );
+                    if let Some(ref m) = self.metrics {
+                        m.grpc_reconnects_total.inc();
+                        m.errors_total.get_or_create(&crate::metrics::ErrorLabels { kind: "grpc_reconnect".to_string() }).inc();
+                    }
+                    tokio::time::sleep(wait).await;
                     continue;
                 }
             };
@@ -214,7 +259,23 @@ impl FirehoseClient {
             let mut stream = stream;
 
             loop {
-                match stream.message().await {
+                let next_message = if let Some(timeout) = stream_idle_timeout {
+                    match tokio::time::timeout(timeout, stream.message()).await {
+                        Ok(msg) => msg,
+                        Err(_) => {
+                            warn!(idle_for = ?timeout, "stream idle timeout reached, will reconnect");
+                            if let Some(ref m) = self.metrics {
+                                m.grpc_reconnects_total.inc();
+                                m.errors_total.get_or_create(&crate::metrics::ErrorLabels { kind: "grpc_reconnect".to_string() }).inc();
+                            }
+                            break;
+                        }
+                    }
+                } else {
+                    stream.message().await
+                };
+
+                match next_message {
                     Ok(Some(resp)) => {
                         let new_cursor = resp.cursor.clone();
                         debug!(cursor = %new_cursor, step = ?resp.step, "received response");
@@ -263,8 +324,10 @@ impl FirehoseClient {
                 }
             }
 
-            tokio::time::sleep(Duration::from_secs(1)).await;
+            let wait = reconnect_backoff
+                .next_backoff()
+                .unwrap_or(Duration::from_secs(60));
+            tokio::time::sleep(wait).await;
         }
     }
 }
-
