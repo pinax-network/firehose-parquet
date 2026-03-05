@@ -5,8 +5,7 @@ use arrow::datatypes::Schema;
 use arrow::record_batch::RecordBatch;
 use firehose_parquet::encode::{BytesColumn, EncodeBytes};
 use firehose_parquet::traits::{
-    est_opt_str, est_str, est_u32, est_u64,
-    BlockIdentity, BlockMapper, CanonicalBuilder,
+    est_opt_str, est_str, est_u32, est_u64, BlockIdentity, BlockMapper, CanonicalBuilder,
 };
 use prost::Message;
 use std::collections::HashMap;
@@ -25,7 +24,11 @@ fn finish_fork_step(builder: &mut Option<StringBuilder>, columns: &mut Vec<Arc<d
 }
 
 fn mk_fork_step(include: bool) -> Option<StringBuilder> {
-    if include { Some(StringBuilder::new()) } else { None }
+    if include {
+        Some(StringBuilder::new())
+    } else {
+        None
+    }
 }
 
 /// Extract bytes from a CryptoHash option, returning empty slice for None.
@@ -133,12 +136,20 @@ fn state_change_cause_name(cause: &near::StateChangeCause) -> &'static str {
         Some(near::state_change_cause::Cause::NotWritableToDisk(_)) => "NotWritableToDisk",
         Some(near::state_change_cause::Cause::InitialState(_)) => "InitialState",
         Some(near::state_change_cause::Cause::TransactionProcessing(_)) => "TransactionProcessing",
-        Some(near::state_change_cause::Cause::ActionReceiptProcessingStarted(_)) => "ActionReceiptProcessingStarted",
-        Some(near::state_change_cause::Cause::ActionReceiptGasReward(_)) => "ActionReceiptGasReward",
+        Some(near::state_change_cause::Cause::ActionReceiptProcessingStarted(_)) => {
+            "ActionReceiptProcessingStarted"
+        }
+        Some(near::state_change_cause::Cause::ActionReceiptGasReward(_)) => {
+            "ActionReceiptGasReward"
+        }
         Some(near::state_change_cause::Cause::ReceiptProcessing(_)) => "ReceiptProcessing",
         Some(near::state_change_cause::Cause::PostponedReceipt(_)) => "PostponedReceipt",
-        Some(near::state_change_cause::Cause::UpdatedDelayedReceipts(_)) => "UpdatedDelayedReceipts",
-        Some(near::state_change_cause::Cause::ValidatorAccountsUpdate(_)) => "ValidatorAccountsUpdate",
+        Some(near::state_change_cause::Cause::UpdatedDelayedReceipts(_)) => {
+            "UpdatedDelayedReceipts"
+        }
+        Some(near::state_change_cause::Cause::ValidatorAccountsUpdate(_)) => {
+            "ValidatorAccountsUpdate"
+        }
         Some(near::state_change_cause::Cause::Migration(_)) => "Migration",
         None => "Unknown",
     }
@@ -222,7 +233,11 @@ pub struct NearBlockMapper {
 }
 
 impl NearBlockMapper {
-    pub fn new(include_fork_step: bool, encoding: EncodeBytes, include_failed_transactions: bool) -> Self {
+    pub fn new(
+        include_fork_step: bool,
+        encoding: EncodeBytes,
+        include_failed_transactions: bool,
+    ) -> Self {
         let enc = &encoding;
         Self {
             include_failed_transactions,
@@ -239,7 +254,12 @@ impl NearBlockMapper {
         }
     }
 
-    fn map_near_block(&mut self, block: &near::Block, identity: &BlockIdentity, fork_step: Option<&str>) {
+    fn map_near_block(
+        &mut self,
+        block: &near::Block,
+        identity: &BlockIdentity,
+        fork_step: Option<&str>,
+    ) {
         let header = match &block.header {
             Some(h) => h,
             None => return,
@@ -248,15 +268,29 @@ impl NearBlockMapper {
         // --- blocks table ---
         self.blocks.canonical.append(identity);
         self.blocks.height.append_value(header.height);
-        self.blocks.hash.append_value(crypto_hash_bytes(&header.hash));
-        self.blocks.prev_hash.append_value(crypto_hash_bytes(&header.prev_hash));
+        self.blocks
+            .hash
+            .append_value(crypto_hash_bytes(&header.hash));
+        self.blocks
+            .prev_hash
+            .append_value(crypto_hash_bytes(&header.prev_hash));
         self.blocks.prev_height.append_value(header.prev_height);
-        self.blocks.epoch_id.append_value(crypto_hash_bytes(&header.epoch_id));
+        self.blocks
+            .epoch_id
+            .append_value(crypto_hash_bytes(&header.epoch_id));
         self.blocks.author.append_value(&block.author);
-        self.blocks.gas_price.append_value(&bigint_to_string(&header.gas_price));
-        self.blocks.total_supply.append_value(&bigint_to_string(&header.total_supply));
-        self.blocks.chunks_included.append_value(header.chunks_included);
-        self.blocks.latest_protocol_version.append_value(header.latest_protocol_version);
+        self.blocks
+            .gas_price
+            .append_value(&bigint_to_string(&header.gas_price));
+        self.blocks
+            .total_supply
+            .append_value(&bigint_to_string(&header.total_supply));
+        self.blocks
+            .chunks_included
+            .append_value(header.chunks_included);
+        self.blocks
+            .latest_protocol_version
+            .append_value(header.latest_protocol_version);
         append_fork_step(&mut self.blocks.fork_step, fork_step);
 
         // --- shards: chunks, transactions, receipts ---
@@ -294,12 +328,20 @@ impl NearBlockMapper {
         self.chunks.canonical.append(identity);
         self.chunks.shard_id.append_value(header.shard_id);
         self.chunks.chunk_hash.append_value(&header.chunk_hash);
-        self.chunks.prev_state_root.append_value(&header.prev_state_root);
+        self.chunks
+            .prev_state_root
+            .append_value(&header.prev_state_root);
         self.chunks.gas_used.append_value(header.gas_used);
         self.chunks.gas_limit.append_value(header.gas_limit);
-        self.chunks.height_created.append_value(header.height_created);
-        self.chunks.height_included.append_value(header.height_included);
-        self.chunks.encoded_length.append_value(header.encoded_length);
+        self.chunks
+            .height_created
+            .append_value(header.height_created);
+        self.chunks
+            .height_included
+            .append_value(header.height_included);
+        self.chunks
+            .encoded_length
+            .append_value(header.encoded_length);
         self.chunks.author.append_value(author);
         append_fork_step(&mut self.chunks.fork_step, fork_step);
     }
@@ -363,12 +405,20 @@ impl NearBlockMapper {
             .execution_outcome
             .as_ref()
             .and_then(|eo| eo.outcome.as_ref())
-            .map(|outcome| (execution_status_str(outcome), outcome.gas_burnt, outcome.executor_id.as_str()))
+            .map(|outcome| {
+                (
+                    execution_status_str(outcome),
+                    outcome.gas_burnt,
+                    outcome.executor_id.as_str(),
+                )
+            })
             .unwrap_or(("Unknown", 0, ""));
 
         self.receipts.canonical.append(identity);
         self.receipts.receipt_id.append_value(receipt_id);
-        self.receipts.predecessor_id.append_value(&receipt.predecessor_id);
+        self.receipts
+            .predecessor_id
+            .append_value(&receipt.predecessor_id);
         self.receipts.receiver_id.append_value(&receipt.receiver_id);
         self.receipts.shard_id.append_value(shard_id);
         self.receipts.status.append_value(status);
@@ -393,17 +443,32 @@ impl NearBlockMapper {
         };
 
         self.state_changes.canonical.append(identity);
-        self.state_changes.r#type.append_value(state_change_type_name(value));
-        self.state_changes.cause.append_value(state_change_cause_name(cause));
-        self.state_changes.account_id.append_value(state_change_account_id(value));
-        self.state_changes.key_base64.append_value(&state_change_key_base64(value));
-        self.state_changes.value_base64.append_value(&state_change_value_base64(value));
+        self.state_changes
+            .r#type
+            .append_value(state_change_type_name(value));
+        self.state_changes
+            .cause
+            .append_value(state_change_cause_name(cause));
+        self.state_changes
+            .account_id
+            .append_value(state_change_account_id(value));
+        self.state_changes
+            .key_base64
+            .append_value(&state_change_key_base64(value));
+        self.state_changes
+            .value_base64
+            .append_value(&state_change_value_base64(value));
         append_fork_step(&mut self.state_changes.fork_step, fork_step);
     }
 }
 
 impl BlockMapper for NearBlockMapper {
-    fn map_block(&mut self, block_bytes: &[u8], identity: &BlockIdentity, fork_step: Option<&str>) -> anyhow::Result<()> {
+    fn map_block(
+        &mut self,
+        block_bytes: &[u8],
+        identity: &BlockIdentity,
+        fork_step: Option<&str>,
+    ) -> anyhow::Result<()> {
         let block = near::Block::decode(block_bytes)?;
         self.map_near_block(&block, identity, fork_step);
         Ok(())
@@ -411,16 +476,33 @@ impl BlockMapper for NearBlockMapper {
 
     fn flush(&mut self) -> anyhow::Result<HashMap<String, RecordBatch>> {
         let mut result = HashMap::new();
-        result.insert("blocks".to_string(), self.blocks.finish(&self.blocks_schema)?);
-        result.insert("chunks".to_string(), self.chunks.finish(&self.chunks_schema)?);
-        result.insert("transactions".to_string(), self.transactions.finish(&self.transactions_schema)?);
-        result.insert("receipts".to_string(), self.receipts.finish(&self.receipts_schema)?);
-        result.insert("state_changes".to_string(), self.state_changes.finish(&self.state_changes_schema)?);
+        result.insert(
+            "blocks".to_string(),
+            self.blocks.finish(&self.blocks_schema)?,
+        );
+        result.insert(
+            "chunks".to_string(),
+            self.chunks.finish(&self.chunks_schema)?,
+        );
+        result.insert(
+            "transactions".to_string(),
+            self.transactions.finish(&self.transactions_schema)?,
+        );
+        result.insert(
+            "receipts".to_string(),
+            self.receipts.finish(&self.receipts_schema)?,
+        );
+        result.insert(
+            "state_changes".to_string(),
+            self.state_changes.finish(&self.state_changes_schema)?,
+        );
         Ok(result)
     }
 
     fn max_table_rows(&self) -> usize {
-        self.blocks.canonical.len()
+        self.blocks
+            .canonical
+            .len()
             .max(self.chunks.canonical.len())
             .max(self.transactions.canonical.len())
             .max(self.receipts.canonical.len())
@@ -485,10 +567,16 @@ impl BlockMapper for NearBlockMapper {
             + est_str(&self.state_changes.key_base64)
             + est_str(&self.state_changes.value_base64)
             + est_opt_str(&self.state_changes.fork_step);
-        [("blocks", blocks), ("chunks", chunks), ("transactions", transactions), ("receipts", receipts), ("state_changes", state_changes)]
-            .into_iter()
-            .max_by_key(|&(_, s)| s)
-            .unwrap_or(("blocks", 0))
+        [
+            ("blocks", blocks),
+            ("chunks", chunks),
+            ("transactions", transactions),
+            ("receipts", receipts),
+            ("state_changes", state_changes),
+        ]
+        .into_iter()
+        .max_by_key(|&(_, s)| s)
+        .unwrap_or(("blocks", 0))
     }
 
     fn table_names(&self) -> Vec<&str> {
@@ -741,15 +829,29 @@ mod tests {
             header: Some(near::BlockHeader {
                 height,
                 prev_height: height.saturating_sub(1),
-                epoch_id: Some(near::CryptoHash { bytes: vec![0xaa; 32] }),
-                next_epoch_id: Some(near::CryptoHash { bytes: vec![0xbb; 32] }),
-                hash: Some(near::CryptoHash { bytes: vec![0x01; 32] }),
-                prev_hash: Some(near::CryptoHash { bytes: vec![0x02; 32] }),
-                prev_state_root: Some(near::CryptoHash { bytes: vec![0x03; 32] }),
+                epoch_id: Some(near::CryptoHash {
+                    bytes: vec![0xaa; 32],
+                }),
+                next_epoch_id: Some(near::CryptoHash {
+                    bytes: vec![0xbb; 32],
+                }),
+                hash: Some(near::CryptoHash {
+                    bytes: vec![0x01; 32],
+                }),
+                prev_hash: Some(near::CryptoHash {
+                    bytes: vec![0x02; 32],
+                }),
+                prev_state_root: Some(near::CryptoHash {
+                    bytes: vec![0x03; 32],
+                }),
                 timestamp: 1_700_000_000,
                 timestamp_nanosec: 1_700_000_000_000_000_000,
-                gas_price: Some(near::BigInt { bytes: vec![0x05, 0xF5, 0xE1, 0x00] }), // 100_000_000
-                total_supply: Some(near::BigInt { bytes: vec![0x01, 0x00] }), // 256
+                gas_price: Some(near::BigInt {
+                    bytes: vec![0x05, 0xF5, 0xE1, 0x00],
+                }), // 100_000_000
+                total_supply: Some(near::BigInt {
+                    bytes: vec![0x01, 0x00],
+                }), // 256
                 chunks_included: 4,
                 latest_protocol_version: 60,
                 ..Default::default()
@@ -774,12 +876,16 @@ mod tests {
                             signer_id: "alice.near".to_string(),
                             receiver_id: "bob.near".to_string(),
                             nonce: 42,
-                            hash: Some(near::CryptoHash { bytes: vec![0x20; 32] }),
-                            actions: vec![
-                                near::Action { action: Some(near::action::Action::Transfer(near::TransferAction {
-                                    deposit: Some(near::BigInt { bytes: vec![0x01] }),
-                                })) },
-                            ],
+                            hash: Some(near::CryptoHash {
+                                bytes: vec![0x20; 32],
+                            }),
+                            actions: vec![near::Action {
+                                action: Some(near::action::Action::Transfer(
+                                    near::TransferAction {
+                                        deposit: Some(near::BigInt { bytes: vec![0x01] }),
+                                    },
+                                )),
+                            }],
                             ..Default::default()
                         }),
                         outcome: Some(near::IndexerExecutionOutcomeWithOptionalReceipt {
@@ -787,11 +893,15 @@ mod tests {
                                 outcome: Some(near::ExecutionOutcome {
                                     gas_burnt: 2_428_000_000_000,
                                     executor_id: "alice.near".to_string(),
-                                    status: Some(near::execution_outcome::Status::SuccessReceiptId(
-                                        near::SuccessReceiptIdExecutionStatus {
-                                            id: Some(near::CryptoHash { bytes: vec![0x30; 32] }),
-                                        },
-                                    )),
+                                    status: Some(
+                                        near::execution_outcome::Status::SuccessReceiptId(
+                                            near::SuccessReceiptIdExecutionStatus {
+                                                id: Some(near::CryptoHash {
+                                                    bytes: vec![0x30; 32],
+                                                }),
+                                            },
+                                        ),
+                                    ),
                                     ..Default::default()
                                 }),
                                 ..Default::default()
@@ -816,7 +926,9 @@ mod tests {
                     receipt: Some(near::Receipt {
                         predecessor_id: "alice.near".to_string(),
                         receiver_id: "bob.near".to_string(),
-                        receipt_id: Some(near::CryptoHash { bytes: vec![0x30; 32] }),
+                        receipt_id: Some(near::CryptoHash {
+                            bytes: vec![0x30; 32],
+                        }),
                         receipt: None,
                     }),
                 }],
@@ -829,7 +941,9 @@ mod tests {
                             account: Some(near::Account {
                                 amount: Some(near::BigInt { bytes: vec![0x01] }),
                                 locked: Some(near::BigInt { bytes: vec![] }),
-                                code_hash: Some(near::CryptoHash { bytes: vec![0x00; 32] }),
+                                code_hash: Some(near::CryptoHash {
+                                    bytes: vec![0x00; 32],
+                                }),
                                 storage_usage: 100,
                             }),
                         },
@@ -838,7 +952,9 @@ mod tests {
                 cause: Some(near::StateChangeCause {
                     cause: Some(near::state_change_cause::Cause::TransactionProcessing(
                         near::state_change_cause::TransactionProcessing {
-                            tx_hash: Some(near::CryptoHash { bytes: vec![0x20; 32] }),
+                            tx_hash: Some(near::CryptoHash {
+                                bytes: vec![0x20; 32],
+                            }),
                         },
                     )),
                 }),
@@ -852,7 +968,9 @@ mod tests {
         let block = make_test_block(100);
         let block_bytes = prost::Message::encode_to_vec(&block);
         let mut mapper = NearBlockMapper::new(false, EncodeBytes::Hex, false);
-        mapper.map_block(&block_bytes, &BlockIdentity::default(), None).unwrap();
+        mapper
+            .map_block(&block_bytes, &BlockIdentity::default(), None)
+            .unwrap();
 
         let batches = mapper.flush().unwrap();
         assert_eq!(batches["blocks"].num_rows(), 1);
@@ -868,8 +986,12 @@ mod tests {
             author: "test.near".to_string(),
             header: Some(near::BlockHeader {
                 height: 1,
-                hash: Some(near::CryptoHash { bytes: vec![0x01; 32] }),
-                prev_hash: Some(near::CryptoHash { bytes: vec![0x00; 32] }),
+                hash: Some(near::CryptoHash {
+                    bytes: vec![0x01; 32],
+                }),
+                prev_hash: Some(near::CryptoHash {
+                    bytes: vec![0x00; 32],
+                }),
                 timestamp: 1_700_000_000,
                 ..Default::default()
             }),
@@ -879,7 +1001,9 @@ mod tests {
         };
         let block_bytes = prost::Message::encode_to_vec(&block);
         let mut mapper = NearBlockMapper::new(false, EncodeBytes::Hex, false);
-        mapper.map_block(&block_bytes, &BlockIdentity::default(), None).unwrap();
+        mapper
+            .map_block(&block_bytes, &BlockIdentity::default(), None)
+            .unwrap();
         let batches = mapper.flush().unwrap();
         assert_eq!(batches["blocks"].num_rows(), 1);
         assert_eq!(batches["chunks"].num_rows(), 0);
@@ -893,7 +1017,9 @@ mod tests {
         let block = make_test_block(100);
         let block_bytes = prost::Message::encode_to_vec(&block);
         let mut mapper = NearBlockMapper::new(false, EncodeBytes::Hex, false);
-        mapper.map_block(&block_bytes, &BlockIdentity::default(), None).unwrap();
+        mapper
+            .map_block(&block_bytes, &BlockIdentity::default(), None)
+            .unwrap();
         let _ = mapper.flush().unwrap();
         assert_eq!(mapper.max_table_rows(), 0);
     }
@@ -914,13 +1040,19 @@ mod tests {
         let block = make_test_block(100);
         let block_bytes = prost::Message::encode_to_vec(&block);
         let mut mapper = NearBlockMapper::new(true, EncodeBytes::Hex, false);
-        mapper.map_block(&block_bytes, &BlockIdentity::default(), Some("FINAL")).unwrap();
+        mapper
+            .map_block(&block_bytes, &BlockIdentity::default(), Some("FINAL"))
+            .unwrap();
 
         let batches = mapper.flush().unwrap();
         let blocks_batch = &batches["blocks"];
         let last_col = blocks_batch.num_columns() - 1;
         assert_eq!(blocks_batch.schema().field(last_col).name(), "fork_step");
-        let fork_col = blocks_batch.column(last_col).as_any().downcast_ref::<StringArray>().unwrap();
+        let fork_col = blocks_batch
+            .column(last_col)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
         assert_eq!(fork_col.value(0), "FINAL");
     }
 
@@ -930,8 +1062,12 @@ mod tests {
             author: "test.near".to_string(),
             header: Some(near::BlockHeader {
                 height: 200,
-                hash: Some(near::CryptoHash { bytes: vec![0x01; 32] }),
-                prev_hash: Some(near::CryptoHash { bytes: vec![0x00; 32] }),
+                hash: Some(near::CryptoHash {
+                    bytes: vec![0x01; 32],
+                }),
+                prev_hash: Some(near::CryptoHash {
+                    bytes: vec![0x00; 32],
+                }),
                 timestamp: 1_700_000_000,
                 ..Default::default()
             }),
@@ -949,7 +1085,9 @@ mod tests {
                 cause: Some(near::StateChangeCause {
                     cause: Some(near::state_change_cause::Cause::ReceiptProcessing(
                         near::state_change_cause::ReceiptProcessing {
-                            tx_hash: Some(near::CryptoHash { bytes: vec![0x20; 32] }),
+                            tx_hash: Some(near::CryptoHash {
+                                bytes: vec![0x20; 32],
+                            }),
                         },
                     )),
                 }),
@@ -958,23 +1096,45 @@ mod tests {
         };
         let block_bytes = prost::Message::encode_to_vec(&block);
         let mut mapper = NearBlockMapper::new(false, EncodeBytes::Hex, false);
-        mapper.map_block(&block_bytes, &BlockIdentity::default(), None).unwrap();
+        mapper
+            .map_block(&block_bytes, &BlockIdentity::default(), None)
+            .unwrap();
         let batches = mapper.flush().unwrap();
         let sc_batch = &batches["state_changes"];
         assert_eq!(sc_batch.num_rows(), 1);
 
         // Verify type and cause
-        let type_col = sc_batch.column(6).as_any().downcast_ref::<StringArray>().unwrap();
+        let type_col = sc_batch
+            .column(6)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
         assert_eq!(type_col.value(0), "DataUpdate");
-        let cause_col = sc_batch.column(7).as_any().downcast_ref::<StringArray>().unwrap();
+        let cause_col = sc_batch
+            .column(7)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
         assert_eq!(cause_col.value(0), "ReceiptProcessing");
-        let account_col = sc_batch.column(8).as_any().downcast_ref::<StringArray>().unwrap();
+        let account_col = sc_batch
+            .column(8)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
         assert_eq!(account_col.value(0), "contract.near");
         // key_base64 for "mykey" is "bXlrZXk="
-        let key_col = sc_batch.column(9).as_any().downcast_ref::<StringArray>().unwrap();
+        let key_col = sc_batch
+            .column(9)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
         assert_eq!(key_col.value(0), "bXlrZXk=");
         // value_base64 for "myvalue" is "bXl2YWx1ZQ=="
-        let val_col = sc_batch.column(10).as_any().downcast_ref::<StringArray>().unwrap();
+        let val_col = sc_batch
+            .column(10)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
         assert_eq!(val_col.value(0), "bXl2YWx1ZQ==");
     }
 
@@ -982,10 +1142,23 @@ mod tests {
     fn test_bigint_to_string() {
         assert_eq!(bigint_to_string(&None), "0");
         assert_eq!(bigint_to_string(&Some(near::BigInt { bytes: vec![] })), "0");
-        assert_eq!(bigint_to_string(&Some(near::BigInt { bytes: vec![0x01] })), "1");
-        assert_eq!(bigint_to_string(&Some(near::BigInt { bytes: vec![0x01, 0x00] })), "256");
+        assert_eq!(
+            bigint_to_string(&Some(near::BigInt { bytes: vec![0x01] })),
+            "1"
+        );
+        assert_eq!(
+            bigint_to_string(&Some(near::BigInt {
+                bytes: vec![0x01, 0x00]
+            })),
+            "256"
+        );
         // 100_000_000 = 0x05F5E100
-        assert_eq!(bigint_to_string(&Some(near::BigInt { bytes: vec![0x05, 0xF5, 0xE1, 0x00] })), "100000000");
+        assert_eq!(
+            bigint_to_string(&Some(near::BigInt {
+                bytes: vec![0x05, 0xF5, 0xE1, 0x00]
+            })),
+            "100000000"
+        );
     }
 
     fn hex(bytes: &[u8]) -> String {

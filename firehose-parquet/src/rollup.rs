@@ -34,9 +34,7 @@ pub fn parse_rollup_target(s: &str) -> Result<RollupTarget> {
     match s.to_lowercase().as_str() {
         "hour" | "hourly" => Ok(RollupTarget::Hour),
         "date" | "daily" | "day" => Ok(RollupTarget::Date),
-        other => anyhow::bail!(
-            "invalid --target-partition '{other}': expected one of: hour, date"
-        ),
+        other => anyhow::bail!("invalid --target-partition '{other}': expected one of: hour, date"),
     }
 }
 
@@ -68,7 +66,10 @@ pub fn run_rollup(config: &RollupConfig) -> Result<()> {
 fn run_rollup_local(config: &RollupConfig) -> Result<()> {
     let source = PathBuf::from(&config.source);
     if !source.is_dir() {
-        anyhow::bail!("source path does not exist or is not a directory: {}", source.display());
+        anyhow::bail!(
+            "source path does not exist or is not a directory: {}",
+            source.display()
+        );
     }
 
     let output = PathBuf::from(&config.output);
@@ -109,7 +110,11 @@ fn run_rollup_local(config: &RollupConfig) -> Result<()> {
                 .with_context(|| format!("opening {}", file_path.display()))?;
             let builder = ParquetRecordBatchReaderBuilder::try_new(file)?;
             if file_kv_metadata.is_none() {
-                file_kv_metadata = builder.metadata().file_metadata().key_value_metadata().cloned();
+                file_kv_metadata = builder
+                    .metadata()
+                    .file_metadata()
+                    .key_value_metadata()
+                    .cloned();
             }
             let reader = builder.build()?;
             for batch_result in reader {
@@ -152,7 +157,10 @@ fn run_rollup_local(config: &RollupConfig) -> Result<()> {
 
     // Delete source files after all groups are successfully written.
     if config.delete_source && !source_files_to_delete.is_empty() {
-        info!(files = source_files_to_delete.len(), "deleting source files");
+        info!(
+            files = source_files_to_delete.len(),
+            "deleting source files"
+        );
         for f in &source_files_to_delete {
             std::fs::remove_file(f)
                 .with_context(|| format!("deleting source file {}", f.display()))?;
@@ -297,7 +305,10 @@ fn compute_group_key(rel_path: &str, target: RollupTarget) -> String {
         match target {
             RollupTarget::Date => {
                 // Keep table name and date= component, drop hour=/minute=/second=.
-                if part.starts_with("hour=") || part.starts_with("minute=") || part.starts_with("second=") {
+                if part.starts_with("hour=")
+                    || part.starts_with("minute=")
+                    || part.starts_with("second=")
+                {
                     continue;
                 }
                 kept.push(part);
@@ -354,15 +365,17 @@ fn cleanup_empty_dirs(dir: &Path) -> Result<()> {
     Ok(())
 }
 
-fn writer_properties(compression: Compression, kv_metadata: Option<&[KeyValue]>) -> WriterProperties {
+fn writer_properties(
+    compression: Compression,
+    kv_metadata: Option<&[KeyValue]>,
+) -> WriterProperties {
     let pq_compression = match compression {
         Compression::None => PqCompression::UNCOMPRESSED,
         Compression::Snappy => PqCompression::SNAPPY,
         Compression::Gzip => PqCompression::GZIP(Default::default()),
         Compression::Zstd => PqCompression::ZSTD(ZstdLevel::try_new(3).unwrap()),
     };
-    let mut builder = WriterProperties::builder()
-        .set_compression(pq_compression);
+    let mut builder = WriterProperties::builder().set_compression(pq_compression);
     if let Some(kvs) = kv_metadata {
         if !kvs.is_empty() {
             builder = builder.set_key_value_metadata(Some(kvs.to_vec()));
@@ -380,7 +393,9 @@ fn run_rollup_s3(config: &RollupConfig) -> Result<()> {
 
     use crate::cli::block_on_async;
 
-    let aws = config.aws.as_ref()
+    let aws = config
+        .aws
+        .as_ref()
         .ok_or_else(|| anyhow::anyhow!("AWS config required for S3 rollup"))?;
 
     // Build S3 client for source.
@@ -404,7 +419,8 @@ fn run_rollup_s3(config: &RollupConfig) -> Result<()> {
             Some(object_store::path::Path::from(src_prefix.as_str()))
         };
         src_client.list(prefix.as_ref()).try_collect().await
-    }).map_err(|e| anyhow::anyhow!("listing S3 objects: {e}"))?;
+    })
+    .map_err(|e| anyhow::anyhow!("listing S3 objects: {e}"))?;
 
     let mut parquet_keys: Vec<String> = objects
         .iter()
@@ -423,7 +439,8 @@ fn run_rollup_s3(config: &RollupConfig) -> Result<()> {
     // Group by target partition. Strip source prefix for relative paths.
     let mut groups: BTreeMap<String, Vec<String>> = BTreeMap::new();
     for key in &parquet_keys {
-        let rel = key.strip_prefix(&src_prefix)
+        let rel = key
+            .strip_prefix(&src_prefix)
             .map(|s| s.trim_start_matches('/'))
             .unwrap_or(key);
         let group_key = compute_group_key(rel, config.target);
@@ -445,11 +462,16 @@ fn run_rollup_s3(config: &RollupConfig) -> Result<()> {
             let data = block_on_async(async {
                 let path = object_store::path::Path::from(s3_key.as_str());
                 src_client.get(&path).await?.bytes().await
-            }).map_err(|e| anyhow::anyhow!("reading s3://{src_bucket}/{s3_key}: {e}"))?;
+            })
+            .map_err(|e| anyhow::anyhow!("reading s3://{src_bucket}/{s3_key}: {e}"))?;
 
             let builder = ParquetRecordBatchReaderBuilder::try_new(data)?;
             if file_kv_metadata.is_none() {
-                file_kv_metadata = builder.metadata().file_metadata().key_value_metadata().cloned();
+                file_kv_metadata = builder
+                    .metadata()
+                    .file_metadata()
+                    .key_value_metadata()
+                    .cloned();
             }
             let reader = builder.build()?;
             for batch_result in reader {
@@ -492,12 +514,16 @@ fn run_rollup_s3(config: &RollupConfig) -> Result<()> {
 
     // Delete source objects.
     if config.delete_source && !source_keys_to_delete.is_empty() {
-        info!(files = source_keys_to_delete.len(), "deleting source files from S3");
+        info!(
+            files = source_keys_to_delete.len(),
+            "deleting source files from S3"
+        );
         for key in &source_keys_to_delete {
             block_on_async(async {
                 let path = object_store::path::Path::from(key.as_str());
                 src_client.delete(&path).await
-            }).map_err(|e| anyhow::anyhow!("deleting s3://{src_bucket}/{key}: {e}"))?;
+            })
+            .map_err(|e| anyhow::anyhow!("deleting s3://{src_bucket}/{key}: {e}"))?;
         }
     }
 
@@ -548,8 +574,12 @@ fn write_merged_batches_s3(
         let payload = object_store::PutPayload::from(bytes::Bytes::from(data));
         let client = Arc::clone(client);
         let cc = cache_control.to_string();
-        block_on_async(async { client.put_opts(&path, payload, crate::writer::s3_put_options(&cc)).await })
-            .map_err(|e| anyhow::anyhow!("uploading s3://{bucket}/{key}: {e}"))?;
+        block_on_async(async {
+            client
+                .put_opts(&path, payload, crate::writer::s3_put_options(&cc))
+                .await
+        })
+        .map_err(|e| anyhow::anyhow!("uploading s3://{bucket}/{key}: {e}"))?;
         info!(path = %key, size = %format_bytes(size as u64), "wrote merged file to S3");
         Ok(())
     };
@@ -615,15 +645,24 @@ mod tests {
     #[test]
     fn test_compute_group_key_date() {
         assert_eq!(
-            compute_group_key("blocks/year=2024/month=01/date=15/hour=14/minute=30/part-000001.parquet", RollupTarget::Date),
+            compute_group_key(
+                "blocks/year=2024/month=01/date=15/hour=14/minute=30/part-000001.parquet",
+                RollupTarget::Date
+            ),
             "blocks/year=2024/month=01/date=15"
         );
         assert_eq!(
-            compute_group_key("blocks/year=2024/month=01/date=15/hour=14/part-000001.parquet", RollupTarget::Date),
+            compute_group_key(
+                "blocks/year=2024/month=01/date=15/hour=14/part-000001.parquet",
+                RollupTarget::Date
+            ),
             "blocks/year=2024/month=01/date=15"
         );
         assert_eq!(
-            compute_group_key("blocks/year=2024/month=01/date=15/part-000001.parquet", RollupTarget::Date),
+            compute_group_key(
+                "blocks/year=2024/month=01/date=15/part-000001.parquet",
+                RollupTarget::Date
+            ),
             "blocks/year=2024/month=01/date=15"
         );
     }
@@ -631,11 +670,17 @@ mod tests {
     #[test]
     fn test_compute_group_key_hour() {
         assert_eq!(
-            compute_group_key("blocks/year=2024/month=01/date=15/hour=14/minute=30/part-000001.parquet", RollupTarget::Hour),
+            compute_group_key(
+                "blocks/year=2024/month=01/date=15/hour=14/minute=30/part-000001.parquet",
+                RollupTarget::Hour
+            ),
             "blocks/year=2024/month=01/date=15/hour=14"
         );
         assert_eq!(
-            compute_group_key("blocks/year=2024/month=01/date=15/hour=14/part-000001.parquet", RollupTarget::Hour),
+            compute_group_key(
+                "blocks/year=2024/month=01/date=15/hour=14/part-000001.parquet",
+                RollupTarget::Hour
+            ),
             "blocks/year=2024/month=01/date=15/hour=14"
         );
     }
@@ -650,9 +695,11 @@ mod tests {
     }
 
     fn make_test_batch(rows: usize) -> RecordBatch {
-        let schema = Arc::new(Schema::new(vec![
-            Field::new("block_number", DataType::UInt64, false),
-        ]));
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "block_number",
+            DataType::UInt64,
+            false,
+        )]));
         let mut builder = UInt64Builder::new();
         for i in 0..rows {
             builder.append_value(i as u64);
@@ -666,8 +713,12 @@ mod tests {
         let output = tempfile::tempdir().unwrap();
 
         // Create minute-partitioned source files.
-        let dir1 = source.path().join("blocks/date=2024-01-15/hour=14/minute=30");
-        let dir2 = source.path().join("blocks/date=2024-01-15/hour=14/minute=31");
+        let dir1 = source
+            .path()
+            .join("blocks/date=2024-01-15/hour=14/minute=30");
+        let dir2 = source
+            .path()
+            .join("blocks/date=2024-01-15/hour=14/minute=31");
         std::fs::create_dir_all(&dir1).unwrap();
         std::fs::create_dir_all(&dir2).unwrap();
 
@@ -749,7 +800,9 @@ mod tests {
         let output = tempfile::tempdir().unwrap();
 
         // Create a source file with enough rows that splitting should occur.
-        let dir = source.path().join("blocks/date=2024-01-15/hour=14/minute=00");
+        let dir = source
+            .path()
+            .join("blocks/date=2024-01-15/hour=14/minute=00");
         std::fs::create_dir_all(&dir).unwrap();
         write_test_parquet(&dir.join("part-000001.parquet"), &make_test_batch(10000));
 
@@ -769,7 +822,11 @@ mod tests {
         let out_dir = output.path().join("blocks/date=2024-01-15/hour=14");
         let mut out_files = Vec::new();
         collect_parquet_files_recursive(&out_dir, &mut out_files).unwrap();
-        assert!(out_files.len() > 1, "should have split into multiple files, got {}", out_files.len());
+        assert!(
+            out_files.len() > 1,
+            "should have split into multiple files, got {}",
+            out_files.len()
+        );
 
         // Total rows should still be 10000.
         let mut total = 0;
@@ -784,7 +841,9 @@ mod tests {
     fn test_rollup_local_delete_source() {
         let source = tempfile::tempdir().unwrap();
 
-        let dir = source.path().join("blocks/date=2024-01-15/hour=14/minute=30");
+        let dir = source
+            .path()
+            .join("blocks/date=2024-01-15/hour=14/minute=30");
         std::fs::create_dir_all(&dir).unwrap();
         write_test_parquet(&dir.join("part-000001.parquet"), &make_test_batch(5));
 
@@ -825,7 +884,11 @@ mod tests {
     fn read_parquet_kv_metadata(path: &Path) -> Option<Vec<KeyValue>> {
         let file = std::fs::File::open(path).unwrap();
         let builder = ParquetRecordBatchReaderBuilder::try_new(file).unwrap();
-        builder.metadata().file_metadata().key_value_metadata().cloned()
+        builder
+            .metadata()
+            .file_metadata()
+            .key_value_metadata()
+            .cloned()
     }
 
     #[test]
@@ -833,18 +896,36 @@ mod tests {
         let source = tempfile::tempdir().unwrap();
         let output = tempfile::tempdir().unwrap();
 
-        let dir1 = source.path().join("blocks/date=2024-01-15/hour=14/minute=30");
-        let dir2 = source.path().join("blocks/date=2024-01-15/hour=14/minute=31");
+        let dir1 = source
+            .path()
+            .join("blocks/date=2024-01-15/hour=14/minute=30");
+        let dir2 = source
+            .path()
+            .join("blocks/date=2024-01-15/hour=14/minute=31");
         std::fs::create_dir_all(&dir1).unwrap();
         std::fs::create_dir_all(&dir2).unwrap();
 
         let kvs = vec![
-            KeyValue::new("firehose-parquet.version".to_string(), Some("0.1.0".to_string())),
-            KeyValue::new("firehose-parquet.chain_name".to_string(), Some("eth".to_string())),
+            KeyValue::new(
+                "firehose-parquet.version".to_string(),
+                Some("0.1.0".to_string()),
+            ),
+            KeyValue::new(
+                "firehose-parquet.chain_name".to_string(),
+                Some("eth".to_string()),
+            ),
         ];
 
-        write_test_parquet_with_metadata(&dir1.join("part-000001.parquet"), &make_test_batch(10), kvs.clone());
-        write_test_parquet_with_metadata(&dir2.join("part-000001.parquet"), &make_test_batch(20), kvs.clone());
+        write_test_parquet_with_metadata(
+            &dir1.join("part-000001.parquet"),
+            &make_test_batch(10),
+            kvs.clone(),
+        );
+        write_test_parquet_with_metadata(
+            &dir2.join("part-000001.parquet"),
+            &make_test_batch(20),
+            kvs.clone(),
+        );
 
         let config = RollupConfig {
             source: source.path().to_string_lossy().to_string(),
@@ -866,7 +947,12 @@ mod tests {
 
         // Verify metadata is preserved.
         let out_kvs = read_parquet_kv_metadata(&out_files[0]).expect("metadata should be present");
-        let find = |key: &str| out_kvs.iter().find(|kv| kv.key == key).and_then(|kv| kv.value.clone());
+        let find = |key: &str| {
+            out_kvs
+                .iter()
+                .find(|kv| kv.key == key)
+                .and_then(|kv| kv.value.clone())
+        };
         assert_eq!(find("firehose-parquet.version"), Some("0.1.0".to_string()));
         assert_eq!(find("firehose-parquet.chain_name"), Some("eth".to_string()));
     }
@@ -876,14 +962,21 @@ mod tests {
         let source = tempfile::tempdir().unwrap();
         let output = tempfile::tempdir().unwrap();
 
-        let dir = source.path().join("blocks/date=2024-01-15/hour=14/minute=00");
+        let dir = source
+            .path()
+            .join("blocks/date=2024-01-15/hour=14/minute=00");
         std::fs::create_dir_all(&dir).unwrap();
 
-        let kvs = vec![
-            KeyValue::new("firehose-parquet.version".to_string(), Some("0.1.0".to_string())),
-        ];
+        let kvs = vec![KeyValue::new(
+            "firehose-parquet.version".to_string(),
+            Some("0.1.0".to_string()),
+        )];
 
-        write_test_parquet_with_metadata(&dir.join("part-000001.parquet"), &make_test_batch(10000), kvs);
+        write_test_parquet_with_metadata(
+            &dir.join("part-000001.parquet"),
+            &make_test_batch(10000),
+            kvs,
+        );
 
         let config = RollupConfig {
             source: source.path().to_string_lossy().to_string(),
@@ -906,7 +999,12 @@ mod tests {
         // Verify all output files have metadata.
         for f in &out_files {
             let out_kvs = read_parquet_kv_metadata(f).expect("metadata should be present");
-            let find = |key: &str| out_kvs.iter().find(|kv| kv.key == key).and_then(|kv| kv.value.clone());
+            let find = |key: &str| {
+                out_kvs
+                    .iter()
+                    .find(|kv| kv.key == key)
+                    .and_then(|kv| kv.value.clone())
+            };
             assert_eq!(find("firehose-parquet.version"), Some("0.1.0".to_string()));
         }
     }

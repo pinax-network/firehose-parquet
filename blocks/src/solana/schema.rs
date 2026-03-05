@@ -70,11 +70,7 @@ pub fn messages_schema(include_fork_step: bool, encoding: &EncodeBytes) -> Schem
         Field::new("num_readonly_unsigned_accounts", DataType::UInt32, false),
         Field::new("recent_blockhash", bytes_data_type(encoding), false),
         Field::new("versioned", DataType::Boolean, false),
-        Field::new(
-            "account_keys",
-            BytesListColumn::data_type(encoding),
-            false,
-        ),
+        Field::new("account_keys", BytesListColumn::data_type(encoding), false),
         Field::new(
             "loaded_writable_addresses",
             BytesListColumn::data_type(encoding),

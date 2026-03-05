@@ -36,63 +36,151 @@ pub fn block_on_async<F: std::future::Future>(f: F) -> F::Output {
 #[derive(Args, Debug, Clone)]
 pub struct CommonArgs {
     /// Firehose gRPC endpoint URL
-    #[arg(short = 'e', long, env = "ENDPOINT", hide_env_values = true, help_heading = "Connection")]
+    #[arg(
+        short = 'e',
+        long,
+        env = "ENDPOINT",
+        hide_env_values = true,
+        help_heading = "Connection"
+    )]
     pub endpoint: Option<String>,
 
     /// Name of environment variable containing the API key for authentication
-    #[arg(long, env = "API_KEY_ENVVAR", default_value = "SUBSTREAMS_API_KEY", hide_env_values = true, help_heading = "Connection")]
+    #[arg(
+        long,
+        env = "API_KEY_ENVVAR",
+        default_value = "SUBSTREAMS_API_KEY",
+        hide_env_values = true,
+        help_heading = "Connection"
+    )]
     pub api_key_envvar: String,
 
     /// Name of environment variable containing the JWT bearer token for authentication
-    #[arg(long, env = "API_TOKEN_ENVVAR", default_value = "SUBSTREAMS_API_TOKEN", hide_env_values = true, help_heading = "Connection")]
+    #[arg(
+        long,
+        env = "API_TOKEN_ENVVAR",
+        default_value = "SUBSTREAMS_API_TOKEN",
+        hide_env_values = true,
+        help_heading = "Connection"
+    )]
     pub api_token_envvar: String,
 
     /// Start block number (inclusive)
-    #[arg(short = 's', long, env = "START_BLOCK", hide_env_values = true, help_heading = "Block Range")]
+    #[arg(
+        short = 's',
+        long,
+        env = "START_BLOCK",
+        hide_env_values = true,
+        help_heading = "Block Range"
+    )]
     pub start_block: Option<u64>,
 
     /// Stop block number (exclusive, 0 = stream forever)
-    #[arg(short = 't', long, env = "STOP_BLOCK", hide_env_values = true, help_heading = "Block Range")]
+    #[arg(
+        short = 't',
+        long,
+        env = "STOP_BLOCK",
+        hide_env_values = true,
+        help_heading = "Block Range"
+    )]
     pub stop_block: Option<u64>,
 
     /// Path to cursor parquet file for resuming a previous session (must end in .parquet)
-    #[arg(short = 'c', long, env = "CURSOR", default_value = "cursor.parquet", hide_env_values = true, help_heading = "Block Range")]
+    #[arg(
+        short = 'c',
+        long,
+        env = "CURSOR",
+        default_value = "cursor.parquet",
+        hide_env_values = true,
+        help_heading = "Block Range"
+    )]
     pub cursor: PathBuf,
 
     /// Only process finalized blocks (when false, adds fork_step column)
-    #[arg(long, env = "FINAL_BLOCKS_ONLY", default_value = "true", hide_env_values = true, help_heading = "Block Range")]
+    #[arg(
+        long,
+        env = "FINAL_BLOCKS_ONLY",
+        default_value = "true",
+        hide_env_values = true,
+        help_heading = "Block Range"
+    )]
     pub final_blocks_only: bool,
 
     /// Output directory
-    #[arg(long, env = "OUTPUT", default_value = ".", hide_env_values = true, help_heading = "Output")]
+    #[arg(
+        long,
+        env = "OUTPUT",
+        default_value = ".",
+        hide_env_values = true,
+        help_heading = "Output"
+    )]
     pub output: PathBuf,
 
     /// Partitioning mode: none, block_range, date, hour, minute, second
-    #[arg(long, env = "PARTITION", default_value = "none", hide_env_values = true, help_heading = "Output")]
+    #[arg(
+        long,
+        env = "PARTITION",
+        default_value = "none",
+        hide_env_values = true,
+        help_heading = "Output"
+    )]
     pub partition: String,
 
     /// Block range size when partition=block_range
-    #[arg(long, env = "BLOCK_RANGE_SIZE", default_value = "10000", hide_env_values = true, help_heading = "Output")]
+    #[arg(
+        long,
+        env = "BLOCK_RANGE_SIZE",
+        default_value = "10000",
+        hide_env_values = true,
+        help_heading = "Output"
+    )]
     pub block_range_size: u64,
 
     /// Compression codec: zstd, snappy, gzip, none
-    #[arg(long, env = "COMPRESSION", default_value = "zstd", hide_env_values = true, help_heading = "Output")]
+    #[arg(
+        long,
+        env = "COMPRESSION",
+        default_value = "zstd",
+        hide_env_values = true,
+        help_heading = "Output"
+    )]
     pub compression: String,
 
     /// Max rows per file before flush (disabled by default)
-    #[arg(long, env = "FLUSH_ROWS", hide_env_values = true, help_heading = "Flush")]
+    #[arg(
+        long,
+        env = "FLUSH_ROWS",
+        hide_env_values = true,
+        help_heading = "Flush"
+    )]
     pub flush_rows: Option<u32>,
 
     /// Max bytes per file before flush (0 = disabled)
-    #[arg(long, env = "FLUSH_BYTES", default_value = "134217728", hide_env_values = true, help_heading = "Flush")]
+    #[arg(
+        long,
+        env = "FLUSH_BYTES",
+        default_value = "134217728",
+        hide_env_values = true,
+        help_heading = "Flush"
+    )]
     pub flush_bytes: u64,
 
     /// Time-based flush interval in seconds (disabled by default)
-    #[arg(long, env = "FLUSH_INTERVAL_SECS", hide_env_values = true, help_heading = "Flush")]
+    #[arg(
+        long,
+        env = "FLUSH_INTERVAL_SECS",
+        hide_env_values = true,
+        help_heading = "Flush"
+    )]
     pub flush_interval_secs: Option<u64>,
 
     /// Log level: trace, debug, info, warn, error
-    #[arg(long, env = "LOG_LEVEL", default_value = "info", hide_env_values = true)]
+    #[arg(
+        long,
+        env = "LOG_LEVEL",
+        default_value = "info",
+        hide_env_values = true
+    )]
     pub log_level: String,
 
     /// Decode and map but don't write files
@@ -104,39 +192,87 @@ pub struct CommonArgs {
     pub metrics_port: Option<u16>,
 
     /// Force a reconnect if no stream message is received for N seconds
-    #[arg(long, env = "STREAM_IDLE_TIMEOUT_SECS", default_value = "120", hide_env_values = true, help_heading = "Connection")]
+    #[arg(
+        long,
+        env = "STREAM_IDLE_TIMEOUT_SECS",
+        default_value = "120",
+        hide_env_values = true,
+        help_heading = "Connection"
+    )]
     pub stream_idle_timeout_secs: Option<u64>,
 
     /// Exit with an error if reconnecting continuously for N seconds
-    #[arg(long, env = "RECONNECT_STALL_TIMEOUT_SECS", default_value = "900", hide_env_values = true, help_heading = "Connection")]
+    #[arg(
+        long,
+        env = "RECONNECT_STALL_TIMEOUT_SECS",
+        default_value = "900",
+        hide_env_values = true,
+        help_heading = "Connection"
+    )]
     pub reconnect_stall_timeout_secs: Option<u64>,
 
     /// AWS access key ID (for S3 output)
-    #[arg(long, env = "AWS_ACCESS_KEY_ID", hide_env_values = true, help_heading = "AWS / S3")]
+    #[arg(
+        long,
+        env = "AWS_ACCESS_KEY_ID",
+        hide_env_values = true,
+        help_heading = "AWS / S3"
+    )]
     pub aws_access_key_id: Option<String>,
 
     /// AWS secret access key (for S3 output)
-    #[arg(long, env = "AWS_SECRET_ACCESS_KEY", hide_env_values = true, help_heading = "AWS / S3")]
+    #[arg(
+        long,
+        env = "AWS_SECRET_ACCESS_KEY",
+        hide_env_values = true,
+        help_heading = "AWS / S3"
+    )]
     pub aws_secret_access_key: Option<String>,
 
     /// AWS session token (for S3 output)
-    #[arg(long, env = "AWS_SESSION_TOKEN", hide_env_values = true, help_heading = "AWS / S3")]
+    #[arg(
+        long,
+        env = "AWS_SESSION_TOKEN",
+        hide_env_values = true,
+        help_heading = "AWS / S3"
+    )]
     pub aws_session_token: Option<String>,
 
     /// AWS region (for S3 output)
-    #[arg(long, env = "AWS_REGION", hide_env_values = true, help_heading = "AWS / S3")]
+    #[arg(
+        long,
+        env = "AWS_REGION",
+        hide_env_values = true,
+        help_heading = "AWS / S3"
+    )]
     pub aws_region: Option<String>,
 
     /// AWS endpoint URL (for S3-compatible services)
-    #[arg(long, env = "AWS_ENDPOINT_URL_S3", hide_env_values = true, help_heading = "AWS / S3")]
+    #[arg(
+        long,
+        env = "AWS_ENDPOINT_URL_S3",
+        hide_env_values = true,
+        help_heading = "AWS / S3"
+    )]
     pub aws_endpoint_url: Option<String>,
 
     /// S3 bucket name (when set, output is written to s3://<bucket>/<output>)
-    #[arg(long, env = "S3_BUCKET", hide_env_values = true, help_heading = "AWS / S3")]
+    #[arg(
+        long,
+        env = "S3_BUCKET",
+        hide_env_values = true,
+        help_heading = "AWS / S3"
+    )]
     pub s3_bucket: Option<String>,
 
     /// Cache-Control header for S3 uploads (empty string = no header)
-    #[arg(long, env = "CACHE_CONTROL", default_value = "public, max-age=31536000, immutable", hide_env_values = true, help_heading = "AWS / S3")]
+    #[arg(
+        long,
+        env = "CACHE_CONTROL",
+        default_value = "public, max-age=31536000, immutable",
+        hide_env_values = true,
+        help_heading = "AWS / S3"
+    )]
     pub cache_control: String,
 }
 
@@ -233,6 +369,62 @@ Examples:
         #[arg(long, env = "AWS_ENDPOINT_URL_S3", hide_env_values = true)]
         aws_endpoint_url: Option<String>,
     },
+    /// Verify deterministic partition merkle roots for table parquet data.
+    ///
+    /// Reads parquet data, computes partition-level roots, compares to
+    /// `merkle_roots.parquet`, and optionally writes missing/updated entries.
+    #[command(after_long_help = "\
+Examples:
+  # Verify EVM blocks and auto-create missing root registry entries
+  firehose-parquet verify ./output/evm/mainnet/blocks --chain evm --table blocks
+
+  # Continue scanning all partitions (no fail-fast) and emit JSON report
+  firehose-parquet verify ./output/evm/mainnet/blocks --no-fail-fast --report-json verify-report.json
+
+  # Verify S3 parquet data with explicit registry location
+  firehose-parquet verify s3://bucket/evm/mainnet/blocks \\
+    --registry-path s3://bucket/evm/mainnet/merkle_roots.parquet
+
+  # Update mismatched registry roots (default behavior only fills missing roots)
+  firehose-parquet verify ./output/evm/mainnet/blocks --update-registry
+")]
+    Verify {
+        /// Path to a directory of .parquet files, a single parquet file, or an S3 URI
+        path: String,
+        /// Chain identifier used in root registry keys
+        #[arg(long, default_value = "evm")]
+        chain: String,
+        /// Table name used in root registry keys
+        #[arg(long, default_value = "blocks")]
+        table: String,
+        /// Continue scanning and aggregate findings instead of failing on first mismatch
+        #[arg(long, default_value = "false")]
+        no_fail_fast: bool,
+        /// Optional path to write a JSON verification report
+        #[arg(long)]
+        report_json: Option<PathBuf>,
+        /// Explicit merkle roots registry path (local or s3://)
+        #[arg(long)]
+        registry_path: Option<String>,
+        /// Overwrite mismatched roots in the registry with computed values
+        #[arg(long, default_value = "false")]
+        update_registry: bool,
+        /// AWS access key ID (for S3 paths)
+        #[arg(long, env = "AWS_ACCESS_KEY_ID", hide_env_values = true)]
+        aws_access_key_id: Option<String>,
+        /// AWS secret access key (for S3 paths)
+        #[arg(long, env = "AWS_SECRET_ACCESS_KEY", hide_env_values = true)]
+        aws_secret_access_key: Option<String>,
+        /// AWS session token (for S3 paths)
+        #[arg(long, env = "AWS_SESSION_TOKEN", hide_env_values = true)]
+        aws_session_token: Option<String>,
+        /// AWS region (for S3 paths)
+        #[arg(long, env = "AWS_REGION", hide_env_values = true)]
+        aws_region: Option<String>,
+        /// AWS endpoint URL (for S3-compatible services)
+        #[arg(long, env = "AWS_ENDPOINT_URL_S3", hide_env_values = true)]
+        aws_endpoint_url: Option<String>,
+    },
     /// Roll up fine-grained partitioned Parquet files into coarser intervals.
     ///
     /// Reads minute/hour-partitioned files and merges them into hourly or daily
@@ -285,7 +477,11 @@ Examples:
         #[arg(long, env = "AWS_ENDPOINT_URL_S3", hide_env_values = true)]
         aws_endpoint_url: Option<String>,
         /// Cache-Control header for S3 uploads (empty string = no header)
-        #[arg(long, env = "CACHE_CONTROL", default_value = "public, max-age=31536000, immutable")]
+        #[arg(
+            long,
+            env = "CACHE_CONTROL",
+            default_value = "public, max-age=31536000, immutable"
+        )]
         cache_control: String,
     },
     /// Merge small parquet part files within each partition into larger files.
@@ -338,7 +534,11 @@ Examples:
         #[arg(long, env = "AWS_ENDPOINT_URL_S3", hide_env_values = true)]
         aws_endpoint_url: Option<String>,
         /// Cache-Control header for S3 uploads
-        #[arg(long, env = "CACHE_CONTROL", default_value = "public, max-age=31536000, immutable")]
+        #[arg(
+            long,
+            env = "CACHE_CONTROL",
+            default_value = "public, max-age=31536000, immutable"
+        )]
         cache_control: String,
     },
     /// Inspect a single Parquet file's metadata: file-level key-value pairs,
@@ -431,7 +631,9 @@ pub fn parse_compression(s: &str) -> anyhow::Result<Compression> {
         "snappy" => Ok(Compression::Snappy),
         "gzip" => Ok(Compression::Gzip),
         "none" => Ok(Compression::None),
-        other => anyhow::bail!("invalid --compression '{other}': expected one of: zstd, snappy, gzip, none"),
+        other => anyhow::bail!(
+            "invalid --compression '{other}': expected one of: zstd, snappy, gzip, none"
+        ),
     }
 }
 
@@ -459,8 +661,12 @@ pub fn build_config(args: &CommonArgs) -> anyhow::Result<Config> {
 
     // Resolve the actual API key / JWT token by reading the environment variable
     // whose *name* is given by `--api-key-envvar` / `--api-token-envvar`.
-    let api_key = std::env::var(&args.api_key_envvar).ok().filter(|v| !v.is_empty());
-    let jwt_token = std::env::var(&args.api_token_envvar).ok().filter(|v| !v.is_empty());
+    let api_key = std::env::var(&args.api_key_envvar)
+        .ok()
+        .filter(|v| !v.is_empty());
+    let jwt_token = std::env::var(&args.api_token_envvar)
+        .ok()
+        .filter(|v| !v.is_empty());
 
     // When S3_BUCKET is set and output isn't already an s3:// URL,
     // build the S3 path automatically: s3://<bucket>/<output>
@@ -507,7 +713,11 @@ pub fn build_config(args: &CommonArgs) -> anyhow::Result<Config> {
         aws_region: args.aws_region.clone(),
         aws_endpoint_url: args.aws_endpoint_url.clone(),
         s3_bucket: args.s3_bucket.clone(),
-        cache_control: if args.cache_control.is_empty() { None } else { Some(args.cache_control.clone()) },
+        cache_control: if args.cache_control.is_empty() {
+            None
+        } else {
+            Some(args.cache_control.clone())
+        },
         metrics_port: args.metrics_port,
         stream_idle_timeout_secs: args.stream_idle_timeout_secs,
         reconnect_stall_timeout_secs: args.reconnect_stall_timeout_secs,
@@ -550,10 +760,18 @@ impl AwsConfig {
         use object_store::aws::AmazonS3Builder;
 
         let mut builder = AmazonS3Builder::new().with_bucket_name(bucket);
-        if let Some(ref key) = self.aws_access_key_id { builder = builder.with_access_key_id(key); }
-        if let Some(ref secret) = self.aws_secret_access_key { builder = builder.with_secret_access_key(secret); }
-        if let Some(ref token) = self.aws_session_token { builder = builder.with_token(token); }
-        if let Some(ref region) = self.aws_region { builder = builder.with_region(region); }
+        if let Some(ref key) = self.aws_access_key_id {
+            builder = builder.with_access_key_id(key);
+        }
+        if let Some(ref secret) = self.aws_secret_access_key {
+            builder = builder.with_secret_access_key(secret);
+        }
+        if let Some(ref token) = self.aws_session_token {
+            builder = builder.with_token(token);
+        }
+        if let Some(ref region) = self.aws_region {
+            builder = builder.with_region(region);
+        }
         if let Some(ref endpoint_url) = self.aws_endpoint_url {
             builder = builder.with_endpoint(endpoint_url);
             // Enable virtual-hosted-style requests when the endpoint contains
@@ -569,7 +787,8 @@ impl AwsConfig {
         if self.aws_access_key_id.is_none() {
             builder = builder.with_skip_signature(true);
         }
-        builder.build()
+        builder
+            .build()
             .map_err(|e| anyhow::anyhow!("building S3 client for bucket {bucket}: {e}"))
     }
 }
@@ -579,9 +798,19 @@ impl AwsConfig {
 /// Supports local filesystem paths and S3 URIs (`s3://bucket/prefix`).
 /// If `path` is a file, inspects that single file.
 /// If `path` is a directory, recursively finds all `.parquet` files.
-pub fn scan_parquet(path: &str, rows: usize, schema_only: bool, aws: Option<&AwsConfig>) -> anyhow::Result<()> {
+pub fn scan_parquet(
+    path: &str,
+    rows: usize,
+    schema_only: bool,
+    aws: Option<&AwsConfig>,
+) -> anyhow::Result<()> {
     if path.starts_with("s3://") {
-        scan_parquet_s3(path, rows, schema_only, aws.ok_or_else(|| anyhow::anyhow!("AWS config required for S3 paths"))?)
+        scan_parquet_s3(
+            path,
+            rows,
+            schema_only,
+            aws.ok_or_else(|| anyhow::anyhow!("AWS config required for S3 paths"))?,
+        )
     } else {
         scan_parquet_local(&PathBuf::from(path), rows, schema_only)
     }
@@ -613,19 +842,13 @@ fn scan_parquet_local(path: &PathBuf, rows: usize, schema_only: bool) -> anyhow:
         let builder = ParquetRecordBatchReaderBuilder::try_new(file)?;
         let metadata = builder.metadata();
 
-        let total_rows: i64 = metadata
-            .row_groups()
-            .iter()
-            .map(|rg| rg.num_rows())
-            .sum();
+        let total_rows: i64 = metadata.row_groups().iter().map(|rg| rg.num_rows()).sum();
         let num_row_groups = metadata.num_row_groups();
         let num_columns = metadata.file_metadata().schema().get_fields().len();
         let schema = builder.schema();
 
         // Relative path for cleaner display.
-        let display_path = file_path
-            .strip_prefix(path)
-            .unwrap_or(file_path);
+        let display_path = file_path.strip_prefix(path).unwrap_or(file_path);
 
         println!("\n{}", "═".repeat(72));
         println!("  {}", display_path.display());
@@ -641,8 +864,17 @@ fn scan_parquet_local(path: &PathBuf, rows: usize, schema_only: bool) -> anyhow:
 
         // Print schema fields.
         for field in schema.fields() {
-            let nullable = if field.is_nullable() { "nullable" } else { "not null" };
-            println!("  {:30} {:20} {}", field.name(), field.data_type(), nullable);
+            let nullable = if field.is_nullable() {
+                "nullable"
+            } else {
+                "not null"
+            };
+            println!(
+                "  {:30} {:20} {}",
+                field.name(),
+                field.data_type(),
+                nullable
+            );
         }
 
         // Print sample rows (vertical format like ClickHouse's \G).
@@ -665,7 +897,12 @@ fn scan_parquet_local(path: &PathBuf, rows: usize, schema_only: bool) -> anyhow:
 }
 
 /// Scan parquet files from an S3 bucket.
-fn scan_parquet_s3(path: &str, rows: usize, schema_only: bool, aws: &AwsConfig) -> anyhow::Result<()> {
+fn scan_parquet_s3(
+    path: &str,
+    rows: usize,
+    schema_only: bool,
+    aws: &AwsConfig,
+) -> anyhow::Result<()> {
     use crate::writer::parse_s3_url;
     use object_store::ObjectStore;
     use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
@@ -684,7 +921,8 @@ fn scan_parquet_s3(path: &str, rows: usize, schema_only: bool, aws: &AwsConfig) 
         use futures::TryStreamExt;
         let stream = client.list(list_prefix.as_ref());
         stream.try_collect().await
-    }).map_err(|e| anyhow::anyhow!("listing S3 objects: {e}"))?;
+    })
+    .map_err(|e| anyhow::anyhow!("listing S3 objects: {e}"))?;
 
     let mut parquet_objects: Vec<_> = objects
         .into_iter()
@@ -699,25 +937,22 @@ fn scan_parquet_s3(path: &str, rows: usize, schema_only: bool, aws: &AwsConfig) 
 
     for obj in &parquet_objects {
         // Download the object into memory.
-        let data = block_on_async(async {
-            client.get(&obj.location).await?.bytes().await
-        }).map_err(|e| anyhow::anyhow!("reading s3://{bucket}/{}: {e}", obj.location))?;
+        let data = block_on_async(async { client.get(&obj.location).await?.bytes().await })
+            .map_err(|e| anyhow::anyhow!("reading s3://{bucket}/{}: {e}", obj.location))?;
 
         let file_size = data.len() as u64;
         let builder = ParquetRecordBatchReaderBuilder::try_new(data.clone())?;
         let metadata = builder.metadata();
 
-        let total_rows: i64 = metadata
-            .row_groups()
-            .iter()
-            .map(|rg| rg.num_rows())
-            .sum();
+        let total_rows: i64 = metadata.row_groups().iter().map(|rg| rg.num_rows()).sum();
         let num_row_groups = metadata.num_row_groups();
         let num_columns = metadata.file_metadata().schema().get_fields().len();
         let schema = builder.schema().clone();
 
         // Strip prefix for cleaner display.
-        let display_key = obj.location.as_ref()
+        let display_key = obj
+            .location
+            .as_ref()
             .strip_prefix(&prefix)
             .map(|s| s.trim_start_matches('/'))
             .unwrap_or(obj.location.as_ref());
@@ -735,8 +970,17 @@ fn scan_parquet_s3(path: &str, rows: usize, schema_only: bool, aws: &AwsConfig) 
         println!("{}", "─".repeat(72));
 
         for field in schema.fields() {
-            let nullable = if field.is_nullable() { "nullable" } else { "not null" };
-            println!("  {:30} {:20} {}", field.name(), field.data_type(), nullable);
+            let nullable = if field.is_nullable() {
+                "nullable"
+            } else {
+                "not null"
+            };
+            println!(
+                "  {:30} {:20} {}",
+                field.name(),
+                field.data_type(),
+                nullable
+            );
         }
 
         if !schema_only && rows > 0 {
@@ -761,7 +1005,12 @@ fn print_sample_rows(
     rows: usize,
     total_rows: i64,
 ) {
-    let max_name_len = schema.fields().iter().map(|f| f.name().len()).max().unwrap_or(0);
+    let max_name_len = schema
+        .fields()
+        .iter()
+        .map(|f| f.name().len())
+        .max()
+        .unwrap_or(0);
     let mut row_number = 0usize;
 
     'outer: for batch_result in reader {
@@ -806,43 +1055,83 @@ fn format_array_value(array: &dyn arrow::array::Array, row: usize) -> String {
 
     match array.data_type() {
         DataType::UInt64 => {
-            let v = array.as_any().downcast_ref::<UInt64Array>().unwrap().value(row);
+            let v = array
+                .as_any()
+                .downcast_ref::<UInt64Array>()
+                .unwrap()
+                .value(row);
             format_number_with_hint(v as i128)
         }
         DataType::UInt32 => {
-            let v = array.as_any().downcast_ref::<UInt32Array>().unwrap().value(row);
+            let v = array
+                .as_any()
+                .downcast_ref::<UInt32Array>()
+                .unwrap()
+                .value(row);
             v.to_string()
         }
         DataType::Int64 => {
-            let v = array.as_any().downcast_ref::<Int64Array>().unwrap().value(row);
+            let v = array
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .unwrap()
+                .value(row);
             format_number_with_hint(v as i128)
         }
         DataType::Int32 => {
-            let v = array.as_any().downcast_ref::<Int32Array>().unwrap().value(row);
+            let v = array
+                .as_any()
+                .downcast_ref::<Int32Array>()
+                .unwrap()
+                .value(row);
             v.to_string()
         }
         DataType::Float64 => {
-            let v = array.as_any().downcast_ref::<Float64Array>().unwrap().value(row);
+            let v = array
+                .as_any()
+                .downcast_ref::<Float64Array>()
+                .unwrap()
+                .value(row);
             format!("{v}")
         }
         DataType::Boolean => {
-            let v = array.as_any().downcast_ref::<BooleanArray>().unwrap().value(row);
+            let v = array
+                .as_any()
+                .downcast_ref::<BooleanArray>()
+                .unwrap()
+                .value(row);
             v.to_string()
         }
         DataType::Utf8 => {
-            let v = array.as_any().downcast_ref::<StringArray>().unwrap().value(row);
+            let v = array
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .unwrap()
+                .value(row);
             truncate_str(v, 80)
         }
         DataType::LargeUtf8 => {
-            let v = array.as_any().downcast_ref::<LargeStringArray>().unwrap().value(row);
+            let v = array
+                .as_any()
+                .downcast_ref::<LargeStringArray>()
+                .unwrap()
+                .value(row);
             truncate_str(v, 80)
         }
         DataType::Binary => {
-            let v = array.as_any().downcast_ref::<BinaryArray>().unwrap().value(row);
+            let v = array
+                .as_any()
+                .downcast_ref::<BinaryArray>()
+                .unwrap()
+                .value(row);
             truncate_str(&format!("0x{}", hex::encode(v)), 80)
         }
         DataType::LargeBinary => {
-            let v = array.as_any().downcast_ref::<LargeBinaryArray>().unwrap().value(row);
+            let v = array
+                .as_any()
+                .downcast_ref::<LargeBinaryArray>()
+                .unwrap()
+                .value(row);
             truncate_str(&format!("0x{}", hex::encode(v)), 80)
         }
         DataType::List(_) => {
@@ -869,7 +1158,8 @@ fn format_array_value(array: &dyn arrow::array::Array, row: usize) -> String {
         }
         _ => {
             // Fallback: use Arrow's Display formatting.
-            let formatter = arrow::util::display::ArrayFormatter::try_new(array, &Default::default());
+            let formatter =
+                arrow::util::display::ArrayFormatter::try_new(array, &Default::default());
             match formatter {
                 Ok(fmt) => fmt.value(row).to_string(),
                 Err(_) => "<unsupported>".to_string(),
@@ -881,9 +1171,7 @@ fn format_array_value(array: &dyn arrow::array::Array, row: usize) -> String {
 /// Format list items (up to `max`) from an inner array.
 fn format_list_items(array: &dyn arrow::array::Array, max: usize) -> String {
     let n = array.len().min(max);
-    let items: Vec<String> = (0..n)
-        .map(|i| format_array_value(array, i))
-        .collect();
+    let items: Vec<String> = (0..n).map(|i| format_array_value(array, i)).collect();
     items.join(", ")
 }
 
@@ -922,7 +1210,10 @@ fn format_number_with_hint(v: i128) -> String {
 /// Supports local filesystem paths and S3 URIs (`s3://bucket/key.parquet`).
 pub fn inspect_parquet(path: &str, aws: Option<&AwsConfig>) -> anyhow::Result<()> {
     if path.starts_with("s3://") {
-        inspect_parquet_s3(path, aws.ok_or_else(|| anyhow::anyhow!("AWS config required for S3 paths"))?)
+        inspect_parquet_s3(
+            path,
+            aws.ok_or_else(|| anyhow::anyhow!("AWS config required for S3 paths"))?,
+        )
     } else {
         inspect_parquet_local(path)
     }
@@ -934,8 +1225,7 @@ fn inspect_parquet_local(path: &str) -> anyhow::Result<()> {
     use parquet::file::serialized_reader::SerializedFileReader;
     use std::fs;
 
-    let file = fs::File::open(path)
-        .map_err(|e| anyhow::anyhow!("opening {path}: {e}"))?;
+    let file = fs::File::open(path).map_err(|e| anyhow::anyhow!("opening {path}: {e}"))?;
     let file_size = file.metadata()?.len();
     let reader = SerializedFileReader::new(file)?;
     let metadata = reader.metadata();
@@ -955,19 +1245,29 @@ fn inspect_parquet_s3(path: &str, aws: &AwsConfig) -> anyhow::Result<()> {
     let (bucket, key) = parse_s3_url(path)?;
 
     let mut builder = AmazonS3Builder::new().with_bucket_name(&bucket);
-    if let Some(ref v) = aws.aws_access_key_id { builder = builder.with_access_key_id(v); }
-    if let Some(ref v) = aws.aws_secret_access_key { builder = builder.with_secret_access_key(v); }
-    if let Some(ref v) = aws.aws_session_token { builder = builder.with_token(v); }
-    if let Some(ref v) = aws.aws_region { builder = builder.with_region(v); }
-    if let Some(ref v) = aws.aws_endpoint_url { builder = builder.with_endpoint(v); }
+    if let Some(ref v) = aws.aws_access_key_id {
+        builder = builder.with_access_key_id(v);
+    }
+    if let Some(ref v) = aws.aws_secret_access_key {
+        builder = builder.with_secret_access_key(v);
+    }
+    if let Some(ref v) = aws.aws_session_token {
+        builder = builder.with_token(v);
+    }
+    if let Some(ref v) = aws.aws_region {
+        builder = builder.with_region(v);
+    }
+    if let Some(ref v) = aws.aws_endpoint_url {
+        builder = builder.with_endpoint(v);
+    }
 
-    let client = builder.build()
+    let client = builder
+        .build()
         .map_err(|e| anyhow::anyhow!("building S3 client for bucket {bucket}: {e}"))?;
 
     let obj_path = object_store::path::Path::from(key.as_str());
-    let data = block_on_async(async {
-        client.get(&obj_path).await?.bytes().await
-    }).map_err(|e| anyhow::anyhow!("reading {path}: {e}"))?;
+    let data = block_on_async(async { client.get(&obj_path).await?.bytes().await })
+        .map_err(|e| anyhow::anyhow!("reading {path}: {e}"))?;
 
     let file_size = data.len() as u64;
     let reader = SerializedFileReader::new(bytes::Bytes::from(data))
@@ -991,7 +1291,10 @@ fn print_inspect(path: &str, file_size: u64, metadata: &parquet::file::metadata:
     println!("{}", "─".repeat(72));
     println!(
         "  rows: {}  row_groups: {}  columns: {}  size: {}",
-        total_rows, num_row_groups, num_columns, format_bytes(file_size),
+        total_rows,
+        num_row_groups,
+        num_columns,
+        format_bytes(file_size),
     );
     if let Some(created_by) = file_meta.created_by() {
         println!("  created_by: {}", created_by);
@@ -1013,7 +1316,12 @@ fn print_inspect(path: &str, file_size: u64, metadata: &parquet::file::metadata:
                 } else {
                     value.to_string()
                 };
-                println!("  {:width$}  {}", kv.key, display_value, width = max_key_len);
+                println!(
+                    "  {:width$}  {}",
+                    kv.key,
+                    display_value,
+                    width = max_key_len
+                );
             }
         }
     }
@@ -1059,7 +1367,12 @@ fn print_inspect(path: &str, file_size: u64, metadata: &parquet::file::metadata:
         println!("  Column Details (row group 0)");
         println!("{}", "─".repeat(72));
 
-        let max_col_name = rg.columns().iter().map(|c| c.column_path().string().len()).max().unwrap_or(0);
+        let max_col_name = rg
+            .columns()
+            .iter()
+            .map(|c| c.column_path().string().len())
+            .max()
+            .unwrap_or(0);
 
         for col in rg.columns() {
             let col_path = col.column_path().string();
@@ -1094,9 +1407,15 @@ fn print_schema_field(field: &parquet::schema::types::Type, indent: usize) {
 
     let prefix = "  ".repeat(indent);
     match field {
-        Type::PrimitiveType { basic_info, physical_type, type_length, .. } => {
+        Type::PrimitiveType {
+            basic_info,
+            physical_type,
+            type_length,
+            ..
+        } => {
             let repetition = format!("{:?}", basic_info.repetition());
-            let logical = basic_info.logical_type_ref()
+            let logical = basic_info
+                .logical_type_ref()
                 .map(|lt| format!(" ({:?})", lt))
                 .unwrap_or_default();
             let len_info = if *type_length > 0 {
@@ -1114,9 +1433,12 @@ fn print_schema_field(field: &parquet::schema::types::Type, indent: usize) {
                 repetition.to_lowercase(),
             );
         }
-        Type::GroupType { basic_info, fields, .. } => {
+        Type::GroupType {
+            basic_info, fields, ..
+        } => {
             let repetition = format!("{:?}", basic_info.repetition());
-            let logical = basic_info.logical_type_ref()
+            let logical = basic_info
+                .logical_type_ref()
                 .map(|lt| format!(" ({:?})", lt))
                 .unwrap_or_default();
             println!(
@@ -1239,7 +1561,10 @@ pub struct PartitionResult {
 
 impl PartitionResult {
     pub fn is_valid(&self) -> bool {
-        self.gaps.is_empty() && self.parent_mismatches.is_empty() && self.duplicates.is_empty() && self.ordering_errors == 0
+        self.gaps.is_empty()
+            && self.parent_mismatches.is_empty()
+            && self.duplicates.is_empty()
+            && self.ordering_errors == 0
     }
 }
 
@@ -1292,8 +1617,12 @@ impl ValidateResult {
             let valid_count = self.partitions.iter().filter(|p| p.is_valid()).count();
             let invalid_count = self.partitions.len() - valid_count;
 
-            println!("  Partitions:        {} total, {} valid, {} with issues\n",
-                self.partitions.len(), valid_count, invalid_count);
+            println!(
+                "  Partitions:        {} total, {} valid, {} with issues\n",
+                self.partitions.len(),
+                valid_count,
+                invalid_count
+            );
 
             for pr in &self.partitions {
                 if pr.is_valid() {
@@ -1305,11 +1634,19 @@ impl ValidateResult {
                     _ => "N/A".to_string(),
                 };
                 println!("  ✗ {}", pr.partition);
-                println!("    files: {}  blocks: {}  range: {}", pr.files_scanned, pr.total_blocks, range);
+                println!(
+                    "    files: {}  blocks: {}  range: {}",
+                    pr.files_scanned, pr.total_blocks, range
+                );
 
                 for gap in &pr.gaps {
                     let missing = gap.to - gap.from;
-                    println!("    gap: {} — {} ({} blocks missing)", gap.from, gap.to - 1, missing);
+                    println!(
+                        "    gap: {} — {} ({} blocks missing)",
+                        gap.from,
+                        gap.to - 1,
+                        missing
+                    );
                 }
                 for mm in &pr.parent_mismatches {
                     println!(
@@ -1318,7 +1655,10 @@ impl ValidateResult {
                     );
                 }
                 for dup in &pr.duplicates {
-                    println!("    duplicate block {} ({} occurrences)", dup.block_num, dup.count);
+                    println!(
+                        "    duplicate block {} ({} occurrences)",
+                        dup.block_num, dup.count
+                    );
                 }
                 if pr.ordering_errors > 0 {
                     println!("    ordering errors: {}", pr.ordering_errors);
@@ -1349,7 +1689,10 @@ impl ValidateResult {
 
         // Empty partitions (warnings).
         if !self.empty_partitions.is_empty() {
-            println!("  Empty partitions:  {} (warning)", self.empty_partitions.len());
+            println!(
+                "  Empty partitions:  {} (warning)",
+                self.empty_partitions.len()
+            );
             for ep in &self.empty_partitions {
                 println!("    {} ({})", ep.partition, ep.reason);
             }
@@ -1358,13 +1701,20 @@ impl ValidateResult {
 
         // Cross-partition issues.
         if !self.cross_partition_issues.is_empty() {
-            println!("  Cross-partition issues: {}", self.cross_partition_issues.len());
+            println!(
+                "  Cross-partition issues: {}",
+                self.cross_partition_issues.len()
+            );
             for cpi in &self.cross_partition_issues {
                 if let Some(ref gap) = cpi.gap {
                     let missing = gap.to - gap.from;
                     println!(
                         "    between {} and {}: gap {} — {} ({} blocks missing)",
-                        cpi.from_partition, cpi.to_partition, gap.from, gap.to - 1, missing
+                        cpi.from_partition,
+                        cpi.to_partition,
+                        gap.from,
+                        gap.to - 1,
+                        missing
                     );
                 }
                 if let Some(ref mm) = cpi.parent_mismatch {
@@ -1392,7 +1742,12 @@ impl ValidateResult {
         if self.partitions.is_empty() {
             for gap in &self.gaps {
                 let missing = gap.to - gap.from;
-                println!("    gap: {} — {} ({} blocks missing)", gap.from, gap.to - 1, missing);
+                println!(
+                    "    gap: {} — {} ({} blocks missing)",
+                    gap.from,
+                    gap.to - 1,
+                    missing
+                );
             }
         }
 
@@ -1432,7 +1787,10 @@ impl ValidateResult {
 
         // Warnings after the pass/fail line.
         if !self.empty_partitions.is_empty() && self.is_valid() {
-            println!("  ⚠ {} empty partition(s) detected (see above)", self.empty_partitions.len());
+            println!(
+                "  ⚠ {} empty partition(s) detected (see above)",
+                self.empty_partitions.len()
+            );
         }
     }
 }
@@ -1441,7 +1799,11 @@ impl ValidateResult {
 type BlockTuple = (u64, String, String, i64);
 
 /// Read a string value from a column that may be Utf8 or Binary.
-fn read_id_string(col: &dyn arrow::array::Array, row: usize, col_name: &str) -> anyhow::Result<String> {
+fn read_id_string(
+    col: &dyn arrow::array::Array,
+    row: usize,
+    col_name: &str,
+) -> anyhow::Result<String> {
     use arrow::array::{BinaryArray, StringArray};
     if let Some(s) = col.as_any().downcast_ref::<StringArray>() {
         Ok(s.value(row).to_string())
@@ -1465,14 +1827,16 @@ fn extract_block_tuples(
     let mut tuples = Vec::new();
     for batch_result in reader {
         let batch = batch_result?;
-        let block_nums = batch.column(block_num_idx)
-            .as_any().downcast_ref::<UInt64Array>()
+        let block_nums = batch
+            .column(block_num_idx)
+            .as_any()
+            .downcast_ref::<UInt64Array>()
             .ok_or_else(|| anyhow::anyhow!("block_num column is not UInt64"))?;
         let block_id_col = batch.column(block_id_idx).as_ref();
         let parent_id_col = batch.column(parent_id_idx).as_ref();
-        let timestamps = timestamp_idx.map(|idx| {
-            batch.column(idx).as_any().downcast_ref::<Int64Array>()
-        }).flatten();
+        let timestamps = timestamp_idx
+            .map(|idx| batch.column(idx).as_any().downcast_ref::<Int64Array>())
+            .flatten();
 
         for i in 0..batch.num_rows() {
             let ts = timestamps.map(|a| a.value(i)).unwrap_or(0);
@@ -1497,24 +1861,39 @@ struct CanonicalIndices {
 
 /// Find column indices for canonical fields in a schema.
 fn find_canonical_indices(schema: &arrow::datatypes::Schema) -> anyhow::Result<CanonicalIndices> {
-    let block_num = schema.index_of("block_num")
+    let block_num = schema
+        .index_of("block_num")
         .map_err(|_| anyhow::anyhow!("missing 'block_num' column — is this a blocks table?"))?;
-    let block_id = schema.index_of("block_id")
+    let block_id = schema
+        .index_of("block_id")
         .map_err(|_| anyhow::anyhow!("missing 'block_id' column"))?;
-    let parent_id = schema.index_of("parent_id")
+    let parent_id = schema
+        .index_of("parent_id")
         .map_err(|_| anyhow::anyhow!("missing 'parent_id' column"))?;
     let timestamp = schema.index_of("timestamp").ok();
-    Ok(CanonicalIndices { block_num, block_id, parent_id, timestamp })
+    Ok(CanonicalIndices {
+        block_num,
+        block_id,
+        parent_id,
+        timestamp,
+    })
 }
 
 /// Compare two schemas and return a list of differences.
-fn compare_schemas(reference: &arrow::datatypes::Schema, other: &arrow::datatypes::Schema) -> Vec<String> {
+fn compare_schemas(
+    reference: &arrow::datatypes::Schema,
+    other: &arrow::datatypes::Schema,
+) -> Vec<String> {
     use std::collections::HashMap;
 
-    let ref_fields: HashMap<&str, &arrow::datatypes::Field> = reference.fields().iter()
+    let ref_fields: HashMap<&str, &arrow::datatypes::Field> = reference
+        .fields()
+        .iter()
         .map(|f| (f.name().as_str(), f.as_ref()))
         .collect();
-    let other_fields: HashMap<&str, &arrow::datatypes::Field> = other.fields().iter()
+    let other_fields: HashMap<&str, &arrow::datatypes::Field> = other
+        .fields()
+        .iter()
         .map(|f| (f.name().as_str(), f.as_ref()))
         .collect();
 
@@ -1528,7 +1907,9 @@ fn compare_schemas(reference: &arrow::datatypes::Schema, other: &arrow::datatype
                 if ref_field.data_type() != other_field.data_type() {
                     diffs.push(format!(
                         "type mismatch: {} ({} vs {})",
-                        name, ref_field.data_type(), other_field.data_type()
+                        name,
+                        ref_field.data_type(),
+                        other_field.data_type()
                     ));
                 }
             }
@@ -1546,9 +1927,17 @@ fn compare_schemas(reference: &arrow::datatypes::Schema, other: &arrow::datatype
 }
 
 /// Validate parquet files at the given path (local or S3).
-pub fn validate_parquet(path: &str, aws: Option<&AwsConfig>, opts: &ValidateOptions) -> anyhow::Result<ValidateResult> {
+pub fn validate_parquet(
+    path: &str,
+    aws: Option<&AwsConfig>,
+    opts: &ValidateOptions,
+) -> anyhow::Result<ValidateResult> {
     if path.starts_with("s3://") {
-        validate_parquet_s3(path, aws.ok_or_else(|| anyhow::anyhow!("AWS config required for S3 paths"))?, opts)
+        validate_parquet_s3(
+            path,
+            aws.ok_or_else(|| anyhow::anyhow!("AWS config required for S3 paths"))?,
+            opts,
+        )
     } else {
         validate_parquet_local(&PathBuf::from(path), opts)
     }
@@ -1629,7 +2018,13 @@ fn check_tuples(tuples: &[BlockTuple]) -> CheckResult {
         }
     }
 
-    CheckResult { gaps, parent_mismatches, duplicates, ordering_errors, timestamp_reversals }
+    CheckResult {
+        gaps,
+        parent_mismatches,
+        duplicates,
+        ordering_errors,
+        timestamp_reversals,
+    }
 }
 
 /// Detect the partition key from a file path by looking for Hive-style directories
@@ -1642,7 +2037,8 @@ fn detect_partition(file_path: &str, base_path: &str) -> String {
         .trim_start_matches('/');
 
     // Walk directory components, collect Hive-style partition segments.
-    let parts: Vec<&str> = relative.split('/')
+    let parts: Vec<&str> = relative
+        .split('/')
         .filter(|seg| seg.contains('=') && !seg.ends_with(".parquet"))
         .collect();
 
@@ -1662,10 +2058,7 @@ struct FileInfo {
     row_count: u64,
 }
 
-fn validate_from_files(
-    files: Vec<FileInfo>,
-    opts: &ValidateOptions,
-) -> ValidateResult {
+fn validate_from_files(files: Vec<FileInfo>, opts: &ValidateOptions) -> ValidateResult {
     // Schema consistency check (#90).
     let mut schema_mismatches = Vec::new();
     if let Some(first) = files.first() {
@@ -1682,9 +2075,12 @@ fn validate_from_files(
     }
 
     // Group by partition.
-    let mut groups: std::collections::BTreeMap<String, (Vec<BlockTuple>, usize, u64)> = std::collections::BTreeMap::new();
+    let mut groups: std::collections::BTreeMap<String, (Vec<BlockTuple>, usize, u64)> =
+        std::collections::BTreeMap::new();
     for fi in files {
-        let entry = groups.entry(fi.partition).or_insert_with(|| (Vec::new(), 0, 0));
+        let entry = groups
+            .entry(fi.partition)
+            .or_insert_with(|| (Vec::new(), 0, 0));
         entry.0.extend(fi.tuples);
         entry.1 += 1;
         entry.2 += fi.row_count;
@@ -1742,7 +2138,8 @@ fn validate_from_files(
     let mut cross_partition_issues = Vec::new();
     if opts.cross_partition && partitions.len() > 1 {
         // Sort partitions by their min_block.
-        let mut sorted_parts: Vec<&PartitionResult> = partitions.iter()
+        let mut sorted_parts: Vec<&PartitionResult> = partitions
+            .iter()
             .filter(|p| p.min_block.is_some())
             .collect();
         sorted_parts.sort_by_key(|p| p.min_block);
@@ -1756,7 +2153,10 @@ fn validate_from_files(
                 // We need the block_id of prev's last block and parent_id of curr's first block.
                 // We already have all_tuples, but let's check from the group data.
                 let gap = if curr_min > prev_max + 1 {
-                    Some(BlockGap { from: prev_max + 1, to: curr_min })
+                    Some(BlockGap {
+                        from: prev_max + 1,
+                        to: curr_min,
+                    })
                 } else {
                     None
                 };
@@ -1768,13 +2168,11 @@ fn validate_from_files(
                     let prev_last = all_tuples.iter().rfind(|t| t.0 == prev_max);
                     let curr_first = all_tuples.iter().find(|t| t.0 == curr_min);
                     match (prev_last, curr_first) {
-                        (Some(pl), Some(cf)) if cf.2 != pl.1 => {
-                            Some(ParentMismatch {
-                                block_num: cf.0,
-                                expected_parent_id: pl.1.clone(),
-                                actual_parent_id: cf.2.clone(),
-                            })
-                        }
+                        (Some(pl), Some(cf)) if cf.2 != pl.1 => Some(ParentMismatch {
+                            block_num: cf.0,
+                            expected_parent_id: pl.1.clone(),
+                            actual_parent_id: cf.2.clone(),
+                        }),
                         _ => None,
                     }
                 } else {
@@ -1830,7 +2228,10 @@ fn validate_from_files(
     }
 }
 
-fn validate_parquet_local(path: &PathBuf, opts: &ValidateOptions) -> anyhow::Result<ValidateResult> {
+fn validate_parquet_local(
+    path: &PathBuf,
+    opts: &ValidateOptions,
+) -> anyhow::Result<ValidateResult> {
     use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 
     let mut paths: Vec<PathBuf> = Vec::new();
@@ -1846,10 +2247,19 @@ fn validate_parquet_local(path: &PathBuf, opts: &ValidateOptions) -> anyhow::Res
     if paths.is_empty() {
         println!("No .parquet files found in {}", path.display());
         return Ok(ValidateResult {
-            files_scanned: 0, total_blocks: 0, min_block: None, max_block: None,
-            gaps: vec![], parent_mismatches: vec![], duplicates: vec![], ordering_errors: 0,
-            timestamp_reversals: vec![], partitions: vec![], empty_partitions: vec![],
-            schema_mismatches: vec![], cross_partition_issues: vec![],
+            files_scanned: 0,
+            total_blocks: 0,
+            min_block: None,
+            max_block: None,
+            gaps: vec![],
+            parent_mismatches: vec![],
+            duplicates: vec![],
+            ordering_errors: 0,
+            timestamp_reversals: vec![],
+            partitions: vec![],
+            empty_partitions: vec![],
+            schema_mismatches: vec![],
+            cross_partition_issues: vec![],
         });
     }
 
@@ -1863,12 +2273,26 @@ fn validate_parquet_local(path: &PathBuf, opts: &ValidateOptions) -> anyhow::Res
         let arrow_schema: arrow::datatypes::Schema = (**schema).clone();
         let indices = find_canonical_indices(&arrow_schema)?;
         let metadata = builder.metadata().clone();
-        let row_count: u64 = metadata.row_groups().iter().map(|rg| rg.num_rows() as u64).sum();
+        let row_count: u64 = metadata
+            .row_groups()
+            .iter()
+            .map(|rg| rg.num_rows() as u64)
+            .sum();
         let reader = builder.build()?;
-        let tuples = extract_block_tuples(reader, indices.block_num, indices.block_id, indices.parent_id, indices.timestamp)?;
+        let tuples = extract_block_tuples(
+            reader,
+            indices.block_num,
+            indices.block_id,
+            indices.parent_id,
+            indices.timestamp,
+        )?;
 
         let partition_key = detect_partition(&file_path.to_string_lossy(), &base);
-        let display = file_path.strip_prefix(path).unwrap_or(file_path).to_string_lossy().to_string();
+        let display = file_path
+            .strip_prefix(path)
+            .unwrap_or(file_path)
+            .to_string_lossy()
+            .to_string();
 
         file_infos.push(FileInfo {
             path: display,
@@ -1882,7 +2306,11 @@ fn validate_parquet_local(path: &PathBuf, opts: &ValidateOptions) -> anyhow::Res
     Ok(validate_from_files(file_infos, opts))
 }
 
-fn validate_parquet_s3(path: &str, aws: &AwsConfig, opts: &ValidateOptions) -> anyhow::Result<ValidateResult> {
+fn validate_parquet_s3(
+    path: &str,
+    aws: &AwsConfig,
+    opts: &ValidateOptions,
+) -> anyhow::Result<ValidateResult> {
     use crate::writer::parse_s3_url;
     use object_store::ObjectStore;
     use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
@@ -1890,14 +2318,20 @@ fn validate_parquet_s3(path: &str, aws: &AwsConfig, opts: &ValidateOptions) -> a
     let (bucket, prefix) = parse_s3_url(path)?;
     let client = aws.build_s3_client(&bucket)?;
 
-    let list_prefix = if prefix.is_empty() { None } else { Some(object_store::path::Path::from(prefix.as_str())) };
+    let list_prefix = if prefix.is_empty() {
+        None
+    } else {
+        Some(object_store::path::Path::from(prefix.as_str()))
+    };
 
     let objects: Vec<object_store::ObjectMeta> = block_on_async(async {
         use futures::TryStreamExt;
         client.list(list_prefix.as_ref()).try_collect().await
-    }).map_err(|e| anyhow::anyhow!("listing S3 objects: {e}"))?;
+    })
+    .map_err(|e| anyhow::anyhow!("listing S3 objects: {e}"))?;
 
-    let mut parquet_objects: Vec<_> = objects.into_iter()
+    let mut parquet_objects: Vec<_> = objects
+        .into_iter()
         .filter(|obj| obj.location.as_ref().ends_with(".parquet"))
         .collect();
     parquet_objects.sort_by(|a, b| a.location.cmp(&b.location));
@@ -1905,31 +2339,51 @@ fn validate_parquet_s3(path: &str, aws: &AwsConfig, opts: &ValidateOptions) -> a
     if parquet_objects.is_empty() {
         println!("No .parquet files found in {path}");
         return Ok(ValidateResult {
-            files_scanned: 0, total_blocks: 0, min_block: None, max_block: None,
-            gaps: vec![], parent_mismatches: vec![], duplicates: vec![], ordering_errors: 0,
-            timestamp_reversals: vec![], partitions: vec![], empty_partitions: vec![],
-            schema_mismatches: vec![], cross_partition_issues: vec![],
+            files_scanned: 0,
+            total_blocks: 0,
+            min_block: None,
+            max_block: None,
+            gaps: vec![],
+            parent_mismatches: vec![],
+            duplicates: vec![],
+            ordering_errors: 0,
+            timestamp_reversals: vec![],
+            partitions: vec![],
+            empty_partitions: vec![],
+            schema_mismatches: vec![],
+            cross_partition_issues: vec![],
         });
     }
 
     let mut file_infos = Vec::new();
 
     for obj in &parquet_objects {
-        let data = block_on_async(async {
-            client.get(&obj.location).await?.bytes().await
-        }).map_err(|e| anyhow::anyhow!("reading s3://{bucket}/{}: {e}", obj.location))?;
+        let data = block_on_async(async { client.get(&obj.location).await?.bytes().await })
+            .map_err(|e| anyhow::anyhow!("reading s3://{bucket}/{}: {e}", obj.location))?;
 
         let builder = ParquetRecordBatchReaderBuilder::try_new(data)?;
         let schema = builder.schema();
         let arrow_schema: arrow::datatypes::Schema = (**schema).clone();
         let indices = find_canonical_indices(&arrow_schema)?;
         let metadata = builder.metadata().clone();
-        let row_count: u64 = metadata.row_groups().iter().map(|rg| rg.num_rows() as u64).sum();
+        let row_count: u64 = metadata
+            .row_groups()
+            .iter()
+            .map(|rg| rg.num_rows() as u64)
+            .sum();
         let reader = builder.build()?;
-        let tuples = extract_block_tuples(reader, indices.block_num, indices.block_id, indices.parent_id, indices.timestamp)?;
+        let tuples = extract_block_tuples(
+            reader,
+            indices.block_num,
+            indices.block_id,
+            indices.parent_id,
+            indices.timestamp,
+        )?;
 
         let partition_key = detect_partition(obj.location.as_ref(), &prefix);
-        let display = obj.location.as_ref()
+        let display = obj
+            .location
+            .as_ref()
             .strip_prefix(&prefix)
             .map(|s| s.trim_start_matches('/'))
             .unwrap_or(obj.location.as_ref())
@@ -1996,7 +2450,10 @@ mod tests {
             std::env::remove_var("S3_BUCKET");
         }
         let cli = parse(&["test-cli", "--endpoint", "http://localhost:9000"]);
-        assert_eq!(cli.common.endpoint.as_deref(), Some("http://localhost:9000"));
+        assert_eq!(
+            cli.common.endpoint.as_deref(),
+            Some("http://localhost:9000")
+        );
         assert_eq!(cli.common.output, PathBuf::from("."));
         assert_eq!(cli.common.partition, "none");
         assert_eq!(cli.common.block_range_size, 10000);
@@ -2027,30 +2484,52 @@ mod tests {
     fn test_all_flags() {
         let cli = parse(&[
             "test-cli",
-            "-e", "https://eth.firehose.pinax.network:443",
-            "--api-key-envvar", "MY_KEY_VAR",
-            "--api-token-envvar", "MY_TOKEN_VAR",
-            "-s", "100",
-            "-t", "200",
-            "-c", "cursor-mainnet-date.parquet",
-            "--output", "/tmp/out",
-            "--partition", "date",
-            "--block-range-size", "5000",
-            "--flush-rows", "10000",
-            "--flush-bytes", "1000000",
-            "--flush-interval-secs", "60",
-            "--stream-idle-timeout-secs", "45",
-            "--reconnect-stall-timeout-secs", "120",
-            "--compression", "snappy",
-            "--log-level", "debug",
+            "-e",
+            "https://eth.firehose.pinax.network:443",
+            "--api-key-envvar",
+            "MY_KEY_VAR",
+            "--api-token-envvar",
+            "MY_TOKEN_VAR",
+            "-s",
+            "100",
+            "-t",
+            "200",
+            "-c",
+            "cursor-mainnet-date.parquet",
+            "--output",
+            "/tmp/out",
+            "--partition",
+            "date",
+            "--block-range-size",
+            "5000",
+            "--flush-rows",
+            "10000",
+            "--flush-bytes",
+            "1000000",
+            "--flush-interval-secs",
+            "60",
+            "--stream-idle-timeout-secs",
+            "45",
+            "--reconnect-stall-timeout-secs",
+            "120",
+            "--compression",
+            "snappy",
+            "--log-level",
+            "debug",
             "--dry-run",
         ]);
-        assert_eq!(cli.common.endpoint.as_deref(), Some("https://eth.firehose.pinax.network:443"));
+        assert_eq!(
+            cli.common.endpoint.as_deref(),
+            Some("https://eth.firehose.pinax.network:443")
+        );
         assert_eq!(cli.common.api_key_envvar, "MY_KEY_VAR");
         assert_eq!(cli.common.api_token_envvar, "MY_TOKEN_VAR");
         assert_eq!(cli.common.start_block, Some(100));
         assert_eq!(cli.common.stop_block, Some(200));
-        assert_eq!(cli.common.cursor, PathBuf::from("cursor-mainnet-date.parquet"));
+        assert_eq!(
+            cli.common.cursor,
+            PathBuf::from("cursor-mainnet-date.parquet")
+        );
         assert_eq!(cli.common.output, PathBuf::from("/tmp/out"));
         assert_eq!(cli.common.partition, "date");
         assert_eq!(cli.common.block_range_size, 5000);
@@ -2083,8 +2562,14 @@ mod tests {
         assert_eq!(parse_partition("hour", 10000).unwrap(), Partition::Hour);
         assert_eq!(parse_partition("minute", 10000).unwrap(), Partition::Minute);
         assert_eq!(parse_partition("second", 10000).unwrap(), Partition::Second);
-        assert_eq!(parse_partition("block_range", 5000).unwrap(), Partition::BlockRange(5000));
-        assert_eq!(parse_partition("BLOCK_RANGE", 20000).unwrap(), Partition::BlockRange(20000));
+        assert_eq!(
+            parse_partition("block_range", 5000).unwrap(),
+            Partition::BlockRange(5000)
+        );
+        assert_eq!(
+            parse_partition("BLOCK_RANGE", 20000).unwrap(),
+            Partition::BlockRange(20000)
+        );
         assert!(parse_partition("unknown", 10000).is_err());
     }
 
@@ -2093,10 +2578,14 @@ mod tests {
     fn test_build_config() {
         let cli = parse(&[
             "test-cli",
-            "--endpoint", "https://example.com:443",
-            "--start-block", "100",
-            "--compression", "gzip",
-            "--partition", "date",
+            "--endpoint",
+            "https://example.com:443",
+            "--start-block",
+            "100",
+            "--compression",
+            "gzip",
+            "--partition",
+            "date",
         ]);
         let config = build_config(&cli.common).expect("build_config should succeed");
         assert_eq!(config.endpoint, "https://example.com:443");
@@ -2116,8 +2605,10 @@ mod tests {
     fn test_cursor_must_be_parquet() {
         let cli = parse(&[
             "test-cli",
-            "--endpoint", "https://example.com:443",
-            "--cursor", "cursor.txt",
+            "--endpoint",
+            "https://example.com:443",
+            "--cursor",
+            "cursor.txt",
         ]);
         let result = build_config(&cli.common);
         assert!(result.is_err());
@@ -2129,11 +2620,16 @@ mod tests {
     fn test_cursor_custom_parquet_name() {
         let cli = parse(&[
             "test-cli",
-            "--endpoint", "https://example.com:443",
-            "--cursor", "cursor-mainnet-date.parquet",
+            "--endpoint",
+            "https://example.com:443",
+            "--cursor",
+            "cursor-mainnet-date.parquet",
         ]);
         let config = build_config(&cli.common).expect("build_config should succeed");
-        assert_eq!(config.cursor_path, Some("cursor-mainnet-date.parquet".to_string()));
+        assert_eq!(
+            config.cursor_path,
+            Some("cursor-mainnet-date.parquet".to_string())
+        );
     }
 
     #[test]
@@ -2152,12 +2648,21 @@ mod tests {
     fn test_completions_generation() {
         // Verify that shell completion generation runs without panicking
         // for each supported shell type.
-        for shell in [Shell::Bash, Shell::Zsh, Shell::Fish, Shell::Elvish, Shell::PowerShell] {
+        for shell in [
+            Shell::Bash,
+            Shell::Zsh,
+            Shell::Fish,
+            Shell::Elvish,
+            Shell::PowerShell,
+        ] {
             let mut cmd = TestCli::command();
             let name = cmd.get_name().to_string();
             let mut buf = Vec::new();
             generate(shell, &mut cmd, name, &mut buf);
-            assert!(!buf.is_empty(), "completions for {shell:?} should not be empty");
+            assert!(
+                !buf.is_empty(),
+                "completions for {shell:?} should not be empty"
+            );
         }
     }
 
@@ -2176,13 +2681,25 @@ mod tests {
         }
 
         let cli = parse(&["test-cli"]);
-        assert_eq!(cli.common.endpoint.as_deref(), Some("https://from-env.example.com:443"));
+        assert_eq!(
+            cli.common.endpoint.as_deref(),
+            Some("https://from-env.example.com:443")
+        );
         assert_eq!(cli.common.start_block, Some(42));
         assert_eq!(cli.common.compression, "snappy");
 
         // CLI flags take precedence over env vars
-        let cli = parse(&["test-cli", "-e", "https://from-cli.example.com:443", "--compression", "gzip"]);
-        assert_eq!(cli.common.endpoint.as_deref(), Some("https://from-cli.example.com:443"));
+        let cli = parse(&[
+            "test-cli",
+            "-e",
+            "https://from-cli.example.com:443",
+            "--compression",
+            "gzip",
+        ]);
+        assert_eq!(
+            cli.common.endpoint.as_deref(),
+            Some("https://from-cli.example.com:443")
+        );
         assert_eq!(cli.common.compression, "gzip");
         // env var still applies for start_block since no CLI flag overrides it
         assert_eq!(cli.common.start_block, Some(42));
@@ -2224,7 +2741,13 @@ mod tests {
             std::env::set_var("MY_CUSTOM_KEY", "custom-key-value");
         }
 
-        let cli = parse(&["test-cli", "--endpoint", "https://example.com:443", "--api-key-envvar", "MY_CUSTOM_KEY"]);
+        let cli = parse(&[
+            "test-cli",
+            "--endpoint",
+            "https://example.com:443",
+            "--api-key-envvar",
+            "MY_CUSTOM_KEY",
+        ]);
         let config = build_config(&cli.common).expect("build_config should succeed");
         assert_eq!(config.api_key.as_deref(), Some("custom-key-value"));
 
@@ -2239,25 +2762,40 @@ mod tests {
     fn test_aws_credentials_flags() {
         let cli = parse(&[
             "test-cli",
-            "--endpoint", "https://example.com:443",
-            "--aws-access-key-id", "AKID123",
-            "--aws-secret-access-key", "secret456",
-            "--aws-session-token", "token789",
-            "--aws-region", "us-east-1",
-            "--aws-endpoint-url", "https://s3.custom.endpoint",
+            "--endpoint",
+            "https://example.com:443",
+            "--aws-access-key-id",
+            "AKID123",
+            "--aws-secret-access-key",
+            "secret456",
+            "--aws-session-token",
+            "token789",
+            "--aws-region",
+            "us-east-1",
+            "--aws-endpoint-url",
+            "https://s3.custom.endpoint",
         ]);
         assert_eq!(cli.common.aws_access_key_id.as_deref(), Some("AKID123"));
-        assert_eq!(cli.common.aws_secret_access_key.as_deref(), Some("secret456"));
+        assert_eq!(
+            cli.common.aws_secret_access_key.as_deref(),
+            Some("secret456")
+        );
         assert_eq!(cli.common.aws_session_token.as_deref(), Some("token789"));
         assert_eq!(cli.common.aws_region.as_deref(), Some("us-east-1"));
-        assert_eq!(cli.common.aws_endpoint_url.as_deref(), Some("https://s3.custom.endpoint"));
+        assert_eq!(
+            cli.common.aws_endpoint_url.as_deref(),
+            Some("https://s3.custom.endpoint")
+        );
 
         let config = build_config(&cli.common).expect("build_config should succeed");
         assert_eq!(config.aws_access_key_id.as_deref(), Some("AKID123"));
         assert_eq!(config.aws_secret_access_key.as_deref(), Some("secret456"));
         assert_eq!(config.aws_session_token.as_deref(), Some("token789"));
         assert_eq!(config.aws_region.as_deref(), Some("us-east-1"));
-        assert_eq!(config.aws_endpoint_url.as_deref(), Some("https://s3.custom.endpoint"));
+        assert_eq!(
+            config.aws_endpoint_url.as_deref(),
+            Some("https://s3.custom.endpoint")
+        );
     }
 
     #[test]
@@ -2295,9 +2833,12 @@ mod tests {
         // When --s3-bucket is set, output should become s3://bucket/output
         let cli = parse(&[
             "test-cli",
-            "--endpoint", "https://example.com:443",
-            "--s3-bucket", "my-bucket",
-            "--output", "my-prefix",
+            "--endpoint",
+            "https://example.com:443",
+            "--s3-bucket",
+            "my-bucket",
+            "--output",
+            "my-prefix",
         ]);
         let config = build_config(&cli.common).expect("build_config should succeed");
         assert_eq!(config.output, PathBuf::from("s3://my-bucket/my-prefix"));
@@ -2318,9 +2859,12 @@ mod tests {
         // When output already starts with s3://, s3_bucket should not double-prefix
         let cli = parse(&[
             "test-cli",
-            "--endpoint", "https://example.com:443",
-            "--s3-bucket", "my-bucket",
-            "--output", "s3://other-bucket/prefix",
+            "--endpoint",
+            "https://example.com:443",
+            "--s3-bucket",
+            "my-bucket",
+            "--output",
+            "s3://other-bucket/prefix",
         ]);
         let config = build_config(&cli.common).expect("build_config should succeed");
         assert_eq!(config.output, PathBuf::from("s3://other-bucket/prefix"));
@@ -2341,8 +2885,10 @@ mod tests {
         // When --s3-bucket is set but output uses default "output", use bucket root
         let cli = parse(&[
             "test-cli",
-            "--endpoint", "https://example.com:443",
-            "--s3-bucket", "my-bucket",
+            "--endpoint",
+            "https://example.com:443",
+            "--s3-bucket",
+            "my-bucket",
         ]);
         let config = build_config(&cli.common).expect("build_config should succeed");
         assert_eq!(config.output, PathBuf::from("s3://my-bucket"));

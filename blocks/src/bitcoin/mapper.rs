@@ -1,16 +1,16 @@
 use super::proto::btc;
 use super::schema;
+use arrow::array::Array;
 use arrow::array::*;
 use arrow::datatypes::Schema;
 use arrow::record_batch::RecordBatch;
 use firehose_parquet::encode::EncodeBytes;
 use firehose_parquet::traits::{
-    est_f64, est_i32, est_i64, est_list_str, est_opt_str, est_str, est_u32,
-    BlockIdentity, BlockMapper, CanonicalBuilder,
+    est_f64, est_i32, est_i64, est_list_str, est_opt_str, est_str, est_u32, BlockIdentity,
+    BlockMapper, CanonicalBuilder,
 };
 use prost::Message;
 use std::collections::HashMap;
-use arrow::array::Array;
 use std::sync::Arc;
 
 fn append_fork_step(builder: &mut Option<StringBuilder>, fork_step: Option<&str>) {
@@ -26,7 +26,11 @@ fn finish_fork_step(builder: &mut Option<StringBuilder>, columns: &mut Vec<Arc<d
 }
 
 fn mk_fork_step(include: bool) -> Option<StringBuilder> {
-    if include { Some(StringBuilder::new()) } else { None }
+    if include {
+        Some(StringBuilder::new())
+    } else {
+        None
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -58,7 +62,12 @@ impl BitcoinBlockMapper {
         }
     }
 
-    fn map_btc_block(&mut self, block: &btc::Block, identity: &BlockIdentity, fork_step: Option<&str>) {
+    fn map_btc_block(
+        &mut self,
+        block: &btc::Block,
+        identity: &BlockIdentity,
+        fork_step: Option<&str>,
+    ) {
         let height = block.height;
         let block_hash = &block.hash;
         let block_time = block.time;
@@ -82,7 +91,15 @@ impl BitcoinBlockMapper {
         append_fork_step(&mut self.blocks.fork_step, fork_step);
 
         for (tx_index, tx) in block.tx.iter().enumerate() {
-            self.map_transaction(height, block_hash, block_time, tx_index as u32, tx, identity, fork_step);
+            self.map_transaction(
+                height,
+                block_hash,
+                block_time,
+                tx_index as u32,
+                tx,
+                identity,
+                fork_step,
+            );
         }
     }
 
@@ -121,8 +138,12 @@ impl BitcoinBlockMapper {
             self.inputs.prev_txid.append_value(&vin.txid);
             self.inputs.prev_vout.append_value(vin.vout);
             self.inputs.sequence.append_value(vin.sequence);
-            self.inputs.script_sig_asm.append_value(script_sig.map_or("", |s| &s.asm));
-            self.inputs.script_sig_hex.append_value(script_sig.map_or("", |s| &s.hex));
+            self.inputs
+                .script_sig_asm
+                .append_value(script_sig.map_or("", |s| &s.asm));
+            self.inputs
+                .script_sig_hex
+                .append_value(script_sig.map_or("", |s| &s.hex));
             self.inputs.coinbase.append_value(&vin.coinbase);
 
             let witness_values = self.inputs.witness.values();
@@ -140,17 +161,30 @@ impl BitcoinBlockMapper {
             self.outputs.block_height.append_value(block_height);
             self.outputs.output_index.append_value(vout.n);
             self.outputs.value.append_value(vout.value);
-            self.outputs.script_pubkey_asm.append_value(script.map_or("", |s| &s.asm));
-            self.outputs.script_pubkey_hex.append_value(script.map_or("", |s| &s.hex));
-            self.outputs.script_pubkey_type.append_value(script.map_or("", |s| &s.r#type));
-            self.outputs.script_pubkey_address.append_value(script.map_or("", |s| &s.address));
+            self.outputs
+                .script_pubkey_asm
+                .append_value(script.map_or("", |s| &s.asm));
+            self.outputs
+                .script_pubkey_hex
+                .append_value(script.map_or("", |s| &s.hex));
+            self.outputs
+                .script_pubkey_type
+                .append_value(script.map_or("", |s| &s.r#type));
+            self.outputs
+                .script_pubkey_address
+                .append_value(script.map_or("", |s| &s.address));
             append_fork_step(&mut self.outputs.fork_step, fork_step);
         }
     }
 }
 
 impl BlockMapper for BitcoinBlockMapper {
-    fn map_block(&mut self, block_bytes: &[u8], identity: &BlockIdentity, fork_step: Option<&str>) -> anyhow::Result<()> {
+    fn map_block(
+        &mut self,
+        block_bytes: &[u8],
+        identity: &BlockIdentity,
+        fork_step: Option<&str>,
+    ) -> anyhow::Result<()> {
         let block = btc::Block::decode(block_bytes)?;
         self.map_btc_block(&block, identity, fork_step);
         Ok(())
@@ -158,15 +192,29 @@ impl BlockMapper for BitcoinBlockMapper {
 
     fn flush(&mut self) -> anyhow::Result<HashMap<String, RecordBatch>> {
         let mut result = HashMap::new();
-        result.insert("blocks".to_string(), self.blocks.finish(&self.blocks_schema)?);
-        result.insert("transactions".to_string(), self.transactions.finish(&self.transactions_schema)?);
-        result.insert("inputs".to_string(), self.inputs.finish(&self.inputs_schema)?);
-        result.insert("outputs".to_string(), self.outputs.finish(&self.outputs_schema)?);
+        result.insert(
+            "blocks".to_string(),
+            self.blocks.finish(&self.blocks_schema)?,
+        );
+        result.insert(
+            "transactions".to_string(),
+            self.transactions.finish(&self.transactions_schema)?,
+        );
+        result.insert(
+            "inputs".to_string(),
+            self.inputs.finish(&self.inputs_schema)?,
+        );
+        result.insert(
+            "outputs".to_string(),
+            self.outputs.finish(&self.outputs_schema)?,
+        );
         Ok(result)
     }
 
     fn max_table_rows(&self) -> usize {
-        self.blocks.canonical.len()
+        self.blocks
+            .canonical
+            .len()
             .max(self.transactions.canonical.len())
             .max(self.inputs.canonical.len())
             .max(self.outputs.canonical.len())
@@ -232,10 +280,15 @@ impl BlockMapper for BitcoinBlockMapper {
             + est_str(&self.outputs.script_pubkey_type)
             + est_str(&self.outputs.script_pubkey_address)
             + est_opt_str(&self.outputs.fork_step);
-        [("blocks", blocks), ("transactions", transactions), ("inputs", inputs), ("outputs", outputs)]
-            .into_iter()
-            .max_by_key(|&(_, s)| s)
-            .unwrap_or(("blocks", 0))
+        [
+            ("blocks", blocks),
+            ("transactions", transactions),
+            ("inputs", inputs),
+            ("outputs", outputs),
+        ]
+        .into_iter()
+        .max_by_key(|&(_, s)| s)
+        .unwrap_or(("blocks", 0))
     }
 
     fn table_names(&self) -> Vec<&str> {
@@ -536,7 +589,9 @@ mod tests {
         let block = make_test_block(0);
         let block_bytes = prost::Message::encode_to_vec(&block);
         let mut mapper = BitcoinBlockMapper::new(false, EncodeBytes::Hex);
-        mapper.map_block(&block_bytes, &BlockIdentity::default(), None).unwrap();
+        mapper
+            .map_block(&block_bytes, &BlockIdentity::default(), None)
+            .unwrap();
 
         let batches = mapper.flush().unwrap();
         assert_eq!(batches["blocks"].num_rows(), 1);
@@ -568,7 +623,9 @@ mod tests {
         };
         let block_bytes = prost::Message::encode_to_vec(&block);
         let mut mapper = BitcoinBlockMapper::new(false, EncodeBytes::Hex);
-        mapper.map_block(&block_bytes, &BlockIdentity::default(), None).unwrap();
+        mapper
+            .map_block(&block_bytes, &BlockIdentity::default(), None)
+            .unwrap();
         let batches = mapper.flush().unwrap();
         assert_eq!(batches["blocks"].num_rows(), 1);
         assert_eq!(batches["transactions"].num_rows(), 0);
@@ -581,7 +638,9 @@ mod tests {
         let block = make_test_block(1);
         let block_bytes = prost::Message::encode_to_vec(&block);
         let mut mapper = BitcoinBlockMapper::new(false, EncodeBytes::Hex);
-        mapper.map_block(&block_bytes, &BlockIdentity::default(), None).unwrap();
+        mapper
+            .map_block(&block_bytes, &BlockIdentity::default(), None)
+            .unwrap();
         let _ = mapper.flush().unwrap();
         assert_eq!(mapper.max_table_rows(), 0);
     }
@@ -601,13 +660,19 @@ mod tests {
         let block = make_test_block(0);
         let block_bytes = prost::Message::encode_to_vec(&block);
         let mut mapper = BitcoinBlockMapper::new(true, EncodeBytes::Hex);
-        mapper.map_block(&block_bytes, &BlockIdentity::default(), Some("FINAL")).unwrap();
+        mapper
+            .map_block(&block_bytes, &BlockIdentity::default(), Some("FINAL"))
+            .unwrap();
 
         let batches = mapper.flush().unwrap();
         let blocks_batch = &batches["blocks"];
         let last_col = blocks_batch.num_columns() - 1;
         assert_eq!(blocks_batch.schema().field(last_col).name(), "fork_step");
-        let fork_col = blocks_batch.column(last_col).as_any().downcast_ref::<StringArray>().unwrap();
+        let fork_col = blocks_batch
+            .column(last_col)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
         assert_eq!(fork_col.value(0), "FINAL");
     }
 }

@@ -91,4 +91,10 @@ pub fn state_changes_schema(include_fork_step: bool, encoding: &EncodeBytes) -> 
     Schema::new(fields)
 }
 
-pub const TABLE_NAMES: [&str; 5] = ["blocks", "chunks", "transactions", "receipts", "state_changes"];
+pub const TABLE_NAMES: [&str; 5] = [
+    "blocks",
+    "chunks",
+    "transactions",
+    "receipts",
+    "state_changes",
+];

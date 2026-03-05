@@ -5,8 +5,8 @@ use arrow::datatypes::Schema;
 use arrow::record_batch::RecordBatch;
 use firehose_parquet::encode::{BytesColumn, EncodeBytes};
 use firehose_parquet::traits::{
-    est_bool, est_i32, est_i64, est_opt_str, est_str, est_u32, est_u64,
-    BlockIdentity, BlockMapper, CanonicalBuilder,
+    est_bool, est_i32, est_i64, est_opt_str, est_str, est_u32, est_u64, BlockIdentity, BlockMapper,
+    CanonicalBuilder,
 };
 use prost::Message;
 use std::collections::HashMap;
@@ -25,7 +25,11 @@ fn finish_fork_step(builder: &mut Option<StringBuilder>, columns: &mut Vec<Arc<d
 }
 
 fn mk_fork_step(include: bool) -> Option<StringBuilder> {
-    if include { Some(StringBuilder::new()) } else { None }
+    if include {
+        Some(StringBuilder::new())
+    } else {
+        None
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -45,7 +49,11 @@ pub struct TronBlockMapper {
 }
 
 impl TronBlockMapper {
-    pub fn new(include_fork_step: bool, encoding: EncodeBytes, include_failed_transactions: bool) -> Self {
+    pub fn new(
+        include_fork_step: bool,
+        encoding: EncodeBytes,
+        include_failed_transactions: bool,
+    ) -> Self {
         let enc = &encoding;
         Self {
             include_failed_transactions,
@@ -56,24 +64,44 @@ impl TronBlockMapper {
             blocks_schema: schema::blocks_schema(include_fork_step, enc),
             transactions_schema: schema::transactions_schema(include_fork_step, enc),
             logs_schema: schema::logs_schema(include_fork_step, enc),
-            internal_transactions_schema: schema::internal_transactions_schema(include_fork_step, enc),
+            internal_transactions_schema: schema::internal_transactions_schema(
+                include_fork_step,
+                enc,
+            ),
         }
     }
 
-    fn map_tron_block(&mut self, block: &tron::Block, identity: &BlockIdentity, fork_step: Option<&str>) {
+    fn map_tron_block(
+        &mut self,
+        block: &tron::Block,
+        identity: &BlockIdentity,
+        fork_step: Option<&str>,
+    ) {
         let header = block.header.as_ref();
         let block_number = header.map_or(0, |h| h.number);
 
         self.blocks.canonical.append(identity);
         self.blocks.number.append_value(block_number);
         self.blocks.hash.append_value(&block.id);
-        self.blocks.parent_hash.append_value(header.map(|h| h.parent_hash.as_slice()).unwrap_or(&[]));
+        self.blocks
+            .parent_hash
+            .append_value(header.map(|h| h.parent_hash.as_slice()).unwrap_or(&[]));
 
-        self.blocks.witness_address.append_value(header.map(|h| h.witness_address.as_slice()).unwrap_or(&[]));
-        self.blocks.version.append_value(header.map_or(0, |h| h.version));
-        self.blocks.tx_trie_root.append_value(header.map(|h| h.tx_trie_root.as_slice()).unwrap_or(&[]));
-        self.blocks.parent_number.append_value(header.map_or(0, |h| h.parent_number));
-        self.blocks.num_transactions.append_value(block.transactions.len() as u32);
+        self.blocks
+            .witness_address
+            .append_value(header.map(|h| h.witness_address.as_slice()).unwrap_or(&[]));
+        self.blocks
+            .version
+            .append_value(header.map_or(0, |h| h.version));
+        self.blocks
+            .tx_trie_root
+            .append_value(header.map(|h| h.tx_trie_root.as_slice()).unwrap_or(&[]));
+        self.blocks
+            .parent_number
+            .append_value(header.map_or(0, |h| h.parent_number));
+        self.blocks
+            .num_transactions
+            .append_value(block.transactions.len() as u32);
         append_fork_step(&mut self.blocks.fork_step, fork_step);
 
         for tx in &block.transactions {
@@ -102,7 +130,9 @@ impl TronBlockMapper {
         self.transactions.result.append_value(tx.result);
         self.transactions.code.append_value(tx.code);
         self.transactions.energy_used.append_value(tx.energy_used);
-        self.transactions.energy_penalty.append_value(tx.energy_penalty);
+        self.transactions
+            .energy_penalty
+            .append_value(tx.energy_penalty);
         self.transactions.fee.append_value(fee);
         self.transactions.contract_type.append_value(contract_type);
         self.transactions.expiration.append_value(tx.expiration);
@@ -119,10 +149,26 @@ impl TronBlockMapper {
                 self.logs.address.append_value(&log.address);
 
                 let topics = &log.topics;
-                if let Some(t) = topics.first() { self.logs.topic0.append_value(t); } else { self.logs.topic0.append_null(); }
-                if let Some(t) = topics.get(1) { self.logs.topic1.append_value(t); } else { self.logs.topic1.append_null(); }
-                if let Some(t) = topics.get(2) { self.logs.topic2.append_value(t); } else { self.logs.topic2.append_null(); }
-                if let Some(t) = topics.get(3) { self.logs.topic3.append_value(t); } else { self.logs.topic3.append_null(); }
+                if let Some(t) = topics.first() {
+                    self.logs.topic0.append_value(t);
+                } else {
+                    self.logs.topic0.append_null();
+                }
+                if let Some(t) = topics.get(1) {
+                    self.logs.topic1.append_value(t);
+                } else {
+                    self.logs.topic1.append_null();
+                }
+                if let Some(t) = topics.get(2) {
+                    self.logs.topic2.append_value(t);
+                } else {
+                    self.logs.topic2.append_null();
+                }
+                if let Some(t) = topics.get(3) {
+                    self.logs.topic3.append_value(t);
+                } else {
+                    self.logs.topic3.append_null();
+                }
                 self.logs.data.append_value(&log.data);
                 append_fork_step(&mut self.logs.fork_step, fork_step);
             }
@@ -130,14 +176,26 @@ impl TronBlockMapper {
             // Map internal transactions from TransactionInfo
             for (internal_index, itx) in info.internal_transactions.iter().enumerate() {
                 self.internal_transactions.canonical.append(identity);
-                self.internal_transactions.block_number.append_value(block_number);
+                self.internal_transactions
+                    .block_number
+                    .append_value(block_number);
                 self.internal_transactions.tx_hash.append_value(&tx.txid);
-                self.internal_transactions.internal_index.append_value(internal_index as u32);
+                self.internal_transactions
+                    .internal_index
+                    .append_value(internal_index as u32);
                 self.internal_transactions.hash.append_value(&itx.hash);
-                self.internal_transactions.caller_address.append_value(&itx.caller_address);
-                self.internal_transactions.transfer_to_address.append_value(&itx.transfer_to_address);
-                self.internal_transactions.note.append_value(String::from_utf8_lossy(&itx.note).as_ref());
-                self.internal_transactions.rejected.append_value(itx.rejected);
+                self.internal_transactions
+                    .caller_address
+                    .append_value(&itx.caller_address);
+                self.internal_transactions
+                    .transfer_to_address
+                    .append_value(&itx.transfer_to_address);
+                self.internal_transactions
+                    .note
+                    .append_value(String::from_utf8_lossy(&itx.note).as_ref());
+                self.internal_transactions
+                    .rejected
+                    .append_value(itx.rejected);
                 append_fork_step(&mut self.internal_transactions.fork_step, fork_step);
             }
         }
@@ -145,7 +203,12 @@ impl TronBlockMapper {
 }
 
 impl BlockMapper for TronBlockMapper {
-    fn map_block(&mut self, block_bytes: &[u8], identity: &BlockIdentity, fork_step: Option<&str>) -> anyhow::Result<()> {
+    fn map_block(
+        &mut self,
+        block_bytes: &[u8],
+        identity: &BlockIdentity,
+        fork_step: Option<&str>,
+    ) -> anyhow::Result<()> {
         let block = tron::Block::decode(block_bytes)?;
         self.map_tron_block(&block, identity, fork_step);
         Ok(())
@@ -153,15 +216,27 @@ impl BlockMapper for TronBlockMapper {
 
     fn flush(&mut self) -> anyhow::Result<HashMap<String, RecordBatch>> {
         let mut result = HashMap::new();
-        result.insert("blocks".to_string(), self.blocks.finish(&self.blocks_schema)?);
-        result.insert("transactions".to_string(), self.transactions.finish(&self.transactions_schema)?);
+        result.insert(
+            "blocks".to_string(),
+            self.blocks.finish(&self.blocks_schema)?,
+        );
+        result.insert(
+            "transactions".to_string(),
+            self.transactions.finish(&self.transactions_schema)?,
+        );
         result.insert("logs".to_string(), self.logs.finish(&self.logs_schema)?);
-        result.insert("internal_transactions".to_string(), self.internal_transactions.finish(&self.internal_transactions_schema)?);
+        result.insert(
+            "internal_transactions".to_string(),
+            self.internal_transactions
+                .finish(&self.internal_transactions_schema)?,
+        );
         Ok(result)
     }
 
     fn max_table_rows(&self) -> usize {
-        self.blocks.canonical.len()
+        self.blocks
+            .canonical
+            .len()
             .max(self.transactions.canonical.len())
             .max(self.logs.canonical.len())
             .max(self.internal_transactions.canonical.len())
@@ -179,7 +254,6 @@ impl BlockMapper for TronBlockMapper {
             + est_u64(&self.blocks.number)
             + self.blocks.hash.estimated_bytes()
             + self.blocks.parent_hash.estimated_bytes()
-
             + self.blocks.witness_address.estimated_bytes()
             + est_u32(&self.blocks.version)
             + self.blocks.tx_trie_root.estimated_bytes()
@@ -215,14 +289,22 @@ impl BlockMapper for TronBlockMapper {
             + est_u32(&self.internal_transactions.internal_index)
             + self.internal_transactions.hash.estimated_bytes()
             + self.internal_transactions.caller_address.estimated_bytes()
-            + self.internal_transactions.transfer_to_address.estimated_bytes()
+            + self
+                .internal_transactions
+                .transfer_to_address
+                .estimated_bytes()
             + est_str(&self.internal_transactions.note)
             + est_bool(&self.internal_transactions.rejected)
             + est_opt_str(&self.internal_transactions.fork_step);
-        [("blocks", blocks), ("transactions", transactions), ("logs", logs), ("internal_transactions", internal_transactions)]
-            .into_iter()
-            .max_by_key(|&(_, s)| s)
-            .unwrap_or(("blocks", 0))
+        [
+            ("blocks", blocks),
+            ("transactions", transactions),
+            ("logs", logs),
+            ("internal_transactions", internal_transactions),
+        ]
+        .into_iter()
+        .max_by_key(|&(_, s)| s)
+        .unwrap_or(("blocks", 0))
     }
 
     fn table_names(&self) -> Vec<&str> {
@@ -433,8 +515,8 @@ impl InternalTransactionsBuilder {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::proto::{protocol, tron};
+    use super::*;
 
     fn make_test_block(number: u64) -> tron::Block {
         tron::Block {
@@ -472,10 +554,7 @@ mod tests {
                     receipt: None,
                     log: vec![protocol::transaction_info::Log {
                         address: vec![0x41, 0x10, 0x20],
-                        topics: vec![
-                            vec![0xab, 0xcd],
-                            vec![0xef, 0x01],
-                        ],
+                        topics: vec![vec![0xab, 0xcd], vec![0xef, 0x01]],
                         data: vec![0x01, 0x02, 0x03],
                     }],
                     result: 0,
@@ -519,7 +598,9 @@ mod tests {
         let block = make_test_block(100);
         let block_bytes = prost::Message::encode_to_vec(&block);
         let mut mapper = TronBlockMapper::new(false, EncodeBytes::Hex, false);
-        mapper.map_block(&block_bytes, &BlockIdentity::default(), None).unwrap();
+        mapper
+            .map_block(&block_bytes, &BlockIdentity::default(), None)
+            .unwrap();
 
         let batches = mapper.flush().unwrap();
         assert_eq!(batches["blocks"].num_rows(), 1);
@@ -546,7 +627,9 @@ mod tests {
         };
         let block_bytes = prost::Message::encode_to_vec(&block);
         let mut mapper = TronBlockMapper::new(false, EncodeBytes::Hex, false);
-        mapper.map_block(&block_bytes, &BlockIdentity::default(), None).unwrap();
+        mapper
+            .map_block(&block_bytes, &BlockIdentity::default(), None)
+            .unwrap();
         let batches = mapper.flush().unwrap();
         assert_eq!(batches["blocks"].num_rows(), 1);
         assert_eq!(batches["transactions"].num_rows(), 0);
@@ -559,7 +642,9 @@ mod tests {
         let block = make_test_block(1);
         let block_bytes = prost::Message::encode_to_vec(&block);
         let mut mapper = TronBlockMapper::new(false, EncodeBytes::Hex, false);
-        mapper.map_block(&block_bytes, &BlockIdentity::default(), None).unwrap();
+        mapper
+            .map_block(&block_bytes, &BlockIdentity::default(), None)
+            .unwrap();
         let _ = mapper.flush().unwrap();
         assert_eq!(mapper.max_table_rows(), 0);
     }
@@ -579,13 +664,19 @@ mod tests {
         let block = make_test_block(0);
         let block_bytes = prost::Message::encode_to_vec(&block);
         let mut mapper = TronBlockMapper::new(true, EncodeBytes::Hex, false);
-        mapper.map_block(&block_bytes, &BlockIdentity::default(), Some("FINAL")).unwrap();
+        mapper
+            .map_block(&block_bytes, &BlockIdentity::default(), Some("FINAL"))
+            .unwrap();
 
         let batches = mapper.flush().unwrap();
         let blocks_batch = &batches["blocks"];
         let last_col = blocks_batch.num_columns() - 1;
         assert_eq!(blocks_batch.schema().field(last_col).name(), "fork_step");
-        let fork_col = blocks_batch.column(last_col).as_any().downcast_ref::<StringArray>().unwrap();
+        let fork_col = blocks_batch
+            .column(last_col)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
         assert_eq!(fork_col.value(0), "FINAL");
     }
 }

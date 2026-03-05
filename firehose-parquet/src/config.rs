@@ -101,22 +101,48 @@ impl Partition {
             Partition::Date => {
                 let dt = time::OffsetDateTime::from_unix_timestamp(timestamp)
                     .unwrap_or(time::OffsetDateTime::UNIX_EPOCH);
-                Some(format!("year={:04}/month={:02}/date={:02}", dt.year(), dt.month() as u8, dt.day()))
+                Some(format!(
+                    "year={:04}/month={:02}/date={:02}",
+                    dt.year(),
+                    dt.month() as u8,
+                    dt.day()
+                ))
             }
             Partition::Hour => {
                 let dt = time::OffsetDateTime::from_unix_timestamp(timestamp)
                     .unwrap_or(time::OffsetDateTime::UNIX_EPOCH);
-                Some(format!("year={:04}/month={:02}/date={:02}/hour={:02}", dt.year(), dt.month() as u8, dt.day(), dt.hour()))
+                Some(format!(
+                    "year={:04}/month={:02}/date={:02}/hour={:02}",
+                    dt.year(),
+                    dt.month() as u8,
+                    dt.day(),
+                    dt.hour()
+                ))
             }
             Partition::Minute => {
                 let dt = time::OffsetDateTime::from_unix_timestamp(timestamp)
                     .unwrap_or(time::OffsetDateTime::UNIX_EPOCH);
-                Some(format!("year={:04}/month={:02}/date={:02}/hour={:02}/minute={:02}", dt.year(), dt.month() as u8, dt.day(), dt.hour(), dt.minute()))
+                Some(format!(
+                    "year={:04}/month={:02}/date={:02}/hour={:02}/minute={:02}",
+                    dt.year(),
+                    dt.month() as u8,
+                    dt.day(),
+                    dt.hour(),
+                    dt.minute()
+                ))
             }
             Partition::Second => {
                 let dt = time::OffsetDateTime::from_unix_timestamp(timestamp)
                     .unwrap_or(time::OffsetDateTime::UNIX_EPOCH);
-                Some(format!("year={:04}/month={:02}/date={:02}/hour={:02}/minute={:02}/second={:02}", dt.year(), dt.month() as u8, dt.day(), dt.hour(), dt.minute(), dt.second()))
+                Some(format!(
+                    "year={:04}/month={:02}/date={:02}/hour={:02}/minute={:02}/second={:02}",
+                    dt.year(),
+                    dt.month() as u8,
+                    dt.day(),
+                    dt.hour(),
+                    dt.minute(),
+                    dt.second()
+                ))
             }
         }
     }
@@ -277,7 +303,10 @@ mod tests {
     #[test]
     fn test_partition_display() {
         assert_eq!(Partition::None.to_string(), "none");
-        assert_eq!(Partition::BlockRange(10000).to_string(), "block_range(10000)");
+        assert_eq!(
+            Partition::BlockRange(10000).to_string(),
+            "block_range(10000)"
+        );
         assert_eq!(Partition::Date.to_string(), "date");
         assert_eq!(Partition::Hour.to_string(), "hour");
     }

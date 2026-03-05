@@ -260,10 +260,7 @@ pub fn serve(registry: Arc<Registry>, port: u16) {
     });
 }
 
-async fn handle_request(
-    stream: &mut tokio::net::TcpStream,
-    registry: &Registry,
-) {
+async fn handle_request(stream: &mut tokio::net::TcpStream, registry: &Registry) {
     // Read the request (we don't parse it fully — just drain input).
     let mut buf = [0u8; 4096];
     let request_line = match tokio::io::AsyncReadExt::read(stream, &mut buf).await {
@@ -349,7 +346,10 @@ mod tests {
         let labels = TableLabels {
             table: "blocks".to_string(),
         };
-        metrics.rows_written_total.get_or_create(&labels).inc_by(100);
+        metrics
+            .rows_written_total
+            .get_or_create(&labels)
+            .inc_by(100);
         assert_eq!(metrics.rows_written_total.get_or_create(&labels).get(), 100);
     }
 

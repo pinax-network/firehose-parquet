@@ -185,7 +185,13 @@ impl CursorState {
             batch
                 .column_by_name(name)
                 .and_then(|c| c.as_string_opt::<i32>())
-                .and_then(|a| if a.is_null(0) { None } else { Some(a.value(0).to_string()) })
+                .and_then(|a| {
+                    if a.is_null(0) {
+                        None
+                    } else {
+                        Some(a.value(0).to_string())
+                    }
+                })
                 .unwrap_or_default()
         };
         let get_u64 = |name: &str| -> u64 {
@@ -212,13 +218,25 @@ impl CursorState {
             batch
                 .column_by_name(name)
                 .and_then(|c| c.as_binary_opt::<i32>())
-                .and_then(|a| if a.is_null(0) { None } else { Some(a.value(0).to_vec()) })
+                .and_then(|a| {
+                    if a.is_null(0) {
+                        None
+                    } else {
+                        Some(a.value(0).to_vec())
+                    }
+                })
                 // Fallback: try reading as Utf8 for backward compat with old cursor files
                 .or_else(|| {
                     batch
                         .column_by_name(name)
                         .and_then(|c| c.as_string_opt::<i32>())
-                        .and_then(|a| if a.is_null(0) { None } else { Some(a.value(0).as_bytes().to_vec()) })
+                        .and_then(|a| {
+                            if a.is_null(0) {
+                                None
+                            } else {
+                                Some(a.value(0).as_bytes().to_vec())
+                            }
+                        })
                 })
                 .unwrap_or_default()
         };
@@ -374,16 +392,17 @@ impl CursorLocation {
             } else {
                 format!("{prefix}/{cursor_filename}")
             };
-            let client = s3_client.ok_or_else(|| {
-                anyhow::anyhow!("output is S3 but no S3 client available")
-            })?;
+            let client = s3_client
+                .ok_or_else(|| anyhow::anyhow!("output is S3 but no S3 client available"))?;
             Ok(CursorLocation::S3 { client, key })
         } else {
             // Local output — local cursor
             if cursor_filename.starts_with("s3://") {
                 anyhow::bail!("local output with S3 cursor path is not supported");
             }
-            Ok(CursorLocation::Local(std::path::PathBuf::from(cursor_filename)))
+            Ok(CursorLocation::Local(std::path::PathBuf::from(
+                cursor_filename,
+            )))
         }
     }
 
@@ -391,12 +410,13 @@ impl CursorLocation {
     pub fn save(&self, state: &CursorState) -> anyhow::Result<()> {
         match self {
             CursorLocation::Local(path) => save_cursor_parquet(path, state),
-            CursorLocation::S3 { client, key } => {
-                tokio::task::block_in_place(|| {
-                    tokio::runtime::Handle::current()
-                        .block_on(save_cursor_parquet_s3(client.as_ref(), key, state))
-                })
-            }
+            CursorLocation::S3 { client, key } => tokio::task::block_in_place(|| {
+                tokio::runtime::Handle::current().block_on(save_cursor_parquet_s3(
+                    client.as_ref(),
+                    key,
+                    state,
+                ))
+            }),
         }
     }
 
@@ -405,12 +425,10 @@ impl CursorLocation {
     pub fn load(&self) -> Option<CursorState> {
         match self {
             CursorLocation::Local(path) => load_cursor_parquet(path),
-            CursorLocation::S3 { client, key } => {
-                tokio::task::block_in_place(|| {
-                    tokio::runtime::Handle::current()
-                        .block_on(load_cursor_parquet_s3(client.as_ref(), key))
-                })
-            }
+            CursorLocation::S3 { client, key } => tokio::task::block_in_place(|| {
+                tokio::runtime::Handle::current()
+                    .block_on(load_cursor_parquet_s3(client.as_ref(), key))
+            }),
         }
     }
 }
@@ -441,10 +459,7 @@ async fn save_cursor_parquet_s3(
 }
 
 /// Load cursor state from S3. Returns `None` if not found or unreadable.
-async fn load_cursor_parquet_s3(
-    client: &dyn ObjectStore,
-    key: &str,
-) -> Option<CursorState> {
+async fn load_cursor_parquet_s3(client: &dyn ObjectStore, key: &str) -> Option<CursorState> {
     let path = object_store::path::Path::from(key);
     let result = match client.get(&path).await {
         Ok(r) => r,
@@ -528,7 +543,10 @@ mod tests {
     fn test_file_metadata() -> ParquetFileMetadata {
         let mut meta = ParquetFileMetadata::new();
         meta.add("firehose-parquet.version", "0.3.2");
-        meta.add("firehose-parquet.endpoint", "https://eth.firehose.pinax.network:443");
+        meta.add(
+            "firehose-parquet.endpoint",
+            "https://eth.firehose.pinax.network:443",
+        );
         meta.add("firehose-parquet.chain_name", "eth-mainnet");
         meta.add("firehose-parquet.chain_name_aliases", "ethereum,eth");
         meta.add("firehose-parquet.first_streamable_block_num", "0");
@@ -580,9 +598,18 @@ mod tests {
             .map(|(k, v)| (k.as_str(), v.as_str()))
             .collect();
         assert_eq!(meta_map.get("firehose-parquet.version"), Some(&"0.3.2"));
-        assert_eq!(meta_map.get("firehose-parquet.chain_name"), Some(&"eth-mainnet"));
-        assert_eq!(meta_map.get("firehose-parquet.block_features"), Some(&"extended,base"));
-        assert_eq!(meta_map.get("firehose-parquet.bytes_encoding"), Some(&"hex"));
+        assert_eq!(
+            meta_map.get("firehose-parquet.chain_name"),
+            Some(&"eth-mainnet")
+        );
+        assert_eq!(
+            meta_map.get("firehose-parquet.block_features"),
+            Some(&"extended,base")
+        );
+        assert_eq!(
+            meta_map.get("firehose-parquet.bytes_encoding"),
+            Some(&"hex")
+        );
         assert_eq!(meta_map.get("firehose-parquet.compression"), Some(&"zstd"));
         assert_eq!(meta_map.get("firehose-parquet.partition"), Some(&"date"));
     }
@@ -613,7 +640,8 @@ mod tests {
 
     #[test]
     fn test_load_cursor_parquet_missing_file() {
-        let result = load_cursor_parquet(Path::new("/tmp/nonexistent_cursor_parquet_12345.parquet"));
+        let result =
+            load_cursor_parquet(Path::new("/tmp/nonexistent_cursor_parquet_12345.parquet"));
         assert!(result.is_none());
     }
 
@@ -633,7 +661,11 @@ mod tests {
     #[test]
     fn test_save_cursor_parquet_creates_parent_dirs() {
         let dir = TempDir::new().unwrap();
-        let path = dir.path().join("nested").join("dir").join(CURSOR_PARQUET_FILENAME);
+        let path = dir
+            .path()
+            .join("nested")
+            .join("dir")
+            .join(CURSOR_PARQUET_FILENAME);
 
         let state = CursorState {
             cursor: "abc".to_string(),
@@ -724,8 +756,8 @@ mod tests {
             }
         }
         let current = CursorState {
-            start_block: Some(500),  // different
-            extended: false,          // different
+            start_block: Some(500), // different
+            extended: false,        // different
             final_blocks_only: true,
             include_failed_transactions: true, // different
             file_metadata: different_meta,
@@ -736,7 +768,9 @@ mod tests {
         assert_eq!(mismatches.len(), 4);
         assert!(mismatches.iter().any(|m| m.contains("start_block")));
         assert!(mismatches.iter().any(|m| m.contains("extended")));
-        assert!(mismatches.iter().any(|m| m.contains("include_failed_transactions")));
+        assert!(mismatches
+            .iter()
+            .any(|m| m.contains("include_failed_transactions")));
         assert!(mismatches.iter().any(|m| m.contains("compression")));
     }
 

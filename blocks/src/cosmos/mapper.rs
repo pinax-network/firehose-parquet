@@ -5,8 +5,8 @@ use arrow::datatypes::Schema;
 use arrow::record_batch::RecordBatch;
 use firehose_parquet::encode::{BytesColumn, EncodeBytes};
 use firehose_parquet::traits::{
-    est_bin, est_i32, est_i64, est_opt_str, est_str, est_u32,
-    BlockIdentity, BlockMapper, CanonicalBuilder,
+    est_bin, est_i32, est_i64, est_opt_str, est_str, est_u32, BlockIdentity, BlockMapper,
+    CanonicalBuilder,
 };
 use prost::Message;
 use sha2::{Digest, Sha256};
@@ -26,7 +26,11 @@ fn finish_fork_step(builder: &mut Option<StringBuilder>, columns: &mut Vec<Arc<d
 }
 
 fn mk_fork_step(include: bool) -> Option<StringBuilder> {
-    if include { Some(StringBuilder::new()) } else { None }
+    if include {
+        Some(StringBuilder::new())
+    } else {
+        None
+    }
 }
 
 /// Compute SHA256 hash of raw tx bytes, returning raw digest bytes.
@@ -51,7 +55,11 @@ pub struct CosmosBlockMapper {
 }
 
 impl CosmosBlockMapper {
-    pub fn new(include_fork_step: bool, encoding: EncodeBytes, include_failed_transactions: bool) -> Self {
+    pub fn new(
+        include_fork_step: bool,
+        encoding: EncodeBytes,
+        include_failed_transactions: bool,
+    ) -> Self {
         let enc = &encoding;
         Self {
             include_failed_transactions,
@@ -66,29 +74,26 @@ impl CosmosBlockMapper {
         }
     }
 
-    fn map_cosmos_block(&mut self, block: &cosmos::Block, identity: &BlockIdentity, fork_step: Option<&str>) {
+    fn map_cosmos_block(
+        &mut self,
+        block: &cosmos::Block,
+        identity: &BlockIdentity,
+        fork_step: Option<&str>,
+    ) {
         let height = block.height;
 
         let header = block.header.as_ref();
         let chain_id = header.map_or("", |h| &h.chain_id);
-        let proposer_address = header
-            .map(|h| h.proposer_address.as_slice())
-            .unwrap_or(&[]);
+        let proposer_address = header.map(|h| h.proposer_address.as_slice()).unwrap_or(&[]);
         let last_block_id_hash = header
             .and_then(|h| h.last_block_id.as_ref())
             .map(|bid| bid.hash.as_slice())
             .unwrap_or(&[]);
-        let validators_hash = header
-            .map(|h| h.validators_hash.as_slice())
-            .unwrap_or(&[]);
+        let validators_hash = header.map(|h| h.validators_hash.as_slice()).unwrap_or(&[]);
         let next_validators_hash = header
             .map(|h| h.next_validators_hash.as_slice())
             .unwrap_or(&[]);
-        let block_time = block
-            .time
-            .as_ref()
-            .map(|t| t.seconds)
-            .unwrap_or(0);
+        let block_time = block.time.as_ref().map(|t| t.seconds).unwrap_or(0);
         let num_txs = block.txs.len() as u32;
 
         // blocks row
@@ -98,9 +103,13 @@ impl CosmosBlockMapper {
         self.blocks.time.append_value(block_time);
         self.blocks.chain_id.append_value(chain_id);
         self.blocks.proposer_address.append_value(proposer_address);
-        self.blocks.last_block_id_hash.append_value(last_block_id_hash);
+        self.blocks
+            .last_block_id_hash
+            .append_value(last_block_id_hash);
         self.blocks.validators_hash.append_value(validators_hash);
-        self.blocks.next_validators_hash.append_value(next_validators_hash);
+        self.blocks
+            .next_validators_hash
+            .append_value(next_validators_hash);
         self.blocks.num_txs.append_value(num_txs);
         append_fork_step(&mut self.blocks.fork_step, fork_step);
 
@@ -133,12 +142,24 @@ impl CosmosBlockMapper {
             self.transactions.canonical.append(identity);
             self.transactions.tx_hash.append_value(&hash);
             self.transactions.index.append_value(tx_idx as u32);
-            self.transactions.code.append_value(tx_result.map_or(0, |r| r.code));
-            self.transactions.gas_wanted.append_value(tx_result.map_or(0, |r| r.gas_wanted));
-            self.transactions.gas_used.append_value(tx_result.map_or(0, |r| r.gas_used));
-            self.transactions.log.append_value(tx_result.map_or("", |r| &r.log));
-            self.transactions.info.append_value(tx_result.map_or("", |r| &r.info));
-            self.transactions.codespace.append_value(tx_result.map_or("", |r| &r.codespace));
+            self.transactions
+                .code
+                .append_value(tx_result.map_or(0, |r| r.code));
+            self.transactions
+                .gas_wanted
+                .append_value(tx_result.map_or(0, |r| r.gas_wanted));
+            self.transactions
+                .gas_used
+                .append_value(tx_result.map_or(0, |r| r.gas_used));
+            self.transactions
+                .log
+                .append_value(tx_result.map_or("", |r| &r.log));
+            self.transactions
+                .info
+                .append_value(tx_result.map_or("", |r| &r.info));
+            self.transactions
+                .codespace
+                .append_value(tx_result.map_or("", |r| &r.codespace));
             append_fork_step(&mut self.transactions.fork_step, fork_step);
 
             // tx-level events
@@ -177,7 +198,12 @@ impl CosmosBlockMapper {
 }
 
 impl BlockMapper for CosmosBlockMapper {
-    fn map_block(&mut self, block_bytes: &[u8], identity: &BlockIdentity, fork_step: Option<&str>) -> anyhow::Result<()> {
+    fn map_block(
+        &mut self,
+        block_bytes: &[u8],
+        identity: &BlockIdentity,
+        fork_step: Option<&str>,
+    ) -> anyhow::Result<()> {
         let block = cosmos::Block::decode(block_bytes)?;
         self.map_cosmos_block(&block, identity, fork_step);
         Ok(())
@@ -185,15 +211,29 @@ impl BlockMapper for CosmosBlockMapper {
 
     fn flush(&mut self) -> anyhow::Result<HashMap<String, RecordBatch>> {
         let mut result = HashMap::new();
-        result.insert("blocks".to_string(), self.blocks.finish(&self.blocks_schema)?);
-        result.insert("transactions".to_string(), self.transactions.finish(&self.transactions_schema)?);
-        result.insert("events".to_string(), self.events.finish(&self.events_schema)?);
-        result.insert("messages".to_string(), self.messages.finish(&self.messages_schema)?);
+        result.insert(
+            "blocks".to_string(),
+            self.blocks.finish(&self.blocks_schema)?,
+        );
+        result.insert(
+            "transactions".to_string(),
+            self.transactions.finish(&self.transactions_schema)?,
+        );
+        result.insert(
+            "events".to_string(),
+            self.events.finish(&self.events_schema)?,
+        );
+        result.insert(
+            "messages".to_string(),
+            self.messages.finish(&self.messages_schema)?,
+        );
         Ok(result)
     }
 
     fn max_table_rows(&self) -> usize {
-        self.blocks.canonical.len()
+        self.blocks
+            .canonical
+            .len()
             .max(self.transactions.canonical.len())
             .max(self.events.canonical.len())
             .max(self.messages.canonical.len())
@@ -244,10 +284,15 @@ impl BlockMapper for CosmosBlockMapper {
             + est_str(&self.messages.type_url)
             + est_bin(&self.messages.value)
             + est_opt_str(&self.messages.fork_step);
-        [("blocks", blocks), ("transactions", transactions), ("events", events), ("messages", messages)]
-            .into_iter()
-            .max_by_key(|&(_, s)| s)
-            .unwrap_or(("blocks", 0))
+        [
+            ("blocks", blocks),
+            ("transactions", transactions),
+            ("events", events),
+            ("messages", messages),
+        ]
+        .into_iter()
+        .max_by_key(|&(_, s)| s)
+        .unwrap_or(("blocks", 0))
     }
 
     fn table_names(&self) -> Vec<&str> {
@@ -461,12 +506,18 @@ mod tests {
         cosmos::Block {
             hash: vec![0xab, 0xcd, 0xef],
             height,
-            time: Some(prost_types::Timestamp { seconds: 1700000000, nanos: 0 }),
+            time: Some(prost_types::Timestamp {
+                seconds: 1700000000,
+                nanos: 0,
+            }),
             header: Some(cosmos::Header {
                 version: None,
                 chain_id: "cosmoshub-4".to_string(),
                 height,
-                time: Some(prost_types::Timestamp { seconds: 1700000000, nanos: 0 }),
+                time: Some(prost_types::Timestamp {
+                    seconds: 1700000000,
+                    nanos: 0,
+                }),
                 last_block_id: Some(cosmos::BlockId {
                     hash: vec![0x11, 0x22],
                     part_set_header: None,
@@ -485,8 +536,14 @@ mod tests {
             events: vec![cosmos::Event {
                 r#type: "coin_received".to_string(),
                 attributes: vec![
-                    cosmos::EventAttribute { key: "receiver".to_string(), value: "cosmos1abc".to_string() },
-                    cosmos::EventAttribute { key: "amount".to_string(), value: "100uatom".to_string() },
+                    cosmos::EventAttribute {
+                        key: "receiver".to_string(),
+                        value: "cosmos1abc".to_string(),
+                    },
+                    cosmos::EventAttribute {
+                        key: "amount".to_string(),
+                        value: "100uatom".to_string(),
+                    },
                 ],
             }],
             txs: vec![raw_tx],
@@ -499,9 +556,10 @@ mod tests {
                 gas_used: 150000,
                 events: vec![cosmos::Event {
                     r#type: "transfer".to_string(),
-                    attributes: vec![
-                        cosmos::EventAttribute { key: "sender".to_string(), value: "cosmos1xyz".to_string() },
-                    ],
+                    attributes: vec![cosmos::EventAttribute {
+                        key: "sender".to_string(),
+                        value: "cosmos1xyz".to_string(),
+                    }],
                 }],
                 codespace: String::new(),
             }],
@@ -515,7 +573,9 @@ mod tests {
         let block = make_test_block(100);
         let block_bytes = prost::Message::encode_to_vec(&block);
         let mut mapper = CosmosBlockMapper::new(false, EncodeBytes::Hex, false);
-        mapper.map_block(&block_bytes, &BlockIdentity::default(), None).unwrap();
+        mapper
+            .map_block(&block_bytes, &BlockIdentity::default(), None)
+            .unwrap();
 
         let batches = mapper.flush().unwrap();
         assert_eq!(batches["blocks"].num_rows(), 1);
@@ -530,7 +590,10 @@ mod tests {
         let block = cosmos::Block {
             hash: vec![0x00],
             height: 1,
-            time: Some(prost_types::Timestamp { seconds: 1700000000, nanos: 0 }),
+            time: Some(prost_types::Timestamp {
+                seconds: 1700000000,
+                nanos: 0,
+            }),
             header: Some(cosmos::Header {
                 chain_id: "cosmoshub-4".to_string(),
                 height: 1,
@@ -545,7 +608,9 @@ mod tests {
         };
         let block_bytes = prost::Message::encode_to_vec(&block);
         let mut mapper = CosmosBlockMapper::new(false, EncodeBytes::Hex, false);
-        mapper.map_block(&block_bytes, &BlockIdentity::default(), None).unwrap();
+        mapper
+            .map_block(&block_bytes, &BlockIdentity::default(), None)
+            .unwrap();
 
         let batches = mapper.flush().unwrap();
         assert_eq!(batches["blocks"].num_rows(), 1);
@@ -559,7 +624,9 @@ mod tests {
         let block = make_test_block(100);
         let block_bytes = prost::Message::encode_to_vec(&block);
         let mut mapper = CosmosBlockMapper::new(false, EncodeBytes::Hex, false);
-        mapper.map_block(&block_bytes, &BlockIdentity::default(), None).unwrap();
+        mapper
+            .map_block(&block_bytes, &BlockIdentity::default(), None)
+            .unwrap();
         let _ = mapper.flush().unwrap();
         assert_eq!(mapper.max_table_rows(), 0);
     }
@@ -579,13 +646,19 @@ mod tests {
         let block = make_test_block(100);
         let block_bytes = prost::Message::encode_to_vec(&block);
         let mut mapper = CosmosBlockMapper::new(true, EncodeBytes::Hex, false);
-        mapper.map_block(&block_bytes, &BlockIdentity::default(), Some("FINAL")).unwrap();
+        mapper
+            .map_block(&block_bytes, &BlockIdentity::default(), Some("FINAL"))
+            .unwrap();
 
         let batches = mapper.flush().unwrap();
         let blocks_batch = &batches["blocks"];
         let last_col = blocks_batch.num_columns() - 1;
         assert_eq!(blocks_batch.schema().field(last_col).name(), "fork_step");
-        let fork_col = blocks_batch.column(last_col).as_any().downcast_ref::<StringArray>().unwrap();
+        let fork_col = blocks_batch
+            .column(last_col)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
         assert_eq!(fork_col.value(0), "FINAL");
     }
 }

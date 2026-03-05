@@ -30,7 +30,10 @@ pub struct FirehoseClient {
 
 impl FirehoseClient {
     pub fn new(config: Config) -> Self {
-        Self { config, metrics: None }
+        Self {
+            config,
+            metrics: None,
+        }
     }
 
     /// Set the pipeline metrics for Prometheus instrumentation.
@@ -83,13 +86,16 @@ impl FirehoseClient {
         if let Some(ref key) = self.config.api_key {
             request.metadata_mut().insert(
                 "x-api-key",
-                key.parse().expect("API key must be valid ASCII metadata value"),
+                key.parse()
+                    .expect("API key must be valid ASCII metadata value"),
             );
         }
         if let Some(ref token) = self.config.jwt_token {
             request.metadata_mut().insert(
                 "authorization",
-                format!("Bearer {token}").parse().expect("JWT token must be valid ASCII metadata value"),
+                format!("Bearer {token}")
+                    .parse()
+                    .expect("JWT token must be valid ASCII metadata value"),
             );
         }
 
@@ -128,7 +134,11 @@ impl FirehoseClient {
     ///
     /// Returns when the stream is cleanly exhausted (stop block reached) or an
     /// unrecoverable error occurs.
-    pub async fn stream_blocks<F>(&self, cursor_location: Option<&CursorLocation>, mut handler: F) -> Result<()>
+    pub async fn stream_blocks<F>(
+        &self,
+        cursor_location: Option<&CursorLocation>,
+        mut handler: F,
+    ) -> Result<()>
     where
         F: FnMut(Vec<u8>, String, String, BlockIdentity, i32) -> Result<()>,
     {
@@ -140,8 +150,14 @@ impl FirehoseClient {
             .with_max_interval(Duration::from_secs(60))
             .with_max_elapsed_time(None) // retry forever
             .build();
-        let stream_idle_timeout = self.config.stream_idle_timeout_secs.map(Duration::from_secs);
-        let reconnect_stall_timeout = self.config.reconnect_stall_timeout_secs.map(Duration::from_secs);
+        let stream_idle_timeout = self
+            .config
+            .stream_idle_timeout_secs
+            .map(Duration::from_secs);
+        let reconnect_stall_timeout = self
+            .config
+            .reconnect_stall_timeout_secs
+            .map(Duration::from_secs);
 
         let mut attempt = 0u64;
         let mut reconnect_stall_started_at: Option<Instant> = None;
@@ -154,7 +170,9 @@ impl FirehoseClient {
                     ch
                 }
                 Err(e) => {
-                    let stall_elapsed = reconnect_stall_started_at.get_or_insert_with(Instant::now).elapsed();
+                    let stall_elapsed = reconnect_stall_started_at
+                        .get_or_insert_with(Instant::now)
+                        .elapsed();
                     if let Some(max_stall) = reconnect_stall_timeout {
                         if stall_elapsed >= max_stall {
                             return Err(anyhow::anyhow!(
@@ -178,7 +196,11 @@ impl FirehoseClient {
                     );
                     if let Some(ref m) = self.metrics {
                         m.grpc_reconnects_total.inc();
-                        m.errors_total.get_or_create(&crate::metrics::ErrorLabels { kind: "grpc_reconnect".to_string() }).inc();
+                        m.errors_total
+                            .get_or_create(&crate::metrics::ErrorLabels {
+                                kind: "grpc_reconnect".to_string(),
+                            })
+                            .inc();
                     }
                     tokio::time::sleep(wait).await;
                     continue;
@@ -206,16 +228,14 @@ impl FirehoseClient {
 
             let mut request = tonic::Request::new(req);
             if let Some(ref key) = self.config.api_key {
-                request.metadata_mut().insert(
-                    "x-api-key",
-                    key.parse().unwrap(),
-                );
+                request
+                    .metadata_mut()
+                    .insert("x-api-key", key.parse().unwrap());
             }
             if let Some(ref token) = self.config.jwt_token {
-                request.metadata_mut().insert(
-                    "authorization",
-                    format!("Bearer {token}").parse().unwrap(),
-                );
+                request
+                    .metadata_mut()
+                    .insert("authorization", format!("Bearer {token}").parse().unwrap());
             }
 
             let stream = match client.blocks(request).await {
@@ -225,7 +245,9 @@ impl FirehoseClient {
                     resp.into_inner()
                 }
                 Err(e) => {
-                    let stall_elapsed = reconnect_stall_started_at.get_or_insert_with(Instant::now).elapsed();
+                    let stall_elapsed = reconnect_stall_started_at
+                        .get_or_insert_with(Instant::now)
+                        .elapsed();
                     if let Some(max_stall) = reconnect_stall_timeout {
                         if stall_elapsed >= max_stall {
                             return Err(anyhow::anyhow!(
@@ -249,7 +271,11 @@ impl FirehoseClient {
                     );
                     if let Some(ref m) = self.metrics {
                         m.grpc_reconnects_total.inc();
-                        m.errors_total.get_or_create(&crate::metrics::ErrorLabels { kind: "grpc_reconnect".to_string() }).inc();
+                        m.errors_total
+                            .get_or_create(&crate::metrics::ErrorLabels {
+                                kind: "grpc_reconnect".to_string(),
+                            })
+                            .inc();
                     }
                     tokio::time::sleep(wait).await;
                     continue;
@@ -266,7 +292,11 @@ impl FirehoseClient {
                             warn!(idle_for = ?timeout, "stream idle timeout reached, will reconnect");
                             if let Some(ref m) = self.metrics {
                                 m.grpc_reconnects_total.inc();
-                                m.errors_total.get_or_create(&crate::metrics::ErrorLabels { kind: "grpc_reconnect".to_string() }).inc();
+                                m.errors_total
+                                    .get_or_create(&crate::metrics::ErrorLabels {
+                                        kind: "grpc_reconnect".to_string(),
+                                    })
+                                    .inc();
                             }
                             break;
                         }
@@ -291,8 +321,10 @@ impl FirehoseClient {
                             })
                         };
 
-                        let identity = resp.metadata.as_ref().map(|m| {
-                            BlockIdentity {
+                        let identity = resp
+                            .metadata
+                            .as_ref()
+                            .map(|m| BlockIdentity {
                                 block_num: m.num,
                                 block_id: m.id.clone(),
                                 parent_num: m.parent_num,
@@ -300,11 +332,17 @@ impl FirehoseClient {
                                 lib_num: m.lib_num,
                                 timestamp: m.time.as_ref().map_or(0, |t| t.seconds),
                                 fork_step: fork_step.clone(),
-                            }
-                        }).unwrap_or_default();
+                            })
+                            .unwrap_or_default();
 
                         if let Some(any) = resp.block {
-                            handler(any.value, any.type_url, new_cursor.clone(), identity, resp.step)?;
+                            handler(
+                                any.value,
+                                any.type_url,
+                                new_cursor.clone(),
+                                identity,
+                                resp.step,
+                            )?;
                         }
 
                         cursor = Some(new_cursor.clone());
@@ -317,7 +355,11 @@ impl FirehoseClient {
                         warn!(error = %e, "stream error, will reconnect");
                         if let Some(ref m) = self.metrics {
                             m.grpc_reconnects_total.inc();
-                            m.errors_total.get_or_create(&crate::metrics::ErrorLabels { kind: "grpc_reconnect".to_string() }).inc();
+                            m.errors_total
+                                .get_or_create(&crate::metrics::ErrorLabels {
+                                    kind: "grpc_reconnect".to_string(),
+                                })
+                                .inc();
                         }
                         break;
                     }

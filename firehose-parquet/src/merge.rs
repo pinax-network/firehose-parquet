@@ -739,7 +739,9 @@ fn read_s3_bytes_with_retry(
             max_attempts,
         );
 
-        match read_span.in_scope(|| block_on_async(async { client.get(location).await?.bytes().await })) {
+        match read_span
+            .in_scope(|| block_on_async(async { client.get(location).await?.bytes().await }))
+        {
             Ok(data) => return Ok(data),
             Err(error) => {
                 if attempt >= max_attempts {
