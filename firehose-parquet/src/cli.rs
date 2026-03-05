@@ -730,6 +730,53 @@ Examples:
 /// Subcommands under `firehose-parquet partitions`.
 #[derive(clap::Subcommand, Debug)]
 pub enum PartitionsCommands {
+    /// Validate continuity and invariants in `partitions.parquet`.
+    #[command(after_long_help = "\
+Examples:
+  # Validate all rows in a local index
+  firehose-parquet partitions validate \\
+    --partitions-index ./output/eth-mainnet/partitions.parquet
+
+  # Validate one chain/type and allow gaps
+  firehose-parquet partitions validate \\
+    --partitions-index s3://my-bucket/partitions.parquet \\
+    --partition-type day \\
+    --partition-chain eth-mainnet \\
+    --allow-gaps \\
+    --json
+")]
+    Validate {
+        /// Path to partitions index parquet file (local path or s3:// URI)
+        #[arg(long)]
+        partitions_index: String,
+        /// Optional partition type filter (e.g. hour, day)
+        #[arg(long)]
+        partition_type: Option<String>,
+        /// Optional chain filter (matches `chain` column)
+        #[arg(long)]
+        partition_chain: Option<String>,
+        /// Allow gaps between adjacent partitions in the same chain/type
+        #[arg(long, default_value = "false")]
+        allow_gaps: bool,
+        /// Emit machine-readable JSON output
+        #[arg(long, default_value = "false")]
+        json: bool,
+        /// AWS access key ID (for S3 paths)
+        #[arg(long, env = "AWS_ACCESS_KEY_ID", hide_env_values = true)]
+        aws_access_key_id: Option<String>,
+        /// AWS secret access key (for S3 paths)
+        #[arg(long, env = "AWS_SECRET_ACCESS_KEY", hide_env_values = true)]
+        aws_secret_access_key: Option<String>,
+        /// AWS session token (for S3 paths)
+        #[arg(long, env = "AWS_SESSION_TOKEN", hide_env_values = true)]
+        aws_session_token: Option<String>,
+        /// AWS region (for S3 paths)
+        #[arg(long, env = "AWS_REGION", hide_env_values = true)]
+        aws_region: Option<String>,
+        /// AWS endpoint URL (for S3-compatible services)
+        #[arg(long, env = "AWS_ENDPOINT_URL_S3", hide_env_values = true)]
+        aws_endpoint_url: Option<String>,
+    },
     /// Deterministically assign partitions to one shard.
     #[command(after_long_help = "\
 Examples:
@@ -997,6 +1044,40 @@ pub struct PartitionShardResult {
     pub total_matches: usize,
     pub returned_rows: usize,
     pub rows: Vec<PartitionListRow>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PartitionValidateRequest {
+    pub list: PartitionListRequest,
+    pub allow_gaps: bool,
+}
+
+#[derive(Debug, Clone, serde::Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PartitionValidationIssueKind {
+    InvalidRange,
+    Gap,
+    Overlap,
+    OutOfOrder,
+}
+
+#[derive(Debug, Clone, serde::Serialize, PartialEq, Eq)]
+pub struct PartitionValidationIssue {
+    pub kind: PartitionValidationIssueKind,
+    pub partition_type: String,
+    pub partition_value: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub chain: Option<String>,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize, PartialEq, Eq)]
+pub struct PartitionValidateResult {
+    pub partitions_index: String,
+    pub total_rows: usize,
+    pub issue_count: usize,
+    pub valid: bool,
+    pub issues: Vec<PartitionValidationIssue>,
 }
 
 pub const PARTITIONS_SCHEMA_VERSION: &str = "1";
@@ -1692,6 +1773,95 @@ pub fn shard_partitions_from_index(
         total_matches: list_result.total_matches,
         returned_rows: rows.len(),
         rows,
+    })
+}
+
+pub fn validate_partitions_index(
+    request: &PartitionValidateRequest,
+    aws: Option<&AwsConfig>,
+) -> anyhow::Result<PartitionValidateResult> {
+    let mut list_request = request.list.clone();
+    list_request.limit = usize::MAX;
+    let list_result = list_partitions_from_index(&list_request, aws)?;
+
+    let mut issues = Vec::new();
+
+    for row in &list_result.rows {
+        if row.start_block >= row.end_block {
+            issues.push(PartitionValidationIssue {
+                kind: PartitionValidationIssueKind::InvalidRange,
+                partition_type: row.partition_type.clone(),
+                partition_value: row.partition_value.clone(),
+                chain: row.chain.clone(),
+                message: format!(
+                    "invalid range: start_block={} end_block={}",
+                    row.start_block, row.end_block
+                ),
+            });
+        }
+    }
+
+    use std::collections::BTreeMap;
+    let mut groups: BTreeMap<(Option<String>, String), Vec<&PartitionListRow>> = BTreeMap::new();
+    for row in &list_result.rows {
+        groups
+            .entry((row.chain.clone(), row.partition_type.clone()))
+            .or_default()
+            .push(row);
+    }
+
+    for ((_chain, _ptype), rows) in groups {
+        for pair in rows.windows(2) {
+            let current = pair[0];
+            let next = pair[1];
+
+            if current.partition_start_ts > next.partition_start_ts {
+                issues.push(PartitionValidationIssue {
+                    kind: PartitionValidationIssueKind::OutOfOrder,
+                    partition_type: next.partition_type.clone(),
+                    partition_value: next.partition_value.clone(),
+                    chain: next.chain.clone(),
+                    message: format!(
+                        "out of order: previous partition_start_ts={} next partition_start_ts={}",
+                        current.partition_start_ts, next.partition_start_ts
+                    ),
+                });
+            }
+
+            if current.end_block < next.start_block {
+                if !request.allow_gaps {
+                    issues.push(PartitionValidationIssue {
+                        kind: PartitionValidationIssueKind::Gap,
+                        partition_type: next.partition_type.clone(),
+                        partition_value: next.partition_value.clone(),
+                        chain: next.chain.clone(),
+                        message: format!(
+                            "gap detected: previous end_block={} next start_block={}",
+                            current.end_block, next.start_block
+                        ),
+                    });
+                }
+            } else if current.end_block > next.start_block {
+                issues.push(PartitionValidationIssue {
+                    kind: PartitionValidationIssueKind::Overlap,
+                    partition_type: next.partition_type.clone(),
+                    partition_value: next.partition_value.clone(),
+                    chain: next.chain.clone(),
+                    message: format!(
+                        "overlap detected: previous end_block={} next start_block={}",
+                        current.end_block, next.start_block
+                    ),
+                });
+            }
+        }
+    }
+
+    Ok(PartitionValidateResult {
+        partitions_index: request.list.index_path.clone(),
+        total_rows: list_result.total_matches,
+        issue_count: issues.len(),
+        valid: issues.is_empty(),
+        issues,
     })
 }
 
@@ -4673,6 +4843,40 @@ mod tests {
     }
 
     #[test]
+    fn test_partitions_validate_subcommand_parse() {
+        let cli = parse(&[
+            "test-cli",
+            "partitions",
+            "validate",
+            "--partitions-index",
+            "./partitions.parquet",
+            "--partition-type",
+            "day",
+            "--partition-chain",
+            "eth-mainnet",
+            "--allow-gaps",
+            "--json",
+        ]);
+        match cli.command.expect("command should exist") {
+            Commands::Partitions(PartitionsCommands::Validate {
+                partitions_index,
+                partition_type,
+                partition_chain,
+                allow_gaps,
+                json,
+                ..
+            }) => {
+                assert_eq!(partitions_index, "./partitions.parquet");
+                assert_eq!(partition_type.as_deref(), Some("day"));
+                assert_eq!(partition_chain.as_deref(), Some("eth-mainnet"));
+                assert!(allow_gaps);
+                assert!(json);
+            }
+            _ => panic!("expected partitions validate subcommand"),
+        }
+    }
+
+    #[test]
     #[serial]
     fn test_completions_generation() {
         // Verify that shell completion generation runs without panicking
@@ -5552,5 +5756,122 @@ mod tests {
         assert_eq!(result.start_block, 200);
         assert_eq!(result.stop_block, 300);
         assert_eq!(result.lookup_source.as_deref(), Some("sidecar"));
+    }
+
+    #[test]
+    fn test_validate_partitions_index_detects_gap_and_overlap() {
+        let rows = vec![
+            PartitionListRow {
+                partition_type: "day".to_string(),
+                partition_value: "2015-07-29 00:00:00".to_string(),
+                partition_start_ts: "2015-07-29 00:00:00".to_string(),
+                start_block: 100,
+                end_block: 200,
+                chain: Some("eth-mainnet".to_string()),
+            },
+            PartitionListRow {
+                partition_type: "day".to_string(),
+                partition_value: "2015-07-30 00:00:00".to_string(),
+                partition_start_ts: "2015-07-30 00:00:00".to_string(),
+                start_block: 250,
+                end_block: 300,
+                chain: Some("eth-mainnet".to_string()),
+            },
+            PartitionListRow {
+                partition_type: "day".to_string(),
+                partition_value: "2015-07-31 00:00:00".to_string(),
+                partition_start_ts: "2015-07-31 00:00:00".to_string(),
+                start_block: 290,
+                end_block: 400,
+                chain: Some("eth-mainnet".to_string()),
+            },
+        ];
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("partitions.parquet");
+
+        use arrow::array::{StringArray, UInt64Array};
+        use arrow::record_batch::RecordBatch;
+        use parquet::arrow::ArrowWriter;
+        use std::fs::File;
+        use std::sync::Arc;
+
+        let schema = Arc::new(arrow::datatypes::Schema::new(vec![
+            arrow::datatypes::Field::new("chain", arrow::datatypes::DataType::Utf8, true),
+            arrow::datatypes::Field::new("partition_type", arrow::datatypes::DataType::Utf8, false),
+            arrow::datatypes::Field::new(
+                "partition_value",
+                arrow::datatypes::DataType::Utf8,
+                false,
+            ),
+            arrow::datatypes::Field::new(
+                "partition_start_ts",
+                arrow::datatypes::DataType::Utf8,
+                false,
+            ),
+            arrow::datatypes::Field::new("start_block", arrow::datatypes::DataType::UInt64, false),
+            arrow::datatypes::Field::new("end_block", arrow::datatypes::DataType::UInt64, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            Arc::clone(&schema),
+            vec![
+                Arc::new(StringArray::from(
+                    rows.iter().map(|r| r.chain.clone()).collect::<Vec<_>>(),
+                )),
+                Arc::new(StringArray::from(
+                    rows.iter()
+                        .map(|r| r.partition_type.clone())
+                        .collect::<Vec<_>>(),
+                )),
+                Arc::new(StringArray::from(
+                    rows.iter()
+                        .map(|r| r.partition_value.clone())
+                        .collect::<Vec<_>>(),
+                )),
+                Arc::new(StringArray::from(
+                    rows.iter()
+                        .map(|r| r.partition_start_ts.clone())
+                        .collect::<Vec<_>>(),
+                )),
+                Arc::new(UInt64Array::from(
+                    rows.iter().map(|r| r.start_block).collect::<Vec<_>>(),
+                )),
+                Arc::new(UInt64Array::from(
+                    rows.iter().map(|r| r.end_block).collect::<Vec<_>>(),
+                )),
+            ],
+        )
+        .expect("batch");
+        let file = File::create(&path).expect("create parquet");
+        let mut writer = ArrowWriter::try_new(file, schema, None).expect("writer");
+        writer.write(&batch).expect("write");
+        writer.close().expect("close");
+
+        let result = validate_partitions_index(
+            &PartitionValidateRequest {
+                list: PartitionListRequest {
+                    index_path: path.to_string_lossy().to_string(),
+                    partition_type: Some("day".to_string()),
+                    chain: Some("eth-mainnet".to_string()),
+                    from: None,
+                    to: None,
+                    limit: usize::MAX,
+                },
+                allow_gaps: false,
+            },
+            None,
+        )
+        .expect("validation should run");
+
+        assert!(!result.valid);
+        assert_eq!(result.issue_count, 2);
+        assert!(result
+            .issues
+            .iter()
+            .any(|i| i.kind == PartitionValidationIssueKind::Gap));
+        assert!(result
+            .issues
+            .iter()
+            .any(|i| i.kind == PartitionValidationIssueKind::Overlap));
     }
 }

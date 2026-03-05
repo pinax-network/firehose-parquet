@@ -318,6 +318,31 @@ Strategies:
 | `--strategy` | `ordinal` | Assignment strategy: `ordinal` or `hash` |
 | `--json` | `false` | Emit machine-readable output |
 
+### `partitions validate` — Check Partition Index Integrity
+
+Validates continuity and basic invariants in `partitions.parquet`.
+
+```bash
+# Validate all rows in a local index
+firehose-parquet partitions validate \
+  --partitions-index ./output/eth-mainnet/partitions.parquet
+
+# Validate one chain/type and emit JSON
+firehose-parquet partitions validate \
+  --partitions-index s3://my-bucket/partitions.parquet \
+  --partition-type day \
+  --partition-chain eth-mainnet \
+  --json
+```
+
+Checks:
+
+- `start_block < end_block` for every row
+- adjacent rows in the same `(chain, partition_type)` do not overlap
+- adjacent rows are contiguous unless `--allow-gaps` is set
+
+Violations exit non-zero for CI gating.
+
 ### `partitions resolve` — Resolve Partition Block Bounds
 
 Resolves one row from `partitions.parquet` and prints the exact ingestion range (`start_block` inclusive, `stop_block` exclusive).

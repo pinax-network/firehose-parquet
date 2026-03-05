@@ -1,4 +1,4 @@
-# Partitions CLI Migration (Phases 1-5)
+# Partitions CLI Migration (Phases 1-6)
 
 This document captures the first implementation slices for the `partitions <subcommand>` initiative.
 
@@ -10,8 +10,9 @@ Related issues:
 - #187 (partition-window ingestion mode)
 - #191 (partition-aware cursor path strategy)
 - #188 (deterministic partition sharding)
+- #189 (`partitions validate` integrity checks)
 
-## What phases 1-5 ship
+## What phases 1-6 ship
 
 1. Adds a grouped CLI namespace: `firehose-parquet partitions ...`
 2. Introduces `firehose-parquet partitions resolve`
@@ -21,6 +22,7 @@ Related issues:
 6. Adds ingestion-side partition window resolution via `--partition-from` + `--partition-to`
 7. Adds partition-aware cursor templating via `--cursor-template`
 8. Adds deterministic partition sharding via `partitions shard`
+9. Adds partition-index integrity validation via `partitions validate`
 
 ## Command behavior
 
@@ -85,6 +87,19 @@ Behavior:
 - no row should appear in more than one shard for fixed inputs
 - combined shard outputs cover the full selected set
 
+### Partition validation mode
+
+The grouped CLI now supports integrity validation for `partitions.parquet`:
+
+- `firehose-parquet partitions validate`
+
+Current checks:
+
+- invalid ranges (`start_block >= end_block`)
+- overlaps between adjacent rows in the same `(chain, partition_type)`
+- gaps between adjacent rows unless `--allow-gaps` is enabled
+- ordering issues based on `partition_start_ts`
+
 ### New command
 
 `firehose-parquet partitions ls` lists index rows with optional filters:
@@ -123,7 +138,7 @@ When legacy flags are used in direct ingestion mode (without explicit `--start-b
 
 `firehose-parquet partitions resolve ...`
 
-## Process used for phases 1-5
+## Process used for phases 1-6
 
 1. Branch from `main` using `codex/` prefix.
 2. Add CLI tree scaffolding in shared CLI crate (`firehose-parquet/src/cli.rs`).
