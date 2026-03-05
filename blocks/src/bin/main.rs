@@ -2,7 +2,8 @@ use anyhow::{anyhow, Result};
 use clap::Parser;
 use firehose_parquet::cli::{
     build_config, init_tracing, load_dotenv, parse_partition_bounds_request,
-    resolve_partition_bounds_from_index, AwsConfig, Commands, CommonArgs,
+    resolve_partition_bounds_from_index, resolve_partition_command, AwsConfig, Commands,
+    CommonArgs, PartitionBoundsRequest, PartitionsCommands,
 };
 use firehose_parquet::config::BlockMetadata;
 use firehose_parquet::cursor::{CursorLocation, CursorState};
@@ -350,6 +351,50 @@ async fn main() -> Result<()> {
                 firehose_parquet::cli::generate_completions::<Cli>(*shell);
                 return Ok(());
             }
+            Commands::Partitions(subcommand) => match subcommand {
+                PartitionsCommands::Resolve {
+                    partitions_index,
+                    partition_type,
+                    partition_value,
+                    partition_chain,
+                    json,
+                    aws_access_key_id,
+                    aws_secret_access_key,
+                    aws_session_token,
+                    aws_region,
+                    aws_endpoint_url,
+                } => {
+                    let request = PartitionBoundsRequest {
+                        index_path: partitions_index.clone(),
+                        partition_type: partition_type.clone(),
+                        partition_value: partition_value.clone(),
+                        chain: partition_chain.clone(),
+                    };
+                    let aws = AwsConfig {
+                        aws_access_key_id: aws_access_key_id.clone(),
+                        aws_secret_access_key: aws_secret_access_key.clone(),
+                        aws_session_token: aws_session_token.clone(),
+                        aws_region: aws_region.clone(),
+                        aws_endpoint_url: aws_endpoint_url.clone(),
+                    };
+                    let result = resolve_partition_command(request, Some(&aws))?;
+
+                    if *json {
+                        println!("{}", serde_json::to_string_pretty(&result)?);
+                    } else {
+                        println!("partitions_index: {}", result.partitions_index);
+                        println!("partition_type:   {}", result.partition_type);
+                        println!("partition_value:  {}", result.partition_value);
+                        if let Some(chain) = result.partition_chain {
+                            println!("partition_chain:  {chain}");
+                        }
+                        println!("start_block:      {}", result.start_block);
+                        println!("stop_block:       {}", result.stop_block);
+                    }
+
+                    return Ok(());
+                }
+            },
             Commands::Scan {
                 path,
                 rows,
@@ -616,6 +661,9 @@ async fn main() -> Result<()> {
     }
     if let Some(ref request) = partition_bounds_request {
         if !has_explicit_range {
+            warn!(
+                "partition range flags are deprecated for direct ingestion; prefer `firehose-parquet partitions resolve ...`"
+            );
             let aws = AwsConfig {
                 aws_access_key_id: config.aws_access_key_id.clone(),
                 aws_secret_access_key: config.aws_secret_access_key.clone(),

@@ -321,6 +321,9 @@ pub enum Commands {
         #[arg(value_enum)]
         shell: Shell,
     },
+    /// Partition index utilities (`partitions.parquet` workflows).
+    #[command(subcommand)]
+    Partitions(PartitionsCommands),
     /// Read and inspect Parquet files (schema, row counts, sample rows).
     /// Supports local paths and S3 URIs (s3://bucket/prefix).
     #[command(after_long_help = "\
@@ -664,6 +667,88 @@ Examples:
         #[arg(long, env = "AWS_ENDPOINT_URL_S3", hide_env_values = true)]
         aws_endpoint_url: Option<String>,
     },
+}
+
+/// Subcommands under `firehose-parquet partitions`.
+#[derive(clap::Subcommand, Debug)]
+pub enum PartitionsCommands {
+    /// Resolve exact [start_block, stop_block) for one partition.
+    #[command(after_long_help = "\
+Examples:
+  # Resolve from local index
+  firehose-parquet partitions resolve \\
+    --partitions-index ./output/eth-mainnet/partitions.parquet \\
+    --partition-type hour \\
+    --partition-value '2015-07-30 15:00:00' \\
+    --partition-chain eth-mainnet
+
+  # Resolve from S3 index and emit JSON
+  firehose-parquet partitions resolve \\
+    --partitions-index s3://my-bucket/eth-mainnet/partitions.parquet \\
+    --partition-type day \\
+    --partition-value '2015-07-30 00:00:00' \\
+    --partition-chain eth-mainnet \\
+    --json
+")]
+    Resolve {
+        /// Path to partitions index parquet file (local path or s3:// URI)
+        #[arg(long)]
+        partitions_index: String,
+        /// Partition type to resolve (e.g. hour, day)
+        #[arg(long)]
+        partition_type: String,
+        /// Partition value to resolve (e.g. "2015-07-30 15:00:00")
+        #[arg(long)]
+        partition_value: String,
+        /// Optional chain filter (matches `chain` column)
+        #[arg(long)]
+        partition_chain: Option<String>,
+        /// Emit machine-readable JSON output
+        #[arg(long, default_value = "false")]
+        json: bool,
+        /// AWS access key ID (for S3 paths)
+        #[arg(long, env = "AWS_ACCESS_KEY_ID", hide_env_values = true)]
+        aws_access_key_id: Option<String>,
+        /// AWS secret access key (for S3 paths)
+        #[arg(long, env = "AWS_SECRET_ACCESS_KEY", hide_env_values = true)]
+        aws_secret_access_key: Option<String>,
+        /// AWS session token (for S3 paths)
+        #[arg(long, env = "AWS_SESSION_TOKEN", hide_env_values = true)]
+        aws_session_token: Option<String>,
+        /// AWS region (for S3 paths)
+        #[arg(long, env = "AWS_REGION", hide_env_values = true)]
+        aws_region: Option<String>,
+        /// AWS endpoint URL (for S3-compatible services)
+        #[arg(long, env = "AWS_ENDPOINT_URL_S3", hide_env_values = true)]
+        aws_endpoint_url: Option<String>,
+    },
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct PartitionResolveResult {
+    pub partitions_index: String,
+    pub partition_type: String,
+    pub partition_value: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub partition_chain: Option<String>,
+    pub start_block: u64,
+    pub stop_block: u64,
+}
+
+/// Resolve partition bounds and return a response payload suitable for CLI output.
+pub fn resolve_partition_command(
+    request: PartitionBoundsRequest,
+    aws: Option<&AwsConfig>,
+) -> anyhow::Result<PartitionResolveResult> {
+    let bounds = resolve_partition_bounds_from_index(&request, aws)?;
+    Ok(PartitionResolveResult {
+        partitions_index: request.index_path,
+        partition_type: request.partition_type,
+        partition_value: request.partition_value,
+        partition_chain: request.chain,
+        start_block: bounds.start_block,
+        stop_block: bounds.stop_block,
+    })
 }
 
 /// Parse a compression string into a [`Compression`] variant.
@@ -2981,6 +3066,42 @@ mod tests {
         match cli.command.unwrap() {
             Commands::Completions { shell } => assert_eq!(shell, Shell::Bash),
             _ => panic!("expected Completions subcommand"),
+        }
+    }
+
+    #[test]
+    fn test_partitions_resolve_subcommand_parse() {
+        let cli = parse(&[
+            "test-cli",
+            "partitions",
+            "resolve",
+            "--partitions-index",
+            "./partitions.parquet",
+            "--partition-type",
+            "hour",
+            "--partition-value",
+            "2015-07-30 15:00:00",
+            "--partition-chain",
+            "eth-mainnet",
+            "--json",
+        ]);
+        assert!(cli.command.is_some());
+        match cli.command.unwrap() {
+            Commands::Partitions(PartitionsCommands::Resolve {
+                partitions_index,
+                partition_type,
+                partition_value,
+                partition_chain,
+                json,
+                ..
+            }) => {
+                assert_eq!(partitions_index, "./partitions.parquet");
+                assert_eq!(partition_type, "hour");
+                assert_eq!(partition_value, "2015-07-30 15:00:00");
+                assert_eq!(partition_chain.as_deref(), Some("eth-mainnet"));
+                assert!(json);
+            }
+            _ => panic!("expected partitions resolve subcommand"),
         }
     }
 

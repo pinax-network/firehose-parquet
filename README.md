@@ -251,6 +251,27 @@ Chain:
 
 ## Subcommands
 
+### `partitions resolve` — Resolve Partition Block Bounds
+
+Resolves one row from `partitions.parquet` and prints the exact ingestion range (`start_block` inclusive, `stop_block` exclusive).
+
+```bash
+# Local index
+firehose-parquet partitions resolve \
+  --partitions-index ./output/eth-mainnet/partitions.parquet \
+  --partition-type hour \
+  --partition-value '2015-07-30 15:00:00' \
+  --partition-chain eth-mainnet
+
+# S3 index with machine-readable output
+firehose-parquet partitions resolve \
+  --partitions-index s3://my-bucket/eth-mainnet/partitions.parquet \
+  --partition-type day \
+  --partition-value '2015-07-30 00:00:00' \
+  --partition-chain eth-mainnet \
+  --json
+```
+
 ### `scan` — Inspect Parquet Files
 
 Read and inspect Parquet files: shows schema, row counts, and sample rows. Supports local paths and S3 URIs.
