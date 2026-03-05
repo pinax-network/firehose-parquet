@@ -60,6 +60,12 @@ Behavior:
 - rewrites `/` and `\` in variable values to `_` to avoid path collisions
 - works for local paths and S3-relative cursor paths under the output prefix
 
+Example patterns:
+
+- single partition worker: `cursor/{chain}/{partition_type}/{partition_value}.parquet`
+- partition window worker: `cursor/{chain}/{partition_type}/{partition_from}-{partition_to}.parquet`
+- local chain-specific worker: `./cursor/{partition_type}/{partition_value}.parquet`
+
 ### New command
 
 `firehose-parquet partitions ls` lists index rows with optional filters:

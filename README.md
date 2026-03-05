@@ -352,12 +352,68 @@ Supported variables:
 - `{partition_from}`
 - `{partition_to}`
 
+More examples:
+
+```bash
+# Local single-partition worker with one cursor per hour
+firehose-parquet --endpoint https://eth.firehose.pinax.network:443 \
+  --output ./output/eth-mainnet \
+  --cursor-template 'cursor/{partition_type}/{partition_value}.parquet' \
+  --partitions-index ./output/eth-mainnet/partitions.parquet \
+  --partition-type hour \
+  --partition-value '2015-07-30 15:00:00'
+# expands to: cursor/hour/2015-07-30 15:00:00.parquet
+
+# Global index with explicit chain segment to avoid cross-chain collisions
+firehose-parquet --endpoint https://eth.firehose.pinax.network:443 \
+  --cursor-template 'cursor/{chain}/{partition_type}/{partition_value}.parquet' \
+  --partitions-index s3://my-bucket/partitions.parquet \
+  --partition-type day \
+  --partition-value '2015-07-30 00:00:00' \
+  --partition-chain eth-mainnet
+# expands to: cursor/eth-mainnet/day/2015-07-30 00:00:00.parquet
+
+# Window worker with one cursor per assigned partition window
+firehose-parquet --endpoint https://eth.firehose.pinax.network:443 \
+  --cursor-template 'cursor/{chain}/{partition_type}/{partition_from}-{partition_to}.parquet' \
+  --partitions-index ./output/eth-mainnet/partitions.parquet \
+  --partition-type hour \
+  --partition-from '2015-07-30 14:00:00' \
+  --partition-to '2015-07-30 18:00:00' \
+  --partition-chain eth-mainnet
+# expands to: cursor/eth-mainnet/hour/2015-07-30 14:00:00-2015-07-30 18:00:00.parquet
+
+# S3 output keeps relative cursor paths under the output prefix
+firehose-parquet --endpoint https://eth.firehose.pinax.network:443 \
+  --output s3://my-bucket/backfill/eth-mainnet \
+  --cursor-template 'cursor/{chain}/{partition_type}/{partition_value}.parquet' \
+  --partitions-index s3://my-bucket/backfill/eth-mainnet/partitions.parquet \
+  --partition-type hour \
+  --partition-value '2015-07-30 15:00:00' \
+  --partition-chain eth-mainnet
+# S3 key expands to: backfill/eth-mainnet/cursor/eth-mainnet/hour/2015-07-30 15:00:00.parquet
+
+# Literal braces via escaping
+firehose-parquet --endpoint https://eth.firehose.pinax.network:443 \
+  --cursor-template 'cursor/{{debug}}/{partition_type}/{partition_value}.parquet' \
+  --partitions-index ./output/eth-mainnet/partitions.parquet \
+  --partition-type hour \
+  --partition-value '2015-07-30 15:00:00'
+# expands to: cursor/{debug}/hour/2015-07-30 15:00:00.parquet
+```
+
 Rules:
 
 - `{{` and `}}` escape literal braces
 - values have `/` and `\` rewritten to `_` during expansion
 - template path must end in `.parquet`
 - with S3 output, relative cursor template paths are stored under the output prefix
+
+Recommended patterns:
+
+- Single partition workers: `cursor/{chain}/{partition_type}/{partition_value}.parquet`
+- Window workers: `cursor/{chain}/{partition_type}/{partition_from}-{partition_to}.parquet`
+- Chain-specific local runs: `./cursor/{partition_type}/{partition_value}.parquet`
 
 ### `scan` — Inspect Parquet Files
 
