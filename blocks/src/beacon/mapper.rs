@@ -5,8 +5,7 @@ use arrow::datatypes::Schema;
 use arrow::record_batch::RecordBatch;
 use firehose_parquet::encode::{BytesColumn, EncodeBytes};
 use firehose_parquet::traits::{
-    est_i64, est_opt_str, est_str, est_u32, est_u64,
-    BlockIdentity, BlockMapper, CanonicalBuilder,
+    est_i64, est_opt_str, est_str, est_u32, est_u64, BlockIdentity, BlockMapper, CanonicalBuilder,
 };
 use prost::Message;
 use std::collections::HashMap;
@@ -42,7 +41,11 @@ fn finish_fork_step(builder: &mut Option<StringBuilder>, columns: &mut Vec<Arc<d
 }
 
 fn mk_fork_step(include: bool) -> Option<StringBuilder> {
-    if include { Some(StringBuilder::new()) } else { None }
+    if include {
+        Some(StringBuilder::new())
+    } else {
+        None
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -89,7 +92,11 @@ fn extract_body_fields(block: &beacon::Block) -> BodyFields<'_> {
 
     match &block.body {
         Some(beacon::block::Body::Phase0(b)) => BodyFields {
-            attestations: b.attestations.iter().map(AttestationFields::Standard).collect(),
+            attestations: b
+                .attestations
+                .iter()
+                .map(AttestationFields::Standard)
+                .collect(),
             deposits: &b.deposits,
             proposer_slashings: &b.proposer_slashings,
             attester_slashings: &b.attester_slashings,
@@ -98,7 +105,11 @@ fn extract_body_fields(block: &beacon::Block) -> BodyFields<'_> {
             blobs: empty_blobs,
         },
         Some(beacon::block::Body::Altair(b)) => BodyFields {
-            attestations: b.attestations.iter().map(AttestationFields::Standard).collect(),
+            attestations: b
+                .attestations
+                .iter()
+                .map(AttestationFields::Standard)
+                .collect(),
             deposits: &b.deposits,
             proposer_slashings: &b.proposer_slashings,
             attester_slashings: &b.attester_slashings,
@@ -107,97 +118,127 @@ fn extract_body_fields(block: &beacon::Block) -> BodyFields<'_> {
             blobs: empty_blobs,
         },
         Some(beacon::block::Body::Bellatrix(b)) => BodyFields {
-            attestations: b.attestations.iter().map(AttestationFields::Standard).collect(),
+            attestations: b
+                .attestations
+                .iter()
+                .map(AttestationFields::Standard)
+                .collect(),
             deposits: &b.deposits,
             proposer_slashings: &b.proposer_slashings,
             attester_slashings: &b.attester_slashings,
             voluntary_exits: &b.voluntary_exits,
-            execution_payload: b.execution_payload.as_ref().map(|ep| ExecutionPayloadFields {
-                parent_hash: &ep.parent_hash,
-                fee_recipient: &ep.fee_recipient,
-                state_root: &ep.state_root,
-                receipts_root: &ep.receipts_root,
-                prev_randao: &ep.prev_randao,
-                block_number: ep.block_number,
-                gas_limit: ep.gas_limit,
-                gas_used: ep.gas_used,
-                timestamp: ep.timestamp.as_ref(),
-                block_hash: &ep.block_hash,
-                base_fee_per_gas: &ep.base_fee_per_gas,
-                blob_gas_used: None,
-                excess_blob_gas: None,
-            }),
+            execution_payload: b
+                .execution_payload
+                .as_ref()
+                .map(|ep| ExecutionPayloadFields {
+                    parent_hash: &ep.parent_hash,
+                    fee_recipient: &ep.fee_recipient,
+                    state_root: &ep.state_root,
+                    receipts_root: &ep.receipts_root,
+                    prev_randao: &ep.prev_randao,
+                    block_number: ep.block_number,
+                    gas_limit: ep.gas_limit,
+                    gas_used: ep.gas_used,
+                    timestamp: ep.timestamp.as_ref(),
+                    block_hash: &ep.block_hash,
+                    base_fee_per_gas: &ep.base_fee_per_gas,
+                    blob_gas_used: None,
+                    excess_blob_gas: None,
+                }),
             blobs: empty_blobs,
         },
         Some(beacon::block::Body::Capella(b)) => BodyFields {
-            attestations: b.attestations.iter().map(AttestationFields::Standard).collect(),
+            attestations: b
+                .attestations
+                .iter()
+                .map(AttestationFields::Standard)
+                .collect(),
             deposits: &b.deposits,
             proposer_slashings: &b.proposer_slashings,
             attester_slashings: &b.attester_slashings,
             voluntary_exits: &b.voluntary_exits,
-            execution_payload: b.execution_payload.as_ref().map(|ep| ExecutionPayloadFields {
-                parent_hash: &ep.parent_hash,
-                fee_recipient: &ep.fee_recipient,
-                state_root: &ep.state_root,
-                receipts_root: &ep.receipts_root,
-                prev_randao: &ep.prev_randao,
-                block_number: ep.block_number,
-                gas_limit: ep.gas_limit,
-                gas_used: ep.gas_used,
-                timestamp: ep.timestamp.as_ref(),
-                block_hash: &ep.block_hash,
-                base_fee_per_gas: &ep.base_fee_per_gas,
-                blob_gas_used: None,
-                excess_blob_gas: None,
-            }),
+            execution_payload: b
+                .execution_payload
+                .as_ref()
+                .map(|ep| ExecutionPayloadFields {
+                    parent_hash: &ep.parent_hash,
+                    fee_recipient: &ep.fee_recipient,
+                    state_root: &ep.state_root,
+                    receipts_root: &ep.receipts_root,
+                    prev_randao: &ep.prev_randao,
+                    block_number: ep.block_number,
+                    gas_limit: ep.gas_limit,
+                    gas_used: ep.gas_used,
+                    timestamp: ep.timestamp.as_ref(),
+                    block_hash: &ep.block_hash,
+                    base_fee_per_gas: &ep.base_fee_per_gas,
+                    blob_gas_used: None,
+                    excess_blob_gas: None,
+                }),
             blobs: empty_blobs,
         },
         Some(beacon::block::Body::Deneb(b)) => BodyFields {
-            attestations: b.attestations.iter().map(AttestationFields::Standard).collect(),
+            attestations: b
+                .attestations
+                .iter()
+                .map(AttestationFields::Standard)
+                .collect(),
             deposits: &b.deposits,
             proposer_slashings: &b.proposer_slashings,
             attester_slashings: &b.attester_slashings,
             voluntary_exits: &b.voluntary_exits,
-            execution_payload: b.execution_payload.as_ref().map(|ep| ExecutionPayloadFields {
-                parent_hash: &ep.parent_hash,
-                fee_recipient: &ep.fee_recipient,
-                state_root: &ep.state_root,
-                receipts_root: &ep.receipts_root,
-                prev_randao: &ep.prev_randao,
-                block_number: ep.block_number,
-                gas_limit: ep.gas_limit,
-                gas_used: ep.gas_used,
-                timestamp: ep.timestamp.as_ref(),
-                block_hash: &ep.block_hash,
-                base_fee_per_gas: &ep.base_fee_per_gas,
-                blob_gas_used: Some(ep.blob_gas_used),
-                excess_blob_gas: Some(ep.excess_blob_gas),
-            }),
+            execution_payload: b
+                .execution_payload
+                .as_ref()
+                .map(|ep| ExecutionPayloadFields {
+                    parent_hash: &ep.parent_hash,
+                    fee_recipient: &ep.fee_recipient,
+                    state_root: &ep.state_root,
+                    receipts_root: &ep.receipts_root,
+                    prev_randao: &ep.prev_randao,
+                    block_number: ep.block_number,
+                    gas_limit: ep.gas_limit,
+                    gas_used: ep.gas_used,
+                    timestamp: ep.timestamp.as_ref(),
+                    block_hash: &ep.block_hash,
+                    base_fee_per_gas: &ep.base_fee_per_gas,
+                    blob_gas_used: Some(ep.blob_gas_used),
+                    excess_blob_gas: Some(ep.excess_blob_gas),
+                }),
             blobs: &b.embedded_blobs,
         },
-        Some(beacon::block::Body::Electra(b)) | Some(beacon::block::Body::Fusaka(b)) => BodyFields {
-            attestations: b.attestations.iter().map(AttestationFields::Electra).collect(),
-            deposits: &b.deposits,
-            proposer_slashings: &b.proposer_slashings,
-            attester_slashings: &b.attester_slashings,
-            voluntary_exits: &b.voluntary_exits,
-            execution_payload: b.execution_payload.as_ref().map(|ep| ExecutionPayloadFields {
-                parent_hash: &ep.parent_hash,
-                fee_recipient: &ep.fee_recipient,
-                state_root: &ep.state_root,
-                receipts_root: &ep.receipts_root,
-                prev_randao: &ep.prev_randao,
-                block_number: ep.block_number,
-                gas_limit: ep.gas_limit,
-                gas_used: ep.gas_used,
-                timestamp: ep.timestamp.as_ref(),
-                block_hash: &ep.block_hash,
-                base_fee_per_gas: &ep.base_fee_per_gas,
-                blob_gas_used: Some(ep.blob_gas_used),
-                excess_blob_gas: Some(ep.excess_blob_gas),
-            }),
-            blobs: &b.embedded_blobs,
-        },
+        Some(beacon::block::Body::Electra(b)) | Some(beacon::block::Body::Fusaka(b)) => {
+            BodyFields {
+                attestations: b
+                    .attestations
+                    .iter()
+                    .map(AttestationFields::Electra)
+                    .collect(),
+                deposits: &b.deposits,
+                proposer_slashings: &b.proposer_slashings,
+                attester_slashings: &b.attester_slashings,
+                voluntary_exits: &b.voluntary_exits,
+                execution_payload: b
+                    .execution_payload
+                    .as_ref()
+                    .map(|ep| ExecutionPayloadFields {
+                        parent_hash: &ep.parent_hash,
+                        fee_recipient: &ep.fee_recipient,
+                        state_root: &ep.state_root,
+                        receipts_root: &ep.receipts_root,
+                        prev_randao: &ep.prev_randao,
+                        block_number: ep.block_number,
+                        gas_limit: ep.gas_limit,
+                        gas_used: ep.gas_used,
+                        timestamp: ep.timestamp.as_ref(),
+                        block_hash: &ep.block_hash,
+                        base_fee_per_gas: &ep.base_fee_per_gas,
+                        blob_gas_used: Some(ep.blob_gas_used),
+                        excess_blob_gas: Some(ep.excess_blob_gas),
+                    }),
+                blobs: &b.embedded_blobs,
+            }
+        }
         None => BodyFields {
             attestations: vec![],
             deposits: empty_deposits,
@@ -256,14 +297,21 @@ impl BeaconBlockMapper {
         }
     }
 
-    fn map_beacon_block(&mut self, block: &beacon::Block, identity: &BlockIdentity, fork_step: Option<&str>) {
+    fn map_beacon_block(
+        &mut self,
+        block: &beacon::Block,
+        identity: &BlockIdentity,
+        fork_step: Option<&str>,
+    ) {
         let slot = block.slot;
 
         // blocks table
         self.blocks.canonical.append(identity);
         self.blocks.slot.append_value(slot);
         self.blocks.parent_slot.append_value(block.parent_slot);
-        self.blocks.proposer_index.append_value(block.proposer_index);
+        self.blocks
+            .proposer_index
+            .append_value(block.proposer_index);
         self.blocks.root.append_value(&block.root);
         self.blocks.parent_root.append_value(&block.parent_root);
         self.blocks.state_root.append_value(&block.state_root);
@@ -281,7 +329,9 @@ impl BeaconBlockMapper {
             self.attestations.attestation_index.append_value(i as u32);
             match att {
                 AttestationFields::Standard(a) => {
-                    self.attestations.aggregation_bits.append_value(&a.aggregation_bits);
+                    self.attestations
+                        .aggregation_bits
+                        .append_value(&a.aggregation_bits);
                     self.attestations.signature.append_value(&a.signature);
                     if let Some(data) = &a.data {
                         self.append_attestation_data(data);
@@ -290,7 +340,9 @@ impl BeaconBlockMapper {
                     }
                 }
                 AttestationFields::Electra(a) => {
-                    self.attestations.aggregation_bits.append_value(&a.aggregation_bits);
+                    self.attestations
+                        .aggregation_bits
+                        .append_value(&a.aggregation_bits);
                     self.attestations.signature.append_value(&a.signature);
                     if let Some(data) = &a.data {
                         self.append_attestation_data(data);
@@ -309,7 +361,9 @@ impl BeaconBlockMapper {
             self.deposits.deposit_index.append_value(i as u32);
             if let Some(data) = &deposit.data {
                 self.deposits.pubkey.append_value(&data.public_key);
-                self.deposits.withdrawal_credentials.append_value(&data.withdrawal_credentials);
+                self.deposits
+                    .withdrawal_credentials
+                    .append_value(&data.withdrawal_credentials);
                 self.deposits.amount.append_value(data.gwei);
                 self.deposits.signature.append_value(&data.signature);
             } else {
@@ -325,7 +379,9 @@ impl BeaconBlockMapper {
         for (i, slashing) in body.proposer_slashings.iter().enumerate() {
             self.proposer_slashings.canonical.append(identity);
             self.proposer_slashings.block_slot.append_value(slot);
-            self.proposer_slashings.slashing_index.append_value(i as u32);
+            self.proposer_slashings
+                .slashing_index
+                .append_value(i as u32);
             self.append_proposer_slashing_header(slashing.signed_header_1.as_ref(), true);
             self.append_proposer_slashing_header(slashing.signed_header_2.as_ref(), false);
             append_fork_step(&mut self.proposer_slashings.fork_step, fork_step);
@@ -335,7 +391,9 @@ impl BeaconBlockMapper {
         for (i, slashing) in body.attester_slashings.iter().enumerate() {
             self.attester_slashings.canonical.append(identity);
             self.attester_slashings.block_slot.append_value(slot);
-            self.attester_slashings.slashing_index.append_value(i as u32);
+            self.attester_slashings
+                .slashing_index
+                .append_value(i as u32);
             self.append_indexed_attestation(slashing.attestation_1.as_ref(), true);
             self.append_indexed_attestation(slashing.attestation_2.as_ref(), false);
             append_fork_step(&mut self.attester_slashings.fork_step, fork_step);
@@ -349,7 +407,9 @@ impl BeaconBlockMapper {
             self.voluntary_exits.signature.append_value(&exit.signature);
             if let Some(msg) = &exit.message {
                 self.voluntary_exits.epoch.append_value(msg.epoch);
-                self.voluntary_exits.validator_index.append_value(msg.validator_index);
+                self.voluntary_exits
+                    .validator_index
+                    .append_value(msg.validator_index);
             } else {
                 self.voluntary_exits.epoch.append_value(0);
                 self.voluntary_exits.validator_index.append_value(0);
@@ -361,20 +421,39 @@ impl BeaconBlockMapper {
         if let Some(ep) = body.execution_payload {
             self.execution_payload.canonical.append(identity);
             self.execution_payload.block_slot.append_value(slot);
-            self.execution_payload.parent_hash.append_value(ep.parent_hash);
-            self.execution_payload.fee_recipient.append_value(ep.fee_recipient);
-            self.execution_payload.state_root.append_value(ep.state_root);
-            self.execution_payload.receipts_root.append_value(ep.receipts_root);
-            self.execution_payload.prev_randao.append_value(ep.prev_randao);
-            self.execution_payload.block_number.append_value(ep.block_number);
+            self.execution_payload
+                .parent_hash
+                .append_value(ep.parent_hash);
+            self.execution_payload
+                .fee_recipient
+                .append_value(ep.fee_recipient);
+            self.execution_payload
+                .state_root
+                .append_value(ep.state_root);
+            self.execution_payload
+                .receipts_root
+                .append_value(ep.receipts_root);
+            self.execution_payload
+                .prev_randao
+                .append_value(ep.prev_randao);
+            self.execution_payload
+                .block_number
+                .append_value(ep.block_number);
             self.execution_payload.gas_limit.append_value(ep.gas_limit);
             self.execution_payload.gas_used.append_value(ep.gas_used);
             match ep.timestamp {
-                Some(ts) => self.execution_payload.payload_timestamp.append_value(ts.seconds),
+                Some(ts) => self
+                    .execution_payload
+                    .payload_timestamp
+                    .append_value(ts.seconds),
                 None => self.execution_payload.payload_timestamp.append_null(),
             }
-            self.execution_payload.block_hash.append_value(ep.block_hash);
-            self.execution_payload.base_fee_per_gas.append_value(ep.base_fee_per_gas);
+            self.execution_payload
+                .block_hash
+                .append_value(ep.block_hash);
+            self.execution_payload
+                .base_fee_per_gas
+                .append_value(ep.base_fee_per_gas);
             match ep.blob_gas_used {
                 Some(v) => self.execution_payload.blob_gas_used.append_value(v),
                 None => self.execution_payload.blob_gas_used.append_null(),
@@ -392,7 +471,9 @@ impl BeaconBlockMapper {
             self.blob_sidecars.block_slot.append_value(slot);
             self.blob_sidecars.blob_index.append_value(blob.index);
             self.blob_sidecars.blob.append_value(&blob.blob);
-            self.blob_sidecars.kzg_commitment.append_value(&blob.kzg_commitment);
+            self.blob_sidecars
+                .kzg_commitment
+                .append_value(&blob.kzg_commitment);
             self.blob_sidecars.kzg_proof.append_value(&blob.kzg_proof);
             append_fork_step(&mut self.blob_sidecars.fork_step, fork_step);
         }
@@ -400,8 +481,12 @@ impl BeaconBlockMapper {
 
     fn append_attestation_data(&mut self, data: &beacon::AttestationData) {
         self.attestations.slot.append_value(data.slot);
-        self.attestations.committee_index.append_value(data.committee_index);
-        self.attestations.beacon_block_root.append_value(&data.beacon_block_root);
+        self.attestations
+            .committee_index
+            .append_value(data.committee_index);
+        self.attestations
+            .beacon_block_root
+            .append_value(&data.beacon_block_root);
         if let Some(src) = &data.source {
             self.attestations.source_epoch.append_value(src.epoch);
             self.attestations.source_root.append_value(&src.root);
@@ -428,7 +513,11 @@ impl BeaconBlockMapper {
         self.attestations.target_root.append_value(&[]);
     }
 
-    fn append_proposer_slashing_header(&mut self, signed: Option<&beacon::SignedBeaconBlockHeader>, is_first: bool) {
+    fn append_proposer_slashing_header(
+        &mut self,
+        signed: Option<&beacon::SignedBeaconBlockHeader>,
+        is_first: bool,
+    ) {
         let (slot_b, pi_b, pr_b, sr_b, br_b) = if is_first {
             (
                 &mut self.proposer_slashings.header_1_slot,
@@ -462,7 +551,11 @@ impl BeaconBlockMapper {
         }
     }
 
-    fn append_indexed_attestation(&mut self, att: Option<&beacon::IndexedAttestation>, is_first: bool) {
+    fn append_indexed_attestation(
+        &mut self,
+        att: Option<&beacon::IndexedAttestation>,
+        is_first: bool,
+    ) {
         let (slot_b, ci_b, bbr_b, se_b, sr_b, te_b, tr_b) = if is_first {
             (
                 &mut self.attester_slashings.attestation_1_slot,
@@ -516,7 +609,12 @@ impl BeaconBlockMapper {
 }
 
 impl BlockMapper for BeaconBlockMapper {
-    fn map_block(&mut self, block_bytes: &[u8], identity: &BlockIdentity, fork_step: Option<&str>) -> anyhow::Result<()> {
+    fn map_block(
+        &mut self,
+        block_bytes: &[u8],
+        identity: &BlockIdentity,
+        fork_step: Option<&str>,
+    ) -> anyhow::Result<()> {
         let block = beacon::Block::decode(block_bytes)?;
         self.map_beacon_block(&block, identity, fork_step);
         Ok(())
@@ -524,19 +622,48 @@ impl BlockMapper for BeaconBlockMapper {
 
     fn flush(&mut self) -> anyhow::Result<HashMap<String, RecordBatch>> {
         let mut result = HashMap::new();
-        result.insert("blocks".to_string(), self.blocks.finish(&self.blocks_schema)?);
-        result.insert("attestations".to_string(), self.attestations.finish(&self.attestations_schema)?);
-        result.insert("deposits".to_string(), self.deposits.finish(&self.deposits_schema)?);
-        result.insert("proposer_slashings".to_string(), self.proposer_slashings.finish(&self.proposer_slashings_schema)?);
-        result.insert("attester_slashings".to_string(), self.attester_slashings.finish(&self.attester_slashings_schema)?);
-        result.insert("voluntary_exits".to_string(), self.voluntary_exits.finish(&self.voluntary_exits_schema)?);
-        result.insert("execution_payload".to_string(), self.execution_payload.finish(&self.execution_payload_schema)?);
-        result.insert("blob_sidecars".to_string(), self.blob_sidecars.finish(&self.blob_sidecars_schema)?);
+        result.insert(
+            "blocks".to_string(),
+            self.blocks.finish(&self.blocks_schema)?,
+        );
+        result.insert(
+            "attestations".to_string(),
+            self.attestations.finish(&self.attestations_schema)?,
+        );
+        result.insert(
+            "deposits".to_string(),
+            self.deposits.finish(&self.deposits_schema)?,
+        );
+        result.insert(
+            "proposer_slashings".to_string(),
+            self.proposer_slashings
+                .finish(&self.proposer_slashings_schema)?,
+        );
+        result.insert(
+            "attester_slashings".to_string(),
+            self.attester_slashings
+                .finish(&self.attester_slashings_schema)?,
+        );
+        result.insert(
+            "voluntary_exits".to_string(),
+            self.voluntary_exits.finish(&self.voluntary_exits_schema)?,
+        );
+        result.insert(
+            "execution_payload".to_string(),
+            self.execution_payload
+                .finish(&self.execution_payload_schema)?,
+        );
+        result.insert(
+            "blob_sidecars".to_string(),
+            self.blob_sidecars.finish(&self.blob_sidecars_schema)?,
+        );
         Ok(result)
     }
 
     fn max_table_rows(&self) -> usize {
-        self.blocks.canonical.len()
+        self.blocks
+            .canonical
+            .len()
             .max(self.attestations.canonical.len())
             .max(self.deposits.canonical.len())
             .max(self.proposer_slashings.canonical.len())
@@ -595,13 +722,25 @@ impl BlockMapper for BeaconBlockMapper {
             + est_u32(&self.proposer_slashings.slashing_index)
             + est_u64(&self.proposer_slashings.header_1_slot)
             + est_u64(&self.proposer_slashings.header_1_proposer_index)
-            + self.proposer_slashings.header_1_parent_root.estimated_bytes()
-            + self.proposer_slashings.header_1_state_root.estimated_bytes()
+            + self
+                .proposer_slashings
+                .header_1_parent_root
+                .estimated_bytes()
+            + self
+                .proposer_slashings
+                .header_1_state_root
+                .estimated_bytes()
             + self.proposer_slashings.header_1_body_root.estimated_bytes()
             + est_u64(&self.proposer_slashings.header_2_slot)
             + est_u64(&self.proposer_slashings.header_2_proposer_index)
-            + self.proposer_slashings.header_2_parent_root.estimated_bytes()
-            + self.proposer_slashings.header_2_state_root.estimated_bytes()
+            + self
+                .proposer_slashings
+                .header_2_parent_root
+                .estimated_bytes()
+            + self
+                .proposer_slashings
+                .header_2_state_root
+                .estimated_bytes()
             + self.proposer_slashings.header_2_body_root.estimated_bytes()
             + est_opt_str(&self.proposer_slashings.fork_step);
         let attester_slashings = self.attester_slashings.canonical.estimated_bytes()
@@ -609,18 +748,36 @@ impl BlockMapper for BeaconBlockMapper {
             + est_u32(&self.attester_slashings.slashing_index)
             + est_u64(&self.attester_slashings.attestation_1_slot)
             + est_u64(&self.attester_slashings.attestation_1_committee_index)
-            + self.attester_slashings.attestation_1_beacon_block_root.estimated_bytes()
+            + self
+                .attester_slashings
+                .attestation_1_beacon_block_root
+                .estimated_bytes()
             + est_u64(&self.attester_slashings.attestation_1_source_epoch)
-            + self.attester_slashings.attestation_1_source_root.estimated_bytes()
+            + self
+                .attester_slashings
+                .attestation_1_source_root
+                .estimated_bytes()
             + est_u64(&self.attester_slashings.attestation_1_target_epoch)
-            + self.attester_slashings.attestation_1_target_root.estimated_bytes()
+            + self
+                .attester_slashings
+                .attestation_1_target_root
+                .estimated_bytes()
             + est_u64(&self.attester_slashings.attestation_2_slot)
             + est_u64(&self.attester_slashings.attestation_2_committee_index)
-            + self.attester_slashings.attestation_2_beacon_block_root.estimated_bytes()
+            + self
+                .attester_slashings
+                .attestation_2_beacon_block_root
+                .estimated_bytes()
             + est_u64(&self.attester_slashings.attestation_2_source_epoch)
-            + self.attester_slashings.attestation_2_source_root.estimated_bytes()
+            + self
+                .attester_slashings
+                .attestation_2_source_root
+                .estimated_bytes()
             + est_u64(&self.attester_slashings.attestation_2_target_epoch)
-            + self.attester_slashings.attestation_2_target_root.estimated_bytes()
+            + self
+                .attester_slashings
+                .attestation_2_target_root
+                .estimated_bytes()
             + est_opt_str(&self.attester_slashings.fork_step);
         let voluntary_exits = self.voluntary_exits.canonical.estimated_bytes()
             + est_u64(&self.voluntary_exits.block_slot)
@@ -652,10 +809,19 @@ impl BlockMapper for BeaconBlockMapper {
             + self.blob_sidecars.kzg_commitment.estimated_bytes()
             + self.blob_sidecars.kzg_proof.estimated_bytes()
             + est_opt_str(&self.blob_sidecars.fork_step);
-        [("blocks", blocks), ("attestations", attestations), ("deposits", deposits), ("proposer_slashings", proposer_slashings), ("attester_slashings", attester_slashings), ("voluntary_exits", voluntary_exits), ("execution_payload", execution_payload), ("blob_sidecars", blob_sidecars)]
-            .into_iter()
-            .max_by_key(|&(_, s)| s)
-            .unwrap_or(("blocks", 0))
+        [
+            ("blocks", blocks),
+            ("attestations", attestations),
+            ("deposits", deposits),
+            ("proposer_slashings", proposer_slashings),
+            ("attester_slashings", attester_slashings),
+            ("voluntary_exits", voluntary_exits),
+            ("execution_payload", execution_payload),
+            ("blob_sidecars", blob_sidecars),
+        ]
+        .into_iter()
+        .max_by_key(|&(_, s)| s)
+        .unwrap_or(("blocks", 0))
     }
 
     fn table_names(&self) -> Vec<&str> {
@@ -1097,7 +1263,10 @@ mod tests {
             proposer_index: 42,
             body_root: vec![0x12; 32],
             signature: vec![0x34; 96],
-            timestamp: Some(prost_types::Timestamp { seconds: 1700000000, nanos: 0 }),
+            timestamp: Some(prost_types::Timestamp {
+                seconds: 1700000000,
+                nanos: 0,
+            }),
             body: Some(beacon::block::Body::Phase0(beacon::Phase0Body {
                 rando_reveal: vec![0x01; 96],
                 eth1_data: Some(beacon::Eth1Data {
@@ -1114,8 +1283,14 @@ mod tests {
                         slot: slot,
                         committee_index: 1,
                         beacon_block_root: vec![0xaa; 32],
-                        source: Some(beacon::Checkpoint { epoch: 10, root: vec![0xbb; 32] }),
-                        target: Some(beacon::Checkpoint { epoch: 11, root: vec![0xcc; 32] }),
+                        source: Some(beacon::Checkpoint {
+                            epoch: 10,
+                            root: vec![0xbb; 32],
+                        }),
+                        target: Some(beacon::Checkpoint {
+                            epoch: 11,
+                            root: vec![0xcc; 32],
+                        }),
                     }),
                     signature: vec![0xdd; 96],
                 }],
@@ -1129,7 +1304,10 @@ mod tests {
                     }),
                 }],
                 voluntary_exits: vec![beacon::SignedVoluntaryExit {
-                    message: Some(beacon::VoluntaryExit { epoch: 100, validator_index: 5 }),
+                    message: Some(beacon::VoluntaryExit {
+                        epoch: 100,
+                        validator_index: 5,
+                    }),
                     signature: vec![0x55; 96],
                 }],
             })),
@@ -1148,7 +1326,10 @@ mod tests {
             proposer_index: 42,
             body_root: vec![0x12; 32],
             signature: vec![0x34; 96],
-            timestamp: Some(prost_types::Timestamp { seconds: 1700000000, nanos: 0 }),
+            timestamp: Some(prost_types::Timestamp {
+                seconds: 1700000000,
+                nanos: 0,
+            }),
             body: Some(beacon::block::Body::Deneb(beacon::DenebBody {
                 rando_reveal: vec![0x01; 96],
                 eth1_data: Some(beacon::Eth1Data {
@@ -1173,7 +1354,10 @@ mod tests {
                     block_number: 12345,
                     gas_limit: 30000000,
                     gas_used: 15000000,
-                    timestamp: Some(prost_types::Timestamp { seconds: 1700000000, nanos: 0 }),
+                    timestamp: Some(prost_types::Timestamp {
+                        seconds: 1700000000,
+                        nanos: 0,
+                    }),
                     extra_data: vec![],
                     base_fee_per_gas: vec![0x01],
                     block_hash: vec![0xa6; 32],
@@ -1200,7 +1384,9 @@ mod tests {
         let block = make_test_block(100);
         let block_bytes = prost::Message::encode_to_vec(&block);
         let mut mapper = BeaconBlockMapper::new(false, EncodeBytes::Hex);
-        mapper.map_block(&block_bytes, &BlockIdentity::default(), None).unwrap();
+        mapper
+            .map_block(&block_bytes, &BlockIdentity::default(), None)
+            .unwrap();
 
         let batches = mapper.flush().unwrap();
         assert_eq!(batches["blocks"].num_rows(), 1);
@@ -1231,7 +1417,9 @@ mod tests {
         };
         let block_bytes = prost::Message::encode_to_vec(&block);
         let mut mapper = BeaconBlockMapper::new(false, EncodeBytes::Hex);
-        mapper.map_block(&block_bytes, &BlockIdentity::default(), None).unwrap();
+        mapper
+            .map_block(&block_bytes, &BlockIdentity::default(), None)
+            .unwrap();
 
         let batches = mapper.flush().unwrap();
         assert_eq!(batches["blocks"].num_rows(), 1);
@@ -1249,7 +1437,9 @@ mod tests {
         let block = make_test_block(1);
         let block_bytes = prost::Message::encode_to_vec(&block);
         let mut mapper = BeaconBlockMapper::new(false, EncodeBytes::Hex);
-        mapper.map_block(&block_bytes, &BlockIdentity::default(), None).unwrap();
+        mapper
+            .map_block(&block_bytes, &BlockIdentity::default(), None)
+            .unwrap();
         let _ = mapper.flush().unwrap();
         assert_eq!(mapper.max_table_rows(), 0);
     }
@@ -1273,13 +1463,19 @@ mod tests {
         let block = make_test_block(0);
         let block_bytes = prost::Message::encode_to_vec(&block);
         let mut mapper = BeaconBlockMapper::new(true, EncodeBytes::Hex);
-        mapper.map_block(&block_bytes, &BlockIdentity::default(), Some("FINAL")).unwrap();
+        mapper
+            .map_block(&block_bytes, &BlockIdentity::default(), Some("FINAL"))
+            .unwrap();
 
         let batches = mapper.flush().unwrap();
         let blocks_batch = &batches["blocks"];
         let last_col = blocks_batch.num_columns() - 1;
         assert_eq!(blocks_batch.schema().field(last_col).name(), "fork_step");
-        let fork_col = blocks_batch.column(last_col).as_any().downcast_ref::<StringArray>().unwrap();
+        let fork_col = blocks_batch
+            .column(last_col)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
         assert_eq!(fork_col.value(0), "FINAL");
     }
 
@@ -1288,7 +1484,9 @@ mod tests {
         let block = make_deneb_block(200);
         let block_bytes = prost::Message::encode_to_vec(&block);
         let mut mapper = BeaconBlockMapper::new(false, EncodeBytes::Hex);
-        mapper.map_block(&block_bytes, &BlockIdentity::default(), None).unwrap();
+        mapper
+            .map_block(&block_bytes, &BlockIdentity::default(), None)
+            .unwrap();
 
         let batches = mapper.flush().unwrap();
         assert_eq!(batches["blocks"].num_rows(), 1);

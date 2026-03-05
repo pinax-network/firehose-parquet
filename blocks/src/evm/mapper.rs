@@ -5,8 +5,8 @@ use arrow::datatypes::Schema;
 use arrow::record_batch::RecordBatch;
 use firehose_parquet::encode::{BytesColumn, EncodeBytes};
 use firehose_parquet::traits::{
-    est_bool, est_i32, est_opt_str, est_str, est_u32, est_u64,
-    BlockIdentity, BlockMapper, CanonicalBuilder,
+    est_bool, est_i32, est_opt_str, est_str, est_u32, est_u64, BlockIdentity, BlockMapper,
+    CanonicalBuilder,
 };
 use prost::Message;
 use std::collections::HashMap;
@@ -32,14 +32,21 @@ fn append_fork_step(builder: &mut Option<StringBuilder>, fork_step: Option<&str>
     }
 }
 
-fn finish_fork_step(builder: &mut Option<StringBuilder>, columns: &mut Vec<Arc<dyn arrow::array::Array>>) {
+fn finish_fork_step(
+    builder: &mut Option<StringBuilder>,
+    columns: &mut Vec<Arc<dyn arrow::array::Array>>,
+) {
     if let Some(ref mut b) = builder {
         columns.push(Arc::new(b.finish()) as Arc<dyn arrow::array::Array>);
     }
 }
 
 fn mk_fork_step(include: bool) -> Option<StringBuilder> {
-    if include { Some(StringBuilder::new()) } else { None }
+    if include {
+        Some(StringBuilder::new())
+    } else {
+        None
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -90,7 +97,12 @@ pub struct EvmBlockMapper {
 }
 
 impl EvmBlockMapper {
-    pub fn new(extended: bool, include_fork_step: bool, encoding: EncodeBytes, include_failed_transactions: bool) -> Self {
+    pub fn new(
+        extended: bool,
+        include_fork_step: bool,
+        encoding: EncodeBytes,
+        include_failed_transactions: bool,
+    ) -> Self {
         let ifs = include_fork_step;
         let enc = &encoding;
         Self {
@@ -99,20 +111,76 @@ impl EvmBlockMapper {
             blocks: EvmBlocksBuilder::new(ifs, enc),
             transactions: EvmTransactionsBuilder::new(ifs, enc),
             logs: EvmLogsBuilder::new(ifs, enc),
-            calls: if extended { Some(EvmCallsBuilder::new(ifs, enc)) } else { None },
-            balance_changes: if extended { Some(EvmBalanceChangesBuilder::new(ifs, enc)) } else { None },
-            code_changes: if extended { Some(EvmCodeChangesBuilder::new(ifs, enc)) } else { None },
-            storage_changes: if extended { Some(EvmStorageChangesBuilder::new(ifs, enc)) } else { None },
-            nonce_changes: if extended { Some(EvmNonceChangesBuilder::new(ifs, enc)) } else { None },
-            gas_changes: if extended { Some(EvmGasChangesBuilder::new(ifs, enc)) } else { None },
-            account_creations: if extended { Some(EvmAccountCreationsBuilder::new(ifs, enc)) } else { None },
-            system_calls: if extended { Some(SystemCallsBuilder::new(ifs, enc)) } else { None },
-            system_balance_changes: if extended { Some(SystemBalanceChangesBuilder::new(ifs, enc)) } else { None },
-            system_code_changes: if extended { Some(SystemCodeChangesBuilder::new(ifs, enc)) } else { None },
-            system_storage_changes: if extended { Some(SystemStorageChangesBuilder::new(ifs, enc)) } else { None },
-            system_nonce_changes: if extended { Some(SystemNonceChangesBuilder::new(ifs, enc)) } else { None },
-            system_gas_changes: if extended { Some(SystemGasChangesBuilder::new(ifs, enc)) } else { None },
-            system_account_creations: if extended { Some(SystemAccountCreationsBuilder::new(ifs, enc)) } else { None },
+            calls: if extended {
+                Some(EvmCallsBuilder::new(ifs, enc))
+            } else {
+                None
+            },
+            balance_changes: if extended {
+                Some(EvmBalanceChangesBuilder::new(ifs, enc))
+            } else {
+                None
+            },
+            code_changes: if extended {
+                Some(EvmCodeChangesBuilder::new(ifs, enc))
+            } else {
+                None
+            },
+            storage_changes: if extended {
+                Some(EvmStorageChangesBuilder::new(ifs, enc))
+            } else {
+                None
+            },
+            nonce_changes: if extended {
+                Some(EvmNonceChangesBuilder::new(ifs, enc))
+            } else {
+                None
+            },
+            gas_changes: if extended {
+                Some(EvmGasChangesBuilder::new(ifs, enc))
+            } else {
+                None
+            },
+            account_creations: if extended {
+                Some(EvmAccountCreationsBuilder::new(ifs, enc))
+            } else {
+                None
+            },
+            system_calls: if extended {
+                Some(SystemCallsBuilder::new(ifs, enc))
+            } else {
+                None
+            },
+            system_balance_changes: if extended {
+                Some(SystemBalanceChangesBuilder::new(ifs, enc))
+            } else {
+                None
+            },
+            system_code_changes: if extended {
+                Some(SystemCodeChangesBuilder::new(ifs, enc))
+            } else {
+                None
+            },
+            system_storage_changes: if extended {
+                Some(SystemStorageChangesBuilder::new(ifs, enc))
+            } else {
+                None
+            },
+            system_nonce_changes: if extended {
+                Some(SystemNonceChangesBuilder::new(ifs, enc))
+            } else {
+                None
+            },
+            system_gas_changes: if extended {
+                Some(SystemGasChangesBuilder::new(ifs, enc))
+            } else {
+                None
+            },
+            system_account_creations: if extended {
+                Some(SystemAccountCreationsBuilder::new(ifs, enc))
+            } else {
+                None
+            },
             blocks_schema: schema::blocks_schema(ifs, enc),
             transactions_schema: schema::transactions_schema(ifs, enc),
             logs_schema: schema::logs_schema(ifs, enc),
@@ -133,7 +201,12 @@ impl EvmBlockMapper {
         }
     }
 
-    fn map_evm_block(&mut self, block: &eth::Block, identity: &BlockIdentity, fork_step: Option<&str>) {
+    fn map_evm_block(
+        &mut self,
+        block: &eth::Block,
+        identity: &BlockIdentity,
+        fork_step: Option<&str>,
+    ) {
         let number = block.number;
         let header = block.header.as_ref();
 
@@ -141,31 +214,57 @@ impl EvmBlockMapper {
         self.blocks.canonical.append(identity);
         self.blocks.number.append_value(number);
         self.blocks.hash.append_value(&block.hash);
-        self.blocks.parent_hash.append_value(header.map_or(&[][..], |h| &h.parent_hash));
+        self.blocks
+            .parent_hash
+            .append_value(header.map_or(&[][..], |h| &h.parent_hash));
 
-        self.blocks.gas_used.append_value(header.map_or(0, |h| h.gas_used));
-        self.blocks.gas_limit.append_value(header.map_or(0, |h| h.gas_limit));
+        self.blocks
+            .gas_used
+            .append_value(header.map_or(0, |h| h.gas_used));
+        self.blocks
+            .gas_limit
+            .append_value(header.map_or(0, |h| h.gas_limit));
         let base_fee = header.and_then(|h| h.base_fee_per_gas.as_ref());
         if base_fee.is_some() {
-            self.blocks.base_fee_per_gas.append_value(bigint_to_string(&header.and_then(|h| h.base_fee_per_gas.clone())));
+            self.blocks.base_fee_per_gas.append_value(bigint_to_string(
+                &header.and_then(|h| h.base_fee_per_gas.clone()),
+            ));
         } else {
             self.blocks.base_fee_per_gas.append_null();
         }
-        self.blocks.coinbase.append_value(header.map_or(&[][..], |h| &h.coinbase));
+        self.blocks
+            .coinbase
+            .append_value(header.map_or(&[][..], |h| &h.coinbase));
         self.blocks.size.append_value(block.size);
-        self.blocks.nonce.append_value(header.map_or(0, |h| h.nonce));
-        self.blocks.state_root.append_value(header.map_or(&[][..], |h| &h.state_root));
-        self.blocks.transactions_root.append_value(header.map_or(&[][..], |h| &h.transactions_root));
-        self.blocks.receipt_root.append_value(header.map_or(&[][..], |h| &h.receipt_root));
+        self.blocks
+            .nonce
+            .append_value(header.map_or(0, |h| h.nonce));
+        self.blocks
+            .state_root
+            .append_value(header.map_or(&[][..], |h| &h.state_root));
+        self.blocks
+            .transactions_root
+            .append_value(header.map_or(&[][..], |h| &h.transactions_root));
+        self.blocks
+            .receipt_root
+            .append_value(header.map_or(&[][..], |h| &h.receipt_root));
         let difficulty = header.and_then(|h| h.difficulty.as_ref());
         if difficulty.is_some() {
-            self.blocks.difficulty.append_value(bigint_to_string(&header.and_then(|h| h.difficulty.clone())));
+            self.blocks
+                .difficulty
+                .append_value(bigint_to_string(&header.and_then(|h| h.difficulty.clone())));
         } else {
             self.blocks.difficulty.append_null();
         }
-        self.blocks.mix_hash.append_value(header.map_or(&[][..], |h| &h.mix_hash));
-        self.blocks.extra_data.append_value(header.map_or(&[][..], |h| &h.extra_data));
-        self.blocks.num_transactions.append_value(block.transaction_traces.len() as u32);
+        self.blocks
+            .mix_hash
+            .append_value(header.map_or(&[][..], |h| &h.mix_hash));
+        self.blocks
+            .extra_data
+            .append_value(header.map_or(&[][..], |h| &h.extra_data));
+        self.blocks
+            .num_transactions
+            .append_value(block.transaction_traces.len() as u32);
         self.blocks.detail_level.append_value(block.detail_level);
         append_fork_step(&mut self.blocks.fork_step, fork_step);
 
@@ -199,7 +298,13 @@ impl EvmBlockMapper {
         }
     }
 
-    fn map_transaction(&mut self, block_number: u64, tx: &eth::TransactionTrace, identity: &BlockIdentity, fork_step: Option<&str>) {
+    fn map_transaction(
+        &mut self,
+        block_number: u64,
+        tx: &eth::TransactionTrace,
+        identity: &BlockIdentity,
+        fork_step: Option<&str>,
+    ) {
         let tx_hash = &tx.hash;
 
         self.transactions.canonical.append(identity);
@@ -208,12 +313,16 @@ impl EvmBlockMapper {
         self.transactions.hash.append_value(tx_hash);
         self.transactions.from.append_value(&tx.from);
         self.transactions.to.append_value(&tx.to);
-        self.transactions.value.append_value(bigint_to_string(&tx.value));
+        self.transactions
+            .value
+            .append_value(bigint_to_string(&tx.value));
         self.transactions.gas_limit.append_value(tx.gas_limit);
         self.transactions.gas_used.append_value(tx.gas_used);
         let gas_price = &tx.gas_price;
         if gas_price.is_some() {
-            self.transactions.gas_price.append_value(bigint_to_string(gas_price));
+            self.transactions
+                .gas_price
+                .append_value(bigint_to_string(gas_price));
         } else {
             self.transactions.gas_price.append_null();
         }
@@ -222,17 +331,23 @@ impl EvmBlockMapper {
         self.transactions.nonce.append_value(tx.nonce);
         self.transactions.input.append_value(&tx.input);
         if tx.max_fee_per_gas.is_some() {
-            self.transactions.max_fee_per_gas.append_value(bigint_to_string(&tx.max_fee_per_gas));
+            self.transactions
+                .max_fee_per_gas
+                .append_value(bigint_to_string(&tx.max_fee_per_gas));
         } else {
             self.transactions.max_fee_per_gas.append_null();
         }
         if tx.max_priority_fee_per_gas.is_some() {
-            self.transactions.max_priority_fee_per_gas.append_value(bigint_to_string(&tx.max_priority_fee_per_gas));
+            self.transactions
+                .max_priority_fee_per_gas
+                .append_value(bigint_to_string(&tx.max_priority_fee_per_gas));
         } else {
             self.transactions.max_priority_fee_per_gas.append_null();
         }
         if let Some(ref receipt) = tx.receipt {
-            self.transactions.cumulative_gas_used.append_value(receipt.cumulative_gas_used);
+            self.transactions
+                .cumulative_gas_used
+                .append_value(receipt.cumulative_gas_used);
         } else {
             self.transactions.cumulative_gas_used.append_null();
         }
@@ -256,7 +371,15 @@ impl EvmBlockMapper {
         }
     }
 
-    fn map_log(&mut self, block_number: u64, tx_hash: &[u8], tx_index: u32, log: &eth::Log, identity: &BlockIdentity, fork_step: Option<&str>) {
+    fn map_log(
+        &mut self,
+        block_number: u64,
+        tx_hash: &[u8],
+        tx_index: u32,
+        log: &eth::Log,
+        identity: &BlockIdentity,
+        fork_step: Option<&str>,
+    ) {
         self.logs.canonical.append(identity);
         self.logs.block_number.append_value(block_number);
         self.logs.tx_hash.append_value(tx_hash);
@@ -288,7 +411,14 @@ impl EvmBlockMapper {
     }
 
     /// Extract state changes from transaction-scoped calls → transaction tables.
-    fn extract_call_state_changes(&mut self, block_number: u64, tx_hash: &[u8], call: &eth::Call, identity: &BlockIdentity, fork_step: Option<&str>) {
+    fn extract_call_state_changes(
+        &mut self,
+        block_number: u64,
+        tx_hash: &[u8],
+        call: &eth::Call,
+        identity: &BlockIdentity,
+        fork_step: Option<&str>,
+    ) {
         if !self.extended {
             return;
         }
@@ -327,7 +457,13 @@ impl EvmBlockMapper {
     }
 
     /// Extract state changes from system calls → system_* tables.
-    fn extract_system_call_state_changes(&mut self, block_number: u64, call: &eth::Call, identity: &BlockIdentity, fork_step: Option<&str>) {
+    fn extract_system_call_state_changes(
+        &mut self,
+        block_number: u64,
+        call: &eth::Call,
+        identity: &BlockIdentity,
+        fork_step: Option<&str>,
+    ) {
         if !self.extended {
             return;
         }
@@ -367,7 +503,12 @@ impl EvmBlockMapper {
 }
 
 impl BlockMapper for EvmBlockMapper {
-    fn map_block(&mut self, block_bytes: &[u8], identity: &BlockIdentity, fork_step: Option<&str>) -> anyhow::Result<()> {
+    fn map_block(
+        &mut self,
+        block_bytes: &[u8],
+        identity: &BlockIdentity,
+        fork_step: Option<&str>,
+    ) -> anyhow::Result<()> {
         let block = eth::Block::decode(block_bytes)?;
         self.map_evm_block(&block, identity, fork_step);
         Ok(())
@@ -375,8 +516,14 @@ impl BlockMapper for EvmBlockMapper {
 
     fn flush(&mut self) -> anyhow::Result<HashMap<String, RecordBatch>> {
         let mut result = HashMap::new();
-        result.insert("blocks".to_string(), self.blocks.finish(&self.blocks_schema)?);
-        result.insert("transactions".to_string(), self.transactions.finish(&self.transactions_schema)?);
+        result.insert(
+            "blocks".to_string(),
+            self.blocks.finish(&self.blocks_schema)?,
+        );
+        result.insert(
+            "transactions".to_string(),
+            self.transactions.finish(&self.transactions_schema)?,
+        );
         result.insert("logs".to_string(), self.logs.finish(&self.logs_schema)?);
 
         if self.extended {
@@ -384,67 +531,137 @@ impl BlockMapper for EvmBlockMapper {
                 result.insert("calls".to_string(), b.finish(&self.calls_schema)?);
             }
             if let Some(ref mut b) = self.balance_changes {
-                result.insert("balance_changes".to_string(), b.finish(&self.balance_changes_schema)?);
+                result.insert(
+                    "balance_changes".to_string(),
+                    b.finish(&self.balance_changes_schema)?,
+                );
             }
             if let Some(ref mut b) = self.code_changes {
-                result.insert("code_changes".to_string(), b.finish(&self.code_changes_schema)?);
+                result.insert(
+                    "code_changes".to_string(),
+                    b.finish(&self.code_changes_schema)?,
+                );
             }
             if let Some(ref mut b) = self.storage_changes {
-                result.insert("storage_changes".to_string(), b.finish(&self.storage_changes_schema)?);
+                result.insert(
+                    "storage_changes".to_string(),
+                    b.finish(&self.storage_changes_schema)?,
+                );
             }
             if let Some(ref mut b) = self.nonce_changes {
-                result.insert("nonce_changes".to_string(), b.finish(&self.nonce_changes_schema)?);
+                result.insert(
+                    "nonce_changes".to_string(),
+                    b.finish(&self.nonce_changes_schema)?,
+                );
             }
             if let Some(ref mut b) = self.gas_changes {
-                result.insert("gas_changes".to_string(), b.finish(&self.gas_changes_schema)?);
+                result.insert(
+                    "gas_changes".to_string(),
+                    b.finish(&self.gas_changes_schema)?,
+                );
             }
             if let Some(ref mut b) = self.account_creations {
-                result.insert("account_creations".to_string(), b.finish(&self.account_creations_schema)?);
+                result.insert(
+                    "account_creations".to_string(),
+                    b.finish(&self.account_creations_schema)?,
+                );
             }
             // System tables
             if let Some(ref mut b) = self.system_calls {
-                result.insert("system_calls".to_string(), b.finish(&self.system_calls_schema)?);
+                result.insert(
+                    "system_calls".to_string(),
+                    b.finish(&self.system_calls_schema)?,
+                );
             }
             if let Some(ref mut b) = self.system_balance_changes {
-                result.insert("system_balance_changes".to_string(), b.finish(&self.system_balance_changes_schema)?);
+                result.insert(
+                    "system_balance_changes".to_string(),
+                    b.finish(&self.system_balance_changes_schema)?,
+                );
             }
             if let Some(ref mut b) = self.system_code_changes {
-                result.insert("system_code_changes".to_string(), b.finish(&self.system_code_changes_schema)?);
+                result.insert(
+                    "system_code_changes".to_string(),
+                    b.finish(&self.system_code_changes_schema)?,
+                );
             }
             if let Some(ref mut b) = self.system_storage_changes {
-                result.insert("system_storage_changes".to_string(), b.finish(&self.system_storage_changes_schema)?);
+                result.insert(
+                    "system_storage_changes".to_string(),
+                    b.finish(&self.system_storage_changes_schema)?,
+                );
             }
             if let Some(ref mut b) = self.system_nonce_changes {
-                result.insert("system_nonce_changes".to_string(), b.finish(&self.system_nonce_changes_schema)?);
+                result.insert(
+                    "system_nonce_changes".to_string(),
+                    b.finish(&self.system_nonce_changes_schema)?,
+                );
             }
             if let Some(ref mut b) = self.system_gas_changes {
-                result.insert("system_gas_changes".to_string(), b.finish(&self.system_gas_changes_schema)?);
+                result.insert(
+                    "system_gas_changes".to_string(),
+                    b.finish(&self.system_gas_changes_schema)?,
+                );
             }
             if let Some(ref mut b) = self.system_account_creations {
-                result.insert("system_account_creations".to_string(), b.finish(&self.system_account_creations_schema)?);
+                result.insert(
+                    "system_account_creations".to_string(),
+                    b.finish(&self.system_account_creations_schema)?,
+                );
             }
         }
         Ok(result)
     }
 
     fn max_table_rows(&self) -> usize {
-        let mut max = self.blocks.canonical.len()
+        let mut max = self
+            .blocks
+            .canonical
+            .len()
             .max(self.transactions.canonical.len())
             .max(self.logs.canonical.len());
-        if let Some(ref b) = self.calls { max = max.max(b.canonical.len()); }
-        if let Some(ref b) = self.balance_changes { max = max.max(b.canonical.len()); }
-        if let Some(ref b) = self.storage_changes { max = max.max(b.canonical.len()); }
-        if let Some(ref b) = self.nonce_changes { max = max.max(b.canonical.len()); }
-        if let Some(ref b) = self.gas_changes { max = max.max(b.canonical.len()); }
-        if let Some(ref b) = self.code_changes { max = max.max(b.canonical.len()); }
-        if let Some(ref b) = self.account_creations { max = max.max(b.canonical.len()); }
-        if let Some(ref b) = self.system_calls { max = max.max(b.canonical.len()); }
-        if let Some(ref b) = self.system_balance_changes { max = max.max(b.canonical.len()); }
-        if let Some(ref b) = self.system_code_changes { max = max.max(b.canonical.len()); }
-        if let Some(ref b) = self.system_storage_changes { max = max.max(b.canonical.len()); }
-        if let Some(ref b) = self.system_nonce_changes { max = max.max(b.canonical.len()); }
-        if let Some(ref b) = self.system_gas_changes { max = max.max(b.canonical.len()); }
-        if let Some(ref b) = self.system_account_creations { max = max.max(b.canonical.len()); }
+        if let Some(ref b) = self.calls {
+            max = max.max(b.canonical.len());
+        }
+        if let Some(ref b) = self.balance_changes {
+            max = max.max(b.canonical.len());
+        }
+        if let Some(ref b) = self.storage_changes {
+            max = max.max(b.canonical.len());
+        }
+        if let Some(ref b) = self.nonce_changes {
+            max = max.max(b.canonical.len());
+        }
+        if let Some(ref b) = self.gas_changes {
+            max = max.max(b.canonical.len());
+        }
+        if let Some(ref b) = self.code_changes {
+            max = max.max(b.canonical.len());
+        }
+        if let Some(ref b) = self.account_creations {
+            max = max.max(b.canonical.len());
+        }
+        if let Some(ref b) = self.system_calls {
+            max = max.max(b.canonical.len());
+        }
+        if let Some(ref b) = self.system_balance_changes {
+            max = max.max(b.canonical.len());
+        }
+        if let Some(ref b) = self.system_code_changes {
+            max = max.max(b.canonical.len());
+        }
+        if let Some(ref b) = self.system_storage_changes {
+            max = max.max(b.canonical.len());
+        }
+        if let Some(ref b) = self.system_nonce_changes {
+            max = max.max(b.canonical.len());
+        }
+        if let Some(ref b) = self.system_gas_changes {
+            max = max.max(b.canonical.len());
+        }
+        if let Some(ref b) = self.system_account_creations {
+            max = max.max(b.canonical.len());
+        }
         max
     }
 
@@ -452,20 +669,48 @@ impl BlockMapper for EvmBlockMapper {
         let mut total = self.blocks.canonical.len()
             + self.transactions.canonical.len()
             + self.logs.canonical.len();
-        if let Some(ref b) = self.calls { total += b.canonical.len(); }
-        if let Some(ref b) = self.balance_changes { total += b.canonical.len(); }
-        if let Some(ref b) = self.storage_changes { total += b.canonical.len(); }
-        if let Some(ref b) = self.nonce_changes { total += b.canonical.len(); }
-        if let Some(ref b) = self.gas_changes { total += b.canonical.len(); }
-        if let Some(ref b) = self.code_changes { total += b.canonical.len(); }
-        if let Some(ref b) = self.account_creations { total += b.canonical.len(); }
-        if let Some(ref b) = self.system_calls { total += b.canonical.len(); }
-        if let Some(ref b) = self.system_balance_changes { total += b.canonical.len(); }
-        if let Some(ref b) = self.system_code_changes { total += b.canonical.len(); }
-        if let Some(ref b) = self.system_storage_changes { total += b.canonical.len(); }
-        if let Some(ref b) = self.system_nonce_changes { total += b.canonical.len(); }
-        if let Some(ref b) = self.system_gas_changes { total += b.canonical.len(); }
-        if let Some(ref b) = self.system_account_creations { total += b.canonical.len(); }
+        if let Some(ref b) = self.calls {
+            total += b.canonical.len();
+        }
+        if let Some(ref b) = self.balance_changes {
+            total += b.canonical.len();
+        }
+        if let Some(ref b) = self.storage_changes {
+            total += b.canonical.len();
+        }
+        if let Some(ref b) = self.nonce_changes {
+            total += b.canonical.len();
+        }
+        if let Some(ref b) = self.gas_changes {
+            total += b.canonical.len();
+        }
+        if let Some(ref b) = self.code_changes {
+            total += b.canonical.len();
+        }
+        if let Some(ref b) = self.account_creations {
+            total += b.canonical.len();
+        }
+        if let Some(ref b) = self.system_calls {
+            total += b.canonical.len();
+        }
+        if let Some(ref b) = self.system_balance_changes {
+            total += b.canonical.len();
+        }
+        if let Some(ref b) = self.system_code_changes {
+            total += b.canonical.len();
+        }
+        if let Some(ref b) = self.system_storage_changes {
+            total += b.canonical.len();
+        }
+        if let Some(ref b) = self.system_nonce_changes {
+            total += b.canonical.len();
+        }
+        if let Some(ref b) = self.system_gas_changes {
+            total += b.canonical.len();
+        }
+        if let Some(ref b) = self.system_account_creations {
+            total += b.canonical.len();
+        }
         total
     }
 
@@ -475,7 +720,6 @@ impl BlockMapper for EvmBlockMapper {
             + est_u64(&self.blocks.number)
             + self.blocks.hash.estimated_bytes()
             + self.blocks.parent_hash.estimated_bytes()
-
             + est_u64(&self.blocks.gas_used)
             + est_u64(&self.blocks.gas_limit)
             + est_str(&self.blocks.base_fee_per_gas)
@@ -524,7 +768,11 @@ impl BlockMapper for EvmBlockMapper {
             + self.logs.topic3.estimated_bytes()
             + self.logs.data.estimated_bytes()
             + est_opt_str(&self.logs.fork_step);
-        let mut tables: Vec<(&str, usize)> = vec![("blocks", blocks), ("transactions", transactions), ("logs", logs)];
+        let mut tables: Vec<(&str, usize)> = vec![
+            ("blocks", blocks),
+            ("transactions", transactions),
+            ("logs", logs),
+        ];
         // calls (tx-level)
         macro_rules! est_calls {
             ($b:expr) => {
@@ -717,21 +965,52 @@ impl BlockMapper for EvmBlockMapper {
                     + est_opt_str(&$b.fork_step)
             };
         }
-        if let Some(ref b) = self.calls { tables.push(("calls", est_calls!(b))); }
-        if let Some(ref b) = self.balance_changes { tables.push(("balance_changes", est_balance_changes!(b))); }
-        if let Some(ref b) = self.code_changes { tables.push(("code_changes", est_code_changes!(b))); }
-        if let Some(ref b) = self.storage_changes { tables.push(("storage_changes", est_storage_changes!(b))); }
-        if let Some(ref b) = self.nonce_changes { tables.push(("nonce_changes", est_nonce_changes!(b))); }
-        if let Some(ref b) = self.gas_changes { tables.push(("gas_changes", est_gas_changes!(b))); }
-        if let Some(ref b) = self.account_creations { tables.push(("account_creations", est_account_creations!(b))); }
-        if let Some(ref b) = self.system_calls { tables.push(("system_calls", est_sys_calls!(b))); }
-        if let Some(ref b) = self.system_balance_changes { tables.push(("system_balance_changes", est_sys_balance_changes!(b))); }
-        if let Some(ref b) = self.system_code_changes { tables.push(("system_code_changes", est_sys_code_changes!(b))); }
-        if let Some(ref b) = self.system_storage_changes { tables.push(("system_storage_changes", est_sys_storage_changes!(b))); }
-        if let Some(ref b) = self.system_nonce_changes { tables.push(("system_nonce_changes", est_sys_nonce_changes!(b))); }
-        if let Some(ref b) = self.system_gas_changes { tables.push(("system_gas_changes", est_sys_gas_changes!(b))); }
-        if let Some(ref b) = self.system_account_creations { tables.push(("system_account_creations", est_sys_account_creations!(b))); }
-        tables.into_iter().max_by_key(|&(_, s)| s).unwrap_or(("blocks", 0))
+        if let Some(ref b) = self.calls {
+            tables.push(("calls", est_calls!(b)));
+        }
+        if let Some(ref b) = self.balance_changes {
+            tables.push(("balance_changes", est_balance_changes!(b)));
+        }
+        if let Some(ref b) = self.code_changes {
+            tables.push(("code_changes", est_code_changes!(b)));
+        }
+        if let Some(ref b) = self.storage_changes {
+            tables.push(("storage_changes", est_storage_changes!(b)));
+        }
+        if let Some(ref b) = self.nonce_changes {
+            tables.push(("nonce_changes", est_nonce_changes!(b)));
+        }
+        if let Some(ref b) = self.gas_changes {
+            tables.push(("gas_changes", est_gas_changes!(b)));
+        }
+        if let Some(ref b) = self.account_creations {
+            tables.push(("account_creations", est_account_creations!(b)));
+        }
+        if let Some(ref b) = self.system_calls {
+            tables.push(("system_calls", est_sys_calls!(b)));
+        }
+        if let Some(ref b) = self.system_balance_changes {
+            tables.push(("system_balance_changes", est_sys_balance_changes!(b)));
+        }
+        if let Some(ref b) = self.system_code_changes {
+            tables.push(("system_code_changes", est_sys_code_changes!(b)));
+        }
+        if let Some(ref b) = self.system_storage_changes {
+            tables.push(("system_storage_changes", est_sys_storage_changes!(b)));
+        }
+        if let Some(ref b) = self.system_nonce_changes {
+            tables.push(("system_nonce_changes", est_sys_nonce_changes!(b)));
+        }
+        if let Some(ref b) = self.system_gas_changes {
+            tables.push(("system_gas_changes", est_sys_gas_changes!(b)));
+        }
+        if let Some(ref b) = self.system_account_creations {
+            tables.push(("system_account_creations", est_sys_account_creations!(b)));
+        }
+        tables
+            .into_iter()
+            .max_by_key(|&(_, s)| s)
+            .unwrap_or(("blocks", 0))
     }
 
     fn table_names(&self) -> Vec<&str> {
@@ -996,7 +1275,15 @@ impl EvmCallsBuilder {
         }
     }
 
-    fn append(&mut self, block_number: u64, tx_hash: &[u8], tx_index: u32, call: &eth::Call, identity: &BlockIdentity, fork_step: Option<&str>) {
+    fn append(
+        &mut self,
+        block_number: u64,
+        tx_hash: &[u8],
+        tx_index: u32,
+        call: &eth::Call,
+        identity: &BlockIdentity,
+        fork_step: Option<&str>,
+    ) {
         self.canonical.append(identity);
         self.block_number.append_value(block_number);
         self.tx_hash.append_value(tx_hash);
@@ -1075,7 +1362,14 @@ impl EvmBalanceChangesBuilder {
         }
     }
 
-    fn append(&mut self, block_number: u64, tx_hash: &[u8], bc: &eth::BalanceChange, identity: &BlockIdentity, fork_step: Option<&str>) {
+    fn append(
+        &mut self,
+        block_number: u64,
+        tx_hash: &[u8],
+        bc: &eth::BalanceChange,
+        identity: &BlockIdentity,
+        fork_step: Option<&str>,
+    ) {
         self.canonical.append(identity);
         self.block_number.append_value(block_number);
         self.tx_hash.append_value(tx_hash);
@@ -1132,7 +1426,14 @@ impl EvmCodeChangesBuilder {
         }
     }
 
-    fn append(&mut self, block_number: u64, tx_hash: &[u8], cc: &eth::CodeChange, identity: &BlockIdentity, fork_step: Option<&str>) {
+    fn append(
+        &mut self,
+        block_number: u64,
+        tx_hash: &[u8],
+        cc: &eth::CodeChange,
+        identity: &BlockIdentity,
+        fork_step: Option<&str>,
+    ) {
         self.canonical.append(identity);
         self.block_number.append_value(block_number);
         self.tx_hash.append_value(tx_hash);
@@ -1189,7 +1490,14 @@ impl EvmStorageChangesBuilder {
         }
     }
 
-    fn append(&mut self, block_number: u64, tx_hash: &[u8], sc: &eth::StorageChange, identity: &BlockIdentity, fork_step: Option<&str>) {
+    fn append(
+        &mut self,
+        block_number: u64,
+        tx_hash: &[u8],
+        sc: &eth::StorageChange,
+        identity: &BlockIdentity,
+        fork_step: Option<&str>,
+    ) {
         self.canonical.append(identity);
         self.block_number.append_value(block_number);
         self.tx_hash.append_value(tx_hash);
@@ -1242,7 +1550,14 @@ impl EvmNonceChangesBuilder {
         }
     }
 
-    fn append(&mut self, block_number: u64, tx_hash: &[u8], nc: &eth::NonceChange, identity: &BlockIdentity, fork_step: Option<&str>) {
+    fn append(
+        &mut self,
+        block_number: u64,
+        tx_hash: &[u8],
+        nc: &eth::NonceChange,
+        identity: &BlockIdentity,
+        fork_step: Option<&str>,
+    ) {
         self.canonical.append(identity);
         self.block_number.append_value(block_number);
         self.tx_hash.append_value(tx_hash);
@@ -1293,7 +1608,14 @@ impl EvmGasChangesBuilder {
         }
     }
 
-    fn append(&mut self, block_number: u64, tx_hash: &[u8], gc: &eth::GasChange, identity: &BlockIdentity, fork_step: Option<&str>) {
+    fn append(
+        &mut self,
+        block_number: u64,
+        tx_hash: &[u8],
+        gc: &eth::GasChange,
+        identity: &BlockIdentity,
+        fork_step: Option<&str>,
+    ) {
         self.canonical.append(identity);
         self.block_number.append_value(block_number);
         self.tx_hash.append_value(tx_hash);
@@ -1340,7 +1662,14 @@ impl EvmAccountCreationsBuilder {
         }
     }
 
-    fn append(&mut self, block_number: u64, tx_hash: &[u8], ac: &eth::AccountCreation, identity: &BlockIdentity, fork_step: Option<&str>) {
+    fn append(
+        &mut self,
+        block_number: u64,
+        tx_hash: &[u8],
+        ac: &eth::AccountCreation,
+        identity: &BlockIdentity,
+        fork_step: Option<&str>,
+    ) {
         self.canonical.append(identity);
         self.block_number.append_value(block_number);
         self.tx_hash.append_value(tx_hash);
@@ -1413,7 +1742,13 @@ impl SystemCallsBuilder {
         }
     }
 
-    fn append(&mut self, block_number: u64, call: &eth::Call, identity: &BlockIdentity, fork_step: Option<&str>) {
+    fn append(
+        &mut self,
+        block_number: u64,
+        call: &eth::Call,
+        identity: &BlockIdentity,
+        fork_step: Option<&str>,
+    ) {
         self.canonical.append(identity);
         self.block_number.append_value(block_number);
         self.call_index.append_value(call.index);
@@ -1486,7 +1821,13 @@ impl SystemBalanceChangesBuilder {
         }
     }
 
-    fn append(&mut self, block_number: u64, bc: &eth::BalanceChange, identity: &BlockIdentity, fork_step: Option<&str>) {
+    fn append(
+        &mut self,
+        block_number: u64,
+        bc: &eth::BalanceChange,
+        identity: &BlockIdentity,
+        fork_step: Option<&str>,
+    ) {
         self.canonical.append(identity);
         self.block_number.append_value(block_number);
         self.ordinal.append_value(bc.ordinal);
@@ -1539,7 +1880,13 @@ impl SystemCodeChangesBuilder {
         }
     }
 
-    fn append(&mut self, block_number: u64, cc: &eth::CodeChange, identity: &BlockIdentity, fork_step: Option<&str>) {
+    fn append(
+        &mut self,
+        block_number: u64,
+        cc: &eth::CodeChange,
+        identity: &BlockIdentity,
+        fork_step: Option<&str>,
+    ) {
         self.canonical.append(identity);
         self.block_number.append_value(block_number);
         self.ordinal.append_value(cc.ordinal);
@@ -1592,7 +1939,13 @@ impl SystemStorageChangesBuilder {
         }
     }
 
-    fn append(&mut self, block_number: u64, sc: &eth::StorageChange, identity: &BlockIdentity, fork_step: Option<&str>) {
+    fn append(
+        &mut self,
+        block_number: u64,
+        sc: &eth::StorageChange,
+        identity: &BlockIdentity,
+        fork_step: Option<&str>,
+    ) {
         self.canonical.append(identity);
         self.block_number.append_value(block_number);
         self.ordinal.append_value(sc.ordinal);
@@ -1641,7 +1994,13 @@ impl SystemNonceChangesBuilder {
         }
     }
 
-    fn append(&mut self, block_number: u64, nc: &eth::NonceChange, identity: &BlockIdentity, fork_step: Option<&str>) {
+    fn append(
+        &mut self,
+        block_number: u64,
+        nc: &eth::NonceChange,
+        identity: &BlockIdentity,
+        fork_step: Option<&str>,
+    ) {
         self.canonical.append(identity);
         self.block_number.append_value(block_number);
         self.ordinal.append_value(nc.ordinal);
@@ -1688,7 +2047,13 @@ impl SystemGasChangesBuilder {
         }
     }
 
-    fn append(&mut self, block_number: u64, gc: &eth::GasChange, identity: &BlockIdentity, fork_step: Option<&str>) {
+    fn append(
+        &mut self,
+        block_number: u64,
+        gc: &eth::GasChange,
+        identity: &BlockIdentity,
+        fork_step: Option<&str>,
+    ) {
         self.canonical.append(identity);
         self.block_number.append_value(block_number);
         self.ordinal.append_value(gc.ordinal);
@@ -1731,7 +2096,13 @@ impl SystemAccountCreationsBuilder {
         }
     }
 
-    fn append(&mut self, block_number: u64, ac: &eth::AccountCreation, identity: &BlockIdentity, fork_step: Option<&str>) {
+    fn append(
+        &mut self,
+        block_number: u64,
+        ac: &eth::AccountCreation,
+        identity: &BlockIdentity,
+        fork_step: Option<&str>,
+    ) {
         self.canonical.append(identity);
         self.block_number.append_value(block_number);
         self.ordinal.append_value(ac.ordinal);
@@ -1758,7 +2129,9 @@ mod num_bigint {
 
     impl BigUint {
         pub fn from_bytes_be(bytes: &[u8]) -> Self {
-            Self { bytes: bytes.to_vec() }
+            Self {
+                bytes: bytes.to_vec(),
+            }
         }
 
         pub fn to_string(&self) -> String {
@@ -1824,12 +2197,17 @@ mod tests {
                 number,
                 gas_limit: 30_000_000,
                 gas_used: 21_000,
-                timestamp: Some(prost_types::Timestamp { seconds: 1700000000, nanos: 0 }),
+                timestamp: Some(prost_types::Timestamp {
+                    seconds: 1700000000,
+                    nanos: 0,
+                }),
                 extra_data: vec![],
                 mix_hash: vec![0x05; 32],
                 nonce: 0,
                 hash: vec![0xab; 32],
-                base_fee_per_gas: Some(eth::BigInt { bytes: vec![0x3B, 0x9A, 0xCA, 0x00] }),
+                base_fee_per_gas: Some(eth::BigInt {
+                    bytes: vec![0x3B, 0x9A, 0xCA, 0x00],
+                }),
                 withdrawals_root: vec![],
                 tx_dependency: None,
                 blob_gas_used: None,
@@ -1841,7 +2219,9 @@ mod tests {
             transaction_traces: vec![eth::TransactionTrace {
                 to: vec![0xaa; 20],
                 nonce: 1,
-                gas_price: Some(eth::BigInt { bytes: vec![0x3B, 0x9A, 0xCA, 0x00] }),
+                gas_price: Some(eth::BigInt {
+                    bytes: vec![0x3B, 0x9A, 0xCA, 0x00],
+                }),
                 gas_limit: 21000,
                 value: Some(eth::BigInt { bytes: vec![0x01] }),
                 input: vec![],
@@ -1940,7 +2320,9 @@ mod tests {
         let block = make_test_evm_block(100);
         let block_bytes = prost::Message::encode_to_vec(&block);
         let mut mapper = EvmBlockMapper::new(false, false, EncodeBytes::Hex, false);
-        mapper.map_block(&block_bytes, &BlockIdentity::default(), None).unwrap();
+        mapper
+            .map_block(&block_bytes, &BlockIdentity::default(), None)
+            .unwrap();
 
         let batches = mapper.flush().unwrap();
         assert_eq!(batches["blocks"].num_rows(), 1);
@@ -1954,7 +2336,9 @@ mod tests {
         let block = make_test_evm_block(200);
         let block_bytes = prost::Message::encode_to_vec(&block);
         let mut mapper = EvmBlockMapper::new(true, false, EncodeBytes::Hex, false);
-        mapper.map_block(&block_bytes, &BlockIdentity::default(), None).unwrap();
+        mapper
+            .map_block(&block_bytes, &BlockIdentity::default(), None)
+            .unwrap();
 
         let batches = mapper.flush().unwrap();
         assert_eq!(batches["blocks"].num_rows(), 1);
@@ -1974,7 +2358,9 @@ mod tests {
         let block = make_test_evm_block(1);
         let block_bytes = prost::Message::encode_to_vec(&block);
         let mut mapper = EvmBlockMapper::new(true, false, EncodeBytes::Hex, false);
-        mapper.map_block(&block_bytes, &BlockIdentity::default(), None).unwrap();
+        mapper
+            .map_block(&block_bytes, &BlockIdentity::default(), None)
+            .unwrap();
         let _ = mapper.flush().unwrap();
         assert_eq!(mapper.max_table_rows(), 0);
     }
@@ -2023,7 +2409,9 @@ mod tests {
         };
         let block_bytes = prost::Message::encode_to_vec(&block);
         let mut mapper = EvmBlockMapper::new(false, false, EncodeBytes::Hex, false);
-        mapper.map_block(&block_bytes, &BlockIdentity::default(), None).unwrap();
+        mapper
+            .map_block(&block_bytes, &BlockIdentity::default(), None)
+            .unwrap();
         let batches = mapper.flush().unwrap();
         assert_eq!(batches["blocks"].num_rows(), 1);
         assert_eq!(batches["transactions"].num_rows(), 0);
@@ -2032,12 +2420,16 @@ mod tests {
 
     #[test]
     fn test_bigint_conversion() {
-        let bi = Some(eth::BigInt { bytes: vec![0x3B, 0x9A, 0xCA, 0x00] });
+        let bi = Some(eth::BigInt {
+            bytes: vec![0x3B, 0x9A, 0xCA, 0x00],
+        });
         assert_eq!(bigint_to_string(&bi), "1000000000");
         assert_eq!(bigint_to_string(&None), "0");
         let bi = Some(eth::BigInt { bytes: vec![0x01] });
         assert_eq!(bigint_to_string(&bi), "1");
-        let bi = Some(eth::BigInt { bytes: vec![0x01, 0x00] });
+        let bi = Some(eth::BigInt {
+            bytes: vec![0x01, 0x00],
+        });
         assert_eq!(bigint_to_string(&bi), "256");
     }
 
@@ -2054,13 +2446,19 @@ mod tests {
         let block = make_test_evm_block(100);
         let block_bytes = prost::Message::encode_to_vec(&block);
         let mut mapper = EvmBlockMapper::new(false, true, EncodeBytes::Hex, false);
-        mapper.map_block(&block_bytes, &BlockIdentity::default(), Some("NEW")).unwrap();
+        mapper
+            .map_block(&block_bytes, &BlockIdentity::default(), Some("NEW"))
+            .unwrap();
 
         let batches = mapper.flush().unwrap();
         let blocks_batch = &batches["blocks"];
         let last_col = blocks_batch.num_columns() - 1;
         assert_eq!(blocks_batch.schema().field(last_col).name(), "fork_step");
-        let fork_col = blocks_batch.column(last_col).as_any().downcast_ref::<StringArray>().unwrap();
+        let fork_col = blocks_batch
+            .column(last_col)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
         assert_eq!(fork_col.value(0), "NEW");
     }
 
@@ -2069,7 +2467,9 @@ mod tests {
         let block = make_test_evm_block(100);
         let block_bytes = prost::Message::encode_to_vec(&block);
         let mut mapper = EvmBlockMapper::new(false, false, EncodeBytes::Binary, false);
-        mapper.map_block(&block_bytes, &BlockIdentity::default(), None).unwrap();
+        mapper
+            .map_block(&block_bytes, &BlockIdentity::default(), None)
+            .unwrap();
         let batches = mapper.flush().unwrap();
         assert_eq!(batches["blocks"].num_rows(), 1);
         // hash is after canonical fields (6 fields) and number field: index 7
@@ -2082,7 +2482,9 @@ mod tests {
         let block = make_test_evm_block(100);
         let block_bytes = prost::Message::encode_to_vec(&block);
         let mut mapper = EvmBlockMapper::new(false, false, EncodeBytes::Base58, false);
-        mapper.map_block(&block_bytes, &BlockIdentity::default(), None).unwrap();
+        mapper
+            .map_block(&block_bytes, &BlockIdentity::default(), None)
+            .unwrap();
         let batches = mapper.flush().unwrap();
         assert_eq!(batches["blocks"].num_rows(), 1);
         let hash_col = batches["blocks"].column(7);

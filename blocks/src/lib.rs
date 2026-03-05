@@ -1,8 +1,8 @@
-pub mod evm;
-pub mod bitcoin;
-pub mod solana;
-pub mod near;
 pub mod antelope;
-pub mod cosmos;
-pub mod tron;
 pub mod beacon;
+pub mod bitcoin;
+pub mod cosmos;
+pub mod evm;
+pub mod near;
+pub mod solana;
+pub mod tron;

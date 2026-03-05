@@ -102,7 +102,11 @@ pub fn canonical_fields_with_encoding(encoding: &EncodeBytes) -> Vec<Field> {
         Field::new("parent_num", DataType::UInt64, false),
         Field::new("parent_id", id_type, false),
         Field::new("lib_num", DataType::UInt64, false),
-        Field::new("timestamp", DataType::Timestamp(TimeUnit::Second, Some(Arc::from("UTC"))), false),
+        Field::new(
+            "timestamp",
+            DataType::Timestamp(TimeUnit::Second, Some(Arc::from("UTC"))),
+            false,
+        ),
     ]
 }
 
@@ -227,7 +231,12 @@ impl ForkStepBuilder {
 /// Trait for mapping raw protobuf block bytes into Arrow RecordBatches.
 pub trait BlockMapper {
     /// Map raw protobuf bytes (from Any.value) into internal builders.
-    fn map_block(&mut self, block_bytes: &[u8], identity: &BlockIdentity, fork_step: Option<&str>) -> anyhow::Result<()>;
+    fn map_block(
+        &mut self,
+        block_bytes: &[u8],
+        identity: &BlockIdentity,
+        fork_step: Option<&str>,
+    ) -> anyhow::Result<()>;
 
     /// Flush all buffered data into RecordBatches.
     fn flush(&mut self) -> anyhow::Result<HashMap<String, RecordBatch>>;

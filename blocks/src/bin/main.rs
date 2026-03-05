@@ -24,10 +24,16 @@ use blocks::solana::mapper::SolanaBlockMapper;
 use blocks::tron::mapper::TronBlockMapper;
 
 /// Supported block types.
-const BLOCK_TYPES: &[&str] = &["auto", "evm", "bitcoin", "solana", "near", "antelope", "cosmos", "tron", "beacon"];
+const BLOCK_TYPES: &[&str] = &[
+    "auto", "evm", "bitcoin", "solana", "near", "antelope", "cosmos", "tron", "beacon",
+];
 
 #[derive(Parser, Debug)]
-#[command(name = "firehose-parquet", version, about = "Convert Firehose gRPC stream to Apache Parquet", after_long_help = "\
+#[command(
+    name = "firehose-parquet",
+    version,
+    about = "Convert Firehose gRPC stream to Apache Parquet",
+    after_long_help = "\
 Examples:
   # Stream EVM blocks to local Parquet (auto-detect chain)
   firehose-parquet --endpoint https://eth.firehose.pinax.network:443 \\
@@ -45,7 +51,8 @@ Examples:
   # Resume from cursor
   firehose-parquet --endpoint https://eth.firehose.pinax.network:443 \\
     --cursor cursor.txt --partition date
-")]
+"
+)]
 struct Cli {
     #[command(subcommand)]
     command: Option<Commands>,
@@ -56,27 +63,57 @@ struct Cli {
     /// Block type to process.
     /// Use "auto" to detect from the Firehose stream.
     /// Options: auto, evm, bitcoin, solana, near, antelope, cosmos, tron, beacon
-    #[arg(long, env = "BLOCK_TYPE", default_value = "auto", hide_env_values = true, help_heading = "Chain")]
+    #[arg(
+        long,
+        env = "BLOCK_TYPE",
+        default_value = "auto",
+        hide_env_values = true,
+        help_heading = "Chain"
+    )]
     block_type: String,
 
     /// Enable extended detail level (extra tables: EVM calls/balance_changes/etc., Antelope db_ops, Solana vote_transactions)
-    #[arg(long, env = "EXTENDED", default_value = "false", hide_env_values = true, help_heading = "Chain")]
+    #[arg(
+        long,
+        env = "EXTENDED",
+        default_value = "false",
+        hide_env_values = true,
+        help_heading = "Chain"
+    )]
     extended: bool,
 
     /// Byte encoding strategy for binary fields (hashes, addresses, etc.)
     /// Options: binary (raw bytes), hex (0x-prefixed), hex_no_prefix, base58, tron_base58, auto (chain-appropriate)
-    #[arg(long, env = "BYTES_ENCODING", default_value = "auto", hide_env_values = true, help_heading = "Chain")]
+    #[arg(
+        long,
+        env = "BYTES_ENCODING",
+        default_value = "auto",
+        hide_env_values = true,
+        help_heading = "Chain"
+    )]
     bytes_encoding: String,
 
     /// Include failed/reverted transactions in output (default: false)
-    #[arg(long, env = "INCLUDE_FAILED_TRANSACTIONS", default_value = "false", hide_env_values = true, help_heading = "Chain")]
+    #[arg(
+        long,
+        env = "INCLUDE_FAILED_TRANSACTIONS",
+        default_value = "false",
+        hide_env_values = true,
+        help_heading = "Chain"
+    )]
     include_failed_transactions: bool,
 
     /// Override cursor parameter validation. When a cursor file exists and its
     /// stored parameters differ from the current CLI arguments, the pipeline
     /// normally exits with an error. This flag suppresses that check and
     /// resumes with the current parameters.
-    #[arg(long, env = "CURSOR_OVERRIDE", default_value = "false", hide_env_values = true, help_heading = "Block Range")]
+    #[arg(
+        long,
+        env = "CURSOR_OVERRIDE",
+        default_value = "false",
+        hide_env_values = true,
+        help_heading = "Block Range"
+    )]
     cursor_override: bool,
 }
 
@@ -109,29 +146,50 @@ fn build_file_metadata(
     let mut meta = ParquetFileMetadata::new();
     meta.add("firehose-parquet.version", env!("CARGO_PKG_VERSION"));
     meta.add("firehose-parquet.block_type", block_type);
-    meta.add("firehose-parquet.bytes_encoding", format!("{:?}", encoding).to_lowercase());
+    meta.add(
+        "firehose-parquet.bytes_encoding",
+        format!("{:?}", encoding).to_lowercase(),
+    );
     meta.add("firehose-parquet.endpoint", endpoint);
     if let Some(ref ei) = endpoint_info {
         if !ei.chain_name.is_empty() {
             meta.add("firehose-parquet.chain_name", &ei.chain_name);
         }
         if !ei.chain_name_aliases.is_empty() {
-            meta.add("firehose-parquet.chain_name_aliases", ei.chain_name_aliases.join(","));
+            meta.add(
+                "firehose-parquet.chain_name_aliases",
+                ei.chain_name_aliases.join(","),
+            );
         }
         if !ei.first_streamable_block_id.is_empty() {
-            meta.add("firehose-parquet.first_streamable_block_id", &ei.first_streamable_block_id);
+            meta.add(
+                "firehose-parquet.first_streamable_block_id",
+                &ei.first_streamable_block_id,
+            );
             // When first_streamable_block_id is present, always write
             // first_streamable_block_num (even when 0) to confirm the
             // endpoint explicitly provided genesis block info.
-            meta.add("firehose-parquet.first_streamable_block_num", ei.first_streamable_block_num.to_string());
+            meta.add(
+                "firehose-parquet.first_streamable_block_num",
+                ei.first_streamable_block_num.to_string(),
+            );
         } else if ei.first_streamable_block_num > 0 {
-            meta.add("firehose-parquet.first_streamable_block_num", ei.first_streamable_block_num.to_string());
+            meta.add(
+                "firehose-parquet.first_streamable_block_num",
+                ei.first_streamable_block_num.to_string(),
+            );
         }
         if ei.block_id_encoding > 0 {
-            meta.add("firehose-parquet.block_id_encoding", block_id_encoding_label(ei.block_id_encoding));
+            meta.add(
+                "firehose-parquet.block_id_encoding",
+                block_id_encoding_label(ei.block_id_encoding),
+            );
         }
         if !ei.block_features.is_empty() {
-            meta.add("firehose-parquet.block_features", ei.block_features.join(","));
+            meta.add(
+                "firehose-parquet.block_features",
+                ei.block_features.join(","),
+            );
         }
     }
     meta
@@ -155,7 +213,9 @@ fn detect_block_type(type_url: &str) -> Result<String> {
     } else if type_url.contains("beacon") {
         Ok("beacon".to_string())
     } else {
-        Err(anyhow!("unable to auto-detect block type from type_url: {type_url}"))
+        Err(anyhow!(
+            "unable to auto-detect block type from type_url: {type_url}"
+        ))
     }
 }
 
@@ -174,10 +234,10 @@ fn default_encode_bytes(block_type: &str) -> EncodeBytes {
 ///   0 = UNSET, 1 = HEX, 2 = 0X_HEX, 3 = BASE58
 fn encode_bytes_from_block_id_encoding(encoding: i32) -> Option<EncodeBytes> {
     match encoding {
-        1 => Some(EncodeBytes::Hex),       // BLOCK_ID_ENCODING_HEX
-        2 => Some(EncodeBytes::Hex),       // BLOCK_ID_ENCODING_0X_HEX
-        3 => Some(EncodeBytes::Base58),    // BLOCK_ID_ENCODING_BASE58
-        _ => None,                         // UNSET or unknown
+        1 => Some(EncodeBytes::Hex),    // BLOCK_ID_ENCODING_HEX
+        2 => Some(EncodeBytes::Hex),    // BLOCK_ID_ENCODING_0X_HEX
+        3 => Some(EncodeBytes::Base58), // BLOCK_ID_ENCODING_BASE58
+        _ => None,                      // UNSET or unknown
     }
 }
 
@@ -207,15 +267,51 @@ fn create_mapper(
     include_failed_transactions: bool,
 ) -> Result<Box<dyn BlockMapper>> {
     match block_type {
-        "evm" => Ok(Box::new(EvmBlockMapper::new(extended, include_fork_step, encode_bytes, include_failed_transactions))),
-        "bitcoin" => Ok(Box::new(BitcoinBlockMapper::new(include_fork_step, encode_bytes.clone()))),
-        "solana" => Ok(Box::new(SolanaBlockMapper::new(extended, include_fork_step, encode_bytes, include_failed_transactions))),
-        "near" => Ok(Box::new(NearBlockMapper::new(include_fork_step, encode_bytes, include_failed_transactions))),
-        "antelope" => Ok(Box::new(AntelopeBlockMapper::new(extended, include_fork_step, encode_bytes, include_failed_transactions))),
-        "cosmos" => Ok(Box::new(CosmosBlockMapper::new(include_fork_step, encode_bytes, include_failed_transactions))),
-        "tron" => Ok(Box::new(TronBlockMapper::new(include_fork_step, encode_bytes, include_failed_transactions))),
-        "beacon" => Ok(Box::new(BeaconBlockMapper::new(include_fork_step, encode_bytes))),
-        other => Err(anyhow!("unsupported block type: {other}. Supported: {}", BLOCK_TYPES.join(", "))),
+        "evm" => Ok(Box::new(EvmBlockMapper::new(
+            extended,
+            include_fork_step,
+            encode_bytes,
+            include_failed_transactions,
+        ))),
+        "bitcoin" => Ok(Box::new(BitcoinBlockMapper::new(
+            include_fork_step,
+            encode_bytes.clone(),
+        ))),
+        "solana" => Ok(Box::new(SolanaBlockMapper::new(
+            extended,
+            include_fork_step,
+            encode_bytes,
+            include_failed_transactions,
+        ))),
+        "near" => Ok(Box::new(NearBlockMapper::new(
+            include_fork_step,
+            encode_bytes,
+            include_failed_transactions,
+        ))),
+        "antelope" => Ok(Box::new(AntelopeBlockMapper::new(
+            extended,
+            include_fork_step,
+            encode_bytes,
+            include_failed_transactions,
+        ))),
+        "cosmos" => Ok(Box::new(CosmosBlockMapper::new(
+            include_fork_step,
+            encode_bytes,
+            include_failed_transactions,
+        ))),
+        "tron" => Ok(Box::new(TronBlockMapper::new(
+            include_fork_step,
+            encode_bytes,
+            include_failed_transactions,
+        ))),
+        "beacon" => Ok(Box::new(BeaconBlockMapper::new(
+            include_fork_step,
+            encode_bytes,
+        ))),
+        other => Err(anyhow!(
+            "unsupported block type: {other}. Supported: {}",
+            BLOCK_TYPES.join(", ")
+        )),
     }
 }
 
@@ -231,9 +327,14 @@ async fn main() -> Result<()> {
                 return Ok(());
             }
             Commands::Scan {
-                path, rows, schema_only,
-                aws_access_key_id, aws_secret_access_key, aws_session_token,
-                aws_region, aws_endpoint_url,
+                path,
+                rows,
+                schema_only,
+                aws_access_key_id,
+                aws_secret_access_key,
+                aws_session_token,
+                aws_region,
+                aws_endpoint_url,
             } => {
                 let aws = firehose_parquet::cli::AwsConfig {
                     aws_access_key_id: aws_access_key_id.clone(),
@@ -247,8 +348,11 @@ async fn main() -> Result<()> {
             }
             Commands::Inspect {
                 path,
-                aws_access_key_id, aws_secret_access_key, aws_session_token,
-                aws_region, aws_endpoint_url,
+                aws_access_key_id,
+                aws_secret_access_key,
+                aws_session_token,
+                aws_region,
+                aws_endpoint_url,
             } => {
                 let aws = firehose_parquet::cli::AwsConfig {
                     aws_access_key_id: aws_access_key_id.clone(),
@@ -261,9 +365,14 @@ async fn main() -> Result<()> {
                 return Ok(());
             }
             Commands::Validate {
-                path, cross_partition, allow_gaps,
-                aws_access_key_id, aws_secret_access_key, aws_session_token,
-                aws_region, aws_endpoint_url,
+                path,
+                cross_partition,
+                allow_gaps,
+                aws_access_key_id,
+                aws_secret_access_key,
+                aws_session_token,
+                aws_region,
+                aws_endpoint_url,
             } => {
                 let aws = firehose_parquet::cli::AwsConfig {
                     aws_access_key_id: aws_access_key_id.clone(),
@@ -284,9 +393,18 @@ async fn main() -> Result<()> {
                 return Ok(());
             }
             Commands::Rollup {
-                source, output, target_partition, compression, flush_bytes, delete_source,
-                aws_access_key_id, aws_secret_access_key, aws_session_token,
-                aws_region, aws_endpoint_url, cache_control,
+                source,
+                output,
+                target_partition,
+                compression,
+                flush_bytes,
+                delete_source,
+                aws_access_key_id,
+                aws_secret_access_key,
+                aws_session_token,
+                aws_region,
+                aws_endpoint_url,
+                cache_control,
             } => {
                 init_tracing(&cli.common.log_level);
                 let target = firehose_parquet::rollup::parse_rollup_target(target_partition)?;
@@ -312,10 +430,53 @@ async fn main() -> Result<()> {
                 firehose_parquet::rollup::run_rollup(&rollup_config)?;
                 return Ok(());
             }
+            Commands::Verify {
+                path,
+                chain,
+                table,
+                no_fail_fast,
+                report_json,
+                registry_path,
+                update_registry,
+                aws_access_key_id,
+                aws_secret_access_key,
+                aws_session_token,
+                aws_region,
+                aws_endpoint_url,
+            } => {
+                let aws = firehose_parquet::cli::AwsConfig {
+                    aws_access_key_id: aws_access_key_id.clone(),
+                    aws_secret_access_key: aws_secret_access_key.clone(),
+                    aws_session_token: aws_session_token.clone(),
+                    aws_region: aws_region.clone(),
+                    aws_endpoint_url: aws_endpoint_url.clone(),
+                };
+                let opts = firehose_parquet::verify::VerifyOptions {
+                    chain: chain.clone(),
+                    table: table.clone(),
+                    no_fail_fast: *no_fail_fast,
+                    report_json: report_json.clone(),
+                    registry_path: registry_path.clone(),
+                    update_registry: *update_registry,
+                };
+                let report = firehose_parquet::verify::verify_parquet(path, Some(&aws), &opts)?;
+                report.print();
+                if !report.is_valid() {
+                    std::process::exit(1);
+                }
+                return Ok(());
+            }
             Commands::Merge {
-                path, compression, flush_bytes, dry_run,
-                aws_access_key_id, aws_secret_access_key, aws_session_token,
-                aws_region, aws_endpoint_url, cache_control,
+                path,
+                compression,
+                flush_bytes,
+                dry_run,
+                aws_access_key_id,
+                aws_secret_access_key,
+                aws_session_token,
+                aws_region,
+                aws_endpoint_url,
+                cache_control,
             } => {
                 init_tracing(&cli.common.log_level);
                 let compression = firehose_parquet::cli::parse_compression(compression)?;
@@ -339,9 +500,14 @@ async fn main() -> Result<()> {
                 return Ok(());
             }
             Commands::Truncate {
-                path, partition, dry_run,
-                aws_access_key_id, aws_secret_access_key, aws_session_token,
-                aws_region, aws_endpoint_url,
+                path,
+                partition,
+                dry_run,
+                aws_access_key_id,
+                aws_secret_access_key,
+                aws_session_token,
+                aws_region,
+                aws_endpoint_url,
             } => {
                 init_tracing(&cli.common.log_level);
                 let aws = Some(firehose_parquet::cli::AwsConfig {
@@ -366,7 +532,10 @@ async fn main() -> Result<()> {
 
     init_tracing(&cli.common.log_level);
 
-    info!(version = env!("CARGO_PKG_VERSION"), "firehose-parquet starting");
+    info!(
+        version = env!("CARGO_PKG_VERSION"),
+        "firehose-parquet starting"
+    );
 
     // Install graceful shutdown handler for SIGINT (Ctrl-C) and SIGTERM.
     // When a signal is received, the flag is set and the streaming loop
@@ -382,8 +551,8 @@ async fn main() -> Result<()> {
             #[cfg(unix)]
             {
                 use tokio::signal::unix::{signal, SignalKind};
-                let mut sigterm = signal(SignalKind::terminate())
-                    .expect("failed to install SIGTERM handler");
+                let mut sigterm =
+                    signal(SignalKind::terminate()).expect("failed to install SIGTERM handler");
                 tokio::select! {
                     _ = ctrl_c => {}
                     _ = sigterm.recv() => {}
@@ -402,7 +571,10 @@ async fn main() -> Result<()> {
 
     let block_type = cli.block_type.to_lowercase();
     if block_type != "auto" && !BLOCK_TYPES.contains(&block_type.as_str()) {
-        return Err(anyhow!("unsupported block type: {block_type}. Supported: {}", BLOCK_TYPES.join(", ")));
+        return Err(anyhow!(
+            "unsupported block type: {block_type}. Supported: {}",
+            BLOCK_TYPES.join(", ")
+        ));
     }
 
     let mut extended = cli.extended;
@@ -438,20 +610,35 @@ async fn main() -> Result<()> {
             ("compression".to_string(), config.compression.to_string()),
             ("bytes_encoding".to_string(), bytes_encoding_str.clone()),
             ("extended".to_string(), extended.to_string()),
-            ("final_blocks_only".to_string(), config.final_blocks_only.to_string()),
+            (
+                "final_blocks_only".to_string(),
+                config.final_blocks_only.to_string(),
+            ),
             ("version".to_string(), env!("CARGO_PKG_VERSION").to_string()),
         ];
         if let Some(ref ei) = endpoint_info {
             labels.push(("chain_name".to_string(), ei.chain_name.clone()));
             if !ei.chain_name_aliases.is_empty() {
-                labels.push(("chain_name_aliases".to_string(), ei.chain_name_aliases.join(",")));
+                labels.push((
+                    "chain_name_aliases".to_string(),
+                    ei.chain_name_aliases.join(","),
+                ));
             }
-            labels.push(("first_streamable_block_num".to_string(), ei.first_streamable_block_num.to_string()));
+            labels.push((
+                "first_streamable_block_num".to_string(),
+                ei.first_streamable_block_num.to_string(),
+            ));
             if !ei.first_streamable_block_id.is_empty() {
-                labels.push(("first_streamable_block_id".to_string(), ei.first_streamable_block_id.clone()));
+                labels.push((
+                    "first_streamable_block_id".to_string(),
+                    ei.first_streamable_block_id.clone(),
+                ));
             }
             if ei.block_id_encoding > 0 {
-                labels.push(("block_id_encoding".to_string(), block_id_encoding_label(ei.block_id_encoding).to_string()));
+                labels.push((
+                    "block_id_encoding".to_string(),
+                    block_id_encoding_label(ei.block_id_encoding).to_string(),
+                ));
             }
             if !ei.block_features.is_empty() {
                 labels.push(("block_features".to_string(), ei.block_features.join(",")));
@@ -485,7 +672,12 @@ async fn main() -> Result<()> {
             flush_bytes,
         )?
     } else {
-        OutputWriter::new(&config.output, config.partition.clone(), config.compression, flush_bytes)
+        OutputWriter::new(
+            &config.output,
+            config.partition.clone(),
+            config.compression,
+            flush_bytes,
+        )
     };
 
     // Pass metrics to the writer for file/byte/row tracking.
@@ -495,12 +687,23 @@ async fn main() -> Result<()> {
     // If "auto", defer until first block arrives.
     let mut mapper: Option<Box<dyn BlockMapper>> = if block_type != "auto" {
         let encode_bytes = parse_encode_bytes(&bytes_encoding_str)
-            .or_else(|| endpoint_info.as_ref().and_then(|ei| encode_bytes_from_block_id_encoding(ei.block_id_encoding)))
+            .or_else(|| {
+                endpoint_info
+                    .as_ref()
+                    .and_then(|ei| encode_bytes_from_block_id_encoding(ei.block_id_encoding))
+            })
             .unwrap_or_else(|| default_encode_bytes(&block_type));
-        let meta = build_file_metadata(&block_type, &encode_bytes, &config.endpoint, &endpoint_info);
+        let meta =
+            build_file_metadata(&block_type, &encode_bytes, &config.endpoint, &endpoint_info);
         log_file_metadata(&meta);
         writer.inner.set_file_metadata(meta);
-        Some(create_mapper(&block_type, extended, include_fork_step, encode_bytes, include_failed_transactions)?)
+        Some(create_mapper(
+            &block_type,
+            extended,
+            include_fork_step,
+            encode_bytes,
+            include_failed_transactions,
+        )?)
     } else {
         None
     };
@@ -550,27 +753,51 @@ async fn main() -> Result<()> {
                 meta.add("firehose-parquet.chain_name", &ei.chain_name);
             }
             if !ei.chain_name_aliases.is_empty() {
-                meta.add("firehose-parquet.chain_name_aliases", ei.chain_name_aliases.join(","));
+                meta.add(
+                    "firehose-parquet.chain_name_aliases",
+                    ei.chain_name_aliases.join(","),
+                );
             }
             if !ei.first_streamable_block_id.is_empty() {
-                meta.add("firehose-parquet.first_streamable_block_id", &ei.first_streamable_block_id);
-                meta.add("firehose-parquet.first_streamable_block_num", ei.first_streamable_block_num.to_string());
+                meta.add(
+                    "firehose-parquet.first_streamable_block_id",
+                    &ei.first_streamable_block_id,
+                );
+                meta.add(
+                    "firehose-parquet.first_streamable_block_num",
+                    ei.first_streamable_block_num.to_string(),
+                );
             } else if ei.first_streamable_block_num > 0 {
-                meta.add("firehose-parquet.first_streamable_block_num", ei.first_streamable_block_num.to_string());
+                meta.add(
+                    "firehose-parquet.first_streamable_block_num",
+                    ei.first_streamable_block_num.to_string(),
+                );
             }
             if ei.block_id_encoding > 0 {
-                meta.add("firehose-parquet.block_id_encoding", block_id_encoding_label(ei.block_id_encoding));
+                meta.add(
+                    "firehose-parquet.block_id_encoding",
+                    block_id_encoding_label(ei.block_id_encoding),
+                );
             }
             if !ei.block_features.is_empty() {
-                meta.add("firehose-parquet.block_features", ei.block_features.join(","));
+                meta.add(
+                    "firehose-parquet.block_features",
+                    ei.block_features.join(","),
+                );
             }
         }
         meta.add("firehose-parquet.partition", config.partition.to_string());
-        meta.add("firehose-parquet.block_range_size", match &config.partition {
-            firehose_parquet::config::Partition::BlockRange(size) => size.to_string(),
-            _ => "0".to_string(),
-        });
-        meta.add("firehose-parquet.compression", config.compression.to_string());
+        meta.add(
+            "firehose-parquet.block_range_size",
+            match &config.partition {
+                firehose_parquet::config::Partition::BlockRange(size) => size.to_string(),
+                _ => "0".to_string(),
+            },
+        );
+        meta.add(
+            "firehose-parquet.compression",
+            config.compression.to_string(),
+        );
         meta
     };
 
@@ -837,7 +1064,12 @@ async fn main() -> Result<()> {
 
             // Save cursor after final flush.
             if wrote {
-                pipeline_metrics.flushes_total.get_or_create(&metrics::FlushLabels { trigger: "shutdown".to_string() }).inc();
+                pipeline_metrics
+                    .flushes_total
+                    .get_or_create(&metrics::FlushLabels {
+                        trigger: "shutdown".to_string(),
+                    })
+                    .inc();
                 if let (Some(ref loc), Some(ref cursor)) = (&cursor_location, &last_cursor) {
                     let mut state = cursor_state_template.clone();
                     state.cursor = cursor.clone();
@@ -848,10 +1080,17 @@ async fn main() -> Result<()> {
                         .unwrap_or_default();
                     if let Err(e) = loc.save(&state) {
                         warn!(error = %e, "failed to save cursor.parquet");
-                        pipeline_metrics.errors_total.get_or_create(&metrics::ErrorLabels { kind: "cursor_save".to_string() }).inc();
+                        pipeline_metrics
+                            .errors_total
+                            .get_or_create(&metrics::ErrorLabels {
+                                kind: "cursor_save".to_string(),
+                            })
+                            .inc();
                     } else {
                         pipeline_metrics.cursor_saves_total.inc();
-                        pipeline_metrics.cursor_last_block_num.set(last_block_num as i64);
+                        pipeline_metrics
+                            .cursor_last_block_num
+                            .set(last_block_num as i64);
                     }
                 }
             }
@@ -861,8 +1100,16 @@ async fn main() -> Result<()> {
     // Final metrics.
     let elapsed = progress_start.elapsed();
     let elapsed_secs = elapsed.as_secs_f64();
-    let blocks_per_sec = if elapsed_secs > 0.0 { blocks_processed as f64 / elapsed_secs } else { 0.0 };
-    let speed_per_sec = if elapsed_secs > 0.0 { bytes_read as f64 / elapsed_secs } else { 0.0 };
+    let blocks_per_sec = if elapsed_secs > 0.0 {
+        blocks_processed as f64 / elapsed_secs
+    } else {
+        0.0
+    };
+    let speed_per_sec = if elapsed_secs > 0.0 {
+        bytes_read as f64 / elapsed_secs
+    } else {
+        0.0
+    };
 
     // Format elapsed as human-readable duration.
     let elapsed_display = {
@@ -910,42 +1157,66 @@ mod tests {
 
     #[test]
     fn test_detect_block_type_evm() {
-        assert_eq!(detect_block_type("type.googleapis.com/sf.ethereum.type.v2.Block").unwrap(), "evm");
+        assert_eq!(
+            detect_block_type("type.googleapis.com/sf.ethereum.type.v2.Block").unwrap(),
+            "evm"
+        );
     }
 
     #[test]
     fn test_detect_block_type_bitcoin() {
-        assert_eq!(detect_block_type("type.googleapis.com/sf.bitcoin.type.v1.Block").unwrap(), "bitcoin");
+        assert_eq!(
+            detect_block_type("type.googleapis.com/sf.bitcoin.type.v1.Block").unwrap(),
+            "bitcoin"
+        );
     }
 
     #[test]
     fn test_detect_block_type_solana() {
-        assert_eq!(detect_block_type("type.googleapis.com/sf.solana.type.v1.Block").unwrap(), "solana");
+        assert_eq!(
+            detect_block_type("type.googleapis.com/sf.solana.type.v1.Block").unwrap(),
+            "solana"
+        );
     }
 
     #[test]
     fn test_detect_block_type_near() {
-        assert_eq!(detect_block_type("type.googleapis.com/sf.near.type.v1.Block").unwrap(), "near");
+        assert_eq!(
+            detect_block_type("type.googleapis.com/sf.near.type.v1.Block").unwrap(),
+            "near"
+        );
     }
 
     #[test]
     fn test_detect_block_type_antelope() {
-        assert_eq!(detect_block_type("type.googleapis.com/sf.antelope.type.v1.Block").unwrap(), "antelope");
+        assert_eq!(
+            detect_block_type("type.googleapis.com/sf.antelope.type.v1.Block").unwrap(),
+            "antelope"
+        );
     }
 
     #[test]
     fn test_detect_block_type_cosmos() {
-        assert_eq!(detect_block_type("type.googleapis.com/sf.cosmos.type.v2.Block").unwrap(), "cosmos");
+        assert_eq!(
+            detect_block_type("type.googleapis.com/sf.cosmos.type.v2.Block").unwrap(),
+            "cosmos"
+        );
     }
 
     #[test]
     fn test_detect_block_type_tron() {
-        assert_eq!(detect_block_type("type.googleapis.com/sf.tron.type.v1.Block").unwrap(), "tron");
+        assert_eq!(
+            detect_block_type("type.googleapis.com/sf.tron.type.v1.Block").unwrap(),
+            "tron"
+        );
     }
 
     #[test]
     fn test_detect_block_type_beacon() {
-        assert_eq!(detect_block_type("type.googleapis.com/sf.beacon.type.v1.Block").unwrap(), "beacon");
+        assert_eq!(
+            detect_block_type("type.googleapis.com/sf.beacon.type.v1.Block").unwrap(),
+            "beacon"
+        );
     }
 
     #[test]
@@ -967,10 +1238,15 @@ mod tests {
 
     #[test]
     fn test_create_mapper_all_types() {
-        for block_type in &["evm", "bitcoin", "solana", "near", "antelope", "cosmos", "tron", "beacon"] {
+        for block_type in &[
+            "evm", "bitcoin", "solana", "near", "antelope", "cosmos", "tron", "beacon",
+        ] {
             let encode_bytes = default_encode_bytes(block_type);
             let mapper = create_mapper(block_type, false, false, encode_bytes, false);
-            assert!(mapper.is_ok(), "create_mapper failed for block_type: {block_type}");
+            assert!(
+                mapper.is_ok(),
+                "create_mapper failed for block_type: {block_type}"
+            );
         }
     }
 
@@ -995,17 +1271,26 @@ mod tests {
 
     #[test]
     fn test_encode_bytes_from_block_id_encoding_hex() {
-        assert_eq!(encode_bytes_from_block_id_encoding(1), Some(EncodeBytes::Hex));
+        assert_eq!(
+            encode_bytes_from_block_id_encoding(1),
+            Some(EncodeBytes::Hex)
+        );
     }
 
     #[test]
     fn test_encode_bytes_from_block_id_encoding_0x_hex() {
-        assert_eq!(encode_bytes_from_block_id_encoding(2), Some(EncodeBytes::Hex));
+        assert_eq!(
+            encode_bytes_from_block_id_encoding(2),
+            Some(EncodeBytes::Hex)
+        );
     }
 
     #[test]
     fn test_encode_bytes_from_block_id_encoding_base58() {
-        assert_eq!(encode_bytes_from_block_id_encoding(3), Some(EncodeBytes::Base58));
+        assert_eq!(
+            encode_bytes_from_block_id_encoding(3),
+            Some(EncodeBytes::Base58)
+        );
     }
 
     #[test]
@@ -1099,7 +1384,10 @@ mod tests {
     // -- build_file_metadata tests --
 
     fn find_meta<'a>(meta: &'a ParquetFileMetadata, key: &str) -> Option<&'a str> {
-        meta.entries.iter().find(|(k, _)| k == key).map(|(_, v)| v.as_str())
+        meta.entries
+            .iter()
+            .find(|(k, _)| k == key)
+            .map(|(_, v)| v.as_str())
     }
 
     #[test]
@@ -1114,12 +1402,30 @@ mod tests {
         });
         let meta = build_file_metadata("evm", &EncodeBytes::Hex, "https://example.com", &ei);
 
-        assert_eq!(find_meta(&meta, "firehose-parquet.chain_name"), Some("matic"));
-        assert_eq!(find_meta(&meta, "firehose-parquet.chain_name_aliases"), Some("polygon,matic"));
-        assert_eq!(find_meta(&meta, "firehose-parquet.first_streamable_block_id"), Some("0xabc"));
-        assert_eq!(find_meta(&meta, "firehose-parquet.first_streamable_block_num"), Some("100"));
-        assert_eq!(find_meta(&meta, "firehose-parquet.block_id_encoding"), Some("hex_0x"));
-        assert_eq!(find_meta(&meta, "firehose-parquet.block_features"), Some("base,extended"));
+        assert_eq!(
+            find_meta(&meta, "firehose-parquet.chain_name"),
+            Some("matic")
+        );
+        assert_eq!(
+            find_meta(&meta, "firehose-parquet.chain_name_aliases"),
+            Some("polygon,matic")
+        );
+        assert_eq!(
+            find_meta(&meta, "firehose-parquet.first_streamable_block_id"),
+            Some("0xabc")
+        );
+        assert_eq!(
+            find_meta(&meta, "firehose-parquet.first_streamable_block_num"),
+            Some("100")
+        );
+        assert_eq!(
+            find_meta(&meta, "firehose-parquet.block_id_encoding"),
+            Some("hex_0x")
+        );
+        assert_eq!(
+            find_meta(&meta, "firehose-parquet.block_features"),
+            Some("base,extended")
+        );
     }
 
     #[test]
@@ -1136,8 +1442,14 @@ mod tests {
         });
         let meta = build_file_metadata("evm", &EncodeBytes::Hex, "https://example.com", &ei);
 
-        assert_eq!(find_meta(&meta, "firehose-parquet.first_streamable_block_id"), Some("0xd4e56740"));
-        assert_eq!(find_meta(&meta, "firehose-parquet.first_streamable_block_num"), Some("0"));
+        assert_eq!(
+            find_meta(&meta, "firehose-parquet.first_streamable_block_id"),
+            Some("0xd4e56740")
+        );
+        assert_eq!(
+            find_meta(&meta, "firehose-parquet.first_streamable_block_num"),
+            Some("0")
+        );
     }
 
     #[test]
@@ -1154,8 +1466,14 @@ mod tests {
         });
         let meta = build_file_metadata("evm", &EncodeBytes::Hex, "https://example.com", &ei);
 
-        assert_eq!(find_meta(&meta, "firehose-parquet.first_streamable_block_id"), None);
-        assert_eq!(find_meta(&meta, "firehose-parquet.first_streamable_block_num"), None);
+        assert_eq!(
+            find_meta(&meta, "firehose-parquet.first_streamable_block_id"),
+            None
+        );
+        assert_eq!(
+            find_meta(&meta, "firehose-parquet.first_streamable_block_num"),
+            None
+        );
     }
 
     #[test]
@@ -1171,8 +1489,14 @@ mod tests {
         });
         let meta = build_file_metadata("evm", &EncodeBytes::Hex, "https://example.com", &ei);
 
-        assert_eq!(find_meta(&meta, "firehose-parquet.first_streamable_block_id"), None);
-        assert_eq!(find_meta(&meta, "firehose-parquet.first_streamable_block_num"), Some("42"));
+        assert_eq!(
+            find_meta(&meta, "firehose-parquet.first_streamable_block_id"),
+            None
+        );
+        assert_eq!(
+            find_meta(&meta, "firehose-parquet.first_streamable_block_num"),
+            Some("42")
+        );
     }
 
     #[test]
@@ -1180,9 +1504,18 @@ mod tests {
         let meta = build_file_metadata("evm", &EncodeBytes::Hex, "https://example.com", &None);
 
         assert_eq!(find_meta(&meta, "firehose-parquet.chain_name"), None);
-        assert_eq!(find_meta(&meta, "firehose-parquet.chain_name_aliases"), None);
-        assert_eq!(find_meta(&meta, "firehose-parquet.first_streamable_block_id"), None);
-        assert_eq!(find_meta(&meta, "firehose-parquet.first_streamable_block_num"), None);
+        assert_eq!(
+            find_meta(&meta, "firehose-parquet.chain_name_aliases"),
+            None
+        );
+        assert_eq!(
+            find_meta(&meta, "firehose-parquet.first_streamable_block_id"),
+            None
+        );
+        assert_eq!(
+            find_meta(&meta, "firehose-parquet.first_streamable_block_num"),
+            None
+        );
         assert_eq!(find_meta(&meta, "firehose-parquet.block_id_encoding"), None);
         assert_eq!(find_meta(&meta, "firehose-parquet.block_features"), None);
     }
@@ -1201,9 +1534,18 @@ mod tests {
         let meta = build_file_metadata("evm", &EncodeBytes::Hex, "https://example.com", &ei);
 
         assert_eq!(find_meta(&meta, "firehose-parquet.chain_name"), Some("eth"));
-        assert_eq!(find_meta(&meta, "firehose-parquet.chain_name_aliases"), None);
-        assert_eq!(find_meta(&meta, "firehose-parquet.first_streamable_block_id"), None);
-        assert_eq!(find_meta(&meta, "firehose-parquet.first_streamable_block_num"), None);
+        assert_eq!(
+            find_meta(&meta, "firehose-parquet.chain_name_aliases"),
+            None
+        );
+        assert_eq!(
+            find_meta(&meta, "firehose-parquet.first_streamable_block_id"),
+            None
+        );
+        assert_eq!(
+            find_meta(&meta, "firehose-parquet.first_streamable_block_num"),
+            None
+        );
         assert_eq!(find_meta(&meta, "firehose-parquet.block_id_encoding"), None);
         assert_eq!(find_meta(&meta, "firehose-parquet.block_features"), None);
     }

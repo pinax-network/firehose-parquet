@@ -99,7 +99,9 @@ pub fn encode_tron_base58(bytes: &[u8]) -> String {
 /// Encode bytes according to the given strategy.
 pub fn encode_bytes(bytes: &[u8], encoding: &EncodeBytes) -> String {
     match encoding {
-        EncodeBytes::Binary => unreachable!("encode_bytes should not be called for Binary encoding"),
+        EncodeBytes::Binary => {
+            unreachable!("encode_bytes should not be called for Binary encoding")
+        }
         EncodeBytes::Hex => encode_hex(bytes),
         EncodeBytes::HexNoPrefix => encode_hex_no_prefix(bytes),
         EncodeBytes::Base58 => encode_base58(bytes),
@@ -250,7 +252,11 @@ impl BytesListColumn {
     /// Arrow DataType for the list schema field.
     pub fn data_type(encoding: &EncodeBytes) -> DataType {
         use arrow::datatypes::Field;
-        DataType::List(Arc::new(Field::new("item", bytes_data_type(encoding), true)))
+        DataType::List(Arc::new(Field::new(
+            "item",
+            bytes_data_type(encoding),
+            true,
+        )))
     }
 
     /// Estimate in-memory byte usage (offsets + inner builder).
@@ -342,7 +348,10 @@ mod tests {
 
     #[test]
     fn test_encode_id_hex_no_prefix() {
-        assert_eq!(encode_id("0xdeadbeef", &EncodeBytes::HexNoPrefix), "deadbeef");
+        assert_eq!(
+            encode_id("0xdeadbeef", &EncodeBytes::HexNoPrefix),
+            "deadbeef"
+        );
         assert_eq!(encode_id("deadbeef", &EncodeBytes::HexNoPrefix), "deadbeef");
     }
 
@@ -360,8 +369,14 @@ mod tests {
 
     #[test]
     fn test_parse_encode_bytes_hex_no_prefix() {
-        assert_eq!(parse_encode_bytes("hex_no_prefix"), Some(EncodeBytes::HexNoPrefix));
-        assert_eq!(parse_encode_bytes("HEX_NO_PREFIX"), Some(EncodeBytes::HexNoPrefix));
+        assert_eq!(
+            parse_encode_bytes("hex_no_prefix"),
+            Some(EncodeBytes::HexNoPrefix)
+        );
+        assert_eq!(
+            parse_encode_bytes("HEX_NO_PREFIX"),
+            Some(EncodeBytes::HexNoPrefix)
+        );
     }
 
     #[test]
@@ -378,7 +393,10 @@ mod tests {
         assert_eq!(parse_encode_bytes("binary"), Some(EncodeBytes::Binary));
         assert_eq!(parse_encode_bytes("hex"), Some(EncodeBytes::Hex));
         assert_eq!(parse_encode_bytes("base58"), Some(EncodeBytes::Base58));
-        assert_eq!(parse_encode_bytes("tron_base58"), Some(EncodeBytes::TronBase58));
+        assert_eq!(
+            parse_encode_bytes("tron_base58"),
+            Some(EncodeBytes::TronBase58)
+        );
         assert_eq!(parse_encode_bytes("auto"), None);
         assert_eq!(parse_encode_bytes("BINARY"), Some(EncodeBytes::Binary));
         assert_eq!(parse_encode_bytes("HEX"), Some(EncodeBytes::Hex));
@@ -405,7 +423,10 @@ mod tests {
         let arr = col.finish();
         assert_eq!(arr.len(), 1);
         assert_eq!(*arr.data_type(), DataType::Utf8);
-        let string_arr = arr.as_any().downcast_ref::<arrow::array::StringArray>().unwrap();
+        let string_arr = arr
+            .as_any()
+            .downcast_ref::<arrow::array::StringArray>()
+            .unwrap();
         assert_eq!(string_arr.value(0), "0xdead");
     }
 
@@ -415,7 +436,10 @@ mod tests {
         col.append_value(&[1, 2, 3]);
         let arr = col.finish();
         assert_eq!(*arr.data_type(), DataType::Utf8);
-        let string_arr = arr.as_any().downcast_ref::<arrow::array::StringArray>().unwrap();
+        let string_arr = arr
+            .as_any()
+            .downcast_ref::<arrow::array::StringArray>()
+            .unwrap();
         assert_eq!(string_arr.value(0), bs58::encode(&[1, 2, 3]).into_string());
     }
 

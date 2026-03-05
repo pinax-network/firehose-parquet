@@ -26,13 +26,15 @@ fn finish_fork_step(builder: &mut Option<StringBuilder>, columns: &mut Vec<Arc<d
 
 /// Solana Vote program ID (`Vote111111111111111111111111111111111111111`).
 const VOTE_PROGRAM_ID: [u8; 32] = [
-    7, 97, 72, 29, 53, 116, 116, 187, 124, 77, 118, 36, 235, 211, 189, 179,
-    216, 53, 94, 115, 209, 16, 67, 252, 13, 163, 83, 128, 0, 0, 0, 0,
+    7, 97, 72, 29, 53, 116, 116, 187, 124, 77, 118, 36, 235, 211, 189, 179, 216, 53, 94, 115, 209,
+    16, 67, 252, 13, 163, 83, 128, 0, 0, 0, 0,
 ];
 
 /// Returns `true` if the Vote program ID appears in the message's account keys.
 fn is_vote_transaction(msg: &solana::Message) -> bool {
-    msg.account_keys.iter().any(|key| key.as_slice() == VOTE_PROGRAM_ID)
+    msg.account_keys
+        .iter()
+        .any(|key| key.as_slice() == VOTE_PROGRAM_ID)
 }
 
 /// Append a single transaction to the given [`TransactionsBuilder`].
@@ -53,7 +55,9 @@ fn append_transaction(
     } else {
         builder.signature.append_value(&[] as &[u8]);
     }
-    builder.num_signatures.append_value(tx.signatures.len() as u32);
+    builder
+        .num_signatures
+        .append_value(tx.signatures.len() as u32);
     builder.fee.append_value(meta.fee);
     if let Some(ref err) = meta.err {
         if !err.err.is_empty() {
@@ -132,13 +136,22 @@ pub struct SolanaBlockMapper {
 }
 
 impl SolanaBlockMapper {
-    pub fn new(extended: bool, include_fork_step: bool, encoding: EncodeBytes, include_failed_transactions: bool) -> Self {
+    pub fn new(
+        extended: bool,
+        include_fork_step: bool,
+        encoding: EncodeBytes,
+        include_failed_transactions: bool,
+    ) -> Self {
         Self {
             extended,
             include_failed_transactions,
             blocks: BlocksBuilder::new(include_fork_step, &encoding),
             transactions: TransactionsBuilder::new(include_fork_step, &encoding),
-            vote_transactions: if extended { Some(TransactionsBuilder::new(include_fork_step, &encoding)) } else { None },
+            vote_transactions: if extended {
+                Some(TransactionsBuilder::new(include_fork_step, &encoding))
+            } else {
+                None
+            },
             messages: MessagesBuilder::new(include_fork_step, &encoding),
             instructions: InstructionsBuilder::new(include_fork_step, &encoding),
             rewards: RewardsBuilder::new(include_fork_step, &encoding),
@@ -155,7 +168,12 @@ impl SolanaBlockMapper {
         }
     }
 
-    fn map_solana_block(&mut self, block: &solana::Block, identity: &BlockIdentity, fork_step: Option<&str>) {
+    fn map_solana_block(
+        &mut self,
+        block: &solana::Block,
+        identity: &BlockIdentity,
+        fork_step: Option<&str>,
+    ) {
         let slot = block.slot;
 
         self.blocks.canonical.append(identity);
@@ -166,13 +184,19 @@ impl SolanaBlockMapper {
             None => self.blocks.block_height.append_null(),
         }
         self.blocks.blockhash.append_value(&block.blockhash);
-        self.blocks.previous_blockhash.append_value(&block.previous_blockhash);
+        self.blocks
+            .previous_blockhash
+            .append_value(&block.previous_blockhash);
         match &block.block_time {
             Some(bt) => self.blocks.block_time.append_value(bt.timestamp),
             None => self.blocks.block_time.append_null(),
         }
-        self.blocks.num_transactions.append_value(block.transactions.len() as u32);
-        self.blocks.num_rewards.append_value(block.rewards.len() as u32);
+        self.blocks
+            .num_transactions
+            .append_value(block.transactions.len() as u32);
+        self.blocks
+            .num_rewards
+            .append_value(block.rewards.len() as u32);
         append_fork_step(&mut self.blocks.fork_step, fork_step);
 
         for (tx_idx, confirmed_tx) in block.transactions.iter().enumerate() {
@@ -184,7 +208,14 @@ impl SolanaBlockMapper {
         }
     }
 
-    fn map_transaction(&mut self, slot: u64, tx_idx: u32, confirmed: &solana::ConfirmedTransaction, identity: &BlockIdentity, fork_step: Option<&str>) {
+    fn map_transaction(
+        &mut self,
+        slot: u64,
+        tx_idx: u32,
+        confirmed: &solana::ConfirmedTransaction,
+        identity: &BlockIdentity,
+        fork_step: Option<&str>,
+    ) {
         let tx = match confirmed.transaction.as_ref() {
             Some(t) => t,
             None => return,
@@ -196,7 +227,8 @@ impl SolanaBlockMapper {
         // Skip failed transactions unless --include-failed-transactions is set.
         // Some Firehose endpoints include `TransactionError { err: vec![] }` for
         // successful txs instead of omitting the field, so check the inner bytes.
-        if !self.include_failed_transactions && meta.err.as_ref().is_some_and(|e| !e.err.is_empty()) {
+        if !self.include_failed_transactions && meta.err.as_ref().is_some_and(|e| !e.err.is_empty())
+        {
             return;
         }
         let msg = match tx.message.as_ref() {
@@ -213,7 +245,15 @@ impl SolanaBlockMapper {
         }
 
         // Successful non-vote transaction
-        append_transaction(&mut self.transactions, slot, tx_idx, tx, meta, identity, fork_step);
+        append_transaction(
+            &mut self.transactions,
+            slot,
+            tx_idx,
+            tx,
+            meta,
+            identity,
+            fork_step,
+        );
 
         // messages
         self.messages.canonical.append(identity);
@@ -221,15 +261,23 @@ impl SolanaBlockMapper {
         self.messages.transaction_index.append_value(tx_idx);
         self.messages.message_index.append_value(0);
         if let Some(h) = msg.header.as_ref() {
-            self.messages.num_required_signatures.append_value(h.num_required_signatures);
-            self.messages.num_readonly_signed_accounts.append_value(h.num_readonly_signed_accounts);
-            self.messages.num_readonly_unsigned_accounts.append_value(h.num_readonly_unsigned_accounts);
+            self.messages
+                .num_required_signatures
+                .append_value(h.num_required_signatures);
+            self.messages
+                .num_readonly_signed_accounts
+                .append_value(h.num_readonly_signed_accounts);
+            self.messages
+                .num_readonly_unsigned_accounts
+                .append_value(h.num_readonly_unsigned_accounts);
         } else {
             self.messages.num_required_signatures.append_value(0);
             self.messages.num_readonly_signed_accounts.append_value(0);
             self.messages.num_readonly_unsigned_accounts.append_value(0);
         }
-        self.messages.recent_blockhash.append_value(&msg.recent_blockhash);
+        self.messages
+            .recent_blockhash
+            .append_value(&msg.recent_blockhash);
         self.messages.versioned.append_value(msg.versioned);
         for key in &msg.account_keys {
             self.messages.account_keys.append_value(key);
@@ -260,8 +308,12 @@ impl SolanaBlockMapper {
             self.instructions.canonical.append(identity);
             self.instructions.slot.append_value(slot);
             self.instructions.transaction_index.append_value(tx_idx);
-            self.instructions.instruction_index.append_value(global_instr_idx);
-            self.instructions.program_id_index.append_value(instr.program_id_index);
+            self.instructions
+                .instruction_index
+                .append_value(global_instr_idx);
+            self.instructions
+                .program_id_index
+                .append_value(instr.program_id_index);
             self.instructions.accounts.append_value(&instr.accounts);
             self.instructions.data.append_value(&instr.data);
             self.instructions.is_inner.append_value(false);
@@ -277,8 +329,12 @@ impl SolanaBlockMapper {
                 self.instructions.canonical.append(identity);
                 self.instructions.slot.append_value(slot);
                 self.instructions.transaction_index.append_value(tx_idx);
-                self.instructions.instruction_index.append_value(global_instr_idx);
-                self.instructions.program_id_index.append_value(inner.program_id_index);
+                self.instructions
+                    .instruction_index
+                    .append_value(global_instr_idx);
+                self.instructions
+                    .program_id_index
+                    .append_value(inner.program_id_index);
                 self.instructions.accounts.append_value(&inner.accounts);
                 self.instructions.data.append_value(&inner.data);
                 self.instructions.is_inner.append_value(true);
@@ -293,25 +349,55 @@ impl SolanaBlockMapper {
         }
 
         // token balances (pre + post)
-        self.map_token_balances(slot, tx_idx, "pre", &meta.pre_token_balances, identity, fork_step);
-        self.map_token_balances(slot, tx_idx, "post", &meta.post_token_balances, identity, fork_step);
+        self.map_token_balances(
+            slot,
+            tx_idx,
+            "pre",
+            &meta.pre_token_balances,
+            identity,
+            fork_step,
+        );
+        self.map_token_balances(
+            slot,
+            tx_idx,
+            "post",
+            &meta.post_token_balances,
+            identity,
+            fork_step,
+        );
 
         // address table lookups from the message
         for (lookup_idx, lookup) in msg.address_table_lookups.iter().enumerate() {
             self.account_lookups.canonical.append(identity);
             self.account_lookups.slot.append_value(slot);
             self.account_lookups.transaction_index.append_value(tx_idx);
-            self.account_lookups.lookup_index.append_value(lookup_idx as u32);
-            self.account_lookups.account_key.append_value(&lookup.account_key);
-            self.account_lookups.writable_indexes.append_value(&lookup.writable_indexes);
-            self.account_lookups.readonly_indexes.append_value(&lookup.readonly_indexes);
+            self.account_lookups
+                .lookup_index
+                .append_value(lookup_idx as u32);
+            self.account_lookups
+                .account_key
+                .append_value(&lookup.account_key);
+            self.account_lookups
+                .writable_indexes
+                .append_value(&lookup.writable_indexes);
+            self.account_lookups
+                .readonly_indexes
+                .append_value(&lookup.readonly_indexes);
             append_fork_step(&mut self.account_lookups.fork_step, fork_step);
         }
 
         // per-transaction rewards
         let reward_base = self.rewards.canonical.len() as u32;
         for (i, reward) in meta.rewards.iter().enumerate() {
-            self.append_reward(slot, reward_base + i as u32, reward, "transaction", Some(tx_idx), identity, fork_step);
+            self.append_reward(
+                slot,
+                reward_base + i as u32,
+                reward,
+                "transaction",
+                Some(tx_idx),
+                identity,
+                fork_step,
+            );
         }
     }
 
@@ -330,7 +416,9 @@ impl SolanaBlockMapper {
             self.token_balances.transaction_index.append_value(tx_idx);
             self.token_balances.balance_index.append_value(i as u32);
             self.token_balances.balance_type.append_value(balance_type);
-            self.token_balances.account_index.append_value(tb.account_index);
+            self.token_balances
+                .account_index
+                .append_value(tb.account_index);
             self.token_balances.mint.append_value(&tb.mint);
             self.token_balances.owner.append_value(&tb.owner);
             self.token_balances.program_id.append_value(&tb.program_id);
@@ -339,7 +427,9 @@ impl SolanaBlockMapper {
                 self.token_balances.amount.append_value(&ui.amount);
                 self.token_balances.ui_amount.append_value(ui.ui_amount);
                 self.token_balances.decimals.append_value(ui.decimals);
-                self.token_balances.ui_amount_string.append_value(&ui.ui_amount_string);
+                self.token_balances
+                    .ui_amount_string
+                    .append_value(&ui.ui_amount_string);
             } else {
                 self.token_balances.amount.append_value("");
                 self.token_balances.ui_amount.append_null();
@@ -350,7 +440,14 @@ impl SolanaBlockMapper {
         }
     }
 
-    fn map_reward(&mut self, slot: u64, idx: u32, reward: &solana::Reward, identity: &BlockIdentity, fork_step: Option<&str>) {
+    fn map_reward(
+        &mut self,
+        slot: u64,
+        idx: u32,
+        reward: &solana::Reward,
+        identity: &BlockIdentity,
+        fork_step: Option<&str>,
+    ) {
         self.append_reward(slot, idx, reward, "block", None, identity, fork_step);
     }
 
@@ -386,7 +483,12 @@ impl SolanaBlockMapper {
 }
 
 impl BlockMapper for SolanaBlockMapper {
-    fn map_block(&mut self, block_bytes: &[u8], identity: &BlockIdentity, fork_step: Option<&str>) -> anyhow::Result<()> {
+    fn map_block(
+        &mut self,
+        block_bytes: &[u8],
+        identity: &BlockIdentity,
+        fork_step: Option<&str>,
+    ) -> anyhow::Result<()> {
         let block = solana::Block::decode(block_bytes)?;
         self.map_solana_block(&block, identity, fork_step);
         Ok(())
@@ -394,28 +496,57 @@ impl BlockMapper for SolanaBlockMapper {
 
     fn flush(&mut self) -> anyhow::Result<HashMap<String, RecordBatch>> {
         let mut result = HashMap::new();
-        result.insert("blocks".to_string(), self.blocks.finish(&self.blocks_schema)?);
-        result.insert("transactions".to_string(), self.transactions.finish(&self.transactions_schema)?);
+        result.insert(
+            "blocks".to_string(),
+            self.blocks.finish(&self.blocks_schema)?,
+        );
+        result.insert(
+            "transactions".to_string(),
+            self.transactions.finish(&self.transactions_schema)?,
+        );
         if let Some(ref mut vote_txs) = self.vote_transactions {
-            result.insert("vote_transactions".to_string(), vote_txs.finish(&self.vote_transactions_schema)?);
+            result.insert(
+                "vote_transactions".to_string(),
+                vote_txs.finish(&self.vote_transactions_schema)?,
+            );
         }
-        result.insert("messages".to_string(), self.messages.finish(&self.messages_schema)?);
-        result.insert("instructions".to_string(), self.instructions.finish(&self.instructions_schema)?);
-        result.insert("rewards".to_string(), self.rewards.finish(&self.rewards_schema)?);
-        result.insert("token_balances".to_string(), self.token_balances.finish(&self.token_balances_schema)?);
-        result.insert("account_lookups".to_string(), self.account_lookups.finish(&self.account_lookups_schema)?);
+        result.insert(
+            "messages".to_string(),
+            self.messages.finish(&self.messages_schema)?,
+        );
+        result.insert(
+            "instructions".to_string(),
+            self.instructions.finish(&self.instructions_schema)?,
+        );
+        result.insert(
+            "rewards".to_string(),
+            self.rewards.finish(&self.rewards_schema)?,
+        );
+        result.insert(
+            "token_balances".to_string(),
+            self.token_balances.finish(&self.token_balances_schema)?,
+        );
+        result.insert(
+            "account_lookups".to_string(),
+            self.account_lookups.finish(&self.account_lookups_schema)?,
+        );
         Ok(result)
     }
 
     fn max_table_rows(&self) -> usize {
-        let mut max = self.blocks.canonical.len()
+        let mut max = self
+            .blocks
+            .canonical
+            .len()
             .max(self.transactions.canonical.len())
             .max(self.messages.canonical.len())
             .max(self.instructions.canonical.len())
             .max(self.rewards.canonical.len())
             .max(self.token_balances.canonical.len())
             .max(self.account_lookups.canonical.len());
-        if let Some(ref vote_txs) = self.vote_transactions { max = max.max(vote_txs.canonical.len()); }
+        if let Some(ref vote_txs) = self.vote_transactions {
+            max = max.max(vote_txs.canonical.len());
+        }
         max
     }
 
@@ -427,7 +558,9 @@ impl BlockMapper for SolanaBlockMapper {
             + self.rewards.canonical.len()
             + self.token_balances.canonical.len()
             + self.account_lookups.canonical.len();
-        if let Some(ref vote_txs) = self.vote_transactions { total += vote_txs.canonical.len(); }
+        if let Some(ref vote_txs) = self.vote_transactions {
+            total += vote_txs.canonical.len();
+        }
         total
     }
 
@@ -504,10 +637,19 @@ impl BlockMapper for SolanaBlockMapper {
             + self.account_lookups.writable_indexes.estimated_bytes()
             + self.account_lookups.readonly_indexes.estimated_bytes()
             + est_opt_str(&self.account_lookups.fork_step);
-        [("blocks", blocks), ("transactions", transactions), ("vote_transactions", vote_transactions), ("messages", messages), ("instructions", instructions), ("rewards", rewards), ("token_balances", token_balances), ("account_lookups", account_lookups)]
-            .into_iter()
-            .max_by_key(|&(_, s)| s)
-            .unwrap_or(("blocks", 0))
+        [
+            ("blocks", blocks),
+            ("transactions", transactions),
+            ("vote_transactions", vote_transactions),
+            ("messages", messages),
+            ("instructions", instructions),
+            ("rewards", rewards),
+            ("token_balances", token_balances),
+            ("account_lookups", account_lookups),
+        ]
+        .into_iter()
+        .max_by_key(|&(_, s)| s)
+        .unwrap_or(("blocks", 0))
     }
 
     fn table_names(&self) -> Vec<&str> {
@@ -548,7 +690,11 @@ impl BlocksBuilder {
             block_time: Int64Builder::new(),
             num_transactions: UInt32Builder::new(),
             num_rewards: UInt32Builder::new(),
-            fork_step: if include_fork_step { Some(StringBuilder::new()) } else { None },
+            fork_step: if include_fork_step {
+                Some(StringBuilder::new())
+            } else {
+                None
+            },
         }
     }
 
@@ -606,7 +752,11 @@ impl TransactionsBuilder {
             post_balances: ListBuilder::new(UInt64Builder::new()),
             return_data_program_id: BytesColumn::new(encoding),
             return_data: BytesColumn::new(encoding),
-            fork_step: if include_fork_step { Some(StringBuilder::new()) } else { None },
+            fork_step: if include_fork_step {
+                Some(StringBuilder::new())
+            } else {
+                None
+            },
         }
     }
 
@@ -683,7 +833,11 @@ impl MessagesBuilder {
             account_keys: BytesListColumn::new(encoding),
             loaded_writable_addresses: BytesListColumn::new(encoding),
             loaded_readonly_addresses: BytesListColumn::new(encoding),
-            fork_step: if include_fork_step { Some(StringBuilder::new()) } else { None },
+            fork_step: if include_fork_step {
+                Some(StringBuilder::new())
+            } else {
+                None
+            },
         }
     }
 
@@ -734,7 +888,11 @@ impl InstructionsBuilder {
             is_inner: BooleanBuilder::new(),
             inner_index: UInt32Builder::new(),
             stack_height: UInt32Builder::new(),
-            fork_step: if include_fork_step { Some(StringBuilder::new()) } else { None },
+            fork_step: if include_fork_step {
+                Some(StringBuilder::new())
+            } else {
+                None
+            },
         }
     }
 
@@ -783,7 +941,11 @@ impl RewardsBuilder {
             commission: StringBuilder::new(),
             source: StringBuilder::new(),
             transaction_index: UInt32Builder::new(),
-            fork_step: if include_fork_step { Some(StringBuilder::new()) } else { None },
+            fork_step: if include_fork_step {
+                Some(StringBuilder::new())
+            } else {
+                None
+            },
         }
     }
 
@@ -838,7 +1000,11 @@ impl TokenBalancesBuilder {
             ui_amount: Float64Builder::new(),
             decimals: UInt32Builder::new(),
             ui_amount_string: StringBuilder::new(),
-            fork_step: if include_fork_step { Some(StringBuilder::new()) } else { None },
+            fork_step: if include_fork_step {
+                Some(StringBuilder::new())
+            } else {
+                None
+            },
         }
     }
 
@@ -884,7 +1050,11 @@ impl AccountLookupsBuilder {
             account_key: BytesColumn::new(encoding),
             writable_indexes: BytesColumn::new(encoding),
             readonly_indexes: BytesColumn::new(encoding),
-            fork_step: if include_fork_step { Some(StringBuilder::new()) } else { None },
+            fork_step: if include_fork_step {
+                Some(StringBuilder::new())
+            } else {
+                None
+            },
         }
     }
 
@@ -918,7 +1088,9 @@ mod tests {
             blockhash: format!("hash_{slot}"),
             previous_blockhash: format!("hash_{}", slot.saturating_sub(1)),
             block_height: Some(solana::BlockHeight { block_height: slot }),
-            block_time: Some(solana::UnixTimestamp { timestamp: 1_700_000_000 + slot as i64 }),
+            block_time: Some(solana::UnixTimestamp {
+                timestamp: 1_700_000_000 + slot as i64,
+            }),
             transactions: vec![solana::ConfirmedTransaction {
                 transaction: Some(solana::Transaction {
                     signatures: vec![vec![1u8; 64]],
@@ -1014,7 +1186,9 @@ mod tests {
         let block = make_test_block(100);
         let block_bytes = prost::Message::encode_to_vec(&block);
         let mut mapper = SolanaBlockMapper::new(false, false, EncodeBytes::Binary, false);
-        mapper.map_block(&block_bytes, &BlockIdentity::default(), None).unwrap();
+        mapper
+            .map_block(&block_bytes, &BlockIdentity::default(), None)
+            .unwrap();
 
         let batches = mapper.flush().unwrap();
         assert_eq!(batches["blocks"].num_rows(), 1);
@@ -1073,7 +1247,9 @@ mod tests {
 
         let block_bytes = prost::Message::encode_to_vec(&block);
         let mut mapper = SolanaBlockMapper::new(true, false, EncodeBytes::Binary, false);
-        mapper.map_block(&block_bytes, &BlockIdentity::default(), None).unwrap();
+        mapper
+            .map_block(&block_bytes, &BlockIdentity::default(), None)
+            .unwrap();
 
         let batches = mapper.flush().unwrap();
         assert_eq!(batches["transactions"].num_rows(), 1, "non-vote");
@@ -1127,7 +1303,9 @@ mod tests {
 
         let block_bytes = prost::Message::encode_to_vec(&block);
         let mut mapper = SolanaBlockMapper::new(true, false, EncodeBytes::Binary, false);
-        mapper.map_block(&block_bytes, &BlockIdentity::default(), None).unwrap();
+        mapper
+            .map_block(&block_bytes, &BlockIdentity::default(), None)
+            .unwrap();
 
         let batches = mapper.flush().unwrap();
         // Failed transaction is completely skipped
@@ -1182,7 +1360,9 @@ mod tests {
         let block_bytes = prost::Message::encode_to_vec(&block);
         // With include_failed_transactions = true, failed tx should be included
         let mut mapper = SolanaBlockMapper::new(true, false, EncodeBytes::Binary, true);
-        mapper.map_block(&block_bytes, &BlockIdentity::default(), None).unwrap();
+        mapper
+            .map_block(&block_bytes, &BlockIdentity::default(), None)
+            .unwrap();
 
         let batches = mapper.flush().unwrap();
         // Failed transaction is included (1 successful + 1 failed = 2)
@@ -1208,7 +1388,9 @@ mod tests {
         let block = make_test_block(1);
         let block_bytes = prost::Message::encode_to_vec(&block);
         let mut mapper = SolanaBlockMapper::new(false, false, EncodeBytes::Binary, false);
-        mapper.map_block(&block_bytes, &BlockIdentity::default(), None).unwrap();
+        mapper
+            .map_block(&block_bytes, &BlockIdentity::default(), None)
+            .unwrap();
         let _ = mapper.flush().unwrap();
         assert_eq!(mapper.max_table_rows(), 0);
     }
@@ -1227,7 +1409,9 @@ mod tests {
         };
         let block_bytes = prost::Message::encode_to_vec(&block);
         let mut mapper = SolanaBlockMapper::new(false, false, EncodeBytes::Binary, false);
-        mapper.map_block(&block_bytes, &BlockIdentity::default(), None).unwrap();
+        mapper
+            .map_block(&block_bytes, &BlockIdentity::default(), None)
+            .unwrap();
         let batches = mapper.flush().unwrap();
         assert_eq!(batches["blocks"].num_rows(), 1);
         assert_eq!(batches["transactions"].num_rows(), 0);
@@ -1240,13 +1424,19 @@ mod tests {
         let block = make_test_block(100);
         let block_bytes = prost::Message::encode_to_vec(&block);
         let mut mapper = SolanaBlockMapper::new(false, true, EncodeBytes::Binary, false);
-        mapper.map_block(&block_bytes, &BlockIdentity::default(), Some("NEW")).unwrap();
+        mapper
+            .map_block(&block_bytes, &BlockIdentity::default(), Some("NEW"))
+            .unwrap();
 
         let batches = mapper.flush().unwrap();
         let blocks_batch = &batches["blocks"];
         let last_col = blocks_batch.num_columns() - 1;
         assert_eq!(blocks_batch.schema().field(last_col).name(), "fork_step");
-        let fork_col = blocks_batch.column(last_col).as_any().downcast_ref::<StringArray>().unwrap();
+        let fork_col = blocks_batch
+            .column(last_col)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
         assert_eq!(fork_col.value(0), "NEW");
     }
 
@@ -1255,11 +1445,16 @@ mod tests {
         let block = make_test_block(100);
         let block_bytes = prost::Message::encode_to_vec(&block);
         let mut mapper = SolanaBlockMapper::new(false, false, EncodeBytes::Hex, false);
-        mapper.map_block(&block_bytes, &BlockIdentity::default(), None).unwrap();
+        mapper
+            .map_block(&block_bytes, &BlockIdentity::default(), None)
+            .unwrap();
         let batches = mapper.flush().unwrap();
         assert_eq!(batches["transactions"].num_rows(), 1);
         // signature column should be Utf8 when encoding is Hex
-        let sig_idx = batches["transactions"].schema().index_of("signature").unwrap();
+        let sig_idx = batches["transactions"]
+            .schema()
+            .index_of("signature")
+            .unwrap();
         let sig_col = batches["transactions"].column(sig_idx);
         assert_eq!(*sig_col.data_type(), arrow::datatypes::DataType::Utf8);
     }
@@ -1269,10 +1464,15 @@ mod tests {
         let block = make_test_block(100);
         let block_bytes = prost::Message::encode_to_vec(&block);
         let mut mapper = SolanaBlockMapper::new(false, false, EncodeBytes::Base58, false);
-        mapper.map_block(&block_bytes, &BlockIdentity::default(), None).unwrap();
+        mapper
+            .map_block(&block_bytes, &BlockIdentity::default(), None)
+            .unwrap();
         let batches = mapper.flush().unwrap();
         assert_eq!(batches["transactions"].num_rows(), 1);
-        let sig_idx = batches["transactions"].schema().index_of("signature").unwrap();
+        let sig_idx = batches["transactions"]
+            .schema()
+            .index_of("signature")
+            .unwrap();
         let sig_col = batches["transactions"].column(sig_idx);
         assert_eq!(*sig_col.data_type(), arrow::datatypes::DataType::Utf8);
     }
@@ -1282,23 +1482,40 @@ mod tests {
         let block = make_test_block(100);
         let block_bytes = prost::Message::encode_to_vec(&block);
         let mut mapper = SolanaBlockMapper::new(false, false, EncodeBytes::Binary, false);
-        mapper.map_block(&block_bytes, &BlockIdentity::default(), None).unwrap();
+        mapper
+            .map_block(&block_bytes, &BlockIdentity::default(), None)
+            .unwrap();
         let batches = mapper.flush().unwrap();
 
         let tb = &batches["token_balances"];
         assert_eq!(tb.num_rows(), 2);
         // Check balance_type column: first row = "pre", second = "post"
         let bt_idx = tb.schema().index_of("balance_type").unwrap();
-        let bt_col = tb.column(bt_idx).as_any().downcast_ref::<StringArray>().unwrap();
+        let bt_col = tb
+            .column(bt_idx)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
         assert_eq!(bt_col.value(0), "pre");
         assert_eq!(bt_col.value(1), "post");
         // Check mint column
         let mint_idx = tb.schema().index_of("mint").unwrap();
-        let mint_col = tb.column(mint_idx).as_any().downcast_ref::<StringArray>().unwrap();
-        assert_eq!(mint_col.value(0), "So11111111111111111111111111111111111111112");
+        let mint_col = tb
+            .column(mint_idx)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        assert_eq!(
+            mint_col.value(0),
+            "So11111111111111111111111111111111111111112"
+        );
         // Check ui_amount
         let ua_idx = tb.schema().index_of("ui_amount").unwrap();
-        let ua_col = tb.column(ua_idx).as_any().downcast_ref::<Float64Array>().unwrap();
+        let ua_col = tb
+            .column(ua_idx)
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .unwrap();
         assert!((ua_col.value(0) - 1.5).abs() < f64::EPSILON);
         assert!((ua_col.value(1) - 0.5).abs() < f64::EPSILON);
     }
@@ -1308,13 +1525,19 @@ mod tests {
         let block = make_test_block(100);
         let block_bytes = prost::Message::encode_to_vec(&block);
         let mut mapper = SolanaBlockMapper::new(false, false, EncodeBytes::Binary, false);
-        mapper.map_block(&block_bytes, &BlockIdentity::default(), None).unwrap();
+        mapper
+            .map_block(&block_bytes, &BlockIdentity::default(), None)
+            .unwrap();
         let batches = mapper.flush().unwrap();
 
         let al = &batches["account_lookups"];
         assert_eq!(al.num_rows(), 1);
         let li_idx = al.schema().index_of("lookup_index").unwrap();
-        let li_col = al.column(li_idx).as_any().downcast_ref::<UInt32Array>().unwrap();
+        let li_col = al
+            .column(li_idx)
+            .as_any()
+            .downcast_ref::<UInt32Array>()
+            .unwrap();
         assert_eq!(li_col.value(0), 0);
     }
 
@@ -1323,19 +1546,29 @@ mod tests {
         let block = make_test_block(100);
         let block_bytes = prost::Message::encode_to_vec(&block);
         let mut mapper = SolanaBlockMapper::new(false, false, EncodeBytes::Binary, false);
-        mapper.map_block(&block_bytes, &BlockIdentity::default(), None).unwrap();
+        mapper
+            .map_block(&block_bytes, &BlockIdentity::default(), None)
+            .unwrap();
         let batches = mapper.flush().unwrap();
 
         let rw = &batches["rewards"];
         assert_eq!(rw.num_rows(), 2);
         let src_idx = rw.schema().index_of("source").unwrap();
-        let src_col = rw.column(src_idx).as_any().downcast_ref::<StringArray>().unwrap();
+        let src_col = rw
+            .column(src_idx)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
         // per-tx rewards come first (from map_transaction), then block rewards (from map_reward)
         assert_eq!(src_col.value(0), "transaction");
         assert_eq!(src_col.value(1), "block");
         // transaction_index: 0 for per-tx reward, null for block reward
         let ti_idx = rw.schema().index_of("transaction_index").unwrap();
-        let ti_col = rw.column(ti_idx).as_any().downcast_ref::<UInt32Array>().unwrap();
+        let ti_col = rw
+            .column(ti_idx)
+            .as_any()
+            .downcast_ref::<UInt32Array>()
+            .unwrap();
         assert_eq!(ti_col.value(0), 0);
         assert!(ti_col.is_null(1));
     }
@@ -1345,13 +1578,19 @@ mod tests {
         let block = make_test_block(100);
         let block_bytes = prost::Message::encode_to_vec(&block);
         let mut mapper = SolanaBlockMapper::new(false, false, EncodeBytes::Binary, false);
-        mapper.map_block(&block_bytes, &BlockIdentity::default(), None).unwrap();
+        mapper
+            .map_block(&block_bytes, &BlockIdentity::default(), None)
+            .unwrap();
         let batches = mapper.flush().unwrap();
 
         let txs = &batches["transactions"];
         // cost_units should be present
         let cu_idx = txs.schema().index_of("cost_units").unwrap();
-        let cu_col = txs.column(cu_idx).as_any().downcast_ref::<UInt64Array>().unwrap();
+        let cu_col = txs
+            .column(cu_idx)
+            .as_any()
+            .downcast_ref::<UInt64Array>()
+            .unwrap();
         assert_eq!(cu_col.value(0), 5678);
         // return_data should be non-null
         let rd_idx = txs.schema().index_of("return_data").unwrap();
@@ -1364,7 +1603,9 @@ mod tests {
         let block = make_test_block(100);
         let block_bytes = prost::Message::encode_to_vec(&block);
         let mut mapper = SolanaBlockMapper::new(false, false, EncodeBytes::Binary, false);
-        mapper.map_block(&block_bytes, &BlockIdentity::default(), None).unwrap();
+        mapper
+            .map_block(&block_bytes, &BlockIdentity::default(), None)
+            .unwrap();
         let batches = mapper.flush().unwrap();
 
         let msgs = &batches["messages"];
@@ -1443,7 +1684,9 @@ mod tests {
 
         let block_bytes = prost::Message::encode_to_vec(&block);
         let mut mapper = SolanaBlockMapper::new(false, false, EncodeBytes::Binary, false);
-        mapper.map_block(&block_bytes, &BlockIdentity::default(), None).unwrap();
+        mapper
+            .map_block(&block_bytes, &BlockIdentity::default(), None)
+            .unwrap();
 
         let batches = mapper.flush().unwrap();
         // Non-vote transaction included

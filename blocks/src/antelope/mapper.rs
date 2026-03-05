@@ -5,8 +5,8 @@ use arrow::datatypes::Schema;
 use arrow::record_batch::RecordBatch;
 use firehose_parquet::encode::EncodeBytes;
 use firehose_parquet::traits::{
-    est_bin, est_i32, est_i64, est_opt_str, est_str, est_u32, est_u64,
-    BlockIdentity, BlockMapper, CanonicalBuilder,
+    est_bin, est_i32, est_i64, est_opt_str, est_str, est_u32, est_u64, BlockIdentity, BlockMapper,
+    CanonicalBuilder,
 };
 use prost::Message;
 use std::collections::HashMap;
@@ -25,7 +25,10 @@ fn finish_fork_step(builder: &mut Option<StringBuilder>, columns: &mut Vec<Arc<d
 }
 
 fn format_authorization(auth: &[antelope::PermissionLevel]) -> String {
-    let parts: Vec<String> = auth.iter().map(|a| format!("{}@{}", a.actor, a.permission)).collect();
+    let parts: Vec<String> = auth
+        .iter()
+        .map(|a| format!("{}@{}", a.actor, a.permission))
+        .collect();
     parts.join(",")
 }
 
@@ -43,7 +46,12 @@ pub struct AntelopeBlockMapper {
 }
 
 impl AntelopeBlockMapper {
-    pub fn new(extended: bool, include_fork_step: bool, encoding: EncodeBytes, include_failed_transactions: bool) -> Self {
+    pub fn new(
+        extended: bool,
+        include_fork_step: bool,
+        encoding: EncodeBytes,
+        include_failed_transactions: bool,
+    ) -> Self {
         let enc = &encoding;
         Self {
             extended,
@@ -51,7 +59,11 @@ impl AntelopeBlockMapper {
             blocks: BlocksBuilder::new(include_fork_step),
             transactions: TransactionsBuilder::new(include_fork_step),
             actions: ActionsBuilder::new(include_fork_step),
-            db_ops: if extended { Some(DbOpsBuilder::new(include_fork_step)) } else { None },
+            db_ops: if extended {
+                Some(DbOpsBuilder::new(include_fork_step))
+            } else {
+                None
+            },
             blocks_schema: schema::blocks_schema(include_fork_step, enc),
             transactions_schema: schema::transactions_schema(include_fork_step, enc),
             actions_schema: schema::actions_schema(include_fork_step, enc),
@@ -59,16 +71,27 @@ impl AntelopeBlockMapper {
         }
     }
 
-    fn map_antelope_block(&mut self, block: &antelope::Block, identity: &BlockIdentity, fork_step: Option<&str>) {
+    fn map_antelope_block(
+        &mut self,
+        block: &antelope::Block,
+        identity: &BlockIdentity,
+        fork_step: Option<&str>,
+    ) {
         let header = block.header.as_ref();
 
         // blocks table
         self.blocks.canonical.append(identity);
         self.blocks.number.append_value(block.number);
         self.blocks.hash.append_value(&block.id);
-        self.blocks.producer.append_value(header.map(|h| h.producer.as_str()).unwrap_or(""));
-        self.blocks.confirmed.append_value(header.map(|h| h.confirmed).unwrap_or(0));
-        self.blocks.schedule_version.append_value(header.map(|h| h.schedule_version).unwrap_or(0));
+        self.blocks
+            .producer
+            .append_value(header.map(|h| h.producer.as_str()).unwrap_or(""));
+        self.blocks
+            .confirmed
+            .append_value(header.map(|h| h.confirmed).unwrap_or(0));
+        self.blocks
+            .schedule_version
+            .append_value(header.map(|h| h.schedule_version).unwrap_or(0));
         append_fork_step(&mut self.blocks.fork_step, fork_step);
 
         // Use unfiltered_transaction_traces (or filtered if filtering was applied)
@@ -91,15 +114,24 @@ impl AntelopeBlockMapper {
         }
     }
 
-    fn map_transaction(&mut self, trace: &antelope::TransactionTrace, identity: &BlockIdentity, fork_step: Option<&str>) {
+    fn map_transaction(
+        &mut self,
+        trace: &antelope::TransactionTrace,
+        identity: &BlockIdentity,
+        fork_step: Option<&str>,
+    ) {
         let receipt = trace.receipt.as_ref();
 
         // transactions table
         self.transactions.canonical.append(identity);
         self.transactions.tx_hash.append_value(&trace.id);
         self.transactions.index.append_value(trace.index);
-        self.transactions.status.append_value(receipt.map(|r| r.status).unwrap_or(0));
-        self.transactions.cpu_usage_us.append_value(receipt.map(|r| r.cpu_usage_micro_seconds).unwrap_or(0));
+        self.transactions
+            .status
+            .append_value(receipt.map(|r| r.status).unwrap_or(0));
+        self.transactions
+            .cpu_usage_us
+            .append_value(receipt.map(|r| r.cpu_usage_micro_seconds).unwrap_or(0));
         self.transactions.net_usage.append_value(trace.net_usage);
         self.transactions.elapsed.append_value(trace.elapsed);
         append_fork_step(&mut self.transactions.fork_step, fork_step);
@@ -117,23 +149,45 @@ impl AntelopeBlockMapper {
         }
     }
 
-    fn map_action(&mut self, action_trace: &antelope::ActionTrace, tx_hash: &str, identity: &BlockIdentity, fork_step: Option<&str>) {
+    fn map_action(
+        &mut self,
+        action_trace: &antelope::ActionTrace,
+        tx_hash: &str,
+        identity: &BlockIdentity,
+        fork_step: Option<&str>,
+    ) {
         let action = action_trace.action.as_ref();
 
         self.actions.canonical.append(identity);
         self.actions.tx_hash.append_value(tx_hash);
-        self.actions.action_ordinal.append_value(action_trace.action_ordinal);
+        self.actions
+            .action_ordinal
+            .append_value(action_trace.action_ordinal);
         self.actions.receiver.append_value(&action_trace.receiver);
-        self.actions.account.append_value(action.map(|a| a.account.as_str()).unwrap_or(""));
-        self.actions.name.append_value(action.map(|a| a.name.as_str()).unwrap_or(""));
-        let auth_str = action.map(|a| format_authorization(&a.authorization)).unwrap_or_default();
+        self.actions
+            .account
+            .append_value(action.map(|a| a.account.as_str()).unwrap_or(""));
+        self.actions
+            .name
+            .append_value(action.map(|a| a.name.as_str()).unwrap_or(""));
+        let auth_str = action
+            .map(|a| format_authorization(&a.authorization))
+            .unwrap_or_default();
         self.actions.authorization.append_value(&auth_str);
-        self.actions.data.append_value(action.map(|a| a.raw_data.as_slice()).unwrap_or(&[]));
+        self.actions
+            .data
+            .append_value(action.map(|a| a.raw_data.as_slice()).unwrap_or(&[]));
         self.actions.console.append_value(&action_trace.console);
         append_fork_step(&mut self.actions.fork_step, fork_step);
     }
 
-    fn map_db_op(db_ops: &mut DbOpsBuilder, db_op: &antelope::DbOp, tx_hash: &str, identity: &BlockIdentity, fork_step: Option<&str>) {
+    fn map_db_op(
+        db_ops: &mut DbOpsBuilder,
+        db_op: &antelope::DbOp,
+        tx_hash: &str,
+        identity: &BlockIdentity,
+        fork_step: Option<&str>,
+    ) {
         db_ops.canonical.append(identity);
         db_ops.tx_hash.append_value(tx_hash);
         db_ops.action_index.append_value(db_op.action_index);
@@ -157,7 +211,12 @@ impl AntelopeBlockMapper {
 }
 
 impl BlockMapper for AntelopeBlockMapper {
-    fn map_block(&mut self, block_bytes: &[u8], identity: &BlockIdentity, fork_step: Option<&str>) -> anyhow::Result<()> {
+    fn map_block(
+        &mut self,
+        block_bytes: &[u8],
+        identity: &BlockIdentity,
+        fork_step: Option<&str>,
+    ) -> anyhow::Result<()> {
         let block = antelope::Block::decode(block_bytes)?;
         self.map_antelope_block(&block, identity, fork_step);
         Ok(())
@@ -165,9 +224,18 @@ impl BlockMapper for AntelopeBlockMapper {
 
     fn flush(&mut self) -> anyhow::Result<HashMap<String, RecordBatch>> {
         let mut result = HashMap::new();
-        result.insert("blocks".to_string(), self.blocks.finish(&self.blocks_schema)?);
-        result.insert("transactions".to_string(), self.transactions.finish(&self.transactions_schema)?);
-        result.insert("actions".to_string(), self.actions.finish(&self.actions_schema)?);
+        result.insert(
+            "blocks".to_string(),
+            self.blocks.finish(&self.blocks_schema)?,
+        );
+        result.insert(
+            "transactions".to_string(),
+            self.transactions.finish(&self.transactions_schema)?,
+        );
+        result.insert(
+            "actions".to_string(),
+            self.actions.finish(&self.actions_schema)?,
+        );
         if let Some(ref mut db_ops) = self.db_ops {
             result.insert("db_ops".to_string(), db_ops.finish(&self.db_ops_schema)?);
         }
@@ -175,10 +243,15 @@ impl BlockMapper for AntelopeBlockMapper {
     }
 
     fn max_table_rows(&self) -> usize {
-        let mut max = self.blocks.canonical.len()
+        let mut max = self
+            .blocks
+            .canonical
+            .len()
             .max(self.transactions.canonical.len())
             .max(self.actions.canonical.len());
-        if let Some(ref db_ops) = self.db_ops { max = max.max(db_ops.canonical.len()); }
+        if let Some(ref db_ops) = self.db_ops {
+            max = max.max(db_ops.canonical.len());
+        }
         max
     }
 
@@ -186,7 +259,9 @@ impl BlockMapper for AntelopeBlockMapper {
         let mut total = self.blocks.canonical.len()
             + self.transactions.canonical.len()
             + self.actions.canonical.len();
-        if let Some(ref db_ops) = self.db_ops { total += db_ops.canonical.len(); }
+        if let Some(ref db_ops) = self.db_ops {
+            total += db_ops.canonical.len();
+        }
         total
     }
 
@@ -216,9 +291,14 @@ impl BlockMapper for AntelopeBlockMapper {
             + est_bin(&self.actions.data)
             + est_str(&self.actions.console)
             + est_opt_str(&self.actions.fork_step);
-        let mut tables: Vec<(&str, usize)> = vec![("blocks", blocks), ("transactions", transactions), ("actions", actions)];
+        let mut tables: Vec<(&str, usize)> = vec![
+            ("blocks", blocks),
+            ("transactions", transactions),
+            ("actions", actions),
+        ];
         if let Some(ref db_ops) = self.db_ops {
-            tables.push(("db_ops",
+            tables.push((
+                "db_ops",
                 db_ops.canonical.estimated_bytes()
                     + est_str(&db_ops.tx_hash)
                     + est_u32(&db_ops.action_index)
@@ -232,7 +312,10 @@ impl BlockMapper for AntelopeBlockMapper {
                     + est_opt_str(&db_ops.fork_step),
             ));
         }
-        tables.into_iter().max_by_key(|&(_, s)| s).unwrap_or(("blocks", 0))
+        tables
+            .into_iter()
+            .max_by_key(|&(_, s)| s)
+            .unwrap_or(("blocks", 0))
     }
 
     fn table_names(&self) -> Vec<&str> {
@@ -267,7 +350,11 @@ impl BlocksBuilder {
             producer: StringBuilder::new(),
             confirmed: UInt32Builder::new(),
             schedule_version: UInt32Builder::new(),
-            fork_step: if include_fork_step { Some(StringBuilder::new()) } else { None },
+            fork_step: if include_fork_step {
+                Some(StringBuilder::new())
+            } else {
+                None
+            },
         }
     }
 
@@ -306,7 +393,11 @@ impl TransactionsBuilder {
             cpu_usage_us: UInt32Builder::new(),
             net_usage: UInt64Builder::new(),
             elapsed: Int64Builder::new(),
-            fork_step: if include_fork_step { Some(StringBuilder::new()) } else { None },
+            fork_step: if include_fork_step {
+                Some(StringBuilder::new())
+            } else {
+                None
+            },
         }
     }
 
@@ -350,7 +441,11 @@ impl ActionsBuilder {
             authorization: StringBuilder::new(),
             data: BinaryBuilder::new(),
             console: StringBuilder::new(),
-            fork_step: if include_fork_step { Some(StringBuilder::new()) } else { None },
+            fork_step: if include_fork_step {
+                Some(StringBuilder::new())
+            } else {
+                None
+            },
         }
     }
 
@@ -398,7 +493,11 @@ impl DbOpsBuilder {
             primary_key: StringBuilder::new(),
             old_data: BinaryBuilder::new(),
             new_data: BinaryBuilder::new(),
-            fork_step: if include_fork_step { Some(StringBuilder::new()) } else { None },
+            fork_step: if include_fork_step {
+                Some(StringBuilder::new())
+            } else {
+                None
+            },
         }
     }
 
@@ -600,7 +699,9 @@ mod tests {
         let block = make_test_block(100);
         let block_bytes = prost::Message::encode_to_vec(&block);
         let mut mapper = AntelopeBlockMapper::new(true, false, EncodeBytes::Hex, false);
-        mapper.map_block(&block_bytes, &BlockIdentity::default(), None).unwrap();
+        mapper
+            .map_block(&block_bytes, &BlockIdentity::default(), None)
+            .unwrap();
 
         assert_eq!(mapper.max_table_rows(), 2); // 2 actions
 
@@ -616,7 +717,9 @@ mod tests {
         let block = make_test_block(1);
         let block_bytes = prost::Message::encode_to_vec(&block);
         let mut mapper = AntelopeBlockMapper::new(true, false, EncodeBytes::Hex, false);
-        mapper.map_block(&block_bytes, &BlockIdentity::default(), None).unwrap();
+        mapper
+            .map_block(&block_bytes, &BlockIdentity::default(), None)
+            .unwrap();
         let _ = mapper.flush().unwrap();
         assert_eq!(mapper.max_table_rows(), 0);
     }
@@ -636,7 +739,9 @@ mod tests {
         };
         let block_bytes = prost::Message::encode_to_vec(&block);
         let mut mapper = AntelopeBlockMapper::new(true, false, EncodeBytes::Hex, false);
-        mapper.map_block(&block_bytes, &BlockIdentity::default(), None).unwrap();
+        mapper
+            .map_block(&block_bytes, &BlockIdentity::default(), None)
+            .unwrap();
         let batches = mapper.flush().unwrap();
         assert_eq!(batches["blocks"].num_rows(), 1);
         assert_eq!(batches["transactions"].num_rows(), 0);
@@ -649,13 +754,19 @@ mod tests {
         let block = make_test_block(100);
         let block_bytes = prost::Message::encode_to_vec(&block);
         let mut mapper = AntelopeBlockMapper::new(true, true, EncodeBytes::Hex, false);
-        mapper.map_block(&block_bytes, &BlockIdentity::default(), Some("NEW")).unwrap();
+        mapper
+            .map_block(&block_bytes, &BlockIdentity::default(), Some("NEW"))
+            .unwrap();
 
         let batches = mapper.flush().unwrap();
         let blocks_batch = &batches["blocks"];
         let last_col = blocks_batch.num_columns() - 1;
         assert_eq!(blocks_batch.schema().field(last_col).name(), "fork_step");
-        let fork_col = blocks_batch.column(last_col).as_any().downcast_ref::<StringArray>().unwrap();
+        let fork_col = blocks_batch
+            .column(last_col)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
         assert_eq!(fork_col.value(0), "NEW");
     }
 
@@ -686,7 +797,9 @@ mod tests {
         let block = make_test_block(100);
         let block_bytes = prost::Message::encode_to_vec(&block);
         let mut mapper = AntelopeBlockMapper::new(false, false, EncodeBytes::Hex, false);
-        mapper.map_block(&block_bytes, &BlockIdentity::default(), None).unwrap();
+        mapper
+            .map_block(&block_bytes, &BlockIdentity::default(), None)
+            .unwrap();
 
         let batches = mapper.flush().unwrap();
         assert_eq!(batches["blocks"].num_rows(), 1);

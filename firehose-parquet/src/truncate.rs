@@ -101,11 +101,16 @@ fn run_truncate_local(config: &TruncateConfig) -> Result<TruncateResult> {
 
     if all_files.is_empty() {
         println!("No .parquet files found in {}", root.display());
-        return Ok(TruncateResult { files_deleted: 0, bytes_freed: 0, dirs_removed: 0 });
+        return Ok(TruncateResult {
+            files_deleted: 0,
+            bytes_freed: 0,
+            dirs_removed: 0,
+        });
     }
 
     // Filter by partition.
-    let matching: Vec<&PathBuf> = all_files.iter()
+    let matching: Vec<&PathBuf> = all_files
+        .iter()
         .filter(|f| {
             let rel = f.strip_prefix(&root).unwrap_or(f);
             matches_partition(&rel.to_string_lossy(), &config.partitions)
@@ -114,7 +119,11 @@ fn run_truncate_local(config: &TruncateConfig) -> Result<TruncateResult> {
 
     if matching.is_empty() {
         println!("No files match the partition filter(s)");
-        return Ok(TruncateResult { files_deleted: 0, bytes_freed: 0, dirs_removed: 0 });
+        return Ok(TruncateResult {
+            files_deleted: 0,
+            bytes_freed: 0,
+            dirs_removed: 0,
+        });
     }
 
     println!("Truncating {} ...\n", root.display());
@@ -128,10 +137,13 @@ fn run_truncate_local(config: &TruncateConfig) -> Result<TruncateResult> {
     for file in &matching {
         let size = std::fs::metadata(file).map(|m| m.len()).unwrap_or(0);
         if config.dry_run {
-            println!("  would delete: {} ({})", file.display(), format_bytes(size));
+            println!(
+                "  would delete: {} ({})",
+                file.display(),
+                format_bytes(size)
+            );
         } else {
-            std::fs::remove_file(file)
-                .with_context(|| format!("deleting {}", file.display()))?;
+            std::fs::remove_file(file).with_context(|| format!("deleting {}", file.display()))?;
         }
         bytes_freed += size;
         files_deleted += 1;
@@ -144,7 +156,11 @@ fn run_truncate_local(config: &TruncateConfig) -> Result<TruncateResult> {
         0
     };
 
-    Ok(TruncateResult { files_deleted, bytes_freed, dirs_removed })
+    Ok(TruncateResult {
+        files_deleted,
+        bytes_freed,
+        dirs_removed,
+    })
 }
 
 fn collect_parquet_files_recursive(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
@@ -193,29 +209,44 @@ fn run_truncate_s3(config: &TruncateConfig) -> Result<TruncateResult> {
     use futures::TryStreamExt;
 
     let (bucket, prefix) = parse_s3_url(&config.path)?;
-    let aws = config.aws.as_ref().ok_or_else(|| anyhow::anyhow!("AWS config required for S3 paths"))?;
+    let aws = config
+        .aws
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("AWS config required for S3 paths"))?;
 
     let client = Arc::new(aws.build_s3_client(&bucket)?);
 
-    let list_prefix = if prefix.is_empty() { None } else { Some(object_store::path::Path::from(prefix.as_str())) };
+    let list_prefix = if prefix.is_empty() {
+        None
+    } else {
+        Some(object_store::path::Path::from(prefix.as_str()))
+    };
 
-    let objects: Vec<object_store::ObjectMeta> = block_on_async(async {
-        client.list(list_prefix.as_ref()).try_collect().await
-    }).map_err(|e| anyhow::anyhow!("listing S3 objects: {e}"))?;
+    let objects: Vec<object_store::ObjectMeta> =
+        block_on_async(async { client.list(list_prefix.as_ref()).try_collect().await })
+            .map_err(|e| anyhow::anyhow!("listing S3 objects: {e}"))?;
 
-    let parquet_objects: Vec<_> = objects.into_iter()
+    let parquet_objects: Vec<_> = objects
+        .into_iter()
         .filter(|obj| obj.location.as_ref().ends_with(".parquet"))
         .collect();
 
     if parquet_objects.is_empty() {
         println!("No .parquet files found in {}", config.path);
-        return Ok(TruncateResult { files_deleted: 0, bytes_freed: 0, dirs_removed: 0 });
+        return Ok(TruncateResult {
+            files_deleted: 0,
+            bytes_freed: 0,
+            dirs_removed: 0,
+        });
     }
 
     // Filter by partition.
-    let matching: Vec<&object_store::ObjectMeta> = parquet_objects.iter()
+    let matching: Vec<&object_store::ObjectMeta> = parquet_objects
+        .iter()
         .filter(|obj| {
-            let rel = obj.location.as_ref()
+            let rel = obj
+                .location
+                .as_ref()
                 .strip_prefix(&prefix)
                 .map(|s| s.trim_start_matches('/'))
                 .unwrap_or(obj.location.as_ref());
@@ -225,7 +256,11 @@ fn run_truncate_s3(config: &TruncateConfig) -> Result<TruncateResult> {
 
     if matching.is_empty() {
         println!("No files match the partition filter(s)");
-        return Ok(TruncateResult { files_deleted: 0, bytes_freed: 0, dirs_removed: 0 });
+        return Ok(TruncateResult {
+            files_deleted: 0,
+            bytes_freed: 0,
+            dirs_removed: 0,
+        });
     }
 
     println!("Truncating {} ...\n", config.path);
@@ -238,15 +273,23 @@ fn run_truncate_s3(config: &TruncateConfig) -> Result<TruncateResult> {
 
     for obj in &matching {
         if config.dry_run {
-            println!("  would delete: s3://{}/{} ({})", bucket, obj.location, format_bytes(obj.size as u64));
+            println!(
+                "  would delete: s3://{}/{} ({})",
+                bucket,
+                obj.location,
+                format_bytes(obj.size as u64)
+            );
         } else {
-            block_on_async(async {
-                client.delete(&obj.location).await
-            }).map_err(|e| anyhow::anyhow!("deleting s3://{bucket}/{}: {e}", obj.location))?;
+            block_on_async(async { client.delete(&obj.location).await })
+                .map_err(|e| anyhow::anyhow!("deleting s3://{bucket}/{}: {e}", obj.location))?;
         }
         bytes_freed += obj.size as u64;
         files_deleted += 1;
     }
 
-    Ok(TruncateResult { files_deleted, bytes_freed, dirs_removed: 0 })
+    Ok(TruncateResult {
+        files_deleted,
+        bytes_freed,
+        dirs_removed: 0,
+    })
 }

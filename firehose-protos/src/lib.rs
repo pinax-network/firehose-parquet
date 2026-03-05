@@ -96,13 +96,13 @@ pub mod protocol {
 }
 
 // Convenience aliases
-pub use sf::firehose::v2 as firehose;
-pub use sf::solana::r#type::v1 as solana;
-pub use sf::ethereum::r#type::v2 as eth;
-pub use sf::bitcoin::r#type::v1 as btc;
-pub use sf::near::r#type::v1 as near;
-pub use sf::antelope::r#type::v1 as antelope;
-pub use sf::cosmos::r#type::v2 as cosmos;
-pub use sf::tron::r#type::v1 as tron;
-pub use sf::beacon::r#type::v1 as beacon;
 pub use cosmos_sdk::tx::v1beta1 as cosmos_tx;
+pub use sf::antelope::r#type::v1 as antelope;
+pub use sf::beacon::r#type::v1 as beacon;
+pub use sf::bitcoin::r#type::v1 as btc;
+pub use sf::cosmos::r#type::v2 as cosmos;
+pub use sf::ethereum::r#type::v2 as eth;
+pub use sf::firehose::v2 as firehose;
+pub use sf::near::r#type::v1 as near;
+pub use sf::solana::r#type::v1 as solana;
+pub use sf::tron::r#type::v1 as tron;

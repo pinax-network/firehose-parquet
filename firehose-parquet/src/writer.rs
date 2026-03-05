@@ -26,7 +26,9 @@ pub struct ParquetFileMetadata {
 
 impl ParquetFileMetadata {
     pub fn new() -> Self {
-        Self { entries: Vec::new() }
+        Self {
+            entries: Vec::new(),
+        }
     }
 
     pub fn add(&mut self, key: impl Into<String>, value: impl Into<String>) {
@@ -57,7 +59,11 @@ pub struct ParquetTableWriter {
 }
 
 impl ParquetTableWriter {
-    pub fn new(output_dir: impl Into<PathBuf>, partition: Partition, compression: Compression) -> Self {
+    pub fn new(
+        output_dir: impl Into<PathBuf>,
+        partition: Partition,
+        compression: Compression,
+    ) -> Self {
         Self {
             output_dir: output_dir.into(),
             partition,
@@ -80,8 +86,7 @@ impl ParquetTableWriter {
     ) -> Result<Self> {
         let (bucket, prefix) = parse_s3_url(output_path)?;
 
-        let mut builder = AmazonS3Builder::new()
-            .with_bucket_name(&bucket);
+        let mut builder = AmazonS3Builder::new().with_bucket_name(&bucket);
 
         if let Some(ref key) = config.aws_access_key_id {
             builder = builder.with_access_key_id(key);
@@ -159,7 +164,9 @@ impl ParquetTableWriter {
             // within a tokio multi-threaded runtime (the gRPC stream handler).
             tokio::task::block_in_place(|| {
                 tokio::runtime::Handle::current().block_on(async {
-                    s3_client.put_opts(&s3_path, payload, s3_put_options(&self.cache_control)).await
+                    s3_client
+                        .put_opts(&s3_path, payload, s3_put_options(&self.cache_control))
+                        .await
                 })
             })
             .with_context(|| format!("uploading to S3: {s3_key}"))?;
@@ -217,18 +224,28 @@ impl ParquetTableWriter {
             }
             Partition::Date => {
                 if let Some(ts) = metadata.min_timestamp {
-                    let dt = OffsetDateTime::from_unix_timestamp(ts).unwrap_or(OffsetDateTime::UNIX_EPOCH);
-                    format!("{table}/year={:04}/month={:02}/date={:02}", dt.year(), dt.month() as u8, dt.day())
+                    let dt = OffsetDateTime::from_unix_timestamp(ts)
+                        .unwrap_or(OffsetDateTime::UNIX_EPOCH);
+                    format!(
+                        "{table}/year={:04}/month={:02}/date={:02}",
+                        dt.year(),
+                        dt.month() as u8,
+                        dt.day()
+                    )
                 } else {
                     table.to_string()
                 }
             }
             Partition::Hour => {
                 if let Some(ts) = metadata.min_timestamp {
-                    let dt = OffsetDateTime::from_unix_timestamp(ts).unwrap_or(OffsetDateTime::UNIX_EPOCH);
+                    let dt = OffsetDateTime::from_unix_timestamp(ts)
+                        .unwrap_or(OffsetDateTime::UNIX_EPOCH);
                     format!(
                         "{table}/year={:04}/month={:02}/date={:02}/hour={:02}",
-                        dt.year(), dt.month() as u8, dt.day(), dt.hour()
+                        dt.year(),
+                        dt.month() as u8,
+                        dt.day(),
+                        dt.hour()
                     )
                 } else {
                     table.to_string()
@@ -236,10 +253,15 @@ impl ParquetTableWriter {
             }
             Partition::Minute => {
                 if let Some(ts) = metadata.min_timestamp {
-                    let dt = OffsetDateTime::from_unix_timestamp(ts).unwrap_or(OffsetDateTime::UNIX_EPOCH);
+                    let dt = OffsetDateTime::from_unix_timestamp(ts)
+                        .unwrap_or(OffsetDateTime::UNIX_EPOCH);
                     format!(
                         "{table}/year={:04}/month={:02}/date={:02}/hour={:02}/minute={:02}",
-                        dt.year(), dt.month() as u8, dt.day(), dt.hour(), dt.minute()
+                        dt.year(),
+                        dt.month() as u8,
+                        dt.day(),
+                        dt.hour(),
+                        dt.minute()
                     )
                 } else {
                     table.to_string()
@@ -247,7 +269,8 @@ impl ParquetTableWriter {
             }
             Partition::Second => {
                 if let Some(ts) = metadata.min_timestamp {
-                    let dt = OffsetDateTime::from_unix_timestamp(ts).unwrap_or(OffsetDateTime::UNIX_EPOCH);
+                    let dt = OffsetDateTime::from_unix_timestamp(ts)
+                        .unwrap_or(OffsetDateTime::UNIX_EPOCH);
                     format!(
                         "{table}/year={:04}/month={:02}/date={:02}/hour={:02}/minute={:02}/second={:02}",
                         dt.year(), dt.month() as u8, dt.day(), dt.hour(), dt.minute(), dt.second()
@@ -270,7 +293,8 @@ impl ParquetTableWriter {
             }
             Partition::Date => {
                 if let Some(ts) = metadata.min_timestamp {
-                    let dt = OffsetDateTime::from_unix_timestamp(ts).unwrap_or(OffsetDateTime::UNIX_EPOCH);
+                    let dt = OffsetDateTime::from_unix_timestamp(ts)
+                        .unwrap_or(OffsetDateTime::UNIX_EPOCH);
                     base.join(format!("year={:04}", dt.year()))
                         .join(format!("month={:02}", dt.month() as u8))
                         .join(format!("date={:02}", dt.day()))
@@ -280,7 +304,8 @@ impl ParquetTableWriter {
             }
             Partition::Hour => {
                 if let Some(ts) = metadata.min_timestamp {
-                    let dt = OffsetDateTime::from_unix_timestamp(ts).unwrap_or(OffsetDateTime::UNIX_EPOCH);
+                    let dt = OffsetDateTime::from_unix_timestamp(ts)
+                        .unwrap_or(OffsetDateTime::UNIX_EPOCH);
                     base.join(format!("year={:04}", dt.year()))
                         .join(format!("month={:02}", dt.month() as u8))
                         .join(format!("date={:02}", dt.day()))
@@ -291,7 +316,8 @@ impl ParquetTableWriter {
             }
             Partition::Minute => {
                 if let Some(ts) = metadata.min_timestamp {
-                    let dt = OffsetDateTime::from_unix_timestamp(ts).unwrap_or(OffsetDateTime::UNIX_EPOCH);
+                    let dt = OffsetDateTime::from_unix_timestamp(ts)
+                        .unwrap_or(OffsetDateTime::UNIX_EPOCH);
                     base.join(format!("year={:04}", dt.year()))
                         .join(format!("month={:02}", dt.month() as u8))
                         .join(format!("date={:02}", dt.day()))
@@ -303,7 +329,8 @@ impl ParquetTableWriter {
             }
             Partition::Second => {
                 if let Some(ts) = metadata.min_timestamp {
-                    let dt = OffsetDateTime::from_unix_timestamp(ts).unwrap_or(OffsetDateTime::UNIX_EPOCH);
+                    let dt = OffsetDateTime::from_unix_timestamp(ts)
+                        .unwrap_or(OffsetDateTime::UNIX_EPOCH);
                     base.join(format!("year={:04}", dt.year()))
                         .join(format!("month={:02}", dt.month() as u8))
                         .join(format!("date={:02}", dt.day()))
@@ -331,11 +358,13 @@ impl ParquetTableWriter {
             Compression::Gzip => PqCompression::GZIP(Default::default()),
             Compression::Zstd => PqCompression::ZSTD(ZstdLevel::try_new(3).unwrap()),
         };
-        let mut builder = WriterProperties::builder()
-            .set_compression(compression);
+        let mut builder = WriterProperties::builder().set_compression(compression);
 
         if !self.file_metadata.entries.is_empty() {
-            let kvs: Vec<KeyValue> = self.file_metadata.entries.iter()
+            let kvs: Vec<KeyValue> = self
+                .file_metadata
+                .entries
+                .iter()
                 .map(|(k, v)| KeyValue::new(k.clone(), Some(v.clone())))
                 .collect();
             builder = builder.set_key_value_metadata(Some(kvs));
@@ -669,12 +698,9 @@ impl OutputWriter {
         // Check if estimated compressed size reaches the target.
         let needs_size_flush = !needs_partition_flush
             && self.flush_bytes > 0
-            && self
-                .buffers
-                .get(table)
-                .map_or(false, |buf| {
-                    (buf.total_bytes as f64 * self.compression_ratio) >= self.flush_bytes as f64
-                });
+            && self.buffers.get(table).map_or(false, |buf| {
+                (buf.total_bytes as f64 * self.compression_ratio) >= self.flush_bytes as f64
+            });
 
         if needs_partition_flush || needs_size_flush {
             // If partition changed, we need to re-buffer the new batch after flush.
@@ -746,15 +772,12 @@ impl OutputWriter {
         // Re-buffer any batches that arrived during a partition change.
         let pending = std::mem::take(&mut self.pending_after_flush);
         for p in pending {
-            let buf = self
-                .buffers
-                .entry(p.table)
-                .or_insert_with(|| TableBuffer {
-                    batches: Vec::new(),
-                    total_bytes: 0,
-                    metadata: p.metadata.clone(),
-                    partition_key: p.partition_key,
-                });
+            let buf = self.buffers.entry(p.table).or_insert_with(|| TableBuffer {
+                batches: Vec::new(),
+                total_bytes: 0,
+                metadata: p.metadata.clone(),
+                partition_key: p.partition_key,
+            });
             let batch_bytes = p.batch.get_array_memory_size();
             buf.batches.push(p.batch);
             buf.total_bytes += batch_bytes;
@@ -836,9 +859,11 @@ mod tests {
     use std::sync::Arc;
 
     fn make_test_batch() -> RecordBatch {
-        let schema = Arc::new(Schema::new(vec![
-            Field::new("block_number", DataType::UInt64, false),
-        ]));
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "block_number",
+            DataType::UInt64,
+            false,
+        )]));
         let mut builder = UInt64Builder::new();
         builder.append_value(42);
         RecordBatch::try_new(schema, vec![Arc::new(builder.finish())]).unwrap()
@@ -857,8 +882,7 @@ mod tests {
     fn test_parquet_round_trip() {
         let dir = tempfile::tempdir().unwrap();
         let batch = make_test_batch();
-        let mut writer =
-            ParquetTableWriter::new(dir.path(), Partition::None, Compression::Snappy);
+        let mut writer = ParquetTableWriter::new(dir.path(), Partition::None, Compression::Snappy);
         let meta = default_metadata();
         let (path, compressed_bytes) = writer.write_batch("blocks", &batch, &meta).unwrap();
 
@@ -888,8 +912,7 @@ mod tests {
     fn test_date_partitioning() {
         let dir = tempfile::tempdir().unwrap();
         let batch = make_test_batch();
-        let mut writer =
-            ParquetTableWriter::new(dir.path(), Partition::Date, Compression::None);
+        let mut writer = ParquetTableWriter::new(dir.path(), Partition::Date, Compression::None);
         // 2024-01-15 12:00:00 UTC = 1705320000
         let meta = BlockMetadata {
             min_block_number: 100,
@@ -898,15 +921,19 @@ mod tests {
             max_timestamp: Some(1705320000),
         };
         let (path, _) = writer.write_batch("blocks", &batch, &meta).unwrap();
-        assert!(path.to_string_lossy().contains("year=2024/month=01/date=15"), "path: {}", path.display());
+        assert!(
+            path.to_string_lossy()
+                .contains("year=2024/month=01/date=15"),
+            "path: {}",
+            path.display()
+        );
     }
 
     #[test]
     fn test_hour_partitioning() {
         let dir = tempfile::tempdir().unwrap();
         let batch = make_test_batch();
-        let mut writer =
-            ParquetTableWriter::new(dir.path(), Partition::Hour, Compression::None);
+        let mut writer = ParquetTableWriter::new(dir.path(), Partition::Hour, Compression::None);
         // 2024-01-15 14:30:00 UTC = 1705329000
         let meta = BlockMetadata {
             min_block_number: 100,
@@ -916,7 +943,11 @@ mod tests {
         };
         let (path, _) = writer.write_batch("blocks", &batch, &meta).unwrap();
         let path_str = path.to_string_lossy();
-        assert!(path_str.contains("year=2024/month=01/date=15"), "path: {}", path_str);
+        assert!(
+            path_str.contains("year=2024/month=01/date=15"),
+            "path: {}",
+            path_str
+        );
         assert!(path_str.contains("hour=14"), "path: {}", path_str);
     }
 
@@ -924,8 +955,7 @@ mod tests {
     fn test_rollover_part_counter() {
         let dir = tempfile::tempdir().unwrap();
         let batch = make_test_batch();
-        let mut writer =
-            ParquetTableWriter::new(dir.path(), Partition::Date, Compression::None);
+        let mut writer = ParquetTableWriter::new(dir.path(), Partition::Date, Compression::None);
         let meta = BlockMetadata {
             min_block_number: 100,
             max_block_number: 200,
@@ -937,12 +967,21 @@ mod tests {
         // File names now include a process UUID prefix: part-{uuid}-NNNNNN.parquet
         let name1 = path1.file_name().unwrap().to_string_lossy();
         let name2 = path2.file_name().unwrap().to_string_lossy();
-        assert!(name1.starts_with("part-") && name1.ends_with("-000001.parquet"), "unexpected: {name1}");
-        assert!(name2.starts_with("part-") && name2.ends_with("-000002.parquet"), "unexpected: {name2}");
+        assert!(
+            name1.starts_with("part-") && name1.ends_with("-000001.parquet"),
+            "unexpected: {name1}"
+        );
+        assert!(
+            name2.starts_with("part-") && name2.ends_with("-000002.parquet"),
+            "unexpected: {name2}"
+        );
         // Both should share the same process ID prefix.
         let prefix1 = &name1["part-".len()..name1.len() - "-000001.parquet".len()];
         let prefix2 = &name2["part-".len()..name2.len() - "-000002.parquet".len()];
-        assert_eq!(prefix1, prefix2, "same writer should produce same process prefix");
+        assert_eq!(
+            prefix1, prefix2,
+            "same writer should produce same process prefix"
+        );
     }
 
     #[test]
@@ -968,7 +1007,10 @@ mod tests {
         let file_path = parts[0].path();
         let read_batches = read_parquet(&file_path).unwrap();
         let total_rows: usize = read_batches.iter().map(|b| b.num_rows()).sum();
-        assert_eq!(total_rows, 1, "should contain the single row from the batch");
+        assert_eq!(
+            total_rows, 1,
+            "should contain the single row from the batch"
+        );
     }
 
     #[test]
@@ -1019,11 +1061,17 @@ mod tests {
         // Write twice — both should be buffered, not written to disk yet.
         out.write_all(&batches, &meta).unwrap();
         out.write_all(&batches, &meta).unwrap();
-        assert!(!dir.path().join("blocks").exists(), "should still be buffered");
+        assert!(
+            !dir.path().join("blocks").exists(),
+            "should still be buffered"
+        );
 
         // flush_remaining writes the concatenated data.
         out.flush_remaining().unwrap();
-        assert!(dir.path().join("blocks").exists(), "should be written after flush");
+        assert!(
+            dir.path().join("blocks").exists(),
+            "should be written after flush"
+        );
 
         // Verify the file has 2 rows (from the 2 batches).
         let parts: Vec<_> = std::fs::read_dir(dir.path().join("blocks"))
@@ -1068,14 +1116,20 @@ mod tests {
 
         // The 2024-01-15 partition should have been written (partition change).
         let jan15 = dir.path().join("blocks/year=2024/month=01/date=15");
-        assert!(jan15.exists(), "old partition should be flushed on date change");
+        assert!(
+            jan15.exists(),
+            "old partition should be flushed on date change"
+        );
 
         // The 2024-01-16 data is still buffered.
         let jan16 = dir.path().join("blocks/year=2024/month=01/date=16");
         assert!(!jan16.exists(), "new partition should still be buffered");
 
         out.flush_remaining().unwrap();
-        assert!(jan16.exists(), "new partition should be written after flush");
+        assert!(
+            jan16.exists(),
+            "new partition should be written after flush"
+        );
     }
 
     #[test]
@@ -1114,11 +1168,17 @@ mod tests {
         for _ in 0..50 {
             out.write_all(&batches, &meta).unwrap();
         }
-        assert!(!dir.path().join("blocks").exists(), "size rollover should be disabled");
+        assert!(
+            !dir.path().join("blocks").exists(),
+            "size rollover should be disabled"
+        );
 
         // Explicit flush writes the accumulated data.
         out.flush_remaining().unwrap();
-        assert!(dir.path().join("blocks").exists(), "flush_remaining should write data");
+        assert!(
+            dir.path().join("blocks").exists(),
+            "flush_remaining should write data"
+        );
 
         // Should produce a single part file with all 50 rows.
         let parts: Vec<_> = std::fs::read_dir(dir.path().join("blocks"))
@@ -1162,7 +1222,8 @@ mod tests {
         // 2024-01-15 23:59:58, 23:59:59, 2024-01-16 00:00:00, 00:00:01
         let ts_before = 1705363198_i64; // 2024-01-15 23:59:58
         let ts_boundary = 1705363200_i64; // 2024-01-16 00:00:00
-        let batch = make_timestamped_batch(&[ts_before, ts_before + 1, ts_boundary, ts_boundary + 1]);
+        let batch =
+            make_timestamped_batch(&[ts_before, ts_before + 1, ts_boundary, ts_boundary + 1]);
 
         let mut batches = HashMap::new();
         batches.insert("blocks".to_string(), batch);
@@ -1184,21 +1245,25 @@ mod tests {
         assert!(jan16.exists(), "2024-01-16 partition should exist");
 
         // Check row counts.
-        let parts15: Vec<_> = std::fs::read_dir(&jan15).unwrap()
+        let parts15: Vec<_> = std::fs::read_dir(&jan15)
+            .unwrap()
             .filter_map(|e| e.ok())
             .filter(|e| e.path().extension().map_or(false, |ext| ext == "parquet"))
             .collect();
-        let rows15: usize = parts15.iter()
+        let rows15: usize = parts15
+            .iter()
             .flat_map(|p| read_parquet(&p.path()).unwrap())
             .map(|b| b.num_rows())
             .sum();
         assert_eq!(rows15, 2, "jan15 should have 2 rows");
 
-        let parts16: Vec<_> = std::fs::read_dir(&jan16).unwrap()
+        let parts16: Vec<_> = std::fs::read_dir(&jan16)
+            .unwrap()
             .filter_map(|e| e.ok())
             .filter(|e| e.path().extension().map_or(false, |ext| ext == "parquet"))
             .collect();
-        let rows16: usize = parts16.iter()
+        let rows16: usize = parts16
+            .iter()
             .flat_map(|p| read_parquet(&p.path()).unwrap())
             .map(|b| b.num_rows())
             .sum();
@@ -1256,7 +1321,8 @@ mod tests {
         let jan15 = dir.path().join("blocks/year=2024/month=01/date=15");
         assert!(jan15.exists());
         // Only one partition should exist (one year directory)
-        let dirs: Vec<_> = std::fs::read_dir(dir.path().join("blocks")).unwrap()
+        let dirs: Vec<_> = std::fs::read_dir(dir.path().join("blocks"))
+            .unwrap()
             .filter_map(|e| e.ok())
             .filter(|e| e.file_type().map_or(false, |ft| ft.is_dir()))
             .collect();
@@ -1273,7 +1339,12 @@ mod tests {
         let mut batches = HashMap::new();
         batches.insert("blocks".to_string(), batch);
 
-        let mut out = OutputWriter::new(dir.path(), Partition::BlockRange(1000), Compression::None, 0);
+        let mut out = OutputWriter::new(
+            dir.path(),
+            Partition::BlockRange(1000),
+            Compression::None,
+            0,
+        );
         let meta = BlockMetadata {
             min_block_number: 100,
             max_block_number: 101,
@@ -1286,11 +1357,13 @@ mod tests {
         // Should write to a single block_range partition
         let br = dir.path().join("blocks/block_range=0-999");
         assert!(br.exists());
-        let parts: Vec<_> = std::fs::read_dir(&br).unwrap()
+        let parts: Vec<_> = std::fs::read_dir(&br)
+            .unwrap()
             .filter_map(|e| e.ok())
             .filter(|e| e.path().extension().map_or(false, |ext| ext == "parquet"))
             .collect();
-        let rows: usize = parts.iter()
+        let rows: usize = parts
+            .iter()
             .flat_map(|p| read_parquet(&p.path()).unwrap())
             .map(|b| b.num_rows())
             .sum();
@@ -1311,6 +1384,10 @@ mod tests {
         // Write and flush — the ratio should remain unchanged.
         out.write_all(&batches, &meta).unwrap();
         out.flush_remaining().unwrap();
-        assert_eq!(out.compression_ratio(), initial_ratio, "ratio should not change after writes");
+        assert_eq!(
+            out.compression_ratio(),
+            initial_ratio,
+            "ratio should not change after writes"
+        );
     }
 }

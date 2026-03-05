@@ -9,4 +9,5 @@ pub mod rollup;
 pub mod s3;
 pub mod traits;
 pub mod truncate;
+pub mod verify;
 pub mod writer;
