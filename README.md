@@ -251,6 +251,36 @@ Chain:
 
 ## Subcommands
 
+### `partitions ls` — Query Partition Index Rows
+
+Lists rows from `partitions.parquet` with optional filters and deterministic ascending order by `partition_start_ts`.
+
+```bash
+# List hour partitions from a local index
+firehose-parquet partitions ls \
+  --partitions-index ./output/eth-mainnet/partitions.parquet \
+  --partition-type hour
+
+# Filter chain + time window and return JSON
+firehose-parquet partitions ls \
+  --partitions-index s3://my-bucket/eth-mainnet/partitions.parquet \
+  --partition-type day \
+  --partition-chain eth-mainnet \
+  --from '2015-07-29 00:00:00' \
+  --to '2015-07-31 00:00:00' \
+  --limit 200 \
+  --json
+```
+
+| Flag | Default | Description |
+|---|---|---|
+| `--partition-type` | none | Optional partition type filter |
+| `--partition-chain` | none | Optional chain filter |
+| `--from` | none | Inclusive lower bound for `partition_start_ts` |
+| `--to` | none | Inclusive upper bound for `partition_start_ts` |
+| `--limit` | `100` | Maximum rows returned |
+| `--json` | `false` | Emit machine-readable output |
+
 ### `partitions resolve` — Resolve Partition Block Bounds
 
 Resolves one row from `partitions.parquet` and prints the exact ingestion range (`start_block` inclusive, `stop_block` exclusive).
