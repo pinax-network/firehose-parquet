@@ -350,6 +350,8 @@ Helpful guard:
 
 - `--strict-single-chain` fails fast when a global index contains multiple chain rows for the same partition descriptor and `--partition-chain` was omitted
 
+See `docs/partitions-parquet-contract.md` for the versioned `partitions.parquet` schema and metadata compatibility contract.
+
 ### Partition-Window Ingestion (`--partition-from/--partition-to`)
 
 Run ingestion over a partition window without explicit block math.
