@@ -4,9 +4,10 @@ use firehose_parquet::cli::{
     build_config, cursor_template_context_from_selection, init_tracing, list_partitions_from_index,
     load_dotenv, parse_partition_selection_request, parse_partition_shard_strategy,
     resolve_cursor_template, resolve_partition_bounds_from_index, resolve_partition_command,
-    resolve_partition_window_bounds_from_index, shard_partitions_from_index, AwsConfig, Commands,
-    CommonArgs, PartitionBoundsRequest, PartitionListRequest, PartitionResolveOptions,
-    PartitionSelectionRequest, PartitionShardRequest, PartitionsCommands,
+    resolve_partition_window_bounds_from_index, shard_partitions_from_index,
+    validate_partitions_index, AwsConfig, Commands, CommonArgs, PartitionBoundsRequest,
+    PartitionListRequest, PartitionResolveOptions, PartitionSelectionRequest,
+    PartitionShardRequest, PartitionValidateRequest, PartitionsCommands,
 };
 use firehose_parquet::config::BlockMetadata;
 use firehose_parquet::cursor::{CursorLocation, CursorState};
@@ -363,6 +364,63 @@ async fn main() -> Result<()> {
                 return Ok(());
             }
             Commands::Partitions(subcommand) => match subcommand {
+                PartitionsCommands::Validate {
+                    partitions_index,
+                    partition_type,
+                    partition_chain,
+                    allow_gaps,
+                    json,
+                    aws_access_key_id,
+                    aws_secret_access_key,
+                    aws_session_token,
+                    aws_region,
+                    aws_endpoint_url,
+                } => {
+                    let request = PartitionValidateRequest {
+                        list: PartitionListRequest {
+                            index_path: partitions_index.clone(),
+                            partition_type: partition_type.clone(),
+                            chain: partition_chain.clone(),
+                            from: None,
+                            to: None,
+                            limit: usize::MAX,
+                        },
+                        allow_gaps: *allow_gaps,
+                    };
+                    let aws = AwsConfig {
+                        aws_access_key_id: aws_access_key_id.clone(),
+                        aws_secret_access_key: aws_secret_access_key.clone(),
+                        aws_session_token: aws_session_token.clone(),
+                        aws_region: aws_region.clone(),
+                        aws_endpoint_url: aws_endpoint_url.clone(),
+                    };
+                    let result = validate_partitions_index(&request, Some(&aws))?;
+
+                    if *json {
+                        println!("{}", serde_json::to_string_pretty(&result)?);
+                    } else {
+                        println!("partitions_index: {}", result.partitions_index);
+                        println!("total_rows:       {}", result.total_rows);
+                        println!("issue_count:      {}", result.issue_count);
+                        println!("valid:            {}", result.valid);
+                        for issue in &result.issues {
+                            let chain = issue.chain.as_deref().unwrap_or("<none>");
+                            println!(
+                                "- {:?} chain={} partition_type={} partition_value={} {}",
+                                issue.kind,
+                                chain,
+                                issue.partition_type,
+                                issue.partition_value,
+                                issue.message
+                            );
+                        }
+                    }
+
+                    if !result.valid {
+                        std::process::exit(1);
+                    }
+                    return Ok(());
+                }
                 PartitionsCommands::Shard {
                     partitions_index,
                     partition_type,
