@@ -730,6 +730,72 @@ Examples:
 /// Subcommands under `firehose-parquet partitions`.
 #[derive(clap::Subcommand, Debug)]
 pub enum PartitionsCommands {
+    /// Deterministically assign partitions to one shard.
+    #[command(after_long_help = "\
+Examples:
+  # Select shard 1 of 4 using ordinal assignment
+  firehose-parquet partitions shard \\
+    --partitions-index ./output/eth-mainnet/partitions.parquet \\
+    --partition-type hour \\
+    --shard-count 4 \\
+    --shard-index 1
+
+  # Select shard 0 of 8 using hash assignment and emit JSON
+  firehose-parquet partitions shard \\
+    --partitions-index s3://my-bucket/eth-mainnet/partitions.parquet \\
+    --partition-type day \\
+    --partition-chain eth-mainnet \\
+    --from '2015-07-29 00:00:00' \\
+    --to '2015-07-31 00:00:00' \\
+    --shard-count 8 \\
+    --shard-index 0 \\
+    --strategy hash \\
+    --json
+")]
+    Shard {
+        /// Path to partitions index parquet file (local path or s3:// URI)
+        #[arg(long)]
+        partitions_index: String,
+        /// Optional partition type filter (e.g. hour, day)
+        #[arg(long)]
+        partition_type: Option<String>,
+        /// Optional chain filter (matches `chain` column)
+        #[arg(long)]
+        partition_chain: Option<String>,
+        /// Lower bound (inclusive) for partition_start_ts (`YYYY-MM-DD HH:MM:SS`)
+        #[arg(long)]
+        from: Option<String>,
+        /// Upper bound (inclusive) for partition_start_ts (`YYYY-MM-DD HH:MM:SS`)
+        #[arg(long)]
+        to: Option<String>,
+        /// Total number of shards
+        #[arg(long)]
+        shard_count: usize,
+        /// Zero-based shard index to select
+        #[arg(long)]
+        shard_index: usize,
+        /// Assignment strategy: ordinal or hash
+        #[arg(long, default_value = "ordinal")]
+        strategy: String,
+        /// Emit machine-readable JSON output
+        #[arg(long, default_value = "false")]
+        json: bool,
+        /// AWS access key ID (for S3 paths)
+        #[arg(long, env = "AWS_ACCESS_KEY_ID", hide_env_values = true)]
+        aws_access_key_id: Option<String>,
+        /// AWS secret access key (for S3 paths)
+        #[arg(long, env = "AWS_SECRET_ACCESS_KEY", hide_env_values = true)]
+        aws_secret_access_key: Option<String>,
+        /// AWS session token (for S3 paths)
+        #[arg(long, env = "AWS_SESSION_TOKEN", hide_env_values = true)]
+        aws_session_token: Option<String>,
+        /// AWS region (for S3 paths)
+        #[arg(long, env = "AWS_REGION", hide_env_values = true)]
+        aws_region: Option<String>,
+        /// AWS endpoint URL (for S3-compatible services)
+        #[arg(long, env = "AWS_ENDPOINT_URL_S3", hide_env_values = true)]
+        aws_endpoint_url: Option<String>,
+    },
     /// List/query partition rows from `partitions.parquet`.
     #[command(after_long_help = "\
 Examples:
@@ -859,6 +925,21 @@ pub struct PartitionListRequest {
     pub limit: usize,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PartitionShardStrategy {
+    Ordinal,
+    Hash,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PartitionShardRequest {
+    pub list: PartitionListRequest,
+    pub shard_count: usize,
+    pub shard_index: usize,
+    pub strategy: PartitionShardStrategy,
+}
+
 #[derive(Debug, Clone, serde::Serialize, PartialEq, Eq)]
 pub struct PartitionListRow {
     pub partition_type: String,
@@ -874,6 +955,17 @@ pub struct PartitionListRow {
 pub struct PartitionListResult {
     pub partitions_index: String,
     pub limit: usize,
+    pub total_matches: usize,
+    pub returned_rows: usize,
+    pub rows: Vec<PartitionListRow>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, PartialEq, Eq)]
+pub struct PartitionShardResult {
+    pub partitions_index: String,
+    pub shard_count: usize,
+    pub shard_index: usize,
+    pub strategy: PartitionShardStrategy,
     pub total_matches: usize,
     pub returned_rows: usize,
     pub rows: Vec<PartitionListRow>,
@@ -1134,6 +1226,82 @@ pub fn list_partitions_from_index(
         partitions_index: request.index_path.clone(),
         limit: request.limit,
         total_matches,
+        returned_rows: rows.len(),
+        rows,
+    })
+}
+
+pub fn parse_partition_shard_strategy(value: &str) -> anyhow::Result<PartitionShardStrategy> {
+    match value.to_ascii_lowercase().as_str() {
+        "ordinal" => Ok(PartitionShardStrategy::Ordinal),
+        "hash" => Ok(PartitionShardStrategy::Hash),
+        other => anyhow::bail!("invalid --strategy '{other}': expected one of: ordinal, hash"),
+    }
+}
+
+fn partition_shard_key(row: &PartitionListRow) -> String {
+    format!(
+        "{}|{}|{}",
+        row.chain.as_deref().unwrap_or_default(),
+        row.partition_type,
+        row.partition_value
+    )
+}
+
+fn assign_partition_shard(
+    row: &PartitionListRow,
+    ordinal: usize,
+    shard_count: usize,
+    strategy: PartitionShardStrategy,
+) -> usize {
+    match strategy {
+        PartitionShardStrategy::Ordinal => ordinal % shard_count,
+        PartitionShardStrategy::Hash => {
+            use sha2::{Digest, Sha256};
+
+            let digest = Sha256::digest(partition_shard_key(row).as_bytes());
+            let value = u64::from_be_bytes(digest[..8].try_into().expect("digest slice"));
+            (value as usize) % shard_count
+        }
+    }
+}
+
+pub fn shard_partitions_from_index(
+    request: &PartitionShardRequest,
+    aws: Option<&AwsConfig>,
+) -> anyhow::Result<PartitionShardResult> {
+    if request.shard_count == 0 {
+        anyhow::bail!("--shard-count must be greater than 0");
+    }
+    if request.shard_index >= request.shard_count {
+        anyhow::bail!(
+            "--shard-index must be less than --shard-count (got {} >= {})",
+            request.shard_index,
+            request.shard_count
+        );
+    }
+
+    let mut list_request = request.list.clone();
+    list_request.limit = usize::MAX;
+    let list_result = list_partitions_from_index(&list_request, aws)?;
+
+    let rows = list_result
+        .rows
+        .into_iter()
+        .enumerate()
+        .filter_map(|(ordinal, row)| {
+            let shard =
+                assign_partition_shard(&row, ordinal, request.shard_count, request.strategy);
+            (shard == request.shard_index).then_some(row)
+        })
+        .collect::<Vec<_>>();
+
+    Ok(PartitionShardResult {
+        partitions_index: request.list.index_path.clone(),
+        shard_count: request.shard_count,
+        shard_index: request.shard_index,
+        strategy: request.strategy,
+        total_matches: list_result.total_matches,
         returned_rows: rows.len(),
         rows,
     })
@@ -4049,6 +4217,57 @@ mod tests {
     }
 
     #[test]
+    fn test_partitions_shard_subcommand_parse() {
+        let cli = parse(&[
+            "test-cli",
+            "partitions",
+            "shard",
+            "--partitions-index",
+            "./partitions.parquet",
+            "--partition-type",
+            "day",
+            "--partition-chain",
+            "eth-mainnet",
+            "--from",
+            "2015-07-29 00:00:00",
+            "--to",
+            "2015-07-31 00:00:00",
+            "--shard-count",
+            "4",
+            "--shard-index",
+            "1",
+            "--strategy",
+            "hash",
+            "--json",
+        ]);
+        match cli.command.expect("command should exist") {
+            Commands::Partitions(PartitionsCommands::Shard {
+                partitions_index,
+                partition_type,
+                partition_chain,
+                from,
+                to,
+                shard_count,
+                shard_index,
+                strategy,
+                json,
+                ..
+            }) => {
+                assert_eq!(partitions_index, "./partitions.parquet");
+                assert_eq!(partition_type.as_deref(), Some("day"));
+                assert_eq!(partition_chain.as_deref(), Some("eth-mainnet"));
+                assert_eq!(from.as_deref(), Some("2015-07-29 00:00:00"));
+                assert_eq!(to.as_deref(), Some("2015-07-31 00:00:00"));
+                assert_eq!(shard_count, 4);
+                assert_eq!(shard_index, 1);
+                assert_eq!(strategy, "hash");
+                assert!(json);
+            }
+            _ => panic!("expected partitions shard subcommand"),
+        }
+    }
+
+    #[test]
     #[serial]
     fn test_completions_generation() {
         // Verify that shell completion generation runs without panicking
@@ -4655,5 +4874,103 @@ mod tests {
             .rows
             .iter()
             .all(|row| row.chain.as_deref() == Some("eth-mainnet")));
+    }
+
+    #[test]
+    fn test_parse_partition_shard_strategy() {
+        assert_eq!(
+            parse_partition_shard_strategy("ordinal").expect("ordinal should parse"),
+            PartitionShardStrategy::Ordinal
+        );
+        assert_eq!(
+            parse_partition_shard_strategy("hash").expect("hash should parse"),
+            PartitionShardStrategy::Hash
+        );
+        assert!(parse_partition_shard_strategy("unknown").is_err());
+    }
+
+    #[test]
+    fn test_shard_partitions_from_index_ordinal_completeness_and_non_overlap() {
+        use arrow::array::{StringArray, UInt64Array};
+        use arrow::record_batch::RecordBatch;
+        use parquet::arrow::ArrowWriter;
+        use std::collections::BTreeSet;
+        use std::fs::File;
+        use std::sync::Arc;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("partitions.parquet");
+
+        let schema = Arc::new(arrow::datatypes::Schema::new(vec![
+            arrow::datatypes::Field::new("chain", arrow::datatypes::DataType::Utf8, true),
+            arrow::datatypes::Field::new("partition_type", arrow::datatypes::DataType::Utf8, false),
+            arrow::datatypes::Field::new(
+                "partition_value",
+                arrow::datatypes::DataType::Utf8,
+                false,
+            ),
+            arrow::datatypes::Field::new(
+                "partition_start_ts",
+                arrow::datatypes::DataType::Utf8,
+                false,
+            ),
+            arrow::datatypes::Field::new("start_block", arrow::datatypes::DataType::UInt64, false),
+            arrow::datatypes::Field::new("end_block", arrow::datatypes::DataType::UInt64, false),
+        ]));
+
+        let values = vec![
+            "2015-07-29 00:00:00",
+            "2015-07-30 00:00:00",
+            "2015-07-31 00:00:00",
+            "2015-08-01 00:00:00",
+            "2015-08-02 00:00:00",
+        ];
+        let batch = RecordBatch::try_new(
+            Arc::clone(&schema),
+            vec![
+                Arc::new(StringArray::from(vec![Some("eth-mainnet"); 5])),
+                Arc::new(StringArray::from(vec!["day"; 5])),
+                Arc::new(StringArray::from(values.clone())),
+                Arc::new(StringArray::from(values)),
+                Arc::new(UInt64Array::from(vec![100_u64, 200, 300, 400, 500])),
+                Arc::new(UInt64Array::from(vec![200_u64, 300, 400, 500, 600])),
+            ],
+        )
+        .expect("record batch");
+
+        let file = File::create(&path).expect("create parquet");
+        let mut writer = ArrowWriter::try_new(file, schema, None).expect("writer");
+        writer.write(&batch).expect("write batch");
+        writer.close().expect("close writer");
+
+        let base_request = PartitionListRequest {
+            index_path: path.to_string_lossy().to_string(),
+            partition_type: Some("day".to_string()),
+            chain: Some("eth-mainnet".to_string()),
+            from: None,
+            to: None,
+            limit: usize::MAX,
+        };
+
+        let mut seen = BTreeSet::new();
+        for shard_index in 0..3 {
+            let result = shard_partitions_from_index(
+                &PartitionShardRequest {
+                    list: base_request.clone(),
+                    shard_count: 3,
+                    shard_index,
+                    strategy: PartitionShardStrategy::Ordinal,
+                },
+                None,
+            )
+            .expect("shard should succeed");
+
+            for row in result.rows {
+                let inserted = seen.insert(row.partition_value);
+                assert!(inserted, "partition appeared in multiple shards");
+            }
+        }
+
+        assert_eq!(seen.len(), 5);
     }
 }
