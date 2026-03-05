@@ -32,7 +32,7 @@ A production-grade Rust toolkit that consumes [StreamingFast Firehose](https://f
 - **File rollover** — flush by row count, byte size, or time interval
 - **Fork handling** — `--final-blocks-only` (default) or include `fork_step` column (`NEW`/`UNDO`/`FINAL`)
 - **Failed transaction filtering** — `--include-failed-transactions` to opt in to failed/reverted txs (excluded by default)
-- **Byte encoding** — configurable encoding for binary fields: `binary` (raw), `hex`, `base58`, `tron_base58`, `auto`
+- **Byte encoding** — configurable encoding for binary fields: `binary` (raw), `hex`, `hex_no_prefix`, `base58`, `tron_base58`, `auto`
 - **Compression** — zstd (default), snappy, gzip, or none
 - **Parquet file metadata** — every file embeds pipeline provenance (`firehose-parquet.*` key-value pairs) in the Parquet footer
 - **Prometheus metrics** — opt-in `/metrics` endpoint for monitoring throughput, buffer state, and errors
@@ -265,10 +265,10 @@ Displays comprehensive metadata for a single Parquet file: file-level key-value 
 
 ```bash
 # Inspect a local file
-firehose-parquet inspect ./output/blocks/date=2026-01-15/part-000001.parquet
+firehose-parquet inspect ./output/blocks/year=2026/month=01/date=15/part-000001.parquet
 
 # Inspect an S3 file
-firehose-parquet inspect s3://my-bucket/evm/blocks/date=2026-01-15/part-000001.parquet
+firehose-parquet inspect s3://my-bucket/evm/blocks/year=2026/month=01/date=15/part-000001.parquet
 ```
 
 **Output includes:**
@@ -295,6 +295,7 @@ firehose-parquet validate s3://my-bucket/solana/blocks/ --allow-gaps
 
 | Flag | Default | Description |
 |---|---|---|
+| `--cross-partition` | `false` | Check continuity between adjacent partitions |
 | `--allow-gaps` | `false` | Suppress gap reporting (useful for Solana skipped slots) |
 
 ### `rollup` — Roll Up Partitions
@@ -359,16 +360,16 @@ Deletes `.parquet` files from local filesystem or S3 with optional partition fil
 firehose-parquet truncate ./output/blocks/
 
 # Delete a specific partition
-firehose-parquet truncate ./output/blocks/ -p "date=2026-01-01"
+firehose-parquet truncate ./output/blocks/ -p "year=2026/month=01/date=01"
 
 # Delete all partitions under a key
 firehose-parquet truncate ./output/blocks/ -p date
 
 # Glob pattern matching
-firehose-parquet truncate s3://bucket/prefix -p "date=2026-01-*"
+firehose-parquet truncate s3://bucket/prefix -p "year=2026/month=01/date=*"
 
 # Multiple partitions
-firehose-parquet truncate ./output/ -p "date=2026-01-01" -p "date=2026-01-02"
+firehose-parquet truncate ./output/ -p "year=2026/month=01/date=01" -p "year=2026/month=01/date=02"
 
 # Dry run — show what would be deleted
 firehose-parquet truncate ./output/blocks/ --dry-run
@@ -467,7 +468,7 @@ Every Parquet file written by the pipeline embeds key-value metadata in the file
 ```python
 import pyarrow.parquet as pq
 
-meta = pq.read_metadata("output/blocks/date=2026-01-15/part-000001.parquet")
+meta = pq.read_metadata("output/blocks/year=2026/month=01/date=15/part-000001.parquet")
 for i in range(meta.metadata.count()):
     key = meta.metadata.keys()[i]
     if key.startswith("firehose-parquet."):
@@ -477,7 +478,7 @@ for i in range(meta.metadata.count()):
 ```sql
 -- DuckDB
 SELECT key, value
-FROM parquet_kv_metadata('output/blocks/date=2026-01-15/part-000001.parquet')
+FROM parquet_kv_metadata('output/blocks/year=2026/month=01/date=15/part-000001.parquet')
 WHERE key LIKE 'firehose-parquet.%';
 ```
 
@@ -487,10 +488,10 @@ WHERE key LIKE 'firehose-parquet.%';
 <chain_name>/
 ├── cursor.parquet
 ├── blocks/
-│   ├── date=2026-02-25/
+│   ├── year=2026/month=02/date=25/
 │   │   ├── part-000001.parquet
 │   │   └── part-000002.parquet
-│   └── date=2026-02-26/
+│   └── year=2026/month=02/date=26/
 │       └── part-000001.parquet
 ├── transactions/
 │   └── ...
@@ -617,7 +618,8 @@ firehose-parquet/
 ├── .env.example                            # environment variables template
 ├── .github/workflows/
 │   ├── ci.yml                              # CI pipeline (build + test)
-│   └── docker-publish.yml                  # GHCR Docker image publish
+│   ├── docker-publish.yml                  # GHCR Docker image publish
+│   └── release.yml                         # release assets for Linux/macOS targets
 ├── proto/                                  # Protobuf definitions (flat layout)
 │   ├── firehose.proto                      # Firehose streaming protocol
 │   ├── ethereum.proto
@@ -628,30 +630,34 @@ firehose-parquet/
 │   ├── cosmos.proto
 │   ├── antelope.proto
 │   └── near.proto
-├── crates/
-│   ├── firehose-protos/                    # Centralized proto compilation
-│   ├── firehose-parquet/                   # Core library
-│   │   └── src/
-│   │       ├── cli.rs                      # Shared CLI args, completions, helpers
-│   │       ├── config.rs                   # Config, Partition, Compression enums
-│   │       ├── cursor.rs                   # Cursor persistence (parquet format)
-│   │       ├── encode.rs                   # BytesColumn, encoding helpers
-│   │       ├── grpc.rs                     # Firehose gRPC client
-│   │       ├── metrics.rs                  # Prometheus metrics & HTTP server
-│   │       ├── traits.rs                   # BlockMapper trait, BlockIdentity
-│   │       └── writer.rs                   # Parquet writer, partitioning
-│   └── blocks/                             # Block type definitions + unified binary
-│       └── src/
-│           ├── bin/
-│           │   └── main.rs                 # Single unified binary (firehose-parquet)
-│           ├── evm/                        # Per-chain mapper, schema, proto
-│           ├── solana/
-│           ├── bitcoin/
-│           ├── beacon/
-│           ├── tron/
-│           ├── cosmos/
-│           ├── antelope/
-│           └── near/
+├── firehose-protos/                        # Centralized proto compilation
+│   ├── build.rs                            # Compiles ./proto/*.proto at build time
+│   └── src/lib.rs                          # include_proto! modules and aliases
+├── firehose-parquet/                       # Core library
+│   └── src/
+│       ├── cli.rs                          # Shared CLI args, subcommands, helpers
+│       ├── config.rs                       # Config, partitioning, compression enums
+│       ├── cursor.rs                       # Cursor persistence (parquet format)
+│       ├── encode.rs                       # Binary encoding strategies
+│       ├── grpc.rs                         # Firehose gRPC client + reconnect logic
+│       ├── metrics.rs                      # Prometheus metrics & HTTP server
+│       ├── merge.rs                        # merge subcommand implementation
+│       ├── rollup.rs                       # rollup subcommand implementation
+│       ├── truncate.rs                     # truncate subcommand implementation
+│       ├── s3.rs                           # object_store/S3 abstraction
+│       ├── traits.rs                       # BlockMapper trait, canonical fields
+│       └── writer.rs                       # Arrow->Parquet writer and flushing
+├── blocks/                                 # Chain mappers + unified binary
+│   └── src/
+│       ├── bin/main.rs                     # Single unified binary (firehose-parquet)
+│       ├── evm/                            # mapper.rs, schema.rs, proto.rs
+│       ├── solana/
+│       ├── bitcoin/
+│       ├── beacon/
+│       ├── tron/
+│       ├── cosmos/
+│       ├── antelope/
+│       └── near/
 └── target/                                 # build output
 ```
 
@@ -668,7 +674,7 @@ cargo test --workspace
 cargo build --release --workspace
 
 # Install
-cargo install --path crates/blocks
+cargo install --path blocks
 ```
 
 ## License
