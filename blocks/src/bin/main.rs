@@ -54,6 +54,20 @@ Examples:
   # Resume from cursor
   firehose-parquet --endpoint https://eth.firehose.pinax.network:443 \\
     --cursor cursor.txt --partition date
+
+  # Resolve range from local partitions index (no explicit start/stop)
+  firehose-parquet --endpoint https://eth.firehose.pinax.network:443 \\
+    --partitions-index ./output/eth-mainnet/partitions.parquet \\
+    --partition-type hour \\
+    --partition-value '2015-07-30 15:00:00' \\
+    --partition-chain eth-mainnet
+
+  # Resolve range from S3 partitions index
+  firehose-parquet --endpoint https://eth.firehose.pinax.network:443 \\
+    --partitions-index s3://my-bucket/eth-mainnet/partitions.parquet \\
+    --partition-type day \\
+    --partition-value '2015-07-30 00:00:00' \\
+    --partition-chain eth-mainnet
 "
 )]
 struct Cli {

@@ -85,7 +85,7 @@ pub struct CommonArgs {
     )]
     pub stop_block: Option<u64>,
 
-    /// Path to partitions index parquet file (local path or s3:// URI)
+    /// Path to partitions index parquet file (local path or s3:// URI), e.g. ./output/eth-mainnet/partitions.parquet
     #[arg(
         long,
         env = "PARTITIONS_INDEX",
@@ -94,7 +94,7 @@ pub struct CommonArgs {
     )]
     pub partitions_index: Option<String>,
 
-    /// Partition type used to resolve start/stop range from --partitions-index
+    /// Partition type used to resolve start/stop range from --partitions-index, e.g. hour or day
     #[arg(
         long,
         env = "PARTITION_TYPE",
@@ -103,7 +103,7 @@ pub struct CommonArgs {
     )]
     pub partition_type: Option<String>,
 
-    /// Partition value used to resolve start/stop range from --partitions-index
+    /// Partition value used to resolve start/stop range from --partitions-index, e.g. "2015-07-30 15:00:00"
     #[arg(
         long,
         env = "PARTITION_VALUE",
@@ -112,7 +112,7 @@ pub struct CommonArgs {
     )]
     pub partition_value: Option<String>,
 
-    /// Optional chain filter used with partition lookup (matches `chain` column)
+    /// Optional chain filter used with partition lookup (matches `chain` column), e.g. eth-mainnet
     #[arg(
         long,
         env = "PARTITION_CHAIN",
