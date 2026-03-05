@@ -672,6 +672,62 @@ Examples:
 /// Subcommands under `firehose-parquet partitions`.
 #[derive(clap::Subcommand, Debug)]
 pub enum PartitionsCommands {
+    /// List/query partition rows from `partitions.parquet`.
+    #[command(after_long_help = "\
+Examples:
+  # List hour partitions from local index
+  firehose-parquet partitions ls \\
+    --partitions-index ./output/eth-mainnet/partitions.parquet \\
+    --partition-type hour
+
+  # Filter by chain + time window and emit JSON
+  firehose-parquet partitions ls \\
+    --partitions-index s3://my-bucket/eth-mainnet/partitions.parquet \\
+    --partition-type day \\
+    --partition-chain eth-mainnet \\
+    --from '2015-07-29 00:00:00' \\
+    --to '2015-07-31 00:00:00' \\
+    --limit 200 \\
+    --json
+")]
+    Ls {
+        /// Path to partitions index parquet file (local path or s3:// URI)
+        #[arg(long)]
+        partitions_index: String,
+        /// Optional partition type filter (e.g. hour, day)
+        #[arg(long)]
+        partition_type: Option<String>,
+        /// Optional chain filter (matches `chain` column)
+        #[arg(long)]
+        partition_chain: Option<String>,
+        /// Lower bound (inclusive) for partition_start_ts (`YYYY-MM-DD HH:MM:SS`)
+        #[arg(long)]
+        from: Option<String>,
+        /// Upper bound (inclusive) for partition_start_ts (`YYYY-MM-DD HH:MM:SS`)
+        #[arg(long)]
+        to: Option<String>,
+        /// Maximum rows to return (sorted ascending by partition_start_ts)
+        #[arg(long, default_value = "100")]
+        limit: usize,
+        /// Emit machine-readable JSON output
+        #[arg(long, default_value = "false")]
+        json: bool,
+        /// AWS access key ID (for S3 paths)
+        #[arg(long, env = "AWS_ACCESS_KEY_ID", hide_env_values = true)]
+        aws_access_key_id: Option<String>,
+        /// AWS secret access key (for S3 paths)
+        #[arg(long, env = "AWS_SECRET_ACCESS_KEY", hide_env_values = true)]
+        aws_secret_access_key: Option<String>,
+        /// AWS session token (for S3 paths)
+        #[arg(long, env = "AWS_SESSION_TOKEN", hide_env_values = true)]
+        aws_session_token: Option<String>,
+        /// AWS region (for S3 paths)
+        #[arg(long, env = "AWS_REGION", hide_env_values = true)]
+        aws_region: Option<String>,
+        /// AWS endpoint URL (for S3-compatible services)
+        #[arg(long, env = "AWS_ENDPOINT_URL_S3", hide_env_values = true)]
+        aws_endpoint_url: Option<String>,
+    },
     /// Resolve exact [start_block, stop_block) for one partition.
     #[command(after_long_help = "\
 Examples:
@@ -735,6 +791,36 @@ pub struct PartitionResolveResult {
     pub stop_block: u64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PartitionListRequest {
+    pub index_path: String,
+    pub partition_type: Option<String>,
+    pub chain: Option<String>,
+    pub from: Option<String>,
+    pub to: Option<String>,
+    pub limit: usize,
+}
+
+#[derive(Debug, Clone, serde::Serialize, PartialEq, Eq)]
+pub struct PartitionListRow {
+    pub partition_type: String,
+    pub partition_value: String,
+    pub partition_start_ts: String,
+    pub start_block: u64,
+    pub end_block: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub chain: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, PartialEq, Eq)]
+pub struct PartitionListResult {
+    pub partitions_index: String,
+    pub limit: usize,
+    pub total_matches: usize,
+    pub returned_rows: usize,
+    pub rows: Vec<PartitionListRow>,
+}
+
 /// Resolve partition bounds and return a response payload suitable for CLI output.
 pub fn resolve_partition_command(
     request: PartitionBoundsRequest,
@@ -748,6 +834,250 @@ pub fn resolve_partition_command(
         partition_chain: request.chain,
         start_block: bounds.start_block,
         stop_block: bounds.stop_block,
+    })
+}
+
+/// List partition rows from a `partitions.parquet` index with optional filters.
+pub fn list_partitions_from_index(
+    request: &PartitionListRequest,
+    aws: Option<&AwsConfig>,
+) -> anyhow::Result<PartitionListResult> {
+    use arrow::array::{
+        Array, Int32Array, Int64Array, LargeStringArray, StringArray, UInt32Array, UInt64Array,
+    };
+    use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+    use std::cmp::Ordering;
+    use std::collections::BinaryHeap;
+
+    if request.limit == 0 {
+        anyhow::bail!("--limit must be greater than 0");
+    }
+
+    fn read_utf8_value(column: &dyn Array, row: usize) -> anyhow::Result<Option<String>> {
+        if column.is_null(row) {
+            return Ok(None);
+        }
+        if let Some(arr) = column.as_any().downcast_ref::<StringArray>() {
+            return Ok(Some(arr.value(row).to_string()));
+        }
+        if let Some(arr) = column.as_any().downcast_ref::<LargeStringArray>() {
+            return Ok(Some(arr.value(row).to_string()));
+        }
+        Ok(None)
+    }
+
+    fn read_u64_value(column: &dyn Array, row: usize) -> anyhow::Result<Option<u64>> {
+        if column.is_null(row) {
+            return Ok(None);
+        }
+        if let Some(arr) = column.as_any().downcast_ref::<UInt64Array>() {
+            return Ok(Some(arr.value(row)));
+        }
+        if let Some(arr) = column.as_any().downcast_ref::<UInt32Array>() {
+            return Ok(Some(arr.value(row) as u64));
+        }
+        if let Some(arr) = column.as_any().downcast_ref::<Int64Array>() {
+            let value = arr.value(row);
+            if value < 0 {
+                anyhow::bail!("negative block value: {value}");
+            }
+            return Ok(Some(value as u64));
+        }
+        if let Some(arr) = column.as_any().downcast_ref::<Int32Array>() {
+            let value = arr.value(row);
+            if value < 0 {
+                anyhow::bail!("negative block value: {value}");
+            }
+            return Ok(Some(value as u64));
+        }
+        anyhow::bail!(
+            "expected integer block column, found {}",
+            column.data_type()
+        )
+    }
+
+    #[derive(Debug, Clone, Eq, PartialEq)]
+    struct HeapEntry {
+        sort_key: (String, String, Option<String>, u64, u64),
+        row: PartitionListRow,
+    }
+
+    impl Ord for HeapEntry {
+        fn cmp(&self, other: &Self) -> Ordering {
+            self.sort_key.cmp(&other.sort_key)
+        }
+    }
+
+    impl PartialOrd for HeapEntry {
+        fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+            Some(self.cmp(other))
+        }
+    }
+
+    fn collect_partition_rows<FStr, FNum>(
+        batch: &arrow::record_batch::RecordBatch,
+        request: &PartitionListRequest,
+        heap: &mut BinaryHeap<HeapEntry>,
+        total_matches: &mut usize,
+        read_utf8_value: &FStr,
+        read_u64_value: &FNum,
+    ) -> anyhow::Result<()>
+    where
+        FStr: Fn(&dyn Array, usize) -> anyhow::Result<Option<String>>,
+        FNum: Fn(&dyn Array, usize) -> anyhow::Result<Option<u64>>,
+    {
+        let schema = batch.schema();
+        let partition_type_idx = schema
+            .index_of("partition_type")
+            .map_err(|_| anyhow::anyhow!("missing required column: partition_type"))?;
+        let partition_value_idx = schema
+            .index_of("partition_value")
+            .map_err(|_| anyhow::anyhow!("missing required column: partition_value"))?;
+        let start_block_idx = schema
+            .index_of("start_block")
+            .map_err(|_| anyhow::anyhow!("missing required column: start_block"))?;
+        let end_block_idx = schema
+            .index_of("end_block")
+            .map_err(|_| anyhow::anyhow!("missing required column: end_block"))?;
+        let chain_idx = schema.index_of("chain").ok();
+        let partition_start_ts_idx = schema.index_of("partition_start_ts").ok();
+
+        for row in 0..batch.num_rows() {
+            let partition_type =
+                read_utf8_value(batch.column(partition_type_idx).as_ref(), row)?
+                    .ok_or_else(|| anyhow::anyhow!("null partition_type at row {}", row))?;
+            let partition_value = read_utf8_value(batch.column(partition_value_idx).as_ref(), row)?
+                .ok_or_else(|| anyhow::anyhow!("null partition_value at row {}", row))?;
+
+            if let Some(filter) = request.partition_type.as_deref() {
+                if !partition_type.eq_ignore_ascii_case(filter) {
+                    continue;
+                }
+            }
+
+            let chain = if let Some(idx) = chain_idx {
+                read_utf8_value(batch.column(idx).as_ref(), row)?
+            } else {
+                None
+            };
+            if let Some(chain_filter) = request.chain.as_deref() {
+                if chain.as_deref() != Some(chain_filter) {
+                    continue;
+                }
+            }
+
+            let partition_start_ts = partition_start_ts_idx
+                .and_then(|idx| {
+                    read_utf8_value(batch.column(idx).as_ref(), row)
+                        .ok()
+                        .flatten()
+                })
+                .unwrap_or_else(|| partition_value.clone());
+
+            if let Some(from) = request.from.as_deref() {
+                if partition_start_ts.as_str() < from {
+                    continue;
+                }
+            }
+            if let Some(to) = request.to.as_deref() {
+                if partition_start_ts.as_str() > to {
+                    continue;
+                }
+            }
+
+            let start_block = read_u64_value(batch.column(start_block_idx).as_ref(), row)?
+                .ok_or_else(|| anyhow::anyhow!("null start_block at row {}", row))?;
+            let end_block = read_u64_value(batch.column(end_block_idx).as_ref(), row)?
+                .ok_or_else(|| anyhow::anyhow!("null end_block at row {}", row))?;
+
+            *total_matches += 1;
+            let list_row = PartitionListRow {
+                partition_type,
+                partition_value,
+                partition_start_ts,
+                start_block,
+                end_block,
+                chain,
+            };
+            let entry = HeapEntry {
+                sort_key: (
+                    list_row.partition_start_ts.clone(),
+                    list_row.partition_type.clone(),
+                    list_row.chain.clone(),
+                    list_row.start_block,
+                    list_row.end_block,
+                ),
+                row: list_row,
+            };
+            heap.push(entry);
+            if heap.len() > request.limit {
+                heap.pop();
+            }
+        }
+
+        Ok(())
+    }
+
+    let mut heap: BinaryHeap<HeapEntry> = BinaryHeap::new();
+    let mut total_matches = 0usize;
+
+    if request.index_path.starts_with("s3://") {
+        use crate::writer::parse_s3_url;
+        use object_store::ObjectStore;
+
+        let aws =
+            aws.ok_or_else(|| anyhow::anyhow!("AWS config required for S3 partition index"))?;
+        let (bucket, key) = parse_s3_url(&request.index_path)?;
+        let client = aws.build_s3_client(&bucket)?;
+        let obj_path = object_store::path::Path::from(key.as_str());
+        let data = block_on_async(async { client.get(&obj_path).await?.bytes().await })
+            .map_err(|e| anyhow::anyhow!("reading {}: {e}", request.index_path))?;
+        let reader = ParquetRecordBatchReaderBuilder::try_new(data)?.build()?;
+        for batch in reader {
+            let batch = batch?;
+            collect_partition_rows(
+                &batch,
+                request,
+                &mut heap,
+                &mut total_matches,
+                &read_utf8_value,
+                &read_u64_value,
+            )?;
+        }
+    } else {
+        let file = std::fs::File::open(&request.index_path)
+            .map_err(|e| anyhow::anyhow!("opening {}: {e}", request.index_path))?;
+        let reader = ParquetRecordBatchReaderBuilder::try_new(file)?.build()?;
+        for batch in reader {
+            let batch = batch?;
+            collect_partition_rows(
+                &batch,
+                request,
+                &mut heap,
+                &mut total_matches,
+                &read_utf8_value,
+                &read_u64_value,
+            )?;
+        }
+    }
+
+    let mut rows: Vec<PartitionListRow> =
+        heap.into_vec().into_iter().map(|entry| entry.row).collect();
+    rows.sort_by(|left, right| {
+        left.partition_start_ts
+            .cmp(&right.partition_start_ts)
+            .then_with(|| left.partition_type.cmp(&right.partition_type))
+            .then_with(|| left.chain.cmp(&right.chain))
+            .then_with(|| left.start_block.cmp(&right.start_block))
+            .then_with(|| left.end_block.cmp(&right.end_block))
+    });
+
+    Ok(PartitionListResult {
+        partitions_index: request.index_path.clone(),
+        limit: request.limit,
+        total_matches,
+        returned_rows: rows.len(),
+        rows,
     })
 }
 
@@ -3106,6 +3436,50 @@ mod tests {
     }
 
     #[test]
+    fn test_partitions_ls_subcommand_parse() {
+        let cli = parse(&[
+            "test-cli",
+            "partitions",
+            "ls",
+            "--partitions-index",
+            "./partitions.parquet",
+            "--partition-type",
+            "day",
+            "--partition-chain",
+            "eth-mainnet",
+            "--from",
+            "2015-07-29 00:00:00",
+            "--to",
+            "2015-07-31 00:00:00",
+            "--limit",
+            "25",
+            "--json",
+        ]);
+        assert!(cli.command.is_some());
+        match cli.command.unwrap() {
+            Commands::Partitions(PartitionsCommands::Ls {
+                partitions_index,
+                partition_type,
+                partition_chain,
+                from,
+                to,
+                limit,
+                json,
+                ..
+            }) => {
+                assert_eq!(partitions_index, "./partitions.parquet");
+                assert_eq!(partition_type.as_deref(), Some("day"));
+                assert_eq!(partition_chain.as_deref(), Some("eth-mainnet"));
+                assert_eq!(from.as_deref(), Some("2015-07-29 00:00:00"));
+                assert_eq!(to.as_deref(), Some("2015-07-31 00:00:00"));
+                assert_eq!(limit, 25);
+                assert!(json);
+            }
+            _ => panic!("expected partitions ls subcommand"),
+        }
+    }
+
+    #[test]
     #[serial]
     fn test_completions_generation() {
         // Verify that shell completion generation runs without panicking
@@ -3511,5 +3885,89 @@ mod tests {
         let err = resolve_partition_bounds_from_index(&request, None)
             .expect_err("duplicate rows should be rejected");
         assert!(err.to_string().contains("ambiguous"));
+    }
+
+    #[test]
+    fn test_list_partitions_from_index_filters_sort_and_limit() {
+        use arrow::array::{StringArray, UInt64Array};
+        use arrow::record_batch::RecordBatch;
+        use parquet::arrow::ArrowWriter;
+        use std::fs::File;
+        use std::sync::Arc;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("partitions.parquet");
+
+        let schema = Arc::new(arrow::datatypes::Schema::new(vec![
+            arrow::datatypes::Field::new("chain", arrow::datatypes::DataType::Utf8, true),
+            arrow::datatypes::Field::new("partition_type", arrow::datatypes::DataType::Utf8, false),
+            arrow::datatypes::Field::new(
+                "partition_value",
+                arrow::datatypes::DataType::Utf8,
+                false,
+            ),
+            arrow::datatypes::Field::new(
+                "partition_start_ts",
+                arrow::datatypes::DataType::Utf8,
+                false,
+            ),
+            arrow::datatypes::Field::new("start_block", arrow::datatypes::DataType::UInt64, false),
+            arrow::datatypes::Field::new("end_block", arrow::datatypes::DataType::UInt64, false),
+        ]));
+
+        let batch = RecordBatch::try_new(
+            Arc::clone(&schema),
+            vec![
+                Arc::new(StringArray::from(vec![
+                    Some("eth-mainnet"),
+                    Some("eth-mainnet"),
+                    Some("eth-mainnet"),
+                    Some("btc-mainnet"),
+                ])),
+                Arc::new(StringArray::from(vec!["day", "day", "day", "day"])),
+                Arc::new(StringArray::from(vec![
+                    "2015-07-30 00:00:00",
+                    "2015-07-29 00:00:00",
+                    "2015-07-31 00:00:00",
+                    "2015-07-29 00:00:00",
+                ])),
+                Arc::new(StringArray::from(vec![
+                    "2015-07-30 00:00:00",
+                    "2015-07-29 00:00:00",
+                    "2015-07-31 00:00:00",
+                    "2015-07-29 00:00:00",
+                ])),
+                Arc::new(UInt64Array::from(vec![200_u64, 100_u64, 300_u64, 999_u64])),
+                Arc::new(UInt64Array::from(vec![300_u64, 200_u64, 400_u64, 1000_u64])),
+            ],
+        )
+        .expect("record batch");
+
+        let file = File::create(&path).expect("create parquet");
+        let mut writer = ArrowWriter::try_new(file, schema, None).expect("writer");
+        writer.write(&batch).expect("write batch");
+        writer.close().expect("close writer");
+
+        let request = PartitionListRequest {
+            index_path: path.to_string_lossy().to_string(),
+            partition_type: Some("day".to_string()),
+            chain: Some("eth-mainnet".to_string()),
+            from: Some("2015-07-29 00:00:00".to_string()),
+            to: Some("2015-07-31 00:00:00".to_string()),
+            limit: 2,
+        };
+
+        let result = list_partitions_from_index(&request, None).expect("list should succeed");
+        assert_eq!(result.total_matches, 3);
+        assert_eq!(result.returned_rows, 2);
+        assert_eq!(result.rows.len(), 2);
+        assert_eq!(result.rows[0].partition_start_ts, "2015-07-29 00:00:00");
+        assert_eq!(result.rows[0].start_block, 100);
+        assert_eq!(result.rows[1].partition_start_ts, "2015-07-30 00:00:00");
+        assert_eq!(result.rows[1].start_block, 200);
+        assert!(result
+            .rows
+            .iter()
+            .all(|row| row.chain.as_deref() == Some("eth-mainnet")));
     }
 }

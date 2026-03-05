@@ -1,22 +1,38 @@
-# Partitions CLI Migration (Phase 1)
+# Partitions CLI Migration (Phases 1-2)
 
-This document captures the first implementation slice for the `partitions <subcommand>` initiative.
+This document captures the first implementation slices for the `partitions <subcommand>` initiative.
 
 Related issues:
 
 - #182 (parent roadmap)
 - #183 (CLI namespace and migration plan)
+- #184 (`partitions ls` query command)
 
-## What this phase ships
+## What phases 1-2 ship
 
 1. Adds a grouped CLI namespace: `firehose-parquet partitions ...`
 2. Introduces `firehose-parquet partitions resolve`
 3. Keeps existing ingestion flags (`--partitions-index`, `--partition-type`, `--partition-value`) working for backward compatibility
 4. Emits a deprecation warning in ingestion mode when those legacy flags are used to drive range resolution directly
+5. Introduces `firehose-parquet partitions ls` for querying/filtering index rows
 
 ## Command behavior
 
 ### New command
+
+`firehose-parquet partitions ls` lists index rows with optional filters:
+
+- optional `--partition-type`
+- optional `--partition-chain`
+- optional `--from` / `--to` time window
+- `--limit` (default `100`)
+- optional `--json`
+
+Output is sorted ascending by `partition_start_ts`, and JSON mode returns machine-readable rows for schedulers/UI.
+
+Implementation note: rows are streamed in record batches and retained in a bounded in-memory top-N heap keyed by ascending sort order, capped by `--limit`.
+
+### Existing command
 
 `firehose-parquet partitions resolve` resolves a single partition row from `partitions.parquet` and returns exact block bounds:
 
@@ -39,27 +55,28 @@ When legacy flags are used in direct ingestion mode (without explicit `--start-b
 
 `firehose-parquet partitions resolve ...`
 
-## Process used for this phase
+## Process used for phases 1-2
 
 1. Branch from `main` using `codex/` prefix.
 2. Add CLI tree scaffolding in shared CLI crate (`firehose-parquet/src/cli.rs`).
-3. Reuse existing partition index resolution logic and wrap it in a command-focused result type.
-4. Wire the binary entrypoint (`blocks/src/bin/main.rs`) to execute the new subcommand.
-5. Add docs and examples in `README.md`.
-6. Add parsing test coverage for the new command.
-7. Run formatting + targeted checks.
+3. Reuse existing partition index resolution logic and wrap it in command-focused result types.
+4. Add partition row query/list command implementation with streaming record-batch reads.
+5. Wire the binary entrypoint (`blocks/src/bin/main.rs`) to execute new subcommands.
+6. Add docs and examples in `README.md`.
+7. Add parsing/data-path test coverage for new commands.
+8. Run formatting + targeted checks.
 
-## Validation run in this phase
+## Validation run in these phases
 
 - `cargo fmt`
 - `cargo test -p firehose-parquet test_partitions_resolve_subcommand_parse -- --nocapture`
+- `cargo test -p firehose-parquet test_partitions_ls_subcommand_parse -- --nocapture`
+- `cargo test -p firehose-parquet test_list_partitions_from_index_filters_sort_and_limit -- --nocapture`
 - `cargo check -p blocks`
 
 ## Follow-up phases (not included here)
 
 - `firehose-parquet partitions build`
-- `firehose-parquet partitions ls`
 - `firehose-parquet partitions validate`
 - `firehose-parquet partitions shard`
 - alias/deprecation lifecycle tests and eventual legacy removal
-
