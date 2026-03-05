@@ -68,6 +68,13 @@ Examples:
     --partition-type day \\
     --partition-value '2015-07-30 00:00:00' \\
     --partition-chain eth-mainnet
+
+  # Resolve range from global S3 index shared across chains
+  firehose-parquet --endpoint https://eth.firehose.pinax.network:443 \\
+    --partitions-index s3://my-bucket/partitions.parquet \\
+    --partition-type hour \\
+    --partition-value '2015-07-30 15:00:00' \\
+    --partition-chain eth-mainnet
 "
 )]
 struct Cli {
