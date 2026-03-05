@@ -1,6 +1,9 @@
 use anyhow::{anyhow, Result};
 use clap::Parser;
-use firehose_parquet::cli::{build_config, init_tracing, load_dotenv, Commands, CommonArgs};
+use firehose_parquet::cli::{
+    build_config, init_tracing, load_dotenv, parse_partition_bounds_request,
+    resolve_partition_bounds_from_index, AwsConfig, Commands, CommonArgs,
+};
 use firehose_parquet::config::BlockMetadata;
 use firehose_parquet::cursor::{CursorLocation, CursorState};
 use firehose_parquet::encode::{parse_encode_bytes, EncodeBytes};
@@ -580,6 +583,36 @@ async fn main() -> Result<()> {
     let mut extended = cli.extended;
     let bytes_encoding_str = cli.bytes_encoding.clone();
     let mut config = build_config(&cli.common)?;
+
+    let partition_bounds_request = parse_partition_bounds_request(&cli.common)?;
+    let has_explicit_range = cli.common.start_block.is_some() || cli.common.stop_block.is_some();
+    if partition_bounds_request.is_some() && has_explicit_range {
+        warn!(
+            "--partitions-index/--partition-type/--partition-value ignored because --start-block/--stop-block was provided"
+        );
+    }
+    if let Some(ref request) = partition_bounds_request {
+        if !has_explicit_range {
+            let aws = AwsConfig {
+                aws_access_key_id: config.aws_access_key_id.clone(),
+                aws_secret_access_key: config.aws_secret_access_key.clone(),
+                aws_session_token: config.aws_session_token.clone(),
+                aws_region: config.aws_region.clone(),
+                aws_endpoint_url: config.aws_endpoint_url.clone(),
+            };
+            let bounds = resolve_partition_bounds_from_index(request, Some(&aws))?;
+            config.start_block = Some(bounds.start_block);
+            config.stop_block = Some(bounds.stop_block);
+            info!(
+                partitions_index = %request.index_path,
+                partition_type = %request.partition_type,
+                partition_value = %request.partition_value,
+                start_block = bounds.start_block,
+                stop_block = bounds.stop_block,
+                "resolved block range from partitions index"
+            );
+        }
+    }
 
     // Fetch endpoint info for auto-detection of encoding, extended features,
     // and chain_name-based output directory.
