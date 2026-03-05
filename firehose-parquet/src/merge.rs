@@ -19,7 +19,11 @@ use parquet::file::metadata::KeyValue;
 use parquet::file::properties::WriterProperties;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use tracing::info;
+use std::time::Duration;
+use tracing::{info, warn};
+
+const S3_READ_MAX_ATTEMPTS: usize = 5;
+const S3_READ_RETRY_BASE_DELAY_MS: u64 = 100;
 
 /// Configuration for a merge operation.
 pub struct MergeConfig {
@@ -513,6 +517,11 @@ fn process_s3_partition(
     } else {
         partition_label
     };
+    let table = partition_label
+        .split('/')
+        .next()
+        .filter(|name| !name.is_empty())
+        .unwrap_or("(root)");
 
     if objects.len() <= 1 {
         result.partitions_skipped += 1;
@@ -525,8 +534,14 @@ fn process_s3_partition(
     let mut all_batches: Vec<RecordBatch> = Vec::new();
     let mut file_kv_metadata: Option<Vec<KeyValue>> = None;
     for obj in objects {
-        let data = block_on_async(async { client.get(&obj.location).await?.bytes().await })
-            .map_err(|e| anyhow::anyhow!("reading s3://{bucket}/{}: {e}", obj.location))?;
+        let data = read_s3_bytes_with_retry(
+            client,
+            bucket,
+            &obj.location,
+            table,
+            partition_label,
+            S3_READ_MAX_ATTEMPTS,
+        )?;
 
         let builder = ParquetRecordBatchReaderBuilder::try_new(data)?;
         if file_kv_metadata.is_none() {
@@ -632,6 +647,48 @@ fn process_s3_partition(
     result.files_written += files_written;
     result.partitions_merged += 1;
     Ok(())
+}
+
+fn read_s3_bytes_with_retry(
+    client: &Arc<object_store::aws::AmazonS3>,
+    bucket: &str,
+    location: &object_store::path::Path,
+    table: &str,
+    partition_label: &str,
+    max_attempts: usize,
+) -> Result<bytes::Bytes> {
+    let mut attempt = 0usize;
+
+    loop {
+        attempt += 1;
+        match block_on_async(async { client.get(location).await?.bytes().await }) {
+            Ok(data) => return Ok(data),
+            Err(error) => {
+                if attempt >= max_attempts {
+                    return Err(anyhow::anyhow!(
+                        "failed reading s3://{bucket}/{location} after {attempt} attempts (table={table}, partition={partition_label}): {error}"
+                    ));
+                }
+
+                let retry_in = Duration::from_millis(
+                    S3_READ_RETRY_BASE_DELAY_MS * 2u64.pow((attempt - 1) as u32),
+                );
+
+                warn!(
+                    s3_key = %location,
+                    table,
+                    partition = partition_label,
+                    attempt,
+                    max_attempts,
+                    retry_in_ms = retry_in.as_millis(),
+                    error = %error,
+                    "failed reading S3 object during merge; retrying"
+                );
+
+                std::thread::sleep(retry_in);
+            }
+        }
+    }
 }
 
 fn print_s3_table_header(prefix: &str, partition_key: &str, current_table: &mut Option<String>) {
