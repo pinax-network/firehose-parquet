@@ -458,6 +458,7 @@ async fn main() -> Result<()> {
                 path,
                 chain,
                 table,
+                hash_strategy,
                 no_fail_fast,
                 report_json,
                 registry_path,
@@ -478,6 +479,7 @@ async fn main() -> Result<()> {
                 let opts = firehose_parquet::verify::VerifyOptions {
                     chain: chain.clone(),
                     table: table.clone(),
+                    hash_strategy: Some(hash_strategy.clone()),
                     no_fail_fast: *no_fail_fast,
                     report_json: report_json.clone(),
                     registry_path: registry_path.clone(),

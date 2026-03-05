@@ -169,6 +169,7 @@ Commands:
   scan         Read and inspect Parquet files (schema, row counts, sample rows)
   inspect      Display full metadata for a single Parquet file
   validate     Check partition integrity (gaps, ordering, duplicates)
+  verify       Verify table roots and protocol checks (chain-aware hash strategy)
   rollup       Roll up fine-grained partitions into coarser ones (e.g. minute → date)
   merge        Consolidate small part files within each partition into larger files
   truncate     Delete parquet files with optional partition filtering
@@ -297,6 +298,23 @@ firehose-parquet validate s3://my-bucket/solana/blocks/ --allow-gaps
 |---|---|---|
 | `--cross-partition` | `false` | Check continuity between adjacent partitions |
 | `--allow-gaps` | `false` | Suppress gap reporting (useful for Solana skipped slots) |
+
+### `verify` — Root + Protocol Verification
+
+Verifies deterministic partition Merkle roots and chain/table-specific protocol checks.
+
+```bash
+# EVM defaults to keccak256
+firehose-parquet verify ./output/evm/mainnet/blocks --chain evm --table blocks
+
+# Bitcoin/Solana default to sha256 via --hash-strategy auto
+firehose-parquet verify ./output/bitcoin/mainnet/blocks --chain bitcoin --table blocks
+
+# Explicit strategy override
+firehose-parquet verify ./output/solana/mainnet/blocks --chain solana --hash-strategy sha256
+```
+
+See [Cross-chain verifiability hash strategy](docs/verifiability-hash-strategy.md) for defaults and normalization rules.
 
 ### `rollup` — Roll Up Partitions
 

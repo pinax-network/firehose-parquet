@@ -2,6 +2,10 @@
 
 This document is a tool-agnostic map of the `firehose-parquet` workspace: where code lives, how data flows, and where to edit for common tasks.
 
+Related design docs:
+
+- `docs/verifiability-hash-strategy.md`: cross-chain verify hash defaults, normalization rules, and onboarding path.
+
 ## Workspace Layout
 
 - `Cargo.toml` (root): Rust workspace with three members: `firehose-protos`, `firehose-parquet`, `blocks`.
@@ -87,4 +91,3 @@ This document is a tool-agnostic map of the `firehose-parquet` workspace: where 
   - protobuf Rust modules under Cargo `OUT_DIR` (created during `firehose-protos` build)
 - Runtime output examples (produced data, not source):
   - `output/` (local Parquet output samples)
-
