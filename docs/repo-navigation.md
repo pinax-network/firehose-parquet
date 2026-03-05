@@ -9,6 +9,7 @@ Related design docs:
 ## Workspace Layout
 
 - `Cargo.toml` (root): Rust workspace with three members: `firehose-protos`, `firehose-parquet`, `blocks`.
+- `docs/verifiability-artifact-runbook.md`: operational guidance for publishing and retaining verify artifacts (`merkle_roots.parquet`, `verify_runs/<run_id>/report.json`).
 - `firehose-protos/`: protobuf compilation crate.
   - `firehose-protos/build.rs`: compiles `proto/*.proto` into Rust modules with `tonic-prost-build`.
   - `firehose-protos/src/lib.rs`: exposes compiled protobuf modules and aliases (`firehose`, `eth`, `solana`, etc.).

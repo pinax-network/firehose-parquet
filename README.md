@@ -382,6 +382,9 @@ firehose-parquet verify ./output/evm/mainnet/blocks --profile quick
 
 # Explicit checks override profile defaults
 firehose-parquet verify ./output/evm/mainnet/blocks --checks roots,protocol
+
+# Publish report to the suggested artifact path
+firehose-parquet verify ./output/evm/mainnet/blocks --publish-report
 ```
 
 | Flag | Default | Description |
@@ -390,12 +393,16 @@ firehose-parquet verify ./output/evm/mainnet/blocks --checks roots,protocol
 | `--profile` | `standard` | Preset families: `quick` (roots), `standard` (roots+protocol), `deep` (adds continuity+completeness) |
 | `--scope` | `table` | Metadata scope tag in reports: `chain`, `table`, `partition`, `run` |
 | `--hash-strategy` | `auto` | Hash strategy for leaves+Merkle nodes: `auto`, `keccak256`, `sha256` |
+| `--publish-report` | `false` | Publish `report.json` to the suggested verify artifact path |
+| `--publish-report-path` | *(suggested path)* | Override where the published report is written (local or `s3://`) |
 
 Migration note: existing verify flags (`--no-fail-fast`, `--report-json`, `--registry-path`, `--update-registry`) remain unchanged.
 
 See [Cross-chain verifiability hash strategy](docs/verifiability-hash-strategy.md) for defaults and normalization rules.
 
 See [Verify report contract](docs/verify-report-contract.md) for schema versioning, run metadata fields, and artifact path guidance.
+
+See [Verifiability artifact runbook](docs/verifiability-artifact-runbook.md) for registry/report lifecycle, S3 publication guidance, and operational workflows.
 
 ### `rollup` — Roll Up Partitions
 

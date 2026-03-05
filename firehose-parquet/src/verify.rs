@@ -140,6 +140,8 @@ pub struct VerifyOptions {
     pub scope: VerifyScope,
     pub no_fail_fast: bool,
     pub report_json: Option<PathBuf>,
+    pub publish_report: bool,
+    pub publish_report_path: Option<String>,
     pub registry_path: Option<String>,
     pub update_registry: bool,
 }
@@ -272,6 +274,7 @@ pub struct VerifyReport {
     pub registry_path: String,
     pub suggested_run_report_path: String,
     pub report_json_path: Option<String>,
+    pub published_report_path: Option<String>,
     pub algorithm: String,
     pub summary: VerifySummary,
     pub findings: Vec<VerifyFinding>,
@@ -307,6 +310,9 @@ impl VerifyReport {
         println!("  suggested rpt: {}", self.suggested_run_report_path);
         if let Some(ref report_path) = self.report_json_path {
             println!("  report json:   {}", report_path);
+        }
+        if let Some(ref report_path) = self.published_report_path {
+            println!("  published rpt: {}", report_path);
         }
         println!("  algorithm:     {}", self.algorithm);
         println!("  partitions:    {}", self.summary.partitions_scanned);
@@ -623,6 +629,15 @@ pub fn verify_parquet(
 
     let run_finished = OffsetDateTime::now_utc();
     let duration_ms = (run_finished - run_started).whole_milliseconds().max(0) as u64;
+    let published_report_path = if opts.publish_report || opts.publish_report_path.is_some() {
+        Some(
+            opts.publish_report_path
+                .clone()
+                .unwrap_or_else(|| suggested_run_report_path.clone()),
+        )
+    } else {
+        None
+    };
 
     let report = VerifyReport {
         report_schema_version: VERIFY_REPORT_SCHEMA_VERSION.to_string(),
@@ -644,6 +659,7 @@ pub fn verify_parquet(
             .report_json
             .as_ref()
             .map(|path| path.display().to_string()),
+        published_report_path,
         algorithm,
         summary: VerifySummary {
             partitions_scanned: partition_roots.len(),
@@ -661,10 +677,15 @@ pub fn verify_parquet(
         capability_findings,
     };
 
+    let bytes = serde_json::to_vec_pretty(&report)?;
+
     if let Some(ref report_path) = opts.report_json {
-        let bytes = serde_json::to_vec_pretty(&report)?;
-        std::fs::write(report_path, bytes)
+        std::fs::write(report_path, &bytes)
             .with_context(|| format!("writing JSON report to {}", report_path.display()))?;
+    }
+
+    if let Some(ref publish_path) = report.published_report_path {
+        write_report_bytes(publish_path, aws, &bytes)?;
     }
 
     Ok(report)
@@ -1626,6 +1647,28 @@ fn write_registry(
     Ok(())
 }
 
+fn write_report_bytes(path: &str, aws: Option<&AwsConfig>, data: &[u8]) -> Result<()> {
+    if path.starts_with("s3://") {
+        let aws = aws.ok_or_else(|| anyhow!("AWS config required for S3 report publish path"))?;
+        let (bucket, key) = parse_s3_url(path)?;
+        let client = aws.build_s3_client(&bucket)?;
+        let location = object_store::path::Path::from(key.as_str());
+        let payload = object_store::PutPayload::from(bytes::Bytes::copy_from_slice(data));
+        block_on_async(async { client.put(&location, payload).await })
+            .map_err(|e| anyhow!("writing report to s3://{bucket}/{}: {e}", location))?;
+    } else {
+        let file_path = PathBuf::from(path);
+        if let Some(parent) = file_path.parent() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("creating report dir {}", parent.display()))?;
+        }
+        std::fs::write(&file_path, data)
+            .with_context(|| format!("writing report {}", file_path.display()))?;
+    }
+
+    Ok(())
+}
+
 fn read_registry_bytes(path: &str, aws: Option<&AwsConfig>) -> Result<Option<Vec<u8>>> {
     if path.starts_with("s3://") {
         let aws = aws.ok_or_else(|| anyhow!("AWS config required for S3 registry path"))?;
@@ -1676,6 +1719,8 @@ mod tests {
             scope: VerifyScope::Table,
             no_fail_fast: false,
             report_json: None,
+            publish_report: false,
+            publish_report_path: None,
             registry_path: None,
             update_registry: false,
         }
