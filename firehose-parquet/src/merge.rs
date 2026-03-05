@@ -20,7 +20,7 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
-use tracing::{info, warn};
+use tracing::{info, info_span, warn};
 
 const S3_READ_MAX_ATTEMPTS: usize = 5;
 const S3_READ_RETRY_BASE_DELAY_MS: u64 = 100;
@@ -724,11 +724,22 @@ fn read_s3_bytes_with_retry(
     partition_label: &str,
     max_attempts: usize,
 ) -> Result<bytes::Bytes> {
+    let s3_uri = format!("s3://{bucket}/{location}");
     let mut attempt = 0usize;
 
     loop {
         attempt += 1;
-        match block_on_async(async { client.get(location).await?.bytes().await }) {
+        let read_span = info_span!(
+            "merge_s3_read",
+            s3_key = %location,
+            s3_uri = %s3_uri,
+            table,
+            partition = partition_label,
+            attempt,
+            max_attempts,
+        );
+
+        match read_span.in_scope(|| block_on_async(async { client.get(location).await?.bytes().await })) {
             Ok(data) => return Ok(data),
             Err(error) => {
                 if attempt >= max_attempts {
@@ -743,13 +754,14 @@ fn read_s3_bytes_with_retry(
 
                 warn!(
                     s3_key = %location,
+                    s3_uri = %s3_uri,
                     table,
                     partition = partition_label,
                     attempt,
                     max_attempts,
                     retry_in_ms = retry_in.as_millis(),
                     error = %error,
-                    "failed reading S3 object during merge; retrying"
+                    "failed reading S3 object during merge (attempt {attempt}/{max_attempts}) for {s3_uri} [table={table}, partition={partition_label}]; retrying"
                 );
 
                 std::thread::sleep(retry_in);
