@@ -12,7 +12,7 @@ use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use parquet::arrow::ArrowWriter;
 use serde::Serialize;
 use sha2::{Digest as ShaDigest, Sha256};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs::File;
 use std::path::{Path, PathBuf};
 use time::format_description::well_known::Rfc3339;
@@ -52,6 +52,43 @@ impl HashStrategy {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, clap::ValueEnum, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VerifyCheck {
+    Roots,
+    Protocol,
+    Continuity,
+    Completeness,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VerifyProfile {
+    Quick,
+    Standard,
+    Deep,
+}
+
+impl VerifyProfile {
+    fn default_checks(self) -> BTreeSet<VerifyCheck> {
+        let mut checks = BTreeSet::new();
+        checks.insert(VerifyCheck::Roots);
+        match self {
+            VerifyProfile::Quick => checks,
+            VerifyProfile::Standard => {
+                checks.insert(VerifyCheck::Protocol);
+                checks
+            }
+            VerifyProfile::Deep => {
+                checks.insert(VerifyCheck::Protocol);
+                checks.insert(VerifyCheck::Continuity);
+                checks.insert(VerifyCheck::Completeness);
+                checks
+            }
+        }
+    }
+}
+
 fn parse_hash_strategy(value: &str) -> Result<Option<HashStrategy>> {
     let lowered = value.to_ascii_lowercase();
     match lowered.as_str() {
@@ -81,15 +118,71 @@ fn resolve_hash_strategy(chain: &str, configured: Option<&str>) -> Result<HashSt
     Ok(default_hash_strategy_for_chain(chain))
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VerifyScope {
+    Chain,
+    Table,
+    Partition,
+    Run,
+}
+
 #[derive(Debug, Clone)]
 pub struct VerifyOptions {
     pub chain: String,
     pub table: String,
     pub hash_strategy: Option<String>,
+    pub checks: Vec<VerifyCheck>,
+    pub profile: VerifyProfile,
+    pub scope: VerifyScope,
     pub no_fail_fast: bool,
     pub report_json: Option<PathBuf>,
     pub registry_path: Option<String>,
     pub update_registry: bool,
+}
+
+impl VerifyOptions {
+    pub fn effective_checks(&self) -> BTreeSet<VerifyCheck> {
+        if self.checks.is_empty() {
+            return self.profile.default_checks();
+        }
+
+        self.checks.iter().copied().collect()
+    }
+
+    fn runs_roots(&self) -> bool {
+        self.effective_checks().contains(&VerifyCheck::Roots)
+    }
+
+    fn runs_protocol(&self) -> bool {
+        self.effective_checks().contains(&VerifyCheck::Protocol)
+    }
+}
+
+fn verify_check_name(check: VerifyCheck) -> &'static str {
+    match check {
+        VerifyCheck::Roots => "roots",
+        VerifyCheck::Protocol => "protocol",
+        VerifyCheck::Continuity => "continuity",
+        VerifyCheck::Completeness => "completeness",
+    }
+}
+
+fn verify_profile_name(profile: VerifyProfile) -> &'static str {
+    match profile {
+        VerifyProfile::Quick => "quick",
+        VerifyProfile::Standard => "standard",
+        VerifyProfile::Deep => "deep",
+    }
+}
+
+fn verify_scope_name(scope: VerifyScope) -> &'static str {
+    match scope {
+        VerifyScope::Chain => "chain",
+        VerifyScope::Table => "table",
+        VerifyScope::Partition => "partition",
+        VerifyScope::Run => "run",
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -120,7 +213,23 @@ pub struct VerifySummary {
     pub protocol_passed: usize,
     pub protocol_failed: usize,
     pub protocol_not_verifiable: usize,
+    pub capability_not_verifiable: usize,
     pub wrote_registry: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CapabilityStatus {
+    NotVerifiable,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct CapabilityFinding {
+    pub chain: String,
+    pub table: String,
+    pub check: VerifyCheck,
+    pub status: CapabilityStatus,
+    pub details: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -146,12 +255,17 @@ pub struct ProtocolCheckFinding {
 pub struct VerifyReport {
     pub chain: String,
     pub table: String,
+    pub scope: VerifyScope,
+    pub requested_checks: Vec<VerifyCheck>,
+    pub effective_checks: Vec<VerifyCheck>,
+    pub profile: VerifyProfile,
     pub data_path: String,
     pub registry_path: String,
     pub algorithm: String,
     pub summary: VerifySummary,
     pub findings: Vec<VerifyFinding>,
     pub protocol_findings: Vec<ProtocolCheckFinding>,
+    pub capability_findings: Vec<CapabilityFinding>,
 }
 
 impl VerifyReport {
@@ -161,6 +275,16 @@ impl VerifyReport {
 
     pub fn print(&self) {
         println!("Verifying {}:{}", self.chain, self.table);
+        println!("  scope:         {}", verify_scope_name(self.scope));
+        println!("  profile:       {}", verify_profile_name(self.profile));
+        println!(
+            "  checks:        {}",
+            self.effective_checks
+                .iter()
+                .map(|check| verify_check_name(*check).to_string())
+                .collect::<Vec<_>>()
+                .join(",")
+        );
         println!("  data path:     {}", self.data_path);
         println!("  registry path: {}", self.registry_path);
         println!("  algorithm:     {}", self.algorithm);
@@ -171,6 +295,10 @@ impl VerifyReport {
         println!("  protocol pass: {}", self.summary.protocol_passed);
         println!("  protocol fail: {}", self.summary.protocol_failed);
         println!("  protocol n/v:  {}", self.summary.protocol_not_verifiable);
+        println!(
+            "  capability n/v:{}",
+            self.summary.capability_not_verifiable
+        );
         println!(
             "  registry write:{}",
             if self.summary.wrote_registry {
@@ -217,6 +345,17 @@ impl VerifyReport {
                     println!("    block_num={}", block_num);
                 }
                 println!("    details={}", p.details);
+            }
+        }
+
+        if !self.capability_findings.is_empty() {
+            println!("\nCapability checks:");
+            for c in &self.capability_findings {
+                println!(
+                    "  - check={} status=not_verifiable",
+                    verify_check_name(c.check)
+                );
+                println!("    details={}", c.details);
             }
         }
     }
@@ -275,6 +414,9 @@ pub fn verify_parquet(
     aws: Option<&AwsConfig>,
     opts: &VerifyOptions,
 ) -> Result<VerifyReport> {
+    let effective_checks = opts.effective_checks();
+    let runs_roots = opts.runs_roots();
+    let runs_protocol = opts.runs_protocol();
     let hash_strategy = resolve_hash_strategy(&opts.chain, opts.hash_strategy.as_deref())?;
     let algorithm = hash_strategy.as_str().to_string();
 
@@ -296,120 +438,123 @@ pub fn verify_parquet(
         return Err(anyhow!("no parquet files found in {}", path));
     }
 
-    let (registry_exists, mut registry) = load_registry(&registry_path, aws)?;
-
     let mut findings = Vec::new();
     let mut matches = 0usize;
     let mut missing_expected = 0usize;
     let mut mismatches = 0usize;
-    let mut needs_registry_write = !registry_exists;
+    let wrote_registry = if runs_roots {
+        let (registry_exists, mut registry) = load_registry(&registry_path, aws)?;
+        let mut needs_registry_write = !registry_exists;
 
-    for (partition, computed_root) in &partition_roots {
-        let key = registry_key(&opts.chain, &opts.table, partition);
-        match registry.get(&key) {
-            Some(row) if row.algorithm.as_str() != algorithm.as_str() => {
-                mismatches += 1;
-                findings.push(VerifyFinding {
-                    chain: opts.chain.clone(),
-                    table: opts.table.clone(),
-                    partition: partition.clone(),
-                    status: FindingStatus::Mismatch,
-                    expected_root: Some(row.merkle_root.clone()),
-                    computed_root: computed_root.clone(),
-                    error: Some(format!(
-                        "algorithm mismatch: registry={} runtime={}",
-                        row.algorithm, algorithm
-                    )),
-                });
-                if opts.update_registry {
-                    needs_registry_write = true;
-                    registry.insert(
-                        key,
-                        RegistryRow {
-                            chain: opts.chain.clone(),
-                            table: opts.table.clone(),
-                            partition: partition.clone(),
-                            algorithm: algorithm.clone(),
-                            merkle_root: computed_root.clone(),
-                            updated_at: now_rfc3339(),
-                        },
-                    );
-                }
-                if !opts.no_fail_fast {
-                    break;
-                }
-            }
-            Some(row) if row.merkle_root == *computed_root => {
-                matches += 1;
-                findings.push(VerifyFinding {
-                    chain: opts.chain.clone(),
-                    table: opts.table.clone(),
-                    partition: partition.clone(),
-                    status: FindingStatus::Match,
-                    expected_root: Some(row.merkle_root.clone()),
-                    computed_root: computed_root.clone(),
-                    error: None,
-                });
-            }
-            Some(row) => {
-                mismatches += 1;
-                findings.push(VerifyFinding {
-                    chain: opts.chain.clone(),
-                    table: opts.table.clone(),
-                    partition: partition.clone(),
-                    status: FindingStatus::Mismatch,
-                    expected_root: Some(row.merkle_root.clone()),
-                    computed_root: computed_root.clone(),
-                    error: None,
-                });
-                if opts.update_registry {
-                    needs_registry_write = true;
-                    registry.insert(
-                        key,
-                        RegistryRow {
-                            chain: opts.chain.clone(),
-                            table: opts.table.clone(),
-                            partition: partition.clone(),
-                            algorithm: algorithm.clone(),
-                            merkle_root: computed_root.clone(),
-                            updated_at: now_rfc3339(),
-                        },
-                    );
-                }
-                if !opts.no_fail_fast {
-                    break;
-                }
-            }
-            None => {
-                missing_expected += 1;
-                findings.push(VerifyFinding {
-                    chain: opts.chain.clone(),
-                    table: opts.table.clone(),
-                    partition: partition.clone(),
-                    status: FindingStatus::MissingExpected,
-                    expected_root: None,
-                    computed_root: computed_root.clone(),
-                    error: None,
-                });
-                needs_registry_write = true;
-                registry.insert(
-                    key,
-                    RegistryRow {
+        for (partition, computed_root) in &partition_roots {
+            let key = registry_key(&opts.chain, &opts.table, partition);
+            match registry.get(&key) {
+                Some(row) if row.algorithm.as_str() != algorithm.as_str() => {
+                    mismatches += 1;
+                    findings.push(VerifyFinding {
                         chain: opts.chain.clone(),
                         table: opts.table.clone(),
                         partition: partition.clone(),
-                        algorithm: algorithm.clone(),
-                        merkle_root: computed_root.clone(),
-                        updated_at: now_rfc3339(),
-                    },
-                );
+                        status: FindingStatus::Mismatch,
+                        expected_root: Some(row.merkle_root.clone()),
+                        computed_root: computed_root.clone(),
+                        error: Some(format!(
+                            "algorithm mismatch: registry={} runtime={}",
+                            row.algorithm, algorithm
+                        )),
+                    });
+                    if opts.update_registry {
+                        needs_registry_write = true;
+                        registry.insert(
+                            key,
+                            RegistryRow {
+                                chain: opts.chain.clone(),
+                                table: opts.table.clone(),
+                                partition: partition.clone(),
+                                algorithm: algorithm.clone(),
+                                merkle_root: computed_root.clone(),
+                                updated_at: now_rfc3339(),
+                            },
+                        );
+                    }
+                    if !opts.no_fail_fast {
+                        break;
+                    }
+                }
+                Some(row) if row.merkle_root == *computed_root => {
+                    matches += 1;
+                    findings.push(VerifyFinding {
+                        chain: opts.chain.clone(),
+                        table: opts.table.clone(),
+                        partition: partition.clone(),
+                        status: FindingStatus::Match,
+                        expected_root: Some(row.merkle_root.clone()),
+                        computed_root: computed_root.clone(),
+                        error: None,
+                    });
+                }
+                Some(row) => {
+                    mismatches += 1;
+                    findings.push(VerifyFinding {
+                        chain: opts.chain.clone(),
+                        table: opts.table.clone(),
+                        partition: partition.clone(),
+                        status: FindingStatus::Mismatch,
+                        expected_root: Some(row.merkle_root.clone()),
+                        computed_root: computed_root.clone(),
+                        error: None,
+                    });
+                    if opts.update_registry {
+                        needs_registry_write = true;
+                        registry.insert(
+                            key,
+                            RegistryRow {
+                                chain: opts.chain.clone(),
+                                table: opts.table.clone(),
+                                partition: partition.clone(),
+                                algorithm: algorithm.clone(),
+                                merkle_root: computed_root.clone(),
+                                updated_at: now_rfc3339(),
+                            },
+                        );
+                    }
+                    if !opts.no_fail_fast {
+                        break;
+                    }
+                }
+                None => {
+                    missing_expected += 1;
+                    findings.push(VerifyFinding {
+                        chain: opts.chain.clone(),
+                        table: opts.table.clone(),
+                        partition: partition.clone(),
+                        status: FindingStatus::MissingExpected,
+                        expected_root: None,
+                        computed_root: computed_root.clone(),
+                        error: None,
+                    });
+                    needs_registry_write = true;
+                    registry.insert(
+                        key,
+                        RegistryRow {
+                            chain: opts.chain.clone(),
+                            table: opts.table.clone(),
+                            partition: partition.clone(),
+                            algorithm: algorithm.clone(),
+                            merkle_root: computed_root.clone(),
+                            updated_at: now_rfc3339(),
+                        },
+                    );
+                }
             }
         }
-    }
 
-    let wrote_registry = if needs_registry_write {
-        write_registry(&registry_path, aws, &registry)?;
-        true
+        if needs_registry_write {
+            write_registry(&registry_path, aws, &registry)?;
+            true
+        } else {
+            false
+        }
     } else {
         false
     };
@@ -417,7 +562,13 @@ pub fn verify_parquet(
     let mut protocol_passed = 0usize;
     let mut protocol_failed = 0usize;
     let mut protocol_not_verifiable = 0usize;
-    for finding in &scan_output.protocol_findings {
+    let protocol_findings = if runs_protocol {
+        scan_output.protocol_findings
+    } else {
+        Vec::new()
+    };
+
+    for finding in &protocol_findings {
         match finding.status {
             ProtocolCheckStatus::Pass => protocol_passed += 1,
             ProtocolCheckStatus::Fail => protocol_failed += 1,
@@ -425,9 +576,34 @@ pub fn verify_parquet(
         }
     }
 
+    let mut capability_findings = Vec::new();
+    if effective_checks.contains(&VerifyCheck::Continuity) {
+        capability_findings.push(CapabilityFinding {
+            chain: opts.chain.clone(),
+            table: opts.table.clone(),
+            check: VerifyCheck::Continuity,
+            status: CapabilityStatus::NotVerifiable,
+            details: "continuity checks are not yet implemented under verify; use `validate` for sequence integrity checks"
+                .to_string(),
+        });
+    }
+    if effective_checks.contains(&VerifyCheck::Completeness) {
+        capability_findings.push(CapabilityFinding {
+            chain: opts.chain.clone(),
+            table: opts.table.clone(),
+            check: VerifyCheck::Completeness,
+            status: CapabilityStatus::NotVerifiable,
+            details: "completeness checks are not yet implemented under verify".to_string(),
+        });
+    }
+
     let report = VerifyReport {
         chain: opts.chain.clone(),
         table: opts.table.clone(),
+        scope: opts.scope,
+        requested_checks: opts.checks.clone(),
+        effective_checks: effective_checks.iter().copied().collect(),
+        profile: opts.profile,
         data_path: path.to_string(),
         registry_path,
         algorithm,
@@ -439,10 +615,12 @@ pub fn verify_parquet(
             protocol_passed,
             protocol_failed,
             protocol_not_verifiable,
+            capability_not_verifiable: capability_findings.len(),
             wrote_registry,
         },
         findings,
-        protocol_findings: scan_output.protocol_findings,
+        protocol_findings,
+        capability_findings,
     };
 
     if let Some(ref report_path) = opts.report_json {
@@ -537,7 +715,7 @@ fn collect_partition_roots_local(
             .or_default()
             .extend(leaves);
 
-        if !opts.no_fail_fast && has_protocol_failure(partition_state) {
+        if opts.runs_protocol() && !opts.no_fail_fast && has_protocol_failure(partition_state) {
             break;
         }
     }
@@ -548,7 +726,11 @@ fn collect_partition_roots_local(
     }
     Ok(ScanOutput {
         partition_roots: roots,
-        protocol_findings: finalize_protocol_findings(opts, &protocol_state),
+        protocol_findings: if opts.runs_protocol() {
+            finalize_protocol_findings(opts, &protocol_state)
+        } else {
+            Vec::new()
+        },
     })
 }
 
@@ -595,7 +777,7 @@ fn collect_partition_roots_s3(
             .or_default()
             .extend(leaves);
 
-        if !opts.no_fail_fast && has_protocol_failure(partition_state) {
+        if opts.runs_protocol() && !opts.no_fail_fast && has_protocol_failure(partition_state) {
             break;
         }
     }
@@ -606,7 +788,11 @@ fn collect_partition_roots_s3(
     }
     Ok(ScanOutput {
         partition_roots: roots,
-        protocol_findings: finalize_protocol_findings(opts, &protocol_state),
+        protocol_findings: if opts.runs_protocol() {
+            finalize_protocol_findings(opts, &protocol_state)
+        } else {
+            Vec::new()
+        },
     })
 }
 
@@ -623,7 +809,9 @@ fn read_parquet_leaves_local(
     let mut leaves = Vec::new();
     for maybe_batch in reader {
         let batch = maybe_batch?;
-        run_protocol_checks_for_batch(opts, &batch, protocol_state);
+        if opts.runs_protocol() {
+            run_protocol_checks_for_batch(opts, &batch, protocol_state);
+        }
         for row in 0..batch.num_rows() {
             let mut encoded = Vec::new();
             for (idx, field) in batch.schema().fields().iter().enumerate() {
@@ -655,7 +843,9 @@ fn read_parquet_leaves_s3(
     let mut leaves = Vec::new();
     for maybe_batch in reader {
         let batch = maybe_batch?;
-        run_protocol_checks_for_batch(opts, &batch, protocol_state);
+        if opts.runs_protocol() {
+            run_protocol_checks_for_batch(opts, &batch, protocol_state);
+        }
         for row in 0..batch.num_rows() {
             let mut encoded = Vec::new();
             for (idx, field) in batch.schema().fields().iter().enumerate() {
@@ -1377,5 +1567,45 @@ fn read_registry_bytes(path: &str, aws: Option<&AwsConfig>) -> Result<Option<Vec
         let data = std::fs::read(&pathbuf)
             .with_context(|| format!("reading registry {}", pathbuf.display()))?;
         Ok(Some(data))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{VerifyCheck, VerifyOptions, VerifyProfile, VerifyScope};
+
+    fn base_opts() -> VerifyOptions {
+        VerifyOptions {
+            chain: "evm".to_string(),
+            table: "blocks".to_string(),
+            checks: vec![],
+            profile: VerifyProfile::Standard,
+            scope: VerifyScope::Table,
+            no_fail_fast: false,
+            report_json: None,
+            registry_path: None,
+            update_registry: false,
+        }
+    }
+
+    #[test]
+    fn profile_standard_defaults_to_roots_and_protocol() {
+        let opts = base_opts();
+        let checks = opts.effective_checks();
+
+        assert!(checks.contains(&VerifyCheck::Roots));
+        assert!(checks.contains(&VerifyCheck::Protocol));
+        assert_eq!(checks.len(), 2);
+    }
+
+    #[test]
+    fn explicit_checks_override_profile_defaults() {
+        let mut opts = base_opts();
+        opts.profile = VerifyProfile::Deep;
+        opts.checks = vec![VerifyCheck::Roots];
+
+        let checks = opts.effective_checks();
+        assert!(checks.contains(&VerifyCheck::Roots));
+        assert_eq!(checks.len(), 1);
     }
 }

@@ -417,6 +417,12 @@ Examples:
   # Verify EVM blocks and auto-create missing root registry entries
   firehose-parquet verify ./output/evm/mainnet/blocks --chain evm --table blocks
 
+  # Quick profile (roots only)
+  firehose-parquet verify ./output/evm/mainnet/blocks --profile quick
+
+  # Explicitly select checks regardless of profile
+  firehose-parquet verify ./output/evm/mainnet/blocks --checks roots,protocol
+
   # Continue scanning all partitions (no fail-fast) and emit JSON report
   firehose-parquet verify ./output/evm/mainnet/blocks --no-fail-fast --report-json verify-report.json
 
@@ -442,6 +448,15 @@ Examples:
         /// Hash strategy used for leaf+merkle hashing (auto, keccak256, sha256)
         #[arg(long, default_value = "auto")]
         hash_strategy: String,
+        /// Check families to run (`roots`, `protocol`, `continuity`, `completeness`)
+        #[arg(long, value_enum, value_delimiter = ',')]
+        checks: Vec<crate::verify::VerifyCheck>,
+        /// Check profile (`quick`, `standard`, `deep`) used when --checks is not set
+        #[arg(long, value_enum, default_value = "standard")]
+        profile: crate::verify::VerifyProfile,
+        /// Report scope tag for metadata (`chain`, `table`, `partition`, `run`)
+        #[arg(long, value_enum, default_value = "table")]
+        scope: crate::verify::VerifyScope,
         /// Continue scanning and aggregate findings instead of failing on first mismatch
         #[arg(long, default_value = "false")]
         no_fail_fast: bool,

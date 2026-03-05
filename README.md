@@ -320,20 +320,29 @@ firehose-parquet validate s3://my-bucket/solana/blocks/ --allow-gaps
 | `--cross-partition` | `false` | Check continuity between adjacent partitions |
 | `--allow-gaps` | `false` | Suppress gap reporting (useful for Solana skipped slots) |
 
-### `verify` — Root + Protocol Verification
+### `verify` — Deterministic Roots + Check Profiles
 
-Verifies deterministic partition Merkle roots and chain/table-specific protocol checks.
+Verifies deterministic partition Merkle roots and optional protocol checks under one command surface.
 
 ```bash
-# EVM defaults to keccak256
+# Standard profile (default): roots + protocol
 firehose-parquet verify ./output/evm/mainnet/blocks --chain evm --table blocks
 
-# Bitcoin/Solana default to sha256 via --hash-strategy auto
-firehose-parquet verify ./output/bitcoin/mainnet/blocks --chain bitcoin --table blocks
+# Quick profile (low-cost)
+firehose-parquet verify ./output/evm/mainnet/blocks --profile quick
 
-# Explicit strategy override
-firehose-parquet verify ./output/solana/mainnet/blocks --chain solana --hash-strategy sha256
+# Explicit checks override profile defaults
+firehose-parquet verify ./output/evm/mainnet/blocks --checks roots,protocol
 ```
+
+| Flag | Default | Description |
+|---|---|---|
+| `--checks` | *(from profile)* | Comma-separated check families: `roots`, `protocol`, `continuity`, `completeness` |
+| `--profile` | `standard` | Preset families: `quick` (roots), `standard` (roots+protocol), `deep` (adds continuity+completeness) |
+| `--scope` | `table` | Metadata scope tag in reports: `chain`, `table`, `partition`, `run` |
+| `--hash-strategy` | `auto` | Hash strategy for leaves+Merkle nodes: `auto`, `keccak256`, `sha256` |
+
+Migration note: existing verify flags (`--no-fail-fast`, `--report-json`, `--registry-path`, `--update-registry`) remain unchanged.
 
 See [Cross-chain verifiability hash strategy](docs/verifiability-hash-strategy.md) for defaults and normalization rules.
 
