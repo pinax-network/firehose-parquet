@@ -395,6 +395,8 @@ Migration note: existing verify flags (`--no-fail-fast`, `--report-json`, `--reg
 
 See [Cross-chain verifiability hash strategy](docs/verifiability-hash-strategy.md) for defaults and normalization rules.
 
+See [Verify report contract](docs/verify-report-contract.md) for schema versioning, run metadata fields, and artifact path guidance.
+
 ### `rollup` — Roll Up Partitions
 
 Rolls up fine-grained partitions (e.g. `minute` or `hour`) into coarser ones (e.g. `date`). Reads source files, concatenates them by target partition, and writes new files respecting `--flush-bytes`.

@@ -16,7 +16,10 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs::File;
 use std::path::{Path, PathBuf};
 use time::format_description::well_known::Rfc3339;
+use time::OffsetDateTime;
 use tiny_keccak::{Hasher, Keccak};
+
+const VERIFY_REPORT_SCHEMA_VERSION: &str = "1.0.0";
 
 #[derive(Debug, Clone, Copy, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -253,6 +256,12 @@ pub struct ProtocolCheckFinding {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct VerifyReport {
+    pub report_schema_version: String,
+    pub run_id: String,
+    pub started_at: String,
+    pub finished_at: String,
+    pub duration_ms: u64,
+    pub tool_version: String,
     pub chain: String,
     pub table: String,
     pub scope: VerifyScope,
@@ -261,6 +270,8 @@ pub struct VerifyReport {
     pub profile: VerifyProfile,
     pub data_path: String,
     pub registry_path: String,
+    pub suggested_run_report_path: String,
+    pub report_json_path: Option<String>,
     pub algorithm: String,
     pub summary: VerifySummary,
     pub findings: Vec<VerifyFinding>,
@@ -275,6 +286,12 @@ impl VerifyReport {
 
     pub fn print(&self) {
         println!("Verifying {}:{}", self.chain, self.table);
+        println!("  report schema: {}", self.report_schema_version);
+        println!("  run id:        {}", self.run_id);
+        println!("  started at:    {}", self.started_at);
+        println!("  finished at:   {}", self.finished_at);
+        println!("  duration ms:   {}", self.duration_ms);
+        println!("  tool version:  {}", self.tool_version);
         println!("  scope:         {}", verify_scope_name(self.scope));
         println!("  profile:       {}", verify_profile_name(self.profile));
         println!(
@@ -287,6 +304,10 @@ impl VerifyReport {
         );
         println!("  data path:     {}", self.data_path);
         println!("  registry path: {}", self.registry_path);
+        println!("  suggested rpt: {}", self.suggested_run_report_path);
+        if let Some(ref report_path) = self.report_json_path {
+            println!("  report json:   {}", report_path);
+        }
         println!("  algorithm:     {}", self.algorithm);
         println!("  partitions:    {}", self.summary.partitions_scanned);
         println!("  matches:       {}", self.summary.matches);
@@ -414,6 +435,8 @@ pub fn verify_parquet(
     aws: Option<&AwsConfig>,
     opts: &VerifyOptions,
 ) -> Result<VerifyReport> {
+    let run_started = OffsetDateTime::now_utc();
+    let run_id = uuid::Uuid::new_v4().to_string();
     let effective_checks = opts.effective_checks();
     let runs_roots = opts.runs_roots();
     let runs_protocol = opts.runs_protocol();
@@ -424,6 +447,7 @@ pub fn verify_parquet(
         .registry_path
         .clone()
         .unwrap_or_else(|| derive_registry_path(path, &opts.chain, &opts.table));
+    let suggested_run_report_path = derive_run_report_path(path, &opts.chain, &opts.table, &run_id);
 
     let scan_output = if path.starts_with("s3://") {
         let aws = aws.ok_or_else(|| anyhow!("AWS config required for S3 paths"))?;
@@ -597,7 +621,16 @@ pub fn verify_parquet(
         });
     }
 
+    let run_finished = OffsetDateTime::now_utc();
+    let duration_ms = (run_finished - run_started).whole_milliseconds().max(0) as u64;
+
     let report = VerifyReport {
+        report_schema_version: VERIFY_REPORT_SCHEMA_VERSION.to_string(),
+        run_id,
+        started_at: format_rfc3339(run_started),
+        finished_at: format_rfc3339(run_finished),
+        duration_ms,
+        tool_version: env!("CARGO_PKG_VERSION").to_string(),
         chain: opts.chain.clone(),
         table: opts.table.clone(),
         scope: opts.scope,
@@ -606,6 +639,11 @@ pub fn verify_parquet(
         profile: opts.profile,
         data_path: path.to_string(),
         registry_path,
+        suggested_run_report_path,
+        report_json_path: opts
+            .report_json
+            .as_ref()
+            .map(|path| path.display().to_string()),
         algorithm,
         summary: VerifySummary {
             partitions_scanned: partition_roots.len(),
@@ -674,6 +712,54 @@ fn derive_registry_path(data_path: &str, chain: &str, table: &str) -> String {
             root.push("mainnet");
         }
         root.push("merkle_roots.parquet");
+        root.to_string_lossy().to_string()
+    }
+}
+
+fn derive_run_report_path(data_path: &str, chain: &str, table: &str, run_id: &str) -> String {
+    if data_path.starts_with("s3://") {
+        if let Ok((bucket, prefix)) = parse_s3_url(data_path) {
+            let mut segments: Vec<&str> = prefix.split('/').filter(|s| !s.is_empty()).collect();
+            if let Some(pos) = segments.iter().position(|s| *s == table) {
+                segments.truncate(pos);
+            }
+            if segments.len() < 2
+                || segments[segments.len() - 2] != chain
+                || segments[segments.len() - 1] != "mainnet"
+            {
+                segments = vec![chain, "mainnet"];
+            }
+            format!(
+                "s3://{}/{}/verify_runs/{}/report.json",
+                bucket,
+                segments.join("/"),
+                run_id
+            )
+        } else {
+            format!(
+                "s3://{}/{}/mainnet/verify_runs/{}/report.json",
+                "unknown", chain, run_id
+            )
+        }
+    } else {
+        let mut root = PathBuf::from(data_path);
+        if root.is_file() {
+            root = root.parent().unwrap_or(Path::new(".")).to_path_buf();
+        }
+
+        let root_text = root.to_string_lossy().to_string();
+        if let Some(idx) = root_text.find(&format!("/{table}")) {
+            root = PathBuf::from(&root_text[..idx]);
+        }
+
+        let root_text = root.to_string_lossy();
+        if !root_text.ends_with(&format!("/{chain}/mainnet")) {
+            root.push(chain);
+            root.push("mainnet");
+        }
+        root.push("verify_runs");
+        root.push(run_id);
+        root.push("report.json");
         root.to_string_lossy().to_string()
     }
 }
@@ -1396,6 +1482,12 @@ fn now_rfc3339() -> String {
         .unwrap_or_else(|_| "".to_string())
 }
 
+fn format_rfc3339(timestamp: OffsetDateTime) -> String {
+    timestamp
+        .format(&Rfc3339)
+        .unwrap_or_else(|_| "".to_string())
+}
+
 fn registry_key(chain: &str, table: &str, partition: &str) -> String {
     format!("{chain}|{table}|{partition}")
 }
@@ -1572,12 +1664,13 @@ fn read_registry_bytes(path: &str, aws: Option<&AwsConfig>) -> Result<Option<Vec
 
 #[cfg(test)]
 mod tests {
-    use super::{VerifyCheck, VerifyOptions, VerifyProfile, VerifyScope};
+    use super::{derive_run_report_path, VerifyCheck, VerifyOptions, VerifyProfile, VerifyScope};
 
     fn base_opts() -> VerifyOptions {
         VerifyOptions {
             chain: "evm".to_string(),
             table: "blocks".to_string(),
+            hash_strategy: None,
             checks: vec![],
             profile: VerifyProfile::Standard,
             scope: VerifyScope::Table,
@@ -1607,5 +1700,22 @@ mod tests {
         let checks = opts.effective_checks();
         assert!(checks.contains(&VerifyCheck::Roots));
         assert_eq!(checks.len(), 1);
+    }
+
+    #[test]
+    fn suggested_run_report_path_local() {
+        let path =
+            derive_run_report_path("./output/evm/mainnet/blocks", "evm", "blocks", "run-123");
+        assert!(path.ends_with("evm/mainnet/verify_runs/run-123/report.json"));
+    }
+
+    #[test]
+    fn suggested_run_report_path_s3() {
+        let path =
+            derive_run_report_path("s3://bucket/evm/mainnet/blocks", "evm", "blocks", "run-123");
+        assert_eq!(
+            path,
+            "s3://bucket/evm/mainnet/verify_runs/run-123/report.json"
+        );
     }
 }
