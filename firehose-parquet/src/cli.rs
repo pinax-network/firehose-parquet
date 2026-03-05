@@ -150,6 +150,18 @@ pub struct CommonArgs {
     )]
     pub cursor: PathBuf,
 
+    /// Optional template used to derive a partition-aware cursor path.
+    ///
+    /// Supported variables: `{chain}`, `{partition_type}`, `{partition_value}`,
+    /// `{partition_from}`, `{partition_to}`. Use `{{` and `}}` for literal braces.
+    #[arg(
+        long,
+        env = "CURSOR_TEMPLATE",
+        hide_env_values = true,
+        help_heading = "Block Range"
+    )]
+    pub cursor_template: Option<String>,
+
     /// Only process finalized blocks (when false, adds fork_step column)
     #[arg(
         long,
@@ -1181,6 +1193,13 @@ pub fn build_config(args: &CommonArgs) -> anyhow::Result<Config> {
             "--cursor path must end in .parquet, got: {cursor_str}"
         ));
     }
+    if let Some(template) = normalize_opt_string(&args.cursor_template) {
+        if !template.ends_with(".parquet") {
+            return Err(anyhow::anyhow!(
+                "--cursor-template must end in .parquet, got: {template}"
+            ));
+        }
+    }
 
     Ok(Config {
         endpoint,
@@ -1278,11 +1297,115 @@ pub struct PartitionWindowBounds {
     pub partition_to: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CursorTemplateContext {
+    pub chain: Option<String>,
+    pub partition_type: Option<String>,
+    pub partition_value: Option<String>,
+    pub partition_from: Option<String>,
+    pub partition_to: Option<String>,
+}
+
 fn normalize_opt_string(value: &Option<String>) -> Option<String> {
     value
         .as_ref()
         .map(|v| v.trim().to_string())
         .filter(|v| !v.is_empty())
+}
+
+fn sanitize_cursor_template_value(value: &str) -> String {
+    value.replace(['/', '\\'], "_")
+}
+
+fn cursor_template_value<'a>(
+    key: &str,
+    context: &'a CursorTemplateContext,
+) -> anyhow::Result<&'a str> {
+    match key {
+        "chain" => context.chain.as_deref(),
+        "partition_type" => context.partition_type.as_deref(),
+        "partition_value" => context.partition_value.as_deref(),
+        "partition_from" => context.partition_from.as_deref(),
+        "partition_to" => context.partition_to.as_deref(),
+        other => anyhow::bail!(
+            "unknown --cursor-template variable {{{other}}}; supported: {{chain}}, {{partition_type}}, {{partition_value}}, {{partition_from}}, {{partition_to}}"
+        ),
+    }
+    .ok_or_else(|| anyhow::anyhow!("--cursor-template variable {{{key}}} requires partition selection context"))
+}
+
+pub fn cursor_template_context_from_selection(
+    selection: Option<&PartitionSelectionRequest>,
+) -> CursorTemplateContext {
+    match selection {
+        Some(PartitionSelectionRequest::Single(request)) => CursorTemplateContext {
+            chain: request.chain.clone(),
+            partition_type: Some(request.partition_type.clone()),
+            partition_value: Some(request.partition_value.clone()),
+            partition_from: None,
+            partition_to: None,
+        },
+        Some(PartitionSelectionRequest::Window(request)) => CursorTemplateContext {
+            chain: request.chain.clone(),
+            partition_type: Some(request.partition_type.clone()),
+            partition_value: None,
+            partition_from: Some(request.partition_from.clone()),
+            partition_to: Some(request.partition_to.clone()),
+        },
+        None => CursorTemplateContext {
+            chain: None,
+            partition_type: None,
+            partition_value: None,
+            partition_from: None,
+            partition_to: None,
+        },
+    }
+}
+
+pub fn resolve_cursor_template(
+    template: &str,
+    context: &CursorTemplateContext,
+) -> anyhow::Result<String> {
+    let mut out = String::with_capacity(template.len());
+    let mut chars = template.chars().peekable();
+
+    while let Some(ch) = chars.next() {
+        match ch {
+            '{' => {
+                if matches!(chars.peek(), Some('{')) {
+                    chars.next();
+                    out.push('{');
+                    continue;
+                }
+
+                let mut key = String::new();
+                let mut found_close = false;
+                for next in chars.by_ref() {
+                    if next == '}' {
+                        found_close = true;
+                        break;
+                    }
+                    key.push(next);
+                }
+                if !found_close {
+                    anyhow::bail!("unterminated --cursor-template variable");
+                }
+                let value = cursor_template_value(&key, context)?;
+                out.push_str(&sanitize_cursor_template_value(value));
+            }
+            '}' => {
+                if matches!(chars.peek(), Some('}')) {
+                    chars.next();
+                    out.push('}');
+                } else {
+                    anyhow::bail!("unmatched }} in --cursor-template");
+                }
+            }
+            other => out.push(other),
+        }
+    }
+
+    Ok(out)
 }
 
 /// Parse and validate partition-bound lookup arguments from [`CommonArgs`].
@@ -3564,6 +3687,7 @@ mod tests {
         assert!(cli.common.partition_to.is_none());
         assert!(cli.common.partition_chain.is_none());
         assert_eq!(cli.common.cursor, PathBuf::from("cursor.parquet"));
+        assert!(cli.common.cursor_template.is_none());
         assert!(cli.common.flush_interval_secs.is_none());
         assert!(cli.common.aws_access_key_id.is_none());
         assert!(cli.common.aws_secret_access_key.is_none());
@@ -3744,6 +3868,80 @@ mod tests {
             config.cursor_path,
             Some("cursor-mainnet-date.parquet".to_string())
         );
+    }
+
+    #[test]
+    #[serial]
+    fn test_cursor_template_must_end_in_parquet() {
+        let cli = parse(&[
+            "test-cli",
+            "--endpoint",
+            "https://example.com:443",
+            "--cursor-template",
+            "cursor/{partition_type}/{partition_value}.txt",
+        ]);
+        let result = build_config(&cli.common);
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("--cursor-template must end in .parquet"));
+    }
+
+    #[test]
+    fn test_resolve_cursor_template_single_partition() {
+        let context = CursorTemplateContext {
+            chain: Some("eth-mainnet".to_string()),
+            partition_type: Some("hour".to_string()),
+            partition_value: Some("2015-07-30 15:00:00".to_string()),
+            partition_from: None,
+            partition_to: None,
+        };
+        let resolved = resolve_cursor_template(
+            "cursor/{chain}/{partition_type}/{partition_value}.parquet",
+            &context,
+        )
+        .expect("template should resolve");
+        assert_eq!(
+            resolved,
+            "cursor/eth-mainnet/hour/2015-07-30 15:00:00.parquet"
+        );
+    }
+
+    #[test]
+    fn test_resolve_cursor_template_window_partition() {
+        let context = CursorTemplateContext {
+            chain: Some("eth-mainnet".to_string()),
+            partition_type: Some("hour".to_string()),
+            partition_value: None,
+            partition_from: Some("2015/07/30 14:00:00".to_string()),
+            partition_to: Some("2015-07-30 18:00:00".to_string()),
+        };
+        let resolved = resolve_cursor_template(
+            "cursor/{chain}/{partition_type}/{partition_from}-{partition_to}.parquet",
+            &context,
+        )
+        .expect("template should resolve");
+        assert_eq!(
+            resolved,
+            "cursor/eth-mainnet/hour/2015_07_30 14:00:00-2015-07-30 18:00:00.parquet"
+        );
+    }
+
+    #[test]
+    fn test_resolve_cursor_template_requires_context() {
+        let context = CursorTemplateContext {
+            chain: None,
+            partition_type: None,
+            partition_value: None,
+            partition_from: None,
+            partition_to: None,
+        };
+        let err = resolve_cursor_template("cursor/{partition_value}.parquet", &context)
+            .expect_err("missing context should fail");
+        assert!(err
+            .to_string()
+            .contains("requires partition selection context"));
     }
 
     #[test]

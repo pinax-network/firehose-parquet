@@ -380,17 +380,18 @@ impl CursorLocation {
 
         if output.starts_with("s3://") {
             // S3 output — place cursor alongside data
-            if cursor_filename.contains('/') || cursor_filename.contains('\\') {
+            if std::path::Path::new(cursor_filename).is_absolute() {
                 anyhow::bail!(
-                    "S3 output with local cursor path containing directories is not supported: {cursor_filename}. \
-                     Use a bare filename (e.g. cursor.parquet) or an explicit s3:// URI."
+                    "S3 output with absolute local cursor path is not supported: {cursor_filename}. \
+                     Use a relative path (e.g. cursor/worker/cursor.parquet) or an explicit s3:// URI."
                 );
             }
             let (_bucket, prefix) = crate::writer::parse_s3_url(output)?;
+            let relative_key = cursor_filename.replace('\\', "/");
             let key = if prefix.is_empty() {
-                cursor_filename.to_string()
+                relative_key
             } else {
-                format!("{prefix}/{cursor_filename}")
+                format!("{prefix}/{relative_key}")
             };
             let client = s3_client
                 .ok_or_else(|| anyhow::anyhow!("output is S3 but no S3 client available"))?;
@@ -674,6 +675,23 @@ mod tests {
         save_cursor_parquet(&path, &state).unwrap();
         let loaded = load_cursor_parquet(&path).expect("should load cursor");
         assert_eq!(loaded.cursor, "abc");
+    }
+
+    #[test]
+    fn test_cursor_location_resolve_s3_allows_relative_directories() {
+        let location = CursorLocation::resolve(
+            "s3://bucket/output",
+            "cursor/hour/2015-07-30 15:00:00.parquet",
+            Some(Arc::new(object_store::memory::InMemory::new())),
+        )
+        .expect("s3 relative cursor path should resolve");
+
+        match location {
+            CursorLocation::S3 { key, .. } => {
+                assert_eq!(key, "output/cursor/hour/2015-07-30 15:00:00.parquet")
+            }
+            CursorLocation::Local(_) => panic!("expected S3 cursor location"),
+        }
     }
 
     #[test]

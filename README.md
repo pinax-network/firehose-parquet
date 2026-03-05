@@ -321,6 +321,44 @@ Window semantics:
 - resolved block range remains `[start_block, stop_block)`
 - matching partition rows must be contiguous
 
+### Partition-Aware Cursor Paths (`--cursor-template`)
+
+Use `--cursor-template` to derive deterministic cursor paths per partition worker and avoid cursor collisions.
+
+```bash
+# Single partition worker
+firehose-parquet --endpoint https://eth.firehose.pinax.network:443 \
+  --cursor-template 'cursor/{chain}/{partition_type}/{partition_value}.parquet' \
+  --partitions-index ./output/eth-mainnet/partitions.parquet \
+  --partition-type hour \
+  --partition-value '2015-07-30 15:00:00' \
+  --partition-chain eth-mainnet
+
+# Partition window worker
+firehose-parquet --endpoint https://eth.firehose.pinax.network:443 \
+  --cursor-template 'cursor/{chain}/{partition_type}/{partition_from}-{partition_to}.parquet' \
+  --partitions-index ./output/eth-mainnet/partitions.parquet \
+  --partition-type hour \
+  --partition-from '2015-07-30 14:00:00' \
+  --partition-to '2015-07-30 18:00:00' \
+  --partition-chain eth-mainnet
+```
+
+Supported variables:
+
+- `{chain}`
+- `{partition_type}`
+- `{partition_value}`
+- `{partition_from}`
+- `{partition_to}`
+
+Rules:
+
+- `{{` and `}}` escape literal braces
+- values have `/` and `\` rewritten to `_` during expansion
+- template path must end in `.parquet`
+- with S3 output, relative cursor template paths are stored under the output prefix
+
 ### `scan` — Inspect Parquet Files
 
 Read and inspect Parquet files: shows schema, row counts, and sample rows. Supports local paths and S3 URIs.
