@@ -456,6 +456,13 @@ Examples:
   # Continue scanning all partitions (no fail-fast) and emit JSON report
   firehose-parquet verify ./output/evm/mainnet/blocks --no-fail-fast --report-json verify-report.json
 
+  # Publish the report to the suggested verify artifact path
+  firehose-parquet verify ./output/evm/mainnet/blocks --publish-report
+
+  # Publish the report to an explicit S3 location
+  firehose-parquet verify s3://bucket/evm/mainnet/blocks \
+    --publish-report-path s3://bucket/evm/mainnet/verify_runs/custom-run/report.json
+
   # Verify S3 parquet data with explicit registry location
   firehose-parquet verify s3://bucket/evm/mainnet/blocks \\
     --registry-path s3://bucket/evm/mainnet/merkle_roots.parquet
@@ -493,6 +500,12 @@ Examples:
         /// Optional path to write a JSON verification report
         #[arg(long)]
         report_json: Option<PathBuf>,
+        /// Publish the JSON report to the suggested verify artifact path
+        #[arg(long, default_value = "false")]
+        publish_report: bool,
+        /// Explicit path to publish the JSON report (local or s3://)
+        #[arg(long)]
+        publish_report_path: Option<String>,
         /// Explicit merkle roots registry path (local or s3://)
         #[arg(long)]
         registry_path: Option<String>,

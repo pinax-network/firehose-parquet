@@ -584,6 +584,8 @@ async fn main() -> Result<()> {
                 scope,
                 no_fail_fast,
                 report_json,
+                publish_report,
+                publish_report_path,
                 registry_path,
                 update_registry,
                 aws_access_key_id,
@@ -608,6 +610,8 @@ async fn main() -> Result<()> {
                     scope: *scope,
                     no_fail_fast: *no_fail_fast,
                     report_json: report_json.clone(),
+                    publish_report: *publish_report,
+                    publish_report_path: publish_report_path.clone(),
                     registry_path: registry_path.clone(),
                     update_registry: *update_registry,
                 };
