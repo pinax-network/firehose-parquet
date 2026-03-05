@@ -81,3 +81,32 @@ Breaking changes:
 - changing canonical partition-value interpretation
 
 Breaking changes require a schema-version increment.
+
+## Optional lookup sidecar
+
+Readers may use an optional sidecar placed alongside the canonical index:
+
+- canonical index: `partitions.parquet`
+- sidecar: `partitions.lookup.json`
+
+Current reader behavior:
+
+- `partitions resolve` checks the sidecar first when present
+- falls back to scanning `partitions.parquet` when the sidecar is absent
+
+Current sidecar contract:
+
+- `lookup_schema_version` — current value: `1`
+- `source_schema_version` — expected canonical source schema version (`1`)
+- `entries[]` with:
+  - `chain` (nullable string)
+  - `partition_type` (string)
+  - `partition_value` (string)
+  - `start_block` (u64)
+  - `end_block` (u64)
+
+Notes:
+
+- The sidecar is an optimization only; `partitions.parquet` remains the source of truth.
+- Unsupported sidecar schema versions are rejected.
+- If no sidecar is present, readers continue with canonical parquet scans.

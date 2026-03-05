@@ -546,6 +546,9 @@ async fn main() -> Result<()> {
                         if let Some(chain) = result.partition_chain {
                             println!("partition_chain:  {chain}");
                         }
+                        if let Some(source) = result.lookup_source {
+                            println!("lookup_source:    {source}");
+                        }
                         println!("start_block:      {}", result.start_block);
                         println!("stop_block:       {}", result.stop_block);
                     }

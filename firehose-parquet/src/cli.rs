@@ -916,12 +916,32 @@ pub struct PartitionResolveResult {
     pub partition_chain: Option<String>,
     pub start_block: u64,
     pub stop_block: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lookup_source: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PartitionResolveOptions {
     pub strict_single_chain: bool,
 }
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct PartitionsLookupEntry {
+    pub chain: Option<String>,
+    pub partition_type: String,
+    pub partition_value: String,
+    pub start_block: u64,
+    pub end_block: u64,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct PartitionsLookupSidecar {
+    pub lookup_schema_version: String,
+    pub source_schema_version: String,
+    pub entries: Vec<PartitionsLookupEntry>,
+}
+
+const PARTITIONS_LOOKUP_SCHEMA_VERSION: &str = "1";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PartitionListRequest {
@@ -1084,6 +1104,129 @@ fn validate_partitions_metadata(
     Ok(())
 }
 
+fn partitions_lookup_sidecar_path(index_path: &str) -> Option<String> {
+    if let Some(prefix) = index_path.strip_suffix("partitions.parquet") {
+        return Some(format!("{prefix}partitions.lookup.json"));
+    }
+    None
+}
+
+fn lookup_matches_request(entry: &PartitionsLookupEntry, request: &PartitionBoundsRequest) -> bool {
+    if !entry
+        .partition_type
+        .eq_ignore_ascii_case(&request.partition_type)
+    {
+        return false;
+    }
+    if entry.partition_value != request.partition_value {
+        return false;
+    }
+    if let Some(chain) = request.chain.as_deref() {
+        return entry.chain.as_deref() == Some(chain);
+    }
+    true
+}
+
+fn validate_lookup_sidecar(sidecar: &PartitionsLookupSidecar) -> anyhow::Result<()> {
+    if sidecar.lookup_schema_version != PARTITIONS_LOOKUP_SCHEMA_VERSION {
+        anyhow::bail!(
+            "unsupported partitions lookup sidecar schema version {} (expected {})",
+            sidecar.lookup_schema_version,
+            PARTITIONS_LOOKUP_SCHEMA_VERSION
+        );
+    }
+    if sidecar.source_schema_version != PARTITIONS_SCHEMA_VERSION {
+        anyhow::bail!(
+            "partitions lookup sidecar expects source schema version {} but reader expects {}",
+            sidecar.source_schema_version,
+            PARTITIONS_SCHEMA_VERSION
+        );
+    }
+    Ok(())
+}
+
+fn load_lookup_sidecar(
+    index_path: &str,
+    aws: Option<&AwsConfig>,
+) -> anyhow::Result<Option<PartitionsLookupSidecar>> {
+    let Some(sidecar_path) = partitions_lookup_sidecar_path(index_path) else {
+        return Ok(None);
+    };
+
+    if sidecar_path.starts_with("s3://") {
+        use crate::writer::parse_s3_url;
+        use object_store::ObjectStore;
+
+        let aws = match aws {
+            Some(aws) => aws,
+            None => return Ok(None),
+        };
+        let (bucket, key) = parse_s3_url(&sidecar_path)?;
+        let client = aws.build_s3_client(&bucket)?;
+        let obj_path = object_store::path::Path::from(key.as_str());
+        let data = match block_on_async(async { client.get(&obj_path).await?.bytes().await }) {
+            Ok(data) => data,
+            Err(_) => return Ok(None),
+        };
+        let sidecar: PartitionsLookupSidecar = serde_json::from_slice(&data)
+            .map_err(|e| anyhow::anyhow!("invalid lookup sidecar {}: {e}", sidecar_path))?;
+        validate_lookup_sidecar(&sidecar)?;
+        return Ok(Some(sidecar));
+    }
+
+    let bytes = match std::fs::read(&sidecar_path) {
+        Ok(bytes) => bytes,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(err) => return Err(anyhow::anyhow!("reading {}: {err}", sidecar_path)),
+    };
+    let sidecar: PartitionsLookupSidecar = serde_json::from_slice(&bytes)
+        .map_err(|e| anyhow::anyhow!("invalid lookup sidecar {}: {e}", sidecar_path))?;
+    validate_lookup_sidecar(&sidecar)?;
+    Ok(Some(sidecar))
+}
+
+fn resolve_partition_bounds_from_lookup_sidecar(
+    request: &PartitionBoundsRequest,
+    aws: Option<&AwsConfig>,
+) -> anyhow::Result<Option<PartitionBounds>> {
+    let Some(sidecar) = load_lookup_sidecar(&request.index_path, aws)? else {
+        return Ok(None);
+    };
+
+    let matches = sidecar
+        .entries
+        .iter()
+        .filter(|entry| lookup_matches_request(entry, request))
+        .collect::<Vec<_>>();
+
+    if matches.is_empty() {
+        return Ok(None);
+    }
+    if matches.len() > 1 {
+        anyhow::bail!(
+            "partition lookup sidecar is ambiguous in {} for partition_type={}, partition_value={}",
+            request.index_path,
+            request.partition_type,
+            request.partition_value
+        );
+    }
+
+    let entry = matches[0];
+    if entry.end_block <= entry.start_block {
+        anyhow::bail!(
+            "invalid partition bounds in lookup sidecar for {}: start_block={} end_block={}",
+            request.index_path,
+            entry.start_block,
+            entry.end_block
+        );
+    }
+
+    Ok(Some(PartitionBounds {
+        start_block: entry.start_block,
+        stop_block: entry.end_block,
+    }))
+}
+
 /// Resolve partition bounds and return a response payload suitable for CLI output.
 fn resolve_partition_chains(
     request: &PartitionBoundsRequest,
@@ -1209,7 +1352,12 @@ pub fn resolve_partition_command(
         }
     }
 
-    let bounds = resolve_partition_bounds_from_index(&request, aws)?;
+    let sidecar_bounds = resolve_partition_bounds_from_lookup_sidecar(&request, aws)?;
+    let lookup_source = sidecar_bounds.as_ref().map(|_| "sidecar".to_string());
+    let bounds = match sidecar_bounds {
+        Some(bounds) => bounds,
+        None => resolve_partition_bounds_from_index(&request, aws)?,
+    };
     Ok(PartitionResolveResult {
         partitions_index: request.index_path,
         partition_type: request.partition_type,
@@ -1217,6 +1365,7 @@ pub fn resolve_partition_command(
         partition_chain: request.chain,
         start_block: bounds.start_block,
         stop_block: bounds.stop_block,
+        lookup_source,
     })
 }
 
@@ -5358,5 +5507,50 @@ mod tests {
         assert!(err
             .to_string()
             .contains("unsupported partitions.parquet schema version"));
+    }
+
+    #[test]
+    fn test_resolve_partition_command_uses_lookup_sidecar_when_present() {
+        use std::fs;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let index_path = dir.path().join("partitions.parquet");
+        fs::write(&index_path, b"placeholder").expect("write placeholder index file");
+
+        let sidecar = PartitionsLookupSidecar {
+            lookup_schema_version: PARTITIONS_LOOKUP_SCHEMA_VERSION.to_string(),
+            source_schema_version: PARTITIONS_SCHEMA_VERSION.to_string(),
+            entries: vec![PartitionsLookupEntry {
+                chain: Some("eth-mainnet".to_string()),
+                partition_type: "hour".to_string(),
+                partition_value: "2015-07-30 15:00:00".to_string(),
+                start_block: 200,
+                end_block: 300,
+            }],
+        };
+        let sidecar_path = dir.path().join("partitions.lookup.json");
+        fs::write(
+            &sidecar_path,
+            serde_json::to_vec_pretty(&sidecar).expect("serialize sidecar"),
+        )
+        .expect("write sidecar");
+
+        let result = resolve_partition_command(
+            PartitionBoundsRequest {
+                index_path: index_path.to_string_lossy().to_string(),
+                partition_type: "hour".to_string(),
+                partition_value: "2015-07-30 15:00:00".to_string(),
+                chain: Some("eth-mainnet".to_string()),
+            },
+            None,
+            &PartitionResolveOptions {
+                strict_single_chain: false,
+            },
+        )
+        .expect("sidecar-backed resolve should succeed");
+
+        assert_eq!(result.start_block, 200);
+        assert_eq!(result.stop_block, 300);
+        assert_eq!(result.lookup_source.as_deref(), Some("sidecar"));
     }
 }
