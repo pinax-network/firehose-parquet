@@ -325,7 +325,7 @@ firehose-parquet rollup ./output/blocks/ -p date --delete-source
 
 Consolidates multiple small part files within each partition directory into fewer, larger files. Unlike `rollup` (which changes partition granularity), `merge` keeps the same partition layout but reduces file count.
 
-All parts in a partition are read into memory, sorted by `block_num`, and written back as new files respecting `--flush-bytes`. Original parts are deleted after successful merge.
+`merge` processes one table at a time and, within each table, one partition at a time. All parts in each partition are read into memory, sorted by `block_num`, and written back as new files respecting `--flush-bytes`. Original parts are deleted after successful merge.
 
 ```bash
 # Merge small parts within each partition (default 256 MB per file)
