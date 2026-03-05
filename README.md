@@ -302,6 +302,25 @@ firehose-parquet partitions resolve \
   --json
 ```
 
+### Partition-Window Ingestion (`--partition-from/--partition-to`)
+
+Run ingestion over a partition window without explicit block math.
+
+```bash
+firehose-parquet --endpoint https://eth.firehose.pinax.network:443 \
+  --partitions-index ./output/eth-mainnet/partitions.parquet \
+  --partition-type hour \
+  --partition-from '2015-07-30 14:00:00' \
+  --partition-to '2015-07-30 18:00:00' \
+  --partition-chain eth-mainnet
+```
+
+Window semantics:
+
+- partition window is `[partition_from, partition_to)`
+- resolved block range remains `[start_block, stop_block)`
+- matching partition rows must be contiguous
+
 ### `scan` — Inspect Parquet Files
 
 Read and inspect Parquet files: shows schema, row counts, and sample rows. Supports local paths and S3 URIs.

@@ -2,8 +2,9 @@ use anyhow::{anyhow, Result};
 use clap::Parser;
 use firehose_parquet::cli::{
     build_config, init_tracing, list_partitions_from_index, load_dotenv,
-    parse_partition_bounds_request, resolve_partition_bounds_from_index, resolve_partition_command,
-    AwsConfig, Commands, CommonArgs, PartitionBoundsRequest, PartitionListRequest,
+    parse_partition_selection_request, resolve_partition_bounds_from_index,
+    resolve_partition_command, resolve_partition_window_bounds_from_index, AwsConfig, Commands,
+    CommonArgs, PartitionBoundsRequest, PartitionListRequest, PartitionSelectionRequest,
     PartitionsCommands,
 };
 use firehose_parquet::config::BlockMetadata;
@@ -76,6 +77,14 @@ Examples:
     --partitions-index s3://my-bucket/partitions.parquet \\
     --partition-type hour \\
     --partition-value '2015-07-30 15:00:00' \\
+    --partition-chain eth-mainnet
+
+  # Resolve an inclusive/exclusive partition window [from, to)
+  firehose-parquet --endpoint https://eth.firehose.pinax.network:443 \\
+    --partitions-index ./output/eth-mainnet/partitions.parquet \\
+    --partition-type hour \\
+    --partition-from '2015-07-30 14:00:00' \\
+    --partition-to '2015-07-30 18:00:00' \\
     --partition-chain eth-mainnet
 "
 )]
@@ -724,14 +733,12 @@ async fn main() -> Result<()> {
     let bytes_encoding_str = cli.bytes_encoding.clone();
     let mut config = build_config(&cli.common)?;
 
-    let partition_bounds_request = parse_partition_bounds_request(&cli.common)?;
+    let partition_selection_request = parse_partition_selection_request(&cli.common)?;
     let has_explicit_range = cli.common.start_block.is_some() || cli.common.stop_block.is_some();
-    if partition_bounds_request.is_some() && has_explicit_range {
-        warn!(
-            "--partitions-index/--partition-type/--partition-value ignored because --start-block/--stop-block was provided"
-        );
+    if partition_selection_request.is_some() && has_explicit_range {
+        warn!("partition selection flags ignored because --start-block/--stop-block was provided");
     }
-    if let Some(ref request) = partition_bounds_request {
+    if let Some(ref request) = partition_selection_request {
         if !has_explicit_range {
             warn!(
                 "partition range flags are deprecated for direct ingestion; prefer `firehose-parquet partitions resolve ...`"
@@ -743,17 +750,37 @@ async fn main() -> Result<()> {
                 aws_region: config.aws_region.clone(),
                 aws_endpoint_url: config.aws_endpoint_url.clone(),
             };
-            let bounds = resolve_partition_bounds_from_index(request, Some(&aws))?;
-            config.start_block = Some(bounds.start_block);
-            config.stop_block = Some(bounds.stop_block);
-            info!(
-                partitions_index = %request.index_path,
-                partition_type = %request.partition_type,
-                partition_value = %request.partition_value,
-                start_block = bounds.start_block,
-                stop_block = bounds.stop_block,
-                "resolved block range from partitions index"
-            );
+            match request {
+                PartitionSelectionRequest::Single(single_request) => {
+                    let bounds = resolve_partition_bounds_from_index(single_request, Some(&aws))?;
+                    config.start_block = Some(bounds.start_block);
+                    config.stop_block = Some(bounds.stop_block);
+                    info!(
+                        partitions_index = %single_request.index_path,
+                        partition_type = %single_request.partition_type,
+                        partition_value = %single_request.partition_value,
+                        start_block = bounds.start_block,
+                        stop_block = bounds.stop_block,
+                        "resolved block range from partitions index"
+                    );
+                }
+                PartitionSelectionRequest::Window(window_request) => {
+                    let bounds =
+                        resolve_partition_window_bounds_from_index(window_request, Some(&aws))?;
+                    config.start_block = Some(bounds.start_block);
+                    config.stop_block = Some(bounds.stop_block);
+                    info!(
+                        partitions_index = %window_request.index_path,
+                        partition_type = %window_request.partition_type,
+                        partition_from = %window_request.partition_from,
+                        partition_to = %window_request.partition_to,
+                        partitions_count = bounds.partitions_count,
+                        start_block = bounds.start_block,
+                        stop_block = bounds.stop_block,
+                        "resolved block range from partition window"
+                    );
+                }
+            }
         }
     }
 

@@ -112,6 +112,24 @@ pub struct CommonArgs {
     )]
     pub partition_value: Option<String>,
 
+    /// Inclusive partition window start used with --partition-from/--partition-to mode
+    #[arg(
+        long,
+        env = "PARTITION_FROM",
+        hide_env_values = true,
+        help_heading = "Block Range"
+    )]
+    pub partition_from: Option<String>,
+
+    /// Exclusive partition window end used with --partition-from/--partition-to mode
+    #[arg(
+        long,
+        env = "PARTITION_TO",
+        hide_env_values = true,
+        help_heading = "Block Range"
+    )]
+    pub partition_to: Option<String>,
+
     /// Optional chain filter used with partition lookup (matches `chain` column), e.g. eth-mainnet
     #[arg(
         long,
@@ -1231,9 +1249,33 @@ pub struct PartitionBoundsRequest {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PartitionWindowRequest {
+    pub index_path: String,
+    pub partition_type: String,
+    pub partition_from: String,
+    pub partition_to: String,
+    pub chain: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PartitionSelectionRequest {
+    Single(PartitionBoundsRequest),
+    Window(PartitionWindowRequest),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PartitionBounds {
     pub start_block: u64,
     pub stop_block: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PartitionWindowBounds {
+    pub start_block: u64,
+    pub stop_block: u64,
+    pub partitions_count: usize,
+    pub partition_from: String,
+    pub partition_to: String,
 }
 
 fn normalize_opt_string(value: &Option<String>) -> Option<String> {
@@ -1285,6 +1327,101 @@ pub fn parse_partition_bounds_request(
         partition_value: partition_value.expect("checked above"),
         chain,
     }))
+}
+
+/// Parse and validate partition-selection arguments from [`CommonArgs`].
+///
+/// Supports either:
+/// - single partition mode (`--partition-value`)
+/// - window mode (`--partition-from` + `--partition-to`)
+pub fn parse_partition_selection_request(
+    args: &CommonArgs,
+) -> anyhow::Result<Option<PartitionSelectionRequest>> {
+    let index_path = normalize_opt_string(&args.partitions_index);
+    let partition_type = normalize_opt_string(&args.partition_type);
+    let partition_value = normalize_opt_string(&args.partition_value);
+    let partition_from = normalize_opt_string(&args.partition_from);
+    let partition_to = normalize_opt_string(&args.partition_to);
+    let chain = normalize_opt_string(&args.partition_chain);
+
+    let any_set = index_path.is_some()
+        || partition_type.is_some()
+        || partition_value.is_some()
+        || partition_from.is_some()
+        || partition_to.is_some()
+        || chain.is_some();
+    if !any_set {
+        return Ok(None);
+    }
+
+    let has_single = partition_value.is_some();
+    let has_window = partition_from.is_some() || partition_to.is_some();
+
+    if has_single && has_window {
+        anyhow::bail!(
+            "partition selection mode is ambiguous: use either --partition-value or --partition-from/--partition-to"
+        );
+    }
+
+    if !has_single && !has_window {
+        anyhow::bail!(
+            "partition selection requires either --partition-value or --partition-from/--partition-to"
+        );
+    }
+
+    let mut common_missing = Vec::new();
+    if index_path.is_none() {
+        common_missing.push("--partitions-index");
+    }
+    if partition_type.is_none() {
+        common_missing.push("--partition-type");
+    }
+    if !common_missing.is_empty() {
+        anyhow::bail!("partition lookup requires: {}", common_missing.join(", "));
+    }
+
+    if has_single {
+        return Ok(Some(PartitionSelectionRequest::Single(
+            PartitionBoundsRequest {
+                index_path: index_path.expect("checked above"),
+                partition_type: partition_type.expect("checked above"),
+                partition_value: partition_value.expect("checked above"),
+                chain,
+            },
+        )));
+    }
+
+    let mut window_missing = Vec::new();
+    if partition_from.is_none() {
+        window_missing.push("--partition-from");
+    }
+    if partition_to.is_none() {
+        window_missing.push("--partition-to");
+    }
+    if !window_missing.is_empty() {
+        anyhow::bail!(
+            "partition window lookup requires: {}",
+            window_missing.join(", ")
+        );
+    }
+
+    let partition_from = partition_from.expect("checked above");
+    let partition_to = partition_to.expect("checked above");
+    if partition_from >= partition_to {
+        anyhow::bail!(
+            "invalid partition window: --partition-from must be less than --partition-to"
+        );
+    }
+
+    Ok(Some(PartitionSelectionRequest::Window(
+        PartitionWindowRequest {
+            index_path: index_path.expect("checked above"),
+            partition_type: partition_type.expect("checked above"),
+            partition_from,
+            partition_to,
+            chain,
+        },
+    )))
 }
 
 /// Resolve `[start_block, stop_block)` from a `partitions.parquet` index file.
@@ -1433,6 +1570,210 @@ pub fn resolve_partition_bounds_from_index(
     Ok(PartitionBounds {
         start_block,
         stop_block,
+    })
+}
+
+/// Resolve a partition window `[partition_from, partition_to)` from `partitions.parquet`.
+///
+/// All matching rows must be contiguous and non-overlapping by block bounds.
+pub fn resolve_partition_window_bounds_from_index(
+    request: &PartitionWindowRequest,
+    aws: Option<&AwsConfig>,
+) -> anyhow::Result<PartitionWindowBounds> {
+    use arrow::array::{
+        Array, Int32Array, Int64Array, LargeStringArray, StringArray, UInt32Array, UInt64Array,
+    };
+    use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+
+    fn read_utf8_value(column: &dyn Array, row: usize) -> anyhow::Result<Option<String>> {
+        if column.is_null(row) {
+            return Ok(None);
+        }
+        if let Some(arr) = column.as_any().downcast_ref::<StringArray>() {
+            return Ok(Some(arr.value(row).to_string()));
+        }
+        if let Some(arr) = column.as_any().downcast_ref::<LargeStringArray>() {
+            return Ok(Some(arr.value(row).to_string()));
+        }
+        anyhow::bail!(
+            "expected Utf8/LargeUtf8 column, found {}",
+            column.data_type()
+        )
+    }
+
+    fn read_u64_value(column: &dyn Array, row: usize) -> anyhow::Result<Option<u64>> {
+        if column.is_null(row) {
+            return Ok(None);
+        }
+        if let Some(arr) = column.as_any().downcast_ref::<UInt64Array>() {
+            return Ok(Some(arr.value(row)));
+        }
+        if let Some(arr) = column.as_any().downcast_ref::<UInt32Array>() {
+            return Ok(Some(arr.value(row) as u64));
+        }
+        if let Some(arr) = column.as_any().downcast_ref::<Int64Array>() {
+            let value = arr.value(row);
+            if value < 0 {
+                anyhow::bail!("negative block value: {value}");
+            }
+            return Ok(Some(value as u64));
+        }
+        if let Some(arr) = column.as_any().downcast_ref::<Int32Array>() {
+            let value = arr.value(row);
+            if value < 0 {
+                anyhow::bail!("negative block value: {value}");
+            }
+            return Ok(Some(value as u64));
+        }
+        anyhow::bail!(
+            "expected integer block column, found {}",
+            column.data_type()
+        )
+    }
+
+    let mut matches: Vec<(String, u64, u64)> = Vec::new();
+
+    let mut collect = |batch: &arrow::record_batch::RecordBatch| -> anyhow::Result<()> {
+        let schema = batch.schema();
+        let partition_type_idx = schema
+            .index_of("partition_type")
+            .map_err(|_| anyhow::anyhow!("missing required column: partition_type"))?;
+        let partition_value_idx = schema
+            .index_of("partition_value")
+            .map_err(|_| anyhow::anyhow!("missing required column: partition_value"))?;
+        let start_block_idx = schema
+            .index_of("start_block")
+            .map_err(|_| anyhow::anyhow!("missing required column: start_block"))?;
+        let end_block_idx = schema
+            .index_of("end_block")
+            .map_err(|_| anyhow::anyhow!("missing required column: end_block"))?;
+        let chain_idx = schema.index_of("chain").ok();
+
+        for row in 0..batch.num_rows() {
+            let partition_type = read_utf8_value(batch.column(partition_type_idx).as_ref(), row)?;
+            let partition_value = read_utf8_value(batch.column(partition_value_idx).as_ref(), row)?;
+
+            if partition_type
+                .as_deref()
+                .map(|v| v.eq_ignore_ascii_case(&request.partition_type))
+                != Some(true)
+            {
+                continue;
+            }
+            let partition_value = match partition_value {
+                Some(value) => value,
+                None => continue,
+            };
+            if partition_value.as_str() < request.partition_from.as_str()
+                || partition_value.as_str() >= request.partition_to.as_str()
+            {
+                continue;
+            }
+
+            if let Some(ref chain_filter) = request.chain {
+                let row_chain = if let Some(idx) = chain_idx {
+                    read_utf8_value(batch.column(idx).as_ref(), row)?
+                } else {
+                    None
+                };
+                if row_chain.as_deref() != Some(chain_filter.as_str()) {
+                    continue;
+                }
+            }
+
+            let start_block = read_u64_value(batch.column(start_block_idx).as_ref(), row)?
+                .ok_or_else(|| anyhow::anyhow!("null start_block at row {}", row))?;
+            let end_block = read_u64_value(batch.column(end_block_idx).as_ref(), row)?
+                .ok_or_else(|| anyhow::anyhow!("null end_block at row {}", row))?;
+
+            matches.push((partition_value, start_block, end_block));
+        }
+
+        Ok(())
+    };
+
+    if request.index_path.starts_with("s3://") {
+        use crate::writer::parse_s3_url;
+        use object_store::ObjectStore;
+
+        let aws =
+            aws.ok_or_else(|| anyhow::anyhow!("AWS config required for S3 partition index"))?;
+        let (bucket, key) = parse_s3_url(&request.index_path)?;
+        let client = aws.build_s3_client(&bucket)?;
+        let obj_path = object_store::path::Path::from(key.as_str());
+        let data = block_on_async(async { client.get(&obj_path).await?.bytes().await })
+            .map_err(|e| anyhow::anyhow!("reading {}: {e}", request.index_path))?;
+        let reader = ParquetRecordBatchReaderBuilder::try_new(data)?.build()?;
+        for batch in reader {
+            collect(&batch?)?;
+        }
+    } else {
+        let file = std::fs::File::open(&request.index_path)
+            .map_err(|e| anyhow::anyhow!("opening {}: {e}", request.index_path))?;
+        let reader = ParquetRecordBatchReaderBuilder::try_new(file)?.build()?;
+        for batch in reader {
+            collect(&batch?)?;
+        }
+    }
+
+    if matches.is_empty() {
+        anyhow::bail!(
+            "no partition rows found in {} for partition_type={} in [{}, {}){}",
+            request.index_path,
+            request.partition_type,
+            request.partition_from,
+            request.partition_to,
+            request
+                .chain
+                .as_ref()
+                .map(|chain| format!(", chain={chain}"))
+                .unwrap_or_default()
+        );
+    }
+
+    matches.sort_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.cmp(&right.1)));
+
+    for (idx, window) in matches.windows(2).enumerate() {
+        let current = &window[0];
+        let next = &window[1];
+        if current.0 == next.0 {
+            anyhow::bail!(
+                "partition window is ambiguous in {}: multiple rows for partition_value={} (rows {} and {})",
+                request.index_path,
+                current.0,
+                idx,
+                idx + 1
+            );
+        }
+        if current.2 != next.1 {
+            anyhow::bail!(
+                "partition window has non-contiguous bounds in {} between {} and {}: end_block={} next_start_block={}",
+                request.index_path,
+                current.0,
+                next.0,
+                current.2,
+                next.1
+            );
+        }
+    }
+
+    let first = matches.first().expect("non-empty checked above");
+    let last = matches.last().expect("non-empty checked above");
+    if last.2 <= first.1 {
+        anyhow::bail!(
+            "invalid partition window bounds in {}: start_block={} end_block={}",
+            request.index_path,
+            first.1,
+            last.2
+        );
+    }
+
+    Ok(PartitionWindowBounds {
+        start_block: first.1,
+        stop_block: last.2,
+        partitions_count: matches.len(),
+        partition_from: request.partition_from.clone(),
+        partition_to: request.partition_to.clone(),
     })
 }
 
@@ -3219,6 +3560,8 @@ mod tests {
         assert!(cli.common.partitions_index.is_none());
         assert!(cli.common.partition_type.is_none());
         assert!(cli.common.partition_value.is_none());
+        assert!(cli.common.partition_from.is_none());
+        assert!(cli.common.partition_to.is_none());
         assert!(cli.common.partition_chain.is_none());
         assert_eq!(cli.common.cursor, PathBuf::from("cursor.parquet"));
         assert!(cli.common.flush_interval_secs.is_none());
@@ -3793,6 +4136,61 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_partition_selection_request_window_success() {
+        let cli = parse(&[
+            "test-cli",
+            "--endpoint",
+            "https://example.com:443",
+            "--partitions-index",
+            "./partitions.parquet",
+            "--partition-type",
+            "hour",
+            "--partition-from",
+            "2015-07-30 15:00:00",
+            "--partition-to",
+            "2015-07-30 18:00:00",
+            "--partition-chain",
+            "eth-mainnet",
+        ]);
+
+        let selection = parse_partition_selection_request(&cli.common)
+            .expect("selection parse should succeed")
+            .expect("selection should exist");
+        match selection {
+            PartitionSelectionRequest::Window(window) => {
+                assert_eq!(window.index_path, "./partitions.parquet");
+                assert_eq!(window.partition_type, "hour");
+                assert_eq!(window.partition_from, "2015-07-30 15:00:00");
+                assert_eq!(window.partition_to, "2015-07-30 18:00:00");
+                assert_eq!(window.chain.as_deref(), Some("eth-mainnet"));
+            }
+            PartitionSelectionRequest::Single(_) => panic!("expected window mode"),
+        }
+    }
+
+    #[test]
+    fn test_parse_partition_selection_request_rejects_mixed_modes() {
+        let cli = parse(&[
+            "test-cli",
+            "--endpoint",
+            "https://example.com:443",
+            "--partitions-index",
+            "./partitions.parquet",
+            "--partition-type",
+            "hour",
+            "--partition-value",
+            "2015-07-30 15:00:00",
+            "--partition-from",
+            "2015-07-30 15:00:00",
+            "--partition-to",
+            "2015-07-30 18:00:00",
+        ]);
+        let err = parse_partition_selection_request(&cli.common)
+            .expect_err("mixed single/window selection must fail");
+        assert!(err.to_string().contains("ambiguous"));
+    }
+
+    #[test]
     fn test_resolve_partition_bounds_from_index_local() {
         use arrow::array::{StringArray, UInt64Array};
         use arrow::record_batch::RecordBatch;
@@ -3900,6 +4298,68 @@ mod tests {
         let err = resolve_partition_bounds_from_index(&request, None)
             .expect_err("duplicate rows should be rejected");
         assert!(err.to_string().contains("ambiguous"));
+    }
+
+    #[test]
+    fn test_resolve_partition_window_bounds_from_index_local() {
+        use arrow::array::{StringArray, UInt64Array};
+        use arrow::record_batch::RecordBatch;
+        use parquet::arrow::ArrowWriter;
+        use std::fs::File;
+        use std::sync::Arc;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("partitions.parquet");
+
+        let schema = Arc::new(arrow::datatypes::Schema::new(vec![
+            arrow::datatypes::Field::new("chain", arrow::datatypes::DataType::Utf8, true),
+            arrow::datatypes::Field::new("partition_type", arrow::datatypes::DataType::Utf8, false),
+            arrow::datatypes::Field::new(
+                "partition_value",
+                arrow::datatypes::DataType::Utf8,
+                false,
+            ),
+            arrow::datatypes::Field::new("start_block", arrow::datatypes::DataType::UInt64, false),
+            arrow::datatypes::Field::new("end_block", arrow::datatypes::DataType::UInt64, false),
+        ]));
+
+        let batch = RecordBatch::try_new(
+            Arc::clone(&schema),
+            vec![
+                Arc::new(StringArray::from(vec![
+                    Some("eth-mainnet"),
+                    Some("eth-mainnet"),
+                    Some("eth-mainnet"),
+                ])),
+                Arc::new(StringArray::from(vec!["hour", "hour", "hour"])),
+                Arc::new(StringArray::from(vec![
+                    "2015-07-30 14:00:00",
+                    "2015-07-30 15:00:00",
+                    "2015-07-30 16:00:00",
+                ])),
+                Arc::new(UInt64Array::from(vec![100_u64, 200_u64, 300_u64])),
+                Arc::new(UInt64Array::from(vec![200_u64, 300_u64, 400_u64])),
+            ],
+        )
+        .expect("record batch");
+
+        let file = File::create(&path).expect("create parquet");
+        let mut writer = ArrowWriter::try_new(file, schema, None).expect("writer");
+        writer.write(&batch).expect("write batch");
+        writer.close().expect("close writer");
+
+        let request = PartitionWindowRequest {
+            index_path: path.to_string_lossy().to_string(),
+            partition_type: "hour".to_string(),
+            partition_from: "2015-07-30 14:00:00".to_string(),
+            partition_to: "2015-07-30 16:00:00".to_string(),
+            chain: Some("eth-mainnet".to_string()),
+        };
+        let bounds = resolve_partition_window_bounds_from_index(&request, None)
+            .expect("partition window bounds should resolve");
+        assert_eq!(bounds.start_block, 100);
+        assert_eq!(bounds.stop_block, 300);
+        assert_eq!(bounds.partitions_count, 2);
     }
 
     #[test]
