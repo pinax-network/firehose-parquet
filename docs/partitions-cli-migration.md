@@ -112,6 +112,7 @@ Inputs:
 - `--partition-type`
 - `--partition-value`
 - optional `--partition-chain`
+- optional `--strict-single-chain`
 - optional `--json` for automation output
 
 ### Backward compatibility
