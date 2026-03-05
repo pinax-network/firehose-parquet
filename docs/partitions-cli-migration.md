@@ -1,4 +1,4 @@
-# Partitions CLI Migration (Phases 1-4)
+# Partitions CLI Migration (Phases 1-5)
 
 This document captures the first implementation slices for the `partitions <subcommand>` initiative.
 
@@ -9,8 +9,9 @@ Related issues:
 - #184 (`partitions ls` query command)
 - #187 (partition-window ingestion mode)
 - #191 (partition-aware cursor path strategy)
+- #188 (deterministic partition sharding)
 
-## What phases 1-4 ship
+## What phases 1-5 ship
 
 1. Adds a grouped CLI namespace: `firehose-parquet partitions ...`
 2. Introduces `firehose-parquet partitions resolve`
@@ -19,6 +20,7 @@ Related issues:
 5. Introduces `firehose-parquet partitions ls` for querying/filtering index rows
 6. Adds ingestion-side partition window resolution via `--partition-from` + `--partition-to`
 7. Adds partition-aware cursor templating via `--cursor-template`
+8. Adds deterministic partition sharding via `partitions shard`
 
 ## Command behavior
 
@@ -66,6 +68,23 @@ Example patterns:
 - partition window worker: `cursor/{chain}/{partition_type}/{partition_from}-{partition_to}.parquet`
 - local chain-specific worker: `./cursor/{partition_type}/{partition_value}.parquet`
 
+### Partition sharding mode
+
+The grouped CLI now supports deterministic shard assignment:
+
+- `firehose-parquet partitions shard --shard-count N --shard-index K`
+
+Supported strategies:
+
+- `ordinal` — sorted row ordinal modulo shard count
+- `hash` — stable SHA-256-based hash of `(chain, partition_type, partition_value)` modulo shard count
+
+Behavior:
+
+- shards are computed from the same filtered partition set as `partitions ls`
+- no row should appear in more than one shard for fixed inputs
+- combined shard outputs cover the full selected set
+
 ### New command
 
 `firehose-parquet partitions ls` lists index rows with optional filters:
@@ -103,7 +122,7 @@ When legacy flags are used in direct ingestion mode (without explicit `--start-b
 
 `firehose-parquet partitions resolve ...`
 
-## Process used for phases 1-4
+## Process used for phases 1-5
 
 1. Branch from `main` using `codex/` prefix.
 2. Add CLI tree scaffolding in shared CLI crate (`firehose-parquet/src/cli.rs`).

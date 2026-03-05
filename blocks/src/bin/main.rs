@@ -2,10 +2,11 @@ use anyhow::{anyhow, Result};
 use clap::Parser;
 use firehose_parquet::cli::{
     build_config, cursor_template_context_from_selection, init_tracing, list_partitions_from_index,
-    load_dotenv, parse_partition_selection_request, resolve_cursor_template,
-    resolve_partition_bounds_from_index, resolve_partition_command,
-    resolve_partition_window_bounds_from_index, AwsConfig, Commands, CommonArgs,
-    PartitionBoundsRequest, PartitionListRequest, PartitionSelectionRequest, PartitionsCommands,
+    load_dotenv, parse_partition_selection_request, parse_partition_shard_strategy,
+    resolve_cursor_template, resolve_partition_bounds_from_index, resolve_partition_command,
+    resolve_partition_window_bounds_from_index, shard_partitions_from_index, AwsConfig, Commands,
+    CommonArgs, PartitionBoundsRequest, PartitionListRequest, PartitionSelectionRequest,
+    PartitionShardRequest, PartitionsCommands,
 };
 use firehose_parquet::config::BlockMetadata;
 use firehose_parquet::cursor::{CursorLocation, CursorState};
@@ -362,6 +363,81 @@ async fn main() -> Result<()> {
                 return Ok(());
             }
             Commands::Partitions(subcommand) => match subcommand {
+                PartitionsCommands::Shard {
+                    partitions_index,
+                    partition_type,
+                    partition_chain,
+                    from,
+                    to,
+                    shard_count,
+                    shard_index,
+                    strategy,
+                    json,
+                    aws_access_key_id,
+                    aws_secret_access_key,
+                    aws_session_token,
+                    aws_region,
+                    aws_endpoint_url,
+                } => {
+                    let list = PartitionListRequest {
+                        index_path: partitions_index.clone(),
+                        partition_type: partition_type.clone(),
+                        chain: partition_chain.clone(),
+                        from: from.clone(),
+                        to: to.clone(),
+                        limit: usize::MAX,
+                    };
+                    let request = PartitionShardRequest {
+                        list,
+                        shard_count: *shard_count,
+                        shard_index: *shard_index,
+                        strategy: parse_partition_shard_strategy(strategy)?,
+                    };
+                    let aws = AwsConfig {
+                        aws_access_key_id: aws_access_key_id.clone(),
+                        aws_secret_access_key: aws_secret_access_key.clone(),
+                        aws_session_token: aws_session_token.clone(),
+                        aws_region: aws_region.clone(),
+                        aws_endpoint_url: aws_endpoint_url.clone(),
+                    };
+                    let result = shard_partitions_from_index(&request, Some(&aws))?;
+
+                    if *json {
+                        println!("{}", serde_json::to_string_pretty(&result)?);
+                    } else {
+                        println!("partitions_index: {}", result.partitions_index);
+                        println!("shard_count:      {}", result.shard_count);
+                        println!("shard_index:      {}", result.shard_index);
+                        println!("strategy:         {:?}", result.strategy);
+                        println!("total_matches:    {}", result.total_matches);
+                        println!("returned_rows:    {}", result.returned_rows);
+                        if !result.rows.is_empty() {
+                            println!();
+                            println!(
+                                "{:<15} {:<19} {:<19} {:>12} {:>12} {}",
+                                "partition_type",
+                                "partition_value",
+                                "partition_start_ts",
+                                "start_block",
+                                "end_block",
+                                "chain"
+                            );
+                            for row in result.rows {
+                                println!(
+                                    "{:<15} {:<19} {:<19} {:>12} {:>12} {}",
+                                    row.partition_type,
+                                    row.partition_value,
+                                    row.partition_start_ts,
+                                    row.start_block,
+                                    row.end_block,
+                                    row.chain.unwrap_or_default()
+                                );
+                            }
+                        }
+                    }
+
+                    return Ok(());
+                }
                 PartitionsCommands::Ls {
                     partitions_index,
                     partition_type,

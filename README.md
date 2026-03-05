@@ -281,6 +281,43 @@ firehose-parquet partitions ls \
 | `--limit` | `100` | Maximum rows returned |
 | `--json` | `false` | Emit machine-readable output |
 
+### `partitions shard` — Deterministic Partition Assignment
+
+Assigns filtered partition rows to one shard for multi-container runs.
+
+```bash
+# Ordinal assignment: shard 1 of 4
+firehose-parquet partitions shard \
+  --partitions-index ./output/eth-mainnet/partitions.parquet \
+  --partition-type hour \
+  --shard-count 4 \
+  --shard-index 1
+
+# Hash assignment over a window with JSON output
+firehose-parquet partitions shard \
+  --partitions-index s3://my-bucket/eth-mainnet/partitions.parquet \
+  --partition-type day \
+  --partition-chain eth-mainnet \
+  --from '2015-07-29 00:00:00' \
+  --to '2015-07-31 00:00:00' \
+  --shard-count 8 \
+  --shard-index 0 \
+  --strategy hash \
+  --json
+```
+
+Strategies:
+
+- `ordinal` — assigns by sorted row ordinal modulo `shard_count`
+- `hash` — assigns by stable hash of `(chain, partition_type, partition_value)` modulo `shard_count`
+
+| Flag | Default | Description |
+|---|---|---|
+| `--shard-count` | none | Total shard count |
+| `--shard-index` | none | Zero-based shard index |
+| `--strategy` | `ordinal` | Assignment strategy: `ordinal` or `hash` |
+| `--json` | `false` | Emit machine-readable output |
+
 ### `partitions resolve` — Resolve Partition Block Bounds
 
 Resolves one row from `partitions.parquet` and prints the exact ingestion range (`start_block` inclusive, `stop_block` exclusive).
