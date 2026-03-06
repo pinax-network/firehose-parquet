@@ -371,14 +371,15 @@ Examples:
   fireparq scan s3://bucket/eth-mainnet/blocks/
 
   # Show 50 sample rows per file
-  fireparq scan ./output/blocks/ -n 50
+  fireparq scan ./output/blocks/ --limit 50
 ")]
     Scan {
         /// Path to a .parquet file or directory, or an S3 URI (s3://bucket/prefix)
         path: String,
         /// Number of sample rows to display per file (0 = schema only)
-        #[arg(short = 'n', long, default_value = "20")]
-        rows: usize,
+        /// Deprecated alias: `--rows`.
+        #[arg(short = 'n', long = "limit", alias = "rows", default_value = "20")]
+        limit: usize,
         /// Only show file metadata (schema, row count, size) without data
         #[arg(long, default_value = "false")]
         schema_only: bool,
@@ -553,8 +554,14 @@ Examples:
         #[arg(short = 'o', long)]
         output: Option<String>,
         /// Target partition interval: hour or date
-        #[arg(short = 'p', long, default_value = "date")]
-        target_partition: String,
+        /// Deprecated alias: `--target-partition`.
+        #[arg(
+            short = 'p',
+            long = "partition",
+            alias = "target-partition",
+            default_value = "date"
+        )]
+        partition: String,
         /// Compression codec: zstd, snappy, gzip, none
         #[arg(long, default_value = "zstd")]
         compression: String,
@@ -738,7 +745,7 @@ Examples:
     --endpoint https://eth.firehose.pinax.network:443 \\
     --start-block 10000000 \\
     --stop-block 10010000 \\
-    --partition-types day,hour \\
+    --partition day,hour \\
     --output ./output
 
   # Build to S3 with an explicit chain override and JSON output
@@ -747,7 +754,7 @@ Examples:
     --chain eth-mainnet \\
     --start-block 10000000 \\
     --stop-block 10010000 \\
-    --partition-types hour,minute \\
+    --partition hour,minute \\
     --output s3://my-bucket/firehose \\
     --write-lookup-sidecar \\
     --json
@@ -781,9 +788,10 @@ Examples:
         /// Stop block number (exclusive)
         #[arg(long)]
         stop_block: u64,
-        /// Comma-separated partition types to build: day,hour,minute,second
-        #[arg(long)]
-        partition_types: String,
+        /// Comma-separated partitions to build: day,hour,minute,second
+        /// Deprecated alias: `--partition-types`.
+        #[arg(long = "partition", alias = "partition-types")]
+        partition: String,
         /// Output root path (local directory or s3:// URI prefix)
         #[arg(long)]
         output: String,
@@ -1475,7 +1483,7 @@ pub fn parse_partition_build_types(spec: &str) -> anyhow::Result<Vec<PartitionBu
     for raw in spec.split(',') {
         let value = raw.trim();
         if value.is_empty() {
-            anyhow::bail!("--partition-types contains an empty value");
+            anyhow::bail!("--partition contains an empty value");
         }
         let partition_type = PartitionBuildType::from_cli_value(value)?;
         if !parsed.contains(&partition_type) {
@@ -1484,7 +1492,7 @@ pub fn parse_partition_build_types(spec: &str) -> anyhow::Result<Vec<PartitionBu
     }
 
     if parsed.is_empty() {
-        anyhow::bail!("--partition-types must contain at least one value");
+        anyhow::bail!("--partition must contain at least one value");
     }
 
     Ok(parsed)
@@ -6041,7 +6049,7 @@ mod tests {
             "100",
             "--stop-block",
             "200",
-            "--partition-types",
+            "--partition",
             "day,hour",
             "--output",
             "./output",
@@ -6055,7 +6063,7 @@ mod tests {
                 chain,
                 start_block,
                 stop_block,
-                partition_types,
+                partition,
                 output,
                 write_lookup_sidecar,
                 resume,
@@ -6066,7 +6074,7 @@ mod tests {
                 assert_eq!(chain.as_deref(), Some("eth-mainnet"));
                 assert_eq!(start_block, 100);
                 assert_eq!(stop_block, 200);
-                assert_eq!(partition_types, "day,hour");
+                assert_eq!(partition, "day,hour");
                 assert_eq!(output, "./output");
                 assert!(write_lookup_sidecar);
                 assert!(resume);
@@ -6074,6 +6082,105 @@ mod tests {
                 assert!(json);
             }
             _ => panic!("expected partitions build subcommand"),
+        }
+    }
+
+    #[test]
+    fn test_partitions_build_subcommand_deprecated_alias_parse() {
+        let cli = parse(&[
+            "test-cli",
+            "partitions",
+            "build",
+            "--endpoint",
+            "https://eth.firehose.pinax.network:443",
+            "--start-block",
+            "100",
+            "--stop-block",
+            "200",
+            "--partition-types",
+            "day,hour",
+            "--output",
+            "./output",
+        ]);
+        match cli.command.expect("command should exist") {
+            Commands::Partitions(PartitionsCommands::Build { partition, .. }) => {
+                assert_eq!(partition, "day,hour");
+            }
+            _ => panic!("expected partitions build subcommand"),
+        }
+    }
+
+    #[test]
+    fn test_scan_subcommand_limit_parse() {
+        let cli = parse(&[
+            "test-cli",
+            "scan",
+            "./output/blocks/",
+            "--limit",
+            "50",
+            "--schema-only",
+        ]);
+        match cli.command.expect("command should exist") {
+            Commands::Scan {
+                path,
+                limit,
+                schema_only,
+                ..
+            } => {
+                assert_eq!(path, "./output/blocks/");
+                assert_eq!(limit, 50);
+                assert!(schema_only);
+            }
+            _ => panic!("expected scan subcommand"),
+        }
+    }
+
+    #[test]
+    fn test_scan_subcommand_deprecated_rows_alias_parse() {
+        let cli = parse(&["test-cli", "scan", "./output/blocks/", "--rows", "12"]);
+        match cli.command.expect("command should exist") {
+            Commands::Scan { limit, .. } => assert_eq!(limit, 12),
+            _ => panic!("expected scan subcommand"),
+        }
+    }
+
+    #[test]
+    fn test_rollup_subcommand_partition_parse() {
+        let cli = parse(&[
+            "test-cli",
+            "rollup",
+            "./output/blocks/",
+            "--partition",
+            "hour",
+            "--delete-source",
+        ]);
+        match cli.command.expect("command should exist") {
+            Commands::Rollup {
+                source,
+                partition,
+                delete_source,
+                ..
+            } => {
+                assert_eq!(source, "./output/blocks/");
+                assert_eq!(partition, "hour");
+                assert!(delete_source);
+            }
+            _ => panic!("expected rollup subcommand"),
+        }
+    }
+
+    #[test]
+    fn test_rollup_subcommand_deprecated_target_partition_alias_parse() {
+        let cli = parse(&[
+            "test-cli",
+            "rollup",
+            "./output/blocks/",
+            "--target-partition",
+            "hour",
+        ]);
+        match cli.command.expect("command should exist") {
+            Commands::Rollup { partition, .. } => assert_eq!(partition, "hour"),
+            _ => panic!("expected rollup subcommand"),
         }
     }
 

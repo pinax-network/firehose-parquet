@@ -312,7 +312,7 @@ fireparq partitions build \
   --endpoint https://eth.firehose.pinax.network:443 \
   --start-block 10000000 \
   --stop-block 10010000 \
-  --partition-types day,hour \
+  --partition day,hour \
   --output ./output
 
 # Build hour + minute rows to S3 with an explicit chain override
@@ -321,7 +321,7 @@ fireparq partitions build \
   --chain eth-mainnet \
   --start-block 10000000 \
   --stop-block 10010000 \
-  --partition-types hour,minute \
+  --partition hour,minute \
   --output s3://my-bucket/firehose \
   --write-lookup-sidecar \
   --json
@@ -332,7 +332,7 @@ fireparq partitions build \
   --chain eth-mainnet \
   --start-block 10000000 \
   --stop-block 10020000 \
-  --partition-types day,hour \
+  --partition day,hour \
   --output ./output \
   --resume
 ```
@@ -350,7 +350,7 @@ Behavior:
 | Flag | Default | Description |
 |---|---|---|
 | `--chain` | inferred | Optional chain override when endpoint info is unavailable |
-| `--partition-types` | none | Comma-separated partition types: `day,hour,minute,second` |
+| `--partition` | none | Comma-separated partitions to build: `day,hour,minute,second` |
 | `--output` | none | Output root directory or `s3://` URI prefix |
 | `--write-lookup-sidecar` | `false` | Also write `partitions.lookup.json` next to the canonical parquet index |
 | `--resume` | `false` | Reuse the existing canonical index at the resolved output path and continue from its frontier |
@@ -701,7 +701,7 @@ fireparq rollup ./output/blocks/ -p date --delete-source
 | Flag | Default | Description |
 |---|---|---|
 | `-o, --output` | same as source | Output path (local or S3 URI) |
-| `-p, --target-partition` | `date` | Target partition interval: `hour` or `date` |
+| `-p, --partition` | `date` | Target partition interval: `hour` or `date` |
 | `--compression` | `zstd` | Compression codec: zstd, snappy, gzip, none |
 | `--flush-bytes` | 128 MB | Max compressed bytes per output file |
 | `--delete-source` | `false` | Delete source files after successful rollup |

@@ -5,6 +5,7 @@ This document is a tool-agnostic map of the `firehose-parquet` workspace: where 
 Related design docs:
 
 - `docs/verifiability-hash-strategy.md`: cross-chain verify hash defaults, normalization rules, and onboarding path.
+- `docs/partition-vocabulary.md`: naming convention for partition-related CLI flags.
 
 ## Workspace Layout
 
