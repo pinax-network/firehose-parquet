@@ -24,6 +24,7 @@ A production-grade Rust toolkit that consumes [StreamingFast Firehose](https://f
 - **Multi-chain** — pluggable `BlockMapper` trait with per-chain mapper modules
 - **Canonical identity columns** — `block_num`, `block_id`, `parent_num`, `parent_id`, `lib_num`, `timestamp` on every table (from Firehose `BlockMetadata`)
 - **gRPC streaming** — connects to any Firehose v2 endpoint via tonic, with TLS and API key / JWT auth
+- **Network aliases** — `--network` resolves built-in Firehose names and supports `FIREHOSE_ENDPOINT_*` per-network overrides
 - **Automatic retry / resume** — exponential back-off on connection errors; resumes from the last cursor
 - **Recovery guardrails** — optional stream idle timeout and reconnect stall timeout to force self-recovery or fail-fast restarts
 - **Cursor persistence** — pipeline state saved as `cursor.parquet` with full parameter validation on resume
@@ -49,6 +50,15 @@ A production-grade Rust toolkit that consumes [StreamingFast Firehose](https://f
 cargo build --release --workspace
 
 # Stream Solana blocks to Parquet (auto-detect chain)
+./target/release/fireparq \
+  --network solana \
+  --start-block 200000000 \
+  --stop-block 200001000 \
+  --output ./output \
+  --partition date \
+  --compression zstd
+
+# Or use an explicit endpoint directly
 ./target/release/fireparq \
   --endpoint https://solana.firehose.pinax.network:443 \
   --start-block 200000000 \
@@ -90,6 +100,38 @@ docker run --rm \
 ## Cursor & Resume
 
 `fireparq` persists pipeline state in a `cursor.parquet` file so streams can be interrupted and resumed without re-processing blocks. The cursor system provides deterministic, crash-safe resume with full parameter validation.
+
+## Network Aliases
+
+`fireparq` can resolve a small built-in set of Firehose network aliases instead of requiring `--endpoint` every time.
+
+Supported names in `v0.5.0`:
+
+- `mainnet`, `eth` → `https://eth.firehose.pinax.network:443`
+- `solana-mainnet-beta`, `solana` → `https://solana.firehose.pinax.network:443`
+- `tron` → `https://tron.firehose.pinax.network:443`
+- `tronevm` → `https://tronevm.firehose.pinax.network:443`
+
+Resolution precedence:
+
+1. `--endpoint` or `ENDPOINT`
+2. `--network` with `FIREHOSE_ENDPOINT_*` override lookup
+3. `--network` built-in default endpoint
+
+Per-network env overrides normalize network names by uppercasing and converting non-alphanumeric separators to underscores.
+
+```bash
+# Built-in alias
+fireparq --network eth --start-block 20000000 --stop-block 20001000
+
+# Alias-specific override
+export FIREHOSE_ENDPOINT_ETH=https://eth.internal.example.com:443
+fireparq --network eth --start-block 20000000 --stop-block 20001000
+
+# Canonical-name override also works for aliases
+export FIREHOSE_ENDPOINT_SOLANA_MAINNET_BETA=https://solana.internal.example.com:443
+fireparq --network solana --start-block 250000000 --stop-block 250100000
+```
 
 ### How It Works
 
@@ -191,6 +233,8 @@ Options:
 Connection:
   -e, --endpoint <ENDPOINT>
           Firehose gRPC endpoint URL [env: ENDPOINT]
+      --network <NETWORK>
+          Built-in Firehose network alias. `--endpoint` or `ENDPOINT` takes precedence. Supports per-network overrides such as `FIREHOSE_ENDPOINT_ETH` [env: NETWORK] [possible values: mainnet, eth, solana-mainnet-beta, solana, tron, tronevm]
       --api-key-envvar <API_KEY_ENVVAR>
           Name of environment variable containing the API key for authentication [env: API_KEY_ENVVAR] [default: SUBSTREAMS_API_KEY]
       --api-token-envvar <API_TOKEN_ENVVAR>

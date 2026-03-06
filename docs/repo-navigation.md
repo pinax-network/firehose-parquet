@@ -15,6 +15,7 @@ Related design docs:
   - `firehose-protos/src/lib.rs`: exposes compiled protobuf modules and aliases (`firehose`, `eth`, `solana`, etc.).
 - `firehose-parquet/`: core library crate used by the binary.
   - `src/cli.rs`: shared CLI args, subcommands, parsing, validation, and utility routines.
+  - `src/networks.rs`: built-in Firehose network alias registry and env override resolution.
   - `src/config.rs`: pipeline config model, partition key behavior, compression enum.
   - `src/grpc.rs`: Firehose stream client, auth headers, reconnect/backoff/timeouts.
   - `src/writer.rs`: Arrow builders to Parquet file writing, flush/rollover logic.
@@ -61,6 +62,8 @@ Related design docs:
   - chain mapper usage in `blocks/src/*/mapper.rs`
 - Change gRPC retry/auth/stream lifecycle:
   - `firehose-parquet/src/grpc.rs`
+- Change built-in `--network` aliases or endpoint override behavior:
+  - `firehose-parquet/src/networks.rs`
 - Change metrics names/labels/endpoint behavior:
   - `firehose-parquet/src/metrics.rs`
 - Change rollup/merge/truncate behavior:
