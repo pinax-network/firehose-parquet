@@ -169,7 +169,10 @@ mod tests {
 
         let resolved =
             resolve_network_endpoint("mainnet").expect("mainnet override should resolve");
-        assert_eq!(resolved.endpoint, "https://override-mainnet.example.com:443");
+        assert_eq!(
+            resolved.endpoint,
+            "https://override-mainnet.example.com:443"
+        );
         assert_eq!(
             resolved.source,
             EndpointSource::EnvOverride {

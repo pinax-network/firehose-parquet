@@ -94,7 +94,7 @@ pub struct CommonArgs {
     )]
     pub partitions_index: Option<String>,
 
-    /// Partition type used to resolve start/stop range from --partitions-index, e.g. hour or day
+    /// Partition type used to resolve start/stop range from --partitions-index, e.g. hour or date
     #[arg(
         long,
         env = "PARTITION_TYPE",
@@ -740,24 +740,29 @@ pub enum PartitionsCommands {
     /// Build `partitions.parquet` directly from Firehose block timestamps.
     #[command(after_long_help = "\
 Examples:
-  # Build a local hour/day index for one chain
+  # Build a local date index for one chain
   fireparq partitions build \\
     --network mainnet \\
-    --start-block 10000000 \\
     --stop-block 10010000 \\
-    --partition day,hour \\
+    --partition date \\
     --output ./output
 
   # Build to S3 with an explicit chain override and JSON output
   fireparq partitions build \\
     --network mainnet \\
     --chain eth-mainnet \\
-    --start-block 10000000 \\
     --stop-block 10010000 \\
-    --partition hour,minute \\
-    --output s3://my-bucket/firehose \\
+    --partition hour \\
+    --s3-bucket my-bucket \\
     --write-lookup-sidecar \\
     --json
+
+  # Let start block fall back to a sibling cursor or endpoint metadata
+  fireparq partitions build \\
+    --network mainnet \\
+    --stop-block 10010000 \\
+    --partition date \\
+    --output ./output
 ")]
     Build {
         /// Firehose gRPC endpoint URL
@@ -785,19 +790,28 @@ Examples:
         /// Optional chain name override; otherwise inferred from endpoint info
         #[arg(long)]
         chain: Option<String>,
-        /// Start block number (inclusive)
+        /// Start block number (inclusive).
+        ///
+        /// When omitted, falls back to a sibling `cursor.parquet` if present,
+        /// then to the endpoint's first streamable block.
         #[arg(long)]
-        start_block: u64,
+        start_block: Option<u64>,
         /// Stop block number (exclusive)
         #[arg(long)]
         stop_block: u64,
-        /// Comma-separated partitions to build: day,hour,minute,second
+        /// Partition to build: date, hour, minute, or second
         /// Deprecated alias: `--partition-types`.
         #[arg(long = "partition", alias = "partition-types")]
         partition: String,
-        /// Output root path (local directory or s3:// URI prefix)
+        /// Output root path (local directory or s3:// URI prefix).
+        ///
+        /// When omitted, `--s3-bucket` or `S3_BUCKET` is required and the
+        /// output root becomes `s3://<bucket>`.
         #[arg(long)]
-        output: String,
+        output: Option<String>,
+        /// S3 bucket name used when `--output` is omitted or should be prefixed.
+        #[arg(long, env = "S3_BUCKET", hide_env_values = true)]
+        s3_bucket: Option<String>,
         /// Also write `partitions.lookup.json` alongside `partitions.parquet`
         #[arg(long, default_value = "false")]
         write_lookup_sidecar: bool,
@@ -833,7 +847,7 @@ Examples:
   # Validate one chain/type and allow gaps
   fireparq partitions validate \\
     --partitions-index s3://my-bucket/partitions.parquet \\
-    --partition-type day \\
+    --partition-type date \\
     --partition-chain eth-mainnet \\
     --allow-gaps \\
     --json
@@ -842,7 +856,7 @@ Examples:
         /// Path to partitions index parquet file (local path or s3:// URI)
         #[arg(long)]
         partitions_index: String,
-        /// Optional partition type filter (e.g. hour, day)
+        /// Optional partition type filter (e.g. hour, date)
         #[arg(long)]
         partition_type: Option<String>,
         /// Optional chain filter (matches `chain` column)
@@ -883,7 +897,7 @@ Examples:
   # Select shard 0 of 8 using hash assignment and emit JSON
   fireparq partitions shard \\
     --partitions-index s3://my-bucket/eth-mainnet/partitions.parquet \\
-    --partition-type day \\
+    --partition-type date \\
     --partition-chain eth-mainnet \\
     --from '2015-07-29 00:00:00' \\
     --to '2015-07-31 00:00:00' \\
@@ -896,7 +910,7 @@ Examples:
         /// Path to partitions index parquet file (local path or s3:// URI)
         #[arg(long)]
         partitions_index: String,
-        /// Optional partition type filter (e.g. hour, day)
+        /// Optional partition type filter (e.g. hour, date)
         #[arg(long)]
         partition_type: Option<String>,
         /// Optional chain filter (matches `chain` column)
@@ -947,7 +961,7 @@ Examples:
   # Filter by chain + time window and emit JSON
   fireparq partitions ls \\
     --partitions-index s3://my-bucket/eth-mainnet/partitions.parquet \\
-    --partition-type day \\
+    --partition-type date \\
     --partition-chain eth-mainnet \\
     --from '2015-07-29 00:00:00' \\
     --to '2015-07-31 00:00:00' \\
@@ -958,7 +972,7 @@ Examples:
         /// Path to partitions index parquet file (local path or s3:// URI)
         #[arg(long)]
         partitions_index: String,
-        /// Optional partition type filter (e.g. hour, day)
+        /// Optional partition type filter (e.g. hour, date)
         #[arg(long)]
         partition_type: Option<String>,
         /// Optional chain filter (matches `chain` column)
@@ -1005,7 +1019,7 @@ Examples:
   # Resolve from S3 index and emit JSON
   fireparq partitions resolve \\
     --partitions-index s3://my-bucket/eth-mainnet/partitions.parquet \\
-    --partition-type day \\
+    --partition-type date \\
     --partition-value '2015-07-30 00:00:00' \\
     --partition-chain eth-mainnet \\
     --json
@@ -1014,7 +1028,7 @@ Examples:
         /// Path to partitions index parquet file (local path or s3:// URI)
         #[arg(long)]
         partitions_index: String,
-        /// Partition type to resolve (e.g. hour, day)
+        /// Partition type to resolve (e.g. hour, date)
         #[arg(long)]
         partition_type: String,
         /// Partition value to resolve (e.g. "2015-07-30 15:00:00")
@@ -1068,7 +1082,7 @@ pub struct PartitionResolveOptions {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PartitionBuildType {
-    Day,
+    Date,
     Hour,
     Minute,
     Second,
@@ -1077,19 +1091,19 @@ pub enum PartitionBuildType {
 impl PartitionBuildType {
     pub fn from_cli_value(value: &str) -> anyhow::Result<Self> {
         match value.trim().to_ascii_lowercase().as_str() {
-            "day" | "date" => Ok(Self::Day),
+            "day" | "date" => Ok(Self::Date),
             "hour" => Ok(Self::Hour),
             "minute" => Ok(Self::Minute),
             "second" => Ok(Self::Second),
             other => anyhow::bail!(
-                "invalid partition type '{other}': expected one of day, hour, minute, second"
+                "invalid partition type '{other}': expected one of date, hour, minute, second"
             ),
         }
     }
 
     pub fn as_str(&self) -> &'static str {
         match self {
-            Self::Day => "day",
+            Self::Date => "date",
             Self::Hour => "hour",
             Self::Minute => "minute",
             Self::Second => "second",
@@ -1098,7 +1112,7 @@ impl PartitionBuildType {
 
     pub fn interval_seconds(&self) -> i64 {
         match self {
-            Self::Day => 86_400,
+            Self::Date => 86_400,
             Self::Hour => 3_600,
             Self::Minute => 60,
             Self::Second => 1,
@@ -1111,7 +1125,7 @@ impl PartitionBuildType {
         let dt = OffsetDateTime::from_unix_timestamp(timestamp)
             .map_err(|e| anyhow::anyhow!("invalid unix timestamp {timestamp}: {e}"))?;
         let rounded = match self {
-            Self::Day => dt.replace_time(time::Time::MIDNIGHT),
+            Self::Date => dt.replace_time(time::Time::MIDNIGHT),
             Self::Hour => dt.replace_minute(0)?.replace_second(0)?,
             Self::Minute => dt.replace_second(0)?,
             Self::Second => dt,
@@ -1124,6 +1138,10 @@ impl std::fmt::Display for PartitionBuildType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.as_str())
     }
+}
+
+fn canonical_partition_type_label(value: &str) -> anyhow::Result<String> {
+    Ok(PartitionBuildType::from_cli_value(value)?.to_string())
 }
 
 #[derive(Debug, Clone, serde::Serialize, PartialEq, Eq)]
@@ -1144,7 +1162,7 @@ pub struct PartitionBuildRow {
 pub struct PartitionBuildResult {
     pub partitions_index: String,
     pub chain: String,
-    pub partition_types: Vec<String>,
+    pub partition: String,
     pub row_count: usize,
     pub start_block: u64,
     pub stop_block: u64,
@@ -1482,33 +1500,71 @@ const PARTITIONS_MIN_START_BLOCK_KEY: &str = "firehose-parquet.partitions.min_st
 const PARTITIONS_MAX_END_BLOCK_KEY: &str = "firehose-parquet.partitions.max_end_block";
 
 pub fn parse_partition_build_types(spec: &str) -> anyhow::Result<Vec<PartitionBuildType>> {
-    let mut parsed = Vec::new();
-    for raw in spec.split(',') {
-        let value = raw.trim();
-        if value.is_empty() {
-            anyhow::bail!("--partition contains an empty value");
-        }
-        let partition_type = PartitionBuildType::from_cli_value(value)?;
-        if !parsed.contains(&partition_type) {
-            parsed.push(partition_type);
-        }
+    let value = spec.trim();
+    if value.is_empty() {
+        anyhow::bail!("--partition is required");
+    }
+    if value.contains(',') {
+        anyhow::bail!(
+            "--partition accepts exactly one value per run; got `{}`",
+            spec.trim()
+        );
     }
 
-    if parsed.is_empty() {
-        anyhow::bail!("--partition must contain at least one value");
-    }
-
-    Ok(parsed)
+    Ok(vec![PartitionBuildType::from_cli_value(value)?])
 }
 
-pub fn build_partitions_index_path(output_root: &str, chain: &str) -> String {
+pub fn resolve_s3_output_root(
+    output: Option<&str>,
+    s3_bucket: Option<&str>,
+) -> anyhow::Result<String> {
+    match (
+        output.map(str::trim).filter(|value| !value.is_empty()),
+        s3_bucket.map(str::trim).filter(|value| !value.is_empty()),
+    ) {
+        (Some(output), Some(bucket)) if !output.starts_with("s3://") => {
+            let normalized = output.trim_start_matches("./").trim_start_matches('/');
+            Ok(format!("s3://{bucket}/{normalized}"))
+        }
+        (Some(output), _) => Ok(output.to_string()),
+        (None, Some(bucket)) => Ok(format!("s3://{bucket}")),
+        (None, None) => {
+            anyhow::bail!("--output is required unless --s3-bucket or S3_BUCKET is set")
+        }
+    }
+}
+
+pub fn build_partitions_output_root(output_root: &str, chain: &str) -> String {
     let normalized_root = output_root.trim_end_matches('/');
     if normalized_root.starts_with("s3://") {
-        format!("{normalized_root}/{chain}/partitions.parquet")
+        format!("{normalized_root}/{chain}")
     } else {
         std::path::PathBuf::from(normalized_root)
             .join(chain)
+            .to_string_lossy()
+            .into_owned()
+    }
+}
+
+pub fn build_partitions_index_path(output_root: &str, chain: &str) -> String {
+    let chain_root = build_partitions_output_root(output_root, chain);
+    if chain_root.starts_with("s3://") {
+        format!("{chain_root}/partitions.parquet")
+    } else {
+        std::path::PathBuf::from(chain_root)
             .join("partitions.parquet")
+            .to_string_lossy()
+            .into_owned()
+    }
+}
+
+pub fn build_partitions_cursor_path(output_root: &str, chain: &str) -> String {
+    let chain_root = build_partitions_output_root(output_root, chain);
+    if chain_root.starts_with("s3://") {
+        format!("{chain_root}/cursor.parquet")
+    } else {
+        std::path::PathBuf::from(chain_root)
+            .join("cursor.parquet")
             .to_string_lossy()
             .into_owned()
     }
@@ -1683,9 +1739,11 @@ pub fn read_partitions_build_rows(
         let end_time_idx = schema.index_of("end_time").ok();
 
         for row_index in 0..batch.num_rows() {
-            let partition_type =
+            let partition_type = canonical_partition_type_label(
                 read_utf8_value(batch.column(partition_type_idx).as_ref(), row_index)?
-                    .ok_or_else(|| anyhow::anyhow!("partition_type cannot be null"))?;
+                    .ok_or_else(|| anyhow::anyhow!("partition_type cannot be null"))?
+                    .as_str(),
+            )?;
             let partition_value =
                 read_utf8_value(batch.column(partition_value_idx).as_ref(), row_index)?
                     .ok_or_else(|| anyhow::anyhow!("partition_value cannot be null"))?;
@@ -2600,7 +2658,9 @@ fn resolve_partition_chains(
         let chain_idx = schema.index_of("chain").ok();
 
         for row in 0..batch.num_rows() {
-            let partition_type = read_utf8_value(batch.column(partition_type_idx).as_ref(), row)?;
+            let partition_type = read_utf8_value(batch.column(partition_type_idx).as_ref(), row)?
+                .map(|value| canonical_partition_type_label(&value))
+                .transpose()?;
             let partition_value = read_utf8_value(batch.column(partition_value_idx).as_ref(), row)?;
 
             if partition_type
@@ -2811,9 +2871,11 @@ pub fn list_partitions_from_index(
         let partition_start_ts_idx = schema.index_of("partition_start_ts").ok();
 
         for row in 0..batch.num_rows() {
-            let partition_type =
+            let partition_type = canonical_partition_type_label(
                 read_utf8_value(batch.column(partition_type_idx).as_ref(), row)?
-                    .ok_or_else(|| anyhow::anyhow!("null partition_type at row {}", row))?;
+                    .ok_or_else(|| anyhow::anyhow!("null partition_type at row {}", row))?
+                    .as_str(),
+            )?;
             let partition_value = read_utf8_value(batch.column(partition_value_idx).as_ref(), row)?
                 .ok_or_else(|| anyhow::anyhow!("null partition_value at row {}", row))?;
 
@@ -3445,7 +3507,9 @@ pub fn parse_partition_bounds_request(
     args: &CommonArgs,
 ) -> anyhow::Result<Option<PartitionBoundsRequest>> {
     let index_path = normalize_opt_string(&args.partitions_index);
-    let partition_type = normalize_opt_string(&args.partition_type);
+    let partition_type = normalize_opt_string(&args.partition_type)
+        .map(|value| canonical_partition_type_label(&value))
+        .transpose()?;
     let partition_value = normalize_opt_string(&args.partition_value);
     let chain = normalize_opt_string(&args.partition_chain);
 
@@ -3490,7 +3554,9 @@ pub fn parse_partition_selection_request(
     args: &CommonArgs,
 ) -> anyhow::Result<Option<PartitionSelectionRequest>> {
     let index_path = normalize_opt_string(&args.partitions_index);
-    let partition_type = normalize_opt_string(&args.partition_type);
+    let partition_type = normalize_opt_string(&args.partition_type)
+        .map(|value| canonical_partition_type_label(&value))
+        .transpose()?;
     let partition_value = normalize_opt_string(&args.partition_value);
     let partition_from = normalize_opt_string(&args.partition_from);
     let partition_to = normalize_opt_string(&args.partition_to);
@@ -6048,12 +6114,10 @@ mod tests {
             "https://eth.firehose.pinax.network:443",
             "--chain",
             "eth-mainnet",
-            "--start-block",
-            "100",
             "--stop-block",
             "200",
             "--partition",
-            "day,hour",
+            "date",
             "--output",
             "./output",
             "--resume",
@@ -6068,17 +6132,22 @@ mod tests {
                 stop_block,
                 partition,
                 output,
+                s3_bucket,
                 write_lookup_sidecar,
                 resume,
                 json,
                 ..
             }) => {
-                assert_eq!(endpoint, "https://eth.firehose.pinax.network:443");
+                assert_eq!(
+                    endpoint.as_deref(),
+                    Some("https://eth.firehose.pinax.network:443")
+                );
                 assert_eq!(chain.as_deref(), Some("eth-mainnet"));
-                assert_eq!(start_block, 100);
+                assert_eq!(start_block, None);
                 assert_eq!(stop_block, 200);
-                assert_eq!(partition, "day,hour");
-                assert_eq!(output, "./output");
+                assert_eq!(partition, "date");
+                assert_eq!(output.as_deref(), Some("./output"));
+                assert!(s3_bucket.is_none());
                 assert!(write_lookup_sidecar);
                 assert!(resume);
                 assert!(write_lookup_sidecar);
@@ -6096,18 +6165,42 @@ mod tests {
             "build",
             "--endpoint",
             "https://eth.firehose.pinax.network:443",
-            "--start-block",
-            "100",
             "--stop-block",
             "200",
             "--partition-types",
-            "day,hour",
+            "date",
             "--output",
             "./output",
         ]);
         match cli.command.expect("command should exist") {
             Commands::Partitions(PartitionsCommands::Build { partition, .. }) => {
-                assert_eq!(partition, "day,hour");
+                assert_eq!(partition, "date");
+            }
+            _ => panic!("expected partitions build subcommand"),
+        }
+    }
+
+    #[test]
+    fn test_partitions_build_subcommand_parse_s3_bucket_without_output() {
+        let cli = parse(&[
+            "test-cli",
+            "partitions",
+            "build",
+            "--endpoint",
+            "https://eth.firehose.pinax.network:443",
+            "--stop-block",
+            "200",
+            "--partition",
+            "hour",
+            "--s3-bucket",
+            "my-bucket",
+        ]);
+        match cli.command.expect("command should exist") {
+            Commands::Partitions(PartitionsCommands::Build {
+                output, s3_bucket, ..
+            }) => {
+                assert!(output.is_none());
+                assert_eq!(s3_bucket.as_deref(), Some("my-bucket"));
             }
             _ => panic!("expected partitions build subcommand"),
         }
@@ -6196,7 +6289,7 @@ mod tests {
             "--partitions-index",
             "./partitions.parquet",
             "--partition-type",
-            "day",
+            "date",
             "--partition-chain",
             "eth-mainnet",
             "--from",
@@ -6220,7 +6313,7 @@ mod tests {
                 ..
             }) => {
                 assert_eq!(partitions_index, "./partitions.parquet");
-                assert_eq!(partition_type.as_deref(), Some("day"));
+                assert_eq!(partition_type.as_deref(), Some("date"));
                 assert_eq!(partition_chain.as_deref(), Some("eth-mainnet"));
                 assert_eq!(from.as_deref(), Some("2015-07-29 00:00:00"));
                 assert_eq!(to.as_deref(), Some("2015-07-31 00:00:00"));
@@ -6240,7 +6333,7 @@ mod tests {
             "--partitions-index",
             "./partitions.parquet",
             "--partition-type",
-            "day",
+            "date",
             "--partition-chain",
             "eth-mainnet",
             "--from",
@@ -6269,7 +6362,7 @@ mod tests {
                 ..
             }) => {
                 assert_eq!(partitions_index, "./partitions.parquet");
-                assert_eq!(partition_type.as_deref(), Some("day"));
+                assert_eq!(partition_type.as_deref(), Some("date"));
                 assert_eq!(partition_chain.as_deref(), Some("eth-mainnet"));
                 assert_eq!(from.as_deref(), Some("2015-07-29 00:00:00"));
                 assert_eq!(to.as_deref(), Some("2015-07-31 00:00:00"));
@@ -6291,7 +6384,7 @@ mod tests {
             "--partitions-index",
             "./partitions.parquet",
             "--partition-type",
-            "day",
+            "date",
             "--partition-chain",
             "eth-mainnet",
             "--allow-gaps",
@@ -6307,7 +6400,7 @@ mod tests {
                 ..
             }) => {
                 assert_eq!(partitions_index, "./partitions.parquet");
-                assert_eq!(partition_type.as_deref(), Some("day"));
+                assert_eq!(partition_type.as_deref(), Some("date"));
                 assert_eq!(partition_chain.as_deref(), Some("eth-mainnet"));
                 assert!(allow_gaps);
                 assert!(json);
@@ -7604,7 +7697,7 @@ mod tests {
             &PartitionValidateRequest {
                 list: PartitionListRequest {
                     index_path: path.to_string_lossy().to_string(),
-                    partition_type: Some("day".to_string()),
+                    partition_type: Some("date".to_string()),
                     chain: Some("eth-mainnet".to_string()),
                     from: None,
                     to: None,
@@ -7629,12 +7722,45 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_partition_build_types_accepts_aliases_and_deduplicates() {
-        let parsed = parse_partition_build_types("date,hour,day,hour").expect("parse types");
-        assert_eq!(
-            parsed,
-            vec![PartitionBuildType::Day, PartitionBuildType::Hour]
-        );
+    fn test_parse_partition_build_types_accepts_date_and_day_alias() {
+        let parsed = parse_partition_build_types("date").expect("parse types");
+        assert_eq!(parsed, vec![PartitionBuildType::Date]);
+
+        let parsed = parse_partition_build_types("day").expect("parse alias");
+        assert_eq!(parsed, vec![PartitionBuildType::Date]);
+    }
+
+    #[test]
+    fn test_parse_partition_build_types_rejects_multiple_values() {
+        let err =
+            parse_partition_build_types("date,hour").expect_err("multiple values should fail");
+        assert!(err.to_string().contains("exactly one value per run"));
+    }
+
+    #[test]
+    fn test_resolve_s3_output_root_prefers_explicit_output() {
+        let resolved =
+            resolve_s3_output_root(Some("./output"), Some("bucket-name")).expect("resolve");
+        assert_eq!(resolved, "s3://bucket-name/output");
+
+        let resolved =
+            resolve_s3_output_root(Some("s3://other-bucket/prefix"), Some("bucket-name"))
+                .expect("resolve s3");
+        assert_eq!(resolved, "s3://other-bucket/prefix");
+    }
+
+    #[test]
+    fn test_resolve_s3_output_root_accepts_bucket_without_output() {
+        let resolved = resolve_s3_output_root(None, Some("bucket-name")).expect("resolve");
+        assert_eq!(resolved, "s3://bucket-name");
+    }
+
+    #[test]
+    fn test_resolve_s3_output_root_requires_output_or_bucket() {
+        let err = resolve_s3_output_root(None, None).expect_err("missing output should fail");
+        assert!(err
+            .to_string()
+            .contains("--output is required unless --s3-bucket or S3_BUCKET is set"));
     }
 
     #[test]
@@ -7659,7 +7785,7 @@ mod tests {
 
         let rows = build_partition_rows_from_blocks(
             "eth-mainnet",
-            vec![PartitionBuildType::Day, PartitionBuildType::Hour],
+            vec![PartitionBuildType::Date, PartitionBuildType::Hour],
             &blocks,
             103,
         )
@@ -7667,14 +7793,14 @@ mod tests {
 
         assert_eq!(rows.len(), 3);
 
-        let day_rows: Vec<_> = rows
+        let date_rows: Vec<_> = rows
             .iter()
-            .filter(|row| row.partition_type == "day")
+            .filter(|row| row.partition_type == "date")
             .collect();
-        assert_eq!(day_rows.len(), 1);
-        assert_eq!(day_rows[0].partition_value, "2023-07-31 00:00:00");
-        assert_eq!(day_rows[0].start_block, 100);
-        assert_eq!(day_rows[0].end_block, 103);
+        assert_eq!(date_rows.len(), 1);
+        assert_eq!(date_rows[0].partition_value, "2023-07-31 00:00:00");
+        assert_eq!(date_rows[0].start_block, 100);
+        assert_eq!(date_rows[0].end_block, 103);
 
         let hour_rows: Vec<_> = rows
             .iter()

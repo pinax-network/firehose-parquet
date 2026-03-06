@@ -2,15 +2,15 @@ use anyhow::{anyhow, Result};
 use clap::builder::PossibleValuesParser;
 use clap::Parser;
 use firehose_parquet::cli::{
-    build_config, build_partitions_index_path, cursor_template_context_from_selection,
-    init_tracing, list_partitions_from_index, load_dotenv, parse_partition_build_types,
-    parse_partition_selection_request, parse_partition_shard_strategy, read_partitions_build_rows,
-    resolve_cursor_template, resolve_partition_bounds_from_index, resolve_partition_command,
-    resolve_partition_window_bounds_from_index, shard_partitions_from_index,
-    validate_partitions_index, write_lookup_sidecar_for_index, write_partitions_index, AwsConfig,
-    Commands, CommonArgs, PartitionBoundsRequest, PartitionBuildResult, PartitionIndexBuilder,
-    PartitionListRequest, PartitionResolveOptions, PartitionSelectionRequest,
-    PartitionShardRequest, PartitionValidateRequest, PartitionsCommands,
+    build_config, build_partitions_index_path, build_partitions_output_root,
+    cursor_template_context_from_selection, init_tracing, list_partitions_from_index, load_dotenv,
+    parse_partition_build_types, parse_partition_selection_request, parse_partition_shard_strategy,
+    read_partitions_build_rows, resolve_cursor_template, resolve_partition_bounds_from_index,
+    resolve_partition_command, resolve_partition_window_bounds_from_index, resolve_s3_output_root,
+    shard_partitions_from_index, validate_partitions_index, write_lookup_sidecar_for_index,
+    write_partitions_index, AwsConfig, Commands, CommonArgs, PartitionBoundsRequest,
+    PartitionBuildResult, PartitionIndexBuilder, PartitionListRequest, PartitionResolveOptions,
+    PartitionSelectionRequest, PartitionShardRequest, PartitionValidateRequest, PartitionsCommands,
 };
 use firehose_parquet::config::{BlockMetadata, Compression, Config, Partition};
 use firehose_parquet::cursor::{CursorLocation, CursorState};
@@ -20,6 +20,7 @@ use firehose_parquet::metrics;
 use firehose_parquet::networks::{resolve_network_endpoint, EndpointSource, KNOWN_NETWORK_NAMES};
 use firehose_parquet::traits::{decode_id_bytes, fork_step_name, BlockIdentity, BlockMapper};
 use firehose_parquet::writer::{OutputWriter, ParquetFileMetadata};
+use object_store::ObjectStore;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -85,7 +86,7 @@ Examples:
   # Resolve range from S3 partitions index
   fireparq --network mainnet \\
     --partitions-index s3://my-bucket/eth-mainnet/partitions.parquet \\
-    --partition-type day \\
+    --partition-type date \\
     --partition-value '2015-07-30 00:00:00' \\
     --partition-chain eth-mainnet
 
@@ -328,28 +329,25 @@ async fn run_partitions_build(
     api_key_envvar: &str,
     api_token_envvar: &str,
     chain_override: Option<&str>,
-    start_block: u64,
+    start_block: Option<u64>,
     stop_block: u64,
     partition_types_spec: &str,
-    output: &str,
+    output: Option<&str>,
+    s3_bucket: Option<&str>,
     write_lookup_sidecar: bool,
     resume: bool,
     aws: &AwsConfig,
 ) -> Result<PartitionBuildResult> {
-    if stop_block <= start_block {
-        return Err(anyhow!(
-            "--stop-block must be greater than --start-block, got {stop_block} <= {start_block}"
-        ));
-    }
+    let output_root = resolve_s3_output_root(output, s3_bucket)?;
 
     let base_config = Config {
         endpoint: endpoint.to_string(),
         api_key: read_optional_env(api_key_envvar),
         jwt_token: read_optional_env(api_token_envvar),
-        start_block: Some(start_block),
+        start_block,
         stop_block: Some(stop_block),
         cursor_path: None,
-        output: PathBuf::from(output),
+        output: PathBuf::from(&output_root),
         partition: Partition::None,
         flush_rows: None,
         flush_bytes: 0,
@@ -362,7 +360,7 @@ async fn run_partitions_build(
         aws_session_token: aws.aws_session_token.clone(),
         aws_region: aws.aws_region.clone(),
         aws_endpoint_url: aws.aws_endpoint_url.clone(),
-        s3_bucket: None,
+        s3_bucket: s3_bucket.map(str::to_string),
         cache_control: None,
         metrics_port: None,
         stream_idle_timeout_secs: None,
@@ -382,8 +380,48 @@ async fn run_partitions_build(
         .ok_or_else(|| {
             anyhow!("--chain is required when the endpoint does not expose chain_name")
         })?;
+
     let partition_types = parse_partition_build_types(partition_types_spec)?;
-    let partitions_index = build_partitions_index_path(output, &chain);
+    let partition_label = partition_types[0].to_string();
+    let partitions_index = build_partitions_index_path(&output_root, &chain);
+    let chain_output_root = build_partitions_output_root(&output_root, &chain);
+
+    let cursor_location = if chain_output_root.starts_with("s3://") {
+        let (bucket, _) = firehose_parquet::writer::parse_s3_url(&chain_output_root)?;
+        let s3_client = Arc::new(aws.build_s3_client(&bucket)?) as Arc<dyn ObjectStore>;
+        Some(CursorLocation::resolve(
+            &chain_output_root,
+            firehose_parquet::cursor::CURSOR_PARQUET_FILENAME,
+            Some(s3_client),
+        )?)
+    } else {
+        Some(CursorLocation::resolve(
+            &chain_output_root,
+            firehose_parquet::cursor::CURSOR_PARQUET_FILENAME,
+            None,
+        )?)
+    };
+
+    let inferred_start_block = if let Some(start_block) = start_block {
+        start_block
+    } else if let Some(cursor_state) = cursor_location.as_ref().and_then(CursorLocation::load) {
+        cursor_state.last_block_num.saturating_add(1)
+    } else if let Some(first_streamable) = endpoint_info
+        .as_ref()
+        .map(|info| info.first_streamable_block_num)
+    {
+        first_streamable
+    } else {
+        return Err(anyhow!(
+            "--start-block is required when no sibling cursor.parquet exists and the endpoint does not expose first_streamable_block_num"
+        ));
+    };
+
+    if stop_block <= inferred_start_block {
+        return Err(anyhow!(
+            "--stop-block must be greater than the effective start block, got {stop_block} <= {inferred_start_block}"
+        ));
+    }
 
     let (mut builder, effective_start_block, resumed_from_block) = if resume {
         match read_partitions_build_rows(&partitions_index, Some(aws)) {
@@ -395,18 +433,18 @@ async fn run_partitions_build(
                 )?;
                 (
                     builder,
-                    start_block.max(resume_start_block),
+                    inferred_start_block.max(resume_start_block),
                     Some(resume_start_block),
                 )
             }
             Ok(_) => (
                 PartitionIndexBuilder::new(chain.clone(), partition_types.clone())?,
-                start_block,
+                inferred_start_block,
                 None,
             ),
             Err(err) if err.to_string().contains("No such file or directory") => (
                 PartitionIndexBuilder::new(chain.clone(), partition_types.clone())?,
-                start_block,
+                inferred_start_block,
                 None,
             ),
             Err(err) => return Err(err),
@@ -414,7 +452,7 @@ async fn run_partitions_build(
     } else {
         (
             PartitionIndexBuilder::new(chain.clone(), partition_types.clone())?,
-            start_block,
+            inferred_start_block,
             None,
         )
     };
@@ -439,16 +477,13 @@ async fn run_partitions_build(
         return Ok(PartitionBuildResult {
             partitions_index,
             chain,
-            partition_types: partition_types
-                .into_iter()
-                .map(|partition_type| partition_type.to_string())
-                .collect(),
+            partition: partition_label.clone(),
             row_count: rows.len(),
             start_block: rows
                 .iter()
                 .map(|row| row.start_block)
                 .min()
-                .unwrap_or(start_block),
+                .unwrap_or(inferred_start_block),
             stop_block: rows
                 .iter()
                 .map(|row| row.end_block)
@@ -477,16 +512,13 @@ async fn run_partitions_build(
     Ok(PartitionBuildResult {
         partitions_index,
         chain,
-        partition_types: partition_types
-            .into_iter()
-            .map(|partition_type| partition_type.to_string())
-            .collect(),
+        partition: partition_label,
         row_count: rows.len(),
         start_block: rows
             .iter()
             .map(|row| row.start_block)
             .min()
-            .unwrap_or(start_block),
+            .unwrap_or(inferred_start_block),
         stop_block: rows
             .iter()
             .map(|row| row.end_block)
@@ -583,6 +615,7 @@ async fn main() -> Result<()> {
                     stop_block,
                     partition,
                     output,
+                    s3_bucket,
                     write_lookup_sidecar,
                     resume,
                     json,
@@ -617,7 +650,8 @@ async fn main() -> Result<()> {
                         *start_block,
                         *stop_block,
                         partition,
-                        output,
+                        output.as_deref(),
+                        s3_bucket.as_deref(),
                         *write_lookup_sidecar,
                         *resume,
                         &aws,
@@ -629,7 +663,7 @@ async fn main() -> Result<()> {
                     } else {
                         println!("partitions_index: {}", result.partitions_index);
                         println!("chain:            {}", result.chain);
-                        println!("partition_types:  {}", result.partition_types.join(","));
+                        println!("partition:        {}", result.partition);
                         println!("row_count:        {}", result.row_count);
                         println!("start_block:      {}", result.start_block);
                         println!("stop_block:       {}", result.stop_block);
