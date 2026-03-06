@@ -1144,6 +1144,31 @@ fn canonical_partition_type_label(value: &str) -> anyhow::Result<String> {
     Ok(PartitionBuildType::from_cli_value(value)?.to_string())
 }
 
+fn normalize_partition_bounds_request(
+    mut request: PartitionBoundsRequest,
+) -> anyhow::Result<PartitionBoundsRequest> {
+    request.partition_type = canonical_partition_type_label(&request.partition_type)?;
+    Ok(request)
+}
+
+fn normalize_partition_window_request(
+    mut request: PartitionWindowRequest,
+) -> anyhow::Result<PartitionWindowRequest> {
+    request.partition_type = canonical_partition_type_label(&request.partition_type)?;
+    Ok(request)
+}
+
+fn normalize_partition_list_request(
+    mut request: PartitionListRequest,
+) -> anyhow::Result<PartitionListRequest> {
+    request.partition_type = request
+        .partition_type
+        .as_deref()
+        .map(canonical_partition_type_label)
+        .transpose()?;
+    Ok(request)
+}
+
 #[derive(Debug, Clone, serde::Serialize, PartialEq, Eq)]
 pub struct PartitionBuildRow {
     pub partition_type: String,
@@ -2494,10 +2519,10 @@ pub fn write_lookup_sidecar_for_index(
 }
 
 fn lookup_matches_request(entry: &PartitionsLookupEntry, request: &PartitionBoundsRequest) -> bool {
-    if !entry
-        .partition_type
-        .eq_ignore_ascii_case(&request.partition_type)
-    {
+    let Ok(entry_partition_type) = canonical_partition_type_label(&entry.partition_type) else {
+        return false;
+    };
+    if !entry_partition_type.eq_ignore_ascii_case(&request.partition_type) {
         return false;
     }
     if entry.partition_value != request.partition_value {
@@ -2626,6 +2651,7 @@ fn resolve_partition_chains(
     request: &PartitionBoundsRequest,
     aws: Option<&AwsConfig>,
 ) -> anyhow::Result<Vec<Option<String>>> {
+    let request = normalize_partition_bounds_request(request.clone())?;
     use arrow::array::{Array, LargeStringArray, StringArray};
     use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
     use std::collections::BTreeSet;
@@ -2724,6 +2750,7 @@ pub fn resolve_partition_command(
     aws: Option<&AwsConfig>,
     options: &PartitionResolveOptions,
 ) -> anyhow::Result<PartitionResolveResult> {
+    request = normalize_partition_bounds_request(request)?;
     if options.strict_single_chain && request.chain.is_none() {
         let chains = resolve_partition_chains(&request, aws)?;
         match chains.as_slice() {
@@ -2770,6 +2797,7 @@ pub fn list_partitions_from_index(
     request: &PartitionListRequest,
     aws: Option<&AwsConfig>,
 ) -> anyhow::Result<PartitionListResult> {
+    let request = normalize_partition_list_request(request.clone())?;
     use arrow::array::{
         Array, Int32Array, Int64Array, LargeStringArray, StringArray, UInt32Array, UInt64Array,
     };
@@ -2987,7 +3015,7 @@ pub fn list_partitions_from_index(
             }
             collect_partition_rows(
                 &batch,
-                request,
+                &request,
                 &mut heap,
                 &mut total_matches,
                 &read_utf8_value,
@@ -3022,7 +3050,7 @@ pub fn list_partitions_from_index(
             }
             collect_partition_rows(
                 &batch,
-                request,
+                &request,
                 &mut heap,
                 &mut total_matches,
                 &read_utf8_value,
@@ -3654,6 +3682,7 @@ pub fn resolve_partition_bounds_from_index(
     request: &PartitionBoundsRequest,
     aws: Option<&AwsConfig>,
 ) -> anyhow::Result<PartitionBounds> {
+    let request = normalize_partition_bounds_request(request.clone())?;
     use arrow::array::{
         Array, Int32Array, Int64Array, LargeStringArray, StringArray, UInt32Array, UInt64Array,
     };
@@ -3726,7 +3755,7 @@ pub fn resolve_partition_bounds_from_index(
             validate_partitions_schema(batch.schema().as_ref())?;
             collect_partition_matches(
                 &batch,
-                request,
+                &request,
                 &mut matches,
                 &read_utf8_value,
                 &read_u64_value,
@@ -3743,7 +3772,7 @@ pub fn resolve_partition_bounds_from_index(
             validate_partitions_schema(batch.schema().as_ref())?;
             collect_partition_matches(
                 &batch,
-                request,
+                &request,
                 &mut matches,
                 &read_utf8_value,
                 &read_u64_value,
@@ -3804,6 +3833,7 @@ pub fn resolve_partition_window_bounds_from_index(
     request: &PartitionWindowRequest,
     aws: Option<&AwsConfig>,
 ) -> anyhow::Result<PartitionWindowBounds> {
+    let request = normalize_partition_window_request(request.clone())?;
     use arrow::array::{
         Array, Int32Array, Int64Array, LargeStringArray, StringArray, UInt32Array, UInt64Array,
     };
