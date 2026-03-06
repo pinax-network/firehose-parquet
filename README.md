@@ -273,6 +273,16 @@ firehose-parquet partitions build \
   --partition-types hour,minute \
   --output s3://my-bucket/firehose \
   --json
+
+# Resume from an existing canonical index and append only missing coverage
+firehose-parquet partitions build \
+  --endpoint https://eth.firehose.pinax.network:443 \
+  --chain eth-mainnet \
+  --start-block 10000000 \
+  --stop-block 10020000 \
+  --partition-types day,hour \
+  --output ./output \
+  --resume
 ```
 
 Behavior:
@@ -282,12 +292,14 @@ Behavior:
 - supports mixed granularities in one file (`day`, `hour`, `minute`, `second`)
 - derives canonical UTC partition keys using rounded interval starts
 - writes contract metadata including schema version, chain scope, and covered block range
+- `--resume` reuses the trailing rows from the existing canonical index and continues from the stored frontier
 
 | Flag | Default | Description |
 |---|---|---|
 | `--chain` | inferred | Optional chain override when endpoint info is unavailable |
 | `--partition-types` | none | Comma-separated partition types: `day,hour,minute,second` |
 | `--output` | none | Output root directory or `s3://` URI prefix |
+| `--resume` | `false` | Reuse the existing canonical index at the resolved output path and continue from its frontier |
 | `--json` | `false` | Emit machine-readable output |
 
 ### `partitions ls` — Query Partition Index Rows
