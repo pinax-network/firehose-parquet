@@ -1733,6 +1733,7 @@ pub fn read_partitions_build_rows(
     }
 
     let mut rows = Vec::new();
+    let mut observed = ObservedPartitionsCoverage::default();
     if path.starts_with("s3://") {
         use crate::writer::parse_s3_url;
         use object_store::ObjectStore;
@@ -1746,6 +1747,8 @@ pub fn read_partitions_build_rows(
         let builder = ParquetRecordBatchReaderBuilder::try_new(data)?;
         let schema = builder.schema();
         validate_partitions_schema(&schema)?;
+        let expectations =
+            read_partitions_metadata_expectations(builder.metadata().file_metadata())?;
         validate_partitions_metadata(builder.metadata().file_metadata())?;
         let reader = builder.build()?;
         for batch in reader {
@@ -1757,11 +1760,17 @@ pub fn read_partitions_build_rows(
                 &read_u64_value,
             )?;
         }
+        for row in &rows {
+            observed.observe(&row.partition_type, row.start_block, row.end_block);
+        }
+        validate_partitions_metadata_consistency(expectations.as_ref(), &observed)?;
     } else {
         let file = std::fs::File::open(path).map_err(|e| anyhow::anyhow!("opening {path}: {e}"))?;
         let builder = ParquetRecordBatchReaderBuilder::try_new(file)?;
         let schema = builder.schema();
         validate_partitions_schema(&schema)?;
+        let expectations =
+            read_partitions_metadata_expectations(builder.metadata().file_metadata())?;
         validate_partitions_metadata(builder.metadata().file_metadata())?;
         let reader = builder.build()?;
         for batch in reader {
@@ -1773,6 +1782,10 @@ pub fn read_partitions_build_rows(
                 &read_u64_value,
             )?;
         }
+        for row in &rows {
+            observed.observe(&row.partition_type, row.start_block, row.end_block);
+        }
+        validate_partitions_metadata_consistency(expectations.as_ref(), &observed)?;
     }
 
     rows.sort_by(|left, right| {
@@ -2043,7 +2056,43 @@ fn validate_partitions_schema(schema: &arrow::datatypes::Schema) -> anyhow::Resu
 fn validate_partitions_metadata(
     file_meta: &parquet::file::metadata::FileMetaData,
 ) -> anyhow::Result<()> {
-    let metadata = file_meta
+    read_partitions_metadata_expectations(file_meta)?;
+
+    Ok(())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PartitionsMetadataExpectations {
+    partition_types: std::collections::BTreeSet<String>,
+    min_start_block: u64,
+    max_end_block: u64,
+}
+
+#[derive(Debug, Default)]
+struct ObservedPartitionsCoverage {
+    partition_types: std::collections::BTreeSet<String>,
+    min_start_block: Option<u64>,
+    max_end_block: Option<u64>,
+}
+
+impl ObservedPartitionsCoverage {
+    fn observe(&mut self, partition_type: &str, start_block: u64, end_block: u64) {
+        self.partition_types.insert(partition_type.to_string());
+        self.min_start_block = Some(
+            self.min_start_block
+                .map_or(start_block, |current| current.min(start_block)),
+        );
+        self.max_end_block = Some(
+            self.max_end_block
+                .map_or(end_block, |current| current.max(end_block)),
+        );
+    }
+}
+
+fn partitions_metadata_map(
+    file_meta: &parquet::file::metadata::FileMetaData,
+) -> std::collections::HashMap<&str, String> {
+    file_meta
         .key_value_metadata()
         .map(|entries| {
             entries
@@ -2051,8 +2100,13 @@ fn validate_partitions_metadata(
                 .filter_map(|entry| entry.value.clone().map(|value| (entry.key.as_str(), value)))
                 .collect::<std::collections::HashMap<_, _>>()
         })
-        .unwrap_or_default();
+        .unwrap_or_default()
+}
 
+fn read_partitions_metadata_expectations(
+    file_meta: &parquet::file::metadata::FileMetaData,
+) -> anyhow::Result<Option<PartitionsMetadataExpectations>> {
+    let metadata = partitions_metadata_map(file_meta);
     let schema_version = metadata.get(PARTITIONS_SCHEMA_VERSION_KEY).cloned();
 
     if let Some(version) = schema_version {
@@ -2172,6 +2226,64 @@ fn validate_partitions_metadata(
                 max_end_block
             );
         }
+
+        return Ok(Some(PartitionsMetadataExpectations {
+            partition_types: parsed_types
+                .into_iter()
+                .map(|partition_type| partition_type.to_string())
+                .collect(),
+            min_start_block,
+            max_end_block,
+        }));
+    }
+
+    Ok(None)
+}
+
+fn validate_partitions_metadata_consistency(
+    expectations: Option<&PartitionsMetadataExpectations>,
+    observed: &ObservedPartitionsCoverage,
+) -> anyhow::Result<()> {
+    let Some(expectations) = expectations else {
+        return Ok(());
+    };
+
+    let observed_min_start_block = observed.min_start_block.ok_or_else(|| {
+        anyhow::anyhow!(
+            "partitions.parquet declared schema version {} but contained no rows",
+            PARTITIONS_SCHEMA_VERSION
+        )
+    })?;
+    let observed_max_end_block = observed.max_end_block.ok_or_else(|| {
+        anyhow::anyhow!(
+            "partitions.parquet declared schema version {} but contained no rows",
+            PARTITIONS_SCHEMA_VERSION
+        )
+    })?;
+
+    if observed.partition_types != expectations.partition_types {
+        anyhow::bail!(
+            "partitions metadata {} does not match observed row partition types: expected {:?}, observed {:?}",
+            PARTITIONS_TYPES_KEY,
+            expectations.partition_types,
+            observed.partition_types
+        );
+    }
+    if observed_min_start_block != expectations.min_start_block {
+        anyhow::bail!(
+            "partitions metadata {}={} does not match observed row minimum {}",
+            PARTITIONS_MIN_START_BLOCK_KEY,
+            expectations.min_start_block,
+            observed_min_start_block
+        );
+    }
+    if observed_max_end_block != expectations.max_end_block {
+        anyhow::bail!(
+            "partitions metadata {}={} does not match observed row maximum {}",
+            PARTITIONS_MAX_END_BLOCK_KEY,
+            expectations.max_end_block,
+            observed_max_end_block
+        );
     }
 
     Ok(())
@@ -2692,6 +2804,7 @@ pub fn list_partitions_from_index(
 
     let mut heap: BinaryHeap<HeapEntry> = BinaryHeap::new();
     let mut total_matches = 0usize;
+    let mut observed = ObservedPartitionsCoverage::default();
 
     if request.index_path.starts_with("s3://") {
         use crate::writer::parse_s3_url;
@@ -2705,11 +2818,27 @@ pub fn list_partitions_from_index(
         let data = block_on_async(async { client.get(&obj_path).await?.bytes().await })
             .map_err(|e| anyhow::anyhow!("reading {}: {e}", request.index_path))?;
         let builder = ParquetRecordBatchReaderBuilder::try_new(data)?;
+        let expectations =
+            read_partitions_metadata_expectations(builder.metadata().file_metadata())?;
         validate_partitions_metadata(builder.metadata().file_metadata())?;
         let reader = builder.build()?;
         for batch in reader {
             let batch = batch?;
             validate_partitions_schema(batch.schema().as_ref())?;
+            let schema = batch.schema();
+            let partition_type_idx = schema.index_of("partition_type")?;
+            let start_block_idx = schema.index_of("start_block")?;
+            let end_block_idx = schema.index_of("end_block")?;
+            for row in 0..batch.num_rows() {
+                let partition_type =
+                    read_utf8_value(batch.column(partition_type_idx).as_ref(), row)?
+                        .ok_or_else(|| anyhow::anyhow!("null partition_type at row {}", row))?;
+                let start_block = read_u64_value(batch.column(start_block_idx).as_ref(), row)?
+                    .ok_or_else(|| anyhow::anyhow!("null start_block at row {}", row))?;
+                let end_block = read_u64_value(batch.column(end_block_idx).as_ref(), row)?
+                    .ok_or_else(|| anyhow::anyhow!("null end_block at row {}", row))?;
+                observed.observe(&partition_type, start_block, end_block);
+            }
             collect_partition_rows(
                 &batch,
                 request,
@@ -2719,15 +2848,32 @@ pub fn list_partitions_from_index(
                 &read_u64_value,
             )?;
         }
+        validate_partitions_metadata_consistency(expectations.as_ref(), &observed)?;
     } else {
         let file = std::fs::File::open(&request.index_path)
             .map_err(|e| anyhow::anyhow!("opening {}: {e}", request.index_path))?;
         let builder = ParquetRecordBatchReaderBuilder::try_new(file)?;
+        let expectations =
+            read_partitions_metadata_expectations(builder.metadata().file_metadata())?;
         validate_partitions_metadata(builder.metadata().file_metadata())?;
         let reader = builder.build()?;
         for batch in reader {
             let batch = batch?;
             validate_partitions_schema(batch.schema().as_ref())?;
+            let schema = batch.schema();
+            let partition_type_idx = schema.index_of("partition_type")?;
+            let start_block_idx = schema.index_of("start_block")?;
+            let end_block_idx = schema.index_of("end_block")?;
+            for row in 0..batch.num_rows() {
+                let partition_type =
+                    read_utf8_value(batch.column(partition_type_idx).as_ref(), row)?
+                        .ok_or_else(|| anyhow::anyhow!("null partition_type at row {}", row))?;
+                let start_block = read_u64_value(batch.column(start_block_idx).as_ref(), row)?
+                    .ok_or_else(|| anyhow::anyhow!("null start_block at row {}", row))?;
+                let end_block = read_u64_value(batch.column(end_block_idx).as_ref(), row)?
+                    .ok_or_else(|| anyhow::anyhow!("null end_block at row {}", row))?;
+                observed.observe(&partition_type, start_block, end_block);
+            }
             collect_partition_rows(
                 &batch,
                 request,
@@ -2737,6 +2883,7 @@ pub fn list_partitions_from_index(
                 &read_u64_value,
             )?;
         }
+        validate_partitions_metadata_consistency(expectations.as_ref(), &observed)?;
     }
 
     let mut rows: Vec<PartitionListRow> =
@@ -6979,6 +7126,160 @@ mod tests {
         assert!(err
             .to_string()
             .contains("invalid partitions metadata coverage"));
+    }
+
+    #[test]
+    fn test_list_partitions_from_index_rejects_metadata_partition_type_mismatch() {
+        use arrow::array::{StringArray, UInt64Array};
+        use arrow::record_batch::RecordBatch;
+        use parquet::arrow::ArrowWriter;
+        use parquet::basic::Compression;
+        use parquet::file::metadata::KeyValue;
+        use parquet::file::properties::WriterProperties;
+        use std::fs::File;
+        use std::sync::Arc;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("partitions.parquet");
+
+        let schema = Arc::new(arrow::datatypes::Schema::new(vec![
+            arrow::datatypes::Field::new("partition_type", arrow::datatypes::DataType::Utf8, false),
+            arrow::datatypes::Field::new(
+                "partition_value",
+                arrow::datatypes::DataType::Utf8,
+                false,
+            ),
+            arrow::datatypes::Field::new("start_block", arrow::datatypes::DataType::UInt64, false),
+            arrow::datatypes::Field::new("end_block", arrow::datatypes::DataType::UInt64, false),
+        ]));
+
+        let batch = RecordBatch::try_new(
+            Arc::clone(&schema),
+            vec![
+                Arc::new(StringArray::from(vec!["day"])),
+                Arc::new(StringArray::from(vec!["2015-07-30 00:00:00"])),
+                Arc::new(UInt64Array::from(vec![100_u64])),
+                Arc::new(UInt64Array::from(vec![200_u64])),
+            ],
+        )
+        .expect("record batch");
+
+        let props = WriterProperties::builder()
+            .set_compression(Compression::SNAPPY)
+            .set_key_value_metadata(Some(vec![
+                KeyValue::new(
+                    PARTITIONS_SCHEMA_VERSION_KEY.to_string(),
+                    PARTITIONS_SCHEMA_VERSION.to_string(),
+                ),
+                KeyValue::new(
+                    PARTITIONS_GENERATED_AT_KEY.to_string(),
+                    "2026-03-06T12:00:00Z".to_string(),
+                ),
+                KeyValue::new(PARTITIONS_SOURCE_KEY.to_string(), "firehose".to_string()),
+                KeyValue::new(
+                    PARTITIONS_CHAIN_SCOPE_KEY.to_string(),
+                    "eth-mainnet".to_string(),
+                ),
+                KeyValue::new(PARTITIONS_TYPES_KEY.to_string(), "hour".to_string()),
+                KeyValue::new(
+                    PARTITIONS_MIN_START_BLOCK_KEY.to_string(),
+                    "100".to_string(),
+                ),
+                KeyValue::new(PARTITIONS_MAX_END_BLOCK_KEY.to_string(), "200".to_string()),
+            ]))
+            .build();
+
+        let file = File::create(&path).expect("create parquet");
+        let mut writer =
+            ArrowWriter::try_new(file, schema, Some(props)).expect("create arrow writer");
+        writer.write(&batch).expect("write batch");
+        writer.close().expect("close writer");
+
+        let err = list_partitions_from_index(
+            &PartitionListRequest {
+                index_path: path.to_string_lossy().to_string(),
+                partition_type: None,
+                chain: None,
+                from: None,
+                to: None,
+                limit: 10,
+            },
+            None,
+        )
+        .expect_err("metadata partition type mismatch should fail");
+        assert!(err.to_string().contains(PARTITIONS_TYPES_KEY));
+    }
+
+    #[test]
+    fn test_read_partitions_build_rows_rejects_metadata_coverage_mismatch() {
+        use arrow::array::{StringArray, UInt64Array};
+        use arrow::record_batch::RecordBatch;
+        use parquet::arrow::ArrowWriter;
+        use parquet::basic::Compression;
+        use parquet::file::metadata::KeyValue;
+        use parquet::file::properties::WriterProperties;
+        use std::fs::File;
+        use std::sync::Arc;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("partitions.parquet");
+
+        let schema = Arc::new(arrow::datatypes::Schema::new(vec![
+            arrow::datatypes::Field::new("partition_type", arrow::datatypes::DataType::Utf8, false),
+            arrow::datatypes::Field::new(
+                "partition_value",
+                arrow::datatypes::DataType::Utf8,
+                false,
+            ),
+            arrow::datatypes::Field::new("start_block", arrow::datatypes::DataType::UInt64, false),
+            arrow::datatypes::Field::new("end_block", arrow::datatypes::DataType::UInt64, false),
+        ]));
+
+        let batch = RecordBatch::try_new(
+            Arc::clone(&schema),
+            vec![
+                Arc::new(StringArray::from(vec!["day"])),
+                Arc::new(StringArray::from(vec!["2015-07-30 00:00:00"])),
+                Arc::new(UInt64Array::from(vec![100_u64])),
+                Arc::new(UInt64Array::from(vec![200_u64])),
+            ],
+        )
+        .expect("record batch");
+
+        let props = WriterProperties::builder()
+            .set_compression(Compression::SNAPPY)
+            .set_key_value_metadata(Some(vec![
+                KeyValue::new(
+                    PARTITIONS_SCHEMA_VERSION_KEY.to_string(),
+                    PARTITIONS_SCHEMA_VERSION.to_string(),
+                ),
+                KeyValue::new(
+                    PARTITIONS_GENERATED_AT_KEY.to_string(),
+                    "2026-03-06T12:00:00Z".to_string(),
+                ),
+                KeyValue::new(PARTITIONS_SOURCE_KEY.to_string(), "firehose".to_string()),
+                KeyValue::new(
+                    PARTITIONS_CHAIN_SCOPE_KEY.to_string(),
+                    "eth-mainnet".to_string(),
+                ),
+                KeyValue::new(PARTITIONS_TYPES_KEY.to_string(), "day".to_string()),
+                KeyValue::new(
+                    PARTITIONS_MIN_START_BLOCK_KEY.to_string(),
+                    "101".to_string(),
+                ),
+                KeyValue::new(PARTITIONS_MAX_END_BLOCK_KEY.to_string(), "200".to_string()),
+            ]))
+            .build();
+
+        let file = File::create(&path).expect("create parquet");
+        let mut writer =
+            ArrowWriter::try_new(file, schema, Some(props)).expect("create arrow writer");
+        writer.write(&batch).expect("write batch");
+        writer.close().expect("close writer");
+
+        let err = read_partitions_build_rows(&path.to_string_lossy(), None)
+            .expect_err("metadata coverage mismatch should fail");
+        assert!(err.to_string().contains(PARTITIONS_MIN_START_BLOCK_KEY));
     }
 
     #[test]
