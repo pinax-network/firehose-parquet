@@ -763,6 +763,13 @@ Examples:
     --stop-block 10010000 \\
     --partition date \\
     --output ./output
+
+  # Continue maintaining the canonical index in live mode
+  fireparq partitions build \\
+    --network mainnet \\
+    --partition date \\
+    --output ./output \\
+    --live
 ")]
     Build {
         /// Firehose gRPC endpoint URL
@@ -792,13 +799,21 @@ Examples:
         chain: Option<String>,
         /// Start block number (inclusive).
         ///
-        /// When omitted, falls back to a sibling `cursor.parquet` if present,
-        /// then to the endpoint's first streamable block.
+        /// When omitted in bounded mode, falls back to a sibling `cursor.parquet`
+        /// if present, then to the endpoint's first streamable block.
+        ///
+        /// When omitted in `--live` mode, existing `partitions.parquet` rows take
+        /// precedence as the restart anchor.
         #[arg(long)]
         start_block: Option<u64>,
-        /// Stop block number (exclusive)
-        #[arg(long)]
-        stop_block: u64,
+        /// Stop block number (exclusive).
+        ///
+        /// Required for bounded builds and incompatible with `--live`.
+        #[arg(long, conflicts_with = "live")]
+        stop_block: Option<u64>,
+        /// Keep extending `partitions.parquet` from its latest covered frontier.
+        #[arg(long, default_value = "false")]
+        live: bool,
         /// Partition to build: date, hour, minute, or second
         /// Deprecated alias: `--partition-types`.
         #[arg(long = "partition", alias = "partition-types")]
@@ -812,8 +827,10 @@ Examples:
         /// S3 bucket name used when `--output` is omitted or should be prefixed.
         #[arg(long, env = "S3_BUCKET", hide_env_values = true)]
         s3_bucket: Option<String>,
-        /// Also write `partitions.lookup.json` alongside `partitions.parquet`
-        #[arg(long, default_value = "false")]
+        /// Also write `partitions.lookup.json` alongside `partitions.parquet`.
+        ///
+        /// Not supported in `--live` mode.
+        #[arg(long, default_value = "false", conflicts_with = "live")]
         write_lookup_sidecar: bool,
         /// Resume from an existing canonical index under the resolved output path
         #[arg(long, default_value = "false")]
@@ -1322,6 +1339,49 @@ impl PartitionIndexBuilder {
         });
 
         Ok(self.rows)
+    }
+
+    pub fn snapshot(&self, stop_block: u64) -> anyhow::Result<Vec<PartitionBuildRow>> {
+        if self.first_seen_block.is_none() {
+            anyhow::bail!("partition build produced no rows because the stream returned no blocks");
+        }
+        if stop_block == 0 {
+            anyhow::bail!("partition build snapshot requires a finite non-zero stop block");
+        }
+
+        let mut rows = self.rows.clone();
+        for partition_type in self.partition_types.clone() {
+            if let Some(active) = self.active.get(&partition_type) {
+                rows.push(build_partition_row(
+                    &self.chain,
+                    partition_type,
+                    active.clone(),
+                    stop_block,
+                )?);
+            }
+        }
+
+        rows.sort_by(|left, right| {
+            left.partition_type
+                .cmp(&right.partition_type)
+                .then_with(|| left.partition_start_ts.cmp(&right.partition_start_ts))
+                .then_with(|| left.start_block.cmp(&right.start_block))
+                .then_with(|| left.end_block.cmp(&right.end_block))
+        });
+
+        Ok(rows)
+    }
+
+    pub fn current_frontier(&self) -> Option<u64> {
+        self.last_seen_block.map(|block| block.saturating_add(1))
+    }
+
+    pub fn has_rows(&self) -> bool {
+        self.first_seen_block.is_some()
+    }
+
+    pub fn finalized_row_count(&self) -> usize {
+        self.rows.len()
     }
 
     pub fn resume_from_existing(
@@ -6160,6 +6220,7 @@ mod tests {
                 chain,
                 start_block,
                 stop_block,
+                live,
                 partition,
                 output,
                 s3_bucket,
@@ -6174,7 +6235,8 @@ mod tests {
                 );
                 assert_eq!(chain.as_deref(), Some("eth-mainnet"));
                 assert_eq!(start_block, None);
-                assert_eq!(stop_block, 200);
+                assert_eq!(stop_block, Some(200));
+                assert!(!live);
                 assert_eq!(partition, "date");
                 assert_eq!(output.as_deref(), Some("./output"));
                 assert!(s3_bucket.is_none());
@@ -6231,6 +6293,39 @@ mod tests {
             }) => {
                 assert!(output.is_none());
                 assert_eq!(s3_bucket.as_deref(), Some("my-bucket"));
+            }
+            _ => panic!("expected partitions build subcommand"),
+        }
+    }
+
+    #[test]
+    fn test_partitions_build_subcommand_live_parse() {
+        let cli = parse(&[
+            "test-cli",
+            "partitions",
+            "build",
+            "--network",
+            "mainnet",
+            "--partition",
+            "date",
+            "--output",
+            "./output",
+            "--live",
+        ]);
+        match cli.command.expect("command should exist") {
+            Commands::Partitions(PartitionsCommands::Build {
+                network,
+                stop_block,
+                live,
+                partition,
+                output,
+                ..
+            }) => {
+                assert_eq!(network.as_deref(), Some("mainnet"));
+                assert_eq!(stop_block, None);
+                assert!(live);
+                assert_eq!(partition, "date");
+                assert_eq!(output.as_deref(), Some("./output"));
             }
             _ => panic!("expected partitions build subcommand"),
         }
@@ -7791,6 +7886,33 @@ mod tests {
         assert!(err
             .to_string()
             .contains("--output is required unless --s3-bucket or S3_BUCKET is set"));
+    }
+
+    #[test]
+    fn test_partition_index_builder_snapshot_includes_active_row() {
+        let mut builder = PartitionIndexBuilder::new("eth-mainnet", vec![PartitionBuildType::Date])
+            .expect("builder");
+        builder
+            .observe_block(&BlockIdentity {
+                block_num: 100,
+                timestamp: 1_690_815_540,
+                ..Default::default()
+            })
+            .expect("observe first block");
+        builder
+            .observe_block(&BlockIdentity {
+                block_num: 101,
+                timestamp: 1_690_815_590,
+                ..Default::default()
+            })
+            .expect("observe second block");
+
+        let rows = builder.snapshot(102).expect("snapshot rows");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].partition_type, "date");
+        assert_eq!(rows[0].start_block, 100);
+        assert_eq!(rows[0].end_block, 102);
+        assert_eq!(builder.current_frontier(), Some(102));
     }
 
     #[test]
