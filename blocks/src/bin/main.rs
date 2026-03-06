@@ -404,6 +404,9 @@ async fn run_partitions_build(
         } else {
             Vec::new()
         };
+        if write_lookup_sidecar {
+            write_lookup_sidecar_for_index(&partitions_index, &rows, Some(aws))?;
+        }
         return Ok(PartitionBuildResult {
             partitions_index,
             chain,
