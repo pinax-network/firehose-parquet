@@ -48,6 +48,6 @@ jobs:
 
       - name: Verify shell completions
         run: |
-          cargo run --bin firehose-parquet -- completions bash > /dev/null
-          cargo run --bin firehose-parquet -- completions zsh > /dev/null
-          cargo run --bin firehose-parquet -- completions fish > /dev/null
+          cargo run --bin fireparq -- completions bash > /dev/null
+          cargo run --bin fireparq -- completions zsh > /dev/null
+          cargo run --bin fireparq -- completions fish > /dev/null

@@ -9,7 +9,7 @@ name = "blocks"
 path = "src/lib.rs"
 
 [[bin]]
-name = "firehose-parquet"
+name = "fireparq"
 path = "src/bin/main.rs"
 
 [dependencies]

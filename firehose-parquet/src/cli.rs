@@ -30,7 +30,7 @@ pub fn block_on_async<F: std::future::Future>(f: F) -> F::Output {
     }
 }
 
-// Shared CLI arguments for all firehose-parquet binaries.
+// Shared CLI arguments for all fireparq binaries.
 //
 // Embed in a per-chain `#[derive(Parser)]` struct with `#[command(flatten)]`.
 #[derive(Args, Debug, Clone)]
@@ -359,19 +359,19 @@ pub enum Commands {
     #[command(after_long_help = "\
 Examples:
   # Inspect a local parquet file
-  firehose-parquet scan ./output/blocks/part-000001.parquet
+  fireparq scan ./output/blocks/part-000001.parquet
 
   # Scan all files in a directory (20 sample rows each)
-  firehose-parquet scan ./output/blocks/
+  fireparq scan ./output/blocks/
 
   # Schema only, no data preview
-  firehose-parquet scan ./output/blocks/ --schema-only
+  fireparq scan ./output/blocks/ --schema-only
 
   # Scan S3 files
-  firehose-parquet scan s3://bucket/eth-mainnet/blocks/
+  fireparq scan s3://bucket/eth-mainnet/blocks/
 
   # Show 50 sample rows per file
-  firehose-parquet scan ./output/blocks/ -n 50
+  fireparq scan ./output/blocks/ -n 50
 ")]
     Scan {
         /// Path to a .parquet file or directory, or an S3 URI (s3://bucket/prefix)
@@ -405,13 +405,13 @@ Examples:
     #[command(after_long_help = "\
 Examples:
   # Validate local blocks directory
-  firehose-parquet validate ./output/blocks/
+  fireparq validate ./output/blocks/
 
   # Validate S3 path
-  firehose-parquet validate s3://bucket/eth-mainnet/blocks/
+  fireparq validate s3://bucket/eth-mainnet/blocks/
 
   # Check continuity across partition boundaries
-  firehose-parquet validate ./output/blocks/ --cross-partition
+  fireparq validate ./output/blocks/ --cross-partition
 ")]
     Validate {
         /// Path to a directory of .parquet files or an S3 URI (s3://bucket/prefix)
@@ -445,33 +445,33 @@ Examples:
     #[command(after_long_help = "\
 Examples:
   # Verify EVM blocks and auto-create missing root registry entries
-  firehose-parquet verify ./output/evm/mainnet/blocks --chain evm --table blocks
+  fireparq verify ./output/evm/mainnet/blocks --chain evm --table blocks
 
   # Quick profile (roots only)
-  firehose-parquet verify ./output/evm/mainnet/blocks --profile quick
+  fireparq verify ./output/evm/mainnet/blocks --profile quick
 
   # Explicitly select checks regardless of profile
-  firehose-parquet verify ./output/evm/mainnet/blocks --checks roots,protocol
+  fireparq verify ./output/evm/mainnet/blocks --checks roots,protocol
 
   # Continue scanning all partitions (no fail-fast) and emit JSON report
-  firehose-parquet verify ./output/evm/mainnet/blocks --no-fail-fast --report-json verify-report.json
+  fireparq verify ./output/evm/mainnet/blocks --no-fail-fast --report-json verify-report.json
 
   # Publish the report to the suggested verify artifact path
-  firehose-parquet verify ./output/evm/mainnet/blocks --publish-report
+  fireparq verify ./output/evm/mainnet/blocks --publish-report
 
   # Publish the report to an explicit S3 location
-  firehose-parquet verify s3://bucket/evm/mainnet/blocks \
+  fireparq verify s3://bucket/evm/mainnet/blocks \
     --publish-report-path s3://bucket/evm/mainnet/verify_runs/custom-run/report.json
 
   # Verify S3 parquet data with explicit registry location
-  firehose-parquet verify s3://bucket/evm/mainnet/blocks \\
+  fireparq verify s3://bucket/evm/mainnet/blocks \\
     --registry-path s3://bucket/evm/mainnet/merkle_roots.parquet
 
   # Override hash strategy (default: auto from chain)
-  firehose-parquet verify ./output/bitcoin/mainnet/blocks --chain bitcoin --hash-strategy sha256
+  fireparq verify ./output/bitcoin/mainnet/blocks --chain bitcoin --hash-strategy sha256
 
   # Update mismatched registry roots (default behavior only fills missing roots)
-  firehose-parquet verify ./output/evm/mainnet/blocks --update-registry
+  fireparq verify ./output/evm/mainnet/blocks --update-registry
 ")]
     Verify {
         /// Path to a directory of .parquet files, a single parquet file, or an S3 URI
@@ -535,16 +535,16 @@ Examples:
     #[command(after_long_help = "\
 Examples:
   # Roll up minute partitions into daily (in-place)
-  firehose-parquet rollup ./output/blocks/
+  fireparq rollup ./output/blocks/
 
   # Roll up to hourly partitions with a separate output
-  firehose-parquet rollup ./output/blocks/ -o ./merged/ -p hour
+  fireparq rollup ./output/blocks/ -o ./merged/ -p hour
 
   # Roll up S3 data, delete source files after
-  firehose-parquet rollup s3://bucket/blocks/ --delete-source
+  fireparq rollup s3://bucket/blocks/ --delete-source
 
   # Custom file size limit (256 MB)
-  firehose-parquet rollup ./output/blocks/ --flush-bytes 268435456
+  fireparq rollup ./output/blocks/ --flush-bytes 268435456
 ")]
     Rollup {
         /// Source path (local directory or S3 URI) containing partitioned Parquet files
@@ -595,19 +595,19 @@ Examples:
     #[command(after_long_help = "\
 Examples:
   # Merge parts within each partition (local)
-  firehose-parquet merge ./output/blocks/
+  fireparq merge ./output/blocks/
 
   # Merge S3 data
-  firehose-parquet merge s3://bucket/eth-mainnet/blocks/
+  fireparq merge s3://bucket/eth-mainnet/blocks/
 
   # Custom target file size (512 MB)
-  firehose-parquet merge ./output/blocks/ --flush-bytes 536870912
+  fireparq merge ./output/blocks/ --flush-bytes 536870912
 
   # Preview what would be merged
-  firehose-parquet merge ./output/blocks/ --dry-run
+  fireparq merge ./output/blocks/ --dry-run
 
   # Use snappy compression
-  firehose-parquet merge ./output/blocks/ --compression snappy
+  fireparq merge ./output/blocks/ --compression snappy
 ")]
     Merge {
         /// Path to a directory of partitioned .parquet files or an S3 URI
@@ -650,10 +650,10 @@ Examples:
     #[command(after_long_help = "\
 Examples:
   # Inspect a local parquet file
-  firehose-parquet inspect ./output/blocks/part-000001.parquet
+  fireparq inspect ./output/blocks/part-000001.parquet
 
   # Inspect an S3 parquet file
-  firehose-parquet inspect s3://bucket/eth-mainnet/blocks/part-000001.parquet
+  fireparq inspect s3://bucket/eth-mainnet/blocks/part-000001.parquet
 ")]
     Inspect {
         /// Path to a single .parquet file (local path or S3 URI)
@@ -681,22 +681,22 @@ Examples:
     #[command(after_long_help = "\
 Examples:
   # Delete all parquet files under a path
-  firehose-parquet truncate ./output/blocks/
+  fireparq truncate ./output/blocks/
 
   # Delete only a specific date partition
-  firehose-parquet truncate ./output/blocks/ -p \"date=01\"
+  fireparq truncate ./output/blocks/ -p \"date=01\"
 
   # Delete with glob pattern (all of January)
-  firehose-parquet truncate s3://bucket/blocks/ -p \"month=01\"
+  fireparq truncate s3://bucket/blocks/ -p \"month=01\"
 
   # Delete a specific year
-  firehose-parquet truncate ./output/ -p \"year=2026\"
+  fireparq truncate ./output/ -p \"year=2026\"
 
   # Delete all minute-level partitions (key-only filter)
-  firehose-parquet truncate ./output/blocks/ -p minute
+  fireparq truncate ./output/blocks/ -p minute
 
   # Preview what would be deleted
-  firehose-parquet truncate ./output/blocks/ --dry-run
+  fireparq truncate ./output/blocks/ --dry-run
 ")]
     Truncate {
         /// Path to a directory or S3 URI containing .parquet files
@@ -727,14 +727,14 @@ Examples:
     },
 }
 
-/// Subcommands under `firehose-parquet partitions`.
+/// Subcommands under `fireparq partitions`.
 #[derive(clap::Subcommand, Debug)]
 pub enum PartitionsCommands {
     /// Build `partitions.parquet` directly from Firehose block timestamps.
     #[command(after_long_help = "\
 Examples:
   # Build a local hour/day index for one chain
-  firehose-parquet partitions build \\
+  fireparq partitions build \\
     --endpoint https://eth.firehose.pinax.network:443 \\
     --start-block 10000000 \\
     --stop-block 10010000 \\
@@ -742,7 +742,7 @@ Examples:
     --output ./output
 
   # Build to S3 with an explicit chain override and JSON output
-  firehose-parquet partitions build \\
+  fireparq partitions build \\
     --endpoint https://eth.firehose.pinax.network:443 \\
     --chain eth-mainnet \\
     --start-block 10000000 \\
@@ -816,11 +816,11 @@ Examples:
     #[command(after_long_help = "\
 Examples:
   # Validate all rows in a local index
-  firehose-parquet partitions validate \\
+  fireparq partitions validate \\
     --partitions-index ./output/eth-mainnet/partitions.parquet
 
   # Validate one chain/type and allow gaps
-  firehose-parquet partitions validate \\
+  fireparq partitions validate \\
     --partitions-index s3://my-bucket/partitions.parquet \\
     --partition-type day \\
     --partition-chain eth-mainnet \\
@@ -863,14 +863,14 @@ Examples:
     #[command(after_long_help = "\
 Examples:
   # Select shard 1 of 4 using ordinal assignment
-  firehose-parquet partitions shard \\
+  fireparq partitions shard \\
     --partitions-index ./output/eth-mainnet/partitions.parquet \\
     --partition-type hour \\
     --shard-count 4 \\
     --shard-index 1
 
   # Select shard 0 of 8 using hash assignment and emit JSON
-  firehose-parquet partitions shard \\
+  fireparq partitions shard \\
     --partitions-index s3://my-bucket/eth-mainnet/partitions.parquet \\
     --partition-type day \\
     --partition-chain eth-mainnet \\
@@ -929,12 +929,12 @@ Examples:
     #[command(after_long_help = "\
 Examples:
   # List hour partitions from local index
-  firehose-parquet partitions ls \\
+  fireparq partitions ls \\
     --partitions-index ./output/eth-mainnet/partitions.parquet \\
     --partition-type hour
 
   # Filter by chain + time window and emit JSON
-  firehose-parquet partitions ls \\
+  fireparq partitions ls \\
     --partitions-index s3://my-bucket/eth-mainnet/partitions.parquet \\
     --partition-type day \\
     --partition-chain eth-mainnet \\
@@ -985,14 +985,14 @@ Examples:
     #[command(after_long_help = "\
 Examples:
   # Resolve from local index
-  firehose-parquet partitions resolve \\
+  fireparq partitions resolve \\
     --partitions-index ./output/eth-mainnet/partitions.parquet \\
     --partition-type hour \\
     --partition-value '2015-07-30 15:00:00' \\
     --partition-chain eth-mainnet
 
   # Resolve from S3 index and emit JSON
-  firehose-parquet partitions resolve \\
+  fireparq partitions resolve \\
     --partitions-index s3://my-bucket/eth-mainnet/partitions.parquet \\
     --partition-type day \\
     --partition-value '2015-07-30 00:00:00' \\

@@ -1,6 +1,6 @@
 # Verify Report Contract
 
-This document defines the versioned JSON report contract emitted by `firehose-parquet verify`.
+This document defines the versioned JSON report contract emitted by `fireparq verify`.
 
 ## Scope
 
