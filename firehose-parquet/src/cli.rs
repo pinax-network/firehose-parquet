@@ -749,6 +749,7 @@ Examples:
     --stop-block 10010000 \\
     --partition-types hour,minute \\
     --output s3://my-bucket/firehose \\
+    --write-lookup-sidecar \\
     --json
 ")]
     Build {
@@ -786,6 +787,9 @@ Examples:
         /// Output root path (local directory or s3:// URI prefix)
         #[arg(long)]
         output: String,
+        /// Also write `partitions.lookup.json` alongside `partitions.parquet`
+        #[arg(long, default_value = "false")]
+        write_lookup_sidecar: bool,
         /// Emit machine-readable JSON output
         #[arg(long, default_value = "false")]
         json: bool,
@@ -1746,6 +1750,73 @@ fn partitions_lookup_sidecar_path(index_path: &str) -> Option<String> {
         return Some(format!("{prefix}partitions.lookup.json"));
     }
     None
+}
+
+fn build_lookup_sidecar(rows: &[PartitionBuildRow]) -> PartitionsLookupSidecar {
+    let entries = rows
+        .iter()
+        .map(|row| PartitionsLookupEntry {
+            chain: row.chain.clone(),
+            partition_type: row.partition_type.clone(),
+            partition_value: row.partition_value.clone(),
+            start_block: row.start_block,
+            end_block: row.end_block,
+        })
+        .collect();
+
+    PartitionsLookupSidecar {
+        lookup_schema_version: PARTITIONS_LOOKUP_SCHEMA_VERSION.to_string(),
+        source_schema_version: PARTITIONS_SCHEMA_VERSION.to_string(),
+        entries,
+    }
+}
+
+pub fn write_lookup_sidecar_for_index(
+    index_path: &str,
+    rows: &[PartitionBuildRow],
+    aws: Option<&AwsConfig>,
+) -> anyhow::Result<Option<String>> {
+    use bytes::Bytes;
+
+    let Some(sidecar_path) = partitions_lookup_sidecar_path(index_path) else {
+        return Ok(None);
+    };
+
+    let payload = serde_json::to_vec_pretty(&build_lookup_sidecar(rows))?;
+
+    if sidecar_path.starts_with("s3://") {
+        use crate::writer::parse_s3_url;
+        use object_store::ObjectStore;
+
+        let aws =
+            aws.ok_or_else(|| anyhow::anyhow!("AWS config required for S3 sidecar output"))?;
+        let (bucket, key) = parse_s3_url(&sidecar_path)?;
+        let client = aws.build_s3_client(&bucket)?;
+        let object_path = object_store::path::Path::from(key.as_str());
+        block_on_async(async {
+            client
+                .put(
+                    &object_path,
+                    object_store::PutPayload::from(Bytes::from(payload)),
+                )
+                .await
+        })
+        .map_err(|e| anyhow::anyhow!("writing {}: {e}", sidecar_path))?;
+        return Ok(Some(sidecar_path));
+    }
+
+    let output_path = std::path::Path::new(&sidecar_path);
+    if let Some(parent) = output_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let file_name = output_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| anyhow::anyhow!("invalid sidecar file name for {}", sidecar_path))?;
+    let temp_path = output_path.with_file_name(format!(".{file_name}.tmp"));
+    std::fs::write(&temp_path, payload)?;
+    std::fs::rename(&temp_path, output_path)?;
+    Ok(Some(sidecar_path))
 }
 
 fn lookup_matches_request(entry: &PartitionsLookupEntry, request: &PartitionBoundsRequest) -> bool {
@@ -5322,6 +5393,7 @@ mod tests {
             "day,hour",
             "--output",
             "./output",
+            "--write-lookup-sidecar",
             "--json",
         ]);
         match cli.command.expect("command should exist") {
@@ -5332,6 +5404,7 @@ mod tests {
                 stop_block,
                 partition_types,
                 output,
+                write_lookup_sidecar,
                 json,
                 ..
             }) => {
@@ -5341,6 +5414,7 @@ mod tests {
                 assert_eq!(stop_block, 200);
                 assert_eq!(partition_types, "day,hour");
                 assert_eq!(output, "./output");
+                assert!(write_lookup_sidecar);
                 assert!(json);
             }
             _ => panic!("expected partitions build subcommand"),
@@ -6556,5 +6630,43 @@ mod tests {
         assert_eq!(rows[0].start_block, 500);
         assert_eq!(rows[0].end_block, 501);
         assert_eq!(rows[0].partition_value, "2023-07-31 14:00:00");
+    }
+
+    #[test]
+    fn test_write_lookup_sidecar_for_index_round_trip() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let index_path = dir.path().join("eth-mainnet").join("partitions.parquet");
+        let rows = vec![PartitionBuildRow {
+            partition_type: "hour".to_string(),
+            partition_interval_seconds: 3_600,
+            partition_start_ts: "2023-07-31 14:00:00".to_string(),
+            partition_value: "2023-07-31 14:00:00".to_string(),
+            start_block: 100,
+            end_block: 103,
+            start_time: "2023-07-31 14:59:00".to_string(),
+            end_time: "2023-07-31 15:00:00".to_string(),
+            chain: Some("eth-mainnet".to_string()),
+        }];
+
+        let sidecar_path =
+            write_lookup_sidecar_for_index(&index_path.to_string_lossy(), &rows, None)
+                .expect("write sidecar")
+                .expect("sidecar path");
+        assert!(sidecar_path.ends_with("partitions.lookup.json"));
+
+        let sidecar = load_lookup_sidecar(&index_path.to_string_lossy(), None)
+            .expect("load sidecar")
+            .expect("sidecar should exist");
+        assert_eq!(
+            sidecar.lookup_schema_version,
+            PARTITIONS_LOOKUP_SCHEMA_VERSION
+        );
+        assert_eq!(sidecar.source_schema_version, PARTITIONS_SCHEMA_VERSION);
+        assert_eq!(sidecar.entries.len(), 1);
+        assert_eq!(sidecar.entries[0].partition_type, "hour");
+        assert_eq!(sidecar.entries[0].partition_value, "2023-07-31 14:00:00");
+        assert_eq!(sidecar.entries[0].start_block, 100);
+        assert_eq!(sidecar.entries[0].end_block, 103);
+        assert_eq!(sidecar.entries[0].chain.as_deref(), Some("eth-mainnet"));
     }
 }

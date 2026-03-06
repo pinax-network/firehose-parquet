@@ -6,10 +6,10 @@ use firehose_parquet::cli::{
     parse_partition_selection_request, parse_partition_shard_strategy, resolve_cursor_template,
     resolve_partition_bounds_from_index, resolve_partition_command,
     resolve_partition_window_bounds_from_index, shard_partitions_from_index,
-    validate_partitions_index, write_partitions_index, AwsConfig, Commands, CommonArgs,
-    PartitionBoundsRequest, PartitionBuildResult, PartitionIndexBuilder, PartitionListRequest,
-    PartitionResolveOptions, PartitionSelectionRequest, PartitionShardRequest,
-    PartitionValidateRequest, PartitionsCommands,
+    validate_partitions_index, write_lookup_sidecar_for_index, write_partitions_index, AwsConfig,
+    Commands, CommonArgs, PartitionBoundsRequest, PartitionBuildResult, PartitionIndexBuilder,
+    PartitionListRequest, PartitionResolveOptions, PartitionSelectionRequest,
+    PartitionShardRequest, PartitionValidateRequest, PartitionsCommands,
 };
 use firehose_parquet::config::{BlockMetadata, Compression, Config, Partition};
 use firehose_parquet::cursor::{CursorLocation, CursorState};
@@ -303,6 +303,7 @@ async fn run_partitions_build(
     stop_block: u64,
     partition_types_spec: &str,
     output: &str,
+    write_lookup_sidecar: bool,
     aws: &AwsConfig,
 ) -> Result<PartitionBuildResult> {
     if stop_block <= start_block {
@@ -361,6 +362,9 @@ async fn run_partitions_build(
     let rows = builder.finish(stop_block)?;
     let partitions_index = build_partitions_index_path(output, &chain);
     write_partitions_index(&partitions_index, &rows, Some(aws))?;
+    if write_lookup_sidecar {
+        write_lookup_sidecar_for_index(&partitions_index, &rows, Some(aws))?;
+    }
 
     Ok(PartitionBuildResult {
         partitions_index,
@@ -468,6 +472,7 @@ async fn main() -> Result<()> {
                     stop_block,
                     partition_types,
                     output,
+                    write_lookup_sidecar,
                     json,
                     aws_access_key_id,
                     aws_secret_access_key,
@@ -492,6 +497,7 @@ async fn main() -> Result<()> {
                         *stop_block,
                         partition_types,
                         output,
+                        *write_lookup_sidecar,
                         &aws,
                     )
                     .await?;

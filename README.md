@@ -272,6 +272,7 @@ firehose-parquet partitions build \
   --stop-block 10010000 \
   --partition-types hour,minute \
   --output s3://my-bucket/firehose \
+  --write-lookup-sidecar \
   --json
 ```
 
@@ -282,12 +283,14 @@ Behavior:
 - supports mixed granularities in one file (`day`, `hour`, `minute`, `second`)
 - derives canonical UTC partition keys using rounded interval starts
 - writes contract metadata including schema version, chain scope, and covered block range
+- can also emit `partitions.lookup.json` for low-latency `partitions resolve` lookups
 
 | Flag | Default | Description |
 |---|---|---|
 | `--chain` | inferred | Optional chain override when endpoint info is unavailable |
 | `--partition-types` | none | Comma-separated partition types: `day,hour,minute,second` |
 | `--output` | none | Output root directory or `s3://` URI prefix |
+| `--write-lookup-sidecar` | `false` | Also write `partitions.lookup.json` next to the canonical parquet index |
 | `--json` | `false` | Emit machine-readable output |
 
 ### `partitions ls` — Query Partition Index Rows
