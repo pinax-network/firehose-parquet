@@ -834,7 +834,7 @@ Every Parquet file written by the pipeline embeds key-value metadata in the file
 
 | Key | Example Value |
 |---|---|
-| `firehose-parquet.version` | `0.4.0` |
+| `firehose-parquet.version` | `0.5.0` |
 | `firehose-parquet.block_type` | `evm` |
 | `firehose-parquet.bytes_encoding` | `hex` |
 | `firehose-parquet.endpoint` | `https://eth.firehose.pinax.network:443` |

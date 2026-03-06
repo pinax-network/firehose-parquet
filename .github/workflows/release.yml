@@ -73,9 +73,9 @@ jobs:
       - name: Package binaries
         shell: bash
         run: |
-          STAGING="firehose-parquet-${{ matrix.suffix }}"
+          STAGING="fireparq-${{ matrix.suffix }}"
           mkdir -p "$STAGING"
-          cp "target/${{ matrix.target }}/release/firehose-parquet" "$STAGING/"
+          cp "target/${{ matrix.target }}/release/fireparq" "$STAGING/"
           tar czf "${STAGING}.tar.gz" "$STAGING"
           echo "ASSET=${STAGING}.tar.gz" >> "$GITHUB_ENV"
 
