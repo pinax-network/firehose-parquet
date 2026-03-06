@@ -1,4 +1,5 @@
 use anyhow::{anyhow, Result};
+use clap::builder::PossibleValuesParser;
 use clap::Parser;
 use firehose_parquet::cli::{
     build_config, build_partitions_index_path, cursor_template_context_from_selection,
@@ -16,6 +17,7 @@ use firehose_parquet::cursor::{CursorLocation, CursorState};
 use firehose_parquet::encode::{parse_encode_bytes, EncodeBytes};
 use firehose_parquet::grpc::{EndpointInfo, FirehoseClient};
 use firehose_parquet::metrics;
+use firehose_parquet::networks::{resolve_network_endpoint, EndpointSource, KNOWN_NETWORK_ALIASES};
 use firehose_parquet::traits::{decode_id_bytes, fork_step_name, BlockIdentity, BlockMapper};
 use firehose_parquet::writer::{OutputWriter, ParquetFileMetadata};
 use std::path::PathBuf;
@@ -49,6 +51,13 @@ Default action:
   Utility workflows live under subcommands such as `partitions`, `scan`, `inspect`, `validate`, and `verify`.
 
 Examples:
+  # Resolve a built-in network alias to its default endpoint
+  fireparq --network eth --start-block 20000000 --stop-block 20001000
+
+  # Override a network alias with an env var
+  FIREHOSE_ENDPOINT_SOLANA=https://solana.internal.example.com:443 \\
+    fireparq --network solana --start-block 250000000 --stop-block 250100000
+
   # Stream EVM blocks to local Parquet (auto-detect chain)
   fireparq --endpoint https://eth.firehose.pinax.network:443 \\
     --start-block 20000000 --stop-block 20001000
@@ -102,6 +111,21 @@ struct Cli {
 
     #[command(flatten)]
     common: CommonArgs,
+
+    /// Built-in Firehose network alias.
+    ///
+    /// When set, resolves a known network name to a default endpoint. `--endpoint`
+    /// or `ENDPOINT` takes precedence if already set. Supports per-network env
+    /// overrides such as `FIREHOSE_ENDPOINT_ETH` or
+    /// `FIREHOSE_ENDPOINT_SOLANA_MAINNET_BETA`.
+    #[arg(
+        long,
+        env = "NETWORK",
+        hide_env_values = true,
+        value_parser = PossibleValuesParser::new(KNOWN_NETWORK_ALIASES),
+        help_heading = "Connection"
+    )]
+    network: Option<String>,
 
     /// Block type to process.
     /// Use "auto" to detect from the Firehose stream.
@@ -1118,7 +1142,36 @@ async fn main() -> Result<()> {
 
     let mut extended = cli.extended;
     let bytes_encoding_str = cli.bytes_encoding.clone();
-    let mut config = build_config(&cli.common)?;
+    let mut common = cli.common.clone();
+    if common.endpoint.is_none() {
+        if let Some(network) = cli.network.as_deref() {
+            let resolved = resolve_network_endpoint(network)?;
+            match &resolved.source {
+                EndpointSource::Builtin => info!(
+                    network = %resolved.requested,
+                    canonical_network = resolved.canonical,
+                    endpoint = %resolved.endpoint,
+                    "resolved built-in network endpoint"
+                ),
+                EndpointSource::EnvOverride { env_var } => info!(
+                    network = %resolved.requested,
+                    canonical_network = resolved.canonical,
+                    endpoint = %resolved.endpoint,
+                    env_var = %env_var,
+                    "resolved network endpoint from environment override"
+                ),
+            }
+            common.endpoint = Some(resolved.endpoint);
+        }
+    } else if let Some(network) = cli.network.as_deref() {
+        info!(
+            endpoint = %common.endpoint.as_deref().unwrap_or_default(),
+            network,
+            "ignoring --network because --endpoint or ENDPOINT is already set"
+        );
+    }
+
+    let mut config = build_config(&common)?;
 
     let partition_selection_request = parse_partition_selection_request(&cli.common)?;
     let has_explicit_range = cli.common.start_block.is_some() || cli.common.stop_block.is_some();
@@ -1775,6 +1828,30 @@ mod tests {
         assert!(help.contains("Default action:"));
         assert!(help.contains("fireparq"));
         assert!(help.contains("ingestion build pipeline"));
+    }
+
+    #[test]
+    fn test_cli_help_mentions_network() {
+        let mut cmd = Cli::command();
+        let help = cmd.render_long_help().to_string();
+        assert!(help.contains("--network <NETWORK>"));
+        assert!(help.contains("FIREHOSE_ENDPOINT_ETH"));
+    }
+
+    #[test]
+    fn test_cli_parses_network_flag() {
+        let cli = Cli::parse_from(["fireparq", "--network", "eth", "--start-block", "100"]);
+        assert_eq!(cli.network.as_deref(), Some("eth"));
+        assert_eq!(cli.common.start_block, Some(100));
+    }
+
+    #[test]
+    fn test_cli_rejects_unknown_network_flag() {
+        let err = Cli::try_parse_from(["fireparq", "--network", "unknown"])
+            .expect_err("unknown network should fail clap parsing");
+        let rendered = err.to_string();
+        assert!(rendered.contains("invalid value 'unknown'"));
+        assert!(rendered.contains("solana-mainnet-beta"));
     }
 
     #[test]

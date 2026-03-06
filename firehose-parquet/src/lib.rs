@@ -5,6 +5,7 @@ pub mod encode;
 pub mod grpc;
 pub mod merge;
 pub mod metrics;
+pub mod networks;
 pub mod rollup;
 pub mod s3;
 pub mod traits;
