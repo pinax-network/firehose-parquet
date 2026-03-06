@@ -1364,6 +1364,8 @@ pub struct PartitionsLookupEntry {
 pub struct PartitionsLookupSidecar {
     pub lookup_schema_version: String,
     pub source_schema_version: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_metadata_hash: Option<String>,
     pub entries: Vec<PartitionsLookupEntry>,
 }
 
@@ -2296,6 +2298,62 @@ fn partitions_lookup_sidecar_path(index_path: &str) -> Option<String> {
     None
 }
 
+fn partitions_metadata_hash_from_map(
+    metadata: &std::collections::HashMap<&str, String>,
+) -> Option<String> {
+    use sha2::{Digest, Sha256};
+
+    let keys = [
+        PARTITIONS_SCHEMA_VERSION_KEY,
+        PARTITIONS_GENERATED_AT_KEY,
+        PARTITIONS_SOURCE_KEY,
+        PARTITIONS_CHAIN_SCOPE_KEY,
+        PARTITIONS_TYPES_KEY,
+        PARTITIONS_MIN_START_BLOCK_KEY,
+        PARTITIONS_MAX_END_BLOCK_KEY,
+    ];
+    let mut hasher = Sha256::new();
+    for key in keys {
+        let value = metadata.get(key)?;
+        hasher.update(key.as_bytes());
+        hasher.update(b"=");
+        hasher.update(value.as_bytes());
+        hasher.update(b"\n");
+    }
+    Some(format!("{:x}", hasher.finalize()))
+}
+
+fn read_partitions_index_metadata_hash(
+    index_path: &str,
+    aws: Option<&AwsConfig>,
+) -> anyhow::Result<Option<String>> {
+    use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+
+    if index_path.starts_with("s3://") {
+        use crate::writer::parse_s3_url;
+        use object_store::ObjectStore;
+
+        let aws =
+            aws.ok_or_else(|| anyhow::anyhow!("AWS config required for S3 partition index"))?;
+        let (bucket, key) = parse_s3_url(index_path)?;
+        let client = aws.build_s3_client(&bucket)?;
+        let obj_path = object_store::path::Path::from(key.as_str());
+        let data = block_on_async(async { client.get(&obj_path).await?.bytes().await })
+            .map_err(|e| anyhow::anyhow!("reading {}: {e}", index_path))?;
+        let builder = ParquetRecordBatchReaderBuilder::try_new(data)?;
+        return Ok(partitions_metadata_hash_from_map(&partitions_metadata_map(
+            builder.metadata().file_metadata(),
+        )));
+    }
+
+    let file = std::fs::File::open(index_path)
+        .map_err(|e| anyhow::anyhow!("opening {}: {e}", index_path))?;
+    let builder = ParquetRecordBatchReaderBuilder::try_new(file)?;
+    Ok(partitions_metadata_hash_from_map(&partitions_metadata_map(
+        builder.metadata().file_metadata(),
+    )))
+}
+
 fn build_lookup_sidecar(rows: &[PartitionBuildRow]) -> PartitionsLookupSidecar {
     let entries = rows
         .iter()
@@ -2311,6 +2369,7 @@ fn build_lookup_sidecar(rows: &[PartitionBuildRow]) -> PartitionsLookupSidecar {
     PartitionsLookupSidecar {
         lookup_schema_version: PARTITIONS_LOOKUP_SCHEMA_VERSION.to_string(),
         source_schema_version: PARTITIONS_SCHEMA_VERSION.to_string(),
+        source_metadata_hash: None,
         entries,
     }
 }
@@ -2326,7 +2385,9 @@ pub fn write_lookup_sidecar_for_index(
         return Ok(None);
     };
 
-    let payload = serde_json::to_vec_pretty(&build_lookup_sidecar(rows))?;
+    let mut sidecar = build_lookup_sidecar(rows);
+    sidecar.source_metadata_hash = read_partitions_index_metadata_hash(index_path, aws)?;
+    let payload = serde_json::to_vec_pretty(&sidecar)?;
 
     if sidecar_path.starts_with("s3://") {
         use crate::writer::parse_s3_url;
@@ -2423,6 +2484,12 @@ fn load_lookup_sidecar(
         let sidecar: PartitionsLookupSidecar = serde_json::from_slice(&data)
             .map_err(|e| anyhow::anyhow!("invalid lookup sidecar {}: {e}", sidecar_path))?;
         validate_lookup_sidecar(&sidecar)?;
+        if let Some(expected_hash) = sidecar.source_metadata_hash.as_deref() {
+            let actual_hash = read_partitions_index_metadata_hash(index_path, Some(aws))?;
+            if actual_hash.as_deref() != Some(expected_hash) {
+                return Ok(None);
+            }
+        }
         return Ok(Some(sidecar));
     }
 
@@ -2434,6 +2501,12 @@ fn load_lookup_sidecar(
     let sidecar: PartitionsLookupSidecar = serde_json::from_slice(&bytes)
         .map_err(|e| anyhow::anyhow!("invalid lookup sidecar {}: {e}", sidecar_path))?;
     validate_lookup_sidecar(&sidecar)?;
+    if let Some(expected_hash) = sidecar.source_metadata_hash.as_deref() {
+        let actual_hash = read_partitions_index_metadata_hash(index_path, aws)?;
+        if actual_hash.as_deref() != Some(expected_hash) {
+            return Ok(None);
+        }
+    }
     Ok(Some(sidecar))
 }
 
@@ -7293,6 +7366,7 @@ mod tests {
         let sidecar = PartitionsLookupSidecar {
             lookup_schema_version: PARTITIONS_LOOKUP_SCHEMA_VERSION.to_string(),
             source_schema_version: PARTITIONS_SCHEMA_VERSION.to_string(),
+            source_metadata_hash: None,
             entries: vec![PartitionsLookupEntry {
                 chain: Some("eth-mainnet".to_string()),
                 partition_type: "hour".to_string(),
@@ -7612,6 +7686,7 @@ mod tests {
             chain: Some("eth-mainnet".to_string()),
         }];
 
+        write_partitions_index(&index_path.to_string_lossy(), &rows, None).expect("write index");
         let sidecar_path =
             write_lookup_sidecar_for_index(&index_path.to_string_lossy(), &rows, None)
                 .expect("write sidecar")
@@ -7626,11 +7701,45 @@ mod tests {
             PARTITIONS_LOOKUP_SCHEMA_VERSION
         );
         assert_eq!(sidecar.source_schema_version, PARTITIONS_SCHEMA_VERSION);
+        assert!(sidecar.source_metadata_hash.is_some());
         assert_eq!(sidecar.entries.len(), 1);
         assert_eq!(sidecar.entries[0].partition_type, "hour");
         assert_eq!(sidecar.entries[0].partition_value, "2023-07-31 14:00:00");
         assert_eq!(sidecar.entries[0].start_block, 100);
         assert_eq!(sidecar.entries[0].end_block, 103);
         assert_eq!(sidecar.entries[0].chain.as_deref(), Some("eth-mainnet"));
+    }
+
+    #[test]
+    fn test_load_lookup_sidecar_returns_none_when_source_metadata_hash_is_stale() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let index_path = dir.path().join("eth-mainnet").join("partitions.parquet");
+
+        let rows = vec![PartitionBuildRow {
+            partition_type: "hour".to_string(),
+            partition_interval_seconds: 3_600,
+            partition_start_ts: "2023-07-31 14:00:00".to_string(),
+            partition_value: "2023-07-31 14:00:00".to_string(),
+            start_block: 100,
+            end_block: 103,
+            start_time: "2023-07-31 14:59:00".to_string(),
+            end_time: "2023-07-31 15:00:00".to_string(),
+            chain: Some("eth-mainnet".to_string()),
+        }];
+        write_partitions_index(&index_path.to_string_lossy(), &rows, None).expect("write index");
+        write_lookup_sidecar_for_index(&index_path.to_string_lossy(), &rows, None)
+            .expect("write sidecar")
+            .expect("sidecar path");
+
+        let mutated_rows = vec![PartitionBuildRow {
+            end_block: 104,
+            ..rows[0].clone()
+        }];
+        write_partitions_index(&index_path.to_string_lossy(), &mutated_rows, None)
+            .expect("rewrite index with different metadata");
+
+        let sidecar = load_lookup_sidecar(&index_path.to_string_lossy(), None)
+            .expect("load sidecar should not error");
+        assert!(sidecar.is_none(), "stale sidecar should be ignored");
     }
 }

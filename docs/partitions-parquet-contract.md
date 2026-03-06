@@ -102,6 +102,7 @@ Current sidecar contract:
 
 - `lookup_schema_version` — current value: `1`
 - `source_schema_version` — expected canonical source schema version (`1`)
+- `source_metadata_hash` — optional SHA-256 fingerprint of canonical parquet file metadata for stale-sidecar detection
 - `entries[]` with:
   - `chain` (nullable string)
   - `partition_type` (string)
@@ -113,4 +114,5 @@ Notes:
 
 - The sidecar is an optimization only; `partitions.parquet` remains the source of truth.
 - Unsupported sidecar schema versions are rejected.
+- When `source_metadata_hash` is present and no longer matches `partitions.parquet`, readers ignore the sidecar and fall back to canonical parquet scans.
 - If no sidecar is present, readers continue with canonical parquet scans.
