@@ -59,45 +59,45 @@ Examples:
     fireparq --network solana --start-block 250000000 --stop-block 250100000
 
   # Stream EVM blocks to local Parquet (auto-detect chain)
-  fireparq --endpoint https://eth.firehose.pinax.network:443 \\
+  fireparq --network mainnet \\
     --start-block 20000000 --stop-block 20001000
 
   # Stream Solana with date partitioning to S3
-  fireparq --endpoint https://solana.firehose.pinax.network:443 \\
+  fireparq --network solana-mainnet-beta \\
     --start-block 250000000 --stop-block 250100000 \\
     --partition date --s3-bucket my-bucket
 
   # Stream with hex encoding and extended tables
-  fireparq --endpoint https://eth.firehose.pinax.network:443 \\
+  fireparq --network mainnet \\
     --start-block 20000000 --bytes-encoding hex --extended
 
   # Resume from cursor
-  fireparq --endpoint https://eth.firehose.pinax.network:443 \\
+  fireparq --network mainnet \\
     --cursor cursor.txt --partition date
 
   # Resolve range from local partitions index (no explicit start/stop)
-  fireparq --endpoint https://eth.firehose.pinax.network:443 \\
+  fireparq --network mainnet \\
     --partitions-index ./output/eth-mainnet/partitions.parquet \\
     --partition-type hour \\
     --partition-value '2015-07-30 15:00:00' \\
     --partition-chain eth-mainnet
 
   # Resolve range from S3 partitions index
-  fireparq --endpoint https://eth.firehose.pinax.network:443 \\
+  fireparq --network mainnet \\
     --partitions-index s3://my-bucket/eth-mainnet/partitions.parquet \\
     --partition-type day \\
     --partition-value '2015-07-30 00:00:00' \\
     --partition-chain eth-mainnet
 
   # Resolve range from global S3 index shared across chains
-  fireparq --endpoint https://eth.firehose.pinax.network:443 \\
+  fireparq --network mainnet \\
     --partitions-index s3://my-bucket/partitions.parquet \\
     --partition-type hour \\
     --partition-value '2015-07-30 15:00:00' \\
     --partition-chain eth-mainnet
 
   # Resolve an inclusive/exclusive partition window [from, to)
-  fireparq --endpoint https://eth.firehose.pinax.network:443 \\
+  fireparq --network mainnet \\
     --partitions-index ./output/eth-mainnet/partitions.parquet \\
     --partition-type hour \\
     --partition-from '2015-07-30 14:00:00' \\
