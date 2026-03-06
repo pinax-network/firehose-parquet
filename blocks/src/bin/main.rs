@@ -575,6 +575,7 @@ async fn main() -> Result<()> {
             Commands::Partitions(subcommand) => match subcommand {
                 PartitionsCommands::Build {
                     endpoint,
+                    network,
                     api_key_envvar,
                     api_token_envvar,
                     chain,
@@ -599,8 +600,17 @@ async fn main() -> Result<()> {
                         aws_region: aws_region.clone(),
                         aws_endpoint_url: aws_endpoint_url.clone(),
                     };
+                    let resolved_endpoint = if let Some(endpoint) = endpoint.as_deref() {
+                        endpoint.to_string()
+                    } else if let Some(network) = network.as_deref() {
+                        let resolved = resolve_network_endpoint(network)?;
+                        resolved.endpoint
+                    } else {
+                        return Err(anyhow!("either --endpoint or --network is required"));
+                    };
+
                     let result = run_partitions_build(
-                        endpoint,
+                        &resolved_endpoint,
                         api_key_envvar,
                         api_token_envvar,
                         chain.as_deref(),

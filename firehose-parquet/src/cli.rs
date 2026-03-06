@@ -742,7 +742,7 @@ pub enum PartitionsCommands {
 Examples:
   # Build a local hour/day index for one chain
   fireparq partitions build \\
-    --endpoint https://eth.firehose.pinax.network:443 \\
+    --network mainnet \\
     --start-block 10000000 \\
     --stop-block 10010000 \\
     --partition day,hour \\
@@ -750,7 +750,7 @@ Examples:
 
   # Build to S3 with an explicit chain override and JSON output
   fireparq partitions build \\
-    --endpoint https://eth.firehose.pinax.network:443 \\
+    --network mainnet \\
     --chain eth-mainnet \\
     --start-block 10000000 \\
     --stop-block 10010000 \\
@@ -762,7 +762,10 @@ Examples:
     Build {
         /// Firehose gRPC endpoint URL
         #[arg(long, env = "ENDPOINT", hide_env_values = true)]
-        endpoint: String,
+        endpoint: Option<String>,
+        /// Firehose network `chainName`
+        #[arg(long, env = "NETWORK", hide_env_values = true)]
+        network: Option<String>,
         /// Name of environment variable containing the API key for authentication
         #[arg(
             long,
