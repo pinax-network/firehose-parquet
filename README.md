@@ -272,6 +272,7 @@ firehose-parquet partitions build \
   --stop-block 10010000 \
   --partition-types hour,minute \
   --output s3://my-bucket/firehose \
+  --write-lookup-sidecar \
   --json
 
 # Resume from an existing canonical index and append only missing coverage
@@ -292,6 +293,7 @@ Behavior:
 - supports mixed granularities in one file (`day`, `hour`, `minute`, `second`)
 - derives canonical UTC partition keys using rounded interval starts
 - writes contract metadata including schema version, chain scope, and covered block range
+- can also emit `partitions.lookup.json` for low-latency `partitions resolve` lookups
 - `--resume` reuses the trailing rows from the existing canonical index and continues from the stored frontier
 
 | Flag | Default | Description |
@@ -299,7 +301,9 @@ Behavior:
 | `--chain` | inferred | Optional chain override when endpoint info is unavailable |
 | `--partition-types` | none | Comma-separated partition types: `day,hour,minute,second` |
 | `--output` | none | Output root directory or `s3://` URI prefix |
+| `--write-lookup-sidecar` | `false` | Also write `partitions.lookup.json` next to the canonical parquet index |
 | `--resume` | `false` | Reuse the existing canonical index at the resolved output path and continue from its frontier |
+| `--write-lookup-sidecar` | `false` | Also write `partitions.lookup.json` next to the canonical parquet index |
 | `--json` | `false` | Emit machine-readable output |
 
 ### `partitions ls` — Query Partition Index Rows
