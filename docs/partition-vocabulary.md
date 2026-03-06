@@ -12,14 +12,14 @@ Use `--partition` for partition granularity or output layout, and keep `--partit
   - Means the partition granularity being written, built, or targeted.
   - Examples:
     - main ingestion output layout (`--partition date`)
-    - `partitions build` granularities (`--partition day,hour`)
+    - `partitions build` granularity (`--partition date`)
     - `rollup` destination granularity (`--partition hour`)
 
 - `--partition-type`
   - Means the partition dimension to query inside a canonical partition index.
   - Examples:
     - `partitions ls --partition-type hour`
-    - `partitions resolve --partition-type day`
+    - `partitions resolve --partition-type date`
     - ingestion-side partition selection with `--partitions-index`
 
 - `--partition-value`

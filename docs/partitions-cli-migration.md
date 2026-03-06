@@ -37,18 +37,19 @@ The grouped CLI now supports writing the canonical partition index directly from
 Current behavior:
 
 - scans the requested `[start_block, stop_block)` range from Firehose
-- computes UTC interval starts for `day`, `hour`, `minute`, and `second`
+- computes UTC interval starts for `date`, `hour`, `minute`, and `second`
 - emits one row per discovered partition with contiguous `[start_block, end_block)` bounds
 - writes `/<chain>/partitions.parquet` under the supplied local or S3 output root
 - includes file metadata defined in `docs/partitions-parquet-contract.md`
 - can optionally write `partitions.lookup.json` for fast exact-match partition resolution
 - supports `--resume` by reusing trailing partition rows from the existing canonical artifact and continuing from the stored frontier
-- supports `--resume` by reusing trailing partition rows from the existing canonical artifact and continuing from the stored frontier
+- infers `--start-block` from a sibling `cursor.parquet` or endpoint metadata when omitted
+- infers the S3 output root from `--s3-bucket` / `S3_BUCKET` when `--output` is omitted
 
 Current limitations:
 
 - requires a finite non-zero `--stop-block`
-- writes the canonical parquet artifact only; optional sidecar generation remains future work
+- requires exactly one `--partition` value per run
 
 ### Ingestion window mode
 

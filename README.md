@@ -307,22 +307,20 @@ Chain:
 Builds a canonical partition index directly from Firehose block timestamps, without requiring a pre-existing `blocks/` table.
 
 ```bash
-# Build day + hour rows locally
+# Build a date index locally
 fireparq partitions build \
   --endpoint https://eth.firehose.pinax.network:443 \
-  --start-block 10000000 \
   --stop-block 10010000 \
-  --partition day,hour \
+  --partition date \
   --output ./output
 
-# Build hour + minute rows to S3 with an explicit chain override
+# Build an hour index to S3 with an explicit chain override
 fireparq partitions build \
   --endpoint https://eth.firehose.pinax.network:443 \
   --chain eth-mainnet \
-  --start-block 10000000 \
   --stop-block 10010000 \
-  --partition hour,minute \
-  --output s3://my-bucket/firehose \
+  --partition hour \
+  --s3-bucket my-bucket \
   --write-lookup-sidecar \
   --json
 
@@ -330,9 +328,8 @@ fireparq partitions build \
 fireparq partitions build \
   --endpoint https://eth.firehose.pinax.network:443 \
   --chain eth-mainnet \
-  --start-block 10000000 \
   --stop-block 10020000 \
-  --partition day,hour \
+  --partition date \
   --output ./output \
   --resume
 ```
@@ -341,18 +338,20 @@ Behavior:
 
 - writes one row per discovered partition to `/<chain>/partitions.parquet`
 - preserves `[start_block, end_block)` semantics
-- supports mixed granularities in one file (`day`, `hour`, `minute`, `second`)
+- supports one partition granularity per run (`date`, `hour`, `minute`, `second`)
 - derives canonical UTC partition keys using rounded interval starts
 - writes contract metadata including schema version, chain scope, and covered block range
 - can also emit `partitions.lookup.json` for low-latency `partitions resolve` lookups
 - `--resume` reuses the trailing rows from the existing canonical index and continues from the stored frontier
+- still requires a finite `--stop-block` so the generated artifact has deterministic coverage
 
 | Flag | Default | Description |
 |---|---|---|
 | `--chain` | inferred | Optional chain override when endpoint info is unavailable |
-| `--partition` | none | Comma-separated partitions to build: `day,hour,minute,second` |
-| `--output` | none | Output root directory or `s3://` URI prefix |
-| `--write-lookup-sidecar` | `false` | Also write `partitions.lookup.json` next to the canonical parquet index |
+| `--partition` | none | Partition to build: `date`, `hour`, `minute`, or `second` |
+| `--start-block` | inferred | Explicit start block, otherwise sibling cursor then endpoint first streamable block |
+| `--output` | inferred from `--s3-bucket` | Output root directory or `s3://` URI prefix |
+| `--s3-bucket` | none | S3 bucket used when `--output` is omitted or should be prefixed |
 | `--resume` | `false` | Reuse the existing canonical index at the resolved output path and continue from its frontier |
 | `--write-lookup-sidecar` | `false` | Also write `partitions.lookup.json` next to the canonical parquet index |
 | `--json` | `false` | Emit machine-readable output |
@@ -370,7 +369,7 @@ fireparq partitions ls \
 # Filter chain + time window and return JSON
 fireparq partitions ls \
   --partitions-index s3://my-bucket/eth-mainnet/partitions.parquet \
-  --partition-type day \
+  --partition-type date \
   --partition-chain eth-mainnet \
   --from '2015-07-29 00:00:00' \
   --to '2015-07-31 00:00:00' \
@@ -402,7 +401,7 @@ fireparq partitions shard \
 # Hash assignment over a window with JSON output
 fireparq partitions shard \
   --partitions-index s3://my-bucket/eth-mainnet/partitions.parquet \
-  --partition-type day \
+  --partition-type date \
   --partition-chain eth-mainnet \
   --from '2015-07-29 00:00:00' \
   --to '2015-07-31 00:00:00' \
@@ -436,7 +435,7 @@ fireparq partitions validate \
 # Validate one chain/type and emit JSON
 fireparq partitions validate \
   --partitions-index s3://my-bucket/partitions.parquet \
-  --partition-type day \
+  --partition-type date \
   --partition-chain eth-mainnet \
   --json
 ```
@@ -464,7 +463,7 @@ fireparq partitions resolve \
 # S3 index with machine-readable output
 fireparq partitions resolve \
   --partitions-index s3://my-bucket/eth-mainnet/partitions.parquet \
-  --partition-type day \
+  --partition-type date \
   --partition-value '2015-07-30 00:00:00' \
   --partition-chain eth-mainnet \
   --json
@@ -472,7 +471,7 @@ fireparq partitions resolve \
 # Require a unique chain match when using a global index
 fireparq partitions resolve \
   --partitions-index s3://my-bucket/partitions.parquet \
-  --partition-type day \
+  --partition-type date \
   --partition-value '2015-07-30 00:00:00' \
   --strict-single-chain
 ```
@@ -553,10 +552,10 @@ fireparq --endpoint https://eth.firehose.pinax.network:443 \
 fireparq --endpoint https://eth.firehose.pinax.network:443 \
   --cursor-template 'cursor/{chain}/{partition_type}/{partition_value}.parquet' \
   --partitions-index s3://my-bucket/partitions.parquet \
-  --partition-type day \
+  --partition-type date \
   --partition-value '2015-07-30 00:00:00' \
   --partition-chain eth-mainnet
-# expands to: cursor/eth-mainnet/day/2015-07-30 00:00:00.parquet
+# expands to: cursor/eth-mainnet/date/2015-07-30 00:00:00.parquet
 
 # Window worker with one cursor per assigned partition window
 fireparq --endpoint https://eth.firehose.pinax.network:443 \

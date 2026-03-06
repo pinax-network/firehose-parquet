@@ -446,6 +446,7 @@ dependencies = [
  "clap",
  "firehose-parquet",
  "firehose-protos",
+ "object_store",
  "prometheus-client",
  "prost",
  "prost-types",
