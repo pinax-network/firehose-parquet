@@ -4,8 +4,7 @@ use crate::networks_generated;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BuiltinNetwork {
-    pub canonical: &'static str,
-    pub aliases: &'static [&'static str],
+    pub chain_name: &'static str,
     pub default_endpoint: &'static str,
 }
 
@@ -18,12 +17,12 @@ pub enum EndpointSource {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedNetworkEndpoint {
     pub requested: String,
-    pub canonical: &'static str,
+    pub chain_name: &'static str,
     pub endpoint: String,
     pub source: EndpointSource,
 }
 
-pub const KNOWN_NETWORK_ALIASES: &[&str] = networks_generated::GENERATED_NETWORK_ALIASES;
+pub const KNOWN_NETWORK_NAMES: &[&str] = networks_generated::GENERATED_NETWORK_NAMES;
 
 const BUILTIN_NETWORKS: &[BuiltinNetwork] = networks_generated::GENERATED_NETWORKS;
 
@@ -60,22 +59,22 @@ pub fn resolve_network_endpoint(name: &str) -> anyhow::Result<ResolvedNetworkEnd
     let requested = normalize_network_name(name);
     let network = BUILTIN_NETWORKS
         .iter()
-        .find(|network| network.aliases.iter().any(|alias| *alias == requested))
+        .find(|network| network.chain_name == requested)
         .ok_or_else(|| {
             anyhow!(
                 "unsupported network `{}`; known values: {}",
                 name.trim(),
-                KNOWN_NETWORK_ALIASES.join(", ")
+                KNOWN_NETWORK_NAMES.join(", ")
             )
         })?;
 
-    for env_var in candidate_env_vars(&requested, network.canonical) {
+    for env_var in candidate_env_vars(&requested, network.chain_name) {
         if let Ok(endpoint) = std::env::var(&env_var) {
             let endpoint = endpoint.trim();
             if !endpoint.is_empty() {
                 return Ok(ResolvedNetworkEndpoint {
                     requested,
-                    canonical: network.canonical,
+                    chain_name: network.chain_name,
                     endpoint: endpoint.to_string(),
                     source: EndpointSource::EnvOverride { env_var },
                 });
@@ -85,7 +84,7 @@ pub fn resolve_network_endpoint(name: &str) -> anyhow::Result<ResolvedNetworkEnd
 
     Ok(ResolvedNetworkEndpoint {
         requested,
-        canonical: network.canonical,
+        chain_name: network.chain_name,
         endpoint: network.default_endpoint.to_string(),
         source: EndpointSource::Builtin,
     })
@@ -121,28 +120,27 @@ mod tests {
 
     #[test]
     #[serial]
-    fn test_resolve_network_endpoint_builtin_aliases() {
+    fn test_resolve_network_endpoint_builtin_names() {
         unsafe {
-            std::env::remove_var("FIREHOSE_ENDPOINT_ETH");
             std::env::remove_var("FIREHOSE_ENDPOINT_MAINNET");
-            std::env::remove_var("FIREHOSE_ENDPOINT_SOLANA");
             std::env::remove_var("FIREHOSE_ENDPOINT_SOLANA_MAINNET_BETA");
             std::env::remove_var("FIREHOSE_ENDPOINT_TRON");
             std::env::remove_var("FIREHOSE_ENDPOINT_TRONEVM");
         }
 
-        let eth = resolve_network_endpoint("eth").expect("eth should resolve");
-        assert_eq!(eth.canonical, "mainnet");
-        assert_eq!(eth.endpoint, "https://eth.firehose.pinax.network:443");
-        assert_eq!(eth.source, EndpointSource::Builtin);
+        let mainnet = resolve_network_endpoint("mainnet").expect("mainnet should resolve");
+        assert_eq!(mainnet.chain_name, "mainnet");
+        assert_eq!(mainnet.endpoint, "https://eth.firehose.pinax.network:443");
+        assert_eq!(mainnet.source, EndpointSource::Builtin);
 
-        let solana = resolve_network_endpoint("solana").expect("solana should resolve");
-        assert_eq!(solana.canonical, "solana-mainnet-beta");
+        let solana =
+            resolve_network_endpoint("solana-mainnet-beta").expect("solana should resolve");
+        assert_eq!(solana.chain_name, "solana-mainnet-beta");
         assert_eq!(solana.endpoint, "https://solana.firehose.pinax.network:443");
         assert_eq!(solana.source, EndpointSource::Builtin);
 
-        let tronevm = resolve_network_endpoint("tronevm").expect("tronevm should resolve");
-        assert_eq!(tronevm.canonical, "tronevm");
+        let tronevm = resolve_network_endpoint("tron-evm").expect("tron-evm should resolve");
+        assert_eq!(tronevm.chain_name, "tron-evm");
         assert_eq!(
             tronevm.endpoint,
             "https://tronevm.firehose.pinax.network:443"
@@ -156,43 +154,37 @@ mod tests {
         assert!(err
             .to_string()
             .contains("unsupported network `unknown-network`"));
-        assert!(err
-            .to_string()
-            .contains("mainnet, eth, solana-mainnet-beta, solana, tron, tronevm"));
+        assert!(err.to_string().contains("mainnet"));
     }
 
     #[test]
     #[serial]
-    fn test_resolve_network_endpoint_uses_requested_alias_override_first() {
+    fn test_resolve_network_endpoint_uses_requested_name_override() {
         unsafe {
-            std::env::set_var(
-                "FIREHOSE_ENDPOINT_ETH",
-                "https://override-eth.example.com:443",
-            );
             std::env::set_var(
                 "FIREHOSE_ENDPOINT_MAINNET",
                 "https://override-mainnet.example.com:443",
             );
         }
 
-        let resolved = resolve_network_endpoint("eth").expect("eth override should resolve");
-        assert_eq!(resolved.endpoint, "https://override-eth.example.com:443");
+        let resolved =
+            resolve_network_endpoint("mainnet").expect("mainnet override should resolve");
+        assert_eq!(resolved.endpoint, "https://override-mainnet.example.com:443");
         assert_eq!(
             resolved.source,
             EndpointSource::EnvOverride {
-                env_var: "FIREHOSE_ENDPOINT_ETH".to_string()
+                env_var: "FIREHOSE_ENDPOINT_MAINNET".to_string()
             }
         );
 
         unsafe {
-            std::env::remove_var("FIREHOSE_ENDPOINT_ETH");
             std::env::remove_var("FIREHOSE_ENDPOINT_MAINNET");
         }
     }
 
     #[test]
     #[serial]
-    fn test_resolve_network_endpoint_falls_back_to_canonical_override() {
+    fn test_resolve_network_endpoint_name_normalizes_for_env() {
         unsafe {
             std::env::set_var(
                 "FIREHOSE_ENDPOINT_SOLANA_MAINNET_BETA",
@@ -200,8 +192,8 @@ mod tests {
             );
         }
 
-        let resolved =
-            resolve_network_endpoint("solana").expect("canonical solana override should resolve");
+        let resolved = resolve_network_endpoint("solana-mainnet-beta")
+            .expect("solana override should resolve");
         assert_eq!(resolved.endpoint, "https://override-solana.example.com:443");
         assert_eq!(
             resolved.source,
