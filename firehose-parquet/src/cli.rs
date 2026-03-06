@@ -790,6 +790,9 @@ Examples:
         /// Also write `partitions.lookup.json` alongside `partitions.parquet`
         #[arg(long, default_value = "false")]
         write_lookup_sidecar: bool,
+        /// Resume from an existing canonical index under the resolved output path
+        #[arg(long, default_value = "false")]
+        resume: bool,
         /// Emit machine-readable JSON output
         #[arg(long, default_value = "false")]
         json: bool,
@@ -1134,6 +1137,9 @@ pub struct PartitionBuildResult {
     pub row_count: usize,
     pub start_block: u64,
     pub stop_block: u64,
+    pub resumed: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resumed_from_block: Option<u64>,
 }
 
 #[derive(Debug, Clone)]
@@ -1262,6 +1268,86 @@ impl PartitionIndexBuilder {
         });
 
         Ok(self.rows)
+    }
+
+    pub fn resume_from_existing(
+        chain: impl Into<String>,
+        partition_types: Vec<PartitionBuildType>,
+        mut existing_rows: Vec<PartitionBuildRow>,
+    ) -> anyhow::Result<(Self, u64)> {
+        if existing_rows.is_empty() {
+            anyhow::bail!("cannot resume partition build without existing rows");
+        }
+
+        let chain = chain.into();
+        let resume_block = existing_rows
+            .iter()
+            .map(|row| row.end_block)
+            .max()
+            .ok_or_else(|| anyhow::anyhow!("missing existing end_block for resume"))?;
+
+        let mut active = std::collections::BTreeMap::new();
+        let mut retained_rows = Vec::new();
+
+        for partition_type in partition_types.iter().copied() {
+            let mut matching = existing_rows
+                .iter()
+                .enumerate()
+                .filter(|(_, row)| row.partition_type == partition_type.as_str())
+                .collect::<Vec<_>>();
+            matching.sort_by(|left, right| {
+                left.1
+                    .partition_start_ts
+                    .cmp(&right.1.partition_start_ts)
+                    .then_with(|| left.1.start_block.cmp(&right.1.start_block))
+                    .then_with(|| left.1.end_block.cmp(&right.1.end_block))
+            });
+
+            let Some((last_index, last_row)) = matching.pop() else {
+                anyhow::bail!(
+                    "cannot resume partition build for chain {}: missing existing rows for partition type {}",
+                    chain,
+                    partition_type
+                );
+            };
+
+            if last_row.end_block != resume_block {
+                anyhow::bail!(
+                    "cannot resume partition build: partition type {} ends at {}, expected common frontier {}",
+                    partition_type,
+                    last_row.end_block,
+                    resume_block
+                );
+            }
+
+            active.insert(
+                partition_type,
+                ActivePartitionBuildRow {
+                    partition_start_ts: parse_partition_timestamp(&last_row.partition_start_ts)?,
+                    partition_value: last_row.partition_value.clone(),
+                    start_block: last_row.start_block,
+                    start_time: parse_partition_timestamp(&last_row.start_time)?,
+                    last_block: last_row.end_block.saturating_sub(1),
+                    last_time: parse_partition_timestamp(&last_row.end_time)?,
+                },
+            );
+
+            existing_rows.remove(last_index);
+        }
+
+        retained_rows.extend(existing_rows);
+
+        Ok((
+            Self {
+                chain,
+                partition_types,
+                active,
+                rows: retained_rows,
+                first_seen_block: Some(resume_block),
+                last_seen_block: resume_block.checked_sub(1),
+            },
+            resume_block,
+        ))
     }
 }
 
@@ -1473,6 +1559,232 @@ fn format_partition_timestamp(timestamp: i64) -> anyhow::Result<String> {
     ))
 }
 
+fn parse_partition_timestamp(value: &str) -> anyhow::Result<i64> {
+    use time::{Date, Month, PrimitiveDateTime, Time};
+
+    let (date_part, time_part) = value.split_once(' ').ok_or_else(|| {
+        anyhow::anyhow!("invalid partition timestamp '{value}': expected YYYY-MM-DD HH:MM:SS")
+    })?;
+    let mut date_iter = date_part.split('-');
+    let year: i32 = date_iter
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("missing year in '{value}'"))?
+        .parse()?;
+    let month: u8 = date_iter
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("missing month in '{value}'"))?
+        .parse()?;
+    let day: u8 = date_iter
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("missing day in '{value}'"))?
+        .parse()?;
+
+    let mut time_iter = time_part.split(':');
+    let hour: u8 = time_iter
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("missing hour in '{value}'"))?
+        .parse()?;
+    let minute: u8 = time_iter
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("missing minute in '{value}'"))?
+        .parse()?;
+    let second: u8 = time_iter
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("missing second in '{value}'"))?
+        .parse()?;
+
+    let month = Month::try_from(month)?;
+    let date = Date::from_calendar_date(year, month, day)?;
+    let time = Time::from_hms(hour, minute, second)?;
+    Ok(PrimitiveDateTime::new(date, time)
+        .assume_utc()
+        .unix_timestamp())
+}
+
+pub fn read_partitions_build_rows(
+    path: &str,
+    aws: Option<&AwsConfig>,
+) -> anyhow::Result<Vec<PartitionBuildRow>> {
+    use arrow::array::{
+        Array, Int32Array, Int64Array, LargeStringArray, StringArray, UInt32Array, UInt64Array,
+    };
+    use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+
+    fn read_utf8_value(column: &dyn Array, row: usize) -> anyhow::Result<Option<String>> {
+        if column.is_null(row) {
+            return Ok(None);
+        }
+        if let Some(arr) = column.as_any().downcast_ref::<StringArray>() {
+            return Ok(Some(arr.value(row).to_string()));
+        }
+        if let Some(arr) = column.as_any().downcast_ref::<LargeStringArray>() {
+            return Ok(Some(arr.value(row).to_string()));
+        }
+        anyhow::bail!("expected utf8 column, found {}", column.data_type())
+    }
+
+    fn read_i64_value(column: &dyn Array, row: usize) -> anyhow::Result<Option<i64>> {
+        if column.is_null(row) {
+            return Ok(None);
+        }
+        if let Some(arr) = column.as_any().downcast_ref::<Int64Array>() {
+            return Ok(Some(arr.value(row)));
+        }
+        if let Some(arr) = column.as_any().downcast_ref::<Int32Array>() {
+            return Ok(Some(arr.value(row) as i64));
+        }
+        if let Some(arr) = column.as_any().downcast_ref::<UInt64Array>() {
+            return Ok(Some(arr.value(row) as i64));
+        }
+        if let Some(arr) = column.as_any().downcast_ref::<UInt32Array>() {
+            return Ok(Some(arr.value(row) as i64));
+        }
+        anyhow::bail!("expected integer column, found {}", column.data_type())
+    }
+
+    fn read_u64_value(column: &dyn Array, row: usize) -> anyhow::Result<Option<u64>> {
+        read_i64_value(column, row)?.map_or(Ok(None), |value| {
+            if value < 0 {
+                anyhow::bail!("negative integer value: {value}");
+            }
+            Ok(Some(value as u64))
+        })
+    }
+
+    fn collect_rows(
+        batch: &arrow::record_batch::RecordBatch,
+        rows: &mut Vec<PartitionBuildRow>,
+        read_utf8_value: &impl Fn(&dyn Array, usize) -> anyhow::Result<Option<String>>,
+        read_i64_value: &impl Fn(&dyn Array, usize) -> anyhow::Result<Option<i64>>,
+        read_u64_value: &impl Fn(&dyn Array, usize) -> anyhow::Result<Option<u64>>,
+    ) -> anyhow::Result<()> {
+        let schema = batch.schema();
+        let partition_type_idx = schema.index_of("partition_type")?;
+        let partition_value_idx = schema.index_of("partition_value")?;
+        let partition_start_ts_idx = schema.index_of("partition_start_ts").ok();
+        let partition_interval_seconds_idx = schema.index_of("partition_interval_seconds").ok();
+        let start_block_idx = schema.index_of("start_block")?;
+        let end_block_idx = schema.index_of("end_block")?;
+        let chain_idx = schema.index_of("chain").ok();
+        let start_time_idx = schema.index_of("start_time").ok();
+        let end_time_idx = schema.index_of("end_time").ok();
+
+        for row_index in 0..batch.num_rows() {
+            let partition_type =
+                read_utf8_value(batch.column(partition_type_idx).as_ref(), row_index)?
+                    .ok_or_else(|| anyhow::anyhow!("partition_type cannot be null"))?;
+            let partition_value =
+                read_utf8_value(batch.column(partition_value_idx).as_ref(), row_index)?
+                    .ok_or_else(|| anyhow::anyhow!("partition_value cannot be null"))?;
+            let partition_start_ts = partition_start_ts_idx
+                .and_then(|idx| {
+                    read_utf8_value(batch.column(idx).as_ref(), row_index)
+                        .ok()
+                        .flatten()
+                })
+                .unwrap_or_else(|| partition_value.clone());
+            let partition_interval_seconds = match partition_interval_seconds_idx {
+                Some(idx) => {
+                    read_i64_value(batch.column(idx).as_ref(), row_index)?.unwrap_or_else(|| {
+                        PartitionBuildType::from_cli_value(&partition_type)
+                            .map(|kind| kind.interval_seconds())
+                            .unwrap_or_default()
+                    })
+                }
+                None => PartitionBuildType::from_cli_value(&partition_type)?.interval_seconds(),
+            };
+            let start_block = read_u64_value(batch.column(start_block_idx).as_ref(), row_index)?
+                .ok_or_else(|| anyhow::anyhow!("start_block cannot be null"))?;
+            let end_block = read_u64_value(batch.column(end_block_idx).as_ref(), row_index)?
+                .ok_or_else(|| anyhow::anyhow!("end_block cannot be null"))?;
+            let chain = chain_idx
+                .map(|idx| read_utf8_value(batch.column(idx).as_ref(), row_index))
+                .transpose()?
+                .flatten();
+            let start_time = start_time_idx
+                .and_then(|idx| {
+                    read_utf8_value(batch.column(idx).as_ref(), row_index)
+                        .ok()
+                        .flatten()
+                })
+                .unwrap_or_else(|| partition_start_ts.clone());
+            let end_time = end_time_idx
+                .and_then(|idx| {
+                    read_utf8_value(batch.column(idx).as_ref(), row_index)
+                        .ok()
+                        .flatten()
+                })
+                .unwrap_or_else(|| partition_start_ts.clone());
+
+            rows.push(PartitionBuildRow {
+                partition_type,
+                partition_interval_seconds,
+                partition_start_ts,
+                partition_value,
+                start_block,
+                end_block,
+                start_time,
+                end_time,
+                chain,
+            });
+        }
+
+        Ok(())
+    }
+
+    let mut rows = Vec::new();
+    if path.starts_with("s3://") {
+        use crate::writer::parse_s3_url;
+        use object_store::ObjectStore;
+
+        let aws = aws.ok_or_else(|| anyhow::anyhow!("AWS config required for S3 paths"))?;
+        let (bucket, key) = parse_s3_url(path)?;
+        let client = aws.build_s3_client(&bucket)?;
+        let object_path = object_store::path::Path::from(key.as_str());
+        let data = block_on_async(async { client.get(&object_path).await?.bytes().await })
+            .map_err(|e| anyhow::anyhow!("reading {path}: {e}"))?;
+        let builder = ParquetRecordBatchReaderBuilder::try_new(data)?;
+        let schema = builder.schema();
+        validate_partitions_schema(&schema)?;
+        validate_partitions_metadata(builder.metadata().file_metadata())?;
+        let reader = builder.build()?;
+        for batch in reader {
+            collect_rows(
+                &batch?,
+                &mut rows,
+                &read_utf8_value,
+                &read_i64_value,
+                &read_u64_value,
+            )?;
+        }
+    } else {
+        let file = std::fs::File::open(path).map_err(|e| anyhow::anyhow!("opening {path}: {e}"))?;
+        let builder = ParquetRecordBatchReaderBuilder::try_new(file)?;
+        let schema = builder.schema();
+        validate_partitions_schema(&schema)?;
+        validate_partitions_metadata(builder.metadata().file_metadata())?;
+        let reader = builder.build()?;
+        for batch in reader {
+            collect_rows(
+                &batch?,
+                &mut rows,
+                &read_utf8_value,
+                &read_i64_value,
+                &read_u64_value,
+            )?;
+        }
+    }
+
+    rows.sort_by(|left, right| {
+        left.partition_type
+            .cmp(&right.partition_type)
+            .then_with(|| left.partition_start_ts.cmp(&right.partition_start_ts))
+            .then_with(|| left.start_block.cmp(&right.start_block))
+            .then_with(|| left.end_block.cmp(&right.end_block))
+    });
+    Ok(rows)
+}
+
 pub fn write_partitions_index(
     path: &str,
     rows: &[PartitionBuildRow],
@@ -1634,10 +1946,16 @@ pub fn write_partitions_index(
         if let Some(parent) = output_path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let file = std::fs::File::create(output_path)?;
+        let file_name = output_path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| anyhow::anyhow!("invalid output file name for {path}"))?;
+        let temp_path = output_path.with_file_name(format!(".{file_name}.tmp"));
+        let file = std::fs::File::create(&temp_path)?;
         let mut writer = ArrowWriter::try_new(file, schema, Some(props))?;
         writer.write(&batch)?;
         writer.close()?;
+        std::fs::rename(&temp_path, output_path)?;
     }
 
     Ok(())
@@ -5393,6 +5711,7 @@ mod tests {
             "day,hour",
             "--output",
             "./output",
+            "--resume",
             "--write-lookup-sidecar",
             "--json",
         ]);
@@ -5405,6 +5724,7 @@ mod tests {
                 partition_types,
                 output,
                 write_lookup_sidecar,
+                resume,
                 json,
                 ..
             }) => {
@@ -5414,6 +5734,8 @@ mod tests {
                 assert_eq!(stop_block, 200);
                 assert_eq!(partition_types, "day,hour");
                 assert_eq!(output, "./output");
+                assert!(write_lookup_sidecar);
+                assert!(resume);
                 assert!(write_lookup_sidecar);
                 assert!(json);
             }
@@ -6630,6 +6952,75 @@ mod tests {
         assert_eq!(rows[0].start_block, 500);
         assert_eq!(rows[0].end_block, 501);
         assert_eq!(rows[0].partition_value, "2023-07-31 14:00:00");
+    }
+
+    #[test]
+    fn test_partition_index_builder_resume_extends_terminal_rows() {
+        let existing_rows = vec![PartitionBuildRow {
+            partition_type: "hour".to_string(),
+            partition_interval_seconds: 3_600,
+            partition_start_ts: "2023-07-31 14:00:00".to_string(),
+            partition_value: "2023-07-31 14:00:00".to_string(),
+            start_block: 100,
+            end_block: 102,
+            start_time: "2023-07-31 14:59:00".to_string(),
+            end_time: "2023-07-31 14:59:50".to_string(),
+            chain: Some("eth-mainnet".to_string()),
+        }];
+
+        let (mut builder, resume_start_block) = PartitionIndexBuilder::resume_from_existing(
+            "eth-mainnet",
+            vec![PartitionBuildType::Hour],
+            existing_rows,
+        )
+        .expect("resume builder");
+        assert_eq!(resume_start_block, 102);
+
+        builder
+            .observe_block(&BlockIdentity {
+                block_num: 102,
+                timestamp: 1_690_815_590,
+                ..Default::default()
+            })
+            .expect("same-hour block");
+        builder
+            .observe_block(&BlockIdentity {
+                block_num: 103,
+                timestamp: 1_690_815_600,
+                ..Default::default()
+            })
+            .expect("next-hour block");
+
+        let rows = builder.finish(104).expect("finish resumed build");
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].partition_value, "2023-07-31 14:00:00");
+        assert_eq!(rows[0].start_block, 100);
+        assert_eq!(rows[0].end_block, 103);
+        assert_eq!(rows[1].partition_value, "2023-07-31 15:00:00");
+        assert_eq!(rows[1].start_block, 103);
+        assert_eq!(rows[1].end_block, 104);
+    }
+
+    #[test]
+    fn test_write_and_read_partitions_build_rows_round_trip() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("eth-mainnet").join("partitions.parquet");
+        let rows = vec![PartitionBuildRow {
+            partition_type: "hour".to_string(),
+            partition_interval_seconds: 3_600,
+            partition_start_ts: "2023-07-31 14:00:00".to_string(),
+            partition_value: "2023-07-31 14:00:00".to_string(),
+            start_block: 100,
+            end_block: 103,
+            start_time: "2023-07-31 14:59:00".to_string(),
+            end_time: "2023-07-31 15:00:00".to_string(),
+            chain: Some("eth-mainnet".to_string()),
+        }];
+
+        write_partitions_index(&path.to_string_lossy(), &rows, None).expect("write rows");
+        let read_back =
+            read_partitions_build_rows(&path.to_string_lossy(), None).expect("read rows back");
+        assert_eq!(read_back, rows);
     }
 
     #[test]

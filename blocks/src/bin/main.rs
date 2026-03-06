@@ -3,8 +3,8 @@ use clap::Parser;
 use firehose_parquet::cli::{
     build_config, build_partitions_index_path, cursor_template_context_from_selection,
     init_tracing, list_partitions_from_index, load_dotenv, parse_partition_build_types,
-    parse_partition_selection_request, parse_partition_shard_strategy, resolve_cursor_template,
-    resolve_partition_bounds_from_index, resolve_partition_command,
+    parse_partition_selection_request, parse_partition_shard_strategy, read_partitions_build_rows,
+    resolve_cursor_template, resolve_partition_bounds_from_index, resolve_partition_command,
     resolve_partition_window_bounds_from_index, shard_partitions_from_index,
     validate_partitions_index, write_lookup_sidecar_for_index, write_partitions_index, AwsConfig,
     Commands, CommonArgs, PartitionBoundsRequest, PartitionBuildResult, PartitionIndexBuilder,
@@ -304,6 +304,7 @@ async fn run_partitions_build(
     partition_types_spec: &str,
     output: &str,
     write_lookup_sidecar: bool,
+    resume: bool,
     aws: &AwsConfig,
 ) -> Result<PartitionBuildResult> {
     if stop_block <= start_block {
@@ -312,7 +313,7 @@ async fn run_partitions_build(
         ));
     }
 
-    let config = Config {
+    let base_config = Config {
         endpoint: endpoint.to_string(),
         api_key: read_optional_env(api_key_envvar),
         jwt_token: read_optional_env(api_token_envvar),
@@ -339,8 +340,8 @@ async fn run_partitions_build(
         reconnect_stall_timeout_secs: None,
     };
 
-    let client = FirehoseClient::new(config);
-    let endpoint_info = client.info().await;
+    let info_client = FirehoseClient::new(base_config.clone());
+    let endpoint_info = info_client.info().await;
     let chain = chain_override
         .map(str::to_string)
         .or_else(|| {
@@ -353,14 +354,89 @@ async fn run_partitions_build(
             anyhow!("--chain is required when the endpoint does not expose chain_name")
         })?;
     let partition_types = parse_partition_build_types(partition_types_spec)?;
-    let mut builder = PartitionIndexBuilder::new(chain.clone(), partition_types.clone())?;
+    let partitions_index = build_partitions_index_path(output, &chain);
 
-    client
+    let (mut builder, effective_start_block, resumed_from_block) = if resume {
+        match read_partitions_build_rows(&partitions_index, Some(aws)) {
+            Ok(existing_rows) if !existing_rows.is_empty() => {
+                let (builder, resume_start_block) = PartitionIndexBuilder::resume_from_existing(
+                    chain.clone(),
+                    partition_types.clone(),
+                    existing_rows,
+                )?;
+                (
+                    builder,
+                    start_block.max(resume_start_block),
+                    Some(resume_start_block),
+                )
+            }
+            Ok(_) => (
+                PartitionIndexBuilder::new(chain.clone(), partition_types.clone())?,
+                start_block,
+                None,
+            ),
+            Err(err) if err.to_string().contains("No such file or directory") => (
+                PartitionIndexBuilder::new(chain.clone(), partition_types.clone())?,
+                start_block,
+                None,
+            ),
+            Err(err) => return Err(err),
+        }
+    } else {
+        (
+            PartitionIndexBuilder::new(chain.clone(), partition_types.clone())?,
+            start_block,
+            None,
+        )
+    };
+
+    if effective_start_block > stop_block {
+        return Err(anyhow!(
+            "effective start block {} is past --stop-block {}",
+            effective_start_block,
+            stop_block
+        ));
+    }
+
+    if effective_start_block == stop_block {
+        let rows = if resume {
+            read_partitions_build_rows(&partitions_index, Some(aws))?
+        } else {
+            Vec::new()
+        };
+        return Ok(PartitionBuildResult {
+            partitions_index,
+            chain,
+            partition_types: partition_types
+                .into_iter()
+                .map(|partition_type| partition_type.to_string())
+                .collect(),
+            row_count: rows.len(),
+            start_block: rows
+                .iter()
+                .map(|row| row.start_block)
+                .min()
+                .unwrap_or(start_block),
+            stop_block: rows
+                .iter()
+                .map(|row| row.end_block)
+                .max()
+                .unwrap_or(stop_block),
+            resumed: resume,
+            resumed_from_block,
+        });
+    }
+
+    let mut stream_config = base_config.clone();
+    stream_config.start_block = Some(effective_start_block);
+    stream_config.stop_block = Some(stop_block);
+    let stream_client = FirehoseClient::new(stream_config);
+
+    stream_client
         .stream_blocks(None, |_, _, _, block, _| builder.observe_block(&block))
         .await?;
 
     let rows = builder.finish(stop_block)?;
-    let partitions_index = build_partitions_index_path(output, &chain);
     write_partitions_index(&partitions_index, &rows, Some(aws))?;
     if write_lookup_sidecar {
         write_lookup_sidecar_for_index(&partitions_index, &rows, Some(aws))?;
@@ -384,6 +460,8 @@ async fn run_partitions_build(
             .map(|row| row.end_block)
             .max()
             .unwrap_or(stop_block),
+        resumed: resume,
+        resumed_from_block,
     })
 }
 
@@ -473,6 +551,7 @@ async fn main() -> Result<()> {
                     partition_types,
                     output,
                     write_lookup_sidecar,
+                    resume,
                     json,
                     aws_access_key_id,
                     aws_secret_access_key,
@@ -498,6 +577,7 @@ async fn main() -> Result<()> {
                         partition_types,
                         output,
                         *write_lookup_sidecar,
+                        *resume,
                         &aws,
                     )
                     .await?;
@@ -511,6 +591,10 @@ async fn main() -> Result<()> {
                         println!("row_count:        {}", result.row_count);
                         println!("start_block:      {}", result.start_block);
                         println!("stop_block:       {}", result.stop_block);
+                        println!("resumed:          {}", result.resumed);
+                        if let Some(resumed_from_block) = result.resumed_from_block {
+                            println!("resumed_from:     {}", resumed_from_block);
+                        }
                     }
 
                     return Ok(());
