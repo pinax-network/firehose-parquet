@@ -434,6 +434,8 @@ See `docs/partitions-parquet-contract.md` for the versioned `partitions.parquet`
 
 When present, `partitions resolve` also checks an optional `partitions.lookup.json` sidecar before falling back to a full parquet scan.
 
+If the sidecar includes a source metadata fingerprint and it no longer matches `partitions.parquet`, the resolver ignores the sidecar and safely falls back to scanning the canonical parquet index.
+
 ### Partition-Window Ingestion (`--partition-from/--partition-to`)
 
 Run ingestion over a partition window without explicit block math.
