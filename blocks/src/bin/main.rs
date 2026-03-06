@@ -579,7 +579,7 @@ async fn main() -> Result<()> {
                     chain,
                     start_block,
                     stop_block,
-                    partition_types,
+                    partition,
                     output,
                     write_lookup_sidecar,
                     resume,
@@ -605,7 +605,7 @@ async fn main() -> Result<()> {
                         chain.as_deref(),
                         *start_block,
                         *stop_block,
-                        partition_types,
+                        partition,
                         output,
                         *write_lookup_sidecar,
                         *resume,
@@ -882,7 +882,7 @@ async fn main() -> Result<()> {
             },
             Commands::Scan {
                 path,
-                rows,
+                limit,
                 schema_only,
                 aws_access_key_id,
                 aws_secret_access_key,
@@ -897,7 +897,7 @@ async fn main() -> Result<()> {
                     aws_region: aws_region.clone(),
                     aws_endpoint_url: aws_endpoint_url.clone(),
                 };
-                firehose_parquet::cli::scan_parquet(path, *rows, *schema_only, Some(&aws))?;
+                firehose_parquet::cli::scan_parquet(path, *limit, *schema_only, Some(&aws))?;
                 return Ok(());
             }
             Commands::Inspect {
@@ -949,7 +949,7 @@ async fn main() -> Result<()> {
             Commands::Rollup {
                 source,
                 output,
-                target_partition,
+                partition,
                 compression,
                 flush_bytes,
                 delete_source,
@@ -961,7 +961,7 @@ async fn main() -> Result<()> {
                 cache_control,
             } => {
                 init_tracing(&cli.common.log_level);
-                let target = firehose_parquet::rollup::parse_rollup_target(target_partition)?;
+                let target = firehose_parquet::rollup::parse_rollup_target(partition)?;
                 let compression = firehose_parquet::cli::parse_compression(compression)?;
                 let output_path = output.clone().unwrap_or_else(|| source.clone());
                 let aws = Some(firehose_parquet::cli::AwsConfig {
