@@ -1,5 +1,7 @@
 use anyhow::anyhow;
 
+use crate::networks_generated;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BuiltinNetwork {
     pub canonical: &'static str,
@@ -21,37 +23,9 @@ pub struct ResolvedNetworkEndpoint {
     pub source: EndpointSource,
 }
 
-pub const KNOWN_NETWORK_ALIASES: &[&str] = &[
-    "mainnet",
-    "eth",
-    "solana-mainnet-beta",
-    "solana",
-    "tron",
-    "tronevm",
-];
+pub const KNOWN_NETWORK_ALIASES: &[&str] = networks_generated::GENERATED_NETWORK_ALIASES;
 
-const BUILTIN_NETWORKS: &[BuiltinNetwork] = &[
-    BuiltinNetwork {
-        canonical: "mainnet",
-        aliases: &["mainnet", "eth"],
-        default_endpoint: "https://eth.firehose.pinax.network:443",
-    },
-    BuiltinNetwork {
-        canonical: "solana-mainnet-beta",
-        aliases: &["solana-mainnet-beta", "solana"],
-        default_endpoint: "https://solana.firehose.pinax.network:443",
-    },
-    BuiltinNetwork {
-        canonical: "tron",
-        aliases: &["tron"],
-        default_endpoint: "https://tron.firehose.pinax.network:443",
-    },
-    BuiltinNetwork {
-        canonical: "tronevm",
-        aliases: &["tronevm"],
-        default_endpoint: "https://tronevm.firehose.pinax.network:443",
-    },
-];
+const BUILTIN_NETWORKS: &[BuiltinNetwork] = networks_generated::GENERATED_NETWORKS;
 
 pub fn normalize_network_name(name: &str) -> String {
     name.trim().to_ascii_lowercase()
