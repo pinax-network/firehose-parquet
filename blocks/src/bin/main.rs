@@ -24,7 +24,7 @@ use object_store::ObjectStore;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use tracing::{info, warn};
 
 use blocks::antelope::mapper::AntelopeBlockMapper;
@@ -330,7 +330,8 @@ async fn run_partitions_build(
     api_token_envvar: &str,
     chain_override: Option<&str>,
     start_block: Option<u64>,
-    stop_block: u64,
+    stop_block: Option<u64>,
+    live: bool,
     partition_types_spec: &str,
     output: Option<&str>,
     s3_bucket: Option<&str>,
@@ -338,6 +339,20 @@ async fn run_partitions_build(
     resume: bool,
     aws: &AwsConfig,
 ) -> Result<PartitionBuildResult> {
+    const LIVE_PARTITIONS_CHECKPOINT_INTERVAL: Duration = Duration::from_secs(30);
+
+    if live && write_lookup_sidecar {
+        return Err(anyhow!(
+            "--write-lookup-sidecar is not supported with --live"
+        ));
+    }
+    if !live && stop_block.is_none() {
+        return Err(anyhow!("--stop-block is required unless --live is set"));
+    }
+    if live && stop_block.is_some() {
+        return Err(anyhow!("--stop-block is incompatible with --live"));
+    }
+
     let output_root = resolve_s3_output_root(output, s3_bucket)?;
 
     let base_config = Config {
@@ -345,7 +360,7 @@ async fn run_partitions_build(
         api_key: read_optional_env(api_key_envvar),
         jwt_token: read_optional_env(api_token_envvar),
         start_block,
-        stop_block: Some(stop_block),
+        stop_block,
         cursor_path: None,
         output: PathBuf::from(&output_root),
         partition: Partition::None,
@@ -386,7 +401,16 @@ async fn run_partitions_build(
     let partitions_index = build_partitions_index_path(&output_root, &chain);
     let chain_output_root = build_partitions_output_root(&output_root, &chain);
 
-    let cursor_location = if chain_output_root.starts_with("s3://") {
+    let existing_rows = match read_partitions_build_rows(&partitions_index, Some(aws)) {
+        Ok(rows) => rows,
+        Err(err) if err.to_string().contains("No such file or directory") => Vec::new(),
+        Err(err) if err.to_string().contains("not found") => Vec::new(),
+        Err(err) => return Err(err),
+    };
+
+    let existing_resume_block = existing_rows.iter().map(|row| row.end_block).max();
+
+    let cursor_location = if !live && chain_output_root.starts_with("s3://") {
         let (bucket, _) = firehose_parquet::writer::parse_s3_url(&chain_output_root)?;
         let s3_client = Arc::new(aws.build_s3_client(&bucket)?) as Arc<dyn ObjectStore>;
         Some(CursorLocation::resolve(
@@ -394,15 +418,41 @@ async fn run_partitions_build(
             firehose_parquet::cursor::CURSOR_PARQUET_FILENAME,
             Some(s3_client),
         )?)
-    } else {
+    } else if !live {
         Some(CursorLocation::resolve(
             &chain_output_root,
             firehose_parquet::cursor::CURSOR_PARQUET_FILENAME,
             None,
         )?)
+    } else {
+        None
     };
 
-    let inferred_start_block = if let Some(start_block) = start_block {
+    let inferred_start_block = if live {
+        if let Some(resume_block) = existing_resume_block {
+            if let Some(explicit_start_block) = start_block {
+                if explicit_start_block != resume_block {
+                    return Err(anyhow!(
+                        "--live resumes from existing partitions.parquet frontier {}; explicit --start-block {} does not match",
+                        resume_block,
+                        explicit_start_block
+                    ));
+                }
+            }
+            resume_block
+        } else if let Some(start_block) = start_block {
+            start_block
+        } else if let Some(first_streamable) = endpoint_info
+            .as_ref()
+            .map(|info| info.first_streamable_block_num)
+        {
+            first_streamable
+        } else {
+            return Err(anyhow!(
+                "--start-block is required when --live has no existing partitions.parquet frontier and the endpoint does not expose first_streamable_block_num"
+            ));
+        }
+    } else if let Some(start_block) = start_block {
         start_block
     } else if let Some(cursor_state) = cursor_location.as_ref().and_then(CursorLocation::load) {
         cursor_state.last_block_num.saturating_add(1)
@@ -417,97 +467,173 @@ async fn run_partitions_build(
         ));
     };
 
-    if stop_block <= inferred_start_block {
-        return Err(anyhow!(
-            "--stop-block must be greater than the effective start block, got {stop_block} <= {inferred_start_block}"
-        ));
-    }
-
-    let (mut builder, effective_start_block, resumed_from_block) = if resume {
-        match read_partitions_build_rows(&partitions_index, Some(aws)) {
-            Ok(existing_rows) if !existing_rows.is_empty() => {
-                let (builder, resume_start_block) = PartitionIndexBuilder::resume_from_existing(
-                    chain.clone(),
-                    partition_types.clone(),
-                    existing_rows,
-                )?;
-                (
-                    builder,
-                    inferred_start_block.max(resume_start_block),
-                    Some(resume_start_block),
-                )
-            }
-            Ok(_) => (
-                PartitionIndexBuilder::new(chain.clone(), partition_types.clone())?,
-                inferred_start_block,
-                None,
-            ),
-            Err(err) if err.to_string().contains("No such file or directory") => (
-                PartitionIndexBuilder::new(chain.clone(), partition_types.clone())?,
-                inferred_start_block,
-                None,
-            ),
-            Err(err) => return Err(err),
-        }
-    } else {
-        (
-            PartitionIndexBuilder::new(chain.clone(), partition_types.clone())?,
-            inferred_start_block,
-            None,
-        )
-    };
-
-    if effective_start_block > stop_block {
-        return Err(anyhow!(
-            "effective start block {} is past --stop-block {}",
-            effective_start_block,
-            stop_block
-        ));
-    }
-
-    if effective_start_block == stop_block {
-        let rows = if resume {
-            read_partitions_build_rows(&partitions_index, Some(aws))?
+    let should_resume_from_existing = live || resume;
+    let (mut builder, effective_start_block, resumed_from_block) =
+        if should_resume_from_existing && !existing_rows.is_empty() {
+            let (builder, resume_start_block) = PartitionIndexBuilder::resume_from_existing(
+                chain.clone(),
+                partition_types.clone(),
+                existing_rows.clone(),
+            )?;
+            let effective_start_block = if live {
+                resume_start_block
+            } else {
+                inferred_start_block.max(resume_start_block)
+            };
+            (builder, effective_start_block, Some(resume_start_block))
         } else {
-            Vec::new()
+            (
+                PartitionIndexBuilder::new(chain.clone(), partition_types.clone())?,
+                inferred_start_block,
+                None,
+            )
         };
-        if write_lookup_sidecar {
-            write_lookup_sidecar_for_index(&partitions_index, &rows, Some(aws))?;
+
+    if let Some(stop_block) = stop_block {
+        if stop_block <= inferred_start_block {
+            return Err(anyhow!(
+                "--stop-block must be greater than the effective start block, got {stop_block} <= {inferred_start_block}"
+            ));
         }
-        return Ok(PartitionBuildResult {
-            partitions_index,
-            chain,
-            partition: partition_label.clone(),
-            row_count: rows.len(),
-            start_block: rows
-                .iter()
-                .map(|row| row.start_block)
-                .min()
-                .unwrap_or(inferred_start_block),
-            stop_block: rows
-                .iter()
-                .map(|row| row.end_block)
-                .max()
-                .unwrap_or(stop_block),
-            resumed: resume,
-            resumed_from_block,
-        });
+
+        if effective_start_block > stop_block {
+            return Err(anyhow!(
+                "effective start block {} is past --stop-block {}",
+                effective_start_block,
+                stop_block
+            ));
+        }
+
+        if effective_start_block == stop_block {
+            let rows = if should_resume_from_existing {
+                existing_rows.clone()
+            } else {
+                Vec::new()
+            };
+            if write_lookup_sidecar {
+                write_lookup_sidecar_for_index(&partitions_index, &rows, Some(aws))?;
+            }
+            return Ok(PartitionBuildResult {
+                partitions_index,
+                chain,
+                partition: partition_label.clone(),
+                row_count: rows.len(),
+                start_block: rows
+                    .iter()
+                    .map(|row| row.start_block)
+                    .min()
+                    .unwrap_or(inferred_start_block),
+                stop_block: rows
+                    .iter()
+                    .map(|row| row.end_block)
+                    .max()
+                    .unwrap_or(stop_block),
+                resumed: should_resume_from_existing && resumed_from_block.is_some(),
+                resumed_from_block,
+            });
+        }
     }
 
     let mut stream_config = base_config.clone();
     stream_config.start_block = Some(effective_start_block);
-    stream_config.stop_block = Some(stop_block);
+    stream_config.stop_block = Some(stop_block.unwrap_or(0));
     let stream_client = FirehoseClient::new(stream_config);
 
-    stream_client
-        .stream_blocks(None, |_, _, _, block, _| builder.observe_block(&block))
-        .await?;
+    let shutdown = Arc::new(AtomicBool::new(false));
+    if live {
+        let shutdown = Arc::clone(&shutdown);
+        tokio::spawn(async move {
+            let ctrl_c = tokio::signal::ctrl_c();
 
-    let rows = builder.finish(stop_block)?;
-    write_partitions_index(&partitions_index, &rows, Some(aws))?;
-    if write_lookup_sidecar {
-        write_lookup_sidecar_for_index(&partitions_index, &rows, Some(aws))?;
+            #[cfg(unix)]
+            {
+                use tokio::signal::unix::{signal, SignalKind};
+                let mut sigterm =
+                    signal(SignalKind::terminate()).expect("failed to install SIGTERM handler");
+                tokio::select! {
+                    _ = ctrl_c => {}
+                    _ = sigterm.recv() => {}
+                }
+            }
+
+            #[cfg(not(unix))]
+            {
+                ctrl_c.await.ok();
+            }
+
+            info!("shutdown signal received, checkpointing live partitions build...");
+            shutdown.store(true, Ordering::SeqCst);
+        });
     }
+
+    let mut last_checkpoint_at = Instant::now();
+    let mut last_finalized_row_count = builder.finalized_row_count();
+
+    let stream_result = stream_client
+        .stream_blocks(None, |_, _, _, block, _| {
+            builder.observe_block(&block)?;
+
+            if live {
+                let should_checkpoint = builder.finalized_row_count() > last_finalized_row_count
+                    || last_checkpoint_at.elapsed() >= LIVE_PARTITIONS_CHECKPOINT_INTERVAL;
+                if should_checkpoint {
+                    let frontier = builder.current_frontier().ok_or_else(|| {
+                        anyhow!("live partition build is missing a checkpoint frontier")
+                    })?;
+                    let rows = builder.snapshot(frontier)?;
+                    write_partitions_index(&partitions_index, &rows, Some(aws))?;
+                    last_checkpoint_at = Instant::now();
+                    last_finalized_row_count = builder.finalized_row_count();
+                }
+
+                if shutdown.load(Ordering::SeqCst) {
+                    return Err(anyhow!("__shutdown__"));
+                }
+            }
+
+            Ok(())
+        })
+        .await;
+
+    let is_shutdown = match &stream_result {
+        Err(err) if live && format!("{err}").contains("__shutdown__") => true,
+        _ => false,
+    };
+
+    let rows = if live {
+        if builder.has_rows() {
+            let frontier = builder.current_frontier().ok_or_else(|| {
+                anyhow!("live partition build is missing a final checkpoint frontier")
+            })?;
+            let rows = builder.snapshot(frontier)?;
+            write_partitions_index(&partitions_index, &rows, Some(aws))?;
+            rows
+        } else if !existing_rows.is_empty() {
+            existing_rows.clone()
+        } else {
+            Vec::new()
+        }
+    } else {
+        let stop_block = stop_block.expect("validated above");
+        let rows = builder.finish(stop_block)?;
+        write_partitions_index(&partitions_index, &rows, Some(aws))?;
+        if write_lookup_sidecar {
+            write_lookup_sidecar_for_index(&partitions_index, &rows, Some(aws))?;
+        }
+        rows
+    };
+
+    if let Err(err) = stream_result {
+        if !is_shutdown {
+            return Err(err);
+        }
+    }
+
+    let result_stop_block = rows
+        .iter()
+        .map(|row| row.end_block)
+        .max()
+        .unwrap_or_else(|| stop_block.unwrap_or(inferred_start_block));
 
     Ok(PartitionBuildResult {
         partitions_index,
@@ -519,12 +645,8 @@ async fn run_partitions_build(
             .map(|row| row.start_block)
             .min()
             .unwrap_or(inferred_start_block),
-        stop_block: rows
-            .iter()
-            .map(|row| row.end_block)
-            .max()
-            .unwrap_or(stop_block),
-        resumed: resume,
+        stop_block: result_stop_block,
+        resumed: should_resume_from_existing && resumed_from_block.is_some(),
         resumed_from_block,
     })
 }
@@ -613,6 +735,7 @@ async fn main() -> Result<()> {
                     chain,
                     start_block,
                     stop_block,
+                    live,
                     partition,
                     output,
                     s3_bucket,
@@ -649,6 +772,7 @@ async fn main() -> Result<()> {
                         chain.as_deref(),
                         *start_block,
                         *stop_block,
+                        *live,
                         partition,
                         output.as_deref(),
                         s3_bucket.as_deref(),

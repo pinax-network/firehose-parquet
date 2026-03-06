@@ -332,6 +332,13 @@ fireparq partitions build \
   --partition date \
   --output ./output \
   --resume
+
+# Continue extending the canonical index in live mode
+fireparq partitions build \
+  --network mainnet \
+  --partition date \
+  --output ./output \
+  --live
 ```
 
 Behavior:
@@ -344,16 +351,19 @@ Behavior:
 - can also emit `partitions.lookup.json` for low-latency `partitions resolve` lookups
 - `--resume` reuses the trailing rows from the existing canonical index and continues from the stored frontier
 - still requires a finite `--stop-block` so the generated artifact has deterministic coverage
+- `--live` treats existing `partitions.parquet` rows as the restart anchor and keeps extending the canonical index
 
 | Flag | Default | Description |
 |---|---|---|
 | `--chain` | inferred | Optional chain override when endpoint info is unavailable |
 | `--partition` | none | Partition to build: `date`, `hour`, `minute`, or `second` |
 | `--start-block` | inferred | Explicit start block, otherwise sibling cursor then endpoint first streamable block |
+| `--stop-block` | none in live mode | Required for bounded builds; incompatible with `--live` |
+| `--live` | `false` | Keep extending `partitions.parquet` and resume from its latest covered frontier |
 | `--output` | inferred from `--s3-bucket` | Output root directory or `s3://` URI prefix |
 | `--s3-bucket` | none | S3 bucket used when `--output` is omitted or should be prefixed |
 | `--resume` | `false` | Reuse the existing canonical index at the resolved output path and continue from its frontier |
-| `--write-lookup-sidecar` | `false` | Also write `partitions.lookup.json` next to the canonical parquet index |
+| `--write-lookup-sidecar` | `false` | Also write `partitions.lookup.json` next to the canonical parquet index (bounded mode only) |
 | `--json` | `false` | Emit machine-readable output |
 
 ### `partitions ls` — Query Partition Index Rows
