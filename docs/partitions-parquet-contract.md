@@ -62,7 +62,11 @@ When a builder writes `partitions.parquet`, it should include these file-level m
 - `firehose-parquet.partitions.min_start_block`
 - `firehose-parquet.partitions.max_end_block`
 
-These keys are not all enforced yet in readers, but they define the target contract for future builders.
+Reader behavior for versioned artifacts:
+
+- legacy/unversioned artifacts remain readable without these keys
+- artifacts declaring schema version `1` must include these keys with valid values
+- inconsistent coverage metadata (for example `min_start_block >= max_end_block`) must be rejected
 
 ## Additive vs breaking changes
 
