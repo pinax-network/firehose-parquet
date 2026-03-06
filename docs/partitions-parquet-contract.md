@@ -6,9 +6,9 @@ This document defines the current compatibility contract for `partitions.parquet
 
 The contract applies to partition index artifacts consumed by:
 
-- `firehose-parquet partitions ls`
-- `firehose-parquet partitions shard`
-- `firehose-parquet partitions resolve`
+- `fireparq partitions ls`
+- `fireparq partitions shard`
+- `fireparq partitions resolve`
 - ingestion-side partition selection (`--partitions-index`, `--partition-type`, `--partition-value`, `--partition-from`, `--partition-to`)
 
 ## Versioning

@@ -15,12 +15,12 @@ Related issues:
 
 ## What phases 1-7 ship
 
-1. Adds a grouped CLI namespace: `firehose-parquet partitions ...`
-2. Adds `firehose-parquet partitions build` for generating canonical `partitions.parquet` artifacts directly from Firehose
-3. Introduces `firehose-parquet partitions resolve`
+1. Adds a grouped CLI namespace: `fireparq partitions ...`
+2. Adds `fireparq partitions build` for generating canonical `partitions.parquet` artifacts directly from Firehose
+3. Introduces `fireparq partitions resolve`
 4. Keeps existing ingestion flags (`--partitions-index`, `--partition-type`, `--partition-value`) working for backward compatibility
 5. Emits a deprecation warning in ingestion mode when those legacy flags are used to drive range resolution directly
-6. Introduces `firehose-parquet partitions ls` for querying/filtering index rows
+6. Introduces `fireparq partitions ls` for querying/filtering index rows
 7. Adds ingestion-side partition window resolution via `--partition-from` + `--partition-to`
 8. Adds partition-aware cursor templating via `--cursor-template`
 9. Adds deterministic partition sharding via `partitions shard`
@@ -32,7 +32,7 @@ Related issues:
 
 The grouped CLI now supports writing the canonical partition index directly from Firehose:
 
-- `firehose-parquet partitions build`
+- `fireparq partitions build`
 
 Current behavior:
 
@@ -98,7 +98,7 @@ Example patterns:
 
 The grouped CLI now supports deterministic shard assignment:
 
-- `firehose-parquet partitions shard --shard-count N --shard-index K`
+- `fireparq partitions shard --shard-count N --shard-index K`
 
 Supported strategies:
 
@@ -115,7 +115,7 @@ Behavior:
 
 The grouped CLI now supports integrity validation for `partitions.parquet`:
 
-- `firehose-parquet partitions validate`
+- `fireparq partitions validate`
 
 Current checks:
 
@@ -126,7 +126,7 @@ Current checks:
 
 ### New command
 
-`firehose-parquet partitions ls` lists index rows with optional filters:
+`fireparq partitions ls` lists index rows with optional filters:
 
 - optional `--partition-type`
 - optional `--partition-chain`
@@ -140,7 +140,7 @@ Implementation note: rows are streamed in record batches and retained in a bound
 
 ### Existing command
 
-`firehose-parquet partitions resolve` resolves a single partition row from `partitions.parquet` and returns exact block bounds:
+`fireparq partitions resolve` resolves a single partition row from `partitions.parquet` and returns exact block bounds:
 
 - `start_block`: inclusive
 - `stop_block`: exclusive
@@ -160,7 +160,7 @@ The existing ingestion flow still supports resolving ranges via legacy flags to 
 
 When legacy flags are used in direct ingestion mode (without explicit `--start-block/--stop-block`), a warning is logged to guide users toward:
 
-`firehose-parquet partitions resolve ...`
+`fireparq partitions resolve ...`
 
 ## Process used for phases 1-7
 
@@ -189,8 +189,8 @@ When legacy flags are used in direct ingestion mode (without explicit `--start-b
 
 ## Follow-up phases (not included here)
 
-- `firehose-parquet partitions validate`
-- `firehose-parquet partitions shard`
+- `fireparq partitions validate`
+- `fireparq partitions shard`
 - optional bounded-concurrency partition window execution mode
 - shard/run-range command integration with partition-aware cursor templates
 - alias/deprecation lifecycle tests and eventual legacy removal

@@ -24,7 +24,7 @@ Related design docs:
   - `src/rollup.rs`, `src/merge.rs`, `src/truncate.rs`: maintenance subcommand implementations.
   - `src/s3.rs`: object_store/S3 helpers used by writer/cursor/tools.
 - `blocks/`: chain-specific mapping crate and the unified binary.
-  - `src/bin/main.rs`: `firehose-parquet` executable entrypoint.
+  - `src/bin/main.rs`: `fireparq` executable entrypoint.
   - `src/<chain>/{mapper,proto,schema}.rs`: per-chain decode, table schema, row mapping.
   - `src/lib.rs`: exports chain modules.
 - `proto/`: source `.proto` files and Buf config.
@@ -76,9 +76,9 @@ Related design docs:
 - Build workspace: `cargo build --workspace`
 - Run tests: `cargo test --workspace`
 - Build release: `cargo build --release --workspace`
-- Run binary from source: `cargo run --bin firehose-parquet -- --help`
+- Run binary from source: `cargo run --bin fireparq -- --help`
 - Install binary locally: `cargo install --path blocks`
-- Generate shell completions: `cargo run --bin firehose-parquet -- completions zsh`
+- Generate shell completions: `cargo run --bin fireparq -- completions zsh`
 - CI entrypoint: `.github/workflows/ci.yml`
 - Docker publish workflow: `.github/workflows/docker-publish.yml`
 - Release assets workflow: `.github/workflows/release.yml`

@@ -1,6 +1,6 @@
 # firehose-parquet
 
-A production-grade Rust toolkit that consumes [StreamingFast Firehose](https://firehose.streamingfast.io/) v2 gRPC streams and writes **Apache Parquet** files. A single unified binary (`firehose-parquet`) supports multiple blockchain types with automatic chain detection.
+A production-grade Rust toolkit that consumes [StreamingFast Firehose](https://firehose.streamingfast.io/) v2 gRPC streams and writes **Apache Parquet** files. A single unified binary (`fireparq`) supports multiple blockchain types with automatic chain detection.
 
 ## Supported Chains
 
@@ -20,7 +20,7 @@ A production-grade Rust toolkit that consumes [StreamingFast Firehose](https://f
 
 ## Features
 
-- **Single binary** — one `firehose-parquet` binary handles all chains via `--block-type` with auto-detection
+- **Single binary** — one `fireparq` binary handles all chains via `--block-type` with auto-detection
 - **Multi-chain** — pluggable `BlockMapper` trait with per-chain mapper modules
 - **Canonical identity columns** — `block_num`, `block_id`, `parent_num`, `parent_id`, `lib_num`, `timestamp` on every table (from Firehose `BlockMetadata`)
 - **gRPC streaming** — connects to any Firehose v2 endpoint via tonic, with TLS and API key / JWT auth
@@ -42,12 +42,14 @@ A production-grade Rust toolkit that consumes [StreamingFast Firehose](https://f
 
 ## Quick Start
 
+> `v0.5.0` renames the installed CLI binary from `firehose-parquet` to `fireparq`. The repository/crate names and Parquet metadata namespace remain `firehose-parquet.*`.
+
 ```bash
 # Build
 cargo build --release --workspace
 
 # Stream Solana blocks to Parquet (auto-detect chain)
-./target/release/firehose-parquet \
+./target/release/fireparq \
   --endpoint https://solana.firehose.pinax.network:443 \
   --start-block 200000000 \
   --stop-block 200001000 \
@@ -56,7 +58,7 @@ cargo build --release --workspace
   --compression zstd
 
 # Stream EVM blocks with extended traces (explicit block type)
-./target/release/firehose-parquet \
+./target/release/fireparq \
   --block-type evm \
   --endpoint https://eth.firehose.pinax.network:443 \
   --start-block 19000000 \
@@ -68,6 +70,8 @@ cargo build --release --workspace
 ### Docker
 
 The image is published to GitHub Container Registry on each release:
+
+The image path stays `ghcr.io/pinax-network/firehose-parquet`, but the container entrypoint now runs `fireparq`.
 
 ```bash
 docker pull ghcr.io/pinax-network/firehose-parquet:latest
@@ -85,7 +89,7 @@ docker run --rm \
 
 ## Cursor & Resume
 
-`firehose-parquet` persists pipeline state in a `cursor.parquet` file so streams can be interrupted and resumed without re-processing blocks. The cursor system provides deterministic, crash-safe resume with full parameter validation.
+`fireparq` persists pipeline state in a `cursor.parquet` file so streams can be interrupted and resumed without re-processing blocks. The cursor system provides deterministic, crash-safe resume with full parameter validation.
 
 ### How It Works
 
@@ -137,7 +141,7 @@ If any parameter differs, the pipeline exits with a clear error showing the mism
 
 ```bash
 # Force resume despite parameter changes
-firehose-parquet \
+fireparq \
   --endpoint https://eth.firehose.pinax.network:443 \
   --cursor cursor.parquet \
   --cursor-override \
@@ -157,15 +161,18 @@ This prevents corrupted or partial files and ensures the next run resumes from a
 
 ## CLI Reference
 
+The top-level `fireparq` invocation is the ingestion/build pipeline. Utility workflows stay under subcommands such as `partitions`, `scan`, `inspect`, `validate`, `verify`, `rollup`, `merge`, and `truncate`.
+
 ```
-$ firehose-parquet --help
+$ fireparq --help
 
-Convert Firehose gRPC stream to Apache Parquet
+Build Apache Parquet datasets from Firehose gRPC streams
 
-Usage: firehose-parquet [OPTIONS] [COMMAND]
+Usage: fireparq [OPTIONS] [COMMAND]
 
 Commands:
   completions  Generate shell completions for the given shell
+  partitions   Partition index utilities (`partitions.parquet` workflows)
   scan         Read and inspect Parquet files (schema, row counts, sample rows)
   inspect      Display full metadata for a single Parquet file
   validate     Check partition integrity (gaps, ordering, duplicates)
@@ -257,7 +264,7 @@ Builds a canonical partition index directly from Firehose block timestamps, with
 
 ```bash
 # Build day + hour rows locally
-firehose-parquet partitions build \
+fireparq partitions build \
   --endpoint https://eth.firehose.pinax.network:443 \
   --start-block 10000000 \
   --stop-block 10010000 \
@@ -265,7 +272,7 @@ firehose-parquet partitions build \
   --output ./output
 
 # Build hour + minute rows to S3 with an explicit chain override
-firehose-parquet partitions build \
+fireparq partitions build \
   --endpoint https://eth.firehose.pinax.network:443 \
   --chain eth-mainnet \
   --start-block 10000000 \
@@ -276,7 +283,7 @@ firehose-parquet partitions build \
   --json
 
 # Resume from an existing canonical index and append only missing coverage
-firehose-parquet partitions build \
+fireparq partitions build \
   --endpoint https://eth.firehose.pinax.network:443 \
   --chain eth-mainnet \
   --start-block 10000000 \
@@ -312,12 +319,12 @@ Lists rows from `partitions.parquet` with optional filters and deterministic asc
 
 ```bash
 # List hour partitions from a local index
-firehose-parquet partitions ls \
+fireparq partitions ls \
   --partitions-index ./output/eth-mainnet/partitions.parquet \
   --partition-type hour
 
 # Filter chain + time window and return JSON
-firehose-parquet partitions ls \
+fireparq partitions ls \
   --partitions-index s3://my-bucket/eth-mainnet/partitions.parquet \
   --partition-type day \
   --partition-chain eth-mainnet \
@@ -342,14 +349,14 @@ Assigns filtered partition rows to one shard for multi-container runs.
 
 ```bash
 # Ordinal assignment: shard 1 of 4
-firehose-parquet partitions shard \
+fireparq partitions shard \
   --partitions-index ./output/eth-mainnet/partitions.parquet \
   --partition-type hour \
   --shard-count 4 \
   --shard-index 1
 
 # Hash assignment over a window with JSON output
-firehose-parquet partitions shard \
+fireparq partitions shard \
   --partitions-index s3://my-bucket/eth-mainnet/partitions.parquet \
   --partition-type day \
   --partition-chain eth-mainnet \
@@ -379,11 +386,11 @@ Validates continuity and basic invariants in `partitions.parquet`.
 
 ```bash
 # Validate all rows in a local index
-firehose-parquet partitions validate \
+fireparq partitions validate \
   --partitions-index ./output/eth-mainnet/partitions.parquet
 
 # Validate one chain/type and emit JSON
-firehose-parquet partitions validate \
+fireparq partitions validate \
   --partitions-index s3://my-bucket/partitions.parquet \
   --partition-type day \
   --partition-chain eth-mainnet \
@@ -404,14 +411,14 @@ Resolves one row from `partitions.parquet` and prints the exact ingestion range 
 
 ```bash
 # Local index
-firehose-parquet partitions resolve \
+fireparq partitions resolve \
   --partitions-index ./output/eth-mainnet/partitions.parquet \
   --partition-type hour \
   --partition-value '2015-07-30 15:00:00' \
   --partition-chain eth-mainnet
 
 # S3 index with machine-readable output
-firehose-parquet partitions resolve \
+fireparq partitions resolve \
   --partitions-index s3://my-bucket/eth-mainnet/partitions.parquet \
   --partition-type day \
   --partition-value '2015-07-30 00:00:00' \
@@ -419,7 +426,7 @@ firehose-parquet partitions resolve \
   --json
 
 # Require a unique chain match when using a global index
-firehose-parquet partitions resolve \
+fireparq partitions resolve \
   --partitions-index s3://my-bucket/partitions.parquet \
   --partition-type day \
   --partition-value '2015-07-30 00:00:00' \
@@ -441,7 +448,7 @@ If the sidecar includes a source metadata fingerprint and it no longer matches `
 Run ingestion over a partition window without explicit block math.
 
 ```bash
-firehose-parquet --endpoint https://eth.firehose.pinax.network:443 \
+fireparq --endpoint https://eth.firehose.pinax.network:443 \
   --partitions-index ./output/eth-mainnet/partitions.parquet \
   --partition-type hour \
   --partition-from '2015-07-30 14:00:00' \
@@ -461,7 +468,7 @@ Use `--cursor-template` to derive deterministic cursor paths per partition worke
 
 ```bash
 # Single partition worker
-firehose-parquet --endpoint https://eth.firehose.pinax.network:443 \
+fireparq --endpoint https://eth.firehose.pinax.network:443 \
   --cursor-template 'cursor/{chain}/{partition_type}/{partition_value}.parquet' \
   --partitions-index ./output/eth-mainnet/partitions.parquet \
   --partition-type hour \
@@ -469,7 +476,7 @@ firehose-parquet --endpoint https://eth.firehose.pinax.network:443 \
   --partition-chain eth-mainnet
 
 # Partition window worker
-firehose-parquet --endpoint https://eth.firehose.pinax.network:443 \
+fireparq --endpoint https://eth.firehose.pinax.network:443 \
   --cursor-template 'cursor/{chain}/{partition_type}/{partition_from}-{partition_to}.parquet' \
   --partitions-index ./output/eth-mainnet/partitions.parquet \
   --partition-type hour \
@@ -490,7 +497,7 @@ More examples:
 
 ```bash
 # Local single-partition worker with one cursor per hour
-firehose-parquet --endpoint https://eth.firehose.pinax.network:443 \
+fireparq --endpoint https://eth.firehose.pinax.network:443 \
   --output ./output/eth-mainnet \
   --cursor-template 'cursor/{partition_type}/{partition_value}.parquet' \
   --partitions-index ./output/eth-mainnet/partitions.parquet \
@@ -499,7 +506,7 @@ firehose-parquet --endpoint https://eth.firehose.pinax.network:443 \
 # expands to: cursor/hour/2015-07-30 15:00:00.parquet
 
 # Global index with explicit chain segment to avoid cross-chain collisions
-firehose-parquet --endpoint https://eth.firehose.pinax.network:443 \
+fireparq --endpoint https://eth.firehose.pinax.network:443 \
   --cursor-template 'cursor/{chain}/{partition_type}/{partition_value}.parquet' \
   --partitions-index s3://my-bucket/partitions.parquet \
   --partition-type day \
@@ -508,7 +515,7 @@ firehose-parquet --endpoint https://eth.firehose.pinax.network:443 \
 # expands to: cursor/eth-mainnet/day/2015-07-30 00:00:00.parquet
 
 # Window worker with one cursor per assigned partition window
-firehose-parquet --endpoint https://eth.firehose.pinax.network:443 \
+fireparq --endpoint https://eth.firehose.pinax.network:443 \
   --cursor-template 'cursor/{chain}/{partition_type}/{partition_from}-{partition_to}.parquet' \
   --partitions-index ./output/eth-mainnet/partitions.parquet \
   --partition-type hour \
@@ -518,7 +525,7 @@ firehose-parquet --endpoint https://eth.firehose.pinax.network:443 \
 # expands to: cursor/eth-mainnet/hour/2015-07-30 14:00:00-2015-07-30 18:00:00.parquet
 
 # S3 output keeps relative cursor paths under the output prefix
-firehose-parquet --endpoint https://eth.firehose.pinax.network:443 \
+fireparq --endpoint https://eth.firehose.pinax.network:443 \
   --output s3://my-bucket/backfill/eth-mainnet \
   --cursor-template 'cursor/{chain}/{partition_type}/{partition_value}.parquet' \
   --partitions-index s3://my-bucket/backfill/eth-mainnet/partitions.parquet \
@@ -528,7 +535,7 @@ firehose-parquet --endpoint https://eth.firehose.pinax.network:443 \
 # S3 key expands to: backfill/eth-mainnet/cursor/eth-mainnet/hour/2015-07-30 15:00:00.parquet
 
 # Literal braces via escaping
-firehose-parquet --endpoint https://eth.firehose.pinax.network:443 \
+fireparq --endpoint https://eth.firehose.pinax.network:443 \
   --cursor-template 'cursor/{{debug}}/{partition_type}/{partition_value}.parquet' \
   --partitions-index ./output/eth-mainnet/partitions.parquet \
   --partition-type hour \
@@ -554,8 +561,8 @@ Recommended patterns:
 Read and inspect Parquet files: shows schema, row counts, and sample rows. Supports local paths and S3 URIs.
 
 ```bash
-firehose-parquet scan ./output/blocks/
-firehose-parquet scan s3://my-bucket/evm/blocks/
+fireparq scan ./output/blocks/
+fireparq scan s3://my-bucket/evm/blocks/
 ```
 
 ### `inspect` — Display File Metadata
@@ -564,10 +571,10 @@ Displays comprehensive metadata for a single Parquet file: file-level key-value 
 
 ```bash
 # Inspect a local file
-firehose-parquet inspect ./output/blocks/year=2026/month=01/date=15/part-000001.parquet
+fireparq inspect ./output/blocks/year=2026/month=01/date=15/part-000001.parquet
 
 # Inspect an S3 file
-firehose-parquet inspect s3://my-bucket/evm/blocks/year=2026/month=01/date=15/part-000001.parquet
+fireparq inspect s3://my-bucket/evm/blocks/year=2026/month=01/date=15/part-000001.parquet
 ```
 
 **Output includes:**
@@ -585,11 +592,11 @@ firehose-parquet inspect s3://my-bucket/evm/blocks/year=2026/month=01/date=15/pa
 Validates partitioned Parquet data for gaps, ordering errors, duplicates, parent hash mismatches, and timestamp reversals. Only partitions with issues are printed; valid ones are silently counted.
 
 ```bash
-firehose-parquet validate ./output/blocks/
-firehose-parquet validate s3://my-bucket/evm/blocks/
+fireparq validate ./output/blocks/
+fireparq validate s3://my-bucket/evm/blocks/
 
 # Solana: allow skipped slots (normal chain behavior, not data corruption)
-firehose-parquet validate s3://my-bucket/solana/blocks/ --allow-gaps
+fireparq validate s3://my-bucket/solana/blocks/ --allow-gaps
 ```
 
 | Flag | Default | Description |
@@ -603,16 +610,16 @@ Verifies deterministic partition Merkle roots and optional protocol checks under
 
 ```bash
 # Standard profile (default): roots + protocol
-firehose-parquet verify ./output/evm/mainnet/blocks --chain evm --table blocks
+fireparq verify ./output/evm/mainnet/blocks --chain evm --table blocks
 
 # Quick profile (low-cost)
-firehose-parquet verify ./output/evm/mainnet/blocks --profile quick
+fireparq verify ./output/evm/mainnet/blocks --profile quick
 
 # Explicit checks override profile defaults
-firehose-parquet verify ./output/evm/mainnet/blocks --checks roots,protocol
+fireparq verify ./output/evm/mainnet/blocks --checks roots,protocol
 
 # Publish report to the suggested artifact path
-firehose-parquet verify ./output/evm/mainnet/blocks --publish-report
+fireparq verify ./output/evm/mainnet/blocks --publish-report
 ```
 
 | Flag | Default | Description |
@@ -638,13 +645,13 @@ Rolls up fine-grained partitions (e.g. `minute` or `hour`) into coarser ones (e.
 
 ```bash
 # Roll up minute-partitioned data into daily partitions
-firehose-parquet rollup ./output/blocks/ -p date
+fireparq rollup ./output/blocks/ -p date
 
 # Roll up to a different output directory
-firehose-parquet rollup ./output/blocks/ -o ./rolled-up/blocks/ -p date
+fireparq rollup ./output/blocks/ -o ./rolled-up/blocks/ -p date
 
 # Delete source files after successful rollup
-firehose-parquet rollup ./output/blocks/ -p date --delete-source
+fireparq rollup ./output/blocks/ -p date --delete-source
 ```
 
 | Flag | Default | Description |
@@ -663,16 +670,16 @@ Consolidates multiple small part files within each partition directory into fewe
 
 ```bash
 # Merge small parts within each partition (default 256 MB per file)
-firehose-parquet merge ./output/blocks/
+fireparq merge ./output/blocks/
 
 # Dry run — show what would be merged without writing
-firehose-parquet merge ./output/blocks/ --dry-run
+fireparq merge ./output/blocks/ --dry-run
 
 # Merge with custom file size limit
-firehose-parquet merge ./output/blocks/ --flush-bytes 536870912
+fireparq merge ./output/blocks/ --flush-bytes 536870912
 
 # Merge S3-hosted data
-firehose-parquet merge s3://my-bucket/evm/blocks/
+fireparq merge s3://my-bucket/evm/blocks/
 ```
 
 | Flag | Default | Description |
@@ -691,22 +698,22 @@ Deletes `.parquet` files from local filesystem or S3 with optional partition fil
 
 ```bash
 # Delete all parquet files in a directory
-firehose-parquet truncate ./output/blocks/
+fireparq truncate ./output/blocks/
 
 # Delete a specific partition
-firehose-parquet truncate ./output/blocks/ -p "year=2026/month=01/date=01"
+fireparq truncate ./output/blocks/ -p "year=2026/month=01/date=01"
 
 # Delete all partitions under a key
-firehose-parquet truncate ./output/blocks/ -p date
+fireparq truncate ./output/blocks/ -p date
 
 # Glob pattern matching
-firehose-parquet truncate s3://bucket/prefix -p "year=2026/month=01/date=*"
+fireparq truncate s3://bucket/prefix -p "year=2026/month=01/date=*"
 
 # Multiple partitions
-firehose-parquet truncate ./output/ -p "year=2026/month=01/date=01" -p "year=2026/month=01/date=02"
+fireparq truncate ./output/ -p "year=2026/month=01/date=01" -p "year=2026/month=01/date=02"
 
 # Dry run — show what would be deleted
-firehose-parquet truncate ./output/blocks/ --dry-run
+fireparq truncate ./output/blocks/ --dry-run
 ```
 
 | Flag | Default | Description |
@@ -768,7 +775,7 @@ Enable the metrics server with `--metrics-port <PORT>` (env: `METRICS_PORT`). A 
 
 ```bash
 # Enable metrics on port 9090
-firehose-parquet \
+fireparq \
   --endpoint https://eth.firehose.pinax.network:443 \
   --metrics-port 9090 \
   --start-block 19000000
@@ -934,13 +941,13 @@ The binary supports the `completions` subcommand:
 
 ```bash
 # Bash
-firehose-parquet completions bash > ~/.local/share/bash-completion/completions/firehose-parquet
+fireparq completions bash > ~/.local/share/bash-completion/completions/fireparq
 
 # Zsh
-firehose-parquet completions zsh > ~/.zfunc/_firehose-parquet
+fireparq completions zsh > ~/.zfunc/_fireparq
 
 # Fish
-firehose-parquet completions fish > ~/.config/fish/completions/firehose-parquet.fish
+fireparq completions fish > ~/.config/fish/completions/fireparq.fish
 ```
 
 ## Repository Structure
@@ -983,7 +990,7 @@ firehose-parquet/
 │       └── writer.rs                       # Arrow->Parquet writer and flushing
 ├── blocks/                                 # Chain mappers + unified binary
 │   └── src/
-│       ├── bin/main.rs                     # Single unified binary (firehose-parquet)
+│       ├── bin/main.rs                     # Single unified binary (fireparq)
 │       ├── evm/                            # mapper.rs, schema.rs, proto.rs
 │       ├── solana/
 │       ├── bitcoin/

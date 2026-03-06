@@ -1,6 +1,6 @@
 # Verifiability Artifact Runbook
 
-This runbook describes how to produce, publish, update, and consume verifiability artifacts for `firehose-parquet verify`.
+This runbook describes how to produce, publish, update, and consume verifiability artifacts for `fireparq verify`.
 
 It complements:
 

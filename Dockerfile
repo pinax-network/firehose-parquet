@@ -2,9 +2,9 @@ FROM rust:1.93-bookworm AS builder
 WORKDIR /app
 RUN apt-get update && apt-get install -y protobuf-compiler && rm -rf /var/lib/apt/lists/*
 COPY . .
-RUN cargo build --release --bin firehose-parquet
+RUN cargo build --release --bin fireparq
 
 FROM debian:bookworm-slim
 RUN apt-get update && apt-get install -y ca-certificates && rm -rf /var/lib/apt/lists/*
-COPY --from=builder /app/target/release/firehose-parquet /usr/local/bin/
-ENTRYPOINT ["firehose-parquet"]
+COPY --from=builder /app/target/release/fireparq /usr/local/bin/
+ENTRYPOINT ["fireparq"]

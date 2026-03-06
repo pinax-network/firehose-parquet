@@ -40,51 +40,55 @@ const BLOCK_TYPES: &[&str] = &[
 
 #[derive(Parser, Debug)]
 #[command(
-    name = "firehose-parquet",
+    name = "fireparq",
     version,
-    about = "Convert Firehose gRPC stream to Apache Parquet",
+    about = "Build Apache Parquet datasets from Firehose gRPC streams",
     after_long_help = "\
+Default action:
+  Invoke `fireparq` with stream/output flags to run the ingestion build pipeline.
+  Utility workflows live under subcommands such as `partitions`, `scan`, `inspect`, `validate`, and `verify`.
+
 Examples:
   # Stream EVM blocks to local Parquet (auto-detect chain)
-  firehose-parquet --endpoint https://eth.firehose.pinax.network:443 \\
+  fireparq --endpoint https://eth.firehose.pinax.network:443 \\
     --start-block 20000000 --stop-block 20001000
 
   # Stream Solana with date partitioning to S3
-  firehose-parquet --endpoint https://solana.firehose.pinax.network:443 \\
+  fireparq --endpoint https://solana.firehose.pinax.network:443 \\
     --start-block 250000000 --stop-block 250100000 \\
     --partition date --s3-bucket my-bucket
 
   # Stream with hex encoding and extended tables
-  firehose-parquet --endpoint https://eth.firehose.pinax.network:443 \\
+  fireparq --endpoint https://eth.firehose.pinax.network:443 \\
     --start-block 20000000 --bytes-encoding hex --extended
 
   # Resume from cursor
-  firehose-parquet --endpoint https://eth.firehose.pinax.network:443 \\
+  fireparq --endpoint https://eth.firehose.pinax.network:443 \\
     --cursor cursor.txt --partition date
 
   # Resolve range from local partitions index (no explicit start/stop)
-  firehose-parquet --endpoint https://eth.firehose.pinax.network:443 \\
+  fireparq --endpoint https://eth.firehose.pinax.network:443 \\
     --partitions-index ./output/eth-mainnet/partitions.parquet \\
     --partition-type hour \\
     --partition-value '2015-07-30 15:00:00' \\
     --partition-chain eth-mainnet
 
   # Resolve range from S3 partitions index
-  firehose-parquet --endpoint https://eth.firehose.pinax.network:443 \\
+  fireparq --endpoint https://eth.firehose.pinax.network:443 \\
     --partitions-index s3://my-bucket/eth-mainnet/partitions.parquet \\
     --partition-type day \\
     --partition-value '2015-07-30 00:00:00' \\
     --partition-chain eth-mainnet
 
   # Resolve range from global S3 index shared across chains
-  firehose-parquet --endpoint https://eth.firehose.pinax.network:443 \\
+  fireparq --endpoint https://eth.firehose.pinax.network:443 \\
     --partitions-index s3://my-bucket/partitions.parquet \\
     --partition-type hour \\
     --partition-value '2015-07-30 15:00:00' \\
     --partition-chain eth-mainnet
 
   # Resolve an inclusive/exclusive partition window [from, to)
-  firehose-parquet --endpoint https://eth.firehose.pinax.network:443 \\
+  fireparq --endpoint https://eth.firehose.pinax.network:443 \\
     --partitions-index ./output/eth-mainnet/partitions.parquet \\
     --partition-type hour \\
     --partition-from '2015-07-30 14:00:00' \\
@@ -1070,10 +1074,7 @@ async fn main() -> Result<()> {
 
     init_tracing(&cli.common.log_level);
 
-    info!(
-        version = env!("CARGO_PKG_VERSION"),
-        "firehose-parquet starting"
-    );
+    info!(version = env!("CARGO_PKG_VERSION"), "fireparq starting");
 
     // Install graceful shutdown handler for SIGINT (Ctrl-C) and SIGTERM.
     // When a signal is received, the flag is set and the streaming loop
@@ -1127,8 +1128,8 @@ async fn main() -> Result<()> {
     if let Some(ref request) = partition_selection_request {
         if !has_explicit_range {
             warn!(
-                "partition range flags are deprecated for direct ingestion; prefer `firehose-parquet partitions resolve ...`"
-            );
+                "partition range flags are deprecated for direct ingestion; prefer `fireparq partitions resolve ...`"
+                );
             let aws = AwsConfig {
                 aws_access_key_id: config.aws_access_key_id.clone(),
                 aws_secret_access_key: config.aws_secret_access_key.clone(),
@@ -1759,6 +1760,22 @@ async fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clap::CommandFactory;
+
+    #[test]
+    fn test_cli_name_is_fireparq() {
+        let cmd = Cli::command();
+        assert_eq!(cmd.get_name(), "fireparq");
+    }
+
+    #[test]
+    fn test_cli_long_help_mentions_default_action() {
+        let mut cmd = Cli::command();
+        let help = cmd.render_long_help().to_string();
+        assert!(help.contains("Default action:"));
+        assert!(help.contains("fireparq"));
+        assert!(help.contains("ingestion build pipeline"));
+    }
 
     #[test]
     fn test_detect_block_type_evm() {

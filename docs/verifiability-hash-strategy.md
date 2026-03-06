@@ -1,6 +1,6 @@
 # Verifiability Hash Strategy and Normalization
 
-This document defines the cross-chain hashing policy used by `firehose-parquet verify` and the normalization rules applied before Merkle leaf hashing.
+This document defines the cross-chain hashing policy used by `fireparq verify` and the normalization rules applied before Merkle leaf hashing.
 
 ## Goals
 
