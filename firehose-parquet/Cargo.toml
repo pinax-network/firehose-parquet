@@ -4,6 +4,10 @@ version.workspace = true
 edition.workspace = true
 description = "Core library for converting Firehose gRPC streams to Apache Parquet"
 
+[[bin]]
+name = "generate-networks"
+path = "../scripts/generate_networks.rs"
+
 [dependencies]
 firehose-protos = { path = "../firehose-protos" }
 arrow.workspace = true

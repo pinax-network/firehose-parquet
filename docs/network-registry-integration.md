@@ -4,26 +4,30 @@ This note records the recommendation for issue #218 while the first `--network` 
 
 ## Recommendation
 
-Ship the initial `--network` support with a small static mapping table plus `FIREHOSE_ENDPOINT_*` overrides, and defer live registry integration to a follow-up.
+Use a one-off generator to turn a checked-in or locally downloaded registry snapshot into `firehose-parquet/src/networks_generated.rs`, keep `FIREHOSE_ENDPOINT_*` overrides, and avoid live registry fetches during builds or CLI startup.
 
 ## Why
 
 - The CLI should stay predictable at startup and work offline.
 - Firehose ingestion should not gain a hard runtime dependency on a remote registry service.
-- Static aliases cover the initial operator workflows for `eth`, `solana`, `tron`, and `tronevm`.
+- A generated Rust module keeps builds reproducible while making it easy to refresh aliases from the registry.
 - Per-network env overrides already let operators pin private or provider-specific endpoints without waiting for a registry update.
 
 ## Preferred future design
 
-When registry-backed discovery is added, prefer a vendored snapshot or generated source file committed into the repo over runtime fetching.
+## Current workflow
 
-That future design should:
+- Download `TheGraphNetworksRegistry.json` locally.
+- Run `cargo run -p firehose-parquet --bin generate-networks -- <path-to-registry-json>`.
+- Review the generated changes in `firehose-parquet/src/networks_generated.rs`.
+- Keep explicit `FIREHOSE_ENDPOINT_*` overrides above generated defaults.
+
+The generator should:
 
 - ingest registry data in a repeatable update step
-- filter to the provider/endpoints we want to expose by default
+- filter to the `pinax.network` Firehose endpoints we want to expose by default
 - emit a generated Rust source/module consumed by the CLI
 - keep tests pinned to the generated snapshot version
-- preserve explicit env overrides above generated defaults
 
 ## What should not happen
 
@@ -31,6 +35,8 @@ That future design should:
 - No silent endpoint drift caused by external registry changes
 - No broad provider selection logic in the first `--network` release
 
-## v0.5.0 decision
+## Endpoint metadata
 
-For `v0.5.0`, the built-in alias table augments future registry work rather than trying to replace it immediately.
+For alias generation, the registry is enough.
+
+Querying each endpoint for `EndpointInfo/Info` can be useful as a separate enrichment or validation step, but it should not be required for generating aliases because it adds network dependencies, slows refreshes, and can fail for temporary endpoint availability reasons.

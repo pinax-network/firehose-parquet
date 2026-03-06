@@ -17,7 +17,7 @@ use firehose_parquet::cursor::{CursorLocation, CursorState};
 use firehose_parquet::encode::{parse_encode_bytes, EncodeBytes};
 use firehose_parquet::grpc::{EndpointInfo, FirehoseClient};
 use firehose_parquet::metrics;
-use firehose_parquet::networks::{resolve_network_endpoint, EndpointSource, KNOWN_NETWORK_ALIASES};
+use firehose_parquet::networks::{resolve_network_endpoint, EndpointSource, KNOWN_NETWORK_NAMES};
 use firehose_parquet::traits::{decode_id_bytes, fork_step_name, BlockIdentity, BlockMapper};
 use firehose_parquet::writer::{OutputWriter, ParquetFileMetadata};
 use std::path::PathBuf;
@@ -112,17 +112,18 @@ struct Cli {
     #[command(flatten)]
     common: CommonArgs,
 
-    /// Built-in Firehose network alias.
+    /// Firehose network `chainName`.
     ///
-    /// When set, resolves a known network name to a default endpoint. `--endpoint`
+    /// When set, resolves a known network `chainName` to a default endpoint.
+    /// The canonical `chainName` remains the final resolved output. `--endpoint`
     /// or `ENDPOINT` takes precedence if already set. Supports per-network env
-    /// overrides such as `FIREHOSE_ENDPOINT_ETH` or
+    /// overrides such as `FIREHOSE_ENDPOINT_MAINNET` or
     /// `FIREHOSE_ENDPOINT_SOLANA_MAINNET_BETA`.
     #[arg(
         long,
         env = "NETWORK",
         hide_env_values = true,
-        value_parser = PossibleValuesParser::new(KNOWN_NETWORK_ALIASES),
+        value_parser = PossibleValuesParser::new(KNOWN_NETWORK_NAMES),
         help_heading = "Connection"
     )]
     network: Option<String>,
@@ -1149,13 +1150,13 @@ async fn main() -> Result<()> {
             match &resolved.source {
                 EndpointSource::Builtin => info!(
                     network = %resolved.requested,
-                    canonical_network = resolved.canonical,
+                    chain_name = resolved.chain_name,
                     endpoint = %resolved.endpoint,
                     "resolved built-in network endpoint"
                 ),
                 EndpointSource::EnvOverride { env_var } => info!(
                     network = %resolved.requested,
-                    canonical_network = resolved.canonical,
+                    chain_name = resolved.chain_name,
                     endpoint = %resolved.endpoint,
                     env_var = %env_var,
                     "resolved network endpoint from environment override"
@@ -1835,13 +1836,13 @@ mod tests {
         let mut cmd = Cli::command();
         let help = cmd.render_long_help().to_string();
         assert!(help.contains("--network <NETWORK>"));
-        assert!(help.contains("FIREHOSE_ENDPOINT_ETH"));
+        assert!(help.contains("FIREHOSE_ENDPOINT_MAINNET"));
     }
 
     #[test]
     fn test_cli_parses_network_flag() {
-        let cli = Cli::parse_from(["fireparq", "--network", "eth", "--start-block", "100"]);
-        assert_eq!(cli.network.as_deref(), Some("eth"));
+        let cli = Cli::parse_from(["fireparq", "--network", "mainnet", "--start-block", "100"]);
+        assert_eq!(cli.network.as_deref(), Some("mainnet"));
         assert_eq!(cli.common.start_block, Some(100));
     }
 
