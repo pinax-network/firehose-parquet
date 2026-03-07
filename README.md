@@ -105,7 +105,7 @@ docker run --rm \
 
 `fireparq` can resolve a small built-in set of Firehose network aliases instead of requiring `--endpoint` every time.
 
-Supported names in `v0.5.2`:
+Supported names in `v0.5.3`:
 
 - `mainnet`, `eth` → `https://eth.firehose.pinax.network:443`
 - `solana-mainnet-beta`, `solana` → `https://solana.firehose.pinax.network:443`
@@ -853,7 +853,7 @@ Every Parquet file written by the pipeline embeds key-value metadata in the file
 
 | Key | Example Value |
 |---|---|
-| `firehose-parquet.version` | `0.5.2` |
+| `firehose-parquet.version` | `0.5.3` |
 | `firehose-parquet.block_type` | `evm` |
 | `firehose-parquet.bytes_encoding` | `hex` |
 | `firehose-parquet.endpoint` | `https://eth.firehose.pinax.network:443` |
