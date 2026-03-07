@@ -321,7 +321,6 @@ fireparq partitions build \
   --stop-block 10010000 \
   --partition hour \
   --s3-bucket my-bucket \
-  --write-lookup-sidecar \
   --json
 
 # Resume from an existing canonical index and append only missing coverage
@@ -348,7 +347,6 @@ Behavior:
 - supports one partition granularity per run (`date`, `hour`, `minute`, `second`)
 - derives canonical UTC partition keys using rounded interval starts
 - writes contract metadata including schema version, chain scope, and covered block range
-- can also emit `partitions.lookup.json` for low-latency `partitions resolve` lookups
 - `--resume` reuses the trailing rows from the existing canonical index and continues from the stored frontier
 - still requires a finite `--stop-block` so the generated artifact has deterministic coverage
 - `--live` treats existing `partitions.parquet` rows as the restart anchor and keeps extending the canonical index
@@ -363,7 +361,6 @@ Behavior:
 | `--output` | inferred from `--s3-bucket` | Output root directory or `s3://` URI prefix |
 | `--s3-bucket` | none | S3 bucket used when `--output` is omitted or should be prefixed |
 | `--resume` | `false` | Reuse the existing canonical index at the resolved output path and continue from its frontier |
-| `--write-lookup-sidecar` | `false` | Also write `partitions.lookup.json` next to the canonical parquet index (bounded mode only) |
 | `--json` | `false` | Emit machine-readable output |
 
 ### `partitions ls` — Query Partition Index Rows
@@ -492,9 +489,7 @@ Helpful guard:
 
 See `docs/partitions-parquet-contract.md` for the versioned `partitions.parquet` schema and metadata compatibility contract.
 
-When present, `partitions resolve` also checks an optional `partitions.lookup.json` sidecar before falling back to a full parquet scan.
-
-If the sidecar includes a source metadata fingerprint and it no longer matches `partitions.parquet`, the resolver ignores the sidecar and safely falls back to scanning the canonical parquet index.
+`partitions resolve` reads the canonical `partitions.parquet` index directly.
 
 ### Partition-Window Ingestion (`--partition-from/--partition-to`)
 

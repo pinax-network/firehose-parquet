@@ -7,10 +7,10 @@ use firehose_parquet::cli::{
     parse_partition_build_types, parse_partition_selection_request, parse_partition_shard_strategy,
     read_partitions_build_rows, resolve_cursor_template, resolve_partition_bounds_from_index,
     resolve_partition_command, resolve_partition_window_bounds_from_index, resolve_s3_output_root,
-    shard_partitions_from_index, validate_partitions_index, write_lookup_sidecar_for_index,
-    write_partitions_index, AwsConfig, Commands, CommonArgs, PartitionBoundsRequest,
-    PartitionBuildResult, PartitionIndexBuilder, PartitionListRequest, PartitionResolveOptions,
-    PartitionSelectionRequest, PartitionShardRequest, PartitionValidateRequest, PartitionsCommands,
+    shard_partitions_from_index, validate_partitions_index, write_partitions_index, AwsConfig,
+    Commands, CommonArgs, PartitionBoundsRequest, PartitionBuildResult, PartitionIndexBuilder,
+    PartitionListRequest, PartitionResolveOptions, PartitionSelectionRequest,
+    PartitionShardRequest, PartitionValidateRequest, PartitionsCommands,
 };
 use firehose_parquet::config::{BlockMetadata, Compression, Config, Partition};
 use firehose_parquet::cursor::{CursorLocation, CursorState};
@@ -335,17 +335,10 @@ async fn run_partitions_build(
     partition_types_spec: &str,
     output: Option<&str>,
     s3_bucket: Option<&str>,
-    write_lookup_sidecar: bool,
     resume: bool,
     aws: &AwsConfig,
 ) -> Result<PartitionBuildResult> {
     const LIVE_PARTITIONS_CHECKPOINT_INTERVAL: Duration = Duration::from_secs(30);
-
-    if live && write_lookup_sidecar {
-        return Err(anyhow!(
-            "--write-lookup-sidecar is not supported with --live"
-        ));
-    }
     if !live && stop_block.is_none() {
         return Err(anyhow!("--stop-block is required unless --live is set"));
     }
@@ -510,9 +503,6 @@ async fn run_partitions_build(
             } else {
                 Vec::new()
             };
-            if write_lookup_sidecar {
-                write_lookup_sidecar_for_index(&partitions_index, &rows, Some(aws))?;
-            }
             return Ok(PartitionBuildResult {
                 partitions_index,
                 chain,
@@ -617,9 +607,6 @@ async fn run_partitions_build(
         let stop_block = stop_block.expect("validated above");
         let rows = builder.finish(stop_block)?;
         write_partitions_index(&partitions_index, &rows, Some(aws))?;
-        if write_lookup_sidecar {
-            write_lookup_sidecar_for_index(&partitions_index, &rows, Some(aws))?;
-        }
         rows
     };
 
@@ -739,7 +726,6 @@ async fn main() -> Result<()> {
                     partition,
                     output,
                     s3_bucket,
-                    write_lookup_sidecar,
                     resume,
                     json,
                     aws_access_key_id,
@@ -776,7 +762,6 @@ async fn main() -> Result<()> {
                         partition,
                         output.as_deref(),
                         s3_bucket.as_deref(),
-                        *write_lookup_sidecar,
                         *resume,
                         &aws,
                     )
@@ -1038,9 +1023,6 @@ async fn main() -> Result<()> {
                         println!("partition_value:  {}", result.partition_value);
                         if let Some(chain) = result.partition_chain {
                             println!("partition_chain:  {chain}");
-                        }
-                        if let Some(source) = result.lookup_source {
-                            println!("lookup_source:    {source}");
                         }
                         println!("start_block:      {}", result.start_block);
                         println!("stop_block:       {}", result.stop_block);

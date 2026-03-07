@@ -27,7 +27,7 @@ In live mode:
 - `partitions.parquet` is the restart anchor
 - the process resumes from the latest covered frontier already stored in that file
 - `--stop-block` is not used
-- `partitions.lookup.json` is not required
+- no `partitions.lookup.json` sidecar is involved
 
 The public artifact remains one stable canonical path:
 
@@ -49,7 +49,7 @@ This keeps S3-oriented automation concise while preserving explicit override beh
 
 `--stop-block` remains required for bounded mode.
 
-Unlike the main ingestion pipeline, `partitions build` produces a canonical bounded artifact (`partitions.parquet`) and optionally `partitions.lookup.json`. Requiring a finite upper bound keeps those artifacts deterministic, reviewable, and safe to rerun in scheduled jobs.
+Unlike the main ingestion pipeline, `partitions build` produces a canonical bounded artifact (`partitions.parquet`). Requiring a finite upper bound keeps that artifact deterministic, reviewable, and safe to rerun in scheduled jobs.
 
 In short:
 

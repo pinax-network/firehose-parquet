@@ -86,33 +86,8 @@ Breaking changes:
 
 Breaking changes require a schema-version increment.
 
-## Optional lookup sidecar
+## Lookup behavior
 
-Readers may use an optional sidecar placed alongside the canonical index:
+`partitions resolve` reads the canonical `partitions.parquet` artifact directly.
 
-- canonical index: `partitions.parquet`
-- sidecar: `partitions.lookup.json`
-
-Current reader behavior:
-
-- `partitions resolve` checks the sidecar first when present
-- falls back to scanning `partitions.parquet` when the sidecar is absent
-
-Current sidecar contract:
-
-- `lookup_schema_version` — current value: `1`
-- `source_schema_version` — expected canonical source schema version (`1`)
-- `source_metadata_hash` — optional SHA-256 fingerprint of canonical parquet file metadata for stale-sidecar detection
-- `entries[]` with:
-  - `chain` (nullable string)
-  - `partition_type` (string)
-  - `partition_value` (string)
-  - `start_block` (u64)
-  - `end_block` (u64)
-
-Notes:
-
-- The sidecar is an optimization only; `partitions.parquet` remains the source of truth.
-- Unsupported sidecar schema versions are rejected.
-- When `source_metadata_hash` is present and no longer matches `partitions.parquet`, readers ignore the sidecar and fall back to canonical parquet scans.
-- If no sidecar is present, readers continue with canonical parquet scans.
+`partitions.parquet` remains the only source of truth for partition lookups.
