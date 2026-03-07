@@ -25,6 +25,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use tokio::sync::Notify;
 use tracing::{info, warn};
 
 use blocks::antelope::mapper::AntelopeBlockMapper;
@@ -561,8 +562,10 @@ async fn run_partitions_build(
     );
 
     let shutdown = Arc::new(AtomicBool::new(false));
+    let shutdown_notify = Arc::new(Notify::new());
     if live {
         let shutdown = Arc::clone(&shutdown);
+        let shutdown_notify = Arc::clone(&shutdown_notify);
         tokio::spawn(async move {
             let ctrl_c = tokio::signal::ctrl_c();
 
@@ -584,6 +587,7 @@ async fn run_partitions_build(
 
             info!("shutdown signal received, checkpointing live partitions build...");
             shutdown.store(true, Ordering::SeqCst);
+            shutdown_notify.notify_waiters();
         });
     }
 
@@ -592,20 +596,31 @@ async fn run_partitions_build(
         let mut last_checkpoint_at = Instant::now();
         let mut last_checkpoint_frontier = builder.current_frontier();
 
-        loop {
+        'live: loop {
             if shutdown.load(Ordering::SeqCst) {
                 break;
             }
 
             let frontier = builder.current_frontier().unwrap_or(effective_start_block);
-            let maybe_frontier_block = fetch_optional_probe_block_identity(
-                &stream_client,
-                frontier,
-                Some(poll_interval),
-                "polling live frontier",
-                PROBE_TIMESTAMP_SCAN_LIMIT,
+            let Some(maybe_frontier_block) = await_live_interruptible(
+                &shutdown,
+                &shutdown_notify,
+                fetch_optional_probe_block_identity(
+                    &stream_client,
+                    frontier,
+                    Some(poll_interval),
+                    "polling live frontier",
+                    PROBE_TIMESTAMP_SCAN_LIMIT,
+                ),
             )
-            .await?;
+            .await?
+            else {
+                info!(
+                    frontier,
+                    "live partitions build interrupted during frontier probe"
+                );
+                break;
+            };
 
             let Some(mut current_block) = maybe_frontier_block else {
                 info!(
@@ -645,14 +660,28 @@ async fn run_partitions_build(
             );
 
             loop {
+                if shutdown.load(Ordering::SeqCst) {
+                    break 'live;
+                }
                 builder.observe_block(&current_block)?;
-                let span = locate_live_partition_span(
-                    &stream_client,
-                    partition_type,
-                    &current_block,
-                    PARTITIONS_PROBE_TIMEOUT,
+                let Some(span) = await_live_interruptible(
+                    &shutdown,
+                    &shutdown_notify,
+                    locate_live_partition_span(
+                        &stream_client,
+                        partition_type,
+                        &current_block,
+                        PARTITIONS_PROBE_TIMEOUT,
+                    ),
                 )
-                .await?;
+                .await?
+                else {
+                    info!(
+                        frontier = current_block.block_num,
+                        "live partitions build interrupted during boundary search"
+                    );
+                    break 'live;
+                };
 
                 if span.last_same.block_num > current_block.block_num {
                     builder.observe_block(&span.last_same)?;
@@ -853,6 +882,24 @@ async fn fetch_required_block_identity(
                 "{context}: block {block_num} is not currently available; lower the range or use --live"
             )
         })
+}
+
+async fn await_live_interruptible<T, F>(
+    shutdown: &Arc<AtomicBool>,
+    shutdown_notify: &Arc<Notify>,
+    future: F,
+) -> Result<Option<T>>
+where
+    F: std::future::Future<Output = Result<T>>,
+{
+    if shutdown.load(Ordering::SeqCst) {
+        return Ok(None);
+    }
+
+    tokio::select! {
+        result = future => result.map(Some),
+        _ = shutdown_notify.notified() => Ok(None),
+    }
 }
 
 async fn fetch_optional_probe_block_identity(
