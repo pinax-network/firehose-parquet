@@ -341,6 +341,7 @@ async fn run_partitions_build(
 ) -> Result<PartitionBuildResult> {
     const LIVE_PARTITIONS_CHECKPOINT_INTERVAL: Duration = Duration::from_secs(30);
     const PARTITIONS_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
+    const PROBE_TIMESTAMP_SCAN_LIMIT: u64 = 16;
     if !live && stop_block.is_none() {
         return Err(anyhow!("--stop-block is required unless --live is set"));
     }
@@ -535,17 +536,28 @@ async fn run_partitions_build(
     let stream_client = FirehoseClient::new(base_config.clone());
 
     info!(
-        mode = if live { "live" } else { "bounded" },
+        endpoint = %endpoint,
         chain = %chain,
+        mode = if live { "live" } else { "bounded" },
         partition = %partition_label,
-        partitions_index = %partitions_index,
-        start_block = effective_start_block,
-        stop_block = stop_block,
+        "starting partitions build"
+    );
+    info!(
+        requested_start_block = start_block,
+        effective_start_block,
+        requested_stop_block = stop_block,
         poll_interval_secs,
+        resume_requested = resume,
         resumed = should_resume_from_existing && resumed_from_block.is_some(),
         resumed_from_block = resumed_from_block,
         existing_rows = existing_rows.len(),
-        "starting sparse partitions build"
+        "resolved partitions build range"
+    );
+    info!(
+        output_root = %output_root,
+        chain_output_root = %chain_output_root,
+        partitions_index = %partitions_index,
+        "resolved partitions build paths"
     );
 
     let shutdown = Arc::new(AtomicBool::new(false));
@@ -586,14 +598,23 @@ async fn run_partitions_build(
             }
 
             let frontier = builder.current_frontier().unwrap_or(effective_start_block);
-            let maybe_frontier_block = stream_client
-                .fetch_block_identity(frontier, Some(poll_interval))
-                .await?;
+            let maybe_frontier_block = fetch_optional_probe_block_identity(
+                &stream_client,
+                frontier,
+                Some(poll_interval),
+                "polling live frontier",
+                PROBE_TIMESTAMP_SCAN_LIMIT,
+            )
+            .await?;
 
             let Some(mut current_block) = maybe_frontier_block else {
                 info!(
                     frontier,
-                    poll_interval_secs, "no new finalized blocks available yet; polling again"
+                    frontier_partition_start_ts = builder
+                        .active_partition_value()
+                        .unwrap_or_else(|| "<none>".to_string()),
+                    poll_interval_secs,
+                    "no new finalized blocks available yet; polling again"
                 );
 
                 if builder.has_rows()
@@ -619,6 +640,7 @@ async fn run_partitions_build(
             info!(
                 frontier = current_block.block_num,
                 timestamp = current_block.timestamp,
+                partition_start_ts = %block_partition_start_label(partition_type, &current_block)?,
                 "processing finalized blocks via sparse probes"
             );
 
@@ -641,6 +663,10 @@ async fn run_partitions_build(
                         current_partition_start = current_block.block_num,
                         current_partition_end = next_boundary.block_num,
                         next_partition_start = next_boundary.block_num,
+                        current_partition_start_ts = %block_partition_start_label(partition_type, &current_block)?,
+                        next_partition_start_ts = %block_partition_start_label(partition_type, &next_boundary)?,
+                        current_block_timestamp = current_block.timestamp,
+                        next_block_timestamp = next_boundary.timestamp,
                         "detected partition rollover"
                     );
                     builder.observe_block(&next_boundary)?;
@@ -695,6 +721,7 @@ async fn run_partitions_build(
             effective_start_block,
             Some(PARTITIONS_PROBE_TIMEOUT),
             "starting partitions build",
+            PROBE_TIMESTAMP_SCAN_LIMIT,
         )
         .await?;
         let lower_bound = endpoint_info
@@ -713,6 +740,7 @@ async fn run_partitions_build(
             info!(
                 requested_start_block = effective_start_block,
                 partition_start_block = current_block.block_num,
+                partition_start_ts = %block_partition_start_label(partition_type, &current_block)?,
                 "expanded bounded build start to the enclosing partition boundary"
             );
         }
@@ -737,6 +765,10 @@ async fn run_partitions_build(
                         current_partition_start = current_block.block_num,
                         current_partition_end = next_boundary.block_num,
                         next_partition_start = next_boundary.block_num,
+                        current_partition_start_ts = %block_partition_start_label(partition_type, &current_block)?,
+                        next_partition_start_ts = %block_partition_start_label(partition_type, &next_boundary)?,
+                        current_block_timestamp = current_block.timestamp,
+                        next_block_timestamp = next_boundary.timestamp,
                         "finalized sparse partition span"
                     );
                     builder.observe_block(&next_boundary)?;
@@ -747,6 +779,8 @@ async fn run_partitions_build(
                         current_partition_start = current_block.block_num,
                         current_partition_end = next_boundary.block_num,
                         requested_stop_block = stop_block,
+                        current_partition_start_ts = %block_partition_start_label(partition_type, &current_block)?,
+                        next_partition_start_ts = %block_partition_start_label(partition_type, &next_boundary)?,
                         "expanded bounded build stop to the enclosing partition boundary"
                     );
                     break next_boundary.block_num;
@@ -804,10 +838,16 @@ async fn fetch_required_block_identity(
     block_num: u64,
     wait_timeout: Option<Duration>,
     context: &str,
+    timestamp_scan_limit: u64,
 ) -> Result<BlockIdentity> {
-    client
-        .fetch_block_identity(block_num, wait_timeout)
-        .await?
+    fetch_optional_probe_block_identity(
+        client,
+        block_num,
+        wait_timeout,
+        context,
+        timestamp_scan_limit,
+    )
+    .await?
         .ok_or_else(|| {
             anyhow!(
                 "{context}: block {block_num} is not currently available; lower the range or use --live"
@@ -815,8 +855,85 @@ async fn fetch_required_block_identity(
         })
 }
 
+async fn fetch_optional_probe_block_identity(
+    client: &FirehoseClient,
+    block_num: u64,
+    wait_timeout: Option<Duration>,
+    context: &str,
+    timestamp_scan_limit: u64,
+) -> Result<Option<BlockIdentity>> {
+    let Some(block) = client.fetch_block_identity(block_num, wait_timeout).await? else {
+        return Ok(None);
+    };
+
+    Ok(Some(
+        normalize_probe_block_identity(client, block, wait_timeout, context, timestamp_scan_limit)
+            .await?,
+    ))
+}
+
+async fn normalize_probe_block_identity(
+    client: &FirehoseClient,
+    mut block: BlockIdentity,
+    wait_timeout: Option<Duration>,
+    context: &str,
+    timestamp_scan_limit: u64,
+) -> Result<BlockIdentity> {
+    if block.timestamp > 0 {
+        return Ok(block);
+    }
+
+    for offset in 1..=timestamp_scan_limit {
+        let next_block_num = block.block_num.saturating_add(offset);
+        let Some(next_block) = client
+            .fetch_block_identity(next_block_num, wait_timeout)
+            .await?
+        else {
+            break;
+        };
+        if next_block.timestamp > 0 {
+            warn!(
+                block_num = block.block_num,
+                borrowed_timestamp_block = next_block.block_num,
+                borrowed_timestamp = next_block.timestamp,
+                context,
+                "probe block timestamp missing; borrowing a subsequent finalized block timestamp"
+            );
+            block.timestamp = next_block.timestamp;
+            return Ok(block);
+        }
+    }
+
+    Err(anyhow!(
+        "{context}: block {} is missing timestamp metadata and no later finalized block with a timestamp was found within {} blocks",
+        block.block_num,
+        timestamp_scan_limit
+    ))
+}
+
 fn block_partition_start(partition_type: PartitionBuildType, block: &BlockIdentity) -> Result<i64> {
     partition_type.round_timestamp(block.timestamp)
+}
+
+fn format_probe_timestamp(timestamp: i64) -> Result<String> {
+    let dt = time::OffsetDateTime::from_unix_timestamp(timestamp)
+        .map_err(|err| anyhow!("invalid unix timestamp {timestamp}: {err}"))?;
+    Ok(format!(
+        "{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
+        dt.year(),
+        dt.month() as u8,
+        dt.day(),
+        dt.hour(),
+        dt.minute(),
+        dt.second()
+    ))
+}
+
+fn block_partition_start_label(
+    partition_type: PartitionBuildType,
+    block: &BlockIdentity,
+) -> Result<String> {
+    format_probe_timestamp(block_partition_start(partition_type, block)?)
 }
 
 async fn find_first_different_block(
@@ -834,6 +951,7 @@ async fn find_first_different_block(
             mid,
             Some(probe_timeout),
             "probing partition boundary",
+            16,
         )
         .await?;
 
@@ -864,9 +982,14 @@ async fn locate_partition_start(
         }
 
         let candidate = high_same.block_num.saturating_sub(step).max(lower_bound);
-        match client
-            .fetch_block_identity(candidate, Some(probe_timeout))
-            .await?
+        match fetch_optional_probe_block_identity(
+            client,
+            candidate,
+            Some(probe_timeout),
+            "backtracking partition start",
+            16,
+        )
+        .await?
         {
             Some(probe) if block_partition_start(partition_type, &probe)? == partition_start_ts => {
                 high_same = probe;
@@ -876,6 +999,14 @@ async fn locate_partition_start(
                 step = step.saturating_mul(2).max(1);
             }
             Some(probe) => {
+                let probe = normalize_probe_block_identity(
+                    client,
+                    probe,
+                    Some(probe_timeout),
+                    "backtracking partition start",
+                    16,
+                )
+                .await?;
                 break probe.block_num;
             }
             None => {
@@ -886,12 +1017,21 @@ async fn locate_partition_start(
 
     while low_exclusive.saturating_add(1) < high_same.block_num {
         let mid = low_exclusive + (high_same.block_num - low_exclusive) / 2;
-        match client
-            .fetch_block_identity(mid, Some(probe_timeout))
-            .await?
+        match fetch_optional_probe_block_identity(
+            client,
+            mid,
+            Some(probe_timeout),
+            "refining partition start",
+            16,
+        )
+        .await?
         {
-            Some(probe) if block_partition_start(partition_type, &probe)? == partition_start_ts => {
-                high_same = probe;
+            Some(probe) => {
+                if block_partition_start(partition_type, &probe)? == partition_start_ts {
+                    high_same = probe;
+                } else {
+                    low_exclusive = mid;
+                }
             }
             _ => {
                 low_exclusive = mid;
@@ -910,9 +1050,14 @@ async fn find_latest_available_block(
 ) -> Result<BlockIdentity> {
     while low_available.block_num.saturating_add(1) < high_unavailable {
         let mid = low_available.block_num + (high_unavailable - low_available.block_num) / 2;
-        match client
-            .fetch_block_identity(mid, Some(probe_timeout))
-            .await?
+        match fetch_optional_probe_block_identity(
+            client,
+            mid,
+            Some(probe_timeout),
+            "finding latest available block",
+            16,
+        )
+        .await?
         {
             Some(probe) => low_available = probe,
             None => high_unavailable = mid,
@@ -934,9 +1079,14 @@ async fn locate_live_partition_span(
 
     loop {
         let candidate = low_same.block_num.saturating_add(step);
-        match client
-            .fetch_block_identity(candidate, Some(probe_timeout))
-            .await?
+        match fetch_optional_probe_block_identity(
+            client,
+            candidate,
+            Some(probe_timeout),
+            "probing live partition span",
+            16,
+        )
+        .await?
         {
             Some(probe) => {
                 if block_partition_start(partition_type, &probe)? == partition_start_ts {

@@ -140,16 +140,15 @@ impl FirehoseClient {
     ) -> Result<Option<BlockIdentity>> {
         let fetch = async {
             let channel = self.connect_with_log(false).await?;
-            let mut client = firehose::stream_client::StreamClient::new(channel)
+            let mut client = firehose::fetch_client::FetchClient::new(channel)
                 .accept_compressed(tonic::codec::CompressionEncoding::Gzip)
                 .max_decoding_message_size(128 * 1024 * 1024);
 
-            let req = firehose::Request {
-                start_block_num: block_num as i64,
-                cursor: String::new(),
-                stop_block_num: block_num,
-                final_blocks_only: true,
+            let req = firehose::SingleBlockRequest {
                 transforms: vec![],
+                reference: Some(firehose::single_block_request::Reference::BlockNumber(
+                    firehose::single_block_request::BlockNumber { num: block_num },
+                )),
             };
 
             let mut request = tonic::Request::new(req);
@@ -164,20 +163,16 @@ impl FirehoseClient {
                     .insert("authorization", format!("Bearer {token}").parse().unwrap());
             }
 
-            let mut stream = client.blocks(request).await?.into_inner();
-            match stream.message().await {
-                Ok(Some(resp)) => Ok(resp.metadata.as_ref().map(|m| BlockIdentity {
-                    block_num: m.num,
-                    block_id: m.id.clone(),
-                    parent_num: m.parent_num,
-                    parent_id: m.parent_id.clone(),
-                    lib_num: m.lib_num,
-                    timestamp: m.time.as_ref().map_or(0, |t| t.seconds),
-                    fork_step: None,
-                })),
-                Ok(None) => Ok(None),
-                Err(err) => Err(anyhow::anyhow!("fetching block {block_num}: {err}")),
-            }
+            let response = client.block(request).await?.into_inner();
+            Ok(response.metadata.as_ref().map(|m| BlockIdentity {
+                block_num: m.num,
+                block_id: m.id.clone(),
+                parent_num: m.parent_num,
+                parent_id: m.parent_id.clone(),
+                lib_num: m.lib_num,
+                timestamp: m.time.as_ref().map_or(0, |t| t.seconds),
+                fork_step: None,
+            }))
         };
 
         match wait_timeout {
