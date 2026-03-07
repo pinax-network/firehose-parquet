@@ -454,6 +454,7 @@ async fn run_partitions_build(
     stop_block: Option<u64>,
     live: bool,
     poll_interval_secs: u64,
+    skip_missing_blocks: bool,
     partition_types_spec: &str,
     output: Option<&str>,
     s3_bucket: Option<&str>,
@@ -736,6 +737,7 @@ async fn run_partitions_build(
                     Some(poll_interval),
                     "polling live frontier",
                     PROBE_TIMESTAMP_SCAN_LIMIT,
+                    skip_missing_blocks,
                     &probe_counter,
                 ),
             )
@@ -811,6 +813,7 @@ async fn run_partitions_build(
                         partition_type,
                         &current_block,
                         PARTITIONS_PROBE_TIMEOUT,
+                        skip_missing_blocks,
                         &probe_counter,
                     ),
                 )
@@ -883,6 +886,7 @@ async fn run_partitions_build(
             Some(PARTITIONS_PROBE_TIMEOUT),
             "starting partitions build",
             PROBE_TIMESTAMP_SCAN_LIMIT,
+            skip_missing_blocks,
             &probe_counter,
         )
         .await?;
@@ -896,6 +900,7 @@ async fn run_partitions_build(
             &seed_block,
             lower_bound,
             PARTITIONS_PROBE_TIMEOUT,
+            skip_missing_blocks,
             &probe_counter,
         )
         .await?;
@@ -929,6 +934,7 @@ async fn run_partitions_build(
                 partition_type,
                 &current_block,
                 PARTITIONS_PROBE_TIMEOUT,
+                skip_missing_blocks,
                 &probe_counter,
             )
             .await?;
@@ -992,8 +998,16 @@ async fn run_partitions_build(
         let total_probes = probe_counter.load(Ordering::Relaxed);
         info!(
             stop_block = final_end_block,
-            partitions = format!("{} ({:.1}/h)", checkpoint_state.total_rollovers, checkpoint_state.partitions_per_hour()),
-            probes = format!("{} ({:.1}/m)", total_probes, checkpoint_state.probes_per_min(total_probes)),
+            partitions = format!(
+                "{} ({:.1}/h)",
+                checkpoint_state.total_rollovers,
+                checkpoint_state.partitions_per_hour()
+            ),
+            probes = format!(
+                "{} ({:.1}/m)",
+                total_probes,
+                checkpoint_state.probes_per_min(total_probes)
+            ),
             elapsed = format_elapsed_human(checkpoint_state.started_at.elapsed().as_secs()),
             "completed bounded sparse partitions build"
         );
@@ -1122,8 +1136,16 @@ fn checkpoint_partitions_builder(
     write_partitions_index_with_metadata(partitions_index, &rows, aws, Some(file_metadata))?;
     let total_probes = probe_counter.load(Ordering::Relaxed);
     info!(
-        partitions = format!("{} ({:.1}/h)", checkpoint_state.total_rollovers, checkpoint_state.partitions_per_hour()),
-        probes = format!("{} ({:.1}/m)", total_probes, checkpoint_state.probes_per_min(total_probes)),
+        partitions = format!(
+            "{} ({:.1}/h)",
+            checkpoint_state.total_rollovers,
+            checkpoint_state.partitions_per_hour()
+        ),
+        probes = format!(
+            "{} ({:.1}/m)",
+            total_probes,
+            checkpoint_state.probes_per_min(total_probes)
+        ),
         elapsed = format_elapsed_human(checkpoint_state.started_at.elapsed().as_secs()),
         "checkpoint"
     );
@@ -1133,12 +1155,38 @@ fn checkpoint_partitions_builder(
 
 const PARTITIONS_PROBE_FETCH_MAX_ATTEMPTS: usize = 4;
 const PARTITIONS_PROBE_FETCH_INITIAL_BACKOFF: Duration = Duration::from_millis(250);
+const PARTITIONS_PROBE_SKIP_MISSING_BLOCK_SCAN_LIMIT: u64 = 16;
+
+fn is_missing_probe_block_error(error: &anyhow::Error) -> bool {
+    let message = error.to_string().to_ascii_lowercase();
+    message.contains("not found") && message.contains("block")
+}
+
+async fn scan_forward_for_available_block<T, Op, Fut>(
+    start_block_num: u64,
+    max_skip_blocks: u64,
+    mut op: Op,
+) -> Result<Option<(u64, T)>>
+where
+    Op: FnMut(u64) -> Fut,
+    Fut: std::future::Future<Output = Result<Option<T>>>,
+{
+    for skipped_blocks in 0..=max_skip_blocks {
+        let candidate_block_num = start_block_num.saturating_add(skipped_blocks);
+        if let Some(value) = op(candidate_block_num).await? {
+            return Ok(Some((candidate_block_num, value)));
+        }
+    }
+
+    Ok(None)
+}
 
 async fn retry_probe_fetch_with_policy<T, Op, Fut>(
     block_num: u64,
     context: &str,
     max_attempts: usize,
     initial_backoff: Duration,
+    skip_missing_blocks: bool,
     probe_counter: &AtomicU64,
     mut op: Op,
 ) -> Result<Option<T>>
@@ -1174,6 +1222,16 @@ where
                 );
             }
             Err(error) if attempt >= attempts => {
+                if skip_missing_blocks && is_missing_probe_block_error(&error) {
+                    warn!(
+                        block_num,
+                        context,
+                        attempts = attempt,
+                        error = %error,
+                        "probe fetch exhausted retries for a missing block; treating it as skipped"
+                    );
+                    return Ok(None);
+                }
                 return Err(anyhow!(
                     "{context}: probe fetch for block {block_num} failed after {attempt} attempts: {error}"
                 ));
@@ -1203,6 +1261,7 @@ async fn fetch_required_block_identity(
     wait_timeout: Option<Duration>,
     context: &str,
     timestamp_scan_limit: u64,
+    skip_missing_blocks: bool,
     probe_counter: &AtomicU64,
 ) -> Result<BlockIdentity> {
     fetch_optional_probe_block_identity(
@@ -1211,6 +1270,7 @@ async fn fetch_required_block_identity(
         wait_timeout,
         context,
         timestamp_scan_limit,
+        skip_missing_blocks,
         probe_counter,
     )
     .await?
@@ -1245,24 +1305,53 @@ async fn fetch_optional_probe_block_identity(
     wait_timeout: Option<Duration>,
     context: &str,
     timestamp_scan_limit: u64,
+    skip_missing_blocks: bool,
     probe_counter: &AtomicU64,
 ) -> Result<Option<BlockIdentity>> {
-    let Some(block) = retry_probe_fetch_with_policy(
-        block_num,
-        context,
-        PARTITIONS_PROBE_FETCH_MAX_ATTEMPTS,
-        PARTITIONS_PROBE_FETCH_INITIAL_BACKOFF,
-        probe_counter,
-        || client.fetch_block_identity(block_num, wait_timeout),
-    )
-    .await?
+    let max_skip_blocks = if skip_missing_blocks {
+        PARTITIONS_PROBE_SKIP_MISSING_BLOCK_SCAN_LIMIT
+    } else {
+        0
+    };
+
+    let Some((resolved_block_num, block)) =
+        scan_forward_for_available_block(block_num, max_skip_blocks, |candidate_block_num| {
+            retry_probe_fetch_with_policy(
+                candidate_block_num,
+                context,
+                PARTITIONS_PROBE_FETCH_MAX_ATTEMPTS,
+                PARTITIONS_PROBE_FETCH_INITIAL_BACKOFF,
+                skip_missing_blocks,
+                probe_counter,
+                move || client.fetch_block_identity(candidate_block_num, wait_timeout),
+            )
+        })
+        .await?
     else {
         return Ok(None);
     };
 
+    if resolved_block_num > block_num {
+        warn!(
+            requested_block_num = block_num,
+            resolved_block_num,
+            skipped_missing_blocks = resolved_block_num.saturating_sub(block_num),
+            context,
+            "skipping missing blocks after probe retries"
+        );
+    }
+
     Ok(Some(
-        normalize_probe_block_identity(client, block, wait_timeout, context, timestamp_scan_limit, probe_counter)
-            .await?,
+        normalize_probe_block_identity(
+            client,
+            block,
+            wait_timeout,
+            context,
+            timestamp_scan_limit,
+            skip_missing_blocks,
+            probe_counter,
+        )
+        .await?,
     ))
 }
 
@@ -1272,6 +1361,7 @@ async fn normalize_probe_block_identity(
     wait_timeout: Option<Duration>,
     context: &str,
     timestamp_scan_limit: u64,
+    skip_missing_blocks: bool,
     probe_counter: &AtomicU64,
 ) -> Result<BlockIdentity> {
     if block.timestamp > 0 {
@@ -1286,6 +1376,7 @@ async fn normalize_probe_block_identity(
             context,
             PARTITIONS_PROBE_FETCH_MAX_ATTEMPTS,
             PARTITIONS_PROBE_FETCH_INITIAL_BACKOFF,
+            skip_missing_blocks,
             probe_counter,
             || client.fetch_block_identity(next_block_num, wait_timeout),
         )
@@ -1317,6 +1408,7 @@ async fn normalize_probe_block_identity(
             context,
             PARTITIONS_PROBE_FETCH_MAX_ATTEMPTS,
             PARTITIONS_PROBE_FETCH_INITIAL_BACKOFF,
+            skip_missing_blocks,
             probe_counter,
             || client.fetch_block_identity(probe_num, wait_timeout),
         )
@@ -1413,6 +1505,7 @@ async fn find_first_different_block(
     mut low_same: BlockIdentity,
     mut high_different: BlockIdentity,
     probe_timeout: Duration,
+    skip_missing_blocks: bool,
     probe_counter: &AtomicU64,
 ) -> Result<(BlockIdentity, BlockIdentity)> {
     while low_same.block_num.saturating_add(1) < high_different.block_num {
@@ -1423,11 +1516,14 @@ async fn find_first_different_block(
             Some(probe_timeout),
             "probing partition boundary",
             16,
+            skip_missing_blocks,
             probe_counter,
         )
         .await?;
 
-        if block_partition_start(partition_type, &probe)? == partition_start_ts {
+        if probe.block_num >= high_different.block_num {
+            break;
+        } else if block_partition_start(partition_type, &probe)? == partition_start_ts {
             low_same = probe;
         } else {
             high_different = probe;
@@ -1443,6 +1539,7 @@ async fn locate_partition_start(
     anchor_block: &BlockIdentity,
     lower_bound: u64,
     probe_timeout: Duration,
+    skip_missing_blocks: bool,
     probe_counter: &AtomicU64,
 ) -> Result<BlockIdentity> {
     let partition_start_ts = block_partition_start(partition_type, anchor_block)?;
@@ -1461,6 +1558,7 @@ async fn locate_partition_start(
             Some(probe_timeout),
             "backtracking partition start",
             16,
+            skip_missing_blocks,
             probe_counter,
         )
         .await?
@@ -1479,6 +1577,7 @@ async fn locate_partition_start(
                     Some(probe_timeout),
                     "backtracking partition start",
                     16,
+                    skip_missing_blocks,
                     probe_counter,
                 )
                 .await?;
@@ -1498,15 +1597,18 @@ async fn locate_partition_start(
             Some(probe_timeout),
             "refining partition start",
             16,
+            skip_missing_blocks,
             probe_counter,
         )
         .await?
         {
             Some(probe) => {
-                if block_partition_start(partition_type, &probe)? == partition_start_ts {
+                if probe.block_num >= high_same.block_num {
+                    low_exclusive = mid;
+                } else if block_partition_start(partition_type, &probe)? == partition_start_ts {
                     high_same = probe;
                 } else {
-                    low_exclusive = mid;
+                    low_exclusive = probe.block_num;
                 }
             }
             _ => {
@@ -1523,6 +1625,7 @@ async fn find_latest_available_block(
     mut low_available: BlockIdentity,
     mut high_unavailable: u64,
     probe_timeout: Duration,
+    skip_missing_blocks: bool,
     probe_counter: &AtomicU64,
 ) -> Result<BlockIdentity> {
     while low_available.block_num.saturating_add(1) < high_unavailable {
@@ -1533,6 +1636,7 @@ async fn find_latest_available_block(
             Some(probe_timeout),
             "finding latest available block",
             16,
+            skip_missing_blocks,
             probe_counter,
         )
         .await?
@@ -1550,6 +1654,7 @@ async fn locate_live_partition_span(
     partition_type: PartitionBuildType,
     start_block: &BlockIdentity,
     probe_timeout: Duration,
+    skip_missing_blocks: bool,
     probe_counter: &AtomicU64,
 ) -> Result<PartitionProbeSpan> {
     let partition_start_ts = block_partition_start(partition_type, start_block)?;
@@ -1564,6 +1669,7 @@ async fn locate_live_partition_span(
             Some(probe_timeout),
             "probing live partition span",
             16,
+            skip_missing_blocks,
             probe_counter,
         )
         .await?
@@ -1582,6 +1688,7 @@ async fn locate_live_partition_span(
                     low_same,
                     probe,
                     probe_timeout,
+                    skip_missing_blocks,
                     probe_counter,
                 )
                 .await?;
@@ -1592,9 +1699,15 @@ async fn locate_live_partition_span(
                 });
             }
             None => {
-                let latest_available =
-                    find_latest_available_block(client, low_same.clone(), candidate, probe_timeout, probe_counter)
-                        .await?;
+                let latest_available = find_latest_available_block(
+                    client,
+                    low_same.clone(),
+                    candidate,
+                    probe_timeout,
+                    skip_missing_blocks,
+                    probe_counter,
+                )
+                .await?;
 
                 if latest_available.block_num == low_same.block_num {
                     return Ok(PartitionProbeSpan {
@@ -1617,6 +1730,7 @@ async fn locate_live_partition_span(
                     low_same,
                     latest_available,
                     probe_timeout,
+                    skip_missing_blocks,
                     probe_counter,
                 )
                 .await?;
@@ -1716,6 +1830,7 @@ async fn main() -> Result<()> {
                     stop_block,
                     live,
                     poll_interval_secs,
+                    skip_missing_blocks,
                     partition,
                     output,
                     s3_bucket,
@@ -1753,6 +1868,7 @@ async fn main() -> Result<()> {
                         *stop_block,
                         *live,
                         *poll_interval_secs,
+                        *skip_missing_blocks,
                         partition,
                         output.as_deref(),
                         s3_bucket.as_deref(),
@@ -3406,6 +3522,7 @@ mod tests {
             "testing probe retry",
             3,
             Duration::from_millis(0),
+            false,
             &probe_counter,
             {
                 let attempts = Arc::clone(&attempts);
@@ -3439,6 +3556,7 @@ mod tests {
             "testing probe retry",
             3,
             Duration::from_millis(0),
+            false,
             &probe_counter,
             {
                 let attempts = Arc::clone(&attempts);
@@ -3472,6 +3590,7 @@ mod tests {
             "testing probe retry",
             3,
             Duration::from_millis(0),
+            false,
             &probe_counter,
             {
                 let attempts = Arc::clone(&attempts);
@@ -3490,5 +3609,61 @@ mod tests {
         assert!(err.to_string().contains("failed after 3 attempts"));
         assert_eq!(attempts.load(AtomicOrdering::SeqCst), 3);
         assert_eq!(probe_counter.load(Ordering::Relaxed), 3);
+    }
+
+    #[tokio::test]
+    async fn test_retry_probe_fetch_with_policy_skips_missing_block_errors() {
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let probe_counter = AtomicU64::new(0);
+        let result = retry_probe_fetch_with_policy(
+            42,
+            "testing probe retry",
+            3,
+            Duration::from_millis(0),
+            true,
+            &probe_counter,
+            {
+                let attempts = Arc::clone(&attempts);
+                move || {
+                    let attempts = Arc::clone(&attempts);
+                    async move {
+                        attempts.fetch_add(1, AtomicOrdering::SeqCst);
+                        Err::<Option<u64>, _>(anyhow!(
+                            "rpc error: code = NotFound desc = block not found in files"
+                        ))
+                    }
+                }
+            },
+        )
+        .await
+        .expect("missing block errors should be skippable");
+
+        assert_eq!(result, None);
+        assert_eq!(attempts.load(AtomicOrdering::SeqCst), 3);
+        assert_eq!(probe_counter.load(Ordering::Relaxed), 3);
+    }
+
+    #[tokio::test]
+    async fn test_scan_forward_for_available_block_returns_first_available_candidate() {
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let result = scan_forward_for_available_block(10, 3, {
+            let attempts = Arc::clone(&attempts);
+            move |candidate| {
+                let attempts = Arc::clone(&attempts);
+                async move {
+                    attempts.fetch_add(1, AtomicOrdering::SeqCst);
+                    match candidate {
+                        10 | 11 => Ok(None),
+                        12 => Ok(Some(candidate * 2)),
+                        _ => Ok(None),
+                    }
+                }
+            }
+        })
+        .await
+        .expect("scan should succeed");
+
+        assert_eq!(result, Some((12, 24)));
+        assert_eq!(attempts.load(AtomicOrdering::SeqCst), 3);
     }
 }
