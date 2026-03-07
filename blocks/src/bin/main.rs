@@ -662,6 +662,7 @@ async fn run_partitions_build(
     let stream_client = FirehoseClient::new(base_config.clone());
 
     info!(
+        version = env!("CARGO_PKG_VERSION"),
         endpoint = %endpoint,
         chain = %chain,
         mode = if live { "live" } else { "bounded" },
@@ -685,6 +686,7 @@ async fn run_partitions_build(
         partitions_index = %partitions_index,
         "resolved partitions build paths"
     );
+    log_file_metadata(&partitions_file_metadata);
 
     let shutdown = Arc::new(AtomicBool::new(false));
     let shutdown_notify = Arc::new(Notify::new());
@@ -3759,5 +3761,136 @@ mod tests {
             Some((33, 1_700_000_000))
         );
         assert!(attempts.load(AtomicOrdering::SeqCst) >= 2);
+    }
+
+    // -- build_partitions_file_metadata tests --
+
+    #[test]
+    fn test_build_partitions_file_metadata_with_endpoint_info() {
+        let ei = Some(EndpointInfo {
+            chain_name: "eth-mainnet".to_string(),
+            chain_name_aliases: vec!["eth".to_string(), "mainnet".to_string()],
+            first_streamable_block_num: 0,
+            first_streamable_block_id: "0xd4e56740".to_string(),
+            block_id_encoding: 2,
+            block_features: vec!["base".to_string(), "extended".to_string()],
+        });
+        let meta =
+            build_partitions_file_metadata("https://example.com", "eth-mainnet", "date", &ei);
+
+        assert_eq!(
+            find_meta(&meta, "firehose-parquet.version"),
+            Some(env!("CARGO_PKG_VERSION"))
+        );
+        assert_eq!(find_meta(&meta, "firehose-parquet.partition"), Some("date"));
+        assert_eq!(
+            find_meta(&meta, "firehose-parquet.endpoint"),
+            Some("https://example.com")
+        );
+        assert_eq!(
+            find_meta(&meta, "firehose-parquet.chain_name"),
+            Some("eth-mainnet")
+        );
+        assert_eq!(
+            find_meta(&meta, "firehose-parquet.chain_name_aliases"),
+            Some("eth,mainnet")
+        );
+        assert_eq!(
+            find_meta(&meta, "firehose-parquet.first_streamable_block_id"),
+            Some("0xd4e56740")
+        );
+        assert_eq!(
+            find_meta(&meta, "firehose-parquet.block_features"),
+            Some("base,extended")
+        );
+        assert_eq!(
+            find_meta(&meta, "firehose-parquet.compression"),
+            Some("uncompressed")
+        );
+        assert_eq!(
+            find_meta(&meta, "firehose-parquet.block_range_size"),
+            Some("0")
+        );
+    }
+
+    #[test]
+    fn test_build_partitions_file_metadata_no_endpoint_info() {
+        let meta =
+            build_partitions_file_metadata("https://example.com", "solana-mainnet", "hour", &None);
+
+        assert_eq!(
+            find_meta(&meta, "firehose-parquet.version"),
+            Some(env!("CARGO_PKG_VERSION"))
+        );
+        assert_eq!(
+            find_meta(&meta, "firehose-parquet.partition"),
+            Some("hour")
+        );
+        assert_eq!(
+            find_meta(&meta, "firehose-parquet.endpoint"),
+            Some("https://example.com")
+        );
+        // Falls back to the chain_override value when no endpoint_info
+        assert_eq!(
+            find_meta(&meta, "firehose-parquet.chain_name"),
+            Some("solana-mainnet")
+        );
+        assert_eq!(find_meta(&meta, "firehose-parquet.chain_name_aliases"), None);
+        assert_eq!(
+            find_meta(&meta, "firehose-parquet.first_streamable_block_id"),
+            None
+        );
+        assert_eq!(
+            find_meta(&meta, "firehose-parquet.compression"),
+            Some("uncompressed")
+        );
+        assert_eq!(
+            find_meta(&meta, "firehose-parquet.block_range_size"),
+            Some("0")
+        );
+    }
+
+    #[test]
+    fn test_build_partitions_file_metadata_chain_name_from_endpoint_info_overrides_arg() {
+        // endpoint_info.chain_name takes precedence over the chain arg
+        let ei = Some(EndpointInfo {
+            chain_name: "polygon".to_string(),
+            chain_name_aliases: vec![],
+            first_streamable_block_num: 0,
+            first_streamable_block_id: String::new(),
+            block_id_encoding: 0,
+            block_features: vec![],
+        });
+        let meta = build_partitions_file_metadata(
+            "https://example.com",
+            "polygon-override",
+            "date",
+            &ei,
+        );
+
+        assert_eq!(
+            find_meta(&meta, "firehose-parquet.chain_name"),
+            Some("polygon")
+        );
+    }
+
+    #[test]
+    fn test_build_partitions_file_metadata_empty_chain_name_falls_back_to_arg() {
+        // When endpoint_info.chain_name is empty, fall back to the chain arg
+        let ei = Some(EndpointInfo {
+            chain_name: String::new(),
+            chain_name_aliases: vec![],
+            first_streamable_block_num: 0,
+            first_streamable_block_id: String::new(),
+            block_id_encoding: 0,
+            block_features: vec![],
+        });
+        let meta =
+            build_partitions_file_metadata("https://example.com", "eth-mainnet", "date", &ei);
+
+        assert_eq!(
+            find_meta(&meta, "firehose-parquet.chain_name"),
+            Some("eth-mainnet")
+        );
     }
 }
