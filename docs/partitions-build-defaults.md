@@ -18,6 +18,8 @@ Bounded-mode resolution order:
 
 This lets operators resume partition index generation from an existing artifact directory without manually looking up the last written block.
 
+For bounded builds, the first emitted row may expand downward from the requested seed block so that the stored row begins at the exact first block in that partition.
+
 ## Live Mode
 
 `fireparq partitions build --live` is the intended follow-up to a bounded backfill.
@@ -27,6 +29,7 @@ In live mode:
 - `partitions.parquet` is the restart anchor
 - the process resumes from the latest covered frontier already stored in that file
 - `--stop-block` is not used
+- `--poll-interval-secs` controls how long the process waits between sparse live probes
 - no `partitions.lookup.json` sidecar is involved
 
 The public artifact remains one stable canonical path:
@@ -56,3 +59,18 @@ In short:
 - ingestion may stream indefinitely
 - bounded `partitions build` must describe a closed coverage interval
 - `partitions build --live` keeps extending the canonical artifact from its stored frontier
+
+Bounded mode uses `--start-block` / `--stop-block` as discovery seeds, then expands to the enclosing partition boundaries so each emitted row is exact. If the trailing boundary has not happened yet, bounded mode should fail instead of writing an inexact terminal row.
+
+## Sparse Probe Methodology
+
+`partitions build` should not stream every block just to inspect timestamps.
+
+For both bounded and live mode, the intended implementation is:
+
+- fetch individual finalized block identities as sparse probes
+- use exponential search to jump ahead within a partition
+- use binary search to find the exact first block of the next partition
+- write contiguous `[start_block, end_block)` rows to `partitions.parquet`
+
+This keeps the command lightweight while still producing exact partition boundaries.

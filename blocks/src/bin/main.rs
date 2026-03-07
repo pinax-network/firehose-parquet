@@ -8,9 +8,9 @@ use firehose_parquet::cli::{
     read_partitions_build_rows, resolve_cursor_template, resolve_partition_bounds_from_index,
     resolve_partition_command, resolve_partition_window_bounds_from_index, resolve_s3_output_root,
     shard_partitions_from_index, validate_partitions_index, write_partitions_index, AwsConfig,
-    Commands, CommonArgs, PartitionBoundsRequest, PartitionBuildResult, PartitionIndexBuilder,
-    PartitionListRequest, PartitionResolveOptions, PartitionSelectionRequest,
-    PartitionShardRequest, PartitionValidateRequest, PartitionsCommands,
+    Commands, CommonArgs, PartitionBoundsRequest, PartitionBuildResult, PartitionBuildType,
+    PartitionIndexBuilder, PartitionListRequest, PartitionResolveOptions,
+    PartitionSelectionRequest, PartitionShardRequest, PartitionValidateRequest, PartitionsCommands,
 };
 use firehose_parquet::config::{BlockMetadata, Compression, Config, Partition};
 use firehose_parquet::cursor::{CursorLocation, CursorState};
@@ -332,6 +332,7 @@ async fn run_partitions_build(
     start_block: Option<u64>,
     stop_block: Option<u64>,
     live: bool,
+    poll_interval_secs: u64,
     partition_types_spec: &str,
     output: Option<&str>,
     s3_bucket: Option<&str>,
@@ -339,11 +340,17 @@ async fn run_partitions_build(
     aws: &AwsConfig,
 ) -> Result<PartitionBuildResult> {
     const LIVE_PARTITIONS_CHECKPOINT_INTERVAL: Duration = Duration::from_secs(30);
+    const PARTITIONS_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
     if !live && stop_block.is_none() {
         return Err(anyhow!("--stop-block is required unless --live is set"));
     }
     if live && stop_block.is_some() {
         return Err(anyhow!("--stop-block is incompatible with --live"));
+    }
+    if live && poll_interval_secs == 0 {
+        return Err(anyhow!(
+            "--poll-interval-secs must be greater than 0 when --live is set"
+        ));
     }
 
     let output_root = resolve_s3_output_root(output, s3_bucket)?;
@@ -390,7 +397,8 @@ async fn run_partitions_build(
         })?;
 
     let partition_types = parse_partition_build_types(partition_types_spec)?;
-    let partition_label = partition_types[0].to_string();
+    let partition_type = partition_types[0];
+    let partition_label = partition_type.to_string();
     let partitions_index = build_partitions_index_path(&output_root, &chain);
     let chain_output_root = build_partitions_output_root(&output_root, &chain);
 
@@ -524,10 +532,21 @@ async fn run_partitions_build(
         }
     }
 
-    let mut stream_config = base_config.clone();
-    stream_config.start_block = Some(effective_start_block);
-    stream_config.stop_block = Some(stop_block.unwrap_or(0));
-    let stream_client = FirehoseClient::new(stream_config);
+    let stream_client = FirehoseClient::new(base_config.clone());
+
+    info!(
+        mode = if live { "live" } else { "bounded" },
+        chain = %chain,
+        partition = %partition_label,
+        partitions_index = %partitions_index,
+        start_block = effective_start_block,
+        stop_block = stop_block,
+        poll_interval_secs,
+        resumed = should_resume_from_existing && resumed_from_block.is_some(),
+        resumed_from_block = resumed_from_block,
+        existing_rows = existing_rows.len(),
+        "starting sparse partitions build"
+    );
 
     let shutdown = Arc::new(AtomicBool::new(false));
     if live {
@@ -556,47 +575,113 @@ async fn run_partitions_build(
         });
     }
 
-    let mut last_checkpoint_at = Instant::now();
-    let mut last_finalized_row_count = builder.finalized_row_count();
+    let rows = if live {
+        let poll_interval = Duration::from_secs(poll_interval_secs);
+        let mut last_checkpoint_at = Instant::now();
+        let mut last_checkpoint_frontier = builder.current_frontier();
 
-    let stream_result = stream_client
-        .stream_blocks(None, |_, _, _, block, _| {
-            builder.observe_block(&block)?;
-
-            if live {
-                let should_checkpoint = builder.finalized_row_count() > last_finalized_row_count
-                    || last_checkpoint_at.elapsed() >= LIVE_PARTITIONS_CHECKPOINT_INTERVAL;
-                if should_checkpoint {
-                    let frontier = builder.current_frontier().ok_or_else(|| {
-                        anyhow!("live partition build is missing a checkpoint frontier")
-                    })?;
-                    let rows = builder.snapshot(frontier)?;
-                    write_partitions_index(&partitions_index, &rows, Some(aws))?;
-                    last_checkpoint_at = Instant::now();
-                    last_finalized_row_count = builder.finalized_row_count();
-                }
-
-                if shutdown.load(Ordering::SeqCst) {
-                    return Err(anyhow!("__shutdown__"));
-                }
+        loop {
+            if shutdown.load(Ordering::SeqCst) {
+                break;
             }
 
-            Ok(())
-        })
-        .await;
+            let frontier = builder.current_frontier().unwrap_or(effective_start_block);
+            let maybe_frontier_block = stream_client
+                .fetch_block_identity(frontier, Some(poll_interval))
+                .await?;
 
-    let is_shutdown = match &stream_result {
-        Err(err) if live && format!("{err}").contains("__shutdown__") => true,
-        _ => false,
-    };
+            let Some(mut current_block) = maybe_frontier_block else {
+                info!(
+                    frontier,
+                    poll_interval_secs, "no new finalized blocks available yet; polling again"
+                );
 
-    let rows = if live {
+                if builder.has_rows()
+                    && last_checkpoint_at.elapsed() >= LIVE_PARTITIONS_CHECKPOINT_INTERVAL
+                {
+                    let checkpoint_frontier = builder.current_frontier().ok_or_else(|| {
+                        anyhow!("live partition build is missing a checkpoint frontier")
+                    })?;
+                    let rows = builder.snapshot(checkpoint_frontier)?;
+                    write_partitions_index(&partitions_index, &rows, Some(aws))?;
+                    info!(
+                        partitions_index = %partitions_index,
+                        frontier = checkpoint_frontier,
+                        row_count = rows.len(),
+                        "checkpointed live partitions index"
+                    );
+                    last_checkpoint_at = Instant::now();
+                    last_checkpoint_frontier = Some(checkpoint_frontier);
+                }
+                continue;
+            };
+
+            info!(
+                frontier = current_block.block_num,
+                timestamp = current_block.timestamp,
+                "processing finalized blocks via sparse probes"
+            );
+
+            loop {
+                builder.observe_block(&current_block)?;
+                let span = locate_live_partition_span(
+                    &stream_client,
+                    partition_type,
+                    &current_block,
+                    PARTITIONS_PROBE_TIMEOUT,
+                )
+                .await?;
+
+                if span.last_same.block_num > current_block.block_num {
+                    builder.observe_block(&span.last_same)?;
+                }
+
+                if let Some(next_boundary) = span.next_boundary {
+                    info!(
+                        current_partition_start = current_block.block_num,
+                        current_partition_end = next_boundary.block_num,
+                        next_partition_start = next_boundary.block_num,
+                        "detected partition rollover"
+                    );
+                    builder.observe_block(&next_boundary)?;
+                    current_block = next_boundary;
+                    continue;
+                }
+
+                break;
+            }
+
+            let checkpoint_frontier = builder
+                .current_frontier()
+                .ok_or_else(|| anyhow!("live partition build is missing a checkpoint frontier"))?;
+            if last_checkpoint_frontier != Some(checkpoint_frontier)
+                || last_checkpoint_at.elapsed() >= LIVE_PARTITIONS_CHECKPOINT_INTERVAL
+            {
+                let rows = builder.snapshot(checkpoint_frontier)?;
+                write_partitions_index(&partitions_index, &rows, Some(aws))?;
+                info!(
+                    partitions_index = %partitions_index,
+                    frontier = checkpoint_frontier,
+                    row_count = rows.len(),
+                    "checkpointed live partitions index"
+                );
+                last_checkpoint_at = Instant::now();
+                last_checkpoint_frontier = Some(checkpoint_frontier);
+            }
+        }
+
         if builder.has_rows() {
             let frontier = builder.current_frontier().ok_or_else(|| {
                 anyhow!("live partition build is missing a final checkpoint frontier")
             })?;
             let rows = builder.snapshot(frontier)?;
             write_partitions_index(&partitions_index, &rows, Some(aws))?;
+            info!(
+                partitions_index = %partitions_index,
+                frontier,
+                row_count = rows.len(),
+                "wrote final live partitions checkpoint"
+            );
             rows
         } else if !existing_rows.is_empty() {
             existing_rows.clone()
@@ -605,16 +690,86 @@ async fn run_partitions_build(
         }
     } else {
         let stop_block = stop_block.expect("validated above");
-        let rows = builder.finish(stop_block)?;
+        let seed_block = fetch_required_block_identity(
+            &stream_client,
+            effective_start_block,
+            Some(PARTITIONS_PROBE_TIMEOUT),
+            "starting partitions build",
+        )
+        .await?;
+        let lower_bound = endpoint_info
+            .as_ref()
+            .map(|info| info.first_streamable_block_num)
+            .unwrap_or(0);
+        let mut current_block = locate_partition_start(
+            &stream_client,
+            partition_type,
+            &seed_block,
+            lower_bound,
+            PARTITIONS_PROBE_TIMEOUT,
+        )
+        .await?;
+        if current_block.block_num != seed_block.block_num {
+            info!(
+                requested_start_block = effective_start_block,
+                partition_start_block = current_block.block_num,
+                "expanded bounded build start to the enclosing partition boundary"
+            );
+        }
+
+        let final_end_block = loop {
+            builder.observe_block(&current_block)?;
+            let span = locate_live_partition_span(
+                &stream_client,
+                partition_type,
+                &current_block,
+                PARTITIONS_PROBE_TIMEOUT,
+            )
+            .await?;
+
+            if span.last_same.block_num > current_block.block_num {
+                builder.observe_block(&span.last_same)?;
+            }
+
+            match span.next_boundary {
+                Some(next_boundary) if next_boundary.block_num < stop_block => {
+                    info!(
+                        current_partition_start = current_block.block_num,
+                        current_partition_end = next_boundary.block_num,
+                        next_partition_start = next_boundary.block_num,
+                        "finalized sparse partition span"
+                    );
+                    builder.observe_block(&next_boundary)?;
+                    current_block = next_boundary;
+                }
+                Some(next_boundary) => {
+                    info!(
+                        current_partition_start = current_block.block_num,
+                        current_partition_end = next_boundary.block_num,
+                        requested_stop_block = stop_block,
+                        "expanded bounded build stop to the enclosing partition boundary"
+                    );
+                    break next_boundary.block_num;
+                }
+                None => {
+                    return Err(anyhow!(
+                        "bounded partitions build could not determine the exact closing boundary for the partition containing block {}; wait for the next partition to begin or use --live",
+                        current_block.block_num
+                    ));
+                }
+            }
+        };
+
+        let rows = builder.finish(final_end_block)?;
         write_partitions_index(&partitions_index, &rows, Some(aws))?;
+        info!(
+            partitions_index = %partitions_index,
+            row_count = rows.len(),
+            stop_block = final_end_block,
+            "completed bounded sparse partitions build"
+        );
         rows
     };
-
-    if let Err(err) = stream_result {
-        if !is_shutdown {
-            return Err(err);
-        }
-    }
 
     let result_stop_block = rows
         .iter()
@@ -636,6 +791,211 @@ async fn run_partitions_build(
         resumed: should_resume_from_existing && resumed_from_block.is_some(),
         resumed_from_block,
     })
+}
+
+#[derive(Debug, Clone)]
+struct PartitionProbeSpan {
+    last_same: BlockIdentity,
+    next_boundary: Option<BlockIdentity>,
+}
+
+async fn fetch_required_block_identity(
+    client: &FirehoseClient,
+    block_num: u64,
+    wait_timeout: Option<Duration>,
+    context: &str,
+) -> Result<BlockIdentity> {
+    client
+        .fetch_block_identity(block_num, wait_timeout)
+        .await?
+        .ok_or_else(|| {
+            anyhow!(
+                "{context}: block {block_num} is not currently available; lower the range or use --live"
+            )
+        })
+}
+
+fn block_partition_start(partition_type: PartitionBuildType, block: &BlockIdentity) -> Result<i64> {
+    partition_type.round_timestamp(block.timestamp)
+}
+
+async fn find_first_different_block(
+    client: &FirehoseClient,
+    partition_type: PartitionBuildType,
+    partition_start_ts: i64,
+    mut low_same: BlockIdentity,
+    mut high_different: BlockIdentity,
+    probe_timeout: Duration,
+) -> Result<(BlockIdentity, BlockIdentity)> {
+    while low_same.block_num.saturating_add(1) < high_different.block_num {
+        let mid = low_same.block_num + (high_different.block_num - low_same.block_num) / 2;
+        let probe = fetch_required_block_identity(
+            client,
+            mid,
+            Some(probe_timeout),
+            "probing partition boundary",
+        )
+        .await?;
+
+        if block_partition_start(partition_type, &probe)? == partition_start_ts {
+            low_same = probe;
+        } else {
+            high_different = probe;
+        }
+    }
+
+    Ok((low_same, high_different))
+}
+
+async fn locate_partition_start(
+    client: &FirehoseClient,
+    partition_type: PartitionBuildType,
+    anchor_block: &BlockIdentity,
+    lower_bound: u64,
+    probe_timeout: Duration,
+) -> Result<BlockIdentity> {
+    let partition_start_ts = block_partition_start(partition_type, anchor_block)?;
+    let mut high_same = anchor_block.clone();
+    let mut step = 1u64;
+
+    let mut low_exclusive = loop {
+        if high_same.block_num <= lower_bound {
+            return Ok(high_same);
+        }
+
+        let candidate = high_same.block_num.saturating_sub(step).max(lower_bound);
+        match client
+            .fetch_block_identity(candidate, Some(probe_timeout))
+            .await?
+        {
+            Some(probe) if block_partition_start(partition_type, &probe)? == partition_start_ts => {
+                high_same = probe;
+                if candidate == lower_bound {
+                    return Ok(high_same);
+                }
+                step = step.saturating_mul(2).max(1);
+            }
+            Some(probe) => {
+                break probe.block_num;
+            }
+            None => {
+                break candidate;
+            }
+        }
+    };
+
+    while low_exclusive.saturating_add(1) < high_same.block_num {
+        let mid = low_exclusive + (high_same.block_num - low_exclusive) / 2;
+        match client
+            .fetch_block_identity(mid, Some(probe_timeout))
+            .await?
+        {
+            Some(probe) if block_partition_start(partition_type, &probe)? == partition_start_ts => {
+                high_same = probe;
+            }
+            _ => {
+                low_exclusive = mid;
+            }
+        }
+    }
+
+    Ok(high_same)
+}
+
+async fn find_latest_available_block(
+    client: &FirehoseClient,
+    mut low_available: BlockIdentity,
+    mut high_unavailable: u64,
+    probe_timeout: Duration,
+) -> Result<BlockIdentity> {
+    while low_available.block_num.saturating_add(1) < high_unavailable {
+        let mid = low_available.block_num + (high_unavailable - low_available.block_num) / 2;
+        match client
+            .fetch_block_identity(mid, Some(probe_timeout))
+            .await?
+        {
+            Some(probe) => low_available = probe,
+            None => high_unavailable = mid,
+        }
+    }
+
+    Ok(low_available)
+}
+
+async fn locate_live_partition_span(
+    client: &FirehoseClient,
+    partition_type: PartitionBuildType,
+    start_block: &BlockIdentity,
+    probe_timeout: Duration,
+) -> Result<PartitionProbeSpan> {
+    let partition_start_ts = block_partition_start(partition_type, start_block)?;
+    let mut low_same = start_block.clone();
+    let mut step = 1u64;
+
+    loop {
+        let candidate = low_same.block_num.saturating_add(step);
+        match client
+            .fetch_block_identity(candidate, Some(probe_timeout))
+            .await?
+        {
+            Some(probe) => {
+                if block_partition_start(partition_type, &probe)? == partition_start_ts {
+                    low_same = probe;
+                    step = step.saturating_mul(2).max(1);
+                    continue;
+                }
+
+                let (last_same, next_boundary) = find_first_different_block(
+                    client,
+                    partition_type,
+                    partition_start_ts,
+                    low_same,
+                    probe,
+                    probe_timeout,
+                )
+                .await?;
+
+                return Ok(PartitionProbeSpan {
+                    last_same,
+                    next_boundary: Some(next_boundary),
+                });
+            }
+            None => {
+                let latest_available =
+                    find_latest_available_block(client, low_same.clone(), candidate, probe_timeout)
+                        .await?;
+
+                if latest_available.block_num == low_same.block_num {
+                    return Ok(PartitionProbeSpan {
+                        last_same: low_same,
+                        next_boundary: None,
+                    });
+                }
+
+                if block_partition_start(partition_type, &latest_available)? == partition_start_ts {
+                    return Ok(PartitionProbeSpan {
+                        last_same: latest_available,
+                        next_boundary: None,
+                    });
+                }
+
+                let (last_same, next_boundary) = find_first_different_block(
+                    client,
+                    partition_type,
+                    partition_start_ts,
+                    low_same,
+                    latest_available,
+                    probe_timeout,
+                )
+                .await?;
+
+                return Ok(PartitionProbeSpan {
+                    last_same,
+                    next_boundary: Some(next_boundary),
+                });
+            }
+        }
+    }
 }
 
 /// Check if the endpoint supports `extended` block features.
@@ -723,6 +1083,7 @@ async fn main() -> Result<()> {
                     start_block,
                     stop_block,
                     live,
+                    poll_interval_secs,
                     partition,
                     output,
                     s3_bucket,
@@ -759,6 +1120,7 @@ async fn main() -> Result<()> {
                         *start_block,
                         *stop_block,
                         *live,
+                        *poll_interval_secs,
                         partition,
                         output.as_deref(),
                         s3_bucket.as_deref(),
