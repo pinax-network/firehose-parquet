@@ -22,7 +22,7 @@ use firehose_parquet::traits::{decode_id_bytes, fork_step_name, BlockIdentity, B
 use firehose_parquet::writer::{OutputWriter, ParquetFileMetadata};
 use object_store::ObjectStore;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::Notify;
@@ -715,6 +715,8 @@ async fn run_partitions_build(
         });
     }
 
+    let probe_counter = AtomicU64::new(0);
+
     let rows = if live {
         let poll_interval = Duration::from_secs(poll_interval_secs);
         let mut checkpoint_state = PartitionsCheckpointState::default();
@@ -734,6 +736,7 @@ async fn run_partitions_build(
                     Some(poll_interval),
                     "polling live frontier",
                     PROBE_TIMESTAMP_SCAN_LIMIT,
+                    &probe_counter,
                 ),
             )
             .await?
@@ -769,6 +772,7 @@ async fn run_partitions_build(
                         &partitions_file_metadata,
                         &mut checkpoint_state,
                         "checkpointed live partitions index",
+                        &probe_counter,
                     )?;
                 }
                 continue;
@@ -798,6 +802,7 @@ async fn run_partitions_build(
                         &partitions_file_metadata,
                         &mut checkpoint_state,
                         "checkpointed live partitions index",
+                        &probe_counter,
                     )?;
                 }
                 let Some(span) = await_live_interruptible(
@@ -808,6 +813,7 @@ async fn run_partitions_build(
                         partition_type,
                         &current_block,
                         PARTITIONS_PROBE_TIMEOUT,
+                        &probe_counter,
                     ),
                 )
                 .await?
@@ -851,6 +857,7 @@ async fn run_partitions_build(
                     &partitions_file_metadata,
                     &mut checkpoint_state,
                     "checkpointed live partitions index",
+                    &probe_counter,
                 )?;
             }
         }
@@ -863,6 +870,7 @@ async fn run_partitions_build(
                 &partitions_file_metadata,
                 &mut checkpoint_state,
                 "wrote final live partitions checkpoint",
+                &probe_counter,
             )?;
             rows
         } else if !existing_rows.is_empty() {
@@ -879,6 +887,7 @@ async fn run_partitions_build(
             Some(PARTITIONS_PROBE_TIMEOUT),
             "starting partitions build",
             PROBE_TIMESTAMP_SCAN_LIMIT,
+            &probe_counter,
         )
         .await?;
         let lower_bound = endpoint_info
@@ -891,6 +900,7 @@ async fn run_partitions_build(
             &seed_block,
             lower_bound,
             PARTITIONS_PROBE_TIMEOUT,
+            &probe_counter,
         )
         .await?;
         if current_block.block_num != seed_block.block_num {
@@ -916,6 +926,7 @@ async fn run_partitions_build(
                     &partitions_file_metadata,
                     &mut checkpoint_state,
                     "checkpointed bounded partitions index",
+                    &probe_counter,
                 )?;
             }
             let span = locate_live_partition_span(
@@ -923,6 +934,7 @@ async fn run_partitions_build(
                 partition_type,
                 &current_block,
                 PARTITIONS_PROBE_TIMEOUT,
+                &probe_counter,
             )
             .await?;
 
@@ -952,6 +964,7 @@ async fn run_partitions_build(
                             &partitions_file_metadata,
                             &mut checkpoint_state,
                             "checkpointed bounded partitions index",
+                            &probe_counter,
                         )?;
                     }
                     current_block = next_boundary;
@@ -982,10 +995,17 @@ async fn run_partitions_build(
             Some(aws),
             Some(&partitions_file_metadata),
         )?;
+        let total_probes = probe_counter.load(Ordering::Relaxed);
         info!(
             partitions_index = %partitions_index,
             row_count = rows.len(),
             stop_block = final_end_block,
+            total_partitions = checkpoint_state.total_rollovers,
+            partitions_per_hour = format!("{:.1}", checkpoint_state.partitions_per_hour()),
+            total_probes,
+            probes_per_sec = format!("{:.1}", checkpoint_state.probes_per_sec(total_probes)),
+            probes_per_partition = format!("{:.1}", checkpoint_state.probes_per_partition(total_probes)),
+            elapsed_secs = checkpoint_state.started_at.elapsed().as_secs(),
             "completed bounded sparse partitions build"
         );
         rows
@@ -1019,16 +1039,54 @@ struct PartitionProbeSpan {
     next_boundary: Option<BlockIdentity>,
 }
 
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Clone)]
 struct PartitionsCheckpointState {
+    started_at: Instant,
     last_checkpoint_at: Option<Instant>,
     last_checkpoint_frontier: Option<u64>,
     rollovers_since_checkpoint: usize,
+    total_rollovers: usize,
+}
+
+impl Default for PartitionsCheckpointState {
+    fn default() -> Self {
+        Self {
+            started_at: Instant::now(),
+            last_checkpoint_at: None,
+            last_checkpoint_frontier: None,
+            rollovers_since_checkpoint: 0,
+            total_rollovers: 0,
+        }
+    }
 }
 
 impl PartitionsCheckpointState {
     fn record_rollover(&mut self) {
         self.rollovers_since_checkpoint = self.rollovers_since_checkpoint.saturating_add(1);
+        self.total_rollovers = self.total_rollovers.saturating_add(1);
+    }
+
+    fn partitions_per_hour(&self) -> f64 {
+        let elapsed_secs = self.started_at.elapsed().as_secs_f64();
+        if elapsed_secs < 1.0 {
+            return 0.0;
+        }
+        (self.total_rollovers as f64) / (elapsed_secs / 3600.0)
+    }
+
+    fn probes_per_sec(&self, total_probes: u64) -> f64 {
+        let elapsed_secs = self.started_at.elapsed().as_secs_f64();
+        if elapsed_secs < 1.0 {
+            return 0.0;
+        }
+        total_probes as f64 / elapsed_secs
+    }
+
+    fn probes_per_partition(&self, total_probes: u64) -> f64 {
+        if self.total_rollovers == 0 {
+            return 0.0;
+        }
+        total_probes as f64 / self.total_rollovers as f64
     }
 
     fn should_checkpoint(
@@ -1074,18 +1132,26 @@ fn checkpoint_partitions_builder(
     file_metadata: &ParquetFileMetadata,
     checkpoint_state: &mut PartitionsCheckpointState,
     checkpoint_mode: &str,
+    probe_counter: &AtomicU64,
 ) -> Result<Vec<firehose_parquet::cli::PartitionBuildRow>> {
     let frontier = builder
         .current_frontier()
         .ok_or_else(|| anyhow!("partition build is missing a checkpoint frontier"))?;
     let rows = builder.snapshot(frontier)?;
     write_partitions_index_with_metadata(partitions_index, &rows, aws, Some(file_metadata))?;
+    let total_probes = probe_counter.load(Ordering::Relaxed);
     info!(
         checkpoint_mode,
         partitions_index = %partitions_index,
         frontier,
         row_count = rows.len(),
         rollovers_since_checkpoint = checkpoint_state.rollovers_since_checkpoint,
+        total_partitions = checkpoint_state.total_rollovers,
+        partitions_per_hour = format!("{:.1}", checkpoint_state.partitions_per_hour()),
+        total_probes,
+        probes_per_sec = format!("{:.1}", checkpoint_state.probes_per_sec(total_probes)),
+        probes_per_partition = format!("{:.1}", checkpoint_state.probes_per_partition(total_probes)),
+        elapsed_secs = checkpoint_state.started_at.elapsed().as_secs(),
         "checkpointed partitions index"
     );
     checkpoint_state.record_checkpoint(frontier);
@@ -1100,6 +1166,7 @@ async fn retry_probe_fetch_with_policy<T, Op, Fut>(
     context: &str,
     max_attempts: usize,
     initial_backoff: Duration,
+    probe_counter: &AtomicU64,
     mut op: Op,
 ) -> Result<Option<T>>
 where
@@ -1111,6 +1178,7 @@ where
     let mut backoff = initial_backoff;
 
     loop {
+        probe_counter.fetch_add(1, Ordering::Relaxed);
         match op().await {
             Ok(Some(value)) => return Ok(Some(value)),
             Ok(None) if attempt >= attempts => {
@@ -1162,6 +1230,7 @@ async fn fetch_required_block_identity(
     wait_timeout: Option<Duration>,
     context: &str,
     timestamp_scan_limit: u64,
+    probe_counter: &AtomicU64,
 ) -> Result<BlockIdentity> {
     fetch_optional_probe_block_identity(
         client,
@@ -1169,6 +1238,7 @@ async fn fetch_required_block_identity(
         wait_timeout,
         context,
         timestamp_scan_limit,
+        probe_counter,
     )
     .await?
         .ok_or_else(|| {
@@ -1202,12 +1272,14 @@ async fn fetch_optional_probe_block_identity(
     wait_timeout: Option<Duration>,
     context: &str,
     timestamp_scan_limit: u64,
+    probe_counter: &AtomicU64,
 ) -> Result<Option<BlockIdentity>> {
     let Some(block) = retry_probe_fetch_with_policy(
         block_num,
         context,
         PARTITIONS_PROBE_FETCH_MAX_ATTEMPTS,
         PARTITIONS_PROBE_FETCH_INITIAL_BACKOFF,
+        probe_counter,
         || client.fetch_block_identity(block_num, wait_timeout),
     )
     .await?
@@ -1216,7 +1288,7 @@ async fn fetch_optional_probe_block_identity(
     };
 
     Ok(Some(
-        normalize_probe_block_identity(client, block, wait_timeout, context, timestamp_scan_limit)
+        normalize_probe_block_identity(client, block, wait_timeout, context, timestamp_scan_limit, probe_counter)
             .await?,
     ))
 }
@@ -1227,6 +1299,7 @@ async fn normalize_probe_block_identity(
     wait_timeout: Option<Duration>,
     context: &str,
     timestamp_scan_limit: u64,
+    probe_counter: &AtomicU64,
 ) -> Result<BlockIdentity> {
     if block.timestamp > 0 {
         return Ok(block);
@@ -1239,6 +1312,7 @@ async fn normalize_probe_block_identity(
             context,
             PARTITIONS_PROBE_FETCH_MAX_ATTEMPTS,
             PARTITIONS_PROBE_FETCH_INITIAL_BACKOFF,
+            probe_counter,
             || client.fetch_block_identity(next_block_num, wait_timeout),
         )
         .await?
@@ -1297,6 +1371,7 @@ async fn find_first_different_block(
     mut low_same: BlockIdentity,
     mut high_different: BlockIdentity,
     probe_timeout: Duration,
+    probe_counter: &AtomicU64,
 ) -> Result<(BlockIdentity, BlockIdentity)> {
     while low_same.block_num.saturating_add(1) < high_different.block_num {
         let mid = low_same.block_num + (high_different.block_num - low_same.block_num) / 2;
@@ -1306,6 +1381,7 @@ async fn find_first_different_block(
             Some(probe_timeout),
             "probing partition boundary",
             16,
+            probe_counter,
         )
         .await?;
 
@@ -1325,6 +1401,7 @@ async fn locate_partition_start(
     anchor_block: &BlockIdentity,
     lower_bound: u64,
     probe_timeout: Duration,
+    probe_counter: &AtomicU64,
 ) -> Result<BlockIdentity> {
     let partition_start_ts = block_partition_start(partition_type, anchor_block)?;
     let mut high_same = anchor_block.clone();
@@ -1342,6 +1419,7 @@ async fn locate_partition_start(
             Some(probe_timeout),
             "backtracking partition start",
             16,
+            probe_counter,
         )
         .await?
         {
@@ -1359,6 +1437,7 @@ async fn locate_partition_start(
                     Some(probe_timeout),
                     "backtracking partition start",
                     16,
+                    probe_counter,
                 )
                 .await?;
                 break probe.block_num;
@@ -1377,6 +1456,7 @@ async fn locate_partition_start(
             Some(probe_timeout),
             "refining partition start",
             16,
+            probe_counter,
         )
         .await?
         {
@@ -1401,6 +1481,7 @@ async fn find_latest_available_block(
     mut low_available: BlockIdentity,
     mut high_unavailable: u64,
     probe_timeout: Duration,
+    probe_counter: &AtomicU64,
 ) -> Result<BlockIdentity> {
     while low_available.block_num.saturating_add(1) < high_unavailable {
         let mid = low_available.block_num + (high_unavailable - low_available.block_num) / 2;
@@ -1410,6 +1491,7 @@ async fn find_latest_available_block(
             Some(probe_timeout),
             "finding latest available block",
             16,
+            probe_counter,
         )
         .await?
         {
@@ -1426,6 +1508,7 @@ async fn locate_live_partition_span(
     partition_type: PartitionBuildType,
     start_block: &BlockIdentity,
     probe_timeout: Duration,
+    probe_counter: &AtomicU64,
 ) -> Result<PartitionProbeSpan> {
     let partition_start_ts = block_partition_start(partition_type, start_block)?;
     let mut low_same = start_block.clone();
@@ -1439,6 +1522,7 @@ async fn locate_live_partition_span(
             Some(probe_timeout),
             "probing live partition span",
             16,
+            probe_counter,
         )
         .await?
         {
@@ -1456,6 +1540,7 @@ async fn locate_live_partition_span(
                     low_same,
                     probe,
                     probe_timeout,
+                    probe_counter,
                 )
                 .await?;
 
@@ -1466,7 +1551,7 @@ async fn locate_live_partition_span(
             }
             None => {
                 let latest_available =
-                    find_latest_available_block(client, low_same.clone(), candidate, probe_timeout)
+                    find_latest_available_block(client, low_same.clone(), candidate, probe_timeout, probe_counter)
                         .await?;
 
                 if latest_available.block_num == low_same.block_num {
@@ -1490,6 +1575,7 @@ async fn locate_live_partition_span(
                     low_same,
                     latest_available,
                     probe_timeout,
+                    probe_counter,
                 )
                 .await?;
 
@@ -3272,11 +3358,13 @@ mod tests {
     #[tokio::test]
     async fn test_retry_probe_fetch_with_policy_retries_none_until_success() {
         let attempts = Arc::new(AtomicUsize::new(0));
+        let probe_counter = AtomicU64::new(0);
         let result = retry_probe_fetch_with_policy(
             42,
             "testing probe retry",
             3,
             Duration::from_millis(0),
+            &probe_counter,
             {
                 let attempts = Arc::clone(&attempts);
                 move || {
@@ -3297,16 +3385,19 @@ mod tests {
 
         assert_eq!(result, Some(99));
         assert_eq!(attempts.load(AtomicOrdering::SeqCst), 3);
+        assert_eq!(probe_counter.load(Ordering::Relaxed), 3);
     }
 
     #[tokio::test]
     async fn test_retry_probe_fetch_with_policy_retries_error_until_success() {
         let attempts = Arc::new(AtomicUsize::new(0));
+        let probe_counter = AtomicU64::new(0);
         let result = retry_probe_fetch_with_policy(
             42,
             "testing probe retry",
             3,
             Duration::from_millis(0),
+            &probe_counter,
             {
                 let attempts = Arc::clone(&attempts);
                 move || {
@@ -3327,16 +3418,19 @@ mod tests {
 
         assert_eq!(result, Some(77));
         assert_eq!(attempts.load(AtomicOrdering::SeqCst), 3);
+        assert_eq!(probe_counter.load(Ordering::Relaxed), 3);
     }
 
     #[tokio::test]
     async fn test_retry_probe_fetch_with_policy_exhausts_errors() {
         let attempts = Arc::new(AtomicUsize::new(0));
+        let probe_counter = AtomicU64::new(0);
         let err = retry_probe_fetch_with_policy(
             42,
             "testing probe retry",
             3,
             Duration::from_millis(0),
+            &probe_counter,
             {
                 let attempts = Arc::clone(&attempts);
                 move || {
@@ -3353,5 +3447,6 @@ mod tests {
 
         assert!(err.to_string().contains("failed after 3 attempts"));
         assert_eq!(attempts.load(AtomicOrdering::SeqCst), 3);
+        assert_eq!(probe_counter.load(Ordering::Relaxed), 3);
     }
 }
