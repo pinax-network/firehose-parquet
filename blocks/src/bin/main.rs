@@ -1092,6 +1092,70 @@ fn checkpoint_partitions_builder(
     Ok(rows)
 }
 
+const PARTITIONS_PROBE_FETCH_MAX_ATTEMPTS: usize = 4;
+const PARTITIONS_PROBE_FETCH_INITIAL_BACKOFF: Duration = Duration::from_millis(250);
+
+async fn retry_probe_fetch_with_policy<T, Op, Fut>(
+    block_num: u64,
+    context: &str,
+    max_attempts: usize,
+    initial_backoff: Duration,
+    mut op: Op,
+) -> Result<Option<T>>
+where
+    Op: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<Option<T>>>,
+{
+    let attempts = max_attempts.max(1);
+    let mut attempt = 1usize;
+    let mut backoff = initial_backoff;
+
+    loop {
+        match op().await {
+            Ok(Some(value)) => return Ok(Some(value)),
+            Ok(None) if attempt >= attempts => {
+                warn!(
+                    block_num,
+                    context,
+                    attempts = attempt,
+                    "probe returned no block after retries"
+                );
+                return Ok(None);
+            }
+            Ok(None) => {
+                warn!(
+                    block_num,
+                    context,
+                    attempt,
+                    max_attempts = attempts,
+                    retry_backoff_ms = backoff.as_millis() as u64,
+                    "probe returned no block; retrying"
+                );
+            }
+            Err(error) if attempt >= attempts => {
+                return Err(anyhow!(
+                    "{context}: probe fetch for block {block_num} failed after {attempt} attempts: {error}"
+                ));
+            }
+            Err(error) => {
+                warn!(
+                    block_num,
+                    context,
+                    attempt,
+                    max_attempts = attempts,
+                    retry_backoff_ms = backoff.as_millis() as u64,
+                    error = %error,
+                    "probe fetch failed; retrying"
+                );
+            }
+        }
+
+        tokio::time::sleep(backoff).await;
+        attempt = attempt.saturating_add(1);
+        backoff = backoff.saturating_mul(2);
+    }
+}
+
 async fn fetch_required_block_identity(
     client: &FirehoseClient,
     block_num: u64,
@@ -1109,7 +1173,7 @@ async fn fetch_required_block_identity(
     .await?
         .ok_or_else(|| {
             anyhow!(
-                "{context}: block {block_num} is not currently available; lower the range or use --live"
+                "{context}: block {block_num} is not currently available after probe retries; lower the range or use --live"
             )
         })
 }
@@ -1139,7 +1203,15 @@ async fn fetch_optional_probe_block_identity(
     context: &str,
     timestamp_scan_limit: u64,
 ) -> Result<Option<BlockIdentity>> {
-    let Some(block) = client.fetch_block_identity(block_num, wait_timeout).await? else {
+    let Some(block) = retry_probe_fetch_with_policy(
+        block_num,
+        context,
+        PARTITIONS_PROBE_FETCH_MAX_ATTEMPTS,
+        PARTITIONS_PROBE_FETCH_INITIAL_BACKOFF,
+        || client.fetch_block_identity(block_num, wait_timeout),
+    )
+    .await?
+    else {
         return Ok(None);
     };
 
@@ -1162,9 +1234,14 @@ async fn normalize_probe_block_identity(
 
     for offset in 1..=timestamp_scan_limit {
         let next_block_num = block.block_num.saturating_add(offset);
-        let Some(next_block) = client
-            .fetch_block_identity(next_block_num, wait_timeout)
-            .await?
+        let Some(next_block) = retry_probe_fetch_with_policy(
+            next_block_num,
+            context,
+            PARTITIONS_PROBE_FETCH_MAX_ATTEMPTS,
+            PARTITIONS_PROBE_FETCH_INITIAL_BACKOFF,
+            || client.fetch_block_identity(next_block_num, wait_timeout),
+        )
+        .await?
         else {
             break;
         };
@@ -2756,6 +2833,7 @@ async fn main() -> Result<()> {
 mod tests {
     use super::*;
     use clap::CommandFactory;
+    use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 
     #[test]
     fn test_cli_name_is_fireparq() {
@@ -3189,5 +3267,91 @@ mod tests {
         );
         assert_eq!(find_meta(&meta, "firehose-parquet.block_id_encoding"), None);
         assert_eq!(find_meta(&meta, "firehose-parquet.block_features"), None);
+    }
+
+    #[tokio::test]
+    async fn test_retry_probe_fetch_with_policy_retries_none_until_success() {
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let result = retry_probe_fetch_with_policy(
+            42,
+            "testing probe retry",
+            3,
+            Duration::from_millis(0),
+            {
+                let attempts = Arc::clone(&attempts);
+                move || {
+                    let attempts = Arc::clone(&attempts);
+                    async move {
+                        let current = attempts.fetch_add(1, AtomicOrdering::SeqCst);
+                        if current < 2 {
+                            Ok(None)
+                        } else {
+                            Ok(Some(99_u64))
+                        }
+                    }
+                }
+            },
+        )
+        .await
+        .expect("retry should succeed");
+
+        assert_eq!(result, Some(99));
+        assert_eq!(attempts.load(AtomicOrdering::SeqCst), 3);
+    }
+
+    #[tokio::test]
+    async fn test_retry_probe_fetch_with_policy_retries_error_until_success() {
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let result = retry_probe_fetch_with_policy(
+            42,
+            "testing probe retry",
+            3,
+            Duration::from_millis(0),
+            {
+                let attempts = Arc::clone(&attempts);
+                move || {
+                    let attempts = Arc::clone(&attempts);
+                    async move {
+                        let current = attempts.fetch_add(1, AtomicOrdering::SeqCst);
+                        if current < 2 {
+                            Err(anyhow!("transient failure"))
+                        } else {
+                            Ok(Some(77_u64))
+                        }
+                    }
+                }
+            },
+        )
+        .await
+        .expect("retry should succeed");
+
+        assert_eq!(result, Some(77));
+        assert_eq!(attempts.load(AtomicOrdering::SeqCst), 3);
+    }
+
+    #[tokio::test]
+    async fn test_retry_probe_fetch_with_policy_exhausts_errors() {
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let err = retry_probe_fetch_with_policy(
+            42,
+            "testing probe retry",
+            3,
+            Duration::from_millis(0),
+            {
+                let attempts = Arc::clone(&attempts);
+                move || {
+                    let attempts = Arc::clone(&attempts);
+                    async move {
+                        attempts.fetch_add(1, AtomicOrdering::SeqCst);
+                        Err::<Option<u64>, _>(anyhow!("still failing"))
+                    }
+                }
+            },
+        )
+        .await
+        .expect_err("retries should exhaust");
+
+        assert!(err.to_string().contains("failed after 3 attempts"));
+        assert_eq!(attempts.load(AtomicOrdering::SeqCst), 3);
     }
 }
