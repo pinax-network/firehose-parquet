@@ -351,14 +351,17 @@ fireparq partitions build \
 Behavior:
 
 - writes one row per discovered partition to `/<chain>/partitions.parquet`
+- writes a required non-null `chain` column on every partition row
 - writes exact partition envelopes when the enclosing boundaries are discoverable
 - supports one partition granularity per run (`date`, `hour`, `minute`, `second`)
 - derives canonical UTC partition keys using rounded interval starts
 - uses sparse single-block probes plus exponential/binary search to skip across ranges instead of streaming every block
+- uses the Firehose single-block fetch path for sparse probes instead of a normal block stream
 - writes contract metadata including schema version, chain scope, and covered block range
 - `--resume` reuses the trailing rows from the existing canonical index and continues from the stored frontier
 - bounded builds may expand the requested start/stop to the enclosing partition boundaries so each completed row remains exact
 - `--live` treats existing `partitions.parquet` rows as the restart anchor, polls for new finalized blocks, and keeps extending the canonical index
+- sparse probes treat missing/non-positive timestamps as missing metadata and borrow a nearby subsequent finalized block timestamp before partitioning
 
 | Flag | Default | Description |
 |---|---|---|

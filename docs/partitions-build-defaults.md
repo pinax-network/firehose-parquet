@@ -36,6 +36,8 @@ The public artifact remains one stable canonical path:
 
 - `partitions.parquet`
 
+Within that artifact, `chain` is a required non-null column on every row.
+
 Implementations may still use temporary or staging paths internally for safe rewrites, but the canonical artifact name stays stable.
 
 ## Output Root
@@ -69,8 +71,11 @@ Bounded mode uses `--start-block` / `--stop-block` as discovery seeds, then expa
 For both bounded and live mode, the intended implementation is:
 
 - fetch individual finalized block identities as sparse probes
+- use the Firehose single-block fetch RPC for exact-height probes
 - use exponential search to jump ahead within a partition
 - use binary search to find the exact first block of the next partition
 - write contiguous `[start_block, end_block)` rows to `partitions.parquet`
+
+If a sparse probe returns a missing/non-positive timestamp, the probe logic should borrow the nearest subsequent finalized block timestamp within a small bounded scan window and log that normalization. If no such timestamp is found, the build should fail instead of silently partitioning at `1970-01-01 00:00:00`.
 
 This keeps the command lightweight while still producing exact partition boundaries.

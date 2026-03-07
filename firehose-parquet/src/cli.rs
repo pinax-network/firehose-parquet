@@ -1199,7 +1199,6 @@ pub struct PartitionBuildRow {
     pub end_block: u64,
     pub start_time: String,
     pub end_time: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub chain: Option<String>,
 }
 
@@ -1377,6 +1376,14 @@ impl PartitionIndexBuilder {
 
     pub fn current_frontier(&self) -> Option<u64> {
         self.last_seen_block.map(|block| block.saturating_add(1))
+    }
+
+    pub fn active_partition_value(&self) -> Option<String> {
+        self.partition_types.first().and_then(|partition_type| {
+            self.active
+                .get(partition_type)
+                .map(|active| active.partition_value.clone())
+        })
     }
 
     pub fn has_rows(&self) -> bool {
@@ -1839,7 +1846,8 @@ pub fn read_partitions_build_rows(
             let chain = chain_idx
                 .map(|idx| read_utf8_value(batch.column(idx).as_ref(), row_index))
                 .transpose()?
-                .flatten();
+                .flatten()
+                .ok_or_else(|| anyhow::anyhow!("chain cannot be null"))?;
             let start_time = start_time_idx
                 .and_then(|idx| {
                     read_utf8_value(batch.column(idx).as_ref(), row_index)
@@ -1864,7 +1872,7 @@ pub fn read_partitions_build_rows(
                 end_block,
                 start_time,
                 end_time,
-                chain,
+                chain: Some(chain),
             });
         }
 
@@ -1955,7 +1963,7 @@ pub fn write_partitions_index(
     }
 
     let schema = Arc::new(Schema::new(vec![
-        Field::new("chain", DataType::Utf8, true),
+        Field::new("chain", DataType::Utf8, false),
         Field::new("partition_type", DataType::Utf8, false),
         Field::new("partition_interval_seconds", DataType::Int64, false),
         Field::new("partition_start_ts", DataType::Utf8, false),
@@ -1970,7 +1978,13 @@ pub fn write_partitions_index(
         schema.clone(),
         vec![
             Arc::new(StringArray::from(
-                rows.iter().map(|row| row.chain.clone()).collect::<Vec<_>>(),
+                rows.iter()
+                    .map(|row| {
+                        row.chain
+                            .clone()
+                            .ok_or_else(|| anyhow::anyhow!("chain cannot be null"))
+                    })
+                    .collect::<anyhow::Result<Vec<_>>>()?,
             )),
             Arc::new(StringArray::from(
                 rows.iter()
@@ -2131,6 +2145,19 @@ fn is_integer_like(data_type: &arrow::datatypes::DataType) -> bool {
 }
 
 fn validate_partitions_schema(schema: &arrow::datatypes::Schema) -> anyhow::Result<()> {
+    let chain = schema
+        .field_with_name("chain")
+        .map_err(|_| anyhow::anyhow!("missing required column: chain"))?;
+    if !is_utf8_like(chain.data_type()) {
+        anyhow::bail!(
+            "invalid partitions.parquet column type for chain: expected Utf8/LargeUtf8, got {}",
+            chain.data_type()
+        );
+    }
+    if chain.is_nullable() {
+        anyhow::bail!("invalid partitions.parquet schema: chain must be non-nullable");
+    }
+
     let partition_type = schema
         .field_with_name("partition_type")
         .map_err(|_| anyhow::anyhow!("missing required column: partition_type"))?;
@@ -2170,16 +2197,6 @@ fn validate_partitions_schema(schema: &arrow::datatypes::Schema) -> anyhow::Resu
             end_block.data_type()
         );
     }
-
-    if let Ok(chain) = schema.field_with_name("chain") {
-        if !is_utf8_like(chain.data_type()) {
-            anyhow::bail!(
-                "invalid partitions.parquet column type for chain: expected Utf8/LargeUtf8, got {}",
-                chain.data_type()
-            );
-        }
-    }
-
     if let Ok(partition_start_ts) = schema.field_with_name("partition_start_ts") {
         if !is_utf8_like(partition_start_ts.data_type()) {
             anyhow::bail!(
@@ -6615,7 +6632,7 @@ mod tests {
         let path = dir.path().join("partitions.parquet");
 
         let schema = Arc::new(arrow::datatypes::Schema::new(vec![
-            arrow::datatypes::Field::new("chain", arrow::datatypes::DataType::Utf8, true),
+            arrow::datatypes::Field::new("chain", arrow::datatypes::DataType::Utf8, false),
             arrow::datatypes::Field::new("partition_type", arrow::datatypes::DataType::Utf8, false),
             arrow::datatypes::Field::new(
                 "partition_value",
@@ -6673,6 +6690,7 @@ mod tests {
         let path = dir.path().join("partitions.parquet");
 
         let schema = Arc::new(arrow::datatypes::Schema::new(vec![
+            arrow::datatypes::Field::new("chain", arrow::datatypes::DataType::Utf8, false),
             arrow::datatypes::Field::new("partition_type", arrow::datatypes::DataType::Utf8, false),
             arrow::datatypes::Field::new(
                 "partition_value",
@@ -6686,6 +6704,7 @@ mod tests {
         let batch = RecordBatch::try_new(
             Arc::clone(&schema),
             vec![
+                Arc::new(StringArray::from(vec!["eth-mainnet", "eth-mainnet"])),
                 Arc::new(StringArray::from(vec!["hour", "hour"])),
                 Arc::new(StringArray::from(vec![
                     "2015-07-30 15:00:00",
@@ -6725,7 +6744,7 @@ mod tests {
         let path = dir.path().join("partitions.parquet");
 
         let schema = Arc::new(arrow::datatypes::Schema::new(vec![
-            arrow::datatypes::Field::new("chain", arrow::datatypes::DataType::Utf8, true),
+            arrow::datatypes::Field::new("chain", arrow::datatypes::DataType::Utf8, false),
             arrow::datatypes::Field::new("partition_type", arrow::datatypes::DataType::Utf8, false),
             arrow::datatypes::Field::new(
                 "partition_value",
@@ -6788,7 +6807,7 @@ mod tests {
         let path = dir.path().join("partitions.parquet");
 
         let schema = Arc::new(arrow::datatypes::Schema::new(vec![
-            arrow::datatypes::Field::new("chain", arrow::datatypes::DataType::Utf8, true),
+            arrow::datatypes::Field::new("chain", arrow::datatypes::DataType::Utf8, false),
             arrow::datatypes::Field::new("partition_type", arrow::datatypes::DataType::Utf8, false),
             arrow::datatypes::Field::new(
                 "partition_value",
@@ -6850,7 +6869,7 @@ mod tests {
         let path = dir.path().join("partitions.parquet");
 
         let schema = Arc::new(arrow::datatypes::Schema::new(vec![
-            arrow::datatypes::Field::new("chain", arrow::datatypes::DataType::Utf8, true),
+            arrow::datatypes::Field::new("chain", arrow::datatypes::DataType::Utf8, false),
             arrow::datatypes::Field::new("partition_type", arrow::datatypes::DataType::Utf8, false),
             arrow::datatypes::Field::new(
                 "partition_value",
@@ -6948,7 +6967,7 @@ mod tests {
         let path = dir.path().join("partitions.parquet");
 
         let schema = Arc::new(arrow::datatypes::Schema::new(vec![
-            arrow::datatypes::Field::new("chain", arrow::datatypes::DataType::Utf8, true),
+            arrow::datatypes::Field::new("chain", arrow::datatypes::DataType::Utf8, false),
             arrow::datatypes::Field::new("partition_type", arrow::datatypes::DataType::Utf8, false),
             arrow::datatypes::Field::new(
                 "partition_value",
@@ -7035,6 +7054,7 @@ mod tests {
         let path = dir.path().join("partitions.parquet");
 
         let schema = Arc::new(arrow::datatypes::Schema::new(vec![
+            arrow::datatypes::Field::new("chain", arrow::datatypes::DataType::Utf8, false),
             arrow::datatypes::Field::new("partition_type", arrow::datatypes::DataType::Utf8, false),
             arrow::datatypes::Field::new(
                 "partition_value",
@@ -7048,6 +7068,7 @@ mod tests {
         let batch = RecordBatch::try_new(
             Arc::clone(&schema),
             vec![
+                Arc::new(StringArray::from(vec!["eth-mainnet"])),
                 Arc::new(StringArray::from(vec!["day"])),
                 Arc::new(StringArray::from(vec!["2015-07-30 00:00:00"])),
                 Arc::new(UInt64Array::from(vec![100_u64])),
@@ -7102,6 +7123,7 @@ mod tests {
         let path = dir.path().join("partitions.parquet");
 
         let schema = Arc::new(arrow::datatypes::Schema::new(vec![
+            arrow::datatypes::Field::new("chain", arrow::datatypes::DataType::Utf8, false),
             arrow::datatypes::Field::new("partition_type", arrow::datatypes::DataType::Utf8, false),
             arrow::datatypes::Field::new(
                 "partition_value",
@@ -7115,6 +7137,7 @@ mod tests {
         let batch = RecordBatch::try_new(
             Arc::clone(&schema),
             vec![
+                Arc::new(StringArray::from(vec!["eth-mainnet"])),
                 Arc::new(StringArray::from(vec!["day"])),
                 Arc::new(StringArray::from(vec!["2015-07-30 00:00:00"])),
                 Arc::new(UInt64Array::from(vec![100_u64])),
@@ -7167,6 +7190,7 @@ mod tests {
         let path = dir.path().join("partitions.parquet");
 
         let schema = Arc::new(arrow::datatypes::Schema::new(vec![
+            arrow::datatypes::Field::new("chain", arrow::datatypes::DataType::Utf8, false),
             arrow::datatypes::Field::new("partition_type", arrow::datatypes::DataType::Utf8, false),
             arrow::datatypes::Field::new(
                 "partition_value",
@@ -7180,6 +7204,7 @@ mod tests {
         let batch = RecordBatch::try_new(
             Arc::clone(&schema),
             vec![
+                Arc::new(StringArray::from(vec!["eth-mainnet"])),
                 Arc::new(StringArray::from(vec!["day"])),
                 Arc::new(StringArray::from(vec!["2015-07-30 00:00:00"])),
                 Arc::new(UInt64Array::from(vec![100_u64])),
@@ -7260,6 +7285,7 @@ mod tests {
         let path = dir.path().join("partitions.parquet");
 
         let schema = Arc::new(arrow::datatypes::Schema::new(vec![
+            arrow::datatypes::Field::new("chain", arrow::datatypes::DataType::Utf8, false),
             arrow::datatypes::Field::new("partition_type", arrow::datatypes::DataType::Utf8, false),
             arrow::datatypes::Field::new(
                 "partition_value",
@@ -7273,6 +7299,7 @@ mod tests {
         let batch = RecordBatch::try_new(
             Arc::clone(&schema),
             vec![
+                Arc::new(StringArray::from(vec!["eth-mainnet"])),
                 Arc::new(StringArray::from(vec!["day"])),
                 Arc::new(StringArray::from(vec!["2015-07-30 00:00:00"])),
                 Arc::new(UInt64Array::from(vec![100_u64])),
@@ -7342,6 +7369,7 @@ mod tests {
         let path = dir.path().join("partitions.parquet");
 
         let schema = Arc::new(arrow::datatypes::Schema::new(vec![
+            arrow::datatypes::Field::new("chain", arrow::datatypes::DataType::Utf8, false),
             arrow::datatypes::Field::new("partition_type", arrow::datatypes::DataType::Utf8, false),
             arrow::datatypes::Field::new(
                 "partition_value",
@@ -7355,6 +7383,7 @@ mod tests {
         let batch = RecordBatch::try_new(
             Arc::clone(&schema),
             vec![
+                Arc::new(StringArray::from(vec!["eth-mainnet"])),
                 Arc::new(StringArray::from(vec!["day"])),
                 Arc::new(StringArray::from(vec!["2015-07-30 00:00:00"])),
                 Arc::new(UInt64Array::from(vec![100_u64])),
@@ -7438,7 +7467,7 @@ mod tests {
         use std::sync::Arc;
 
         let schema = Arc::new(arrow::datatypes::Schema::new(vec![
-            arrow::datatypes::Field::new("chain", arrow::datatypes::DataType::Utf8, true),
+            arrow::datatypes::Field::new("chain", arrow::datatypes::DataType::Utf8, false),
             arrow::datatypes::Field::new("partition_type", arrow::datatypes::DataType::Utf8, false),
             arrow::datatypes::Field::new(
                 "partition_value",
