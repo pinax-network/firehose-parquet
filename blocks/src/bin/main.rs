@@ -690,21 +690,39 @@ async fn run_partitions_build(
         }
     } else {
         let stop_block = stop_block.expect("validated above");
-        let mut current_block = fetch_required_block_identity(
+        let seed_block = fetch_required_block_identity(
             &stream_client,
             effective_start_block,
             Some(PARTITIONS_PROBE_TIMEOUT),
             "starting partitions build",
         )
         .await?;
+        let lower_bound = endpoint_info
+            .as_ref()
+            .map(|info| info.first_streamable_block_num)
+            .unwrap_or(0);
+        let mut current_block = locate_partition_start(
+            &stream_client,
+            partition_type,
+            &seed_block,
+            lower_bound,
+            PARTITIONS_PROBE_TIMEOUT,
+        )
+        .await?;
+        if current_block.block_num != seed_block.block_num {
+            info!(
+                requested_start_block = effective_start_block,
+                partition_start_block = current_block.block_num,
+                "expanded bounded build start to the enclosing partition boundary"
+            );
+        }
 
-        loop {
+        let final_end_block = loop {
             builder.observe_block(&current_block)?;
-            let span = locate_bounded_partition_span(
+            let span = locate_live_partition_span(
                 &stream_client,
                 partition_type,
                 &current_block,
-                stop_block,
                 PARTITIONS_PROBE_TIMEOUT,
             )
             .await?;
@@ -713,27 +731,41 @@ async fn run_partitions_build(
                 builder.observe_block(&span.last_same)?;
             }
 
-            if let Some(next_boundary) = span.next_boundary {
-                info!(
-                    current_partition_start = current_block.block_num,
-                    current_partition_end = next_boundary.block_num,
-                    next_partition_start = next_boundary.block_num,
-                    "finalized sparse partition span"
-                );
-                builder.observe_block(&next_boundary)?;
-                current_block = next_boundary;
-                continue;
+            match span.next_boundary {
+                Some(next_boundary) if next_boundary.block_num < stop_block => {
+                    info!(
+                        current_partition_start = current_block.block_num,
+                        current_partition_end = next_boundary.block_num,
+                        next_partition_start = next_boundary.block_num,
+                        "finalized sparse partition span"
+                    );
+                    builder.observe_block(&next_boundary)?;
+                    current_block = next_boundary;
+                }
+                Some(next_boundary) => {
+                    info!(
+                        current_partition_start = current_block.block_num,
+                        current_partition_end = next_boundary.block_num,
+                        requested_stop_block = stop_block,
+                        "expanded bounded build stop to the enclosing partition boundary"
+                    );
+                    break next_boundary.block_num;
+                }
+                None => {
+                    return Err(anyhow!(
+                        "bounded partitions build could not determine the exact closing boundary for the partition containing block {}; wait for the next partition to begin or use --live",
+                        current_block.block_num
+                    ));
+                }
             }
+        };
 
-            break;
-        }
-
-        let rows = builder.finish(stop_block)?;
+        let rows = builder.finish(final_end_block)?;
         write_partitions_index(&partitions_index, &rows, Some(aws))?;
         info!(
             partitions_index = %partitions_index,
             row_count = rows.len(),
-            stop_block,
+            stop_block = final_end_block,
             "completed bounded sparse partitions build"
         );
         rows
@@ -815,6 +847,61 @@ async fn find_first_different_block(
     Ok((low_same, high_different))
 }
 
+async fn locate_partition_start(
+    client: &FirehoseClient,
+    partition_type: PartitionBuildType,
+    anchor_block: &BlockIdentity,
+    lower_bound: u64,
+    probe_timeout: Duration,
+) -> Result<BlockIdentity> {
+    let partition_start_ts = block_partition_start(partition_type, anchor_block)?;
+    let mut high_same = anchor_block.clone();
+    let mut step = 1u64;
+
+    let mut low_exclusive = loop {
+        if high_same.block_num <= lower_bound {
+            return Ok(high_same);
+        }
+
+        let candidate = high_same.block_num.saturating_sub(step).max(lower_bound);
+        match client
+            .fetch_block_identity(candidate, Some(probe_timeout))
+            .await?
+        {
+            Some(probe) if block_partition_start(partition_type, &probe)? == partition_start_ts => {
+                high_same = probe;
+                if candidate == lower_bound {
+                    return Ok(high_same);
+                }
+                step = step.saturating_mul(2).max(1);
+            }
+            Some(probe) => {
+                break probe.block_num;
+            }
+            None => {
+                break candidate;
+            }
+        }
+    };
+
+    while low_exclusive.saturating_add(1) < high_same.block_num {
+        let mid = low_exclusive + (high_same.block_num - low_exclusive) / 2;
+        match client
+            .fetch_block_identity(mid, Some(probe_timeout))
+            .await?
+        {
+            Some(probe) if block_partition_start(partition_type, &probe)? == partition_start_ts => {
+                high_same = probe;
+            }
+            _ => {
+                low_exclusive = mid;
+            }
+        }
+    }
+
+    Ok(high_same)
+}
+
 async fn find_latest_available_block(
     client: &FirehoseClient,
     mut low_available: BlockIdentity,
@@ -833,90 +920,6 @@ async fn find_latest_available_block(
     }
 
     Ok(low_available)
-}
-
-async fn locate_bounded_partition_span(
-    client: &FirehoseClient,
-    partition_type: PartitionBuildType,
-    start_block: &BlockIdentity,
-    stop_block: u64,
-    probe_timeout: Duration,
-) -> Result<PartitionProbeSpan> {
-    let partition_start_ts = block_partition_start(partition_type, start_block)?;
-    let mut low_same = start_block.clone();
-    let mut step = 1u64;
-
-    loop {
-        let candidate = start_block.block_num.saturating_add(step);
-        if candidate >= stop_block {
-            let terminal_block_num = stop_block.saturating_sub(1);
-            if terminal_block_num == low_same.block_num {
-                return Ok(PartitionProbeSpan {
-                    last_same: low_same,
-                    next_boundary: None,
-                });
-            }
-
-            let terminal = fetch_required_block_identity(
-                client,
-                terminal_block_num,
-                Some(probe_timeout),
-                "probing bounded partition end",
-            )
-            .await?;
-
-            if block_partition_start(partition_type, &terminal)? == partition_start_ts {
-                return Ok(PartitionProbeSpan {
-                    last_same: terminal,
-                    next_boundary: None,
-                });
-            }
-
-            let (last_same, next_boundary) = find_first_different_block(
-                client,
-                partition_type,
-                partition_start_ts,
-                low_same,
-                terminal,
-                probe_timeout,
-            )
-            .await?;
-
-            return Ok(PartitionProbeSpan {
-                last_same,
-                next_boundary: Some(next_boundary),
-            });
-        }
-
-        let probe = fetch_required_block_identity(
-            client,
-            candidate,
-            Some(probe_timeout),
-            "probing sparse partition span",
-        )
-        .await?;
-
-        if block_partition_start(partition_type, &probe)? == partition_start_ts {
-            low_same = probe;
-            step = step.saturating_mul(2).max(1);
-            continue;
-        }
-
-        let (last_same, next_boundary) = find_first_different_block(
-            client,
-            partition_type,
-            partition_start_ts,
-            low_same,
-            probe,
-            probe_timeout,
-        )
-        .await?;
-
-        return Ok(PartitionProbeSpan {
-            last_same,
-            next_boundary: Some(next_boundary),
-        });
-    }
 }
 
 async fn locate_live_partition_span(

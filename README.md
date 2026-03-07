@@ -351,21 +351,21 @@ fireparq partitions build \
 Behavior:
 
 - writes one row per discovered partition to `/<chain>/partitions.parquet`
-- preserves `[start_block, end_block)` semantics
+- writes exact partition envelopes when the enclosing boundaries are discoverable
 - supports one partition granularity per run (`date`, `hour`, `minute`, `second`)
 - derives canonical UTC partition keys using rounded interval starts
 - uses sparse single-block probes plus exponential/binary search to skip across ranges instead of streaming every block
 - writes contract metadata including schema version, chain scope, and covered block range
 - `--resume` reuses the trailing rows from the existing canonical index and continues from the stored frontier
-- still requires a finite `--stop-block` so the generated artifact has deterministic coverage
+- bounded builds may expand the requested start/stop to the enclosing partition boundaries so each completed row remains exact
 - `--live` treats existing `partitions.parquet` rows as the restart anchor, polls for new finalized blocks, and keeps extending the canonical index
 
 | Flag | Default | Description |
 |---|---|---|
 | `--chain` | inferred | Optional chain override when endpoint info is unavailable |
 | `--partition` | none | Partition to build: `date`, `hour`, `minute`, or `second` |
-| `--start-block` | inferred | Explicit start block, otherwise sibling cursor then endpoint first streamable block |
-| `--stop-block` | none in live mode | Required for bounded builds; incompatible with `--live` |
+| `--start-block` | inferred | Explicit probe seed, otherwise sibling cursor then endpoint first streamable block; bounded builds may expand downward to the enclosing partition start |
+| `--stop-block` | none in live mode | Required for bounded builds; incompatible with `--live`; bounded builds expand upward to the enclosing partition end |
 | `--live` | `false` | Keep extending `partitions.parquet` and resume from its latest covered frontier |
 | `--poll-interval-secs` | `30` | Live-mode poll interval while waiting for the next finalized block frontier |
 | `--output` | inferred from `--s3-bucket` | Output root directory or `s3://` URI prefix |
