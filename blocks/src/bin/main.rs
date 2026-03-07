@@ -986,6 +986,9 @@ async fn run_partitions_build(
             partitions_index = %partitions_index,
             row_count = rows.len(),
             stop_block = final_end_block,
+            total_partitions = checkpoint_state.total_rollovers,
+            partitions_per_min = format!("{:.1}", checkpoint_state.partitions_per_minute()),
+            elapsed_secs = checkpoint_state.started_at.elapsed().as_secs(),
             "completed bounded sparse partitions build"
         );
         rows
@@ -1019,16 +1022,39 @@ struct PartitionProbeSpan {
     next_boundary: Option<BlockIdentity>,
 }
 
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Clone)]
 struct PartitionsCheckpointState {
+    started_at: Instant,
     last_checkpoint_at: Option<Instant>,
     last_checkpoint_frontier: Option<u64>,
     rollovers_since_checkpoint: usize,
+    total_rollovers: usize,
+}
+
+impl Default for PartitionsCheckpointState {
+    fn default() -> Self {
+        Self {
+            started_at: Instant::now(),
+            last_checkpoint_at: None,
+            last_checkpoint_frontier: None,
+            rollovers_since_checkpoint: 0,
+            total_rollovers: 0,
+        }
+    }
 }
 
 impl PartitionsCheckpointState {
     fn record_rollover(&mut self) {
         self.rollovers_since_checkpoint = self.rollovers_since_checkpoint.saturating_add(1);
+        self.total_rollovers = self.total_rollovers.saturating_add(1);
+    }
+
+    fn partitions_per_minute(&self) -> f64 {
+        let elapsed_secs = self.started_at.elapsed().as_secs_f64();
+        if elapsed_secs < 1.0 {
+            return 0.0;
+        }
+        (self.total_rollovers as f64) / (elapsed_secs / 60.0)
     }
 
     fn should_checkpoint(
@@ -1086,6 +1112,9 @@ fn checkpoint_partitions_builder(
         frontier,
         row_count = rows.len(),
         rollovers_since_checkpoint = checkpoint_state.rollovers_since_checkpoint,
+        total_partitions = checkpoint_state.total_rollovers,
+        partitions_per_min = format!("{:.1}", checkpoint_state.partitions_per_minute()),
+        elapsed_secs = checkpoint_state.started_at.elapsed().as_secs(),
         "checkpointed partitions index"
     );
     checkpoint_state.record_checkpoint(frontier);
