@@ -341,6 +341,8 @@ async fn run_partitions_build(
     aws: &AwsConfig,
 ) -> Result<PartitionBuildResult> {
     const LIVE_PARTITIONS_CHECKPOINT_INTERVAL: Duration = Duration::from_secs(30);
+    const PARTITIONS_CHECKPOINT_INTERVAL: Duration = Duration::from_secs(30);
+    const PARTITIONS_CHECKPOINT_ROLLOVERS: usize = 16;
     const PARTITIONS_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
     const PROBE_TIMESTAMP_SCAN_LIMIT: u64 = 16;
     if !live && stop_block.is_none() {
@@ -593,8 +595,7 @@ async fn run_partitions_build(
 
     let rows = if live {
         let poll_interval = Duration::from_secs(poll_interval_secs);
-        let mut last_checkpoint_at = Instant::now();
-        let mut last_checkpoint_frontier = builder.current_frontier();
+        let mut checkpoint_state = PartitionsCheckpointState::default();
 
         'live: loop {
             if shutdown.load(Ordering::SeqCst) {
@@ -633,21 +634,19 @@ async fn run_partitions_build(
                 );
 
                 if builder.has_rows()
-                    && last_checkpoint_at.elapsed() >= LIVE_PARTITIONS_CHECKPOINT_INTERVAL
+                    && checkpoint_state.should_checkpoint(
+                        &builder,
+                        LIVE_PARTITIONS_CHECKPOINT_INTERVAL,
+                        PARTITIONS_CHECKPOINT_ROLLOVERS,
+                    )
                 {
-                    let checkpoint_frontier = builder.current_frontier().ok_or_else(|| {
-                        anyhow!("live partition build is missing a checkpoint frontier")
-                    })?;
-                    let rows = builder.snapshot(checkpoint_frontier)?;
-                    write_partitions_index(&partitions_index, &rows, Some(aws))?;
-                    info!(
-                        partitions_index = %partitions_index,
-                        frontier = checkpoint_frontier,
-                        row_count = rows.len(),
-                        "checkpointed live partitions index"
-                    );
-                    last_checkpoint_at = Instant::now();
-                    last_checkpoint_frontier = Some(checkpoint_frontier);
+                    checkpoint_partitions_builder(
+                        &builder,
+                        &partitions_index,
+                        Some(aws),
+                        &mut checkpoint_state,
+                        "checkpointed live partitions index",
+                    )?;
                 }
                 continue;
             };
@@ -664,6 +663,19 @@ async fn run_partitions_build(
                     break 'live;
                 }
                 builder.observe_block(&current_block)?;
+                if checkpoint_state.should_checkpoint(
+                    &builder,
+                    LIVE_PARTITIONS_CHECKPOINT_INTERVAL,
+                    PARTITIONS_CHECKPOINT_ROLLOVERS,
+                ) {
+                    checkpoint_partitions_builder(
+                        &builder,
+                        &partitions_index,
+                        Some(aws),
+                        &mut checkpoint_state,
+                        "checkpointed live partitions index",
+                    )?;
+                }
                 let Some(span) = await_live_interruptible(
                     &shutdown,
                     &shutdown_notify,
@@ -699,6 +711,7 @@ async fn run_partitions_build(
                         "detected partition rollover"
                     );
                     builder.observe_block(&next_boundary)?;
+                    checkpoint_state.record_rollover();
                     current_block = next_boundary;
                     continue;
                 }
@@ -706,37 +719,29 @@ async fn run_partitions_build(
                 break;
             }
 
-            let checkpoint_frontier = builder
-                .current_frontier()
-                .ok_or_else(|| anyhow!("live partition build is missing a checkpoint frontier"))?;
-            if last_checkpoint_frontier != Some(checkpoint_frontier)
-                || last_checkpoint_at.elapsed() >= LIVE_PARTITIONS_CHECKPOINT_INTERVAL
-            {
-                let rows = builder.snapshot(checkpoint_frontier)?;
-                write_partitions_index(&partitions_index, &rows, Some(aws))?;
-                info!(
-                    partitions_index = %partitions_index,
-                    frontier = checkpoint_frontier,
-                    row_count = rows.len(),
-                    "checkpointed live partitions index"
-                );
-                last_checkpoint_at = Instant::now();
-                last_checkpoint_frontier = Some(checkpoint_frontier);
+            if checkpoint_state.should_checkpoint(
+                &builder,
+                LIVE_PARTITIONS_CHECKPOINT_INTERVAL,
+                PARTITIONS_CHECKPOINT_ROLLOVERS,
+            ) {
+                checkpoint_partitions_builder(
+                    &builder,
+                    &partitions_index,
+                    Some(aws),
+                    &mut checkpoint_state,
+                    "checkpointed live partitions index",
+                )?;
             }
         }
 
         if builder.has_rows() {
-            let frontier = builder.current_frontier().ok_or_else(|| {
-                anyhow!("live partition build is missing a final checkpoint frontier")
-            })?;
-            let rows = builder.snapshot(frontier)?;
-            write_partitions_index(&partitions_index, &rows, Some(aws))?;
-            info!(
-                partitions_index = %partitions_index,
-                frontier,
-                row_count = rows.len(),
-                "wrote final live partitions checkpoint"
-            );
+            let rows = checkpoint_partitions_builder(
+                &builder,
+                &partitions_index,
+                Some(aws),
+                &mut checkpoint_state,
+                "wrote final live partitions checkpoint",
+            )?;
             rows
         } else if !existing_rows.is_empty() {
             existing_rows.clone()
@@ -745,6 +750,7 @@ async fn run_partitions_build(
         }
     } else {
         let stop_block = stop_block.expect("validated above");
+        let mut checkpoint_state = PartitionsCheckpointState::default();
         let seed_block = fetch_required_block_identity(
             &stream_client,
             effective_start_block,
@@ -776,6 +782,19 @@ async fn run_partitions_build(
 
         let final_end_block = loop {
             builder.observe_block(&current_block)?;
+            if checkpoint_state.should_checkpoint(
+                &builder,
+                PARTITIONS_CHECKPOINT_INTERVAL,
+                PARTITIONS_CHECKPOINT_ROLLOVERS,
+            ) {
+                checkpoint_partitions_builder(
+                    &builder,
+                    &partitions_index,
+                    Some(aws),
+                    &mut checkpoint_state,
+                    "checkpointed bounded partitions index",
+                )?;
+            }
             let span = locate_live_partition_span(
                 &stream_client,
                 partition_type,
@@ -801,6 +820,20 @@ async fn run_partitions_build(
                         "finalized sparse partition span"
                     );
                     builder.observe_block(&next_boundary)?;
+                    checkpoint_state.record_rollover();
+                    if checkpoint_state.should_checkpoint(
+                        &builder,
+                        PARTITIONS_CHECKPOINT_INTERVAL,
+                        PARTITIONS_CHECKPOINT_ROLLOVERS,
+                    ) {
+                        checkpoint_partitions_builder(
+                            &builder,
+                            &partitions_index,
+                            Some(aws),
+                            &mut checkpoint_state,
+                            "checkpointed bounded partitions index",
+                        )?;
+                    }
                     current_block = next_boundary;
                 }
                 Some(next_boundary) => {
@@ -860,6 +893,78 @@ async fn run_partitions_build(
 struct PartitionProbeSpan {
     last_same: BlockIdentity,
     next_boundary: Option<BlockIdentity>,
+}
+
+#[derive(Debug, Default, Clone)]
+struct PartitionsCheckpointState {
+    last_checkpoint_at: Option<Instant>,
+    last_checkpoint_frontier: Option<u64>,
+    rollovers_since_checkpoint: usize,
+}
+
+impl PartitionsCheckpointState {
+    fn record_rollover(&mut self) {
+        self.rollovers_since_checkpoint = self.rollovers_since_checkpoint.saturating_add(1);
+    }
+
+    fn should_checkpoint(
+        &self,
+        builder: &PartitionIndexBuilder,
+        interval: Duration,
+        max_rollovers: usize,
+    ) -> bool {
+        if !builder.has_rows() {
+            return false;
+        }
+
+        let frontier = match builder.current_frontier() {
+            Some(frontier) => frontier,
+            None => return false,
+        };
+
+        if self.last_checkpoint_frontier.is_none() {
+            return true;
+        }
+
+        let frontier_advanced = self.last_checkpoint_frontier != Some(frontier);
+        let interval_elapsed = self
+            .last_checkpoint_at
+            .map(|at| at.elapsed() >= interval)
+            .unwrap_or(true);
+        let enough_rollovers = self.rollovers_since_checkpoint >= max_rollovers;
+
+        frontier_advanced && (interval_elapsed || enough_rollovers)
+    }
+
+    fn record_checkpoint(&mut self, frontier: u64) {
+        self.last_checkpoint_frontier = Some(frontier);
+        self.last_checkpoint_at = Some(Instant::now());
+        self.rollovers_since_checkpoint = 0;
+    }
+}
+
+fn checkpoint_partitions_builder(
+    builder: &PartitionIndexBuilder,
+    partitions_index: &str,
+    aws: Option<&AwsConfig>,
+    checkpoint_state: &mut PartitionsCheckpointState,
+    checkpoint_mode: &str,
+) -> Result<Vec<firehose_parquet::cli::PartitionBuildRow>> {
+    let frontier = builder
+        .current_frontier()
+        .ok_or_else(|| anyhow!("partition build is missing a checkpoint frontier"))?;
+    let rows = builder.snapshot(frontier)?;
+    write_partitions_index(partitions_index, &rows, aws)?;
+    info!(
+        checkpoint_mode,
+        partitions_index = %partitions_index,
+        frontier,
+        row_count = rows.len(),
+        rollovers_since_checkpoint = checkpoint_state.rollovers_since_checkpoint,
+        "checkpointed partitions index"
+    );
+    checkpoint_state.record_checkpoint(frontier);
+    Ok(rows)
 }
 
 async fn fetch_required_block_identity(
