@@ -358,6 +358,8 @@ Behavior:
 - uses sparse single-block probes plus exponential/binary search to skip across ranges instead of streaming every block
 - uses the Firehose single-block fetch path for sparse probes instead of a normal block stream
 - writes contract metadata including schema version, chain scope, and covered block range
+- writes an initial checkpoint as soon as the first row exists
+- checkpoints long bounded and live runs continuously by elapsed time and partition rollovers
 - `--resume` reuses the trailing rows from the existing canonical index and continues from the stored frontier
 - bounded builds may expand the requested start/stop to the enclosing partition boundaries so each completed row remains exact
 - `--live` treats existing `partitions.parquet` rows as the restart anchor, polls for new finalized blocks, and keeps extending the canonical index

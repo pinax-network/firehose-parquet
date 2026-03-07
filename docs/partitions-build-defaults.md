@@ -75,6 +75,8 @@ For both bounded and live mode, the intended implementation is:
 - use exponential search to jump ahead within a partition
 - use binary search to find the exact first block of the next partition
 - write contiguous `[start_block, end_block)` rows to `partitions.parquet`
+- create an initial checkpoint as soon as the first row can be materialized
+- continue checkpointing long runs based on elapsed time and partition rollovers
 
 If a sparse probe returns a missing/non-positive timestamp, the probe logic should borrow the nearest subsequent finalized block timestamp within a small bounded scan window and log that normalization. If no such timestamp is found, the build should fail instead of silently partitioning at `1970-01-01 00:00:00`.
 
