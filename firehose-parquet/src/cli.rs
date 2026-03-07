@@ -1771,7 +1771,7 @@ pub fn read_partitions_build_rows(
         anyhow::bail!("expected utf8 column, found {}", column.data_type())
     }
 
-    fn read_timestamp_value(column: &dyn Array, row: usize) -> anyhow::Result<Option<String>> {
+    fn read_timestamp_as_string(column: &dyn Array, row: usize) -> anyhow::Result<Option<String>> {
         if column.is_null(row) {
             return Ok(None);
         }
@@ -1880,14 +1880,14 @@ pub fn read_partitions_build_rows(
                 .ok_or_else(|| anyhow::anyhow!("chain cannot be null"))?;
             let start_time = start_time_idx
                 .and_then(|idx| {
-                    read_timestamp_value(batch.column(idx).as_ref(), row_index)
+                    read_timestamp_as_string(batch.column(idx).as_ref(), row_index)
                         .ok()
                         .flatten()
                 })
                 .unwrap_or_else(|| partition_start_ts.clone());
             let end_time = end_time_idx
                 .and_then(|idx| {
-                    read_timestamp_value(batch.column(idx).as_ref(), row_index)
+                    read_timestamp_as_string(batch.column(idx).as_ref(), row_index)
                         .ok()
                         .flatten()
                 })
@@ -2043,7 +2043,18 @@ pub fn write_partitions_index_with_metadata(
             Arc::new(
                 TimestampSecondArray::from(
                     rows.iter()
-                        .map(|row| parse_partition_timestamp(&row.start_time))
+                        .enumerate()
+                        .map(|(index, row)| {
+                            parse_partition_timestamp(&row.start_time).map_err(|error| {
+                                anyhow::anyhow!(
+                                    "invalid start_time for partition row {} ({}) at index {}: {}",
+                                    row.partition_type,
+                                    row.partition_value,
+                                    index,
+                                    error
+                                )
+                            })
+                        })
                         .collect::<anyhow::Result<Vec<_>>>()?,
                 )
                 .with_timezone("UTC"),
@@ -2051,7 +2062,18 @@ pub fn write_partitions_index_with_metadata(
             Arc::new(
                 TimestampSecondArray::from(
                     rows.iter()
-                        .map(|row| parse_partition_timestamp(&row.end_time))
+                        .enumerate()
+                        .map(|(index, row)| {
+                            parse_partition_timestamp(&row.end_time).map_err(|error| {
+                                anyhow::anyhow!(
+                                    "invalid end_time for partition row {} ({}) at index {}: {}",
+                                    row.partition_type,
+                                    row.partition_value,
+                                    index,
+                                    error
+                                )
+                            })
+                        })
                         .collect::<anyhow::Result<Vec<_>>>()?,
                 )
                 .with_timezone("UTC"),
