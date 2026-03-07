@@ -701,13 +701,9 @@ async fn run_partitions_build(
 
                 if let Some(next_boundary) = span.next_boundary {
                     info!(
-                        current_partition_start = current_block.block_num,
-                        current_partition_end = next_boundary.block_num,
-                        next_partition_start = next_boundary.block_num,
                         current_partition_start_ts = %block_partition_start_label(partition_type, &current_block)?,
-                        next_partition_start_ts = %block_partition_start_label(partition_type, &next_boundary)?,
-                        current_block_timestamp = current_block.timestamp,
-                        next_block_timestamp = next_boundary.timestamp,
+                        current_range = %format!("[{}, {})", current_block.block_num, next_boundary.block_num),
+                        next_partition_start = next_boundary.block_num,
                         "detected partition rollover"
                     );
                     builder.observe_block(&next_boundary)?;
@@ -810,13 +806,9 @@ async fn run_partitions_build(
             match span.next_boundary {
                 Some(next_boundary) if next_boundary.block_num < stop_block => {
                     info!(
-                        current_partition_start = current_block.block_num,
-                        current_partition_end = next_boundary.block_num,
-                        next_partition_start = next_boundary.block_num,
                         current_partition_start_ts = %block_partition_start_label(partition_type, &current_block)?,
-                        next_partition_start_ts = %block_partition_start_label(partition_type, &next_boundary)?,
-                        current_block_timestamp = current_block.timestamp,
-                        next_block_timestamp = next_boundary.timestamp,
+                        current_range = %format!("[{}, {})", current_block.block_num, next_boundary.block_num),
+                        next_partition_start = next_boundary.block_num,
                         "finalized sparse partition span"
                     );
                     builder.observe_block(&next_boundary)?;
@@ -838,11 +830,10 @@ async fn run_partitions_build(
                 }
                 Some(next_boundary) => {
                     info!(
-                        current_partition_start = current_block.block_num,
-                        current_partition_end = next_boundary.block_num,
                         requested_stop_block = stop_block,
                         current_partition_start_ts = %block_partition_start_label(partition_type, &current_block)?,
-                        next_partition_start_ts = %block_partition_start_label(partition_type, &next_boundary)?,
+                        current_range = %format!("[{}, {})", current_block.block_num, next_boundary.block_num),
+                        next_partition_start = next_boundary.block_num,
                         "expanded bounded build stop to the enclosing partition boundary"
                     );
                     break next_boundary.block_num;
