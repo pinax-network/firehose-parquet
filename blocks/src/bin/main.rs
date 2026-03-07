@@ -993,7 +993,7 @@ async fn run_partitions_build(
         info!(
             stop_block = final_end_block,
             partitions = format!("{} ({:.1}/h)", checkpoint_state.total_rollovers, checkpoint_state.partitions_per_hour()),
-            probes = format!("{} ({:.1}/h)", total_probes, checkpoint_state.probes_per_hour(total_probes)),
+            probes = format!("{} ({:.1}/m)", total_probes, checkpoint_state.probes_per_min(total_probes)),
             elapsed = format_elapsed_human(checkpoint_state.started_at.elapsed().as_secs()),
             "completed bounded sparse partitions build"
         );
@@ -1063,12 +1063,12 @@ impl PartitionsCheckpointState {
         (self.total_rollovers as f64) / (elapsed_secs / 3600.0)
     }
 
-    fn probes_per_hour(&self, total_probes: u64) -> f64 {
+    fn probes_per_min(&self, total_probes: u64) -> f64 {
         let elapsed_secs = self.started_at.elapsed().as_secs_f64();
         if elapsed_secs < 1.0 {
             return 0.0;
         }
-        (total_probes as f64) / (elapsed_secs / 3600.0)
+        (total_probes as f64) / (elapsed_secs / 60.0)
     }
 
     fn should_checkpoint(
@@ -1123,7 +1123,7 @@ fn checkpoint_partitions_builder(
     let total_probes = probe_counter.load(Ordering::Relaxed);
     info!(
         partitions = format!("{} ({:.1}/h)", checkpoint_state.total_rollovers, checkpoint_state.partitions_per_hour()),
-        probes = format!("{} ({:.1}/h)", total_probes, checkpoint_state.probes_per_hour(total_probes)),
+        probes = format!("{} ({:.1}/m)", total_probes, checkpoint_state.probes_per_min(total_probes)),
         elapsed = format_elapsed_human(checkpoint_state.started_at.elapsed().as_secs()),
         "checkpoint"
     );
