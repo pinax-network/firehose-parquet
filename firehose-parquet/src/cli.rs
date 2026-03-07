@@ -769,6 +769,14 @@ Examples:
     --partition date \\
     --output ./output \\
     --live
+
+  # Poll for new finalized blocks every 15s in live mode
+  fireparq partitions build \\
+    --network mainnet \\
+    --partition date \\
+    --output ./output \\
+    --live \\
+    --poll-interval-secs 15
 ")]
     Build {
         /// Firehose gRPC endpoint URL
@@ -813,6 +821,9 @@ Examples:
         /// Keep extending `partitions.parquet` from its latest covered frontier.
         #[arg(long, default_value = "false")]
         live: bool,
+        /// Poll interval used by `--live` sparse probes while waiting for new blocks.
+        #[arg(long, default_value_t = 30)]
+        poll_interval_secs: u64,
         /// Partition to build: date, hour, minute, or second
         /// Deprecated alias: `--partition-types`.
         #[arg(long = "partition", alias = "partition-types")]
@@ -6012,12 +6023,15 @@ mod tests {
             "--output",
             "./output",
             "--live",
+            "--poll-interval-secs",
+            "15",
         ]);
         match cli.command.expect("command should exist") {
             Commands::Partitions(PartitionsCommands::Build {
                 network,
                 stop_block,
                 live,
+                poll_interval_secs,
                 partition,
                 output,
                 ..
@@ -6025,6 +6039,7 @@ mod tests {
                 assert_eq!(network.as_deref(), Some("mainnet"));
                 assert_eq!(stop_block, None);
                 assert!(live);
+                assert_eq!(poll_interval_secs, 15);
                 assert_eq!(partition, "date");
                 assert_eq!(output.as_deref(), Some("./output"));
             }

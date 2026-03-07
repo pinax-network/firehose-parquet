@@ -42,7 +42,7 @@ impl FirehoseClient {
     }
 
     /// Build a tonic channel to the configured endpoint.
-    async fn connect(&self) -> Result<Channel> {
+    async fn connect_with_log(&self, log_connect: bool) -> Result<Channel> {
         let uri = self.config.endpoint.clone();
         let mut endpoint = Endpoint::from_shared(uri.clone())
             .with_context(|| format!("invalid endpoint URI: {uri}"))?
@@ -61,8 +61,16 @@ impl FirehoseClient {
             .connect()
             .await
             .with_context(|| format!("connecting to {uri}"))?;
-        info!(endpoint = %uri, tls = use_tls, "connected to Firehose");
+        if log_connect {
+            info!(endpoint = %uri, tls = use_tls, "connected to Firehose");
+        } else {
+            debug!(endpoint = %uri, tls = use_tls, "connected to Firehose for sparse probe");
+        }
         Ok(channel)
+    }
+
+    async fn connect(&self) -> Result<Channel> {
+        self.connect_with_log(true).await
     }
 
     /// Fetch endpoint information from the `EndpointInfo/Info` RPC.
@@ -122,6 +130,62 @@ impl FirehoseClient {
                 warn!(error = %e, "EndpointInfo/Info RPC not available; skipping");
                 None
             }
+        }
+    }
+
+    pub async fn fetch_block_identity(
+        &self,
+        block_num: u64,
+        wait_timeout: Option<Duration>,
+    ) -> Result<Option<BlockIdentity>> {
+        let fetch = async {
+            let channel = self.connect_with_log(false).await?;
+            let mut client = firehose::stream_client::StreamClient::new(channel)
+                .accept_compressed(tonic::codec::CompressionEncoding::Gzip)
+                .max_decoding_message_size(128 * 1024 * 1024);
+
+            let req = firehose::Request {
+                start_block_num: block_num as i64,
+                cursor: String::new(),
+                stop_block_num: block_num,
+                final_blocks_only: true,
+                transforms: vec![],
+            };
+
+            let mut request = tonic::Request::new(req);
+            if let Some(ref key) = self.config.api_key {
+                request
+                    .metadata_mut()
+                    .insert("x-api-key", key.parse().unwrap());
+            }
+            if let Some(ref token) = self.config.jwt_token {
+                request
+                    .metadata_mut()
+                    .insert("authorization", format!("Bearer {token}").parse().unwrap());
+            }
+
+            let mut stream = client.blocks(request).await?.into_inner();
+            match stream.message().await {
+                Ok(Some(resp)) => Ok(resp.metadata.as_ref().map(|m| BlockIdentity {
+                    block_num: m.num,
+                    block_id: m.id.clone(),
+                    parent_num: m.parent_num,
+                    parent_id: m.parent_id.clone(),
+                    lib_num: m.lib_num,
+                    timestamp: m.time.as_ref().map_or(0, |t| t.seconds),
+                    fork_step: None,
+                })),
+                Ok(None) => Ok(None),
+                Err(err) => Err(anyhow::anyhow!("fetching block {block_num}: {err}")),
+            }
+        };
+
+        match wait_timeout {
+            Some(timeout) => match tokio::time::timeout(timeout, fetch).await {
+                Ok(result) => result,
+                Err(_) => Ok(None),
+            },
+            None => fetch.await,
         }
     }
 

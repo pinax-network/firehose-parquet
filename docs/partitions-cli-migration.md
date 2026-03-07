@@ -45,10 +45,10 @@ Current behavior:
 - infers `--start-block` from a sibling `cursor.parquet` or endpoint metadata when omitted
 - infers the S3 output root from `--s3-bucket` / `S3_BUCKET` when `--output` is omitted
 - supports `--live` to keep extending `partitions.parquet` from its latest covered frontier
+- uses sparse finalized block probes instead of streaming every block for partition discovery
 
 Current limitations:
 
-- requires a finite non-zero `--stop-block`
 - requires exactly one `--partition` value per run
 
 ### Ingestion window mode
