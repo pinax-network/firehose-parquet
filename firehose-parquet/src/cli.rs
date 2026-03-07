@@ -1850,7 +1850,7 @@ pub fn read_partitions_build_rows(
                     .as_str(),
             )?;
             let partition_value =
-                read_utf8_value(batch.column(partition_value_idx).as_ref(), row_index)?
+                read_timestamp_as_string(batch.column(partition_value_idx).as_ref(), row_index)?
                     .ok_or_else(|| anyhow::anyhow!("partition cannot be null"))?;
             let partition_start_ts = partition_start_ts_idx
                 .and_then(|idx| {
@@ -1989,7 +1989,11 @@ pub fn write_partitions_index_with_metadata(
     }
 
     let schema = Arc::new(Schema::new(vec![
-        Field::new("partition", DataType::Utf8, false),
+        Field::new(
+            "partition",
+            DataType::Timestamp(TimeUnit::Second, Some(Arc::from("UTC"))),
+            false,
+        ),
         Field::new("chain", DataType::Utf8, false),
         Field::new("type", DataType::Utf8, false),
         Field::new("interval", DataType::Int64, false),
@@ -2010,11 +2014,25 @@ pub fn write_partitions_index_with_metadata(
     let batch = RecordBatch::try_new(
         schema.clone(),
         vec![
-            Arc::new(StringArray::from(
-                rows.iter()
-                    .map(|row| row.partition_value.clone())
-                    .collect::<Vec<_>>(),
-            )),
+            Arc::new(
+                TimestampSecondArray::from(
+                    rows.iter()
+                        .enumerate()
+                        .map(|(index, row)| {
+                            parse_partition_timestamp(&row.partition_value).map_err(|error| {
+                                anyhow::anyhow!(
+                                    "invalid partition for partition row {} ({}) at index {}: {}",
+                                    row.partition_type,
+                                    row.partition_value,
+                                    index,
+                                    error
+                                )
+                            })
+                        })
+                        .collect::<anyhow::Result<Vec<_>>>()?,
+                )
+                .with_timezone("UTC"),
+            ),
             Arc::new(StringArray::from(
                 rows.iter()
                     .map(|row| {
@@ -2221,9 +2239,10 @@ fn validate_partitions_schema(schema: &arrow::datatypes::Schema) -> anyhow::Resu
     }
 
     let partition_value = field_with_name_any(schema, &["partition", "partition_value"])?;
-    if !is_utf8_like(partition_value.data_type()) {
+    if !(is_utf8_like(partition_value.data_type()) || is_timestamp_second_utc(partition_value.data_type()))
+    {
         anyhow::bail!(
-            "invalid partitions.parquet column type for partition: expected Utf8/LargeUtf8, got {}",
+            "invalid partitions.parquet column type for partition: expected Utf8/LargeUtf8 or Timestamp(Second, UTC), got {}",
             partition_value.data_type()
         );
     }
@@ -7510,6 +7529,10 @@ mod tests {
             ]
         );
         assert!(schema.field_with_name("partition_start_ts").is_err());
+        assert_eq!(
+            schema.field_with_name("partition").expect("partition").data_type(),
+            &DataType::Timestamp(TimeUnit::Second, Some(Arc::from("UTC")))
+        );
         assert_eq!(
             schema.field_with_name("start_time").expect("start_time").data_type(),
             &DataType::Timestamp(TimeUnit::Second, Some(Arc::from("UTC")))
