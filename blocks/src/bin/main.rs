@@ -771,7 +771,6 @@ async fn run_partitions_build(
                         Some(aws),
                         &partitions_file_metadata,
                         &mut checkpoint_state,
-                        "checkpointed live partitions index",
                         &probe_counter,
                     )?;
                 }
@@ -801,7 +800,6 @@ async fn run_partitions_build(
                         Some(aws),
                         &partitions_file_metadata,
                         &mut checkpoint_state,
-                        "checkpointed live partitions index",
                         &probe_counter,
                     )?;
                 }
@@ -831,9 +829,9 @@ async fn run_partitions_build(
 
                 if let Some(next_boundary) = span.next_boundary {
                     info!(
-                        current_partition_start_ts = %block_partition_start_label(partition_type, &current_block)?,
-                        current_range = %format!("[{}, {})", current_block.block_num, next_boundary.block_num),
-                        next_partition_start = next_boundary.block_num,
+                        partition = %block_partition_date_label(partition_type, &current_block)?,
+                        range = %format!("[{}, {})", current_block.block_num, next_boundary.block_num),
+                        next = next_boundary.block_num,
                         "detected partition rollover"
                     );
                     builder.observe_block(&next_boundary)?;
@@ -856,7 +854,6 @@ async fn run_partitions_build(
                     Some(aws),
                     &partitions_file_metadata,
                     &mut checkpoint_state,
-                    "checkpointed live partitions index",
                     &probe_counter,
                 )?;
             }
@@ -869,7 +866,6 @@ async fn run_partitions_build(
                 Some(aws),
                 &partitions_file_metadata,
                 &mut checkpoint_state,
-                "wrote final live partitions checkpoint",
                 &probe_counter,
             )?;
             rows
@@ -925,7 +921,6 @@ async fn run_partitions_build(
                     Some(aws),
                     &partitions_file_metadata,
                     &mut checkpoint_state,
-                    "checkpointed bounded partitions index",
                     &probe_counter,
                 )?;
             }
@@ -945,9 +940,9 @@ async fn run_partitions_build(
             match span.next_boundary {
                 Some(next_boundary) if next_boundary.block_num < stop_block => {
                     info!(
-                        current_partition_start_ts = %block_partition_start_label(partition_type, &current_block)?,
-                        current_range = %format!("[{}, {})", current_block.block_num, next_boundary.block_num),
-                        next_partition_start = next_boundary.block_num,
+                        partition = %block_partition_date_label(partition_type, &current_block)?,
+                        range = %format!("[{}, {})", current_block.block_num, next_boundary.block_num),
+                        next = next_boundary.block_num,
                         "finalized sparse partition span"
                     );
                     builder.observe_block(&next_boundary)?;
@@ -963,7 +958,6 @@ async fn run_partitions_build(
                             Some(aws),
                             &partitions_file_metadata,
                             &mut checkpoint_state,
-                            "checkpointed bounded partitions index",
                             &probe_counter,
                         )?;
                     }
@@ -972,9 +966,9 @@ async fn run_partitions_build(
                 Some(next_boundary) => {
                     info!(
                         requested_stop_block = stop_block,
-                        current_partition_start_ts = %block_partition_start_label(partition_type, &current_block)?,
-                        current_range = %format!("[{}, {})", current_block.block_num, next_boundary.block_num),
-                        next_partition_start = next_boundary.block_num,
+                        partition = %block_partition_date_label(partition_type, &current_block)?,
+                        range = %format!("[{}, {})", current_block.block_num, next_boundary.block_num),
+                        next = next_boundary.block_num,
                         "expanded bounded build stop to the enclosing partition boundary"
                     );
                     break next_boundary.block_num;
@@ -997,15 +991,10 @@ async fn run_partitions_build(
         )?;
         let total_probes = probe_counter.load(Ordering::Relaxed);
         info!(
-            partitions_index = %partitions_index,
-            row_count = rows.len(),
             stop_block = final_end_block,
-            total_partitions = checkpoint_state.total_rollovers,
-            partitions_per_hour = format!("{:.1}", checkpoint_state.partitions_per_hour()),
-            total_probes,
-            probes_per_sec = format!("{:.1}", checkpoint_state.probes_per_sec(total_probes)),
-            probes_per_partition = format!("{:.1}", checkpoint_state.probes_per_partition(total_probes)),
-            elapsed_secs = checkpoint_state.started_at.elapsed().as_secs(),
+            partitions = format!("{} ({:.1}/h)", checkpoint_state.total_rollovers, checkpoint_state.partitions_per_hour()),
+            probes = format!("{} ({:.1}/m)", total_probes, checkpoint_state.probes_per_min(total_probes)),
+            elapsed = format_elapsed_human(checkpoint_state.started_at.elapsed().as_secs()),
             "completed bounded sparse partitions build"
         );
         rows
@@ -1074,19 +1063,12 @@ impl PartitionsCheckpointState {
         (self.total_rollovers as f64) / (elapsed_secs / 3600.0)
     }
 
-    fn probes_per_sec(&self, total_probes: u64) -> f64 {
+    fn probes_per_min(&self, total_probes: u64) -> f64 {
         let elapsed_secs = self.started_at.elapsed().as_secs_f64();
         if elapsed_secs < 1.0 {
             return 0.0;
         }
-        total_probes as f64 / elapsed_secs
-    }
-
-    fn probes_per_partition(&self, total_probes: u64) -> f64 {
-        if self.total_rollovers == 0 {
-            return 0.0;
-        }
-        total_probes as f64 / self.total_rollovers as f64
+        (total_probes as f64) / (elapsed_secs / 60.0)
     }
 
     fn should_checkpoint(
@@ -1131,7 +1113,6 @@ fn checkpoint_partitions_builder(
     aws: Option<&AwsConfig>,
     file_metadata: &ParquetFileMetadata,
     checkpoint_state: &mut PartitionsCheckpointState,
-    checkpoint_mode: &str,
     probe_counter: &AtomicU64,
 ) -> Result<Vec<firehose_parquet::cli::PartitionBuildRow>> {
     let frontier = builder
@@ -1141,18 +1122,10 @@ fn checkpoint_partitions_builder(
     write_partitions_index_with_metadata(partitions_index, &rows, aws, Some(file_metadata))?;
     let total_probes = probe_counter.load(Ordering::Relaxed);
     info!(
-        checkpoint_mode,
-        partitions_index = %partitions_index,
-        frontier,
-        row_count = rows.len(),
-        rollovers_since_checkpoint = checkpoint_state.rollovers_since_checkpoint,
-        total_partitions = checkpoint_state.total_rollovers,
-        partitions_per_hour = format!("{:.1}", checkpoint_state.partitions_per_hour()),
-        total_probes,
-        probes_per_sec = format!("{:.1}", checkpoint_state.probes_per_sec(total_probes)),
-        probes_per_partition = format!("{:.1}", checkpoint_state.probes_per_partition(total_probes)),
-        elapsed_secs = checkpoint_state.started_at.elapsed().as_secs(),
-        "checkpointed partitions index"
+        partitions = format!("{} ({:.1}/h)", checkpoint_state.total_rollovers, checkpoint_state.partitions_per_hour()),
+        probes = format!("{} ({:.1}/m)", total_probes, checkpoint_state.probes_per_min(total_probes)),
+        elapsed = format_elapsed_human(checkpoint_state.started_at.elapsed().as_secs()),
+        "checkpoint"
     );
     checkpoint_state.record_checkpoint(frontier);
     Ok(rows)
@@ -1362,6 +1335,38 @@ fn block_partition_start_label(
     block: &BlockIdentity,
 ) -> Result<String> {
     format_probe_timestamp(block_partition_start(partition_type, block)?)
+}
+
+fn block_partition_date_label(
+    partition_type: PartitionBuildType,
+    block: &BlockIdentity,
+) -> Result<String> {
+    let ts = block_partition_start(partition_type, block)?;
+    let dt = time::OffsetDateTime::from_unix_timestamp(ts)
+        .map_err(|err| anyhow!("invalid unix timestamp {ts}: {err}"))?;
+    Ok(format!(
+        "{:04}-{:02}-{:02}",
+        dt.year(),
+        dt.month() as u8,
+        dt.day(),
+    ))
+}
+
+fn format_elapsed_human(secs: u64) -> String {
+    let h = secs / 3600;
+    let m = (secs % 3600) / 60;
+    let s = secs % 60;
+    if h > 0 && m > 0 {
+        format!("{h}h{m}m")
+    } else if h > 0 {
+        format!("{h}h")
+    } else if m > 0 && s > 0 {
+        format!("{m}m{s}s")
+    } else if m > 0 {
+        format!("{m}m")
+    } else {
+        format!("{s}s")
+    }
 }
 
 async fn find_first_different_block(
