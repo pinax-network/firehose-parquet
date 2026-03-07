@@ -638,6 +638,12 @@ fireparq inspect ./output/blocks/year=2026/month=01/date=15/part-000001.parquet
 
 # Inspect an S3 file
 fireparq inspect s3://my-bucket/evm/blocks/year=2026/month=01/date=15/part-000001.parquet
+
+# Show only schema fields, including explicit nullability
+fireparq inspect s3://my-bucket/evm/partitions.parquet --schema-only
+
+# Emit machine-readable schema JSON for a single parquet artifact
+fireparq inspect s3://my-bucket/evm/partitions.parquet --schema-only --json
 ```
 
 **Output includes:**
@@ -646,7 +652,7 @@ fireparq inspect s3://my-bucket/evm/blocks/year=2026/month=01/date=15/part-00000
 |---|---|
 | **File info** | Total rows, row groups, columns, file size, created_by, Parquet version |
 | **File metadata** | All key-value pairs stored in the Parquet footer |
-| **Schema** | Physical types, logical types (e.g. String, Timestamp), repetition levels, nested groups |
+| **Schema** | Physical types, logical types (e.g. String, Timestamp), repetition levels, explicit `nullable=` output, nested groups |
 | **Row groups** | Per-group row count, compressed/uncompressed size, compression ratio |
 | **Column details** | Per-column encoding, compression codec, compressed/uncompressed size, ratio |
 

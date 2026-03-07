@@ -661,10 +661,22 @@ Examples:
 
   # Inspect an S3 parquet file
   fireparq inspect s3://bucket/eth-mainnet/blocks/part-000001.parquet
+
+  # Show only the schema with explicit nullability
+  fireparq inspect s3://bucket/eth-mainnet/partitions.parquet --schema-only
+
+  # Emit machine-readable schema details
+  fireparq inspect s3://bucket/eth-mainnet/partitions.parquet --schema-only --json
 ")]
     Inspect {
         /// Path to a single .parquet file (local path or S3 URI)
         path: String,
+        /// Only show the schema, including explicit nullability
+        #[arg(long, default_value = "false")]
+        schema_only: bool,
+        /// Emit machine-readable JSON output
+        #[arg(long, default_value = "false")]
+        json: bool,
         /// AWS access key ID (for S3 paths)
         #[arg(long, env = "AWS_ACCESS_KEY_ID", hide_env_values = true)]
         aws_access_key_id: Option<String>,
@@ -1565,15 +1577,6 @@ pub struct PartitionValidateResult {
     pub issues: Vec<PartitionValidationIssue>,
 }
 
-pub const PARTITIONS_SCHEMA_VERSION: &str = "1";
-const PARTITIONS_SCHEMA_VERSION_KEY: &str = "firehose-parquet.partitions.schema_version";
-const PARTITIONS_GENERATED_AT_KEY: &str = "firehose-parquet.partitions.generated_at";
-const PARTITIONS_SOURCE_KEY: &str = "firehose-parquet.partitions.source";
-const PARTITIONS_CHAIN_SCOPE_KEY: &str = "firehose-parquet.partitions.chain_scope";
-const PARTITIONS_TYPES_KEY: &str = "firehose-parquet.partitions.partition_types";
-const PARTITIONS_MIN_START_BLOCK_KEY: &str = "firehose-parquet.partitions.min_start_block";
-const PARTITIONS_MAX_END_BLOCK_KEY: &str = "firehose-parquet.partitions.max_end_block";
-
 pub fn parse_partition_build_types(spec: &str) -> anyhow::Result<Vec<PartitionBuildType>> {
     let value = spec.trim();
     if value.is_empty() {
@@ -1880,7 +1883,6 @@ pub fn read_partitions_build_rows(
     }
 
     let mut rows = Vec::new();
-    let mut observed = ObservedPartitionsCoverage::default();
     if path.starts_with("s3://") {
         use crate::writer::parse_s3_url;
         use object_store::ObjectStore;
@@ -1894,8 +1896,6 @@ pub fn read_partitions_build_rows(
         let builder = ParquetRecordBatchReaderBuilder::try_new(data)?;
         let schema = builder.schema();
         validate_partitions_schema(&schema)?;
-        let expectations =
-            read_partitions_metadata_expectations(builder.metadata().file_metadata())?;
         validate_partitions_metadata(builder.metadata().file_metadata())?;
         let reader = builder.build()?;
         for batch in reader {
@@ -1907,17 +1907,11 @@ pub fn read_partitions_build_rows(
                 &read_u64_value,
             )?;
         }
-        for row in &rows {
-            observed.observe(&row.partition_type, row.start_block, row.end_block);
-        }
-        validate_partitions_metadata_consistency(expectations.as_ref(), &observed)?;
     } else {
         let file = std::fs::File::open(path).map_err(|e| anyhow::anyhow!("opening {path}: {e}"))?;
         let builder = ParquetRecordBatchReaderBuilder::try_new(file)?;
         let schema = builder.schema();
         validate_partitions_schema(&schema)?;
-        let expectations =
-            read_partitions_metadata_expectations(builder.metadata().file_metadata())?;
         validate_partitions_metadata(builder.metadata().file_metadata())?;
         let reader = builder.build()?;
         for batch in reader {
@@ -1929,10 +1923,6 @@ pub fn read_partitions_build_rows(
                 &read_u64_value,
             )?;
         }
-        for row in &rows {
-            observed.observe(&row.partition_type, row.start_block, row.end_block);
-        }
-        validate_partitions_metadata_consistency(expectations.as_ref(), &observed)?;
     }
 
     rows.sort_by(|left, right| {
@@ -1949,6 +1939,15 @@ pub fn write_partitions_index(
     path: &str,
     rows: &[PartitionBuildRow],
     aws: Option<&AwsConfig>,
+) -> anyhow::Result<()> {
+    write_partitions_index_with_metadata(path, rows, aws, None)
+}
+
+pub fn write_partitions_index_with_metadata(
+    path: &str,
+    rows: &[PartitionBuildRow],
+    aws: Option<&AwsConfig>,
+    file_metadata: Option<&crate::writer::ParquetFileMetadata>,
 ) -> anyhow::Result<()> {
     use arrow::array::{Int64Array, StringArray, UInt64Array};
     use arrow::datatypes::{DataType, Field, Schema};
@@ -2025,41 +2024,18 @@ pub fn write_partitions_index(
         ],
     )?;
 
-    let generated_at =
-        time::OffsetDateTime::now_utc().format(&time::format_description::well_known::Rfc3339)?;
-    let min_start_block = rows.iter().map(|row| row.start_block).min().unwrap_or(0);
-    let max_end_block = rows.iter().map(|row| row.end_block).max().unwrap_or(0);
-    let chain_scope = rows
-        .iter()
-        .find_map(|row| row.chain.clone())
-        .unwrap_or_else(|| "unknown".to_string());
-    let partition_types = rows
-        .iter()
-        .map(|row| row.partition_type.clone())
-        .collect::<std::collections::BTreeSet<_>>()
-        .into_iter()
-        .collect::<Vec<_>>()
-        .join(",");
-    let props = WriterProperties::builder()
-        .set_key_value_metadata(Some(vec![
-            KeyValue::new(
-                PARTITIONS_SCHEMA_VERSION_KEY.to_string(),
-                PARTITIONS_SCHEMA_VERSION.to_string(),
-            ),
-            KeyValue::new(PARTITIONS_GENERATED_AT_KEY.to_string(), generated_at),
-            KeyValue::new(PARTITIONS_SOURCE_KEY.to_string(), "firehose".to_string()),
-            KeyValue::new(PARTITIONS_CHAIN_SCOPE_KEY.to_string(), chain_scope),
-            KeyValue::new(PARTITIONS_TYPES_KEY.to_string(), partition_types),
-            KeyValue::new(
-                PARTITIONS_MIN_START_BLOCK_KEY.to_string(),
-                min_start_block.to_string(),
-            ),
-            KeyValue::new(
-                PARTITIONS_MAX_END_BLOCK_KEY.to_string(),
-                max_end_block.to_string(),
-            ),
-        ]))
-        .build();
+    let mut props_builder = WriterProperties::builder();
+    if let Some(file_metadata) = file_metadata {
+        let kvs = file_metadata
+            .entries
+            .iter()
+            .map(|(key, value)| KeyValue::new(key.clone(), value.clone()))
+            .collect::<Vec<_>>();
+        if !kvs.is_empty() {
+            props_builder = props_builder.set_key_value_metadata(Some(kvs));
+        }
+    }
+    let props = props_builder.build();
 
     if path.starts_with("s3://") {
         use crate::writer::parse_s3_url;
@@ -2210,238 +2186,8 @@ fn validate_partitions_schema(schema: &arrow::datatypes::Schema) -> anyhow::Resu
 }
 
 fn validate_partitions_metadata(
-    file_meta: &parquet::file::metadata::FileMetaData,
+    _file_meta: &parquet::file::metadata::FileMetaData,
 ) -> anyhow::Result<()> {
-    read_partitions_metadata_expectations(file_meta)?;
-
-    Ok(())
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct PartitionsMetadataExpectations {
-    partition_types: std::collections::BTreeSet<String>,
-    min_start_block: u64,
-    max_end_block: u64,
-}
-
-#[derive(Debug, Default)]
-struct ObservedPartitionsCoverage {
-    partition_types: std::collections::BTreeSet<String>,
-    min_start_block: Option<u64>,
-    max_end_block: Option<u64>,
-}
-
-impl ObservedPartitionsCoverage {
-    fn observe(&mut self, partition_type: &str, start_block: u64, end_block: u64) {
-        self.partition_types.insert(partition_type.to_string());
-        self.min_start_block = Some(
-            self.min_start_block
-                .map_or(start_block, |current| current.min(start_block)),
-        );
-        self.max_end_block = Some(
-            self.max_end_block
-                .map_or(end_block, |current| current.max(end_block)),
-        );
-    }
-}
-
-fn partitions_metadata_map(
-    file_meta: &parquet::file::metadata::FileMetaData,
-) -> std::collections::HashMap<&str, String> {
-    file_meta
-        .key_value_metadata()
-        .map(|entries| {
-            entries
-                .iter()
-                .filter_map(|entry| entry.value.clone().map(|value| (entry.key.as_str(), value)))
-                .collect::<std::collections::HashMap<_, _>>()
-        })
-        .unwrap_or_default()
-}
-
-fn read_partitions_metadata_expectations(
-    file_meta: &parquet::file::metadata::FileMetaData,
-) -> anyhow::Result<Option<PartitionsMetadataExpectations>> {
-    let metadata = partitions_metadata_map(file_meta);
-    let schema_version = metadata.get(PARTITIONS_SCHEMA_VERSION_KEY).cloned();
-
-    if let Some(version) = schema_version {
-        if version != PARTITIONS_SCHEMA_VERSION {
-            anyhow::bail!(
-                "unsupported partitions.parquet schema version {} (expected {})",
-                version,
-                PARTITIONS_SCHEMA_VERSION
-            );
-        }
-
-        let generated_at = metadata.get(PARTITIONS_GENERATED_AT_KEY).ok_or_else(|| {
-            anyhow::anyhow!(
-                "partitions.parquet schema version {} requires metadata key {}",
-                PARTITIONS_SCHEMA_VERSION,
-                PARTITIONS_GENERATED_AT_KEY
-            )
-        })?;
-        time::OffsetDateTime::parse(generated_at, &time::format_description::well_known::Rfc3339)
-            .map_err(|e| {
-            anyhow::anyhow!(
-                "invalid partitions metadata {} value {:?}: {}",
-                PARTITIONS_GENERATED_AT_KEY,
-                generated_at,
-                e
-            )
-        })?;
-
-        let source = metadata.get(PARTITIONS_SOURCE_KEY).ok_or_else(|| {
-            anyhow::anyhow!(
-                "partitions.parquet schema version {} requires metadata key {}",
-                PARTITIONS_SCHEMA_VERSION,
-                PARTITIONS_SOURCE_KEY
-            )
-        })?;
-        if source.trim().is_empty() {
-            anyhow::bail!(
-                "partitions metadata {} cannot be empty",
-                PARTITIONS_SOURCE_KEY
-            );
-        }
-
-        let chain_scope = metadata.get(PARTITIONS_CHAIN_SCOPE_KEY).ok_or_else(|| {
-            anyhow::anyhow!(
-                "partitions.parquet schema version {} requires metadata key {}",
-                PARTITIONS_SCHEMA_VERSION,
-                PARTITIONS_CHAIN_SCOPE_KEY
-            )
-        })?;
-        if chain_scope.trim().is_empty() {
-            anyhow::bail!(
-                "partitions metadata {} cannot be empty",
-                PARTITIONS_CHAIN_SCOPE_KEY
-            );
-        }
-
-        let partition_types = metadata.get(PARTITIONS_TYPES_KEY).ok_or_else(|| {
-            anyhow::anyhow!(
-                "partitions.parquet schema version {} requires metadata key {}",
-                PARTITIONS_SCHEMA_VERSION,
-                PARTITIONS_TYPES_KEY
-            )
-        })?;
-        let parsed_types = partition_types
-            .split(',')
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(PartitionBuildType::from_cli_value)
-            .collect::<anyhow::Result<Vec<_>>>()?;
-        if parsed_types.is_empty() {
-            anyhow::bail!(
-                "partitions metadata {} must include at least one partition type",
-                PARTITIONS_TYPES_KEY
-            );
-        }
-
-        let min_start_block = metadata
-            .get(PARTITIONS_MIN_START_BLOCK_KEY)
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "partitions.parquet schema version {} requires metadata key {}",
-                    PARTITIONS_SCHEMA_VERSION,
-                    PARTITIONS_MIN_START_BLOCK_KEY
-                )
-            })?
-            .parse::<u64>()
-            .map_err(|e| {
-                anyhow::anyhow!(
-                    "invalid partitions metadata {} value: {}",
-                    PARTITIONS_MIN_START_BLOCK_KEY,
-                    e
-                )
-            })?;
-        let max_end_block = metadata
-            .get(PARTITIONS_MAX_END_BLOCK_KEY)
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "partitions.parquet schema version {} requires metadata key {}",
-                    PARTITIONS_SCHEMA_VERSION,
-                    PARTITIONS_MAX_END_BLOCK_KEY
-                )
-            })?
-            .parse::<u64>()
-            .map_err(|e| {
-                anyhow::anyhow!(
-                    "invalid partitions metadata {} value: {}",
-                    PARTITIONS_MAX_END_BLOCK_KEY,
-                    e
-                )
-            })?;
-        if min_start_block >= max_end_block {
-            anyhow::bail!(
-                "invalid partitions metadata coverage: {}={} must be < {}={}",
-                PARTITIONS_MIN_START_BLOCK_KEY,
-                min_start_block,
-                PARTITIONS_MAX_END_BLOCK_KEY,
-                max_end_block
-            );
-        }
-
-        return Ok(Some(PartitionsMetadataExpectations {
-            partition_types: parsed_types
-                .into_iter()
-                .map(|partition_type| partition_type.to_string())
-                .collect(),
-            min_start_block,
-            max_end_block,
-        }));
-    }
-
-    Ok(None)
-}
-
-fn validate_partitions_metadata_consistency(
-    expectations: Option<&PartitionsMetadataExpectations>,
-    observed: &ObservedPartitionsCoverage,
-) -> anyhow::Result<()> {
-    let Some(expectations) = expectations else {
-        return Ok(());
-    };
-
-    let observed_min_start_block = observed.min_start_block.ok_or_else(|| {
-        anyhow::anyhow!(
-            "partitions.parquet declared schema version {} but contained no rows",
-            PARTITIONS_SCHEMA_VERSION
-        )
-    })?;
-    let observed_max_end_block = observed.max_end_block.ok_or_else(|| {
-        anyhow::anyhow!(
-            "partitions.parquet declared schema version {} but contained no rows",
-            PARTITIONS_SCHEMA_VERSION
-        )
-    })?;
-
-    if observed.partition_types != expectations.partition_types {
-        anyhow::bail!(
-            "partitions metadata {} does not match observed row partition types: expected {:?}, observed {:?}",
-            PARTITIONS_TYPES_KEY,
-            expectations.partition_types,
-            observed.partition_types
-        );
-    }
-    if observed_min_start_block != expectations.min_start_block {
-        anyhow::bail!(
-            "partitions metadata {}={} does not match observed row minimum {}",
-            PARTITIONS_MIN_START_BLOCK_KEY,
-            expectations.min_start_block,
-            observed_min_start_block
-        );
-    }
-    if observed_max_end_block != expectations.max_end_block {
-        anyhow::bail!(
-            "partitions metadata {}={} does not match observed row maximum {}",
-            PARTITIONS_MAX_END_BLOCK_KEY,
-            expectations.max_end_block,
-            observed_max_end_block
-        );
-    }
-
     Ok(())
 }
 
@@ -2771,7 +2517,6 @@ pub fn list_partitions_from_index(
 
     let mut heap: BinaryHeap<HeapEntry> = BinaryHeap::new();
     let mut total_matches = 0usize;
-    let mut observed = ObservedPartitionsCoverage::default();
 
     if request.index_path.starts_with("s3://") {
         use crate::writer::parse_s3_url;
@@ -2785,27 +2530,11 @@ pub fn list_partitions_from_index(
         let data = block_on_async(async { client.get(&obj_path).await?.bytes().await })
             .map_err(|e| anyhow::anyhow!("reading {}: {e}", request.index_path))?;
         let builder = ParquetRecordBatchReaderBuilder::try_new(data)?;
-        let expectations =
-            read_partitions_metadata_expectations(builder.metadata().file_metadata())?;
         validate_partitions_metadata(builder.metadata().file_metadata())?;
         let reader = builder.build()?;
         for batch in reader {
             let batch = batch?;
             validate_partitions_schema(batch.schema().as_ref())?;
-            let schema = batch.schema();
-            let partition_type_idx = schema.index_of("partition_type")?;
-            let start_block_idx = schema.index_of("start_block")?;
-            let end_block_idx = schema.index_of("end_block")?;
-            for row in 0..batch.num_rows() {
-                let partition_type =
-                    read_utf8_value(batch.column(partition_type_idx).as_ref(), row)?
-                        .ok_or_else(|| anyhow::anyhow!("null partition_type at row {}", row))?;
-                let start_block = read_u64_value(batch.column(start_block_idx).as_ref(), row)?
-                    .ok_or_else(|| anyhow::anyhow!("null start_block at row {}", row))?;
-                let end_block = read_u64_value(batch.column(end_block_idx).as_ref(), row)?
-                    .ok_or_else(|| anyhow::anyhow!("null end_block at row {}", row))?;
-                observed.observe(&partition_type, start_block, end_block);
-            }
             collect_partition_rows(
                 &batch,
                 &request,
@@ -2815,32 +2544,15 @@ pub fn list_partitions_from_index(
                 &read_u64_value,
             )?;
         }
-        validate_partitions_metadata_consistency(expectations.as_ref(), &observed)?;
     } else {
         let file = std::fs::File::open(&request.index_path)
             .map_err(|e| anyhow::anyhow!("opening {}: {e}", request.index_path))?;
         let builder = ParquetRecordBatchReaderBuilder::try_new(file)?;
-        let expectations =
-            read_partitions_metadata_expectations(builder.metadata().file_metadata())?;
         validate_partitions_metadata(builder.metadata().file_metadata())?;
         let reader = builder.build()?;
         for batch in reader {
             let batch = batch?;
             validate_partitions_schema(batch.schema().as_ref())?;
-            let schema = batch.schema();
-            let partition_type_idx = schema.index_of("partition_type")?;
-            let start_block_idx = schema.index_of("start_block")?;
-            let end_block_idx = schema.index_of("end_block")?;
-            for row in 0..batch.num_rows() {
-                let partition_type =
-                    read_utf8_value(batch.column(partition_type_idx).as_ref(), row)?
-                        .ok_or_else(|| anyhow::anyhow!("null partition_type at row {}", row))?;
-                let start_block = read_u64_value(batch.column(start_block_idx).as_ref(), row)?
-                    .ok_or_else(|| anyhow::anyhow!("null start_block at row {}", row))?;
-                let end_block = read_u64_value(batch.column(end_block_idx).as_ref(), row)?
-                    .ok_or_else(|| anyhow::anyhow!("null end_block at row {}", row))?;
-                observed.observe(&partition_type, start_block, end_block);
-            }
             collect_partition_rows(
                 &batch,
                 &request,
@@ -2850,7 +2562,6 @@ pub fn list_partitions_from_index(
                 &read_u64_value,
             )?;
         }
-        validate_partitions_metadata_consistency(expectations.as_ref(), &observed)?;
     }
 
     let mut rows: Vec<PartitionListRow> =
@@ -4353,19 +4064,26 @@ fn format_number_with_hint(v: i128) -> String {
 /// Displays file-level key-value metadata, Arrow schema, row group details,
 /// and per-column chunk information.
 /// Supports local filesystem paths and S3 URIs (`s3://bucket/key.parquet`).
-pub fn inspect_parquet(path: &str, aws: Option<&AwsConfig>) -> anyhow::Result<()> {
+pub fn inspect_parquet(
+    path: &str,
+    schema_only: bool,
+    json: bool,
+    aws: Option<&AwsConfig>,
+) -> anyhow::Result<()> {
     if path.starts_with("s3://") {
         inspect_parquet_s3(
             path,
+            schema_only,
+            json,
             aws.ok_or_else(|| anyhow::anyhow!("AWS config required for S3 paths"))?,
         )
     } else {
-        inspect_parquet_local(path)
+        inspect_parquet_local(path, schema_only, json)
     }
 }
 
 /// Inspect a local parquet file.
-fn inspect_parquet_local(path: &str) -> anyhow::Result<()> {
+fn inspect_parquet_local(path: &str, schema_only: bool, json: bool) -> anyhow::Result<()> {
     use parquet::file::reader::FileReader;
     use parquet::file::serialized_reader::SerializedFileReader;
     use std::fs;
@@ -4375,12 +4093,17 @@ fn inspect_parquet_local(path: &str) -> anyhow::Result<()> {
     let reader = SerializedFileReader::new(file)?;
     let metadata = reader.metadata();
 
-    print_inspect(path, file_size, metadata);
+    print_inspect(path, file_size, metadata, schema_only, json)?;
     Ok(())
 }
 
 /// Inspect an S3 parquet file.
-fn inspect_parquet_s3(path: &str, aws: &AwsConfig) -> anyhow::Result<()> {
+fn inspect_parquet_s3(
+    path: &str,
+    schema_only: bool,
+    json: bool,
+    aws: &AwsConfig,
+) -> anyhow::Result<()> {
     use crate::writer::parse_s3_url;
     use object_store::aws::AmazonS3Builder;
     use object_store::ObjectStore;
@@ -4419,16 +4142,56 @@ fn inspect_parquet_s3(path: &str, aws: &AwsConfig) -> anyhow::Result<()> {
         .map_err(|e| anyhow::anyhow!("parsing parquet from {path}: {e}"))?;
     let metadata = reader.metadata();
 
-    print_inspect(path, file_size, metadata);
+    print_inspect(path, file_size, metadata, schema_only, json)?;
     Ok(())
 }
 
 /// Print the full inspection output for a parquet file.
-fn print_inspect(path: &str, file_size: u64, metadata: &parquet::file::metadata::ParquetMetaData) {
+fn print_inspect(
+    path: &str,
+    file_size: u64,
+    metadata: &parquet::file::metadata::ParquetMetaData,
+    schema_only: bool,
+    json: bool,
+) -> anyhow::Result<()> {
     let file_meta = metadata.file_metadata();
     let num_row_groups = metadata.num_row_groups();
     let total_rows: i64 = metadata.row_groups().iter().map(|rg| rg.num_rows()).sum();
     let num_columns = file_meta.schema().get_fields().len();
+    let schema = build_schema_fields(file_meta.schema().get_fields());
+
+    if json {
+        let output = if schema_only {
+            serde_json::json!({
+                "path": path,
+                "schema": schema,
+            })
+        } else {
+            serde_json::json!({
+                "path": path,
+                "file_size_bytes": file_size,
+                "rows": total_rows,
+                "row_groups": num_row_groups,
+                "columns": num_columns,
+                "created_by": file_meta.created_by(),
+                "version": file_meta.version(),
+                "schema": schema,
+            })
+        };
+        println!("{}", serde_json::to_string_pretty(&output)?);
+        return Ok(());
+    }
+
+    if schema_only {
+        println!("{}", "═".repeat(72));
+        println!("  Schema: {}", path);
+        println!("{}", "─".repeat(72));
+        for field in file_meta.schema().get_fields() {
+            print_schema_field(field, 1);
+        }
+        println!("{}", "═".repeat(72));
+        return Ok(());
+    }
 
     // Header
     println!("{}", "═".repeat(72));
@@ -4477,8 +4240,7 @@ fn print_inspect(path: &str, file_size: u64, metadata: &parquet::file::metadata:
     println!("{}", "─".repeat(72));
 
     // Use the parquet schema for detailed type info.
-    let schema = file_meta.schema();
-    for field in schema.get_fields() {
+    for field in file_meta.schema().get_fields() {
         print_schema_field(field, 1);
     }
 
@@ -4544,10 +4306,70 @@ fn print_inspect(path: &str, file_size: u64, metadata: &parquet::file::metadata:
     }
 
     println!("\n{}", "═".repeat(72));
+    Ok(())
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct InspectSchemaField {
+    name: String,
+    kind: String,
+    physical_type: Option<String>,
+    logical_type: Option<String>,
+    repetition: String,
+    nullable: bool,
+    type_length: Option<i32>,
+    children: Vec<InspectSchemaField>,
+}
+
+fn build_schema_fields(fields: &[parquet::schema::types::TypePtr]) -> Vec<InspectSchemaField> {
+    fields
+        .iter()
+        .map(|field| build_schema_field(field))
+        .collect()
+}
+
+fn build_schema_field(field: &parquet::schema::types::Type) -> InspectSchemaField {
+    use parquet::basic::Repetition;
+    use parquet::schema::types::Type;
+
+    match field {
+        Type::PrimitiveType {
+            basic_info,
+            physical_type,
+            type_length,
+            ..
+        } => InspectSchemaField {
+            name: basic_info.name().to_string(),
+            kind: "primitive".to_string(),
+            physical_type: Some(format!("{:?}", physical_type)),
+            logical_type: basic_info
+                .logical_type_ref()
+                .map(|value| format!("{:?}", value)),
+            repetition: format!("{:?}", basic_info.repetition()).to_lowercase(),
+            nullable: matches!(basic_info.repetition(), Repetition::OPTIONAL),
+            type_length: (*type_length > 0).then_some(*type_length),
+            children: Vec::new(),
+        },
+        Type::GroupType {
+            basic_info, fields, ..
+        } => InspectSchemaField {
+            name: basic_info.name().to_string(),
+            kind: "group".to_string(),
+            physical_type: None,
+            logical_type: basic_info
+                .logical_type_ref()
+                .map(|value| format!("{:?}", value)),
+            repetition: format!("{:?}", basic_info.repetition()).to_lowercase(),
+            nullable: matches!(basic_info.repetition(), Repetition::OPTIONAL),
+            type_length: None,
+            children: build_schema_fields(fields),
+        },
+    }
 }
 
 /// Print a parquet schema field with indentation (supports nested types).
 fn print_schema_field(field: &parquet::schema::types::Type, indent: usize) {
+    use parquet::basic::Repetition;
     use parquet::schema::types::Type;
 
     let prefix = "  ".repeat(indent);
@@ -4559,6 +4381,7 @@ fn print_schema_field(field: &parquet::schema::types::Type, indent: usize) {
             ..
         } => {
             let repetition = format!("{:?}", basic_info.repetition());
+            let nullable = matches!(basic_info.repetition(), Repetition::OPTIONAL);
             let logical = basic_info
                 .logical_type_ref()
                 .map(|lt| format!(" ({:?})", lt))
@@ -4569,29 +4392,32 @@ fn print_schema_field(field: &parquet::schema::types::Type, indent: usize) {
                 String::new()
             };
             println!(
-                "{}{:30} {:?}{}{}  {}",
+                "{}{:30} {:?}{}{}  {} nullable={}",
                 prefix,
                 basic_info.name(),
                 physical_type,
                 len_info,
                 logical,
                 repetition.to_lowercase(),
+                nullable,
             );
         }
         Type::GroupType {
             basic_info, fields, ..
         } => {
             let repetition = format!("{:?}", basic_info.repetition());
+            let nullable = matches!(basic_info.repetition(), Repetition::OPTIONAL);
             let logical = basic_info
                 .logical_type_ref()
                 .map(|lt| format!(" ({:?})", lt))
                 .unwrap_or_default();
             println!(
-                "{}{:30} group{}  {}",
+                "{}{:30} group{}  {} nullable={}",
                 prefix,
                 basic_info.name(),
                 logical,
                 repetition.to_lowercase(),
+                nullable,
             );
             for f in fields {
                 print_schema_field(f, indent + 1);
@@ -6065,6 +5891,53 @@ mod tests {
     }
 
     #[test]
+    fn test_inspect_subcommand_schema_only_parse() {
+        let cli = parse(&[
+            "test-cli",
+            "inspect",
+            "s3://bucket/mainnet/partitions.parquet",
+            "--schema-only",
+        ]);
+        match cli.command.expect("command should exist") {
+            Commands::Inspect {
+                path,
+                schema_only,
+                json,
+                ..
+            } => {
+                assert_eq!(path, "s3://bucket/mainnet/partitions.parquet");
+                assert!(schema_only);
+                assert!(!json);
+            }
+            _ => panic!("expected inspect subcommand"),
+        }
+    }
+
+    #[test]
+    fn test_inspect_subcommand_schema_only_json_parse() {
+        let cli = parse(&[
+            "test-cli",
+            "inspect",
+            "./output/mainnet/partitions.parquet",
+            "--schema-only",
+            "--json",
+        ]);
+        match cli.command.expect("command should exist") {
+            Commands::Inspect {
+                path,
+                schema_only,
+                json,
+                ..
+            } => {
+                assert_eq!(path, "./output/mainnet/partitions.parquet");
+                assert!(schema_only);
+                assert!(json);
+            }
+            _ => panic!("expected inspect subcommand"),
+        }
+    }
+
+    #[test]
     fn test_scan_subcommand_limit_parse() {
         let cli = parse(&[
             "test-cli",
@@ -7040,7 +6913,7 @@ mod tests {
     }
 
     #[test]
-    fn test_list_partitions_from_index_rejects_unsupported_schema_version() {
+    fn test_list_partitions_from_index_ignores_legacy_partitions_metadata() {
         use arrow::array::{StringArray, UInt64Array};
         use arrow::record_batch::RecordBatch;
         use parquet::arrow::ArrowWriter;
@@ -7079,10 +6952,10 @@ mod tests {
 
         let props = WriterProperties::builder()
             .set_compression(Compression::SNAPPY)
-            .set_key_value_metadata(Some(vec![KeyValue {
-                key: PARTITIONS_SCHEMA_VERSION_KEY.to_string(),
-                value: Some("999".to_string()),
-            }]))
+            .set_key_value_metadata(Some(vec![KeyValue::new(
+                "firehose-parquet.partitions.schema_version".to_string(),
+                "999".to_string(),
+            )]))
             .build();
 
         let file = File::create(&path).expect("create parquet");
@@ -7091,7 +6964,7 @@ mod tests {
         writer.write(&batch).expect("write batch");
         writer.close().expect("close writer");
 
-        let err = list_partitions_from_index(
+        let result = list_partitions_from_index(
             &PartitionListRequest {
                 index_path: path.to_string_lossy().to_string(),
                 partition_type: Some("day".to_string()),
@@ -7102,176 +6975,14 @@ mod tests {
             },
             None,
         )
-        .expect_err("unsupported schema version should fail");
-        assert!(err
-            .to_string()
-            .contains("unsupported partitions.parquet schema version"));
+        .expect("legacy partitions metadata should be ignored");
+        assert_eq!(result.rows.len(), 1);
+        assert_eq!(result.rows[0].start_block, 100);
+        assert_eq!(result.rows[0].end_block, 200);
     }
 
     #[test]
-    fn test_list_partitions_from_index_rejects_missing_required_versioned_metadata() {
-        use arrow::array::{StringArray, UInt64Array};
-        use arrow::record_batch::RecordBatch;
-        use parquet::arrow::ArrowWriter;
-        use parquet::basic::Compression;
-        use parquet::file::metadata::KeyValue;
-        use parquet::file::properties::WriterProperties;
-        use std::fs::File;
-        use std::sync::Arc;
-
-        let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("partitions.parquet");
-
-        let schema = Arc::new(arrow::datatypes::Schema::new(vec![
-            arrow::datatypes::Field::new("chain", arrow::datatypes::DataType::Utf8, false),
-            arrow::datatypes::Field::new("partition_type", arrow::datatypes::DataType::Utf8, false),
-            arrow::datatypes::Field::new(
-                "partition_value",
-                arrow::datatypes::DataType::Utf8,
-                false,
-            ),
-            arrow::datatypes::Field::new("start_block", arrow::datatypes::DataType::UInt64, false),
-            arrow::datatypes::Field::new("end_block", arrow::datatypes::DataType::UInt64, false),
-        ]));
-
-        let batch = RecordBatch::try_new(
-            Arc::clone(&schema),
-            vec![
-                Arc::new(StringArray::from(vec!["eth-mainnet"])),
-                Arc::new(StringArray::from(vec!["day"])),
-                Arc::new(StringArray::from(vec!["2015-07-30 00:00:00"])),
-                Arc::new(UInt64Array::from(vec![100_u64])),
-                Arc::new(UInt64Array::from(vec![200_u64])),
-            ],
-        )
-        .expect("record batch");
-
-        let props = WriterProperties::builder()
-            .set_compression(Compression::SNAPPY)
-            .set_key_value_metadata(Some(vec![KeyValue {
-                key: PARTITIONS_SCHEMA_VERSION_KEY.to_string(),
-                value: Some(PARTITIONS_SCHEMA_VERSION.to_string()),
-            }]))
-            .build();
-
-        let file = File::create(&path).expect("create parquet");
-        let mut writer =
-            ArrowWriter::try_new(file, schema, Some(props)).expect("create arrow writer");
-        writer.write(&batch).expect("write batch");
-        writer.close().expect("close writer");
-
-        let err = list_partitions_from_index(
-            &PartitionListRequest {
-                index_path: path.to_string_lossy().to_string(),
-                partition_type: Some("day".to_string()),
-                chain: None,
-                from: None,
-                to: None,
-                limit: 10,
-            },
-            None,
-        )
-        .expect_err("missing required metadata should fail");
-        assert!(err.to_string().contains(PARTITIONS_GENERATED_AT_KEY));
-    }
-
-    #[test]
-    fn test_list_partitions_from_index_rejects_invalid_versioned_metadata_coverage() {
-        use arrow::array::{StringArray, UInt64Array};
-        use arrow::record_batch::RecordBatch;
-        use parquet::arrow::ArrowWriter;
-        use parquet::basic::Compression;
-        use parquet::file::metadata::KeyValue;
-        use parquet::file::properties::WriterProperties;
-        use std::fs::File;
-        use std::sync::Arc;
-
-        let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("partitions.parquet");
-
-        let schema = Arc::new(arrow::datatypes::Schema::new(vec![
-            arrow::datatypes::Field::new("chain", arrow::datatypes::DataType::Utf8, false),
-            arrow::datatypes::Field::new("partition_type", arrow::datatypes::DataType::Utf8, false),
-            arrow::datatypes::Field::new(
-                "partition_value",
-                arrow::datatypes::DataType::Utf8,
-                false,
-            ),
-            arrow::datatypes::Field::new("start_block", arrow::datatypes::DataType::UInt64, false),
-            arrow::datatypes::Field::new("end_block", arrow::datatypes::DataType::UInt64, false),
-        ]));
-
-        let batch = RecordBatch::try_new(
-            Arc::clone(&schema),
-            vec![
-                Arc::new(StringArray::from(vec!["eth-mainnet"])),
-                Arc::new(StringArray::from(vec!["day"])),
-                Arc::new(StringArray::from(vec!["2015-07-30 00:00:00"])),
-                Arc::new(UInt64Array::from(vec![100_u64])),
-                Arc::new(UInt64Array::from(vec![200_u64])),
-            ],
-        )
-        .expect("record batch");
-
-        let props = WriterProperties::builder()
-            .set_compression(Compression::SNAPPY)
-            .set_key_value_metadata(Some(vec![
-                KeyValue {
-                    key: PARTITIONS_SCHEMA_VERSION_KEY.to_string(),
-                    value: Some(PARTITIONS_SCHEMA_VERSION.to_string()),
-                },
-                KeyValue {
-                    key: PARTITIONS_GENERATED_AT_KEY.to_string(),
-                    value: Some("2026-03-06T12:00:00Z".to_string()),
-                },
-                KeyValue {
-                    key: PARTITIONS_SOURCE_KEY.to_string(),
-                    value: Some("firehose".to_string()),
-                },
-                KeyValue {
-                    key: PARTITIONS_CHAIN_SCOPE_KEY.to_string(),
-                    value: Some("eth-mainnet".to_string()),
-                },
-                KeyValue {
-                    key: PARTITIONS_TYPES_KEY.to_string(),
-                    value: Some("day".to_string()),
-                },
-                KeyValue {
-                    key: PARTITIONS_MIN_START_BLOCK_KEY.to_string(),
-                    value: Some("200".to_string()),
-                },
-                KeyValue {
-                    key: PARTITIONS_MAX_END_BLOCK_KEY.to_string(),
-                    value: Some("200".to_string()),
-                },
-            ]))
-            .build();
-
-        let file = File::create(&path).expect("create parquet");
-        let mut writer =
-            ArrowWriter::try_new(file, schema, Some(props)).expect("create arrow writer");
-        writer.write(&batch).expect("write batch");
-        writer.close().expect("close writer");
-
-        let err = list_partitions_from_index(
-            &PartitionListRequest {
-                index_path: path.to_string_lossy().to_string(),
-                partition_type: Some("day".to_string()),
-                chain: None,
-                from: None,
-                to: None,
-                limit: 10,
-            },
-            None,
-        )
-        .expect_err("invalid coverage metadata should fail");
-        assert!(err
-            .to_string()
-            .contains("invalid partitions metadata coverage"));
-    }
-
-    #[test]
-    fn test_list_partitions_from_index_rejects_metadata_partition_type_mismatch() {
+    fn test_read_partitions_build_rows_ignores_legacy_partitions_metadata() {
         use arrow::array::{StringArray, UInt64Array};
         use arrow::record_batch::RecordBatch;
         use parquet::arrow::ArrowWriter;
@@ -7312,24 +7023,13 @@ mod tests {
             .set_compression(Compression::SNAPPY)
             .set_key_value_metadata(Some(vec![
                 KeyValue::new(
-                    PARTITIONS_SCHEMA_VERSION_KEY.to_string(),
-                    PARTITIONS_SCHEMA_VERSION.to_string(),
+                    "firehose-parquet.partitions.partition_types".to_string(),
+                    "hour".to_string(),
                 ),
                 KeyValue::new(
-                    PARTITIONS_GENERATED_AT_KEY.to_string(),
-                    "2026-03-06T12:00:00Z".to_string(),
+                    "firehose-parquet.partitions.max_end_block".to_string(),
+                    "999999".to_string(),
                 ),
-                KeyValue::new(PARTITIONS_SOURCE_KEY.to_string(), "firehose".to_string()),
-                KeyValue::new(
-                    PARTITIONS_CHAIN_SCOPE_KEY.to_string(),
-                    "eth-mainnet".to_string(),
-                ),
-                KeyValue::new(PARTITIONS_TYPES_KEY.to_string(), "hour".to_string()),
-                KeyValue::new(
-                    PARTITIONS_MIN_START_BLOCK_KEY.to_string(),
-                    "100".to_string(),
-                ),
-                KeyValue::new(PARTITIONS_MAX_END_BLOCK_KEY.to_string(), "200".to_string()),
             ]))
             .build();
 
@@ -7339,93 +7039,11 @@ mod tests {
         writer.write(&batch).expect("write batch");
         writer.close().expect("close writer");
 
-        let err = list_partitions_from_index(
-            &PartitionListRequest {
-                index_path: path.to_string_lossy().to_string(),
-                partition_type: None,
-                chain: None,
-                from: None,
-                to: None,
-                limit: 10,
-            },
-            None,
-        )
-        .expect_err("metadata partition type mismatch should fail");
-        assert!(err.to_string().contains(PARTITIONS_TYPES_KEY));
-    }
-
-    #[test]
-    fn test_read_partitions_build_rows_rejects_metadata_coverage_mismatch() {
-        use arrow::array::{StringArray, UInt64Array};
-        use arrow::record_batch::RecordBatch;
-        use parquet::arrow::ArrowWriter;
-        use parquet::basic::Compression;
-        use parquet::file::metadata::KeyValue;
-        use parquet::file::properties::WriterProperties;
-        use std::fs::File;
-        use std::sync::Arc;
-
-        let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("partitions.parquet");
-
-        let schema = Arc::new(arrow::datatypes::Schema::new(vec![
-            arrow::datatypes::Field::new("chain", arrow::datatypes::DataType::Utf8, false),
-            arrow::datatypes::Field::new("partition_type", arrow::datatypes::DataType::Utf8, false),
-            arrow::datatypes::Field::new(
-                "partition_value",
-                arrow::datatypes::DataType::Utf8,
-                false,
-            ),
-            arrow::datatypes::Field::new("start_block", arrow::datatypes::DataType::UInt64, false),
-            arrow::datatypes::Field::new("end_block", arrow::datatypes::DataType::UInt64, false),
-        ]));
-
-        let batch = RecordBatch::try_new(
-            Arc::clone(&schema),
-            vec![
-                Arc::new(StringArray::from(vec!["eth-mainnet"])),
-                Arc::new(StringArray::from(vec!["day"])),
-                Arc::new(StringArray::from(vec!["2015-07-30 00:00:00"])),
-                Arc::new(UInt64Array::from(vec![100_u64])),
-                Arc::new(UInt64Array::from(vec![200_u64])),
-            ],
-        )
-        .expect("record batch");
-
-        let props = WriterProperties::builder()
-            .set_compression(Compression::SNAPPY)
-            .set_key_value_metadata(Some(vec![
-                KeyValue::new(
-                    PARTITIONS_SCHEMA_VERSION_KEY.to_string(),
-                    PARTITIONS_SCHEMA_VERSION.to_string(),
-                ),
-                KeyValue::new(
-                    PARTITIONS_GENERATED_AT_KEY.to_string(),
-                    "2026-03-06T12:00:00Z".to_string(),
-                ),
-                KeyValue::new(PARTITIONS_SOURCE_KEY.to_string(), "firehose".to_string()),
-                KeyValue::new(
-                    PARTITIONS_CHAIN_SCOPE_KEY.to_string(),
-                    "eth-mainnet".to_string(),
-                ),
-                KeyValue::new(PARTITIONS_TYPES_KEY.to_string(), "day".to_string()),
-                KeyValue::new(
-                    PARTITIONS_MIN_START_BLOCK_KEY.to_string(),
-                    "101".to_string(),
-                ),
-                KeyValue::new(PARTITIONS_MAX_END_BLOCK_KEY.to_string(), "200".to_string()),
-            ]))
-            .build();
-
-        let file = File::create(&path).expect("create parquet");
-        let mut writer =
-            ArrowWriter::try_new(file, schema, Some(props)).expect("create arrow writer");
-        writer.write(&batch).expect("write batch");
-        writer.close().expect("close writer");
-
-        let err = read_partitions_build_rows(&path.to_string_lossy(), None)
-            .expect_err("metadata coverage mismatch should fail");
-        assert!(err.to_string().contains(PARTITIONS_MIN_START_BLOCK_KEY));
+        let rows = read_partitions_build_rows(&path.to_string_lossy(), None)
+            .expect("legacy partitions metadata should be ignored");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].start_block, 100);
+        assert_eq!(rows[0].end_block, 200);
     }
 
     #[test]
@@ -7755,5 +7373,49 @@ mod tests {
         let read_back =
             read_partitions_build_rows(&path.to_string_lossy(), None).expect("read rows back");
         assert_eq!(read_back, rows);
+    }
+
+    #[test]
+    fn test_write_partitions_index_with_metadata_preserves_firehose_metadata() {
+        use crate::writer::ParquetFileMetadata;
+        use parquet::file::reader::{FileReader, SerializedFileReader};
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("eth-mainnet").join("partitions.parquet");
+        let rows = vec![PartitionBuildRow {
+            partition_type: "hour".to_string(),
+            partition_interval_seconds: 3_600,
+            partition_start_ts: "2023-07-31 14:00:00".to_string(),
+            partition_value: "2023-07-31 14:00:00".to_string(),
+            start_block: 100,
+            end_block: 103,
+            start_time: "2023-07-31 14:59:00".to_string(),
+            end_time: "2023-07-31 15:00:00".to_string(),
+            chain: Some("eth-mainnet".to_string()),
+        }];
+        let mut metadata = ParquetFileMetadata::new();
+        metadata.add("firehose-parquet.version", "0.5.4-test");
+        metadata.add("firehose-parquet.endpoint", "https://example.com:443");
+
+        write_partitions_index_with_metadata(&path.to_string_lossy(), &rows, None, Some(&metadata))
+            .expect("write rows with metadata");
+
+        let file = std::fs::File::open(&path).expect("open parquet");
+        let reader = SerializedFileReader::new(file).expect("reader");
+        let file_meta = reader.metadata().file_metadata();
+        let kv = file_meta
+            .key_value_metadata()
+            .expect("key value metadata should exist");
+
+        assert!(kv.iter().any(|entry| {
+            entry.key == "firehose-parquet.version" && entry.value.as_deref() == Some("0.5.4-test")
+        }));
+        assert!(kv.iter().any(|entry| {
+            entry.key == "firehose-parquet.endpoint"
+                && entry.value.as_deref() == Some("https://example.com:443")
+        }));
+        assert!(!kv
+            .iter()
+            .any(|entry| entry.key.starts_with("firehose-parquet.partitions.")));
     }
 }

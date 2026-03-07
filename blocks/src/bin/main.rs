@@ -7,9 +7,9 @@ use firehose_parquet::cli::{
     parse_partition_build_types, parse_partition_selection_request, parse_partition_shard_strategy,
     read_partitions_build_rows, resolve_cursor_template, resolve_partition_bounds_from_index,
     resolve_partition_command, resolve_partition_window_bounds_from_index, resolve_s3_output_root,
-    shard_partitions_from_index, validate_partitions_index, write_partitions_index, AwsConfig,
-    Commands, CommonArgs, PartitionBoundsRequest, PartitionBuildResult, PartitionBuildType,
-    PartitionIndexBuilder, PartitionListRequest, PartitionResolveOptions,
+    shard_partitions_from_index, validate_partitions_index, write_partitions_index_with_metadata,
+    AwsConfig, Commands, CommonArgs, PartitionBoundsRequest, PartitionBuildResult,
+    PartitionBuildType, PartitionIndexBuilder, PartitionListRequest, PartitionResolveOptions,
     PartitionSelectionRequest, PartitionShardRequest, PartitionValidateRequest, PartitionsCommands,
 };
 use firehose_parquet::config::{BlockMetadata, Compression, Config, Partition};
@@ -265,6 +265,126 @@ fn build_file_metadata(
     meta
 }
 
+fn infer_partitions_block_type(
+    chain: &str,
+    endpoint_info: &Option<EndpointInfo>,
+) -> Option<&'static str> {
+    let mut candidates = vec![chain.to_ascii_lowercase()];
+    if let Some(info) = endpoint_info {
+        if !info.chain_name.is_empty() {
+            candidates.push(info.chain_name.to_ascii_lowercase());
+        }
+        candidates.extend(
+            info.chain_name_aliases
+                .iter()
+                .map(|alias| alias.to_ascii_lowercase()),
+        );
+    }
+
+    for candidate in candidates {
+        if candidate.contains("beacon") {
+            return Some("beacon");
+        }
+        if candidate.contains("solana") {
+            return Some("solana");
+        }
+        if candidate.contains("bitcoin") {
+            return Some("bitcoin");
+        }
+        if candidate.contains("near") {
+            return Some("near");
+        }
+        if candidate.contains("antelope") || candidate.contains("eos") {
+            return Some("antelope");
+        }
+        if candidate.contains("cosmos") {
+            return Some("cosmos");
+        }
+        if candidate.contains("tron") {
+            return Some("tron");
+        }
+        if candidate.contains("ethereum") || candidate.contains("evm") || candidate == "mainnet" {
+            return Some("evm");
+        }
+    }
+
+    None
+}
+
+fn build_partitions_file_metadata(
+    endpoint: &str,
+    chain: &str,
+    partition: &str,
+    endpoint_info: &Option<EndpointInfo>,
+) -> ParquetFileMetadata {
+    let inferred_block_type = infer_partitions_block_type(chain, endpoint_info);
+    let encoding = inferred_block_type
+        .map(default_encode_bytes)
+        .or_else(|| {
+            endpoint_info
+                .as_ref()
+                .and_then(|info| encode_bytes_from_block_id_encoding(info.block_id_encoding))
+        })
+        .unwrap_or(EncodeBytes::Hex);
+
+    let mut meta = ParquetFileMetadata::new();
+    meta.add("firehose-parquet.version", env!("CARGO_PKG_VERSION"));
+    if let Some(block_type) = inferred_block_type {
+        meta.add("firehose-parquet.block_type", block_type);
+    }
+    meta.add(
+        "firehose-parquet.bytes_encoding",
+        format!("{:?}", encoding).to_lowercase(),
+    );
+    meta.add("firehose-parquet.endpoint", endpoint);
+    if let Some(info) = endpoint_info {
+        if !info.chain_name.is_empty() {
+            meta.add("firehose-parquet.chain_name", &info.chain_name);
+        } else {
+            meta.add("firehose-parquet.chain_name", chain);
+        }
+        if !info.chain_name_aliases.is_empty() {
+            meta.add(
+                "firehose-parquet.chain_name_aliases",
+                info.chain_name_aliases.join(","),
+            );
+        }
+        if !info.first_streamable_block_id.is_empty() {
+            meta.add(
+                "firehose-parquet.first_streamable_block_id",
+                &info.first_streamable_block_id,
+            );
+            meta.add(
+                "firehose-parquet.first_streamable_block_num",
+                info.first_streamable_block_num.to_string(),
+            );
+        } else if info.first_streamable_block_num > 0 {
+            meta.add(
+                "firehose-parquet.first_streamable_block_num",
+                info.first_streamable_block_num.to_string(),
+            );
+        }
+        if info.block_id_encoding > 0 {
+            meta.add(
+                "firehose-parquet.block_id_encoding",
+                block_id_encoding_label(info.block_id_encoding),
+            );
+        }
+        if !info.block_features.is_empty() {
+            meta.add(
+                "firehose-parquet.block_features",
+                info.block_features.join(","),
+            );
+        }
+    } else {
+        meta.add("firehose-parquet.chain_name", chain);
+    }
+    meta.add("firehose-parquet.partition", partition);
+    meta.add("firehose-parquet.block_range_size", "0");
+    meta.add("firehose-parquet.compression", "uncompressed");
+    meta
+}
+
 fn detect_block_type(type_url: &str) -> Result<String> {
     if type_url.contains("ethereum") {
         Ok("evm".to_string())
@@ -403,6 +523,8 @@ async fn run_partitions_build(
     let partition_types = parse_partition_build_types(partition_types_spec)?;
     let partition_type = partition_types[0];
     let partition_label = partition_type.to_string();
+    let partitions_file_metadata =
+        build_partitions_file_metadata(endpoint, &chain, &partition_label, &endpoint_info);
     let partitions_index = build_partitions_index_path(&output_root, &chain);
     let chain_output_root = build_partitions_output_root(&output_root, &chain);
 
@@ -644,6 +766,7 @@ async fn run_partitions_build(
                         &builder,
                         &partitions_index,
                         Some(aws),
+                        &partitions_file_metadata,
                         &mut checkpoint_state,
                         "checkpointed live partitions index",
                     )?;
@@ -672,6 +795,7 @@ async fn run_partitions_build(
                         &builder,
                         &partitions_index,
                         Some(aws),
+                        &partitions_file_metadata,
                         &mut checkpoint_state,
                         "checkpointed live partitions index",
                     )?;
@@ -724,6 +848,7 @@ async fn run_partitions_build(
                     &builder,
                     &partitions_index,
                     Some(aws),
+                    &partitions_file_metadata,
                     &mut checkpoint_state,
                     "checkpointed live partitions index",
                 )?;
@@ -735,6 +860,7 @@ async fn run_partitions_build(
                 &builder,
                 &partitions_index,
                 Some(aws),
+                &partitions_file_metadata,
                 &mut checkpoint_state,
                 "wrote final live partitions checkpoint",
             )?;
@@ -787,6 +913,7 @@ async fn run_partitions_build(
                     &builder,
                     &partitions_index,
                     Some(aws),
+                    &partitions_file_metadata,
                     &mut checkpoint_state,
                     "checkpointed bounded partitions index",
                 )?;
@@ -822,6 +949,7 @@ async fn run_partitions_build(
                             &builder,
                             &partitions_index,
                             Some(aws),
+                            &partitions_file_metadata,
                             &mut checkpoint_state,
                             "checkpointed bounded partitions index",
                         )?;
@@ -848,7 +976,12 @@ async fn run_partitions_build(
         };
 
         let rows = builder.finish(final_end_block)?;
-        write_partitions_index(&partitions_index, &rows, Some(aws))?;
+        write_partitions_index_with_metadata(
+            &partitions_index,
+            &rows,
+            Some(aws),
+            Some(&partitions_file_metadata),
+        )?;
         info!(
             partitions_index = %partitions_index,
             row_count = rows.len(),
@@ -938,6 +1071,7 @@ fn checkpoint_partitions_builder(
     builder: &PartitionIndexBuilder,
     partitions_index: &str,
     aws: Option<&AwsConfig>,
+    file_metadata: &ParquetFileMetadata,
     checkpoint_state: &mut PartitionsCheckpointState,
     checkpoint_mode: &str,
 ) -> Result<Vec<firehose_parquet::cli::PartitionBuildRow>> {
@@ -945,7 +1079,7 @@ fn checkpoint_partitions_builder(
         .current_frontier()
         .ok_or_else(|| anyhow!("partition build is missing a checkpoint frontier"))?;
     let rows = builder.snapshot(frontier)?;
-    write_partitions_index(partitions_index, &rows, aws)?;
+    write_partitions_index_with_metadata(partitions_index, &rows, aws, Some(file_metadata))?;
     info!(
         checkpoint_mode,
         partitions_index = %partitions_index,
@@ -1708,6 +1842,8 @@ async fn main() -> Result<()> {
             }
             Commands::Inspect {
                 path,
+                schema_only,
+                json,
                 aws_access_key_id,
                 aws_secret_access_key,
                 aws_session_token,
@@ -1721,7 +1857,7 @@ async fn main() -> Result<()> {
                     aws_region: aws_region.clone(),
                     aws_endpoint_url: aws_endpoint_url.clone(),
                 };
-                firehose_parquet::cli::inspect_parquet(path, Some(&aws))?;
+                firehose_parquet::cli::inspect_parquet(path, *schema_only, *json, Some(&aws))?;
                 return Ok(());
             }
             Commands::Validate {
