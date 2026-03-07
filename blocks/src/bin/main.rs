@@ -1181,6 +1181,57 @@ where
     Ok(None)
 }
 
+async fn find_timestamp_borrow_probe<T, Fetch, Fut, GetTimestamp>(
+    block_num: u64,
+    timestamp_scan_limit: u64,
+    max_skip_blocks: u64,
+    mut fetch: Fetch,
+    get_timestamp: GetTimestamp,
+) -> Result<Option<(u64, T)>>
+where
+    Fetch: FnMut(u64, u64) -> Fut,
+    Fut: std::future::Future<Output = Result<Option<(u64, T)>>>,
+    GetTimestamp: Fn(&T) -> i64 + Copy,
+{
+    let phase1_end = block_num.saturating_add(timestamp_scan_limit);
+    let mut search_start = block_num.saturating_add(1);
+
+    while search_start <= phase1_end {
+        let allowed_skip = max_skip_blocks.min(phase1_end.saturating_sub(search_start));
+        let Some((resolved_block_num, probe)) = fetch(search_start, allowed_skip).await? else {
+            break;
+        };
+        if get_timestamp(&probe) > 0 {
+            return Ok(Some((resolved_block_num, probe)));
+        }
+        search_start = resolved_block_num.saturating_add(1);
+    }
+
+    let mut jump = timestamp_scan_limit.saturating_mul(2).max(32);
+    loop {
+        let probe_num = block_num.saturating_add(jump);
+        let Some((resolved_block_num, probe)) = fetch(probe_num, max_skip_blocks).await? else {
+            if max_skip_blocks == 0 {
+                break;
+            }
+            jump = match jump.checked_mul(2) {
+                Some(next) => next,
+                None => break,
+            };
+            continue;
+        };
+        if get_timestamp(&probe) > 0 {
+            return Ok(Some((resolved_block_num, probe)));
+        }
+        jump = match jump.checked_mul(2) {
+            Some(next) => next,
+            None => break,
+        };
+    }
+
+    Ok(None)
+}
+
 async fn retry_probe_fetch_with_policy<T, Op, Fut>(
     block_num: u64,
     context: &str,
@@ -1314,19 +1365,16 @@ async fn fetch_optional_probe_block_identity(
         0
     };
 
-    let Some((resolved_block_num, block)) =
-        scan_forward_for_available_block(block_num, max_skip_blocks, |candidate_block_num| {
-            retry_probe_fetch_with_policy(
-                candidate_block_num,
-                context,
-                PARTITIONS_PROBE_FETCH_MAX_ATTEMPTS,
-                PARTITIONS_PROBE_FETCH_INITIAL_BACKOFF,
-                skip_missing_blocks,
-                probe_counter,
-                move || client.fetch_block_identity(candidate_block_num, wait_timeout),
-            )
-        })
-        .await?
+    let Some((resolved_block_num, block)) = fetch_probe_block_identity_raw(
+        client,
+        block_num,
+        wait_timeout,
+        context,
+        max_skip_blocks,
+        skip_missing_blocks,
+        probe_counter,
+    )
+    .await?
     else {
         return Ok(None);
     };
@@ -1355,6 +1403,29 @@ async fn fetch_optional_probe_block_identity(
     ))
 }
 
+async fn fetch_probe_block_identity_raw(
+    client: &FirehoseClient,
+    block_num: u64,
+    wait_timeout: Option<Duration>,
+    context: &str,
+    max_skip_blocks: u64,
+    skip_missing_blocks: bool,
+    probe_counter: &AtomicU64,
+) -> Result<Option<(u64, BlockIdentity)>> {
+    scan_forward_for_available_block(block_num, max_skip_blocks, |candidate_block_num| {
+        retry_probe_fetch_with_policy(
+            candidate_block_num,
+            context,
+            PARTITIONS_PROBE_FETCH_MAX_ATTEMPTS,
+            PARTITIONS_PROBE_FETCH_INITIAL_BACKOFF,
+            skip_missing_blocks,
+            probe_counter,
+            move || client.fetch_block_identity(candidate_block_num, wait_timeout),
+        )
+    })
+    .await
+}
+
 async fn normalize_probe_block_identity(
     client: &FirehoseClient,
     mut block: BlockIdentity,
@@ -1368,71 +1439,51 @@ async fn normalize_probe_block_identity(
         return Ok(block);
     }
 
-    // Phase 1: linear scan within the small bounded window.
-    for offset in 1..=timestamp_scan_limit {
-        let next_block_num = block.block_num.saturating_add(offset);
-        let Some(next_block) = retry_probe_fetch_with_policy(
-            next_block_num,
-            context,
-            PARTITIONS_PROBE_FETCH_MAX_ATTEMPTS,
-            PARTITIONS_PROBE_FETCH_INITIAL_BACKOFF,
-            skip_missing_blocks,
-            probe_counter,
-            || client.fetch_block_identity(next_block_num, wait_timeout),
-        )
-        .await?
-        else {
-            break;
-        };
-        if next_block.timestamp > 0 {
-            warn!(
-                block_num = block.block_num,
-                borrowed_timestamp_block = next_block.block_num,
-                borrowed_timestamp = next_block.timestamp,
-                context,
-                "probe block timestamp missing; borrowing a subsequent finalized block timestamp"
-            );
-            block.timestamp = next_block.timestamp;
-            return Ok(block);
-        }
-    }
+    let max_skip_blocks = if skip_missing_blocks {
+        PARTITIONS_PROBE_SKIP_MISSING_BLOCK_SCAN_LIMIT
+    } else {
+        0
+    };
 
-    // Phase 2: exponential forward search for chains with large timestamp-less
-    // ranges (e.g. Solana legacy blocks).  Each iteration doubles the jump so
-    // arbitrarily large gaps are covered in O(log N) probes.
-    let mut jump = timestamp_scan_limit.saturating_mul(2).max(32);
-    loop {
-        let probe_num = block.block_num.saturating_add(jump);
-        let Some(probe) = retry_probe_fetch_with_policy(
-            probe_num,
-            context,
-            PARTITIONS_PROBE_FETCH_MAX_ATTEMPTS,
-            PARTITIONS_PROBE_FETCH_INITIAL_BACKOFF,
-            skip_missing_blocks,
-            probe_counter,
-            || client.fetch_block_identity(probe_num, wait_timeout),
-        )
-        .await?
-        else {
-            // Block does not exist yet — chain is not that long.
-            break;
-        };
-        if probe.timestamp > 0 {
+    if let Some((borrowed_block_num, probe)) = find_timestamp_borrow_probe(
+        block.block_num,
+        timestamp_scan_limit,
+        max_skip_blocks,
+        |candidate_block_num, allowed_skip| {
+            fetch_probe_block_identity_raw(
+                client,
+                candidate_block_num,
+                wait_timeout,
+                context,
+                allowed_skip,
+                skip_missing_blocks,
+                probe_counter,
+            )
+        },
+        |probe: &BlockIdentity| probe.timestamp,
+    )
+    .await?
+    {
+        if borrowed_block_num <= block.block_num.saturating_add(timestamp_scan_limit) {
             warn!(
                 block_num = block.block_num,
                 borrowed_timestamp_block = probe.block_num,
                 borrowed_timestamp = probe.timestamp,
-                scanned_offset = jump,
+                context,
+                "probe block timestamp missing; borrowing a subsequent finalized block timestamp"
+            );
+        } else {
+            warn!(
+                block_num = block.block_num,
+                borrowed_timestamp_block = probe.block_num,
+                borrowed_timestamp = probe.timestamp,
+                scanned_offset = borrowed_block_num.saturating_sub(block.block_num),
                 context,
                 "probe block timestamp missing; borrowing a distant finalized block timestamp via exponential search"
             );
-            block.timestamp = probe.timestamp;
-            return Ok(block);
         }
-        jump = match jump.checked_mul(2) {
-            Some(next) => next,
-            None => break, // overflow — give up
-        };
+        block.timestamp = probe.timestamp;
+        return Ok(block);
     }
 
     Err(anyhow!(
@@ -3665,5 +3716,48 @@ mod tests {
 
         assert_eq!(result, Some((12, 24)));
         assert_eq!(attempts.load(AtomicOrdering::SeqCst), 3);
+    }
+
+    #[tokio::test]
+    async fn test_find_timestamp_borrow_probe_skips_missing_exponential_probe() {
+        #[derive(Clone, Debug)]
+        struct Probe {
+            timestamp: i64,
+        }
+
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let result = find_timestamp_borrow_probe(
+            0,
+            16,
+            16,
+            {
+                let attempts = Arc::clone(&attempts);
+                move |candidate, allowed_skip| {
+                    let attempts = Arc::clone(&attempts);
+                    async move {
+                        attempts.fetch_add(1, AtomicOrdering::SeqCst);
+                        match (candidate, allowed_skip) {
+                            (1..=16, _) => Ok(None),
+                            (32, 16) => Ok(Some((
+                                33,
+                                Probe {
+                                    timestamp: 1_700_000_000,
+                                },
+                            ))),
+                            _ => Ok(None),
+                        }
+                    }
+                }
+            },
+            |probe: &Probe| probe.timestamp,
+        )
+        .await
+        .expect("timestamp scan should succeed");
+
+        assert_eq!(
+            result.map(|(block_num, probe)| (block_num, probe.timestamp)),
+            Some((33, 1_700_000_000))
+        );
+        assert!(attempts.load(AtomicOrdering::SeqCst) >= 2);
     }
 }
