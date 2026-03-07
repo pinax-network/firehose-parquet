@@ -661,10 +661,22 @@ Examples:
 
   # Inspect an S3 parquet file
   fireparq inspect s3://bucket/eth-mainnet/blocks/part-000001.parquet
+
+  # Show only the schema with explicit nullability
+  fireparq inspect s3://bucket/eth-mainnet/partitions.parquet --schema-only
+
+  # Emit machine-readable schema details
+  fireparq inspect s3://bucket/eth-mainnet/partitions.parquet --schema-only --json
 ")]
     Inspect {
         /// Path to a single .parquet file (local path or S3 URI)
         path: String,
+        /// Only show the schema, including explicit nullability
+        #[arg(long, default_value = "false")]
+        schema_only: bool,
+        /// Emit machine-readable JSON output
+        #[arg(long, default_value = "false")]
+        json: bool,
         /// AWS access key ID (for S3 paths)
         #[arg(long, env = "AWS_ACCESS_KEY_ID", hide_env_values = true)]
         aws_access_key_id: Option<String>,
@@ -4353,19 +4365,26 @@ fn format_number_with_hint(v: i128) -> String {
 /// Displays file-level key-value metadata, Arrow schema, row group details,
 /// and per-column chunk information.
 /// Supports local filesystem paths and S3 URIs (`s3://bucket/key.parquet`).
-pub fn inspect_parquet(path: &str, aws: Option<&AwsConfig>) -> anyhow::Result<()> {
+pub fn inspect_parquet(
+    path: &str,
+    schema_only: bool,
+    json: bool,
+    aws: Option<&AwsConfig>,
+) -> anyhow::Result<()> {
     if path.starts_with("s3://") {
         inspect_parquet_s3(
             path,
+            schema_only,
+            json,
             aws.ok_or_else(|| anyhow::anyhow!("AWS config required for S3 paths"))?,
         )
     } else {
-        inspect_parquet_local(path)
+        inspect_parquet_local(path, schema_only, json)
     }
 }
 
 /// Inspect a local parquet file.
-fn inspect_parquet_local(path: &str) -> anyhow::Result<()> {
+fn inspect_parquet_local(path: &str, schema_only: bool, json: bool) -> anyhow::Result<()> {
     use parquet::file::reader::FileReader;
     use parquet::file::serialized_reader::SerializedFileReader;
     use std::fs;
@@ -4375,12 +4394,17 @@ fn inspect_parquet_local(path: &str) -> anyhow::Result<()> {
     let reader = SerializedFileReader::new(file)?;
     let metadata = reader.metadata();
 
-    print_inspect(path, file_size, metadata);
+    print_inspect(path, file_size, metadata, schema_only, json)?;
     Ok(())
 }
 
 /// Inspect an S3 parquet file.
-fn inspect_parquet_s3(path: &str, aws: &AwsConfig) -> anyhow::Result<()> {
+fn inspect_parquet_s3(
+    path: &str,
+    schema_only: bool,
+    json: bool,
+    aws: &AwsConfig,
+) -> anyhow::Result<()> {
     use crate::writer::parse_s3_url;
     use object_store::aws::AmazonS3Builder;
     use object_store::ObjectStore;
@@ -4419,16 +4443,56 @@ fn inspect_parquet_s3(path: &str, aws: &AwsConfig) -> anyhow::Result<()> {
         .map_err(|e| anyhow::anyhow!("parsing parquet from {path}: {e}"))?;
     let metadata = reader.metadata();
 
-    print_inspect(path, file_size, metadata);
+    print_inspect(path, file_size, metadata, schema_only, json)?;
     Ok(())
 }
 
 /// Print the full inspection output for a parquet file.
-fn print_inspect(path: &str, file_size: u64, metadata: &parquet::file::metadata::ParquetMetaData) {
+fn print_inspect(
+    path: &str,
+    file_size: u64,
+    metadata: &parquet::file::metadata::ParquetMetaData,
+    schema_only: bool,
+    json: bool,
+) -> anyhow::Result<()> {
     let file_meta = metadata.file_metadata();
     let num_row_groups = metadata.num_row_groups();
     let total_rows: i64 = metadata.row_groups().iter().map(|rg| rg.num_rows()).sum();
     let num_columns = file_meta.schema().get_fields().len();
+    let schema = build_schema_fields(file_meta.schema().get_fields());
+
+    if json {
+        let output = if schema_only {
+            serde_json::json!({
+                "path": path,
+                "schema": schema,
+            })
+        } else {
+            serde_json::json!({
+                "path": path,
+                "file_size_bytes": file_size,
+                "rows": total_rows,
+                "row_groups": num_row_groups,
+                "columns": num_columns,
+                "created_by": file_meta.created_by(),
+                "version": file_meta.version(),
+                "schema": schema,
+            })
+        };
+        println!("{}", serde_json::to_string_pretty(&output)?);
+        return Ok(());
+    }
+
+    if schema_only {
+        println!("{}", "═".repeat(72));
+        println!("  Schema: {}", path);
+        println!("{}", "─".repeat(72));
+        for field in file_meta.schema().get_fields() {
+            print_schema_field(field, 1);
+        }
+        println!("{}", "═".repeat(72));
+        return Ok(());
+    }
 
     // Header
     println!("{}", "═".repeat(72));
@@ -4477,8 +4541,7 @@ fn print_inspect(path: &str, file_size: u64, metadata: &parquet::file::metadata:
     println!("{}", "─".repeat(72));
 
     // Use the parquet schema for detailed type info.
-    let schema = file_meta.schema();
-    for field in schema.get_fields() {
+    for field in file_meta.schema().get_fields() {
         print_schema_field(field, 1);
     }
 
@@ -4544,10 +4607,70 @@ fn print_inspect(path: &str, file_size: u64, metadata: &parquet::file::metadata:
     }
 
     println!("\n{}", "═".repeat(72));
+    Ok(())
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct InspectSchemaField {
+    name: String,
+    kind: String,
+    physical_type: Option<String>,
+    logical_type: Option<String>,
+    repetition: String,
+    nullable: bool,
+    type_length: Option<i32>,
+    children: Vec<InspectSchemaField>,
+}
+
+fn build_schema_fields(fields: &[parquet::schema::types::TypePtr]) -> Vec<InspectSchemaField> {
+    fields
+        .iter()
+        .map(|field| build_schema_field(field))
+        .collect()
+}
+
+fn build_schema_field(field: &parquet::schema::types::Type) -> InspectSchemaField {
+    use parquet::basic::Repetition;
+    use parquet::schema::types::Type;
+
+    match field {
+        Type::PrimitiveType {
+            basic_info,
+            physical_type,
+            type_length,
+            ..
+        } => InspectSchemaField {
+            name: basic_info.name().to_string(),
+            kind: "primitive".to_string(),
+            physical_type: Some(format!("{:?}", physical_type)),
+            logical_type: basic_info
+                .logical_type_ref()
+                .map(|value| format!("{:?}", value)),
+            repetition: format!("{:?}", basic_info.repetition()).to_lowercase(),
+            nullable: matches!(basic_info.repetition(), Repetition::OPTIONAL),
+            type_length: (*type_length > 0).then_some(*type_length),
+            children: Vec::new(),
+        },
+        Type::GroupType {
+            basic_info, fields, ..
+        } => InspectSchemaField {
+            name: basic_info.name().to_string(),
+            kind: "group".to_string(),
+            physical_type: None,
+            logical_type: basic_info
+                .logical_type_ref()
+                .map(|value| format!("{:?}", value)),
+            repetition: format!("{:?}", basic_info.repetition()).to_lowercase(),
+            nullable: matches!(basic_info.repetition(), Repetition::OPTIONAL),
+            type_length: None,
+            children: build_schema_fields(fields),
+        },
+    }
 }
 
 /// Print a parquet schema field with indentation (supports nested types).
 fn print_schema_field(field: &parquet::schema::types::Type, indent: usize) {
+    use parquet::basic::Repetition;
     use parquet::schema::types::Type;
 
     let prefix = "  ".repeat(indent);
@@ -4559,6 +4682,7 @@ fn print_schema_field(field: &parquet::schema::types::Type, indent: usize) {
             ..
         } => {
             let repetition = format!("{:?}", basic_info.repetition());
+            let nullable = matches!(basic_info.repetition(), Repetition::OPTIONAL);
             let logical = basic_info
                 .logical_type_ref()
                 .map(|lt| format!(" ({:?})", lt))
@@ -4569,29 +4693,32 @@ fn print_schema_field(field: &parquet::schema::types::Type, indent: usize) {
                 String::new()
             };
             println!(
-                "{}{:30} {:?}{}{}  {}",
+                "{}{:30} {:?}{}{}  {} nullable={}",
                 prefix,
                 basic_info.name(),
                 physical_type,
                 len_info,
                 logical,
                 repetition.to_lowercase(),
+                nullable,
             );
         }
         Type::GroupType {
             basic_info, fields, ..
         } => {
             let repetition = format!("{:?}", basic_info.repetition());
+            let nullable = matches!(basic_info.repetition(), Repetition::OPTIONAL);
             let logical = basic_info
                 .logical_type_ref()
                 .map(|lt| format!(" ({:?})", lt))
                 .unwrap_or_default();
             println!(
-                "{}{:30} group{}  {}",
+                "{}{:30} group{}  {} nullable={}",
                 prefix,
                 basic_info.name(),
                 logical,
                 repetition.to_lowercase(),
+                nullable,
             );
             for f in fields {
                 print_schema_field(f, indent + 1);
@@ -6061,6 +6188,53 @@ mod tests {
                 assert_eq!(output.as_deref(), Some("./output"));
             }
             _ => panic!("expected partitions build subcommand"),
+        }
+    }
+
+    #[test]
+    fn test_inspect_subcommand_schema_only_parse() {
+        let cli = parse(&[
+            "test-cli",
+            "inspect",
+            "s3://bucket/mainnet/partitions.parquet",
+            "--schema-only",
+        ]);
+        match cli.command.expect("command should exist") {
+            Commands::Inspect {
+                path,
+                schema_only,
+                json,
+                ..
+            } => {
+                assert_eq!(path, "s3://bucket/mainnet/partitions.parquet");
+                assert!(schema_only);
+                assert!(!json);
+            }
+            _ => panic!("expected inspect subcommand"),
+        }
+    }
+
+    #[test]
+    fn test_inspect_subcommand_schema_only_json_parse() {
+        let cli = parse(&[
+            "test-cli",
+            "inspect",
+            "./output/mainnet/partitions.parquet",
+            "--schema-only",
+            "--json",
+        ]);
+        match cli.command.expect("command should exist") {
+            Commands::Inspect {
+                path,
+                schema_only,
+                json,
+                ..
+            } => {
+                assert_eq!(path, "./output/mainnet/partitions.parquet");
+                assert!(schema_only);
+                assert!(json);
+            }
+            _ => panic!("expected inspect subcommand"),
         }
     }
 

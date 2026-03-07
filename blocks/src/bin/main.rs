@@ -1708,6 +1708,8 @@ async fn main() -> Result<()> {
             }
             Commands::Inspect {
                 path,
+                schema_only,
+                json,
                 aws_access_key_id,
                 aws_secret_access_key,
                 aws_session_token,
@@ -1721,7 +1723,7 @@ async fn main() -> Result<()> {
                     aws_region: aws_region.clone(),
                     aws_endpoint_url: aws_endpoint_url.clone(),
                 };
-                firehose_parquet::cli::inspect_parquet(path, Some(&aws))?;
+                firehose_parquet::cli::inspect_parquet(path, *schema_only, *json, Some(&aws))?;
                 return Ok(());
             }
             Commands::Validate {
