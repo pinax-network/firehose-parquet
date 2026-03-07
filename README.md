@@ -43,7 +43,7 @@ A production-grade Rust toolkit that consumes [StreamingFast Firehose](https://f
 
 ## Quick Start
 
-> `v0.5.0` renames the installed CLI binary from `firehose-parquet` to `fireparq`. The repository/crate names and Parquet metadata namespace remain `firehose-parquet.*`.
+> `v0.5.0+` renames the installed CLI binary from `firehose-parquet` to `fireparq`. The repository/crate names and Parquet metadata namespace remain `firehose-parquet.*`.
 
 ```bash
 # Build
@@ -105,7 +105,7 @@ docker run --rm \
 
 `fireparq` can resolve a small built-in set of Firehose network aliases instead of requiring `--endpoint` every time.
 
-Supported names in `v0.5.0`:
+Supported names in `v0.5.1`:
 
 - `mainnet`, `eth` → `https://eth.firehose.pinax.network:443`
 - `solana-mainnet-beta`, `solana` → `https://solana.firehose.pinax.network:443`
@@ -838,7 +838,7 @@ Every Parquet file written by the pipeline embeds key-value metadata in the file
 
 | Key | Example Value |
 |---|---|
-| `firehose-parquet.version` | `0.5.0` |
+| `firehose-parquet.version` | `0.5.1` |
 | `firehose-parquet.block_type` | `evm` |
 | `firehose-parquet.bytes_encoding` | `hex` |
 | `firehose-parquet.endpoint` | `https://eth.firehose.pinax.network:443` |

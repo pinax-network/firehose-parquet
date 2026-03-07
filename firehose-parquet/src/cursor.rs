@@ -543,7 +543,7 @@ mod tests {
 
     fn test_file_metadata() -> ParquetFileMetadata {
         let mut meta = ParquetFileMetadata::new();
-        meta.add("firehose-parquet.version", "0.5.0");
+        meta.add("firehose-parquet.version", "0.5.1");
         meta.add(
             "firehose-parquet.endpoint",
             "https://eth.firehose.pinax.network:443",
@@ -598,7 +598,7 @@ mod tests {
             .iter()
             .map(|(k, v)| (k.as_str(), v.as_str()))
             .collect();
-        assert_eq!(meta_map.get("firehose-parquet.version"), Some(&"0.5.0"));
+        assert_eq!(meta_map.get("firehose-parquet.version"), Some(&"0.5.1"));
         assert_eq!(
             meta_map.get("firehose-parquet.chain_name"),
             Some(&"eth-mainnet")
