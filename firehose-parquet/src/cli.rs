@@ -836,6 +836,9 @@ Examples:
         /// Poll interval used by `--live` sparse probes while waiting for new blocks.
         #[arg(long, default_value_t = 30)]
         poll_interval_secs: u64,
+        /// Allow sparse probes to scan forward a small window when a chain skips block numbers.
+        #[arg(long, default_value_t = false)]
+        skip_missing_blocks: bool,
         /// Partition to build: date, hour, minute, or second
         /// Deprecated alias: `--partition-types`.
         #[arg(long = "partition", alias = "partition-types")]
@@ -5989,6 +5992,7 @@ mod tests {
                 stop_block,
                 live,
                 poll_interval_secs,
+                skip_missing_blocks,
                 partition,
                 output,
                 ..
@@ -5997,8 +6001,35 @@ mod tests {
                 assert_eq!(stop_block, None);
                 assert!(live);
                 assert_eq!(poll_interval_secs, 15);
+                assert!(!skip_missing_blocks);
                 assert_eq!(partition, "date");
                 assert_eq!(output.as_deref(), Some("./output"));
+            }
+            _ => panic!("expected partitions build subcommand"),
+        }
+    }
+
+    #[test]
+    fn test_partitions_build_subcommand_skip_missing_blocks_parse() {
+        let cli = parse(&[
+            "test-cli",
+            "partitions",
+            "build",
+            "--network",
+            "solana-mainnet-beta",
+            "--partition",
+            "date",
+            "--output",
+            "./output",
+            "--live",
+            "--skip-missing-blocks",
+        ]);
+        match cli.command.expect("command should exist") {
+            Commands::Partitions(PartitionsCommands::Build {
+                skip_missing_blocks,
+                ..
+            }) => {
+                assert!(skip_missing_blocks);
             }
             _ => panic!("expected partitions build subcommand"),
         }
