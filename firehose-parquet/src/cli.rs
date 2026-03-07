@@ -1753,7 +1753,8 @@ pub fn read_partitions_build_rows(
     aws: Option<&AwsConfig>,
 ) -> anyhow::Result<Vec<PartitionBuildRow>> {
     use arrow::array::{
-        Array, Int32Array, Int64Array, LargeStringArray, StringArray, UInt32Array, UInt64Array,
+        Array, Int32Array, Int64Array, LargeStringArray, StringArray, TimestampSecondArray,
+        UInt32Array, UInt64Array,
     };
     use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 
@@ -1768,6 +1769,25 @@ pub fn read_partitions_build_rows(
             return Ok(Some(arr.value(row).to_string()));
         }
         anyhow::bail!("expected utf8 column, found {}", column.data_type())
+    }
+
+    fn read_timestamp_as_string(column: &dyn Array, row: usize) -> anyhow::Result<Option<String>> {
+        if column.is_null(row) {
+            return Ok(None);
+        }
+        if let Some(arr) = column.as_any().downcast_ref::<StringArray>() {
+            return Ok(Some(arr.value(row).to_string()));
+        }
+        if let Some(arr) = column.as_any().downcast_ref::<LargeStringArray>() {
+            return Ok(Some(arr.value(row).to_string()));
+        }
+        if let Some(arr) = column.as_any().downcast_ref::<TimestampSecondArray>() {
+            return Ok(Some(format_partition_timestamp(arr.value(row))?));
+        }
+        anyhow::bail!(
+            "expected utf8 or timestamp(second, UTC) column, found {}",
+            column.data_type()
+        )
     }
 
     fn read_i64_value(column: &dyn Array, row: usize) -> anyhow::Result<Option<i64>> {
@@ -1806,10 +1826,17 @@ pub fn read_partitions_build_rows(
         read_u64_value: &impl Fn(&dyn Array, usize) -> anyhow::Result<Option<u64>>,
     ) -> anyhow::Result<()> {
         let schema = batch.schema();
-        let partition_type_idx = schema.index_of("partition_type")?;
-        let partition_value_idx = schema.index_of("partition_value")?;
+        let partition_type_idx = schema
+            .index_of("type")
+            .or_else(|_| schema.index_of("partition_type"))?;
+        let partition_value_idx = schema
+            .index_of("partition")
+            .or_else(|_| schema.index_of("partition_value"))?;
         let partition_start_ts_idx = schema.index_of("partition_start_ts").ok();
-        let partition_interval_seconds_idx = schema.index_of("partition_interval_seconds").ok();
+        let partition_interval_seconds_idx = schema
+            .index_of("interval")
+            .ok()
+            .or_else(|| schema.index_of("partition_interval_seconds").ok());
         let start_block_idx = schema.index_of("start_block")?;
         let end_block_idx = schema.index_of("end_block")?;
         let chain_idx = schema.index_of("chain").ok();
@@ -1819,12 +1846,12 @@ pub fn read_partitions_build_rows(
         for row_index in 0..batch.num_rows() {
             let partition_type = canonical_partition_type_label(
                 read_utf8_value(batch.column(partition_type_idx).as_ref(), row_index)?
-                    .ok_or_else(|| anyhow::anyhow!("partition_type cannot be null"))?
+                    .ok_or_else(|| anyhow::anyhow!("type cannot be null"))?
                     .as_str(),
             )?;
             let partition_value =
-                read_utf8_value(batch.column(partition_value_idx).as_ref(), row_index)?
-                    .ok_or_else(|| anyhow::anyhow!("partition_value cannot be null"))?;
+                read_timestamp_as_string(batch.column(partition_value_idx).as_ref(), row_index)?
+                    .ok_or_else(|| anyhow::anyhow!("partition cannot be null"))?;
             let partition_start_ts = partition_start_ts_idx
                 .and_then(|idx| {
                     read_utf8_value(batch.column(idx).as_ref(), row_index)
@@ -1853,14 +1880,14 @@ pub fn read_partitions_build_rows(
                 .ok_or_else(|| anyhow::anyhow!("chain cannot be null"))?;
             let start_time = start_time_idx
                 .and_then(|idx| {
-                    read_utf8_value(batch.column(idx).as_ref(), row_index)
+                    read_timestamp_as_string(batch.column(idx).as_ref(), row_index)
                         .ok()
                         .flatten()
                 })
                 .unwrap_or_else(|| partition_start_ts.clone());
             let end_time = end_time_idx
                 .and_then(|idx| {
-                    read_utf8_value(batch.column(idx).as_ref(), row_index)
+                    read_timestamp_as_string(batch.column(idx).as_ref(), row_index)
                         .ok()
                         .flatten()
                 })
@@ -1949,8 +1976,8 @@ pub fn write_partitions_index_with_metadata(
     aws: Option<&AwsConfig>,
     file_metadata: Option<&crate::writer::ParquetFileMetadata>,
 ) -> anyhow::Result<()> {
-    use arrow::array::{Int64Array, StringArray, UInt64Array};
-    use arrow::datatypes::{DataType, Field, Schema};
+    use arrow::array::{Int64Array, StringArray, TimestampSecondArray, UInt64Array};
+    use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
     use arrow::record_batch::RecordBatch;
     use parquet::arrow::ArrowWriter;
     use parquet::file::metadata::KeyValue;
@@ -1962,20 +1989,50 @@ pub fn write_partitions_index_with_metadata(
     }
 
     let schema = Arc::new(Schema::new(vec![
+        Field::new(
+            "partition",
+            DataType::Timestamp(TimeUnit::Second, Some(Arc::from("UTC"))),
+            false,
+        ),
         Field::new("chain", DataType::Utf8, false),
-        Field::new("partition_type", DataType::Utf8, false),
-        Field::new("partition_interval_seconds", DataType::Int64, false),
-        Field::new("partition_start_ts", DataType::Utf8, false),
-        Field::new("partition_value", DataType::Utf8, false),
+        Field::new("type", DataType::Utf8, false),
+        Field::new("interval", DataType::Int64, false),
         Field::new("start_block", DataType::UInt64, false),
         Field::new("end_block", DataType::UInt64, false),
-        Field::new("start_time", DataType::Utf8, false),
-        Field::new("end_time", DataType::Utf8, false),
+        Field::new(
+            "start_time",
+            DataType::Timestamp(TimeUnit::Second, Some(Arc::from("UTC"))),
+            false,
+        ),
+        Field::new(
+            "end_time",
+            DataType::Timestamp(TimeUnit::Second, Some(Arc::from("UTC"))),
+            false,
+        ),
     ]));
 
     let batch = RecordBatch::try_new(
         schema.clone(),
         vec![
+            Arc::new(
+                TimestampSecondArray::from(
+                    rows.iter()
+                        .enumerate()
+                        .map(|(index, row)| {
+                            parse_partition_timestamp(&row.partition_value).map_err(|error| {
+                                anyhow::anyhow!(
+                                    "invalid partition for partition row {} ({}) at index {}: {}",
+                                    row.partition_type,
+                                    row.partition_value,
+                                    index,
+                                    error
+                                )
+                            })
+                        })
+                        .collect::<anyhow::Result<Vec<_>>>()?,
+                )
+                .with_timezone("UTC"),
+            ),
             Arc::new(StringArray::from(
                 rows.iter()
                     .map(|row| {
@@ -1995,32 +2052,50 @@ pub fn write_partitions_index_with_metadata(
                     .map(|row| row.partition_interval_seconds)
                     .collect::<Vec<_>>(),
             )),
-            Arc::new(StringArray::from(
-                rows.iter()
-                    .map(|row| row.partition_start_ts.clone())
-                    .collect::<Vec<_>>(),
-            )),
-            Arc::new(StringArray::from(
-                rows.iter()
-                    .map(|row| row.partition_value.clone())
-                    .collect::<Vec<_>>(),
-            )),
             Arc::new(UInt64Array::from(
                 rows.iter().map(|row| row.start_block).collect::<Vec<_>>(),
             )),
             Arc::new(UInt64Array::from(
                 rows.iter().map(|row| row.end_block).collect::<Vec<_>>(),
             )),
-            Arc::new(StringArray::from(
-                rows.iter()
-                    .map(|row| row.start_time.clone())
-                    .collect::<Vec<_>>(),
-            )),
-            Arc::new(StringArray::from(
-                rows.iter()
-                    .map(|row| row.end_time.clone())
-                    .collect::<Vec<_>>(),
-            )),
+            Arc::new(
+                TimestampSecondArray::from(
+                    rows.iter()
+                        .enumerate()
+                        .map(|(index, row)| {
+                            parse_partition_timestamp(&row.start_time).map_err(|error| {
+                                anyhow::anyhow!(
+                                    "invalid start_time for partition row {} ({}) at index {}: {}",
+                                    row.partition_type,
+                                    row.partition_value,
+                                    index,
+                                    error
+                                )
+                            })
+                        })
+                        .collect::<anyhow::Result<Vec<_>>>()?,
+                )
+                .with_timezone("UTC"),
+            ),
+            Arc::new(
+                TimestampSecondArray::from(
+                    rows.iter()
+                        .enumerate()
+                        .map(|(index, row)| {
+                            parse_partition_timestamp(&row.end_time).map_err(|error| {
+                                anyhow::anyhow!(
+                                    "invalid end_time for partition row {} ({}) at index {}: {}",
+                                    row.partition_type,
+                                    row.partition_value,
+                                    index,
+                                    error
+                                )
+                            })
+                        })
+                        .collect::<anyhow::Result<Vec<_>>>()?,
+                )
+                .with_timezone("UTC"),
+            ),
         ],
     )?;
 
@@ -2120,7 +2195,28 @@ fn is_integer_like(data_type: &arrow::datatypes::DataType) -> bool {
     )
 }
 
+fn is_timestamp_second_utc(data_type: &arrow::datatypes::DataType) -> bool {
+    matches!(
+        data_type,
+        arrow::datatypes::DataType::Timestamp(
+            arrow::datatypes::TimeUnit::Second,
+            Some(timezone)
+        )
+            if timezone.as_ref() == "UTC"
+    )
+}
+
 fn validate_partitions_schema(schema: &arrow::datatypes::Schema) -> anyhow::Result<()> {
+    fn field_with_name_any<'a>(
+        schema: &'a arrow::datatypes::Schema,
+        names: &[&str],
+    ) -> anyhow::Result<&'a arrow::datatypes::Field> {
+        names
+            .iter()
+            .find_map(|name| schema.field_with_name(name).ok())
+            .ok_or_else(|| anyhow::anyhow!("missing required column: {}", names.join(" or ")))
+    }
+
     let chain = schema
         .field_with_name("chain")
         .map_err(|_| anyhow::anyhow!("missing required column: chain"))?;
@@ -2134,22 +2230,19 @@ fn validate_partitions_schema(schema: &arrow::datatypes::Schema) -> anyhow::Resu
         anyhow::bail!("invalid partitions.parquet schema: chain must be non-nullable");
     }
 
-    let partition_type = schema
-        .field_with_name("partition_type")
-        .map_err(|_| anyhow::anyhow!("missing required column: partition_type"))?;
+    let partition_type = field_with_name_any(schema, &["type", "partition_type"])?;
     if !is_utf8_like(partition_type.data_type()) {
         anyhow::bail!(
-            "invalid partitions.parquet column type for partition_type: expected Utf8/LargeUtf8, got {}",
+            "invalid partitions.parquet column type for type: expected Utf8/LargeUtf8, got {}",
             partition_type.data_type()
         );
     }
 
-    let partition_value = schema
-        .field_with_name("partition_value")
-        .map_err(|_| anyhow::anyhow!("missing required column: partition_value"))?;
-    if !is_utf8_like(partition_value.data_type()) {
+    let partition_value = field_with_name_any(schema, &["partition", "partition_value"])?;
+    if !(is_utf8_like(partition_value.data_type()) || is_timestamp_second_utc(partition_value.data_type()))
+    {
         anyhow::bail!(
-            "invalid partitions.parquet column type for partition_value: expected Utf8/LargeUtf8, got {}",
+            "invalid partitions.parquet column type for partition: expected Utf8/LargeUtf8 or Timestamp(Second, UTC), got {}",
             partition_value.data_type()
         );
     }
@@ -2179,6 +2272,27 @@ fn validate_partitions_schema(schema: &arrow::datatypes::Schema) -> anyhow::Resu
                 "invalid partitions.parquet column type for partition_start_ts: expected Utf8/LargeUtf8, got {}",
                 partition_start_ts.data_type()
             );
+        }
+    }
+    if let Ok(interval) = field_with_name_any(schema, &["interval", "partition_interval_seconds"]) {
+        if !is_integer_like(interval.data_type()) {
+            anyhow::bail!(
+                "invalid partitions.parquet column type for interval: expected integer, got {}",
+                interval.data_type()
+            );
+        }
+    }
+    for (name, field) in [
+        ("start_time", schema.field_with_name("start_time")),
+        ("end_time", schema.field_with_name("end_time")),
+    ] {
+        if let Ok(field) = field {
+            if !(is_utf8_like(field.data_type()) || is_timestamp_second_utc(field.data_type())) {
+                anyhow::bail!(
+                    "invalid partitions.parquet column type for {name}: expected Utf8/LargeUtf8 or Timestamp(Second, UTC), got {}",
+                    field.data_type()
+                );
+            }
         }
     }
 
@@ -7373,6 +7487,60 @@ mod tests {
         let read_back =
             read_partitions_build_rows(&path.to_string_lossy(), None).expect("read rows back");
         assert_eq!(read_back, rows);
+    }
+
+    #[test]
+    fn test_write_partitions_index_uses_updated_schema() {
+        use arrow::datatypes::{DataType, TimeUnit};
+        use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+        use std::sync::Arc;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("eth-mainnet").join("partitions.parquet");
+        let rows = vec![PartitionBuildRow {
+            partition_type: "hour".to_string(),
+            partition_interval_seconds: 3_600,
+            partition_start_ts: "2023-07-31 14:00:00".to_string(),
+            partition_value: "2023-07-31 14:00:00".to_string(),
+            start_block: 100,
+            end_block: 103,
+            start_time: "2023-07-31 14:59:00".to_string(),
+            end_time: "2023-07-31 15:00:00".to_string(),
+            chain: Some("eth-mainnet".to_string()),
+        }];
+
+        write_partitions_index(&path.to_string_lossy(), &rows, None).expect("write rows");
+
+        let file = std::fs::File::open(&path).expect("open parquet");
+        let builder = ParquetRecordBatchReaderBuilder::try_new(file).expect("builder");
+        let schema = builder.schema();
+
+        assert_eq!(
+            schema.fields().iter().map(|field| field.name()).collect::<Vec<_>>(),
+            vec![
+                "partition",
+                "chain",
+                "type",
+                "interval",
+                "start_block",
+                "end_block",
+                "start_time",
+                "end_time",
+            ]
+        );
+        assert!(schema.field_with_name("partition_start_ts").is_err());
+        assert_eq!(
+            schema.field_with_name("partition").expect("partition").data_type(),
+            &DataType::Timestamp(TimeUnit::Second, Some(Arc::from("UTC")))
+        );
+        assert_eq!(
+            schema.field_with_name("start_time").expect("start_time").data_type(),
+            &DataType::Timestamp(TimeUnit::Second, Some(Arc::from("UTC")))
+        );
+        assert_eq!(
+            schema.field_with_name("end_time").expect("end_time").data_type(),
+            &DataType::Timestamp(TimeUnit::Second, Some(Arc::from("UTC")))
+        );
     }
 
     #[test]
