@@ -41,7 +41,6 @@ Current behavior:
 - emits one row per discovered partition with contiguous `[start_block, end_block)` bounds
 - writes `/<chain>/partitions.parquet` under the supplied local or S3 output root
 - includes file metadata defined in `docs/partitions-parquet-contract.md`
-- can optionally write `partitions.lookup.json` for fast exact-match partition resolution
 - supports `--resume` by reusing trailing partition rows from the existing canonical artifact and continuing from the stored frontier
 - infers `--start-block` from a sibling `cursor.parquet` or endpoint metadata when omitted
 - infers the S3 output root from `--s3-bucket` / `S3_BUCKET` when `--output` is omitted

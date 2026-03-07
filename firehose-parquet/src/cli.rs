@@ -754,7 +754,6 @@ Examples:
     --stop-block 10010000 \\
     --partition hour \\
     --s3-bucket my-bucket \\
-    --write-lookup-sidecar \\
     --json
 
   # Let start block fall back to a sibling cursor or endpoint metadata
@@ -827,11 +826,6 @@ Examples:
         /// S3 bucket name used when `--output` is omitted or should be prefixed.
         #[arg(long, env = "S3_BUCKET", hide_env_values = true)]
         s3_bucket: Option<String>,
-        /// Also write `partitions.lookup.json` alongside `partitions.parquet`.
-        ///
-        /// Not supported in `--live` mode.
-        #[arg(long, default_value = "false", conflicts_with = "live")]
-        write_lookup_sidecar: bool,
         /// Resume from an existing canonical index under the resolved output path
         #[arg(long, default_value = "false")]
         resume: bool,
@@ -1087,8 +1081,6 @@ pub struct PartitionResolveResult {
     pub partition_chain: Option<String>,
     pub start_block: u64,
     pub stop_block: u64,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub lookup_source: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1464,26 +1456,6 @@ impl PartitionIndexBuilder {
         ))
     }
 }
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
-pub struct PartitionsLookupEntry {
-    pub chain: Option<String>,
-    pub partition_type: String,
-    pub partition_value: String,
-    pub start_block: u64,
-    pub end_block: u64,
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
-pub struct PartitionsLookupSidecar {
-    pub lookup_schema_version: String,
-    pub source_schema_version: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub source_metadata_hash: Option<String>,
-    pub entries: Vec<PartitionsLookupEntry>,
-}
-
-const PARTITIONS_LOOKUP_SCHEMA_VERSION: &str = "1";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PartitionListRequest {
@@ -2445,267 +2417,6 @@ fn validate_partitions_metadata_consistency(
     Ok(())
 }
 
-fn partitions_lookup_sidecar_path(index_path: &str) -> Option<String> {
-    if let Some(prefix) = index_path.strip_suffix("partitions.parquet") {
-        return Some(format!("{prefix}partitions.lookup.json"));
-    }
-    None
-}
-
-fn partitions_metadata_hash_from_map(
-    metadata: &std::collections::HashMap<&str, String>,
-) -> Option<String> {
-    use sha2::{Digest, Sha256};
-
-    let keys = [
-        PARTITIONS_SCHEMA_VERSION_KEY,
-        PARTITIONS_GENERATED_AT_KEY,
-        PARTITIONS_SOURCE_KEY,
-        PARTITIONS_CHAIN_SCOPE_KEY,
-        PARTITIONS_TYPES_KEY,
-        PARTITIONS_MIN_START_BLOCK_KEY,
-        PARTITIONS_MAX_END_BLOCK_KEY,
-    ];
-    let mut hasher = Sha256::new();
-    for key in keys {
-        let value = metadata.get(key)?;
-        hasher.update(key.as_bytes());
-        hasher.update(b"=");
-        hasher.update(value.as_bytes());
-        hasher.update(b"\n");
-    }
-    Some(format!("{:x}", hasher.finalize()))
-}
-
-fn read_partitions_index_metadata_hash(
-    index_path: &str,
-    aws: Option<&AwsConfig>,
-) -> anyhow::Result<Option<String>> {
-    use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
-
-    if index_path.starts_with("s3://") {
-        use crate::writer::parse_s3_url;
-        use object_store::ObjectStore;
-
-        let aws =
-            aws.ok_or_else(|| anyhow::anyhow!("AWS config required for S3 partition index"))?;
-        let (bucket, key) = parse_s3_url(index_path)?;
-        let client = aws.build_s3_client(&bucket)?;
-        let obj_path = object_store::path::Path::from(key.as_str());
-        let data = block_on_async(async { client.get(&obj_path).await?.bytes().await })
-            .map_err(|e| anyhow::anyhow!("reading {}: {e}", index_path))?;
-        let builder = ParquetRecordBatchReaderBuilder::try_new(data)?;
-        return Ok(partitions_metadata_hash_from_map(&partitions_metadata_map(
-            builder.metadata().file_metadata(),
-        )));
-    }
-
-    let file = std::fs::File::open(index_path)
-        .map_err(|e| anyhow::anyhow!("opening {}: {e}", index_path))?;
-    let builder = ParquetRecordBatchReaderBuilder::try_new(file)?;
-    Ok(partitions_metadata_hash_from_map(&partitions_metadata_map(
-        builder.metadata().file_metadata(),
-    )))
-}
-
-fn build_lookup_sidecar(rows: &[PartitionBuildRow]) -> PartitionsLookupSidecar {
-    let entries = rows
-        .iter()
-        .map(|row| PartitionsLookupEntry {
-            chain: row.chain.clone(),
-            partition_type: row.partition_type.clone(),
-            partition_value: row.partition_value.clone(),
-            start_block: row.start_block,
-            end_block: row.end_block,
-        })
-        .collect();
-
-    PartitionsLookupSidecar {
-        lookup_schema_version: PARTITIONS_LOOKUP_SCHEMA_VERSION.to_string(),
-        source_schema_version: PARTITIONS_SCHEMA_VERSION.to_string(),
-        source_metadata_hash: None,
-        entries,
-    }
-}
-
-pub fn write_lookup_sidecar_for_index(
-    index_path: &str,
-    rows: &[PartitionBuildRow],
-    aws: Option<&AwsConfig>,
-) -> anyhow::Result<Option<String>> {
-    use bytes::Bytes;
-
-    let Some(sidecar_path) = partitions_lookup_sidecar_path(index_path) else {
-        return Ok(None);
-    };
-
-    let mut sidecar = build_lookup_sidecar(rows);
-    sidecar.source_metadata_hash = read_partitions_index_metadata_hash(index_path, aws)?;
-    let payload = serde_json::to_vec_pretty(&sidecar)?;
-
-    if sidecar_path.starts_with("s3://") {
-        use crate::writer::parse_s3_url;
-        use object_store::ObjectStore;
-
-        let aws =
-            aws.ok_or_else(|| anyhow::anyhow!("AWS config required for S3 sidecar output"))?;
-        let (bucket, key) = parse_s3_url(&sidecar_path)?;
-        let client = aws.build_s3_client(&bucket)?;
-        let object_path = object_store::path::Path::from(key.as_str());
-        block_on_async(async {
-            client
-                .put(
-                    &object_path,
-                    object_store::PutPayload::from(Bytes::from(payload)),
-                )
-                .await
-        })
-        .map_err(|e| anyhow::anyhow!("writing {}: {e}", sidecar_path))?;
-        return Ok(Some(sidecar_path));
-    }
-
-    let output_path = std::path::Path::new(&sidecar_path);
-    if let Some(parent) = output_path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let file_name = output_path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .ok_or_else(|| anyhow::anyhow!("invalid sidecar file name for {}", sidecar_path))?;
-    let temp_path = output_path.with_file_name(format!(".{file_name}.tmp"));
-    std::fs::write(&temp_path, payload)?;
-    std::fs::rename(&temp_path, output_path)?;
-    Ok(Some(sidecar_path))
-}
-
-fn lookup_matches_request(entry: &PartitionsLookupEntry, request: &PartitionBoundsRequest) -> bool {
-    let Ok(entry_partition_type) = canonical_partition_type_label(&entry.partition_type) else {
-        return false;
-    };
-    if !entry_partition_type.eq_ignore_ascii_case(&request.partition_type) {
-        return false;
-    }
-    if entry.partition_value != request.partition_value {
-        return false;
-    }
-    if let Some(chain) = request.chain.as_deref() {
-        return entry.chain.as_deref() == Some(chain);
-    }
-    true
-}
-
-fn validate_lookup_sidecar(sidecar: &PartitionsLookupSidecar) -> anyhow::Result<()> {
-    if sidecar.lookup_schema_version != PARTITIONS_LOOKUP_SCHEMA_VERSION {
-        anyhow::bail!(
-            "unsupported partitions lookup sidecar schema version {} (expected {})",
-            sidecar.lookup_schema_version,
-            PARTITIONS_LOOKUP_SCHEMA_VERSION
-        );
-    }
-    if sidecar.source_schema_version != PARTITIONS_SCHEMA_VERSION {
-        anyhow::bail!(
-            "partitions lookup sidecar expects source schema version {} but reader expects {}",
-            sidecar.source_schema_version,
-            PARTITIONS_SCHEMA_VERSION
-        );
-    }
-    Ok(())
-}
-
-fn load_lookup_sidecar(
-    index_path: &str,
-    aws: Option<&AwsConfig>,
-) -> anyhow::Result<Option<PartitionsLookupSidecar>> {
-    let Some(sidecar_path) = partitions_lookup_sidecar_path(index_path) else {
-        return Ok(None);
-    };
-
-    if sidecar_path.starts_with("s3://") {
-        use crate::writer::parse_s3_url;
-        use object_store::ObjectStore;
-
-        let aws = match aws {
-            Some(aws) => aws,
-            None => return Ok(None),
-        };
-        let (bucket, key) = parse_s3_url(&sidecar_path)?;
-        let client = aws.build_s3_client(&bucket)?;
-        let obj_path = object_store::path::Path::from(key.as_str());
-        let data = match block_on_async(async { client.get(&obj_path).await?.bytes().await }) {
-            Ok(data) => data,
-            Err(_) => return Ok(None),
-        };
-        let sidecar: PartitionsLookupSidecar = serde_json::from_slice(&data)
-            .map_err(|e| anyhow::anyhow!("invalid lookup sidecar {}: {e}", sidecar_path))?;
-        validate_lookup_sidecar(&sidecar)?;
-        if let Some(expected_hash) = sidecar.source_metadata_hash.as_deref() {
-            let actual_hash = read_partitions_index_metadata_hash(index_path, Some(aws))?;
-            if actual_hash.as_deref() != Some(expected_hash) {
-                return Ok(None);
-            }
-        }
-        return Ok(Some(sidecar));
-    }
-
-    let bytes = match std::fs::read(&sidecar_path) {
-        Ok(bytes) => bytes,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(err) => return Err(anyhow::anyhow!("reading {}: {err}", sidecar_path)),
-    };
-    let sidecar: PartitionsLookupSidecar = serde_json::from_slice(&bytes)
-        .map_err(|e| anyhow::anyhow!("invalid lookup sidecar {}: {e}", sidecar_path))?;
-    validate_lookup_sidecar(&sidecar)?;
-    if let Some(expected_hash) = sidecar.source_metadata_hash.as_deref() {
-        let actual_hash = read_partitions_index_metadata_hash(index_path, aws)?;
-        if actual_hash.as_deref() != Some(expected_hash) {
-            return Ok(None);
-        }
-    }
-    Ok(Some(sidecar))
-}
-
-fn resolve_partition_bounds_from_lookup_sidecar(
-    request: &PartitionBoundsRequest,
-    aws: Option<&AwsConfig>,
-) -> anyhow::Result<Option<PartitionBounds>> {
-    let Some(sidecar) = load_lookup_sidecar(&request.index_path, aws)? else {
-        return Ok(None);
-    };
-
-    let matches = sidecar
-        .entries
-        .iter()
-        .filter(|entry| lookup_matches_request(entry, request))
-        .collect::<Vec<_>>();
-
-    if matches.is_empty() {
-        return Ok(None);
-    }
-    if matches.len() > 1 {
-        anyhow::bail!(
-            "partition lookup sidecar is ambiguous in {} for partition_type={}, partition_value={}",
-            request.index_path,
-            request.partition_type,
-            request.partition_value
-        );
-    }
-
-    let entry = matches[0];
-    if entry.end_block <= entry.start_block {
-        anyhow::bail!(
-            "invalid partition bounds in lookup sidecar for {}: start_block={} end_block={}",
-            request.index_path,
-            entry.start_block,
-            entry.end_block
-        );
-    }
-
-    Ok(Some(PartitionBounds {
-        start_block: entry.start_block,
-        stop_block: entry.end_block,
-    }))
-}
-
 /// Resolve partition bounds and return a response payload suitable for CLI output.
 fn resolve_partition_chains(
     request: &PartitionBoundsRequest,
@@ -2835,12 +2546,7 @@ pub fn resolve_partition_command(
         }
     }
 
-    let sidecar_bounds = resolve_partition_bounds_from_lookup_sidecar(&request, aws)?;
-    let lookup_source = sidecar_bounds.as_ref().map(|_| "sidecar".to_string());
-    let bounds = match sidecar_bounds {
-        Some(bounds) => bounds,
-        None => resolve_partition_bounds_from_index(&request, aws)?,
-    };
+    let bounds = resolve_partition_bounds_from_index(&request, aws)?;
     Ok(PartitionResolveResult {
         partitions_index: request.index_path,
         partition_type: request.partition_type,
@@ -2848,7 +2554,6 @@ pub fn resolve_partition_command(
         partition_chain: request.chain,
         start_block: bounds.start_block,
         stop_block: bounds.stop_block,
-        lookup_source,
     })
 }
 
@@ -6211,7 +5916,6 @@ mod tests {
             "--output",
             "./output",
             "--resume",
-            "--write-lookup-sidecar",
             "--json",
         ]);
         match cli.command.expect("command should exist") {
@@ -6224,7 +5928,6 @@ mod tests {
                 partition,
                 output,
                 s3_bucket,
-                write_lookup_sidecar,
                 resume,
                 json,
                 ..
@@ -6240,9 +5943,7 @@ mod tests {
                 assert_eq!(partition, "date");
                 assert_eq!(output.as_deref(), Some("./output"));
                 assert!(s3_bucket.is_none());
-                assert!(write_lookup_sidecar);
                 assert!(resume);
-                assert!(write_lookup_sidecar);
                 assert!(json);
             }
             _ => panic!("expected partitions build subcommand"),
@@ -7684,52 +7385,6 @@ mod tests {
     }
 
     #[test]
-    fn test_resolve_partition_command_uses_lookup_sidecar_when_present() {
-        use std::fs;
-
-        let dir = tempfile::tempdir().expect("tempdir");
-        let index_path = dir.path().join("partitions.parquet");
-        fs::write(&index_path, b"placeholder").expect("write placeholder index file");
-
-        let sidecar = PartitionsLookupSidecar {
-            lookup_schema_version: PARTITIONS_LOOKUP_SCHEMA_VERSION.to_string(),
-            source_schema_version: PARTITIONS_SCHEMA_VERSION.to_string(),
-            source_metadata_hash: None,
-            entries: vec![PartitionsLookupEntry {
-                chain: Some("eth-mainnet".to_string()),
-                partition_type: "hour".to_string(),
-                partition_value: "2015-07-30 15:00:00".to_string(),
-                start_block: 200,
-                end_block: 300,
-            }],
-        };
-        let sidecar_path = dir.path().join("partitions.lookup.json");
-        fs::write(
-            &sidecar_path,
-            serde_json::to_vec_pretty(&sidecar).expect("serialize sidecar"),
-        )
-        .expect("write sidecar");
-
-        let result = resolve_partition_command(
-            PartitionBoundsRequest {
-                index_path: index_path.to_string_lossy().to_string(),
-                partition_type: "hour".to_string(),
-                partition_value: "2015-07-30 15:00:00".to_string(),
-                chain: Some("eth-mainnet".to_string()),
-            },
-            None,
-            &PartitionResolveOptions {
-                strict_single_chain: false,
-            },
-        )
-        .expect("sidecar-backed resolve should succeed");
-
-        assert_eq!(result.start_block, 200);
-        assert_eq!(result.stop_block, 300);
-        assert_eq!(result.lookup_source.as_deref(), Some("sidecar"));
-    }
-
-    #[test]
     fn test_validate_partitions_index_detects_gap_and_overlap() {
         let rows = vec![
             PartitionListRow {
@@ -8056,78 +7711,5 @@ mod tests {
         let read_back =
             read_partitions_build_rows(&path.to_string_lossy(), None).expect("read rows back");
         assert_eq!(read_back, rows);
-    }
-
-    #[test]
-    fn test_write_lookup_sidecar_for_index_round_trip() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let index_path = dir.path().join("eth-mainnet").join("partitions.parquet");
-        let rows = vec![PartitionBuildRow {
-            partition_type: "hour".to_string(),
-            partition_interval_seconds: 3_600,
-            partition_start_ts: "2023-07-31 14:00:00".to_string(),
-            partition_value: "2023-07-31 14:00:00".to_string(),
-            start_block: 100,
-            end_block: 103,
-            start_time: "2023-07-31 14:59:00".to_string(),
-            end_time: "2023-07-31 15:00:00".to_string(),
-            chain: Some("eth-mainnet".to_string()),
-        }];
-
-        write_partitions_index(&index_path.to_string_lossy(), &rows, None).expect("write index");
-        let sidecar_path =
-            write_lookup_sidecar_for_index(&index_path.to_string_lossy(), &rows, None)
-                .expect("write sidecar")
-                .expect("sidecar path");
-        assert!(sidecar_path.ends_with("partitions.lookup.json"));
-
-        let sidecar = load_lookup_sidecar(&index_path.to_string_lossy(), None)
-            .expect("load sidecar")
-            .expect("sidecar should exist");
-        assert_eq!(
-            sidecar.lookup_schema_version,
-            PARTITIONS_LOOKUP_SCHEMA_VERSION
-        );
-        assert_eq!(sidecar.source_schema_version, PARTITIONS_SCHEMA_VERSION);
-        assert!(sidecar.source_metadata_hash.is_some());
-        assert_eq!(sidecar.entries.len(), 1);
-        assert_eq!(sidecar.entries[0].partition_type, "hour");
-        assert_eq!(sidecar.entries[0].partition_value, "2023-07-31 14:00:00");
-        assert_eq!(sidecar.entries[0].start_block, 100);
-        assert_eq!(sidecar.entries[0].end_block, 103);
-        assert_eq!(sidecar.entries[0].chain.as_deref(), Some("eth-mainnet"));
-    }
-
-    #[test]
-    fn test_load_lookup_sidecar_returns_none_when_source_metadata_hash_is_stale() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let index_path = dir.path().join("eth-mainnet").join("partitions.parquet");
-
-        let rows = vec![PartitionBuildRow {
-            partition_type: "hour".to_string(),
-            partition_interval_seconds: 3_600,
-            partition_start_ts: "2023-07-31 14:00:00".to_string(),
-            partition_value: "2023-07-31 14:00:00".to_string(),
-            start_block: 100,
-            end_block: 103,
-            start_time: "2023-07-31 14:59:00".to_string(),
-            end_time: "2023-07-31 15:00:00".to_string(),
-            chain: Some("eth-mainnet".to_string()),
-        }];
-        write_partitions_index(&index_path.to_string_lossy(), &rows, None).expect("write index");
-        write_lookup_sidecar_for_index(&index_path.to_string_lossy(), &rows, None)
-            .expect("write sidecar")
-            .expect("sidecar path");
-
-        let mutated_rows = vec![PartitionBuildRow {
-            end_block: 104,
-            ..rows[0].clone()
-        }];
-        write_partitions_index(&index_path.to_string_lossy(), &mutated_rows, None)
-            .expect("rewrite index with different metadata");
-
-        let sidecar = load_lookup_sidecar(&index_path.to_string_lossy(), None)
-            .expect("load sidecar should not error");
-        assert!(sidecar.is_none(), "stale sidecar should be ignored");
     }
 }
