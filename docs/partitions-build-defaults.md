@@ -78,6 +78,6 @@ For both bounded and live mode, the intended implementation is:
 - create an initial checkpoint as soon as the first row can be materialized
 - continue checkpointing long runs based on elapsed time and partition rollovers
 
-If a sparse probe returns a missing/non-positive timestamp, the probe logic should borrow the nearest subsequent finalized block timestamp within a small bounded scan window and log that normalization. If no such timestamp is found, the build should fail instead of silently partitioning at `1970-01-01 00:00:00`.
+If a sparse probe returns a missing/non-positive timestamp, the probe logic should borrow the nearest subsequent finalized block timestamp within a small bounded scan window (linear scan of up to 16 blocks) and log that normalization. If no timestamp is found within the small window, the probe falls back to an exponential forward search — doubling the jump distance on each step — so that chains with large timestamp-less ranges (e.g. Solana legacy blocks) can still be partitioned without streaming every block. If the exponential search also fails to find any reachable block with a timestamp, the build fails instead of silently partitioning at `1970-01-01 00:00:00`.
 
 This keeps the command lightweight while still producing exact partition boundaries.

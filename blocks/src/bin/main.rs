@@ -1278,6 +1278,7 @@ async fn normalize_probe_block_identity(
         return Ok(block);
     }
 
+    // Phase 1: linear scan within the small bounded window.
     for offset in 1..=timestamp_scan_limit {
         let next_block_num = block.block_num.saturating_add(offset);
         let Some(next_block) = retry_probe_fetch_with_policy(
@@ -1305,10 +1306,46 @@ async fn normalize_probe_block_identity(
         }
     }
 
+    // Phase 2: exponential forward search for chains with large timestamp-less
+    // ranges (e.g. Solana legacy blocks).  Each iteration doubles the jump so
+    // arbitrarily large gaps are covered in O(log N) probes.
+    let mut jump = timestamp_scan_limit.saturating_mul(2).max(32);
+    loop {
+        let probe_num = block.block_num.saturating_add(jump);
+        let Some(probe) = retry_probe_fetch_with_policy(
+            probe_num,
+            context,
+            PARTITIONS_PROBE_FETCH_MAX_ATTEMPTS,
+            PARTITIONS_PROBE_FETCH_INITIAL_BACKOFF,
+            probe_counter,
+            || client.fetch_block_identity(probe_num, wait_timeout),
+        )
+        .await?
+        else {
+            // Block does not exist yet — chain is not that long.
+            break;
+        };
+        if probe.timestamp > 0 {
+            warn!(
+                block_num = block.block_num,
+                borrowed_timestamp_block = probe.block_num,
+                borrowed_timestamp = probe.timestamp,
+                scanned_offset = jump,
+                context,
+                "probe block timestamp missing; borrowing a distant finalized block timestamp via exponential search"
+            );
+            block.timestamp = probe.timestamp;
+            return Ok(block);
+        }
+        jump = match jump.checked_mul(2) {
+            Some(next) => next,
+            None => break, // overflow — give up
+        };
+    }
+
     Err(anyhow!(
-        "{context}: block {} is missing timestamp metadata and no later finalized block with a timestamp was found within {} blocks",
+        "{context}: block {} is missing timestamp metadata and no finalized block with a timestamp was found in any reachable subsequent block",
         block.block_num,
-        timestamp_scan_limit
     ))
 }
 
