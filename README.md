@@ -314,6 +314,14 @@ fireparq partitions build \
   --partition date \
   --output ./output
 
+# Override the default zstd compression with snappy
+fireparq partitions build \
+  --endpoint https://eth.firehose.pinax.network:443 \
+  --stop-block 10010000 \
+  --partition date \
+  --compression snappy \
+  --output ./output
+
 # Build an hour index to S3 with an explicit chain override
 fireparq partitions build \
   --endpoint https://eth.firehose.pinax.network:443 \
@@ -351,6 +359,7 @@ fireparq partitions build \
 Behavior:
 
 - writes one row per discovered partition to `/<chain>/partitions.parquet`
+- writes `partitions.parquet` with `zstd` compression by default (overridable with `--compression`)
 - writes a required non-null `chain` column on every partition row
 - writes exact partition envelopes when the enclosing boundaries are discoverable
 - supports one partition granularity per run (`date`, `hour`, `minute`, `second`)
