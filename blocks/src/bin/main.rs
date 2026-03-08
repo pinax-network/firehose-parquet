@@ -2221,6 +2221,7 @@ async fn main() -> Result<()> {
             Commands::Scan {
                 path,
                 limit,
+                offset,
                 schema_only,
                 vertical,
                 json,
@@ -2240,6 +2241,7 @@ async fn main() -> Result<()> {
                 firehose_parquet::cli::scan_parquet(
                     path,
                     *limit,
+                    *offset,
                     *schema_only,
                     *vertical,
                     *json,
