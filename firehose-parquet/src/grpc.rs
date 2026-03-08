@@ -10,6 +10,18 @@ use std::time::{Duration, Instant};
 use tonic::transport::{Channel, ClientTlsConfig, Endpoint};
 use tracing::{debug, info, warn};
 
+const FIREHOSE_TCP_KEEPALIVE: Duration = Duration::from_secs(30);
+const FIREHOSE_HTTP2_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(30);
+const FIREHOSE_HTTP2_KEEPALIVE_TIMEOUT: Duration = Duration::from_secs(10);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct EndpointKeepaliveSettings {
+    tcp_keepalive: Duration,
+    http2_keep_alive_interval: Duration,
+    keep_alive_timeout: Duration,
+    keep_alive_while_idle: bool,
+}
+
 /// Information about the Firehose endpoint, returned by the `EndpointInfo/Info` RPC.
 #[derive(Debug, Clone)]
 pub struct EndpointInfo {
@@ -41,13 +53,35 @@ impl FirehoseClient {
         self.metrics = Some(metrics);
     }
 
+    fn endpoint_keepalive_settings() -> EndpointKeepaliveSettings {
+        EndpointKeepaliveSettings {
+            tcp_keepalive: FIREHOSE_TCP_KEEPALIVE,
+            http2_keep_alive_interval: FIREHOSE_HTTP2_KEEPALIVE_INTERVAL,
+            keep_alive_timeout: FIREHOSE_HTTP2_KEEPALIVE_TIMEOUT,
+            keep_alive_while_idle: true,
+        }
+    }
+
+    fn endpoint(&self) -> Result<Endpoint> {
+        let uri = self.config.endpoint.clone();
+        let keepalive = Self::endpoint_keepalive_settings();
+        Endpoint::from_shared(uri.clone())
+            .with_context(|| format!("invalid endpoint URI: {uri}"))
+            .map(|endpoint| {
+                endpoint
+                    .timeout(Duration::from_secs(300))
+                    .connect_timeout(Duration::from_secs(30))
+                    .tcp_keepalive(Some(keepalive.tcp_keepalive))
+                    .http2_keep_alive_interval(keepalive.http2_keep_alive_interval)
+                    .keep_alive_timeout(keepalive.keep_alive_timeout)
+                    .keep_alive_while_idle(keepalive.keep_alive_while_idle)
+            })
+    }
+
     /// Build a tonic channel to the configured endpoint.
     async fn connect_with_log(&self, log_connect: bool) -> Result<Channel> {
         let uri = self.config.endpoint.clone();
-        let mut endpoint = Endpoint::from_shared(uri.clone())
-            .with_context(|| format!("invalid endpoint URI: {uri}"))?
-            .timeout(Duration::from_secs(300))
-            .connect_timeout(Duration::from_secs(30));
+        let mut endpoint = self.endpoint()?;
 
         // Determine if TLS should be used based on the URL scheme.
         // https:// → TLS enabled; http:// → plaintext (no TLS).
@@ -430,5 +464,63 @@ impl FirehoseClient {
                 .unwrap_or(Duration::from_secs(60));
             tokio::time::sleep(wait).await;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::{Compression, Partition};
+    use std::path::PathBuf;
+
+    fn test_config(endpoint: &str) -> Config {
+        Config {
+            endpoint: endpoint.to_string(),
+            api_key: None,
+            jwt_token: None,
+            start_block: None,
+            stop_block: None,
+            cursor_path: None,
+            output: PathBuf::from("/tmp/output"),
+            partition: Partition::None,
+            flush_rows: None,
+            flush_bytes: 0,
+            flush_interval_secs: None,
+            compression: Compression::Zstd,
+            final_blocks_only: true,
+            dry_run: false,
+            aws_access_key_id: None,
+            aws_secret_access_key: None,
+            aws_session_token: None,
+            aws_region: None,
+            aws_endpoint_url: None,
+            s3_bucket: None,
+            cache_control: None,
+            metrics_port: None,
+            stream_idle_timeout_secs: None,
+            reconnect_stall_timeout_secs: None,
+        }
+    }
+
+    #[test]
+    fn test_endpoint_enables_keepalive_settings() {
+        let client = FirehoseClient::new(test_config("https://example.com"));
+        let endpoint = client.endpoint().expect("endpoint should build");
+        let keepalive = FirehoseClient::endpoint_keepalive_settings();
+
+        assert_eq!(
+            endpoint.get_connect_timeout(),
+            Some(Duration::from_secs(30))
+        );
+        assert_eq!(endpoint.get_tcp_keepalive(), Some(keepalive.tcp_keepalive));
+        assert_eq!(
+            keepalive,
+            EndpointKeepaliveSettings {
+                tcp_keepalive: Duration::from_secs(30),
+                http2_keep_alive_interval: Duration::from_secs(30),
+                keep_alive_timeout: Duration::from_secs(10),
+                keep_alive_while_idle: true,
+            }
+        );
     }
 }
