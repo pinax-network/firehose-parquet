@@ -862,11 +862,16 @@ Examples:
         ///
         /// When omitted in `--live` mode, existing `partitions.parquet` rows take
         /// precedence as the restart anchor.
+        ///
+        /// When `--partition block_range` is used, explicit values must align to
+        /// `--block-range-size`.
         #[arg(long)]
         start_block: Option<u64>,
         /// Stop block number (exclusive).
         ///
         /// Required for bounded builds and incompatible with `--live`.
+        /// When `--partition block_range` is used, explicit values must align to
+        /// `--block-range-size`.
         #[arg(long, conflicts_with = "live")]
         stop_block: Option<u64>,
         /// Keep extending `partitions.parquet` from its latest covered frontier.
@@ -6777,6 +6782,45 @@ mod tests {
                 strict_timestamps,
                 ..
             }) => {
+                assert_eq!(partition, "block_range");
+                assert_eq!(block_range_size, Some(1000000));
+                assert!(!strict_timestamps);
+            }
+            _ => panic!("expected partitions build subcommand"),
+        }
+    }
+
+    #[test]
+    fn test_partitions_build_live_block_range_parse_without_stop_block() {
+        let cli = parse(&[
+            "test-cli",
+            "partitions",
+            "build",
+            "--network",
+            "solana-mainnet-beta",
+            "--partition",
+            "block_range",
+            "--block-range-size",
+            "1000000",
+            "--strict-timestamps",
+            "false",
+            "--output",
+            "./output",
+            "--live",
+        ]);
+        match cli.command.expect("command should exist") {
+            Commands::Partitions(PartitionsCommands::Build {
+                network,
+                stop_block,
+                live,
+                partition,
+                block_range_size,
+                strict_timestamps,
+                ..
+            }) => {
+                assert_eq!(network.as_deref(), Some("solana-mainnet-beta"));
+                assert_eq!(stop_block, None);
+                assert!(live);
                 assert_eq!(partition, "block_range");
                 assert_eq!(block_range_size, Some(1000000));
                 assert!(!strict_timestamps);
