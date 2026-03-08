@@ -3910,8 +3910,6 @@ fn collect_scan_parquet_local(
     rows: usize,
     schema_only: bool,
 ) -> anyhow::Result<Vec<ScanFileResult>> {
-    use std::fs;
-
     let mut files: Vec<PathBuf> = Vec::new();
     let single_file = if path.is_file() {
         files.push(path.to_path_buf());

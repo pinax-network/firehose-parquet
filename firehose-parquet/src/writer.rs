@@ -1195,7 +1195,6 @@ mod tests {
 
     /// Helper: build a batch with block_num and timestamp columns for partition split tests.
     fn make_timestamped_batch(timestamps: &[i64]) -> RecordBatch {
-        use arrow::array::Int64Array;
         let schema = Arc::new(Schema::new(vec![
             Field::new("block_number", DataType::UInt64, false),
             Field::new("timestamp", DataType::Int64, false),
