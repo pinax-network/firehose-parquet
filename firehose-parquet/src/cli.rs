@@ -381,6 +381,9 @@ Examples:
 
   # Show 50 sample rows per file
   fireparq scan ./output/blocks/ --limit 50
+
+  # Paginate: skip first 20 rows, show next 20
+  fireparq scan ./output/blocks/ --offset 20 --limit 20
 ")]
     Scan {
         /// Path to a .parquet file or directory, or an S3 URI (s3://bucket/prefix)
@@ -389,6 +392,9 @@ Examples:
         /// Deprecated alias: `--rows`.
         #[arg(short = 'n', long = "limit", alias = "rows", default_value = "20")]
         limit: usize,
+        /// Number of rows to skip before displaying (for pagination)
+        #[arg(long, default_value = "0")]
+        offset: usize,
         /// Only show file metadata (schema, row count, size) without data
         #[arg(long, default_value = "false")]
         schema_only: bool,
@@ -3810,6 +3816,7 @@ impl AwsConfig {
 pub fn scan_parquet(
     path: &str,
     rows: usize,
+    offset: usize,
     schema_only: bool,
     vertical: bool,
     json: bool,
@@ -3819,11 +3826,12 @@ pub fn scan_parquet(
         collect_scan_parquet_s3(
             path,
             rows,
+            offset,
             schema_only,
             aws.ok_or_else(|| anyhow::anyhow!("AWS config required for S3 paths"))?,
         )?
     } else {
-        collect_scan_parquet_local(&PathBuf::from(path), rows, schema_only)?
+        collect_scan_parquet_local(&PathBuf::from(path), rows, offset, schema_only)?
     };
 
     if files.is_empty() {
@@ -3908,6 +3916,7 @@ struct ScanJsonOutput {
 fn collect_scan_parquet_local(
     path: &std::path::Path,
     rows: usize,
+    offset: usize,
     schema_only: bool,
 ) -> anyhow::Result<Vec<ScanFileResult>> {
     let mut files: Vec<PathBuf> = Vec::new();
@@ -3937,6 +3946,7 @@ fn collect_scan_parquet_local(
             file_path,
             display_path,
             rows,
+            offset,
             schema_only,
         )?);
     }
@@ -3947,6 +3957,7 @@ fn build_scan_file_result_from_local(
     file_path: &std::path::Path,
     display_path: String,
     rows: usize,
+    offset: usize,
     schema_only: bool,
 ) -> anyhow::Result<ScanFileResult> {
     use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
@@ -3966,7 +3977,7 @@ fn build_scan_file_result_from_local(
         let file = fs::File::open(file_path)?;
         let builder = ParquetRecordBatchReaderBuilder::try_new(file)?;
         let reader = builder.build()?;
-        collect_sample_rows(&schema, reader, rows)
+        collect_sample_rows(&schema, reader, rows, offset)
     };
 
     Ok(ScanFileResult {
@@ -3985,6 +3996,7 @@ fn build_scan_file_result_from_local(
 fn collect_scan_parquet_s3(
     path: &str,
     rows: usize,
+    offset: usize,
     schema_only: bool,
     aws: &AwsConfig,
 ) -> anyhow::Result<Vec<ScanFileResult>> {
@@ -4006,6 +4018,7 @@ fn collect_scan_parquet_s3(
             data,
             display_key,
             rows,
+            offset,
             schema_only,
         )?);
     }
@@ -4017,6 +4030,7 @@ fn build_scan_file_result_from_bytes(
     data: bytes::Bytes,
     display_path: String,
     rows: usize,
+    offset: usize,
     schema_only: bool,
 ) -> anyhow::Result<ScanFileResult> {
     use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
@@ -4033,7 +4047,7 @@ fn build_scan_file_result_from_bytes(
     } else {
         let builder = ParquetRecordBatchReaderBuilder::try_new(data)?;
         let reader = builder.build()?;
-        collect_sample_rows(&schema, reader, rows)
+        collect_sample_rows(&schema, reader, rows, offset)
     };
 
     Ok(ScanFileResult {
@@ -4108,9 +4122,11 @@ fn collect_sample_rows(
     schema: &arrow::datatypes::SchemaRef,
     reader: impl Iterator<Item = Result<arrow::record_batch::RecordBatch, arrow::error::ArrowError>>,
     rows: usize,
+    offset: usize,
 ) -> Vec<ScanRow> {
     let mut out = Vec::new();
-    let mut row_number = 0usize;
+    let mut absolute_row = 0usize;
+    let mut collected = 0usize;
 
     'outer: for batch_result in reader {
         let batch = match batch_result {
@@ -4121,12 +4137,16 @@ fn collect_sample_rows(
             }
         };
         for row_idx in 0..batch.num_rows() {
-            if row_number >= rows {
+            if collected >= rows {
                 break 'outer;
             }
-            row_number += 1;
+            absolute_row += 1;
+            if absolute_row <= offset {
+                continue;
+            }
+            collected += 1;
             out.push(ScanRow {
-                row_number,
+                row_number: absolute_row,
                 cells: schema
                     .fields()
                     .iter()
