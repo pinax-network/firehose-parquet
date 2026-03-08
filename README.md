@@ -628,6 +628,7 @@ Read and inspect Parquet files: shows schema, row counts, and sample rows. Suppo
 ```bash
 fireparq scan ./output/blocks/
 fireparq scan s3://my-bucket/evm/blocks/
+fireparq scan s3://my-bucket/evm/partitions.parquet
 ```
 
 ### `inspect` — Display File Metadata

@@ -370,6 +370,9 @@ Examples:
   # Scan S3 files
   fireparq scan s3://bucket/eth-mainnet/blocks/
 
+  # Scan a single S3 parquet file
+  fireparq scan s3://bucket/eth-mainnet/partitions.parquet
+
   # Show 50 sample rows per file
   fireparq scan ./output/blocks/ --limit 50
 ")]
@@ -2242,7 +2245,8 @@ fn validate_partitions_schema(schema: &arrow::datatypes::Schema) -> anyhow::Resu
     }
 
     let partition_value = field_with_name_any(schema, &["partition", "partition_value"])?;
-    if !(is_utf8_like(partition_value.data_type()) || is_timestamp_second_utc(partition_value.data_type()))
+    if !(is_utf8_like(partition_value.data_type())
+        || is_timestamp_second_utc(partition_value.data_type()))
     {
         anyhow::bail!(
             "invalid partitions.parquet column type for partition: expected Utf8/LargeUtf8 or Timestamp(Second, UTC), got {}",
@@ -3882,26 +3886,9 @@ fn scan_parquet_s3(
 
     let (bucket, prefix) = parse_s3_url(path)?;
     let client = aws.build_s3_client(&bucket)?;
-
-    // List all .parquet objects under the prefix.
-    let list_prefix = if prefix.is_empty() {
-        None
-    } else {
-        Some(object_store::path::Path::from(prefix.as_str()))
-    };
-
-    let objects: Vec<object_store::ObjectMeta> = block_on_async(async {
-        use futures::TryStreamExt;
-        let stream = client.list(list_prefix.as_ref());
-        stream.try_collect().await
-    })
-    .map_err(|e| anyhow::anyhow!("listing S3 objects: {e}"))?;
-
-    let mut parquet_objects: Vec<_> = objects
-        .into_iter()
-        .filter(|obj| obj.location.as_ref().ends_with(".parquet"))
-        .collect();
-    parquet_objects.sort_by(|a, b| a.location.cmp(&b.location));
+    let (parquet_objects, exact_object_path) =
+        block_on_async(collect_scan_s3_parquet_objects(&client, &prefix))
+            .map_err(|e| anyhow::anyhow!("listing S3 objects: {e}"))?;
 
     if parquet_objects.is_empty() {
         println!("No .parquet files found in {path}");
@@ -3923,12 +3910,7 @@ fn scan_parquet_s3(
         let schema = builder.schema().clone();
 
         // Strip prefix for cleaner display.
-        let display_key = obj
-            .location
-            .as_ref()
-            .strip_prefix(&prefix)
-            .map(|s| s.trim_start_matches('/'))
-            .unwrap_or(obj.location.as_ref());
+        let display_key = scan_s3_display_key(obj.location.as_ref(), &prefix, exact_object_path);
 
         println!("\n{}", "═".repeat(72));
         println!("  {}", display_key);
@@ -3969,6 +3951,50 @@ fn scan_parquet_s3(
     }
 
     Ok(())
+}
+
+async fn collect_scan_s3_parquet_objects(
+    store: &dyn object_store::ObjectStore,
+    prefix: &str,
+) -> anyhow::Result<(Vec<object_store::ObjectMeta>, bool)> {
+    use futures::TryStreamExt;
+
+    if prefix.ends_with(".parquet") && !prefix.is_empty() {
+        let object_path = object_store::path::Path::from(prefix);
+        match store.head(&object_path).await {
+            Ok(meta) => return Ok((vec![meta], true)),
+            Err(object_store::Error::NotFound { .. }) => {}
+            Err(err) => {
+                return Err(anyhow::anyhow!(
+                    "reading object metadata for {prefix}: {err}"
+                ))
+            }
+        }
+    }
+
+    let list_prefix = if prefix.is_empty() {
+        None
+    } else {
+        Some(object_store::path::Path::from(prefix))
+    };
+    let objects: Vec<object_store::ObjectMeta> =
+        store.list(list_prefix.as_ref()).try_collect().await?;
+    let mut parquet_objects: Vec<_> = objects
+        .into_iter()
+        .filter(|obj| obj.location.as_ref().ends_with(".parquet"))
+        .collect();
+    parquet_objects.sort_by(|a, b| a.location.cmp(&b.location));
+    Ok((parquet_objects, false))
+}
+
+fn scan_s3_display_key(location: &str, prefix: &str, exact_object_path: bool) -> String {
+    if exact_object_path {
+        return location.to_string();
+    }
+    location
+        .strip_prefix(prefix)
+        .map(|s| s.trim_start_matches('/').to_string())
+        .unwrap_or_else(|| location.to_string())
 }
 
 /// Print sample rows in vertical format (shared between local and S3 scan).
@@ -7547,7 +7573,11 @@ mod tests {
         let schema = builder.schema();
 
         assert_eq!(
-            schema.fields().iter().map(|field| field.name()).collect::<Vec<_>>(),
+            schema
+                .fields()
+                .iter()
+                .map(|field| field.name())
+                .collect::<Vec<_>>(),
             vec![
                 "partition",
                 "chain",
@@ -7561,15 +7591,24 @@ mod tests {
         );
         assert!(schema.field_with_name("partition_start_ts").is_err());
         assert_eq!(
-            schema.field_with_name("partition").expect("partition").data_type(),
+            schema
+                .field_with_name("partition")
+                .expect("partition")
+                .data_type(),
             &DataType::Timestamp(TimeUnit::Second, Some(Arc::from("UTC")))
         );
         assert_eq!(
-            schema.field_with_name("start_time").expect("start_time").data_type(),
+            schema
+                .field_with_name("start_time")
+                .expect("start_time")
+                .data_type(),
             &DataType::Timestamp(TimeUnit::Second, Some(Arc::from("UTC")))
         );
         assert_eq!(
-            schema.field_with_name("end_time").expect("end_time").data_type(),
+            schema
+                .field_with_name("end_time")
+                .expect("end_time")
+                .data_type(),
             &DataType::Timestamp(TimeUnit::Second, Some(Arc::from("UTC")))
         );
     }
@@ -7616,5 +7655,91 @@ mod tests {
         assert!(!kv
             .iter()
             .any(|entry| entry.key.starts_with("firehose-parquet.partitions.")));
+    }
+
+    #[test]
+    fn test_collect_scan_s3_parquet_objects_treats_exact_file_as_single_object() {
+        use bytes::Bytes;
+        use object_store::memory::InMemory;
+        use object_store::path::Path;
+        use object_store::ObjectStore;
+
+        let store = InMemory::new();
+        let location = Path::from("mainnet/partitions.parquet");
+        block_on_async(async {
+            store
+                .put(
+                    &location,
+                    object_store::PutPayload::from(Bytes::from_static(b"parquet")),
+                )
+                .await
+        })
+        .expect("put object");
+
+        let (objects, exact_object_path) = block_on_async(collect_scan_s3_parquet_objects(
+            &store,
+            "mainnet/partitions.parquet",
+        ))
+        .expect("collect objects");
+
+        assert!(exact_object_path);
+        assert_eq!(objects.len(), 1);
+        assert_eq!(objects[0].location.as_ref(), "mainnet/partitions.parquet");
+    }
+
+    #[test]
+    fn test_collect_scan_s3_parquet_objects_lists_prefix_and_filters_parquet() {
+        use bytes::Bytes;
+        use object_store::memory::InMemory;
+        use object_store::path::Path;
+        use object_store::ObjectStore;
+
+        let store = InMemory::new();
+        block_on_async(async {
+            store
+                .put(
+                    &Path::from("mainnet/a.parquet"),
+                    object_store::PutPayload::from(Bytes::from_static(b"a")),
+                )
+                .await?;
+            store
+                .put(
+                    &Path::from("mainnet/nested/b.parquet"),
+                    object_store::PutPayload::from(Bytes::from_static(b"b")),
+                )
+                .await?;
+            store
+                .put(
+                    &Path::from("mainnet/notes.txt"),
+                    object_store::PutPayload::from(Bytes::from_static(b"txt")),
+                )
+                .await
+        })
+        .expect("put objects");
+
+        let (objects, exact_object_path) =
+            block_on_async(collect_scan_s3_parquet_objects(&store, "mainnet"))
+                .expect("collect objects");
+
+        assert!(!exact_object_path);
+        assert_eq!(
+            objects
+                .iter()
+                .map(|obj| obj.location.as_ref())
+                .collect::<Vec<_>>(),
+            vec!["mainnet/a.parquet", "mainnet/nested/b.parquet"]
+        );
+    }
+
+    #[test]
+    fn test_scan_s3_display_key_keeps_exact_object_key() {
+        assert_eq!(
+            scan_s3_display_key(
+                "mainnet/partitions.parquet",
+                "mainnet/partitions.parquet",
+                true
+            ),
+            "mainnet/partitions.parquet"
+        );
     }
 }
