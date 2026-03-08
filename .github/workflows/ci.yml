@@ -8,6 +8,9 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  CARGO_PROFILE_DEV_DEBUG: 0
+  CARGO_PROFILE_TEST_DEBUG: 0
 
 jobs:
   build-and-test:
@@ -30,24 +33,23 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Cache cargo registry & build
+      - name: Cache cargo registry
         uses: actions/cache@v4
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            target
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-
 
-      - name: Build workspace
-        run: cargo build --workspace
-
       - name: Run tests
-        run: cargo test --workspace
+        run: cargo test --workspace --locked
+
+      - name: Build fireparq binary
+        run: cargo build --bin fireparq --locked
 
       - name: Verify shell completions
         run: |
-          cargo run --bin fireparq -- completions bash > /dev/null
-          cargo run --bin fireparq -- completions zsh > /dev/null
-          cargo run --bin fireparq -- completions fish > /dev/null
+          ./target/debug/fireparq completions bash > /dev/null
+          ./target/debug/fireparq completions zsh > /dev/null
+          ./target/debug/fireparq completions fish > /dev/null
