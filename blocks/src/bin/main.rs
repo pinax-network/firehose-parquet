@@ -10,8 +10,8 @@ use firehose_parquet::cli::{
     shard_partitions_from_index, validate_partitions_index, write_partitions_index_strict,
     AwsConfig, Commands, CommonArgs, PartitionBoundsRequest, PartitionBuildResult,
     PartitionBuildRow, PartitionBuildType, PartitionIndexBuilder, PartitionListRequest,
-    PartitionResolveOptions,
-    PartitionSelectionRequest, PartitionShardRequest, PartitionValidateRequest, PartitionsCommands,
+    PartitionResolveOptions, PartitionSelectionRequest, PartitionShardRequest,
+    PartitionValidateRequest, PartitionsCommands,
 };
 use firehose_parquet::config::{BlockMetadata, Compression, Config, Partition};
 use firehose_parquet::cursor::{CursorLocation, CursorState};
@@ -350,9 +350,7 @@ fn validate_existing_partitions_params(
     // Validate block_range_size consistency (when block_range)
     if let Some(brs) = block_range_size {
         for row in existing_rows {
-            if row.partition_interval_seconds > 0
-                && row.partition_interval_seconds != brs as i64
-            {
+            if row.partition_interval_seconds > 0 && row.partition_interval_seconds != brs as i64 {
                 return Err(anyhow!(
                     "existing partitions.parquet uses block_range_size={} but current --block-range-size is {}; \
                      cannot change block range size for an existing partitions file",
@@ -711,8 +709,7 @@ async fn run_partitions_build(
             };
             (builder, effective_start_block, Some(resume_start_block))
         } else {
-            let mut builder =
-                PartitionIndexBuilder::new(chain.clone(), partition_types.clone())?;
+            let mut builder = PartitionIndexBuilder::new(chain.clone(), partition_types.clone())?;
             if let Some(brs) = block_range_size {
                 builder = builder.with_block_range_size(brs);
             }
@@ -880,7 +877,7 @@ async fn run_partitions_build(
                         &partitions_file_metadata,
                         &mut checkpoint_state,
                         &probe_counter,
-                    !strict_timestamps,
+                        !strict_timestamps,
                     )?;
                 }
                 continue;
@@ -911,7 +908,7 @@ async fn run_partitions_build(
                         &partitions_file_metadata,
                         &mut checkpoint_state,
                         &probe_counter,
-                    !strict_timestamps,
+                        !strict_timestamps,
                     )?;
                 }
                 let Some(span) = await_live_interruptible(
@@ -968,7 +965,7 @@ async fn run_partitions_build(
                     &partitions_file_metadata,
                     &mut checkpoint_state,
                     &probe_counter,
-                !strict_timestamps,
+                    !strict_timestamps,
                 )?;
             }
         }
@@ -982,7 +979,7 @@ async fn run_partitions_build(
                 &partitions_file_metadata,
                 &mut checkpoint_state,
                 &probe_counter,
-            !strict_timestamps,
+                !strict_timestamps,
             )?;
             rows
         } else if !existing_rows.is_empty() {
@@ -995,11 +992,13 @@ async fn run_partitions_build(
         let stop_block = stop_block.expect("validated above");
         let block_range_size = block_range_size.expect("validated above");
         let checkpoint_state_started = Instant::now();
+        let mut checkpoint_state = PartitionsCheckpointState::default();
 
         // Align start to block_range_size boundary
         let aligned_start = (effective_start_block / block_range_size) * block_range_size;
         // Align stop to the next boundary (exclusive)
-        let aligned_stop = ((stop_block + block_range_size - 1) / block_range_size) * block_range_size;
+        let aligned_stop =
+            ((stop_block + block_range_size - 1) / block_range_size) * block_range_size;
 
         info!(
             effective_start_block,
@@ -1011,7 +1010,8 @@ async fn run_partitions_build(
             "starting block-range partitions build"
         );
 
-        let mut rows = Vec::new();
+        let mut rows = existing_rows.clone();
+        let existing_row_count = rows.len();
         let mut boundary = aligned_start;
 
         while boundary < aligned_stop {
@@ -1117,17 +1117,45 @@ async fn run_partitions_build(
                 "built block-range partition"
             );
 
+            checkpoint_state.record_rollover();
+            let frontier_advanced =
+                checkpoint_state.last_checkpoint_frontier != Some(partition_end);
+            let interval_elapsed = checkpoint_state
+                .last_checkpoint_at
+                .map(|at| at.elapsed() >= PARTITIONS_CHECKPOINT_INTERVAL)
+                .unwrap_or(true);
+            let enough_rollovers =
+                checkpoint_state.rollovers_since_checkpoint >= PARTITIONS_CHECKPOINT_ROLLOVERS;
+            if frontier_advanced
+                && (checkpoint_state.last_checkpoint_frontier.is_none()
+                    || interval_elapsed
+                    || enough_rollovers)
+            {
+                checkpoint_partitions_rows(
+                    &rows,
+                    &partitions_index,
+                    compression,
+                    Some(aws),
+                    &partitions_file_metadata,
+                    &mut checkpoint_state,
+                    &probe_counter,
+                    !strict_timestamps,
+                )?;
+            }
+
             boundary = partition_end;
         }
 
-        write_partitions_index_strict(
-            &partitions_index,
-            &rows,
-            compression,
-            Some(aws),
-            Some(&partitions_file_metadata),
-            !strict_timestamps, // nullable when strict is off
-        )?;
+        if rows.len() > existing_row_count {
+            write_partitions_index_strict(
+                &partitions_index,
+                &rows,
+                compression,
+                Some(aws),
+                Some(&partitions_file_metadata),
+                !strict_timestamps, // nullable when strict is off
+            )?;
+        }
         let total_probes = probe_counter.load(Ordering::Relaxed);
         let elapsed_secs = checkpoint_state_started.elapsed().as_secs();
         info!(
@@ -1190,7 +1218,7 @@ async fn run_partitions_build(
                     &partitions_file_metadata,
                     &mut checkpoint_state,
                     &probe_counter,
-                !strict_timestamps,
+                    !strict_timestamps,
                 )?;
             }
             let span = locate_live_partition_span(
@@ -1230,7 +1258,7 @@ async fn run_partitions_build(
                             &partitions_file_metadata,
                             &mut checkpoint_state,
                             &probe_counter,
-                        !strict_timestamps,
+                            !strict_timestamps,
                         )?;
                     }
                     current_block = next_boundary;
@@ -1428,6 +1456,48 @@ fn checkpoint_partitions_builder(
     );
     checkpoint_state.record_checkpoint(frontier);
     Ok(rows)
+}
+
+fn checkpoint_partitions_rows(
+    rows: &[firehose_parquet::cli::PartitionBuildRow],
+    partitions_index: &str,
+    compression: Compression,
+    aws: Option<&AwsConfig>,
+    file_metadata: &ParquetFileMetadata,
+    checkpoint_state: &mut PartitionsCheckpointState,
+    probe_counter: &AtomicU64,
+    nullable_timestamps: bool,
+) -> Result<Vec<firehose_parquet::cli::PartitionBuildRow>> {
+    let frontier = rows
+        .iter()
+        .map(|row| row.end_block)
+        .max()
+        .ok_or_else(|| anyhow!("partition build is missing a checkpoint frontier"))?;
+    write_partitions_index_strict(
+        partitions_index,
+        rows,
+        compression,
+        aws,
+        Some(file_metadata),
+        nullable_timestamps,
+    )?;
+    let total_probes = probe_counter.load(Ordering::Relaxed);
+    info!(
+        partitions = format!(
+            "{} ({:.1}/h)",
+            checkpoint_state.total_rollovers,
+            checkpoint_state.partitions_per_hour()
+        ),
+        probes = format!(
+            "{} ({:.1}/m)",
+            total_probes,
+            checkpoint_state.probes_per_min(total_probes)
+        ),
+        elapsed = format_elapsed_human(checkpoint_state.started_at.elapsed().as_secs()),
+        "checkpoint"
+    );
+    checkpoint_state.record_checkpoint(frontier);
+    Ok(rows.to_vec())
 }
 
 const PARTITIONS_PROBE_FETCH_MAX_ATTEMPTS: usize = 4;
@@ -4111,6 +4181,104 @@ mod tests {
             find_meta(&meta, "firehose-parquet.block_range_size"),
             Some("0")
         );
+    }
+
+    #[test]
+    fn test_validate_existing_partitions_params_rejects_block_range_size_change() {
+        let existing_rows = vec![PartitionBuildRow {
+            partition_type: "block_range".to_string(),
+            partition_interval_seconds: 1_000_000,
+            partition_start_ts: "0".to_string(),
+            partition_value: "0".to_string(),
+            start_block: 0,
+            end_block: 1_000_000,
+            start_time: None,
+            end_time: None,
+            chain: Some("solana-mainnet-beta".to_string()),
+        }];
+
+        let err = validate_existing_partitions_params(
+            &existing_rows,
+            "solana-mainnet-beta",
+            PartitionBuildType::BlockRange,
+            Some(10_000_000),
+        )
+        .expect_err("block range size changes should be rejected");
+
+        assert!(err
+            .to_string()
+            .contains("cannot change block range size for an existing partitions file"));
+    }
+
+    #[test]
+    fn test_checkpoint_partitions_rows_preserves_existing_block_range_rows() {
+        let dir = std::env::temp_dir().join(format!(
+            "fireparq-block-range-checkpoint-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system time")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        let path = dir.join("partitions.parquet");
+        let rows = vec![
+            PartitionBuildRow {
+                partition_type: "block_range".to_string(),
+                partition_interval_seconds: 10,
+                partition_start_ts: "0".to_string(),
+                partition_value: "0".to_string(),
+                start_block: 0,
+                end_block: 10,
+                start_time: None,
+                end_time: None,
+                chain: Some("solana-mainnet-beta".to_string()),
+            },
+            PartitionBuildRow {
+                partition_type: "block_range".to_string(),
+                partition_interval_seconds: 10,
+                partition_start_ts: "10".to_string(),
+                partition_value: "10".to_string(),
+                start_block: 10,
+                end_block: 20,
+                start_time: None,
+                end_time: None,
+                chain: Some("solana-mainnet-beta".to_string()),
+            },
+        ];
+        let metadata = build_partitions_file_metadata(
+            "https://example.com",
+            "solana-mainnet-beta",
+            "block_range",
+            Compression::Zstd,
+            &None,
+            Some(10),
+            false,
+        );
+        let mut checkpoint_state = PartitionsCheckpointState::default();
+        let probe_counter = std::sync::atomic::AtomicU64::new(0);
+
+        checkpoint_partitions_rows(
+            &rows,
+            &path.to_string_lossy(),
+            Compression::Zstd,
+            None,
+            &metadata,
+            &mut checkpoint_state,
+            &probe_counter,
+            true,
+        )
+        .expect("checkpoint rows");
+
+        let persisted =
+            read_partitions_build_rows(path.to_str().expect("utf8 path"), None).expect("read back");
+        assert_eq!(persisted.len(), 2);
+        assert_eq!(persisted[0].start_block, 0);
+        assert_eq!(persisted[0].end_block, 10);
+        assert_eq!(persisted[1].start_block, 10);
+        assert_eq!(persisted[1].end_block, 20);
+        assert_eq!(checkpoint_state.last_checkpoint_frontier, Some(20));
+        std::fs::remove_file(&path).expect("remove parquet");
+        std::fs::remove_dir(&dir).expect("remove temp dir");
     }
 
     #[test]
