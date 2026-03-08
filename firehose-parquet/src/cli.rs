@@ -2021,17 +2021,28 @@ pub fn read_partitions_build_rows(
         })
     }
 
+    /// File-level metadata fallbacks for columns that may have been removed from the row schema.
+    #[derive(Debug, Clone, Default)]
+    struct PartitionsFileContext {
+        chain: Option<String>,
+        partition_type: Option<String>,
+        interval: Option<i64>,
+    }
+
     fn collect_rows(
         batch: &arrow::record_batch::RecordBatch,
         rows: &mut Vec<PartitionBuildRow>,
         read_utf8_value: &impl Fn(&dyn Array, usize) -> anyhow::Result<Option<String>>,
         read_i64_value: &impl Fn(&dyn Array, usize) -> anyhow::Result<Option<i64>>,
         read_u64_value: &impl Fn(&dyn Array, usize) -> anyhow::Result<Option<u64>>,
+        file_ctx: &PartitionsFileContext,
     ) -> anyhow::Result<()> {
         let schema = batch.schema();
+        // type column is optional in new schema (read from metadata)
         let partition_type_idx = schema
             .index_of("type")
-            .or_else(|_| schema.index_of("partition_type"))?;
+            .or_else(|_| schema.index_of("partition_type"))
+            .ok();
         let partition_value_idx = schema
             .index_of("partition")
             .or_else(|_| schema.index_of("partition_value"))?;
@@ -2047,11 +2058,18 @@ pub fn read_partitions_build_rows(
         let end_time_idx = schema.index_of("end_time").ok();
 
         for row_index in 0..batch.num_rows() {
-            let partition_type = canonical_partition_type_label(
-                read_utf8_value(batch.column(partition_type_idx).as_ref(), row_index)?
-                    .ok_or_else(|| anyhow::anyhow!("type cannot be null"))?
-                    .as_str(),
-            )?;
+            // Resolve partition_type from column or file metadata
+            let partition_type = if let Some(idx) = partition_type_idx {
+                canonical_partition_type_label(
+                    read_utf8_value(batch.column(idx).as_ref(), row_index)?
+                        .ok_or_else(|| anyhow::anyhow!("type cannot be null"))?
+                        .as_str(),
+                )?
+            } else if let Some(ref pt) = file_ctx.partition_type {
+                pt.clone()
+            } else {
+                anyhow::bail!("partition type not found in columns or file metadata");
+            };
 
             // partition column: read as UInt64 (new schema) or Timestamp/String (old schema)
             let partition_column = batch.column(partition_value_idx).as_ref();
@@ -2080,22 +2098,30 @@ pub fn read_partitions_build_rows(
             let partition_interval_seconds = match partition_interval_seconds_idx {
                 Some(idx) => {
                     read_i64_value(batch.column(idx).as_ref(), row_index)?.unwrap_or_else(|| {
-                        PartitionBuildType::from_cli_value(&partition_type)
-                            .map(|kind| kind.interval_seconds())
-                            .unwrap_or_default()
+                        file_ctx.interval.unwrap_or_else(|| {
+                            PartitionBuildType::from_cli_value(&partition_type)
+                                .map(|kind| kind.interval_seconds())
+                                .unwrap_or_default()
+                        })
                     })
                 }
-                None => PartitionBuildType::from_cli_value(&partition_type)?.interval_seconds(),
+                None => file_ctx.interval.unwrap_or_else(|| {
+                    PartitionBuildType::from_cli_value(&partition_type)
+                        .map(|kind| kind.interval_seconds())
+                        .unwrap_or_default()
+                }),
             };
             let start_block = read_u64_value(batch.column(start_block_idx).as_ref(), row_index)?
                 .ok_or_else(|| anyhow::anyhow!("start_block cannot be null"))?;
             let end_block = read_u64_value(batch.column(end_block_idx).as_ref(), row_index)?
                 .ok_or_else(|| anyhow::anyhow!("end_block cannot be null"))?;
-            let chain = chain_idx
-                .map(|idx| read_utf8_value(batch.column(idx).as_ref(), row_index))
-                .transpose()?
-                .flatten()
-                .ok_or_else(|| anyhow::anyhow!("chain cannot be null"))?;
+
+            // Resolve chain from column or file metadata
+            let chain = if let Some(idx) = chain_idx {
+                read_utf8_value(batch.column(idx).as_ref(), row_index)?
+            } else {
+                file_ctx.chain.clone()
+            };
 
             // start_time and end_time are now nullable
             let start_time = start_time_idx.and_then(|idx| {
@@ -2118,7 +2144,7 @@ pub fn read_partitions_build_rows(
                 end_block,
                 start_time,
                 end_time,
-                chain: Some(chain),
+                chain,
             });
         }
 
@@ -2126,6 +2152,39 @@ pub fn read_partitions_build_rows(
     }
 
     let mut rows = Vec::new();
+    /// Extract chain/type/interval from Parquet file-level key-value metadata.
+    fn extract_file_context(
+        file_metadata: &parquet::file::metadata::FileMetaData,
+    ) -> PartitionsFileContext {
+        let kv = file_metadata.key_value_metadata();
+        let find = |key: &str| -> Option<String> {
+            kv.as_ref().and_then(|kvs| {
+                kvs.iter()
+                    .find(|kv| kv.key == key)
+                    .and_then(|kv| kv.value.clone())
+            })
+        };
+        let chain = find("firehose-parquet.chain_name");
+        let partition_type = find("partition_type")
+            .or_else(|| find("firehose-parquet.partition"))
+            .and_then(|pt| canonical_partition_type_label(&pt).ok());
+        let interval = find("firehose-parquet.block_range_size")
+            .and_then(|v| v.parse::<i64>().ok())
+            .filter(|v| *v > 0)
+            .or_else(|| {
+                partition_type.as_ref().and_then(|pt| {
+                    PartitionBuildType::from_cli_value(pt)
+                        .ok()
+                        .map(|kind| kind.interval_seconds())
+                })
+            });
+        PartitionsFileContext {
+            chain,
+            partition_type,
+            interval,
+        }
+    }
+
     if path.starts_with("s3://") {
         use crate::writer::parse_s3_url;
         use object_store::ObjectStore;
@@ -2140,6 +2199,7 @@ pub fn read_partitions_build_rows(
         let schema = builder.schema();
         validate_partitions_schema(&schema)?;
         validate_partitions_metadata(builder.metadata().file_metadata())?;
+        let file_ctx = extract_file_context(builder.metadata().file_metadata());
         let reader = builder.build()?;
         for batch in reader {
             collect_rows(
@@ -2148,6 +2208,7 @@ pub fn read_partitions_build_rows(
                 &read_utf8_value,
                 &read_i64_value,
                 &read_u64_value,
+                &file_ctx,
             )?;
         }
     } else {
@@ -2156,6 +2217,7 @@ pub fn read_partitions_build_rows(
         let schema = builder.schema();
         validate_partitions_schema(&schema)?;
         validate_partitions_metadata(builder.metadata().file_metadata())?;
+        let file_ctx = extract_file_context(builder.metadata().file_metadata());
         let reader = builder.build()?;
         for batch in reader {
             collect_rows(
@@ -2164,6 +2226,7 @@ pub fn read_partitions_build_rows(
                 &read_utf8_value,
                 &read_i64_value,
                 &read_u64_value,
+                &file_ctx,
             )?;
         }
     }
@@ -2217,7 +2280,7 @@ fn write_partitions_index_impl(
     file_metadata: Option<&crate::writer::ParquetFileMetadata>,
     nullable_timestamps: bool,
 ) -> anyhow::Result<()> {
-    use arrow::array::{Int64Array, StringArray, TimestampSecondArray, UInt64Array};
+    use arrow::array::{TimestampSecondArray, UInt64Array};
     use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
     use arrow::record_batch::RecordBatch;
     use parquet::arrow::ArrowWriter;
@@ -2231,11 +2294,33 @@ fn write_partitions_index_impl(
         anyhow::bail!("cannot write an empty partitions index");
     }
 
+    // Build minimal metadata from rows when no external metadata is provided.
+    // This ensures chain_name and partition type are always in file metadata.
+    let auto_metadata = if file_metadata.is_none() {
+        let mut meta = crate::writer::ParquetFileMetadata::new();
+        if let Some(chain) = rows.first().and_then(|r| r.chain.as_deref()) {
+            meta.add("firehose-parquet.chain_name", chain);
+        }
+        if let Some(row) = rows.first() {
+            meta.add("firehose-parquet.partition", &row.partition_type);
+            meta.add(
+                "firehose-parquet.block_range_size",
+                if row.partition_type == "block_range" {
+                    row.partition_interval_seconds.to_string()
+                } else {
+                    "0".to_string()
+                },
+            );
+        }
+        Some(meta)
+    } else {
+        None
+    };
+    let effective_metadata = file_metadata.or(auto_metadata.as_ref());
+
+    // Lean schema: chain, type, interval live in file-level metadata only
     let schema = Arc::new(Schema::new(vec![
         Field::new("partition", DataType::UInt64, false),
-        Field::new("chain", DataType::Utf8, false),
-        Field::new("type", DataType::Utf8, false),
-        Field::new("interval", DataType::Int64, false),
         Field::new("start_block", DataType::UInt64, false),
         Field::new("end_block", DataType::UInt64, false),
         Field::new(
@@ -2309,25 +2394,6 @@ fn write_partitions_index_impl(
         schema.clone(),
         vec![
             Arc::new(UInt64Array::from(partition_values)),
-            Arc::new(StringArray::from(
-                rows.iter()
-                    .map(|row| {
-                        row.chain
-                            .clone()
-                            .ok_or_else(|| anyhow::anyhow!("chain cannot be null"))
-                    })
-                    .collect::<anyhow::Result<Vec<_>>>()?,
-            )),
-            Arc::new(StringArray::from(
-                rows.iter()
-                    .map(|row| row.partition_type.clone())
-                    .collect::<Vec<_>>(),
-            )),
-            Arc::new(Int64Array::from(
-                rows.iter()
-                    .map(|row| row.partition_interval_seconds)
-                    .collect::<Vec<_>>(),
-            )),
             Arc::new(UInt64Array::from(
                 rows.iter().map(|row| row.start_block).collect::<Vec<_>>(),
             )),
@@ -2351,10 +2417,9 @@ fn write_partitions_index_impl(
     };
     let mut props_builder = WriterProperties::builder().set_compression(pq_compression);
     let mut kvs = Vec::new();
-    if let Some(file_metadata) = file_metadata {
+    if let Some(meta) = effective_metadata {
         kvs.extend(
-            file_metadata
-                .entries
+            meta.entries
                 .iter()
                 .map(|(key, value)| KeyValue::new(key.clone(), value.clone())),
         );
@@ -2476,25 +2541,26 @@ fn validate_partitions_schema(schema: &arrow::datatypes::Schema) -> anyhow::Resu
             .ok_or_else(|| anyhow::anyhow!("missing required column: {}", names.join(" or ")))
     }
 
-    let chain = schema
-        .field_with_name("chain")
-        .map_err(|_| anyhow::anyhow!("missing required column: chain"))?;
-    if !is_utf8_like(chain.data_type()) {
-        anyhow::bail!(
-            "invalid partitions.parquet column type for chain: expected Utf8/LargeUtf8, got {}",
-            chain.data_type()
-        );
-    }
-    if chain.is_nullable() {
-        anyhow::bail!("invalid partitions.parquet schema: chain must be non-nullable");
+    // chain, type, interval are optional in new schema (stored in file-level metadata)
+    if let Ok(chain) = schema.field_with_name("chain") {
+        if !is_utf8_like(chain.data_type()) {
+            anyhow::bail!(
+                "invalid partitions.parquet column type for chain: expected Utf8/LargeUtf8, got {}",
+                chain.data_type()
+            );
+        }
+        if chain.is_nullable() {
+            anyhow::bail!("invalid partitions.parquet schema: chain must be non-nullable");
+        }
     }
 
-    let partition_type = field_with_name_any(schema, &["type", "partition_type"])?;
-    if !is_utf8_like(partition_type.data_type()) {
-        anyhow::bail!(
-            "invalid partitions.parquet column type for type: expected Utf8/LargeUtf8, got {}",
-            partition_type.data_type()
-        );
+    if let Ok(partition_type) = field_with_name_any(schema, &["type", "partition_type"]) {
+        if !is_utf8_like(partition_type.data_type()) {
+            anyhow::bail!(
+                "invalid partitions.parquet column type for type: expected Utf8/LargeUtf8, got {}",
+                partition_type.data_type()
+            );
+        }
     }
 
     let partition_value = field_with_name_any(schema, &["partition", "partition_value"])?;
@@ -8399,15 +8465,16 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![
                 "partition",
-                "chain",
-                "type",
-                "interval",
                 "start_block",
                 "end_block",
                 "start_time",
                 "end_time",
             ]
         );
+        // chain, type, interval are in file-level metadata, not columns
+        assert!(schema.field_with_name("chain").is_err());
+        assert!(schema.field_with_name("type").is_err());
+        assert!(schema.field_with_name("interval").is_err());
         assert!(schema.field_with_name("partition_start_ts").is_err());
         assert_eq!(
             schema
@@ -8416,6 +8483,15 @@ mod tests {
                 .data_type(),
             &DataType::UInt64
         );
+
+        // Verify file-level metadata contains partition_type
+        let file_metadata = builder.metadata().file_metadata();
+        let kvs = file_metadata.key_value_metadata().expect("metadata");
+        let partition_type_kv = kvs
+            .iter()
+            .find(|kv| kv.key == "partition_type")
+            .expect("partition_type metadata");
+        assert_eq!(partition_type_kv.value.as_deref(), Some("hour"));
         assert_eq!(
             schema
                 .field_with_name("start_time")

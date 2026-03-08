@@ -312,6 +312,60 @@ fn infer_partitions_block_type(
     None
 }
 
+/// Validate that existing partitions rows match current build parameters.
+/// Prevents mixing chains, partition types, or block range sizes.
+fn validate_existing_partitions_params(
+    existing_rows: &[PartitionBuildRow],
+    chain: &str,
+    partition_type: PartitionBuildType,
+    block_range_size: Option<u64>,
+) -> Result<()> {
+    // Validate chain consistency
+    for row in existing_rows {
+        if let Some(ref existing_chain) = row.chain {
+            if existing_chain != chain {
+                return Err(anyhow!(
+                    "existing partitions.parquet was built for chain '{}' but current --chain is '{}'; \
+                     cannot mix chains in the same partitions file",
+                    existing_chain,
+                    chain
+                ));
+            }
+        }
+    }
+
+    // Validate partition type consistency
+    let current_pt = partition_type.as_str();
+    for row in existing_rows {
+        if row.partition_type != current_pt {
+            return Err(anyhow!(
+                "existing partitions.parquet uses partition type '{}' but current --partition is '{}'; \
+                 cannot mix partition types in the same file",
+                row.partition_type,
+                current_pt
+            ));
+        }
+    }
+
+    // Validate block_range_size consistency (when block_range)
+    if let Some(brs) = block_range_size {
+        for row in existing_rows {
+            if row.partition_interval_seconds > 0
+                && row.partition_interval_seconds != brs as i64
+            {
+                return Err(anyhow!(
+                    "existing partitions.parquet uses block_range_size={} but current --block-range-size is {}; \
+                     cannot change block range size for an existing partitions file",
+                    row.partition_interval_seconds,
+                    brs
+                ));
+            }
+        }
+    }
+
+    Ok(())
+}
+
 fn build_partitions_file_metadata(
     endpoint: &str,
     chain: &str,
@@ -568,6 +622,16 @@ async fn run_partitions_build(
         Err(err) if err.to_string().contains("not found") => Vec::new(),
         Err(err) => return Err(err),
     };
+
+    // Validate existing file metadata matches current parameters (prevent mixing)
+    if !existing_rows.is_empty() {
+        validate_existing_partitions_params(
+            &existing_rows,
+            &chain,
+            partition_type,
+            block_range_size,
+        )?;
+    }
 
     let existing_resume_block = existing_rows.iter().map(|row| row.end_block).max();
 
