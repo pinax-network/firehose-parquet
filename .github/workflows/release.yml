@@ -76,6 +76,7 @@ jobs:
           STAGING="fireparq-${{ matrix.suffix }}"
           mkdir -p "$STAGING"
           cp "target/${{ matrix.target }}/release/fireparq" "$STAGING/"
+          cp "target/${{ matrix.target }}/release/generate-networks" "$STAGING/"
           tar czf "${STAGING}.tar.gz" "$STAGING"
           echo "ASSET=${STAGING}.tar.gz" >> "$GITHUB_ENV"
 
