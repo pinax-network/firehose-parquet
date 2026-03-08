@@ -10,8 +10,8 @@ use firehose_parquet::cli::{
     shard_partitions_from_index, validate_partitions_index, write_partitions_index_strict,
     AwsConfig, Commands, CommonArgs, PartitionBoundsRequest, PartitionBuildResult,
     PartitionBuildRow, PartitionBuildType, PartitionIndexBuilder, PartitionListRequest,
-    PartitionResolveOptions, PartitionSelectionRequest, PartitionShardRequest,
-    PartitionValidateRequest, PartitionsCommands,
+    PartitionResolveOptions,
+    PartitionSelectionRequest, PartitionShardRequest, PartitionValidateRequest, PartitionsCommands,
 };
 use firehose_parquet::config::{BlockMetadata, Compression, Config, Partition};
 use firehose_parquet::cursor::{CursorLocation, CursorState};
@@ -350,7 +350,9 @@ fn validate_existing_partitions_params(
     // Validate block_range_size consistency (when block_range)
     if let Some(brs) = block_range_size {
         for row in existing_rows {
-            if row.partition_interval_seconds > 0 && row.partition_interval_seconds != brs as i64 {
+            if row.partition_interval_seconds > 0
+                && row.partition_interval_seconds != brs as i64
+            {
                 return Err(anyhow!(
                     "existing partitions.parquet uses block_range_size={} but current --block-range-size is {}; \
                      cannot change block range size for an existing partitions file",
@@ -711,7 +713,8 @@ async fn run_partitions_build(
             };
             (builder, effective_start_block, Some(resume_start_block))
         } else {
-            let mut builder = PartitionIndexBuilder::new(chain.clone(), partition_types.clone())?;
+            let mut builder =
+                PartitionIndexBuilder::new(chain.clone(), partition_types.clone())?;
             if let Some(brs) = block_range_size {
                 builder = builder.with_block_range_size(brs);
             }
@@ -879,7 +882,7 @@ async fn run_partitions_build(
                         &partitions_file_metadata,
                         &mut checkpoint_state,
                         &probe_counter,
-                        !strict_timestamps,
+                    !strict_timestamps,
                     )?;
                 }
                 continue;
@@ -910,7 +913,7 @@ async fn run_partitions_build(
                         &partitions_file_metadata,
                         &mut checkpoint_state,
                         &probe_counter,
-                        !strict_timestamps,
+                    !strict_timestamps,
                     )?;
                 }
                 let Some(span) = await_live_interruptible(
@@ -967,7 +970,7 @@ async fn run_partitions_build(
                     &partitions_file_metadata,
                     &mut checkpoint_state,
                     &probe_counter,
-                    !strict_timestamps,
+                !strict_timestamps,
                 )?;
             }
         }
@@ -981,7 +984,7 @@ async fn run_partitions_build(
                 &partitions_file_metadata,
                 &mut checkpoint_state,
                 &probe_counter,
-                !strict_timestamps,
+            !strict_timestamps,
             )?;
             rows
         } else if !existing_rows.is_empty() {
@@ -998,8 +1001,7 @@ async fn run_partitions_build(
         // Align start to block_range_size boundary
         let aligned_start = (effective_start_block / block_range_size) * block_range_size;
         // Align stop to the next boundary (exclusive)
-        let aligned_stop =
-            ((stop_block + block_range_size - 1) / block_range_size) * block_range_size;
+        let aligned_stop = ((stop_block + block_range_size - 1) / block_range_size) * block_range_size;
 
         info!(
             effective_start_block,
@@ -1190,7 +1192,7 @@ async fn run_partitions_build(
                     &partitions_file_metadata,
                     &mut checkpoint_state,
                     &probe_counter,
-                    !strict_timestamps,
+                !strict_timestamps,
                 )?;
             }
             let span = locate_live_partition_span(
@@ -1230,7 +1232,7 @@ async fn run_partitions_build(
                             &partitions_file_metadata,
                             &mut checkpoint_state,
                             &probe_counter,
-                            !strict_timestamps,
+                        !strict_timestamps,
                         )?;
                     }
                     current_block = next_boundary;
