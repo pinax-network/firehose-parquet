@@ -7,7 +7,7 @@ use firehose_parquet::cli::{
     parse_partition_build_types, parse_partition_selection_request, parse_partition_shard_strategy,
     read_partitions_build_rows, resolve_cursor_template, resolve_partition_bounds_from_index,
     resolve_partition_command, resolve_partition_window_bounds_from_index, resolve_s3_output_root,
-    shard_partitions_from_index, validate_partitions_index, write_partitions_index_with_metadata,
+    shard_partitions_from_index, validate_partitions_index, write_partitions_index_strict,
     AwsConfig, Commands, CommonArgs, PartitionBoundsRequest, PartitionBuildResult,
     PartitionBuildRow, PartitionBuildType, PartitionIndexBuilder, PartitionListRequest,
     PartitionResolveOptions,
@@ -318,6 +318,8 @@ fn build_partitions_file_metadata(
     partition: &str,
     compression: Compression,
     endpoint_info: &Option<EndpointInfo>,
+    block_range_size: Option<u64>,
+    strict_timestamps: bool,
 ) -> ParquetFileMetadata {
     let inferred_block_type = infer_partitions_block_type(chain, endpoint_info);
     let encoding = inferred_block_type
@@ -382,7 +384,14 @@ fn build_partitions_file_metadata(
         meta.add("firehose-parquet.chain_name", chain);
     }
     meta.add("firehose-parquet.partition", partition);
-    meta.add("firehose-parquet.block_range_size", "0");
+    meta.add(
+        "firehose-parquet.block_range_size",
+        block_range_size.unwrap_or(0).to_string(),
+    );
+    meta.add(
+        "firehose-parquet.strict_timestamps",
+        strict_timestamps.to_string(),
+    );
     meta.add("firehose-parquet.compression", compression.to_string());
     meta
 }
@@ -547,6 +556,8 @@ async fn run_partitions_build(
         &partition_label,
         compression,
         &endpoint_info,
+        block_range_size,
+        strict_timestamps,
     );
     let partitions_index = build_partitions_index_path(&output_root, &chain);
     let chain_output_root = build_partitions_output_root(&output_root, &chain);
@@ -805,6 +816,7 @@ async fn run_partitions_build(
                         &partitions_file_metadata,
                         &mut checkpoint_state,
                         &probe_counter,
+                    !strict_timestamps,
                     )?;
                 }
                 continue;
@@ -835,6 +847,7 @@ async fn run_partitions_build(
                         &partitions_file_metadata,
                         &mut checkpoint_state,
                         &probe_counter,
+                    !strict_timestamps,
                     )?;
                 }
                 let Some(span) = await_live_interruptible(
@@ -891,6 +904,7 @@ async fn run_partitions_build(
                     &partitions_file_metadata,
                     &mut checkpoint_state,
                     &probe_counter,
+                !strict_timestamps,
                 )?;
             }
         }
@@ -904,6 +918,7 @@ async fn run_partitions_build(
                 &partitions_file_metadata,
                 &mut checkpoint_state,
                 &probe_counter,
+            !strict_timestamps,
             )?;
             rows
         } else if !existing_rows.is_empty() {
@@ -1041,12 +1056,13 @@ async fn run_partitions_build(
             boundary = partition_end;
         }
 
-        write_partitions_index_with_metadata(
+        write_partitions_index_strict(
             &partitions_index,
             &rows,
             compression,
             Some(aws),
             Some(&partitions_file_metadata),
+            !strict_timestamps, // nullable when strict is off
         )?;
         let total_probes = probe_counter.load(Ordering::Relaxed);
         let elapsed_secs = checkpoint_state_started.elapsed().as_secs();
@@ -1110,6 +1126,7 @@ async fn run_partitions_build(
                     &partitions_file_metadata,
                     &mut checkpoint_state,
                     &probe_counter,
+                !strict_timestamps,
                 )?;
             }
             let span = locate_live_partition_span(
@@ -1149,6 +1166,7 @@ async fn run_partitions_build(
                             &partitions_file_metadata,
                             &mut checkpoint_state,
                             &probe_counter,
+                        !strict_timestamps,
                         )?;
                     }
                     current_block = next_boundary;
@@ -1173,12 +1191,13 @@ async fn run_partitions_build(
         };
 
         let rows = builder.finish(final_end_block)?;
-        write_partitions_index_with_metadata(
+        write_partitions_index_strict(
             &partitions_index,
             &rows,
             compression,
             Some(aws),
             Some(&partitions_file_metadata),
+            !strict_timestamps,
         )?;
         let total_probes = probe_counter.load(Ordering::Relaxed);
         info!(
@@ -1314,17 +1333,19 @@ fn checkpoint_partitions_builder(
     file_metadata: &ParquetFileMetadata,
     checkpoint_state: &mut PartitionsCheckpointState,
     probe_counter: &AtomicU64,
+    nullable_timestamps: bool,
 ) -> Result<Vec<firehose_parquet::cli::PartitionBuildRow>> {
     let frontier = builder
         .current_frontier()
         .ok_or_else(|| anyhow!("partition build is missing a checkpoint frontier"))?;
     let rows = builder.snapshot(frontier)?;
-    write_partitions_index_with_metadata(
+    write_partitions_index_strict(
         partitions_index,
         &rows,
         compression,
         aws,
         Some(file_metadata),
+        nullable_timestamps,
     )?;
     let total_probes = probe_counter.load(Ordering::Relaxed);
     info!(
@@ -3989,6 +4010,8 @@ mod tests {
             "date",
             Compression::Zstd,
             &ei,
+            None,
+            true,
         );
 
         assert_eq!(
@@ -4034,6 +4057,8 @@ mod tests {
             "hour",
             Compression::Zstd,
             &None,
+            None,
+            true,
         );
 
         assert_eq!(
@@ -4085,6 +4110,8 @@ mod tests {
             "date",
             Compression::Zstd,
             &ei,
+            None,
+            true,
         );
 
         assert_eq!(
@@ -4110,6 +4137,8 @@ mod tests {
             "date",
             Compression::Zstd,
             &ei,
+            None,
+            true,
         );
 
         assert_eq!(
@@ -4126,6 +4155,8 @@ mod tests {
             "date",
             Compression::Snappy,
             &None,
+            None,
+            true,
         );
 
         assert_eq!(

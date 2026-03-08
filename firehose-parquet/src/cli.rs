@@ -2193,6 +2193,30 @@ pub fn write_partitions_index_with_metadata(
     aws: Option<&AwsConfig>,
     file_metadata: Option<&crate::writer::ParquetFileMetadata>,
 ) -> anyhow::Result<()> {
+    // Default: nullable timestamps (backward compat)
+    write_partitions_index_impl(path, rows, compression, aws, file_metadata, true)
+}
+
+/// Write partitions index with explicit control over timestamp nullability.
+pub fn write_partitions_index_strict(
+    path: &str,
+    rows: &[PartitionBuildRow],
+    compression: Compression,
+    aws: Option<&AwsConfig>,
+    file_metadata: Option<&crate::writer::ParquetFileMetadata>,
+    nullable_timestamps: bool,
+) -> anyhow::Result<()> {
+    write_partitions_index_impl(path, rows, compression, aws, file_metadata, nullable_timestamps)
+}
+
+fn write_partitions_index_impl(
+    path: &str,
+    rows: &[PartitionBuildRow],
+    compression: Compression,
+    aws: Option<&AwsConfig>,
+    file_metadata: Option<&crate::writer::ParquetFileMetadata>,
+    nullable_timestamps: bool,
+) -> anyhow::Result<()> {
     use arrow::array::{Int64Array, StringArray, TimestampSecondArray, UInt64Array};
     use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
     use arrow::record_batch::RecordBatch;
@@ -2217,12 +2241,12 @@ pub fn write_partitions_index_with_metadata(
         Field::new(
             "start_time",
             DataType::Timestamp(TimeUnit::Second, Some(Arc::from("UTC"))),
-            true, // nullable
+            nullable_timestamps,
         ),
         Field::new(
             "end_time",
             DataType::Timestamp(TimeUnit::Second, Some(Arc::from("UTC"))),
-            true, // nullable
+            nullable_timestamps,
         ),
     ]));
 
