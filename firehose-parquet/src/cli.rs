@@ -818,6 +818,16 @@ Examples:
     --partition date \\
     --compression snappy \\
     --output ./output
+
+  # Build block-range partitions for Solana (1M blocks each)
+  fireparq partitions build \\
+    --network solana-mainnet-beta \\
+    --start-block 0 \\
+    --stop-block 300000000 \\
+    --partition block_range \\
+    --block-range-size 1000000 \\
+    --strict-timestamps false \\
+    --output ./output
 ")]
     Build {
         /// Firehose gRPC endpoint URL
@@ -868,10 +878,18 @@ Examples:
         /// Allow sparse probes to scan forward a small window when a chain skips block numbers.
         #[arg(long, default_value_t = false)]
         skip_missing_blocks: bool,
-        /// Partition to build: date, hour, minute, or second
+        /// Partition to build: date, hour, minute, second, or block_range
         /// Deprecated alias: `--partition-types`.
         #[arg(long = "partition", alias = "partition-types")]
         partition: String,
+        /// Block range size (required when --partition block_range).
+        /// Each partition covers exactly this many blocks (e.g. 1000000).
+        #[arg(long)]
+        block_range_size: Option<u64>,
+        /// Require non-null timestamps for all probed blocks (default: true).
+        /// Set to false for chains like Solana where blocks may lack timestamps.
+        #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
+        strict_timestamps: bool,
         /// Compression codec for the written `partitions.parquet`: zstd, snappy, gzip, none
         #[arg(long, default_value = "zstd")]
         compression: String,
@@ -1153,6 +1171,7 @@ pub enum PartitionBuildType {
     Hour,
     Minute,
     Second,
+    BlockRange,
 }
 
 impl PartitionBuildType {
@@ -1162,8 +1181,9 @@ impl PartitionBuildType {
             "hour" => Ok(Self::Hour),
             "minute" => Ok(Self::Minute),
             "second" => Ok(Self::Second),
+            "block_range" | "block-range" | "blocks" => Ok(Self::BlockRange),
             other => anyhow::bail!(
-                "invalid partition type '{other}': expected one of date, hour, minute, second"
+                "invalid partition type '{other}': expected one of date, hour, minute, second, block_range"
             ),
         }
     }
@@ -1174,20 +1194,33 @@ impl PartitionBuildType {
             Self::Hour => "hour",
             Self::Minute => "minute",
             Self::Second => "second",
+            Self::BlockRange => "block_range",
         }
     }
 
+    /// Returns true if this is a time-based partition type.
+    pub fn is_time_based(&self) -> bool {
+        !matches!(self, Self::BlockRange)
+    }
+
+    /// For time-based types, returns the interval in seconds.
+    /// For block_range, returns 0 (use `block_range_size` instead).
     pub fn interval_seconds(&self) -> i64 {
         match self {
             Self::Date => 86_400,
             Self::Hour => 3_600,
             Self::Minute => 60,
             Self::Second => 1,
+            Self::BlockRange => 0,
         }
     }
 
     pub fn round_timestamp(&self, timestamp: i64) -> anyhow::Result<i64> {
         use time::OffsetDateTime;
+
+        if matches!(self, Self::BlockRange) {
+            anyhow::bail!("round_timestamp is not applicable for block_range partitions");
+        }
 
         let dt = OffsetDateTime::from_unix_timestamp(timestamp)
             .map_err(|e| anyhow::anyhow!("invalid unix timestamp {timestamp}: {e}"))?;
@@ -1196,6 +1229,7 @@ impl PartitionBuildType {
             Self::Hour => dt.replace_minute(0)?.replace_second(0)?,
             Self::Minute => dt.replace_second(0)?,
             Self::Second => dt,
+            Self::BlockRange => unreachable!(),
         };
         Ok(rounded.unix_timestamp())
     }
@@ -1240,12 +1274,18 @@ fn normalize_partition_list_request(
 pub struct PartitionBuildRow {
     pub partition_type: String,
     pub partition_interval_seconds: i64,
+    /// For time-based: epoch seconds formatted as "YYYY-MM-DD HH:MM:SS".
+    /// For block_range: the start block number formatted as a string.
     pub partition_start_ts: String,
+    /// For time-based: same as partition_start_ts.
+    /// For block_range: the start block number as a string.
     pub partition_value: String,
     pub start_block: u64,
     pub end_block: u64,
-    pub start_time: String,
-    pub end_time: String,
+    /// Nullable — populated best-effort, None when block is missing/has no timestamp.
+    pub start_time: Option<String>,
+    /// Nullable — populated best-effort, None when block is missing/has no timestamp.
+    pub end_time: Option<String>,
     pub chain: Option<String>,
 }
 
@@ -1267,9 +1307,9 @@ struct ActivePartitionBuildRow {
     partition_start_ts: i64,
     partition_value: String,
     start_block: u64,
-    start_time: i64,
+    start_time: Option<i64>,
     last_block: u64,
-    last_time: i64,
+    last_time: Option<i64>,
 }
 
 #[derive(Debug, Clone)]
@@ -1280,6 +1320,10 @@ pub struct PartitionIndexBuilder {
     rows: Vec<PartitionBuildRow>,
     first_seen_block: Option<u64>,
     last_seen_block: Option<u64>,
+    /// Block range size for block_range partition type. Required when partition type is BlockRange.
+    block_range_size: Option<u64>,
+    /// When true (default), missing timestamps cause an error for time-based partitions.
+    strict_timestamps: bool,
 }
 
 impl PartitionIndexBuilder {
@@ -1298,7 +1342,19 @@ impl PartitionIndexBuilder {
             rows: Vec::new(),
             first_seen_block: None,
             last_seen_block: None,
+            block_range_size: None,
+            strict_timestamps: true,
         })
+    }
+
+    pub fn with_block_range_size(mut self, size: u64) -> Self {
+        self.block_range_size = Some(size);
+        self
+    }
+
+    pub fn with_strict_timestamps(mut self, strict: bool) -> Self {
+        self.strict_timestamps = strict;
+        self
     }
 
     pub fn observe_block(&mut self, block: &crate::traits::BlockIdentity) -> anyhow::Result<()> {
@@ -1315,14 +1371,79 @@ impl PartitionIndexBuilder {
         self.first_seen_block.get_or_insert(block.block_num);
         self.last_seen_block = Some(block.block_num);
 
+        let timestamp = if block.timestamp != 0 {
+            Some(block.timestamp)
+        } else {
+            None
+        };
+
         for partition_type in self.partition_types.clone() {
-            let partition_start_ts = partition_type.round_timestamp(block.timestamp)?;
+            if partition_type == PartitionBuildType::BlockRange {
+                // Block-range partitions don't use observe_block — they are built deterministically.
+                // But if called, we can accumulate timestamps for best-effort time columns.
+                let block_range_size = self.block_range_size.ok_or_else(|| {
+                    anyhow::anyhow!("block_range_size is required for block_range partition type")
+                })?;
+                let partition_start_block = (block.block_num / block_range_size) * block_range_size;
+                let partition_start_ts = partition_start_block as i64;
+                let partition_value = partition_start_block.to_string();
+
+                match self.active.get_mut(&partition_type) {
+                    Some(active) if active.partition_start_ts == partition_start_ts => {
+                        active.last_block = block.block_num;
+                        active.last_time = timestamp;
+                    }
+                    Some(active) => {
+                        let finalized = build_partition_row(
+                            &self.chain,
+                            partition_type,
+                            active.clone(),
+                            block.block_num,
+                            self.block_range_size,
+                        )?;
+                        self.rows.push(finalized);
+                        *active = ActivePartitionBuildRow {
+                            partition_start_ts,
+                            partition_value,
+                            start_block: block.block_num,
+                            start_time: timestamp,
+                            last_block: block.block_num,
+                            last_time: timestamp,
+                        };
+                    }
+                    None => {
+                        self.active.insert(
+                            partition_type,
+                            ActivePartitionBuildRow {
+                                partition_start_ts,
+                                partition_value,
+                                start_block: block.block_num,
+                                start_time: timestamp,
+                                last_block: block.block_num,
+                                last_time: timestamp,
+                            },
+                        );
+                    }
+                }
+                continue;
+            }
+
+            // Time-based partition types
+            if timestamp.is_none() && self.strict_timestamps {
+                anyhow::bail!(
+                    "block {} has no timestamp (timestamp=0) and --strict-timestamps is enabled",
+                    block.block_num
+                );
+            }
+
+            let ts = timestamp.unwrap_or(0);
+            let partition_start_ts = partition_type.round_timestamp(ts)?;
             let partition_value = format_partition_timestamp(partition_start_ts)?;
 
             match self.active.get_mut(&partition_type) {
                 Some(active) if active.partition_start_ts == partition_start_ts => {
                     active.last_block = block.block_num;
-                    active.last_time = block.timestamp;
+                    active.last_time = timestamp;
                 }
                 Some(active) => {
                     let finalized = build_partition_row(
@@ -1330,15 +1451,16 @@ impl PartitionIndexBuilder {
                         partition_type,
                         active.clone(),
                         block.block_num,
+                        self.block_range_size,
                     )?;
                     self.rows.push(finalized);
                     *active = ActivePartitionBuildRow {
                         partition_start_ts,
                         partition_value,
                         start_block: block.block_num,
-                        start_time: block.timestamp,
+                        start_time: timestamp,
                         last_block: block.block_num,
-                        last_time: block.timestamp,
+                        last_time: timestamp,
                     };
                 }
                 None => {
@@ -1348,9 +1470,9 @@ impl PartitionIndexBuilder {
                             partition_start_ts,
                             partition_value,
                             start_block: block.block_num,
-                            start_time: block.timestamp,
+                            start_time: timestamp,
                             last_block: block.block_num,
-                            last_time: block.timestamp,
+                            last_time: timestamp,
                         },
                     );
                 }
@@ -1375,6 +1497,7 @@ impl PartitionIndexBuilder {
                     partition_type,
                     active,
                     stop_block,
+                    self.block_range_size,
                 )?);
             }
         }
@@ -1406,6 +1529,7 @@ impl PartitionIndexBuilder {
                     partition_type,
                     active.clone(),
                     stop_block,
+                    self.block_range_size,
                 )?);
             }
         }
@@ -1491,15 +1615,35 @@ impl PartitionIndexBuilder {
                 );
             }
 
+            let start_time = last_row
+                .start_time
+                .as_deref()
+                .map(parse_partition_timestamp)
+                .transpose()?;
+            let last_time = last_row
+                .end_time
+                .as_deref()
+                .map(parse_partition_timestamp)
+                .transpose()?;
+
+            let partition_start_ts = if partition_type == PartitionBuildType::BlockRange {
+                last_row
+                    .partition_start_ts
+                    .parse::<i64>()
+                    .unwrap_or(last_row.start_block as i64)
+            } else {
+                parse_partition_timestamp(&last_row.partition_start_ts)?
+            };
+
             active.insert(
                 partition_type,
                 ActivePartitionBuildRow {
-                    partition_start_ts: parse_partition_timestamp(&last_row.partition_start_ts)?,
+                    partition_start_ts,
                     partition_value: last_row.partition_value.clone(),
                     start_block: last_row.start_block,
-                    start_time: parse_partition_timestamp(&last_row.start_time)?,
+                    start_time,
                     last_block: last_row.end_block.saturating_sub(1),
-                    last_time: parse_partition_timestamp(&last_row.end_time)?,
+                    last_time,
                 },
             );
 
@@ -1516,6 +1660,8 @@ impl PartitionIndexBuilder {
                 rows: retained_rows,
                 first_seen_block: Some(resume_block),
                 last_seen_block: resume_block.checked_sub(1),
+                block_range_size: None,
+                strict_timestamps: true,
             },
             resume_block,
         ))
@@ -1701,6 +1847,7 @@ fn build_partition_row(
     partition_type: PartitionBuildType,
     active: ActivePartitionBuildRow,
     end_block: u64,
+    block_range_size: Option<u64>,
 ) -> anyhow::Result<PartitionBuildRow> {
     if active.start_block >= end_block {
         anyhow::bail!(
@@ -1712,15 +1859,36 @@ fn build_partition_row(
         );
     }
 
+    let partition_start_ts = if partition_type == PartitionBuildType::BlockRange {
+        active.partition_start_ts.to_string()
+    } else {
+        format_partition_timestamp(active.partition_start_ts)?
+    };
+
+    let start_time = active
+        .start_time
+        .map(format_partition_timestamp)
+        .transpose()?;
+    let end_time = active
+        .last_time
+        .map(format_partition_timestamp)
+        .transpose()?;
+
+    let interval = if partition_type == PartitionBuildType::BlockRange {
+        block_range_size.unwrap_or(0) as i64
+    } else {
+        partition_type.interval_seconds()
+    };
+
     Ok(PartitionBuildRow {
         partition_type: partition_type.to_string(),
-        partition_interval_seconds: partition_type.interval_seconds(),
-        partition_start_ts: format_partition_timestamp(active.partition_start_ts)?,
+        partition_interval_seconds: interval,
+        partition_start_ts,
         partition_value: active.partition_value,
         start_block: active.start_block,
         end_block,
-        start_time: format_partition_timestamp(active.start_time)?,
-        end_time: format_partition_timestamp(active.last_time)?,
+        start_time,
+        end_time,
         chain: Some(chain.to_string()),
     })
 }
@@ -1853,17 +2021,28 @@ pub fn read_partitions_build_rows(
         })
     }
 
+    /// File-level metadata fallbacks for columns that may have been removed from the row schema.
+    #[derive(Debug, Clone, Default)]
+    struct PartitionsFileContext {
+        chain: Option<String>,
+        partition_type: Option<String>,
+        interval: Option<i64>,
+    }
+
     fn collect_rows(
         batch: &arrow::record_batch::RecordBatch,
         rows: &mut Vec<PartitionBuildRow>,
         read_utf8_value: &impl Fn(&dyn Array, usize) -> anyhow::Result<Option<String>>,
         read_i64_value: &impl Fn(&dyn Array, usize) -> anyhow::Result<Option<i64>>,
         read_u64_value: &impl Fn(&dyn Array, usize) -> anyhow::Result<Option<u64>>,
+        file_ctx: &PartitionsFileContext,
     ) -> anyhow::Result<()> {
         let schema = batch.schema();
+        // type column is optional in new schema (read from metadata)
         let partition_type_idx = schema
             .index_of("type")
-            .or_else(|_| schema.index_of("partition_type"))?;
+            .or_else(|_| schema.index_of("partition_type"))
+            .ok();
         let partition_value_idx = schema
             .index_of("partition")
             .or_else(|_| schema.index_of("partition_value"))?;
@@ -1879,14 +2058,36 @@ pub fn read_partitions_build_rows(
         let end_time_idx = schema.index_of("end_time").ok();
 
         for row_index in 0..batch.num_rows() {
-            let partition_type = canonical_partition_type_label(
-                read_utf8_value(batch.column(partition_type_idx).as_ref(), row_index)?
-                    .ok_or_else(|| anyhow::anyhow!("type cannot be null"))?
-                    .as_str(),
-            )?;
-            let partition_value =
-                read_timestamp_as_string(batch.column(partition_value_idx).as_ref(), row_index)?
-                    .ok_or_else(|| anyhow::anyhow!("partition cannot be null"))?;
+            // Resolve partition_type from column or file metadata
+            let partition_type = if let Some(idx) = partition_type_idx {
+                canonical_partition_type_label(
+                    read_utf8_value(batch.column(idx).as_ref(), row_index)?
+                        .ok_or_else(|| anyhow::anyhow!("type cannot be null"))?
+                        .as_str(),
+                )?
+            } else if let Some(ref pt) = file_ctx.partition_type {
+                pt.clone()
+            } else {
+                anyhow::bail!("partition type not found in columns or file metadata");
+            };
+
+            // partition column: read as UInt64 (new schema) or Timestamp/String (old schema)
+            let partition_column = batch.column(partition_value_idx).as_ref();
+            let partition_value = if let Some(arr) =
+                partition_column.as_any().downcast_ref::<UInt64Array>()
+            {
+                if partition_type == "block_range" {
+                    arr.value(row_index).to_string()
+                } else {
+                    // UInt64 epoch seconds → format as timestamp string
+                    format_partition_timestamp(arr.value(row_index) as i64)?
+                }
+            } else {
+                // Old schema: Timestamp or String
+                read_timestamp_as_string(partition_column, row_index)?
+                    .ok_or_else(|| anyhow::anyhow!("partition cannot be null"))?
+            };
+
             let partition_start_ts = partition_start_ts_idx
                 .and_then(|idx| {
                     read_utf8_value(batch.column(idx).as_ref(), row_index)
@@ -1897,36 +2098,42 @@ pub fn read_partitions_build_rows(
             let partition_interval_seconds = match partition_interval_seconds_idx {
                 Some(idx) => {
                     read_i64_value(batch.column(idx).as_ref(), row_index)?.unwrap_or_else(|| {
-                        PartitionBuildType::from_cli_value(&partition_type)
-                            .map(|kind| kind.interval_seconds())
-                            .unwrap_or_default()
+                        file_ctx.interval.unwrap_or_else(|| {
+                            PartitionBuildType::from_cli_value(&partition_type)
+                                .map(|kind| kind.interval_seconds())
+                                .unwrap_or_default()
+                        })
                     })
                 }
-                None => PartitionBuildType::from_cli_value(&partition_type)?.interval_seconds(),
+                None => file_ctx.interval.unwrap_or_else(|| {
+                    PartitionBuildType::from_cli_value(&partition_type)
+                        .map(|kind| kind.interval_seconds())
+                        .unwrap_or_default()
+                }),
             };
             let start_block = read_u64_value(batch.column(start_block_idx).as_ref(), row_index)?
                 .ok_or_else(|| anyhow::anyhow!("start_block cannot be null"))?;
             let end_block = read_u64_value(batch.column(end_block_idx).as_ref(), row_index)?
                 .ok_or_else(|| anyhow::anyhow!("end_block cannot be null"))?;
-            let chain = chain_idx
-                .map(|idx| read_utf8_value(batch.column(idx).as_ref(), row_index))
-                .transpose()?
-                .flatten()
-                .ok_or_else(|| anyhow::anyhow!("chain cannot be null"))?;
-            let start_time = start_time_idx
-                .and_then(|idx| {
-                    read_timestamp_as_string(batch.column(idx).as_ref(), row_index)
-                        .ok()
-                        .flatten()
-                })
-                .unwrap_or_else(|| partition_start_ts.clone());
-            let end_time = end_time_idx
-                .and_then(|idx| {
-                    read_timestamp_as_string(batch.column(idx).as_ref(), row_index)
-                        .ok()
-                        .flatten()
-                })
-                .unwrap_or_else(|| partition_start_ts.clone());
+
+            // Resolve chain from column or file metadata
+            let chain = if let Some(idx) = chain_idx {
+                read_utf8_value(batch.column(idx).as_ref(), row_index)?
+            } else {
+                file_ctx.chain.clone()
+            };
+
+            // start_time and end_time are now nullable
+            let start_time = start_time_idx.and_then(|idx| {
+                read_timestamp_as_string(batch.column(idx).as_ref(), row_index)
+                    .ok()
+                    .flatten()
+            });
+            let end_time = end_time_idx.and_then(|idx| {
+                read_timestamp_as_string(batch.column(idx).as_ref(), row_index)
+                    .ok()
+                    .flatten()
+            });
 
             rows.push(PartitionBuildRow {
                 partition_type,
@@ -1937,7 +2144,7 @@ pub fn read_partitions_build_rows(
                 end_block,
                 start_time,
                 end_time,
-                chain: Some(chain),
+                chain,
             });
         }
 
@@ -1945,6 +2152,39 @@ pub fn read_partitions_build_rows(
     }
 
     let mut rows = Vec::new();
+    /// Extract chain/type/interval from Parquet file-level key-value metadata.
+    fn extract_file_context(
+        file_metadata: &parquet::file::metadata::FileMetaData,
+    ) -> PartitionsFileContext {
+        let kv = file_metadata.key_value_metadata();
+        let find = |key: &str| -> Option<String> {
+            kv.as_ref().and_then(|kvs| {
+                kvs.iter()
+                    .find(|kv| kv.key == key)
+                    .and_then(|kv| kv.value.clone())
+            })
+        };
+        let chain = find("firehose-parquet.chain_name");
+        let partition_type = find("partition_type")
+            .or_else(|| find("firehose-parquet.partition"))
+            .and_then(|pt| canonical_partition_type_label(&pt).ok());
+        let interval = find("firehose-parquet.block_range_size")
+            .and_then(|v| v.parse::<i64>().ok())
+            .filter(|v| *v > 0)
+            .or_else(|| {
+                partition_type.as_ref().and_then(|pt| {
+                    PartitionBuildType::from_cli_value(pt)
+                        .ok()
+                        .map(|kind| kind.interval_seconds())
+                })
+            });
+        PartitionsFileContext {
+            chain,
+            partition_type,
+            interval,
+        }
+    }
+
     if path.starts_with("s3://") {
         use crate::writer::parse_s3_url;
         use object_store::ObjectStore;
@@ -1959,6 +2199,7 @@ pub fn read_partitions_build_rows(
         let schema = builder.schema();
         validate_partitions_schema(&schema)?;
         validate_partitions_metadata(builder.metadata().file_metadata())?;
+        let file_ctx = extract_file_context(builder.metadata().file_metadata());
         let reader = builder.build()?;
         for batch in reader {
             collect_rows(
@@ -1967,6 +2208,7 @@ pub fn read_partitions_build_rows(
                 &read_utf8_value,
                 &read_i64_value,
                 &read_u64_value,
+                &file_ctx,
             )?;
         }
     } else {
@@ -1975,6 +2217,7 @@ pub fn read_partitions_build_rows(
         let schema = builder.schema();
         validate_partitions_schema(&schema)?;
         validate_partitions_metadata(builder.metadata().file_metadata())?;
+        let file_ctx = extract_file_context(builder.metadata().file_metadata());
         let reader = builder.build()?;
         for batch in reader {
             collect_rows(
@@ -1983,6 +2226,7 @@ pub fn read_partitions_build_rows(
                 &read_utf8_value,
                 &read_i64_value,
                 &read_u64_value,
+                &file_ctx,
             )?;
         }
     }
@@ -2012,7 +2256,31 @@ pub fn write_partitions_index_with_metadata(
     aws: Option<&AwsConfig>,
     file_metadata: Option<&crate::writer::ParquetFileMetadata>,
 ) -> anyhow::Result<()> {
-    use arrow::array::{Int64Array, StringArray, TimestampSecondArray, UInt64Array};
+    // Default: nullable timestamps (backward compat)
+    write_partitions_index_impl(path, rows, compression, aws, file_metadata, true)
+}
+
+/// Write partitions index with explicit control over timestamp nullability.
+pub fn write_partitions_index_strict(
+    path: &str,
+    rows: &[PartitionBuildRow],
+    compression: Compression,
+    aws: Option<&AwsConfig>,
+    file_metadata: Option<&crate::writer::ParquetFileMetadata>,
+    nullable_timestamps: bool,
+) -> anyhow::Result<()> {
+    write_partitions_index_impl(path, rows, compression, aws, file_metadata, nullable_timestamps)
+}
+
+fn write_partitions_index_impl(
+    path: &str,
+    rows: &[PartitionBuildRow],
+    compression: Compression,
+    aws: Option<&AwsConfig>,
+    file_metadata: Option<&crate::writer::ParquetFileMetadata>,
+    nullable_timestamps: bool,
+) -> anyhow::Result<()> {
+    use arrow::array::{TimestampSecondArray, UInt64Array};
     use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
     use arrow::record_batch::RecordBatch;
     use parquet::arrow::ArrowWriter;
@@ -2026,70 +2294,106 @@ pub fn write_partitions_index_with_metadata(
         anyhow::bail!("cannot write an empty partitions index");
     }
 
+    // Build minimal metadata from rows when no external metadata is provided.
+    // This ensures chain_name and partition type are always in file metadata.
+    let auto_metadata = if file_metadata.is_none() {
+        let mut meta = crate::writer::ParquetFileMetadata::new();
+        if let Some(chain) = rows.first().and_then(|r| r.chain.as_deref()) {
+            meta.add("firehose-parquet.chain_name", chain);
+        }
+        if let Some(row) = rows.first() {
+            meta.add("firehose-parquet.partition", &row.partition_type);
+            meta.add(
+                "firehose-parquet.block_range_size",
+                if row.partition_type == "block_range" {
+                    row.partition_interval_seconds.to_string()
+                } else {
+                    "0".to_string()
+                },
+            );
+        }
+        Some(meta)
+    } else {
+        None
+    };
+    let effective_metadata = file_metadata.or(auto_metadata.as_ref());
+
+    // Lean schema: chain, type, interval live in file-level metadata only
     let schema = Arc::new(Schema::new(vec![
-        Field::new(
-            "partition",
-            DataType::Timestamp(TimeUnit::Second, Some(Arc::from("UTC"))),
-            false,
-        ),
-        Field::new("chain", DataType::Utf8, false),
-        Field::new("type", DataType::Utf8, false),
-        Field::new("interval", DataType::Int64, false),
+        Field::new("partition", DataType::UInt64, false),
         Field::new("start_block", DataType::UInt64, false),
         Field::new("end_block", DataType::UInt64, false),
         Field::new(
             "start_time",
             DataType::Timestamp(TimeUnit::Second, Some(Arc::from("UTC"))),
-            false,
+            nullable_timestamps,
         ),
         Field::new(
             "end_time",
             DataType::Timestamp(TimeUnit::Second, Some(Arc::from("UTC"))),
-            false,
+            nullable_timestamps,
         ),
     ]));
+
+    // Determine partition type from rows to store as file-level metadata
+    let partition_type_label = rows
+        .first()
+        .map(|row| row.partition_type.clone())
+        .unwrap_or_default();
+
+    // Build partition column: UInt64 — epoch seconds for time-based, start block for block_range
+    let partition_values = rows
+        .iter()
+        .enumerate()
+        .map(|(index, row)| {
+            if row.partition_type == "block_range" {
+                row.partition_value.parse::<u64>().map_err(|error| {
+                    anyhow::anyhow!(
+                        "invalid partition value for block_range row at index {}: {} ({})",
+                        index,
+                        row.partition_value,
+                        error
+                    )
+                })
+            } else {
+                parse_partition_timestamp(&row.partition_value).map(|ts| ts as u64).map_err(|error| {
+                    anyhow::anyhow!(
+                        "invalid partition for partition row {} ({}) at index {}: {}",
+                        row.partition_type,
+                        row.partition_value,
+                        index,
+                        error
+                    )
+                })
+            }
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
+
+    // Build nullable start_time / end_time columns
+    let start_time_values: Vec<Option<i64>> = rows
+        .iter()
+        .map(|row| {
+            row.start_time
+                .as_deref()
+                .map(parse_partition_timestamp)
+                .transpose()
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
+
+    let end_time_values: Vec<Option<i64>> = rows
+        .iter()
+        .map(|row| {
+            row.end_time
+                .as_deref()
+                .map(parse_partition_timestamp)
+                .transpose()
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
 
     let batch = RecordBatch::try_new(
         schema.clone(),
         vec![
-            Arc::new(
-                TimestampSecondArray::from(
-                    rows.iter()
-                        .enumerate()
-                        .map(|(index, row)| {
-                            parse_partition_timestamp(&row.partition_value).map_err(|error| {
-                                anyhow::anyhow!(
-                                    "invalid partition for partition row {} ({}) at index {}: {}",
-                                    row.partition_type,
-                                    row.partition_value,
-                                    index,
-                                    error
-                                )
-                            })
-                        })
-                        .collect::<anyhow::Result<Vec<_>>>()?,
-                )
-                .with_timezone("UTC"),
-            ),
-            Arc::new(StringArray::from(
-                rows.iter()
-                    .map(|row| {
-                        row.chain
-                            .clone()
-                            .ok_or_else(|| anyhow::anyhow!("chain cannot be null"))
-                    })
-                    .collect::<anyhow::Result<Vec<_>>>()?,
-            )),
-            Arc::new(StringArray::from(
-                rows.iter()
-                    .map(|row| row.partition_type.clone())
-                    .collect::<Vec<_>>(),
-            )),
-            Arc::new(Int64Array::from(
-                rows.iter()
-                    .map(|row| row.partition_interval_seconds)
-                    .collect::<Vec<_>>(),
-            )),
+            Arc::new(UInt64Array::from(partition_values)),
             Arc::new(UInt64Array::from(
                 rows.iter().map(|row| row.start_block).collect::<Vec<_>>(),
             )),
@@ -2097,42 +2401,10 @@ pub fn write_partitions_index_with_metadata(
                 rows.iter().map(|row| row.end_block).collect::<Vec<_>>(),
             )),
             Arc::new(
-                TimestampSecondArray::from(
-                    rows.iter()
-                        .enumerate()
-                        .map(|(index, row)| {
-                            parse_partition_timestamp(&row.start_time).map_err(|error| {
-                                anyhow::anyhow!(
-                                    "invalid start_time for partition row {} ({}) at index {}: {}",
-                                    row.partition_type,
-                                    row.partition_value,
-                                    index,
-                                    error
-                                )
-                            })
-                        })
-                        .collect::<anyhow::Result<Vec<_>>>()?,
-                )
-                .with_timezone("UTC"),
+                TimestampSecondArray::from(start_time_values).with_timezone("UTC"),
             ),
             Arc::new(
-                TimestampSecondArray::from(
-                    rows.iter()
-                        .enumerate()
-                        .map(|(index, row)| {
-                            parse_partition_timestamp(&row.end_time).map_err(|error| {
-                                anyhow::anyhow!(
-                                    "invalid end_time for partition row {} ({}) at index {}: {}",
-                                    row.partition_type,
-                                    row.partition_value,
-                                    index,
-                                    error
-                                )
-                            })
-                        })
-                        .collect::<anyhow::Result<Vec<_>>>()?,
-                )
-                .with_timezone("UTC"),
+                TimestampSecondArray::from(end_time_values).with_timezone("UTC"),
             ),
         ],
     )?;
@@ -2144,15 +2416,23 @@ pub fn write_partitions_index_with_metadata(
         Compression::Zstd => PqCompression::ZSTD(ZstdLevel::try_new(3).unwrap()),
     };
     let mut props_builder = WriterProperties::builder().set_compression(pq_compression);
-    if let Some(file_metadata) = file_metadata {
-        let kvs = file_metadata
-            .entries
-            .iter()
-            .map(|(key, value)| KeyValue::new(key.clone(), value.clone()))
-            .collect::<Vec<_>>();
-        if !kvs.is_empty() {
-            props_builder = props_builder.set_key_value_metadata(Some(kvs));
-        }
+    let mut kvs = Vec::new();
+    if let Some(meta) = effective_metadata {
+        kvs.extend(
+            meta.entries
+                .iter()
+                .map(|(key, value)| KeyValue::new(key.clone(), value.clone())),
+        );
+    }
+    // Always store partition_type as file-level metadata
+    if !partition_type_label.is_empty() {
+        kvs.push(KeyValue::new(
+            "partition_type".to_string(),
+            partition_type_label,
+        ));
+    }
+    if !kvs.is_empty() {
+        props_builder = props_builder.set_key_value_metadata(Some(kvs));
     }
     let props = props_builder.build();
 
@@ -2261,33 +2541,35 @@ fn validate_partitions_schema(schema: &arrow::datatypes::Schema) -> anyhow::Resu
             .ok_or_else(|| anyhow::anyhow!("missing required column: {}", names.join(" or ")))
     }
 
-    let chain = schema
-        .field_with_name("chain")
-        .map_err(|_| anyhow::anyhow!("missing required column: chain"))?;
-    if !is_utf8_like(chain.data_type()) {
-        anyhow::bail!(
-            "invalid partitions.parquet column type for chain: expected Utf8/LargeUtf8, got {}",
-            chain.data_type()
-        );
-    }
-    if chain.is_nullable() {
-        anyhow::bail!("invalid partitions.parquet schema: chain must be non-nullable");
+    // chain, type, interval are optional in new schema (stored in file-level metadata)
+    if let Ok(chain) = schema.field_with_name("chain") {
+        if !is_utf8_like(chain.data_type()) {
+            anyhow::bail!(
+                "invalid partitions.parquet column type for chain: expected Utf8/LargeUtf8, got {}",
+                chain.data_type()
+            );
+        }
+        if chain.is_nullable() {
+            anyhow::bail!("invalid partitions.parquet schema: chain must be non-nullable");
+        }
     }
 
-    let partition_type = field_with_name_any(schema, &["type", "partition_type"])?;
-    if !is_utf8_like(partition_type.data_type()) {
-        anyhow::bail!(
-            "invalid partitions.parquet column type for type: expected Utf8/LargeUtf8, got {}",
-            partition_type.data_type()
-        );
+    if let Ok(partition_type) = field_with_name_any(schema, &["type", "partition_type"]) {
+        if !is_utf8_like(partition_type.data_type()) {
+            anyhow::bail!(
+                "invalid partitions.parquet column type for type: expected Utf8/LargeUtf8, got {}",
+                partition_type.data_type()
+            );
+        }
     }
 
     let partition_value = field_with_name_any(schema, &["partition", "partition_value"])?;
     if !(is_utf8_like(partition_value.data_type())
-        || is_timestamp_second_utc(partition_value.data_type()))
+        || is_timestamp_second_utc(partition_value.data_type())
+        || is_integer_like(partition_value.data_type()))
     {
         anyhow::bail!(
-            "invalid partitions.parquet column type for partition: expected Utf8/LargeUtf8 or Timestamp(Second, UTC), got {}",
+            "invalid partitions.parquet column type for partition: expected Utf8/LargeUtf8, Timestamp(Second, UTC), or UInt64, got {}",
             partition_value.data_type()
         );
     }
@@ -6470,6 +6752,160 @@ mod tests {
     }
 
     #[test]
+    fn test_partitions_build_block_range_parse() {
+        let cli = parse(&[
+            "test-cli",
+            "partitions",
+            "build",
+            "--endpoint",
+            "https://sol.firehose.pinax.network:443",
+            "--stop-block",
+            "10000000",
+            "--partition",
+            "block_range",
+            "--block-range-size",
+            "1000000",
+            "--strict-timestamps",
+            "false",
+            "--output",
+            "./output",
+        ]);
+        match cli.command.expect("command should exist") {
+            Commands::Partitions(PartitionsCommands::Build {
+                partition,
+                block_range_size,
+                strict_timestamps,
+                ..
+            }) => {
+                assert_eq!(partition, "block_range");
+                assert_eq!(block_range_size, Some(1000000));
+                assert!(!strict_timestamps);
+            }
+            _ => panic!("expected partitions build subcommand"),
+        }
+    }
+
+    #[test]
+    fn test_partitions_build_strict_timestamps_default_true() {
+        let cli = parse(&[
+            "test-cli",
+            "partitions",
+            "build",
+            "--endpoint",
+            "https://eth.firehose.pinax.network:443",
+            "--stop-block",
+            "200",
+            "--partition",
+            "date",
+            "--output",
+            "./output",
+        ]);
+        match cli.command.expect("command should exist") {
+            Commands::Partitions(PartitionsCommands::Build {
+                strict_timestamps, ..
+            }) => {
+                assert!(strict_timestamps);
+            }
+            _ => panic!("expected partitions build subcommand"),
+        }
+    }
+
+    #[test]
+    fn test_partition_build_type_block_range() {
+        let bt = PartitionBuildType::from_cli_value("block_range").expect("parse");
+        assert_eq!(bt, PartitionBuildType::BlockRange);
+        assert_eq!(bt.as_str(), "block_range");
+        assert!(!bt.is_time_based());
+        assert_eq!(bt.interval_seconds(), 0);
+
+        // Also accept alternate spellings
+        assert_eq!(
+            PartitionBuildType::from_cli_value("block-range").expect("parse"),
+            PartitionBuildType::BlockRange
+        );
+        assert_eq!(
+            PartitionBuildType::from_cli_value("blocks").expect("parse"),
+            PartitionBuildType::BlockRange
+        );
+    }
+
+    #[test]
+    fn test_write_read_block_range_partitions_index() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("solana-mainnet").join("partitions.parquet");
+        let rows = vec![
+            PartitionBuildRow {
+                partition_type: "block_range".to_string(),
+                partition_interval_seconds: 1_000_000,
+                partition_start_ts: "0".to_string(),
+                partition_value: "0".to_string(),
+                start_block: 0,
+                end_block: 1_000_000,
+                start_time: None,
+                end_time: Some("2021-04-06 12:00:00".to_string()),
+                chain: Some("solana-mainnet".to_string()),
+            },
+            PartitionBuildRow {
+                partition_type: "block_range".to_string(),
+                partition_interval_seconds: 1_000_000,
+                partition_start_ts: "1000000".to_string(),
+                partition_value: "1000000".to_string(),
+                start_block: 1_000_000,
+                end_block: 2_000_000,
+                start_time: Some("2021-04-06 12:00:01".to_string()),
+                end_time: Some("2021-04-10 08:30:00".to_string()),
+                chain: Some("solana-mainnet".to_string()),
+            },
+        ];
+        write_partitions_index(&path.to_string_lossy(), &rows, None).expect("write rows");
+
+        let read_rows =
+            read_partitions_build_rows(&path.to_string_lossy(), None).expect("read rows");
+        assert_eq!(read_rows.len(), 2);
+        assert_eq!(read_rows[0].partition_type, "block_range");
+        assert_eq!(read_rows[0].partition_value, "0");
+        assert_eq!(read_rows[0].start_block, 0);
+        assert_eq!(read_rows[0].end_block, 1_000_000);
+        assert!(read_rows[0].start_time.is_none());
+        assert_eq!(
+            read_rows[0].end_time.as_deref(),
+            Some("2021-04-06 12:00:00")
+        );
+        assert_eq!(read_rows[1].partition_value, "1000000");
+        assert_eq!(read_rows[1].start_block, 1_000_000);
+        assert_eq!(read_rows[1].end_block, 2_000_000);
+        assert_eq!(
+            read_rows[1].start_time.as_deref(),
+            Some("2021-04-06 12:00:01")
+        );
+    }
+
+    #[test]
+    fn test_write_read_time_partitions_with_nullable_timestamps() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("sol-mainnet").join("partitions.parquet");
+        let rows = vec![PartitionBuildRow {
+            partition_type: "date".to_string(),
+            partition_interval_seconds: 86_400,
+            partition_start_ts: "2021-04-06 00:00:00".to_string(),
+            partition_value: "2021-04-06 00:00:00".to_string(),
+            start_block: 100,
+            end_block: 200,
+            start_time: None, // nullable
+            end_time: None,   // nullable
+            chain: Some("sol-mainnet".to_string()),
+        }];
+        write_partitions_index(&path.to_string_lossy(), &rows, None).expect("write rows");
+
+        let read_rows =
+            read_partitions_build_rows(&path.to_string_lossy(), None).expect("read rows");
+        assert_eq!(read_rows.len(), 1);
+        assert_eq!(read_rows[0].partition_type, "date");
+        assert!(read_rows[0].start_time.is_none());
+        assert!(read_rows[0].end_time.is_none());
+    }
+
+    #[test]
     fn test_inspect_subcommand_schema_only_parse() {
         let cli = parse(&[
             "test-cli",
@@ -7935,8 +8371,8 @@ mod tests {
             partition_value: "2023-07-31 14:00:00".to_string(),
             start_block: 100,
             end_block: 102,
-            start_time: "2023-07-31 14:59:00".to_string(),
-            end_time: "2023-07-31 14:59:50".to_string(),
+            start_time: Some("2023-07-31 14:59:00".to_string()),
+            end_time: Some("2023-07-31 14:59:50".to_string()),
             chain: Some("eth-mainnet".to_string()),
         }];
 
@@ -7984,8 +8420,8 @@ mod tests {
             partition_value: "2023-07-31 14:00:00".to_string(),
             start_block: 100,
             end_block: 103,
-            start_time: "2023-07-31 14:59:00".to_string(),
-            end_time: "2023-07-31 15:00:00".to_string(),
+            start_time: Some("2023-07-31 14:59:00".to_string()),
+            end_time: Some("2023-07-31 15:00:00".to_string()),
             chain: Some("eth-mainnet".to_string()),
         }];
 
@@ -8010,8 +8446,8 @@ mod tests {
             partition_value: "2023-07-31 14:00:00".to_string(),
             start_block: 100,
             end_block: 103,
-            start_time: "2023-07-31 14:59:00".to_string(),
-            end_time: "2023-07-31 15:00:00".to_string(),
+            start_time: Some("2023-07-31 14:59:00".to_string()),
+            end_time: Some("2023-07-31 15:00:00".to_string()),
             chain: Some("eth-mainnet".to_string()),
         }];
 
@@ -8029,23 +8465,33 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![
                 "partition",
-                "chain",
-                "type",
-                "interval",
                 "start_block",
                 "end_block",
                 "start_time",
                 "end_time",
             ]
         );
+        // chain, type, interval are in file-level metadata, not columns
+        assert!(schema.field_with_name("chain").is_err());
+        assert!(schema.field_with_name("type").is_err());
+        assert!(schema.field_with_name("interval").is_err());
         assert!(schema.field_with_name("partition_start_ts").is_err());
         assert_eq!(
             schema
                 .field_with_name("partition")
                 .expect("partition")
                 .data_type(),
-            &DataType::Timestamp(TimeUnit::Second, Some(Arc::from("UTC")))
+            &DataType::UInt64
         );
+
+        // Verify file-level metadata contains partition_type
+        let file_metadata = builder.metadata().file_metadata();
+        let kvs = file_metadata.key_value_metadata().expect("metadata");
+        let partition_type_kv = kvs
+            .iter()
+            .find(|kv| kv.key == "partition_type")
+            .expect("partition_type metadata");
+        assert_eq!(partition_type_kv.value.as_deref(), Some("hour"));
         assert_eq!(
             schema
                 .field_with_name("start_time")
@@ -8053,12 +8499,26 @@ mod tests {
                 .data_type(),
             &DataType::Timestamp(TimeUnit::Second, Some(Arc::from("UTC")))
         );
+        assert!(
+            schema
+                .field_with_name("start_time")
+                .expect("start_time")
+                .is_nullable(),
+            "start_time should be nullable"
+        );
         assert_eq!(
             schema
                 .field_with_name("end_time")
                 .expect("end_time")
                 .data_type(),
             &DataType::Timestamp(TimeUnit::Second, Some(Arc::from("UTC")))
+        );
+        assert!(
+            schema
+                .field_with_name("end_time")
+                .expect("end_time")
+                .is_nullable(),
+            "end_time should be nullable"
         );
     }
 
@@ -8076,8 +8536,8 @@ mod tests {
             partition_value: "2023-07-31 14:00:00".to_string(),
             start_block: 100,
             end_block: 103,
-            start_time: "2023-07-31 14:59:00".to_string(),
-            end_time: "2023-07-31 15:00:00".to_string(),
+            start_time: Some("2023-07-31 14:59:00".to_string()),
+            end_time: Some("2023-07-31 15:00:00".to_string()),
             chain: Some("eth-mainnet".to_string()),
         }];
         let mut metadata = ParquetFileMetadata::new();
@@ -8212,8 +8672,8 @@ mod tests {
             partition_value: "2023-07-31 14:00:00".to_string(),
             start_block: 100,
             end_block: 103,
-            start_time: "2023-07-31 14:59:00".to_string(),
-            end_time: "2023-07-31 15:00:00".to_string(),
+            start_time: Some("2023-07-31 14:59:00".to_string()),
+            end_time: Some("2023-07-31 15:00:00".to_string()),
             chain: Some("eth-mainnet".to_string()),
         }];
 
@@ -8241,8 +8701,8 @@ mod tests {
             partition_value: "2023-07-31 14:00:00".to_string(),
             start_block: 100,
             end_block: 103,
-            start_time: "2023-07-31 14:59:00".to_string(),
-            end_time: "2023-07-31 15:00:00".to_string(),
+            start_time: Some("2023-07-31 14:59:00".to_string()),
+            end_time: Some("2023-07-31 15:00:00".to_string()),
             chain: Some("eth-mainnet".to_string()),
         }];
         let mut metadata = ParquetFileMetadata::new();
