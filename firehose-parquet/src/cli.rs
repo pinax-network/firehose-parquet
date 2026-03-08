@@ -792,6 +792,14 @@ Examples:
     --output ./output \\
     --live \\
     --poll-interval-secs 15
+
+  # Override the default zstd compression
+  fireparq partitions build \\
+    --network mainnet \\
+    --stop-block 10010000 \\
+    --partition date \\
+    --compression snappy \\
+    --output ./output
 ")]
     Build {
         /// Firehose gRPC endpoint URL
@@ -846,6 +854,9 @@ Examples:
         /// Deprecated alias: `--partition-types`.
         #[arg(long = "partition", alias = "partition-types")]
         partition: String,
+        /// Compression codec for the written `partitions.parquet`: zstd, snappy, gzip, none
+        #[arg(long, default_value = "zstd")]
+        compression: String,
         /// Output root path (local directory or s3:// URI prefix).
         ///
         /// When omitted, `--s3-bucket` or `S3_BUCKET` is required and the
@@ -1973,12 +1984,13 @@ pub fn write_partitions_index(
     rows: &[PartitionBuildRow],
     aws: Option<&AwsConfig>,
 ) -> anyhow::Result<()> {
-    write_partitions_index_with_metadata(path, rows, aws, None)
+    write_partitions_index_with_metadata(path, rows, Compression::Zstd, aws, None)
 }
 
 pub fn write_partitions_index_with_metadata(
     path: &str,
     rows: &[PartitionBuildRow],
+    compression: Compression,
     aws: Option<&AwsConfig>,
     file_metadata: Option<&crate::writer::ParquetFileMetadata>,
 ) -> anyhow::Result<()> {
@@ -1986,6 +1998,8 @@ pub fn write_partitions_index_with_metadata(
     use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
     use arrow::record_batch::RecordBatch;
     use parquet::arrow::ArrowWriter;
+    use parquet::basic::Compression as PqCompression;
+    use parquet::basic::ZstdLevel;
     use parquet::file::metadata::KeyValue;
     use parquet::file::properties::WriterProperties;
     use std::sync::Arc;
@@ -2105,7 +2119,13 @@ pub fn write_partitions_index_with_metadata(
         ],
     )?;
 
-    let mut props_builder = WriterProperties::builder();
+    let pq_compression = match compression {
+        Compression::None => PqCompression::UNCOMPRESSED,
+        Compression::Snappy => PqCompression::SNAPPY,
+        Compression::Gzip => PqCompression::GZIP(Default::default()),
+        Compression::Zstd => PqCompression::ZSTD(ZstdLevel::try_new(3).unwrap()),
+    };
+    let mut props_builder = WriterProperties::builder().set_compression(pq_compression);
     if let Some(file_metadata) = file_metadata {
         let kvs = file_metadata
             .entries
@@ -5923,6 +5943,7 @@ mod tests {
                 stop_block,
                 live,
                 partition,
+                compression,
                 output,
                 s3_bucket,
                 resume,
@@ -5938,6 +5959,7 @@ mod tests {
                 assert_eq!(stop_block, Some(200));
                 assert!(!live);
                 assert_eq!(partition, "date");
+                assert_eq!(compression, "zstd");
                 assert_eq!(output.as_deref(), Some("./output"));
                 assert!(s3_bucket.is_none());
                 assert!(resume);
@@ -6020,6 +6042,7 @@ mod tests {
                 poll_interval_secs,
                 skip_missing_blocks,
                 partition,
+                compression,
                 output,
                 ..
             }) => {
@@ -6029,6 +6052,7 @@ mod tests {
                 assert_eq!(poll_interval_secs, 15);
                 assert!(!skip_missing_blocks);
                 assert_eq!(partition, "date");
+                assert_eq!(compression, "zstd");
                 assert_eq!(output.as_deref(), Some("./output"));
             }
             _ => panic!("expected partitions build subcommand"),
@@ -6056,6 +6080,31 @@ mod tests {
                 ..
             }) => {
                 assert!(skip_missing_blocks);
+            }
+            _ => panic!("expected partitions build subcommand"),
+        }
+    }
+
+    #[test]
+    fn test_partitions_build_subcommand_compression_override_parse() {
+        let cli = parse(&[
+            "test-cli",
+            "partitions",
+            "build",
+            "--endpoint",
+            "https://eth.firehose.pinax.network:443",
+            "--stop-block",
+            "200",
+            "--partition",
+            "date",
+            "--compression",
+            "snappy",
+            "--output",
+            "./output",
+        ]);
+        match cli.command.expect("command should exist") {
+            Commands::Partitions(PartitionsCommands::Build { compression, .. }) => {
+                assert_eq!(compression, "snappy");
             }
             _ => panic!("expected partitions build subcommand"),
         }
@@ -7635,8 +7684,14 @@ mod tests {
         metadata.add("firehose-parquet.version", "0.5.4-test");
         metadata.add("firehose-parquet.endpoint", "https://example.com:443");
 
-        write_partitions_index_with_metadata(&path.to_string_lossy(), &rows, None, Some(&metadata))
-            .expect("write rows with metadata");
+        write_partitions_index_with_metadata(
+            &path.to_string_lossy(),
+            &rows,
+            Compression::Zstd,
+            None,
+            Some(&metadata),
+        )
+        .expect("write rows with metadata");
 
         let file = std::fs::File::open(&path).expect("open parquet");
         let reader = SerializedFileReader::new(file).expect("reader");
@@ -7741,5 +7796,71 @@ mod tests {
             ),
             "mainnet/partitions.parquet"
         );
+    }
+
+    #[test]
+    fn test_write_partitions_index_defaults_to_zstd_compression() {
+        use parquet::basic::Compression as PqCompression;
+        use parquet::file::reader::{FileReader, SerializedFileReader};
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("eth-mainnet").join("partitions.parquet");
+        let rows = vec![PartitionBuildRow {
+            partition_type: "hour".to_string(),
+            partition_interval_seconds: 3_600,
+            partition_start_ts: "2023-07-31 14:00:00".to_string(),
+            partition_value: "2023-07-31 14:00:00".to_string(),
+            start_block: 100,
+            end_block: 103,
+            start_time: "2023-07-31 14:59:00".to_string(),
+            end_time: "2023-07-31 15:00:00".to_string(),
+            chain: Some("eth-mainnet".to_string()),
+        }];
+
+        write_partitions_index(&path.to_string_lossy(), &rows, None).expect("write rows");
+
+        let file = std::fs::File::open(&path).expect("open parquet");
+        let reader = SerializedFileReader::new(file).expect("reader");
+        let compression = reader.metadata().row_group(0).column(0).compression();
+
+        assert!(matches!(compression, PqCompression::ZSTD(_)));
+    }
+
+    #[test]
+    fn test_write_partitions_index_with_metadata_honors_snappy_compression() {
+        use crate::writer::ParquetFileMetadata;
+        use parquet::basic::Compression as PqCompression;
+        use parquet::file::reader::{FileReader, SerializedFileReader};
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("eth-mainnet").join("partitions.parquet");
+        let rows = vec![PartitionBuildRow {
+            partition_type: "hour".to_string(),
+            partition_interval_seconds: 3_600,
+            partition_start_ts: "2023-07-31 14:00:00".to_string(),
+            partition_value: "2023-07-31 14:00:00".to_string(),
+            start_block: 100,
+            end_block: 103,
+            start_time: "2023-07-31 14:59:00".to_string(),
+            end_time: "2023-07-31 15:00:00".to_string(),
+            chain: Some("eth-mainnet".to_string()),
+        }];
+        let mut metadata = ParquetFileMetadata::new();
+        metadata.add("firehose-parquet.compression", "snappy");
+
+        write_partitions_index_with_metadata(
+            &path.to_string_lossy(),
+            &rows,
+            Compression::Snappy,
+            None,
+            Some(&metadata),
+        )
+        .expect("write rows with snappy compression");
+
+        let file = std::fs::File::open(&path).expect("open parquet");
+        let reader = SerializedFileReader::new(file).expect("reader");
+        let compression = reader.metadata().row_group(0).column(0).compression();
+
+        assert_eq!(compression, PqCompression::SNAPPY);
     }
 }

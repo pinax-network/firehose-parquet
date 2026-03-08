@@ -315,6 +315,7 @@ fn build_partitions_file_metadata(
     endpoint: &str,
     chain: &str,
     partition: &str,
+    compression: Compression,
     endpoint_info: &Option<EndpointInfo>,
 ) -> ParquetFileMetadata {
     let inferred_block_type = infer_partitions_block_type(chain, endpoint_info);
@@ -381,7 +382,7 @@ fn build_partitions_file_metadata(
     }
     meta.add("firehose-parquet.partition", partition);
     meta.add("firehose-parquet.block_range_size", "0");
-    meta.add("firehose-parquet.compression", "uncompressed");
+    meta.add("firehose-parquet.compression", compression.to_string());
     meta
 }
 
@@ -456,6 +457,7 @@ async fn run_partitions_build(
     poll_interval_secs: u64,
     skip_missing_blocks: bool,
     partition_types_spec: &str,
+    compression: Compression,
     output: Option<&str>,
     s3_bucket: Option<&str>,
     resume: bool,
@@ -492,7 +494,7 @@ async fn run_partitions_build(
         flush_rows: None,
         flush_bytes: 0,
         flush_interval_secs: None,
-        compression: Compression::Zstd,
+        compression,
         final_blocks_only: true,
         dry_run: false,
         aws_access_key_id: aws.aws_access_key_id.clone(),
@@ -524,8 +526,13 @@ async fn run_partitions_build(
     let partition_types = parse_partition_build_types(partition_types_spec)?;
     let partition_type = partition_types[0];
     let partition_label = partition_type.to_string();
-    let partitions_file_metadata =
-        build_partitions_file_metadata(endpoint, &chain, &partition_label, &endpoint_info);
+    let partitions_file_metadata = build_partitions_file_metadata(
+        endpoint,
+        &chain,
+        &partition_label,
+        compression,
+        &endpoint_info,
+    );
     let partitions_index = build_partitions_index_path(&output_root, &chain);
     let chain_output_root = build_partitions_output_root(&output_root, &chain);
 
@@ -772,6 +779,7 @@ async fn run_partitions_build(
                     checkpoint_partitions_builder(
                         &builder,
                         &partitions_index,
+                        compression,
                         Some(aws),
                         &partitions_file_metadata,
                         &mut checkpoint_state,
@@ -801,6 +809,7 @@ async fn run_partitions_build(
                     checkpoint_partitions_builder(
                         &builder,
                         &partitions_index,
+                        compression,
                         Some(aws),
                         &partitions_file_metadata,
                         &mut checkpoint_state,
@@ -856,6 +865,7 @@ async fn run_partitions_build(
                 checkpoint_partitions_builder(
                     &builder,
                     &partitions_index,
+                    compression,
                     Some(aws),
                     &partitions_file_metadata,
                     &mut checkpoint_state,
@@ -868,6 +878,7 @@ async fn run_partitions_build(
             let rows = checkpoint_partitions_builder(
                 &builder,
                 &partitions_index,
+                compression,
                 Some(aws),
                 &partitions_file_metadata,
                 &mut checkpoint_state,
@@ -925,6 +936,7 @@ async fn run_partitions_build(
                 checkpoint_partitions_builder(
                     &builder,
                     &partitions_index,
+                    compression,
                     Some(aws),
                     &partitions_file_metadata,
                     &mut checkpoint_state,
@@ -963,6 +975,7 @@ async fn run_partitions_build(
                         checkpoint_partitions_builder(
                             &builder,
                             &partitions_index,
+                            compression,
                             Some(aws),
                             &partitions_file_metadata,
                             &mut checkpoint_state,
@@ -994,6 +1007,7 @@ async fn run_partitions_build(
         write_partitions_index_with_metadata(
             &partitions_index,
             &rows,
+            compression,
             Some(aws),
             Some(&partitions_file_metadata),
         )?;
@@ -1126,6 +1140,7 @@ impl PartitionsCheckpointState {
 fn checkpoint_partitions_builder(
     builder: &PartitionIndexBuilder,
     partitions_index: &str,
+    compression: Compression,
     aws: Option<&AwsConfig>,
     file_metadata: &ParquetFileMetadata,
     checkpoint_state: &mut PartitionsCheckpointState,
@@ -1135,7 +1150,13 @@ fn checkpoint_partitions_builder(
         .current_frontier()
         .ok_or_else(|| anyhow!("partition build is missing a checkpoint frontier"))?;
     let rows = builder.snapshot(frontier)?;
-    write_partitions_index_with_metadata(partitions_index, &rows, aws, Some(file_metadata))?;
+    write_partitions_index_with_metadata(
+        partitions_index,
+        &rows,
+        compression,
+        aws,
+        Some(file_metadata),
+    )?;
     let total_probes = probe_counter.load(Ordering::Relaxed);
     info!(
         partitions = format!(
@@ -1885,6 +1906,7 @@ async fn main() -> Result<()> {
                     poll_interval_secs,
                     skip_missing_blocks,
                     partition,
+                    compression,
                     output,
                     s3_bucket,
                     resume,
@@ -1896,6 +1918,7 @@ async fn main() -> Result<()> {
                     aws_endpoint_url,
                 } => {
                     init_tracing(&cli.common.log_level);
+                    let compression = firehose_parquet::cli::parse_compression(compression)?;
                     let aws = AwsConfig {
                         aws_access_key_id: aws_access_key_id.clone(),
                         aws_secret_access_key: aws_secret_access_key.clone(),
@@ -1923,6 +1946,7 @@ async fn main() -> Result<()> {
                         *poll_interval_secs,
                         *skip_missing_blocks,
                         partition,
+                        compression,
                         output.as_deref(),
                         s3_bucket.as_deref(),
                         *resume,
@@ -3775,8 +3799,13 @@ mod tests {
             block_id_encoding: 2,
             block_features: vec!["base".to_string(), "extended".to_string()],
         });
-        let meta =
-            build_partitions_file_metadata("https://example.com", "eth-mainnet", "date", &ei);
+        let meta = build_partitions_file_metadata(
+            "https://example.com",
+            "eth-mainnet",
+            "date",
+            Compression::Zstd,
+            &ei,
+        );
 
         assert_eq!(
             find_meta(&meta, "firehose-parquet.version"),
@@ -3805,7 +3834,7 @@ mod tests {
         );
         assert_eq!(
             find_meta(&meta, "firehose-parquet.compression"),
-            Some("uncompressed")
+            Some("zstd")
         );
         assert_eq!(
             find_meta(&meta, "firehose-parquet.block_range_size"),
@@ -3815,17 +3844,19 @@ mod tests {
 
     #[test]
     fn test_build_partitions_file_metadata_no_endpoint_info() {
-        let meta =
-            build_partitions_file_metadata("https://example.com", "solana-mainnet", "hour", &None);
+        let meta = build_partitions_file_metadata(
+            "https://example.com",
+            "solana-mainnet",
+            "hour",
+            Compression::Zstd,
+            &None,
+        );
 
         assert_eq!(
             find_meta(&meta, "firehose-parquet.version"),
             Some(env!("CARGO_PKG_VERSION"))
         );
-        assert_eq!(
-            find_meta(&meta, "firehose-parquet.partition"),
-            Some("hour")
-        );
+        assert_eq!(find_meta(&meta, "firehose-parquet.partition"), Some("hour"));
         assert_eq!(
             find_meta(&meta, "firehose-parquet.endpoint"),
             Some("https://example.com")
@@ -3835,14 +3866,17 @@ mod tests {
             find_meta(&meta, "firehose-parquet.chain_name"),
             Some("solana-mainnet")
         );
-        assert_eq!(find_meta(&meta, "firehose-parquet.chain_name_aliases"), None);
+        assert_eq!(
+            find_meta(&meta, "firehose-parquet.chain_name_aliases"),
+            None
+        );
         assert_eq!(
             find_meta(&meta, "firehose-parquet.first_streamable_block_id"),
             None
         );
         assert_eq!(
             find_meta(&meta, "firehose-parquet.compression"),
-            Some("uncompressed")
+            Some("zstd")
         );
         assert_eq!(
             find_meta(&meta, "firehose-parquet.block_range_size"),
@@ -3865,6 +3899,7 @@ mod tests {
             "https://example.com",
             "polygon-override",
             "date",
+            Compression::Zstd,
             &ei,
         );
 
@@ -3885,12 +3920,33 @@ mod tests {
             block_id_encoding: 0,
             block_features: vec![],
         });
-        let meta =
-            build_partitions_file_metadata("https://example.com", "eth-mainnet", "date", &ei);
+        let meta = build_partitions_file_metadata(
+            "https://example.com",
+            "eth-mainnet",
+            "date",
+            Compression::Zstd,
+            &ei,
+        );
 
         assert_eq!(
             find_meta(&meta, "firehose-parquet.chain_name"),
             Some("eth-mainnet")
+        );
+    }
+
+    #[test]
+    fn test_build_partitions_file_metadata_honors_requested_compression() {
+        let meta = build_partitions_file_metadata(
+            "https://example.com",
+            "eth-mainnet",
+            "date",
+            Compression::Snappy,
+            &None,
+        );
+
+        assert_eq!(
+            find_meta(&meta, "firehose-parquet.compression"),
+            Some("snappy")
         );
     }
 }
