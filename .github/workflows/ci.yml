@@ -11,6 +11,7 @@ env:
   CARGO_INCREMENTAL: 0
   CARGO_PROFILE_DEV_DEBUG: 0
   CARGO_PROFILE_TEST_DEBUG: 0
+  BUF_TOKEN: ${{ secrets.BUF_TOKEN }}
 
 jobs:
   build-and-test:
