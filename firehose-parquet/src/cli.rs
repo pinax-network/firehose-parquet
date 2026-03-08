@@ -373,6 +373,12 @@ Examples:
   # Scan a single S3 parquet file
   fireparq scan s3://bucket/eth-mainnet/partitions.parquet
 
+  # Use the legacy vertical row format
+  fireparq scan ./output/blocks/part-000001.parquet --vertical
+
+  # Emit machine-readable JSON
+  fireparq scan ./output/blocks/part-000001.parquet --json
+
   # Show 50 sample rows per file
   fireparq scan ./output/blocks/ --limit 50
 ")]
@@ -386,6 +392,12 @@ Examples:
         /// Only show file metadata (schema, row count, size) without data
         #[arg(long, default_value = "false")]
         schema_only: bool,
+        /// Use the legacy vertical row-by-row display instead of boxed table output
+        #[arg(long, default_value = "false", conflicts_with = "json")]
+        vertical: bool,
+        /// Emit machine-readable JSON including file info, schema, and sampled rows
+        #[arg(long, default_value = "false", conflicts_with = "vertical")]
+        json: bool,
         /// AWS access key ID (for S3 paths)
         #[arg(long, env = "AWS_ACCESS_KEY_ID", hide_env_values = true)]
         aws_access_key_id: Option<String>,
@@ -3799,110 +3811,187 @@ pub fn scan_parquet(
     path: &str,
     rows: usize,
     schema_only: bool,
+    vertical: bool,
+    json: bool,
     aws: Option<&AwsConfig>,
 ) -> anyhow::Result<()> {
-    if path.starts_with("s3://") {
-        scan_parquet_s3(
+    let files = if path.starts_with("s3://") {
+        collect_scan_parquet_s3(
             path,
             rows,
             schema_only,
             aws.ok_or_else(|| anyhow::anyhow!("AWS config required for S3 paths"))?,
-        )
+        )?
     } else {
-        scan_parquet_local(&PathBuf::from(path), rows, schema_only)
-    }
-}
-
-/// Scan parquet files from the local filesystem.
-fn scan_parquet_local(path: &PathBuf, rows: usize, schema_only: bool) -> anyhow::Result<()> {
-    use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
-    use std::fs;
-
-    let mut files: Vec<PathBuf> = Vec::new();
-    if path.is_file() {
-        files.push(path.clone());
-    } else if path.is_dir() {
-        collect_parquet_files(path, &mut files)?;
-        files.sort();
-    } else {
-        anyhow::bail!("path does not exist: {}", path.display());
-    }
+        collect_scan_parquet_local(&PathBuf::from(path), rows, schema_only)?
+    };
 
     if files.is_empty() {
-        println!("No .parquet files found in {}", path.display());
+        if json {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&ScanJsonOutput {
+                    files_scanned: 0,
+                    files: Vec::new(),
+                })?
+            );
+        } else {
+            println!("No .parquet files found in {path}");
+        }
         return Ok(());
     }
 
-    for file_path in &files {
-        let file = fs::File::open(file_path)?;
-        let file_size = file.metadata()?.len();
-        let builder = ParquetRecordBatchReaderBuilder::try_new(file)?;
-        let metadata = builder.metadata();
-
-        let total_rows: i64 = metadata.row_groups().iter().map(|rg| rg.num_rows()).sum();
-        let num_row_groups = metadata.num_row_groups();
-        let num_columns = metadata.file_metadata().schema().get_fields().len();
-        let schema = builder.schema();
-
-        // Relative path for cleaner display.
-        let display_path = file_path.strip_prefix(path).unwrap_or(file_path);
-
-        println!("\n{}", "═".repeat(72));
-        println!("  {}", display_path.display());
-        println!("{}", "─".repeat(72));
+    if json {
         println!(
-            "  rows: {}  row_groups: {}  columns: {}  size: {}",
-            total_rows,
-            num_row_groups,
-            num_columns,
-            format_bytes(file_size),
+            "{}",
+            serde_json::to_string_pretty(&ScanJsonOutput {
+                files_scanned: files.len(),
+                files,
+            })?
         );
-        println!("{}", "─".repeat(72));
-
-        // Print schema fields.
-        for field in schema.fields() {
-            let nullable = if field.is_nullable() {
-                "nullable"
-            } else {
-                "not null"
-            };
-            println!(
-                "  {:30} {:20} {}",
-                field.name(),
-                field.data_type(),
-                nullable
-            );
-        }
-
-        // Print sample rows (vertical format like ClickHouse's \G).
-        if !schema_only && rows > 0 {
-            let file = fs::File::open(file_path)?;
-            let builder = ParquetRecordBatchReaderBuilder::try_new(file)?;
-            let reader = builder.build()?;
-
-            print_sample_rows(&schema, reader, rows, total_rows);
-        }
+        return Ok(());
     }
 
-    // Summary.
-    if files.len() > 1 {
-        println!("\n{}", "═".repeat(72));
-        println!("  {} parquet files scanned", files.len());
-    }
-
+    let row_mode = if vertical {
+        ScanRowDisplayMode::Vertical
+    } else {
+        ScanRowDisplayMode::Table
+    };
+    render_scan_results(&files, row_mode, !schema_only && rows > 0);
     Ok(())
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ScanRowDisplayMode {
+    Table,
+    Vertical,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct ScanSchemaColumn {
+    name: String,
+    data_type: String,
+    nullable: bool,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct ScanRowCell {
+    name: String,
+    value: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct ScanRow {
+    row_number: usize,
+    cells: Vec<ScanRowCell>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct ScanFileResult {
+    path: String,
+    total_rows: i64,
+    row_groups: usize,
+    columns: usize,
+    size_bytes: u64,
+    size_human: String,
+    schema: Vec<ScanSchemaColumn>,
+    sample_rows: Vec<ScanRow>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct ScanJsonOutput {
+    files_scanned: usize,
+    files: Vec<ScanFileResult>,
+}
+
+/// Scan parquet files from the local filesystem.
+fn collect_scan_parquet_local(
+    path: &std::path::Path,
+    rows: usize,
+    schema_only: bool,
+) -> anyhow::Result<Vec<ScanFileResult>> {
+    use std::fs;
+
+    let mut files: Vec<PathBuf> = Vec::new();
+    let single_file = if path.is_file() {
+        files.push(path.to_path_buf());
+        true
+    } else if path.is_dir() {
+        collect_parquet_files(&path.to_path_buf(), &mut files)?;
+        files.sort();
+        false
+    } else {
+        anyhow::bail!("path does not exist: {}", path.display());
+    };
+
+    let mut results = Vec::with_capacity(files.len());
+    for file_path in &files {
+        let display_path = if single_file {
+            file_path.display().to_string()
+        } else {
+            file_path
+                .strip_prefix(path)
+                .unwrap_or(file_path)
+                .display()
+                .to_string()
+        };
+        results.push(build_scan_file_result_from_local(
+            file_path,
+            display_path,
+            rows,
+            schema_only,
+        )?);
+    }
+    Ok(results)
+}
+
+fn build_scan_file_result_from_local(
+    file_path: &std::path::Path,
+    display_path: String,
+    rows: usize,
+    schema_only: bool,
+) -> anyhow::Result<ScanFileResult> {
+    use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+    use std::fs;
+
+    let file = fs::File::open(file_path)?;
+    let file_size = file.metadata()?.len();
+    let builder = ParquetRecordBatchReaderBuilder::try_new(file)?;
+    let metadata = builder.metadata();
+    let total_rows: i64 = metadata.row_groups().iter().map(|rg| rg.num_rows()).sum();
+    let row_groups = metadata.num_row_groups();
+    let columns = metadata.file_metadata().schema().get_fields().len();
+    let schema = builder.schema().clone();
+    let sample_rows = if schema_only || rows == 0 {
+        Vec::new()
+    } else {
+        let file = fs::File::open(file_path)?;
+        let builder = ParquetRecordBatchReaderBuilder::try_new(file)?;
+        let reader = builder.build()?;
+        collect_sample_rows(&schema, reader, rows)
+    };
+
+    Ok(ScanFileResult {
+        path: display_path,
+        total_rows,
+        row_groups,
+        columns,
+        size_bytes: file_size,
+        size_human: format_bytes(file_size),
+        schema: build_scan_schema(&schema),
+        sample_rows,
+    })
+}
+
 /// Scan parquet files from an S3 bucket.
-fn scan_parquet_s3(
+fn collect_scan_parquet_s3(
     path: &str,
     rows: usize,
     schema_only: bool,
     aws: &AwsConfig,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<Vec<ScanFileResult>> {
     use crate::writer::parse_s3_url;
     use object_store::ObjectStore;
-    use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 
     let (bucket, prefix) = parse_s3_url(path)?;
     let client = aws.build_s3_client(&bucket)?;
@@ -3910,67 +3999,55 @@ fn scan_parquet_s3(
         block_on_async(collect_scan_s3_parquet_objects(&client, &prefix))
             .map_err(|e| anyhow::anyhow!("listing S3 objects: {e}"))?;
 
-    if parquet_objects.is_empty() {
-        println!("No .parquet files found in {path}");
-        return Ok(());
-    }
-
+    let mut results = Vec::with_capacity(parquet_objects.len());
     for obj in &parquet_objects {
-        // Download the object into memory.
         let data = block_on_async(async { client.get(&obj.location).await?.bytes().await })
             .map_err(|e| anyhow::anyhow!("reading s3://{bucket}/{}: {e}", obj.location))?;
-
-        let file_size = data.len() as u64;
-        let builder = ParquetRecordBatchReaderBuilder::try_new(data.clone())?;
-        let metadata = builder.metadata();
-
-        let total_rows: i64 = metadata.row_groups().iter().map(|rg| rg.num_rows()).sum();
-        let num_row_groups = metadata.num_row_groups();
-        let num_columns = metadata.file_metadata().schema().get_fields().len();
-        let schema = builder.schema().clone();
-
-        // Strip prefix for cleaner display.
         let display_key = scan_s3_display_key(obj.location.as_ref(), &prefix, exact_object_path);
-
-        println!("\n{}", "═".repeat(72));
-        println!("  {}", display_key);
-        println!("{}", "─".repeat(72));
-        println!(
-            "  rows: {}  row_groups: {}  columns: {}  size: {}",
-            total_rows,
-            num_row_groups,
-            num_columns,
-            format_bytes(file_size),
-        );
-        println!("{}", "─".repeat(72));
-
-        for field in schema.fields() {
-            let nullable = if field.is_nullable() {
-                "nullable"
-            } else {
-                "not null"
-            };
-            println!(
-                "  {:30} {:20} {}",
-                field.name(),
-                field.data_type(),
-                nullable
-            );
-        }
-
-        if !schema_only && rows > 0 {
-            let builder = ParquetRecordBatchReaderBuilder::try_new(data)?;
-            let reader = builder.build()?;
-            print_sample_rows(&schema, reader, rows, total_rows);
-        }
+        results.push(build_scan_file_result_from_bytes(
+            data,
+            display_key,
+            rows,
+            schema_only,
+        )?);
     }
 
-    if parquet_objects.len() > 1 {
-        println!("\n{}", "═".repeat(72));
-        println!("  {} parquet files scanned", parquet_objects.len());
-    }
+    Ok(results)
+}
 
-    Ok(())
+fn build_scan_file_result_from_bytes(
+    data: bytes::Bytes,
+    display_path: String,
+    rows: usize,
+    schema_only: bool,
+) -> anyhow::Result<ScanFileResult> {
+    use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+
+    let file_size = data.len() as u64;
+    let builder = ParquetRecordBatchReaderBuilder::try_new(data.clone())?;
+    let metadata = builder.metadata();
+    let total_rows: i64 = metadata.row_groups().iter().map(|rg| rg.num_rows()).sum();
+    let row_groups = metadata.num_row_groups();
+    let columns = metadata.file_metadata().schema().get_fields().len();
+    let schema = builder.schema().clone();
+    let sample_rows = if schema_only || rows == 0 {
+        Vec::new()
+    } else {
+        let builder = ParquetRecordBatchReaderBuilder::try_new(data)?;
+        let reader = builder.build()?;
+        collect_sample_rows(&schema, reader, rows)
+    };
+
+    Ok(ScanFileResult {
+        path: display_path,
+        total_rows,
+        row_groups,
+        columns,
+        size_bytes: file_size,
+        size_human: format_bytes(file_size),
+        schema: build_scan_schema(&schema),
+        sample_rows,
+    })
 }
 
 async fn collect_scan_s3_parquet_objects(
@@ -4017,19 +4094,24 @@ fn scan_s3_display_key(location: &str, prefix: &str, exact_object_path: bool) ->
         .unwrap_or_else(|| location.to_string())
 }
 
-/// Print sample rows in vertical format (shared between local and S3 scan).
-fn print_sample_rows(
+fn build_scan_schema(schema: &arrow::datatypes::SchemaRef) -> Vec<ScanSchemaColumn> {
+    schema
+        .fields()
+        .iter()
+        .map(|field| ScanSchemaColumn {
+            name: field.name().clone(),
+            data_type: field.data_type().to_string(),
+            nullable: field.is_nullable(),
+        })
+        .collect()
+}
+
+fn collect_sample_rows(
     schema: &arrow::datatypes::SchemaRef,
     reader: impl Iterator<Item = Result<arrow::record_batch::RecordBatch, arrow::error::ArrowError>>,
     rows: usize,
-    total_rows: i64,
-) {
-    let max_name_len = schema
-        .fields()
-        .iter()
-        .map(|f| f.name().len())
-        .max()
-        .unwrap_or(0);
+) -> Vec<ScanRow> {
+    let mut out = Vec::new();
     let mut row_number = 0usize;
 
     'outer: for batch_result in reader {
@@ -4045,22 +4127,189 @@ fn print_sample_rows(
                 break 'outer;
             }
             row_number += 1;
-
-            println!("\nRow {}:", row_number);
-            println!("{}", "──────");
-            for (col_idx, field) in schema.fields().iter().enumerate() {
-                let col = batch.column(col_idx);
-                let value = format_array_value(col.as_ref(), row_idx);
-                println!("  {:width$}  {}", field.name(), value, width = max_name_len);
-            }
+            out.push(ScanRow {
+                row_number,
+                cells: schema
+                    .fields()
+                    .iter()
+                    .enumerate()
+                    .map(|(col_idx, field)| ScanRowCell {
+                        name: field.name().clone(),
+                        value: format_array_value(batch.column(col_idx).as_ref(), row_idx),
+                    })
+                    .collect(),
+            });
         }
     }
 
-    if row_number == 0 {
-        println!("\n  (empty)");
-    } else if (rows as i64) < total_rows {
-        println!("\n  ... showing {rows} of {total_rows} rows");
+    out
+}
+
+fn render_scan_results(files: &[ScanFileResult], row_mode: ScanRowDisplayMode, show_rows: bool) {
+    for file in files {
+        println!("\n{}", "═".repeat(72));
+        println!("  {}", file.path);
+        println!("{}", "─".repeat(72));
+        println!(
+            "  rows: {}  row_groups: {}  columns: {}  size: {}",
+            file.total_rows, file.row_groups, file.columns, file.size_human
+        );
+        println!("{}", "─".repeat(72));
+
+        for field in &file.schema {
+            println!(
+                "  {:30} {:20} {}",
+                field.name,
+                field.data_type,
+                if field.nullable {
+                    "nullable"
+                } else {
+                    "not null"
+                }
+            );
+        }
+
+        if show_rows {
+            render_scan_rows(file, row_mode);
+        }
     }
+
+    if files.len() > 1 {
+        println!("\n{}", "═".repeat(72));
+        println!("  {} parquet files scanned", files.len());
+    }
+}
+
+fn render_scan_rows(file: &ScanFileResult, row_mode: ScanRowDisplayMode) {
+    if file.sample_rows.is_empty() {
+        println!("\n  (empty)");
+        return;
+    }
+
+    let rendered = match row_mode {
+        ScanRowDisplayMode::Table => format_scan_rows_table(file),
+        ScanRowDisplayMode::Vertical => format_scan_rows_vertical(file),
+    };
+    println!("\n{rendered}");
+
+    let shown = file.sample_rows.len();
+    if file.total_rows > shown as i64 {
+        println!("\n  {shown} rows shown of {} total.", file.total_rows);
+    } else {
+        println!("\n  {shown} rows in set.");
+    }
+}
+
+fn format_scan_rows_vertical(file: &ScanFileResult) -> String {
+    let max_name_len = file
+        .schema
+        .iter()
+        .map(|field| field.name.len())
+        .max()
+        .unwrap_or(0);
+    let mut out = String::new();
+
+    for row in &file.sample_rows {
+        if !out.is_empty() {
+            out.push('\n');
+        }
+        out.push_str(&format!("Row {}:\n", row.row_number));
+        out.push_str("──────");
+        for cell in &row.cells {
+            out.push('\n');
+            out.push_str(&format!(
+                "  {:width$}  {}",
+                cell.name,
+                cell.value,
+                width = max_name_len
+            ));
+        }
+        out.push('\n');
+    }
+
+    out.trim_end().to_string()
+}
+
+fn format_scan_rows_table(file: &ScanFileResult) -> String {
+    let headers = file
+        .schema
+        .iter()
+        .map(|field| field.name.clone())
+        .collect::<Vec<_>>();
+    let mut widths = headers
+        .iter()
+        .map(|header| header.chars().count())
+        .collect::<Vec<_>>();
+    for row in &file.sample_rows {
+        for (index, cell) in row.cells.iter().enumerate() {
+            widths[index] = widths[index].max(cell.value.chars().count());
+        }
+    }
+
+    let row_number_width = file
+        .sample_rows
+        .last()
+        .map(|row| row.row_number.to_string().len())
+        .unwrap_or(1);
+    let mut out = String::new();
+
+    out.push_str(&scan_table_border('┌', '┬', '┐', &widths));
+    out.push('\n');
+    out.push_str("    ");
+    out.push_str(&scan_table_row(
+        &headers.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
+        &widths,
+    ));
+    out.push('\n');
+    out.push_str(&scan_table_border('├', '┼', '┤', &widths));
+
+    for row in &file.sample_rows {
+        out.push('\n');
+        out.push_str(&format!(
+            "{:>width$}. {}",
+            row.row_number,
+            scan_table_row(
+                &row.cells
+                    .iter()
+                    .map(|cell| cell.value.as_str())
+                    .collect::<Vec<_>>(),
+                &widths
+            ),
+            width = row_number_width
+        ));
+    }
+
+    out.push('\n');
+    out.push_str(&scan_table_border('└', '┴', '┘', &widths));
+    out
+}
+
+fn scan_table_border(left: char, middle: char, right: char, widths: &[usize]) -> String {
+    let mut out = String::from("    ");
+    out.push(left);
+    for (index, width) in widths.iter().enumerate() {
+        if index > 0 {
+            out.push(middle);
+        }
+        out.push_str(&"─".repeat(*width + 2));
+    }
+    out.push(right);
+    out
+}
+
+fn scan_table_row(values: &[&str], widths: &[usize]) -> String {
+    let mut out = String::from("│");
+    for (index, value) in values.iter().enumerate() {
+        if index > 0 {
+            out.push('│');
+        }
+        out.push(' ');
+        out.push_str(value);
+        let padding = widths[index].saturating_sub(value.chars().count());
+        out.push_str(&" ".repeat(padding + 1));
+    }
+    out.push('│');
+    out
 }
 
 /// Format a single cell value from an Arrow array for vertical display.
@@ -5650,6 +5899,10 @@ mod tests {
         TestCli::parse_from(args)
     }
 
+    fn try_parse(args: &[&str]) -> Result<TestCli, clap::Error> {
+        TestCli::try_parse_from(args)
+    }
+
     #[test]
     #[serial]
     fn test_required_endpoint() {
@@ -6260,11 +6513,15 @@ mod tests {
                 path,
                 limit,
                 schema_only,
+                vertical,
+                json,
                 ..
             } => {
                 assert_eq!(path, "./output/blocks/");
                 assert_eq!(limit, 50);
                 assert!(schema_only);
+                assert!(!vertical);
+                assert!(!json);
             }
             _ => panic!("expected scan subcommand"),
         }
@@ -6277,6 +6534,43 @@ mod tests {
             Commands::Scan { limit, .. } => assert_eq!(limit, 12),
             _ => panic!("expected scan subcommand"),
         }
+    }
+
+    #[test]
+    fn test_scan_subcommand_vertical_parse() {
+        let cli = parse(&["test-cli", "scan", "./output/blocks/", "--vertical"]);
+        match cli.command.expect("command should exist") {
+            Commands::Scan { vertical, json, .. } => {
+                assert!(vertical);
+                assert!(!json);
+            }
+            _ => panic!("expected scan subcommand"),
+        }
+    }
+
+    #[test]
+    fn test_scan_subcommand_json_parse() {
+        let cli = parse(&["test-cli", "scan", "./output/blocks/", "--json"]);
+        match cli.command.expect("command should exist") {
+            Commands::Scan { vertical, json, .. } => {
+                assert!(!vertical);
+                assert!(json);
+            }
+            _ => panic!("expected scan subcommand"),
+        }
+    }
+
+    #[test]
+    fn test_scan_subcommand_json_conflicts_with_vertical() {
+        let err = try_parse(&[
+            "test-cli",
+            "scan",
+            "./output/blocks/",
+            "--json",
+            "--vertical",
+        ])
+        .expect_err("scan should reject conflicting output flags");
+        assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
     }
 
     #[test]
@@ -7968,5 +8262,93 @@ mod tests {
         let array = TimestampMillisecondArray::from(vec![123]).with_timezone("UTC");
 
         assert_eq!(format_array_value(&array, 0), "1970-01-01 00:00:00.123 UTC");
+    }
+
+    #[test]
+    fn test_format_scan_rows_table_includes_headers_and_row_numbers() {
+        let file = ScanFileResult {
+            path: "blocks.parquet".to_string(),
+            total_rows: 2,
+            row_groups: 1,
+            columns: 2,
+            size_bytes: 42,
+            size_human: "42 B".to_string(),
+            schema: vec![
+                ScanSchemaColumn {
+                    name: "block_num".to_string(),
+                    data_type: "UInt64".to_string(),
+                    nullable: false,
+                },
+                ScanSchemaColumn {
+                    name: "block_hash".to_string(),
+                    data_type: "Utf8".to_string(),
+                    nullable: false,
+                },
+            ],
+            sample_rows: vec![
+                ScanRow {
+                    row_number: 1,
+                    cells: vec![
+                        ScanRowCell {
+                            name: "block_num".to_string(),
+                            value: "1".to_string(),
+                        },
+                        ScanRowCell {
+                            name: "block_hash".to_string(),
+                            value: "0xabc".to_string(),
+                        },
+                    ],
+                },
+                ScanRow {
+                    row_number: 2,
+                    cells: vec![
+                        ScanRowCell {
+                            name: "block_num".to_string(),
+                            value: "2".to_string(),
+                        },
+                        ScanRowCell {
+                            name: "block_hash".to_string(),
+                            value: "0xdef".to_string(),
+                        },
+                    ],
+                },
+            ],
+        };
+
+        let rendered = format_scan_rows_table(&file);
+        assert!(rendered.contains("┌"));
+        assert!(rendered.contains("block_num"));
+        assert!(rendered.contains("block_hash"));
+        assert!(rendered.contains("1. │ 1"));
+        assert!(rendered.contains("2. │ 2"));
+    }
+
+    #[test]
+    fn test_format_scan_rows_vertical_matches_legacy_style() {
+        let file = ScanFileResult {
+            path: "blocks.parquet".to_string(),
+            total_rows: 1,
+            row_groups: 1,
+            columns: 1,
+            size_bytes: 42,
+            size_human: "42 B".to_string(),
+            schema: vec![ScanSchemaColumn {
+                name: "block_num".to_string(),
+                data_type: "UInt64".to_string(),
+                nullable: false,
+            }],
+            sample_rows: vec![ScanRow {
+                row_number: 1,
+                cells: vec![ScanRowCell {
+                    name: "block_num".to_string(),
+                    value: "42".to_string(),
+                }],
+            }],
+        };
+
+        let rendered = format_scan_rows_vertical(&file);
+        assert!(rendered.contains("Row 1:"));
+        assert!(rendered.contains("block_num"));
+        assert!(rendered.contains("42"));
     }
 }

@@ -632,12 +632,14 @@ Recommended patterns:
 
 ### `scan` — Inspect Parquet Files
 
-Read and inspect Parquet files: shows schema, row counts, and sample rows. Supports local paths and S3 URIs.
+Read and inspect Parquet files: shows schema, row counts, and sample rows. By default, sampled rows render in a boxed table; use `--vertical` for the legacy row-by-row view or `--json` for machine-readable output. Supports local paths and S3 URIs.
 
 ```bash
 fireparq scan ./output/blocks/
 fireparq scan s3://my-bucket/evm/blocks/
 fireparq scan s3://my-bucket/evm/partitions.parquet
+fireparq scan ./output/blocks/part-000001.parquet --vertical
+fireparq scan ./output/blocks/part-000001.parquet --json
 ```
 
 ### `inspect` — Display File Metadata
