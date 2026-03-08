@@ -9,7 +9,8 @@ use firehose_parquet::cli::{
     resolve_partition_command, resolve_partition_window_bounds_from_index, resolve_s3_output_root,
     shard_partitions_from_index, validate_partitions_index, write_partitions_index_with_metadata,
     AwsConfig, Commands, CommonArgs, PartitionBoundsRequest, PartitionBuildResult,
-    PartitionBuildType, PartitionIndexBuilder, PartitionListRequest, PartitionResolveOptions,
+    PartitionBuildRow, PartitionBuildType, PartitionIndexBuilder, PartitionListRequest,
+    PartitionResolveOptions,
     PartitionSelectionRequest, PartitionShardRequest, PartitionValidateRequest, PartitionsCommands,
 };
 use firehose_parquet::config::{BlockMetadata, Compression, Config, Partition};
@@ -457,6 +458,8 @@ async fn run_partitions_build(
     poll_interval_secs: u64,
     skip_missing_blocks: bool,
     partition_types_spec: &str,
+    block_range_size: Option<u64>,
+    strict_timestamps: bool,
     compression: Compression,
     output: Option<&str>,
     s3_bucket: Option<&str>,
@@ -526,6 +529,18 @@ async fn run_partitions_build(
     let partition_types = parse_partition_build_types(partition_types_spec)?;
     let partition_type = partition_types[0];
     let partition_label = partition_type.to_string();
+
+    // Validate block_range_size requirement
+    if partition_type == PartitionBuildType::BlockRange && block_range_size.is_none() {
+        return Err(anyhow!(
+            "--block-range-size is required when --partition block_range"
+        ));
+    }
+    if partition_type != PartitionBuildType::BlockRange && block_range_size.is_some() {
+        return Err(anyhow!(
+            "--block-range-size is only valid when --partition block_range"
+        ));
+    }
     let partitions_file_metadata = build_partitions_file_metadata(
         endpoint,
         &chain,
@@ -605,11 +620,15 @@ async fn run_partitions_build(
     let should_resume_from_existing = live || resume;
     let (mut builder, effective_start_block, resumed_from_block) =
         if should_resume_from_existing && !existing_rows.is_empty() {
-            let (builder, resume_start_block) = PartitionIndexBuilder::resume_from_existing(
+            let (mut builder, resume_start_block) = PartitionIndexBuilder::resume_from_existing(
                 chain.clone(),
                 partition_types.clone(),
                 existing_rows.clone(),
             )?;
+            if let Some(brs) = block_range_size {
+                builder = builder.with_block_range_size(brs);
+            }
+            builder = builder.with_strict_timestamps(strict_timestamps);
             let effective_start_block = if live {
                 resume_start_block
             } else {
@@ -617,11 +636,13 @@ async fn run_partitions_build(
             };
             (builder, effective_start_block, Some(resume_start_block))
         } else {
-            (
-                PartitionIndexBuilder::new(chain.clone(), partition_types.clone())?,
-                inferred_start_block,
-                None,
-            )
+            let mut builder =
+                PartitionIndexBuilder::new(chain.clone(), partition_types.clone())?;
+            if let Some(brs) = block_range_size {
+                builder = builder.with_block_range_size(brs);
+            }
+            builder = builder.with_strict_timestamps(strict_timestamps);
+            (builder, inferred_start_block, None)
         };
 
     if let Some(stop_block) = stop_block {
@@ -890,7 +911,155 @@ async fn run_partitions_build(
         } else {
             Vec::new()
         }
+    } else if partition_type == PartitionBuildType::BlockRange {
+        // ── Block-range build: deterministic boundaries, one probe per boundary ──
+        let stop_block = stop_block.expect("validated above");
+        let block_range_size = block_range_size.expect("validated above");
+        let checkpoint_state_started = Instant::now();
+
+        // Align start to block_range_size boundary
+        let aligned_start = (effective_start_block / block_range_size) * block_range_size;
+        // Align stop to the next boundary (exclusive)
+        let aligned_stop = ((stop_block + block_range_size - 1) / block_range_size) * block_range_size;
+
+        info!(
+            effective_start_block,
+            aligned_start,
+            stop_block,
+            aligned_stop,
+            block_range_size,
+            partitions = (aligned_stop - aligned_start) / block_range_size,
+            "starting block-range partitions build"
+        );
+
+        let mut rows = Vec::new();
+        let mut boundary = aligned_start;
+
+        while boundary < aligned_stop {
+            let partition_end = (boundary + block_range_size).min(aligned_stop);
+
+            // Probe the first block of this partition for start_time (best-effort)
+            let start_time = match stream_client
+                .fetch_block_identity(boundary, Some(PARTITIONS_PROBE_TIMEOUT))
+                .await
+            {
+                Ok(Some(block)) if block.timestamp != 0 => {
+                    probe_counter.fetch_add(1, Ordering::Relaxed);
+                    Some(block.timestamp)
+                }
+                Ok(Some(_)) => {
+                    probe_counter.fetch_add(1, Ordering::Relaxed);
+                    None // block exists but no timestamp
+                }
+                _ => {
+                    probe_counter.fetch_add(1, Ordering::Relaxed);
+                    if skip_missing_blocks {
+                        None
+                    } else {
+                        // Try scanning forward a small window
+                        let mut found = None;
+                        for offset in 1..=PROBE_TIMESTAMP_SCAN_LIMIT {
+                            if let Ok(Some(block)) = stream_client
+                                .fetch_block_identity(
+                                    boundary + offset,
+                                    Some(PARTITIONS_PROBE_TIMEOUT),
+                                )
+                                .await
+                            {
+                                probe_counter.fetch_add(1, Ordering::Relaxed);
+                                if block.timestamp != 0 {
+                                    found = Some(block.timestamp);
+                                    break;
+                                }
+                            } else {
+                                probe_counter.fetch_add(1, Ordering::Relaxed);
+                            }
+                        }
+                        found
+                    }
+                }
+            };
+
+            // Probe the last block of this partition for end_time (best-effort)
+            let end_time = if partition_end > boundary + 1 {
+                match stream_client
+                    .fetch_block_identity(
+                        partition_end.saturating_sub(1),
+                        Some(PARTITIONS_PROBE_TIMEOUT),
+                    )
+                    .await
+                {
+                    Ok(Some(block)) if block.timestamp != 0 => {
+                        probe_counter.fetch_add(1, Ordering::Relaxed);
+                        Some(block.timestamp)
+                    }
+                    Ok(Some(_)) => {
+                        probe_counter.fetch_add(1, Ordering::Relaxed);
+                        None
+                    }
+                    _ => {
+                        probe_counter.fetch_add(1, Ordering::Relaxed);
+                        None
+                    }
+                }
+            } else {
+                start_time
+            };
+
+            // Enforce strict timestamps if enabled
+            if strict_timestamps && (start_time.is_none() || end_time.is_none()) {
+                return Err(anyhow!(
+                    "block-range partition [{}, {}) has no timestamp and --strict-timestamps is enabled; \
+                     use --strict-timestamps false for chains with missing blocks",
+                    boundary,
+                    partition_end
+                ));
+            }
+
+            let start_time_str = start_time.map(format_probe_timestamp).transpose()?;
+            let end_time_str = end_time.map(format_probe_timestamp).transpose()?;
+
+            rows.push(PartitionBuildRow {
+                partition_type: "block_range".to_string(),
+                partition_interval_seconds: block_range_size as i64,
+                partition_start_ts: boundary.to_string(),
+                partition_value: boundary.to_string(),
+                start_block: boundary,
+                end_block: partition_end,
+                start_time: start_time_str,
+                end_time: end_time_str,
+                chain: Some(chain.clone()),
+            });
+
+            info!(
+                partition = %format!("[{}, {})", boundary, partition_end),
+                start_time = start_time.map(|t| t.to_string()).unwrap_or_else(|| "null".to_string()),
+                end_time = end_time.map(|t| t.to_string()).unwrap_or_else(|| "null".to_string()),
+                "built block-range partition"
+            );
+
+            boundary = partition_end;
+        }
+
+        write_partitions_index_with_metadata(
+            &partitions_index,
+            &rows,
+            compression,
+            Some(aws),
+            Some(&partitions_file_metadata),
+        )?;
+        let total_probes = probe_counter.load(Ordering::Relaxed);
+        let elapsed_secs = checkpoint_state_started.elapsed().as_secs();
+        info!(
+            stop_block = aligned_stop,
+            partitions = rows.len(),
+            probes = total_probes,
+            elapsed = format_elapsed_human(elapsed_secs),
+            "completed block-range partitions build"
+        );
+        rows
     } else {
+        // ── Time-based build: sparse probing with exponential/binary search ──
         let stop_block = stop_block.expect("validated above");
         let mut checkpoint_state = PartitionsCheckpointState::default();
         let seed_block = fetch_required_block_identity(
@@ -1906,6 +2075,8 @@ async fn main() -> Result<()> {
                     poll_interval_secs,
                     skip_missing_blocks,
                     partition,
+                    block_range_size,
+                    strict_timestamps,
                     compression,
                     output,
                     s3_bucket,
@@ -1946,6 +2117,8 @@ async fn main() -> Result<()> {
                         *poll_interval_secs,
                         *skip_missing_blocks,
                         partition,
+                        *block_range_size,
+                        *strict_timestamps,
                         compression,
                         output.as_deref(),
                         s3_bucket.as_deref(),
