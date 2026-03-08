@@ -14,6 +14,14 @@ const FIREHOSE_TCP_KEEPALIVE: Duration = Duration::from_secs(30);
 const FIREHOSE_HTTP2_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(30);
 const FIREHOSE_HTTP2_KEEPALIVE_TIMEOUT: Duration = Duration::from_secs(10);
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct EndpointKeepaliveSettings {
+    tcp_keepalive: Duration,
+    http2_keep_alive_interval: Duration,
+    keep_alive_timeout: Duration,
+    keep_alive_while_idle: bool,
+}
+
 /// Information about the Firehose endpoint, returned by the `EndpointInfo/Info` RPC.
 #[derive(Debug, Clone)]
 pub struct EndpointInfo {
@@ -45,18 +53,28 @@ impl FirehoseClient {
         self.metrics = Some(metrics);
     }
 
+    fn endpoint_keepalive_settings() -> EndpointKeepaliveSettings {
+        EndpointKeepaliveSettings {
+            tcp_keepalive: FIREHOSE_TCP_KEEPALIVE,
+            http2_keep_alive_interval: FIREHOSE_HTTP2_KEEPALIVE_INTERVAL,
+            keep_alive_timeout: FIREHOSE_HTTP2_KEEPALIVE_TIMEOUT,
+            keep_alive_while_idle: true,
+        }
+    }
+
     fn endpoint(&self) -> Result<Endpoint> {
         let uri = self.config.endpoint.clone();
+        let keepalive = Self::endpoint_keepalive_settings();
         Endpoint::from_shared(uri.clone())
             .with_context(|| format!("invalid endpoint URI: {uri}"))
             .map(|endpoint| {
                 endpoint
                     .timeout(Duration::from_secs(300))
                     .connect_timeout(Duration::from_secs(30))
-                    .tcp_keepalive(Some(FIREHOSE_TCP_KEEPALIVE))
-                    .http2_keep_alive_interval(FIREHOSE_HTTP2_KEEPALIVE_INTERVAL)
-                    .keep_alive_timeout(FIREHOSE_HTTP2_KEEPALIVE_TIMEOUT)
-                    .keep_alive_while_idle(true)
+                    .tcp_keepalive(Some(keepalive.tcp_keepalive))
+                    .http2_keep_alive_interval(keepalive.http2_keep_alive_interval)
+                    .keep_alive_timeout(keepalive.keep_alive_timeout)
+                    .keep_alive_while_idle(keepalive.keep_alive_while_idle)
             })
     }
 
@@ -485,14 +503,24 @@ mod tests {
     }
 
     #[test]
-    fn endpoint_enables_keepalive_settings() {
+    fn test_endpoint_enables_keepalive_settings() {
         let client = FirehoseClient::new(test_config("https://example.com"));
         let endpoint = client.endpoint().expect("endpoint should build");
+        let keepalive = FirehoseClient::endpoint_keepalive_settings();
 
         assert_eq!(
             endpoint.get_connect_timeout(),
             Some(Duration::from_secs(30))
         );
-        assert_eq!(endpoint.get_tcp_keepalive(), Some(FIREHOSE_TCP_KEEPALIVE));
+        assert_eq!(endpoint.get_tcp_keepalive(), Some(keepalive.tcp_keepalive));
+        assert_eq!(
+            keepalive,
+            EndpointKeepaliveSettings {
+                tcp_keepalive: Duration::from_secs(30),
+                http2_keep_alive_interval: Duration::from_secs(30),
+                keep_alive_timeout: Duration::from_secs(10),
+                keep_alive_while_idle: true,
+            }
+        );
     }
 }
