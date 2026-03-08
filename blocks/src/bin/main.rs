@@ -10,8 +10,8 @@ use firehose_parquet::cli::{
     shard_partitions_from_index, validate_partitions_index, write_partitions_index_strict,
     AwsConfig, Commands, CommonArgs, PartitionBoundsRequest, PartitionBuildResult,
     PartitionBuildRow, PartitionBuildType, PartitionIndexBuilder, PartitionListRequest,
-    PartitionResolveOptions,
-    PartitionSelectionRequest, PartitionShardRequest, PartitionValidateRequest, PartitionsCommands,
+    PartitionResolveOptions, PartitionSelectionRequest, PartitionShardRequest,
+    PartitionValidateRequest, PartitionsCommands,
 };
 use firehose_parquet::config::{BlockMetadata, Compression, Config, Partition};
 use firehose_parquet::cursor::{CursorLocation, CursorState};
@@ -350,9 +350,7 @@ fn validate_existing_partitions_params(
     // Validate block_range_size consistency (when block_range)
     if let Some(brs) = block_range_size {
         for row in existing_rows {
-            if row.partition_interval_seconds > 0
-                && row.partition_interval_seconds != brs as i64
-            {
+            if row.partition_interval_seconds > 0 && row.partition_interval_seconds != brs as i64 {
                 return Err(anyhow!(
                     "existing partitions.parquet uses block_range_size={} but current --block-range-size is {}; \
                      cannot change block range size for an existing partitions file",
@@ -546,6 +544,23 @@ async fn run_partitions_build(
         ));
     }
 
+    let partition_types = parse_partition_build_types(partition_types_spec)?;
+    let partition_type = partition_types[0];
+    let partition_label = partition_type.to_string();
+
+    // Validate block_range_size requirement
+    if partition_type == PartitionBuildType::BlockRange && block_range_size.is_none() {
+        return Err(anyhow!(
+            "--block-range-size is required when --partition block_range"
+        ));
+    }
+    if partition_type != PartitionBuildType::BlockRange && block_range_size.is_some() {
+        return Err(anyhow!(
+            "--block-range-size is only valid when --partition block_range"
+        ));
+    }
+    validate_block_range_bounds(partition_type, start_block, stop_block, block_range_size)?;
+
     let output_root = resolve_s3_output_root(output, s3_bucket)?;
 
     let base_config = Config {
@@ -589,21 +604,6 @@ async fn run_partitions_build(
             anyhow!("--chain is required when the endpoint does not expose chain_name")
         })?;
 
-    let partition_types = parse_partition_build_types(partition_types_spec)?;
-    let partition_type = partition_types[0];
-    let partition_label = partition_type.to_string();
-
-    // Validate block_range_size requirement
-    if partition_type == PartitionBuildType::BlockRange && block_range_size.is_none() {
-        return Err(anyhow!(
-            "--block-range-size is required when --partition block_range"
-        ));
-    }
-    if partition_type != PartitionBuildType::BlockRange && block_range_size.is_some() {
-        return Err(anyhow!(
-            "--block-range-size is only valid when --partition block_range"
-        ));
-    }
     let partitions_file_metadata = build_partitions_file_metadata(
         endpoint,
         &chain,
@@ -711,8 +711,7 @@ async fn run_partitions_build(
             };
             (builder, effective_start_block, Some(resume_start_block))
         } else {
-            let mut builder =
-                PartitionIndexBuilder::new(chain.clone(), partition_types.clone())?;
+            let mut builder = PartitionIndexBuilder::new(chain.clone(), partition_types.clone())?;
             if let Some(brs) = block_range_size {
                 builder = builder.with_block_range_size(brs);
             }
@@ -880,7 +879,7 @@ async fn run_partitions_build(
                         &partitions_file_metadata,
                         &mut checkpoint_state,
                         &probe_counter,
-                    !strict_timestamps,
+                        !strict_timestamps,
                     )?;
                 }
                 continue;
@@ -911,7 +910,7 @@ async fn run_partitions_build(
                         &partitions_file_metadata,
                         &mut checkpoint_state,
                         &probe_counter,
-                    !strict_timestamps,
+                        !strict_timestamps,
                     )?;
                 }
                 let Some(span) = await_live_interruptible(
@@ -968,7 +967,7 @@ async fn run_partitions_build(
                     &partitions_file_metadata,
                     &mut checkpoint_state,
                     &probe_counter,
-                !strict_timestamps,
+                    !strict_timestamps,
                 )?;
             }
         }
@@ -982,7 +981,7 @@ async fn run_partitions_build(
                 &partitions_file_metadata,
                 &mut checkpoint_state,
                 &probe_counter,
-            !strict_timestamps,
+                !strict_timestamps,
             )?;
             rows
         } else if !existing_rows.is_empty() {
@@ -999,7 +998,8 @@ async fn run_partitions_build(
         // Align start to block_range_size boundary
         let aligned_start = (effective_start_block / block_range_size) * block_range_size;
         // Align stop to the next boundary (exclusive)
-        let aligned_stop = ((stop_block + block_range_size - 1) / block_range_size) * block_range_size;
+        let aligned_stop =
+            ((stop_block + block_range_size - 1) / block_range_size) * block_range_size;
 
         info!(
             effective_start_block,
@@ -1190,7 +1190,7 @@ async fn run_partitions_build(
                     &partitions_file_metadata,
                     &mut checkpoint_state,
                     &probe_counter,
-                !strict_timestamps,
+                    !strict_timestamps,
                 )?;
             }
             let span = locate_live_partition_span(
@@ -1230,7 +1230,7 @@ async fn run_partitions_build(
                             &partitions_file_metadata,
                             &mut checkpoint_state,
                             &probe_counter,
-                        !strict_timestamps,
+                            !strict_timestamps,
                         )?;
                     }
                     current_block = next_boundary;
@@ -1302,6 +1302,30 @@ async fn run_partitions_build(
         resumed: should_resume_from_existing && resumed_from_block.is_some(),
         resumed_from_block,
     })
+}
+
+fn validate_block_range_bounds(
+    partition_type: PartitionBuildType,
+    start_block: Option<u64>,
+    stop_block: Option<u64>,
+    block_range_size: Option<u64>,
+) -> Result<()> {
+    if partition_type != PartitionBuildType::BlockRange {
+        return Ok(());
+    }
+
+    let block_range_size = block_range_size.expect("validated by caller");
+    for (flag, block_num) in [("start-block", start_block), ("stop-block", stop_block)] {
+        if let Some(block_num) = block_num {
+            if block_num % block_range_size != 0 {
+                return Err(anyhow!(
+                    "--{flag} must align to --block-range-size ({block_range_size}) when --partition block_range; got {block_num}"
+                ));
+            }
+        }
+    }
+
+    Ok(())
 }
 
 #[derive(Debug, Clone)]
@@ -3462,6 +3486,55 @@ mod tests {
         let rendered = err.to_string();
         assert!(rendered.contains("invalid value 'unknown'"));
         assert!(rendered.contains("solana-mainnet-beta"));
+    }
+
+    #[test]
+    fn test_validate_block_range_bounds_accepts_aligned_values() {
+        validate_block_range_bounds(
+            PartitionBuildType::BlockRange,
+            Some(0),
+            Some(30_000_000),
+            Some(10_000_000),
+        )
+        .expect("aligned block-range bounds should be accepted");
+    }
+
+    #[test]
+    fn test_validate_block_range_bounds_rejects_misaligned_start_block() {
+        let err = validate_block_range_bounds(
+            PartitionBuildType::BlockRange,
+            Some(1),
+            Some(30_000_000),
+            Some(10_000_000),
+        )
+        .expect_err("misaligned start block should fail");
+
+        assert_eq!(
+            err.to_string(),
+            "--start-block must align to --block-range-size (10000000) when --partition block_range; got 1"
+        );
+    }
+
+    #[test]
+    fn test_validate_block_range_bounds_rejects_misaligned_stop_block() {
+        let err = validate_block_range_bounds(
+            PartitionBuildType::BlockRange,
+            Some(0),
+            Some(30_000_001),
+            Some(10_000_000),
+        )
+        .expect_err("misaligned stop block should fail");
+
+        assert_eq!(
+            err.to_string(),
+            "--stop-block must align to --block-range-size (10000000) when --partition block_range; got 30000001"
+        );
+    }
+
+    #[test]
+    fn test_validate_block_range_bounds_ignores_non_block_range_partitions() {
+        validate_block_range_bounds(PartitionBuildType::Date, Some(1), Some(2), None)
+            .expect("non block-range partitions should not enforce alignment");
     }
 
     #[test]

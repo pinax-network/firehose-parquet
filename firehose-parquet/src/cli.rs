@@ -862,11 +862,16 @@ Examples:
         ///
         /// When omitted in `--live` mode, existing `partitions.parquet` rows take
         /// precedence as the restart anchor.
+        ///
+        /// When `--partition block_range` is used, explicit values must align to
+        /// `--block-range-size`.
         #[arg(long)]
         start_block: Option<u64>,
         /// Stop block number (exclusive).
         ///
         /// Required for bounded builds and incompatible with `--live`.
+        /// When `--partition block_range` is used, explicit values must align to
+        /// `--block-range-size`.
         #[arg(long, conflicts_with = "live")]
         stop_block: Option<u64>,
         /// Keep extending `partitions.parquet` from its latest covered frontier.
@@ -2073,20 +2078,19 @@ pub fn read_partitions_build_rows(
 
             // partition column: read as UInt64 (new schema) or Timestamp/String (old schema)
             let partition_column = batch.column(partition_value_idx).as_ref();
-            let partition_value = if let Some(arr) =
-                partition_column.as_any().downcast_ref::<UInt64Array>()
-            {
-                if partition_type == "block_range" {
-                    arr.value(row_index).to_string()
+            let partition_value =
+                if let Some(arr) = partition_column.as_any().downcast_ref::<UInt64Array>() {
+                    if partition_type == "block_range" {
+                        arr.value(row_index).to_string()
+                    } else {
+                        // UInt64 epoch seconds → format as timestamp string
+                        format_partition_timestamp(arr.value(row_index) as i64)?
+                    }
                 } else {
-                    // UInt64 epoch seconds → format as timestamp string
-                    format_partition_timestamp(arr.value(row_index) as i64)?
-                }
-            } else {
-                // Old schema: Timestamp or String
-                read_timestamp_as_string(partition_column, row_index)?
-                    .ok_or_else(|| anyhow::anyhow!("partition cannot be null"))?
-            };
+                    // Old schema: Timestamp or String
+                    read_timestamp_as_string(partition_column, row_index)?
+                        .ok_or_else(|| anyhow::anyhow!("partition cannot be null"))?
+                };
 
             let partition_start_ts = partition_start_ts_idx
                 .and_then(|idx| {
@@ -2269,7 +2273,14 @@ pub fn write_partitions_index_strict(
     file_metadata: Option<&crate::writer::ParquetFileMetadata>,
     nullable_timestamps: bool,
 ) -> anyhow::Result<()> {
-    write_partitions_index_impl(path, rows, compression, aws, file_metadata, nullable_timestamps)
+    write_partitions_index_impl(
+        path,
+        rows,
+        compression,
+        aws,
+        file_metadata,
+        nullable_timestamps,
+    )
 }
 
 fn write_partitions_index_impl(
@@ -2356,15 +2367,17 @@ fn write_partitions_index_impl(
                     )
                 })
             } else {
-                parse_partition_timestamp(&row.partition_value).map(|ts| ts as u64).map_err(|error| {
-                    anyhow::anyhow!(
-                        "invalid partition for partition row {} ({}) at index {}: {}",
-                        row.partition_type,
-                        row.partition_value,
-                        index,
-                        error
-                    )
-                })
+                parse_partition_timestamp(&row.partition_value)
+                    .map(|ts| ts as u64)
+                    .map_err(|error| {
+                        anyhow::anyhow!(
+                            "invalid partition for partition row {} ({}) at index {}: {}",
+                            row.partition_type,
+                            row.partition_value,
+                            index,
+                            error
+                        )
+                    })
             }
         })
         .collect::<anyhow::Result<Vec<_>>>()?;
@@ -2400,12 +2413,8 @@ fn write_partitions_index_impl(
             Arc::new(UInt64Array::from(
                 rows.iter().map(|row| row.end_block).collect::<Vec<_>>(),
             )),
-            Arc::new(
-                TimestampSecondArray::from(start_time_values).with_timezone("UTC"),
-            ),
-            Arc::new(
-                TimestampSecondArray::from(end_time_values).with_timezone("UTC"),
-            ),
+            Arc::new(TimestampSecondArray::from(start_time_values).with_timezone("UTC")),
+            Arc::new(TimestampSecondArray::from(end_time_values).with_timezone("UTC")),
         ],
     )?;
 
