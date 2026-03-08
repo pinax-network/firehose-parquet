@@ -4066,7 +4066,7 @@ fn print_sample_rows(
 /// Format a single cell value from an Arrow array for vertical display.
 fn format_array_value(array: &dyn arrow::array::Array, row: usize) -> String {
     use arrow::array::*;
-    use arrow::datatypes::DataType;
+    use arrow::datatypes::{DataType, TimeUnit};
 
     if array.is_null(row) {
         return "NULL".to_string();
@@ -4153,6 +4153,51 @@ fn format_array_value(array: &dyn arrow::array::Array, row: usize) -> String {
                 .value(row);
             truncate_str(&format!("0x{}", hex::encode(v)), 80)
         }
+        DataType::Timestamp(unit, timezone) => {
+            let timezone_label = timezone.as_deref().filter(|tz| !tz.is_empty());
+            match unit {
+                TimeUnit::Second => format_timestamp_value(
+                    array
+                        .as_any()
+                        .downcast_ref::<TimestampSecondArray>()
+                        .unwrap()
+                        .value(row),
+                    0,
+                    timezone_label,
+                    1_000_000_000,
+                ),
+                TimeUnit::Millisecond => format_timestamp_value(
+                    array
+                        .as_any()
+                        .downcast_ref::<TimestampMillisecondArray>()
+                        .unwrap()
+                        .value(row),
+                    3,
+                    timezone_label,
+                    1_000_000,
+                ),
+                TimeUnit::Microsecond => format_timestamp_value(
+                    array
+                        .as_any()
+                        .downcast_ref::<TimestampMicrosecondArray>()
+                        .unwrap()
+                        .value(row),
+                    6,
+                    timezone_label,
+                    1_000,
+                ),
+                TimeUnit::Nanosecond => format_timestamp_value(
+                    array
+                        .as_any()
+                        .downcast_ref::<TimestampNanosecondArray>()
+                        .unwrap()
+                        .value(row),
+                    9,
+                    timezone_label,
+                    1,
+                ),
+            }
+        }
         DataType::List(_) => {
             let list = array.as_any().downcast_ref::<ListArray>().unwrap();
             let inner = list.value(row);
@@ -4185,6 +4230,49 @@ fn format_array_value(array: &dyn arrow::array::Array, row: usize) -> String {
             }
         }
     }
+}
+
+fn format_timestamp_value(
+    value: i64,
+    fractional_digits: usize,
+    timezone_label: Option<&str>,
+    nanos_per_unit: i64,
+) -> String {
+    use time::OffsetDateTime;
+
+    let nanos = i128::from(value) * i128::from(nanos_per_unit);
+    let dt = match OffsetDateTime::from_unix_timestamp_nanos(nanos) {
+        Ok(dt) => dt,
+        Err(_) => return format!("{value} (invalid timestamp)"),
+    };
+
+    let mut formatted = format!(
+        "{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
+        dt.year(),
+        dt.month() as u8,
+        dt.day(),
+        dt.hour(),
+        dt.minute(),
+        dt.second()
+    );
+
+    if fractional_digits > 0 {
+        let fractional = match fractional_digits {
+            3 => dt.nanosecond() / 1_000_000,
+            6 => dt.nanosecond() / 1_000,
+            9 => dt.nanosecond(),
+            _ => 0,
+        };
+        formatted.push('.');
+        formatted.push_str(&format!("{fractional:0width$}", width = fractional_digits));
+    }
+
+    if let Some(label) = timezone_label {
+        formatted.push(' ');
+        formatted.push_str(label);
+    }
+
+    formatted
 }
 
 /// Format list items (up to `max`) from an inner array.
@@ -7862,5 +7950,23 @@ mod tests {
         let compression = reader.metadata().row_group(0).column(0).compression();
 
         assert_eq!(compression, PqCompression::SNAPPY);
+    }
+
+    #[test]
+    fn test_format_array_value_formats_timestamp_second_utc() {
+        use arrow::array::TimestampSecondArray;
+
+        let array = TimestampSecondArray::from(vec![0]).with_timezone("UTC");
+
+        assert_eq!(format_array_value(&array, 0), "1970-01-01 00:00:00 UTC");
+    }
+
+    #[test]
+    fn test_format_array_value_formats_timestamp_millisecond_utc() {
+        use arrow::array::TimestampMillisecondArray;
+
+        let array = TimestampMillisecondArray::from(vec![123]).with_timezone("UTC");
+
+        assert_eq!(format_array_value(&array, 0), "1970-01-01 00:00:00.123 UTC");
     }
 }
