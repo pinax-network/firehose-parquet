@@ -6791,6 +6791,45 @@ mod tests {
     }
 
     #[test]
+    fn test_partitions_build_live_block_range_parse_without_stop_block() {
+        let cli = parse(&[
+            "test-cli",
+            "partitions",
+            "build",
+            "--network",
+            "solana-mainnet-beta",
+            "--partition",
+            "block_range",
+            "--block-range-size",
+            "1000000",
+            "--strict-timestamps",
+            "false",
+            "--output",
+            "./output",
+            "--live",
+        ]);
+        match cli.command.expect("command should exist") {
+            Commands::Partitions(PartitionsCommands::Build {
+                network,
+                stop_block,
+                live,
+                partition,
+                block_range_size,
+                strict_timestamps,
+                ..
+            }) => {
+                assert_eq!(network.as_deref(), Some("solana-mainnet-beta"));
+                assert_eq!(stop_block, None);
+                assert!(live);
+                assert_eq!(partition, "block_range");
+                assert_eq!(block_range_size, Some(1000000));
+                assert!(!strict_timestamps);
+            }
+            _ => panic!("expected partitions build subcommand"),
+        }
+    }
+
+    #[test]
     fn test_partitions_build_strict_timestamps_default_true() {
         let cli = parse(&[
             "test-cli",
