@@ -1612,6 +1612,7 @@ fn checkpoint_partitions_rows(
 const PARTITIONS_PROBE_FETCH_MAX_ATTEMPTS: usize = 4;
 const PARTITIONS_PROBE_FETCH_INITIAL_BACKOFF: Duration = Duration::from_millis(250);
 const PARTITIONS_PROBE_SKIP_MISSING_BLOCK_SCAN_LIMIT: u64 = 16;
+const PARTITIONS_PROBE_TIMESTAMP_EXPONENTIAL_MAX_JUMP: u64 = 65_536;
 
 fn is_missing_probe_block_error(error: &anyhow::Error) -> bool {
     let message = error.to_string().to_ascii_lowercase();
@@ -1665,6 +1666,9 @@ where
 
     let mut jump = timestamp_scan_limit.saturating_mul(2).max(32);
     loop {
+        if jump > PARTITIONS_PROBE_TIMESTAMP_EXPONENTIAL_MAX_JUMP {
+            break;
+        }
         let probe_num = block_num.saturating_add(jump);
         let Some((resolved_block_num, probe)) = fetch(probe_num, max_skip_blocks).await? else {
             if max_skip_blocks == 0 {
@@ -1943,8 +1947,10 @@ async fn normalize_probe_block_identity(
     }
 
     Err(anyhow!(
-        "{context}: block {} is missing timestamp metadata and no finalized block with a timestamp was found in any reachable subsequent block",
+        "{context}: block {} is missing timestamp metadata and no finalized block with a timestamp was found within {} sequential probe blocks or the bounded exponential probe window (max jump {})",
         block.block_num,
+        timestamp_scan_limit,
+        PARTITIONS_PROBE_TIMESTAMP_EXPONENTIAL_MAX_JUMP,
     ))
 }
 
@@ -4558,6 +4564,56 @@ mod tests {
                 .block_num,
             106
         );
+    }
+
+    #[tokio::test]
+    async fn test_find_timestamp_borrow_probe_bounds_exponential_search() {
+        #[derive(Clone, Debug)]
+        struct Probe {
+            timestamp: i64,
+        }
+
+        let probed_candidates = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let result = find_timestamp_borrow_probe(
+            0,
+            16,
+            0,
+            {
+                let probed_candidates = Arc::clone(&probed_candidates);
+                move |candidate, allowed_skip| {
+                    let probed_candidates = Arc::clone(&probed_candidates);
+                    async move {
+                        probed_candidates
+                            .lock()
+                            .expect("lock probed candidates")
+                            .push((candidate, allowed_skip));
+                        Ok(Some((candidate, Probe { timestamp: 0 })))
+                    }
+                }
+            },
+            |probe: &Probe| probe.timestamp,
+        )
+        .await
+        .expect("bounded timestamp scan should succeed");
+
+        assert!(result.is_none());
+
+        let probed_candidates = probed_candidates
+            .lock()
+            .expect("lock probed candidates")
+            .clone();
+        let exponential_candidates: Vec<u64> = probed_candidates
+            .iter()
+            .filter_map(|(candidate, _)| (*candidate > 16).then_some(*candidate))
+            .collect();
+
+        assert_eq!(
+            exponential_candidates.last().copied(),
+            Some(PARTITIONS_PROBE_TIMESTAMP_EXPONENTIAL_MAX_JUMP)
+        );
+        assert!(exponential_candidates
+            .iter()
+            .all(|candidate| *candidate <= PARTITIONS_PROBE_TIMESTAMP_EXPONENTIAL_MAX_JUMP))
     }
 
     // -- build_partitions_file_metadata tests --
