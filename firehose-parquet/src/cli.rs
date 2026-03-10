@@ -4543,17 +4543,18 @@ fn format_scan_rows_table(file: &ScanFileResult) -> String {
         .last()
         .map(|row| row.row_number.to_string().len())
         .unwrap_or(1);
+    let table_indent = " ".repeat(row_number_width + 2);
     let mut out = String::new();
 
-    out.push_str(&scan_table_border('┌', '┬', '┐', &widths));
+    out.push_str(&scan_table_border('┌', '┬', '┐', &widths, &table_indent));
     out.push('\n');
-    out.push_str("    ");
+    out.push_str(&table_indent);
     out.push_str(&scan_table_row(
         &headers.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
         &widths,
     ));
     out.push('\n');
-    out.push_str(&scan_table_border('├', '┼', '┤', &widths));
+    out.push_str(&scan_table_border('├', '┼', '┤', &widths, &table_indent));
 
     for row in &file.sample_rows {
         out.push('\n');
@@ -4572,12 +4573,18 @@ fn format_scan_rows_table(file: &ScanFileResult) -> String {
     }
 
     out.push('\n');
-    out.push_str(&scan_table_border('└', '┴', '┘', &widths));
+    out.push_str(&scan_table_border('└', '┴', '┘', &widths, &table_indent));
     out
 }
 
-fn scan_table_border(left: char, middle: char, right: char, widths: &[usize]) -> String {
-    let mut out = String::from("    ");
+fn scan_table_border(
+    left: char,
+    middle: char,
+    right: char,
+    widths: &[usize],
+    indent: &str,
+) -> String {
+    let mut out = indent.to_string();
     out.push(left);
     for (index, width) in widths.iter().enumerate() {
         if index > 0 {
@@ -8831,6 +8838,48 @@ mod tests {
         assert!(rendered.contains("block_hash"));
         assert!(rendered.contains("1. │ 1"));
         assert!(rendered.contains("2. │ 2"));
+    }
+
+    #[test]
+    fn test_format_scan_rows_table_aligns_border_with_single_digit_row_numbers() {
+        let file = ScanFileResult {
+            path: "blocks.parquet".to_string(),
+            total_rows: 2,
+            row_groups: 1,
+            columns: 1,
+            size_bytes: 42,
+            size_human: "42 B".to_string(),
+            schema: vec![ScanSchemaColumn {
+                name: "block_num".to_string(),
+                data_type: "UInt64".to_string(),
+                nullable: false,
+            }],
+            sample_rows: vec![
+                ScanRow {
+                    row_number: 1,
+                    cells: vec![ScanRowCell {
+                        name: "block_num".to_string(),
+                        value: "1".to_string(),
+                    }],
+                },
+                ScanRow {
+                    row_number: 2,
+                    cells: vec![ScanRowCell {
+                        name: "block_num".to_string(),
+                        value: "2".to_string(),
+                    }],
+                },
+            ],
+        };
+
+        let rendered = format_scan_rows_table(&file);
+        let lines = rendered.lines().collect::<Vec<_>>();
+
+        assert_eq!(lines[0].find('┌'), lines[1].find('│'));
+        assert_eq!(lines[0].find('┌'), lines[2].find('├'));
+        assert_eq!(lines[0].find('┌'), lines[3].find('│'));
+        assert_eq!(lines[0].find('┌'), lines[4].find('│'));
+        assert_eq!(lines[0].find('┌'), lines[5].find('└'));
     }
 
     #[test]
