@@ -450,6 +450,57 @@ fn build_partitions_file_metadata(
     meta
 }
 
+fn load_existing_partitions_build_rows(
+    partitions_index: &str,
+    aws: &AwsConfig,
+    overwrite: bool,
+) -> Result<Vec<PartitionBuildRow>> {
+    if overwrite {
+        return Ok(Vec::new());
+    }
+
+    match read_partitions_build_rows(partitions_index, Some(aws)) {
+        Ok(rows) => Ok(rows),
+        Err(err) if err.to_string().contains("No such file or directory") => Ok(Vec::new()),
+        Err(err) if err.to_string().contains("not found") => Ok(Vec::new()),
+        Err(err) => Err(err),
+    }
+}
+
+fn log_existing_partitions_index_state(
+    partitions_index: &str,
+    existing_rows: &[PartitionBuildRow],
+    overwrite: bool,
+) {
+    if overwrite {
+        info!(
+            partitions_index = %partitions_index,
+            "overwrite requested; ignoring any existing partitions index until the next successful write"
+        );
+    } else if let Some(existing_frontier) = existing_rows.iter().map(|row| row.end_block).max() {
+        info!(
+            partitions_index = %partitions_index,
+            existing_rows = existing_rows.len(),
+            existing_frontier,
+            "loaded existing partitions index"
+        );
+    } else {
+        info!(
+            partitions_index = %partitions_index,
+            "no existing partitions index found; starting with a fresh canonical index"
+        );
+    }
+}
+
+fn log_overwrite_completed(partitions_index: &str, row_count: usize, frontier: u64) {
+    info!(
+        partitions_index = %partitions_index,
+        row_count,
+        frontier,
+        "overwrite completed; replaced canonical partitions index"
+    );
+}
+
 fn detect_block_type(type_url: &str) -> Result<String> {
     if type_url.contains("ethereum") {
         Ok("evm".to_string())
@@ -527,6 +578,7 @@ async fn run_partitions_build(
     output: Option<&str>,
     s3_bucket: Option<&str>,
     resume: bool,
+    overwrite: bool,
     aws: &AwsConfig,
 ) -> Result<PartitionBuildResult> {
     const LIVE_PARTITIONS_CHECKPOINT_INTERVAL: Duration = Duration::from_secs(30);
@@ -618,12 +670,8 @@ async fn run_partitions_build(
     let partitions_index = build_partitions_index_path(&output_root, &chain);
     let chain_output_root = build_partitions_output_root(&output_root, &chain);
 
-    let existing_rows = match read_partitions_build_rows(&partitions_index, Some(aws)) {
-        Ok(rows) => rows,
-        Err(err) if err.to_string().contains("No such file or directory") => Vec::new(),
-        Err(err) if err.to_string().contains("not found") => Vec::new(),
-        Err(err) => return Err(err),
-    };
+    let existing_rows = load_existing_partitions_build_rows(&partitions_index, aws, overwrite)?;
+    log_existing_partitions_index_state(&partitions_index, &existing_rows, overwrite);
 
     // Validate existing file metadata matches current parameters (prevent mixing)
     if !existing_rows.is_empty() {
@@ -694,7 +742,7 @@ async fn run_partitions_build(
         ));
     };
 
-    let should_resume_from_existing = live || resume;
+    let should_resume_from_existing = (live || resume) && !overwrite;
     let (mut builder, effective_start_block, resumed_from_block) =
         if should_resume_from_existing && !existing_rows.is_empty() {
             let (mut builder, resume_start_block) = PartitionIndexBuilder::resume_from_existing(
@@ -779,6 +827,7 @@ async fn run_partitions_build(
         requested_stop_block = stop_block,
         poll_interval_secs,
         resume_requested = resume,
+        overwrite_requested = overwrite,
         resumed = should_resume_from_existing && resumed_from_block.is_some(),
         resumed_from_block = resumed_from_block,
         existing_rows = existing_rows.len(),
@@ -859,7 +908,7 @@ async fn run_partitions_build(
             let Some(mut current_block) = maybe_frontier_block else {
                 info!(
                     frontier,
-                    frontier_partition_start_ts = builder
+                    frontier_partition_start = builder
                         .active_partition_value()
                         .unwrap_or_else(|| "<none>".to_string()),
                     poll_interval_secs,
@@ -882,6 +931,7 @@ async fn run_partitions_build(
                         &mut checkpoint_state,
                         &probe_counter,
                         !strict_timestamps,
+                        overwrite,
                     )?;
                 }
                 continue;
@@ -890,7 +940,7 @@ async fn run_partitions_build(
             info!(
                 frontier = current_block.block_num,
                 timestamp = current_block.timestamp,
-                partition_start_ts = %block_partition_start_label(partition_type, &current_block)?,
+                partition_start = %block_partition_start_label(partition_type, &current_block, block_range_size)?,
                 "processing finalized blocks via sparse probes"
             );
 
@@ -913,6 +963,7 @@ async fn run_partitions_build(
                         &mut checkpoint_state,
                         &probe_counter,
                         !strict_timestamps,
+                        overwrite,
                     )?;
                 }
                 let Some(span) = await_live_interruptible(
@@ -970,6 +1021,7 @@ async fn run_partitions_build(
                     &mut checkpoint_state,
                     &probe_counter,
                     !strict_timestamps,
+                    overwrite,
                 )?;
             }
         }
@@ -984,6 +1036,7 @@ async fn run_partitions_build(
                 &mut checkpoint_state,
                 &probe_counter,
                 !strict_timestamps,
+                overwrite,
             )?;
             rows
         } else if !existing_rows.is_empty() {
@@ -1144,6 +1197,7 @@ async fn run_partitions_build(
                     &mut checkpoint_state,
                     &probe_counter,
                     !strict_timestamps,
+                    overwrite,
                 )?;
             }
 
@@ -1159,6 +1213,14 @@ async fn run_partitions_build(
                 Some(&partitions_file_metadata),
                 !strict_timestamps, // nullable when strict is off
             )?;
+            if overwrite && checkpoint_state.last_checkpoint_frontier.is_none() {
+                let frontier = rows
+                    .iter()
+                    .map(|row| row.end_block)
+                    .max()
+                    .unwrap_or(aligned_start);
+                log_overwrite_completed(&partitions_index, rows.len(), frontier);
+            }
         }
         let total_probes = probe_counter.load(Ordering::Relaxed);
         let elapsed_secs = checkpoint_state_started.elapsed().as_secs();
@@ -1202,7 +1264,11 @@ async fn run_partitions_build(
             info!(
                 requested_start_block = effective_start_block,
                 partition_start_block = current_block.block_num,
-                partition_start_ts = %block_partition_start_label(partition_type, &current_block)?,
+                partition_start = %block_partition_start_label(
+                    partition_type,
+                    &current_block,
+                    block_range_size
+                )?,
                 "expanded bounded build start to the enclosing partition boundary"
             );
         }
@@ -1223,6 +1289,7 @@ async fn run_partitions_build(
                     &mut checkpoint_state,
                     &probe_counter,
                     !strict_timestamps,
+                    overwrite,
                 )?;
             }
             let span = locate_live_partition_span(
@@ -1263,6 +1330,7 @@ async fn run_partitions_build(
                             &mut checkpoint_state,
                             &probe_counter,
                             !strict_timestamps,
+                            overwrite,
                         )?;
                     }
                     current_block = next_boundary;
@@ -1295,6 +1363,9 @@ async fn run_partitions_build(
             Some(&partitions_file_metadata),
             !strict_timestamps,
         )?;
+        if overwrite && checkpoint_state.last_checkpoint_frontier.is_none() {
+            log_overwrite_completed(&partitions_index, rows.len(), final_end_block);
+        }
         let total_probes = probe_counter.load(Ordering::Relaxed);
         info!(
             stop_block = final_end_block,
@@ -1454,6 +1525,7 @@ fn checkpoint_partitions_builder(
     checkpoint_state: &mut PartitionsCheckpointState,
     probe_counter: &AtomicU64,
     nullable_timestamps: bool,
+    overwrite_requested: bool,
 ) -> Result<Vec<firehose_parquet::cli::PartitionBuildRow>> {
     let frontier = builder
         .current_frontier()
@@ -1467,6 +1539,9 @@ fn checkpoint_partitions_builder(
         Some(file_metadata),
         nullable_timestamps,
     )?;
+    if overwrite_requested && checkpoint_state.last_checkpoint_frontier.is_none() {
+        log_overwrite_completed(partitions_index, rows.len(), frontier);
+    }
     let total_probes = probe_counter.load(Ordering::Relaxed);
     info!(
         partitions = format!(
@@ -1495,6 +1570,7 @@ fn checkpoint_partitions_rows(
     checkpoint_state: &mut PartitionsCheckpointState,
     probe_counter: &AtomicU64,
     nullable_timestamps: bool,
+    overwrite_requested: bool,
 ) -> Result<Vec<firehose_parquet::cli::PartitionBuildRow>> {
     let frontier = rows
         .iter()
@@ -1509,6 +1585,9 @@ fn checkpoint_partitions_rows(
         Some(file_metadata),
         nullable_timestamps,
     )?;
+    if overwrite_requested && checkpoint_state.last_checkpoint_frontier.is_none() {
+        log_overwrite_completed(partitions_index, rows.len(), frontier);
+    }
     let total_probes = probe_counter.load(Ordering::Relaxed);
     info!(
         partitions = format!(
@@ -1888,8 +1967,18 @@ fn format_probe_timestamp(timestamp: i64) -> Result<String> {
 fn block_partition_start_label(
     partition_type: PartitionBuildType,
     block: &BlockIdentity,
+    block_range_size: Option<u64>,
 ) -> Result<String> {
-    format_probe_timestamp(block_partition_start(partition_type, block)?)
+    match partition_type {
+        PartitionBuildType::BlockRange => {
+            let block_range_size = block_range_size.ok_or_else(|| {
+                anyhow!("block_range logging requires --block-range-size to be resolved")
+            })?;
+            let partition_start = (block.block_num / block_range_size) * block_range_size;
+            Ok(partition_start.to_string())
+        }
+        _ => format_probe_timestamp(block_partition_start(partition_type, block)?),
+    }
 }
 
 fn block_partition_date_label(
@@ -2264,6 +2353,7 @@ async fn main() -> Result<()> {
                     output,
                     s3_bucket,
                     resume,
+                    overwrite,
                     json,
                     aws_access_key_id,
                     aws_secret_access_key,
@@ -2306,6 +2396,7 @@ async fn main() -> Result<()> {
                         output.as_deref(),
                         s3_bucket.as_deref(),
                         *resume,
+                        *overwrite,
                         &aws,
                     )
                     .await?;
@@ -4356,6 +4447,94 @@ mod tests {
     }
 
     #[test]
+    fn test_load_existing_partitions_build_rows_reads_existing_index() {
+        let dir = std::env::temp_dir().join(format!(
+            "fireparq-load-existing-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system time")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        let path = dir.join("partitions.parquet");
+        let rows = vec![PartitionBuildRow {
+            partition_type: "hour".to_string(),
+            partition_interval_seconds: 3_600,
+            partition_start_ts: "2023-07-31 14:00:00".to_string(),
+            partition_value: "2023-07-31 14:00:00".to_string(),
+            start_block: 100,
+            end_block: 200,
+            start_time: Some("2023-07-31 14:00:01".to_string()),
+            end_time: Some("2023-07-31 14:59:59".to_string()),
+            chain: Some("eth-mainnet".to_string()),
+        }];
+
+        firehose_parquet::cli::write_partitions_index(&path.to_string_lossy(), &rows, None)
+            .expect("write partitions index");
+
+        let loaded = load_existing_partitions_build_rows(
+            &path.to_string_lossy(),
+            &AwsConfig {
+                aws_access_key_id: None,
+                aws_secret_access_key: None,
+                aws_session_token: None,
+                aws_region: None,
+                aws_endpoint_url: None,
+            },
+            false,
+        )
+        .expect("load existing rows");
+
+        assert_eq!(loaded, rows);
+        std::fs::remove_file(&path).expect("remove parquet");
+        std::fs::remove_dir(&dir).expect("remove temp dir");
+    }
+
+    #[test]
+    fn test_load_existing_partitions_build_rows_skips_existing_index_when_overwrite() {
+        let dir = std::env::temp_dir().join(format!(
+            "fireparq-load-overwrite-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system time")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        let path = dir.join("partitions.parquet");
+        let rows = vec![PartitionBuildRow {
+            partition_type: "hour".to_string(),
+            partition_interval_seconds: 3_600,
+            partition_start_ts: "2023-07-31 14:00:00".to_string(),
+            partition_value: "2023-07-31 14:00:00".to_string(),
+            start_block: 100,
+            end_block: 200,
+            start_time: Some("2023-07-31 14:00:01".to_string()),
+            end_time: Some("2023-07-31 14:59:59".to_string()),
+            chain: Some("eth-mainnet".to_string()),
+        }];
+
+        firehose_parquet::cli::write_partitions_index(&path.to_string_lossy(), &rows, None)
+            .expect("write partitions index");
+
+        let loaded = load_existing_partitions_build_rows(
+            &path.to_string_lossy(),
+            &AwsConfig {
+                aws_access_key_id: None,
+                aws_secret_access_key: None,
+                aws_session_token: None,
+                aws_region: None,
+                aws_endpoint_url: None,
+            },
+            true,
+        )
+        .expect("skip existing rows");
+
+        assert!(loaded.is_empty());
+        std::fs::remove_file(&path).expect("remove parquet");
+        std::fs::remove_dir(&dir).expect("remove temp dir");
+    }
+
+    #[test]
     fn test_checkpoint_partitions_rows_preserves_existing_block_range_rows() {
         let dir = std::env::temp_dir().join(format!(
             "fireparq-block-range-checkpoint-{}",
@@ -4411,6 +4590,7 @@ mod tests {
             &mut checkpoint_state,
             &probe_counter,
             true,
+            false,
         )
         .expect("checkpoint rows");
 
@@ -4424,6 +4604,35 @@ mod tests {
         assert_eq!(checkpoint_state.last_checkpoint_frontier, Some(20));
         std::fs::remove_file(&path).expect("remove parquet");
         std::fs::remove_dir(&dir).expect("remove temp dir");
+    }
+
+    #[test]
+    fn test_block_partition_start_label_for_block_range_uses_partition_boundary() {
+        let block = BlockIdentity {
+            block_num: 167_772_19,
+            timestamp: 1_614_498_520,
+            ..Default::default()
+        };
+
+        let label =
+            block_partition_start_label(PartitionBuildType::BlockRange, &block, Some(100_000))
+                .expect("block range label");
+
+        assert_eq!(label, "16700000");
+    }
+
+    #[test]
+    fn test_block_partition_start_label_for_hour_formats_timestamp() {
+        let block = BlockIdentity {
+            block_num: 42,
+            timestamp: 1_690_815_590,
+            ..Default::default()
+        };
+
+        let label = block_partition_start_label(PartitionBuildType::Hour, &block, None)
+            .expect("hour label");
+
+        assert_eq!(label, "2023-07-31 14:00:00");
     }
 
     #[test]
