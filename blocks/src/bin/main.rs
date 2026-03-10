@@ -4616,6 +4616,13 @@ mod tests {
             .all(|candidate| *candidate <= PARTITIONS_PROBE_TIMESTAMP_EXPONENTIAL_MAX_JUMP))
     }
 
+    #[test]
+    fn test_next_live_partition_probe_candidate_avoids_u64_max_sentinel() {
+        assert_eq!(next_live_partition_probe_candidate(10, 5), Some(15));
+        assert_eq!(next_live_partition_probe_candidate(u64::MAX - 1, 1), None);
+        assert_eq!(next_live_partition_probe_candidate(u64::MAX - 5, 10), None);
+    }
+
     // -- build_partitions_file_metadata tests --
 
     #[test]
