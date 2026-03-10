@@ -2164,6 +2164,8 @@ async fn find_latest_available_block(
     Ok(low_available)
 }
 
+/// Avoid probing the `u64::MAX` sentinel, which can pin live sparse probing to
+/// a non-progressing "latest block" fetch instead of a concrete block number.
 fn next_live_partition_probe_candidate(block_num: u64, step: u64) -> Option<u64> {
     block_num
         .checked_add(step)
