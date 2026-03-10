@@ -911,10 +911,10 @@ Examples:
         #[arg(long, env = "S3_BUCKET", hide_env_values = true)]
         s3_bucket: Option<String>,
         /// Resume from an existing canonical index under the resolved output path
-        #[arg(long, default_value = "false")]
+        #[arg(long, default_value = "false", conflicts_with = "overwrite")]
         resume: bool,
         /// Ignore and replace any existing canonical index instead of reading it
-        #[arg(long, default_value = "false")]
+        #[arg(long, default_value = "false", conflicts_with = "resume")]
         overwrite: bool,
         /// Emit machine-readable JSON output
         #[arg(long, default_value = "false")]
@@ -6603,6 +6603,7 @@ mod tests {
                 output,
                 s3_bucket,
                 resume,
+                overwrite,
                 json,
                 ..
             }) => {
@@ -6619,6 +6620,7 @@ mod tests {
                 assert_eq!(output.as_deref(), Some("./output"));
                 assert!(s3_bucket.is_none());
                 assert!(resume);
+                assert!(!overwrite);
                 assert!(json);
             }
             _ => panic!("expected partitions build subcommand"),
@@ -6649,6 +6651,32 @@ mod tests {
             }
             _ => panic!("expected partitions build subcommand"),
         }
+    }
+
+    #[test]
+    fn test_partitions_build_subcommand_rejects_resume_with_overwrite() {
+        let err = TestCli::try_parse_from([
+            "test-cli",
+            "partitions",
+            "build",
+            "--endpoint",
+            "https://eth.firehose.pinax.network:443",
+            "--chain",
+            "eth-mainnet",
+            "--stop-block",
+            "200",
+            "--partition",
+            "date",
+            "--output",
+            "./output",
+            "--resume",
+            "--overwrite",
+        ])
+        .expect_err("resume and overwrite should conflict");
+
+        let rendered = err.to_string();
+        assert!(rendered.contains("--resume"));
+        assert!(rendered.contains("--overwrite"));
     }
 
     #[test]
