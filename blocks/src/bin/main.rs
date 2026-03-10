@@ -450,6 +450,23 @@ fn build_partitions_file_metadata(
     meta
 }
 
+fn load_existing_partitions_build_rows(
+    partitions_index: &str,
+    aws: &AwsConfig,
+    overwrite: bool,
+) -> Result<Vec<PartitionBuildRow>> {
+    if overwrite {
+        return Ok(Vec::new());
+    }
+
+    match read_partitions_build_rows(partitions_index, Some(aws)) {
+        Ok(rows) => Ok(rows),
+        Err(err) if err.to_string().contains("No such file or directory") => Ok(Vec::new()),
+        Err(err) if err.to_string().contains("not found") => Ok(Vec::new()),
+        Err(err) => Err(err),
+    }
+}
+
 fn detect_block_type(type_url: &str) -> Result<String> {
     if type_url.contains("ethereum") {
         Ok("evm".to_string())
@@ -527,6 +544,7 @@ async fn run_partitions_build(
     output: Option<&str>,
     s3_bucket: Option<&str>,
     resume: bool,
+    overwrite: bool,
     aws: &AwsConfig,
 ) -> Result<PartitionBuildResult> {
     const LIVE_PARTITIONS_CHECKPOINT_INTERVAL: Duration = Duration::from_secs(30);
@@ -618,12 +636,7 @@ async fn run_partitions_build(
     let partitions_index = build_partitions_index_path(&output_root, &chain);
     let chain_output_root = build_partitions_output_root(&output_root, &chain);
 
-    let existing_rows = match read_partitions_build_rows(&partitions_index, Some(aws)) {
-        Ok(rows) => rows,
-        Err(err) if err.to_string().contains("No such file or directory") => Vec::new(),
-        Err(err) if err.to_string().contains("not found") => Vec::new(),
-        Err(err) => return Err(err),
-    };
+    let existing_rows = load_existing_partitions_build_rows(&partitions_index, aws, overwrite)?;
 
     // Validate existing file metadata matches current parameters (prevent mixing)
     if !existing_rows.is_empty() {
@@ -694,7 +707,7 @@ async fn run_partitions_build(
         ));
     };
 
-    let should_resume_from_existing = live || resume;
+    let should_resume_from_existing = (live || resume) && !overwrite;
     let (mut builder, effective_start_block, resumed_from_block) =
         if should_resume_from_existing && !existing_rows.is_empty() {
             let (mut builder, resume_start_block) = PartitionIndexBuilder::resume_from_existing(
@@ -779,6 +792,7 @@ async fn run_partitions_build(
         requested_stop_block = stop_block,
         poll_interval_secs,
         resume_requested = resume,
+        overwrite_requested = overwrite,
         resumed = should_resume_from_existing && resumed_from_block.is_some(),
         resumed_from_block = resumed_from_block,
         existing_rows = existing_rows.len(),
@@ -2264,6 +2278,7 @@ async fn main() -> Result<()> {
                     output,
                     s3_bucket,
                     resume,
+                    overwrite,
                     json,
                     aws_access_key_id,
                     aws_secret_access_key,
@@ -2306,6 +2321,7 @@ async fn main() -> Result<()> {
                         output.as_deref(),
                         s3_bucket.as_deref(),
                         *resume,
+                        *overwrite,
                         &aws,
                     )
                     .await?;
@@ -4352,6 +4368,94 @@ mod tests {
         assert!(err
             .to_string()
             .contains("cannot change block range size for an existing partitions file"));
+    }
+
+    #[test]
+    fn test_load_existing_partitions_build_rows_reads_existing_index() {
+        let dir = std::env::temp_dir().join(format!(
+            "fireparq-load-existing-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system time")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        let path = dir.join("partitions.parquet");
+        let rows = vec![PartitionBuildRow {
+            partition_type: "hour".to_string(),
+            partition_interval_seconds: 3_600,
+            partition_start_ts: "2023-07-31 14:00:00".to_string(),
+            partition_value: "2023-07-31 14:00:00".to_string(),
+            start_block: 100,
+            end_block: 200,
+            start_time: Some("2023-07-31 14:00:01".to_string()),
+            end_time: Some("2023-07-31 14:59:59".to_string()),
+            chain: Some("eth-mainnet".to_string()),
+        }];
+
+        firehose_parquet::cli::write_partitions_index(&path.to_string_lossy(), &rows, None)
+            .expect("write partitions index");
+
+        let loaded = load_existing_partitions_build_rows(
+            &path.to_string_lossy(),
+            &AwsConfig {
+                aws_access_key_id: None,
+                aws_secret_access_key: None,
+                aws_session_token: None,
+                aws_region: None,
+                aws_endpoint_url: None,
+            },
+            false,
+        )
+        .expect("load existing rows");
+
+        assert_eq!(loaded, rows);
+        std::fs::remove_file(&path).expect("remove parquet");
+        std::fs::remove_dir(&dir).expect("remove temp dir");
+    }
+
+    #[test]
+    fn test_load_existing_partitions_build_rows_skips_existing_index_when_overwrite() {
+        let dir = std::env::temp_dir().join(format!(
+            "fireparq-load-overwrite-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system time")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        let path = dir.join("partitions.parquet");
+        let rows = vec![PartitionBuildRow {
+            partition_type: "hour".to_string(),
+            partition_interval_seconds: 3_600,
+            partition_start_ts: "2023-07-31 14:00:00".to_string(),
+            partition_value: "2023-07-31 14:00:00".to_string(),
+            start_block: 100,
+            end_block: 200,
+            start_time: Some("2023-07-31 14:00:01".to_string()),
+            end_time: Some("2023-07-31 14:59:59".to_string()),
+            chain: Some("eth-mainnet".to_string()),
+        }];
+
+        firehose_parquet::cli::write_partitions_index(&path.to_string_lossy(), &rows, None)
+            .expect("write partitions index");
+
+        let loaded = load_existing_partitions_build_rows(
+            &path.to_string_lossy(),
+            &AwsConfig {
+                aws_access_key_id: None,
+                aws_secret_access_key: None,
+                aws_session_token: None,
+                aws_region: None,
+                aws_endpoint_url: None,
+            },
+            true,
+        )
+        .expect("skip existing rows");
+
+        assert!(loaded.is_empty());
+        std::fs::remove_file(&path).expect("remove parquet");
+        std::fs::remove_dir(&dir).expect("remove temp dir");
     }
 
     #[test]
