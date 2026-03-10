@@ -1,30 +1,30 @@
-use anyhow::{anyhow, Result};
-use clap::builder::PossibleValuesParser;
+use anyhow::{Result, anyhow};
 use clap::Parser;
+use clap::builder::PossibleValuesParser;
 use firehose_parquet::cli::{
-    build_config, build_partitions_index_path, build_partitions_output_root,
-    cursor_template_context_from_selection, init_tracing, list_partitions_from_index, load_dotenv,
-    parse_partition_build_types, parse_partition_selection_request, parse_partition_shard_strategy,
-    read_partitions_build_rows, resolve_cursor_template, resolve_partition_bounds_from_index,
-    resolve_partition_command, resolve_partition_window_bounds_from_index, resolve_s3_output_root,
-    shard_partitions_from_index, validate_partitions_index, write_partitions_index_strict,
     AwsConfig, Commands, CommonArgs, PartitionBoundsRequest, PartitionBuildResult,
     PartitionBuildRow, PartitionBuildType, PartitionIndexBuilder, PartitionListRequest,
     PartitionResolveOptions, PartitionSelectionRequest, PartitionShardRequest,
-    PartitionValidateRequest, PartitionsCommands,
+    PartitionValidateRequest, PartitionsCommands, build_config, build_partitions_index_path,
+    build_partitions_output_root, cursor_template_context_from_selection, init_tracing,
+    list_partitions_from_index, load_dotenv, parse_partition_build_types,
+    parse_partition_selection_request, parse_partition_shard_strategy, read_partitions_build_rows,
+    resolve_cursor_template, resolve_partition_bounds_from_index, resolve_partition_command,
+    resolve_partition_window_bounds_from_index, resolve_s3_output_root,
+    shard_partitions_from_index, validate_partitions_index, write_partitions_index_strict,
 };
 use firehose_parquet::config::{BlockMetadata, Compression, Config, Partition};
 use firehose_parquet::cursor::{CursorLocation, CursorState};
-use firehose_parquet::encode::{parse_encode_bytes, EncodeBytes};
+use firehose_parquet::encode::{EncodeBytes, parse_encode_bytes};
 use firehose_parquet::grpc::{EndpointInfo, FirehoseClient};
 use firehose_parquet::metrics;
-use firehose_parquet::networks::{resolve_network_endpoint, EndpointSource, KNOWN_NETWORK_NAMES};
-use firehose_parquet::traits::{decode_id_bytes, fork_step_name, BlockIdentity, BlockMapper};
+use firehose_parquet::networks::{EndpointSource, KNOWN_NETWORK_NAMES, resolve_network_endpoint};
+use firehose_parquet::traits::{BlockIdentity, BlockMapper, decode_id_bytes, fork_step_name};
 use firehose_parquet::writer::{OutputWriter, ParquetFileMetadata};
 use object_store::ObjectStore;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 use tokio::sync::Notify;
 use tracing::{info, warn};
@@ -212,6 +212,7 @@ fn build_file_metadata(
     block_type: &str,
     encoding: &firehose_parquet::encode::EncodeBytes,
     endpoint: &str,
+    compression: Compression,
     endpoint_info: &Option<EndpointInfo>,
 ) -> ParquetFileMetadata {
     let mut meta = ParquetFileMetadata::new();
@@ -222,6 +223,7 @@ fn build_file_metadata(
         format!("{:?}", encoding).to_lowercase(),
     );
     meta.add("firehose-parquet.endpoint", endpoint);
+    meta.add("firehose-parquet.compression", compression.to_string());
     if let Some(ref ei) = endpoint_info {
         if !ei.chain_name.is_empty() {
             meta.add("firehose-parquet.chain_name", &ei.chain_name);
@@ -800,7 +802,7 @@ async fn run_partitions_build(
 
             #[cfg(unix)]
             {
-                use tokio::signal::unix::{signal, SignalKind};
+                use tokio::signal::unix::{SignalKind, signal};
                 let mut sigterm =
                     signal(SignalKind::terminate()).expect("failed to install SIGTERM handler");
                 tokio::select! {
@@ -2818,7 +2820,7 @@ async fn main() -> Result<()> {
 
             #[cfg(unix)]
             {
-                use tokio::signal::unix::{signal, SignalKind};
+                use tokio::signal::unix::{SignalKind, signal};
                 let mut sigterm =
                     signal(SignalKind::terminate()).expect("failed to install SIGTERM handler");
                 tokio::select! {
@@ -2887,7 +2889,7 @@ async fn main() -> Result<()> {
         if !has_explicit_range {
             warn!(
                 "partition range flags are deprecated for direct ingestion; prefer `fireparq partitions resolve ...`"
-                );
+            );
             let aws = AwsConfig {
                 aws_access_key_id: config.aws_access_key_id.clone(),
                 aws_secret_access_key: config.aws_secret_access_key.clone(),
@@ -3057,8 +3059,13 @@ async fn main() -> Result<()> {
                     .and_then(|ei| encode_bytes_from_block_id_encoding(ei.block_id_encoding))
             })
             .unwrap_or_else(|| default_encode_bytes(&block_type));
-        let meta =
-            build_file_metadata(&block_type, &encode_bytes, &config.endpoint, &endpoint_info);
+        let meta = build_file_metadata(
+            &block_type,
+            &encode_bytes,
+            &config.endpoint,
+            config.compression,
+            &endpoint_info,
+        );
         log_file_metadata(&meta);
         writer.inner.set_file_metadata(meta);
         Some(create_mapper(
@@ -3210,7 +3217,13 @@ async fn main() -> Result<()> {
                 let encode_bytes = parse_encode_bytes(&bytes_encoding_str)
                     .or_else(|| endpoint_info.as_ref().and_then(|ei| encode_bytes_from_block_id_encoding(ei.block_id_encoding)))
                     .unwrap_or_else(|| default_encode_bytes(&detected));
-                let meta = build_file_metadata(&detected, &encode_bytes, &config.endpoint, &endpoint_info);
+                let meta = build_file_metadata(
+                    &detected,
+                    &encode_bytes,
+                    &config.endpoint,
+                    config.compression,
+                    &endpoint_info,
+                );
                 log_file_metadata(&meta);
                 writer.inner.set_file_metadata(meta);
                 mapper = Some(create_mapper(&detected, extended, include_fork_step, encode_bytes, include_failed_transactions)?);
@@ -3854,7 +3867,13 @@ mod tests {
             block_id_encoding: 2,
             block_features: vec!["base".to_string(), "extended".to_string()],
         });
-        let meta = build_file_metadata("evm", &EncodeBytes::Hex, "https://example.com", &ei);
+        let meta = build_file_metadata(
+            "evm",
+            &EncodeBytes::Hex,
+            "https://example.com",
+            Compression::Zstd,
+            &ei,
+        );
 
         assert_eq!(
             find_meta(&meta, "firehose-parquet.chain_name"),
@@ -3894,7 +3913,13 @@ mod tests {
             block_id_encoding: 1,
             block_features: vec![],
         });
-        let meta = build_file_metadata("evm", &EncodeBytes::Hex, "https://example.com", &ei);
+        let meta = build_file_metadata(
+            "evm",
+            &EncodeBytes::Hex,
+            "https://example.com",
+            Compression::Zstd,
+            &ei,
+        );
 
         assert_eq!(
             find_meta(&meta, "firehose-parquet.first_streamable_block_id"),
@@ -3918,7 +3943,13 @@ mod tests {
             block_id_encoding: 0,
             block_features: vec![],
         });
-        let meta = build_file_metadata("evm", &EncodeBytes::Hex, "https://example.com", &ei);
+        let meta = build_file_metadata(
+            "evm",
+            &EncodeBytes::Hex,
+            "https://example.com",
+            Compression::Zstd,
+            &ei,
+        );
 
         assert_eq!(
             find_meta(&meta, "firehose-parquet.first_streamable_block_id"),
@@ -3941,7 +3972,13 @@ mod tests {
             block_id_encoding: 0,
             block_features: vec![],
         });
-        let meta = build_file_metadata("evm", &EncodeBytes::Hex, "https://example.com", &ei);
+        let meta = build_file_metadata(
+            "evm",
+            &EncodeBytes::Hex,
+            "https://example.com",
+            Compression::Zstd,
+            &ei,
+        );
 
         assert_eq!(
             find_meta(&meta, "firehose-parquet.first_streamable_block_id"),
@@ -3955,7 +3992,13 @@ mod tests {
 
     #[test]
     fn test_build_file_metadata_no_endpoint_info() {
-        let meta = build_file_metadata("evm", &EncodeBytes::Hex, "https://example.com", &None);
+        let meta = build_file_metadata(
+            "evm",
+            &EncodeBytes::Hex,
+            "https://example.com",
+            Compression::Zstd,
+            &None,
+        );
 
         assert_eq!(find_meta(&meta, "firehose-parquet.chain_name"), None);
         assert_eq!(
@@ -3972,6 +4015,10 @@ mod tests {
         );
         assert_eq!(find_meta(&meta, "firehose-parquet.block_id_encoding"), None);
         assert_eq!(find_meta(&meta, "firehose-parquet.block_features"), None);
+        assert_eq!(
+            find_meta(&meta, "firehose-parquet.compression"),
+            Some("zstd")
+        );
     }
 
     #[test]
@@ -3985,7 +4032,13 @@ mod tests {
             block_id_encoding: 0,
             block_features: vec![],
         });
-        let meta = build_file_metadata("evm", &EncodeBytes::Hex, "https://example.com", &ei);
+        let meta = build_file_metadata(
+            "evm",
+            &EncodeBytes::Hex,
+            "https://example.com",
+            Compression::Zstd,
+            &ei,
+        );
 
         assert_eq!(find_meta(&meta, "firehose-parquet.chain_name"), Some("eth"));
         assert_eq!(
@@ -4002,6 +4055,22 @@ mod tests {
         );
         assert_eq!(find_meta(&meta, "firehose-parquet.block_id_encoding"), None);
         assert_eq!(find_meta(&meta, "firehose-parquet.block_features"), None);
+    }
+
+    #[test]
+    fn test_build_file_metadata_honors_requested_compression() {
+        let meta = build_file_metadata(
+            "evm",
+            &EncodeBytes::Hex,
+            "https://example.com",
+            Compression::Snappy,
+            &None,
+        );
+
+        assert_eq!(
+            find_meta(&meta, "firehose-parquet.compression"),
+            Some("snappy")
+        );
     }
 
     #[tokio::test]
@@ -4280,9 +4349,10 @@ mod tests {
         )
         .expect_err("block range size changes should be rejected");
 
-        assert!(err
-            .to_string()
-            .contains("cannot change block range size for an existing partitions file"));
+        assert!(
+            err.to_string()
+                .contains("cannot change block range size for an existing partitions file")
+        );
     }
 
     #[test]
