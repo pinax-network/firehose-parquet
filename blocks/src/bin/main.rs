@@ -1,30 +1,30 @@
-use anyhow::{Result, anyhow};
-use clap::Parser;
+use anyhow::{anyhow, Result};
 use clap::builder::PossibleValuesParser;
+use clap::Parser;
 use firehose_parquet::cli::{
+    build_config, build_partitions_index_path, build_partitions_output_root,
+    cursor_template_context_from_selection, init_tracing, list_partitions_from_index, load_dotenv,
+    parse_partition_build_types, parse_partition_selection_request, parse_partition_shard_strategy,
+    read_partitions_build_rows, resolve_cursor_template, resolve_partition_bounds_from_index,
+    resolve_partition_command, resolve_partition_window_bounds_from_index, resolve_s3_output_root,
+    shard_partitions_from_index, validate_partitions_index, write_partitions_index_strict,
     AwsConfig, Commands, CommonArgs, PartitionBoundsRequest, PartitionBuildResult,
     PartitionBuildRow, PartitionBuildType, PartitionIndexBuilder, PartitionListRequest,
     PartitionResolveOptions, PartitionSelectionRequest, PartitionShardRequest,
-    PartitionValidateRequest, PartitionsCommands, build_config, build_partitions_index_path,
-    build_partitions_output_root, cursor_template_context_from_selection, init_tracing,
-    list_partitions_from_index, load_dotenv, parse_partition_build_types,
-    parse_partition_selection_request, parse_partition_shard_strategy, read_partitions_build_rows,
-    resolve_cursor_template, resolve_partition_bounds_from_index, resolve_partition_command,
-    resolve_partition_window_bounds_from_index, resolve_s3_output_root,
-    shard_partitions_from_index, validate_partitions_index, write_partitions_index_strict,
+    PartitionValidateRequest, PartitionsCommands,
 };
 use firehose_parquet::config::{BlockMetadata, Compression, Config, Partition};
 use firehose_parquet::cursor::{CursorLocation, CursorState};
-use firehose_parquet::encode::{EncodeBytes, parse_encode_bytes};
+use firehose_parquet::encode::{parse_encode_bytes, EncodeBytes};
 use firehose_parquet::grpc::{EndpointInfo, FirehoseClient};
 use firehose_parquet::metrics;
-use firehose_parquet::networks::{EndpointSource, KNOWN_NETWORK_NAMES, resolve_network_endpoint};
-use firehose_parquet::traits::{BlockIdentity, BlockMapper, decode_id_bytes, fork_step_name};
+use firehose_parquet::networks::{resolve_network_endpoint, EndpointSource, KNOWN_NETWORK_NAMES};
+use firehose_parquet::traits::{decode_id_bytes, fork_step_name, BlockIdentity, BlockMapper};
 use firehose_parquet::writer::{OutputWriter, ParquetFileMetadata};
 use object_store::ObjectStore;
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::Notify;
 use tracing::{info, warn};
@@ -802,7 +802,7 @@ async fn run_partitions_build(
 
             #[cfg(unix)]
             {
-                use tokio::signal::unix::{SignalKind, signal};
+                use tokio::signal::unix::{signal, SignalKind};
                 let mut sigterm =
                     signal(SignalKind::terminate()).expect("failed to install SIGTERM handler");
                 tokio::select! {
@@ -2820,7 +2820,7 @@ async fn main() -> Result<()> {
 
             #[cfg(unix)]
             {
-                use tokio::signal::unix::{SignalKind, signal};
+                use tokio::signal::unix::{signal, SignalKind};
                 let mut sigterm =
                     signal(SignalKind::terminate()).expect("failed to install SIGTERM handler");
                 tokio::select! {
@@ -2889,7 +2889,7 @@ async fn main() -> Result<()> {
         if !has_explicit_range {
             warn!(
                 "partition range flags are deprecated for direct ingestion; prefer `fireparq partitions resolve ...`"
-            );
+                );
             let aws = AwsConfig {
                 aws_access_key_id: config.aws_access_key_id.clone(),
                 aws_secret_access_key: config.aws_secret_access_key.clone(),
@@ -4349,10 +4349,9 @@ mod tests {
         )
         .expect_err("block range size changes should be rejected");
 
-        assert!(
-            err.to_string()
-                .contains("cannot change block range size for an existing partitions file")
-        );
+        assert!(err
+            .to_string()
+            .contains("cannot change block range size for an existing partitions file"));
     }
 
     #[test]
