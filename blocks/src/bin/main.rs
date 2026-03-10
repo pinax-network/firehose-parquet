@@ -212,6 +212,7 @@ fn build_file_metadata(
     block_type: &str,
     encoding: &firehose_parquet::encode::EncodeBytes,
     endpoint: &str,
+    compression: Compression,
     endpoint_info: &Option<EndpointInfo>,
 ) -> ParquetFileMetadata {
     let mut meta = ParquetFileMetadata::new();
@@ -222,6 +223,7 @@ fn build_file_metadata(
         format!("{:?}", encoding).to_lowercase(),
     );
     meta.add("firehose-parquet.endpoint", endpoint);
+    meta.add("firehose-parquet.compression", compression.to_string());
     if let Some(ref ei) = endpoint_info {
         if !ei.chain_name.is_empty() {
             meta.add("firehose-parquet.chain_name", &ei.chain_name);
@@ -3057,8 +3059,13 @@ async fn main() -> Result<()> {
                     .and_then(|ei| encode_bytes_from_block_id_encoding(ei.block_id_encoding))
             })
             .unwrap_or_else(|| default_encode_bytes(&block_type));
-        let meta =
-            build_file_metadata(&block_type, &encode_bytes, &config.endpoint, &endpoint_info);
+        let meta = build_file_metadata(
+            &block_type,
+            &encode_bytes,
+            &config.endpoint,
+            config.compression,
+            &endpoint_info,
+        );
         log_file_metadata(&meta);
         writer.inner.set_file_metadata(meta);
         Some(create_mapper(
@@ -3210,7 +3217,13 @@ async fn main() -> Result<()> {
                 let encode_bytes = parse_encode_bytes(&bytes_encoding_str)
                     .or_else(|| endpoint_info.as_ref().and_then(|ei| encode_bytes_from_block_id_encoding(ei.block_id_encoding)))
                     .unwrap_or_else(|| default_encode_bytes(&detected));
-                let meta = build_file_metadata(&detected, &encode_bytes, &config.endpoint, &endpoint_info);
+                let meta = build_file_metadata(
+                    &detected,
+                    &encode_bytes,
+                    &config.endpoint,
+                    config.compression,
+                    &endpoint_info,
+                );
                 log_file_metadata(&meta);
                 writer.inner.set_file_metadata(meta);
                 mapper = Some(create_mapper(&detected, extended, include_fork_step, encode_bytes, include_failed_transactions)?);
@@ -3854,7 +3867,13 @@ mod tests {
             block_id_encoding: 2,
             block_features: vec!["base".to_string(), "extended".to_string()],
         });
-        let meta = build_file_metadata("evm", &EncodeBytes::Hex, "https://example.com", &ei);
+        let meta = build_file_metadata(
+            "evm",
+            &EncodeBytes::Hex,
+            "https://example.com",
+            Compression::Zstd,
+            &ei,
+        );
 
         assert_eq!(
             find_meta(&meta, "firehose-parquet.chain_name"),
@@ -3894,7 +3913,13 @@ mod tests {
             block_id_encoding: 1,
             block_features: vec![],
         });
-        let meta = build_file_metadata("evm", &EncodeBytes::Hex, "https://example.com", &ei);
+        let meta = build_file_metadata(
+            "evm",
+            &EncodeBytes::Hex,
+            "https://example.com",
+            Compression::Zstd,
+            &ei,
+        );
 
         assert_eq!(
             find_meta(&meta, "firehose-parquet.first_streamable_block_id"),
@@ -3918,7 +3943,13 @@ mod tests {
             block_id_encoding: 0,
             block_features: vec![],
         });
-        let meta = build_file_metadata("evm", &EncodeBytes::Hex, "https://example.com", &ei);
+        let meta = build_file_metadata(
+            "evm",
+            &EncodeBytes::Hex,
+            "https://example.com",
+            Compression::Zstd,
+            &ei,
+        );
 
         assert_eq!(
             find_meta(&meta, "firehose-parquet.first_streamable_block_id"),
@@ -3941,7 +3972,13 @@ mod tests {
             block_id_encoding: 0,
             block_features: vec![],
         });
-        let meta = build_file_metadata("evm", &EncodeBytes::Hex, "https://example.com", &ei);
+        let meta = build_file_metadata(
+            "evm",
+            &EncodeBytes::Hex,
+            "https://example.com",
+            Compression::Zstd,
+            &ei,
+        );
 
         assert_eq!(
             find_meta(&meta, "firehose-parquet.first_streamable_block_id"),
@@ -3955,7 +3992,13 @@ mod tests {
 
     #[test]
     fn test_build_file_metadata_no_endpoint_info() {
-        let meta = build_file_metadata("evm", &EncodeBytes::Hex, "https://example.com", &None);
+        let meta = build_file_metadata(
+            "evm",
+            &EncodeBytes::Hex,
+            "https://example.com",
+            Compression::Zstd,
+            &None,
+        );
 
         assert_eq!(find_meta(&meta, "firehose-parquet.chain_name"), None);
         assert_eq!(
@@ -3972,6 +4015,10 @@ mod tests {
         );
         assert_eq!(find_meta(&meta, "firehose-parquet.block_id_encoding"), None);
         assert_eq!(find_meta(&meta, "firehose-parquet.block_features"), None);
+        assert_eq!(
+            find_meta(&meta, "firehose-parquet.compression"),
+            Some("zstd")
+        );
     }
 
     #[test]
@@ -3985,7 +4032,13 @@ mod tests {
             block_id_encoding: 0,
             block_features: vec![],
         });
-        let meta = build_file_metadata("evm", &EncodeBytes::Hex, "https://example.com", &ei);
+        let meta = build_file_metadata(
+            "evm",
+            &EncodeBytes::Hex,
+            "https://example.com",
+            Compression::Zstd,
+            &ei,
+        );
 
         assert_eq!(find_meta(&meta, "firehose-parquet.chain_name"), Some("eth"));
         assert_eq!(
@@ -4002,6 +4055,22 @@ mod tests {
         );
         assert_eq!(find_meta(&meta, "firehose-parquet.block_id_encoding"), None);
         assert_eq!(find_meta(&meta, "firehose-parquet.block_features"), None);
+    }
+
+    #[test]
+    fn test_build_file_metadata_honors_requested_compression() {
+        let meta = build_file_metadata(
+            "evm",
+            &EncodeBytes::Hex,
+            "https://example.com",
+            Compression::Snappy,
+            &None,
+        );
+
+        assert_eq!(
+            find_meta(&meta, "firehose-parquet.compression"),
+            Some("snappy")
+        );
     }
 
     #[tokio::test]
