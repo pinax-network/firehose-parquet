@@ -2164,6 +2164,12 @@ async fn find_latest_available_block(
     Ok(low_available)
 }
 
+fn next_live_partition_probe_candidate(block_num: u64, step: u64) -> Option<u64> {
+    block_num
+        .checked_add(step)
+        .filter(|candidate| *candidate != u64::MAX)
+}
+
 async fn locate_live_partition_span(
     client: &FirehoseClient,
     partition_type: PartitionBuildType,
@@ -2177,7 +2183,12 @@ async fn locate_live_partition_span(
     let mut step = 1u64;
 
     loop {
-        let candidate = low_same.block_num.saturating_add(step);
+        let Some(candidate) = next_live_partition_probe_candidate(low_same.block_num, step) else {
+            return Ok(PartitionProbeSpan {
+                last_same: low_same,
+                next_boundary: None,
+            });
+        };
         match fetch_optional_probe_block_identity(
             client,
             candidate,
@@ -4359,6 +4370,13 @@ mod tests {
             Some((33, 1_700_000_000))
         );
         assert!(attempts.load(AtomicOrdering::SeqCst) >= 2);
+    }
+
+    #[test]
+    fn test_next_live_partition_probe_candidate_avoids_u64_max_sentinel() {
+        assert_eq!(next_live_partition_probe_candidate(10, 5), Some(15));
+        assert_eq!(next_live_partition_probe_candidate(u64::MAX - 1, 1), None);
+        assert_eq!(next_live_partition_probe_candidate(u64::MAX - 5, 10), None);
     }
 
     // -- build_partitions_file_metadata tests --
