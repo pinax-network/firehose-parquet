@@ -4256,6 +4256,7 @@ mod tests {
             find_meta(&meta, "firehose-parquet.block_range_size"),
             Some("0")
         );
+        assert_eq!(find_meta(&meta, "partition_type"), None);
     }
 
     #[test]
