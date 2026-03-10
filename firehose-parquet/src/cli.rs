@@ -2340,12 +2340,6 @@ fn write_partitions_index_impl(
         ),
     ]));
 
-    // Determine partition type from rows to store as file-level metadata
-    let partition_type_label = rows
-        .first()
-        .map(|row| row.partition_type.clone())
-        .unwrap_or_default();
-
     // Build partition column: UInt64 — epoch seconds for time-based, start block for block_range
     let partition_values = rows
         .iter()
@@ -2428,13 +2422,6 @@ fn write_partitions_index_impl(
                 .iter()
                 .map(|(key, value)| KeyValue::new(key.clone(), value.clone())),
         );
-    }
-    // Always store partition_type as file-level metadata
-    if !partition_type_label.is_empty() {
-        kvs.push(KeyValue::new(
-            "partition_type".to_string(),
-            partition_type_label,
-        ));
     }
     if !kvs.is_empty() {
         props_builder = props_builder.set_key_value_metadata(Some(kvs));
@@ -8528,14 +8515,15 @@ mod tests {
             &DataType::UInt64
         );
 
-        // Verify file-level metadata contains partition_type
+        // Verify file-level metadata uses the namespaced partition key only
         let file_metadata = builder.metadata().file_metadata();
         let kvs = file_metadata.key_value_metadata().expect("metadata");
-        let partition_type_kv = kvs
+        let partition_kv = kvs
             .iter()
-            .find(|kv| kv.key == "partition_type")
-            .expect("partition_type metadata");
-        assert_eq!(partition_type_kv.value.as_deref(), Some("hour"));
+            .find(|kv| kv.key == "firehose-parquet.partition")
+            .expect("firehose-parquet.partition metadata");
+        assert_eq!(partition_kv.value.as_deref(), Some("hour"));
+        assert!(!kvs.iter().any(|kv| kv.key == "partition_type"));
         assert_eq!(
             schema
                 .field_with_name("start_time")
