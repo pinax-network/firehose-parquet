@@ -974,6 +974,7 @@ async fn run_partitions_build(
                         partition_type,
                         &current_block,
                         PARTITIONS_PROBE_TIMEOUT,
+                        true,
                         skip_missing_blocks,
                         &probe_counter,
                     ),
@@ -1297,6 +1298,7 @@ async fn run_partitions_build(
                 partition_type,
                 &current_block,
                 PARTITIONS_PROBE_TIMEOUT,
+                false,
                 skip_missing_blocks,
                 &probe_counter,
             )
@@ -2017,24 +2019,59 @@ async fn find_first_different_block(
     client: &FirehoseClient,
     partition_type: PartitionBuildType,
     partition_start_ts: i64,
-    mut low_same: BlockIdentity,
-    mut high_different: BlockIdentity,
+    low_same: BlockIdentity,
+    high_different: BlockIdentity,
     probe_timeout: Duration,
     skip_missing_blocks: bool,
     probe_counter: &AtomicU64,
 ) -> Result<(BlockIdentity, BlockIdentity)> {
+    let span = find_first_different_block_with_fetch(
+        partition_type,
+        partition_start_ts,
+        low_same,
+        high_different,
+        |mid| async move {
+            fetch_required_block_identity(
+                client,
+                mid,
+                Some(probe_timeout),
+                "probing partition boundary",
+                16,
+                skip_missing_blocks,
+                probe_counter,
+            )
+            .await
+            .map(Some)
+        },
+    )
+    .await?;
+
+    Ok((
+        span.last_same,
+        span.next_boundary
+            .expect("bounded partition boundary search should resolve a next boundary"),
+    ))
+}
+
+async fn find_first_different_block_with_fetch<F, Fut>(
+    partition_type: PartitionBuildType,
+    partition_start_ts: i64,
+    mut low_same: BlockIdentity,
+    mut high_different: BlockIdentity,
+    mut fetch_probe: F,
+) -> Result<PartitionProbeSpan>
+where
+    F: FnMut(u64) -> Fut,
+    Fut: std::future::Future<Output = Result<Option<BlockIdentity>>>,
+{
     while low_same.block_num.saturating_add(1) < high_different.block_num {
         let mid = low_same.block_num + (high_different.block_num - low_same.block_num) / 2;
-        let probe = fetch_required_block_identity(
-            client,
-            mid,
-            Some(probe_timeout),
-            "probing partition boundary",
-            16,
-            skip_missing_blocks,
-            probe_counter,
-        )
-        .await?;
+        let Some(probe) = fetch_probe(mid).await? else {
+            return Ok(PartitionProbeSpan {
+                last_same: low_same,
+                next_boundary: None,
+            });
+        };
 
         if probe.block_num >= high_different.block_num {
             break;
@@ -2045,7 +2082,10 @@ async fn find_first_different_block(
         }
     }
 
-    Ok((low_same, high_different))
+    Ok(PartitionProbeSpan {
+        last_same: low_same,
+        next_boundary: Some(high_different),
+    })
 }
 
 async fn locate_partition_start(
@@ -2177,6 +2217,7 @@ async fn locate_live_partition_span(
     partition_type: PartitionBuildType,
     start_block: &BlockIdentity,
     probe_timeout: Duration,
+    allow_incomplete_boundary: bool,
     skip_missing_blocks: bool,
     probe_counter: &AtomicU64,
 ) -> Result<PartitionProbeSpan> {
@@ -2207,6 +2248,28 @@ async fn locate_live_partition_span(
                     low_same = probe;
                     step = step.saturating_mul(2).max(1);
                     continue;
+                }
+
+                if allow_incomplete_boundary {
+                    return find_first_different_block_with_fetch(
+                        partition_type,
+                        partition_start_ts,
+                        low_same,
+                        probe,
+                        |mid| async move {
+                            fetch_optional_probe_block_identity(
+                                client,
+                                mid,
+                                Some(probe_timeout),
+                                "probing partition boundary",
+                                16,
+                                skip_missing_blocks,
+                                probe_counter,
+                            )
+                            .await
+                        },
+                    )
+                    .await;
                 }
 
                 let (last_same, next_boundary) = find_first_different_block(
@@ -2249,6 +2312,28 @@ async fn locate_live_partition_span(
                         last_same: latest_available,
                         next_boundary: None,
                     });
+                }
+
+                if allow_incomplete_boundary {
+                    return find_first_different_block_with_fetch(
+                        partition_type,
+                        partition_start_ts,
+                        low_same,
+                        latest_available,
+                        |mid| async move {
+                            fetch_optional_probe_block_identity(
+                                client,
+                                mid,
+                                Some(probe_timeout),
+                                "probing partition boundary",
+                                16,
+                                skip_missing_blocks,
+                                probe_counter,
+                            )
+                            .await
+                        },
+                    )
+                    .await;
                 }
 
                 let (last_same, next_boundary) = find_first_different_block(
@@ -4379,6 +4464,100 @@ mod tests {
         assert_eq!(next_live_partition_probe_candidate(10, 5), Some(15));
         assert_eq!(next_live_partition_probe_candidate(u64::MAX - 1, 1), None);
         assert_eq!(next_live_partition_probe_candidate(u64::MAX - 5, 10), None);
+    }
+
+    #[tokio::test]
+    async fn test_find_first_different_block_with_fetch_returns_incomplete_boundary_on_missing_probe(
+    ) {
+        let low_same = BlockIdentity {
+            block_num: 100,
+            timestamp: 1_700_000_000,
+            ..Default::default()
+        };
+        let high_different = BlockIdentity {
+            block_num: 110,
+            timestamp: 1_700_086_400,
+            ..Default::default()
+        };
+        let same_ts = low_same.timestamp;
+
+        let span = find_first_different_block_with_fetch(
+            PartitionBuildType::Date,
+            block_partition_start(PartitionBuildType::Date, &low_same)
+                .expect("partition start timestamp"),
+            low_same.clone(),
+            high_different,
+            |mid| async move {
+                match mid {
+                    105 => Ok(Some(BlockIdentity {
+                        block_num: 105,
+                        timestamp: same_ts,
+                        ..Default::default()
+                    })),
+                    107 => Ok(None),
+                    other => panic!("unexpected probe block {other}"),
+                }
+            },
+        )
+        .await
+        .expect("boundary search should succeed");
+
+        assert_eq!(span.last_same.block_num, 105);
+        assert!(span.next_boundary.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_find_first_different_block_with_fetch_resolves_boundary_when_probes_available() {
+        let low_same = BlockIdentity {
+            block_num: 100,
+            timestamp: 1_700_000_000,
+            ..Default::default()
+        };
+        let high_different = BlockIdentity {
+            block_num: 110,
+            timestamp: 1_700_086_400,
+            ..Default::default()
+        };
+        let same_ts = low_same.timestamp;
+        let next_ts = high_different.timestamp;
+
+        let span = find_first_different_block_with_fetch(
+            PartitionBuildType::Date,
+            block_partition_start(PartitionBuildType::Date, &low_same)
+                .expect("partition start timestamp"),
+            low_same.clone(),
+            high_different,
+            |mid| async move {
+                match mid {
+                    105 => Ok(Some(BlockIdentity {
+                        block_num: 105,
+                        timestamp: same_ts,
+                        ..Default::default()
+                    })),
+                    107 => Ok(Some(BlockIdentity {
+                        block_num: 107,
+                        timestamp: next_ts,
+                        ..Default::default()
+                    })),
+                    106 => Ok(Some(BlockIdentity {
+                        block_num: 106,
+                        timestamp: next_ts,
+                        ..Default::default()
+                    })),
+                    other => panic!("unexpected probe block {other}"),
+                }
+            },
+        )
+        .await
+        .expect("boundary search should succeed");
+
+        assert_eq!(span.last_same.block_num, 105);
+        assert_eq!(
+            span.next_boundary
+                .expect("boundary should resolve")
+                .block_num,
+            106
+        );
     }
 
     // -- build_partitions_file_metadata tests --
