@@ -5383,7 +5383,7 @@ fn check_tuples(tuples: &[BlockTuple]) -> CheckResult {
 }
 
 /// Detect the partition key from a file path by looking for Hive-style directories
-/// (e.g. `date=2026-01-01`, `block_range=0-10000`). Returns the partition directory
+/// (e.g. `date=2026-01-01`, `block_range=0-100000`). Returns the partition directory
 /// path relative to the base, or "(root)" if no partition structure is detected.
 fn detect_partition(file_path: &str, base_path: &str) -> String {
     let relative = file_path
@@ -5991,6 +5991,17 @@ mod tests {
             Partition::BlockRange(20000)
         );
         assert!(parse_partition("unknown", 10000).is_err());
+    }
+
+    #[test]
+    fn test_detect_partition_accepts_exclusive_block_range_label() {
+        assert_eq!(
+            detect_partition(
+                "/tmp/output/blocks/block_range=390500000-390600000/part-000001.parquet",
+                "/tmp/output"
+            ),
+            "block_range=390500000-390600000"
+        );
     }
 
     #[test]

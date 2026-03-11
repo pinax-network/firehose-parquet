@@ -222,8 +222,8 @@ impl ParquetTableWriter {
             Partition::None => table.to_string(),
             Partition::BlockRange(size) => {
                 let start = (metadata.min_block_number / size) * size;
-                let end = start + size - 1;
-                format!("{table}/block_range={start}-{end}")
+                let stop = start + size;
+                format!("{table}/block_range={start}-{stop}")
             }
             Partition::Date => {
                 if let Some(ts) = metadata.min_timestamp {
@@ -296,8 +296,8 @@ impl ParquetTableWriter {
             Partition::None => base,
             Partition::BlockRange(size) => {
                 let start = (metadata.min_block_number / size) * size;
-                let end = start + size - 1;
-                base.join(format!("block_range={start}-{end}"))
+                let stop = start + size;
+                base.join(format!("block_range={start}-{stop}"))
             }
             Partition::Date => {
                 if let Some(ts) = metadata.min_timestamp {
@@ -925,7 +925,7 @@ mod tests {
             max_timestamp: None,
         };
         let (path, _) = writer.write_batch("blocks", &batch, &meta).unwrap();
-        assert!(path.to_string_lossy().contains("block_range=100-199"));
+        assert!(path.to_string_lossy().contains("block_range=100-200"));
     }
 
     #[test]
@@ -1403,7 +1403,7 @@ mod tests {
         out.flush_remaining().unwrap();
 
         // Should write to a single block_range partition
-        let br = dir.path().join("blocks/block_range=0-999");
+        let br = dir.path().join("blocks/block_range=0-1000");
         assert!(br.exists());
         let parts: Vec<_> = std::fs::read_dir(&br)
             .unwrap()

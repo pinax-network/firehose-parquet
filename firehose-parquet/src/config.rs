@@ -97,7 +97,7 @@ impl Partition {
             Partition::None => None,
             Partition::BlockRange(size) => {
                 let start = (block_number / size) * size;
-                Some(format!("block_range={}-{}", start, start + size - 1))
+                Some(format!("block_range={}-{}", start, start + size))
             }
             Partition::Date => {
                 let dt = time::OffsetDateTime::from_unix_timestamp(timestamp)
@@ -502,12 +502,20 @@ mod tests {
     #[test]
     fn test_partition_key_block_range() {
         assert_eq!(
+            Partition::BlockRange(1000).partition_key(1000, 0),
+            Some("block_range=1000-2000".to_string())
+        );
+        assert_eq!(
             Partition::BlockRange(1000).partition_key(1500, 0),
-            Some("block_range=1000-1999".to_string())
+            Some("block_range=1000-2000".to_string())
+        );
+        assert_eq!(
+            Partition::BlockRange(1000).partition_key(1999, 0),
+            Some("block_range=1000-2000".to_string())
         );
         assert_eq!(
             Partition::BlockRange(1000).partition_key(2000, 0),
-            Some("block_range=2000-2999".to_string())
+            Some("block_range=2000-3000".to_string())
         );
     }
 
