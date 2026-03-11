@@ -873,7 +873,157 @@ async fn run_partitions_build(
 
     let probe_counter = AtomicU64::new(0);
 
-    let rows = if live {
+    let rows = if live && partition_type == PartitionBuildType::BlockRange {
+        let poll_interval = Duration::from_secs(poll_interval_secs);
+        let block_range_size = block_range_size.expect("validated above");
+        let mut checkpoint_state = PartitionsCheckpointState::default();
+        let mut rows = existing_rows.clone();
+
+        info!(
+            effective_start_block,
+            block_range_size,
+            existing_rows = rows.len(),
+            "starting live block-range partitions build"
+        );
+
+        'live: loop {
+            if shutdown.load(Ordering::SeqCst) {
+                break;
+            }
+
+            let frontier = rows
+                .iter()
+                .map(|row| row.end_block)
+                .max()
+                .unwrap_or(effective_start_block);
+            let Some(maybe_latest_available) = await_live_interruptible(
+                &shutdown,
+                &shutdown_notify,
+                locate_live_block_range_latest_available_block(
+                    &stream_client,
+                    frontier,
+                    poll_interval,
+                    skip_missing_blocks,
+                    &probe_counter,
+                ),
+            )
+            .await?
+            else {
+                info!(
+                    frontier,
+                    "live block-range build interrupted during frontier probe"
+                );
+                break;
+            };
+
+            let Some(latest_available) = maybe_latest_available else {
+                info!(
+                    frontier,
+                    poll_interval_secs,
+                    "no new finalized blocks available yet for block-range build; polling again"
+                );
+                continue;
+            };
+
+            let completed_frontier = completed_block_range_frontier(
+                latest_available.block_num,
+                block_range_size,
+            );
+            if completed_frontier <= frontier {
+                info!(
+                    frontier,
+                    latest_finalized_block = latest_available.block_num,
+                    next_partition_end = frontier.saturating_add(block_range_size),
+                    "latest finalized block has not completed the next block-range partition yet"
+                );
+                continue;
+            }
+
+            info!(
+                frontier,
+                latest_finalized_block = latest_available.block_num,
+                completed_frontier,
+                block_range_size,
+                "processing live block-range partitions"
+            );
+
+            let mut boundary = frontier;
+            while boundary < completed_frontier {
+                if shutdown.load(Ordering::SeqCst) {
+                    break 'live;
+                }
+
+                let partition_end = (boundary + block_range_size).min(completed_frontier);
+                let row = build_block_range_partition_row(
+                    &stream_client,
+                    &chain,
+                    boundary,
+                    partition_end,
+                    block_range_size,
+                    PARTITIONS_PROBE_TIMEOUT,
+                    skip_missing_blocks,
+                    strict_timestamps,
+                    &probe_counter,
+                )
+                .await?;
+
+                info!(
+                    partition = %format!("[{}, {})", boundary, partition_end),
+                    start_time = row.start_time.as_deref().unwrap_or("null"),
+                    end_time = row.end_time.as_deref().unwrap_or("null"),
+                    "built live block-range partition"
+                );
+
+                rows.push(row);
+                checkpoint_state.record_rollover();
+
+                let frontier_advanced = checkpoint_state.last_checkpoint_frontier != Some(partition_end);
+                let interval_elapsed = checkpoint_state
+                    .last_checkpoint_at
+                    .map(|at| at.elapsed() >= PARTITIONS_CHECKPOINT_INTERVAL)
+                    .unwrap_or(true);
+                let enough_rollovers =
+                    checkpoint_state.rollovers_since_checkpoint >= PARTITIONS_CHECKPOINT_ROLLOVERS;
+                if frontier_advanced
+                    && (checkpoint_state.last_checkpoint_frontier.is_none()
+                        || interval_elapsed
+                        || enough_rollovers)
+                {
+                    checkpoint_partitions_rows(
+                        &rows,
+                        &partitions_index,
+                        compression,
+                        Some(aws),
+                        &partitions_file_metadata,
+                        &mut checkpoint_state,
+                        &probe_counter,
+                        !strict_timestamps,
+                        overwrite,
+                    )?;
+                }
+
+                boundary = partition_end;
+            }
+        }
+
+        if !rows.is_empty() {
+            checkpoint_partitions_rows(
+                &rows,
+                &partitions_index,
+                compression,
+                Some(aws),
+                &partitions_file_metadata,
+                &mut checkpoint_state,
+                &probe_counter,
+                !strict_timestamps,
+                overwrite,
+            )?
+        } else if !existing_rows.is_empty() {
+            existing_rows.clone()
+        } else {
+            Vec::new()
+        }
+    } else if live {
         let poll_interval = Duration::from_secs(poll_interval_secs);
         let mut checkpoint_state = PartitionsCheckpointState::default();
 
@@ -1075,105 +1225,27 @@ async fn run_partitions_build(
         while boundary < aligned_stop {
             let partition_end = (boundary + block_range_size).min(aligned_stop);
 
-            // Probe the first block of this partition for start_time (best-effort)
-            let start_time = match stream_client
-                .fetch_block_identity(boundary, Some(PARTITIONS_PROBE_TIMEOUT))
-                .await
-            {
-                Ok(Some(block)) if block.timestamp != 0 => {
-                    probe_counter.fetch_add(1, Ordering::Relaxed);
-                    Some(block.timestamp)
-                }
-                Ok(Some(_)) => {
-                    probe_counter.fetch_add(1, Ordering::Relaxed);
-                    None // block exists but no timestamp
-                }
-                _ => {
-                    probe_counter.fetch_add(1, Ordering::Relaxed);
-                    if skip_missing_blocks {
-                        None
-                    } else {
-                        // Try scanning forward a small window
-                        let mut found = None;
-                        for offset in 1..=PROBE_TIMESTAMP_SCAN_LIMIT {
-                            if let Ok(Some(block)) = stream_client
-                                .fetch_block_identity(
-                                    boundary + offset,
-                                    Some(PARTITIONS_PROBE_TIMEOUT),
-                                )
-                                .await
-                            {
-                                probe_counter.fetch_add(1, Ordering::Relaxed);
-                                if block.timestamp != 0 {
-                                    found = Some(block.timestamp);
-                                    break;
-                                }
-                            } else {
-                                probe_counter.fetch_add(1, Ordering::Relaxed);
-                            }
-                        }
-                        found
-                    }
-                }
-            };
-
-            // Probe the last block of this partition for end_time (best-effort)
-            let end_time = if partition_end > boundary + 1 {
-                match stream_client
-                    .fetch_block_identity(
-                        partition_end.saturating_sub(1),
-                        Some(PARTITIONS_PROBE_TIMEOUT),
-                    )
-                    .await
-                {
-                    Ok(Some(block)) if block.timestamp != 0 => {
-                        probe_counter.fetch_add(1, Ordering::Relaxed);
-                        Some(block.timestamp)
-                    }
-                    Ok(Some(_)) => {
-                        probe_counter.fetch_add(1, Ordering::Relaxed);
-                        None
-                    }
-                    _ => {
-                        probe_counter.fetch_add(1, Ordering::Relaxed);
-                        None
-                    }
-                }
-            } else {
-                start_time
-            };
-
-            // Enforce strict timestamps if enabled
-            if strict_timestamps && (start_time.is_none() || end_time.is_none()) {
-                return Err(anyhow!(
-                    "block-range partition [{}, {}) has no timestamp and --strict-timestamps is enabled; \
-                     use --strict-timestamps false for chains with missing blocks",
-                    boundary,
-                    partition_end
-                ));
-            }
-
-            let start_time_str = start_time.map(format_probe_timestamp).transpose()?;
-            let end_time_str = end_time.map(format_probe_timestamp).transpose()?;
-
-            rows.push(PartitionBuildRow {
-                partition_type: "block_range".to_string(),
-                partition_interval_seconds: block_range_size as i64,
-                partition_start_ts: boundary.to_string(),
-                partition_value: boundary.to_string(),
-                start_block: boundary,
-                end_block: partition_end,
-                start_time: start_time_str,
-                end_time: end_time_str,
-                chain: Some(chain.clone()),
-            });
+            let row = build_block_range_partition_row(
+                &stream_client,
+                &chain,
+                boundary,
+                partition_end,
+                block_range_size,
+                PARTITIONS_PROBE_TIMEOUT,
+                skip_missing_blocks,
+                strict_timestamps,
+                &probe_counter,
+            )
+            .await?;
 
             info!(
                 partition = %format!("[{}, {})", boundary, partition_end),
-                start_time = start_time.map(|t| t.to_string()).unwrap_or_else(|| "null".to_string()),
-                end_time = end_time.map(|t| t.to_string()).unwrap_or_else(|| "null".to_string()),
+                start_time = row.start_time.as_deref().unwrap_or("null"),
+                end_time = row.end_time.as_deref().unwrap_or("null"),
                 "built block-range partition"
             );
+
+            rows.push(row);
 
             checkpoint_state.record_rollover();
             let frontier_advanced =
@@ -1609,6 +1681,14 @@ fn checkpoint_partitions_rows(
     Ok(rows.to_vec())
 }
 
+fn completed_block_range_frontier(latest_available_block_num: u64, block_range_size: u64) -> u64 {
+    latest_available_block_num
+        .saturating_add(1)
+        .checked_div(block_range_size)
+        .unwrap_or(0)
+        .saturating_mul(block_range_size)
+}
+
 const PARTITIONS_PROBE_FETCH_MAX_ATTEMPTS: usize = 4;
 const PARTITIONS_PROBE_FETCH_INITIAL_BACKOFF: Duration = Duration::from_millis(250);
 const PARTITIONS_PROBE_SKIP_MISSING_BLOCK_SCAN_LIMIT: u64 = 16;
@@ -1863,6 +1943,47 @@ async fn fetch_optional_probe_block_identity(
     ))
 }
 
+async fn fetch_optional_raw_probe_block_identity(
+    client: &FirehoseClient,
+    block_num: u64,
+    wait_timeout: Option<Duration>,
+    context: &str,
+    skip_missing_blocks: bool,
+    probe_counter: &AtomicU64,
+) -> Result<Option<BlockIdentity>> {
+    let max_skip_blocks = if skip_missing_blocks {
+        PARTITIONS_PROBE_SKIP_MISSING_BLOCK_SCAN_LIMIT
+    } else {
+        0
+    };
+
+    let Some((resolved_block_num, block)) = fetch_probe_block_identity_raw(
+        client,
+        block_num,
+        wait_timeout,
+        context,
+        max_skip_blocks,
+        skip_missing_blocks,
+        probe_counter,
+    )
+    .await?
+    else {
+        return Ok(None);
+    };
+
+    if resolved_block_num > block_num {
+        warn!(
+            requested_block_num = block_num,
+            resolved_block_num,
+            skipped_missing_blocks = resolved_block_num.saturating_sub(block_num),
+            context,
+            "skipping missing blocks after probe retries"
+        );
+    }
+
+    Ok(Some(block))
+}
+
 async fn fetch_probe_block_identity_raw(
     client: &FirehoseClient,
     block_num: u64,
@@ -1898,7 +2019,6 @@ async fn normalize_probe_block_identity(
     if block.timestamp > 0 {
         return Ok(block);
     }
-
     let max_skip_blocks = if skip_missing_blocks {
         PARTITIONS_PROBE_SKIP_MISSING_BLOCK_SCAN_LIMIT
     } else {
@@ -1946,12 +2066,211 @@ async fn normalize_probe_block_identity(
         return Ok(block);
     }
 
-    Err(anyhow!(
-        "{context}: block {} is missing timestamp metadata and no finalized block with a timestamp was found within {} sequential probe blocks or the bounded exponential probe window (max jump {})",
+    Err(anyhow!(format_missing_timestamp_probe_error(
+        context,
         block.block_num,
         timestamp_scan_limit,
         PARTITIONS_PROBE_TIMESTAMP_EXPONENTIAL_MAX_JUMP,
-    ))
+    )))
+}
+
+async fn probe_block_range_boundary_timestamp(
+    client: &FirehoseClient,
+    block_num: u64,
+    probe_timeout: Duration,
+    scan_forward_on_missing: bool,
+    skip_missing_blocks: bool,
+    probe_counter: &AtomicU64,
+) -> Option<i64> {
+    match client
+        .fetch_block_identity(block_num, Some(probe_timeout))
+        .await
+    {
+        Ok(Some(block)) if block.timestamp != 0 => {
+            probe_counter.fetch_add(1, Ordering::Relaxed);
+            Some(block.timestamp)
+        }
+        Ok(Some(_)) => {
+            probe_counter.fetch_add(1, Ordering::Relaxed);
+            None
+        }
+        _ if skip_missing_blocks || !scan_forward_on_missing => {
+            probe_counter.fetch_add(1, Ordering::Relaxed);
+            None
+        }
+        _ => {
+            probe_counter.fetch_add(1, Ordering::Relaxed);
+            let mut found = None;
+            for offset in 1..=16 {
+                if let Ok(Some(block)) = client
+                    .fetch_block_identity(block_num + offset, Some(probe_timeout))
+                    .await
+                {
+                    probe_counter.fetch_add(1, Ordering::Relaxed);
+                    if block.timestamp != 0 {
+                        found = Some(block.timestamp);
+                        break;
+                    }
+                } else {
+                    probe_counter.fetch_add(1, Ordering::Relaxed);
+                }
+            }
+            found
+        }
+    }
+}
+
+async fn build_block_range_partition_row(
+    client: &FirehoseClient,
+    chain: &str,
+    boundary: u64,
+    partition_end: u64,
+    block_range_size: u64,
+    probe_timeout: Duration,
+    skip_missing_blocks: bool,
+    strict_timestamps: bool,
+    probe_counter: &AtomicU64,
+) -> Result<PartitionBuildRow> {
+    let start_time = probe_block_range_boundary_timestamp(
+        client,
+        boundary,
+        probe_timeout,
+        true,
+        skip_missing_blocks,
+        probe_counter,
+    )
+    .await;
+    let end_time = if partition_end > boundary + 1 {
+        probe_block_range_boundary_timestamp(
+            client,
+            partition_end.saturating_sub(1),
+            probe_timeout,
+            false,
+            skip_missing_blocks,
+            probe_counter,
+        )
+        .await
+    } else {
+        start_time
+    };
+
+    if strict_timestamps && (start_time.is_none() || end_time.is_none()) {
+        return Err(anyhow!(
+            "block-range partition [{}, {}) has no timestamp and --strict-timestamps is enabled; \
+             use --strict-timestamps false for chains with missing blocks",
+            boundary,
+            partition_end
+        ));
+    }
+
+    Ok(PartitionBuildRow {
+        partition_type: "block_range".to_string(),
+        partition_interval_seconds: block_range_size as i64,
+        partition_start_ts: boundary.to_string(),
+        partition_value: boundary.to_string(),
+        start_block: boundary,
+        end_block: partition_end,
+        start_time: start_time.map(format_probe_timestamp).transpose()?,
+        end_time: end_time.map(format_probe_timestamp).transpose()?,
+        chain: Some(chain.to_string()),
+    })
+}
+
+async fn find_latest_available_block_raw(
+    client: &FirehoseClient,
+    mut low_available: BlockIdentity,
+    mut high_unavailable: u64,
+    probe_timeout: Duration,
+    skip_missing_blocks: bool,
+    probe_counter: &AtomicU64,
+) -> Result<BlockIdentity> {
+    while low_available.block_num.saturating_add(1) < high_unavailable {
+        let mid = low_available.block_num + (high_unavailable - low_available.block_num) / 2;
+        match fetch_optional_raw_probe_block_identity(
+            client,
+            mid,
+            Some(probe_timeout),
+            "finding latest available block-range block",
+            skip_missing_blocks,
+            probe_counter,
+        )
+        .await?
+        {
+            Some(probe) => low_available = probe,
+            None => high_unavailable = mid,
+        }
+    }
+
+    Ok(low_available)
+}
+
+async fn locate_live_block_range_latest_available_block(
+    client: &FirehoseClient,
+    frontier: u64,
+    probe_timeout: Duration,
+    skip_missing_blocks: bool,
+    probe_counter: &AtomicU64,
+) -> Result<Option<BlockIdentity>> {
+    let Some(mut low_available) = fetch_optional_raw_probe_block_identity(
+        client,
+        frontier,
+        Some(probe_timeout),
+        "polling live frontier",
+        skip_missing_blocks,
+        probe_counter,
+    )
+    .await?
+    else {
+        return Ok(None);
+    };
+
+    let mut step = 1u64;
+    loop {
+        let Some(candidate) = next_live_partition_probe_candidate(low_available.block_num, step)
+        else {
+            return Ok(Some(low_available));
+        };
+
+        match fetch_optional_raw_probe_block_identity(
+            client,
+            candidate,
+            Some(probe_timeout),
+            "probing live block-range availability",
+            skip_missing_blocks,
+            probe_counter,
+        )
+        .await?
+        {
+            Some(probe) => {
+                low_available = probe;
+                step = step.saturating_mul(2).max(1);
+            }
+            None => {
+                return Ok(Some(
+                    find_latest_available_block_raw(
+                        client,
+                        low_available,
+                        candidate,
+                        probe_timeout,
+                        skip_missing_blocks,
+                        probe_counter,
+                    )
+                    .await?,
+                ));
+            }
+        }
+    }
+}
+
+fn format_missing_timestamp_probe_error(
+    context: &str,
+    block_num: u64,
+    timestamp_scan_limit: u64,
+    max_jump: u64,
+) -> String {
+    format!(
+        "{context}: block {block_num} is missing timestamp metadata and no finalized block with a timestamp was found within {timestamp_scan_limit} sequential probe blocks or the bounded exponential probe window (max jump {max_jump}); for legacy ranges on chains like Solana, rerun with --partition block_range --block-range-size <N> --strict-timestamps false"
+    )
 }
 
 fn block_partition_start(partition_type: PartitionBuildType, block: &BlockIdentity) -> Result<i64> {
@@ -3818,6 +4137,22 @@ mod tests {
     }
 
     #[test]
+    fn test_completed_block_range_frontier_requires_full_partition() {
+        assert_eq!(completed_block_range_frontier(0, 100_000), 0);
+        assert_eq!(completed_block_range_frontier(99_998, 100_000), 0);
+        assert_eq!(completed_block_range_frontier(99_999, 100_000), 100_000);
+        assert_eq!(completed_block_range_frontier(250_123, 100_000), 200_000);
+    }
+
+    #[test]
+    fn test_completed_block_range_frontier_handles_u64_max() {
+        assert_eq!(
+            completed_block_range_frontier(u64::MAX, 100_000),
+            (u64::MAX / 100_000).saturating_mul(100_000)
+        );
+    }
+
+    #[test]
     fn test_detect_block_type_evm() {
         assert_eq!(
             detect_block_type("type.googleapis.com/sf.ethereum.type.v2.Block").unwrap(),
@@ -4466,7 +4801,7 @@ mod tests {
     }
 
     #[test]
-    fn test_next_live_partition_probe_candidate_avoids_u64_max_sentinel() {
+    fn test_next_live_partition_probe_candidate_avoids_u64_max_sentinel_duplicate_guard() {
         assert_eq!(next_live_partition_probe_candidate(10, 5), Some(15));
         assert_eq!(next_live_partition_probe_candidate(u64::MAX - 1, 1), None);
         assert_eq!(next_live_partition_probe_candidate(u64::MAX - 5, 10), None);
@@ -4614,6 +4949,21 @@ mod tests {
         assert!(exponential_candidates
             .iter()
             .all(|candidate| *candidate <= PARTITIONS_PROBE_TIMESTAMP_EXPONENTIAL_MAX_JUMP))
+    }
+
+    #[test]
+    fn test_format_missing_timestamp_probe_error_suggests_block_range() {
+        let message = format_missing_timestamp_probe_error(
+            "polling live frontier",
+            4_420_838,
+            16,
+            PARTITIONS_PROBE_TIMESTAMP_EXPONENTIAL_MAX_JUMP,
+        );
+
+        assert!(message.contains("polling live frontier: block 4420838 is missing timestamp metadata"));
+        assert!(message.contains("--partition block_range"));
+        assert!(message.contains("--block-range-size <N>"));
+        assert!(message.contains("--strict-timestamps false"));
     }
 
     #[test]
