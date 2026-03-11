@@ -3,13 +3,14 @@ use crate::metrics::PipelineMetrics;
 use anyhow::{Context, Result};
 use arrow::array::Int64Array;
 use arrow::record_batch::RecordBatch;
-use object_store::aws::AmazonS3Builder;
 use object_store::ObjectStore;
+use object_store::aws::AmazonS3Builder;
 use parquet::arrow::ArrowWriter;
 use parquet::basic::Compression as PqCompression;
 use parquet::basic::ZstdLevel;
 use parquet::file::properties::WriterProperties;
 use std::collections::HashMap;
+use std::fmt::Display;
 use std::fs::{self, File};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -169,7 +170,9 @@ impl ParquetTableWriter {
                         .await
                 })
             })
-            .with_context(|| format!("uploading to S3: {s3_key}"))?;
+            .map_err(|error| {
+                with_root_cause_context(format!("uploading to S3: {s3_key}"), error.into())
+            })?;
 
             info!(
                 table,
@@ -273,7 +276,12 @@ impl ParquetTableWriter {
                         .unwrap_or(OffsetDateTime::UNIX_EPOCH);
                     format!(
                         "{table}/year={:04}/month={:02}/date={:02}/hour={:02}/minute={:02}/second={:02}",
-                        dt.year(), dt.month() as u8, dt.day(), dt.hour(), dt.minute(), dt.second()
+                        dt.year(),
+                        dt.month() as u8,
+                        dt.day(),
+                        dt.hour(),
+                        dt.minute(),
+                        dt.second()
                     )
                 } else {
                     table.to_string()
@@ -371,6 +379,17 @@ impl ParquetTableWriter {
         }
 
         builder.build()
+    }
+}
+
+fn with_root_cause_context(context: impl Display, error: anyhow::Error) -> anyhow::Error {
+    let context = context.to_string();
+    let root_cause = error.root_cause().to_string();
+
+    if root_cause == error.to_string() {
+        error.context(context)
+    } else {
+        error.context(format!("{context} (root cause: {root_cause})"))
     }
 }
 
@@ -854,6 +873,7 @@ pub fn read_parquet(path: &Path) -> Result<Vec<RecordBatch>> {
 mod tests {
     use super::*;
     use crate::config::{BlockMetadata, Compression, Partition};
+    use anyhow::anyhow;
     use arrow::array::UInt64Builder;
     use arrow::datatypes::{DataType, Field, Schema};
     use std::sync::Arc;
@@ -1038,6 +1058,35 @@ mod tests {
     fn test_parse_s3_url_invalid() {
         assert!(parse_s3_url("http://not-s3").is_err());
         assert!(parse_s3_url("s3://").is_err());
+    }
+
+    #[test]
+    fn test_with_root_cause_context_includes_distinct_root_cause() {
+        let error = anyhow!("operation timed out")
+            .context("error sending request")
+            .context("HTTP error: error sending request");
+
+        let error = with_root_cause_context("uploading to S3: path/file.parquet", error);
+
+        assert_eq!(
+            error.to_string(),
+            "uploading to S3: path/file.parquet (root cause: operation timed out)"
+        );
+        let chain: Vec<_> = error.chain().map(ToString::to_string).collect();
+        assert_eq!(chain[1], "HTTP error: error sending request");
+        assert_eq!(chain.last().unwrap(), "operation timed out");
+    }
+
+    #[test]
+    fn test_with_root_cause_context_avoids_duplicate_single_cause() {
+        let error = with_root_cause_context(
+            "uploading to S3: path/file.parquet",
+            anyhow!("operation timed out"),
+        );
+
+        assert_eq!(error.to_string(), "uploading to S3: path/file.parquet");
+        let chain: Vec<_> = error.chain().map(ToString::to_string).collect();
+        assert_eq!(chain[1], "operation timed out");
     }
 
     #[test]
