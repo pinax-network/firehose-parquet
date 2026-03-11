@@ -6433,6 +6433,20 @@ mod tests {
 
     #[test]
     #[serial]
+    fn test_live_flag_parses_without_stop_block() {
+        let cli = parse(&[
+            "test-cli",
+            "--endpoint",
+            "https://example.com:443",
+            "--live",
+        ]);
+
+        assert!(cli.common.live);
+        assert!(cli.common.stop_block.is_none());
+    }
+
+    #[test]
+    #[serial]
     fn test_cursor_must_be_parquet() {
         let cli = parse(&[
             "test-cli",
