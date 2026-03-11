@@ -69,8 +69,8 @@ pub struct CommonArgs {
 
     /// Start block number (inclusive).
     ///
-    /// In live mode, omitting this starts from the endpoint's first streamable
-    /// block when available.
+    /// In live mode, omitting this resumes from an existing cursor when
+    /// available, otherwise starts from the endpoint's first streamable block.
     #[arg(
         short = 's',
         long,
@@ -94,8 +94,9 @@ pub struct CommonArgs {
 
     /// Keep the stream open and continue following finalized blocks.
     ///
-    /// When set and `--start-block` is omitted, starts from the endpoint's
-    /// first streamable block.
+    /// When set and `--start-block` is omitted, resumes from an existing cursor
+    /// when available, otherwise starts from the endpoint's first streamable
+    /// block.
     #[arg(
         long,
         env = "LIVE",

@@ -262,7 +262,7 @@ Connection:
 
 Block Range:
   -s, --start-block <START_BLOCK>  Start block number (inclusive) [env: START_BLOCK]
-                                  In `--live` mode, omitting this starts from the endpoint's first streamable block when available
+                                  In `--live` mode, omitting this resumes from an existing cursor when available, otherwise starts from the endpoint's first streamable block
       --live                      Keep the stream open and continue following finalized blocks [env: LIVE] [default: false]
   -t, --stop-block <STOP_BLOCK>    Stop block number (exclusive)
                                   Required unless `--live` is set [env: STOP_BLOCK]

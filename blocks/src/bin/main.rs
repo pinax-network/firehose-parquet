@@ -73,7 +73,8 @@ Examples:
   fireparq build --network solana-mainnet-beta \\
     --start-block 250000000 --live
 
-  # Start live mode from the endpoint's first streamable block
+  # Resume live mode from cursor.parquet, or fall back to the endpoint's
+  # first streamable block when no cursor exists
   fireparq build --network mainnet --live
 
   # See all build options
@@ -650,10 +651,15 @@ fn validate_ingestion_block_range(live: bool, stop_block: Option<u64>) -> Result
 fn resolve_live_start_block(
     live: bool,
     start_block: Option<u64>,
+    cursor_state: Option<&CursorState>,
     endpoint_info: &Option<EndpointInfo>,
 ) -> Result<Option<u64>> {
     if !live || start_block.is_some() {
         return Ok(start_block);
+    }
+
+    if let Some(state) = cursor_state {
+        return Ok(state.start_block);
     }
 
     endpoint_info
@@ -662,9 +668,23 @@ fn resolve_live_start_block(
         .map(Some)
         .ok_or_else(|| {
             anyhow!(
-                "--start-block is required when --live is set and the endpoint does not expose first_streamable_block_num"
+                "--start-block is required when --live is set and neither an existing cursor nor the endpoint exposes first_streamable_block_num"
             )
         })
+}
+
+fn resolve_cursor_location(config: &firehose_parquet::config::Config) -> Result<Option<CursorLocation>> {
+    if let Some(ref cp) = config.cursor_path {
+        let output_str = config.output.to_string_lossy().to_string();
+        let s3_client = if firehose_parquet::writer::is_s3_output(&config.output) {
+            Some(firehose_parquet::s3::build_s3_client(config)?)
+        } else {
+            None
+        };
+        Ok(Some(CursorLocation::resolve(&output_str, cp, s3_client)?))
+    } else {
+        Ok(None)
+    }
 }
 
 async fn run_partitions_build(
@@ -3596,12 +3616,19 @@ async fn run_ingestion(args: &BuildArgs) -> Result<()> {
     let mut client = FirehoseClient::new(config.clone());
     let endpoint_info = client.info().await;
 
-    validate_ingestion_block_range(args.common.live, config.stop_block)?;
-    config.start_block =
-        resolve_live_start_block(args.common.live, config.start_block, &endpoint_info)?;
-
     // Use chain_name as a subdirectory under the output path.
     config.output = resolve_output(&config.output, &endpoint_info);
+
+    let cursor_location = resolve_cursor_location(&config)?;
+    let existing_cursor_state = cursor_location.as_ref().and_then(CursorLocation::load);
+
+    validate_ingestion_block_range(args.common.live, config.stop_block)?;
+    config.start_block = resolve_live_start_block(
+        args.common.live,
+        config.start_block,
+        existing_cursor_state.as_ref(),
+        &endpoint_info,
+    )?;
 
     // Auto-detect extended block features if not explicitly set by user.
     if !extended && supports_extended(&endpoint_info) {
@@ -3729,18 +3756,6 @@ async fn run_ingestion(args: &BuildArgs) -> Result<()> {
         None
     };
 
-    // Resolve cursor location (local or S3) based on output path.
-    let cursor_location: Option<CursorLocation> = if let Some(ref cp) = config.cursor_path {
-        let output_str = config.output.to_string_lossy().to_string();
-        let s3_client = if firehose_parquet::writer::is_s3_output(&config.output) {
-            Some(firehose_parquet::s3::build_s3_client(&config)?)
-        } else {
-            None
-        };
-        Some(CursorLocation::resolve(&output_str, cp, s3_client)?)
-    } else {
-        None
-    };
     let mut blocks_processed: u64 = 0;
     let mut min_block: Option<u64> = None;
     let mut max_block: Option<u64> = None;
@@ -4321,6 +4336,7 @@ mod tests {
         assert!(help.contains("--network <NETWORK>"));
         assert!(help.contains("FIREHOSE_ENDPOINT_MAINNET"));
         assert!(help.contains("--live"));
+        assert!(help.contains("existing cursor"));
         assert!(help.contains("first streamable block"));
         assert!(help.contains("--skip-missing-blocks"));
     }
@@ -4399,6 +4415,27 @@ mod tests {
     }
 
     #[test]
+    fn test_resolve_live_start_block_prefers_cursor_start_block() {
+        let cursor_state = CursorState {
+            start_block: Some(21),
+            ..CursorState::default()
+        };
+        let endpoint_info = Some(EndpointInfo {
+            chain_name: "mainnet".to_string(),
+            chain_name_aliases: vec![],
+            first_streamable_block_num: 42,
+            first_streamable_block_id: String::new(),
+            block_id_encoding: 0,
+            block_features: vec![],
+        });
+
+        let start_block = resolve_live_start_block(true, None, Some(&cursor_state), &endpoint_info)
+            .expect("live mode should prefer an existing cursor");
+
+        assert_eq!(start_block, Some(21));
+    }
+
+    #[test]
     fn test_resolve_live_start_block_uses_endpoint_first_streamable_block() {
         let endpoint_info = Some(EndpointInfo {
             chain_name: "mainnet".to_string(),
@@ -4409,7 +4446,7 @@ mod tests {
             block_features: vec![],
         });
 
-        let start_block = resolve_live_start_block(true, None, &endpoint_info)
+        let start_block = resolve_live_start_block(true, None, None, &endpoint_info)
             .expect("live mode should use endpoint first streamable block");
 
         assert_eq!(start_block, Some(42));
@@ -4417,12 +4454,12 @@ mod tests {
 
     #[test]
     fn test_resolve_live_start_block_rejects_missing_first_streamable_metadata() {
-        let err = resolve_live_start_block(true, None, &None)
-            .expect_err("live mode should require an explicit start or endpoint metadata");
+        let err = resolve_live_start_block(true, None, None, &None)
+            .expect_err("live mode should require an explicit start, cursor, or endpoint metadata");
 
         assert_eq!(
             err.to_string(),
-            "--start-block is required when --live is set and the endpoint does not expose first_streamable_block_num"
+            "--start-block is required when --live is set and neither an existing cursor nor the endpoint exposes first_streamable_block_num"
         );
     }
 
