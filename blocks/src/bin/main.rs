@@ -11,7 +11,7 @@ use firehose_parquet::cli::{
     read_partitions_build_rows, resolve_cursor_template, resolve_partition_bounds_from_index,
     resolve_partition_command, resolve_partition_window_bounds_from_index, resolve_s3_output_root,
     shard_partitions_from_index, validate_partitions_index, write_partitions_index_strict,
-    AwsConfig, Commands, CommonArgs, PartitionBoundsRequest, PartitionBuildResult,
+    AwsConfig, BuildArgs, Commands, CommonArgs, PartitionBoundsRequest, PartitionBuildResult,
     PartitionBuildRow, PartitionBuildType, PartitionIndexBuilder, PartitionListRequest,
     PartitionResolveOptions, PartitionSelectionRequest, PartitionShardRequest,
     PartitionValidateRequest, PartitionsCommands,
@@ -52,70 +52,32 @@ const BLOCK_TYPES: &[&str] = &[
     version,
     about = "Build Apache Parquet datasets from Firehose gRPC streams",
     after_long_help = "\
-Default action:
-  Invoke `fireparq` with stream/output flags to run the ingestion build pipeline.
+Primary workflow:
+  Use `fireparq build` to run the ingestion pipeline (preferred form).
   Utility workflows live under subcommands such as `partitions`, `scan`, `inspect`, `validate`, and `verify`.
 
-Examples:
-  # Resolve a built-in network alias to its default endpoint
-  fireparq --network eth --start-block 20000000 --stop-block 20001000
+Deprecated top-level usage:
+  Passing ingestion flags directly to `fireparq` (without the `build` subcommand) still works
+  but is deprecated and will be removed in a future release. Prefer `fireparq build ...`.
 
-  # Run a bounded historical ingestion
-  fireparq --network mainnet \\
+Migration:
+  fireparq --network mainnet --start-block 100 --stop-block 200
+  → fireparq build --network mainnet --start-block 100 --stop-block 200
+
+Examples:
+  # Run a bounded historical ingestion (preferred form)
+  fireparq build --network mainnet \\
     --start-block 20000000 --stop-block 20001000
 
   # Backfill from a block and keep following finalized blocks
-  fireparq --network solana-mainnet-beta \\
+  fireparq build --network solana-mainnet-beta \\
     --start-block 250000000 --live
 
   # Start live mode from the endpoint's first streamable block
-  fireparq --network mainnet --live
+  fireparq build --network mainnet --live
 
-  # Override a network alias with an env var
-  FIREHOSE_ENDPOINT_SOLANA=https://solana.internal.example.com:443 \\
-    fireparq --network solana --start-block 250000000 --stop-block 250100000
-
-  # Stream EVM blocks to local Parquet (auto-detect chain)
-  fireparq --network mainnet \\
-    --start-block 20000000 --stop-block 20001000
-
-  # Stream with hex encoding and extended tables
-  fireparq --network mainnet \\
-    --start-block 20000000 --stop-block 20001000 \\
-    --bytes-encoding hex --extended
-
-  # Resume from cursor
-  fireparq --network mainnet \\
-    --cursor cursor.txt --partition date
-
-  # Resolve range from local partitions index (no explicit start/stop)
-  fireparq --network mainnet \\
-    --partitions-index ./output/eth-mainnet/partitions.parquet \\
-    --partition-type hour \\
-    --partition-value '2015-07-30 15:00:00' \\
-    --partition-chain eth-mainnet
-
-  # Resolve range from S3 partitions index
-  fireparq --network mainnet \\
-    --partitions-index s3://my-bucket/eth-mainnet/partitions.parquet \\
-    --partition-type date \\
-    --partition-value '2015-07-30 00:00:00' \\
-    --partition-chain eth-mainnet
-
-  # Resolve range from global S3 index shared across chains
-  fireparq --network mainnet \\
-    --partitions-index s3://my-bucket/partitions.parquet \\
-    --partition-type hour \\
-    --partition-value '2015-07-30 15:00:00' \\
-    --partition-chain eth-mainnet
-
-  # Resolve an inclusive/exclusive partition window [from, to)
-  fireparq --network mainnet \\
-    --partitions-index ./output/eth-mainnet/partitions.parquet \\
-    --partition-type hour \\
-    --partition-from '2015-07-30 14:00:00' \\
-    --partition-to '2015-07-30 18:00:00' \\
-    --partition-chain eth-mainnet
+  # See all build options
+  fireparq build --help
 "
 )]
 struct Cli {
@@ -2901,6 +2863,10 @@ async fn main() -> Result<()> {
                 firehose_parquet::cli::generate_completions::<Cli>(*shell);
                 return Ok(());
             }
+            Commands::Build(build_args) => {
+                run_ingestion(build_args).await?;
+                return Ok(());
+            }
             Commands::Partitions(subcommand) => match subcommand {
                 PartitionsCommands::Build {
                     endpoint,
@@ -3461,7 +3427,27 @@ async fn main() -> Result<()> {
         }
     }
 
-    init_tracing(&cli.common.log_level);
+    // Legacy root-level invocation without explicit `build` subcommand.
+    // Deprecated: prefer `fireparq build ...`.
+    // This top-level ingestion path will be removed in a future release.
+    warn!(
+        "Deprecated: passing ingestion flags directly to `fireparq` is deprecated. \
+Use `fireparq build` instead. This top-level ingestion will be removed in a future release."
+    );
+    let build_args = BuildArgs {
+        common: cli.common.clone(),
+        network: cli.network.clone(),
+        block_type: cli.block_type.clone(),
+        extended: cli.extended,
+        bytes_encoding: cli.bytes_encoding.clone(),
+        include_failed_transactions: cli.include_failed_transactions,
+        cursor_override: cli.cursor_override,
+    };
+    run_ingestion(&build_args).await
+}
+
+async fn run_ingestion(args: &BuildArgs) -> Result<()> {
+    init_tracing(&args.common.log_level);
 
     info!(version = env!("CARGO_PKG_VERSION"), "fireparq starting");
 
@@ -3497,7 +3483,7 @@ async fn main() -> Result<()> {
         });
     }
 
-    let block_type = cli.block_type.to_lowercase();
+    let block_type = args.block_type.to_lowercase();
     if block_type != "auto" && !BLOCK_TYPES.contains(&block_type.as_str()) {
         return Err(anyhow!(
             "unsupported block type: {block_type}. Supported: {}",
@@ -3505,11 +3491,11 @@ async fn main() -> Result<()> {
         ));
     }
 
-    let mut extended = cli.extended;
-    let bytes_encoding_str = cli.bytes_encoding.clone();
-    let mut common = cli.common.clone();
+    let mut extended = args.extended;
+    let bytes_encoding_str = args.bytes_encoding.clone();
+    let mut common = args.common.clone();
     if common.endpoint.is_none() {
-        if let Some(network) = cli.network.as_deref() {
+        if let Some(network) = args.network.as_deref() {
             let resolved = resolve_network_endpoint(network)?;
             match &resolved.source {
                 EndpointSource::Builtin => info!(
@@ -3528,7 +3514,7 @@ async fn main() -> Result<()> {
             }
             common.endpoint = Some(resolved.endpoint);
         }
-    } else if let Some(network) = cli.network.as_deref() {
+    } else if let Some(network) = args.network.as_deref() {
         info!(
             endpoint = %common.endpoint.as_deref().unwrap_or_default(),
             network,
@@ -3538,8 +3524,8 @@ async fn main() -> Result<()> {
 
     let mut config = build_config(&common)?;
 
-    let partition_selection_request = parse_partition_selection_request(&cli.common)?;
-    let has_explicit_range = cli.common.start_block.is_some() || cli.common.stop_block.is_some();
+    let partition_selection_request = parse_partition_selection_request(&args.common)?;
+    let has_explicit_range = args.common.start_block.is_some() || args.common.stop_block.is_some();
     if partition_selection_request.is_some() && has_explicit_range {
         warn!("partition selection flags ignored because --start-block/--stop-block was provided");
     }
@@ -3589,7 +3575,7 @@ async fn main() -> Result<()> {
         }
     }
 
-    if let Some(template) = cli.common.cursor_template.as_deref() {
+    if let Some(template) = args.common.cursor_template.as_deref() {
         let selection_context = if has_explicit_range {
             None
         } else {
@@ -3610,9 +3596,9 @@ async fn main() -> Result<()> {
     let mut client = FirehoseClient::new(config.clone());
     let endpoint_info = client.info().await;
 
-    validate_ingestion_block_range(cli.common.live, config.stop_block)?;
+    validate_ingestion_block_range(args.common.live, config.stop_block)?;
     config.start_block =
-        resolve_live_start_block(cli.common.live, config.start_block, &endpoint_info)?;
+        resolve_live_start_block(args.common.live, config.start_block, &endpoint_info)?;
 
     // Use chain_name as a subdirectory under the output path.
     config.output = resolve_output(&config.output, &endpoint_info);
@@ -3623,7 +3609,7 @@ async fn main() -> Result<()> {
         extended = true;
     }
 
-    let include_failed_transactions = cli.include_failed_transactions;
+    let include_failed_transactions = args.include_failed_transactions;
 
     info!(block_type, extended, bytes_encoding = %bytes_encoding_str, include_failed_transactions, "starting pipeline\n{config}");
 
@@ -3690,7 +3676,7 @@ async fn main() -> Result<()> {
     let flush_bytes = config.flush_bytes;
     let flush_interval_secs = config.flush_interval_secs;
     let dry_run = config.dry_run;
-    let strict_timestamps = cli.common.strict_timestamps;
+    let strict_timestamps = args.common.strict_timestamps;
 
     let mut writer = if firehose_parquet::writer::is_s3_output(&config.output) {
         OutputWriter::new_s3(
@@ -3856,7 +3842,7 @@ async fn main() -> Result<()> {
         if let Some(loaded) = loc.load() {
             let mismatches = loaded.validate_params(&cursor_state_template);
             if !mismatches.is_empty() {
-                if cli.cursor_override {
+                if args.cursor_override {
                     warn!(
                         "cursor parameter mismatch detected (overridden via --cursor-override):\n  {}",
                         mismatches.join("\n  ")
@@ -4207,6 +4193,7 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4220,12 +4207,111 @@ mod tests {
     }
 
     #[test]
-    fn test_cli_long_help_mentions_default_action() {
+    fn test_cli_long_help_mentions_build_subcommand() {
         let mut cmd = Cli::command();
         let help = cmd.render_long_help().to_string();
-        assert!(help.contains("Default action:"));
+        assert!(help.contains("fireparq build"));
         assert!(help.contains("fireparq"));
-        assert!(help.contains("ingestion build pipeline"));
+        assert!(help.contains("Deprecated"));
+    }
+
+    #[test]
+    fn test_build_subcommand_parses_network_flag() {
+        let cli = Cli::parse_from([
+            "fireparq",
+            "build",
+            "--network",
+            "mainnet",
+            "--start-block",
+            "100",
+            "--stop-block",
+            "200",
+        ]);
+        if let Some(Commands::Build(build_args)) = cli.command {
+            assert_eq!(build_args.network.as_deref(), Some("mainnet"));
+            assert_eq!(build_args.common.start_block, Some(100));
+            assert_eq!(build_args.common.stop_block, Some(200));
+        } else {
+            panic!("expected Commands::Build");
+        }
+    }
+
+    #[test]
+    fn test_build_subcommand_parses_extended_and_block_type() {
+        let cli = Cli::parse_from([
+            "fireparq",
+            "build",
+            "--network",
+            "mainnet",
+            "--start-block",
+            "100",
+            "--stop-block",
+            "200",
+            "--extended",
+            "--block-type",
+            "evm",
+            "--bytes-encoding",
+            "hex",
+        ]);
+        if let Some(Commands::Build(build_args)) = cli.command {
+            assert!(build_args.extended);
+            assert_eq!(build_args.block_type, "evm");
+            assert_eq!(build_args.bytes_encoding, "hex");
+        } else {
+            panic!("expected Commands::Build");
+        }
+    }
+
+    #[test]
+    fn test_build_subcommand_parses_live_flag() {
+        let cli = Cli::parse_from(["fireparq", "build", "--network", "mainnet", "--live"]);
+        if let Some(Commands::Build(build_args)) = cli.command {
+            assert!(build_args.common.live);
+        } else {
+            panic!("expected Commands::Build");
+        }
+    }
+
+    #[test]
+    fn test_build_subcommand_cursor_override_default_false() {
+        let cli = Cli::parse_from([
+            "fireparq",
+            "build",
+            "--network",
+            "mainnet",
+            "--start-block",
+            "100",
+            "--stop-block",
+            "200",
+        ]);
+        if let Some(Commands::Build(build_args)) = cli.command {
+            assert!(!build_args.cursor_override);
+        } else {
+            panic!("expected Commands::Build");
+        }
+    }
+
+    #[test]
+    fn test_build_subcommand_rejects_unknown_network() {
+        let err = Cli::try_parse_from(["fireparq", "build", "--network", "unknown"])
+            .expect_err("unknown network should fail clap parsing");
+        let rendered = err.to_string();
+        assert!(rendered.contains("invalid value 'unknown'"));
+        assert!(rendered.contains("solana-mainnet-beta"));
+    }
+
+    #[test]
+    fn test_build_subcommand_help_contains_examples() {
+        let cmd = Cli::command();
+        // Find the build subcommand
+        let build_subcmd = cmd
+            .get_subcommands()
+            .find(|sc| sc.get_name() == "build")
+            .expect("build subcommand should exist");
+        let help = build_subcmd.clone().render_long_help().to_string();
+        assert!(help.contains("fireparq build --network"));
+        assert!(help.contains("--start-block"));
+        assert!(help.contains("--live"));
     }
 
     #[test]
