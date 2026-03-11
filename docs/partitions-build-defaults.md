@@ -74,7 +74,7 @@ For both bounded and live mode, the intended implementation is:
 - use the Firehose single-block fetch RPC for exact-height probes
 - use exponential search to jump ahead within a partition
 - use binary search to find the exact first block of the next partition
-- write contiguous `[start_block, end_block)` rows to `partitions.parquet`
+- write contiguous `[start_block, stop_block)` rows to `partitions.parquet`
 - create an initial checkpoint as soon as the first row can be materialized
 - continue checkpointing long runs based on elapsed time and partition rollovers
 

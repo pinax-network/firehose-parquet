@@ -477,7 +477,7 @@ fn log_existing_partitions_index_state(
             partitions_index = %partitions_index,
             "overwrite requested; ignoring any existing partitions index until the next successful write"
         );
-    } else if let Some(existing_frontier) = existing_rows.iter().map(|row| row.end_block).max() {
+    } else if let Some(existing_frontier) = existing_rows.iter().map(|row| row.stop_block).max() {
         info!(
             partitions_index = %partitions_index,
             existing_rows = existing_rows.len(),
@@ -683,7 +683,7 @@ async fn run_partitions_build(
         )?;
     }
 
-    let existing_resume_block = existing_rows.iter().map(|row| row.end_block).max();
+    let existing_resume_block = existing_rows.iter().map(|row| row.stop_block).max();
 
     let cursor_location = if !live && chain_output_root.starts_with("s3://") {
         let (bucket, _) = firehose_parquet::writer::parse_s3_url(&chain_output_root)?;
@@ -802,7 +802,7 @@ async fn run_partitions_build(
                     .unwrap_or(inferred_start_block),
                 stop_block: rows
                     .iter()
-                    .map(|row| row.end_block)
+                    .map(|row| row.stop_block)
                     .max()
                     .unwrap_or(stop_block),
                 resumed: should_resume_from_existing && resumed_from_block.is_some(),
@@ -893,7 +893,7 @@ async fn run_partitions_build(
 
             let frontier = rows
                 .iter()
-                .map(|row| row.end_block)
+                .map(|row| row.stop_block)
                 .max()
                 .unwrap_or(effective_start_block);
             let Some(maybe_latest_available) = await_live_interruptible(
@@ -1289,7 +1289,7 @@ async fn run_partitions_build(
             if overwrite && checkpoint_state.last_checkpoint_frontier.is_none() {
                 let frontier = rows
                     .iter()
-                    .map(|row| row.end_block)
+                    .map(|row| row.stop_block)
                     .max()
                     .unwrap_or(aligned_start);
                 log_overwrite_completed(&partitions_index, rows.len(), frontier);
@@ -1461,7 +1461,7 @@ async fn run_partitions_build(
 
     let result_stop_block = rows
         .iter()
-        .map(|row| row.end_block)
+        .map(|row| row.stop_block)
         .max()
         .unwrap_or_else(|| stop_block.unwrap_or(inferred_start_block));
 
@@ -1648,7 +1648,7 @@ fn checkpoint_partitions_rows(
 ) -> Result<Vec<firehose_parquet::cli::PartitionBuildRow>> {
     let frontier = rows
         .iter()
-        .map(|row| row.end_block)
+        .map(|row| row.stop_block)
         .max()
         .ok_or_else(|| anyhow!("partition build is missing a checkpoint frontier"))?;
     write_partitions_index_strict(
@@ -2169,7 +2169,7 @@ async fn build_block_range_partition_row(
         partition_start_ts: boundary.to_string(),
         partition_value: boundary.to_string(),
         start_block: boundary,
-        end_block: partition_end,
+        stop_block: partition_end,
         start_time: start_time.map(format_probe_timestamp).transpose()?,
         end_time: end_time.map(format_probe_timestamp).transpose()?,
         chain: Some(chain.to_string()),
@@ -2954,7 +2954,7 @@ async fn main() -> Result<()> {
                                 "partition_value",
                                 "partition_start_ts",
                                 "start_block",
-                                "end_block",
+                                "stop_block",
                                 "chain"
                             );
                             for row in result.rows {
@@ -2964,7 +2964,7 @@ async fn main() -> Result<()> {
                                     row.partition_value,
                                     row.partition_start_ts,
                                     row.start_block,
-                                    row.end_block,
+                                    row.stop_block,
                                     row.chain.unwrap_or_default()
                                 );
                             }
@@ -3019,7 +3019,7 @@ async fn main() -> Result<()> {
                                 "partition_value",
                                 "partition_start_ts",
                                 "start_block",
-                                "end_block",
+                                "stop_block",
                                 "chain"
                             );
                             for row in result.rows {
@@ -3029,7 +3029,7 @@ async fn main() -> Result<()> {
                                     row.partition_value,
                                     row.partition_start_ts,
                                     row.start_block,
-                                    row.end_block,
+                                    row.stop_block,
                                     row.chain.unwrap_or_default()
                                 );
                             }
@@ -5039,7 +5039,7 @@ mod tests {
             partition_start_ts: "0".to_string(),
             partition_value: "0".to_string(),
             start_block: 0,
-            end_block: 1_000_000,
+            stop_block: 1_000_000,
             start_time: None,
             end_time: None,
             chain: Some("solana-mainnet-beta".to_string()),
@@ -5075,7 +5075,7 @@ mod tests {
             partition_start_ts: "2023-07-31 14:00:00".to_string(),
             partition_value: "2023-07-31 14:00:00".to_string(),
             start_block: 100,
-            end_block: 200,
+            stop_block: 200,
             start_time: Some("2023-07-31 14:00:01".to_string()),
             end_time: Some("2023-07-31 14:59:59".to_string()),
             chain: Some("eth-mainnet".to_string()),
@@ -5119,7 +5119,7 @@ mod tests {
             partition_start_ts: "2023-07-31 14:00:00".to_string(),
             partition_value: "2023-07-31 14:00:00".to_string(),
             start_block: 100,
-            end_block: 200,
+            stop_block: 200,
             start_time: Some("2023-07-31 14:00:01".to_string()),
             end_time: Some("2023-07-31 14:59:59".to_string()),
             chain: Some("eth-mainnet".to_string()),
@@ -5164,7 +5164,7 @@ mod tests {
                 partition_start_ts: "0".to_string(),
                 partition_value: "0".to_string(),
                 start_block: 0,
-                end_block: 10,
+                stop_block: 10,
                 start_time: None,
                 end_time: None,
                 chain: Some("solana-mainnet-beta".to_string()),
@@ -5175,7 +5175,7 @@ mod tests {
                 partition_start_ts: "10".to_string(),
                 partition_value: "10".to_string(),
                 start_block: 10,
-                end_block: 20,
+                stop_block: 20,
                 start_time: None,
                 end_time: None,
                 chain: Some("solana-mainnet-beta".to_string()),
@@ -5210,9 +5210,9 @@ mod tests {
             read_partitions_build_rows(path.to_str().expect("utf8 path"), None).expect("read back");
         assert_eq!(persisted.len(), 2);
         assert_eq!(persisted[0].start_block, 0);
-        assert_eq!(persisted[0].end_block, 10);
+        assert_eq!(persisted[0].stop_block, 10);
         assert_eq!(persisted[1].start_block, 10);
-        assert_eq!(persisted[1].end_block, 20);
+        assert_eq!(persisted[1].stop_block, 20);
         assert_eq!(checkpoint_state.last_checkpoint_frontier, Some(20));
         std::fs::remove_file(&path).expect("remove parquet");
         std::fs::remove_dir(&dir).expect("remove temp dir");

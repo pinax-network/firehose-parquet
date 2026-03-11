@@ -31,12 +31,17 @@ These columns are required for all supported readers:
 - `partition_type` — UTF-8 string
 - `partition_value` — UTF-8 string
 - `start_block` — integer
-- `end_block` — integer
+- `stop_block` — integer
+
+Migration compatibility:
+
+- new `partitions build` artifacts write `stop_block`
+- readers continue accepting legacy `end_block` columns from older artifacts
 
 Range semantics:
 
 - `start_block` is inclusive
-- `end_block` is exclusive
+- `stop_block` is exclusive
 
 ## Optional columns
 
@@ -60,13 +65,13 @@ When a builder writes `partitions.parquet`, it should include these file-level m
 - `firehose-parquet.partitions.chain_scope`
 - `firehose-parquet.partitions.partition_types`
 - `firehose-parquet.partitions.min_start_block`
-- `firehose-parquet.partitions.max_end_block`
+- `firehose-parquet.partitions.max_stop_block`
 
 Reader behavior for versioned artifacts:
 
 - legacy/unversioned artifacts remain readable without these keys
 - artifacts declaring schema version `1` must include these keys with valid values
-- inconsistent coverage metadata (for example `min_start_block >= max_end_block`) must be rejected
+- inconsistent coverage metadata (for example `min_start_block >= max_stop_block`) must be rejected
 
 ## Additive vs breaking changes
 
@@ -85,6 +90,8 @@ Breaking changes:
 - changing canonical partition-value interpretation
 
 Breaking changes require a schema-version increment.
+
+The `end_block` → `stop_block` transition is handled as a reader-compatible migration: new writers emit `stop_block`, while readers continue accepting legacy `end_block` artifacts.
 
 ## Lookup behavior
 

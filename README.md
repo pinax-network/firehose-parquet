@@ -475,7 +475,7 @@ fireparq partitions validate \
 
 Checks:
 
-- `start_block < end_block` for every row
+- `start_block < stop_block` for every row
 - adjacent rows in the same `(chain, partition_type)` do not overlap
 - adjacent rows are contiguous unless `--allow-gaps` is set
 
