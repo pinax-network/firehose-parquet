@@ -50,7 +50,7 @@ A production-grade Rust toolkit that consumes [StreamingFast Firehose](https://f
 cargo build --release --workspace
 
 # Stream Solana blocks to Parquet (auto-detect chain)
-./target/release/fireparq \
+./target/release/fireparq build \
   --network solana \
   --start-block 200000000 \
   --stop-block 200001000 \
@@ -59,7 +59,7 @@ cargo build --release --workspace
   --compression zstd
 
 # Or use an explicit endpoint directly
-./target/release/fireparq \
+./target/release/fireparq build \
   --endpoint https://solana.firehose.pinax.network:443 \
   --start-block 200000000 \
   --stop-block 200001000 \
@@ -68,7 +68,7 @@ cargo build --release --workspace
   --compression zstd
 
 # Stream EVM blocks with extended traces (explicit block type)
-./target/release/fireparq \
+./target/release/fireparq build \
   --block-type evm \
   --endpoint https://eth.firehose.pinax.network:443 \
   --start-block 19000000 \
@@ -77,7 +77,7 @@ cargo build --release --workspace
   --bytes-encoding hex
 
 # Backfill from a block and keep following finalized blocks
-./target/release/fireparq \
+./target/release/fireparq build \
   --network solana-mainnet-beta \
   --start-block 250000000 \
   --live \
@@ -85,7 +85,7 @@ cargo build --release --workspace
   --partition date
 
 # Start live mode from the endpoint's first streamable block
-./target/release/fireparq \
+./target/release/fireparq build \
   --network mainnet \
   --live \
   --output ./output
@@ -653,7 +653,7 @@ Recommended patterns:
 
 ### `scan` — Inspect Parquet Files
 
-Read and inspect Parquet files: shows schema, row counts, and sample rows. By default, sampled rows render in a boxed table; use `--vertical` for the legacy row-by-row view or `--json` for machine-readable output. Supports local paths and S3 URIs.
+Read and inspect Parquet files: shows schema, row counts, and sample rows. By default, sampled rows render in a boxed table; use `--vertical` for row-by-row output or `--json` for machine-readable output. Supports local paths and S3 URIs.
 
 ```bash
 fireparq scan ./output/blocks/

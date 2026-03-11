@@ -39,4 +39,4 @@ This convention leads to the following CLI adjustments:
 - `rollup --target-partition` → `--partition`
 - `scan --rows` → `--limit`
 
-Deprecated aliases remain accepted for one compatibility window so existing scripts keep working while docs and examples move to the new names.
+These rename decisions are now canonical. Deprecated aliases are no longer accepted.

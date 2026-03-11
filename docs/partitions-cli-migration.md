@@ -18,8 +18,8 @@ Related issues:
 1. Adds a grouped CLI namespace: `fireparq partitions ...`
 2. Adds `fireparq partitions build` for generating canonical `partitions.parquet` artifacts directly from Firehose
 3. Introduces `fireparq partitions resolve`
-4. Keeps existing ingestion flags (`--partitions-index`, `--partition-type`, `--partition-value`) working for backward compatibility
-5. Emits a deprecation warning in ingestion mode when those legacy flags are used to drive range resolution directly
+4. Supports ingestion-side partition selection through `--partitions-index`, `--partition-type`, and `--partition-value`
+5. Uses `fireparq build` as the only ingestion entrypoint
 6. Introduces `fireparq partitions ls` for querying/filtering index rows
 7. Adds ingestion-side partition window resolution via `--partition-from` + `--partition-to`
 8. Adds partition-aware cursor templating via `--cursor-template`
@@ -155,14 +155,6 @@ Inputs:
 - optional `--strict-single-chain`
 - optional `--json` for automation output
 
-### Backward compatibility
-
-The existing ingestion flow still supports resolving ranges via legacy flags to avoid breaking active workflows. This is intentionally preserved for one migration window.
-
-When legacy flags are used in direct ingestion mode (without explicit `--start-block/--stop-block`), a warning is logged to guide users toward:
-
-`fireparq partitions resolve ...`
-
 ## Process used for phases 1-7
 
 1. Branch from `main` using `codex/` prefix.
@@ -194,4 +186,4 @@ When legacy flags are used in direct ingestion mode (without explicit `--start-b
 - `fireparq partitions shard`
 - optional bounded-concurrency partition window execution mode
 - shard/run-range command integration with partition-aware cursor templates
-- alias/deprecation lifecycle tests and eventual legacy removal
+- additional partition workflow polish
