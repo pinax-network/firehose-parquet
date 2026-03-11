@@ -192,6 +192,17 @@ pub struct CommonArgs {
     )]
     pub partition: String,
 
+    /// Require non-null timestamps in output schemas and streamed blocks.
+    #[arg(
+        long,
+        env = "STRICT_TIMESTAMPS",
+        default_value_t = true,
+        hide_env_values = true,
+        help_heading = "Output",
+        action = clap::ArgAction::Set
+    )]
+    pub strict_timestamps: bool,
+
     /// Block range size when partition=block_range
     #[arg(
         long,
@@ -6408,6 +6419,24 @@ mod tests {
         assert_eq!(config.reconnect_stall_timeout_secs, Some(900));
         // cursor defaults to cursor.parquet
         assert_eq!(config.cursor_path, Some("cursor.parquet".to_string()));
+    }
+
+    #[test]
+    fn test_common_args_strict_timestamps_default_true() {
+        let cli = parse(&["test-cli", "--endpoint", "https://example.com:443"]);
+        assert!(cli.common.strict_timestamps);
+    }
+
+    #[test]
+    fn test_common_args_strict_timestamps_parse_false() {
+        let cli = parse(&[
+            "test-cli",
+            "--endpoint",
+            "https://example.com:443",
+            "--strict-timestamps",
+            "false",
+        ]);
+        assert!(!cli.common.strict_timestamps);
     }
 
     #[test]

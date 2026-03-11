@@ -1,4 +1,7 @@
 use anyhow::{anyhow, Result};
+use arrow::array::{Array, TimestampSecondArray, TimestampSecondBuilder};
+use arrow::datatypes::{Field, Schema};
+use arrow::record_batch::RecordBatch;
 use clap::builder::PossibleValuesParser;
 use clap::Parser;
 use firehose_parquet::cli::{
@@ -214,6 +217,7 @@ fn build_file_metadata(
     endpoint: &str,
     compression: Compression,
     endpoint_info: &Option<EndpointInfo>,
+    strict_timestamps: bool,
 ) -> ParquetFileMetadata {
     let mut meta = ParquetFileMetadata::new();
     meta.add("firehose-parquet.version", env!("CARGO_PKG_VERSION"));
@@ -265,7 +269,110 @@ fn build_file_metadata(
             );
         }
     }
+    meta.add(
+        "firehose-parquet.strict_timestamps",
+        strict_timestamps.to_string(),
+    );
     meta
+}
+
+fn partition_requires_timestamp(partition: &Partition) -> bool {
+    matches!(
+        partition,
+        Partition::Date | Partition::Hour | Partition::Minute | Partition::Second
+    )
+}
+
+fn validate_block_timestamp(
+    block_num: u64,
+    timestamp: i64,
+    strict_timestamps: bool,
+    partition: &Partition,
+) -> Result<()> {
+    if timestamp != 0 {
+        return Ok(());
+    }
+
+    if strict_timestamps {
+        return Err(anyhow!(
+            "block {block_num} is missing timestamp metadata and --strict-timestamps is enabled; rerun with --strict-timestamps false to allow null timestamps"
+        ));
+    }
+
+    if partition_requires_timestamp(partition) {
+        return Err(anyhow!(
+            "block {block_num} is missing timestamp metadata; time-based partitioning requires timestamps even when --strict-timestamps is false"
+        ));
+    }
+
+    Ok(())
+}
+
+fn rewrite_timestamp_column(batch: &RecordBatch, nullable_timestamps: bool) -> Result<RecordBatch> {
+    if !nullable_timestamps {
+        return Ok(batch.clone());
+    }
+
+    let schema = batch.schema();
+    let Some(timestamp_index) = schema.index_of("timestamp").ok() else {
+        return Ok(batch.clone());
+    };
+
+    let timestamp_field = schema.field(timestamp_index);
+    let timestamp_array = batch
+        .column(timestamp_index)
+        .as_any()
+        .downcast_ref::<TimestampSecondArray>()
+        .ok_or_else(|| {
+            anyhow!(
+                "timestamp column expected Timestamp(Second, UTC), got {}",
+                timestamp_field.data_type()
+            )
+        })?;
+
+    let mut builder = TimestampSecondBuilder::new().with_timezone("UTC");
+    for row_index in 0..batch.num_rows() {
+        if timestamp_array.is_null(row_index) || timestamp_array.value(row_index) == 0 {
+            builder.append_null();
+        } else {
+            builder.append_value(timestamp_array.value(row_index));
+        }
+    }
+
+    let mut fields = batch
+        .schema()
+        .fields()
+        .iter()
+        .map(|field| field.as_ref().clone())
+        .collect::<Vec<_>>();
+    fields[timestamp_index] = Field::new(
+        timestamp_field.name(),
+        timestamp_field.data_type().clone(),
+        true,
+    );
+
+    let schema = std::sync::Arc::new(Schema::new_with_metadata(
+        fields,
+        schema.metadata().clone(),
+    ));
+    let mut columns = batch.columns().to_vec();
+    columns[timestamp_index] = std::sync::Arc::new(builder.finish());
+
+    Ok(RecordBatch::try_new(schema, columns)?)
+}
+
+fn rewrite_batches_with_nullable_timestamps(
+    batches: std::collections::HashMap<String, RecordBatch>,
+    nullable_timestamps: bool,
+) -> Result<std::collections::HashMap<String, RecordBatch>> {
+    if !nullable_timestamps {
+        return Ok(batches);
+    }
+
+    batches
+        .into_iter()
+        .map(|(table, batch)| Ok((table, rewrite_timestamp_column(&batch, true)?)))
+        .collect()
 }
 
 fn infer_partitions_block_type(
@@ -3542,6 +3649,7 @@ async fn main() -> Result<()> {
     let flush_bytes = config.flush_bytes;
     let flush_interval_secs = config.flush_interval_secs;
     let dry_run = config.dry_run;
+    let strict_timestamps = cli.common.strict_timestamps;
 
     let mut writer = if firehose_parquet::writer::is_s3_output(&config.output) {
         OutputWriter::new_s3(
@@ -3579,6 +3687,7 @@ async fn main() -> Result<()> {
             &config.endpoint,
             config.compression,
             &endpoint_info,
+            strict_timestamps,
         );
         log_file_metadata(&meta);
         writer.inner.set_file_metadata(meta);
@@ -3683,6 +3792,10 @@ async fn main() -> Result<()> {
             "firehose-parquet.compression",
             config.compression.to_string(),
         );
+        meta.add(
+            "firehose-parquet.strict_timestamps",
+            strict_timestamps.to_string(),
+        );
         meta
     };
 
@@ -3737,6 +3850,7 @@ async fn main() -> Result<()> {
                     &config.endpoint,
                     config.compression,
                     &endpoint_info,
+                    strict_timestamps,
                 );
                 log_file_metadata(&meta);
                 writer.inner.set_file_metadata(meta);
@@ -3747,6 +3861,8 @@ async fn main() -> Result<()> {
 
             let block_number = identity.block_num;
             let ts = identity.timestamp;
+            validate_block_timestamp(block_number, ts, strict_timestamps, &partition_config)?;
+            let has_timestamp = ts != 0;
 
             // Flush the mapper at partition boundaries to ensure each flush
             // produces batches belonging to exactly one partition.
@@ -3764,6 +3880,8 @@ async fn main() -> Result<()> {
                         "partition boundary detected, flushing mapper"
                     );
                     let batches = m.flush()?;
+                    let batches =
+                        rewrite_batches_with_nullable_timestamps(batches, !strict_timestamps)?;
                     if !dry_run {
                         let metadata = BlockMetadata {
                             min_block_number: min_block.unwrap_or(0),
@@ -3805,8 +3923,10 @@ async fn main() -> Result<()> {
             max_block = Some(max_block.map_or(block_number, |s: u64| s.max(block_number)));
             global_min_block = Some(global_min_block.map_or(block_number, |s: u64| s.min(block_number)));
             global_max_block = Some(global_max_block.map_or(block_number, |s: u64| s.max(block_number)));
-            min_timestamp = Some(min_timestamp.map_or(ts, |s: i64| s.min(ts)));
-            max_timestamp = Some(max_timestamp.map_or(ts, |s: i64| s.max(ts)));
+            if has_timestamp {
+                min_timestamp = Some(min_timestamp.map_or(ts, |s: i64| s.min(ts)));
+                max_timestamp = Some(max_timestamp.map_or(ts, |s: i64| s.max(ts)));
+            }
 
             m.map_block(&block_bytes, &identity, fork_step_str)?;
             blocks_processed += 1;
@@ -3872,6 +3992,8 @@ async fn main() -> Result<()> {
             if rows_to_flush || time_to_flush || bytes_to_flush {
                 let flush_trigger = if bytes_to_flush { "bytes" } else if rows_to_flush { "rows" } else { "interval" };
                 let batches = m.flush()?;
+                let batches =
+                    rewrite_batches_with_nullable_timestamps(batches, !strict_timestamps)?;
                 if !dry_run {
                     let metadata = BlockMetadata {
                         min_block_number: min_block.unwrap_or(0),
@@ -3937,6 +4059,8 @@ async fn main() -> Result<()> {
         if let Some(m) = mapper.as_mut() {
             if m.max_table_rows() > 0 {
                 let batches = m.flush()?;
+                let batches =
+                    rewrite_batches_with_nullable_timestamps(batches, !strict_timestamps)?;
                 if !dry_run {
                     let metadata = BlockMetadata {
                         min_block_number: min_block.unwrap_or(0),
@@ -4076,6 +4200,26 @@ mod tests {
         let cli = Cli::parse_from(["fireparq", "--network", "mainnet", "--start-block", "100"]);
         assert_eq!(cli.network.as_deref(), Some("mainnet"));
         assert_eq!(cli.common.start_block, Some(100));
+    }
+
+    #[test]
+    fn test_cli_strict_timestamps_default_true() {
+        let cli = Cli::parse_from(["fireparq", "--network", "mainnet", "--start-block", "100"]);
+        assert!(cli.common.strict_timestamps);
+    }
+
+    #[test]
+    fn test_cli_parses_strict_timestamps_false() {
+        let cli = Cli::parse_from([
+            "fireparq",
+            "--network",
+            "solana-mainnet-beta",
+            "--start-block",
+            "100",
+            "--strict-timestamps",
+            "false",
+        ]);
+        assert!(!cli.common.strict_timestamps);
     }
 
     #[test]
@@ -4335,6 +4479,86 @@ mod tests {
     }
 
     #[test]
+    fn test_validate_block_timestamp_missing_in_strict_mode_errors() {
+        let err = validate_block_timestamp(42, 0, true, &Partition::None)
+            .expect_err("strict timestamps should reject missing values");
+        assert!(err.to_string().contains("--strict-timestamps is enabled"));
+    }
+
+    #[test]
+    fn test_validate_block_timestamp_missing_in_permissive_block_range_allows() {
+        validate_block_timestamp(42, 0, false, &Partition::BlockRange(1000))
+            .expect("block-range partition should allow null timestamps in permissive mode");
+    }
+
+    #[test]
+    fn test_validate_block_timestamp_missing_in_permissive_time_partition_errors() {
+        let err = validate_block_timestamp(42, 0, false, &Partition::Date)
+            .expect_err("time-based partitioning still requires a timestamp");
+        assert!(err
+            .to_string()
+            .contains("time-based partitioning requires timestamps"));
+    }
+
+    #[test]
+    fn test_rewrite_timestamp_column_makes_timestamp_nullable() {
+        let schema = std::sync::Arc::new(Schema::new(vec![
+            Field::new("block_num", arrow::datatypes::DataType::UInt64, false),
+            Field::new(
+                "timestamp",
+                arrow::datatypes::DataType::Timestamp(
+                    arrow::datatypes::TimeUnit::Second,
+                    Some(std::sync::Arc::from("UTC")),
+                ),
+                false,
+            ),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                std::sync::Arc::new(arrow::array::UInt64Array::from(vec![1_u64, 2_u64])),
+                std::sync::Arc::new(
+                    TimestampSecondArray::from(vec![Some(1_700_000_000), Some(0)])
+                        .with_timezone("UTC"),
+                ),
+            ],
+        )
+        .expect("record batch should build");
+
+        let rewritten =
+            rewrite_timestamp_column(&batch, true).expect("nullable rewrite should succeed");
+        let rewritten_schema = rewritten.schema();
+        let timestamp_field = rewritten_schema
+            .field_with_name("timestamp")
+            .expect("timestamp field should exist");
+        assert!(timestamp_field.is_nullable());
+
+        let timestamp_array = rewritten
+            .column(rewritten_schema.index_of("timestamp").expect("timestamp index"))
+            .as_any()
+            .downcast_ref::<TimestampSecondArray>()
+            .expect("timestamp column type should be preserved");
+        assert_eq!(timestamp_array.value(0), 1_700_000_000);
+        assert!(timestamp_array.is_null(1));
+    }
+
+    #[test]
+    fn test_build_file_metadata_records_strict_timestamps() {
+        let metadata = build_file_metadata(
+            "solana",
+            &EncodeBytes::Base58,
+            "https://example.com:443",
+            Compression::Zstd,
+            &None,
+            false,
+        );
+
+        assert!(metadata.entries.iter().any(|(key, value)| {
+            key == "firehose-parquet.strict_timestamps" && value == "false"
+        }));
+    }
+
+    #[test]
     fn test_supports_extended_true() {
         let ei = Some(EndpointInfo {
             chain_name: "mainnet".to_string(),
@@ -4403,6 +4627,7 @@ mod tests {
             "https://example.com",
             Compression::Zstd,
             &ei,
+            true,
         );
 
         assert_eq!(
@@ -4449,6 +4674,7 @@ mod tests {
             "https://example.com",
             Compression::Zstd,
             &ei,
+            true,
         );
 
         assert_eq!(
@@ -4479,6 +4705,7 @@ mod tests {
             "https://example.com",
             Compression::Zstd,
             &ei,
+            true,
         );
 
         assert_eq!(
@@ -4508,6 +4735,7 @@ mod tests {
             "https://example.com",
             Compression::Zstd,
             &ei,
+            true,
         );
 
         assert_eq!(
@@ -4528,6 +4756,7 @@ mod tests {
             "https://example.com",
             Compression::Zstd,
             &None,
+            true,
         );
 
         assert_eq!(find_meta(&meta, "firehose-parquet.chain_name"), None);
@@ -4568,6 +4797,7 @@ mod tests {
             "https://example.com",
             Compression::Zstd,
             &ei,
+            true,
         );
 
         assert_eq!(find_meta(&meta, "firehose-parquet.chain_name"), Some("eth"));
@@ -4595,6 +4825,7 @@ mod tests {
             "https://example.com",
             Compression::Snappy,
             &None,
+            true,
         );
 
         assert_eq!(
