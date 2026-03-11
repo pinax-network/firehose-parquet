@@ -1303,7 +1303,7 @@ pub struct PartitionBuildRow {
     /// For block_range: the start block number as a string.
     pub partition_value: String,
     pub start_block: u64,
-    pub end_block: u64,
+    pub stop_block: u64,
     /// Nullable — populated best-effort, None when block is missing/has no timestamp.
     pub start_time: Option<String>,
     /// Nullable — populated best-effort, None when block is missing/has no timestamp.
@@ -1529,7 +1529,7 @@ impl PartitionIndexBuilder {
                 .cmp(&right.partition_type)
                 .then_with(|| left.partition_start_ts.cmp(&right.partition_start_ts))
                 .then_with(|| left.start_block.cmp(&right.start_block))
-                .then_with(|| left.end_block.cmp(&right.end_block))
+                .then_with(|| left.stop_block.cmp(&right.stop_block))
         });
 
         Ok(self.rows)
@@ -1561,7 +1561,7 @@ impl PartitionIndexBuilder {
                 .cmp(&right.partition_type)
                 .then_with(|| left.partition_start_ts.cmp(&right.partition_start_ts))
                 .then_with(|| left.start_block.cmp(&right.start_block))
-                .then_with(|| left.end_block.cmp(&right.end_block))
+                .then_with(|| left.stop_block.cmp(&right.stop_block))
         });
 
         Ok(rows)
@@ -1599,9 +1599,9 @@ impl PartitionIndexBuilder {
         let chain = chain.into();
         let resume_block = existing_rows
             .iter()
-            .map(|row| row.end_block)
+            .map(|row| row.stop_block)
             .max()
-            .ok_or_else(|| anyhow::anyhow!("missing existing end_block for resume"))?;
+            .ok_or_else(|| anyhow::anyhow!("missing existing stop_block for resume"))?;
 
         let mut active = std::collections::BTreeMap::new();
         let mut retained_rows = Vec::new();
@@ -1617,7 +1617,7 @@ impl PartitionIndexBuilder {
                     .partition_start_ts
                     .cmp(&right.1.partition_start_ts)
                     .then_with(|| left.1.start_block.cmp(&right.1.start_block))
-                    .then_with(|| left.1.end_block.cmp(&right.1.end_block))
+                    .then_with(|| left.1.stop_block.cmp(&right.1.stop_block))
             });
 
             let Some((last_index, last_row)) = matching.pop() else {
@@ -1628,11 +1628,11 @@ impl PartitionIndexBuilder {
                 );
             };
 
-            if last_row.end_block != resume_block {
+            if last_row.stop_block != resume_block {
                 anyhow::bail!(
                     "cannot resume partition build: partition type {} ends at {}, expected common frontier {}",
                     partition_type,
-                    last_row.end_block,
+                    last_row.stop_block,
                     resume_block
                 );
             }
@@ -1664,7 +1664,7 @@ impl PartitionIndexBuilder {
                     partition_value: last_row.partition_value.clone(),
                     start_block: last_row.start_block,
                     start_time,
-                    last_block: last_row.end_block.saturating_sub(1),
+                    last_block: last_row.stop_block.saturating_sub(1),
                     last_time,
                 },
             );
@@ -1721,7 +1721,7 @@ pub struct PartitionListRow {
     pub partition_value: String,
     pub partition_start_ts: String,
     pub start_block: u64,
-    pub end_block: u64,
+    pub stop_block: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub chain: Option<String>,
 }
@@ -1868,16 +1868,16 @@ fn build_partition_row(
     chain: &str,
     partition_type: PartitionBuildType,
     active: ActivePartitionBuildRow,
-    end_block: u64,
+    stop_block: u64,
     block_range_size: Option<u64>,
 ) -> anyhow::Result<PartitionBuildRow> {
-    if active.start_block >= end_block {
+    if active.start_block >= stop_block {
         anyhow::bail!(
-            "invalid partition row for {} {}: start_block {} must be < end_block {}",
+            "invalid partition row for {} {}: start_block {} must be < stop_block {}",
             partition_type,
             active.partition_value,
             active.start_block,
-            end_block
+            stop_block
         );
     }
 
@@ -1908,7 +1908,7 @@ fn build_partition_row(
         partition_start_ts,
         partition_value: active.partition_value,
         start_block: active.start_block,
-        end_block,
+        stop_block,
         start_time,
         end_time,
         chain: Some(chain.to_string()),
@@ -2074,7 +2074,7 @@ pub fn read_partitions_build_rows(
             .ok()
             .or_else(|| schema.index_of("partition_interval_seconds").ok());
         let start_block_idx = schema.index_of("start_block")?;
-        let end_block_idx = schema.index_of("end_block")?;
+        let stop_block_idx = partition_stop_block_idx(schema.as_ref())?;
         let chain_idx = schema.index_of("chain").ok();
         let start_time_idx = schema.index_of("start_time").ok();
         let end_time_idx = schema.index_of("end_time").ok();
@@ -2134,8 +2134,8 @@ pub fn read_partitions_build_rows(
             };
             let start_block = read_u64_value(batch.column(start_block_idx).as_ref(), row_index)?
                 .ok_or_else(|| anyhow::anyhow!("start_block cannot be null"))?;
-            let end_block = read_u64_value(batch.column(end_block_idx).as_ref(), row_index)?
-                .ok_or_else(|| anyhow::anyhow!("end_block cannot be null"))?;
+            let stop_block = read_u64_value(batch.column(stop_block_idx).as_ref(), row_index)?
+                .ok_or_else(|| anyhow::anyhow!("stop_block cannot be null"))?;
 
             // Resolve chain from column or file metadata
             let chain = if let Some(idx) = chain_idx {
@@ -2162,7 +2162,7 @@ pub fn read_partitions_build_rows(
                 partition_start_ts,
                 partition_value,
                 start_block,
-                end_block,
+                stop_block,
                 start_time,
                 end_time,
                 chain,
@@ -2257,7 +2257,7 @@ pub fn read_partitions_build_rows(
             .cmp(&right.partition_type)
             .then_with(|| left.partition_start_ts.cmp(&right.partition_start_ts))
             .then_with(|| left.start_block.cmp(&right.start_block))
-            .then_with(|| left.end_block.cmp(&right.end_block))
+            .then_with(|| left.stop_block.cmp(&right.stop_block))
     });
     Ok(rows)
 }
@@ -2350,7 +2350,7 @@ fn write_partitions_index_impl(
     let schema = Arc::new(Schema::new(vec![
         Field::new("partition", DataType::UInt64, false),
         Field::new("start_block", DataType::UInt64, false),
-        Field::new("end_block", DataType::UInt64, false),
+        Field::new("stop_block", DataType::UInt64, false),
         Field::new(
             "start_time",
             DataType::Timestamp(TimeUnit::Second, Some(Arc::from("UTC"))),
@@ -2422,7 +2422,7 @@ fn write_partitions_index_impl(
                 rows.iter().map(|row| row.start_block).collect::<Vec<_>>(),
             )),
             Arc::new(UInt64Array::from(
-                rows.iter().map(|row| row.end_block).collect::<Vec<_>>(),
+                rows.iter().map(|row| row.stop_block).collect::<Vec<_>>(),
             )),
             Arc::new(TimestampSecondArray::from(start_time_values).with_timezone("UTC")),
             Arc::new(TimestampSecondArray::from(end_time_values).with_timezone("UTC")),
@@ -2543,6 +2543,22 @@ fn is_timestamp_second_utc(data_type: &arrow::datatypes::DataType) -> bool {
     )
 }
 
+fn partition_stop_block_idx(schema: &arrow::datatypes::Schema) -> anyhow::Result<usize> {
+    schema
+        .index_of("stop_block")
+        .or_else(|_| schema.index_of("end_block"))
+        .map_err(|_| anyhow::anyhow!("missing required column: stop_block or end_block"))
+}
+
+fn partition_stop_block_field<'a>(
+    schema: &'a arrow::datatypes::Schema,
+) -> anyhow::Result<&'a arrow::datatypes::Field> {
+    schema
+        .field_with_name("stop_block")
+        .or_else(|_| schema.field_with_name("end_block"))
+        .map_err(|_| anyhow::anyhow!("missing required column: stop_block or end_block"))
+}
+
 fn validate_partitions_schema(schema: &arrow::datatypes::Schema) -> anyhow::Result<()> {
     fn field_with_name_any<'a>(
         schema: &'a arrow::datatypes::Schema,
@@ -2597,13 +2613,11 @@ fn validate_partitions_schema(schema: &arrow::datatypes::Schema) -> anyhow::Resu
         );
     }
 
-    let end_block = schema
-        .field_with_name("end_block")
-        .map_err(|_| anyhow::anyhow!("missing required column: end_block"))?;
-    if !is_integer_like(end_block.data_type()) {
+    let stop_block = partition_stop_block_field(schema)?;
+    if !is_integer_like(stop_block.data_type()) {
         anyhow::bail!(
-            "invalid partitions.parquet column type for end_block: expected integer, got {}",
-            end_block.data_type()
+            "invalid partitions.parquet column type for stop_block: expected integer, got {}",
+            stop_block.data_type()
         );
     }
     if let Ok(partition_start_ts) = schema.field_with_name("partition_start_ts") {
@@ -2885,9 +2899,7 @@ pub fn list_partitions_from_index(
         let start_block_idx = schema
             .index_of("start_block")
             .map_err(|_| anyhow::anyhow!("missing required column: start_block"))?;
-        let end_block_idx = schema
-            .index_of("end_block")
-            .map_err(|_| anyhow::anyhow!("missing required column: end_block"))?;
+        let stop_block_idx = partition_stop_block_idx(schema.as_ref())?;
         let chain_idx = schema.index_of("chain").ok();
         let partition_start_ts_idx = schema.index_of("partition_start_ts").ok();
 
@@ -2938,8 +2950,8 @@ pub fn list_partitions_from_index(
 
             let start_block = read_u64_value(batch.column(start_block_idx).as_ref(), row)?
                 .ok_or_else(|| anyhow::anyhow!("null start_block at row {}", row))?;
-            let end_block = read_u64_value(batch.column(end_block_idx).as_ref(), row)?
-                .ok_or_else(|| anyhow::anyhow!("null end_block at row {}", row))?;
+            let stop_block = read_u64_value(batch.column(stop_block_idx).as_ref(), row)?
+                .ok_or_else(|| anyhow::anyhow!("null stop_block at row {}", row))?;
 
             *total_matches += 1;
             let list_row = PartitionListRow {
@@ -2947,7 +2959,7 @@ pub fn list_partitions_from_index(
                 partition_value,
                 partition_start_ts,
                 start_block,
-                end_block,
+                stop_block,
                 chain,
             };
             let entry = HeapEntry {
@@ -2956,7 +2968,7 @@ pub fn list_partitions_from_index(
                     list_row.partition_type.clone(),
                     list_row.chain.clone(),
                     list_row.start_block,
-                    list_row.end_block,
+                    list_row.stop_block,
                 ),
                 row: list_row,
             };
@@ -3026,7 +3038,7 @@ pub fn list_partitions_from_index(
             .then_with(|| left.partition_type.cmp(&right.partition_type))
             .then_with(|| left.chain.cmp(&right.chain))
             .then_with(|| left.start_block.cmp(&right.start_block))
-            .then_with(|| left.end_block.cmp(&right.end_block))
+            .then_with(|| left.stop_block.cmp(&right.stop_block))
     });
 
     Ok(PartitionListResult {
@@ -3125,15 +3137,15 @@ pub fn validate_partitions_index(
     let mut issues = Vec::new();
 
     for row in &list_result.rows {
-        if row.start_block >= row.end_block {
+        if row.start_block >= row.stop_block {
             issues.push(PartitionValidationIssue {
                 kind: PartitionValidationIssueKind::InvalidRange,
                 partition_type: row.partition_type.clone(),
                 partition_value: row.partition_value.clone(),
                 chain: row.chain.clone(),
                 message: format!(
-                    "invalid range: start_block={} end_block={}",
-                    row.start_block, row.end_block
+                    "invalid range: start_block={} stop_block={}",
+                    row.start_block, row.stop_block
                 ),
             });
         }
@@ -3166,7 +3178,7 @@ pub fn validate_partitions_index(
                 });
             }
 
-            if current.end_block < next.start_block {
+            if current.stop_block < next.start_block {
                 if !request.allow_gaps {
                     issues.push(PartitionValidationIssue {
                         kind: PartitionValidationIssueKind::Gap,
@@ -3174,20 +3186,20 @@ pub fn validate_partitions_index(
                         partition_value: next.partition_value.clone(),
                         chain: next.chain.clone(),
                         message: format!(
-                            "gap detected: previous end_block={} next start_block={}",
-                            current.end_block, next.start_block
+                            "gap detected: previous stop_block={} next start_block={}",
+                            current.stop_block, next.start_block
                         ),
                     });
                 }
-            } else if current.end_block > next.start_block {
+            } else if current.stop_block > next.start_block {
                 issues.push(PartitionValidationIssue {
                     kind: PartitionValidationIssueKind::Overlap,
                     partition_type: next.partition_type.clone(),
                     partition_value: next.partition_value.clone(),
                     chain: next.chain.clone(),
                     message: format!(
-                        "overlap detected: previous end_block={} next start_block={}",
-                        current.end_block, next.start_block
+                        "overlap detected: previous stop_block={} next start_block={}",
+                        current.stop_block, next.start_block
                     ),
                 });
             }
@@ -3634,7 +3646,7 @@ pub fn parse_partition_selection_request(
 /// - `partition_type` (utf8)
 /// - `partition_value` (utf8)
 /// - `start_block` (u64 or integer)
-/// - `end_block` (u64 or integer)
+/// - `stop_block` (u64 or integer; legacy `end_block` is also accepted)
 /// - optional `chain` (utf8)
 pub fn resolve_partition_bounds_from_index(
     request: &PartitionBoundsRequest,
@@ -3771,7 +3783,7 @@ pub fn resolve_partition_bounds_from_index(
     let (start_block, stop_block) = matches[0];
     if stop_block <= start_block {
         anyhow::bail!(
-            "invalid partition bounds in {}: start_block={} end_block={}",
+            "invalid partition bounds in {}: start_block={} stop_block={}",
             request.index_path,
             start_block,
             stop_block
@@ -3856,9 +3868,7 @@ pub fn resolve_partition_window_bounds_from_index(
         let start_block_idx = schema
             .index_of("start_block")
             .map_err(|_| anyhow::anyhow!("missing required column: start_block"))?;
-        let end_block_idx = schema
-            .index_of("end_block")
-            .map_err(|_| anyhow::anyhow!("missing required column: end_block"))?;
+        let stop_block_idx = partition_stop_block_idx(schema.as_ref())?;
         let chain_idx = schema.index_of("chain").ok();
 
         for row in 0..batch.num_rows() {
@@ -3895,10 +3905,10 @@ pub fn resolve_partition_window_bounds_from_index(
 
             let start_block = read_u64_value(batch.column(start_block_idx).as_ref(), row)?
                 .ok_or_else(|| anyhow::anyhow!("null start_block at row {}", row))?;
-            let end_block = read_u64_value(batch.column(end_block_idx).as_ref(), row)?
-                .ok_or_else(|| anyhow::anyhow!("null end_block at row {}", row))?;
+            let stop_block = read_u64_value(batch.column(stop_block_idx).as_ref(), row)?
+                .ok_or_else(|| anyhow::anyhow!("null stop_block at row {}", row))?;
 
-            matches.push((partition_value, start_block, end_block));
+            matches.push((partition_value, start_block, stop_block));
         }
 
         Ok(())
@@ -3967,7 +3977,7 @@ pub fn resolve_partition_window_bounds_from_index(
         }
         if current.2 != next.1 {
             anyhow::bail!(
-                "partition window has non-contiguous bounds in {} between {} and {}: end_block={} next_start_block={}",
+                "partition window has non-contiguous bounds in {} between {} and {}: stop_block={} next_start_block={}",
                 request.index_path,
                 current.0,
                 next.0,
@@ -3981,7 +3991,7 @@ pub fn resolve_partition_window_bounds_from_index(
     let last = matches.last().expect("non-empty checked above");
     if last.2 <= first.1 {
         anyhow::bail!(
-            "invalid partition window bounds in {}: start_block={} end_block={}",
+            "invalid partition window bounds in {}: start_block={} stop_block={}",
             request.index_path,
             first.1,
             last.2
@@ -4018,9 +4028,7 @@ where
     let start_block_idx = schema
         .index_of("start_block")
         .map_err(|_| anyhow::anyhow!("missing required column: start_block"))?;
-    let end_block_idx = schema
-        .index_of("end_block")
-        .map_err(|_| anyhow::anyhow!("missing required column: end_block"))?;
+    let stop_block_idx = partition_stop_block_idx(schema.as_ref())?;
     let chain_idx = schema.index_of("chain").ok();
 
     for row in 0..batch.num_rows() {
@@ -4051,10 +4059,10 @@ where
 
         let start_block = read_u64_value(batch.column(start_block_idx).as_ref(), row)?
             .ok_or_else(|| anyhow::anyhow!("null start_block at row {}", row))?;
-        let end_block = read_u64_value(batch.column(end_block_idx).as_ref(), row)?
-            .ok_or_else(|| anyhow::anyhow!("null end_block at row {}", row))?;
+        let stop_block = read_u64_value(batch.column(stop_block_idx).as_ref(), row)?
+            .ok_or_else(|| anyhow::anyhow!("null stop_block at row {}", row))?;
 
-        matches.push((start_block, end_block));
+        matches.push((start_block, stop_block));
     }
 
     Ok(())
@@ -6971,7 +6979,7 @@ mod tests {
                 partition_start_ts: "0".to_string(),
                 partition_value: "0".to_string(),
                 start_block: 0,
-                end_block: 1_000_000,
+                stop_block: 1_000_000,
                 start_time: None,
                 end_time: Some("2021-04-06 12:00:00".to_string()),
                 chain: Some("solana-mainnet".to_string()),
@@ -6982,7 +6990,7 @@ mod tests {
                 partition_start_ts: "1000000".to_string(),
                 partition_value: "1000000".to_string(),
                 start_block: 1_000_000,
-                end_block: 2_000_000,
+                stop_block: 2_000_000,
                 start_time: Some("2021-04-06 12:00:01".to_string()),
                 end_time: Some("2021-04-10 08:30:00".to_string()),
                 chain: Some("solana-mainnet".to_string()),
@@ -6996,7 +7004,7 @@ mod tests {
         assert_eq!(read_rows[0].partition_type, "block_range");
         assert_eq!(read_rows[0].partition_value, "0");
         assert_eq!(read_rows[0].start_block, 0);
-        assert_eq!(read_rows[0].end_block, 1_000_000);
+        assert_eq!(read_rows[0].stop_block, 1_000_000);
         assert!(read_rows[0].start_time.is_none());
         assert_eq!(
             read_rows[0].end_time.as_deref(),
@@ -7004,7 +7012,7 @@ mod tests {
         );
         assert_eq!(read_rows[1].partition_value, "1000000");
         assert_eq!(read_rows[1].start_block, 1_000_000);
-        assert_eq!(read_rows[1].end_block, 2_000_000);
+        assert_eq!(read_rows[1].stop_block, 2_000_000);
         assert_eq!(
             read_rows[1].start_time.as_deref(),
             Some("2021-04-06 12:00:01")
@@ -7021,7 +7029,7 @@ mod tests {
             partition_start_ts: "2021-04-06 00:00:00".to_string(),
             partition_value: "2021-04-06 00:00:00".to_string(),
             start_block: 100,
-            end_block: 200,
+            stop_block: 200,
             start_time: None, // nullable
             end_time: None,   // nullable
             chain: Some("sol-mainnet".to_string()),
@@ -7700,7 +7708,7 @@ mod tests {
                 false,
             ),
             arrow::datatypes::Field::new("start_block", arrow::datatypes::DataType::UInt64, false),
-            arrow::datatypes::Field::new("end_block", arrow::datatypes::DataType::UInt64, false),
+            arrow::datatypes::Field::new("stop_block", arrow::datatypes::DataType::UInt64, false),
         ]));
 
         let batch = RecordBatch::try_new(
@@ -7758,7 +7766,7 @@ mod tests {
                 false,
             ),
             arrow::datatypes::Field::new("start_block", arrow::datatypes::DataType::UInt64, false),
-            arrow::datatypes::Field::new("end_block", arrow::datatypes::DataType::UInt64, false),
+            arrow::datatypes::Field::new("stop_block", arrow::datatypes::DataType::UInt64, false),
         ]));
 
         let batch = RecordBatch::try_new(
@@ -7812,7 +7820,7 @@ mod tests {
                 false,
             ),
             arrow::datatypes::Field::new("start_block", arrow::datatypes::DataType::UInt64, false),
-            arrow::datatypes::Field::new("end_block", arrow::datatypes::DataType::UInt64, false),
+            arrow::datatypes::Field::new("stop_block", arrow::datatypes::DataType::UInt64, false),
         ]));
 
         let batch = RecordBatch::try_new(
@@ -7875,7 +7883,7 @@ mod tests {
                 false,
             ),
             arrow::datatypes::Field::new("start_block", arrow::datatypes::DataType::UInt64, false),
-            arrow::datatypes::Field::new("end_block", arrow::datatypes::DataType::UInt64, false),
+            arrow::datatypes::Field::new("stop_block", arrow::datatypes::DataType::UInt64, false),
         ]));
 
         let batch = RecordBatch::try_new(
@@ -7942,7 +7950,7 @@ mod tests {
                 false,
             ),
             arrow::datatypes::Field::new("start_block", arrow::datatypes::DataType::UInt64, false),
-            arrow::datatypes::Field::new("end_block", arrow::datatypes::DataType::UInt64, false),
+            arrow::datatypes::Field::new("stop_block", arrow::datatypes::DataType::UInt64, false),
         ]));
 
         let batch = RecordBatch::try_new(
@@ -8040,7 +8048,7 @@ mod tests {
                 false,
             ),
             arrow::datatypes::Field::new("start_block", arrow::datatypes::DataType::UInt64, false),
-            arrow::datatypes::Field::new("end_block", arrow::datatypes::DataType::UInt64, false),
+            arrow::datatypes::Field::new("stop_block", arrow::datatypes::DataType::UInt64, false),
         ]));
 
         let values = vec![
@@ -8122,7 +8130,7 @@ mod tests {
                 false,
             ),
             arrow::datatypes::Field::new("start_block", arrow::datatypes::DataType::UInt64, false),
-            arrow::datatypes::Field::new("end_block", arrow::datatypes::DataType::UInt64, false),
+            arrow::datatypes::Field::new("stop_block", arrow::datatypes::DataType::UInt64, false),
         ]));
 
         let batch = RecordBatch::try_new(
@@ -8165,11 +8173,11 @@ mod tests {
         .expect("legacy partitions metadata should be ignored");
         assert_eq!(result.rows.len(), 1);
         assert_eq!(result.rows[0].start_block, 100);
-        assert_eq!(result.rows[0].end_block, 200);
+        assert_eq!(result.rows[0].stop_block, 200);
     }
 
     #[test]
-    fn test_read_partitions_build_rows_ignores_legacy_partitions_metadata() {
+    fn test_read_partitions_build_rows_accepts_legacy_end_block_column_and_metadata() {
         use arrow::array::{StringArray, UInt64Array};
         use arrow::record_batch::RecordBatch;
         use parquet::arrow::ArrowWriter;
@@ -8230,7 +8238,59 @@ mod tests {
             .expect("legacy partitions metadata should be ignored");
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].start_block, 100);
-        assert_eq!(rows[0].end_block, 200);
+        assert_eq!(rows[0].stop_block, 200);
+    }
+
+    #[test]
+    fn test_resolve_partition_bounds_from_index_accepts_legacy_end_block_column() {
+        use arrow::array::{StringArray, UInt64Array};
+        use arrow::record_batch::RecordBatch;
+        use parquet::arrow::ArrowWriter;
+        use std::fs::File;
+        use std::sync::Arc;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("partitions.parquet");
+
+        let schema = Arc::new(arrow::datatypes::Schema::new(vec![
+            arrow::datatypes::Field::new("chain", arrow::datatypes::DataType::Utf8, false),
+            arrow::datatypes::Field::new("partition_type", arrow::datatypes::DataType::Utf8, false),
+            arrow::datatypes::Field::new(
+                "partition_value",
+                arrow::datatypes::DataType::Utf8,
+                false,
+            ),
+            arrow::datatypes::Field::new("start_block", arrow::datatypes::DataType::UInt64, false),
+            arrow::datatypes::Field::new("end_block", arrow::datatypes::DataType::UInt64, false),
+        ]));
+
+        let batch = RecordBatch::try_new(
+            Arc::clone(&schema),
+            vec![
+                Arc::new(StringArray::from(vec!["eth-mainnet"])),
+                Arc::new(StringArray::from(vec!["hour"])),
+                Arc::new(StringArray::from(vec!["2015-07-30 15:00:00"])),
+                Arc::new(UInt64Array::from(vec![200_u64])),
+                Arc::new(UInt64Array::from(vec![300_u64])),
+            ],
+        )
+        .expect("record batch");
+
+        let file = File::create(&path).expect("create parquet");
+        let mut writer = ArrowWriter::try_new(file, schema, None).expect("writer");
+        writer.write(&batch).expect("write batch");
+        writer.close().expect("close writer");
+
+        let request = PartitionBoundsRequest {
+            index_path: path.to_string_lossy().to_string(),
+            partition_type: "hour".to_string(),
+            partition_value: "2015-07-30 15:00:00".to_string(),
+            chain: Some("eth-mainnet".to_string()),
+        };
+        let bounds = resolve_partition_bounds_from_index(&request, None)
+            .expect("legacy end_block column should still resolve");
+        assert_eq!(bounds.start_block, 200);
+        assert_eq!(bounds.stop_block, 300);
     }
 
     #[test]
@@ -8241,7 +8301,7 @@ mod tests {
                 partition_value: "2015-07-29 00:00:00".to_string(),
                 partition_start_ts: "2015-07-29 00:00:00".to_string(),
                 start_block: 100,
-                end_block: 200,
+                stop_block: 200,
                 chain: Some("eth-mainnet".to_string()),
             },
             PartitionListRow {
@@ -8249,7 +8309,7 @@ mod tests {
                 partition_value: "2015-07-30 00:00:00".to_string(),
                 partition_start_ts: "2015-07-30 00:00:00".to_string(),
                 start_block: 250,
-                end_block: 300,
+                stop_block: 300,
                 chain: Some("eth-mainnet".to_string()),
             },
             PartitionListRow {
@@ -8257,7 +8317,7 @@ mod tests {
                 partition_value: "2015-07-31 00:00:00".to_string(),
                 partition_start_ts: "2015-07-31 00:00:00".to_string(),
                 start_block: 290,
-                end_block: 400,
+                stop_block: 400,
                 chain: Some("eth-mainnet".to_string()),
             },
         ];
@@ -8285,7 +8345,7 @@ mod tests {
                 false,
             ),
             arrow::datatypes::Field::new("start_block", arrow::datatypes::DataType::UInt64, false),
-            arrow::datatypes::Field::new("end_block", arrow::datatypes::DataType::UInt64, false),
+            arrow::datatypes::Field::new("stop_block", arrow::datatypes::DataType::UInt64, false),
         ]));
         let batch = RecordBatch::try_new(
             Arc::clone(&schema),
@@ -8312,7 +8372,7 @@ mod tests {
                     rows.iter().map(|r| r.start_block).collect::<Vec<_>>(),
                 )),
                 Arc::new(UInt64Array::from(
-                    rows.iter().map(|r| r.end_block).collect::<Vec<_>>(),
+                    rows.iter().map(|r| r.stop_block).collect::<Vec<_>>(),
                 )),
             ],
         )
@@ -8415,7 +8475,7 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].partition_type, "date");
         assert_eq!(rows[0].start_block, 100);
-        assert_eq!(rows[0].end_block, 102);
+        assert_eq!(rows[0].stop_block, 102);
         assert_eq!(builder.current_frontier(), Some(102));
     }
 
@@ -8456,7 +8516,7 @@ mod tests {
         assert_eq!(date_rows.len(), 1);
         assert_eq!(date_rows[0].partition_value, "2023-07-31 00:00:00");
         assert_eq!(date_rows[0].start_block, 100);
-        assert_eq!(date_rows[0].end_block, 103);
+        assert_eq!(date_rows[0].stop_block, 103);
 
         let hour_rows: Vec<_> = rows
             .iter()
@@ -8465,10 +8525,10 @@ mod tests {
         assert_eq!(hour_rows.len(), 2);
         assert_eq!(hour_rows[0].partition_value, "2023-07-31 14:00:00");
         assert_eq!(hour_rows[0].start_block, 100);
-        assert_eq!(hour_rows[0].end_block, 102);
+        assert_eq!(hour_rows[0].stop_block, 102);
         assert_eq!(hour_rows[1].partition_value, "2023-07-31 15:00:00");
         assert_eq!(hour_rows[1].start_block, 102);
-        assert_eq!(hour_rows[1].end_block, 103);
+        assert_eq!(hour_rows[1].stop_block, 103);
     }
 
     #[test]
@@ -8489,7 +8549,7 @@ mod tests {
 
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].start_block, 500);
-        assert_eq!(rows[0].end_block, 501);
+        assert_eq!(rows[0].stop_block, 501);
         assert_eq!(rows[0].partition_value, "2023-07-31 14:00:00");
     }
 
@@ -8501,7 +8561,7 @@ mod tests {
             partition_start_ts: "2023-07-31 14:00:00".to_string(),
             partition_value: "2023-07-31 14:00:00".to_string(),
             start_block: 100,
-            end_block: 102,
+            stop_block: 102,
             start_time: Some("2023-07-31 14:59:00".to_string()),
             end_time: Some("2023-07-31 14:59:50".to_string()),
             chain: Some("eth-mainnet".to_string()),
@@ -8534,10 +8594,10 @@ mod tests {
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[0].partition_value, "2023-07-31 14:00:00");
         assert_eq!(rows[0].start_block, 100);
-        assert_eq!(rows[0].end_block, 103);
+        assert_eq!(rows[0].stop_block, 103);
         assert_eq!(rows[1].partition_value, "2023-07-31 15:00:00");
         assert_eq!(rows[1].start_block, 103);
-        assert_eq!(rows[1].end_block, 104);
+        assert_eq!(rows[1].stop_block, 104);
     }
 
     #[test]
@@ -8550,7 +8610,7 @@ mod tests {
             partition_start_ts: "2023-07-31 14:00:00".to_string(),
             partition_value: "2023-07-31 14:00:00".to_string(),
             start_block: 100,
-            end_block: 103,
+            stop_block: 103,
             start_time: Some("2023-07-31 14:59:00".to_string()),
             end_time: Some("2023-07-31 15:00:00".to_string()),
             chain: Some("eth-mainnet".to_string()),
@@ -8576,7 +8636,7 @@ mod tests {
             partition_start_ts: "2023-07-31 14:00:00".to_string(),
             partition_value: "2023-07-31 14:00:00".to_string(),
             start_block: 100,
-            end_block: 103,
+            stop_block: 103,
             start_time: Some("2023-07-31 14:59:00".to_string()),
             end_time: Some("2023-07-31 15:00:00".to_string()),
             chain: Some("eth-mainnet".to_string()),
@@ -8597,7 +8657,7 @@ mod tests {
             vec![
                 "partition",
                 "start_block",
-                "end_block",
+                "stop_block",
                 "start_time",
                 "end_time",
             ]
@@ -8667,7 +8727,7 @@ mod tests {
             partition_start_ts: "2023-07-31 14:00:00".to_string(),
             partition_value: "2023-07-31 14:00:00".to_string(),
             start_block: 100,
-            end_block: 103,
+            stop_block: 103,
             start_time: Some("2023-07-31 14:59:00".to_string()),
             end_time: Some("2023-07-31 15:00:00".to_string()),
             chain: Some("eth-mainnet".to_string()),
@@ -8803,7 +8863,7 @@ mod tests {
             partition_start_ts: "2023-07-31 14:00:00".to_string(),
             partition_value: "2023-07-31 14:00:00".to_string(),
             start_block: 100,
-            end_block: 103,
+            stop_block: 103,
             start_time: Some("2023-07-31 14:59:00".to_string()),
             end_time: Some("2023-07-31 15:00:00".to_string()),
             chain: Some("eth-mainnet".to_string()),
@@ -8832,7 +8892,7 @@ mod tests {
             partition_start_ts: "2023-07-31 14:00:00".to_string(),
             partition_value: "2023-07-31 14:00:00".to_string(),
             start_block: 100,
-            end_block: 103,
+            stop_block: 103,
             start_time: Some("2023-07-31 14:59:00".to_string()),
             end_time: Some("2023-07-31 15:00:00".to_string()),
             chain: Some("eth-mainnet".to_string()),

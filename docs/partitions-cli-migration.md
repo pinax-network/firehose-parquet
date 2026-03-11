@@ -38,7 +38,7 @@ Current behavior:
 
 - scans the requested `[start_block, stop_block)` range from Firehose
 - computes UTC interval starts for `date`, `hour`, `minute`, and `second`
-- emits one row per discovered partition with contiguous `[start_block, end_block)` bounds
+- emits one row per discovered partition with contiguous `[start_block, stop_block)` bounds
 - writes `/<chain>/partitions.parquet` under the supplied local or S3 output root
 - includes file metadata defined in `docs/partitions-parquet-contract.md`
 - supports `--resume` by reusing trailing partition rows from the existing canonical artifact and continuing from the stored frontier
@@ -120,7 +120,7 @@ The grouped CLI now supports integrity validation for `partitions.parquet`:
 
 Current checks:
 
-- invalid ranges (`start_block >= end_block`)
+- invalid ranges (`start_block >= stop_block`)
 - overlaps between adjacent rows in the same `(chain, partition_type)`
 - gaps between adjacent rows unless `--allow-gaps` is enabled
 - ordering issues based on `partition_start_ts`
