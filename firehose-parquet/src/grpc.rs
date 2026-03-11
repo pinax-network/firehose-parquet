@@ -480,6 +480,7 @@ mod tests {
             jwt_token: None,
             start_block: None,
             stop_block: None,
+            skip_missing_blocks: false,
             cursor_path: None,
             output: PathBuf::from("/tmp/output"),
             partition: Partition::None,
