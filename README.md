@@ -75,6 +75,20 @@ cargo build --release --workspace
   --stop-block 19001000 \
   --extended \
   --bytes-encoding hex
+
+# Backfill from a block and keep following finalized blocks
+./target/release/fireparq \
+  --network solana-mainnet-beta \
+  --start-block 250000000 \
+  --live \
+  --output ./output \
+  --partition date
+
+# Start live mode from the endpoint's first streamable block
+./target/release/fireparq \
+  --network mainnet \
+  --live \
+  --output ./output
 ```
 
 ### Docker
@@ -248,7 +262,10 @@ Connection:
 
 Block Range:
   -s, --start-block <START_BLOCK>  Start block number (inclusive) [env: START_BLOCK]
-  -t, --stop-block <STOP_BLOCK>    Stop block number (exclusive, 0 = stream forever) [env: STOP_BLOCK]
+                                  In `--live` mode, omitting this starts from the endpoint's first streamable block when available
+      --live                      Keep the stream open and continue following finalized blocks [env: LIVE] [default: false]
+  -t, --stop-block <STOP_BLOCK>    Stop block number (exclusive)
+                                  Required unless `--live` is set [env: STOP_BLOCK]
   -c, --cursor <CURSOR>            Path to cursor file for resuming a previous session [env: CURSOR]
       --cursor-override            Override cursor parameter validation on resume [env: CURSOR_OVERRIDE]
       --final-blocks-only          Only process finalized blocks (when false, adds fork_step column) [env: FINAL_BLOCKS_ONLY]

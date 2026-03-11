@@ -65,7 +65,10 @@ pub struct CommonArgs {
     )]
     pub api_token_envvar: String,
 
-    /// Start block number (inclusive)
+    /// Start block number (inclusive).
+    ///
+    /// In live mode, omitting this starts from the endpoint's first streamable
+    /// block when available.
     #[arg(
         short = 's',
         long,
@@ -75,7 +78,9 @@ pub struct CommonArgs {
     )]
     pub start_block: Option<u64>,
 
-    /// Stop block number (exclusive, 0 = stream forever)
+    /// Stop block number (exclusive).
+    ///
+    /// Required unless `--live` is set.
     #[arg(
         short = 't',
         long,
@@ -84,6 +89,19 @@ pub struct CommonArgs {
         help_heading = "Block Range"
     )]
     pub stop_block: Option<u64>,
+
+    /// Keep the stream open and continue following finalized blocks.
+    ///
+    /// When set and `--start-block` is omitted, starts from the endpoint's
+    /// first streamable block.
+    #[arg(
+        long,
+        env = "LIVE",
+        default_value = "false",
+        hide_env_values = true,
+        help_heading = "Block Range"
+    )]
+    pub live: bool,
 
     /// Path to partitions index parquet file (local path or s3:// URI), e.g. ./output/eth-mainnet/partitions.parquet
     #[arg(
@@ -6271,6 +6289,7 @@ mod tests {
         assert_eq!(cli.common.api_token_envvar, "SUBSTREAMS_API_TOKEN");
         assert!(cli.common.start_block.is_none());
         assert!(cli.common.stop_block.is_none());
+        assert!(!cli.common.live);
         assert!(cli.common.partitions_index.is_none());
         assert!(cli.common.partition_type.is_none());
         assert!(cli.common.partition_value.is_none());
@@ -6305,6 +6324,7 @@ mod tests {
             "100",
             "-t",
             "200",
+            "--live",
             "-c",
             "cursor-mainnet-date.parquet",
             "--output",
@@ -6345,6 +6365,7 @@ mod tests {
         assert_eq!(cli.common.api_token_envvar, "MY_TOKEN_VAR");
         assert_eq!(cli.common.start_block, Some(100));
         assert_eq!(cli.common.stop_block, Some(200));
+        assert!(cli.common.live);
         assert_eq!(
             cli.common.partitions_index.as_deref(),
             Some("./output/eth-mainnet/partitions.parquet")
@@ -6445,6 +6466,20 @@ mod tests {
             "false",
         ]);
         assert!(!cli.common.strict_timestamps);
+    }
+
+    #[test]
+    #[serial]
+    fn test_live_flag_parses_without_stop_block() {
+        let cli = parse(&[
+            "test-cli",
+            "--endpoint",
+            "https://example.com:443",
+            "--live",
+        ]);
+
+        assert!(cli.common.live);
+        assert!(cli.common.stop_block.is_none());
     }
 
     #[test]

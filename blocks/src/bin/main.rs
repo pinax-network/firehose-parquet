@@ -60,6 +60,17 @@ Examples:
   # Resolve a built-in network alias to its default endpoint
   fireparq --network eth --start-block 20000000 --stop-block 20001000
 
+  # Run a bounded historical ingestion
+  fireparq --network mainnet \\
+    --start-block 20000000 --stop-block 20001000
+
+  # Backfill from a block and keep following finalized blocks
+  fireparq --network solana-mainnet-beta \\
+    --start-block 250000000 --live
+
+  # Start live mode from the endpoint's first streamable block
+  fireparq --network mainnet --live
+
   # Override a network alias with an env var
   FIREHOSE_ENDPOINT_SOLANA=https://solana.internal.example.com:443 \\
     fireparq --network solana --start-block 250000000 --stop-block 250100000
@@ -68,14 +79,10 @@ Examples:
   fireparq --network mainnet \\
     --start-block 20000000 --stop-block 20001000
 
-  # Stream Solana with date partitioning to S3
-  fireparq --network solana-mainnet-beta \\
-    --start-block 250000000 --stop-block 250100000 \\
-    --partition date --s3-bucket my-bucket
-
   # Stream with hex encoding and extended tables
   fireparq --network mainnet \\
-    --start-block 20000000 --bytes-encoding hex --extended
+    --start-block 20000000 --stop-block 20001000 \\
+    --bytes-encoding hex --extended
 
   # Resume from cursor
   fireparq --network mainnet \\
@@ -668,6 +675,36 @@ fn read_optional_env(name: &str) -> Option<String> {
     std::env::var(name).ok().filter(|value| !value.is_empty())
 }
 
+fn validate_ingestion_block_range(live: bool, stop_block: Option<u64>) -> Result<()> {
+    if !live && stop_block.is_none() {
+        return Err(anyhow!("--stop-block is required unless --live is set"));
+    }
+    if live && stop_block.is_some() {
+        return Err(anyhow!("--stop-block is incompatible with --live"));
+    }
+    Ok(())
+}
+
+fn resolve_live_start_block(
+    live: bool,
+    start_block: Option<u64>,
+    endpoint_info: &Option<EndpointInfo>,
+) -> Result<Option<u64>> {
+    if !live || start_block.is_some() {
+        return Ok(start_block);
+    }
+
+    endpoint_info
+        .as_ref()
+        .map(|info| info.first_streamable_block_num)
+        .map(Some)
+        .ok_or_else(|| {
+            anyhow!(
+                "--start-block is required when --live is set and the endpoint does not expose first_streamable_block_num"
+            )
+        })
+}
+
 async fn run_partitions_build(
     endpoint: &str,
     api_key_envvar: &str,
@@ -1032,10 +1069,8 @@ async fn run_partitions_build(
                 continue;
             };
 
-            let completed_frontier = completed_block_range_frontier(
-                latest_available.block_num,
-                block_range_size,
-            );
+            let completed_frontier =
+                completed_block_range_frontier(latest_available.block_num, block_range_size);
             if completed_frontier <= frontier {
                 info!(
                     frontier,
@@ -1084,7 +1119,8 @@ async fn run_partitions_build(
                 rows.push(row);
                 checkpoint_state.record_rollover();
 
-                let frontier_advanced = checkpoint_state.last_checkpoint_frontier != Some(partition_end);
+                let frontier_advanced =
+                    checkpoint_state.last_checkpoint_frontier != Some(partition_end);
                 let interval_elapsed = checkpoint_state
                     .last_checkpoint_at
                     .map(|at| at.elapsed() >= PARTITIONS_CHECKPOINT_INTERVAL)
@@ -3573,6 +3609,10 @@ async fn main() -> Result<()> {
     let mut client = FirehoseClient::new(config.clone());
     let endpoint_info = client.info().await;
 
+    validate_ingestion_block_range(cli.common.live, config.stop_block)?;
+    config.start_block =
+        resolve_live_start_block(cli.common.live, config.start_block, &endpoint_info)?;
+
     // Use chain_name as a subdirectory under the output path.
     config.output = resolve_output(&config.output, &endpoint_info);
 
@@ -4193,6 +4233,8 @@ mod tests {
         let help = cmd.render_long_help().to_string();
         assert!(help.contains("--network <NETWORK>"));
         assert!(help.contains("FIREHOSE_ENDPOINT_MAINNET"));
+        assert!(help.contains("--live"));
+        assert!(help.contains("first streamable block"));
     }
 
     #[test]
@@ -4229,6 +4271,63 @@ mod tests {
         let rendered = err.to_string();
         assert!(rendered.contains("invalid value 'unknown'"));
         assert!(rendered.contains("solana-mainnet-beta"));
+    }
+
+    #[test]
+    fn test_cli_parses_live_flag() {
+        let cli = Cli::parse_from(["fireparq", "--network", "mainnet", "--live"]);
+        assert!(cli.common.live);
+    }
+
+    #[test]
+    fn test_validate_ingestion_block_range_accepts_bounded_mode() {
+        validate_ingestion_block_range(false, Some(200))
+            .expect("bounded mode should accept --stop-block");
+    }
+
+    #[test]
+    fn test_validate_ingestion_block_range_rejects_missing_stop_without_live() {
+        let err = validate_ingestion_block_range(false, None)
+            .expect_err("missing --stop-block should require --live");
+        assert_eq!(
+            err.to_string(),
+            "--stop-block is required unless --live is set"
+        );
+    }
+
+    #[test]
+    fn test_validate_ingestion_block_range_rejects_stop_block_in_live_mode() {
+        let err = validate_ingestion_block_range(true, Some(200))
+            .expect_err("--live should reject --stop-block");
+        assert_eq!(err.to_string(), "--stop-block is incompatible with --live");
+    }
+
+    #[test]
+    fn test_resolve_live_start_block_uses_endpoint_first_streamable_block() {
+        let endpoint_info = Some(EndpointInfo {
+            chain_name: "mainnet".to_string(),
+            chain_name_aliases: vec![],
+            first_streamable_block_num: 42,
+            first_streamable_block_id: String::new(),
+            block_id_encoding: 0,
+            block_features: vec![],
+        });
+
+        let start_block = resolve_live_start_block(true, None, &endpoint_info)
+            .expect("live mode should use endpoint first streamable block");
+
+        assert_eq!(start_block, Some(42));
+    }
+
+    #[test]
+    fn test_resolve_live_start_block_rejects_missing_first_streamable_metadata() {
+        let err = resolve_live_start_block(true, None, &None)
+            .expect_err("live mode should require an explicit start or endpoint metadata");
+
+        assert_eq!(
+            err.to_string(),
+            "--start-block is required when --live is set and the endpoint does not expose first_streamable_block_num"
+        );
     }
 
     #[test]
@@ -5191,7 +5290,9 @@ mod tests {
             PARTITIONS_PROBE_TIMESTAMP_EXPONENTIAL_MAX_JUMP,
         );
 
-        assert!(message.contains("polling live frontier: block 4420838 is missing timestamp metadata"));
+        assert!(
+            message.contains("polling live frontier: block 4420838 is missing timestamp metadata")
+        );
         assert!(message.contains("--partition block_range"));
         assert!(message.contains("--block-range-size <N>"));
         assert!(message.contains("--strict-timestamps false"));
