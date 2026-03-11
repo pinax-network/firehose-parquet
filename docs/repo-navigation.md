@@ -16,7 +16,7 @@ Related design docs:
   - `firehose-protos/build.rs`: compiles `proto/*.proto` into Rust modules with `tonic-prost-build`.
   - `firehose-protos/src/lib.rs`: exposes compiled protobuf modules and aliases (`firehose`, `eth`, `solana`, etc.).
 - `firehose-parquet/`: core library crate used by the binary.
-  - `src/cli.rs`: shared CLI args, subcommands, parsing, validation, and utility routines.
+  - `src/cli.rs`: shared CLI args (`CommonArgs`, `BuildArgs`), subcommands, parsing, validation, and utility routines.
   - `src/networks.rs`: built-in Firehose network alias registry and env override resolution.
   - `src/config.rs`: pipeline config model, partition key behavior, compression enum.
   - `src/grpc.rs`: Firehose stream client, auth headers, reconnect/backoff/timeouts.
@@ -37,6 +37,8 @@ Related design docs:
 ## Data-Flow Mental Model
 
 1. CLI options/env load in `blocks/src/bin/main.rs` using shared structures from `firehose-parquet/src/cli.rs`.
+   The primary ingestion path dispatches to `fireparq build` (`Commands::Build(BuildArgs)`) which calls `run_ingestion`.
+   The legacy root-level invocation still works but emits a deprecation warning.
 2. Endpoint metadata and stream messages come from `firehose-parquet/src/grpc.rs`.
 3. Selected chain mapper (`blocks/src/<chain>/mapper.rs`) decodes protobuf blocks and builds Arrow columns using schemas from `schema.rs`.
 4. `firehose-parquet/src/writer.rs` flushes `RecordBatch`es to partitioned Parquet files (local or S3).
@@ -46,8 +48,8 @@ Related design docs:
 ## Where To Edit For X
 
 - Add/change CLI flag or subcommand:
-  - `blocks/src/bin/main.rs` (binary-specific flags like `--block-type`, `--extended`)
-  - `firehose-parquet/src/cli.rs` (shared flags/subcommands and argument validation)
+  - `firehose-parquet/src/cli.rs` (shared flags/subcommands including `BuildArgs` for `fireparq build`, and argument validation)
+  - `blocks/src/bin/main.rs` (binary-specific wiring: `run_ingestion`, backward-compat deprecated root path)
 - Add a new chain or adjust chain-specific table mapping:
   - `blocks/src/<chain>/proto.rs` for protobuf type aliases
   - `blocks/src/<chain>/schema.rs` for Arrow schema
@@ -82,6 +84,7 @@ Related design docs:
 - Run tests: `cargo test --workspace`
 - Build release: `cargo build --release --workspace`
 - Run binary from source: `cargo run --bin fireparq -- --help`
+- Run ingestion (preferred form): `cargo run --bin fireparq -- build --network mainnet --start-block 100 --live`
 - Install binary locally: `cargo install --path blocks`
 - Generate shell completions: `cargo run --bin fireparq -- completions zsh`
 - CI entrypoint: `.github/workflows/ci.yml`

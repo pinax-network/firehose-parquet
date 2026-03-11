@@ -1,4 +1,6 @@
 use crate::config::{Compression, Config, Partition};
+use crate::networks::KNOWN_NETWORK_NAMES;
+use clap::builder::PossibleValuesParser;
 use clap::Args;
 use clap_complete::{generate, Shell};
 use std::io;
@@ -384,6 +386,143 @@ pub struct CommonArgs {
     pub cache_control: String,
 }
 
+/// Arguments for the `build` subcommand — main Firehose ingestion pipeline.
+///
+/// Streams blocks from a Firehose gRPC endpoint and writes Apache Parquet
+/// datasets partitioned by block range, date, hour, minute, or second.
+#[derive(clap::Args, Debug, Clone)]
+#[command(after_long_help = "\
+Examples:
+  # Run a bounded historical ingestion
+  fireparq build --network mainnet \\
+    --start-block 20000000 --stop-block 20001000
+
+  # Backfill from a block and keep following finalized blocks
+  fireparq build --network solana-mainnet-beta \\
+    --start-block 250000000 --live
+
+  # Start live mode from the endpoint's first streamable block
+  fireparq build --network mainnet --live
+
+  # Override a network alias with an env var
+  FIREHOSE_ENDPOINT_SOLANA=https://solana.internal.example.com:443 \\
+    fireparq build --network solana --start-block 250000000 --stop-block 250100000
+
+  # Stream with hex encoding and extended tables
+  fireparq build --network mainnet \\
+    --start-block 20000000 --stop-block 20001000 \\
+    --bytes-encoding hex --extended
+
+  # Resume from cursor
+  fireparq build --network mainnet \\
+    --cursor cursor.parquet --partition date
+
+  # Resolve range from local partitions index (no explicit start/stop)
+  fireparq build --network mainnet \\
+    --partitions-index ./output/eth-mainnet/partitions.parquet \\
+    --partition-type hour \\
+    --partition-value '2015-07-30 15:00:00' \\
+    --partition-chain eth-mainnet
+
+  # Resolve range from S3 partitions index
+  fireparq build --network mainnet \\
+    --partitions-index s3://my-bucket/eth-mainnet/partitions.parquet \\
+    --partition-type date \\
+    --partition-value '2015-07-30 00:00:00' \\
+    --partition-chain eth-mainnet
+
+  # Resolve range from global S3 index shared across chains
+  fireparq build --network mainnet \\
+    --partitions-index s3://my-bucket/partitions.parquet \\
+    --partition-type hour \\
+    --partition-value '2015-07-30 15:00:00' \\
+    --partition-chain eth-mainnet
+
+  # Resolve an inclusive/exclusive partition window [from, to)
+  fireparq build --network mainnet \\
+    --partitions-index ./output/eth-mainnet/partitions.parquet \\
+    --partition-type hour \\
+    --partition-from '2015-07-30 14:00:00' \\
+    --partition-to '2015-07-30 18:00:00' \\
+    --partition-chain eth-mainnet
+")]
+pub struct BuildArgs {
+    #[command(flatten)]
+    pub common: CommonArgs,
+
+    /// Firehose network `chainName`.
+    ///
+    /// When set, resolves a known network `chainName` to a default endpoint.
+    /// The canonical `chainName` remains the final resolved output. `--endpoint`
+    /// or `ENDPOINT` takes precedence if already set. Supports per-network env
+    /// overrides such as `FIREHOSE_ENDPOINT_MAINNET` or
+    /// `FIREHOSE_ENDPOINT_SOLANA_MAINNET_BETA`.
+    #[arg(
+        long,
+        env = "NETWORK",
+        hide_env_values = true,
+        value_parser = PossibleValuesParser::new(KNOWN_NETWORK_NAMES),
+        help_heading = "Connection"
+    )]
+    pub network: Option<String>,
+
+    /// Block type to process.
+    /// Use "auto" to detect from the Firehose stream.
+    /// Options: auto, evm, bitcoin, solana, near, antelope, cosmos, tron, beacon
+    #[arg(
+        long,
+        env = "BLOCK_TYPE",
+        default_value = "auto",
+        hide_env_values = true,
+        help_heading = "Chain"
+    )]
+    pub block_type: String,
+
+    /// Enable extended detail level (extra tables: EVM calls/balance_changes/etc., Antelope db_ops, Solana vote_transactions)
+    #[arg(
+        long,
+        env = "EXTENDED",
+        default_value = "false",
+        hide_env_values = true,
+        help_heading = "Chain"
+    )]
+    pub extended: bool,
+
+    /// Byte encoding strategy for binary fields (hashes, addresses, etc.)
+    /// Options: binary (raw bytes), hex (0x-prefixed), hex_no_prefix, base58, tron_base58, auto (chain-appropriate)
+    #[arg(
+        long,
+        env = "BYTES_ENCODING",
+        default_value = "auto",
+        hide_env_values = true,
+        help_heading = "Chain"
+    )]
+    pub bytes_encoding: String,
+
+    /// Include failed/reverted transactions in output (default: false)
+    #[arg(
+        long,
+        env = "INCLUDE_FAILED_TRANSACTIONS",
+        default_value = "false",
+        hide_env_values = true,
+        help_heading = "Chain"
+    )]
+    pub include_failed_transactions: bool,
+
+    /// Override cursor parameter validation. When a cursor file exists and its
+    /// stored parameters differ from the current CLI arguments, the pipeline
+    /// normally exits with an error. This flag suppresses that check and
+    /// resumes with the current parameters.
+    #[arg(
+        long,
+        env = "CURSOR_OVERRIDE",
+        default_value = "false",
+        hide_env_values = true,
+        help_heading = "Block Range"
+    )]
+    pub cursor_override: bool,
+}
+
 /// Subcommands shared by all binaries.
 #[derive(clap::Subcommand, Debug)]
 pub enum Commands {
@@ -393,6 +532,12 @@ pub enum Commands {
         #[arg(value_enum)]
         shell: Shell,
     },
+    /// Stream blocks from a Firehose gRPC endpoint and write Apache Parquet datasets.
+    ///
+    /// This is the primary ingestion workflow. Partitions output by block range,
+    /// date, hour, minute, or second. Supports live mode, cursor-based resume,
+    /// and S3 output.
+    Build(BuildArgs),
     /// Partition index utilities (`partitions.parquet` workflows).
     #[command(subcommand)]
     Partitions(PartitionsCommands),
