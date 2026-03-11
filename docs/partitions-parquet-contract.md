@@ -35,6 +35,7 @@ These columns are optional:
 Interpretation rules:
 
 - when `firehose-parquet.partition = block_range`, `partition` stores the partition start block
+- block-range output paths should use the same `[start_block, stop_block)` naming (for example `block_range=390500000-390600000`)
 - otherwise `partition` stores UTC epoch seconds and readers render it as canonical `YYYY-MM-DD HH:MM:SS`
 - `chain` may be stored once in file metadata (`firehose-parquet.chain_name`) for single-chain indexes or per row in the optional `chain` column for shared/global indexes
 
