@@ -962,10 +962,8 @@ async fn run_partitions_build(
                 continue;
             };
 
-            let completed_frontier = completed_block_range_frontier(
-                latest_available.block_num,
-                block_range_size,
-            );
+            let completed_frontier =
+                completed_block_range_frontier(latest_available.block_num, block_range_size);
             if completed_frontier <= frontier {
                 info!(
                     frontier,
@@ -1014,7 +1012,8 @@ async fn run_partitions_build(
                 rows.push(row);
                 checkpoint_state.record_rollover();
 
-                let frontier_advanced = checkpoint_state.last_checkpoint_frontier != Some(partition_end);
+                let frontier_advanced =
+                    checkpoint_state.last_checkpoint_frontier != Some(partition_end);
                 let interval_elapsed = checkpoint_state
                     .last_checkpoint_at
                     .map(|at| at.elapsed() >= PARTITIONS_CHECKPOINT_INTERVAL)
@@ -3504,7 +3503,8 @@ async fn main() -> Result<()> {
     let endpoint_info = client.info().await;
 
     validate_ingestion_block_range(cli.common.live, config.stop_block)?;
-    config.start_block = resolve_live_start_block(cli.common.live, config.start_block, &endpoint_info)?;
+    config.start_block =
+        resolve_live_start_block(cli.common.live, config.start_block, &endpoint_info)?;
 
     // Use chain_name as a subdirectory under the output path.
     config.output = resolve_output(&config.output, &endpoint_info);
@@ -4145,7 +4145,10 @@ mod tests {
     fn test_validate_ingestion_block_range_rejects_missing_stop_without_live() {
         let err = validate_ingestion_block_range(false, None)
             .expect_err("missing --stop-block should require --live");
-        assert_eq!(err.to_string(), "--stop-block is required unless --live is set");
+        assert_eq!(
+            err.to_string(),
+            "--stop-block is required unless --live is set"
+        );
     }
 
     #[test]
@@ -4159,8 +4162,11 @@ mod tests {
     fn test_resolve_live_start_block_uses_endpoint_first_streamable_block() {
         let endpoint_info = Some(EndpointInfo {
             chain_name: "mainnet".to_string(),
+            chain_name_aliases: vec![],
             first_streamable_block_num: 42,
-            ..EndpointInfo::default()
+            first_streamable_block_id: String::new(),
+            block_id_encoding: 0,
+            block_features: vec![],
         });
 
         let start_block = resolve_live_start_block(true, None, &endpoint_info)
@@ -5053,7 +5059,9 @@ mod tests {
             PARTITIONS_PROBE_TIMESTAMP_EXPONENTIAL_MAX_JUMP,
         );
 
-        assert!(message.contains("polling live frontier: block 4420838 is missing timestamp metadata"));
+        assert!(
+            message.contains("polling live frontier: block 4420838 is missing timestamp metadata")
+        );
         assert!(message.contains("--partition block_range"));
         assert!(message.contains("--block-range-size <N>"));
         assert!(message.contains("--strict-timestamps false"));
