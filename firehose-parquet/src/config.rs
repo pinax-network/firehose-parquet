@@ -61,6 +61,7 @@ pub struct Config {
     pub jwt_token: Option<String>,
     pub start_block: Option<u64>,
     pub stop_block: Option<u64>,
+    pub skip_missing_blocks: bool,
     /// Resolved cursor location — either a local path or an `s3://` URI.
     /// Must have a `.parquet` extension.
     pub cursor_path: Option<String>,
@@ -209,6 +210,9 @@ impl std::fmt::Display for Config {
         writeln!(f, "  auth               {auth}")?;
         writeln!(f, "  start_block        {start}")?;
         writeln!(f, "  stop_block         {stop} (exclusive)")?;
+        if self.skip_missing_blocks {
+            writeln!(f, "  skip_missing_blocks true")?;
+        }
         if let Some(ref path) = self.cursor_path {
             writeln!(f, "  cursor             {}", path)?;
         }
@@ -273,6 +277,7 @@ impl Default for Config {
             jwt_token: None,
             start_block: None,
             stop_block: None,
+            skip_missing_blocks: false,
             cursor_path: None,
             output: PathBuf::from("."),
             partition: Partition::None,
@@ -368,6 +373,16 @@ mod tests {
         let display = config.to_string();
         assert!(display.contains("start_block        100"));
         assert!(display.contains("stop_block         200 (exclusive)"));
+    }
+
+    #[test]
+    fn test_config_display_skip_missing_blocks() {
+        let config = Config {
+            skip_missing_blocks: true,
+            ..Config::default()
+        };
+        let display = config.to_string();
+        assert!(display.contains("skip_missing_blocks true"));
     }
 
     #[test]

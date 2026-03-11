@@ -85,6 +85,19 @@ pub struct CommonArgs {
     )]
     pub stop_block: Option<u64>,
 
+    /// Skip over missing block numbers after retries are exhausted.
+    ///
+    /// Useful for sparse chains like Solana where not every block number exists,
+    /// but permissive mode may continue past gaps instead of failing fast.
+    #[arg(
+        long,
+        env = "SKIP_MISSING_BLOCKS",
+        default_value = "false",
+        hide_env_values = true,
+        help_heading = "Block Range"
+    )]
+    pub skip_missing_blocks: bool,
+
     /// Path to partitions index parquet file (local path or s3:// URI), e.g. ./output/eth-mainnet/partitions.parquet
     #[arg(
         long,
@@ -3273,6 +3286,7 @@ pub fn build_config(args: &CommonArgs) -> anyhow::Result<Config> {
         jwt_token,
         start_block: args.start_block,
         stop_block: args.stop_block,
+        skip_missing_blocks: args.skip_missing_blocks,
         cursor_path: Some(args.cursor.to_string_lossy().to_string()),
         output,
         partition: parse_partition(&args.partition, args.block_range_size)?,
@@ -6252,6 +6266,7 @@ mod tests {
         assert_eq!(cli.common.api_token_envvar, "SUBSTREAMS_API_TOKEN");
         assert!(cli.common.start_block.is_none());
         assert!(cli.common.stop_block.is_none());
+        assert!(!cli.common.skip_missing_blocks);
         assert!(cli.common.partitions_index.is_none());
         assert!(cli.common.partition_type.is_none());
         assert!(cli.common.partition_value.is_none());
@@ -6286,6 +6301,7 @@ mod tests {
             "100",
             "-t",
             "200",
+            "--skip-missing-blocks",
             "-c",
             "cursor-mainnet-date.parquet",
             "--output",
@@ -6326,6 +6342,7 @@ mod tests {
         assert_eq!(cli.common.api_token_envvar, "MY_TOKEN_VAR");
         assert_eq!(cli.common.start_block, Some(100));
         assert_eq!(cli.common.stop_block, Some(200));
+        assert!(cli.common.skip_missing_blocks);
         assert_eq!(
             cli.common.partitions_index.as_deref(),
             Some("./output/eth-mainnet/partitions.parquet")
@@ -6392,6 +6409,7 @@ mod tests {
             "https://example.com:443",
             "--start-block",
             "100",
+            "--skip-missing-blocks",
             "--compression",
             "gzip",
             "--partition",
@@ -6400,6 +6418,7 @@ mod tests {
         let config = build_config(&cli.common).expect("build_config should succeed");
         assert_eq!(config.endpoint, "https://example.com:443");
         assert_eq!(config.start_block, Some(100));
+        assert!(config.skip_missing_blocks);
         assert_eq!(config.compression, Compression::Gzip);
         assert_eq!(config.partition, Partition::Date);
         assert!(config.flush_rows.is_none());

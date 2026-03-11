@@ -623,6 +623,7 @@ async fn run_partitions_build(
         jwt_token: read_optional_env(api_token_envvar),
         start_block,
         stop_block,
+        skip_missing_blocks,
         cursor_path: None,
         output: PathBuf::from(&output_root),
         partition: Partition::None,
@@ -4069,13 +4070,22 @@ mod tests {
         let help = cmd.render_long_help().to_string();
         assert!(help.contains("--network <NETWORK>"));
         assert!(help.contains("FIREHOSE_ENDPOINT_MAINNET"));
+        assert!(help.contains("--skip-missing-blocks"));
     }
 
     #[test]
     fn test_cli_parses_network_flag() {
-        let cli = Cli::parse_from(["fireparq", "--network", "mainnet", "--start-block", "100"]);
+        let cli = Cli::parse_from([
+            "fireparq",
+            "--network",
+            "mainnet",
+            "--start-block",
+            "100",
+            "--skip-missing-blocks",
+        ]);
         assert_eq!(cli.network.as_deref(), Some("mainnet"));
         assert_eq!(cli.common.start_block, Some(100));
+        assert!(cli.common.skip_missing_blocks);
     }
 
     #[test]

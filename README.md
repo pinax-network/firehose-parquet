@@ -249,6 +249,7 @@ Connection:
 Block Range:
   -s, --start-block <START_BLOCK>  Start block number (inclusive) [env: START_BLOCK]
   -t, --stop-block <STOP_BLOCK>    Stop block number (exclusive, 0 = stream forever) [env: STOP_BLOCK]
+      --skip-missing-blocks        Skip missing block numbers after retries are exhausted; useful for sparse chains like Solana, but may continue past gaps instead of failing fast [env: SKIP_MISSING_BLOCKS]
   -c, --cursor <CURSOR>            Path to cursor file for resuming a previous session [env: CURSOR]
       --cursor-override            Override cursor parameter validation on resume [env: CURSOR_OVERRIDE]
       --final-blocks-only          Only process finalized blocks (when false, adds fork_step column) [env: FINAL_BLOCKS_ONLY]
