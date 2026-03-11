@@ -190,10 +190,10 @@ When output is written to S3, the cursor file is automatically placed alongside 
 
 When resuming from an existing `cursor.parquet`, the pipeline validates that the current CLI parameters match those stored in the cursor. Checked parameters include:
 
-- `start_block`, `stop_block`, `extended`, `final_blocks_only`, `include_failed_transactions`
+- `start_block`, `extended`, `final_blocks_only`, `include_failed_transactions`
 - `endpoint`, `partition`, `block_range_size`, `compression`, `bytes_encoding` (from file metadata)
 
-If any parameter differs, the pipeline exits with a clear error showing the mismatches. Use `--cursor-override` to force resume with the current parameters (e.g. when intentionally changing `stop_block`).
+On resume, the cursor's stored `start_block` is reused when present. The cursor's `stop_block` may be omitted from the CLI for bounded resume, replaced with a new explicit `--stop-block`, or omitted with `--live` to continue streaming indefinitely. Other parameter mismatches still fail fast unless `--cursor-override` is set.
 
 ```bash
 # Force resume despite parameter changes
@@ -262,10 +262,10 @@ Connection:
 
 Block Range:
   -s, --start-block <START_BLOCK>  Start block number (inclusive) [env: START_BLOCK]
-                                  In `--live` mode, omitting this starts from the endpoint's first streamable block when available
+                                  In `--live` mode, omitting this resumes from an existing cursor when available, otherwise starts from the endpoint's first streamable block
       --live                      Keep the stream open and continue following finalized blocks [env: LIVE] [default: false]
   -t, --stop-block <STOP_BLOCK>    Stop block number (exclusive)
-                                  Required unless `--live` is set [env: STOP_BLOCK]
+                                  Required unless `--live` is set or an existing cursor provides one [env: STOP_BLOCK]
       --skip-missing-blocks
           Skip missing block numbers after retries are exhausted; useful for sparse chains like Solana, but may continue past gaps instead of failing fast [env: SKIP_MISSING_BLOCKS]
   -c, --cursor <CURSOR>            Path to cursor file for resuming a previous session [env: CURSOR]
