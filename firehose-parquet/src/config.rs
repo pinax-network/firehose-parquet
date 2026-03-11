@@ -502,6 +502,10 @@ mod tests {
     #[test]
     fn test_partition_key_block_range() {
         assert_eq!(
+            Partition::BlockRange(1000).partition_key(1000, 0),
+            Some("block_range=1000-2000".to_string())
+        );
+        assert_eq!(
             Partition::BlockRange(1000).partition_key(1500, 0),
             Some("block_range=1000-2000".to_string())
         );
