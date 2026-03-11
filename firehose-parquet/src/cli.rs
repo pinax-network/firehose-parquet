@@ -82,7 +82,7 @@ pub struct CommonArgs {
 
     /// Stop block number (exclusive).
     ///
-    /// Required unless `--live` is set.
+    /// Required unless `--live` is set or an existing cursor provides one.
     #[arg(
         short = 't',
         long,

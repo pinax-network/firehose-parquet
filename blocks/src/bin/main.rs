@@ -321,10 +321,7 @@ fn rewrite_timestamp_column(batch: &RecordBatch, nullable_timestamps: bool) -> R
         true,
     );
 
-    let schema = std::sync::Arc::new(Schema::new_with_metadata(
-        fields,
-        schema.metadata().clone(),
-    ));
+    let schema = std::sync::Arc::new(Schema::new_with_metadata(fields, schema.metadata().clone()));
     let mut columns = batch.columns().to_vec();
     columns[timestamp_index] = std::sync::Arc::new(builder.finish());
 
@@ -638,28 +635,30 @@ fn read_optional_env(name: &str) -> Option<String> {
     std::env::var(name).ok().filter(|value| !value.is_empty())
 }
 
-fn validate_ingestion_block_range(live: bool, stop_block: Option<u64>) -> Result<()> {
-    if !live && stop_block.is_none() {
-        return Err(anyhow!("--stop-block is required unless --live is set"));
-    }
-    if live && stop_block.is_some() {
-        return Err(anyhow!("--stop-block is incompatible with --live"));
+fn validate_ingestion_block_range(
+    live: bool,
+    stop_block: Option<u64>,
+    cursor_state: Option<&CursorState>,
+) -> Result<()> {
+    if !live && stop_block.is_none() && cursor_state.and_then(|state| state.stop_block).is_none() {
+        return Err(anyhow!(
+            "--stop-block is required unless --live is set or an existing cursor provides one"
+        ));
     }
     Ok(())
 }
 
-fn resolve_live_start_block(
-    live: bool,
+fn resolve_ingestion_start_block(
     start_block: Option<u64>,
     cursor_state: Option<&CursorState>,
     endpoint_info: &Option<EndpointInfo>,
 ) -> Result<Option<u64>> {
-    if !live || start_block.is_some() {
-        return Ok(start_block);
+    if let Some(cursor_start_block) = cursor_state.and_then(|state| state.start_block) {
+        return Ok(Some(cursor_start_block));
     }
 
-    if let Some(state) = cursor_state {
-        return Ok(state.start_block);
+    if start_block.is_some() {
+        return Ok(start_block);
     }
 
     endpoint_info
@@ -668,12 +667,55 @@ fn resolve_live_start_block(
         .map(Some)
         .ok_or_else(|| {
             anyhow!(
-                "--start-block is required when --live is set and neither an existing cursor nor the endpoint exposes first_streamable_block_num"
+                "--start-block is required when neither an existing cursor nor the endpoint exposes first_streamable_block_num"
             )
         })
 }
 
-fn resolve_cursor_location(config: &firehose_parquet::config::Config) -> Result<Option<CursorLocation>> {
+fn resolve_ingestion_stop_block(
+    live: bool,
+    stop_block: Option<u64>,
+    cursor_state: Option<&CursorState>,
+) -> Result<Option<u64>> {
+    if let Some(stop_block) = stop_block {
+        return Ok(Some(stop_block));
+    }
+
+    if live {
+        return Ok(None);
+    }
+
+    cursor_state
+        .and_then(|state| state.stop_block)
+        .map(Some)
+        .ok_or_else(|| {
+            anyhow!(
+                "--stop-block is required unless --live is set or an existing cursor provides one"
+            )
+        })
+}
+
+fn validate_block_range_alignment(
+    start_block: Option<u64>,
+    stop_block: Option<u64>,
+    block_range_size: u64,
+) -> Result<()> {
+    for (flag, block_num) in [("start-block", start_block), ("stop-block", stop_block)] {
+        if let Some(block_num) = block_num {
+            if block_num % block_range_size != 0 {
+                return Err(anyhow!(
+                    "--{flag} must align to --block-range-size ({block_range_size}) when --partition block_range; got {block_num}"
+                ));
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn resolve_cursor_location(
+    config: &firehose_parquet::config::Config,
+) -> Result<Option<CursorLocation>> {
     if let Some(ref cp) = config.cursor_path {
         let output_str = config.output.to_string_lossy().to_string();
         let s3_client = if firehose_parquet::writer::is_s3_output(&config.output) {
@@ -1618,17 +1660,7 @@ fn validate_block_range_bounds(
     }
 
     let block_range_size = block_range_size.expect("validated by caller");
-    for (flag, block_num) in [("start-block", start_block), ("stop-block", stop_block)] {
-        if let Some(block_num) = block_num {
-            if block_num % block_range_size != 0 {
-                return Err(anyhow!(
-                    "--{flag} must align to --block-range-size ({block_range_size}) when --partition block_range; got {block_num}"
-                ));
-            }
-        }
-    }
-
-    Ok(())
+    validate_block_range_alignment(start_block, stop_block, block_range_size)
 }
 
 #[derive(Debug, Clone)]
@@ -3622,13 +3654,24 @@ async fn run_ingestion(args: &BuildArgs) -> Result<()> {
     let cursor_location = resolve_cursor_location(&config)?;
     let existing_cursor_state = cursor_location.as_ref().and_then(CursorLocation::load);
 
-    validate_ingestion_block_range(args.common.live, config.stop_block)?;
-    config.start_block = resolve_live_start_block(
+    validate_ingestion_block_range(
         args.common.live,
+        config.stop_block,
+        existing_cursor_state.as_ref(),
+    )?;
+    config.start_block = resolve_ingestion_start_block(
         config.start_block,
         existing_cursor_state.as_ref(),
         &endpoint_info,
     )?;
+    config.stop_block = resolve_ingestion_stop_block(
+        args.common.live,
+        config.stop_block,
+        existing_cursor_state.as_ref(),
+    )?;
+    if let firehose_parquet::config::Partition::BlockRange(block_range_size) = &config.partition {
+        validate_block_range_alignment(config.start_block, config.stop_block, *block_range_size)?;
+    }
 
     // Auto-detect extended block features if not explicitly set by user.
     if !extended && supports_extended(&endpoint_info) {
@@ -3855,7 +3898,8 @@ async fn run_ingestion(args: &BuildArgs) -> Result<()> {
     // Validate cursor parameters against current CLI arguments.
     if let Some(ref loc) = cursor_location {
         if let Some(loaded) = loc.load() {
-            let mismatches = loaded.validate_params(&cursor_state_template);
+            let mut mismatches = loaded.validate_params(&cursor_state_template);
+            mismatches.retain(|mismatch| !mismatch.starts_with("stop_block:"));
             if !mismatches.is_empty() {
                 if args.cursor_override {
                     warn!(
@@ -4208,7 +4252,6 @@ async fn run_ingestion(args: &BuildArgs) -> Result<()> {
     Ok(())
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4393,29 +4436,39 @@ mod tests {
 
     #[test]
     fn test_validate_ingestion_block_range_accepts_bounded_mode() {
-        validate_ingestion_block_range(false, Some(200))
+        validate_ingestion_block_range(false, Some(200), None)
             .expect("bounded mode should accept --stop-block");
     }
 
     #[test]
-    fn test_validate_ingestion_block_range_rejects_missing_stop_without_live() {
-        let err = validate_ingestion_block_range(false, None)
-            .expect_err("missing --stop-block should require --live");
+    fn test_validate_ingestion_block_range_accepts_cursor_stop_without_live() {
+        let cursor_state = CursorState {
+            stop_block: Some(200),
+            ..CursorState::default()
+        };
+
+        validate_ingestion_block_range(false, None, Some(&cursor_state))
+            .expect("bounded mode should accept a stop block from the cursor");
+    }
+
+    #[test]
+    fn test_validate_ingestion_block_range_rejects_missing_stop_without_live_or_cursor() {
+        let err = validate_ingestion_block_range(false, None, None)
+            .expect_err("missing --stop-block should require --live or cursor state");
         assert_eq!(
             err.to_string(),
-            "--stop-block is required unless --live is set"
+            "--stop-block is required unless --live is set or an existing cursor provides one"
         );
     }
 
     #[test]
-    fn test_validate_ingestion_block_range_rejects_stop_block_in_live_mode() {
-        let err = validate_ingestion_block_range(true, Some(200))
-            .expect_err("--live should reject --stop-block");
-        assert_eq!(err.to_string(), "--stop-block is incompatible with --live");
+    fn test_validate_ingestion_block_range_accepts_stop_block_in_live_mode() {
+        validate_ingestion_block_range(true, Some(200), None)
+            .expect("live mode should allow an explicit --stop-block");
     }
 
     #[test]
-    fn test_resolve_live_start_block_prefers_cursor_start_block() {
+    fn test_resolve_ingestion_start_block_prefers_cursor_start_block() {
         let cursor_state = CursorState {
             start_block: Some(21),
             ..CursorState::default()
@@ -4429,14 +4482,22 @@ mod tests {
             block_features: vec![],
         });
 
-        let start_block = resolve_live_start_block(true, None, Some(&cursor_state), &endpoint_info)
-            .expect("live mode should prefer an existing cursor");
+        let start_block = resolve_ingestion_start_block(None, Some(&cursor_state), &endpoint_info)
+            .expect("ingestion should prefer an existing cursor");
 
         assert_eq!(start_block, Some(21));
     }
 
     #[test]
-    fn test_resolve_live_start_block_uses_endpoint_first_streamable_block() {
+    fn test_resolve_ingestion_start_block_uses_explicit_start_without_cursor() {
+        let start_block = resolve_ingestion_start_block(Some(21), None, &None)
+            .expect("ingestion should use an explicit start block when no cursor exists");
+
+        assert_eq!(start_block, Some(21));
+    }
+
+    #[test]
+    fn test_resolve_ingestion_start_block_uses_endpoint_first_streamable_block() {
         let endpoint_info = Some(EndpointInfo {
             chain_name: "mainnet".to_string(),
             chain_name_aliases: vec![],
@@ -4446,20 +4507,76 @@ mod tests {
             block_features: vec![],
         });
 
-        let start_block = resolve_live_start_block(true, None, None, &endpoint_info)
-            .expect("live mode should use endpoint first streamable block");
+        let start_block = resolve_ingestion_start_block(None, None, &endpoint_info)
+            .expect("ingestion should use endpoint first streamable block");
 
         assert_eq!(start_block, Some(42));
     }
 
     #[test]
-    fn test_resolve_live_start_block_rejects_missing_first_streamable_metadata() {
-        let err = resolve_live_start_block(true, None, None, &None)
-            .expect_err("live mode should require an explicit start, cursor, or endpoint metadata");
+    fn test_resolve_ingestion_start_block_rejects_missing_first_streamable_metadata() {
+        let err = resolve_ingestion_start_block(None, None, &None)
+            .expect_err("ingestion should require an explicit start, cursor, or endpoint metadata");
 
         assert_eq!(
             err.to_string(),
-            "--start-block is required when --live is set and neither an existing cursor nor the endpoint exposes first_streamable_block_num"
+            "--start-block is required when neither an existing cursor nor the endpoint exposes first_streamable_block_num"
+        );
+    }
+
+    #[test]
+    fn test_resolve_ingestion_stop_block_prefers_explicit_stop_block() {
+        let cursor_state = CursorState {
+            stop_block: Some(200),
+            ..CursorState::default()
+        };
+
+        let stop_block = resolve_ingestion_stop_block(false, Some(300), Some(&cursor_state))
+            .expect("ingestion should accept an explicit stop block");
+
+        assert_eq!(stop_block, Some(300));
+    }
+
+    #[test]
+    fn test_resolve_ingestion_stop_block_uses_cursor_stop_for_bounded_resume() {
+        let cursor_state = CursorState {
+            stop_block: Some(200),
+            ..CursorState::default()
+        };
+
+        let stop_block = resolve_ingestion_stop_block(false, None, Some(&cursor_state))
+            .expect("bounded resume should use the cursor stop block");
+
+        assert_eq!(stop_block, Some(200));
+    }
+
+    #[test]
+    fn test_resolve_ingestion_stop_block_keeps_live_stream_open_when_omitted() {
+        let cursor_state = CursorState {
+            stop_block: Some(200),
+            ..CursorState::default()
+        };
+
+        let stop_block = resolve_ingestion_stop_block(true, None, Some(&cursor_state))
+            .expect("live mode should keep streaming when stop block is omitted");
+
+        assert_eq!(stop_block, None);
+    }
+
+    #[test]
+    fn test_validate_block_range_alignment_accepts_aligned_values() {
+        validate_block_range_alignment(Some(0), Some(30_000_000), 10_000_000)
+            .expect("aligned block-range bounds should be accepted");
+    }
+
+    #[test]
+    fn test_validate_block_range_alignment_rejects_misaligned_stop_block() {
+        let err = validate_block_range_alignment(Some(0), Some(30_000_001), 10_000_000)
+            .expect_err("misaligned stop block should fail");
+
+        assert_eq!(
+            err.to_string(),
+            "--stop-block must align to --block-range-size (10000000) when --partition block_range; got 30000001"
         );
     }
 
@@ -4766,7 +4883,11 @@ mod tests {
         assert!(timestamp_field.is_nullable());
 
         let timestamp_array = rewritten
-            .column(rewritten_schema.index_of("timestamp").expect("timestamp index"))
+            .column(
+                rewritten_schema
+                    .index_of("timestamp")
+                    .expect("timestamp index"),
+            )
             .as_any()
             .downcast_ref::<TimestampSecondArray>()
             .expect("timestamp column type should be preserved");
