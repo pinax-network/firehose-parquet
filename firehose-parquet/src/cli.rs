@@ -393,9 +393,6 @@ pub struct CommonArgs {
 #[derive(clap::Args, Debug, Clone)]
 #[command(after_long_help = "\
 Examples:
-  # Resolve a built-in network alias to its default endpoint
-  fireparq build --network eth --start-block 20000000 --stop-block 20001000
-
   # Run a bounded historical ingestion
   fireparq build --network mainnet \\
     --start-block 20000000 --stop-block 20001000
@@ -410,10 +407,6 @@ Examples:
   # Override a network alias with an env var
   FIREHOSE_ENDPOINT_SOLANA=https://solana.internal.example.com:443 \\
     fireparq build --network solana --start-block 250000000 --stop-block 250100000
-
-  # Stream EVM blocks to local Parquet (auto-detect chain)
-  fireparq build --network mainnet \\
-    --start-block 20000000 --stop-block 20001000
 
   # Stream with hex encoding and extended tables
   fireparq build --network mainnet \\
