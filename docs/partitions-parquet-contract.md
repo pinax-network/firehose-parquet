@@ -1,6 +1,6 @@
 # Partitions Parquet Contract
 
-This document defines the current compatibility contract for `partitions.parquet`.
+This document defines the canonical `partitions.parquet` layout consumed by current CLI readers.
 
 ## Scope
 
@@ -11,32 +11,13 @@ The contract applies to partition index artifacts consumed by:
 - `fireparq partitions resolve`
 - ingestion-side partition selection (`--partitions-index`, `--partition-type`, `--partition-value`, `--partition-from`, `--partition-to`)
 
-## Versioning
-
-- Metadata key: `firehose-parquet.partitions.schema_version`
-- Current version: `1`
-
-Compatibility policy:
-
-- Missing schema version is treated as a legacy/unversioned artifact and remains readable.
-- Matching version (`1`) is accepted.
-- Unknown/incompatible versions must be rejected by readers with a clear error.
-
-This allows current readers to remain backward-compatible while giving future builders a stable version gate.
-
 ## Required columns
 
-These columns are required for all supported readers:
+These columns are required for current readers:
 
-- `partition_type` — UTF-8 string
-- `partition_value` — UTF-8 string
+- `partition` — integer
 - `start_block` — integer
 - `stop_block` — integer
-
-Migration compatibility:
-
-- new `partitions build` artifacts write `stop_block`
-- readers continue accepting legacy `end_block` columns from older artifacts
 
 Range semantics:
 
@@ -45,53 +26,30 @@ Range semantics:
 
 ## Optional columns
 
-These columns are optional but recommended:
+These columns are optional:
 
 - `chain` — UTF-8 string
-- `partition_start_ts` — UTF-8 string in canonical `YYYY-MM-DD HH:MM:SS` UTC form
-- `partition_interval_seconds` — integer
-- `start_time` — timestamp or canonical string
-- `end_time` — timestamp or canonical string
+- `start_time` — timestamp(second, UTC)
+- `end_time` — timestamp(second, UTC)
 
-Current CLI readers rely on `partition_start_ts` when present for listing/sorting windows and otherwise fall back to `partition_value`.
+Interpretation rules:
+
+- when `firehose-parquet.partition = block_range`, `partition` stores the partition start block
+- otherwise `partition` stores UTC epoch seconds and readers render it as canonical `YYYY-MM-DD HH:MM:SS`
+- `chain` may be stored once in file metadata (`firehose-parquet.chain_name`) for single-chain indexes or per row in the optional `chain` column for shared/global indexes
 
 ## Recommended file metadata
 
-When a builder writes `partitions.parquet`, it should include these file-level metadata keys in the `firehose-parquet.*` namespace:
+Current readers require:
 
-- `firehose-parquet.partitions.schema_version`
-- `firehose-parquet.partitions.generated_at`
-- `firehose-parquet.partitions.source`
-- `firehose-parquet.partitions.chain_scope`
-- `firehose-parquet.partitions.partition_types`
-- `firehose-parquet.partitions.min_start_block`
-- `firehose-parquet.partitions.max_stop_block`
+- `firehose-parquet.partition`
 
-Reader behavior for versioned artifacts:
+Additional metadata used when present:
 
-- legacy/unversioned artifacts remain readable without these keys
-- artifacts declaring schema version `1` must include these keys with valid values
-- inconsistent coverage metadata (for example `min_start_block >= max_stop_block`) must be rejected
+- `firehose-parquet.chain_name`
+- `firehose-parquet.block_range_size` (required when `firehose-parquet.partition = block_range`)
 
-## Additive vs breaking changes
-
-Additive changes:
-
-- adding new optional metadata keys
-- adding new optional columns
-- adding new nullable fields that existing readers can ignore
-
-Breaking changes:
-
-- renaming required columns
-- changing required column meaning
-- changing required column types incompatibly
-- changing inclusive/exclusive block semantics
-- changing canonical partition-value interpretation
-
-Breaking changes require a schema-version increment.
-
-The `end_block` → `stop_block` transition is handled as a reader-compatible migration: new writers emit `stop_block`, while readers continue accepting legacy `end_block` artifacts.
+Older experimental layouts such as `partition_type`/`partition_value` row columns, `end_block`, and unversioned compatibility metadata are no longer part of the supported contract.
 
 ## Lookup behavior
 

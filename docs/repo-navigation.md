@@ -38,7 +38,6 @@ Related design docs:
 
 1. CLI options/env load in `blocks/src/bin/main.rs` using shared structures from `firehose-parquet/src/cli.rs`.
    The primary ingestion path dispatches to `fireparq build` (`Commands::Build(BuildArgs)`) which calls `run_ingestion`.
-   The legacy root-level invocation still works but emits a deprecation warning.
 2. Endpoint metadata and stream messages come from `firehose-parquet/src/grpc.rs`.
 3. Selected chain mapper (`blocks/src/<chain>/mapper.rs`) decodes protobuf blocks and builds Arrow columns using schemas from `schema.rs`.
 4. `firehose-parquet/src/writer.rs` flushes `RecordBatch`es to partitioned Parquet files (local or S3).
@@ -49,7 +48,7 @@ Related design docs:
 
 - Add/change CLI flag or subcommand:
   - `firehose-parquet/src/cli.rs` (shared flags/subcommands including `BuildArgs` for `fireparq build`, and argument validation)
-  - `blocks/src/bin/main.rs` (binary-specific wiring: `run_ingestion`, backward-compat deprecated root path)
+  - `blocks/src/bin/main.rs` (binary-specific wiring: `run_ingestion` and subcommand dispatch)
 - Add a new chain or adjust chain-specific table mapping:
   - `blocks/src/<chain>/proto.rs` for protobuf type aliases
   - `blocks/src/<chain>/schema.rs` for Arrow schema

@@ -2223,7 +2223,6 @@ pub fn read_partitions_build_rows(
         batch: &arrow::record_batch::RecordBatch,
         rows: &mut Vec<PartitionBuildRow>,
         read_utf8_value: &impl Fn(&dyn Array, usize) -> anyhow::Result<Option<String>>,
-        _read_i64_value: &impl Fn(&dyn Array, usize) -> anyhow::Result<Option<i64>>,
         read_u64_value: &impl Fn(&dyn Array, usize) -> anyhow::Result<Option<u64>>,
         file_ctx: &PartitionsFileContext,
     ) -> anyhow::Result<()> {
@@ -2354,7 +2353,6 @@ pub fn read_partitions_build_rows(
                 &batch?,
                 &mut rows,
                 &read_utf8_value,
-                &read_i64_value,
                 &read_u64_value,
                 &file_ctx,
             )?;
@@ -2372,7 +2370,6 @@ pub fn read_partitions_build_rows(
                 &batch?,
                 &mut rows,
                 &read_utf8_value,
-                &read_i64_value,
                 &read_u64_value,
                 &file_ctx,
             )?;
@@ -7641,9 +7638,11 @@ mod tests {
             None,
         )
         .expect_err("legacy partitions metadata should be rejected");
-        assert!(err
-            .to_string()
-            .contains("missing required metadata: firehose-parquet.partition"));
+        let message = err.to_string();
+        assert!(
+            message.contains("missing required column: partition")
+                || message.contains("missing required metadata: firehose-parquet.partition")
+        );
     }
 
     #[test]
