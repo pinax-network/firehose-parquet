@@ -192,12 +192,19 @@ fn validate_block_timestamp(
     timestamp: i64,
     strict_timestamps: bool,
     partition: &Partition,
+    start_block: Option<u64>,
 ) -> Result<()> {
     if timestamp != 0 {
         return Ok(());
     }
 
     if strict_timestamps {
+        if start_block == Some(block_num) {
+            return Err(anyhow!(
+                "block {block_num} is missing timestamp metadata and --strict-timestamps is enabled; this can happen for genesis / first-streamable blocks. Rerun with --bootstrap-missing-genesis-timestamp to start from the next timestamped block, or use --strict-timestamps false to allow null timestamps"
+            ));
+        }
+
         return Err(anyhow!(
             "block {block_num} is missing timestamp metadata and --strict-timestamps is enabled; rerun with --strict-timestamps false to allow null timestamps"
         ));
@@ -3979,7 +3986,13 @@ async fn run_ingestion(args: &BuildArgs) -> Result<()> {
                 }
                 GenesisTimestampBootstrapAction::None => {}
             }
-            validate_block_timestamp(block_number, ts, strict_timestamps, &partition_config)?;
+            validate_block_timestamp(
+                block_number,
+                ts,
+                strict_timestamps,
+                &partition_config,
+                config.start_block,
+            )?;
             let has_timestamp = ts != 0;
 
             // Flush the mapper at partition boundaries to ensure each flush
@@ -4872,20 +4885,35 @@ mod tests {
 
     #[test]
     fn test_validate_block_timestamp_missing_in_strict_mode_errors() {
-        let err = validate_block_timestamp(42, 0, true, &Partition::None)
+        let err = validate_block_timestamp(42, 0, true, &Partition::None, Some(0))
             .expect_err("strict timestamps should reject missing values");
         assert!(err.to_string().contains("--strict-timestamps is enabled"));
+        assert!(!err
+            .to_string()
+            .contains("--bootstrap-missing-genesis-timestamp"));
+    }
+
+    #[test]
+    fn test_validate_block_timestamp_missing_in_first_streamable_block_suggests_bootstrap() {
+        let err = validate_block_timestamp(0, 0, true, &Partition::None, Some(0)).expect_err(
+            "strict timestamps should suggest bootstrap for the first streamable block",
+        );
+        let message = err.to_string();
+
+        assert!(message.contains("genesis / first-streamable blocks"));
+        assert!(message.contains("--bootstrap-missing-genesis-timestamp"));
+        assert!(message.contains("--strict-timestamps false"));
     }
 
     #[test]
     fn test_validate_block_timestamp_missing_in_permissive_block_range_allows() {
-        validate_block_timestamp(42, 0, false, &Partition::BlockRange(1000))
+        validate_block_timestamp(42, 0, false, &Partition::BlockRange(1000), Some(0))
             .expect("block-range partition should allow null timestamps in permissive mode");
     }
 
     #[test]
     fn test_validate_block_timestamp_missing_in_permissive_time_partition_errors() {
-        let err = validate_block_timestamp(42, 0, false, &Partition::Date)
+        let err = validate_block_timestamp(42, 0, false, &Partition::Date, Some(0))
             .expect_err("time-based partitioning still requires a timestamp");
         assert!(err
             .to_string()
@@ -4922,9 +4950,11 @@ mod tests {
             bootstrap.observe_block(0, 0, 0),
             GenesisTimestampBootstrapAction::None
         );
-        let err = validate_block_timestamp(0, 0, true, &Partition::None)
+        let err = validate_block_timestamp(0, 0, true, &Partition::None, Some(0))
             .expect_err("strict timestamps should still fail without bootstrap flag");
-        assert!(err.to_string().contains("--strict-timestamps is enabled"));
+        let message = err.to_string();
+        assert!(message.contains("--strict-timestamps is enabled"));
+        assert!(message.contains("--bootstrap-missing-genesis-timestamp"));
     }
 
     #[test]
