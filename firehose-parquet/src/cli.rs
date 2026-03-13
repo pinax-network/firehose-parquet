@@ -510,10 +510,11 @@ pub struct BuildArgs {
     )]
     pub include_failed_transactions: bool,
 
-    /// Override cursor parameter validation. When a cursor file exists and its
-    /// stored parameters differ from the current CLI arguments, the pipeline
-    /// normally exits with an error. This flag suppresses that check and
-    /// resumes with the current parameters.
+    /// Override cursor parameter validation and restart from the current CLI
+    /// range. When a cursor file exists and its stored parameters differ from
+    /// the current CLI arguments, the pipeline normally exits with an error.
+    /// This flag suppresses that check and ignores the stored resume position
+    /// for start/stop/live resolution.
     #[arg(
         long,
         env = "CURSOR_OVERRIDE",

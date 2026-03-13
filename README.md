@@ -195,12 +195,15 @@ When resuming from an existing `cursor.parquet`, the pipeline validates that the
 
 On resume, the cursor's stored `start_block` is reused when present. The cursor's `stop_block` may be omitted from the CLI for bounded resume, replaced with a new explicit `--stop-block`, or omitted with `--live` to continue streaming indefinitely. Other parameter mismatches still fail fast unless `--cursor-override` is set.
 
+When `--cursor-override` is set, the CLI request takes precedence over the stored cursor range. The pipeline still loads the cursor file for validation/logging, but it restarts from the CLI-provided or endpoint-default start block and does not pass the stored stream cursor token to Firehose.
+
 ```bash
-# Force resume despite parameter changes
+# Restart from the requested range despite parameter changes in cursor.parquet
 fireparq \
   --endpoint https://eth.firehose.pinax.network:443 \
   --cursor cursor.parquet \
   --cursor-override \
+  --start-block 1 \
   --stop-block 20000000
 ```
 
