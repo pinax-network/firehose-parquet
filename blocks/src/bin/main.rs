@@ -212,6 +212,84 @@ fn validate_block_timestamp(
     Ok(())
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GenesisTimestampBootstrapAction {
+    None,
+    Skip,
+    Anchored {
+        effective_start_block: u64,
+        skipped_blocks: u64,
+        first_skipped_block: u64,
+    },
+}
+
+#[derive(Debug, Clone)]
+struct GenesisTimestampBootstrap {
+    enabled: bool,
+    requested_start_block: Option<u64>,
+    first_skipped_block: Option<u64>,
+    skipped_blocks: u64,
+}
+
+impl GenesisTimestampBootstrap {
+    fn new(enabled: bool, strict_timestamps: bool, requested_start_block: Option<u64>) -> Self {
+        Self {
+            enabled: enabled && strict_timestamps,
+            requested_start_block,
+            first_skipped_block: None,
+            skipped_blocks: 0,
+        }
+    }
+
+    fn observe_block(
+        &mut self,
+        blocks_processed: u64,
+        block_number: u64,
+        timestamp: i64,
+    ) -> GenesisTimestampBootstrapAction {
+        if !self.enabled {
+            return GenesisTimestampBootstrapAction::None;
+        }
+
+        if blocks_processed > 0 {
+            self.enabled = false;
+            return GenesisTimestampBootstrapAction::None;
+        }
+
+        if let Some(first_skipped_block) = self.first_skipped_block {
+            if timestamp == 0 {
+                self.skipped_blocks += 1;
+                return GenesisTimestampBootstrapAction::Skip;
+            }
+
+            self.enabled = false;
+            return GenesisTimestampBootstrapAction::Anchored {
+                effective_start_block: block_number,
+                skipped_blocks: self.skipped_blocks,
+                first_skipped_block,
+            };
+        }
+
+        if self.requested_start_block != Some(block_number) || timestamp != 0 {
+            self.enabled = false;
+            return GenesisTimestampBootstrapAction::None;
+        }
+
+        self.first_skipped_block = Some(block_number);
+        self.skipped_blocks = 1;
+        GenesisTimestampBootstrapAction::Skip
+    }
+}
+
+fn missing_genesis_timestamp_bootstrap_error(
+    first_skipped_block: u64,
+    skipped_blocks: u64,
+) -> anyhow::Error {
+    anyhow!(
+        "skipped {skipped_blocks} timestamp-less bootstrap block(s) starting at block {first_skipped_block} because --bootstrap-missing-genesis-timestamp is enabled, but no later block with timestamp metadata was found before the stream ended"
+    )
+}
+
 fn rewrite_timestamp_column(batch: &RecordBatch, nullable_timestamps: bool) -> Result<RecordBatch> {
     if !nullable_timestamps {
         return Ok(batch.clone());
@@ -3670,6 +3748,11 @@ async fn run_ingestion(args: &BuildArgs) -> Result<()> {
     let flush_interval_secs = config.flush_interval_secs;
     let dry_run = config.dry_run;
     let strict_timestamps = args.common.strict_timestamps;
+    let mut genesis_timestamp_bootstrap = GenesisTimestampBootstrap::new(
+        args.bootstrap_missing_genesis_timestamp,
+        strict_timestamps,
+        config.start_block,
+    );
 
     let mut writer = if firehose_parquet::writer::is_s3_output(&config.output) {
         OutputWriter::new_s3(
@@ -3808,7 +3891,7 @@ async fn run_ingestion(args: &BuildArgs) -> Result<()> {
     };
 
     // Build a template CursorState with pipeline parameters that stay constant.
-    let cursor_state_template = CursorState {
+    let mut cursor_state_template = CursorState {
         start_block: config.start_block,
         stop_block: config.stop_block,
         extended,
@@ -3870,6 +3953,32 @@ async fn run_ingestion(args: &BuildArgs) -> Result<()> {
 
             let block_number = identity.block_num;
             let ts = identity.timestamp;
+            match genesis_timestamp_bootstrap.observe_block(blocks_processed, block_number, ts) {
+                GenesisTimestampBootstrapAction::Skip => {
+                    if genesis_timestamp_bootstrap.skipped_blocks == 1 {
+                        warn!(
+                            requested_start_block = ?config.start_block,
+                            block_number,
+                            "skipping first streamable block because it lacks timestamp metadata and --bootstrap-missing-genesis-timestamp is enabled"
+                        );
+                    }
+                    return Ok(());
+                }
+                GenesisTimestampBootstrapAction::Anchored {
+                    effective_start_block,
+                    skipped_blocks,
+                    first_skipped_block,
+                } => {
+                    cursor_state_template.start_block = Some(effective_start_block);
+                    info!(
+                        first_skipped_block,
+                        effective_start_block,
+                        skipped_blocks,
+                        "starting strict ingestion from the first timestamped block after skipping timestamp-less bootstrap blocks"
+                    );
+                }
+                GenesisTimestampBootstrapAction::None => {}
+            }
             validate_block_timestamp(block_number, ts, strict_timestamps, &partition_config)?;
             let has_timestamp = ts != 0;
 
@@ -4121,6 +4230,15 @@ async fn run_ingestion(args: &BuildArgs) -> Result<()> {
         }
     }
 
+    if !is_shutdown && genesis_timestamp_bootstrap.enabled {
+        if let Some(first_skipped_block) = genesis_timestamp_bootstrap.first_skipped_block {
+            return Err(missing_genesis_timestamp_bootstrap_error(
+                first_skipped_block,
+                genesis_timestamp_bootstrap.skipped_blocks,
+            ));
+        }
+    }
+
     // Final metrics.
     let elapsed = progress_start.elapsed();
     let elapsed_secs = elapsed.as_secs_f64();
@@ -4272,6 +4390,45 @@ mod tests {
     }
 
     #[test]
+    fn test_build_subcommand_bootstrap_missing_genesis_timestamp_default_false() {
+        let cli = Cli::parse_from([
+            "fireparq",
+            "build",
+            "--network",
+            "mainnet",
+            "--start-block",
+            "0",
+            "--stop-block",
+            "200",
+        ]);
+        if let Some(Commands::Build(build_args)) = cli.command {
+            assert!(!build_args.bootstrap_missing_genesis_timestamp);
+        } else {
+            panic!("expected Commands::Build");
+        }
+    }
+
+    #[test]
+    fn test_build_subcommand_parses_bootstrap_missing_genesis_timestamp_flag() {
+        let cli = Cli::parse_from([
+            "fireparq",
+            "build",
+            "--network",
+            "mainnet",
+            "--start-block",
+            "0",
+            "--stop-block",
+            "200",
+            "--bootstrap-missing-genesis-timestamp",
+        ]);
+        if let Some(Commands::Build(build_args)) = cli.command {
+            assert!(build_args.bootstrap_missing_genesis_timestamp);
+        } else {
+            panic!("expected Commands::Build");
+        }
+    }
+
+    #[test]
     fn test_build_subcommand_rejects_unknown_network() {
         let err = Cli::try_parse_from(["fireparq", "build", "--network", "unknown"])
             .expect_err("unknown network should fail clap parsing");
@@ -4308,12 +4465,16 @@ mod tests {
         assert!(help.contains("existing cursor"));
         assert!(help.contains("first streamable block"));
         assert!(help.contains("--skip-missing-blocks"));
+        assert!(help.contains("--bootstrap-missing-genesis-timestamp"));
     }
 
     #[test]
     fn test_cli_requires_subcommand() {
         let err = Cli::try_parse_from(["fireparq"]).expect_err("subcommand should be required");
-        assert_eq!(err.kind(), clap::error::ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand);
+        assert_eq!(
+            err.kind(),
+            clap::error::ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand
+        );
     }
 
     #[test]
@@ -4729,6 +4890,51 @@ mod tests {
         assert!(err
             .to_string()
             .contains("time-based partitioning requires timestamps"));
+    }
+
+    #[test]
+    fn test_genesis_timestamp_bootstrap_skips_until_first_timestamped_block() {
+        let mut bootstrap = GenesisTimestampBootstrap::new(true, true, Some(0));
+
+        assert_eq!(
+            bootstrap.observe_block(0, 0, 0),
+            GenesisTimestampBootstrapAction::Skip
+        );
+        assert_eq!(
+            bootstrap.observe_block(0, 1, 0),
+            GenesisTimestampBootstrapAction::Skip
+        );
+        assert_eq!(
+            bootstrap.observe_block(0, 2, 1_700_000_000),
+            GenesisTimestampBootstrapAction::Anchored {
+                effective_start_block: 2,
+                skipped_blocks: 2,
+                first_skipped_block: 0,
+            }
+        );
+    }
+
+    #[test]
+    fn test_genesis_timestamp_bootstrap_keeps_default_strict_behavior_without_flag() {
+        let mut bootstrap = GenesisTimestampBootstrap::new(false, true, Some(0));
+
+        assert_eq!(
+            bootstrap.observe_block(0, 0, 0),
+            GenesisTimestampBootstrapAction::None
+        );
+        let err = validate_block_timestamp(0, 0, true, &Partition::None)
+            .expect_err("strict timestamps should still fail without bootstrap flag");
+        assert!(err.to_string().contains("--strict-timestamps is enabled"));
+    }
+
+    #[test]
+    fn test_missing_genesis_timestamp_bootstrap_error_mentions_missing_anchor() {
+        let err = missing_genesis_timestamp_bootstrap_error(0, 3);
+        let message = err.to_string();
+
+        assert!(message.contains("--bootstrap-missing-genesis-timestamp"));
+        assert!(message.contains("no later block with timestamp metadata was found"));
+        assert!(message.contains("block 0"));
     }
 
     #[test]

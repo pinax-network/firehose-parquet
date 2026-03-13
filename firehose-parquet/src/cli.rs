@@ -522,6 +522,20 @@ pub struct BuildArgs {
         help_heading = "Block Range"
     )]
     pub cursor_override: bool,
+
+    /// In strict mode, skip initial timestamp-less bootstrap blocks until the
+    /// first timestamped block, then begin ingestion there.
+    ///
+    /// Intended for chains whose first streamable block (often genesis) does
+    /// not expose timestamp metadata.
+    #[arg(
+        long,
+        env = "BOOTSTRAP_MISSING_GENESIS_TIMESTAMP",
+        default_value = "false",
+        hide_env_values = true,
+        help_heading = "Block Range"
+    )]
+    pub bootstrap_missing_genesis_timestamp: bool,
 }
 
 /// Subcommands shared by all binaries.
@@ -2257,7 +2271,9 @@ pub fn read_partitions_build_rows(
         let partition_type = file_ctx
             .partition_type
             .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("missing required metadata: firehose-parquet.partition"))?
+            .ok_or_else(|| {
+                anyhow::anyhow!("missing required metadata: firehose-parquet.partition")
+            })?
             .clone();
         let partition_value_idx = schema
             .index_of("partition")
@@ -7365,20 +7381,8 @@ mod tests {
         write_test_partitions_index(
             &path,
             vec![
-                time_partition_row(
-                    Some("eth-mainnet"),
-                    "hour",
-                    "2015-07-30 14:00:00",
-                    100,
-                    200,
-                ),
-                time_partition_row(
-                    Some("eth-mainnet"),
-                    "hour",
-                    "2015-07-30 15:00:00",
-                    200,
-                    300,
-                ),
+                time_partition_row(Some("eth-mainnet"), "hour", "2015-07-30 14:00:00", 100, 200),
+                time_partition_row(Some("eth-mainnet"), "hour", "2015-07-30 15:00:00", 200, 300),
             ],
         )
         .expect("write partitions index");
@@ -7402,20 +7406,8 @@ mod tests {
         write_test_partitions_index(
             &path,
             vec![
-                time_partition_row(
-                    Some("eth-mainnet"),
-                    "hour",
-                    "2015-07-30 15:00:00",
-                    200,
-                    300,
-                ),
-                time_partition_row(
-                    Some("eth-mainnet"),
-                    "hour",
-                    "2015-07-30 15:00:00",
-                    201,
-                    301,
-                ),
+                time_partition_row(Some("eth-mainnet"), "hour", "2015-07-30 15:00:00", 200, 300),
+                time_partition_row(Some("eth-mainnet"), "hour", "2015-07-30 15:00:00", 201, 301),
             ],
         )
         .expect("write partitions index");
@@ -7496,27 +7488,9 @@ mod tests {
         write_test_partitions_index(
             &path,
             vec![
-                time_partition_row(
-                    Some("eth-mainnet"),
-                    "hour",
-                    "2015-07-30 14:00:00",
-                    100,
-                    200,
-                ),
-                time_partition_row(
-                    Some("eth-mainnet"),
-                    "hour",
-                    "2015-07-30 15:00:00",
-                    200,
-                    300,
-                ),
-                time_partition_row(
-                    Some("eth-mainnet"),
-                    "hour",
-                    "2015-07-30 16:00:00",
-                    300,
-                    400,
-                ),
+                time_partition_row(Some("eth-mainnet"), "hour", "2015-07-30 14:00:00", 100, 200),
+                time_partition_row(Some("eth-mainnet"), "hour", "2015-07-30 15:00:00", 200, 300),
+                time_partition_row(Some("eth-mainnet"), "hour", "2015-07-30 16:00:00", 300, 400),
             ],
         )
         .expect("write partitions index");
@@ -7885,27 +7859,9 @@ mod tests {
         write_test_partitions_index(
             &path,
             vec![
-                time_partition_row(
-                    Some("eth-mainnet"),
-                    "date",
-                    "2015-07-29 00:00:00",
-                    100,
-                    200,
-                ),
-                time_partition_row(
-                    Some("eth-mainnet"),
-                    "date",
-                    "2015-07-30 00:00:00",
-                    250,
-                    300,
-                ),
-                time_partition_row(
-                    Some("eth-mainnet"),
-                    "date",
-                    "2015-07-31 00:00:00",
-                    290,
-                    400,
-                ),
+                time_partition_row(Some("eth-mainnet"), "date", "2015-07-29 00:00:00", 100, 200),
+                time_partition_row(Some("eth-mainnet"), "date", "2015-07-30 00:00:00", 250, 300),
+                time_partition_row(Some("eth-mainnet"), "date", "2015-07-31 00:00:00", 290, 400),
             ],
         )
         .expect("write partitions index");
