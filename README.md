@@ -713,15 +713,18 @@ Lookup order matches `scan`: explicit `s3://...` URIs win, existing local paths 
 
 ### `validate` — Check Partition Integrity
 
-Validates partitioned Parquet data for gaps, ordering errors, duplicates, parent hash mismatches, and timestamp reversals. Only partitions with issues are printed; valid ones are silently counted.
+Validates partitioned Parquet data for gaps, ordering errors, duplicates, parent hash mismatches, and timestamp reversals. Only partitions with issues are printed; valid ones are silently counted. Supports local paths, shorthand S3 keys/prefixes via `S3_BUCKET`, and explicit S3 URIs.
 
 ```bash
 fireparq validate ./output/blocks/
+S3_BUCKET=my-bucket fireparq validate evm/blocks/
 fireparq validate s3://my-bucket/evm/blocks/
 
 # Solana: allow skipped slots (normal chain behavior, not data corruption)
 fireparq validate s3://my-bucket/solana/blocks/ --allow-gaps
 ```
+
+Lookup order matches `scan` / `inspect`: explicit `s3://...` URIs win, existing local paths win over shorthand S3 resolution, and only missing relative paths fall back to `s3://<S3_BUCKET>/<path>`.
 
 | Flag | Default | Description |
 |---|---|---|
@@ -730,7 +733,7 @@ fireparq validate s3://my-bucket/solana/blocks/ --allow-gaps
 
 ### `verify` — Deterministic Roots + Check Profiles
 
-Verifies deterministic partition Merkle roots and optional protocol checks under one command surface.
+Verifies deterministic partition Merkle roots and optional protocol checks under one command surface. Supports local paths, shorthand S3 keys/prefixes via `S3_BUCKET`, and explicit S3 URIs for the data path.
 
 ```bash
 # Standard profile (default): roots + protocol
@@ -744,7 +747,12 @@ fireparq verify ./output/evm/mainnet/blocks --checks roots,protocol
 
 # Publish report to the suggested artifact path
 fireparq verify ./output/evm/mainnet/blocks --publish-report
+
+# Resolve a shorthand S3 data path when no local match exists
+S3_BUCKET=my-bucket fireparq verify evm/mainnet/blocks --chain evm --table blocks
 ```
+
+Lookup order for the data path matches `scan` / `inspect`: explicit `s3://...` URIs win, existing local paths win over shorthand S3 resolution, and only missing relative paths fall back to `s3://<S3_BUCKET>/<path>`.
 
 | Flag | Default | Description |
 |---|---|---|
@@ -765,7 +773,7 @@ See [Verifiability artifact runbook](docs/verifiability-artifact-runbook.md) for
 
 ### `rollup` — Roll Up Partitions
 
-Rolls up fine-grained partitions (e.g. `minute` or `hour`) into coarser ones (e.g. `date`). Reads source files, concatenates them by target partition, and writes new files respecting `--flush-bytes`.
+Rolls up fine-grained partitions (e.g. `minute` or `hour`) into coarser ones (e.g. `date`). Reads source files, concatenates them by target partition, and writes new files respecting `--flush-bytes`. The source path supports local paths, shorthand S3 keys/prefixes via `S3_BUCKET`, and explicit S3 URIs.
 
 ```bash
 # Roll up minute-partitioned data into daily partitions
@@ -776,7 +784,12 @@ fireparq rollup ./output/blocks/ -o ./rolled-up/blocks/ -p date
 
 # Delete source files after successful rollup
 fireparq rollup ./output/blocks/ -p date --delete-source
+
+# Resolve a shorthand S3 source path when no local match exists
+S3_BUCKET=my-bucket fireparq rollup evm/blocks/ -p date
 ```
+
+Lookup order for the source path matches `scan` / `inspect`: explicit `s3://...` URIs win, existing local paths win over shorthand S3 resolution, and only missing relative paths fall back to `s3://<S3_BUCKET>/<path>`.
 
 | Flag | Default | Description |
 |---|---|---|
@@ -788,7 +801,7 @@ fireparq rollup ./output/blocks/ -p date --delete-source
 
 ### `merge` — Consolidate Part Files
 
-Consolidates multiple small part files within each partition directory into fewer, larger files. Unlike `rollup` (which changes partition granularity), `merge` keeps the same partition layout but reduces file count.
+Consolidates multiple small part files within each partition directory into fewer, larger files. Unlike `rollup` (which changes partition granularity), `merge` keeps the same partition layout but reduces file count. Supports local paths, shorthand S3 keys/prefixes via `S3_BUCKET`, and explicit S3 URIs.
 
 `merge` processes one table at a time and, within each table, one partition at a time. All parts in each partition are read into memory, sorted by `block_num`, and written back as new files respecting `--flush-bytes`. Original parts are deleted after successful merge.
 
@@ -804,7 +817,12 @@ fireparq merge ./output/blocks/ --flush-bytes 536870912
 
 # Merge S3-hosted data
 fireparq merge s3://my-bucket/evm/blocks/
+
+# Resolve a shorthand S3 path when no local match exists
+S3_BUCKET=my-bucket fireparq merge evm/blocks/
 ```
+
+Lookup order matches `scan` / `inspect`: explicit `s3://...` URIs win, existing local paths win over shorthand S3 resolution, and only missing relative paths fall back to `s3://<S3_BUCKET>/<path>`.
 
 | Flag | Default | Description |
 |---|---|---|
@@ -818,7 +836,7 @@ fireparq merge s3://my-bucket/evm/blocks/
 
 ### `truncate` — Delete Parquet Files
 
-Deletes `.parquet` files from local filesystem or S3 with optional partition filtering. Supports glob patterns for flexible selection.
+Deletes `.parquet` files from local filesystem or S3 with optional partition filtering. Supports glob patterns for flexible selection, local paths, shorthand S3 keys/prefixes via `S3_BUCKET`, and explicit S3 URIs.
 
 ```bash
 # Delete all parquet files in a directory
@@ -833,12 +851,17 @@ fireparq truncate ./output/blocks/ -p date
 # Glob pattern matching
 fireparq truncate s3://bucket/prefix -p "year=2026/month=01/date=*"
 
+# Resolve a shorthand S3 path when no local match exists
+S3_BUCKET=my-bucket fireparq truncate evm/blocks/ -p "month=01"
+
 # Multiple partitions
 fireparq truncate ./output/ -p "year=2026/month=01/date=01" -p "year=2026/month=01/date=02"
 
 # Dry run — show what would be deleted
 fireparq truncate ./output/blocks/ --dry-run
 ```
+
+Lookup order matches `scan` / `inspect`: explicit `s3://...` URIs win, existing local paths win over shorthand S3 resolution, and only missing relative paths fall back to `s3://<S3_BUCKET>/<path>`.
 
 | Flag | Default | Description |
 |---|---|---|

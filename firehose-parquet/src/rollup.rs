@@ -3,7 +3,7 @@
 //! Reads minute- or hour-partitioned files and merges them into hourly or daily
 //! partitions, respecting a compressed file-size limit (`flush_bytes`).
 
-use crate::cli::{format_bytes, AwsConfig};
+use crate::cli::{format_bytes, resolve_parquet_input_path_string, AwsConfig};
 use crate::config::Compression;
 use anyhow::{Context, Result};
 use arrow::compute::concat_batches;
@@ -52,10 +52,27 @@ pub struct RollupConfig {
 
 /// Run the rollup operation.
 pub fn run_rollup(config: &RollupConfig) -> Result<()> {
-    if config.source.starts_with("s3://") || config.output.starts_with("s3://") {
-        run_rollup_s3(config)
+    let resolved_source = resolve_parquet_input_path_string(&config.source);
+    let resolved_output = if config.output == config.source {
+        resolved_source.clone()
     } else {
-        run_rollup_local(config)
+        config.output.clone()
+    };
+    let resolved = RollupConfig {
+        source: resolved_source,
+        output: resolved_output,
+        target: config.target,
+        compression: config.compression,
+        flush_bytes: config.flush_bytes,
+        delete_source: config.delete_source,
+        aws: config.aws.clone(),
+        cache_control: config.cache_control.clone(),
+    };
+
+    if resolved.source.starts_with("s3://") || resolved.output.starts_with("s3://") {
+        run_rollup_s3(&resolved)
+    } else {
+        run_rollup_local(&resolved)
     }
 }
 

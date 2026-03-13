@@ -1,4 +1,4 @@
-use crate::cli::{block_on_async, AwsConfig};
+use crate::cli::{block_on_async, resolve_parquet_input_path_string, AwsConfig};
 use crate::writer::parse_s3_url;
 use anyhow::{anyhow, Context, Result};
 use arrow::array::{
@@ -441,6 +441,7 @@ pub fn verify_parquet(
     aws: Option<&AwsConfig>,
     opts: &VerifyOptions,
 ) -> Result<VerifyReport> {
+    let resolved_path = resolve_parquet_input_path_string(path);
     let run_started = OffsetDateTime::now_utc();
     let run_id = uuid::Uuid::new_v4().to_string();
     let effective_checks = opts.effective_checks();
@@ -452,20 +453,21 @@ pub fn verify_parquet(
     let registry_path = opts
         .registry_path
         .clone()
-        .unwrap_or_else(|| derive_registry_path(path, &opts.chain, &opts.table));
-    let suggested_run_report_path = derive_run_report_path(path, &opts.chain, &opts.table, &run_id);
+        .unwrap_or_else(|| derive_registry_path(&resolved_path, &opts.chain, &opts.table));
+    let suggested_run_report_path =
+        derive_run_report_path(&resolved_path, &opts.chain, &opts.table, &run_id);
 
-    let scan_output = if path.starts_with("s3://") {
+    let scan_output = if resolved_path.starts_with("s3://") {
         let aws = aws.ok_or_else(|| anyhow!("AWS config required for S3 paths"))?;
-        collect_partition_roots_s3(path, aws, opts, hash_strategy)?
+        collect_partition_roots_s3(&resolved_path, aws, opts, hash_strategy)?
     } else {
-        collect_partition_roots_local(path, opts, hash_strategy)?
+        collect_partition_roots_local(&resolved_path, opts, hash_strategy)?
     };
 
     let partition_roots = scan_output.partition_roots;
 
     if partition_roots.is_empty() {
-        return Err(anyhow!("no parquet files found in {}", path));
+        return Err(anyhow!("no parquet files found in {}", resolved_path));
     }
 
     let mut findings = Vec::new();
@@ -652,7 +654,7 @@ pub fn verify_parquet(
         requested_checks: opts.checks.clone(),
         effective_checks: effective_checks.iter().copied().collect(),
         profile: opts.profile,
-        data_path: path.to_string(),
+        data_path: resolved_path,
         registry_path,
         suggested_run_report_path,
         report_json_path: opts

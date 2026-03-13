@@ -4,7 +4,7 @@
 //! `merge` operates within each existing partition directory, consolidating
 //! many small parts into fewer larger files.
 
-use crate::cli::{block_on_async, format_bytes, AwsConfig};
+use crate::cli::{block_on_async, format_bytes, resolve_parquet_input_path_string, AwsConfig};
 use crate::config::Compression;
 use crate::writer::s3_put_options;
 use anyhow::{Context, Result};
@@ -140,10 +140,19 @@ impl MergeResult {
 
 /// Run the merge operation.
 pub fn run_merge(config: &MergeConfig) -> Result<MergeResult> {
-    if config.path.starts_with("s3://") {
-        run_merge_s3(config)
+    let resolved = MergeConfig {
+        path: resolve_parquet_input_path_string(&config.path),
+        compression: config.compression,
+        flush_bytes: config.flush_bytes,
+        dry_run: config.dry_run,
+        aws: config.aws.clone(),
+        cache_control: config.cache_control.clone(),
+    };
+
+    if resolved.path.starts_with("s3://") {
+        run_merge_s3(&resolved)
     } else {
-        run_merge_local(config)
+        run_merge_local(&resolved)
     }
 }
 
