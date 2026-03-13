@@ -9,11 +9,11 @@ use firehose_parquet::cli::{
     parse_partition_build_types, parse_partition_selection_request, parse_partition_shard_strategy,
     read_partitions_build_rows, resolve_cursor_template, resolve_partition_bounds_from_index,
     resolve_partition_command, resolve_partition_window_bounds_from_index, resolve_s3_output_root,
-    shard_partitions_from_index, validate_partitions_index, write_partitions_index_strict,
-    AwsConfig, BuildArgs, Commands, PartitionBoundsRequest, PartitionBuildResult,
-    PartitionBuildRow, PartitionBuildType, PartitionIndexBuilder, PartitionListRequest,
-    PartitionResolveOptions, PartitionSelectionRequest, PartitionShardRequest,
-    PartitionValidateRequest, PartitionsCommands,
+    shard_partitions_from_index, validate_partitions_index, validate_s3_output_credentials,
+    write_partitions_index_strict, AwsConfig, BuildArgs, Commands, PartitionBoundsRequest,
+    PartitionBuildResult, PartitionBuildRow, PartitionBuildType, PartitionIndexBuilder,
+    PartitionListRequest, PartitionResolveOptions, PartitionSelectionRequest,
+    PartitionShardRequest, PartitionValidateRequest, PartitionsCommands,
 };
 use firehose_parquet::config::{BlockMetadata, Compression, Config, Partition};
 use firehose_parquet::cursor::{CursorLocation, CursorState};
@@ -718,6 +718,11 @@ async fn run_partitions_build(
     validate_block_range_bounds(partition_type, start_block, stop_block, block_range_size)?;
 
     let output_root = resolve_s3_output_root(output, s3_bucket)?;
+    validate_s3_output_credentials(
+        &output_root,
+        aws.aws_access_key_id.as_deref(),
+        aws.aws_secret_access_key.as_deref(),
+    )?;
 
     let base_config = Config {
         endpoint: endpoint.to_string(),

@@ -1984,6 +1984,32 @@ pub fn resolve_s3_output_root(
     }
 }
 
+/// Reject S3 output when explicit AWS credentials were not resolved by the CLI/config layer.
+pub fn validate_s3_output_credentials(
+    output: &str,
+    aws_access_key_id: Option<&str>,
+    aws_secret_access_key: Option<&str>,
+) -> anyhow::Result<()> {
+    if !output.starts_with("s3://") {
+        return Ok(());
+    }
+
+    let has_access_key_id = aws_access_key_id
+        .map(str::trim)
+        .is_some_and(|value| !value.is_empty());
+    let has_secret_access_key = aws_secret_access_key
+        .map(str::trim)
+        .is_some_and(|value| !value.is_empty());
+
+    if has_access_key_id && has_secret_access_key {
+        return Ok(());
+    }
+
+    anyhow::bail!(
+        "S3 output requested but explicit AWS credentials were not fully resolved from AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY; refusing to fall back silently to metadata providers"
+    );
+}
+
 pub fn build_partitions_output_root(output_root: &str, chain: &str) -> String {
     let normalized_root = output_root.trim_end_matches('/');
     if normalized_root.starts_with("s3://") {
@@ -3107,6 +3133,12 @@ pub fn build_config(args: &CommonArgs) -> anyhow::Result<Config> {
     } else {
         args.output.clone()
     };
+
+    validate_s3_output_credentials(
+        output.to_string_lossy().as_ref(),
+        args.aws_access_key_id.as_deref(),
+        args.aws_secret_access_key.as_deref(),
+    )?;
 
     // Validate that the cursor path has a .parquet extension.
     let cursor_str = args.cursor.to_string_lossy();
@@ -7066,7 +7098,9 @@ mod tests {
     fn test_aws_credentials_defaults_none() {
         // Clear any AWS env vars that may leak from .env
         unsafe {
+            std::env::remove_var("ACCESS_KEY_ID");
             std::env::remove_var("AWS_ACCESS_KEY_ID");
+            std::env::remove_var("SECRET_ACCESS_KEY");
             std::env::remove_var("AWS_SECRET_ACCESS_KEY");
             std::env::remove_var("AWS_SESSION_TOKEN");
             std::env::remove_var("AWS_REGION");
@@ -7080,6 +7114,59 @@ mod tests {
         assert!(cli.common.aws_region.is_none());
         assert!(cli.common.aws_endpoint_url.is_none());
         assert!(cli.common.s3_bucket.is_none());
+    }
+
+    #[test]
+    #[serial]
+    fn test_build_config_rejects_s3_bucket_without_explicit_aws_credentials() {
+        unsafe {
+            std::env::remove_var("AWS_ACCESS_KEY_ID");
+            std::env::remove_var("AWS_SECRET_ACCESS_KEY");
+            std::env::set_var("ACCESS_KEY_ID", "alias-only-access-key");
+            std::env::set_var("SECRET_ACCESS_KEY", "alias-only-secret-key");
+        }
+
+        let cli = parse(&[
+            "test-cli",
+            "--endpoint",
+            "https://example.com:443",
+            "--s3-bucket",
+            "my-bucket",
+            "--output",
+            "my-prefix",
+        ]);
+        let err = build_config(&cli.common)
+            .expect_err("build_config should fail without AWS_* credentials");
+        let message = err.to_string();
+        assert!(message.contains("AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY"));
+        assert!(message.contains("metadata providers"));
+
+        unsafe {
+            std::env::remove_var("ACCESS_KEY_ID");
+            std::env::remove_var("SECRET_ACCESS_KEY");
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn test_build_config_rejects_direct_s3_output_without_explicit_aws_credentials() {
+        unsafe {
+            std::env::remove_var("AWS_ACCESS_KEY_ID");
+            std::env::remove_var("AWS_SECRET_ACCESS_KEY");
+        }
+
+        let cli = parse(&[
+            "test-cli",
+            "--endpoint",
+            "https://example.com:443",
+            "--output",
+            "s3://my-bucket/my-prefix",
+        ]);
+        let err = build_config(&cli.common)
+            .expect_err("build_config should fail for direct s3 output without credentials");
+        let message = err.to_string();
+        assert!(message.contains("AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY"));
+        assert!(message.contains("metadata providers"));
     }
 
     #[test]
@@ -7098,6 +7185,10 @@ mod tests {
             "test-cli",
             "--endpoint",
             "https://example.com:443",
+            "--aws-access-key-id",
+            "AKID123",
+            "--aws-secret-access-key",
+            "secret456",
             "--s3-bucket",
             "my-bucket",
             "--output",
@@ -7124,6 +7215,10 @@ mod tests {
             "test-cli",
             "--endpoint",
             "https://example.com:443",
+            "--aws-access-key-id",
+            "AKID123",
+            "--aws-secret-access-key",
+            "secret456",
             "--s3-bucket",
             "my-bucket",
             "--output",
@@ -7150,6 +7245,10 @@ mod tests {
             "test-cli",
             "--endpoint",
             "https://example.com:443",
+            "--aws-access-key-id",
+            "AKID123",
+            "--aws-secret-access-key",
+            "secret456",
             "--s3-bucket",
             "my-bucket",
         ]);
