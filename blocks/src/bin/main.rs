@@ -4313,7 +4313,10 @@ mod tests {
     #[test]
     fn test_cli_requires_subcommand() {
         let err = Cli::try_parse_from(["fireparq"]).expect_err("subcommand should be required");
-        assert_eq!(err.kind(), clap::error::ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand);
+        assert_eq!(
+            err.kind(),
+            clap::error::ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand
+        );
     }
 
     #[test]
