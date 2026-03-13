@@ -1044,17 +1044,28 @@ Examples:
 ")]
     Build {
         /// Firehose gRPC endpoint URL
-        #[arg(long, env = "ENDPOINT", hide_env_values = true)]
+        #[arg(
+            long,
+            env = "ENDPOINT",
+            hide_env_values = true,
+            help_heading = "Connection"
+        )]
         endpoint: Option<String>,
         /// Firehose network `chainName`
-        #[arg(long, env = "NETWORK", hide_env_values = true)]
+        #[arg(
+            long,
+            env = "NETWORK",
+            hide_env_values = true,
+            help_heading = "Connection"
+        )]
         network: Option<String>,
         /// Name of environment variable containing the API key for authentication
         #[arg(
             long,
             env = "API_KEY_ENVVAR",
             default_value = "SUBSTREAMS_API_KEY",
-            hide_env_values = true
+            hide_env_values = true,
+            help_heading = "Connection"
         )]
         api_key_envvar: String,
         /// Name of environment variable containing the JWT bearer token for authentication
@@ -1062,11 +1073,12 @@ Examples:
             long,
             env = "API_TOKEN_ENVVAR",
             default_value = "SUBSTREAMS_API_TOKEN",
-            hide_env_values = true
+            hide_env_values = true,
+            help_heading = "Connection"
         )]
         api_token_envvar: String,
         /// Optional chain name override; otherwise inferred from endpoint info
-        #[arg(long)]
+        #[arg(long, help_heading = "Connection")]
         chain: Option<String>,
         /// Start block number (inclusive).
         ///
@@ -1081,70 +1093,123 @@ Examples:
         ///
         /// When `--partition block_range` is used, explicit values must align to
         /// `--block-range-size`.
-        #[arg(long)]
+        #[arg(long, help_heading = "Block Range")]
         start_block: Option<u64>,
         /// Stop block number (exclusive).
         ///
         /// Required for bounded builds and incompatible with `--live`.
         /// When `--partition block_range` is used, explicit values must align to
         /// `--block-range-size`.
-        #[arg(long, conflicts_with = "live")]
+        #[arg(long, conflicts_with = "live", help_heading = "Block Range")]
         stop_block: Option<u64>,
         /// Keep extending `partitions.parquet` from its latest covered frontier.
-        #[arg(long, default_value = "false")]
+        #[arg(long, default_value = "false", help_heading = "Block Range")]
         live: bool,
         /// Poll interval used by `--live` sparse probes while waiting for new blocks.
-        #[arg(long, default_value_t = 30)]
+        #[arg(long, default_value_t = 30, help_heading = "Runtime / Logging")]
         poll_interval_secs: u64,
         /// Allow sparse probes to scan forward a small window when a chain skips block numbers.
-        #[arg(long, default_value_t = false)]
+        #[arg(
+            long,
+            default_value_t = false,
+            help_heading = "Runtime / Logging"
+        )]
         skip_missing_blocks: bool,
         /// Partition to build: date, hour, minute, second, or block_range
-        #[arg(long = "partition")]
+        #[arg(long = "partition", help_heading = "Partitioning")]
         partition: String,
         /// Block range size (required when --partition block_range).
         /// Each partition covers exactly this many blocks (e.g. 1000000).
-        #[arg(long)]
+        #[arg(long, help_heading = "Partitioning")]
         block_range_size: Option<u64>,
         /// Require non-null timestamps for all probed blocks (default: true).
         /// Set to false for chains like Solana where blocks may lack timestamps.
-        #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
+        #[arg(
+            long,
+            default_value_t = true,
+            action = clap::ArgAction::Set,
+            help_heading = "Partitioning"
+        )]
         strict_timestamps: bool,
         /// Compression codec for the written `partitions.parquet`: zstd, snappy, gzip, none
-        #[arg(long, default_value = "zstd")]
+        #[arg(long, default_value = "zstd", help_heading = "Output")]
         compression: String,
         /// Output root path (local directory or s3:// URI prefix).
         ///
         /// When omitted, `--s3-bucket` or `S3_BUCKET` is required and the
         /// output root becomes `s3://<bucket>`.
-        #[arg(long)]
+        #[arg(long, help_heading = "Output")]
         output: Option<String>,
         /// S3 bucket name used when `--output` is omitted or should be prefixed.
-        #[arg(long, env = "S3_BUCKET", hide_env_values = true)]
+        #[arg(
+            long,
+            env = "S3_BUCKET",
+            hide_env_values = true,
+            help_heading = "Output"
+        )]
         s3_bucket: Option<String>,
         /// Resume from an existing canonical index under the resolved output path
-        #[arg(long, default_value = "false", conflicts_with = "overwrite")]
+        #[arg(
+            long,
+            default_value = "false",
+            conflicts_with = "overwrite",
+            help_heading = "Output"
+        )]
         resume: bool,
         /// Ignore and replace any existing canonical index instead of reading it
-        #[arg(long, default_value = "false", conflicts_with = "resume")]
+        #[arg(
+            long,
+            default_value = "false",
+            conflicts_with = "resume",
+            help_heading = "Output"
+        )]
         overwrite: bool,
         /// Emit machine-readable JSON output
-        #[arg(long, default_value = "false")]
+        #[arg(
+            long,
+            default_value = "false",
+            help_heading = "Runtime / Logging"
+        )]
         json: bool,
         /// AWS access key ID (for S3 paths)
-        #[arg(long, env = "AWS_ACCESS_KEY_ID", hide_env_values = true)]
+        #[arg(
+            long,
+            env = "AWS_ACCESS_KEY_ID",
+            hide_env_values = true,
+            help_heading = "AWS / S3"
+        )]
         aws_access_key_id: Option<String>,
         /// AWS secret access key (for S3 paths)
-        #[arg(long, env = "AWS_SECRET_ACCESS_KEY", hide_env_values = true)]
+        #[arg(
+            long,
+            env = "AWS_SECRET_ACCESS_KEY",
+            hide_env_values = true,
+            help_heading = "AWS / S3"
+        )]
         aws_secret_access_key: Option<String>,
         /// AWS session token (for S3 paths)
-        #[arg(long, env = "AWS_SESSION_TOKEN", hide_env_values = true)]
+        #[arg(
+            long,
+            env = "AWS_SESSION_TOKEN",
+            hide_env_values = true,
+            help_heading = "AWS / S3"
+        )]
         aws_session_token: Option<String>,
         /// AWS region (for S3 paths)
-        #[arg(long, env = "AWS_REGION", hide_env_values = true)]
+        #[arg(
+            long,
+            env = "AWS_REGION",
+            hide_env_values = true,
+            help_heading = "AWS / S3"
+        )]
         aws_region: Option<String>,
         /// AWS endpoint URL (for S3-compatible services)
-        #[arg(long, env = "AWS_ENDPOINT_URL_S3", hide_env_values = true)]
+        #[arg(
+            long,
+            env = "AWS_ENDPOINT_URL_S3",
+            hide_env_values = true,
+            help_heading = "AWS / S3"
+        )]
         aws_endpoint_url: Option<String>,
     },
     /// Validate continuity and invariants in `partitions.parquet`.
@@ -6686,6 +6751,39 @@ mod tests {
             }
             _ => panic!("expected partitions build subcommand"),
         }
+    }
+
+    #[test]
+    fn test_partitions_build_help_uses_grouped_headings() {
+        let cmd = TestCli::command();
+        let partitions = cmd
+            .get_subcommands()
+            .find(|subcmd| subcmd.get_name() == "partitions")
+            .expect("partitions subcommand should exist");
+        let build = partitions
+            .get_subcommands()
+            .find(|subcmd| subcmd.get_name() == "build")
+            .expect("partitions build subcommand should exist");
+
+        let help = build.clone().render_long_help().to_string();
+
+        for heading in [
+            "Connection:",
+            "Block Range:",
+            "Output:",
+            "AWS / S3:",
+            "Partitioning:",
+            "Runtime / Logging:",
+        ] {
+            assert!(
+                help.contains(heading),
+                "expected help to contain heading `{heading}`\n{help}"
+            );
+        }
+
+        assert!(help.contains("--aws-region"));
+        assert!(help.contains("--partition"));
+        assert!(help.contains("--json"));
     }
 
     #[test]
