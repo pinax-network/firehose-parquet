@@ -4,7 +4,7 @@ use clap::builder::PossibleValuesParser;
 use clap::Args;
 use clap_complete::{generate, Shell};
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 /// Load environment variables from `.env` file (if present).
 ///
@@ -2013,24 +2013,41 @@ fn configured_s3_bucket() -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
+fn shorthand_s3_key(path: &str) -> Option<String> {
+    let mut parts = Vec::new();
+    for component in Path::new(path).components() {
+        match component {
+            Component::CurDir => {}
+            Component::Normal(part) => parts.push(part.to_string_lossy().into_owned()),
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => return None,
+        }
+    }
+
+    if parts.is_empty() {
+        return None;
+    }
+
+    Some(parts.join("/"))
+}
+
 fn resolve_parquet_input_path(path: &str) -> ParquetInputPath {
+    let input_path = Path::new(path);
     if path.starts_with("s3://") {
         return ParquetInputPath::S3(path.to_string());
     }
 
-    let local_path = PathBuf::from(path);
-    if local_path.exists() {
+    if input_path.exists() {
+        let local_path = input_path.to_path_buf();
         return ParquetInputPath::Local(local_path);
     }
 
-    if !Path::new(path).is_absolute() {
-        if let Some(bucket) = configured_s3_bucket() {
-            let key = path.trim_start_matches("./").trim_start_matches('/');
+    if !input_path.is_absolute() {
+        if let (Some(bucket), Some(key)) = (configured_s3_bucket(), shorthand_s3_key(path)) {
             return ParquetInputPath::S3(format!("s3://{bucket}/{key}"));
         }
     }
 
-    ParquetInputPath::Local(local_path)
+    ParquetInputPath::Local(input_path.to_path_buf())
 }
 
 /// Reject S3 output when explicit AWS credentials were not resolved by the CLI/config layer.
@@ -2306,9 +2323,7 @@ pub fn read_partitions_build_rows(
         let partition_type = file_ctx
             .partition_type
             .as_ref()
-            .ok_or_else(|| {
-                anyhow::anyhow!("missing required metadata: firehose-parquet.partition")
-            })?
+            .ok_or_else(|| anyhow::anyhow!("missing required metadata: firehose-parquet.partition"))?
             .clone();
         let partition_value_idx = schema
             .index_of("partition")
@@ -5857,7 +5872,6 @@ mod tests {
     use crate::traits::BlockIdentity;
     use clap::{CommandFactory, Parser};
     use serial_test::serial;
-    use std::path::Path;
 
     /// Minimal CLI wrapper used only for testing CommonArgs parsing.
     #[derive(Parser, Debug)]
@@ -5904,28 +5918,22 @@ mod tests {
     impl EnvVarGuard {
         fn set(key: &'static str, value: &str) -> Self {
             let previous = std::env::var(key).ok();
-            unsafe {
-                std::env::set_var(key, value);
-            }
+            std::env::set_var(key, value);
             Self { key, previous }
         }
 
         fn remove(key: &'static str) -> Self {
             let previous = std::env::var(key).ok();
-            unsafe {
-                std::env::remove_var(key);
-            }
+            std::env::remove_var(key);
             Self { key, previous }
         }
     }
 
     impl Drop for EnvVarGuard {
         fn drop(&mut self) {
-            unsafe {
-                match &self.previous {
-                    Some(value) => std::env::set_var(self.key, value),
-                    None => std::env::remove_var(self.key),
-                }
+            match &self.previous {
+                Some(value) => std::env::set_var(self.key, value),
+                None => std::env::remove_var(self.key),
             }
         }
     }
@@ -6897,6 +6905,30 @@ mod tests {
 
     #[test]
     #[serial]
+    fn test_configured_s3_bucket_ignores_blank_values() {
+        let _bucket = EnvVarGuard::set("S3_BUCKET", "   ");
+
+        assert_eq!(configured_s3_bucket(), None);
+    }
+
+    #[test]
+    fn test_shorthand_s3_key_normalizes_relative_paths() {
+        assert_eq!(
+            shorthand_s3_key(".//mainnet//partitions.parquet"),
+            Some("mainnet/partitions.parquet".to_string())
+        );
+    }
+
+    #[test]
+    fn test_shorthand_s3_key_rejects_empty_and_non_relative_paths() {
+        assert_eq!(shorthand_s3_key(""), None);
+        assert_eq!(shorthand_s3_key("./"), None);
+        assert_eq!(shorthand_s3_key("../partitions.parquet"), None);
+        assert_eq!(shorthand_s3_key("/partitions.parquet"), None);
+    }
+
+    #[test]
+    #[serial]
     fn test_resolve_parquet_input_path_prefers_existing_local_relative_path() {
         let _bucket = EnvVarGuard::set("S3_BUCKET", "configured-bucket");
         let dir = tempfile::tempdir().expect("tempdir");
@@ -6966,6 +6998,36 @@ mod tests {
         assert_eq!(
             resolved,
             ParquetInputPath::Local(PathBuf::from("/definitely/missing/partitions.parquet"))
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn test_resolve_parquet_input_path_does_not_rewrite_parent_relative_paths() {
+        let _bucket = EnvVarGuard::set("S3_BUCKET", "configured-bucket");
+        let dir = tempfile::tempdir().expect("tempdir");
+        let _cwd = CurrentDirGuard::set(dir.path());
+
+        let resolved = resolve_parquet_input_path("./../../partitions.parquet");
+
+        assert_eq!(
+            resolved,
+            ParquetInputPath::Local(PathBuf::from("./../../partitions.parquet"))
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn test_resolve_parquet_input_path_normalizes_redundant_current_dir_segments() {
+        let _bucket = EnvVarGuard::set("S3_BUCKET", "configured-bucket");
+        let dir = tempfile::tempdir().expect("tempdir");
+        let _cwd = CurrentDirGuard::set(dir.path());
+
+        let resolved = resolve_parquet_input_path(".//mainnet//partitions.parquet");
+
+        assert_eq!(
+            resolved,
+            ParquetInputPath::S3("s3://configured-bucket/mainnet/partitions.parquet".to_string())
         );
     }
 
@@ -7550,8 +7612,20 @@ mod tests {
         write_test_partitions_index(
             &path,
             vec![
-                time_partition_row(Some("eth-mainnet"), "hour", "2015-07-30 14:00:00", 100, 200),
-                time_partition_row(Some("eth-mainnet"), "hour", "2015-07-30 15:00:00", 200, 300),
+                time_partition_row(
+                    Some("eth-mainnet"),
+                    "hour",
+                    "2015-07-30 14:00:00",
+                    100,
+                    200,
+                ),
+                time_partition_row(
+                    Some("eth-mainnet"),
+                    "hour",
+                    "2015-07-30 15:00:00",
+                    200,
+                    300,
+                ),
             ],
         )
         .expect("write partitions index");
@@ -7575,8 +7649,20 @@ mod tests {
         write_test_partitions_index(
             &path,
             vec![
-                time_partition_row(Some("eth-mainnet"), "hour", "2015-07-30 15:00:00", 200, 300),
-                time_partition_row(Some("eth-mainnet"), "hour", "2015-07-30 15:00:00", 201, 301),
+                time_partition_row(
+                    Some("eth-mainnet"),
+                    "hour",
+                    "2015-07-30 15:00:00",
+                    200,
+                    300,
+                ),
+                time_partition_row(
+                    Some("eth-mainnet"),
+                    "hour",
+                    "2015-07-30 15:00:00",
+                    201,
+                    301,
+                ),
             ],
         )
         .expect("write partitions index");
@@ -7657,9 +7743,27 @@ mod tests {
         write_test_partitions_index(
             &path,
             vec![
-                time_partition_row(Some("eth-mainnet"), "hour", "2015-07-30 14:00:00", 100, 200),
-                time_partition_row(Some("eth-mainnet"), "hour", "2015-07-30 15:00:00", 200, 300),
-                time_partition_row(Some("eth-mainnet"), "hour", "2015-07-30 16:00:00", 300, 400),
+                time_partition_row(
+                    Some("eth-mainnet"),
+                    "hour",
+                    "2015-07-30 14:00:00",
+                    100,
+                    200,
+                ),
+                time_partition_row(
+                    Some("eth-mainnet"),
+                    "hour",
+                    "2015-07-30 15:00:00",
+                    200,
+                    300,
+                ),
+                time_partition_row(
+                    Some("eth-mainnet"),
+                    "hour",
+                    "2015-07-30 16:00:00",
+                    300,
+                    400,
+                ),
             ],
         )
         .expect("write partitions index");
@@ -8028,9 +8132,27 @@ mod tests {
         write_test_partitions_index(
             &path,
             vec![
-                time_partition_row(Some("eth-mainnet"), "date", "2015-07-29 00:00:00", 100, 200),
-                time_partition_row(Some("eth-mainnet"), "date", "2015-07-30 00:00:00", 250, 300),
-                time_partition_row(Some("eth-mainnet"), "date", "2015-07-31 00:00:00", 290, 400),
+                time_partition_row(
+                    Some("eth-mainnet"),
+                    "date",
+                    "2015-07-29 00:00:00",
+                    100,
+                    200,
+                ),
+                time_partition_row(
+                    Some("eth-mainnet"),
+                    "date",
+                    "2015-07-30 00:00:00",
+                    250,
+                    300,
+                ),
+                time_partition_row(
+                    Some("eth-mainnet"),
+                    "date",
+                    "2015-07-31 00:00:00",
+                    290,
+                    400,
+                ),
             ],
         )
         .expect("write partitions index");
