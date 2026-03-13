@@ -4,7 +4,7 @@ use clap::builder::PossibleValuesParser;
 use clap::Args;
 use clap_complete::{generate, Shell};
 use std::io;
-use std::path::PathBuf;
+use std::path::{Component, Path, PathBuf};
 
 /// Load environment variables from `.env` file (if present).
 ///
@@ -557,7 +557,7 @@ pub enum Commands {
     #[command(subcommand)]
     Partitions(PartitionsCommands),
     /// Read and inspect Parquet files (schema, row counts, sample rows).
-    /// Supports local paths and S3 URIs (s3://bucket/prefix).
+    /// Supports local paths, shorthand S3 keys via `S3_BUCKET`, and `s3://bucket/prefix` URIs.
     #[command(after_long_help = "\
 Examples:
   # Inspect a local parquet file
@@ -571,6 +571,9 @@ Examples:
 
   # Scan S3 files
   fireparq scan s3://bucket/eth-mainnet/blocks/
+
+  # Resolve a shorthand key via S3_BUCKET when no local match exists
+  S3_BUCKET=my-bucket fireparq scan eth-mainnet/partitions.parquet
 
   # Scan a single S3 parquet file
   fireparq scan s3://bucket/eth-mainnet/partitions.parquet
@@ -586,9 +589,14 @@ Examples:
 
   # Paginate: skip first 20 rows, show next 20
   fireparq scan ./output/blocks/ --offset 20 --limit 20
+
+Lookup order:
+  1. Explicit s3://bucket/... URIs are used as-is.
+  2. Non-URI paths use the local filesystem when the path exists.
+  3. Otherwise, if S3_BUCKET is set, relative paths fall back to s3://<bucket>/<path>.
 ")]
     Scan {
-        /// Path to a .parquet file or directory, or an S3 URI (s3://bucket/prefix)
+        /// Path to a .parquet file or directory, a shorthand S3 key/prefix via S3_BUCKET, or an S3 URI
         path: String,
         /// Number of sample rows to display per file (0 = schema only)
         #[arg(short = 'n', long = "limit", default_value = "20")]
@@ -869,7 +877,7 @@ Examples:
     },
     /// Inspect a single Parquet file's metadata: file-level key-value pairs,
     /// schema, row group details, and column chunk info.
-    /// Supports local paths and S3 URIs (s3://bucket/key.parquet).
+    /// Supports local paths, shorthand S3 keys via `S3_BUCKET`, and `s3://bucket/key.parquet` URIs.
     #[command(after_long_help = "\
 Examples:
   # Inspect a local parquet file
@@ -878,14 +886,22 @@ Examples:
   # Inspect an S3 parquet file
   fireparq inspect s3://bucket/eth-mainnet/blocks/part-000001.parquet
 
+  # Resolve a shorthand key via S3_BUCKET when no local match exists
+  S3_BUCKET=my-bucket fireparq inspect eth-mainnet/partitions.parquet
+
   # Show only the schema with explicit nullability
   fireparq inspect s3://bucket/eth-mainnet/partitions.parquet --schema-only
 
   # Emit machine-readable schema details
   fireparq inspect s3://bucket/eth-mainnet/partitions.parquet --schema-only --json
+
+Lookup order:
+  1. Explicit s3://bucket/... URIs are used as-is.
+  2. Non-URI paths use the local filesystem when the path exists.
+  3. Otherwise, if S3_BUCKET is set, relative paths fall back to s3://<bucket>/<path>.
 ")]
     Inspect {
-        /// Path to a single .parquet file (local path or S3 URI)
+        /// Path to a single .parquet file (local path, shorthand key via S3_BUCKET, or s3:// URI)
         path: String,
         /// Only show the schema, including explicit nullability
         #[arg(long, default_value = "false")]
@@ -1996,6 +2012,56 @@ pub fn resolve_s3_output_root(
             anyhow::bail!("--output is required unless --s3-bucket or S3_BUCKET is set")
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ParquetInputPath {
+    Local(PathBuf),
+    S3(String),
+}
+
+fn configured_s3_bucket() -> Option<String> {
+    std::env::var("S3_BUCKET")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn shorthand_s3_key(path: &str) -> Option<String> {
+    let mut parts = Vec::new();
+    for component in Path::new(path).components() {
+        match component {
+            Component::CurDir => {}
+            Component::Normal(part) => parts.push(part.to_string_lossy().into_owned()),
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => return None,
+        }
+    }
+
+    if parts.is_empty() {
+        return None;
+    }
+
+    Some(parts.join("/"))
+}
+
+fn resolve_parquet_input_path(path: &str) -> ParquetInputPath {
+    let input_path = Path::new(path);
+    if path.starts_with("s3://") {
+        return ParquetInputPath::S3(path.to_string());
+    }
+
+    if input_path.exists() {
+        let local_path = input_path.to_path_buf();
+        return ParquetInputPath::Local(local_path);
+    }
+
+    if !input_path.is_absolute() {
+        if let (Some(bucket), Some(key)) = (configured_s3_bucket(), shorthand_s3_key(path)) {
+            return ParquetInputPath::S3(format!("s3://{bucket}/{key}"));
+        }
+    }
+
+    ParquetInputPath::Local(input_path.to_path_buf())
 }
 
 /// Reject S3 output when explicit AWS credentials were not resolved by the CLI/config layer.
@@ -3718,6 +3784,8 @@ impl AwsConfig {
 /// Scan and display parquet files at the given path.
 ///
 /// Supports local filesystem paths and S3 URIs (`s3://bucket/prefix`).
+/// Non-URI relative paths resolve locally first; when no local path exists and
+/// `S3_BUCKET` is configured, they fall back to `s3://<bucket>/<path>`.
 /// If `path` is a file, inspects that single file.
 /// If `path` is a directory, recursively finds all `.parquet` files.
 pub fn scan_parquet(
@@ -3729,16 +3797,18 @@ pub fn scan_parquet(
     json: bool,
     aws: Option<&AwsConfig>,
 ) -> anyhow::Result<()> {
-    let files = if path.starts_with("s3://") {
-        collect_scan_parquet_s3(
+    let resolved_path = resolve_parquet_input_path(path);
+    let files = match &resolved_path {
+        ParquetInputPath::S3(path) => collect_scan_parquet_s3(
             path,
             rows,
             offset,
             schema_only,
             aws.ok_or_else(|| anyhow::anyhow!("AWS config required for S3 paths"))?,
-        )?
-    } else {
-        collect_scan_parquet_local(&PathBuf::from(path), rows, offset, schema_only)?
+        )?,
+        ParquetInputPath::Local(path) => {
+            collect_scan_parquet_local(path, rows, offset, schema_only)?
+        }
     };
 
     if files.is_empty() {
@@ -4496,21 +4566,24 @@ fn format_number_with_hint(v: i128) -> String {
 /// Displays file-level key-value metadata, Arrow schema, row group details,
 /// and per-column chunk information.
 /// Supports local filesystem paths and S3 URIs (`s3://bucket/key.parquet`).
+/// Non-URI relative paths resolve locally first; when no local path exists and
+/// `S3_BUCKET` is configured, they fall back to `s3://<bucket>/<path>`.
 pub fn inspect_parquet(
     path: &str,
     schema_only: bool,
     json: bool,
     aws: Option<&AwsConfig>,
 ) -> anyhow::Result<()> {
-    if path.starts_with("s3://") {
-        inspect_parquet_s3(
-            path,
+    match resolve_parquet_input_path(path) {
+        ParquetInputPath::S3(path) => inspect_parquet_s3(
+            &path,
             schema_only,
             json,
             aws.ok_or_else(|| anyhow::anyhow!("AWS config required for S3 paths"))?,
-        )
-    } else {
-        inspect_parquet_local(path, schema_only, json)
+        ),
+        ParquetInputPath::Local(path) => {
+            inspect_parquet_local(path.to_string_lossy().as_ref(), schema_only, json)
+        }
     }
 }
 
@@ -5835,6 +5908,52 @@ mod tests {
         TestCli::try_parse_from(args)
     }
 
+    struct CurrentDirGuard {
+        previous: PathBuf,
+    }
+
+    impl CurrentDirGuard {
+        fn set(path: &Path) -> Self {
+            let previous = std::env::current_dir().expect("current dir");
+            std::env::set_current_dir(path).expect("set current dir");
+            Self { previous }
+        }
+    }
+
+    impl Drop for CurrentDirGuard {
+        fn drop(&mut self) {
+            std::env::set_current_dir(&self.previous).expect("restore current dir");
+        }
+    }
+
+    struct EnvVarGuard {
+        key: &'static str,
+        previous: Option<String>,
+    }
+
+    impl EnvVarGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            let previous = std::env::var(key).ok();
+            std::env::set_var(key, value);
+            Self { key, previous }
+        }
+
+        fn remove(key: &'static str) -> Self {
+            let previous = std::env::var(key).ok();
+            std::env::remove_var(key);
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            match &self.previous {
+                Some(value) => std::env::set_var(self.key, value),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
+
     fn write_test_partitions_index(
         path: &std::path::Path,
         rows: Vec<PartitionBuildRow>,
@@ -6798,6 +6917,134 @@ mod tests {
         ])
         .expect_err("scan should reject conflicting output flags");
         assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
+    }
+
+    #[test]
+    #[serial]
+    fn test_configured_s3_bucket_ignores_blank_values() {
+        let _bucket = EnvVarGuard::set("S3_BUCKET", "   ");
+
+        assert_eq!(configured_s3_bucket(), None);
+    }
+
+    #[test]
+    fn test_shorthand_s3_key_normalizes_relative_paths() {
+        assert_eq!(
+            shorthand_s3_key(".//mainnet//partitions.parquet"),
+            Some("mainnet/partitions.parquet".to_string())
+        );
+    }
+
+    #[test]
+    fn test_shorthand_s3_key_rejects_empty_and_non_relative_paths() {
+        assert_eq!(shorthand_s3_key(""), None);
+        assert_eq!(shorthand_s3_key("./"), None);
+        assert_eq!(shorthand_s3_key("../partitions.parquet"), None);
+        assert_eq!(shorthand_s3_key("/partitions.parquet"), None);
+    }
+
+    #[test]
+    #[serial]
+    fn test_resolve_parquet_input_path_prefers_existing_local_relative_path() {
+        let _bucket = EnvVarGuard::set("S3_BUCKET", "configured-bucket");
+        let dir = tempfile::tempdir().expect("tempdir");
+        let _cwd = CurrentDirGuard::set(dir.path());
+        let local_path = dir.path().join("mainnet").join("partitions.parquet");
+        std::fs::create_dir_all(local_path.parent().expect("parent")).expect("create dir");
+        std::fs::write(&local_path, b"not-a-real-parquet").expect("write file");
+
+        let resolved = resolve_parquet_input_path("./mainnet/partitions.parquet");
+
+        assert_eq!(
+            resolved,
+            ParquetInputPath::Local(PathBuf::from("./mainnet/partitions.parquet"))
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn test_resolve_parquet_input_path_falls_back_to_configured_s3_bucket() {
+        let _bucket = EnvVarGuard::set("S3_BUCKET", "configured-bucket");
+        let dir = tempfile::tempdir().expect("tempdir");
+        let _cwd = CurrentDirGuard::set(dir.path());
+
+        let resolved = resolve_parquet_input_path("./mainnet/partitions.parquet");
+
+        assert_eq!(
+            resolved,
+            ParquetInputPath::S3("s3://configured-bucket/mainnet/partitions.parquet".to_string())
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn test_resolve_parquet_input_path_keeps_missing_local_path_without_bucket() {
+        let _bucket = EnvVarGuard::remove("S3_BUCKET");
+        let dir = tempfile::tempdir().expect("tempdir");
+        let _cwd = CurrentDirGuard::set(dir.path());
+
+        let resolved = resolve_parquet_input_path("./mainnet/partitions.parquet");
+
+        assert_eq!(
+            resolved,
+            ParquetInputPath::Local(PathBuf::from("./mainnet/partitions.parquet"))
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn test_resolve_parquet_input_path_keeps_explicit_s3_uri() {
+        let _bucket = EnvVarGuard::set("S3_BUCKET", "configured-bucket");
+
+        let resolved = resolve_parquet_input_path("s3://other-bucket/mainnet/partitions.parquet");
+
+        assert_eq!(
+            resolved,
+            ParquetInputPath::S3("s3://other-bucket/mainnet/partitions.parquet".to_string())
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn test_resolve_parquet_input_path_does_not_rewrite_missing_absolute_paths() {
+        let _bucket = EnvVarGuard::set("S3_BUCKET", "configured-bucket");
+
+        let resolved = resolve_parquet_input_path("/definitely/missing/partitions.parquet");
+
+        assert_eq!(
+            resolved,
+            ParquetInputPath::Local(PathBuf::from("/definitely/missing/partitions.parquet"))
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn test_resolve_parquet_input_path_does_not_rewrite_parent_relative_paths() {
+        let _bucket = EnvVarGuard::set("S3_BUCKET", "configured-bucket");
+        let dir = tempfile::tempdir().expect("tempdir");
+        let _cwd = CurrentDirGuard::set(dir.path());
+
+        let resolved = resolve_parquet_input_path("./../../partitions.parquet");
+
+        assert_eq!(
+            resolved,
+            ParquetInputPath::Local(PathBuf::from("./../../partitions.parquet"))
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn test_resolve_parquet_input_path_normalizes_redundant_current_dir_segments() {
+        let _bucket = EnvVarGuard::set("S3_BUCKET", "configured-bucket");
+        let dir = tempfile::tempdir().expect("tempdir");
+        let _cwd = CurrentDirGuard::set(dir.path());
+
+        let resolved = resolve_parquet_input_path(".//mainnet//partitions.parquet");
+
+        assert_eq!(
+            resolved,
+            ParquetInputPath::S3("s3://configured-bucket/mainnet/partitions.parquet".to_string())
+        );
     }
 
     #[test]

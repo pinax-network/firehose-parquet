@@ -653,23 +653,33 @@ Recommended patterns:
 
 ### `scan` — Inspect Parquet Files
 
-Read and inspect Parquet files: shows schema, row counts, and sample rows. By default, sampled rows render in a boxed table; use `--vertical` for row-by-row output or `--json` for machine-readable output. Supports local paths and S3 URIs.
+Read and inspect Parquet files: shows schema, row counts, and sample rows. By default, sampled rows render in a boxed table; use `--vertical` for row-by-row output or `--json` for machine-readable output. Supports local paths, shorthand S3 keys/prefixes via `S3_BUCKET`, and explicit S3 URIs.
 
 ```bash
 fireparq scan ./output/blocks/
+S3_BUCKET=my-bucket fireparq scan evm/blocks/
 fireparq scan s3://my-bucket/evm/blocks/
 fireparq scan s3://my-bucket/evm/partitions.parquet
 fireparq scan ./output/blocks/part-000001.parquet --vertical
 fireparq scan ./output/blocks/part-000001.parquet --json
 ```
 
+Lookup order:
+
+1. Explicit `s3://bucket/...` URIs are used as-is.
+2. Non-URI paths use the local filesystem when the path exists.
+3. Otherwise, if `S3_BUCKET` is set, relative paths fall back to `s3://<bucket>/<path>`.
+
 ### `inspect` — Display File Metadata
 
-Displays comprehensive metadata for a single Parquet file: file-level key-value pairs (including custom `firehose-parquet.*` entries), the full Parquet schema with physical/logical types, row group statistics, and per-column chunk details (encoding, compression, sizes). Supports local paths and S3 URIs.
+Displays comprehensive metadata for a single Parquet file: file-level key-value pairs (including custom `firehose-parquet.*` entries), the full Parquet schema with physical/logical types, row group statistics, and per-column chunk details (encoding, compression, sizes). Supports local paths, shorthand S3 keys via `S3_BUCKET`, and explicit S3 URIs.
 
 ```bash
 # Inspect a local file
 fireparq inspect ./output/blocks/year=2026/month=01/date=15/part-000001.parquet
+
+# Resolve a shorthand key against S3_BUCKET when no local path matches
+S3_BUCKET=my-bucket fireparq inspect evm/partitions.parquet
 
 # Inspect an S3 file
 fireparq inspect s3://my-bucket/evm/blocks/year=2026/month=01/date=15/part-000001.parquet
@@ -680,6 +690,8 @@ fireparq inspect s3://my-bucket/evm/partitions.parquet --schema-only
 # Emit machine-readable schema JSON for a single parquet artifact
 fireparq inspect s3://my-bucket/evm/partitions.parquet --schema-only --json
 ```
+
+Lookup order matches `scan`: explicit `s3://...` URIs win, existing local paths win over shorthand S3 resolution, and only missing relative paths fall back to `s3://<S3_BUCKET>/<path>`.
 
 **Output includes:**
 
