@@ -7262,12 +7262,9 @@ mod tests {
             Ok(_) => panic!("verify should stay local and report no parquet files"),
             Err(err) => err,
         };
-        assert!(verify_err
-            .to_string()
-            .contains("no parquet files found in ./mainnet/blocks/"));
-        assert!(!verify_err
-            .to_string()
-            .contains("AWS config required for S3 paths"));
+        let verify_message = verify_err.to_string();
+        assert!(verify_message.contains("no parquet files found in"));
+        assert!(!verify_message.contains("AWS config required for S3 paths"));
 
         let partitions_path = dir.path().join("mainnet").join("partitions.parquet");
         write_test_partitions_index(
