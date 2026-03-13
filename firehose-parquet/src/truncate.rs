@@ -1,7 +1,7 @@
 //! Truncate (delete) parquet files from local filesystem or S3,
 //! with optional partition filtering.
 
-use crate::cli::{block_on_async, format_bytes, AwsConfig};
+use crate::cli::{block_on_async, format_bytes, resolve_parquet_input_path_string, AwsConfig};
 use anyhow::{Context, Result};
 use object_store::ObjectStore;
 use std::path::{Path, PathBuf};
@@ -40,10 +40,17 @@ impl TruncateResult {
 
 /// Run the truncate operation.
 pub fn run_truncate(config: &TruncateConfig) -> Result<TruncateResult> {
-    if config.path.starts_with("s3://") {
-        run_truncate_s3(config)
+    let resolved = TruncateConfig {
+        path: resolve_parquet_input_path_string(&config.path),
+        partitions: config.partitions.clone(),
+        dry_run: config.dry_run,
+        aws: config.aws.clone(),
+    };
+
+    if resolved.path.starts_with("s3://") {
+        run_truncate_s3(&resolved)
     } else {
-        run_truncate_local(config)
+        run_truncate_local(&resolved)
     }
 }
 

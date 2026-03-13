@@ -119,7 +119,7 @@ pub struct CommonArgs {
     )]
     pub skip_missing_blocks: bool,
 
-    /// Path to partitions index parquet file (local path or s3:// URI), e.g. ./output/eth-mainnet/partitions.parquet
+    /// Path to partitions index parquet file (local path, shorthand S3 key via S3_BUCKET, or s3:// URI), e.g. ./output/eth-mainnet/partitions.parquet
     #[arg(
         long,
         env = "PARTITIONS_INDEX",
@@ -640,14 +640,22 @@ Examples:
   # Validate local blocks directory
   fireparq validate ./output/blocks/
 
+  # Validate shorthand S3 path when no local match exists
+  S3_BUCKET=my-bucket fireparq validate eth-mainnet/blocks/
+
   # Validate S3 path
   fireparq validate s3://bucket/eth-mainnet/blocks/
 
   # Check continuity across partition boundaries
   fireparq validate ./output/blocks/ --cross-partition
+
+Lookup order:
+  1. Explicit s3://bucket/... URIs are used as-is.
+  2. Non-URI paths use the local filesystem when the path exists.
+  3. Otherwise, if S3_BUCKET is set, relative paths fall back to s3://<bucket>/<path>.
 ")]
     Validate {
-        /// Path to a directory of .parquet files or an S3 URI (s3://bucket/prefix)
+        /// Path to a directory of .parquet files, a shorthand S3 key/prefix via S3_BUCKET, or an S3 URI
         path: String,
         /// Check continuity across partition boundaries
         #[arg(long, default_value = "false")]
@@ -696,6 +704,9 @@ Examples:
   fireparq verify s3://bucket/evm/mainnet/blocks \
     --publish-report-path s3://bucket/evm/mainnet/verify_runs/custom-run/report.json
 
+  # Resolve a shorthand S3 data path when no local match exists
+  S3_BUCKET=my-bucket fireparq verify evm/mainnet/blocks --chain evm --table blocks
+
   # Verify S3 parquet data with explicit registry location
   fireparq verify s3://bucket/evm/mainnet/blocks \\
     --registry-path s3://bucket/evm/mainnet/merkle_roots.parquet
@@ -705,9 +716,14 @@ Examples:
 
   # Update mismatched registry roots (default behavior only fills missing roots)
   fireparq verify ./output/evm/mainnet/blocks --update-registry
+
+Lookup order for the data path:
+  1. Explicit s3://bucket/... URIs are used as-is.
+  2. Non-URI paths use the local filesystem when the path exists.
+  3. Otherwise, if S3_BUCKET is set, relative paths fall back to s3://<bucket>/<path>.
 ")]
     Verify {
-        /// Path to a directory of .parquet files, a single parquet file, or an S3 URI
+        /// Path to a directory of .parquet files, a single parquet file, a shorthand S3 key/prefix via S3_BUCKET, or an S3 URI
         path: String,
         /// Chain identifier used in root registry keys
         #[arg(long, default_value = "evm")]
@@ -776,11 +792,19 @@ Examples:
   # Roll up S3 data, delete source files after
   fireparq rollup s3://bucket/blocks/ --delete-source
 
+  # Resolve a shorthand S3 source path in-place when no local match exists
+  S3_BUCKET=my-bucket fireparq rollup eth-mainnet/blocks/
+
   # Custom file size limit (256 MB)
   fireparq rollup ./output/blocks/ --flush-bytes 268435456
+
+Lookup order for the source path:
+  1. Explicit s3://bucket/... URIs are used as-is.
+  2. Non-URI paths use the local filesystem when the path exists.
+  3. Otherwise, if S3_BUCKET is set, relative paths fall back to s3://<bucket>/<path>.
 ")]
     Rollup {
-        /// Source path (local directory or S3 URI) containing partitioned Parquet files
+        /// Source path containing partitioned Parquet files (local directory, shorthand S3 key/prefix via S3_BUCKET, or S3 URI)
         source: String,
         /// Output path (local directory or S3 URI). Defaults to source (in-place rollup).
         #[arg(short = 'o', long)]
@@ -833,6 +857,9 @@ Examples:
   # Merge S3 data
   fireparq merge s3://bucket/eth-mainnet/blocks/
 
+  # Resolve a shorthand S3 path when no local match exists
+  S3_BUCKET=my-bucket fireparq merge eth-mainnet/blocks/
+
   # Custom target file size (512 MB)
   fireparq merge ./output/blocks/ --flush-bytes 536870912
 
@@ -841,9 +868,14 @@ Examples:
 
   # Use snappy compression
   fireparq merge ./output/blocks/ --compression snappy
+
+Lookup order:
+  1. Explicit s3://bucket/... URIs are used as-is.
+  2. Non-URI paths use the local filesystem when the path exists.
+  3. Otherwise, if S3_BUCKET is set, relative paths fall back to s3://<bucket>/<path>.
 ")]
     Merge {
-        /// Path to a directory of partitioned .parquet files or an S3 URI
+        /// Path to a directory of partitioned .parquet files, a shorthand S3 key/prefix via S3_BUCKET, or an S3 URI
         path: String,
         /// Compression codec: zstd, snappy, gzip, none
         #[arg(long, default_value = "zstd")]
@@ -942,6 +974,9 @@ Examples:
   # Delete with glob pattern (all of January)
   fireparq truncate s3://bucket/blocks/ -p \"month=01\"
 
+  # Resolve a shorthand S3 path when no local match exists
+  S3_BUCKET=my-bucket fireparq truncate eth-mainnet/blocks/ -p \"month=01\"
+
   # Delete a specific year
   fireparq truncate ./output/ -p \"year=2026\"
 
@@ -950,9 +985,14 @@ Examples:
 
   # Preview what would be deleted
   fireparq truncate ./output/blocks/ --dry-run
+
+Lookup order:
+  1. Explicit s3://bucket/... URIs are used as-is.
+  2. Non-URI paths use the local filesystem when the path exists.
+  3. Otherwise, if S3_BUCKET is set, relative paths fall back to s3://<bucket>/<path>.
 ")]
     Truncate {
-        /// Path to a directory or S3 URI containing .parquet files
+        /// Path to a directory containing .parquet files, a shorthand S3 key/prefix via S3_BUCKET, or an S3 URI
         path: String,
         /// Partition filter(s) — only delete files matching these partition segments.
         /// Use a key name to match all values (e.g. "date" matches all date=* partitions),
@@ -1228,7 +1268,7 @@ Examples:
     --json
 ")]
     Validate {
-        /// Path to partitions index parquet file (local path or s3:// URI)
+        /// Path to partitions index parquet file (local path, shorthand S3 key via S3_BUCKET, or s3:// URI)
         #[arg(long)]
         partitions_index: String,
         /// Optional partition type filter (e.g. hour, date)
@@ -1282,7 +1322,7 @@ Examples:
     --json
 ")]
     Shard {
-        /// Path to partitions index parquet file (local path or s3:// URI)
+        /// Path to partitions index parquet file (local path, shorthand S3 key via S3_BUCKET, or s3:// URI)
         #[arg(long)]
         partitions_index: String,
         /// Optional partition type filter (e.g. hour, date)
@@ -1344,7 +1384,7 @@ Examples:
     --json
 ")]
     Ls {
-        /// Path to partitions index parquet file (local path or s3:// URI)
+        /// Path to partitions index parquet file (local path, shorthand S3 key via S3_BUCKET, or s3:// URI)
         #[arg(long)]
         partitions_index: String,
         /// Optional partition type filter (e.g. hour, date)
@@ -1400,7 +1440,7 @@ Examples:
     --json
 ")]
     Resolve {
-        /// Path to partitions index parquet file (local path or s3:// URI)
+        /// Path to partitions index parquet file (local path, shorthand S3 key via S3_BUCKET, or s3:// URI)
         #[arg(long)]
         partitions_index: String,
         /// Partition type to resolve (e.g. hour, date)
@@ -2131,6 +2171,13 @@ fn resolve_parquet_input_path(path: &str) -> ParquetInputPath {
     ParquetInputPath::Local(input_path.to_path_buf())
 }
 
+pub fn resolve_parquet_input_path_string(path: &str) -> String {
+    match resolve_parquet_input_path(path) {
+        ParquetInputPath::S3(path) => path,
+        ParquetInputPath::Local(path) => path.to_string_lossy().into_owned(),
+    }
+}
+
 /// Reject S3 output when explicit AWS credentials were not resolved by the CLI/config layer.
 pub fn validate_s3_output_credentials(
     output: &str,
@@ -2319,6 +2366,7 @@ pub fn read_partitions_build_rows(
     path: &str,
     aws: Option<&AwsConfig>,
 ) -> anyhow::Result<Vec<PartitionBuildRow>> {
+    let path = resolve_parquet_input_path_string(path);
     use arrow::array::{
         Array, Int32Array, Int64Array, LargeStringArray, StringArray, TimestampSecondArray,
         UInt32Array, UInt64Array,
@@ -2513,7 +2561,7 @@ pub fn read_partitions_build_rows(
         use object_store::ObjectStore;
 
         let aws = aws.ok_or_else(|| anyhow::anyhow!("AWS config required for S3 paths"))?;
-        let (bucket, key) = parse_s3_url(path)?;
+        let (bucket, key) = parse_s3_url(&path)?;
         let client = aws.build_s3_client(&bucket)?;
         let object_path = object_store::path::Path::from(key.as_str());
         let data = block_on_async(async { client.get(&object_path).await?.bytes().await })
@@ -2534,7 +2582,8 @@ pub fn read_partitions_build_rows(
             )?;
         }
     } else {
-        let file = std::fs::File::open(path).map_err(|e| anyhow::anyhow!("opening {path}: {e}"))?;
+        let file =
+            std::fs::File::open(&path).map_err(|e| anyhow::anyhow!("opening {path}: {e}"))?;
         let builder = ParquetRecordBatchReaderBuilder::try_new(file)?;
         let schema = builder.schema();
         validate_partitions_schema(&schema)?;
@@ -3355,6 +3404,7 @@ pub fn generate_completions<C: clap::CommandFactory>(shell: Shell) {
 }
 
 /// AWS credentials for building an S3 client.
+#[derive(Debug, Clone)]
 pub struct AwsConfig {
     pub aws_access_key_id: Option<String>,
     pub aws_secret_access_key: Option<String>,
@@ -5475,9 +5525,10 @@ pub fn validate_parquet(
     aws: Option<&AwsConfig>,
     opts: &ValidateOptions,
 ) -> anyhow::Result<ValidateResult> {
+    let path = resolve_parquet_input_path_string(path);
     if path.starts_with("s3://") {
         validate_parquet_s3(
-            path,
+            &path,
             aws.ok_or_else(|| anyhow::anyhow!("AWS config required for S3 paths"))?,
             opts,
         )
@@ -7145,6 +7196,193 @@ mod tests {
             resolved,
             ParquetInputPath::S3("s3://configured-bucket/mainnet/partitions.parquet".to_string())
         );
+    }
+
+    fn test_verify_options() -> crate::verify::VerifyOptions {
+        crate::verify::VerifyOptions {
+            chain: "evm".to_string(),
+            table: "blocks".to_string(),
+            hash_strategy: Some("auto".to_string()),
+            checks: vec![],
+            profile: crate::verify::VerifyProfile::Standard,
+            scope: crate::verify::VerifyScope::Table,
+            no_fail_fast: false,
+            report_json: None,
+            publish_report: false,
+            publish_report_path: None,
+            registry_path: None,
+            update_registry: false,
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn test_updated_commands_fall_back_to_configured_s3_bucket_for_missing_relative_paths() {
+        let _bucket = EnvVarGuard::set("S3_BUCKET", "configured-bucket");
+        let dir = tempfile::tempdir().expect("tempdir");
+        let _cwd = CurrentDirGuard::set(dir.path());
+
+        let truncate_err = match crate::truncate::run_truncate(&crate::truncate::TruncateConfig {
+            path: "./mainnet/blocks/".to_string(),
+            partitions: vec![],
+            dry_run: true,
+            aws: None,
+        }) {
+            Ok(_) => panic!("truncate should resolve to S3 without a local path"),
+            Err(err) => err,
+        };
+        assert!(truncate_err
+            .to_string()
+            .contains("AWS config required for S3 paths"));
+
+        let merge_err = match crate::merge::run_merge(&crate::merge::MergeConfig {
+            path: "./mainnet/blocks/".to_string(),
+            compression: crate::config::Compression::Zstd,
+            flush_bytes: 1024,
+            dry_run: true,
+            aws: None,
+            cache_control: String::new(),
+        }) {
+            Ok(_) => panic!("merge should resolve to S3 without a local path"),
+            Err(err) => err,
+        };
+        assert!(merge_err
+            .to_string()
+            .contains("AWS config required for S3 paths"));
+
+        let rollup_err = crate::rollup::run_rollup(&crate::rollup::RollupConfig {
+            source: "./mainnet/blocks/".to_string(),
+            output: "./mainnet/blocks/".to_string(),
+            target: crate::rollup::RollupTarget::Date,
+            compression: crate::config::Compression::Zstd,
+            flush_bytes: 1024,
+            delete_source: false,
+            aws: None,
+            cache_control: String::new(),
+        })
+        .expect_err("rollup should resolve to S3 without a local path");
+        assert!(rollup_err
+            .to_string()
+            .contains("AWS config required for S3 rollup"));
+
+        let validate_err = match validate_parquet(
+            "./mainnet/blocks/",
+            None,
+            &ValidateOptions {
+                cross_partition: false,
+                allow_gaps: false,
+            },
+        ) {
+            Ok(_) => panic!("validate should resolve to S3 without a local path"),
+            Err(err) => err,
+        };
+        assert!(validate_err
+            .to_string()
+            .contains("AWS config required for S3 paths"));
+
+        let verify_err = match crate::verify::verify_parquet(
+            "./mainnet/blocks/",
+            None,
+            &test_verify_options(),
+        ) {
+            Ok(_) => panic!("verify should resolve to S3 without a local path"),
+            Err(err) => err,
+        };
+        assert!(verify_err
+            .to_string()
+            .contains("AWS config required for S3 paths"));
+
+        let partitions_err = read_partitions_build_rows("./mainnet/partitions.parquet", None)
+            .expect_err("partitions index reader should resolve to S3 without a local path");
+        assert!(partitions_err
+            .to_string()
+            .contains("AWS config required for S3 paths"));
+    }
+
+    #[test]
+    #[serial]
+    fn test_updated_commands_prefer_existing_local_paths_over_configured_s3_bucket() {
+        let _bucket = EnvVarGuard::set("S3_BUCKET", "configured-bucket");
+        let dir = tempfile::tempdir().expect("tempdir");
+        let _cwd = CurrentDirGuard::set(dir.path());
+
+        let blocks_dir = dir.path().join("mainnet").join("blocks");
+        std::fs::create_dir_all(&blocks_dir).expect("create blocks dir");
+
+        let truncate_result = crate::truncate::run_truncate(&crate::truncate::TruncateConfig {
+            path: "./mainnet/blocks/".to_string(),
+            partitions: vec![],
+            dry_run: true,
+            aws: None,
+        })
+        .expect("truncate should stay local when the directory exists");
+        assert_eq!(truncate_result.files_deleted, 0);
+
+        let merge_result = crate::merge::run_merge(&crate::merge::MergeConfig {
+            path: "./mainnet/blocks/".to_string(),
+            compression: crate::config::Compression::Zstd,
+            flush_bytes: 1024,
+            dry_run: true,
+            aws: None,
+            cache_control: String::new(),
+        })
+        .expect("merge should stay local when the directory exists");
+        assert_eq!(merge_result.files_read, 0);
+
+        crate::rollup::run_rollup(&crate::rollup::RollupConfig {
+            source: "./mainnet/blocks/".to_string(),
+            output: "./mainnet/blocks/".to_string(),
+            target: crate::rollup::RollupTarget::Date,
+            compression: crate::config::Compression::Zstd,
+            flush_bytes: 1024,
+            delete_source: false,
+            aws: None,
+            cache_control: String::new(),
+        })
+        .expect("rollup should stay local when the directory exists");
+
+        let validate_result = validate_parquet(
+            "./mainnet/blocks/",
+            None,
+            &ValidateOptions {
+                cross_partition: false,
+                allow_gaps: false,
+            },
+        )
+        .expect("validate should stay local when the directory exists");
+        assert_eq!(validate_result.files_scanned, 0);
+
+        let verify_err = match crate::verify::verify_parquet(
+            "./mainnet/blocks/",
+            None,
+            &test_verify_options(),
+        ) {
+            Ok(_) => panic!("verify should stay local and report no parquet files"),
+            Err(err) => err,
+        };
+        let verify_message = verify_err.to_string();
+        assert!(verify_message.contains("no parquet files found in"));
+        assert!(!verify_message.contains("AWS config required for S3 paths"));
+
+        let partitions_path = dir.path().join("mainnet").join("partitions.parquet");
+        write_test_partitions_index(
+            &partitions_path,
+            vec![PartitionBuildRow {
+                partition_type: "date".to_string(),
+                partition_interval_seconds: PartitionBuildType::Date.interval_seconds(),
+                partition_start_ts: "2015-07-30 00:00:00".to_string(),
+                partition_value: "2015-07-30 00:00:00".to_string(),
+                start_block: 10,
+                stop_block: 20,
+                start_time: Some("2015-07-30 00:00:00".to_string()),
+                end_time: Some("2015-07-31 00:00:00".to_string()),
+                chain: Some("eth-mainnet".to_string()),
+            }],
+        )
+        .expect("write partitions index");
+        let rows = read_partitions_build_rows("./mainnet/partitions.parquet", None)
+            .expect("partitions index reader should stay local when the file exists");
+        assert_eq!(rows.len(), 1);
     }
 
     #[test]
