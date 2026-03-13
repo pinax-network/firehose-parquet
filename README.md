@@ -321,6 +321,11 @@ Chain:
           Include failed/reverted transactions in output (default: false) [env: INCLUDE_FAILED_TRANSACTIONS]
 ```
 
+When `--bootstrap-missing-genesis-timestamp` is enabled in strict mode, leading
+bootstrap blocks with missing timestamps are still written to output. Their
+timestamps are synthesized from the first later block that includes timestamp
+metadata.
+
 ## Subcommands
 
 ### `partitions build` — Generate `/<chain>/partitions.parquet`
