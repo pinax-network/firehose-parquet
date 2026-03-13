@@ -1,5 +1,4 @@
 use crate::config::Config;
-use crate::cursor::CursorLocation;
 use crate::metrics::PipelineMetrics;
 use crate::traits::BlockIdentity;
 use anyhow::{Context, Result};
@@ -220,7 +219,9 @@ impl FirehoseClient {
 
     /// Start streaming blocks. Calls `handler` for every block received as
     /// raw bytes (the `Any.value` field). The handler receives the raw bytes
-    /// and the cursor string.
+    /// and the cursor string. When `initial_cursor` is provided, the stream
+    /// resumes from that cursor; otherwise it starts fresh from
+    /// `self.config.start_block`.
     ///
     /// On stream errors the client will retry with exponential back-off
     /// and resume from the last cursor.
@@ -229,15 +230,13 @@ impl FirehoseClient {
     /// unrecoverable error occurs.
     pub async fn stream_blocks<F>(
         &self,
-        cursor_location: Option<&CursorLocation>,
+        initial_cursor: Option<String>,
         mut handler: F,
     ) -> Result<()>
     where
         F: FnMut(Vec<u8>, String, String, BlockIdentity, i32) -> Result<()>,
     {
-        let mut cursor: Option<String> = cursor_location
-            .and_then(|loc| loc.load())
-            .map(|state| state.cursor);
+        let mut cursor = initial_cursor;
         let mut reconnect_backoff = ExponentialBackoffBuilder::default()
             .with_initial_interval(Duration::from_secs(1))
             .with_max_interval(Duration::from_secs(60))

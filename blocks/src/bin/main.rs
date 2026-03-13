@@ -671,13 +671,16 @@ fn resolve_ingestion_start_block(
     start_block: Option<u64>,
     cursor_state: Option<&CursorState>,
     endpoint_info: &Option<EndpointInfo>,
+    cursor_override: bool,
 ) -> Result<Option<u64>> {
-    if let Some(cursor_start_block) = cursor_state.and_then(|state| state.start_block) {
-        return Ok(Some(cursor_start_block));
+    if !cursor_override {
+        if let Some(cursor_start_block) = cursor_state.and_then(|state| state.start_block) {
+            return Ok(Some(cursor_start_block));
+        }
     }
 
-    if start_block.is_some() {
-        return Ok(start_block);
+    if let Some(start_block) = start_block {
+        return Ok(Some(start_block));
     }
 
     endpoint_info
@@ -695,6 +698,7 @@ fn resolve_ingestion_stop_block(
     live: bool,
     stop_block: Option<u64>,
     cursor_state: Option<&CursorState>,
+    cursor_override: bool,
 ) -> Result<Option<u64>> {
     if let Some(stop_block) = stop_block {
         return Ok(Some(stop_block));
@@ -702,6 +706,12 @@ fn resolve_ingestion_stop_block(
 
     if live {
         return Ok(None);
+    }
+
+    if cursor_override {
+        return Err(anyhow!(
+            "--stop-block is required unless --live is set or an existing cursor provides one"
+        ));
     }
 
     cursor_state
@@ -712,6 +722,17 @@ fn resolve_ingestion_stop_block(
                 "--stop-block is required unless --live is set or an existing cursor provides one"
             )
         })
+}
+
+fn stream_resume_cursor(
+    cursor_state: Option<&CursorState>,
+    cursor_override: bool,
+) -> Option<String> {
+    if cursor_override {
+        None
+    } else {
+        cursor_state.map(|state| state.cursor.clone())
+    }
 }
 
 fn validate_block_range_alignment(
@@ -3661,21 +3682,22 @@ async fn run_ingestion(args: &BuildArgs) -> Result<()> {
 
     let cursor_location = resolve_cursor_location(&config)?;
     let existing_cursor_state = cursor_location.as_ref().and_then(CursorLocation::load);
+    let resume_cursor_state = existing_cursor_state
+        .as_ref()
+        .filter(|_| !args.cursor_override);
 
-    validate_ingestion_block_range(
-        args.common.live,
-        config.stop_block,
-        existing_cursor_state.as_ref(),
-    )?;
+    validate_ingestion_block_range(args.common.live, config.stop_block, resume_cursor_state)?;
     config.start_block = resolve_ingestion_start_block(
         config.start_block,
         existing_cursor_state.as_ref(),
         &endpoint_info,
+        args.cursor_override,
     )?;
     config.stop_block = resolve_ingestion_stop_block(
         args.common.live,
         config.stop_block,
-        existing_cursor_state.as_ref(),
+        resume_cursor_state,
+        args.cursor_override,
     )?;
     if let firehose_parquet::config::Partition::BlockRange(block_range_size) = &config.partition {
         validate_block_range_alignment(config.start_block, config.stop_block, *block_range_size)?;
@@ -3690,6 +3712,33 @@ async fn run_ingestion(args: &BuildArgs) -> Result<()> {
     let include_failed_transactions = args.include_failed_transactions;
 
     info!(block_type, extended, bytes_encoding = %bytes_encoding_str, include_failed_transactions, "starting pipeline\n{config}");
+
+    if let Some(cursor_state) = existing_cursor_state.as_ref() {
+        if args.cursor_override {
+            info!(
+                stored_cursor_last_block_num = cursor_state.last_block_num,
+                requested_start_block = ?config.start_block,
+                requested_stop_block = ?config.stop_block,
+                live = args.common.live,
+                "cursor override enabled, restarting from CLI-provided/default bounds"
+            );
+        } else {
+            info!(
+                stored_cursor_last_block_num = cursor_state.last_block_num,
+                requested_start_block = ?config.start_block,
+                requested_stop_block = ?config.stop_block,
+                live = args.common.live,
+                "resuming from stored cursor"
+            );
+        }
+    } else {
+        info!(
+            requested_start_block = ?config.start_block,
+            requested_stop_block = ?config.stop_block,
+            live = args.common.live,
+            "starting without stored cursor"
+        );
+    }
 
     // Initialize Prometheus metrics if --metrics-port is set.
     let (mut metrics_registry, pipeline_metrics) = metrics::init();
@@ -3909,28 +3958,26 @@ async fn run_ingestion(args: &BuildArgs) -> Result<()> {
     };
 
     // Validate cursor parameters against current CLI arguments.
-    if let Some(ref loc) = cursor_location {
-        if let Some(loaded) = loc.load() {
-            let mut mismatches = loaded.validate_params(&cursor_state_template);
-            mismatches.retain(|mismatch| !mismatch.starts_with("stop_block:"));
-            if !mismatches.is_empty() {
-                if args.cursor_override {
-                    warn!(
-                        "cursor parameter mismatch detected (overridden via --cursor-override):\n  {}",
-                        mismatches.join("\n  ")
-                    );
-                } else {
-                    return Err(anyhow!(
-                        "cursor parameter mismatch detected:\n  {}\n\nUse --cursor-override to force resume with current parameters.",
-                        mismatches.join("\n  ")
-                    ));
-                }
+    if let Some(loaded) = existing_cursor_state.as_ref() {
+        let mut mismatches = loaded.validate_params(&cursor_state_template);
+        mismatches.retain(|mismatch| !mismatch.starts_with("stop_block:"));
+        if !mismatches.is_empty() {
+            if args.cursor_override {
+                warn!(
+                    "cursor parameter mismatch detected (overridden via --cursor-override):\n  {}",
+                    mismatches.join("\n  ")
+                );
+            } else {
+                return Err(anyhow!(
+                    "cursor parameter mismatch detected:\n  {}\n\nUse --cursor-override to force resume with current parameters.",
+                    mismatches.join("\n  ")
+                ));
             }
         }
     }
 
     let stream_result = client
-        .stream_blocks(cursor_location.as_ref(), |block_bytes, type_url, cursor_str, identity: BlockIdentity, step: i32| {
+        .stream_blocks(stream_resume_cursor(existing_cursor_state.as_ref(), args.cursor_override), |block_bytes, type_url, cursor_str, identity: BlockIdentity, step: i32| {
             let fork_step_str = fork_step_name(step);
             if final_blocks_only && step == 2 {
                 return Ok(());
@@ -4538,18 +4585,41 @@ mod tests {
             block_features: vec![],
         });
 
-        let start_block = resolve_ingestion_start_block(None, Some(&cursor_state), &endpoint_info)
-            .expect("ingestion should prefer an existing cursor");
+        let start_block =
+            resolve_ingestion_start_block(None, Some(&cursor_state), &endpoint_info, false)
+                .expect("ingestion should prefer an existing cursor");
 
         assert_eq!(start_block, Some(21));
     }
 
     #[test]
     fn test_resolve_ingestion_start_block_uses_explicit_start_without_cursor() {
-        let start_block = resolve_ingestion_start_block(Some(21), None, &None)
+        let start_block = resolve_ingestion_start_block(Some(21), None, &None, false)
             .expect("ingestion should use an explicit start block when no cursor exists");
 
         assert_eq!(start_block, Some(21));
+    }
+
+    #[test]
+    fn test_resolve_ingestion_start_block_ignores_cursor_start_when_override_is_enabled() {
+        let cursor_state = CursorState {
+            start_block: Some(21),
+            ..CursorState::default()
+        };
+        let endpoint_info = Some(EndpointInfo {
+            chain_name: "mainnet".to_string(),
+            chain_name_aliases: vec![],
+            first_streamable_block_num: 42,
+            first_streamable_block_id: String::new(),
+            block_id_encoding: 0,
+            block_features: vec![],
+        });
+
+        let start_block =
+            resolve_ingestion_start_block(Some(7), Some(&cursor_state), &endpoint_info, true)
+                .expect("cursor override should use the requested start block");
+
+        assert_eq!(start_block, Some(7));
     }
 
     #[test]
@@ -4563,15 +4633,38 @@ mod tests {
             block_features: vec![],
         });
 
-        let start_block = resolve_ingestion_start_block(None, None, &endpoint_info)
+        let start_block = resolve_ingestion_start_block(None, None, &endpoint_info, false)
             .expect("ingestion should use endpoint first streamable block");
 
         assert_eq!(start_block, Some(42));
     }
 
     #[test]
+    fn test_resolve_ingestion_start_block_uses_endpoint_first_streamable_block_when_override_is_enabled(
+    ) {
+        let cursor_state = CursorState {
+            start_block: Some(21),
+            ..CursorState::default()
+        };
+        let endpoint_info = Some(EndpointInfo {
+            chain_name: "mainnet".to_string(),
+            chain_name_aliases: vec![],
+            first_streamable_block_num: 42,
+            first_streamable_block_id: String::new(),
+            block_id_encoding: 0,
+            block_features: vec![],
+        });
+
+        let start_block =
+            resolve_ingestion_start_block(None, Some(&cursor_state), &endpoint_info, true)
+                .expect("cursor override should fall back to endpoint metadata");
+
+        assert_eq!(start_block, Some(42));
+    }
+
+    #[test]
     fn test_resolve_ingestion_start_block_rejects_missing_first_streamable_metadata() {
-        let err = resolve_ingestion_start_block(None, None, &None)
+        let err = resolve_ingestion_start_block(None, None, &None, false)
             .expect_err("ingestion should require an explicit start, cursor, or endpoint metadata");
 
         assert_eq!(
@@ -4587,7 +4680,7 @@ mod tests {
             ..CursorState::default()
         };
 
-        let stop_block = resolve_ingestion_stop_block(false, Some(300), Some(&cursor_state))
+        let stop_block = resolve_ingestion_stop_block(false, Some(300), Some(&cursor_state), false)
             .expect("ingestion should accept an explicit stop block");
 
         assert_eq!(stop_block, Some(300));
@@ -4600,7 +4693,7 @@ mod tests {
             ..CursorState::default()
         };
 
-        let stop_block = resolve_ingestion_stop_block(false, None, Some(&cursor_state))
+        let stop_block = resolve_ingestion_stop_block(false, None, Some(&cursor_state), false)
             .expect("bounded resume should use the cursor stop block");
 
         assert_eq!(stop_block, Some(200));
@@ -4613,10 +4706,49 @@ mod tests {
             ..CursorState::default()
         };
 
-        let stop_block = resolve_ingestion_stop_block(true, None, Some(&cursor_state))
+        let stop_block = resolve_ingestion_stop_block(true, None, Some(&cursor_state), false)
             .expect("live mode should keep streaming when stop block is omitted");
 
         assert_eq!(stop_block, None);
+    }
+
+    #[test]
+    fn test_resolve_ingestion_stop_block_rejects_cursor_stop_when_override_is_enabled() {
+        let cursor_state = CursorState {
+            stop_block: Some(200),
+            ..CursorState::default()
+        };
+
+        let err = resolve_ingestion_stop_block(false, None, Some(&cursor_state), true)
+            .expect_err("cursor override should not inherit the cursor stop block");
+
+        assert_eq!(
+            err.to_string(),
+            "--stop-block is required unless --live is set or an existing cursor provides one"
+        );
+    }
+
+    #[test]
+    fn test_stream_resume_cursor_ignores_stored_cursor_when_override_is_enabled() {
+        let cursor_state = CursorState {
+            cursor: "cursor-123".to_string(),
+            ..CursorState::default()
+        };
+
+        assert_eq!(stream_resume_cursor(Some(&cursor_state), true), None);
+    }
+
+    #[test]
+    fn test_stream_resume_cursor_uses_stored_cursor_without_override() {
+        let cursor_state = CursorState {
+            cursor: "cursor-123".to_string(),
+            ..CursorState::default()
+        };
+
+        assert_eq!(
+            stream_resume_cursor(Some(&cursor_state), false),
+            Some("cursor-123".to_string())
+        );
     }
 
     #[test]
