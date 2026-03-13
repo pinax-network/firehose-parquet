@@ -215,11 +215,11 @@ fn validate_block_timestamp(
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum GenesisTimestampBootstrapAction {
     None,
-    Skip,
+    Buffer,
     Anchored {
-        effective_start_block: u64,
-        skipped_blocks: u64,
-        first_skipped_block: u64,
+        anchor_block: u64,
+        buffered_blocks: u64,
+        first_buffered_block: u64,
     },
 }
 
@@ -227,8 +227,16 @@ enum GenesisTimestampBootstrapAction {
 struct GenesisTimestampBootstrap {
     enabled: bool,
     requested_start_block: Option<u64>,
-    first_skipped_block: Option<u64>,
-    skipped_blocks: u64,
+    first_buffered_block: Option<u64>,
+    buffered_blocks: u64,
+}
+
+#[derive(Debug, Clone)]
+struct BufferedBootstrapBlock {
+    block_bytes: Vec<u8>,
+    cursor: String,
+    fork_step: Option<String>,
+    identity: BlockIdentity,
 }
 
 impl GenesisTimestampBootstrap {
@@ -236,8 +244,8 @@ impl GenesisTimestampBootstrap {
         Self {
             enabled: enabled && strict_timestamps,
             requested_start_block,
-            first_skipped_block: None,
-            skipped_blocks: 0,
+            first_buffered_block: None,
+            buffered_blocks: 0,
         }
     }
 
@@ -256,17 +264,17 @@ impl GenesisTimestampBootstrap {
             return GenesisTimestampBootstrapAction::None;
         }
 
-        if let Some(first_skipped_block) = self.first_skipped_block {
+        if let Some(first_buffered_block) = self.first_buffered_block {
             if timestamp == 0 {
-                self.skipped_blocks += 1;
-                return GenesisTimestampBootstrapAction::Skip;
+                self.buffered_blocks += 1;
+                return GenesisTimestampBootstrapAction::Buffer;
             }
 
             self.enabled = false;
             return GenesisTimestampBootstrapAction::Anchored {
-                effective_start_block: block_number,
-                skipped_blocks: self.skipped_blocks,
-                first_skipped_block,
+                anchor_block: block_number,
+                buffered_blocks: self.buffered_blocks,
+                first_buffered_block,
             };
         }
 
@@ -275,19 +283,32 @@ impl GenesisTimestampBootstrap {
             return GenesisTimestampBootstrapAction::None;
         }
 
-        self.first_skipped_block = Some(block_number);
-        self.skipped_blocks = 1;
-        GenesisTimestampBootstrapAction::Skip
+        self.first_buffered_block = Some(block_number);
+        self.buffered_blocks = 1;
+        GenesisTimestampBootstrapAction::Buffer
     }
 }
 
 fn missing_genesis_timestamp_bootstrap_error(
-    first_skipped_block: u64,
-    skipped_blocks: u64,
+    first_buffered_block: u64,
+    buffered_blocks: u64,
 ) -> anyhow::Error {
     anyhow!(
-        "skipped {skipped_blocks} timestamp-less bootstrap block(s) starting at block {first_skipped_block} because --bootstrap-missing-genesis-timestamp is enabled, but no later block with timestamp metadata was found before the stream ended"
+        "buffered {buffered_blocks} timestamp-less bootstrap block(s) starting at block {first_buffered_block} because --bootstrap-missing-genesis-timestamp is enabled, but no later block with timestamp metadata was found before the stream ended"
     )
+}
+
+fn take_anchored_bootstrap_blocks(
+    buffered_blocks: &mut Vec<BufferedBootstrapBlock>,
+    anchor_timestamp: i64,
+) -> Vec<BufferedBootstrapBlock> {
+    buffered_blocks
+        .drain(..)
+        .map(|mut block| {
+            block.identity.timestamp = anchor_timestamp;
+            block
+        })
+        .collect()
 }
 
 fn rewrite_timestamp_column(batch: &RecordBatch, nullable_timestamps: bool) -> Result<RecordBatch> {
@@ -3818,6 +3839,7 @@ async fn run_ingestion(args: &BuildArgs) -> Result<()> {
     let mut last_block_num: u64 = 0;
     let mut last_block_id: String = String::new();
     let mut bytes_read: u64 = 0;
+    let mut buffered_bootstrap_blocks: Vec<BufferedBootstrapBlock> = Vec::new();
     let progress_start = Instant::now();
     let mut current_partition_key: Option<String> = None;
     let partition_config = config.partition.clone();
@@ -3891,7 +3913,7 @@ async fn run_ingestion(args: &BuildArgs) -> Result<()> {
     };
 
     // Build a template CursorState with pipeline parameters that stay constant.
-    let mut cursor_state_template = CursorState {
+    let cursor_state_template = CursorState {
         start_block: config.start_block,
         stop_block: config.stop_block,
         extended,
@@ -3954,49 +3976,173 @@ async fn run_ingestion(args: &BuildArgs) -> Result<()> {
             let block_number = identity.block_num;
             let ts = identity.timestamp;
             match genesis_timestamp_bootstrap.observe_block(blocks_processed, block_number, ts) {
-                GenesisTimestampBootstrapAction::Skip => {
-                    if genesis_timestamp_bootstrap.skipped_blocks == 1 {
+                GenesisTimestampBootstrapAction::Buffer => {
+                    if genesis_timestamp_bootstrap.buffered_blocks == 1 {
                         warn!(
                             requested_start_block = ?config.start_block,
                             block_number,
-                            "skipping first streamable block because it lacks timestamp metadata and --bootstrap-missing-genesis-timestamp is enabled"
+                            "buffering first streamable block because it lacks timestamp metadata; its timestamp will be synthesized from the first later timestamped block because --bootstrap-missing-genesis-timestamp is enabled"
                         );
                     }
+                    buffered_bootstrap_blocks.push(BufferedBootstrapBlock {
+                        block_bytes,
+                        cursor: cursor_str,
+                        fork_step: fork_step_str.map(str::to_owned),
+                        identity,
+                    });
                     return Ok(());
                 }
                 GenesisTimestampBootstrapAction::Anchored {
-                    effective_start_block,
-                    skipped_blocks,
-                    first_skipped_block,
+                    anchor_block,
+                    buffered_blocks,
+                    first_buffered_block,
                 } => {
-                    cursor_state_template.start_block = Some(effective_start_block);
                     info!(
-                        first_skipped_block,
-                        effective_start_block,
-                        skipped_blocks,
-                        "starting strict ingestion from the first timestamped block after skipping timestamp-less bootstrap blocks"
+                        first_buffered_block,
+                        anchor_block,
+                        buffered_blocks,
+                        "preserving buffered bootstrap block(s) with a synthesized timestamp from the first later timestamped block"
                     );
                 }
                 GenesisTimestampBootstrapAction::None => {}
             }
-            validate_block_timestamp(block_number, ts, strict_timestamps, &partition_config)?;
-            let has_timestamp = ts != 0;
+            let mut process_block = |block_bytes: &[u8],
+                                     identity: &BlockIdentity,
+                                     fork_step: Option<&str>,
+                                     cursor: &str|
+             -> Result<()> {
+                let block_number = identity.block_num;
+                let ts = identity.timestamp;
+                validate_block_timestamp(block_number, ts, strict_timestamps, &partition_config)?;
+                let has_timestamp = ts != 0;
 
-            // Flush the mapper at partition boundaries to ensure each flush
-            // produces batches belonging to exactly one partition.
-            // See: https://github.com/pinax-network/firehose-parquet/issues/110
-            let new_partition_key = partition_config.partition_key(block_number, ts);
-            if let Some(ref new_key) = new_partition_key {
-                let partition_changed = current_partition_key
-                    .as_ref()
-                    .map_or(false, |cur| cur != new_key);
-                if partition_changed && m.max_table_rows() > 0 {
+                // Flush the mapper at partition boundaries to ensure each flush
+                // produces batches belonging to exactly one partition.
+                // See: https://github.com/pinax-network/firehose-parquet/issues/110
+                let new_partition_key = partition_config.partition_key(block_number, ts);
+                if let Some(ref new_key) = new_partition_key {
+                    let partition_changed = current_partition_key
+                        .as_ref()
+                        .map_or(false, |cur| cur != new_key);
+                    if partition_changed && m.max_table_rows() > 0 {
+                        info!(
+                            old_partition = %current_partition_key.as_deref().unwrap_or("?"),
+                            new_partition = %new_key,
+                            block_number,
+                            "partition boundary detected, flushing mapper"
+                        );
+                        let batches = m.flush()?;
+                        let batches =
+                            rewrite_batches_with_nullable_timestamps(batches, !strict_timestamps)?;
+                        if !dry_run {
+                            let metadata = BlockMetadata {
+                                min_block_number: min_block.unwrap_or(0),
+                                max_block_number: max_block.unwrap_or(0),
+                                min_timestamp,
+                                max_timestamp,
+                            };
+                            let wrote = writer.write_all(&batches, &metadata)?;
+                            if wrote {
+                                pipeline_metrics.flushes_total.get_or_create(&metrics::FlushLabels { trigger: "partition_boundary".to_string() }).inc();
+                                if let (Some(ref loc), Some(ref cursor)) = (&cursor_location, &last_cursor) {
+                                    let mut state = cursor_state_template.clone();
+                                    state.cursor = cursor.clone();
+                                    state.last_block_num = last_block_num;
+                                    state.last_block_id = decode_id_bytes(&last_block_id);
+                                    state.updated_at = time::OffsetDateTime::now_utc()
+                                        .format(&time::format_description::well_known::Rfc3339)
+                                        .unwrap_or_default();
+                                    if let Err(e) = loc.save(&state) {
+                                        warn!(error = %e, "failed to save cursor.parquet");
+                                        pipeline_metrics.errors_total.get_or_create(&metrics::ErrorLabels { kind: "cursor_save".to_string() }).inc();
+                                    } else {
+                                        pipeline_metrics.cursor_saves_total.inc();
+                                        pipeline_metrics.cursor_last_block_num.set(last_block_num as i64);
+                                    }
+                                }
+                            }
+                        }
+                        min_block = None;
+                        max_block = None;
+                        min_timestamp = None;
+                        max_timestamp = None;
+                        last_flush_time = Instant::now();
+                    }
+                }
+                current_partition_key = new_partition_key;
+
+                min_block = Some(min_block.map_or(block_number, |s: u64| s.min(block_number)));
+                max_block = Some(max_block.map_or(block_number, |s: u64| s.max(block_number)));
+                global_min_block = Some(global_min_block.map_or(block_number, |s: u64| s.min(block_number)));
+                global_max_block = Some(global_max_block.map_or(block_number, |s: u64| s.max(block_number)));
+                if has_timestamp {
+                    min_timestamp = Some(min_timestamp.map_or(ts, |s: i64| s.min(ts)));
+                    max_timestamp = Some(max_timestamp.map_or(ts, |s: i64| s.max(ts)));
+                }
+
+                m.map_block(block_bytes, identity, fork_step)?;
+                blocks_processed += 1;
+                bytes_read += block_bytes.len() as u64;
+                last_cursor = Some(cursor.to_owned());
+                last_block_num = block_number;
+                last_block_id = identity.block_id.clone();
+
+                // Update Prometheus metrics.
+                pipeline_metrics.blocks_processed_total.inc();
+                pipeline_metrics.bytes_read_total.inc_by(block_bytes.len() as u64);
+                pipeline_metrics.current_block_number.set(block_number as i64);
+                if global_min_block.map_or(true, |g| block_number <= g) {
+                    pipeline_metrics.min_block_number.set(block_number as i64);
+                }
+                if global_max_block.map_or(true, |g| block_number >= g) {
+                    pipeline_metrics.max_block_number.set(block_number as i64);
+                }
+
+                // Check for graceful shutdown after processing the current block.
+                if shutdown.load(Ordering::SeqCst) {
+                    info!(blocks_processed, block_number, "shutdown requested, breaking out of stream");
+                    return Err(anyhow!("__shutdown__"));
+                }
+
+                if blocks_processed % 100 == 0 {
+                    let elapsed_secs = progress_start.elapsed().as_secs_f64();
+                    let speed_per_sec = if elapsed_secs > 0.0 {
+                        bytes_read as f64 / elapsed_secs
+                    } else {
+                        0.0
+                    };
+                    let blocks_per_sec = if elapsed_secs > 0.0 {
+                        blocks_processed as f64 / elapsed_secs
+                    } else {
+                        0.0
+                    };
                     info!(
-                        old_partition = %current_partition_key.as_deref().unwrap_or("?"),
-                        new_partition = %new_key,
+                        blocks_processed,
                         block_number,
-                        "partition boundary detected, flushing mapper"
+                        total_rows = m.total_rows(),
+                        bytes_read = firehose_parquet::cli::format_bytes(bytes_read),
+                        speed = format!("{}/s | {:.0} blocks/s", firehose_parquet::cli::format_bytes(speed_per_sec as u64), blocks_per_sec),
+                        "progress"
                     );
+
+                    // Update rolling throughput gauges.
+                    pipeline_metrics.blocks_per_second.set(blocks_per_sec);
+                    pipeline_metrics.bytes_per_second.set(speed_per_sec);
+                    pipeline_metrics.elapsed_seconds.set(elapsed_secs);
+                }
+
+                let time_to_flush = flush_interval_secs
+                    .map(|secs| last_flush_time.elapsed().as_secs() >= secs)
+                    .unwrap_or(false);
+
+                let rows_to_flush = flush_rows
+                    .map(|limit| m.max_table_rows() >= limit)
+                    .unwrap_or(false);
+
+                let bytes_to_flush = m.estimated_bytes() as u64 >= flush_bytes;
+
+                if rows_to_flush || time_to_flush || bytes_to_flush {
+                    let flush_trigger = if bytes_to_flush { "bytes" } else if rows_to_flush { "rows" } else { "interval" };
                     let batches = m.flush()?;
                     let batches =
                         rewrite_batches_with_nullable_timestamps(batches, !strict_timestamps)?;
@@ -4008,8 +4154,10 @@ async fn run_ingestion(args: &BuildArgs) -> Result<()> {
                             max_timestamp,
                         };
                         let wrote = writer.write_all(&batches, &metadata)?;
+
+                        // Only update cursor after all tables have been written.
                         if wrote {
-                            pipeline_metrics.flushes_total.get_or_create(&metrics::FlushLabels { trigger: "partition_boundary".to_string() }).inc();
+                            pipeline_metrics.flushes_total.get_or_create(&metrics::FlushLabels { trigger: flush_trigger.to_string() }).inc();
                             if let (Some(ref loc), Some(ref cursor)) = (&cursor_location, &last_cursor) {
                                 let mut state = cursor_state_template.clone();
                                 state.cursor = cursor.clone();
@@ -4034,122 +4182,20 @@ async fn run_ingestion(args: &BuildArgs) -> Result<()> {
                     max_timestamp = None;
                     last_flush_time = Instant::now();
                 }
-            }
-            current_partition_key = new_partition_key;
 
-            min_block = Some(min_block.map_or(block_number, |s: u64| s.min(block_number)));
-            max_block = Some(max_block.map_or(block_number, |s: u64| s.max(block_number)));
-            global_min_block = Some(global_min_block.map_or(block_number, |s: u64| s.min(block_number)));
-            global_max_block = Some(global_max_block.map_or(block_number, |s: u64| s.max(block_number)));
-            if has_timestamp {
-                min_timestamp = Some(min_timestamp.map_or(ts, |s: i64| s.min(ts)));
-                max_timestamp = Some(max_timestamp.map_or(ts, |s: i64| s.max(ts)));
-            }
+                Ok(())
+            };
 
-            m.map_block(&block_bytes, &identity, fork_step_str)?;
-            blocks_processed += 1;
-            bytes_read += block_bytes.len() as u64;
-            last_cursor = Some(cursor_str);
-            last_block_num = block_number;
-            last_block_id = identity.block_id.clone();
-
-            // Update Prometheus metrics.
-            pipeline_metrics.blocks_processed_total.inc();
-            pipeline_metrics.bytes_read_total.inc_by(block_bytes.len() as u64);
-            pipeline_metrics.current_block_number.set(block_number as i64);
-            if global_min_block.map_or(true, |g| block_number <= g) {
-                pipeline_metrics.min_block_number.set(block_number as i64);
-            }
-            if global_max_block.map_or(true, |g| block_number >= g) {
-                pipeline_metrics.max_block_number.set(block_number as i64);
+            for buffered_block in take_anchored_bootstrap_blocks(&mut buffered_bootstrap_blocks, ts) {
+                process_block(
+                    &buffered_block.block_bytes,
+                    &buffered_block.identity,
+                    buffered_block.fork_step.as_deref(),
+                    &buffered_block.cursor,
+                )?;
             }
 
-            // Check for graceful shutdown after processing the current block.
-            if shutdown.load(Ordering::SeqCst) {
-                info!(blocks_processed, block_number, "shutdown requested, breaking out of stream");
-                return Err(anyhow!("__shutdown__"));
-            }
-
-            if blocks_processed % 100 == 0 {
-                let elapsed_secs = progress_start.elapsed().as_secs_f64();
-                let speed_per_sec = if elapsed_secs > 0.0 {
-                    bytes_read as f64 / elapsed_secs
-                } else {
-                    0.0
-                };
-                let blocks_per_sec = if elapsed_secs > 0.0 {
-                    blocks_processed as f64 / elapsed_secs
-                } else {
-                    0.0
-                };
-                info!(
-                    blocks_processed,
-                    block_number,
-                    total_rows = m.total_rows(),
-                    bytes_read = firehose_parquet::cli::format_bytes(bytes_read),
-                    speed = format!("{}/s | {:.0} blocks/s", firehose_parquet::cli::format_bytes(speed_per_sec as u64), blocks_per_sec),
-                    "progress"
-                );
-
-                // Update rolling throughput gauges.
-                pipeline_metrics.blocks_per_second.set(blocks_per_sec);
-                pipeline_metrics.bytes_per_second.set(speed_per_sec);
-                pipeline_metrics.elapsed_seconds.set(elapsed_secs);
-            }
-
-            let time_to_flush = flush_interval_secs
-                .map(|secs| last_flush_time.elapsed().as_secs() >= secs)
-                .unwrap_or(false);
-
-            let rows_to_flush = flush_rows
-                .map(|limit| m.max_table_rows() >= limit)
-                .unwrap_or(false);
-
-            let bytes_to_flush = m.estimated_bytes() as u64 >= flush_bytes;
-
-            if rows_to_flush || time_to_flush || bytes_to_flush {
-                let flush_trigger = if bytes_to_flush { "bytes" } else if rows_to_flush { "rows" } else { "interval" };
-                let batches = m.flush()?;
-                let batches =
-                    rewrite_batches_with_nullable_timestamps(batches, !strict_timestamps)?;
-                if !dry_run {
-                    let metadata = BlockMetadata {
-                        min_block_number: min_block.unwrap_or(0),
-                        max_block_number: max_block.unwrap_or(0),
-                        min_timestamp,
-                        max_timestamp,
-                    };
-                    let wrote = writer.write_all(&batches, &metadata)?;
-
-                    // Only update cursor after all tables have been written.
-                    if wrote {
-                        pipeline_metrics.flushes_total.get_or_create(&metrics::FlushLabels { trigger: flush_trigger.to_string() }).inc();
-                        if let (Some(ref loc), Some(ref cursor)) = (&cursor_location, &last_cursor) {
-                            let mut state = cursor_state_template.clone();
-                            state.cursor = cursor.clone();
-                            state.last_block_num = last_block_num;
-                            state.last_block_id = decode_id_bytes(&last_block_id);
-                            state.updated_at = time::OffsetDateTime::now_utc()
-                                .format(&time::format_description::well_known::Rfc3339)
-                                .unwrap_or_default();
-                            if let Err(e) = loc.save(&state) {
-                                warn!(error = %e, "failed to save cursor.parquet");
-                                pipeline_metrics.errors_total.get_or_create(&metrics::ErrorLabels { kind: "cursor_save".to_string() }).inc();
-                            } else {
-                                pipeline_metrics.cursor_saves_total.inc();
-                                pipeline_metrics.cursor_last_block_num.set(last_block_num as i64);
-                            }
-                        }
-                    }
-                }
-                min_block = None;
-                max_block = None;
-                min_timestamp = None;
-                max_timestamp = None;
-                last_flush_time = Instant::now();
-            }
-
-            Ok(())
+            process_block(&block_bytes, &identity, fork_step_str, &cursor_str)
         })
         .await;
 
@@ -4231,10 +4277,10 @@ async fn run_ingestion(args: &BuildArgs) -> Result<()> {
     }
 
     if !is_shutdown && genesis_timestamp_bootstrap.enabled {
-        if let Some(first_skipped_block) = genesis_timestamp_bootstrap.first_skipped_block {
+        if let Some(first_buffered_block) = genesis_timestamp_bootstrap.first_buffered_block {
             return Err(missing_genesis_timestamp_bootstrap_error(
-                first_skipped_block,
-                genesis_timestamp_bootstrap.skipped_blocks,
+                first_buffered_block,
+                genesis_timestamp_bootstrap.buffered_blocks,
             ));
         }
     }
@@ -4466,6 +4512,7 @@ mod tests {
         assert!(help.contains("first streamable block"));
         assert!(help.contains("--skip-missing-blocks"));
         assert!(help.contains("--bootstrap-missing-genesis-timestamp"));
+        assert!(help.contains("synthesize their timestamp"));
     }
 
     #[test]
@@ -4893,23 +4940,23 @@ mod tests {
     }
 
     #[test]
-    fn test_genesis_timestamp_bootstrap_skips_until_first_timestamped_block() {
+    fn test_genesis_timestamp_bootstrap_buffers_until_first_timestamped_block() {
         let mut bootstrap = GenesisTimestampBootstrap::new(true, true, Some(0));
 
         assert_eq!(
             bootstrap.observe_block(0, 0, 0),
-            GenesisTimestampBootstrapAction::Skip
+            GenesisTimestampBootstrapAction::Buffer
         );
         assert_eq!(
             bootstrap.observe_block(0, 1, 0),
-            GenesisTimestampBootstrapAction::Skip
+            GenesisTimestampBootstrapAction::Buffer
         );
         assert_eq!(
             bootstrap.observe_block(0, 2, 1_700_000_000),
             GenesisTimestampBootstrapAction::Anchored {
-                effective_start_block: 2,
-                skipped_blocks: 2,
-                first_skipped_block: 0,
+                anchor_block: 2,
+                buffered_blocks: 2,
+                first_buffered_block: 0,
             }
         );
     }
@@ -4935,6 +4982,45 @@ mod tests {
         assert!(message.contains("--bootstrap-missing-genesis-timestamp"));
         assert!(message.contains("no later block with timestamp metadata was found"));
         assert!(message.contains("block 0"));
+    }
+
+    #[test]
+    fn test_take_anchored_bootstrap_blocks_preserves_block_numbers() {
+        let mut buffered_blocks = vec![
+            BufferedBootstrapBlock {
+                block_bytes: vec![0x01],
+                cursor: "cursor-0".to_string(),
+                fork_step: None,
+                identity: BlockIdentity {
+                    block_num: 0,
+                    block_id: "block-0".to_string(),
+                    timestamp: 0,
+                    ..BlockIdentity::default()
+                },
+            },
+            BufferedBootstrapBlock {
+                block_bytes: vec![0x02],
+                cursor: "cursor-1".to_string(),
+                fork_step: Some("STEP_NEW".to_string()),
+                identity: BlockIdentity {
+                    block_num: 1,
+                    block_id: "block-1".to_string(),
+                    timestamp: 0,
+                    ..BlockIdentity::default()
+                },
+            },
+        ];
+
+        let anchored = take_anchored_bootstrap_blocks(&mut buffered_blocks, 1_700_000_000);
+
+        assert!(buffered_blocks.is_empty());
+        assert_eq!(anchored.len(), 2);
+        assert_eq!(anchored[0].identity.block_num, 0);
+        assert_eq!(anchored[1].identity.block_num, 1);
+        assert_eq!(anchored[0].identity.timestamp, 1_700_000_000);
+        assert_eq!(anchored[1].identity.timestamp, 1_700_000_000);
+        assert_eq!(anchored[0].cursor, "cursor-0");
+        assert_eq!(anchored[1].fork_step.as_deref(), Some("STEP_NEW"));
     }
 
     #[test]

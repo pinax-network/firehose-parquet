@@ -523,8 +523,9 @@ pub struct BuildArgs {
     )]
     pub cursor_override: bool,
 
-    /// In strict mode, skip initial timestamp-less bootstrap blocks until the
-    /// first timestamped block, then begin ingestion there.
+    /// In strict mode, preserve initial timestamp-less bootstrap blocks in
+    /// output and synthesize their timestamp from the first later timestamped
+    /// block.
     ///
     /// Intended for chains whose first streamable block (often genesis) does
     /// not expose timestamp metadata.
