@@ -4293,6 +4293,12 @@ fn collect_sample_rows(
     out
 }
 
+/// Compute the 1-based inclusive absolute row bounds to sample for `scan`.
+///
+/// `offset` and `rows` are interpreted relative to the requested display
+/// `order`: ascending starts from the beginning of the file, while descending
+/// starts from the end of the file. Returns `None` when the requested window
+/// falls outside the available rows or when there are no rows to display.
 fn scan_sample_row_bounds(
     total_rows: usize,
     rows: usize,
@@ -4310,7 +4316,7 @@ fn scan_sample_row_bounds(
             (start_row <= end_row).then_some((start_row, end_row))
         }
         ScanOrder::Desc => {
-            let end_row = total_rows - offset;
+            let end_row = total_rows.saturating_sub(offset);
             let start_row = end_row.saturating_sub(rows.saturating_sub(1)).max(1);
             (start_row <= end_row).then_some((start_row, end_row))
         }
