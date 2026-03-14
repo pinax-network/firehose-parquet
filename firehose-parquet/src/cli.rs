@@ -592,6 +592,12 @@ Examples:
   # Paginate: skip first 20 rows, show next 20
   fireparq scan ./output/blocks/ --offset 20 --limit 20
 
+  # Show the latest 20 rows first
+  fireparq scan ./output/blocks/part-000001.parquet --order desc --limit 20
+
+  # Skip the latest 20 rows, then show the previous 20
+  fireparq scan ./output/blocks/part-000001.parquet --order desc --offset 20 --limit 20
+
 Lookup order:
   1. Explicit s3://bucket/... URIs are used as-is.
   2. Non-URI paths use the local filesystem when the path exists.
@@ -606,6 +612,9 @@ Lookup order:
         /// Number of rows to skip before displaying (for pagination)
         #[arg(long, default_value = "0")]
         offset: usize,
+        /// Row display order for pagination and previews
+        #[arg(long, value_enum, default_value = "asc")]
+        order: ScanOrder,
         /// Only show file metadata (schema, row count, size) without data
         #[arg(long, default_value = "false")]
         schema_only: bool,
@@ -1149,11 +1158,7 @@ Examples:
         #[arg(long, default_value_t = 30, help_heading = "Runtime / Logging")]
         poll_interval_secs: u64,
         /// Allow sparse probes to scan forward a small window when a chain skips block numbers.
-        #[arg(
-            long,
-            default_value_t = false,
-            help_heading = "Runtime / Logging"
-        )]
+        #[arg(long, default_value_t = false, help_heading = "Runtime / Logging")]
         skip_missing_blocks: bool,
         /// Partition to build: date, hour, minute, second, or block_range
         #[arg(long = "partition", help_heading = "Partitioning")]
@@ -1205,11 +1210,7 @@ Examples:
         )]
         overwrite: bool,
         /// Emit machine-readable JSON output
-        #[arg(
-            long,
-            default_value = "false",
-            help_heading = "Runtime / Logging"
-        )]
+        #[arg(long, default_value = "false", help_heading = "Runtime / Logging")]
         json: bool,
         /// AWS access key ID (for S3 paths)
         #[arg(
@@ -1561,6 +1562,12 @@ impl PartitionBuildType {
         };
         Ok(rounded.unix_timestamp())
     }
+}
+
+#[derive(clap::ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScanOrder {
+    Asc,
+    Desc,
 }
 
 impl std::fmt::Display for PartitionBuildType {
@@ -3909,6 +3916,7 @@ pub fn scan_parquet(
     path: &str,
     rows: usize,
     offset: usize,
+    order: ScanOrder,
     schema_only: bool,
     vertical: bool,
     json: bool,
@@ -3920,11 +3928,12 @@ pub fn scan_parquet(
             path,
             rows,
             offset,
+            order,
             schema_only,
             aws.ok_or_else(|| anyhow::anyhow!("AWS config required for S3 paths"))?,
         )?,
         ParquetInputPath::Local(path) => {
-            collect_scan_parquet_local(path, rows, offset, schema_only)?
+            collect_scan_parquet_local(path, rows, offset, order, schema_only)?
         }
     };
 
@@ -4011,6 +4020,7 @@ fn collect_scan_parquet_local(
     path: &std::path::Path,
     rows: usize,
     offset: usize,
+    order: ScanOrder,
     schema_only: bool,
 ) -> anyhow::Result<Vec<ScanFileResult>> {
     let mut files: Vec<PathBuf> = Vec::new();
@@ -4041,6 +4051,7 @@ fn collect_scan_parquet_local(
             display_path,
             rows,
             offset,
+            order,
             schema_only,
         )?);
     }
@@ -4052,6 +4063,7 @@ fn build_scan_file_result_from_local(
     display_path: String,
     rows: usize,
     offset: usize,
+    order: ScanOrder,
     schema_only: bool,
 ) -> anyhow::Result<ScanFileResult> {
     use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
@@ -4071,7 +4083,14 @@ fn build_scan_file_result_from_local(
         let file = fs::File::open(file_path)?;
         let builder = ParquetRecordBatchReaderBuilder::try_new(file)?;
         let reader = builder.build()?;
-        collect_sample_rows(&schema, reader, rows, offset)
+        collect_sample_rows(
+            &schema,
+            reader,
+            usize::try_from(total_rows).unwrap_or(usize::MAX),
+            rows,
+            offset,
+            order,
+        )
     };
 
     Ok(ScanFileResult {
@@ -4091,6 +4110,7 @@ fn collect_scan_parquet_s3(
     path: &str,
     rows: usize,
     offset: usize,
+    order: ScanOrder,
     schema_only: bool,
     aws: &AwsConfig,
 ) -> anyhow::Result<Vec<ScanFileResult>> {
@@ -4113,6 +4133,7 @@ fn collect_scan_parquet_s3(
             display_key,
             rows,
             offset,
+            order,
             schema_only,
         )?);
     }
@@ -4125,6 +4146,7 @@ fn build_scan_file_result_from_bytes(
     display_path: String,
     rows: usize,
     offset: usize,
+    order: ScanOrder,
     schema_only: bool,
 ) -> anyhow::Result<ScanFileResult> {
     use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
@@ -4141,7 +4163,14 @@ fn build_scan_file_result_from_bytes(
     } else {
         let builder = ParquetRecordBatchReaderBuilder::try_new(data)?;
         let reader = builder.build()?;
-        collect_sample_rows(&schema, reader, rows, offset)
+        collect_sample_rows(
+            &schema,
+            reader,
+            usize::try_from(total_rows).unwrap_or(usize::MAX),
+            rows,
+            offset,
+            order,
+        )
     };
 
     Ok(ScanFileResult {
@@ -4215,12 +4244,16 @@ fn build_scan_schema(schema: &arrow::datatypes::SchemaRef) -> Vec<ScanSchemaColu
 fn collect_sample_rows(
     schema: &arrow::datatypes::SchemaRef,
     reader: impl Iterator<Item = Result<arrow::record_batch::RecordBatch, arrow::error::ArrowError>>,
+    total_rows: usize,
     rows: usize,
     offset: usize,
+    order: ScanOrder,
 ) -> Vec<ScanRow> {
+    let Some((start_row, end_row)) = scan_sample_row_bounds(total_rows, rows, offset, order) else {
+        return Vec::new();
+    };
     let mut out = Vec::new();
     let mut absolute_row = 0usize;
-    let mut collected = 0usize;
 
     'outer: for batch_result in reader {
         let batch = match batch_result {
@@ -4231,14 +4264,13 @@ fn collect_sample_rows(
             }
         };
         for row_idx in 0..batch.num_rows() {
-            if collected >= rows {
-                break 'outer;
-            }
             absolute_row += 1;
-            if absolute_row <= offset {
+            if absolute_row < start_row {
                 continue;
             }
-            collected += 1;
+            if absolute_row > end_row {
+                break 'outer;
+            }
             out.push(ScanRow {
                 row_number: absolute_row,
                 cells: schema
@@ -4254,7 +4286,35 @@ fn collect_sample_rows(
         }
     }
 
+    if matches!(order, ScanOrder::Desc) {
+        out.reverse();
+    }
+
     out
+}
+
+fn scan_sample_row_bounds(
+    total_rows: usize,
+    rows: usize,
+    offset: usize,
+    order: ScanOrder,
+) -> Option<(usize, usize)> {
+    if total_rows == 0 || rows == 0 || offset >= total_rows {
+        return None;
+    }
+
+    match order {
+        ScanOrder::Asc => {
+            let start_row = offset.saturating_add(1);
+            let end_row = total_rows.min(offset.saturating_add(rows));
+            (start_row <= end_row).then_some((start_row, end_row))
+        }
+        ScanOrder::Desc => {
+            let end_row = total_rows - offset;
+            let start_row = end_row.saturating_sub(rows.saturating_sub(1)).max(1);
+            (start_row <= end_row).then_some((start_row, end_row))
+        }
+    }
 }
 
 fn render_scan_results(files: &[ScanFileResult], row_mode: ScanRowDisplayMode, show_rows: bool) {
@@ -7019,6 +7079,7 @@ mod tests {
                 path,
                 limit,
                 schema_only,
+                order,
                 vertical,
                 json,
                 ..
@@ -7026,6 +7087,7 @@ mod tests {
                 assert_eq!(path, "./output/blocks/");
                 assert_eq!(limit, 50);
                 assert!(schema_only);
+                assert_eq!(order, ScanOrder::Asc);
                 assert!(!vertical);
                 assert!(!json);
             }
@@ -7053,6 +7115,15 @@ mod tests {
                 assert!(!vertical);
                 assert!(json);
             }
+            _ => panic!("expected scan subcommand"),
+        }
+    }
+
+    #[test]
+    fn test_scan_subcommand_order_parse() {
+        let cli = parse(&["test-cli", "scan", "./output/blocks/", "--order", "desc"]);
+        match cli.command.expect("command should exist") {
+            Commands::Scan { order, .. } => assert_eq!(order, ScanOrder::Desc),
             _ => panic!("expected scan subcommand"),
         }
     }
@@ -9001,6 +9072,95 @@ mod tests {
         let array = TimestampMillisecondArray::from(vec![123]).with_timezone("UTC");
 
         assert_eq!(format_array_value(&array, 0), "1970-01-01 00:00:00.123 UTC");
+    }
+
+    #[test]
+    fn test_collect_sample_rows_respects_ascending_and_descending_pagination() {
+        use arrow::array::Int32Array;
+        use arrow::record_batch::RecordBatch;
+        use std::sync::Arc;
+
+        let schema = Arc::new(arrow::datatypes::Schema::new(vec![
+            arrow::datatypes::Field::new("value", arrow::datatypes::DataType::Int32, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            Arc::clone(&schema),
+            vec![Arc::new(Int32Array::from(vec![10, 20, 30, 40, 50]))],
+        )
+        .expect("record batch");
+
+        let asc_rows = collect_sample_rows(
+            &schema,
+            vec![Ok(batch.clone())].into_iter(),
+            5,
+            2,
+            1,
+            ScanOrder::Asc,
+        );
+        assert_eq!(
+            asc_rows
+                .iter()
+                .map(|row| row.row_number)
+                .collect::<Vec<_>>(),
+            vec![2, 3]
+        );
+        assert_eq!(
+            asc_rows
+                .iter()
+                .map(|row| row.cells[0].value.as_str())
+                .collect::<Vec<_>>(),
+            vec!["20", "30"]
+        );
+
+        let desc_rows = collect_sample_rows(
+            &schema,
+            vec![Ok(batch.clone())].into_iter(),
+            5,
+            2,
+            1,
+            ScanOrder::Desc,
+        );
+        assert_eq!(
+            desc_rows
+                .iter()
+                .map(|row| row.row_number)
+                .collect::<Vec<_>>(),
+            vec![4, 3]
+        );
+        assert_eq!(
+            desc_rows
+                .iter()
+                .map(|row| row.cells[0].value.as_str())
+                .collect::<Vec<_>>(),
+            vec!["40", "30"]
+        );
+    }
+
+    #[test]
+    fn test_collect_sample_rows_returns_empty_when_offset_exceeds_selected_order() {
+        use arrow::array::Int32Array;
+        use arrow::record_batch::RecordBatch;
+        use std::sync::Arc;
+
+        let schema = Arc::new(arrow::datatypes::Schema::new(vec![
+            arrow::datatypes::Field::new("value", arrow::datatypes::DataType::Int32, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            Arc::clone(&schema),
+            vec![Arc::new(Int32Array::from(vec![1, 2, 3]))],
+        )
+        .expect("record batch");
+
+        let rows = collect_sample_rows(
+            &schema,
+            vec![Ok(batch)].into_iter(),
+            3,
+            2,
+            3,
+            ScanOrder::Desc,
+        );
+
+        assert!(rows.is_empty());
     }
 
     #[test]

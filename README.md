@@ -661,7 +661,7 @@ Recommended patterns:
 
 ### `scan` — Inspect Parquet Files
 
-Read and inspect Parquet files: shows schema, row counts, and sample rows. By default, sampled rows render in a boxed table; use `--vertical` for row-by-row output or `--json` for machine-readable output. Supports local paths, shorthand S3 keys/prefixes via `S3_BUCKET`, and explicit S3 URIs.
+Read and inspect Parquet files: shows schema, row counts, and sample rows. By default, sampled rows render in a boxed table in ascending row order; use `--order desc` to inspect the latest rows first, `--vertical` for row-by-row output, or `--json` for machine-readable output. Supports local paths, shorthand S3 keys/prefixes via `S3_BUCKET`, and explicit S3 URIs.
 
 ```bash
 fireparq scan ./output/blocks/
@@ -670,6 +670,8 @@ fireparq scan s3://my-bucket/evm/blocks/
 fireparq scan s3://my-bucket/evm/partitions.parquet
 fireparq scan ./output/blocks/part-000001.parquet --vertical
 fireparq scan ./output/blocks/part-000001.parquet --json
+fireparq scan ./output/blocks/part-000001.parquet --order desc --limit 20
+fireparq scan ./output/blocks/part-000001.parquet --order desc --offset 20 --limit 20
 ```
 
 Lookup order:
