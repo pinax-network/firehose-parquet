@@ -1131,6 +1131,8 @@ async fn run_partitions_build(
                 .map(|row| row.stop_block)
                 .max()
                 .unwrap_or(effective_start_block);
+            let frontier_context =
+                live_block_range_frontier_log_context(&rows, frontier, block_range_size);
             let Some(maybe_latest_available) = await_live_interruptible(
                 &shutdown,
                 &shutdown_notify,
@@ -1146,6 +1148,20 @@ async fn run_partitions_build(
             else {
                 info!(
                     frontier,
+                    next_partition_start = frontier_context.next_partition_start,
+                    next_partition = %frontier_context.next_partition,
+                    latest_completed_partition = frontier_context
+                        .latest_completed_partition
+                        .as_deref()
+                        .unwrap_or("none"),
+                    latest_completed_start_time = frontier_context
+                        .latest_completed_start_time
+                        .as_deref()
+                        .unwrap_or("unavailable"),
+                    latest_completed_end_time = frontier_context
+                        .latest_completed_end_time
+                        .as_deref()
+                        .unwrap_or("unavailable"),
                     "live block-range build interrupted during frontier probe"
                 );
                 break;
@@ -1155,17 +1171,49 @@ async fn run_partitions_build(
                 info!(
                     frontier,
                     poll_interval_secs,
+                    next_partition_start = frontier_context.next_partition_start,
+                    next_partition = %frontier_context.next_partition,
+                    latest_completed_partition = frontier_context
+                        .latest_completed_partition
+                        .as_deref()
+                        .unwrap_or("none"),
+                    latest_completed_start_time = frontier_context
+                        .latest_completed_start_time
+                        .as_deref()
+                        .unwrap_or("unavailable"),
+                    latest_completed_end_time = frontier_context
+                        .latest_completed_end_time
+                        .as_deref()
+                        .unwrap_or("unavailable"),
                     "no new finalized blocks available yet for block-range build; polling again"
                 );
                 continue;
             };
 
+            let latest_finalized_block_time =
+                format_optional_probe_timestamp(latest_available.timestamp)?;
             let completed_frontier =
                 completed_block_range_frontier(latest_available.block_num, block_range_size);
             if completed_frontier <= frontier {
                 info!(
                     frontier,
+                    next_partition_start = frontier_context.next_partition_start,
+                    next_partition = %frontier_context.next_partition,
+                    latest_completed_partition = frontier_context
+                        .latest_completed_partition
+                        .as_deref()
+                        .unwrap_or("none"),
+                    latest_completed_start_time = frontier_context
+                        .latest_completed_start_time
+                        .as_deref()
+                        .unwrap_or("unavailable"),
+                    latest_completed_end_time = frontier_context
+                        .latest_completed_end_time
+                        .as_deref()
+                        .unwrap_or("unavailable"),
                     latest_finalized_block = latest_available.block_num,
+                    latest_finalized_block_time =
+                        latest_finalized_block_time.as_deref().unwrap_or("unavailable"),
                     next_partition_end = frontier.saturating_add(block_range_size),
                     "latest finalized block has not completed the next block-range partition yet"
                 );
@@ -1174,7 +1222,11 @@ async fn run_partitions_build(
 
             info!(
                 frontier,
+                next_partition_start = frontier_context.next_partition_start,
+                next_partition = %frontier_context.next_partition,
                 latest_finalized_block = latest_available.block_num,
+                latest_finalized_block_time =
+                    latest_finalized_block_time.as_deref().unwrap_or("unavailable"),
                 completed_frontier,
                 block_range_size,
                 "processing live block-range partitions"
@@ -2513,6 +2565,43 @@ fn format_probe_timestamp(timestamp: i64) -> Result<String> {
         dt.minute(),
         dt.second()
     ))
+}
+
+fn format_optional_probe_timestamp(timestamp: i64) -> Result<Option<String>> {
+    if timestamp > 0 {
+        Ok(Some(format_probe_timestamp(timestamp)?))
+    } else {
+        Ok(None)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LiveBlockRangeFrontierLogContext {
+    next_partition_start: u64,
+    next_partition: String,
+    latest_completed_partition: Option<String>,
+    latest_completed_start_time: Option<String>,
+    latest_completed_end_time: Option<String>,
+}
+
+fn live_block_range_frontier_log_context(
+    rows: &[PartitionBuildRow],
+    frontier: u64,
+    block_range_size: u64,
+) -> LiveBlockRangeFrontierLogContext {
+    let latest_completed = rows
+        .iter()
+        .filter(|row| row.stop_block == frontier)
+        .max_by_key(|row| row.start_block)
+        .or_else(|| rows.iter().max_by_key(|row| row.stop_block));
+
+    LiveBlockRangeFrontierLogContext {
+        next_partition_start: frontier,
+        next_partition: format!("{}-{}", frontier, frontier.saturating_add(block_range_size)),
+        latest_completed_partition: latest_completed.map(|row| row.partition_value.clone()),
+        latest_completed_start_time: latest_completed.and_then(|row| row.start_time.clone()),
+        latest_completed_end_time: latest_completed.and_then(|row| row.end_time.clone()),
+    }
 }
 
 fn block_partition_start_label(
@@ -4178,14 +4267,45 @@ async fn run_ingestion(args: &BuildArgs) -> Result<()> {
                     } else {
                         0.0
                     };
-                    info!(
-                        blocks_processed,
-                        block_number,
-                        total_rows = m.total_rows(),
-                        bytes_read = firehose_parquet::cli::format_bytes(bytes_read),
-                        speed = format!("{}/s | {:.0} blocks/s", firehose_parquet::cli::format_bytes(speed_per_sec as u64), blocks_per_sec),
-                        "progress"
-                    );
+                    let block_timestamp = format_optional_probe_timestamp(ts)?;
+                    match (block_timestamp.as_deref(), current_partition_key.as_deref()) {
+                        (Some(block_timestamp), Some(partition)) => info!(
+                            blocks_processed,
+                            block_number,
+                            block_timestamp,
+                            partition,
+                            total_rows = m.total_rows(),
+                            bytes_read = firehose_parquet::cli::format_bytes(bytes_read),
+                            speed = format!("{}/s | {:.0} blocks/s", firehose_parquet::cli::format_bytes(speed_per_sec as u64), blocks_per_sec),
+                            "progress"
+                        ),
+                        (Some(block_timestamp), None) => info!(
+                            blocks_processed,
+                            block_number,
+                            block_timestamp,
+                            total_rows = m.total_rows(),
+                            bytes_read = firehose_parquet::cli::format_bytes(bytes_read),
+                            speed = format!("{}/s | {:.0} blocks/s", firehose_parquet::cli::format_bytes(speed_per_sec as u64), blocks_per_sec),
+                            "progress"
+                        ),
+                        (None, Some(partition)) => info!(
+                            blocks_processed,
+                            block_number,
+                            partition,
+                            total_rows = m.total_rows(),
+                            bytes_read = firehose_parquet::cli::format_bytes(bytes_read),
+                            speed = format!("{}/s | {:.0} blocks/s", firehose_parquet::cli::format_bytes(speed_per_sec as u64), blocks_per_sec),
+                            "progress"
+                        ),
+                        (None, None) => info!(
+                            blocks_processed,
+                            block_number,
+                            total_rows = m.total_rows(),
+                            bytes_read = firehose_parquet::cli::format_bytes(bytes_read),
+                            speed = format!("{}/s | {:.0} blocks/s", firehose_parquet::cli::format_bytes(speed_per_sec as u64), blocks_per_sec),
+                            "progress"
+                        ),
+                    }
 
                     // Update rolling throughput gauges.
                     pipeline_metrics.blocks_per_second.set(blocks_per_sec);
@@ -6169,6 +6289,65 @@ mod tests {
             .expect("hour label");
 
         assert_eq!(label, "2023-07-31 14:00:00");
+    }
+
+    #[test]
+    fn test_format_optional_probe_timestamp_handles_missing_timestamp() {
+        assert_eq!(
+            format_optional_probe_timestamp(0).expect("missing timestamp should be allowed"),
+            None
+        );
+        assert_eq!(
+            format_optional_probe_timestamp(1_690_815_590)
+                .expect("valid timestamp")
+                .as_deref(),
+            Some("2023-07-31 14:59:50")
+        );
+    }
+
+    #[test]
+    fn test_live_block_range_frontier_log_context_uses_latest_completed_partition() {
+        let rows = vec![
+            PartitionBuildRow {
+                partition_type: "block_range".to_string(),
+                partition_interval_seconds: 100_000,
+                partition_start_ts: "406200000".to_string(),
+                partition_value: "406200000".to_string(),
+                start_block: 406_200_000,
+                stop_block: 406_300_000,
+                start_time: Some("2026-03-14 16:00:00".to_string()),
+                end_time: Some("2026-03-14 16:59:59".to_string()),
+                chain: Some("solana-mainnet-beta".to_string()),
+            },
+            PartitionBuildRow {
+                partition_type: "block_range".to_string(),
+                partition_interval_seconds: 100_000,
+                partition_start_ts: "406300000".to_string(),
+                partition_value: "406300000".to_string(),
+                start_block: 406_300_000,
+                stop_block: 406_400_000,
+                start_time: Some("2026-03-14 17:00:00".to_string()),
+                end_time: Some("2026-03-14 17:59:59".to_string()),
+                chain: Some("solana-mainnet-beta".to_string()),
+            },
+        ];
+
+        let context = live_block_range_frontier_log_context(&rows, 406_400_000, 100_000);
+
+        assert_eq!(context.next_partition_start, 406_400_000);
+        assert_eq!(context.next_partition, "406400000-406500000");
+        assert_eq!(
+            context.latest_completed_partition.as_deref(),
+            Some("406300000")
+        );
+        assert_eq!(
+            context.latest_completed_start_time.as_deref(),
+            Some("2026-03-14 17:00:00")
+        );
+        assert_eq!(
+            context.latest_completed_end_time.as_deref(),
+            Some("2026-03-14 17:59:59")
+        );
     }
 
     #[test]
