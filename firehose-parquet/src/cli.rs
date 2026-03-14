@@ -1910,14 +1910,9 @@ impl PartitionIndexBuilder {
         }
 
         let chain = chain.into();
-        let resume_block = existing_rows
-            .iter()
-            .map(|row| row.stop_block)
-            .max()
-            .ok_or_else(|| anyhow::anyhow!("missing existing stop_block for resume"))?;
-
         let mut active = std::collections::BTreeMap::new();
         let mut retained_rows = Vec::new();
+        let mut resume_block = None;
 
         for partition_type in partition_types.iter().copied() {
             let mut matching = existing_rows
@@ -1925,13 +1920,7 @@ impl PartitionIndexBuilder {
                 .enumerate()
                 .filter(|(_, row)| row.partition_type == partition_type.as_str())
                 .collect::<Vec<_>>();
-            matching.sort_by(|left, right| {
-                left.1
-                    .partition_start_ts
-                    .cmp(&right.1.partition_start_ts)
-                    .then_with(|| left.1.start_block.cmp(&right.1.start_block))
-                    .then_with(|| left.1.stop_block.cmp(&right.1.stop_block))
-            });
+            sort_resume_rows(partition_type, &mut matching);
 
             let Some((last_index, last_row)) = matching.pop() else {
                 anyhow::bail!(
@@ -1941,12 +1930,18 @@ impl PartitionIndexBuilder {
                 );
             };
 
-            if last_row.stop_block != resume_block {
+            let partition_resume_block = if partition_type == PartitionBuildType::BlockRange {
+                validate_block_range_resume_rows(&matching, last_row)?
+            } else {
+                last_row.stop_block
+            };
+            let common_resume_block = resume_block.get_or_insert(partition_resume_block);
+            if partition_resume_block != *common_resume_block {
                 anyhow::bail!(
                     "cannot resume partition build: partition type {} ends at {}, expected common frontier {}",
                     partition_type,
-                    last_row.stop_block,
-                    resume_block
+                    partition_resume_block,
+                    common_resume_block
                 );
             }
 
@@ -1986,6 +1981,8 @@ impl PartitionIndexBuilder {
         }
 
         retained_rows.extend(existing_rows);
+        let resume_block = resume_block
+            .ok_or_else(|| anyhow::anyhow!("missing existing stop_block for resume"))?;
 
         Ok((
             Self {
@@ -2001,6 +1998,108 @@ impl PartitionIndexBuilder {
             resume_block,
         ))
     }
+}
+
+fn sort_resume_rows(
+    partition_type: PartitionBuildType,
+    matching: &mut Vec<(usize, &PartitionBuildRow)>,
+) {
+    matching.sort_by(|left, right| match partition_type {
+        PartitionBuildType::BlockRange => left
+            .1
+            .start_block
+            .cmp(&right.1.start_block)
+            .then_with(|| left.1.stop_block.cmp(&right.1.stop_block))
+            .then_with(|| left.1.partition_start_ts.cmp(&right.1.partition_start_ts)),
+        _ => left
+            .1
+            .partition_start_ts
+            .cmp(&right.1.partition_start_ts)
+            .then_with(|| left.1.start_block.cmp(&right.1.start_block))
+            .then_with(|| left.1.stop_block.cmp(&right.1.stop_block)),
+    });
+}
+
+fn validate_block_range_resume_rows(
+    completed_rows: &[(usize, &PartitionBuildRow)],
+    terminal_row: &PartitionBuildRow,
+) -> anyhow::Result<u64> {
+    let block_range_size = u64::try_from(terminal_row.partition_interval_seconds)
+        .ok()
+        .filter(|size| *size > 0)
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "cannot resume partition build: partition type block_range has invalid block range size {}",
+                terminal_row.partition_interval_seconds
+            )
+        })?;
+
+    let mut previous: Option<&PartitionBuildRow> = None;
+    for row in completed_rows
+        .iter()
+        .map(|(_, row)| *row)
+        .chain(std::iter::once(terminal_row))
+    {
+        if row.start_block >= row.stop_block {
+            anyhow::bail!(
+                "cannot resume partition build: partition type block_range has invalid range {}..{}",
+                row.start_block,
+                row.stop_block
+            );
+        }
+        if row.partition_interval_seconds != block_range_size as i64 {
+            anyhow::bail!(
+                "cannot resume partition build: partition type block_range mixes block range sizes {} and {}",
+                block_range_size,
+                row.partition_interval_seconds
+            );
+        }
+        if row.start_block % block_range_size != 0 {
+            anyhow::bail!(
+                "cannot resume partition build: partition type block_range starts at misaligned block {}, expected multiple of {}",
+                row.start_block,
+                block_range_size
+            );
+        }
+
+        let row_size = row.stop_block - row.start_block;
+        if row_size > block_range_size {
+            anyhow::bail!(
+                "cannot resume partition build: partition type block_range row {}..{} exceeds block range size {}",
+                row.start_block,
+                row.stop_block,
+                block_range_size
+            );
+        }
+
+        if let Some(previous_row) = previous {
+            if previous_row.stop_block != row.start_block {
+                let relation = if previous_row.stop_block < row.start_block {
+                    "gap"
+                } else {
+                    "overlap"
+                };
+                anyhow::bail!(
+                    "cannot resume partition build: partition type block_range has {} between {} and {}",
+                    relation,
+                    previous_row.stop_block,
+                    row.start_block
+                );
+            }
+            if previous_row.stop_block - previous_row.start_block != block_range_size {
+                anyhow::bail!(
+                    "cannot resume partition build: partition type block_range row {}..{} is incomplete before the final frontier {}",
+                    previous_row.start_block,
+                    previous_row.stop_block,
+                    terminal_row.stop_block
+                );
+            }
+        }
+
+        previous = Some(row);
+    }
+
+    Ok(terminal_row.stop_block)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -8761,6 +8860,75 @@ mod tests {
         assert_eq!(rows[1].partition_value, "2023-07-31 15:00:00");
         assert_eq!(rows[1].start_block, 103);
         assert_eq!(rows[1].stop_block, 104);
+    }
+
+    fn block_range_row(
+        start_block: u64,
+        stop_block: u64,
+        block_range_size: u64,
+    ) -> PartitionBuildRow {
+        PartitionBuildRow {
+            partition_type: "block_range".to_string(),
+            partition_interval_seconds: block_range_size as i64,
+            partition_start_ts: start_block.to_string(),
+            partition_value: start_block.to_string(),
+            start_block,
+            stop_block,
+            start_time: None,
+            end_time: None,
+            chain: Some("solana-mainnet-beta".to_string()),
+        }
+    }
+
+    #[test]
+    fn test_partition_index_builder_resume_block_range_uses_numeric_frontier() {
+        let existing_rows = vec![
+            block_range_row(90_000_000, 100_000_000, 10_000_000),
+            block_range_row(100_000_000, 110_000_000, 10_000_000),
+        ];
+
+        let (_builder, resume_start_block) = PartitionIndexBuilder::resume_from_existing(
+            "solana-mainnet-beta",
+            vec![PartitionBuildType::BlockRange],
+            existing_rows,
+        )
+        .expect("resume builder");
+
+        assert_eq!(resume_start_block, 110_000_000);
+    }
+
+    #[test]
+    fn test_partition_index_builder_resume_block_range_accepts_partial_terminal_row() {
+        let existing_rows = vec![
+            block_range_row(400_000_000, 400_100_000, 100_000),
+            block_range_row(400_100_000, 400_150_000, 100_000),
+        ];
+
+        let (_builder, resume_start_block) = PartitionIndexBuilder::resume_from_existing(
+            "solana-mainnet-beta",
+            vec![PartitionBuildType::BlockRange],
+            existing_rows,
+        )
+        .expect("resume builder");
+
+        assert_eq!(resume_start_block, 400_150_000);
+    }
+
+    #[test]
+    fn test_partition_index_builder_resume_block_range_rejects_gap() {
+        let err = PartitionIndexBuilder::resume_from_existing(
+            "solana-mainnet-beta",
+            vec![PartitionBuildType::BlockRange],
+            vec![
+                block_range_row(400_000_000, 400_100_000, 100_000),
+                block_range_row(400_200_000, 400_300_000, 100_000),
+            ],
+        )
+        .expect_err("gap should fail");
+
+        assert!(err
+            .to_string()
+            .contains("partition type block_range has gap"));
     }
 
     #[test]
