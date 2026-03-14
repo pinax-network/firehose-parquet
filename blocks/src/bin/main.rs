@@ -1267,7 +1267,7 @@ async fn run_partitions_build(
             }
 
             let frontier = builder.current_frontier().unwrap_or(effective_start_block);
-            let Some(maybe_frontier_block) = await_live_interruptible(
+            let maybe_frontier_block = match await_live_probe_or_backoff(
                 &shutdown,
                 &shutdown_notify,
                 fetch_optional_probe_block_identity(
@@ -1279,14 +1279,21 @@ async fn run_partitions_build(
                     skip_missing_blocks,
                     &probe_counter,
                 ),
+                frontier,
+                poll_interval,
+                "polling live frontier",
             )
             .await?
-            else {
-                info!(
-                    frontier,
-                    "live partitions build interrupted during frontier probe"
-                );
-                break;
+            {
+                LiveProbeOutcome::Ready(value) => value,
+                LiveProbeOutcome::Interrupted => {
+                    info!(
+                        frontier,
+                        "live partitions build interrupted during frontier probe"
+                    );
+                    break;
+                }
+                LiveProbeOutcome::RetryAfterBackoff => continue,
             };
 
             let Some(mut current_block) = maybe_frontier_block else {
@@ -1350,7 +1357,7 @@ async fn run_partitions_build(
                         overwrite,
                     )?;
                 }
-                let Some(span) = await_live_interruptible(
+                let span = match await_live_probe_or_backoff(
                     &shutdown,
                     &shutdown_notify,
                     locate_live_partition_span(
@@ -1362,14 +1369,21 @@ async fn run_partitions_build(
                         skip_missing_blocks,
                         &probe_counter,
                     ),
+                    current_block.block_num,
+                    poll_interval,
+                    "probing live partition span",
                 )
                 .await?
-                else {
-                    info!(
-                        frontier = current_block.block_num,
-                        "live partitions build interrupted during boundary search"
-                    );
-                    break 'live;
+                {
+                    LiveProbeOutcome::Ready(span) => span,
+                    LiveProbeOutcome::Interrupted => {
+                        info!(
+                            frontier = current_block.block_num,
+                            "live partitions build interrupted during boundary search"
+                        );
+                        break 'live;
+                    }
+                    LiveProbeOutcome::RetryAfterBackoff => continue,
                 };
 
                 if span.last_same.block_num > current_block.block_num {
@@ -1918,9 +1932,72 @@ const PARTITIONS_PROBE_FETCH_INITIAL_BACKOFF: Duration = Duration::from_millis(2
 const PARTITIONS_PROBE_SKIP_MISSING_BLOCK_SCAN_LIMIT: u64 = 16;
 const PARTITIONS_PROBE_TIMESTAMP_EXPONENTIAL_MAX_JUMP: u64 = 65_536;
 
+enum LiveProbeOutcome<T> {
+    Ready(T),
+    Interrupted,
+    RetryAfterBackoff,
+}
+
 fn is_missing_probe_block_error(error: &anyhow::Error) -> bool {
     let message = error.to_string().to_ascii_lowercase();
     message.contains("not found") && message.contains("block")
+}
+
+fn is_transient_live_probe_error(error: &anyhow::Error) -> bool {
+    let message = error.to_string().to_ascii_lowercase();
+    [
+        "service is currently unavailable",
+        "message: \"unavailable\"",
+        "code = unavailable",
+        "code: unavailable",
+        "deadline exceeded",
+        "timed out",
+        "timeout",
+        "temporarily unavailable",
+        "connection reset",
+        "connection refused",
+        "broken pipe",
+        "transport error",
+    ]
+    .iter()
+    .any(|pattern| message.contains(pattern))
+}
+
+async fn await_live_probe_or_backoff<T, F>(
+    shutdown: &Arc<AtomicBool>,
+    shutdown_notify: &Arc<Notify>,
+    future: F,
+    frontier: u64,
+    poll_interval: Duration,
+    context: &str,
+) -> Result<LiveProbeOutcome<T>>
+where
+    F: std::future::Future<Output = Result<T>>,
+{
+    match await_live_interruptible(shutdown, shutdown_notify, future).await {
+        Ok(Some(value)) => Ok(LiveProbeOutcome::Ready(value)),
+        Ok(None) => Ok(LiveProbeOutcome::Interrupted),
+        Err(error) if is_transient_live_probe_error(&error) => {
+            warn!(
+                frontier,
+                context,
+                poll_interval_secs = poll_interval.as_secs(),
+                error = %error,
+                "transient live probe failed after retries; backing off before polling again"
+            );
+
+            match await_live_interruptible(shutdown, shutdown_notify, async move {
+                tokio::time::sleep(poll_interval).await;
+                Ok::<(), anyhow::Error>(())
+            })
+            .await?
+            {
+                Some(()) => Ok(LiveProbeOutcome::RetryAfterBackoff),
+                None => Ok(LiveProbeOutcome::Interrupted),
+            }
+        }
+        Err(error) => Err(error),
+    }
 }
 
 async fn scan_forward_for_available_block<T, Op, Fut>(
@@ -5621,6 +5698,35 @@ mod tests {
         assert!(err.to_string().contains("failed after 3 attempts"));
         assert_eq!(attempts.load(AtomicOrdering::SeqCst), 3);
         assert_eq!(probe_counter.load(Ordering::Relaxed), 3);
+    }
+
+    #[test]
+    fn test_is_transient_live_probe_error_matches_service_unavailable() {
+        let err = anyhow!("code: 'The service is currently unavailable', message: \"unavailable\"");
+        assert!(is_transient_live_probe_error(&err));
+    }
+
+    #[tokio::test]
+    async fn test_await_live_probe_or_backoff_retries_transient_sparse_probe_failures() {
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let shutdown_notify = Arc::new(Notify::new());
+
+        let outcome = await_live_probe_or_backoff(
+            &shutdown,
+            &shutdown_notify,
+            async {
+                Err::<u64, _>(anyhow!(
+                    "code: 'The service is currently unavailable', message: \"unavailable\""
+                ))
+            },
+            274_902_564_975,
+            Duration::from_millis(0),
+            "probing live partition span",
+        )
+        .await
+        .expect("transient live probe failures should back off instead of exiting");
+
+        assert!(matches!(outcome, LiveProbeOutcome::RetryAfterBackoff));
     }
 
     #[tokio::test]
