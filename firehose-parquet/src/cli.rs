@@ -4332,6 +4332,8 @@ fn scan_sample_row_bounds(
         }
         ScanOrder::Desc => {
             let end_row = total_rows.saturating_sub(offset);
+            // For descending order, start from the last visible row and walk
+            // backward `rows - 1` positions, clamping to the first row.
             let start_row = end_row.saturating_sub(rows.saturating_sub(1)).max(1);
             (start_row <= end_row).then_some((start_row, end_row))
         }
