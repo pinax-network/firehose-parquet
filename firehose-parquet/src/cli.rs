@@ -4083,10 +4083,11 @@ fn build_scan_file_result_from_local(
         let file = fs::File::open(file_path)?;
         let builder = ParquetRecordBatchReaderBuilder::try_new(file)?;
         let reader = builder.build()?;
+        let total_rows_for_sampling = scan_total_rows_for_sampling(total_rows)?;
         collect_sample_rows(
             &schema,
             reader,
-            usize::try_from(total_rows).unwrap_or(usize::MAX),
+            total_rows_for_sampling,
             rows,
             offset,
             order,
@@ -4163,10 +4164,11 @@ fn build_scan_file_result_from_bytes(
     } else {
         let builder = ParquetRecordBatchReaderBuilder::try_new(data)?;
         let reader = builder.build()?;
+        let total_rows_for_sampling = scan_total_rows_for_sampling(total_rows)?;
         collect_sample_rows(
             &schema,
             reader,
-            usize::try_from(total_rows).unwrap_or(usize::MAX),
+            total_rows_for_sampling,
             rows,
             offset,
             order,
@@ -4263,6 +4265,11 @@ fn collect_sample_rows(
                 break;
             }
         };
+        let batch_end_row = absolute_row.saturating_add(batch.num_rows());
+        if batch_end_row < start_row {
+            absolute_row = batch_end_row;
+            continue;
+        }
         for row_idx in 0..batch.num_rows() {
             absolute_row += 1;
             if absolute_row < start_row {
@@ -4291,6 +4298,14 @@ fn collect_sample_rows(
     }
 
     out
+}
+
+fn scan_total_rows_for_sampling(total_rows: i64) -> anyhow::Result<usize> {
+    usize::try_from(total_rows).map_err(|_| {
+        anyhow::anyhow!(
+            "parquet row count {total_rows} exceeds supported scan preview size on this platform"
+        )
+    })
 }
 
 /// Compute the 1-based inclusive absolute row bounds to sample for `scan`.
