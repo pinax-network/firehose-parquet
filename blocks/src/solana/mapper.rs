@@ -115,6 +115,13 @@ fn append_transaction(
     append_fork_step(&mut builder.fork_step, fork_step);
 }
 
+fn solana_canonical_identity(block: &solana::Block, identity: &BlockIdentity) -> BlockIdentity {
+    let mut canonical = identity.clone();
+    canonical.block_id = block.blockhash.clone();
+    canonical.parent_id = block.previous_blockhash.clone();
+    canonical
+}
+
 pub struct SolanaBlockMapper {
     extended: bool,
     include_failed_transactions: bool,
@@ -177,10 +184,11 @@ impl SolanaBlockMapper {
     ) {
         let slot = block.slot;
         let block_time_opt = block.block_time.as_ref().map(|bt| bt.timestamp);
+        let canonical_identity = solana_canonical_identity(block, identity);
 
         self.blocks
             .canonical
-            .append_with_optional_timestamp(identity, block_time_opt);
+            .append_with_optional_timestamp(&canonical_identity, block_time_opt);
         self.blocks.slot.append_value(slot);
         self.blocks.parent_slot.append_value(block.parent_slot);
         match &block.block_height {
@@ -204,11 +212,25 @@ impl SolanaBlockMapper {
         append_fork_step(&mut self.blocks.fork_step, fork_step);
 
         for (tx_idx, confirmed_tx) in block.transactions.iter().enumerate() {
-            self.map_transaction(slot, tx_idx as u32, confirmed_tx, identity, block_time_opt, fork_step);
+            self.map_transaction(
+                slot,
+                tx_idx as u32,
+                confirmed_tx,
+                &canonical_identity,
+                block_time_opt,
+                fork_step,
+            );
         }
 
         for (reward_idx, reward) in block.rewards.iter().enumerate() {
-            self.map_reward(slot, reward_idx as u32, reward, identity, block_time_opt, fork_step);
+            self.map_reward(
+                slot,
+                reward_idx as u32,
+                reward,
+                &canonical_identity,
+                block_time_opt,
+                fork_step,
+            );
         }
     }
 
@@ -1225,6 +1247,55 @@ mod tests {
         assert_eq!(batches["token_balances"].num_rows(), 2);
         // 1 address table lookup
         assert_eq!(batches["account_lookups"].num_rows(), 1);
+    }
+
+    #[test]
+    fn test_solana_canonical_ids_match_blockhash_fields() {
+        let block = make_test_block(100);
+        let block_bytes = prost::Message::encode_to_vec(&block);
+        let mut mapper = SolanaBlockMapper::new(false, false, EncodeBytes::Binary, false);
+
+        let identity = BlockIdentity {
+            block_num: 100,
+            block_id: "firehose-envelope-id".to_string(),
+            parent_num: 99,
+            parent_id: "firehose-envelope-parent-id".to_string(),
+            lib_num: 99,
+            timestamp: 1_700_000_100,
+            fork_step: None,
+        };
+
+        mapper.map_block(&block_bytes, &identity, None).unwrap();
+        let batches = mapper.flush().unwrap();
+        let blocks = &batches["blocks"];
+
+        let block_id = blocks
+            .column_by_name("block_id")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<BinaryArray>()
+            .unwrap();
+        let parent_id = blocks
+            .column_by_name("parent_id")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<BinaryArray>()
+            .unwrap();
+        let blockhash = blocks
+            .column_by_name("blockhash")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        let previous_blockhash = blocks
+            .column_by_name("previous_blockhash")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+
+        assert_eq!(block_id.value(0), blockhash.value(0).as_bytes());
+        assert_eq!(parent_id.value(0), previous_blockhash.value(0).as_bytes());
     }
 
     #[test]
