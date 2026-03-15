@@ -38,6 +38,11 @@ pub fn est_i32(b: &Int32Builder) -> usize {
     b.len() * 4
 }
 
+/// Estimate memory usage of a `Date32Builder`.
+pub fn est_date32(b: &Date32Builder) -> usize {
+    b.len() * 4
+}
+
 /// Estimate memory usage of a `Float64Builder`.
 pub fn est_f64(b: &Float64Builder) -> usize {
     b.len() * 8
@@ -98,7 +103,11 @@ pub fn date32_from_timestamp_seconds(timestamp_seconds: i64) -> i32 {
     timestamp_seconds
         .div_euclid(86_400)
         .try_into()
-        .expect("block timestamp date exceeds Arrow Date32 range")
+        .unwrap_or_else(|_| {
+            panic!(
+                "block timestamp {timestamp_seconds} exceeds Arrow Date32 range when converted to days"
+            )
+        })
 }
 
 /// Returns the 7 canonical identity fields to prepend to every schema.
@@ -200,7 +209,7 @@ impl CanonicalBuilder {
             + self.parent_id.estimated_bytes()
             + est_u64(&self.lib_num)
             + est_ts_sec(&self.timestamp)
-            + self.date.len() * 4
+            + est_date32(&self.date)
     }
 }
 
