@@ -189,12 +189,7 @@ impl CanonicalBuilder {
         self.timestamp.append_value(id.timestamp);
         self.date
             .append_value(date32_from_timestamp_seconds(id.timestamp));
-
-        // Decode hex ID strings to bytes, then encode through BytesColumn.
-        let block_id_bytes = decode_id_bytes(&id.block_id);
-        let parent_id_bytes = decode_id_bytes(&id.parent_id);
-        self.block_id.append_value(&block_id_bytes);
-        self.parent_id.append_value(&parent_id_bytes);
+        self.append_ids(id);
     }
 
     /// Append a row with an optional timestamp/date.  When `timestamp` is
@@ -218,8 +213,11 @@ impl CanonicalBuilder {
                 self.date.append_null();
             }
         }
+        self.append_ids(id);
+    }
 
-        // Decode hex ID strings to bytes, then encode through BytesColumn.
+    /// Decode and append the block_id/parent_id columns.
+    fn append_ids(&mut self, id: &BlockIdentity) {
         let block_id_bytes = decode_id_bytes(&id.block_id);
         let parent_id_bytes = decode_id_bytes(&id.parent_id);
         self.block_id.append_value(&block_id_bytes);
