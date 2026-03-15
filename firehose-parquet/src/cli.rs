@@ -2187,7 +2187,12 @@ pub fn resolve_s3_output_root(
         output.map(str::trim).filter(|value| !value.is_empty()),
         s3_bucket.map(str::trim).filter(|value| !value.is_empty()),
     ) {
-        (Some(output), Some(bucket)) if !output.starts_with("s3://") => {
+        (Some(output), Some(bucket))
+            if !output.starts_with("s3://") && !is_explicit_local_output_path(output) =>
+        {
+            if output == "." {
+                return Ok(format!("s3://{bucket}"));
+            }
             let normalized = output.trim_start_matches("./").trim_start_matches('/');
             Ok(format!("s3://{bucket}/{normalized}"))
         }
@@ -2197,6 +2202,20 @@ pub fn resolve_s3_output_root(
             anyhow::bail!("--output is required unless --s3-bucket or S3_BUCKET is set")
         }
     }
+}
+
+fn is_explicit_local_output_path(output: &str) -> bool {
+    let output = output.trim();
+    if output.is_empty() || output == "." {
+        return false;
+    }
+
+    let path = Path::new(output);
+    path.is_absolute()
+        || output.starts_with("./")
+        || output.starts_with("../")
+        || output.starts_with(".\\")
+        || output.starts_with("..\\")
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -3384,21 +3403,11 @@ pub fn build_config(args: &CommonArgs) -> anyhow::Result<Config> {
         .ok()
         .filter(|v| !v.is_empty());
 
-    // When S3_BUCKET is set and output isn't already an s3:// URL,
-    // build the S3 path automatically: s3://<bucket>/<output>
-    // If output is still the default ("."), use the bucket root.
-    let output = if let Some(ref bucket) = args.s3_bucket {
-        let path = args.output.to_string_lossy();
-        if path.starts_with("s3://") {
-            args.output.clone()
-        } else if path == "." {
-            PathBuf::from(format!("s3://{bucket}"))
-        } else {
-            PathBuf::from(format!("s3://{bucket}/{path}"))
-        }
-    } else {
-        args.output.clone()
-    };
+    // Only reinterpret output as S3 when it is not an explicit local path.
+    let output = PathBuf::from(resolve_s3_output_root(
+        Some(args.output.to_string_lossy().as_ref()),
+        args.s3_bucket.as_deref(),
+    )?);
 
     validate_s3_output_credentials(
         output.to_string_lossy().as_ref(),
@@ -7906,6 +7915,35 @@ mod tests {
 
     #[test]
     #[serial]
+    fn test_s3_bucket_preserves_explicit_local_output() {
+        unsafe {
+            std::env::remove_var("AWS_ACCESS_KEY_ID");
+            std::env::remove_var("AWS_SECRET_ACCESS_KEY");
+            std::env::remove_var("AWS_SESSION_TOKEN");
+            std::env::remove_var("AWS_REGION");
+            std::env::remove_var("AWS_ENDPOINT_URL_S3");
+            std::env::remove_var("S3_BUCKET");
+        }
+        let cli = parse(&[
+            "test-cli",
+            "--endpoint",
+            "https://example.com:443",
+            "--aws-access-key-id",
+            "AKID123",
+            "--aws-secret-access-key",
+            "secret456",
+            "--s3-bucket",
+            "my-bucket",
+            "--output",
+            "./output",
+        ]);
+        let config = build_config(&cli.common).expect("build_config should succeed");
+        assert_eq!(config.output, PathBuf::from("./output"));
+        assert_eq!(config.s3_bucket.as_deref(), Some("my-bucket"));
+    }
+
+    #[test]
+    #[serial]
     fn test_s3_bucket_no_double_prefix() {
         unsafe {
             std::env::remove_var("AWS_ACCESS_KEY_ID");
@@ -8603,7 +8641,7 @@ mod tests {
     fn test_resolve_s3_output_root_prefers_explicit_output() {
         let resolved =
             resolve_s3_output_root(Some("./output"), Some("bucket-name")).expect("resolve");
-        assert_eq!(resolved, "s3://bucket-name/output");
+        assert_eq!(resolved, "./output");
 
         let resolved =
             resolve_s3_output_root(Some("s3://other-bucket/prefix"), Some("bucket-name"))
@@ -8615,6 +8653,13 @@ mod tests {
     fn test_resolve_s3_output_root_accepts_bucket_without_output() {
         let resolved = resolve_s3_output_root(None, Some("bucket-name")).expect("resolve");
         assert_eq!(resolved, "s3://bucket-name");
+    }
+
+    #[test]
+    fn test_resolve_s3_output_root_rewrites_implicit_relative_output() {
+        let resolved =
+            resolve_s3_output_root(Some("output"), Some("bucket-name")).expect("resolve");
+        assert_eq!(resolved, "s3://bucket-name/output");
     }
 
     #[test]

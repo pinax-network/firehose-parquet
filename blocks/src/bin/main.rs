@@ -18,9 +18,7 @@ use firehose_parquet::encode::{parse_encode_bytes, EncodeBytes};
 use firehose_parquet::grpc::{EndpointInfo, FirehoseClient};
 use firehose_parquet::metrics;
 use firehose_parquet::networks::{resolve_network_endpoint, EndpointSource};
-use firehose_parquet::traits::{
-    decode_id_bytes, fork_step_name, BlockIdentity, BlockMapper,
-};
+use firehose_parquet::traits::{decode_id_bytes, fork_step_name, BlockIdentity, BlockMapper};
 use firehose_parquet::writer::{OutputWriter, ParquetFileMetadata};
 use object_store::ObjectStore;
 use std::path::PathBuf;
@@ -203,9 +201,7 @@ fn validate_block_timestamp(
         ));
     }
 
-    Err(anyhow!(
-        "block {block_num} is missing timestamp metadata"
-    ))
+    Err(anyhow!("block {block_num} is missing timestamp metadata"))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -4499,6 +4495,7 @@ async fn run_ingestion(args: &BuildArgs) -> Result<()> {
 mod tests {
     use super::*;
     use clap::CommandFactory;
+    use firehose_parquet::cursor::CursorLocation;
     use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 
     #[test]
@@ -4559,6 +4556,28 @@ mod tests {
             assert_eq!(build_args.bytes_encoding, "hex");
         } else {
             panic!("expected Commands::Build");
+        }
+    }
+
+    #[test]
+    fn test_resolve_cursor_location_keeps_local_cursor_for_local_output() {
+        let config = Config {
+            output: std::path::PathBuf::from("./output"),
+            cursor_path: Some("cursor.parquet".to_string()),
+            s3_bucket: Some("my-bucket".to_string()),
+            aws_access_key_id: Some("AKID123".to_string()),
+            aws_secret_access_key: Some("secret456".to_string()),
+            aws_region: Some("auto".to_string()),
+            aws_endpoint_url: Some("https://storage.example.com".to_string()),
+            ..Config::default()
+        };
+
+        let cursor_location = resolve_cursor_location(&config).expect("cursor location");
+        match cursor_location {
+            Some(CursorLocation::Local(path)) => {
+                assert_eq!(path, std::path::PathBuf::from("cursor.parquet"));
+            }
+            other => panic!("expected local cursor location, got {other:?}"),
         }
     }
 
@@ -5281,13 +5300,15 @@ mod tests {
             &None,
         );
 
-        assert!(metadata.entries.iter().any(|(key, value)| {
-            key == "firehose-parquet.block_type" && value == "solana"
-        }));
+        assert!(metadata
+            .entries
+            .iter()
+            .any(|(key, value)| { key == "firehose-parquet.block_type" && value == "solana" }));
         // strict_timestamps is no longer recorded in metadata
-        assert!(!metadata.entries.iter().any(|(key, _)| {
-            key == "firehose-parquet.strict_timestamps"
-        }));
+        assert!(!metadata
+            .entries
+            .iter()
+            .any(|(key, _)| { key == "firehose-parquet.strict_timestamps" }));
     }
 
     #[test]
