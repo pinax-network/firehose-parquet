@@ -840,9 +840,17 @@ Lookup order matches `scan` / `inspect`: explicit `s3://...` URIs win, existing 
 
 Deletes `.parquet` files from local filesystem or S3 with optional partition filtering. Supports glob patterns for flexible selection, local paths, shorthand S3 keys/prefixes via `S3_BUCKET`, and explicit S3 URIs.
 
+When truncating a network root, root-level `.parquet` artifacts such as `partitions.parquet` and `cursor.parquet` are included in the matched files. `--dry-run` prints every matched file explicitly so those artifacts are visible before deletion. You can also target a single `.parquet` file directly, such as `fireparq truncate unichain/partitions.parquet`.
+
 ```bash
 # Delete all parquet files in a directory
 fireparq truncate ./output/blocks/
+
+# Delete all parquet files under a network root, including root-level artifacts
+fireparq truncate ./output/mainnet/ --dry-run
+
+# Delete a single parquet file directly
+fireparq truncate ./output/mainnet/partitions.parquet
 
 # Delete a specific partition
 fireparq truncate ./output/blocks/ -p "year=2026/month=01/date=01"
