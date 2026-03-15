@@ -732,6 +732,35 @@ mod tests {
     }
 
     #[test]
+    fn test_cursor_location_local_save_and_load_under_output_root() {
+        let dir = TempDir::new().unwrap();
+        let output_root = dir.path().join("output").join("mainnet");
+        let location = CursorLocation::resolve(
+            output_root.to_string_lossy().as_ref(),
+            CURSOR_PARQUET_FILENAME,
+            None,
+        )
+        .expect("local relative cursor path should resolve");
+
+        let state = CursorState {
+            cursor: "cursor-123".to_string(),
+            last_block_num: 42,
+            ..CursorState::default()
+        };
+
+        location.save(&state).expect("cursor save should succeed");
+
+        match &location {
+            CursorLocation::Local(path) => assert!(path.exists()),
+            CursorLocation::S3 { .. } => panic!("expected local cursor location"),
+        }
+
+        let loaded = location.load().expect("cursor load should succeed");
+        assert_eq!(loaded.cursor, state.cursor);
+        assert_eq!(loaded.last_block_num, state.last_block_num);
+    }
+
+    #[test]
     fn test_cursor_parquet_nullable_fields() {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join(CURSOR_PARQUET_FILENAME);
