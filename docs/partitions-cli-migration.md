@@ -2,6 +2,11 @@
 
 This document captures the first implementation slices for the `partitions <subcommand>` initiative.
 
+Historical note: the main `fireparq build` ingestion flow now uses explicit
+`--start-block` / `--stop-block` bounds or `--live` mode only. Partition-index
+lookups stay under `fireparq partitions ...`, typically via `partitions resolve`
+followed by an explicit `fireparq build`.
+
 Related issues:
 
 - #182 (parent roadmap)
@@ -51,49 +56,12 @@ Current limitations:
 
 - requires exactly one `--partition` value per run
 
-### Ingestion window mode
+### Explicit resolve-then-build flow
 
-Main ingestion now supports partition windows without manual block math:
+Current ingestion keeps partition index usage under the grouped CLI:
 
-- `--partitions-index`
-- `--partition-type`
-- `--partition-from` (inclusive)
-- `--partition-to` (exclusive)
-- optional `--partition-chain`
-
-Behavior:
-
-- Resolves all matching partition rows in `[partition_from, partition_to)`.
-- Requires contiguous/non-overlapping block bounds across resolved rows.
-- Produces one resolved `[start_block, stop_block)` range before running ingestion.
-
-### Partition-aware cursor mode
-
-Main ingestion now supports deterministic cursor-path templating:
-
-- `--cursor-template 'cursor/{chain}/{partition_type}/{partition_value}.parquet'`
-
-Supported variables:
-
-- `{chain}`
-- `{partition_type}`
-- `{partition_value}`
-- `{partition_from}`
-- `{partition_to}`
-
-Behavior:
-
-- expands against the effective partition selection mode
-- rejects unknown variables and missing required context
-- escapes literal braces via `{{` and `}}`
-- rewrites `/` and `\` in variable values to `_` to avoid path collisions
-- works for local paths and S3-relative cursor paths under the output prefix
-
-Example patterns:
-
-- single partition worker: `cursor/{chain}/{partition_type}/{partition_value}.parquet`
-- partition window worker: `cursor/{chain}/{partition_type}/{partition_from}-{partition_to}.parquet`
-- local chain-specific worker: `./cursor/{partition_type}/{partition_value}.parquet`
+- `fireparq partitions resolve`
+- `fireparq build --start-block ... --stop-block ...`
 
 ### Partition sharding mode
 

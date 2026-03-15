@@ -9,7 +9,6 @@ The contract applies to partition index artifacts consumed by:
 - `fireparq partitions ls`
 - `fireparq partitions shard`
 - `fireparq partitions resolve`
-- ingestion-side partition selection (`--partitions-index`, `--partition-type`, `--partition-value`, `--partition-from`, `--partition-to`)
 
 ## Required columns
 

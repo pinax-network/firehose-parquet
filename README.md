@@ -546,118 +546,50 @@ See `docs/partitions-parquet-contract.md` for the versioned `partitions.parquet`
 
 `partitions resolve` reads the canonical `partitions.parquet` index directly.
 
-### Partition-Window Ingestion (`--partition-from/--partition-to`)
+### Resolving ranges from `partitions.parquet`
 
-Run ingestion over a partition window without explicit block math.
-
-```bash
-fireparq --endpoint https://eth.firehose.pinax.network:443 \
-  --partitions-index ./output/eth-mainnet/partitions.parquet \
-  --partition-type hour \
-  --partition-from '2015-07-30 14:00:00' \
-  --partition-to '2015-07-30 18:00:00' \
-  --partition-chain eth-mainnet
-```
-
-Window semantics:
-
-- partition window is `[partition_from, partition_to)`
-- resolved block range remains `[start_block, stop_block)`
-- matching partition rows must be contiguous
-
-### Partition-Aware Cursor Paths (`--cursor-template`)
-
-Use `--cursor-template` to derive deterministic cursor paths per partition worker and avoid cursor collisions.
+The main `fireparq build` workflow uses explicit block bounds or `--live`.
+If you want to ingest the range covered by a partition in `partitions.parquet`,
+resolve it first under the `partitions` namespace and then run `build` with the
+returned block range.
 
 ```bash
-# Single partition worker
-fireparq --endpoint https://eth.firehose.pinax.network:443 \
-  --cursor-template 'cursor/{chain}/{partition_type}/{partition_value}.parquet' \
+# 1) Resolve an exact block range from the canonical index
+fireparq partitions resolve \
   --partitions-index ./output/eth-mainnet/partitions.parquet \
   --partition-type hour \
   --partition-value '2015-07-30 15:00:00' \
   --partition-chain eth-mainnet
 
-# Partition window worker
-fireparq --endpoint https://eth.firehose.pinax.network:443 \
-  --cursor-template 'cursor/{chain}/{partition_type}/{partition_from}-{partition_to}.parquet' \
-  --partitions-index ./output/eth-mainnet/partitions.parquet \
-  --partition-type hour \
-  --partition-from '2015-07-30 14:00:00' \
-  --partition-to '2015-07-30 18:00:00' \
-  --partition-chain eth-mainnet
+# 2) Run ingestion with explicit block bounds
+fireparq build --network mainnet \
+  --start-block 200 \
+  --stop-block 300
 ```
 
-Supported variables:
+### Custom Cursor Paths (`--cursor-template`)
 
-- `{chain}`
-- `{partition_type}`
-- `{partition_value}`
-- `{partition_from}`
-- `{partition_to}`
-
-More examples:
+Use `--cursor-template` to choose a deterministic cursor path for a build run.
 
 ```bash
-# Local single-partition worker with one cursor per hour
-fireparq --endpoint https://eth.firehose.pinax.network:443 \
-  --output ./output/eth-mainnet \
-  --cursor-template 'cursor/{partition_type}/{partition_value}.parquet' \
-  --partitions-index ./output/eth-mainnet/partitions.parquet \
-  --partition-type hour \
-  --partition-value '2015-07-30 15:00:00'
-# expands to: cursor/hour/2015-07-30 15:00:00.parquet
+# Keep a dedicated cursor for this live pipeline
+fireparq build --network mainnet \
+  --live \
+  --cursor-template 'cursor/live-mainnet.parquet'
 
-# Global index with explicit chain segment to avoid cross-chain collisions
-fireparq --endpoint https://eth.firehose.pinax.network:443 \
-  --cursor-template 'cursor/{chain}/{partition_type}/{partition_value}.parquet' \
-  --partitions-index s3://my-bucket/partitions.parquet \
-  --partition-type date \
-  --partition-value '2015-07-30 00:00:00' \
-  --partition-chain eth-mainnet
-# expands to: cursor/eth-mainnet/date/2015-07-30 00:00:00.parquet
-
-# Window worker with one cursor per assigned partition window
-fireparq --endpoint https://eth.firehose.pinax.network:443 \
-  --cursor-template 'cursor/{chain}/{partition_type}/{partition_from}-{partition_to}.parquet' \
-  --partitions-index ./output/eth-mainnet/partitions.parquet \
-  --partition-type hour \
-  --partition-from '2015-07-30 14:00:00' \
-  --partition-to '2015-07-30 18:00:00' \
-  --partition-chain eth-mainnet
-# expands to: cursor/eth-mainnet/hour/2015-07-30 14:00:00-2015-07-30 18:00:00.parquet
-
-# S3 output keeps relative cursor paths under the output prefix
-fireparq --endpoint https://eth.firehose.pinax.network:443 \
+# Store a cursor under the S3 output prefix
+fireparq build --network mainnet \
+  --start-block 20000000 \
+  --stop-block 20001000 \
   --output s3://my-bucket/backfill/eth-mainnet \
-  --cursor-template 'cursor/{chain}/{partition_type}/{partition_value}.parquet' \
-  --partitions-index s3://my-bucket/backfill/eth-mainnet/partitions.parquet \
-  --partition-type hour \
-  --partition-value '2015-07-30 15:00:00' \
-  --partition-chain eth-mainnet
-# S3 key expands to: backfill/eth-mainnet/cursor/eth-mainnet/hour/2015-07-30 15:00:00.parquet
-
-# Literal braces via escaping
-fireparq --endpoint https://eth.firehose.pinax.network:443 \
-  --cursor-template 'cursor/{{debug}}/{partition_type}/{partition_value}.parquet' \
-  --partitions-index ./output/eth-mainnet/partitions.parquet \
-  --partition-type hour \
-  --partition-value '2015-07-30 15:00:00'
-# expands to: cursor/{debug}/hour/2015-07-30 15:00:00.parquet
+  --cursor-template 'cursor/backfill.parquet'
 ```
 
 Rules:
 
-- `{{` and `}}` escape literal braces
-- values have `/` and `\` rewritten to `_` during expansion
 - template path must end in `.parquet`
+- `{{` and `}}` escape literal braces
 - with S3 output, relative cursor template paths are stored under the output prefix
-
-Recommended patterns:
-
-- Single partition workers: `cursor/{chain}/{partition_type}/{partition_value}.parquet`
-- Window workers: `cursor/{chain}/{partition_type}/{partition_from}-{partition_to}.parquet`
-- Chain-specific local runs: `./cursor/{partition_type}/{partition_value}.parquet`
 
 ### `scan` — Inspect Parquet Files
 

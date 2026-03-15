@@ -124,7 +124,10 @@ pub fn canonical_fields_with_nullable_timestamps(encoding: &EncodeBytes) -> Vec<
     canonical_fields_with_encoding_nullable(encoding, true)
 }
 
-fn canonical_fields_with_encoding_nullable(encoding: &EncodeBytes, nullable_timestamps: bool) -> Vec<Field> {
+fn canonical_fields_with_encoding_nullable(
+    encoding: &EncodeBytes,
+    nullable_timestamps: bool,
+) -> Vec<Field> {
     let id_type = bytes_data_type(encoding);
     vec![
         Field::new("block_num", DataType::UInt64, false),
@@ -195,11 +198,7 @@ impl CanonicalBuilder {
     /// Append a row with an optional timestamp/date.  When `timestamp` is
     /// `None` (e.g. Solana blocks without `block_time`), null values are
     /// written for both the `timestamp` and `date` columns.
-    pub fn append_with_optional_timestamp(
-        &mut self,
-        id: &BlockIdentity,
-        timestamp: Option<i64>,
-    ) {
+    pub fn append_with_optional_timestamp(&mut self, id: &BlockIdentity, timestamp: Option<i64>) {
         self.block_num.append_value(id.block_num);
         self.parent_num.append_value(id.parent_num);
         self.lib_num.append_value(id.lib_num);
