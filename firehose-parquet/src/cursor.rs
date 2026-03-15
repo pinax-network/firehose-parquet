@@ -363,7 +363,8 @@ impl CursorLocation {
     /// Resolve cursor location from output path and cursor filename.
     ///
     /// If output is an S3 path, the cursor is placed alongside data in S3.
-    /// If output is local, the cursor stays local.
+    /// If output is local, relative cursor paths are placed under the local
+    /// output root while absolute local paths remain absolute.
     pub fn resolve(
         output: &str,
         cursor_filename: &str,
@@ -401,9 +402,13 @@ impl CursorLocation {
             if cursor_filename.starts_with("s3://") {
                 anyhow::bail!("local output with S3 cursor path is not supported");
             }
-            Ok(CursorLocation::Local(std::path::PathBuf::from(
-                cursor_filename,
-            )))
+            let cursor_path = std::path::PathBuf::from(cursor_filename);
+            let resolved_path = if cursor_path.is_absolute() {
+                cursor_path
+            } else {
+                std::path::PathBuf::from(output).join(cursor_path)
+            };
+            Ok(CursorLocation::Local(resolved_path))
         }
     }
 
@@ -692,6 +697,67 @@ mod tests {
             }
             CursorLocation::Local(_) => panic!("expected S3 cursor location"),
         }
+    }
+
+    #[test]
+    fn test_cursor_location_resolve_local_places_relative_cursor_under_output_root() {
+        let location = CursorLocation::resolve("./output/mainnet", CURSOR_PARQUET_FILENAME, None)
+            .expect("local relative cursor path should resolve");
+
+        match location {
+            CursorLocation::Local(path) => {
+                assert_eq!(
+                    path,
+                    std::path::PathBuf::from("./output/mainnet").join(CURSOR_PARQUET_FILENAME)
+                );
+            }
+            CursorLocation::S3 { .. } => panic!("expected local cursor location"),
+        }
+    }
+
+    #[test]
+    fn test_cursor_location_resolve_local_keeps_absolute_cursor_path() {
+        let absolute_path = std::env::temp_dir().join(CURSOR_PARQUET_FILENAME);
+        let location = CursorLocation::resolve(
+            "./output/mainnet",
+            absolute_path.to_string_lossy().as_ref(),
+            None,
+        )
+        .expect("absolute local cursor path should resolve");
+
+        match location {
+            CursorLocation::Local(path) => assert_eq!(path, absolute_path),
+            CursorLocation::S3 { .. } => panic!("expected local cursor location"),
+        }
+    }
+
+    #[test]
+    fn test_cursor_location_local_save_and_load_under_output_root() {
+        let dir = TempDir::new().unwrap();
+        let output_root = dir.path().join("output").join("mainnet");
+        let location = CursorLocation::resolve(
+            output_root.to_string_lossy().as_ref(),
+            CURSOR_PARQUET_FILENAME,
+            None,
+        )
+        .expect("local relative cursor path should resolve");
+
+        let state = CursorState {
+            cursor: "cursor-123".to_string(),
+            last_block_num: 42,
+            ..CursorState::default()
+        };
+
+        location.save(&state).expect("cursor save should succeed");
+
+        match &location {
+            CursorLocation::Local(path) => assert!(path.exists()),
+            CursorLocation::S3 { .. } => panic!("expected local cursor location"),
+        }
+
+        let loaded = location.load().expect("cursor load should succeed");
+        assert_eq!(loaded.cursor, state.cursor);
+        assert_eq!(loaded.last_block_num, state.last_block_num);
     }
 
     #[test]
