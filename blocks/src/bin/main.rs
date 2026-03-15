@@ -1,16 +1,15 @@
 use anyhow::{anyhow, Result};
 use clap::{Args, Parser};
 use firehose_parquet::cli::{
-    build_config, build_partitions_index_path, build_partitions_output_root,
-    cursor_template_context_from_selection, init_tracing, list_partitions_from_index, load_dotenv,
-    parse_partition_build_types, parse_partition_selection_request, parse_partition_shard_strategy,
-    read_partitions_build_rows, resolve_cursor_template, resolve_partition_bounds_from_index,
-    resolve_partition_command, resolve_partition_window_bounds_from_index, resolve_s3_output_root,
-    shard_partitions_from_index, validate_partitions_index, validate_s3_output_credentials,
-    write_partitions_index_strict, AwsConfig, BuildArgs, Commands, PartitionBoundsRequest,
+    build_config, build_partitions_index_path, build_partitions_output_root, init_tracing,
+    list_partitions_from_index, load_dotenv, parse_partition_build_types,
+    parse_partition_shard_strategy, read_partitions_build_rows, resolve_cursor_template,
+    resolve_partition_command, resolve_s3_output_root, shard_partitions_from_index,
+    validate_partitions_index, validate_s3_output_credentials, write_partitions_index_strict,
+    AwsConfig, BuildArgs, Commands, CursorTemplateContext, PartitionBoundsRequest,
     PartitionBuildResult, PartitionBuildRow, PartitionBuildType, PartitionIndexBuilder,
-    PartitionListRequest, PartitionResolveOptions, PartitionSelectionRequest,
-    PartitionShardRequest, PartitionValidateRequest, PartitionsCommands,
+    PartitionListRequest, PartitionResolveOptions, PartitionShardRequest, PartitionValidateRequest,
+    PartitionsCommands,
 };
 use firehose_parquet::config::{BlockMetadata, Compression, Config, Partition};
 use firehose_parquet::cursor::{CursorLocation, CursorState};
@@ -18,9 +17,7 @@ use firehose_parquet::encode::{parse_encode_bytes, EncodeBytes};
 use firehose_parquet::grpc::{EndpointInfo, FirehoseClient};
 use firehose_parquet::metrics;
 use firehose_parquet::networks::{resolve_network_endpoint, EndpointSource};
-use firehose_parquet::traits::{
-    decode_id_bytes, fork_step_name, BlockIdentity, BlockMapper,
-};
+use firehose_parquet::traits::{decode_id_bytes, fork_step_name, BlockIdentity, BlockMapper};
 use firehose_parquet::writer::{OutputWriter, ParquetFileMetadata};
 use object_store::ObjectStore;
 use std::path::PathBuf;
@@ -203,9 +200,7 @@ fn validate_block_timestamp(
         ));
     }
 
-    Err(anyhow!(
-        "block {block_num} is missing timestamp metadata"
-    ))
+    Err(anyhow!("block {block_num} is missing timestamp metadata"))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -3701,70 +3696,20 @@ async fn run_ingestion(args: &BuildArgs) -> Result<()> {
 
     let mut config = build_config(&common)?;
 
-    let partition_selection_request = parse_partition_selection_request(&args.common)?;
-    let has_explicit_range = args.common.start_block.is_some() || args.common.stop_block.is_some();
-    if partition_selection_request.is_some() && has_explicit_range {
-        warn!("partition selection flags ignored because --start-block/--stop-block was provided");
-    }
-    if let Some(ref request) = partition_selection_request {
-        if !has_explicit_range {
-            warn!(
-                "partition range flags are deprecated for direct ingestion; prefer `fireparq partitions resolve ...`"
-                );
-            let aws = AwsConfig {
-                aws_access_key_id: config.aws_access_key_id.clone(),
-                aws_secret_access_key: config.aws_secret_access_key.clone(),
-                aws_session_token: config.aws_session_token.clone(),
-                aws_region: config.aws_region.clone(),
-                aws_endpoint_url: config.aws_endpoint_url.clone(),
-            };
-            match request {
-                PartitionSelectionRequest::Single(single_request) => {
-                    let bounds = resolve_partition_bounds_from_index(single_request, Some(&aws))?;
-                    config.start_block = Some(bounds.start_block);
-                    config.stop_block = Some(bounds.stop_block);
-                    info!(
-                        partitions_index = %single_request.index_path,
-                        partition_type = %single_request.partition_type,
-                        partition_value = %single_request.partition_value,
-                        start_block = bounds.start_block,
-                        stop_block = bounds.stop_block,
-                        "resolved block range from partitions index"
-                    );
-                }
-                PartitionSelectionRequest::Window(window_request) => {
-                    let bounds =
-                        resolve_partition_window_bounds_from_index(window_request, Some(&aws))?;
-                    config.start_block = Some(bounds.start_block);
-                    config.stop_block = Some(bounds.stop_block);
-                    info!(
-                        partitions_index = %window_request.index_path,
-                        partition_type = %window_request.partition_type,
-                        partition_from = %window_request.partition_from,
-                        partition_to = %window_request.partition_to,
-                        partitions_count = bounds.partitions_count,
-                        start_block = bounds.start_block,
-                        stop_block = bounds.stop_block,
-                        "resolved block range from partition window"
-                    );
-                }
-            }
-        }
-    }
-
     if let Some(template) = args.common.cursor_template.as_deref() {
-        let selection_context = if has_explicit_range {
-            None
-        } else {
-            partition_selection_request.as_ref()
+        let context = CursorTemplateContext {
+            chain: None,
+            partition_type: None,
+            partition_value: None,
+            partition_from: None,
+            partition_to: None,
         };
-        let context = cursor_template_context_from_selection(selection_context);
         let resolved_cursor_path = resolve_cursor_template(template, &context)?;
         config.cursor_path = Some(resolved_cursor_path.clone());
         info!(
             cursor_template = %template,
             cursor_path = %resolved_cursor_path,
-            "resolved partition-aware cursor path"
+            "resolved cursor path"
         );
     }
 
@@ -4651,6 +4596,9 @@ mod tests {
         assert!(help.contains("fireparq build --network"));
         assert!(help.contains("--start-block"));
         assert!(help.contains("--live"));
+        assert!(!help.contains("--partitions-index"));
+        assert!(!help.contains("--partition-from"));
+        assert!(!help.contains("--partition-to"));
     }
 
     #[test]
@@ -4669,6 +4617,31 @@ mod tests {
         assert!(help.contains("--skip-missing-blocks"));
         assert!(help.contains("--bootstrap-missing-genesis-timestamp"));
         assert!(help.contains("synthesize their timestamp"));
+    }
+
+    #[test]
+    fn test_build_subcommand_rejects_removed_partition_index_flags() {
+        for (flag, value) in [
+            ("--partitions-index", "./partitions.parquet"),
+            ("--partition-from", "2015-07-30 14:00:00"),
+            ("--partition-to", "2015-07-30 18:00:00"),
+        ] {
+            let err = Cli::try_parse_from([
+                "fireparq",
+                "build",
+                "--network",
+                "mainnet",
+                "--start-block",
+                "100",
+                "--stop-block",
+                "200",
+                flag,
+                value,
+            ])
+            .expect_err("removed build flag must be rejected");
+            assert_eq!(err.kind(), clap::error::ErrorKind::UnknownArgument);
+            assert!(err.to_string().contains(flag));
+        }
     }
 
     #[test]
@@ -5281,13 +5254,15 @@ mod tests {
             &None,
         );
 
-        assert!(metadata.entries.iter().any(|(key, value)| {
-            key == "firehose-parquet.block_type" && value == "solana"
-        }));
+        assert!(metadata
+            .entries
+            .iter()
+            .any(|(key, value)| { key == "firehose-parquet.block_type" && value == "solana" }));
         // strict_timestamps is no longer recorded in metadata
-        assert!(!metadata.entries.iter().any(|(key, _)| {
-            key == "firehose-parquet.strict_timestamps"
-        }));
+        assert!(!metadata
+            .entries
+            .iter()
+            .any(|(key, _)| { key == "firehose-parquet.strict_timestamps" }));
     }
 
     #[test]

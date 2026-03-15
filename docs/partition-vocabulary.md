@@ -20,7 +20,6 @@ Use `--partition` for partition granularity or output layout, and keep `--partit
   - Examples:
     - `partitions ls --partition-type hour`
     - `partitions resolve --partition-type date`
-    - ingestion-side partition selection with `--partitions-index`
 
 - `--partition-value`
   - Means one exact partition key value inside the selected `--partition-type`.

@@ -119,60 +119,6 @@ pub struct CommonArgs {
     )]
     pub skip_missing_blocks: bool,
 
-    /// Path to partitions index parquet file (local path, shorthand S3 key via S3_BUCKET, or s3:// URI), e.g. ./output/eth-mainnet/partitions.parquet
-    #[arg(
-        long,
-        env = "PARTITIONS_INDEX",
-        hide_env_values = true,
-        help_heading = "Block Range"
-    )]
-    pub partitions_index: Option<String>,
-
-    /// Partition type used to resolve start/stop range from --partitions-index, e.g. hour or date
-    #[arg(
-        long,
-        env = "PARTITION_TYPE",
-        hide_env_values = true,
-        help_heading = "Block Range"
-    )]
-    pub partition_type: Option<String>,
-
-    /// Partition value used to resolve start/stop range from --partitions-index, e.g. "2015-07-30 15:00:00"
-    #[arg(
-        long,
-        env = "PARTITION_VALUE",
-        hide_env_values = true,
-        help_heading = "Block Range"
-    )]
-    pub partition_value: Option<String>,
-
-    /// Inclusive partition window start used with --partition-from/--partition-to mode
-    #[arg(
-        long,
-        env = "PARTITION_FROM",
-        hide_env_values = true,
-        help_heading = "Block Range"
-    )]
-    pub partition_from: Option<String>,
-
-    /// Exclusive partition window end used with --partition-from/--partition-to mode
-    #[arg(
-        long,
-        env = "PARTITION_TO",
-        hide_env_values = true,
-        help_heading = "Block Range"
-    )]
-    pub partition_to: Option<String>,
-
-    /// Optional chain filter used with partition lookup (matches `chain` column), e.g. eth-mainnet
-    #[arg(
-        long,
-        env = "PARTITION_CHAIN",
-        hide_env_values = true,
-        help_heading = "Block Range"
-    )]
-    pub partition_chain: Option<String>,
-
     /// Path to cursor parquet file for resuming a previous session (must end in .parquet)
     #[arg(
         short = 'c',
@@ -184,10 +130,9 @@ pub struct CommonArgs {
     )]
     pub cursor: PathBuf,
 
-    /// Optional template used to derive a partition-aware cursor path.
+    /// Optional template used to derive the cursor path.
     ///
-    /// Supported variables: `{chain}`, `{partition_type}`, `{partition_value}`,
-    /// `{partition_from}`, `{partition_to}`. Use `{{` and `}}` for literal braces.
+    /// Literal paths are supported directly. Use `{{` and `}}` to escape braces.
     #[arg(
         long,
         env = "CURSOR_TEMPLATE",
@@ -406,35 +351,6 @@ Examples:
   # Resume from cursor
   fireparq build --network mainnet \\
     --cursor cursor.parquet --partition date
-
-  # Resolve range from local partitions index (no explicit start/stop)
-  fireparq build --network mainnet \\
-    --partitions-index ./output/eth-mainnet/partitions.parquet \\
-    --partition-type hour \\
-    --partition-value '2015-07-30 15:00:00' \\
-    --partition-chain eth-mainnet
-
-  # Resolve range from S3 partitions index
-  fireparq build --network mainnet \\
-    --partitions-index s3://my-bucket/eth-mainnet/partitions.parquet \\
-    --partition-type date \\
-    --partition-value '2015-07-30 00:00:00' \\
-    --partition-chain eth-mainnet
-
-  # Resolve range from global S3 index shared across chains
-  fireparq build --network mainnet \\
-    --partitions-index s3://my-bucket/partitions.parquet \\
-    --partition-type hour \\
-    --partition-value '2015-07-30 15:00:00' \\
-    --partition-chain eth-mainnet
-
-  # Resolve an inclusive/exclusive partition window [from, to)
-  fireparq build --network mainnet \\
-    --partitions-index ./output/eth-mainnet/partitions.parquet \\
-    --partition-type hour \\
-    --partition-from '2015-07-30 14:00:00' \\
-    --partition-to '2015-07-30 18:00:00' \\
-    --partition-chain eth-mainnet
 ")]
 pub struct BuildArgs {
     #[command(flatten)]
@@ -3499,12 +3415,6 @@ pub struct PartitionWindowRequest {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum PartitionSelectionRequest {
-    Single(PartitionBoundsRequest),
-    Window(PartitionWindowRequest),
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PartitionBounds {
     pub start_block: u64,
     pub stop_block: u64,
@@ -3556,34 +3466,6 @@ fn cursor_template_value<'a>(
     .ok_or_else(|| anyhow::anyhow!("--cursor-template variable {{{key}}} requires partition selection context"))
 }
 
-pub fn cursor_template_context_from_selection(
-    selection: Option<&PartitionSelectionRequest>,
-) -> CursorTemplateContext {
-    match selection {
-        Some(PartitionSelectionRequest::Single(request)) => CursorTemplateContext {
-            chain: request.chain.clone(),
-            partition_type: Some(request.partition_type.clone()),
-            partition_value: Some(request.partition_value.clone()),
-            partition_from: None,
-            partition_to: None,
-        },
-        Some(PartitionSelectionRequest::Window(request)) => CursorTemplateContext {
-            chain: request.chain.clone(),
-            partition_type: Some(request.partition_type.clone()),
-            partition_value: None,
-            partition_from: Some(request.partition_from.clone()),
-            partition_to: Some(request.partition_to.clone()),
-        },
-        None => CursorTemplateContext {
-            chain: None,
-            partition_type: None,
-            partition_value: None,
-            partition_from: None,
-            partition_to: None,
-        },
-    }
-}
-
 pub fn resolve_cursor_template(
     template: &str,
     context: &CursorTemplateContext,
@@ -3628,149 +3510,6 @@ pub fn resolve_cursor_template(
     }
 
     Ok(out)
-}
-
-/// Parse and validate partition-bound lookup arguments from [`CommonArgs`].
-///
-/// Returns `Ok(None)` when no lookup args are provided.
-/// Returns an error when lookup args are partially specified.
-pub fn parse_partition_bounds_request(
-    args: &CommonArgs,
-) -> anyhow::Result<Option<PartitionBoundsRequest>> {
-    let index_path = normalize_opt_string(&args.partitions_index);
-    let partition_type = normalize_opt_string(&args.partition_type)
-        .map(|value| canonical_partition_type_label(&value))
-        .transpose()?;
-    let partition_value = normalize_opt_string(&args.partition_value);
-    let chain = normalize_opt_string(&args.partition_chain);
-
-    let any_set = index_path.is_some()
-        || partition_type.is_some()
-        || partition_value.is_some()
-        || chain.is_some();
-
-    if !any_set {
-        return Ok(None);
-    }
-
-    let mut missing = Vec::new();
-    if index_path.is_none() {
-        missing.push("--partitions-index");
-    }
-    if partition_type.is_none() {
-        missing.push("--partition-type");
-    }
-    if partition_value.is_none() {
-        missing.push("--partition-value");
-    }
-
-    if !missing.is_empty() {
-        anyhow::bail!("partition lookup requires: {}", missing.join(", "));
-    }
-
-    Ok(Some(PartitionBoundsRequest {
-        index_path: index_path.expect("checked above"),
-        partition_type: partition_type.expect("checked above"),
-        partition_value: partition_value.expect("checked above"),
-        chain,
-    }))
-}
-
-/// Parse and validate partition-selection arguments from [`CommonArgs`].
-///
-/// Supports either:
-/// - single partition mode (`--partition-value`)
-/// - window mode (`--partition-from` + `--partition-to`)
-pub fn parse_partition_selection_request(
-    args: &CommonArgs,
-) -> anyhow::Result<Option<PartitionSelectionRequest>> {
-    let index_path = normalize_opt_string(&args.partitions_index);
-    let partition_type = normalize_opt_string(&args.partition_type)
-        .map(|value| canonical_partition_type_label(&value))
-        .transpose()?;
-    let partition_value = normalize_opt_string(&args.partition_value);
-    let partition_from = normalize_opt_string(&args.partition_from);
-    let partition_to = normalize_opt_string(&args.partition_to);
-    let chain = normalize_opt_string(&args.partition_chain);
-
-    let any_set = index_path.is_some()
-        || partition_type.is_some()
-        || partition_value.is_some()
-        || partition_from.is_some()
-        || partition_to.is_some()
-        || chain.is_some();
-    if !any_set {
-        return Ok(None);
-    }
-
-    let has_single = partition_value.is_some();
-    let has_window = partition_from.is_some() || partition_to.is_some();
-
-    if has_single && has_window {
-        anyhow::bail!(
-            "partition selection mode is ambiguous: use either --partition-value or --partition-from/--partition-to"
-        );
-    }
-
-    if !has_single && !has_window {
-        anyhow::bail!(
-            "partition selection requires either --partition-value or --partition-from/--partition-to"
-        );
-    }
-
-    let mut common_missing = Vec::new();
-    if index_path.is_none() {
-        common_missing.push("--partitions-index");
-    }
-    if partition_type.is_none() {
-        common_missing.push("--partition-type");
-    }
-    if !common_missing.is_empty() {
-        anyhow::bail!("partition lookup requires: {}", common_missing.join(", "));
-    }
-
-    if has_single {
-        return Ok(Some(PartitionSelectionRequest::Single(
-            PartitionBoundsRequest {
-                index_path: index_path.expect("checked above"),
-                partition_type: partition_type.expect("checked above"),
-                partition_value: partition_value.expect("checked above"),
-                chain,
-            },
-        )));
-    }
-
-    let mut window_missing = Vec::new();
-    if partition_from.is_none() {
-        window_missing.push("--partition-from");
-    }
-    if partition_to.is_none() {
-        window_missing.push("--partition-to");
-    }
-    if !window_missing.is_empty() {
-        anyhow::bail!(
-            "partition window lookup requires: {}",
-            window_missing.join(", ")
-        );
-    }
-
-    let partition_from = partition_from.expect("checked above");
-    let partition_to = partition_to.expect("checked above");
-    if partition_from >= partition_to {
-        anyhow::bail!(
-            "invalid partition window: --partition-from must be less than --partition-to"
-        );
-    }
-
-    Ok(Some(PartitionSelectionRequest::Window(
-        PartitionWindowRequest {
-            index_path: index_path.expect("checked above"),
-            partition_type: partition_type.expect("checked above"),
-            partition_from,
-            partition_to,
-            chain,
-        },
-    )))
 }
 
 /// Resolve `[start_block, stop_block)` from a canonical `partitions.parquet` index file.
@@ -6287,12 +6026,6 @@ mod tests {
         assert!(cli.common.stop_block.is_none());
         assert!(!cli.common.live);
         assert!(!cli.common.skip_missing_blocks);
-        assert!(cli.common.partitions_index.is_none());
-        assert!(cli.common.partition_type.is_none());
-        assert!(cli.common.partition_value.is_none());
-        assert!(cli.common.partition_from.is_none());
-        assert!(cli.common.partition_to.is_none());
-        assert!(cli.common.partition_chain.is_none());
         assert_eq!(cli.common.cursor, PathBuf::from("cursor.parquet"));
         assert!(cli.common.cursor_template.is_none());
         assert!(cli.common.flush_interval_secs.is_none());
@@ -6346,14 +6079,6 @@ mod tests {
             "--log-level",
             "debug",
             "--dry-run",
-            "--partitions-index",
-            "./output/eth-mainnet/partitions.parquet",
-            "--partition-type",
-            "hour",
-            "--partition-value",
-            "2015-07-30 15:00:00",
-            "--partition-chain",
-            "eth-mainnet",
         ]);
         assert_eq!(
             cli.common.endpoint.as_deref(),
@@ -6365,16 +6090,6 @@ mod tests {
         assert_eq!(cli.common.stop_block, Some(200));
         assert!(cli.common.live);
         assert!(cli.common.skip_missing_blocks);
-        assert_eq!(
-            cli.common.partitions_index.as_deref(),
-            Some("./output/eth-mainnet/partitions.parquet")
-        );
-        assert_eq!(cli.common.partition_type.as_deref(), Some("hour"));
-        assert_eq!(
-            cli.common.partition_value.as_deref(),
-            Some("2015-07-30 15:00:00")
-        );
-        assert_eq!(cli.common.partition_chain.as_deref(), Some("eth-mainnet"));
         assert_eq!(
             cli.common.cursor,
             PathBuf::from("cursor-mainnet-date.parquet")
@@ -7962,105 +7677,23 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_partition_bounds_request_none() {
-        let cli = parse(&["test-cli", "--endpoint", "https://example.com:443"]);
-        assert!(parse_partition_bounds_request(&cli.common)
-            .expect("partition request parsing should succeed")
-            .is_none());
-    }
-
-    #[test]
-    fn test_parse_partition_bounds_request_requires_all_flags() {
-        let cli = parse(&[
-            "test-cli",
-            "--endpoint",
-            "https://example.com:443",
-            "--partitions-index",
-            "./partitions.parquet",
-        ]);
-        let err = parse_partition_bounds_request(&cli.common)
-            .expect_err("should fail with partial lookup args");
-        assert!(err.to_string().contains("--partition-type"));
-        assert!(err.to_string().contains("--partition-value"));
-    }
-
-    #[test]
-    fn test_parse_partition_bounds_request_success() {
-        let cli = parse(&[
-            "test-cli",
-            "--endpoint",
-            "https://example.com:443",
-            "--partitions-index",
-            "./partitions.parquet",
-            "--partition-type",
-            "hour",
-            "--partition-value",
-            "2015-07-30 15:00:00",
-            "--partition-chain",
-            "eth-mainnet",
-        ]);
-        let request = parse_partition_bounds_request(&cli.common)
-            .expect("partition request parsing should succeed")
-            .expect("request should be present");
-        assert_eq!(request.index_path, "./partitions.parquet");
-        assert_eq!(request.partition_type, "hour");
-        assert_eq!(request.partition_value, "2015-07-30 15:00:00");
-        assert_eq!(request.chain.as_deref(), Some("eth-mainnet"));
-    }
-
-    #[test]
-    fn test_parse_partition_selection_request_window_success() {
-        let cli = parse(&[
-            "test-cli",
-            "--endpoint",
-            "https://example.com:443",
-            "--partitions-index",
-            "./partitions.parquet",
-            "--partition-type",
-            "hour",
-            "--partition-from",
-            "2015-07-30 15:00:00",
-            "--partition-to",
-            "2015-07-30 18:00:00",
-            "--partition-chain",
-            "eth-mainnet",
-        ]);
-
-        let selection = parse_partition_selection_request(&cli.common)
-            .expect("selection parse should succeed")
-            .expect("selection should exist");
-        match selection {
-            PartitionSelectionRequest::Window(window) => {
-                assert_eq!(window.index_path, "./partitions.parquet");
-                assert_eq!(window.partition_type, "hour");
-                assert_eq!(window.partition_from, "2015-07-30 15:00:00");
-                assert_eq!(window.partition_to, "2015-07-30 18:00:00");
-                assert_eq!(window.chain.as_deref(), Some("eth-mainnet"));
-            }
-            PartitionSelectionRequest::Single(_) => panic!("expected window mode"),
+    fn test_common_args_reject_removed_partition_flags() {
+        for (flag, value) in [
+            ("--partitions-index", "./partitions.parquet"),
+            ("--partition-from", "2015-07-30 15:00:00"),
+            ("--partition-to", "2015-07-30 18:00:00"),
+        ] {
+            let err = try_parse(&[
+                "test-cli",
+                "--endpoint",
+                "https://example.com:443",
+                flag,
+                value,
+            ])
+            .expect_err("removed build flag must be rejected");
+            assert_eq!(err.kind(), clap::error::ErrorKind::UnknownArgument);
+            assert!(err.to_string().contains(flag));
         }
-    }
-
-    #[test]
-    fn test_parse_partition_selection_request_rejects_mixed_modes() {
-        let cli = parse(&[
-            "test-cli",
-            "--endpoint",
-            "https://example.com:443",
-            "--partitions-index",
-            "./partitions.parquet",
-            "--partition-type",
-            "hour",
-            "--partition-value",
-            "2015-07-30 15:00:00",
-            "--partition-from",
-            "2015-07-30 15:00:00",
-            "--partition-to",
-            "2015-07-30 18:00:00",
-        ]);
-        let err = parse_partition_selection_request(&cli.common)
-            .expect_err("mixed single/window selection must fail");
-        assert!(err.to_string().contains("ambiguous"));
     }
 
     #[test]
