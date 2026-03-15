@@ -177,11 +177,11 @@ Pipeline configuration and firehose endpoint metadata are embedded in the file f
 
 ### S3-Aware Cursor
 
-When output is written to S3, the cursor file is automatically placed alongside the data in the same S3 bucket/prefix — no special configuration needed:
+When output is written locally or to S3, the default cursor file is automatically placed alongside the data under the resolved chain output root — no special configuration needed:
 
 | Output | `--cursor` value | Cursor location |
 |---|---|---|
-| `./output` | *(default)* | `./cursor.parquet` |
+| `./output` | *(default)* | `./output/<chain>/cursor.parquet` |
 | `s3://bucket/prefix` | *(default)* | `s3://bucket/prefix/cursor.parquet` |
 | `s3://bucket/prefix` | `my-cursor.parquet` | `s3://bucket/prefix/my-cursor.parquet` |
 | `s3://bucket/prefix` | `s3://other/path.parquet` | `s3://other/path.parquet` |

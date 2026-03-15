@@ -4509,9 +4509,9 @@ mod tests {
     }
 
     #[test]
-    fn test_resolve_cursor_location_keeps_local_cursor_for_local_output() {
+    fn test_resolve_cursor_location_places_default_local_cursor_under_chain_output_root() {
         let config = Config {
-            output: std::path::PathBuf::from("./output"),
+            output: std::path::PathBuf::from("./output/mainnet"),
             cursor_path: Some("cursor.parquet".to_string()),
             s3_bucket: Some("my-bucket".to_string()),
             aws_access_key_id: Some("AKID123".to_string()),
@@ -4524,7 +4524,10 @@ mod tests {
         let cursor_location = resolve_cursor_location(&config).expect("cursor location");
         match cursor_location {
             Some(CursorLocation::Local(path)) => {
-                assert_eq!(path, std::path::PathBuf::from("cursor.parquet"));
+                assert_eq!(
+                    path,
+                    std::path::PathBuf::from("./output/mainnet").join("cursor.parquet")
+                );
             }
             other => panic!("expected local cursor location, got {other:?}"),
         }
