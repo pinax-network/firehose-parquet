@@ -429,6 +429,7 @@ mod tests {
     #[test]
     fn test_config_display_aws_credentials() {
         let config = Config {
+            output: PathBuf::from("s3://my-bucket/output"),
             s3_bucket: Some("my-bucket".to_string()),
             aws_region: Some("us-east-1".to_string()),
             aws_endpoint_url: Some("https://t3.storage.dev".to_string()),
