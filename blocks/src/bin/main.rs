@@ -1,9 +1,4 @@
 use anyhow::{anyhow, Result};
-use arrow::array::{
-    Array, Date32Array, Date32Builder, TimestampSecondArray, TimestampSecondBuilder,
-};
-use arrow::datatypes::{Field, Schema};
-use arrow::record_batch::RecordBatch;
 use clap::{Args, Parser};
 use firehose_parquet::cli::{
     build_config, build_partitions_index_path, build_partitions_output_root,
@@ -24,7 +19,7 @@ use firehose_parquet::grpc::{EndpointInfo, FirehoseClient};
 use firehose_parquet::metrics;
 use firehose_parquet::networks::{resolve_network_endpoint, EndpointSource};
 use firehose_parquet::traits::{
-    date32_from_timestamp_seconds, decode_id_bytes, fork_step_name, BlockIdentity, BlockMapper,
+    decode_id_bytes, fork_step_name, BlockIdentity, BlockMapper,
 };
 use firehose_parquet::writer::{OutputWriter, ParquetFileMetadata};
 use object_store::ObjectStore;
@@ -125,7 +120,6 @@ fn build_file_metadata(
     endpoint: &str,
     compression: Compression,
     endpoint_info: &Option<EndpointInfo>,
-    strict_timestamps: bool,
 ) -> ParquetFileMetadata {
     let mut meta = ParquetFileMetadata::new();
     meta.add("firehose-parquet.version", env!("CARGO_PKG_VERSION"));
@@ -177,10 +171,6 @@ fn build_file_metadata(
             );
         }
     }
-    meta.add(
-        "firehose-parquet.strict_timestamps",
-        strict_timestamps.to_string(),
-    );
     meta
 }
 
@@ -194,7 +184,6 @@ fn partition_requires_timestamp(partition: &Partition) -> bool {
 fn validate_block_timestamp(
     block_num: u64,
     timestamp: i64,
-    strict_timestamps: bool,
     partition: &Partition,
     start_block: Option<u64>,
 ) -> Result<()> {
@@ -202,25 +191,21 @@ fn validate_block_timestamp(
         return Ok(());
     }
 
-    if strict_timestamps {
-        if start_block == Some(block_num) {
-            return Err(anyhow!(
-                "block {block_num} is missing timestamp metadata and --strict-timestamps is enabled; this can happen for genesis / first-streamable blocks. Rerun with --bootstrap-missing-genesis-timestamp to start from the next timestamped block, or use --strict-timestamps false to allow null timestamps"
-            ));
-        }
-
+    if start_block == Some(block_num) {
         return Err(anyhow!(
-            "block {block_num} is missing timestamp metadata and --strict-timestamps is enabled; rerun with --strict-timestamps false to allow null timestamps"
+            "block {block_num} is missing timestamp metadata; this can happen for genesis / first-streamable blocks. Rerun with --bootstrap-missing-genesis-timestamp to start from the next timestamped block"
         ));
     }
 
     if partition_requires_timestamp(partition) {
         return Err(anyhow!(
-            "block {block_num} is missing timestamp metadata; time-based partitioning requires timestamps even when --strict-timestamps is false"
+            "block {block_num} is missing timestamp metadata; time-based partitioning requires timestamps"
         ));
     }
 
-    Ok(())
+    Err(anyhow!(
+        "block {block_num} is missing timestamp metadata"
+    ))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -251,9 +236,9 @@ struct BufferedBootstrapBlock {
 }
 
 impl GenesisTimestampBootstrap {
-    fn new(enabled: bool, strict_timestamps: bool, requested_start_block: Option<u64>) -> Self {
+    fn new(enabled: bool, requested_start_block: Option<u64>) -> Self {
         Self {
-            enabled: enabled && strict_timestamps,
+            enabled,
             requested_start_block,
             first_buffered_block: None,
             buffered_blocks: 0,
@@ -319,101 +304,6 @@ fn take_anchored_bootstrap_blocks(
             block.identity.timestamp = anchor_timestamp;
             block
         })
-        .collect()
-}
-
-fn rewrite_timestamp_column(batch: &RecordBatch, nullable_timestamps: bool) -> Result<RecordBatch> {
-    if !nullable_timestamps {
-        return Ok(batch.clone());
-    }
-
-    let schema = batch.schema();
-    let Some(timestamp_index) = schema.index_of("timestamp").ok() else {
-        return Ok(batch.clone());
-    };
-
-    let timestamp_field = schema.field(timestamp_index);
-    let date_index = schema.index_of("date").ok();
-    let timestamp_array = batch
-        .column(timestamp_index)
-        .as_any()
-        .downcast_ref::<TimestampSecondArray>()
-        .ok_or_else(|| {
-            anyhow!(
-                "timestamp column expected Timestamp(Second, UTC), got {}",
-                timestamp_field.data_type()
-            )
-        })?;
-    let date_field_and_array = if let Some(date_index) = date_index {
-        let date_field = schema.field(date_index);
-        batch
-            .column(date_index)
-            .as_any()
-            .downcast_ref::<Date32Array>()
-            .ok_or_else(|| {
-                anyhow!(
-                    "date column expected Date32, got {}",
-                    date_field.data_type()
-                )
-            })?;
-        Some((date_index, date_field.as_ref().clone()))
-    } else {
-        None
-    };
-
-    let mut timestamp_builder = TimestampSecondBuilder::new().with_timezone("UTC");
-    let mut date_builder = date_field_and_array.as_ref().map(|_| Date32Builder::new());
-    for row_index in 0..batch.num_rows() {
-        if timestamp_array.is_null(row_index) || timestamp_array.value(row_index) == 0 {
-            timestamp_builder.append_null();
-            if let Some(ref mut builder) = date_builder {
-                builder.append_null();
-            }
-        } else {
-            let timestamp = timestamp_array.value(row_index);
-            timestamp_builder.append_value(timestamp);
-            if let Some(ref mut builder) = date_builder {
-                builder.append_value(date32_from_timestamp_seconds(timestamp));
-            }
-        }
-    }
-
-    let mut fields = batch
-        .schema()
-        .fields()
-        .iter()
-        .map(|field| field.as_ref().clone())
-        .collect::<Vec<_>>();
-    fields[timestamp_index] = Field::new(
-        timestamp_field.name(),
-        timestamp_field.data_type().clone(),
-        true,
-    );
-    if let Some((date_index, date_field)) = date_field_and_array {
-        fields[date_index] = Field::new(date_field.name(), date_field.data_type().clone(), true);
-    }
-
-    let schema = std::sync::Arc::new(Schema::new_with_metadata(fields, schema.metadata().clone()));
-    let mut columns = batch.columns().to_vec();
-    columns[timestamp_index] = std::sync::Arc::new(timestamp_builder.finish());
-    if let (Some(date_index), Some(mut builder)) = (date_index, date_builder) {
-        columns[date_index] = std::sync::Arc::new(builder.finish());
-    }
-
-    Ok(RecordBatch::try_new(schema, columns)?)
-}
-
-fn rewrite_batches_with_nullable_timestamps(
-    batches: std::collections::HashMap<String, RecordBatch>,
-    nullable_timestamps: bool,
-) -> Result<std::collections::HashMap<String, RecordBatch>> {
-    if !nullable_timestamps {
-        return Ok(batches);
-    }
-
-    batches
-        .into_iter()
-        .map(|(table, batch)| Ok((table, rewrite_timestamp_column(&batch, true)?)))
         .collect()
 }
 
@@ -522,7 +412,6 @@ fn build_partitions_file_metadata(
     compression: Compression,
     endpoint_info: &Option<EndpointInfo>,
     block_range_size: Option<u64>,
-    strict_timestamps: bool,
 ) -> ParquetFileMetadata {
     let inferred_block_type = infer_partitions_block_type(chain, endpoint_info);
     let encoding = inferred_block_type
@@ -590,10 +479,6 @@ fn build_partitions_file_metadata(
     meta.add(
         "firehose-parquet.block_range_size",
         block_range_size.unwrap_or(0).to_string(),
-    );
-    meta.add(
-        "firehose-parquet.strict_timestamps",
-        strict_timestamps.to_string(),
     );
     meta.add("firehose-parquet.compression", compression.to_string());
     meta
@@ -837,7 +722,6 @@ async fn run_partitions_build(
     skip_missing_blocks: bool,
     partition_types_spec: &str,
     block_range_size: Option<u64>,
-    strict_timestamps: bool,
     compression: Compression,
     output: Option<&str>,
     s3_bucket: Option<&str>,
@@ -935,7 +819,6 @@ async fn run_partitions_build(
         compression,
         &endpoint_info,
         block_range_size,
-        strict_timestamps,
     );
     let partitions_index = build_partitions_index_path(&output_root, &chain);
     let chain_output_root = build_partitions_output_root(&output_root, &chain);
@@ -1023,7 +906,6 @@ async fn run_partitions_build(
             if let Some(brs) = block_range_size {
                 builder = builder.with_block_range_size(brs);
             }
-            builder = builder.with_strict_timestamps(strict_timestamps);
             let effective_start_block = if live {
                 resume_start_block
             } else {
@@ -1035,7 +917,6 @@ async fn run_partitions_build(
             if let Some(brs) = block_range_size {
                 builder = builder.with_block_range_size(brs);
             }
-            builder = builder.with_strict_timestamps(strict_timestamps);
             (builder, inferred_start_block, None)
         };
 
@@ -1282,7 +1163,6 @@ async fn run_partitions_build(
                     block_range_size,
                     PARTITIONS_PROBE_TIMEOUT,
                     skip_missing_blocks,
-                    strict_timestamps,
                     &probe_counter,
                 )
                 .await?;
@@ -1318,7 +1198,6 @@ async fn run_partitions_build(
                         &partitions_file_metadata,
                         &mut checkpoint_state,
                         &probe_counter,
-                        !strict_timestamps,
                         overwrite,
                     )?;
                 }
@@ -1336,7 +1215,6 @@ async fn run_partitions_build(
                 &partitions_file_metadata,
                 &mut checkpoint_state,
                 &probe_counter,
-                !strict_timestamps,
                 overwrite,
             )?
         } else if !existing_rows.is_empty() {
@@ -1408,7 +1286,6 @@ async fn run_partitions_build(
                         &partitions_file_metadata,
                         &mut checkpoint_state,
                         &probe_counter,
-                        !strict_timestamps,
                         overwrite,
                     )?;
                 }
@@ -1440,7 +1317,6 @@ async fn run_partitions_build(
                         &partitions_file_metadata,
                         &mut checkpoint_state,
                         &probe_counter,
-                        !strict_timestamps,
                         overwrite,
                     )?;
                 }
@@ -1506,7 +1382,6 @@ async fn run_partitions_build(
                     &partitions_file_metadata,
                     &mut checkpoint_state,
                     &probe_counter,
-                    !strict_timestamps,
                     overwrite,
                 )?;
             }
@@ -1521,7 +1396,6 @@ async fn run_partitions_build(
                 &partitions_file_metadata,
                 &mut checkpoint_state,
                 &probe_counter,
-                !strict_timestamps,
                 overwrite,
             )?;
             rows
@@ -1568,7 +1442,6 @@ async fn run_partitions_build(
                 block_range_size,
                 PARTITIONS_PROBE_TIMEOUT,
                 skip_missing_blocks,
-                strict_timestamps,
                 &probe_counter,
             )
             .await?;
@@ -1604,7 +1477,6 @@ async fn run_partitions_build(
                     &partitions_file_metadata,
                     &mut checkpoint_state,
                     &probe_counter,
-                    !strict_timestamps,
                     overwrite,
                 )?;
             }
@@ -1619,7 +1491,6 @@ async fn run_partitions_build(
                 compression,
                 Some(aws),
                 Some(&partitions_file_metadata),
-                !strict_timestamps, // nullable when strict is off
             )?;
             if overwrite && checkpoint_state.last_checkpoint_frontier.is_none() {
                 let frontier = rows
@@ -1696,7 +1567,6 @@ async fn run_partitions_build(
                     &partitions_file_metadata,
                     &mut checkpoint_state,
                     &probe_counter,
-                    !strict_timestamps,
                     overwrite,
                 )?;
             }
@@ -1738,7 +1608,6 @@ async fn run_partitions_build(
                             &partitions_file_metadata,
                             &mut checkpoint_state,
                             &probe_counter,
-                            !strict_timestamps,
                             overwrite,
                         )?;
                     }
@@ -1770,7 +1639,6 @@ async fn run_partitions_build(
             compression,
             Some(aws),
             Some(&partitions_file_metadata),
-            !strict_timestamps,
         )?;
         if overwrite && checkpoint_state.last_checkpoint_frontier.is_none() {
             log_overwrite_completed(&partitions_index, rows.len(), final_end_block);
@@ -1923,7 +1791,6 @@ fn checkpoint_partitions_builder(
     file_metadata: &ParquetFileMetadata,
     checkpoint_state: &mut PartitionsCheckpointState,
     probe_counter: &AtomicU64,
-    nullable_timestamps: bool,
     overwrite_requested: bool,
 ) -> Result<Vec<firehose_parquet::cli::PartitionBuildRow>> {
     let frontier = builder
@@ -1936,7 +1803,6 @@ fn checkpoint_partitions_builder(
         compression,
         aws,
         Some(file_metadata),
-        nullable_timestamps,
     )?;
     if overwrite_requested && checkpoint_state.last_checkpoint_frontier.is_none() {
         log_overwrite_completed(partitions_index, rows.len(), frontier);
@@ -1968,7 +1834,6 @@ fn checkpoint_partitions_rows(
     file_metadata: &ParquetFileMetadata,
     checkpoint_state: &mut PartitionsCheckpointState,
     probe_counter: &AtomicU64,
-    nullable_timestamps: bool,
     overwrite_requested: bool,
 ) -> Result<Vec<firehose_parquet::cli::PartitionBuildRow>> {
     let frontier = rows
@@ -1982,7 +1847,6 @@ fn checkpoint_partitions_rows(
         compression,
         aws,
         Some(file_metadata),
-        nullable_timestamps,
     )?;
     if overwrite_requested && checkpoint_state.last_checkpoint_frontier.is_none() {
         log_overwrite_completed(partitions_index, rows.len(), frontier);
@@ -2516,7 +2380,6 @@ async fn build_block_range_partition_row(
     block_range_size: u64,
     probe_timeout: Duration,
     skip_missing_blocks: bool,
-    strict_timestamps: bool,
     probe_counter: &AtomicU64,
 ) -> Result<PartitionBuildRow> {
     let start_time = probe_block_range_boundary_timestamp(
@@ -2541,15 +2404,6 @@ async fn build_block_range_partition_row(
     } else {
         start_time
     };
-
-    if strict_timestamps && (start_time.is_none() || end_time.is_none()) {
-        return Err(anyhow!(
-            "block-range partition [{}, {}) has no timestamp and --strict-timestamps is enabled; \
-             use --strict-timestamps false for chains with missing blocks",
-            boundary,
-            partition_end
-        ));
-    }
 
     Ok(PartitionBuildRow {
         partition_type: "block_range".to_string(),
@@ -3200,7 +3054,6 @@ async fn main() -> Result<()> {
                     skip_missing_blocks,
                     partition,
                     block_range_size,
-                    strict_timestamps,
                     compression,
                     output,
                     s3_bucket,
@@ -3243,7 +3096,6 @@ async fn main() -> Result<()> {
                         *skip_missing_blocks,
                         partition,
                         *block_range_size,
-                        *strict_timestamps,
                         compression,
                         output.as_deref(),
                         s3_bucket.as_deref(),
@@ -4027,10 +3879,9 @@ async fn run_ingestion(args: &BuildArgs) -> Result<()> {
     let flush_bytes = config.flush_bytes;
     let flush_interval_secs = config.flush_interval_secs;
     let dry_run = config.dry_run;
-    let strict_timestamps = args.common.strict_timestamps;
+    let mut is_solana = block_type == "solana";
     let mut genesis_timestamp_bootstrap = GenesisTimestampBootstrap::new(
         args.bootstrap_missing_genesis_timestamp,
-        strict_timestamps,
         config.start_block,
     );
 
@@ -4070,7 +3921,6 @@ async fn run_ingestion(args: &BuildArgs) -> Result<()> {
             &config.endpoint,
             config.compression,
             &endpoint_info,
-            strict_timestamps,
         );
         log_file_metadata(&meta);
         writer.inner.set_file_metadata(meta);
@@ -4164,10 +4014,6 @@ async fn run_ingestion(args: &BuildArgs) -> Result<()> {
             "firehose-parquet.compression",
             config.compression.to_string(),
         );
-        meta.add(
-            "firehose-parquet.strict_timestamps",
-            strict_timestamps.to_string(),
-        );
         meta
     };
 
@@ -4221,10 +4067,10 @@ async fn run_ingestion(args: &BuildArgs) -> Result<()> {
                     &config.endpoint,
                     config.compression,
                     &endpoint_info,
-                    strict_timestamps,
                 );
                 log_file_metadata(&meta);
                 writer.inner.set_file_metadata(meta);
+                is_solana = detected == "solana";
                 mapper = Some(create_mapper(&detected, extended, include_fork_step, encode_bytes, include_failed_transactions)?);
             }
 
@@ -4232,6 +4078,9 @@ async fn run_ingestion(args: &BuildArgs) -> Result<()> {
 
             let block_number = identity.block_num;
             let ts = identity.timestamp;
+            // For Solana, blocks may legitimately lack timestamps — skip the
+            // genesis bootstrap and timestamp validation entirely.
+            if !is_solana {
             match genesis_timestamp_bootstrap.observe_block(blocks_processed, block_number, ts) {
                 GenesisTimestampBootstrapAction::Buffer => {
                     if genesis_timestamp_bootstrap.buffered_blocks == 1 {
@@ -4263,6 +4112,7 @@ async fn run_ingestion(args: &BuildArgs) -> Result<()> {
                 }
                 GenesisTimestampBootstrapAction::None => {}
             }
+            } // end if !is_solana
             let mut process_block = |block_bytes: &[u8],
                                      identity: &BlockIdentity,
                                      fork_step: Option<&str>,
@@ -4270,13 +4120,15 @@ async fn run_ingestion(args: &BuildArgs) -> Result<()> {
              -> Result<()> {
                 let block_number = identity.block_num;
                 let ts = identity.timestamp;
-                validate_block_timestamp(
-                    block_number,
-                    ts,
-                    strict_timestamps,
-                    &partition_config,
-                    config.start_block,
-                )?;
+                // Solana blocks may have no timestamp; skip validation for Solana.
+                if !is_solana {
+                    validate_block_timestamp(
+                        block_number,
+                        ts,
+                        &partition_config,
+                        config.start_block,
+                    )?;
+                }
                 let has_timestamp = ts != 0;
 
                 // Flush the mapper at partition boundaries to ensure each flush
@@ -4295,8 +4147,6 @@ async fn run_ingestion(args: &BuildArgs) -> Result<()> {
                             "partition boundary detected, flushing mapper"
                         );
                         let batches = m.flush()?;
-                        let batches =
-                            rewrite_batches_with_nullable_timestamps(batches, !strict_timestamps)?;
                         if !dry_run {
                             let metadata = BlockMetadata {
                                 min_block_number: min_block.unwrap_or(0),
@@ -4438,8 +4288,6 @@ async fn run_ingestion(args: &BuildArgs) -> Result<()> {
                 if rows_to_flush || time_to_flush || bytes_to_flush {
                     let flush_trigger = if bytes_to_flush { "bytes" } else if rows_to_flush { "rows" } else { "interval" };
                     let batches = m.flush()?;
-                    let batches =
-                        rewrite_batches_with_nullable_timestamps(batches, !strict_timestamps)?;
                     if !dry_run {
                         let metadata = BlockMetadata {
                             min_block_number: min_block.unwrap_or(0),
@@ -4517,8 +4365,6 @@ async fn run_ingestion(args: &BuildArgs) -> Result<()> {
         if let Some(m) = mapper.as_mut() {
             if m.max_table_rows() > 0 {
                 let batches = m.flush()?;
-                let batches =
-                    rewrite_batches_with_nullable_timestamps(batches, !strict_timestamps)?;
                 if !dry_run {
                     let metadata = BlockMetadata {
                         min_block_number: min_block.unwrap_or(0),
@@ -5297,37 +5143,27 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_block_timestamp_missing_in_strict_mode_errors() {
-        let err = validate_block_timestamp(42, 0, true, &Partition::None, Some(0))
-            .expect_err("strict timestamps should reject missing values");
-        assert!(err.to_string().contains("--strict-timestamps is enabled"));
-        assert!(!err
-            .to_string()
-            .contains("--bootstrap-missing-genesis-timestamp"));
+    fn test_validate_block_timestamp_missing_errors() {
+        let err = validate_block_timestamp(42, 0, &Partition::None, Some(0))
+            .expect_err("missing timestamp should error");
+        assert!(err.to_string().contains("missing timestamp metadata"));
     }
 
     #[test]
     fn test_validate_block_timestamp_missing_in_first_streamable_block_suggests_bootstrap() {
-        let err = validate_block_timestamp(0, 0, true, &Partition::None, Some(0)).expect_err(
-            "strict timestamps should suggest bootstrap for the first streamable block",
+        let err = validate_block_timestamp(0, 0, &Partition::None, Some(0)).expect_err(
+            "missing timestamp should suggest bootstrap for the first streamable block",
         );
         let message = err.to_string();
 
         assert!(message.contains("genesis / first-streamable blocks"));
         assert!(message.contains("--bootstrap-missing-genesis-timestamp"));
-        assert!(message.contains("--strict-timestamps false"));
     }
 
     #[test]
-    fn test_validate_block_timestamp_missing_in_permissive_block_range_allows() {
-        validate_block_timestamp(42, 0, false, &Partition::BlockRange(1000), Some(0))
-            .expect("block-range partition should allow null timestamps in permissive mode");
-    }
-
-    #[test]
-    fn test_validate_block_timestamp_missing_in_permissive_time_partition_errors() {
-        let err = validate_block_timestamp(42, 0, false, &Partition::Date, Some(0))
-            .expect_err("time-based partitioning still requires a timestamp");
+    fn test_validate_block_timestamp_missing_time_partition_errors() {
+        let err = validate_block_timestamp(42, 0, &Partition::Date, Some(0))
+            .expect_err("time-based partitioning requires a timestamp");
         assert!(err
             .to_string()
             .contains("time-based partitioning requires timestamps"));
@@ -5335,7 +5171,7 @@ mod tests {
 
     #[test]
     fn test_genesis_timestamp_bootstrap_buffers_until_first_timestamped_block() {
-        let mut bootstrap = GenesisTimestampBootstrap::new(true, true, Some(0));
+        let mut bootstrap = GenesisTimestampBootstrap::new(true, Some(0));
 
         assert_eq!(
             bootstrap.observe_block(0, 0, 0),
@@ -5356,17 +5192,17 @@ mod tests {
     }
 
     #[test]
-    fn test_genesis_timestamp_bootstrap_keeps_default_strict_behavior_without_flag() {
-        let mut bootstrap = GenesisTimestampBootstrap::new(false, true, Some(0));
+    fn test_genesis_timestamp_bootstrap_disabled_when_flag_not_set() {
+        let mut bootstrap = GenesisTimestampBootstrap::new(false, Some(0));
 
         assert_eq!(
             bootstrap.observe_block(0, 0, 0),
             GenesisTimestampBootstrapAction::None
         );
-        let err = validate_block_timestamp(0, 0, true, &Partition::None, Some(0))
-            .expect_err("strict timestamps should still fail without bootstrap flag");
+        let err = validate_block_timestamp(0, 0, &Partition::None, Some(0))
+            .expect_err("missing timestamps should still fail without bootstrap flag");
         let message = err.to_string();
-        assert!(message.contains("--strict-timestamps is enabled"));
+        assert!(message.contains("missing timestamp metadata"));
         assert!(message.contains("--bootstrap-missing-genesis-timestamp"));
     }
 
@@ -5420,84 +5256,21 @@ mod tests {
     }
 
     #[test]
-    fn test_rewrite_timestamp_column_makes_timestamp_nullable() {
-        let schema = std::sync::Arc::new(Schema::new(vec![
-            Field::new("block_num", arrow::datatypes::DataType::UInt64, false),
-            Field::new(
-                "timestamp",
-                arrow::datatypes::DataType::Timestamp(
-                    arrow::datatypes::TimeUnit::Second,
-                    Some(std::sync::Arc::from("UTC")),
-                ),
-                false,
-            ),
-            Field::new("date", arrow::datatypes::DataType::Date32, false),
-        ]));
-        let batch = RecordBatch::try_new(
-            schema,
-            vec![
-                std::sync::Arc::new(arrow::array::UInt64Array::from(vec![1_u64, 2_u64])),
-                std::sync::Arc::new(
-                    TimestampSecondArray::from(vec![Some(1_700_000_000), Some(0)])
-                        .with_timezone("UTC"),
-                ),
-                std::sync::Arc::new(arrow::array::Date32Array::from(vec![
-                    Some(date32_from_timestamp_seconds(1_700_000_000)),
-                    Some(date32_from_timestamp_seconds(0)),
-                ])),
-            ],
-        )
-        .expect("record batch should build");
-
-        let rewritten =
-            rewrite_timestamp_column(&batch, true).expect("nullable rewrite should succeed");
-        let rewritten_schema = rewritten.schema();
-        let timestamp_field = rewritten_schema
-            .field_with_name("timestamp")
-            .expect("timestamp field should exist");
-        assert!(timestamp_field.is_nullable());
-        let date_field = rewritten_schema
-            .field_with_name("date")
-            .expect("date field should exist");
-        assert!(date_field.is_nullable());
-
-        let timestamp_array = rewritten
-            .column(
-                rewritten_schema
-                    .index_of("timestamp")
-                    .expect("timestamp index"),
-            )
-            .as_any()
-            .downcast_ref::<TimestampSecondArray>()
-            .expect("timestamp column type should be preserved");
-        assert_eq!(timestamp_array.value(0), 1_700_000_000);
-        assert!(timestamp_array.is_null(1));
-
-        let date_array = rewritten
-            .column(rewritten_schema.index_of("date").expect("date index"))
-            .as_any()
-            .downcast_ref::<Date32Array>()
-            .expect("date column type should be preserved");
-        assert_eq!(
-            date_array.value(0),
-            date32_from_timestamp_seconds(1_700_000_000)
-        );
-        assert!(date_array.is_null(1));
-    }
-
-    #[test]
-    fn test_build_file_metadata_records_strict_timestamps() {
+    fn test_build_file_metadata_includes_block_type() {
         let metadata = build_file_metadata(
             "solana",
             &EncodeBytes::Base58,
             "https://example.com:443",
             Compression::Zstd,
             &None,
-            false,
         );
 
         assert!(metadata.entries.iter().any(|(key, value)| {
-            key == "firehose-parquet.strict_timestamps" && value == "false"
+            key == "firehose-parquet.block_type" && value == "solana"
+        }));
+        // strict_timestamps is no longer recorded in metadata
+        assert!(!metadata.entries.iter().any(|(key, _)| {
+            key == "firehose-parquet.strict_timestamps"
         }));
     }
 
@@ -5570,7 +5343,6 @@ mod tests {
             "https://example.com",
             Compression::Zstd,
             &ei,
-            true,
         );
 
         assert_eq!(
@@ -5617,7 +5389,6 @@ mod tests {
             "https://example.com",
             Compression::Zstd,
             &ei,
-            true,
         );
 
         assert_eq!(
@@ -5648,7 +5419,6 @@ mod tests {
             "https://example.com",
             Compression::Zstd,
             &ei,
-            true,
         );
 
         assert_eq!(
@@ -5678,7 +5448,6 @@ mod tests {
             "https://example.com",
             Compression::Zstd,
             &ei,
-            true,
         );
 
         assert_eq!(
@@ -5699,7 +5468,6 @@ mod tests {
             "https://example.com",
             Compression::Zstd,
             &None,
-            true,
         );
 
         assert_eq!(find_meta(&meta, "firehose-parquet.chain_name"), None);
@@ -5740,7 +5508,6 @@ mod tests {
             "https://example.com",
             Compression::Zstd,
             &ei,
-            true,
         );
 
         assert_eq!(find_meta(&meta, "firehose-parquet.chain_name"), Some("eth"));
@@ -5768,7 +5535,6 @@ mod tests {
             "https://example.com",
             Compression::Snappy,
             &None,
-            true,
         );
 
         assert_eq!(
@@ -6197,7 +5963,6 @@ mod tests {
             Compression::Zstd,
             &ei,
             None,
-            true,
         );
 
         assert_eq!(
@@ -6393,7 +6158,6 @@ mod tests {
             Compression::Zstd,
             &None,
             Some(10),
-            false,
         );
         let mut checkpoint_state = PartitionsCheckpointState::default();
         let probe_counter = std::sync::atomic::AtomicU64::new(0);
@@ -6406,7 +6170,6 @@ mod tests {
             &metadata,
             &mut checkpoint_state,
             &probe_counter,
-            true,
             false,
         )
         .expect("checkpoint rows");
@@ -6520,7 +6283,6 @@ mod tests {
             Compression::Zstd,
             &None,
             None,
-            true,
         );
 
         assert_eq!(
@@ -6573,7 +6335,6 @@ mod tests {
             Compression::Zstd,
             &ei,
             None,
-            true,
         );
 
         assert_eq!(
@@ -6600,7 +6361,6 @@ mod tests {
             Compression::Zstd,
             &ei,
             None,
-            true,
         );
 
         assert_eq!(
@@ -6618,7 +6378,6 @@ mod tests {
             Compression::Snappy,
             &None,
             None,
-            true,
         );
 
         assert_eq!(

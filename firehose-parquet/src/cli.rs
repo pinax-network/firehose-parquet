@@ -226,17 +226,6 @@ pub struct CommonArgs {
     )]
     pub partition: String,
 
-    /// Require non-null timestamps in output schemas and streamed blocks.
-    #[arg(
-        long,
-        env = "STRICT_TIMESTAMPS",
-        default_value_t = true,
-        hide_env_values = true,
-        help_heading = "Output",
-        action = clap::ArgAction::Set
-    )]
-    pub strict_timestamps: bool,
-
     /// Block range size when partition=block_range
     #[arg(
         long,
@@ -1167,15 +1156,6 @@ Examples:
         /// Each partition covers exactly this many blocks (e.g. 1000000).
         #[arg(long, help_heading = "Partitioning")]
         block_range_size: Option<u64>,
-        /// Require non-null timestamps for all probed blocks (default: true).
-        /// Set to false for chains like Solana where blocks may lack timestamps.
-        #[arg(
-            long,
-            default_value_t = true,
-            action = clap::ArgAction::Set,
-            help_heading = "Partitioning"
-        )]
-        strict_timestamps: bool,
         /// Compression codec for the written `partitions.parquet`: zstd, snappy, gzip, none
         #[arg(long, default_value = "zstd", help_heading = "Output")]
         compression: String,
@@ -1657,8 +1637,6 @@ pub struct PartitionIndexBuilder {
     last_seen_block: Option<u64>,
     /// Block range size for block_range partition type. Required when partition type is BlockRange.
     block_range_size: Option<u64>,
-    /// When true (default), missing timestamps cause an error for time-based partitions.
-    strict_timestamps: bool,
 }
 
 impl PartitionIndexBuilder {
@@ -1678,17 +1656,11 @@ impl PartitionIndexBuilder {
             first_seen_block: None,
             last_seen_block: None,
             block_range_size: None,
-            strict_timestamps: true,
         })
     }
 
     pub fn with_block_range_size(mut self, size: u64) -> Self {
         self.block_range_size = Some(size);
-        self
-    }
-
-    pub fn with_strict_timestamps(mut self, strict: bool) -> Self {
-        self.strict_timestamps = strict;
         self
     }
 
@@ -1763,14 +1735,7 @@ impl PartitionIndexBuilder {
                 continue;
             }
 
-            // Time-based partition types
-            if timestamp.is_none() && self.strict_timestamps {
-                anyhow::bail!(
-                    "block {} has no timestamp (timestamp=0) and --strict-timestamps is enabled",
-                    block.block_num
-                );
-            }
-
+            // Time-based partition types: missing timestamps are allowed (e.g. Solana).
             let ts = timestamp.unwrap_or(0);
             let partition_start_ts = partition_type.round_timestamp(ts)?;
             let partition_value = format_partition_timestamp(partition_start_ts)?;
@@ -1993,7 +1958,6 @@ impl PartitionIndexBuilder {
                 first_seen_block: Some(resume_block),
                 last_seen_block: resume_block.checked_sub(1),
                 block_range_size: None,
-                strict_timestamps: true,
             },
             resume_block,
         ))
@@ -2732,18 +2696,16 @@ pub fn write_partitions_index_with_metadata(
     aws: Option<&AwsConfig>,
     file_metadata: Option<&crate::writer::ParquetFileMetadata>,
 ) -> anyhow::Result<()> {
-    // Default: nullable timestamps in the canonical partitions index schema.
-    write_partitions_index_impl(path, rows, compression, aws, file_metadata, true)
+    write_partitions_index_impl(path, rows, compression, aws, file_metadata)
 }
 
-/// Write partitions index with explicit control over timestamp nullability.
+/// Write partitions index.
 pub fn write_partitions_index_strict(
     path: &str,
     rows: &[PartitionBuildRow],
     compression: Compression,
     aws: Option<&AwsConfig>,
     file_metadata: Option<&crate::writer::ParquetFileMetadata>,
-    nullable_timestamps: bool,
 ) -> anyhow::Result<()> {
     write_partitions_index_impl(
         path,
@@ -2751,7 +2713,6 @@ pub fn write_partitions_index_strict(
         compression,
         aws,
         file_metadata,
-        nullable_timestamps,
     )
 }
 
@@ -2761,7 +2722,6 @@ fn write_partitions_index_impl(
     compression: Compression,
     aws: Option<&AwsConfig>,
     file_metadata: Option<&crate::writer::ParquetFileMetadata>,
-    nullable_timestamps: bool,
 ) -> anyhow::Result<()> {
     use arrow::array::{TimestampSecondArray, UInt64Array};
     use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
@@ -2809,12 +2769,12 @@ fn write_partitions_index_impl(
         Field::new(
             "start_time",
             DataType::Timestamp(TimeUnit::Second, Some(Arc::from("UTC"))),
-            nullable_timestamps,
+            true,
         ),
         Field::new(
             "end_time",
             DataType::Timestamp(TimeUnit::Second, Some(Arc::from("UTC"))),
-            nullable_timestamps,
+            true,
         ),
     ]));
 
@@ -6501,24 +6461,6 @@ mod tests {
     }
 
     #[test]
-    fn test_common_args_strict_timestamps_default_true() {
-        let cli = parse(&["test-cli", "--endpoint", "https://example.com:443"]);
-        assert!(cli.common.strict_timestamps);
-    }
-
-    #[test]
-    fn test_common_args_strict_timestamps_parse_false() {
-        let cli = parse(&[
-            "test-cli",
-            "--endpoint",
-            "https://example.com:443",
-            "--strict-timestamps",
-            "false",
-        ]);
-        assert!(!cli.common.strict_timestamps);
-    }
-
-    #[test]
     #[serial]
     fn test_live_flag_parses_without_stop_block() {
         let cli = parse(&[
@@ -6927,8 +6869,6 @@ mod tests {
             "block_range",
             "--block-range-size",
             "1000000",
-            "--strict-timestamps",
-            "false",
             "--output",
             "./output",
         ]);
@@ -6936,12 +6876,10 @@ mod tests {
             Commands::Partitions(PartitionsCommands::Build {
                 partition,
                 block_range_size,
-                strict_timestamps,
                 ..
             }) => {
                 assert_eq!(partition, "block_range");
                 assert_eq!(block_range_size, Some(1000000));
-                assert!(!strict_timestamps);
             }
             _ => panic!("expected partitions build subcommand"),
         }
@@ -6959,8 +6897,6 @@ mod tests {
             "block_range",
             "--block-range-size",
             "1000000",
-            "--strict-timestamps",
-            "false",
             "--output",
             "./output",
             "--live",
@@ -6972,7 +6908,6 @@ mod tests {
                 live,
                 partition,
                 block_range_size,
-                strict_timestamps,
                 ..
             }) => {
                 assert_eq!(network.as_deref(), Some("solana-mainnet-beta"));
@@ -6980,7 +6915,6 @@ mod tests {
                 assert!(live);
                 assert_eq!(partition, "block_range");
                 assert_eq!(block_range_size, Some(1000000));
-                assert!(!strict_timestamps);
             }
             _ => panic!("expected partitions build subcommand"),
         }
@@ -7017,31 +6951,6 @@ mod tests {
         assert!(help.contains("--aws-region"));
         assert!(help.contains("--partition"));
         assert!(help.contains("--json"));
-    }
-
-    #[test]
-    fn test_partitions_build_strict_timestamps_default_true() {
-        let cli = parse(&[
-            "test-cli",
-            "partitions",
-            "build",
-            "--endpoint",
-            "https://eth.firehose.pinax.network:443",
-            "--stop-block",
-            "200",
-            "--partition",
-            "date",
-            "--output",
-            "./output",
-        ]);
-        match cli.command.expect("command should exist") {
-            Commands::Partitions(PartitionsCommands::Build {
-                strict_timestamps, ..
-            }) => {
-                assert!(strict_timestamps);
-            }
-            _ => panic!("expected partitions build subcommand"),
-        }
     }
 
     #[test]
