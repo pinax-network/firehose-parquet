@@ -131,6 +131,8 @@ pub struct CommonArgs {
     pub cursor: PathBuf,
 
     /// Optional template used to derive the cursor path.
+    ///
+    /// Literal paths are supported directly. Use `{{` and `}}` to escape braces.
     #[arg(
         long,
         env = "CURSOR_TEMPLATE",
@@ -7667,7 +7669,7 @@ mod tests {
     }
 
     #[test]
-    fn test_common_args_reject_removed_partition_index_flags() {
+    fn test_common_args_reject_removed_partition_flags() {
         for (flag, value) in [
             ("--partitions-index", "./partitions.parquet"),
             ("--partition-from", "2015-07-30 15:00:00"),
