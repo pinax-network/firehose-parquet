@@ -239,12 +239,13 @@ impl std::fmt::Display for Config {
         if let Some(secs) = self.reconnect_stall_timeout_secs {
             writeln!(f, "  reconnect_stall_timeout {secs}s")?;
         }
-        // AWS / S3 section — only shown when at least one credential is set
-        if self.aws_access_key_id.is_some()
-            || self.aws_secret_access_key.is_some()
-            || self.aws_endpoint_url.is_some()
-            || self.aws_region.is_some()
-            || self.s3_bucket.is_some()
+        // AWS / S3 section — only shown when output is actually targeting S3.
+        if self.output.to_string_lossy().starts_with("s3://")
+            && (self.aws_access_key_id.is_some()
+                || self.aws_secret_access_key.is_some()
+                || self.aws_endpoint_url.is_some()
+                || self.aws_region.is_some()
+                || self.s3_bucket.is_some())
         {
             if let Some(ref bucket) = self.s3_bucket {
                 writeln!(f, "  s3_bucket          {bucket}")?;
@@ -428,6 +429,7 @@ mod tests {
     #[test]
     fn test_config_display_aws_credentials() {
         let config = Config {
+            output: PathBuf::from("s3://my-bucket/output"),
             s3_bucket: Some("my-bucket".to_string()),
             aws_region: Some("us-east-1".to_string()),
             aws_endpoint_url: Some("https://t3.storage.dev".to_string()),
@@ -455,6 +457,28 @@ mod tests {
     fn test_config_display_no_aws_when_unset() {
         let config = Config::default();
         let display = config.to_string();
+        assert!(!display.contains("s3_bucket"));
+        assert!(!display.contains("aws_region"));
+        assert!(!display.contains("aws_endpoint"));
+        assert!(!display.contains("aws_access_key"));
+        assert!(!display.contains("aws_secret_key"));
+        assert!(!display.contains("aws_session_token"));
+    }
+
+    #[test]
+    fn test_config_display_omits_aws_for_local_output_even_when_configured() {
+        let config = Config {
+            output: PathBuf::from("./output"),
+            s3_bucket: Some("my-bucket".to_string()),
+            aws_region: Some("us-east-1".to_string()),
+            aws_endpoint_url: Some("https://t3.storage.dev".to_string()),
+            aws_access_key_id: Some("AKID123456".to_string()),
+            aws_secret_access_key: Some("super-secret".to_string()),
+            aws_session_token: Some("tok-secret".to_string()),
+            ..Config::default()
+        };
+        let display = config.to_string();
+        assert!(display.contains("output             ./output"));
         assert!(!display.contains("s3_bucket"));
         assert!(!display.contains("aws_region"));
         assert!(!display.contains("aws_endpoint"));
