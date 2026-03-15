@@ -2707,7 +2707,13 @@ pub fn write_partitions_index_strict(
     aws: Option<&AwsConfig>,
     file_metadata: Option<&crate::writer::ParquetFileMetadata>,
 ) -> anyhow::Result<()> {
-    write_partitions_index_impl(path, rows, compression, aws, file_metadata)
+    write_partitions_index_impl(
+        path,
+        rows,
+        compression,
+        aws,
+        file_metadata,
+    )
 }
 
 fn write_partitions_index_impl(

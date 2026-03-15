@@ -48,9 +48,7 @@ fn append_transaction(
     block_time_opt: Option<i64>,
     fork_step: Option<&str>,
 ) {
-    builder
-        .canonical
-        .append_with_optional_timestamp(identity, block_time_opt);
+    builder.canonical.append_with_optional_timestamp(identity, block_time_opt);
     builder.slot.append_value(slot);
     builder.transaction_index.append_value(tx_idx);
     if let Some(sig) = tx.signatures.first() {
@@ -206,25 +204,11 @@ impl SolanaBlockMapper {
         append_fork_step(&mut self.blocks.fork_step, fork_step);
 
         for (tx_idx, confirmed_tx) in block.transactions.iter().enumerate() {
-            self.map_transaction(
-                slot,
-                tx_idx as u32,
-                confirmed_tx,
-                identity,
-                block_time_opt,
-                fork_step,
-            );
+            self.map_transaction(slot, tx_idx as u32, confirmed_tx, identity, block_time_opt, fork_step);
         }
 
         for (reward_idx, reward) in block.rewards.iter().enumerate() {
-            self.map_reward(
-                slot,
-                reward_idx as u32,
-                reward,
-                identity,
-                block_time_opt,
-                fork_step,
-            );
+            self.map_reward(slot, reward_idx as u32, reward, identity, block_time_opt, fork_step);
         }
     }
 
@@ -260,16 +244,7 @@ impl SolanaBlockMapper {
         // Vote transactions go to a separate table (no messages/instructions)
         if is_vote_transaction(msg) {
             if let Some(ref mut vote_txs) = self.vote_transactions {
-                append_transaction(
-                    vote_txs,
-                    slot,
-                    tx_idx,
-                    tx,
-                    meta,
-                    identity,
-                    block_time_opt,
-                    fork_step,
-                );
+                append_transaction(vote_txs, slot, tx_idx, tx, meta, identity, block_time_opt, fork_step);
             }
             return;
         }
@@ -494,16 +469,7 @@ impl SolanaBlockMapper {
         block_time_opt: Option<i64>,
         fork_step: Option<&str>,
     ) {
-        self.append_reward(
-            slot,
-            idx,
-            reward,
-            "block",
-            None,
-            identity,
-            block_time_opt,
-            fork_step,
-        );
+        self.append_reward(slot, idx, reward, "block", None, identity, block_time_opt, fork_step);
     }
 
     fn append_reward(
