@@ -112,7 +112,19 @@ pub fn date32_from_timestamp_seconds(timestamp_seconds: i64) -> i32 {
 
 /// Returns the 7 canonical identity fields to prepend to every schema.
 /// Uses the given encoding to determine the data type of block_id/parent_id.
+/// Pass `nullable_timestamps = true` for chains (e.g. Solana) where
+/// `timestamp` and `date` may be null.
 pub fn canonical_fields_with_encoding(encoding: &EncodeBytes) -> Vec<Field> {
+    canonical_fields_with_encoding_nullable(encoding, false)
+}
+
+/// Returns the 7 canonical identity fields with nullable `timestamp` and `date`.
+/// Use for Solana tables where `block_time` may be absent.
+pub fn canonical_fields_with_nullable_timestamps(encoding: &EncodeBytes) -> Vec<Field> {
+    canonical_fields_with_encoding_nullable(encoding, true)
+}
+
+fn canonical_fields_with_encoding_nullable(encoding: &EncodeBytes, nullable_timestamps: bool) -> Vec<Field> {
     let id_type = bytes_data_type(encoding);
     vec![
         Field::new("block_num", DataType::UInt64, false),
@@ -123,9 +135,9 @@ pub fn canonical_fields_with_encoding(encoding: &EncodeBytes) -> Vec<Field> {
         Field::new(
             "timestamp",
             DataType::Timestamp(TimeUnit::Second, Some(Arc::from("UTC"))),
-            false,
+            nullable_timestamps,
         ),
-        Field::new("date", DataType::Date32, false),
+        Field::new("date", DataType::Date32, nullable_timestamps),
     ]
 }
 
@@ -177,8 +189,35 @@ impl CanonicalBuilder {
         self.timestamp.append_value(id.timestamp);
         self.date
             .append_value(date32_from_timestamp_seconds(id.timestamp));
+        self.append_ids(id);
+    }
 
-        // Decode hex ID strings to bytes, then encode through BytesColumn.
+    /// Append a row with an optional timestamp/date.  When `timestamp` is
+    /// `None` (e.g. Solana blocks without `block_time`), null values are
+    /// written for both the `timestamp` and `date` columns.
+    pub fn append_with_optional_timestamp(
+        &mut self,
+        id: &BlockIdentity,
+        timestamp: Option<i64>,
+    ) {
+        self.block_num.append_value(id.block_num);
+        self.parent_num.append_value(id.parent_num);
+        self.lib_num.append_value(id.lib_num);
+        match timestamp {
+            Some(ts) => {
+                self.timestamp.append_value(ts);
+                self.date.append_value(date32_from_timestamp_seconds(ts));
+            }
+            None => {
+                self.timestamp.append_null();
+                self.date.append_null();
+            }
+        }
+        self.append_ids(id);
+    }
+
+    /// Decode and append the block_id/parent_id columns.
+    fn append_ids(&mut self, id: &BlockIdentity) {
         let block_id_bytes = decode_id_bytes(&id.block_id);
         let parent_id_bytes = decode_id_bytes(&id.parent_id);
         self.block_id.append_value(&block_id_bytes);
@@ -337,5 +376,45 @@ mod tests {
             date_array.value(0),
             date32_from_timestamp_seconds(1_700_000_000)
         );
+    }
+
+    #[test]
+    fn test_canonical_fields_with_nullable_timestamps_are_nullable() {
+        let fields = canonical_fields_with_nullable_timestamps(&EncodeBytes::Hex);
+        let ts_field = fields.iter().find(|f| f.name() == "timestamp").unwrap();
+        let date_field = fields.iter().find(|f| f.name() == "date").unwrap();
+        assert!(ts_field.is_nullable());
+        assert!(date_field.is_nullable());
+    }
+
+    #[test]
+    fn test_canonical_builder_append_with_optional_timestamp_none() {
+        use arrow::array::{Array, TimestampSecondArray};
+        let mut builder = CanonicalBuilder::new();
+        builder.append_with_optional_timestamp(
+            &BlockIdentity {
+                block_num: 100,
+                block_id: "cc".to_string(),
+                parent_num: 99,
+                parent_id: "dd".to_string(),
+                lib_num: 98,
+                timestamp: 0,
+                fork_step: None,
+            },
+            None,
+        );
+
+        let columns = builder.finish();
+        let ts_array = columns[5]
+            .as_any()
+            .downcast_ref::<TimestampSecondArray>()
+            .expect("timestamp column should be TimestampSecondArray");
+        let date_array = columns[6]
+            .as_any()
+            .downcast_ref::<Date32Array>()
+            .expect("date column should be Date32");
+
+        assert!(ts_array.is_null(0), "timestamp should be null");
+        assert!(date_array.is_null(0), "date should be null");
     }
 }

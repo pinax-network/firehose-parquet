@@ -1,6 +1,6 @@
 use arrow::datatypes::{DataType, Field, Schema};
 use firehose_parquet::encode::{bytes_data_type, BytesListColumn, EncodeBytes};
-use firehose_parquet::traits::{canonical_fields_with_encoding, fork_step_field};
+use firehose_parquet::traits::{canonical_fields_with_nullable_timestamps, fork_step_field};
 use std::sync::Arc;
 
 fn maybe_fork_step(fields: &mut Vec<Field>, include: bool) {
@@ -10,7 +10,7 @@ fn maybe_fork_step(fields: &mut Vec<Field>, include: bool) {
 }
 
 pub fn blocks_schema(include_fork_step: bool, encoding: &EncodeBytes) -> Schema {
-    let mut fields = canonical_fields_with_encoding(encoding);
+    let mut fields = canonical_fields_with_nullable_timestamps(encoding);
     fields.extend(vec![
         Field::new("slot", DataType::UInt64, false),
         Field::new("parent_slot", DataType::UInt64, false),
@@ -26,7 +26,7 @@ pub fn blocks_schema(include_fork_step: bool, encoding: &EncodeBytes) -> Schema 
 }
 
 pub fn transactions_schema(include_fork_step: bool, encoding: &EncodeBytes) -> Schema {
-    let mut fields = canonical_fields_with_encoding(encoding);
+    let mut fields = canonical_fields_with_nullable_timestamps(encoding);
     fields.extend(vec![
         Field::new("slot", DataType::UInt64, false),
         Field::new("transaction_index", DataType::UInt32, false),
@@ -60,7 +60,7 @@ pub fn transactions_schema(include_fork_step: bool, encoding: &EncodeBytes) -> S
 }
 
 pub fn messages_schema(include_fork_step: bool, encoding: &EncodeBytes) -> Schema {
-    let mut fields = canonical_fields_with_encoding(encoding);
+    let mut fields = canonical_fields_with_nullable_timestamps(encoding);
     fields.extend(vec![
         Field::new("slot", DataType::UInt64, false),
         Field::new("transaction_index", DataType::UInt32, false),
@@ -87,7 +87,7 @@ pub fn messages_schema(include_fork_step: bool, encoding: &EncodeBytes) -> Schem
 }
 
 pub fn instructions_schema(include_fork_step: bool, encoding: &EncodeBytes) -> Schema {
-    let mut fields = canonical_fields_with_encoding(encoding);
+    let mut fields = canonical_fields_with_nullable_timestamps(encoding);
     fields.extend(vec![
         Field::new("slot", DataType::UInt64, false),
         Field::new("transaction_index", DataType::UInt32, false),
@@ -104,7 +104,7 @@ pub fn instructions_schema(include_fork_step: bool, encoding: &EncodeBytes) -> S
 }
 
 pub fn rewards_schema(include_fork_step: bool, encoding: &EncodeBytes) -> Schema {
-    let mut fields = canonical_fields_with_encoding(encoding);
+    let mut fields = canonical_fields_with_nullable_timestamps(encoding);
     fields.extend(vec![
         Field::new("slot", DataType::UInt64, false),
         Field::new("reward_index", DataType::UInt32, false),
@@ -123,7 +123,7 @@ pub fn rewards_schema(include_fork_step: bool, encoding: &EncodeBytes) -> Schema
 
 /// Token balance changes (pre/post) per transaction.
 pub fn token_balances_schema(include_fork_step: bool, encoding: &EncodeBytes) -> Schema {
-    let mut fields = canonical_fields_with_encoding(encoding);
+    let mut fields = canonical_fields_with_nullable_timestamps(encoding);
     fields.extend(vec![
         Field::new("slot", DataType::UInt64, false),
         Field::new("transaction_index", DataType::UInt32, false),
@@ -145,7 +145,7 @@ pub fn token_balances_schema(include_fork_step: bool, encoding: &EncodeBytes) ->
 
 /// Address table lookups from versioned transactions.
 pub fn account_lookups_schema(include_fork_step: bool, encoding: &EncodeBytes) -> Schema {
-    let mut fields = canonical_fields_with_encoding(encoding);
+    let mut fields = canonical_fields_with_nullable_timestamps(encoding);
     fields.extend(vec![
         Field::new("slot", DataType::UInt64, false),
         Field::new("transaction_index", DataType::UInt32, false),
