@@ -2968,6 +2968,26 @@ fn supports_extended(endpoint_info: &Option<EndpointInfo>) -> bool {
     })
 }
 
+/// Keep `--extended` as the only switch that enables extended output while
+/// logging endpoint capability when available.
+fn resolve_extended_mode(extended_requested: bool, endpoint_info: &Option<EndpointInfo>) -> bool {
+    let endpoint_supports_extended = supports_extended(endpoint_info);
+
+    if endpoint_supports_extended {
+        if extended_requested {
+            info!("endpoint advertises extended block features; honoring --extended");
+        } else {
+            info!(
+                "endpoint advertises extended block features; extended output remains disabled without --extended"
+            );
+        }
+    } else if extended_requested {
+        warn!("--extended requested but endpoint did not advertise extended block features");
+    }
+
+    extended_requested
+}
+
 /// Create a `Box<dyn BlockMapper>` for the given block type.
 fn create_mapper(
     block_type: &str,
@@ -3748,8 +3768,8 @@ async fn run_ingestion(args: &BuildArgs) -> Result<()> {
         );
     }
 
-    // Fetch endpoint info for auto-detection of encoding, extended features,
-    // and chain_name-based output directory.
+    // Fetch endpoint info for auto-detection of encoding, chain_name-based
+    // output directory, and feature capability logging.
     let mut client = FirehoseClient::new(config.clone());
     let endpoint_info = client.info().await;
 
@@ -3779,11 +3799,7 @@ async fn run_ingestion(args: &BuildArgs) -> Result<()> {
         validate_block_range_alignment(config.start_block, config.stop_block, *block_range_size)?;
     }
 
-    // Auto-detect extended block features if not explicitly set by user.
-    if !extended && supports_extended(&endpoint_info) {
-        info!("auto-detected extended block features from endpoint info");
-        extended = true;
-    }
+    extended = resolve_extended_mode(extended, &endpoint_info);
 
     let include_failed_transactions = args.include_failed_transactions;
 
@@ -5303,6 +5319,34 @@ mod tests {
     #[test]
     fn test_supports_extended_none() {
         assert!(!supports_extended(&None));
+    }
+
+    #[test]
+    fn test_resolve_extended_mode_does_not_auto_enable_from_endpoint_info() {
+        let ei = Some(EndpointInfo {
+            chain_name: "mainnet".to_string(),
+            chain_name_aliases: vec![],
+            first_streamable_block_num: 0,
+            first_streamable_block_id: String::new(),
+            block_id_encoding: 1,
+            block_features: vec!["extended".to_string()],
+        });
+
+        assert!(!resolve_extended_mode(false, &ei));
+    }
+
+    #[test]
+    fn test_resolve_extended_mode_honors_cli_flag_when_endpoint_supports_extended() {
+        let ei = Some(EndpointInfo {
+            chain_name: "mainnet".to_string(),
+            chain_name_aliases: vec![],
+            first_streamable_block_num: 0,
+            first_streamable_block_id: String::new(),
+            block_id_encoding: 1,
+            block_features: vec!["base".to_string(), "extended".to_string()],
+        });
+
+        assert!(resolve_extended_mode(true, &ei));
     }
 
     // -- block_id_encoding_label tests --
