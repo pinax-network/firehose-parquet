@@ -33,6 +33,13 @@ fn mk_fork_step(include: bool) -> Option<StringBuilder> {
     }
 }
 
+fn bitcoin_canonical_identity(block: &btc::Block, identity: &BlockIdentity) -> BlockIdentity {
+    let mut canonical = identity.clone();
+    canonical.block_id = block.hash.clone();
+    canonical.parent_id = block.previous_hash.clone();
+    canonical
+}
+
 // ---------------------------------------------------------------------------
 // Bitcoin BlockMapper
 // ---------------------------------------------------------------------------
@@ -71,8 +78,9 @@ impl BitcoinBlockMapper {
         let height = block.height;
         let block_hash = &block.hash;
         let block_time = block.time;
+        let canonical_identity = bitcoin_canonical_identity(block, identity);
 
-        self.blocks.canonical.append(identity);
+        self.blocks.canonical.append(&canonical_identity);
         self.blocks.hash.append_value(&block.hash);
         self.blocks.height.append_value(height);
         self.blocks.previous_hash.append_value(&block.previous_hash);
@@ -97,7 +105,7 @@ impl BitcoinBlockMapper {
                 block_time,
                 tx_index as u32,
                 tx,
-                identity,
+                &canonical_identity,
                 fork_step,
             );
         }
@@ -598,6 +606,54 @@ mod tests {
         assert_eq!(batches["transactions"].num_rows(), 1);
         assert_eq!(batches["inputs"].num_rows(), 1);
         assert_eq!(batches["outputs"].num_rows(), 1);
+    }
+
+    #[test]
+    fn test_bitcoin_canonical_ids_match_block_hash_fields() {
+        let block = make_test_block(0);
+        let block_bytes = prost::Message::encode_to_vec(&block);
+        let mut mapper = BitcoinBlockMapper::new(false, EncodeBytes::Hex);
+        let identity = BlockIdentity {
+            block_num: 0,
+            block_id: "firehose-envelope-id".to_string(),
+            parent_num: 0,
+            parent_id: "firehose-envelope-parent-id".to_string(),
+            lib_num: 0,
+            timestamp: block.time,
+            fork_step: None,
+        };
+
+        mapper.map_block(&block_bytes, &identity, None).unwrap();
+        let batches = mapper.flush().unwrap();
+        let blocks = &batches["blocks"];
+
+        let block_id = blocks
+            .column_by_name("block_id")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        let parent_id = blocks
+            .column_by_name("parent_id")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        let hash = blocks
+            .column_by_name("hash")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        let previous_hash = blocks
+            .column_by_name("previous_hash")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+
+        assert_eq!(block_id.value(0), format!("0x{}", hash.value(0)));
+        assert_eq!(parent_id.value(0), format!("0x{}", previous_hash.value(0)));
     }
 
     #[test]

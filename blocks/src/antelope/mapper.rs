@@ -32,6 +32,20 @@ fn format_authorization(auth: &[antelope::PermissionLevel]) -> String {
     parts.join(",")
 }
 
+fn antelope_canonical_identity(
+    block: &antelope::Block,
+    identity: &BlockIdentity,
+) -> BlockIdentity {
+    let mut canonical = identity.clone();
+    canonical.block_id = block.id.clone();
+    canonical.parent_id = block
+        .header
+        .as_ref()
+        .map(|h| h.previous.clone())
+        .unwrap_or_default();
+    canonical
+}
+
 pub struct AntelopeBlockMapper {
     extended: bool,
     include_failed_transactions: bool,
@@ -78,9 +92,10 @@ impl AntelopeBlockMapper {
         fork_step: Option<&str>,
     ) {
         let header = block.header.as_ref();
+        let canonical_identity = antelope_canonical_identity(block, identity);
 
         // blocks table
-        self.blocks.canonical.append(identity);
+        self.blocks.canonical.append(&canonical_identity);
         self.blocks.number.append_value(block.number);
         self.blocks.hash.append_value(&block.id);
         self.blocks
@@ -110,7 +125,7 @@ impl AntelopeBlockMapper {
                     continue;
                 }
             }
-            self.map_transaction(trace, identity, fork_step);
+            self.map_transaction(trace, &canonical_identity, fork_step);
         }
     }
 
@@ -710,6 +725,41 @@ mod tests {
         assert_eq!(batches["transactions"].num_rows(), 1);
         assert_eq!(batches["actions"].num_rows(), 2);
         assert_eq!(batches["db_ops"].num_rows(), 1);
+    }
+
+    #[test]
+    fn test_antelope_canonical_ids_match_block_hash_fields() {
+        let block = make_test_block(100);
+        let block_bytes = prost::Message::encode_to_vec(&block);
+        let mut mapper = AntelopeBlockMapper::new(true, false, EncodeBytes::Hex, false);
+        let identity = BlockIdentity {
+            block_num: 100,
+            block_id: "firehose-envelope-id".to_string(),
+            parent_num: 99,
+            parent_id: "firehose-envelope-parent-id".to_string(),
+            lib_num: 99,
+            timestamp: 0,
+            fork_step: None,
+        };
+
+        mapper.map_block(&block_bytes, &identity, None).unwrap();
+        let batches = mapper.flush().unwrap();
+        let blocks = &batches["blocks"];
+
+        let block_id = blocks
+            .column_by_name("block_id")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        let parent_id = blocks
+            .column_by_name("parent_id")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        assert_eq!(block_id.value(0), "0x626c6f636b5f686173685f313030");
+        assert_eq!(parent_id.value(0), "0x626c6f636b5f686173685f3939");
     }
 
     #[test]
