@@ -960,11 +960,19 @@ Lookup order:
     /// Delete parquet files from local filesystem or S3, with optional partition filtering.
     ///
     /// Deletes only .parquet files. Never deletes buckets or non-parquet files.
+    /// Truncating a network root includes root-level parquet artifacts like
+    /// partitions.parquet and cursor.parquet, and --dry-run lists each matched file.
     /// Use --partition to target specific partitions (supports glob patterns).
     #[command(after_long_help = "\
 Examples:
   # Delete all parquet files under a path
   fireparq truncate ./output/blocks/
+
+  # Delete all parquet files under a network root, including root-level artifacts
+  fireparq truncate ./output/mainnet/ --dry-run
+
+  # Delete a single parquet file directly
+  fireparq truncate ./output/mainnet/partitions.parquet
 
   # Delete only a specific date partition
   fireparq truncate ./output/blocks/ -p \"date=01\"
@@ -990,7 +998,7 @@ Lookup order:
   3. Otherwise, if S3_BUCKET is set, relative paths fall back to s3://<bucket>/<path>.
 ")]
     Truncate {
-        /// Path to a directory containing .parquet files, a shorthand S3 key/prefix via S3_BUCKET, or an S3 URI
+        /// Path to a .parquet file, a directory containing .parquet files, a shorthand S3 key/prefix via S3_BUCKET, or an S3 URI
         path: String,
         /// Partition filter(s) — only delete files matching these partition segments.
         /// Use a key name to match all values (e.g. "date" matches all date=* partitions),
@@ -2707,13 +2715,7 @@ pub fn write_partitions_index_strict(
     aws: Option<&AwsConfig>,
     file_metadata: Option<&crate::writer::ParquetFileMetadata>,
 ) -> anyhow::Result<()> {
-    write_partitions_index_impl(
-        path,
-        rows,
-        compression,
-        aws,
-        file_metadata,
-    )
+    write_partitions_index_impl(path, rows, compression, aws, file_metadata)
 }
 
 fn write_partitions_index_impl(

@@ -102,9 +102,7 @@ fn run_truncate_local(config: &TruncateConfig) -> Result<TruncateResult> {
         anyhow::bail!("path does not exist: {}", root.display());
     }
 
-    let mut all_files: Vec<PathBuf> = Vec::new();
-    collect_parquet_files_recursive(&root, &mut all_files)?;
-    all_files.sort();
+    let all_files = collect_local_parquet_targets(&root)?;
 
     if all_files.is_empty() {
         println!("No .parquet files found in {}", root.display());
@@ -118,10 +116,7 @@ fn run_truncate_local(config: &TruncateConfig) -> Result<TruncateResult> {
     // Filter by partition.
     let matching: Vec<&PathBuf> = all_files
         .iter()
-        .filter(|f| {
-            let rel = f.strip_prefix(&root).unwrap_or(f);
-            matches_partition(&rel.to_string_lossy(), &config.partitions)
-        })
+        .filter(|f| matches_partition(&local_match_path(f, &root), &config.partitions))
         .collect();
 
     if matching.is_empty() {
@@ -157,7 +152,7 @@ fn run_truncate_local(config: &TruncateConfig) -> Result<TruncateResult> {
     }
 
     // Clean up empty directories.
-    let dirs_removed = if !config.dry_run {
+    let dirs_removed = if !config.dry_run && root.is_dir() {
         cleanup_empty_dirs(&root)?
     } else {
         0
@@ -170,6 +165,36 @@ fn run_truncate_local(config: &TruncateConfig) -> Result<TruncateResult> {
     })
 }
 
+fn collect_local_parquet_targets(path: &Path) -> Result<Vec<PathBuf>> {
+    let mut files = Vec::new();
+    if path.is_file() {
+        if is_parquet_file(path) {
+            files.push(path.to_path_buf());
+        }
+    } else {
+        collect_parquet_files_recursive(path, &mut files)?;
+        files.sort();
+    }
+    Ok(files)
+}
+
+fn local_match_path(file: &Path, root: &Path) -> String {
+    if root.is_file() {
+        file.file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| file.to_string_lossy().into_owned())
+    } else {
+        file.strip_prefix(root)
+            .unwrap_or(file)
+            .to_string_lossy()
+            .into_owned()
+    }
+}
+
+fn is_parquet_file(path: &Path) -> bool {
+    path.extension().is_some_and(|ext| ext == "parquet")
+}
+
 fn collect_parquet_files_recursive(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
     if !dir.is_dir() {
         return Ok(());
@@ -179,7 +204,7 @@ fn collect_parquet_files_recursive(dir: &Path, out: &mut Vec<PathBuf>) -> Result
         let path = entry.path();
         if path.is_dir() {
             collect_parquet_files_recursive(&path, out)?;
-        } else if path.extension().map_or(false, |ext| ext == "parquet") {
+        } else if is_parquet_file(&path) {
             out.push(path);
         }
     }
@@ -299,4 +324,100 @@ fn run_truncate_s3(config: &TruncateConfig) -> Result<TruncateResult> {
         bytes_freed,
         dirs_removed: 0,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn write_test_file(path: &Path, contents: &[u8]) {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(path, contents).unwrap();
+    }
+
+    #[test]
+    fn collect_local_parquet_targets_includes_root_level_artifacts() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("mainnet");
+        write_test_file(&root.join("partitions.parquet"), b"partitions");
+        write_test_file(&root.join("cursor.parquet"), b"cursor");
+        write_test_file(
+            &root.join("blocks/year=2024/month=01/date=15/part-0001.parquet"),
+            b"blocks",
+        );
+        write_test_file(&root.join("README.txt"), b"not parquet");
+
+        let files = collect_local_parquet_targets(&root).unwrap();
+        let rel_paths: Vec<_> = files
+            .iter()
+            .map(|path| {
+                path.strip_prefix(&root)
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect();
+
+        assert_eq!(
+            rel_paths,
+            vec![
+                "blocks/year=2024/month=01/date=15/part-0001.parquet".to_string(),
+                "cursor.parquet".to_string(),
+                "partitions.parquet".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn run_truncate_local_dry_run_counts_root_level_artifacts_without_deleting() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("mainnet");
+        write_test_file(&root.join("partitions.parquet"), b"partitions");
+        write_test_file(&root.join("cursor.parquet"), b"cursor");
+        write_test_file(
+            &root.join("blocks/year=2024/month=01/date=15/part-0001.parquet"),
+            b"blocks",
+        );
+
+        let result = run_truncate_local(&TruncateConfig {
+            path: root.to_string_lossy().into_owned(),
+            partitions: vec![],
+            dry_run: true,
+            aws: None,
+        })
+        .unwrap();
+
+        assert_eq!(result.files_deleted, 3);
+        assert!(root.join("partitions.parquet").exists());
+        assert!(root.join("cursor.parquet").exists());
+        assert!(root
+            .join("blocks/year=2024/month=01/date=15/part-0001.parquet")
+            .exists());
+    }
+
+    #[test]
+    fn run_truncate_local_deletes_single_explicit_parquet_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("unichain");
+        let partitions = root.join("partitions.parquet");
+        let cursor = root.join("cursor.parquet");
+        write_test_file(&partitions, b"partitions");
+        write_test_file(&cursor, b"cursor");
+
+        let result = run_truncate_local(&TruncateConfig {
+            path: partitions.to_string_lossy().into_owned(),
+            partitions: vec![],
+            dry_run: false,
+            aws: None,
+        })
+        .unwrap();
+
+        assert_eq!(result.files_deleted, 1);
+        assert_eq!(result.bytes_freed, b"partitions".len() as u64);
+        assert_eq!(result.dirs_removed, 0);
+        assert!(!partitions.exists());
+        assert!(cursor.exists());
+    }
 }
