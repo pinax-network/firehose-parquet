@@ -1102,36 +1102,37 @@ mod tests {
         let batches = mapper.flush().unwrap();
         let sc_batch = &batches["state_changes"];
         assert_eq!(sc_batch.num_rows(), 1);
+        let schema = sc_batch.schema();
 
         // Verify type and cause
         let type_col = sc_batch
-            .column(6)
+            .column(schema.index_of("type").unwrap())
             .as_any()
             .downcast_ref::<StringArray>()
             .unwrap();
         assert_eq!(type_col.value(0), "DataUpdate");
         let cause_col = sc_batch
-            .column(7)
+            .column(schema.index_of("cause").unwrap())
             .as_any()
             .downcast_ref::<StringArray>()
             .unwrap();
         assert_eq!(cause_col.value(0), "ReceiptProcessing");
         let account_col = sc_batch
-            .column(8)
+            .column(schema.index_of("account_id").unwrap())
             .as_any()
             .downcast_ref::<StringArray>()
             .unwrap();
         assert_eq!(account_col.value(0), "contract.near");
         // key_base64 for "mykey" is "bXlrZXk="
         let key_col = sc_batch
-            .column(9)
+            .column(schema.index_of("key_base64").unwrap())
             .as_any()
             .downcast_ref::<StringArray>()
             .unwrap();
         assert_eq!(key_col.value(0), "bXlrZXk=");
         // value_base64 for "myvalue" is "bXl2YWx1ZQ=="
         let val_col = sc_batch
-            .column(10)
+            .column(schema.index_of("value_base64").unwrap())
             .as_any()
             .downcast_ref::<StringArray>()
             .unwrap();

@@ -2472,8 +2472,12 @@ mod tests {
             .unwrap();
         let batches = mapper.flush().unwrap();
         assert_eq!(batches["blocks"].num_rows(), 1);
-        // hash is after canonical fields (6 fields) and number field: index 7
-        let hash_col = batches["blocks"].column(7);
+        let hash_col = batches["blocks"].column(
+            batches["blocks"]
+                .schema()
+                .index_of("hash")
+                .expect("hash field should exist"),
+        );
         assert_eq!(*hash_col.data_type(), arrow::datatypes::DataType::Binary);
     }
 
@@ -2487,7 +2491,12 @@ mod tests {
             .unwrap();
         let batches = mapper.flush().unwrap();
         assert_eq!(batches["blocks"].num_rows(), 1);
-        let hash_col = batches["blocks"].column(7);
+        let hash_col = batches["blocks"].column(
+            batches["blocks"]
+                .schema()
+                .index_of("hash")
+                .expect("hash field should exist"),
+        );
         assert_eq!(*hash_col.data_type(), arrow::datatypes::DataType::Utf8);
     }
 }
