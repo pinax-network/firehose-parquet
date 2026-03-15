@@ -32,6 +32,18 @@ fn mk_fork_step(include: bool) -> Option<StringBuilder> {
     }
 }
 
+fn tron_reserved_encoding(encoding: &EncodeBytes) -> EncodeBytes {
+    match encoding {
+        // Tron Base58Check is only appropriate for address/account-like values.
+        // Keep protocol-native hash/topic identifiers as raw hex without `0x`.
+        // Besides the requested block/parent/transaction hash and log topic fields,
+        // `tx_trie_root` and internal transaction `hash` also stay hex because
+        // they are hash-like protocol identifiers rather than addresses.
+        EncodeBytes::TronBase58 => EncodeBytes::HexNoPrefix,
+        other => other.clone(),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Tron BlockMapper
 // ---------------------------------------------------------------------------
@@ -331,14 +343,15 @@ struct BlocksBuilder {
 
 impl BlocksBuilder {
     fn new(include_fork_step: bool, encoding: &EncodeBytes) -> Self {
+        let reserved_encoding = tron_reserved_encoding(encoding);
         Self {
             canonical: CanonicalBuilder::with_encoding(encoding),
             number: UInt64Builder::new(),
-            hash: BytesColumn::new(encoding),
-            parent_hash: BytesColumn::new(encoding),
+            hash: BytesColumn::new(&reserved_encoding),
+            parent_hash: BytesColumn::new(&reserved_encoding),
             witness_address: BytesColumn::new(encoding),
             version: UInt32Builder::new(),
-            tx_trie_root: BytesColumn::new(encoding),
+            tx_trie_root: BytesColumn::new(&reserved_encoding),
             parent_number: UInt64Builder::new(),
             num_transactions: UInt32Builder::new(),
             fork_step: mk_fork_step(include_fork_step),
@@ -379,10 +392,11 @@ struct TransactionsBuilder {
 
 impl TransactionsBuilder {
     fn new(include_fork_step: bool, encoding: &EncodeBytes) -> Self {
+        let reserved_encoding = tron_reserved_encoding(encoding);
         Self {
             canonical: CanonicalBuilder::with_encoding(encoding),
             block_number: UInt64Builder::new(),
-            txid: BytesColumn::new(encoding),
+            txid: BytesColumn::new(&reserved_encoding),
             result: BooleanBuilder::new(),
             code: Int32Builder::new(),
             energy_used: Int64Builder::new(),
@@ -430,16 +444,17 @@ struct LogsBuilder {
 
 impl LogsBuilder {
     fn new(include_fork_step: bool, encoding: &EncodeBytes) -> Self {
+        let reserved_encoding = tron_reserved_encoding(encoding);
         Self {
             canonical: CanonicalBuilder::with_encoding(encoding),
             block_number: UInt64Builder::new(),
-            tx_hash: BytesColumn::new(encoding),
+            tx_hash: BytesColumn::new(&reserved_encoding),
             log_index: UInt32Builder::new(),
             address: BytesColumn::new(encoding),
-            topic0: BytesColumn::new(encoding),
-            topic1: BytesColumn::new(encoding),
-            topic2: BytesColumn::new(encoding),
-            topic3: BytesColumn::new(encoding),
+            topic0: BytesColumn::new(&reserved_encoding),
+            topic1: BytesColumn::new(&reserved_encoding),
+            topic2: BytesColumn::new(&reserved_encoding),
+            topic3: BytesColumn::new(&reserved_encoding),
             data: BytesColumn::new(encoding),
             fork_step: mk_fork_step(include_fork_step),
         }
@@ -478,12 +493,13 @@ struct InternalTransactionsBuilder {
 
 impl InternalTransactionsBuilder {
     fn new(include_fork_step: bool, encoding: &EncodeBytes) -> Self {
+        let reserved_encoding = tron_reserved_encoding(encoding);
         Self {
             canonical: CanonicalBuilder::with_encoding(encoding),
             block_number: UInt64Builder::new(),
-            tx_hash: BytesColumn::new(encoding),
+            tx_hash: BytesColumn::new(&reserved_encoding),
             internal_index: UInt32Builder::new(),
-            hash: BytesColumn::new(encoding),
+            hash: BytesColumn::new(&reserved_encoding),
             caller_address: BytesColumn::new(encoding),
             transfer_to_address: BytesColumn::new(encoding),
             note: StringBuilder::new(),
@@ -517,6 +533,23 @@ impl InternalTransactionsBuilder {
 mod tests {
     use super::super::proto::{protocol, tron};
     use super::*;
+    use firehose_parquet::encode::{encode_hex_no_prefix, encode_tron_base58};
+
+    fn tron_address(seed: u8) -> Vec<u8> {
+        let mut address = vec![0x41];
+        address.extend(std::iter::repeat_n(seed, 20));
+        address
+    }
+
+    fn string_col<'a>(batch: &'a RecordBatch, name: &str) -> &'a StringArray {
+        let column = batch
+            .column_by_name(name)
+            .unwrap_or_else(|| panic!("missing column {name}"));
+        column
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap_or_else(|| panic!("column {name} is not Utf8"))
+    }
 
     fn make_test_block(number: u64) -> tron::Block {
         tron::Block {
@@ -524,7 +557,7 @@ mod tests {
             header: Some(tron::BlockHeader {
                 number,
                 tx_trie_root: vec![0xaa, 0xbb],
-                witness_address: vec![0x41, 0x01, 0x02],
+                witness_address: tron_address(0x11),
                 parent_number: number.saturating_sub(1),
                 parent_hash: vec![0x00, 0x01, 0x02],
                 version: 28,
@@ -553,7 +586,7 @@ mod tests {
                     contract_address: vec![],
                     receipt: None,
                     log: vec![protocol::transaction_info::Log {
-                        address: vec![0x41, 0x10, 0x20],
+                        address: tron_address(0x22),
                         topics: vec![vec![0xab, 0xcd], vec![0xef, 0x01]],
                         data: vec![0x01, 0x02, 0x03],
                     }],
@@ -564,8 +597,8 @@ mod tests {
                     unfreeze_amount: 0,
                     internal_transactions: vec![protocol::InternalTransaction {
                         hash: vec![0x11, 0x22],
-                        caller_address: vec![0x41, 0xaa],
-                        transfer_to_address: vec![0x41, 0xbb],
+                        caller_address: tron_address(0xaa),
+                        transfer_to_address: tron_address(0xbb),
                         call_value_info: vec![],
                         note: b"call".to_vec(),
                         rejected: false,
@@ -678,5 +711,66 @@ mod tests {
             .downcast_ref::<StringArray>()
             .unwrap();
         assert_eq!(fork_col.value(0), "FINAL");
+    }
+
+    #[test]
+    fn test_tron_base58_keeps_reserved_hash_fields_hex_without_prefix() {
+        let block = make_test_block(100);
+        let block_bytes = prost::Message::encode_to_vec(&block);
+        let identity = BlockIdentity {
+            block_num: 100,
+            block_id: "0x010203".to_string(),
+            parent_num: 99,
+            parent_id: "0x000102".to_string(),
+            lib_num: 100,
+            timestamp: 1_700_000_000,
+            fork_step: None,
+        };
+        let mut mapper = TronBlockMapper::new(false, EncodeBytes::TronBase58, false);
+        mapper.map_block(&block_bytes, &identity, None).unwrap();
+
+        let batches = mapper.flush().unwrap();
+
+        let blocks = &batches["blocks"];
+        assert_eq!(string_col(blocks, "block_id").value(0), "010203");
+        assert_eq!(string_col(blocks, "parent_id").value(0), "000102");
+        assert_eq!(string_col(blocks, "hash").value(0), "010203");
+        assert_eq!(string_col(blocks, "parent_hash").value(0), "000102");
+        assert_eq!(string_col(blocks, "tx_trie_root").value(0), "aabb");
+        assert_eq!(
+            string_col(blocks, "witness_address").value(0),
+            encode_tron_base58(&tron_address(0x11))
+        );
+
+        let transactions = &batches["transactions"];
+        assert_eq!(string_col(transactions, "txid").value(0), "deadbeef");
+
+        let logs = &batches["logs"];
+        assert_eq!(string_col(logs, "tx_hash").value(0), "deadbeef");
+        assert_eq!(
+            string_col(logs, "address").value(0),
+            encode_tron_base58(&tron_address(0x22))
+        );
+        assert_eq!(string_col(logs, "topic0").value(0), "abcd");
+        assert_eq!(string_col(logs, "topic1").value(0), "ef01");
+        assert_eq!(
+            string_col(logs, "data").value(0),
+            encode_hex_no_prefix(&[0x01, 0x02, 0x03])
+        );
+
+        let internal_transactions = &batches["internal_transactions"];
+        assert_eq!(
+            string_col(internal_transactions, "tx_hash").value(0),
+            "deadbeef"
+        );
+        assert_eq!(string_col(internal_transactions, "hash").value(0), "1122");
+        assert_eq!(
+            string_col(internal_transactions, "caller_address").value(0),
+            encode_tron_base58(&tron_address(0xaa))
+        );
+        assert_eq!(
+            string_col(internal_transactions, "transfer_to_address").value(0),
+            encode_tron_base58(&tron_address(0xbb))
+        );
     }
 }

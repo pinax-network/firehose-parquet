@@ -4646,6 +4646,18 @@ mod tests {
     }
 
     #[test]
+    fn test_build_help_mentions_tron_bytes_encoding_behavior() {
+        let cmd = Cli::command();
+        let build_subcmd = cmd
+            .get_subcommands()
+            .find(|sc| sc.get_name() == "build")
+            .expect("build subcommand should exist");
+        let help = build_subcmd.clone().render_long_help().to_string();
+        assert!(help.contains("For Tron, `auto` resolves to `tron_base58`"));
+        assert!(help.contains("hashes and topics stay raw hex without `0x`"));
+    }
+
+    #[test]
     fn test_build_subcommand_rejects_removed_partition_index_flags() {
         for (flag, value) in [
             ("--partitions-index", "./partitions.parquet"),

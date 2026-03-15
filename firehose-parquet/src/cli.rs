@@ -396,6 +396,7 @@ pub struct BuildArgs {
 
     /// Byte encoding strategy for binary fields (hashes, addresses, etc.)
     /// Options: binary (raw bytes), hex (0x-prefixed), hex_no_prefix, base58, tron_base58, auto (chain-appropriate)
+    /// For Tron, `auto` resolves to `tron_base58`; reserved block/transaction hashes and topics stay raw hex without `0x`.
     #[arg(
         long,
         env = "BYTES_ENCODING",

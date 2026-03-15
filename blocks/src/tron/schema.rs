@@ -8,16 +8,24 @@ fn maybe_fork_step(fields: &mut Vec<Field>, include: bool) {
     }
 }
 
+fn tron_reserved_encoding(encoding: &EncodeBytes) -> EncodeBytes {
+    match encoding {
+        EncodeBytes::TronBase58 => EncodeBytes::HexNoPrefix,
+        other => other.clone(),
+    }
+}
+
 pub fn blocks_schema(include_fork_step: bool, encoding: &EncodeBytes) -> Schema {
     let bd = bytes_data_type(encoding);
+    let reserved_bd = bytes_data_type(&tron_reserved_encoding(encoding));
     let mut fields = canonical_fields_with_encoding(encoding);
     fields.extend(vec![
         Field::new("number", DataType::UInt64, false),
-        Field::new("hash", bd.clone(), false),
-        Field::new("parent_hash", bd.clone(), false),
+        Field::new("hash", reserved_bd.clone(), false),
+        Field::new("parent_hash", reserved_bd.clone(), false),
         Field::new("witness_address", bd.clone(), false),
         Field::new("version", DataType::UInt32, false),
-        Field::new("tx_trie_root", bd, false),
+        Field::new("tx_trie_root", reserved_bd, false),
         Field::new("parent_number", DataType::UInt64, false),
         Field::new("num_transactions", DataType::UInt32, false),
     ]);
@@ -26,11 +34,11 @@ pub fn blocks_schema(include_fork_step: bool, encoding: &EncodeBytes) -> Schema 
 }
 
 pub fn transactions_schema(include_fork_step: bool, encoding: &EncodeBytes) -> Schema {
-    let bd = bytes_data_type(encoding);
+    let reserved_bd = bytes_data_type(&tron_reserved_encoding(encoding));
     let mut fields = canonical_fields_with_encoding(encoding);
     fields.extend(vec![
         Field::new("block_number", DataType::UInt64, false),
-        Field::new("txid", bd, false),
+        Field::new("txid", reserved_bd, false),
         Field::new("result", DataType::Boolean, false),
         Field::new("code", DataType::Int32, false),
         Field::new("energy_used", DataType::Int64, false),
@@ -46,16 +54,17 @@ pub fn transactions_schema(include_fork_step: bool, encoding: &EncodeBytes) -> S
 
 pub fn logs_schema(include_fork_step: bool, encoding: &EncodeBytes) -> Schema {
     let bd = bytes_data_type(encoding);
+    let reserved_bd = bytes_data_type(&tron_reserved_encoding(encoding));
     let mut fields = canonical_fields_with_encoding(encoding);
     fields.extend(vec![
         Field::new("block_number", DataType::UInt64, false),
-        Field::new("tx_hash", bd.clone(), false),
+        Field::new("tx_hash", reserved_bd.clone(), false),
         Field::new("log_index", DataType::UInt32, false),
         Field::new("address", bd.clone(), false),
-        Field::new("topic0", bd.clone(), true),
-        Field::new("topic1", bd.clone(), true),
-        Field::new("topic2", bd.clone(), true),
-        Field::new("topic3", bd.clone(), true),
+        Field::new("topic0", reserved_bd.clone(), true),
+        Field::new("topic1", reserved_bd.clone(), true),
+        Field::new("topic2", reserved_bd.clone(), true),
+        Field::new("topic3", reserved_bd.clone(), true),
         Field::new("data", bd, false),
     ]);
     maybe_fork_step(&mut fields, include_fork_step);
@@ -64,12 +73,13 @@ pub fn logs_schema(include_fork_step: bool, encoding: &EncodeBytes) -> Schema {
 
 pub fn internal_transactions_schema(include_fork_step: bool, encoding: &EncodeBytes) -> Schema {
     let bd = bytes_data_type(encoding);
+    let reserved_bd = bytes_data_type(&tron_reserved_encoding(encoding));
     let mut fields = canonical_fields_with_encoding(encoding);
     fields.extend(vec![
         Field::new("block_number", DataType::UInt64, false),
-        Field::new("tx_hash", bd.clone(), false),
+        Field::new("tx_hash", reserved_bd.clone(), false),
         Field::new("internal_index", DataType::UInt32, false),
-        Field::new("hash", bd.clone(), false),
+        Field::new("hash", reserved_bd.clone(), false),
         Field::new("caller_address", bd.clone(), false),
         Field::new("transfer_to_address", bd, false),
         Field::new("note", DataType::Utf8, false),

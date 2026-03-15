@@ -75,7 +75,7 @@ fn checksum4(data: &[u8]) -> [u8; 4] {
 /// Encode bytes as a Tron Base58Check address.
 /// - 20 bytes → prepend version byte (0x41), append checksum, base58 encode.
 /// - 21 bytes → assume version byte already present, append checksum, base58 encode.
-/// - Other lengths → fall back to hex encoding.
+/// - Other lengths → fall back to hex encoding without `0x`.
 pub fn encode_tron_base58(bytes: &[u8]) -> String {
     match bytes.len() {
         20 => {
@@ -92,7 +92,7 @@ pub fn encode_tron_base58(bytes: &[u8]) -> String {
             data.extend_from_slice(&chk);
             bs58::encode(data).into_string()
         }
-        _ => encode_hex(bytes),
+        _ => encode_hex_no_prefix(bytes),
     }
 }
 
@@ -328,8 +328,17 @@ mod tests {
         // Non-address size (e.g., 32-byte hash) → falls back to hex
         let hash = [0xab; 32];
         let encoded = encode_tron_base58(&hash);
-        assert!(encoded.starts_with("0x"));
-        assert_eq!(encoded, encode_hex(&hash));
+        assert!(!encoded.starts_with("0x"));
+        assert_eq!(encoded, encode_hex_no_prefix(&hash));
+    }
+
+    #[test]
+    fn test_encode_id_tron_base58_falls_back_to_hex_no_prefix() {
+        assert_eq!(
+            encode_id("0xdeadbeef", &EncodeBytes::TronBase58),
+            "deadbeef"
+        );
+        assert_eq!(encode_id("deadbeef", &EncodeBytes::TronBase58), "deadbeef");
     }
 
     #[test]
