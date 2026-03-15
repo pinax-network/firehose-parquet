@@ -1,6 +1,6 @@
 use arrow::array::{
-    ArrayBuilder, BinaryBuilder, BooleanBuilder, Float64Builder, Int32Builder, Int64Builder,
-    ListBuilder, StringBuilder, TimestampSecondBuilder, UInt32Builder, UInt64Builder,
+    ArrayBuilder, BinaryBuilder, BooleanBuilder, Date32Builder, Float64Builder, Int32Builder,
+    Int64Builder, ListBuilder, StringBuilder, TimestampSecondBuilder, UInt32Builder, UInt64Builder,
 };
 use arrow::datatypes::{DataType, Field, TimeUnit};
 use arrow::record_batch::RecordBatch;
@@ -35,6 +35,11 @@ pub fn est_ts_sec(b: &TimestampSecondBuilder) -> usize {
 
 /// Estimate memory usage of an `Int32Builder`.
 pub fn est_i32(b: &Int32Builder) -> usize {
+    b.len() * 4
+}
+
+/// Estimate memory usage of a `Date32Builder`.
+pub fn est_date32(b: &Date32Builder) -> usize {
     b.len() * 4
 }
 
@@ -92,7 +97,20 @@ pub struct BlockIdentity {
     pub fork_step: Option<String>,
 }
 
-/// Returns the 6 canonical identity fields to prepend to every schema.
+/// Convert a block timestamp expressed as UTC unix seconds into Arrow `Date32`
+/// days since epoch.
+pub fn date32_from_timestamp_seconds(timestamp_seconds: i64) -> i32 {
+    timestamp_seconds
+        .div_euclid(86_400)
+        .try_into()
+        .unwrap_or_else(|_| {
+            panic!(
+                "block timestamp {timestamp_seconds} exceeds Arrow Date32 range when converted to days"
+            )
+        })
+}
+
+/// Returns the 7 canonical identity fields to prepend to every schema.
 /// Uses the given encoding to determine the data type of block_id/parent_id.
 pub fn canonical_fields_with_encoding(encoding: &EncodeBytes) -> Vec<Field> {
     let id_type = bytes_data_type(encoding);
@@ -107,10 +125,11 @@ pub fn canonical_fields_with_encoding(encoding: &EncodeBytes) -> Vec<Field> {
             DataType::Timestamp(TimeUnit::Second, Some(Arc::from("UTC"))),
             false,
         ),
+        Field::new("date", DataType::Date32, false),
     ]
 }
 
-/// Returns the 6 canonical identity fields (Utf8 block_id/parent_id).
+/// Returns the 7 canonical identity fields (Utf8 block_id/parent_id).
 /// Use `canonical_fields_with_encoding` when encoding matters.
 pub fn canonical_fields() -> Vec<Field> {
     canonical_fields_with_encoding(&EncodeBytes::Hex)
@@ -130,6 +149,7 @@ pub struct CanonicalBuilder {
     parent_id: BytesColumn,
     pub lib_num: UInt64Builder,
     pub timestamp: TimestampSecondBuilder,
+    pub date: Date32Builder,
 }
 
 impl CanonicalBuilder {
@@ -146,6 +166,7 @@ impl CanonicalBuilder {
             parent_id: BytesColumn::new(encoding),
             lib_num: UInt64Builder::new(),
             timestamp: TimestampSecondBuilder::new().with_timezone("UTC"),
+            date: Date32Builder::new(),
         }
     }
 
@@ -154,6 +175,8 @@ impl CanonicalBuilder {
         self.parent_num.append_value(id.parent_num);
         self.lib_num.append_value(id.lib_num);
         self.timestamp.append_value(id.timestamp);
+        self.date
+            .append_value(date32_from_timestamp_seconds(id.timestamp));
 
         // Decode hex ID strings to bytes, then encode through BytesColumn.
         let block_id_bytes = decode_id_bytes(&id.block_id);
@@ -170,6 +193,7 @@ impl CanonicalBuilder {
             self.parent_id.finish(),
             Arc::new(self.lib_num.finish()),
             Arc::new(self.timestamp.finish()),
+            Arc::new(self.date.finish()),
         ]
     }
 
@@ -185,6 +209,7 @@ impl CanonicalBuilder {
             + self.parent_id.estimated_bytes()
             + est_u64(&self.lib_num)
             + est_ts_sec(&self.timestamp)
+            + est_date32(&self.date)
     }
 }
 
@@ -262,4 +287,55 @@ pub trait BlockMapper {
 
     /// Get table names.
     fn table_names(&self) -> Vec<&str>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use arrow::array::Date32Array;
+
+    #[test]
+    fn test_date32_from_timestamp_seconds_uses_utc_days() {
+        assert_eq!(date32_from_timestamp_seconds(0), 0);
+        assert_eq!(date32_from_timestamp_seconds(86_399), 0);
+        assert_eq!(date32_from_timestamp_seconds(86_400), 1);
+        assert_eq!(date32_from_timestamp_seconds(-1), -1);
+    }
+
+    #[test]
+    fn test_canonical_fields_include_date32() {
+        let fields = canonical_fields();
+        let date_field = fields
+            .iter()
+            .find(|field| field.name() == "date")
+            .expect("date field should be present");
+
+        assert_eq!(date_field.data_type(), &DataType::Date32);
+        assert!(!date_field.is_nullable());
+    }
+
+    #[test]
+    fn test_canonical_builder_derives_date_column_from_timestamp() {
+        let mut builder = CanonicalBuilder::new();
+        builder.append(&BlockIdentity {
+            block_num: 42,
+            block_id: "aa".to_string(),
+            parent_num: 41,
+            parent_id: "bb".to_string(),
+            lib_num: 40,
+            timestamp: 1_700_000_000,
+            fork_step: None,
+        });
+
+        let columns = builder.finish();
+        let date_array = columns[6]
+            .as_any()
+            .downcast_ref::<Date32Array>()
+            .expect("date column should be Date32");
+
+        assert_eq!(
+            date_array.value(0),
+            date32_from_timestamp_seconds(1_700_000_000)
+        );
+    }
 }

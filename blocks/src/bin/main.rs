@@ -1,5 +1,7 @@
 use anyhow::{anyhow, Result};
-use arrow::array::{Array, TimestampSecondArray, TimestampSecondBuilder};
+use arrow::array::{
+    Array, Date32Array, Date32Builder, TimestampSecondArray, TimestampSecondBuilder,
+};
 use arrow::datatypes::{Field, Schema};
 use arrow::record_batch::RecordBatch;
 use clap::{Args, Parser};
@@ -21,7 +23,9 @@ use firehose_parquet::encode::{parse_encode_bytes, EncodeBytes};
 use firehose_parquet::grpc::{EndpointInfo, FirehoseClient};
 use firehose_parquet::metrics;
 use firehose_parquet::networks::{resolve_network_endpoint, EndpointSource};
-use firehose_parquet::traits::{decode_id_bytes, fork_step_name, BlockIdentity, BlockMapper};
+use firehose_parquet::traits::{
+    date32_from_timestamp_seconds, decode_id_bytes, fork_step_name, BlockIdentity, BlockMapper,
+};
 use firehose_parquet::writer::{OutputWriter, ParquetFileMetadata};
 use object_store::ObjectStore;
 use std::path::PathBuf;
@@ -329,6 +333,7 @@ fn rewrite_timestamp_column(batch: &RecordBatch, nullable_timestamps: bool) -> R
     };
 
     let timestamp_field = schema.field(timestamp_index);
+    let date_index = schema.index_of("date").ok();
     let timestamp_array = batch
         .column(timestamp_index)
         .as_any()
@@ -339,13 +344,37 @@ fn rewrite_timestamp_column(batch: &RecordBatch, nullable_timestamps: bool) -> R
                 timestamp_field.data_type()
             )
         })?;
+    let date_field_and_array = if let Some(date_index) = date_index {
+        let date_field = schema.field(date_index);
+        batch
+            .column(date_index)
+            .as_any()
+            .downcast_ref::<Date32Array>()
+            .ok_or_else(|| {
+                anyhow!(
+                    "date column expected Date32, got {}",
+                    date_field.data_type()
+                )
+            })?;
+        Some((date_index, date_field.as_ref().clone()))
+    } else {
+        None
+    };
 
-    let mut builder = TimestampSecondBuilder::new().with_timezone("UTC");
+    let mut timestamp_builder = TimestampSecondBuilder::new().with_timezone("UTC");
+    let mut date_builder = date_field_and_array.as_ref().map(|_| Date32Builder::new());
     for row_index in 0..batch.num_rows() {
         if timestamp_array.is_null(row_index) || timestamp_array.value(row_index) == 0 {
-            builder.append_null();
+            timestamp_builder.append_null();
+            if let Some(ref mut builder) = date_builder {
+                builder.append_null();
+            }
         } else {
-            builder.append_value(timestamp_array.value(row_index));
+            let timestamp = timestamp_array.value(row_index);
+            timestamp_builder.append_value(timestamp);
+            if let Some(ref mut builder) = date_builder {
+                builder.append_value(date32_from_timestamp_seconds(timestamp));
+            }
         }
     }
 
@@ -360,10 +389,16 @@ fn rewrite_timestamp_column(batch: &RecordBatch, nullable_timestamps: bool) -> R
         timestamp_field.data_type().clone(),
         true,
     );
+    if let Some((date_index, date_field)) = date_field_and_array {
+        fields[date_index] = Field::new(date_field.name(), date_field.data_type().clone(), true);
+    }
 
     let schema = std::sync::Arc::new(Schema::new_with_metadata(fields, schema.metadata().clone()));
     let mut columns = batch.columns().to_vec();
-    columns[timestamp_index] = std::sync::Arc::new(builder.finish());
+    columns[timestamp_index] = std::sync::Arc::new(timestamp_builder.finish());
+    if let (Some(date_index), Some(mut builder)) = (date_index, date_builder) {
+        columns[date_index] = std::sync::Arc::new(builder.finish());
+    }
 
     Ok(RecordBatch::try_new(schema, columns)?)
 }
@@ -5396,6 +5431,7 @@ mod tests {
                 ),
                 false,
             ),
+            Field::new("date", arrow::datatypes::DataType::Date32, false),
         ]));
         let batch = RecordBatch::try_new(
             schema,
@@ -5405,6 +5441,10 @@ mod tests {
                     TimestampSecondArray::from(vec![Some(1_700_000_000), Some(0)])
                         .with_timezone("UTC"),
                 ),
+                std::sync::Arc::new(arrow::array::Date32Array::from(vec![
+                    Some(date32_from_timestamp_seconds(1_700_000_000)),
+                    Some(date32_from_timestamp_seconds(0)),
+                ])),
             ],
         )
         .expect("record batch should build");
@@ -5416,6 +5456,10 @@ mod tests {
             .field_with_name("timestamp")
             .expect("timestamp field should exist");
         assert!(timestamp_field.is_nullable());
+        let date_field = rewritten_schema
+            .field_with_name("date")
+            .expect("date field should exist");
+        assert!(date_field.is_nullable());
 
         let timestamp_array = rewritten
             .column(
@@ -5428,6 +5472,17 @@ mod tests {
             .expect("timestamp column type should be preserved");
         assert_eq!(timestamp_array.value(0), 1_700_000_000);
         assert!(timestamp_array.is_null(1));
+
+        let date_array = rewritten
+            .column(rewritten_schema.index_of("date").expect("date index"))
+            .as_any()
+            .downcast_ref::<Date32Array>()
+            .expect("date column type should be preserved");
+        assert_eq!(
+            date_array.value(0),
+            date32_from_timestamp_seconds(1_700_000_000)
+        );
+        assert!(date_array.is_null(1));
     }
 
     #[test]
