@@ -18,7 +18,9 @@ use firehose_parquet::encode::{parse_encode_bytes, EncodeBytes};
 use firehose_parquet::grpc::{EndpointInfo, FirehoseClient};
 use firehose_parquet::metrics;
 use firehose_parquet::networks::{resolve_network_endpoint, EndpointSource};
-use firehose_parquet::traits::{decode_id_bytes, fork_step_name, BlockIdentity, BlockMapper};
+use firehose_parquet::traits::{
+    decode_id_bytes, fork_step_name, BlockIdentity, BlockMapper,
+};
 use firehose_parquet::writer::{OutputWriter, ParquetFileMetadata};
 use object_store::ObjectStore;
 use std::path::PathBuf;
@@ -201,7 +203,9 @@ fn validate_block_timestamp(
         ));
     }
 
-    Err(anyhow!("block {block_num} is missing timestamp metadata"))
+    Err(anyhow!(
+        "block {block_num} is missing timestamp metadata"
+    ))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -5261,15 +5265,13 @@ mod tests {
             &None,
         );
 
-        assert!(metadata
-            .entries
-            .iter()
-            .any(|(key, value)| { key == "firehose-parquet.block_type" && value == "solana" }));
+        assert!(metadata.entries.iter().any(|(key, value)| {
+            key == "firehose-parquet.block_type" && value == "solana"
+        }));
         // strict_timestamps is no longer recorded in metadata
-        assert!(!metadata
-            .entries
-            .iter()
-            .any(|(key, _)| { key == "firehose-parquet.strict_timestamps" }));
+        assert!(!metadata.entries.iter().any(|(key, _)| {
+            key == "firehose-parquet.strict_timestamps"
+        }));
     }
 
     #[test]
