@@ -13,6 +13,7 @@ use parquet::arrow::ArrowWriter;
 use parquet::file::metadata::KeyValue;
 use parquet::file::properties::WriterProperties;
 
+use crate::encode::{parse_encode_bytes, EncodeBytes};
 use crate::writer::ParquetFileMetadata;
 
 /// The filename used for the cursor parquet file.
@@ -54,6 +55,89 @@ fn cursor_schema() -> Schema {
         Field::new("final_blocks_only", DataType::Boolean, false),
         Field::new("include_failed_transactions", DataType::Boolean, false),
     ])
+}
+
+fn encode_bytes_label(encoding: &EncodeBytes) -> &'static str {
+    match encoding {
+        EncodeBytes::Binary => "binary",
+        EncodeBytes::Hex => "hex",
+        EncodeBytes::HexNoPrefix => "hex_no_prefix",
+        EncodeBytes::Base58 => "base58",
+        EncodeBytes::TronBase58 => "tron_base58",
+    }
+}
+
+fn block_id_encoding_to_bytes_encoding(encoding: &str) -> Option<EncodeBytes> {
+    match encoding {
+        // Firehose block-id hints describe how canonical IDs are rendered, but
+        // cursor compatibility only needs the effective byte-field encoding.
+        // Both hex variants therefore normalize to the same EncodeBytes::Hex.
+        "hex" | "hex_0x" => Some(EncodeBytes::Hex),
+        "base58" => Some(EncodeBytes::Base58),
+        _ => None,
+    }
+}
+
+fn is_tron_style_chain_name(chain_name: &str) -> bool {
+    chain_name.eq_ignore_ascii_case("tron") || chain_name.eq_ignore_ascii_case("tron-evm")
+}
+
+fn metadata_has_tron_style_chain(state: &CursorState) -> bool {
+    state
+        .get_metadata("firehose-parquet.chain_name")
+        .map(is_tron_style_chain_name)
+        .unwrap_or(false)
+        || state
+            .get_metadata("firehose-parquet.chain_name_aliases")
+            .map(|aliases| aliases.split(',').any(is_tron_style_chain_name))
+            .unwrap_or(false)
+}
+
+fn block_type_default_bytes_encoding(
+    block_type: &str,
+    tron_style_evm_profile: bool,
+) -> Option<EncodeBytes> {
+    match block_type {
+        "evm" if tron_style_evm_profile => Some(EncodeBytes::TronBase58),
+        "evm" | "bitcoin" | "antelope" | "cosmos" | "beacon" => Some(EncodeBytes::Hex),
+        "solana" | "near" => Some(EncodeBytes::Base58),
+        "tron" => Some(EncodeBytes::TronBase58),
+        _ => None,
+    }
+}
+
+/// Resolve `bytes_encoding=auto` from cursor metadata.
+///
+/// This prefers a known block-type output contract, then falls back to the
+/// stored block-id encoding hint, and finally defaults to hex when neither is
+/// available.
+fn resolve_auto_bytes_encoding(state: &CursorState) -> EncodeBytes {
+    let tron_style_evm_profile = metadata_has_tron_style_chain(state);
+
+    if let Some(block_type) = state.get_metadata("firehose-parquet.block_type") {
+        if let Some(encoding) =
+            block_type_default_bytes_encoding(block_type, tron_style_evm_profile)
+        {
+            return encoding;
+        }
+    }
+
+    state
+        .get_metadata("firehose-parquet.block_id_encoding")
+        .and_then(block_id_encoding_to_bytes_encoding)
+        .unwrap_or(EncodeBytes::Hex)
+}
+
+fn effective_bytes_encoding_label(state: &CursorState, raw: &str) -> String {
+    if let Some(encoding) = parse_encode_bytes(raw) {
+        return encode_bytes_label(&encoding).to_string();
+    }
+
+    if raw.eq_ignore_ascii_case("auto") {
+        return encode_bytes_label(&resolve_auto_bytes_encoding(state)).to_string();
+    }
+
+    raw.to_string()
 }
 
 impl CursorState {
@@ -154,7 +238,20 @@ impl CursorState {
             let stored = self.get_metadata(key).unwrap_or("");
             let current_val = current.get_metadata(key).unwrap_or("");
             // Skip comparison when the stored value is empty (older cursor without metadata).
-            if !stored.is_empty() && stored != current_val {
+            if stored.is_empty() {
+                continue;
+            }
+
+            if *key == "firehose-parquet.bytes_encoding" {
+                let stored_effective = effective_bytes_encoding_label(self, stored);
+                let current_effective = effective_bytes_encoding_label(current, current_val);
+                if stored_effective != current_effective {
+                    let short_key = key.strip_prefix("firehose-parquet.").unwrap_or(key);
+                    mismatches.push(format!(
+                        "{short_key}: cursor=\"{stored_effective}\" vs current=\"{current_effective}\""
+                    ));
+                }
+            } else if stored != current_val {
                 let short_key = key.strip_prefix("firehose-parquet.").unwrap_or(key);
                 mismatches.push(format!(
                     "{short_key}: cursor=\"{stored}\" vs current=\"{current_val}\""
@@ -566,6 +663,26 @@ mod tests {
         meta
     }
 
+    fn metadata_with_entries(updates: &[(&str, &str)], removals: &[&str]) -> ParquetFileMetadata {
+        let mut meta = test_file_metadata();
+        meta.entries
+            .retain(|(key, _)| !removals.iter().any(|removal| removal == key));
+
+        for (key, value) in updates {
+            if let Some((_, existing)) = meta
+                .entries
+                .iter_mut()
+                .find(|(existing, _)| existing == key)
+            {
+                *existing = value.to_string();
+            } else {
+                meta.add((*key).to_string(), (*value).to_string());
+            }
+        }
+
+        meta
+    }
+
     #[test]
     fn test_save_and_load_cursor_parquet() {
         let dir = TempDir::new().unwrap();
@@ -856,6 +973,100 @@ mod tests {
             .iter()
             .any(|m| m.contains("include_failed_transactions")));
         assert!(mismatches.iter().any(|m| m.contains("compression")));
+    }
+
+    #[test]
+    fn test_validate_params_resolves_auto_bytes_encoding_when_compatible() {
+        let stored_meta = metadata_with_entries(
+            &[
+                ("firehose-parquet.block_type", "solana"),
+                ("firehose-parquet.chain_name", "solana-mainnet-beta"),
+                ("firehose-parquet.chain_name_aliases", "solana"),
+                ("firehose-parquet.block_id_encoding", "base58"),
+                ("firehose-parquet.bytes_encoding", "base58"),
+            ],
+            &[],
+        );
+        let current_meta = metadata_with_entries(
+            &[
+                ("firehose-parquet.chain_name", "solana-mainnet-beta"),
+                ("firehose-parquet.chain_name_aliases", "solana"),
+                ("firehose-parquet.block_id_encoding", "base58"),
+                ("firehose-parquet.bytes_encoding", "auto"),
+            ],
+            &["firehose-parquet.block_type"],
+        );
+        // Simulate the pre-detection current cursor template built before an
+        // auto block type has been resolved. Validation should still use the
+        // endpoint-derived metadata to resolve auto -> base58.
+        let state = CursorState {
+            cursor: "c1".to_string(),
+            start_block: Some(100),
+            stop_block: Some(200),
+            extended: true,
+            final_blocks_only: true,
+            include_failed_transactions: false,
+            file_metadata: stored_meta,
+            ..CursorState::default()
+        };
+        let current = CursorState {
+            start_block: Some(100),
+            stop_block: Some(200),
+            extended: true,
+            final_blocks_only: true,
+            include_failed_transactions: false,
+            file_metadata: current_meta,
+            ..CursorState::default()
+        };
+
+        assert!(state.validate_params(&current).is_empty());
+    }
+
+    #[test]
+    fn test_validate_params_reports_effective_bytes_encoding_mismatch() {
+        let stored_meta = metadata_with_entries(
+            &[
+                ("firehose-parquet.block_type", "solana"),
+                ("firehose-parquet.chain_name", "solana-mainnet-beta"),
+                ("firehose-parquet.chain_name_aliases", "solana"),
+                ("firehose-parquet.block_id_encoding", "base58"),
+                ("firehose-parquet.bytes_encoding", "base58"),
+            ],
+            &[],
+        );
+        let current_meta = metadata_with_entries(
+            &[
+                ("firehose-parquet.chain_name", "eth-mainnet"),
+                ("firehose-parquet.chain_name_aliases", "ethereum,eth"),
+                ("firehose-parquet.block_id_encoding", "hex_0x"),
+                ("firehose-parquet.bytes_encoding", "auto"),
+            ],
+            &["firehose-parquet.block_type"],
+        );
+        let state = CursorState {
+            cursor: "c1".to_string(),
+            start_block: Some(100),
+            stop_block: Some(200),
+            extended: true,
+            final_blocks_only: true,
+            include_failed_transactions: false,
+            file_metadata: stored_meta,
+            ..CursorState::default()
+        };
+        let current = CursorState {
+            start_block: Some(100),
+            stop_block: Some(200),
+            extended: true,
+            final_blocks_only: true,
+            include_failed_transactions: false,
+            file_metadata: current_meta,
+            ..CursorState::default()
+        };
+
+        assert_eq!(
+            state.validate_params(&current),
+            vec!["bytes_encoding: cursor=\"base58\" vs current=\"hex\"".to_string()]
+        );
     }
 
     #[test]
