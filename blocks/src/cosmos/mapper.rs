@@ -3,7 +3,7 @@ use super::schema;
 use arrow::array::*;
 use arrow::datatypes::Schema;
 use arrow::record_batch::RecordBatch;
-use firehose_parquet::encode::{BytesColumn, EncodeBytes};
+use firehose_parquet::encode::{encode_hex, BytesColumn, EncodeBytes};
 use firehose_parquet::traits::{
     est_bin, est_i32, est_i64, est_opt_str, est_str, est_u32, BlockIdentity, BlockMapper,
     CanonicalBuilder,
@@ -36,6 +36,22 @@ fn mk_fork_step(include: bool) -> Option<StringBuilder> {
 /// Compute SHA256 hash of raw tx bytes, returning raw digest bytes.
 fn tx_hash_bytes(raw: &[u8]) -> Vec<u8> {
     Sha256::digest(raw).to_vec()
+}
+
+fn cosmos_parent_hash(block: &cosmos::Block) -> &[u8] {
+    block
+        .header
+        .as_ref()
+        .and_then(|header| header.last_block_id.as_ref())
+        .map(|block_id| block_id.hash.as_slice())
+        .unwrap_or(&[])
+}
+
+fn cosmos_canonical_identity(block: &cosmos::Block, identity: &BlockIdentity) -> BlockIdentity {
+    let mut canonical = identity.clone();
+    canonical.block_id = encode_hex(&block.hash);
+    canonical.parent_id = encode_hex(cosmos_parent_hash(block));
+    canonical
 }
 
 // ---------------------------------------------------------------------------
@@ -85,10 +101,7 @@ impl CosmosBlockMapper {
         let header = block.header.as_ref();
         let chain_id = header.map_or("", |h| &h.chain_id);
         let proposer_address = header.map(|h| h.proposer_address.as_slice()).unwrap_or(&[]);
-        let last_block_id_hash = header
-            .and_then(|h| h.last_block_id.as_ref())
-            .map(|bid| bid.hash.as_slice())
-            .unwrap_or(&[]);
+        let last_block_id_hash = cosmos_parent_hash(block);
         let validators_hash = header.map(|h| h.validators_hash.as_slice()).unwrap_or(&[]);
         let next_validators_hash = header
             .map(|h| h.next_validators_hash.as_slice())
@@ -205,7 +218,8 @@ impl BlockMapper for CosmosBlockMapper {
         fork_step: Option<&str>,
     ) -> anyhow::Result<()> {
         let block = cosmos::Block::decode(block_bytes)?;
-        self.map_cosmos_block(&block, identity, fork_step);
+        let canonical = cosmos_canonical_identity(&block, identity);
+        self.map_cosmos_block(&block, &canonical, fork_step);
         Ok(())
     }
 
@@ -660,5 +674,55 @@ mod tests {
             .downcast_ref::<StringArray>()
             .unwrap();
         assert_eq!(fork_col.value(0), "FINAL");
+    }
+
+    #[test]
+    fn test_cosmos_canonical_ids_match_hash_fields() {
+        let block = make_test_block(100);
+        let block_bytes = prost::Message::encode_to_vec(&block);
+        let mut mapper = CosmosBlockMapper::new(false, EncodeBytes::Hex, false);
+        let identity = BlockIdentity {
+            block_num: 100,
+            block_id: "0x9999".to_string(),
+            parent_num: 99,
+            parent_id: "0x8888".to_string(),
+            lib_num: 98,
+            timestamp: 1_700_000_000,
+            fork_step: None,
+        };
+
+        mapper.map_block(&block_bytes, &identity, None).unwrap();
+        let batches = mapper.flush().unwrap();
+        let blocks = &batches["blocks"];
+
+        let block_id = blocks
+            .column_by_name("block_id")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        let parent_id = blocks
+            .column_by_name("parent_id")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        let hash = blocks
+            .column_by_name("hash")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        let last_block_id_hash = blocks
+            .column_by_name("last_block_id_hash")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+
+        assert_eq!(block_id.value(0), hash.value(0));
+        assert_eq!(parent_id.value(0), last_block_id_hash.value(0));
+        assert_ne!(block_id.value(0), "0x9999");
+        assert_ne!(parent_id.value(0), "0x8888");
     }
 }

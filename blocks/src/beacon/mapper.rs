@@ -3,7 +3,7 @@ use super::schema;
 use arrow::array::*;
 use arrow::datatypes::Schema;
 use arrow::record_batch::RecordBatch;
-use firehose_parquet::encode::{BytesColumn, EncodeBytes};
+use firehose_parquet::encode::{encode_hex, BytesColumn, EncodeBytes};
 use firehose_parquet::traits::{
     est_i64, est_opt_str, est_str, est_u32, est_u64, BlockIdentity, BlockMapper, CanonicalBuilder,
 };
@@ -46,6 +46,13 @@ fn mk_fork_step(include: bool) -> Option<StringBuilder> {
     } else {
         None
     }
+}
+
+fn beacon_canonical_identity(block: &beacon::Block, identity: &BlockIdentity) -> BlockIdentity {
+    let mut canonical = identity.clone();
+    canonical.block_id = encode_hex(&block.root);
+    canonical.parent_id = encode_hex(&block.parent_root);
+    canonical
 }
 
 // ---------------------------------------------------------------------------
@@ -616,7 +623,8 @@ impl BlockMapper for BeaconBlockMapper {
         fork_step: Option<&str>,
     ) -> anyhow::Result<()> {
         let block = beacon::Block::decode(block_bytes)?;
-        self.map_beacon_block(&block, identity, fork_step);
+        let canonical = beacon_canonical_identity(&block, identity);
+        self.map_beacon_block(&block, &canonical, fork_step);
         Ok(())
     }
 
@@ -1492,5 +1500,71 @@ mod tests {
         assert_eq!(batches["blocks"].num_rows(), 1);
         assert_eq!(batches["execution_payload"].num_rows(), 1);
         assert_eq!(batches["blob_sidecars"].num_rows(), 1);
+    }
+
+    #[test]
+    fn test_beacon_canonical_ids_match_root_fields() {
+        let block = make_deneb_block(200);
+        let block_bytes = prost::Message::encode_to_vec(&block);
+        let mut mapper = BeaconBlockMapper::new(false, EncodeBytes::Hex);
+        let identity = BlockIdentity {
+            block_num: 200,
+            block_id: "0x9999".to_string(),
+            parent_num: 199,
+            parent_id: "0x8888".to_string(),
+            lib_num: 198,
+            timestamp: 1_700_000_000,
+            fork_step: None,
+        };
+
+        mapper.map_block(&block_bytes, &identity, None).unwrap();
+        let batches = mapper.flush().unwrap();
+
+        let blocks = &batches["blocks"];
+        let block_id = blocks
+            .column_by_name("block_id")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        let parent_id = blocks
+            .column_by_name("parent_id")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        let root = blocks
+            .column_by_name("root")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        let parent_root = blocks
+            .column_by_name("parent_root")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+
+        let execution_payload = &batches["execution_payload"];
+        let execution_block_hash = execution_payload
+            .column_by_name("block_hash")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        let execution_parent_hash = execution_payload
+            .column_by_name("parent_hash")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+
+        assert_eq!(block_id.value(0), root.value(0));
+        assert_eq!(parent_id.value(0), parent_root.value(0));
+        assert_ne!(block_id.value(0), execution_block_hash.value(0));
+        assert_ne!(parent_id.value(0), execution_parent_hash.value(0));
+        assert_ne!(block_id.value(0), "0x9999");
+        assert_ne!(parent_id.value(0), "0x8888");
     }
 }
