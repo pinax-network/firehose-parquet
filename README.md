@@ -8,7 +8,7 @@ A production-grade Rust toolkit that consumes [StreamingFast Firehose](https://f
 |---|---|---|
 | `evm` | `eth.firehose.pinax.network:443` | blocks, transactions, logs |
 | `evm --extended` | | + calls, balance_changes, code_changes, storage_changes, nonce_changes, gas_changes, account_creations |
-| `solana` | `solana.firehose.pinax.network:443` | blocks, transactions, messages, instructions, rewards |
+| `solana` | `solana.firehose.pinax.network:443` | blocks, transactions, messages, instructions, rewards, token_balances, account_lookups (`--extended`: `vote_transactions`) |
 | `bitcoin` | `btc.firehose.pinax.network:443` | blocks, transactions, inputs, outputs |
 | `beacon` | `beacon.firehose.pinax.network:443` | blocks, attestations, deposits, proposer_slashings, attester_slashings, voluntary_exits, execution_payload, blob_sidecars |
 | `tron` | `tron.firehose.pinax.network:443` | blocks, transactions, logs, internal_transactions |
@@ -314,7 +314,7 @@ Chain:
           Block type to process. Use "auto" to detect from the Firehose stream.
           Options: auto, evm, bitcoin, solana, near, antelope, cosmos, tron, beacon [env: BLOCK_TYPE] [default: auto]
       --extended
-          Enable extended detail level (EVM only: calls, balance_changes, etc.) [env: EXTENDED]
+          Enable extended detail level (extra tables: EVM calls/balance_changes/etc., Antelope db_ops, Solana vote_transactions) [env: EXTENDED]
       --bytes-encoding <BYTES_ENCODING>
           Byte encoding strategy for binary fields (hashes, addresses, etc.)
           Options: binary (raw bytes), hex (0x-prefixed), hex_no_prefix, base58, tron_base58, auto (chain-appropriate)
