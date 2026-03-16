@@ -3,7 +3,7 @@ use super::schema;
 use arrow::array::*;
 use arrow::datatypes::Schema;
 use arrow::record_batch::RecordBatch;
-use firehose_parquet::encode::{BytesColumn, EncodeBytes};
+use firehose_parquet::encode::{encode_hex, BytesColumn, EncodeBytes};
 use firehose_parquet::traits::{
     est_opt_str, est_str, est_u32, est_u64, BlockIdentity, BlockMapper, CanonicalBuilder,
 };
@@ -37,6 +37,15 @@ fn crypto_hash_bytes(hash: &Option<near::CryptoHash>) -> &[u8] {
         Some(h) => &h.bytes,
         None => &[],
     }
+}
+
+fn near_canonical_identity(block: &near::Block, identity: &BlockIdentity) -> BlockIdentity {
+    let mut canonical = identity.clone();
+    if let Some(header) = &block.header {
+        canonical.block_id = encode_hex(crypto_hash_bytes(&header.hash));
+        canonical.parent_id = encode_hex(crypto_hash_bytes(&header.prev_hash));
+    }
+    canonical
 }
 
 /// Convert a BigInt (big-endian two's complement) to a decimal string.
@@ -470,7 +479,8 @@ impl BlockMapper for NearBlockMapper {
         fork_step: Option<&str>,
     ) -> anyhow::Result<()> {
         let block = near::Block::decode(block_bytes)?;
-        self.map_near_block(&block, identity, fork_step);
+        let canonical = near_canonical_identity(&block, identity);
+        self.map_near_block(&block, &canonical, fork_step);
         Ok(())
     }
 
@@ -1193,9 +1203,9 @@ mod tests {
         let block_bytes = prost::Message::encode_to_vec(&block);
         let identity = BlockIdentity {
             block_num: 100,
-            block_id: format!("0x{}", hex(&[0x01; 32])),
+            block_id: format!("0x{}", hex(&[0x09; 32])),
             parent_num: 99,
-            parent_id: format!("0x{}", hex(&[0x00; 32])),
+            parent_id: format!("0x{}", hex(&[0x08; 32])),
             lib_num: 98,
             timestamp: 1_700_000_000,
             fork_step: None,
@@ -1232,14 +1242,8 @@ mod tests {
             .as_any()
             .downcast_ref::<StringArray>()
             .unwrap();
-        assert_eq!(
-            block_id_col.value(0),
-            firehose_parquet::encode::encode_base58(&[0x01; 32])
-        );
-        assert_eq!(
-            parent_id_col.value(0),
-            firehose_parquet::encode::encode_base58(&[0x00; 32])
-        );
+        assert_eq!(block_id_col.value(0), hash_col.value(0));
+        assert_eq!(parent_id_col.value(0), prev_hash_col.value(0));
         assert_eq!(
             hash_col.value(0),
             firehose_parquet::encode::encode_base58(&[0x01; 32])
@@ -1251,6 +1255,14 @@ mod tests {
         assert_eq!(
             epoch_id_col.value(0),
             firehose_parquet::encode::encode_base58(&[0xaa; 32])
+        );
+        assert_ne!(
+            block_id_col.value(0),
+            firehose_parquet::encode::encode_base58(&[0x09; 32])
+        );
+        assert_ne!(
+            parent_id_col.value(0),
+            firehose_parquet::encode::encode_base58(&[0x08; 32])
         );
 
         let chunks_batch = &batches["chunks"];

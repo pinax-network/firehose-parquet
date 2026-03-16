@@ -36,6 +36,16 @@ If a registry row exists with a different algorithm than runtime selection, veri
 
 Note: Protocol-level consensus hashing details can differ from dataset Merkle policy. This matrix defines **dataset verifiability policy** for `verify`.
 
+## Payload-Native Canonical Block Identity Sources
+
+For chains that expose a protocol-native block hash or root in the payload, mapper canonical IDs should follow that payload field rather than relying on the Firehose envelope alone.
+
+| Chain   | `block_id` source | `parent_id` source |
+|---------|-------------------|--------------------|
+| Beacon  | `blocks.root` | `blocks.parent_root` |
+| Cosmos  | `blocks.hash` | `blocks.last_block_id_hash` |
+| Near    | `blocks.hash` | `blocks.prev_hash` |
+
 ## Leaf Normalization Rules
 
 Before hashing each row into a Merkle leaf:
