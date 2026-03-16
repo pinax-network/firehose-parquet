@@ -224,7 +224,12 @@ impl ParquetTableWriter {
                 let (start, stop) = self
                     .partition
                     .block_range_bounds(metadata.min_block_number)
-                    .expect("block-range partition should resolve bounds");
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "expected BlockRange partition bounds for block {} while formatting block-range output path",
+                            metadata.min_block_number
+                        )
+                    });
                 format!("{table}/block_range={start}-{stop}")
             }
             Partition::Date => {
@@ -300,7 +305,12 @@ impl ParquetTableWriter {
                 let (start, stop) = self
                     .partition
                     .block_range_bounds(metadata.min_block_number)
-                    .expect("block-range partition should resolve bounds");
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "expected BlockRange partition bounds for block {} while resolving block-range output directory",
+                            metadata.min_block_number
+                        )
+                    });
                 base.join(format!("block_range={start}-{stop}"))
             }
             Partition::Date => {

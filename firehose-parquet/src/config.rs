@@ -110,7 +110,17 @@ impl Partition {
         };
 
         let anchor = start_block.unwrap_or(0);
-        let partition_index = block_number.saturating_sub(anchor) / *size;
+        if block_number < anchor {
+            debug_assert!(
+                block_number >= anchor,
+                "block number {block_number} precedes anchored block-range start {anchor}"
+            );
+            let stop = anchor.saturating_add(*size);
+            return Some((anchor, stop));
+        }
+
+        let relative_block = block_number - anchor;
+        let partition_index = relative_block / *size;
         let start = anchor.saturating_add(partition_index.saturating_mul(*size));
         let stop = start.saturating_add(*size);
         Some((start, stop))
