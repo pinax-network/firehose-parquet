@@ -131,22 +131,22 @@ fn output_block_id_encoding_label(encoding: &EncodeBytes) -> Option<&'static str
     }
 }
 
-fn is_tron_evm_chain_name(chain_name: &str) -> bool {
-    chain_name.eq_ignore_ascii_case("tron-evm")
+fn is_tron_style_chain_name(chain_name: &str) -> bool {
+    chain_name.eq_ignore_ascii_case("tron") || chain_name.eq_ignore_ascii_case("tron-evm")
 }
 
 fn endpoint_uses_tron_style_evm_profile(endpoint_info: &Option<EndpointInfo>) -> bool {
     endpoint_info.as_ref().map_or(false, |ei| {
-        is_tron_evm_chain_name(&ei.chain_name)
+        is_tron_style_chain_name(&ei.chain_name)
             || ei
                 .chain_name_aliases
                 .iter()
-                .any(|alias| is_tron_evm_chain_name(alias))
+                .any(|alias| is_tron_style_chain_name(alias))
     })
 }
 
 fn chain_uses_tron_style_evm_profile(chain: &str, endpoint_info: &Option<EndpointInfo>) -> bool {
-    is_tron_evm_chain_name(chain) || endpoint_uses_tron_style_evm_profile(endpoint_info)
+    is_tron_style_chain_name(chain) || endpoint_uses_tron_style_evm_profile(endpoint_info)
 }
 
 fn add_common_file_metadata(
@@ -414,7 +414,7 @@ fn infer_partitions_block_type(
     }
 
     for candidate in candidates {
-        if is_tron_evm_chain_name(&candidate) {
+        if candidate.eq_ignore_ascii_case("tron-evm") {
             return Some("evm");
         }
         if candidate.contains("beacon") {
@@ -5138,6 +5138,17 @@ mod tests {
         assert!(endpoint_uses_tron_style_evm_profile(&ei));
         assert!(chain_uses_tron_style_evm_profile("eth-mainnet", &ei));
         assert!(chain_uses_tron_style_evm_profile("tron-evm", &None));
+
+        let tron = Some(EndpointInfo {
+            chain_name: "tron".to_string(),
+            chain_name_aliases: vec![],
+            first_streamable_block_num: 0,
+            first_streamable_block_id: String::new(),
+            block_id_encoding: 0,
+            block_features: vec![],
+        });
+        assert!(endpoint_uses_tron_style_evm_profile(&tron));
+        assert!(chain_uses_tron_style_evm_profile("tron", &None));
     }
 
     #[test]
@@ -5205,6 +5216,22 @@ mod tests {
     #[test]
     fn test_encode_bytes_from_block_id_encoding_unknown() {
         assert_eq!(encode_bytes_from_block_id_encoding(99), None);
+    }
+
+    #[test]
+    fn test_resolve_encode_bytes_uses_tron_style_profile_for_tron_chain_name() {
+        let endpoint_info = Some(EndpointInfo {
+            chain_name: "tron".to_string(),
+            chain_name_aliases: vec![],
+            first_streamable_block_num: 0,
+            first_streamable_block_id: String::new(),
+            block_id_encoding: 0,
+            block_features: vec![],
+        });
+
+        let resolved = resolve_encode_bytes("evm", "auto", &endpoint_info, true);
+
+        assert_eq!(resolved, EncodeBytes::TronBase58);
     }
 
     #[test]
