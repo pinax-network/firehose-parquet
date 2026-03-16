@@ -648,13 +648,16 @@ fn resolve_encode_bytes(
     endpoint_info: &Option<EndpointInfo>,
     tron_style_evm_profile: bool,
 ) -> EncodeBytes {
-    parse_encode_bytes(bytes_encoding)
-        .or_else(|| {
-            endpoint_info
+    parse_encode_bytes(bytes_encoding).unwrap_or_else(|| {
+        let default_encoding = default_encode_bytes(block_type, tron_style_evm_profile);
+        match default_encoding {
+            EncodeBytes::Base58 | EncodeBytes::TronBase58 => default_encoding,
+            EncodeBytes::Binary | EncodeBytes::Hex | EncodeBytes::HexNoPrefix => endpoint_info
                 .as_ref()
                 .and_then(|ei| encode_bytes_from_block_id_encoding(ei.block_id_encoding))
-        })
-        .unwrap_or_else(|| default_encode_bytes(block_type, tron_style_evm_profile))
+                .unwrap_or(default_encoding),
+        }
+    })
 }
 
 /// Resolve the output directory, prepending `chain_name` when available.
@@ -5266,6 +5269,70 @@ mod tests {
             first_streamable_block_num: 0,
             first_streamable_block_id: String::new(),
             block_id_encoding: 0,
+            block_features: vec![],
+        });
+
+        let resolved = resolve_encode_bytes("evm", "auto", &endpoint_info, true);
+
+        assert_eq!(resolved, EncodeBytes::TronBase58);
+    }
+
+    #[test]
+    fn test_resolve_encode_bytes_near_prefers_output_contract_over_endpoint_hint() {
+        let endpoint_info = Some(EndpointInfo {
+            chain_name: "near-mainnet".to_string(),
+            chain_name_aliases: vec!["near".to_string()],
+            first_streamable_block_num: 0,
+            first_streamable_block_id: String::new(),
+            block_id_encoding: 2,
+            block_features: vec![],
+        });
+
+        let resolved = resolve_encode_bytes("near", "auto", &endpoint_info, false);
+
+        assert_eq!(resolved, EncodeBytes::Base58);
+    }
+
+    #[test]
+    fn test_resolve_encode_bytes_explicit_cli_override_wins_for_near() {
+        let endpoint_info = Some(EndpointInfo {
+            chain_name: "near-mainnet".to_string(),
+            chain_name_aliases: vec!["near".to_string()],
+            first_streamable_block_num: 0,
+            first_streamable_block_id: String::new(),
+            block_id_encoding: 3,
+            block_features: vec![],
+        });
+
+        let resolved = resolve_encode_bytes("near", "hex", &endpoint_info, false);
+
+        assert_eq!(resolved, EncodeBytes::Hex);
+    }
+
+    #[test]
+    fn test_resolve_encode_bytes_generic_chain_uses_endpoint_hint_before_default() {
+        let endpoint_info = Some(EndpointInfo {
+            chain_name: "eth-mainnet".to_string(),
+            chain_name_aliases: vec!["ethereum".to_string()],
+            first_streamable_block_num: 0,
+            first_streamable_block_id: String::new(),
+            block_id_encoding: 3,
+            block_features: vec![],
+        });
+
+        let resolved = resolve_encode_bytes("evm", "auto", &endpoint_info, false);
+
+        assert_eq!(resolved, EncodeBytes::Base58);
+    }
+
+    #[test]
+    fn test_resolve_encode_bytes_tron_style_contract_overrides_endpoint_hint() {
+        let endpoint_info = Some(EndpointInfo {
+            chain_name: "tron-evm".to_string(),
+            chain_name_aliases: vec!["tron".to_string()],
+            first_streamable_block_num: 0,
+            first_streamable_block_id: String::new(),
+            block_id_encoding: 2,
             block_features: vec![],
         });
 
