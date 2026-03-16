@@ -304,6 +304,20 @@ fn build_file_metadata(
     meta
 }
 
+fn maybe_add_synthetic_timestamp_metadata(
+    meta: &mut ParquetFileMetadata,
+    block_type: &str,
+    backfill_missing_timestamps: bool,
+) {
+    if block_type == "solana" && backfill_missing_timestamps {
+        meta.add("firehose-parquet.synthetic_timestamps", "true");
+        meta.add(
+            "firehose-parquet.synthetic_timestamp_policy",
+            "block_time_interpolation",
+        );
+    }
+}
+
 fn build_cursor_file_metadata(
     block_type: Option<&str>,
     encoding: Option<&EncodeBytes>,
@@ -463,6 +477,133 @@ fn take_anchored_bootstrap_blocks(
             block
         })
         .collect()
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct TimestampAnchor {
+    block_num: u64,
+    timestamp: i64,
+}
+
+#[derive(Debug, Clone, Default)]
+struct TimestampBackfill {
+    enabled: bool,
+    last_anchor: Option<TimestampAnchor>,
+    buffered_blocks: Vec<BufferedBootstrapBlock>,
+}
+
+impl TimestampBackfill {
+    fn new(enabled: bool) -> Self {
+        Self {
+            enabled,
+            last_anchor: None,
+            buffered_blocks: Vec::new(),
+        }
+    }
+
+    fn observe_block(
+        &mut self,
+        block_bytes: Vec<u8>,
+        cursor: String,
+        fork_step: Option<String>,
+        identity: BlockIdentity,
+    ) -> anyhow::Result<Vec<BufferedBootstrapBlock>> {
+        let current = BufferedBootstrapBlock {
+            block_bytes,
+            cursor,
+            fork_step,
+            identity,
+        };
+
+        if !self.enabled {
+            if current.identity.timestamp != 0 {
+                self.last_anchor = Some(TimestampAnchor {
+                    block_num: current.identity.block_num,
+                    timestamp: current.identity.timestamp,
+                });
+            }
+            return Ok(vec![current]);
+        }
+
+        if current.identity.timestamp == 0 {
+            self.buffered_blocks.push(current);
+            return Ok(Vec::new());
+        }
+
+        let anchor = TimestampAnchor {
+            block_num: current.identity.block_num,
+            timestamp: current.identity.timestamp,
+        };
+        let mut ready = if self.buffered_blocks.is_empty() {
+            Vec::new()
+        } else if let Some(previous_anchor) = self.last_anchor {
+            interpolate_buffered_blocks(&mut self.buffered_blocks, previous_anchor, anchor)?
+        } else {
+            take_anchored_bootstrap_blocks(&mut self.buffered_blocks, anchor.timestamp)
+        };
+
+        ready.push(current);
+        self.last_anchor = Some(anchor);
+        Ok(ready)
+    }
+
+    fn drain_open_span(&mut self) -> anyhow::Result<Vec<BufferedBootstrapBlock>> {
+        if self.buffered_blocks.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        if let Some(anchor) = self.last_anchor {
+            return Ok(take_anchored_bootstrap_blocks(
+                &mut self.buffered_blocks,
+                anchor.timestamp,
+            ));
+        }
+
+        let first_buffered_block = self
+            .buffered_blocks
+            .first()
+            .map(|block| block.identity.block_num)
+            .unwrap_or_default();
+        let buffered_blocks = self.buffered_blocks.len();
+        Err(anyhow!(
+            "buffered {buffered_blocks} block(s) starting at block {first_buffered_block} for --backfill-missing-timestamps, but no timestamped anchor block was observed before the stream ended"
+        ))
+    }
+}
+
+fn interpolate_buffered_blocks(
+    buffered_blocks: &mut Vec<BufferedBootstrapBlock>,
+    start: TimestampAnchor,
+    end: TimestampAnchor,
+) -> anyhow::Result<Vec<BufferedBootstrapBlock>> {
+    if end.block_num <= start.block_num {
+        return Err(anyhow!(
+            "cannot interpolate timestamps with non-increasing anchors: start={} end={}",
+            start.block_num,
+            end.block_num
+        ));
+    }
+
+    let span = i128::from(end.block_num - start.block_num);
+    Ok(buffered_blocks
+        .drain(..)
+        .map(|mut block| {
+            let offset = i128::from(block.identity.block_num - start.block_num);
+            let delta = i128::from(end.timestamp) - i128::from(start.timestamp);
+            let interpolated = i128::from(start.timestamp) + (delta.saturating_mul(offset) / span);
+            block.identity.timestamp = i64::try_from(interpolated).unwrap_or_else(|_| {
+                panic!(
+                    "interpolated timestamp {interpolated} does not fit in i64 for block {}",
+                    block.identity.block_num
+                )
+            });
+            block
+        })
+        .collect())
+}
+
+fn should_emit_progress_log(counter: u64) -> bool {
+    counter > 0 && counter % 100 == 0
 }
 
 fn infer_partitions_block_type(
@@ -3138,6 +3279,7 @@ fn create_mapper(
     extended: bool,
     include_fork_step: bool,
     encode_bytes: EncodeBytes,
+    backfill_missing_timestamps: bool,
     include_failed_transactions: bool,
 ) -> Result<Box<dyn BlockMapper>> {
     match block_type {
@@ -3155,6 +3297,7 @@ fn create_mapper(
             extended,
             include_fork_step,
             encode_bytes,
+            backfill_missing_timestamps,
             include_failed_transactions,
         ))),
         "near" => Ok(Box::new(NearBlockMapper::new(
@@ -3905,9 +4048,17 @@ async fn run_ingestion(args: &BuildArgs) -> Result<()> {
 
     extended = resolve_extended_mode(extended, &endpoint_info);
 
+    let backfill_missing_timestamps = args.backfill_missing_timestamps;
     let include_failed_transactions = args.include_failed_transactions;
 
-    info!(block_type, extended, bytes_encoding = %bytes_encoding_str, include_failed_transactions, "starting pipeline\n{config}");
+    info!(
+        block_type,
+        extended,
+        backfill_missing_timestamps,
+        bytes_encoding = %bytes_encoding_str,
+        include_failed_transactions,
+        "starting pipeline\n{config}"
+    );
 
     if let Some(cursor_state) = existing_cursor_state.as_ref() {
         if args.cursor_override {
@@ -4005,6 +4156,7 @@ async fn run_ingestion(args: &BuildArgs) -> Result<()> {
         args.bootstrap_missing_genesis_timestamp,
         config.start_block,
     );
+    let mut timestamp_backfill = TimestampBackfill::new(backfill_missing_timestamps);
 
     let mut writer = if firehose_parquet::writer::is_s3_output(&config.output) {
         OutputWriter::new_s3(
@@ -4042,6 +4194,8 @@ async fn run_ingestion(args: &BuildArgs) -> Result<()> {
             config.compression,
             &endpoint_info,
         );
+        let mut meta = meta;
+        maybe_add_synthetic_timestamp_metadata(&mut meta, &block_type, backfill_missing_timestamps);
         log_file_metadata(&meta);
         writer.inner.set_file_metadata(meta);
         Some(create_mapper(
@@ -4049,12 +4203,14 @@ async fn run_ingestion(args: &BuildArgs) -> Result<()> {
             extended,
             include_fork_step,
             encode_bytes,
+            backfill_missing_timestamps,
             include_failed_transactions,
         )?)
     } else {
         None
     };
 
+    let mut blocks_observed: u64 = 0;
     let mut blocks_processed: u64 = 0;
     let mut min_block: Option<u64> = None;
     let mut max_block: Option<u64> = None;
@@ -4099,6 +4255,14 @@ async fn run_ingestion(args: &BuildArgs) -> Result<()> {
         &config.partition,
         &endpoint_info,
     );
+    let mut cursor_file_metadata = cursor_file_metadata;
+    if block_type != "auto" {
+        maybe_add_synthetic_timestamp_metadata(
+            &mut cursor_file_metadata,
+            &block_type,
+            backfill_missing_timestamps,
+        );
+    }
 
     // Build a template CursorState with pipeline parameters that stay constant.
     let mut cursor_state_template = CursorState {
@@ -4154,9 +4318,15 @@ async fn run_ingestion(args: &BuildArgs) -> Result<()> {
                     config.compression,
                     &endpoint_info,
                 );
+                let mut meta = meta;
+                maybe_add_synthetic_timestamp_metadata(
+                    &mut meta,
+                    &detected,
+                    backfill_missing_timestamps,
+                );
                 log_file_metadata(&meta);
                 writer.inner.set_file_metadata(meta);
-                cursor_state_template.file_metadata = build_cursor_file_metadata(
+                let mut cursor_meta = build_cursor_file_metadata(
                     Some(&detected),
                     Some(&encode_bytes),
                     &bytes_encoding_str,
@@ -4165,14 +4335,79 @@ async fn run_ingestion(args: &BuildArgs) -> Result<()> {
                     &config.partition,
                     &endpoint_info,
                 );
+                maybe_add_synthetic_timestamp_metadata(
+                    &mut cursor_meta,
+                    &detected,
+                    backfill_missing_timestamps,
+                );
+                cursor_state_template.file_metadata = cursor_meta;
                 is_solana = detected == "solana";
-                mapper = Some(create_mapper(&detected, extended, include_fork_step, encode_bytes, include_failed_transactions)?);
+                mapper = Some(create_mapper(
+                    &detected,
+                    extended,
+                    include_fork_step,
+                    encode_bytes,
+                    backfill_missing_timestamps,
+                    include_failed_transactions,
+                )?);
             }
 
             let m = mapper.as_mut().unwrap();
 
             let block_number = identity.block_num;
             let ts = identity.timestamp;
+            blocks_observed += 1;
+            let fork_step_owned = fork_step_str.map(str::to_owned);
+            let ready_solana_blocks = if is_solana && backfill_missing_timestamps {
+                timestamp_backfill.observe_block(
+                    block_bytes,
+                    cursor_str,
+                    fork_step_owned,
+                    identity,
+                )?
+            } else {
+                vec![BufferedBootstrapBlock {
+                    block_bytes,
+                    cursor: cursor_str,
+                    fork_step: fork_step_owned,
+                    identity,
+                }]
+            };
+            let current_anchor_timestamp = ready_solana_blocks
+                .last()
+                .map(|block| block.identity.timestamp)
+                .unwrap_or(ts);
+            if ready_solana_blocks.is_empty() {
+                if should_emit_progress_log(blocks_observed) {
+                    let elapsed_secs = progress_start.elapsed().as_secs_f64();
+                    let observed_blocks_per_sec = if elapsed_secs > 0.0 {
+                        blocks_observed as f64 / elapsed_secs
+                    } else {
+                        0.0
+                    };
+                    let block_timestamp = format_optional_probe_timestamp(current_anchor_timestamp)?;
+                    match block_timestamp.as_deref() {
+                        Some(block_timestamp) => info!(
+                            blocks_observed,
+                            blocks_processed,
+                            block_number,
+                            block_timestamp,
+                            buffered_blocks = timestamp_backfill.buffered_blocks.len(),
+                            speed = format!("{:.0} observed blocks/s", observed_blocks_per_sec),
+                            "progress (buffering timestamps)"
+                        ),
+                        None => info!(
+                            blocks_observed,
+                            blocks_processed,
+                            block_number,
+                            buffered_blocks = timestamp_backfill.buffered_blocks.len(),
+                            speed = format!("{:.0} observed blocks/s", observed_blocks_per_sec),
+                            "progress (buffering timestamps)"
+                        ),
+                    }
+                }
+                return Ok(());
+            }
             // For Solana, blocks may legitimately lack timestamps — skip the
             // genesis bootstrap and timestamp validation entirely.
             if !is_solana {
@@ -4186,10 +4421,10 @@ async fn run_ingestion(args: &BuildArgs) -> Result<()> {
                         );
                     }
                     buffered_bootstrap_blocks.push(BufferedBootstrapBlock {
-                        block_bytes,
-                        cursor: cursor_str,
-                        fork_step: fork_step_str.map(str::to_owned),
-                        identity,
+                        block_bytes: ready_solana_blocks[0].block_bytes.clone(),
+                        cursor: ready_solana_blocks[0].cursor.clone(),
+                        fork_step: ready_solana_blocks[0].fork_step.clone(),
+                        identity: ready_solana_blocks[0].identity.clone(),
                     });
                     return Ok(());
                 }
@@ -4312,7 +4547,7 @@ async fn run_ingestion(args: &BuildArgs) -> Result<()> {
                     return Err(anyhow!("__shutdown__"));
                 }
 
-                if blocks_processed % 100 == 0 {
+                if should_emit_progress_log(blocks_processed) {
                     let elapsed_secs = progress_start.elapsed().as_secs_f64();
                     let speed_per_sec = if elapsed_secs > 0.0 {
                         bytes_read as f64 / elapsed_secs
@@ -4423,7 +4658,10 @@ async fn run_ingestion(args: &BuildArgs) -> Result<()> {
                 Ok(())
             };
 
-            for buffered_block in take_anchored_bootstrap_blocks(&mut buffered_bootstrap_blocks, ts) {
+            for buffered_block in take_anchored_bootstrap_blocks(
+                &mut buffered_bootstrap_blocks,
+                current_anchor_timestamp,
+            ) {
                 process_block(
                     &buffered_block.block_bytes,
                     &buffered_block.identity,
@@ -4432,7 +4670,16 @@ async fn run_ingestion(args: &BuildArgs) -> Result<()> {
                 )?;
             }
 
-            process_block(&block_bytes, &identity, fork_step_str, &cursor_str)
+            for ready_block in ready_solana_blocks {
+                process_block(
+                    &ready_block.block_bytes,
+                    &ready_block.identity,
+                    ready_block.fork_step.as_deref(),
+                    &ready_block.cursor,
+                )?;
+            }
+
+            Ok(())
         })
         .await;
 
@@ -4457,7 +4704,38 @@ async fn run_ingestion(args: &BuildArgs) -> Result<()> {
     if is_shutdown {
         info!("skipping partial buffer flush to preserve partition determinism");
     } else {
+        let trailing_timestamp_backfill_blocks = timestamp_backfill.drain_open_span()?;
         if let Some(m) = mapper.as_mut() {
+            for buffered_block in trailing_timestamp_backfill_blocks {
+                let block_number = buffered_block.identity.block_num;
+                let ts = buffered_block.identity.timestamp;
+                min_block = Some(min_block.map_or(block_number, |s: u64| s.min(block_number)));
+                max_block = Some(max_block.map_or(block_number, |s: u64| s.max(block_number)));
+                global_min_block =
+                    Some(global_min_block.map_or(block_number, |s: u64| s.min(block_number)));
+                global_max_block =
+                    Some(global_max_block.map_or(block_number, |s: u64| s.max(block_number)));
+                min_timestamp = Some(min_timestamp.map_or(ts, |s: i64| s.min(ts)));
+                max_timestamp = Some(max_timestamp.map_or(ts, |s: i64| s.max(ts)));
+
+                m.map_block(
+                    &buffered_block.block_bytes,
+                    &buffered_block.identity,
+                    buffered_block.fork_step.as_deref(),
+                )?;
+                blocks_processed += 1;
+                bytes_read += buffered_block.block_bytes.len() as u64;
+                last_cursor = Some(buffered_block.cursor);
+                last_block_num = block_number;
+                last_block_id = buffered_block.identity.block_id.clone();
+                pipeline_metrics.blocks_processed_total.inc();
+                pipeline_metrics
+                    .bytes_read_total
+                    .inc_by(buffered_block.block_bytes.len() as u64);
+                pipeline_metrics
+                    .current_block_number
+                    .set(block_number as i64);
+            }
             if m.max_table_rows() > 0 {
                 let batches = m.flush()?;
                 if !dry_run {
@@ -4643,6 +4921,45 @@ mod tests {
     }
 
     #[test]
+    fn test_build_subcommand_backfill_missing_timestamps_default_false() {
+        let cli = Cli::parse_from([
+            "fireparq",
+            "build",
+            "--network",
+            "solana-mainnet-beta",
+            "--start-block",
+            "100",
+            "--stop-block",
+            "200",
+        ]);
+        if let Some(Commands::Build(build_args)) = cli.command {
+            assert!(!build_args.backfill_missing_timestamps);
+        } else {
+            panic!("expected Commands::Build");
+        }
+    }
+
+    #[test]
+    fn test_build_subcommand_parses_backfill_missing_timestamps_flag() {
+        let cli = Cli::parse_from([
+            "fireparq",
+            "build",
+            "--network",
+            "solana-mainnet-beta",
+            "--start-block",
+            "100",
+            "--stop-block",
+            "200",
+            "--backfill-missing-timestamps",
+        ]);
+        if let Some(Commands::Build(build_args)) = cli.command {
+            assert!(build_args.backfill_missing_timestamps);
+        } else {
+            panic!("expected Commands::Build");
+        }
+    }
+
+    #[test]
     fn test_resolve_cursor_location_places_default_local_cursor_under_chain_output_root() {
         let config = Config {
             output: std::path::PathBuf::from("./output/mainnet"),
@@ -4777,7 +5094,9 @@ mod tests {
         assert!(help.contains("first streamable block"));
         assert!(help.contains("--skip-missing-blocks"));
         assert!(help.contains("--bootstrap-missing-genesis-timestamp"));
+        assert!(help.contains("--backfill-missing-timestamps"));
         assert!(help.contains("synthesize their timestamp"));
+        assert!(help.contains("derived values"));
         assert!(!help.contains("--strict-timestamps"));
     }
 
@@ -5294,7 +5613,7 @@ mod tests {
             "evm", "bitcoin", "solana", "near", "antelope", "cosmos", "tron", "beacon",
         ] {
             let encode_bytes = default_encode_bytes(block_type, false);
-            let mapper = create_mapper(block_type, false, false, encode_bytes, false);
+            let mapper = create_mapper(block_type, false, false, encode_bytes, false, false);
             assert!(
                 mapper.is_ok(),
                 "create_mapper failed for block_type: {block_type}"
@@ -5304,7 +5623,7 @@ mod tests {
 
     #[test]
     fn test_create_mapper_invalid_type() {
-        assert!(create_mapper("unknown", false, false, EncodeBytes::Hex, false).is_err());
+        assert!(create_mapper("unknown", false, false, EncodeBytes::Hex, false, false).is_err());
     }
 
     #[test]
@@ -5626,6 +5945,161 @@ mod tests {
     }
 
     #[test]
+    fn test_should_emit_progress_log_every_hundred_blocks() {
+        assert!(!should_emit_progress_log(0));
+        assert!(!should_emit_progress_log(99));
+        assert!(should_emit_progress_log(100));
+        assert!(!should_emit_progress_log(101));
+        assert!(should_emit_progress_log(200));
+    }
+
+    #[test]
+    fn test_timestamp_backfill_interpolates_between_anchors() {
+        let mut backfill = TimestampBackfill::new(true);
+        let first = backfill
+            .observe_block(
+                vec![0x01],
+                "cursor-10".to_string(),
+                None,
+                BlockIdentity {
+                    block_num: 10,
+                    timestamp: 1_000,
+                    ..BlockIdentity::default()
+                },
+            )
+            .expect("first anchor should process immediately");
+        assert_eq!(first.len(), 1);
+
+        let missing = backfill
+            .observe_block(
+                vec![0x02],
+                "cursor-15".to_string(),
+                None,
+                BlockIdentity {
+                    block_num: 15,
+                    timestamp: 0,
+                    ..BlockIdentity::default()
+                },
+            )
+            .expect("missing block should buffer");
+        assert!(missing.is_empty());
+
+        let ready = backfill
+            .observe_block(
+                vec![0x03],
+                "cursor-20".to_string(),
+                None,
+                BlockIdentity {
+                    block_num: 20,
+                    timestamp: 1_100,
+                    ..BlockIdentity::default()
+                },
+            )
+            .expect("second anchor should release buffered span");
+        assert_eq!(ready.len(), 2);
+        assert_eq!(ready[0].identity.block_num, 15);
+        assert_eq!(ready[0].identity.timestamp, 1_050);
+        assert_eq!(ready[1].identity.block_num, 20);
+        assert_eq!(ready[1].identity.timestamp, 1_100);
+    }
+
+    #[test]
+    fn test_timestamp_backfill_leading_blocks_wait_for_first_anchor() {
+        let mut backfill = TimestampBackfill::new(true);
+        assert!(backfill
+            .observe_block(
+                vec![0x01],
+                "cursor-0".to_string(),
+                None,
+                BlockIdentity {
+                    block_num: 0,
+                    timestamp: 0,
+                    ..BlockIdentity::default()
+                },
+            )
+            .expect("leading block should buffer")
+            .is_empty());
+
+        let ready = backfill
+            .observe_block(
+                vec![0x02],
+                "cursor-1".to_string(),
+                None,
+                BlockIdentity {
+                    block_num: 1,
+                    timestamp: 1_700_000_000,
+                    ..BlockIdentity::default()
+                },
+            )
+            .expect("first anchor should release leading buffer");
+        assert_eq!(ready.len(), 2);
+        assert_eq!(ready[0].identity.block_num, 0);
+        assert_eq!(ready[0].identity.timestamp, 1_700_000_000);
+        assert_eq!(ready[1].identity.block_num, 1);
+    }
+
+    #[test]
+    fn test_timestamp_backfill_frontier_uses_last_anchor_on_drain() {
+        let mut backfill = TimestampBackfill::new(true);
+        backfill
+            .observe_block(
+                vec![0x01],
+                "cursor-100".to_string(),
+                None,
+                BlockIdentity {
+                    block_num: 100,
+                    timestamp: 1_700_000_000,
+                    ..BlockIdentity::default()
+                },
+            )
+            .expect("anchor should process immediately");
+        assert!(backfill
+            .observe_block(
+                vec![0x02],
+                "cursor-101".to_string(),
+                None,
+                BlockIdentity {
+                    block_num: 101,
+                    timestamp: 0,
+                    ..BlockIdentity::default()
+                },
+            )
+            .expect("trailing block should buffer")
+            .is_empty());
+
+        let drained = backfill
+            .drain_open_span()
+            .expect("frontier drain should backfill from prior anchor");
+        assert_eq!(drained.len(), 1);
+        assert_eq!(drained[0].identity.block_num, 101);
+        assert_eq!(drained[0].identity.timestamp, 1_700_000_000);
+    }
+
+    #[test]
+    fn test_timestamp_backfill_requires_anchor_before_stream_end() {
+        let mut backfill = TimestampBackfill::new(true);
+        assert!(backfill
+            .observe_block(
+                vec![0x01],
+                "cursor-5".to_string(),
+                None,
+                BlockIdentity {
+                    block_num: 5,
+                    timestamp: 0,
+                    ..BlockIdentity::default()
+                },
+            )
+            .expect("timestamp-less block should buffer")
+            .is_empty());
+
+        let err = backfill
+            .drain_open_span()
+            .expect_err("draining without any anchor should fail");
+        assert!(err.to_string().contains("--backfill-missing-timestamps"));
+        assert!(err.to_string().contains("no timestamped anchor block"));
+    }
+
+    #[test]
     fn test_build_file_metadata_includes_block_type() {
         let metadata = build_file_metadata(
             "solana",
@@ -5644,6 +6118,48 @@ mod tests {
             .entries
             .iter()
             .any(|(key, _)| { key == "firehose-parquet.strict_timestamps" }));
+    }
+
+    #[test]
+    fn test_synthetic_timestamp_metadata_added_for_solana_backfill() {
+        let mut metadata = build_file_metadata(
+            "solana",
+            &EncodeBytes::Base58,
+            "https://example.com:443",
+            Compression::Zstd,
+            &None,
+        );
+        maybe_add_synthetic_timestamp_metadata(&mut metadata, "solana", true);
+
+        assert_eq!(
+            find_meta(&metadata, "firehose-parquet.synthetic_timestamps"),
+            Some("true")
+        );
+        assert_eq!(
+            find_meta(&metadata, "firehose-parquet.synthetic_timestamp_policy"),
+            Some("block_time_interpolation")
+        );
+    }
+
+    #[test]
+    fn test_synthetic_timestamp_metadata_not_added_when_backfill_disabled() {
+        let mut metadata = build_file_metadata(
+            "solana",
+            &EncodeBytes::Base58,
+            "https://example.com:443",
+            Compression::Zstd,
+            &None,
+        );
+        maybe_add_synthetic_timestamp_metadata(&mut metadata, "solana", false);
+
+        assert_eq!(
+            find_meta(&metadata, "firehose-parquet.synthetic_timestamps"),
+            None
+        );
+        assert_eq!(
+            find_meta(&metadata, "firehose-parquet.synthetic_timestamp_policy"),
+            None
+        );
     }
 
     #[test]
