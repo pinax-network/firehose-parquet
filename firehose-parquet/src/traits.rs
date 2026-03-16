@@ -124,7 +124,10 @@ pub fn canonical_fields_with_nullable_timestamps(encoding: &EncodeBytes) -> Vec<
     canonical_fields_with_encoding_nullable(encoding, true)
 }
 
-fn canonical_fields_with_encoding_nullable(encoding: &EncodeBytes, nullable_timestamps: bool) -> Vec<Field> {
+fn canonical_fields_with_encoding_nullable(
+    encoding: &EncodeBytes,
+    nullable_timestamps: bool,
+) -> Vec<Field> {
     let id_type = bytes_data_type(encoding);
     vec![
         Field::new("block_num", DataType::UInt64, false),
@@ -195,11 +198,7 @@ impl CanonicalBuilder {
     /// Append a row with an optional timestamp/date.  When `timestamp` is
     /// `None` (e.g. Solana blocks without `block_time`), null values are
     /// written for both the `timestamp` and `date` columns.
-    pub fn append_with_optional_timestamp(
-        &mut self,
-        id: &BlockIdentity,
-        timestamp: Option<i64>,
-    ) {
+    pub fn append_with_optional_timestamp(&mut self, id: &BlockIdentity, timestamp: Option<i64>) {
         self.block_num.append_value(id.block_num);
         self.parent_num.append_value(id.parent_num);
         self.lib_num.append_value(id.lib_num);
@@ -331,7 +330,10 @@ pub trait BlockMapper {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use arrow::array::Date32Array;
+    use arrow::array::{BinaryArray, Date32Array, TimestampSecondArray, UInt64Array};
+    use arrow::record_batch::RecordBatch;
+    use bytes::Bytes;
+    use parquet::arrow::{arrow_reader::ParquetRecordBatchReaderBuilder, ArrowWriter};
 
     #[test]
     fn test_date32_from_timestamp_seconds_uses_utc_days() {
@@ -389,7 +391,7 @@ mod tests {
 
     #[test]
     fn test_canonical_builder_append_with_optional_timestamp_none() {
-        use arrow::array::{Array, TimestampSecondArray};
+        use arrow::array::Array;
         let mut builder = CanonicalBuilder::new();
         builder.append_with_optional_timestamp(
             &BlockIdentity {
@@ -416,5 +418,67 @@ mod tests {
 
         assert!(ts_array.is_null(0), "timestamp should be null");
         assert!(date_array.is_null(0), "date should be null");
+    }
+
+    #[test]
+    fn test_nullable_canonical_timestamp_and_date_stay_optional_in_parquet() {
+        let timestamp = 1_700_000_000;
+        let schema = Arc::new(arrow::datatypes::Schema::new(
+            canonical_fields_with_nullable_timestamps(&EncodeBytes::Binary),
+        ));
+        let batch = RecordBatch::try_new(
+            Arc::clone(&schema),
+            vec![
+                Arc::new(UInt64Array::from(vec![42_u64])),
+                Arc::new(BinaryArray::from(vec![b"block-id".as_slice()])),
+                Arc::new(UInt64Array::from(vec![41_u64])),
+                Arc::new(BinaryArray::from(vec![b"parent-id".as_slice()])),
+                Arc::new(UInt64Array::from(vec![40_u64])),
+                Arc::new(TimestampSecondArray::from(vec![timestamp]).with_timezone("UTC")),
+                Arc::new(Date32Array::from(vec![date32_from_timestamp_seconds(
+                    timestamp,
+                )])),
+            ],
+        )
+        .expect("record batch should build");
+
+        let mut parquet_bytes = Vec::new();
+        let mut writer =
+            ArrowWriter::try_new(&mut parquet_bytes, Arc::clone(&schema), None).expect("writer");
+        writer.write(&batch).expect("write batch");
+        writer.close().expect("close writer");
+
+        let builder =
+            ParquetRecordBatchReaderBuilder::try_new(Bytes::from(parquet_bytes)).expect("reader");
+        let roundtrip_schema = builder.schema();
+        let parquet_schema = builder.parquet_schema().root_schema();
+
+        let timestamp_field = roundtrip_schema
+            .field_with_name("timestamp")
+            .expect("timestamp field should exist after roundtrip");
+        let date_field = roundtrip_schema
+            .field_with_name("date")
+            .expect("date field should exist after roundtrip");
+        assert!(timestamp_field.is_nullable());
+        assert!(date_field.is_nullable());
+
+        let parquet_timestamp = parquet_schema
+            .get_fields()
+            .iter()
+            .find(|field| field.name() == "timestamp")
+            .expect("timestamp field should exist in parquet schema");
+        let parquet_date = parquet_schema
+            .get_fields()
+            .iter()
+            .find(|field| field.name() == "date")
+            .expect("date field should exist in parquet schema");
+        assert!(
+            parquet_timestamp.is_optional(),
+            "parquet timestamp field should stay optional even without null values"
+        );
+        assert!(
+            parquet_date.is_optional(),
+            "parquet date field should stay optional even without null values"
+        );
     }
 }

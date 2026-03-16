@@ -32,10 +32,7 @@ fn format_authorization(auth: &[antelope::PermissionLevel]) -> String {
     parts.join(",")
 }
 
-fn antelope_canonical_identity(
-    block: &antelope::Block,
-    identity: &BlockIdentity,
-) -> BlockIdentity {
+fn antelope_canonical_identity(block: &antelope::Block, identity: &BlockIdentity) -> BlockIdentity {
     let mut canonical = identity.clone();
     canonical.block_id = block.id.clone();
     canonical.parent_id = block
