@@ -179,7 +179,7 @@ impl PipelineMetrics {
         );
         registry.register(
             "firehose_parquet_backfill_buffer_estimated_bytes",
-            "Current unresolved Solana timestamp backfill buffer size",
+            "Current unresolved Solana timestamp backfill buffer size (estimated)",
             metrics.backfill_buffer_estimated_bytes.clone(),
         );
         registry.register(
