@@ -73,11 +73,7 @@ fn append_transaction(
     block_time_opt: Option<i64>,
     fork_step: Option<&str>,
 ) {
-    append_canonical_timestamp(
-        &mut builder.canonical,
-        identity,
-        block_time_opt,
-    );
+    append_canonical_timestamp(&mut builder.canonical, identity, block_time_opt);
     builder.slot.append_value(slot);
     builder.transaction_index.append_value(tx_idx);
     if let Some(sig) = tx.signatures.first() {
@@ -359,11 +355,7 @@ impl SolanaBlockMapper {
         );
 
         // messages
-        append_canonical_timestamp(
-            &mut self.messages.canonical,
-            identity,
-            block_time_opt,
-        );
+        append_canonical_timestamp(&mut self.messages.canonical, identity, block_time_opt);
         self.messages.slot.append_value(slot);
         self.messages.transaction_index.append_value(tx_idx);
         self.messages.message_index.append_value(0);
@@ -412,11 +404,7 @@ impl SolanaBlockMapper {
         // instructions (top-level)
         let mut global_instr_idx = 0u32;
         for instr in &msg.instructions {
-            append_canonical_timestamp(
-                &mut self.instructions.canonical,
-                identity,
-                block_time_opt,
-            );
+            append_canonical_timestamp(&mut self.instructions.canonical, identity, block_time_opt);
             self.instructions.slot.append_value(slot);
             self.instructions.transaction_index.append_value(tx_idx);
             self.instructions
@@ -599,11 +587,7 @@ impl SolanaBlockMapper {
         block_time_opt: Option<i64>,
         fork_step: Option<&str>,
     ) {
-        append_canonical_timestamp(
-            &mut self.rewards.canonical,
-            identity,
-            block_time_opt,
-        );
+        append_canonical_timestamp(&mut self.rewards.canonical, identity, block_time_opt);
         self.rewards.slot.append_value(slot);
         self.rewards.reward_index.append_value(idx);
         self.rewards.pubkey.append_value(&reward.pubkey);

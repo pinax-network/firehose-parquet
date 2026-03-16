@@ -547,9 +547,11 @@ impl TimestampBackfill {
 
         if current.identity.timestamp == 0 {
             let mut current = current;
-            let anchor = self
-                .last_anchor
-                .ok_or_else(|| anyhow!("nullable-timestamp partition routing requires a last-known timestamp anchor"))?;
+            let anchor = self.last_anchor.ok_or_else(|| {
+                anyhow!(
+                    "nullable-timestamp partition routing requires a last-known timestamp anchor"
+                )
+            })?;
             current.identity.timestamp = anchor.timestamp;
             return Ok(vec![current]);
         }
@@ -578,7 +580,6 @@ fn update_timestamp_backfill_metrics(
         .backfill_buffered_blocks
         .set(i64::try_from(timestamp_backfill.buffered_blocks_len()).unwrap_or(i64::MAX));
 }
-
 
 fn should_emit_progress_log(counter: u64) -> bool {
     counter > 0 && counter % 100 == 0
@@ -5951,11 +5952,19 @@ mod tests {
             Partition::Minute,
             Partition::Second,
         ] {
-            assert!(use_last_known_timestamp_partition_routing("solana", &partition));
+            assert!(use_last_known_timestamp_partition_routing(
+                "solana", &partition
+            ));
         }
 
-        assert!(!use_last_known_timestamp_partition_routing("solana", &Partition::None));
-        assert!(!use_last_known_timestamp_partition_routing("evm", &Partition::Date));
+        assert!(!use_last_known_timestamp_partition_routing(
+            "solana",
+            &Partition::None
+        ));
+        assert!(!use_last_known_timestamp_partition_routing(
+            "evm",
+            &Partition::Date
+        ));
     }
 
     #[test]

@@ -1,8 +1,6 @@
 use arrow::datatypes::{DataType, Field, Schema};
 use firehose_parquet::encode::{bytes_data_type, BytesListColumn, EncodeBytes};
-use firehose_parquet::traits::{
-    canonical_fields_with_nullable_timestamps, fork_step_field,
-};
+use firehose_parquet::traits::{canonical_fields_with_nullable_timestamps, fork_step_field};
 use std::sync::Arc;
 
 fn maybe_fork_step(fields: &mut Vec<Field>, include: bool) {
