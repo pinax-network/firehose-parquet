@@ -43,6 +43,9 @@ const BLOCK_TYPES: &[&str] = &[
     "auto", "evm", "bitcoin", "solana", "near", "antelope", "cosmos", "tron", "beacon",
 ];
 const DEFAULT_TIMESTAMP_BACKFILL_BUFFER_LIMIT_BYTES: u64 = 134_217_728;
+const SOLANA_EXTENDED_ERROR: &str =
+    "--extended is not supported for Solana; use --with-votes to emit vote_transactions";
+const WITH_VOTES_NON_SOLANA_ERROR: &str = "--with-votes is only supported for Solana";
 
 #[derive(Parser, Debug)]
 #[command(
@@ -3280,22 +3283,135 @@ fn chain_name_is_solana(name: &str) -> bool {
     normalized == "solana" || normalized.starts_with("solana-")
 }
 
-fn extended_warning_message(endpoint_info: &Option<EndpointInfo>) -> &'static str {
-    if endpoint_info.as_ref().is_some_and(|ei| {
+fn endpoint_chain_is_solana(endpoint_info: &Option<EndpointInfo>) -> bool {
+    endpoint_info.as_ref().is_some_and(|ei| {
         chain_name_is_solana(&ei.chain_name)
             || ei
                 .chain_name_aliases
                 .iter()
                 .any(|alias| chain_name_is_solana(alias))
-    }) {
-        "--extended requested but endpoint did not advertise extended block features; for Solana this may only be an endpoint capability-advertisement mismatch, and vote_transactions can still be emitted when present in the stream"
-    } else {
-        "--extended requested but endpoint did not advertise extended block features"
+    })
+}
+
+fn cursor_metadata_block_type<'a>(cursor_state: Option<&'a CursorState>) -> Option<&'a str> {
+    cursor_state.and_then(|state| state.get_metadata("firehose-parquet.block_type"))
+}
+
+fn cursor_chain_is_solana(cursor_state: Option<&CursorState>) -> bool {
+    cursor_metadata_block_type(cursor_state).is_some_and(chain_name_is_solana)
+        || cursor_state.is_some_and(|state| {
+            state
+                .get_metadata("firehose-parquet.chain_name")
+                .is_some_and(chain_name_is_solana)
+                || state
+                    .get_metadata("firehose-parquet.chain_name_aliases")
+                    .is_some_and(|aliases| aliases.split(',').any(chain_name_is_solana))
+        })
+}
+
+fn chain_is_solana(
+    requested_block_type: &str,
+    endpoint_info: &Option<EndpointInfo>,
+    cursor_state: Option<&CursorState>,
+) -> bool {
+    requested_block_type == "solana"
+        || (requested_block_type == "auto"
+            && (endpoint_chain_is_solana(endpoint_info) || cursor_chain_is_solana(cursor_state)))
+}
+
+fn chain_is_known_non_solana(
+    requested_block_type: &str,
+    endpoint_info: &Option<EndpointInfo>,
+    cursor_state: Option<&CursorState>,
+) -> bool {
+    match requested_block_type {
+        "auto" => {
+            if endpoint_info.is_some() {
+                !endpoint_chain_is_solana(endpoint_info)
+            } else {
+                cursor_metadata_block_type(cursor_state)
+                    .is_some_and(|block_type| !chain_name_is_solana(block_type))
+            }
+        }
+        "solana" => false,
+        _ => true,
     }
 }
 
-/// Keep `--extended` as the only switch that enables extended output while
-/// logging endpoint capability when available.
+fn validate_chain_feature_flags(
+    requested_block_type: &str,
+    endpoint_info: &Option<EndpointInfo>,
+    cursor_state: Option<&CursorState>,
+    extended_requested: bool,
+    with_votes_requested: bool,
+) -> Result<()> {
+    if chain_is_solana(requested_block_type, endpoint_info, cursor_state) && extended_requested {
+        return Err(anyhow!(SOLANA_EXTENDED_ERROR));
+    }
+
+    if chain_is_known_non_solana(requested_block_type, endpoint_info, cursor_state)
+        && with_votes_requested
+    {
+        return Err(anyhow!(WITH_VOTES_NON_SOLANA_ERROR));
+    }
+
+    Ok(())
+}
+
+fn extended_warning_message() -> &'static str {
+    "--extended requested but endpoint did not advertise extended block features"
+}
+
+fn log_solana_vote_mode(with_votes: bool) {
+    if with_votes {
+        info!("Solana vote_transactions enabled via --with-votes");
+    } else {
+        info!("Solana vote_transactions remain disabled without --with-votes");
+    }
+}
+
+fn maybe_add_solana_with_votes_metadata(
+    meta: &mut ParquetFileMetadata,
+    block_type: Option<&str>,
+    with_votes: bool,
+) {
+    if block_type == Some("solana") {
+        meta.add("firehose-parquet.with_votes", with_votes.to_string());
+    }
+}
+
+fn parse_metadata_bool(value: &str) -> Option<bool> {
+    match value {
+        "true" => Some(true),
+        "false" => Some(false),
+        _ => None,
+    }
+}
+
+fn solana_with_votes_from_cursor(cursor_state: &CursorState) -> bool {
+    cursor_state
+        .get_metadata("firehose-parquet.with_votes")
+        .and_then(parse_metadata_bool)
+        .unwrap_or(cursor_state.extended)
+}
+
+fn apply_solana_cursor_feature_validation(
+    mismatches: &mut Vec<String>,
+    cursor_state: &CursorState,
+    with_votes: bool,
+) {
+    mismatches.retain(|mismatch| !mismatch.starts_with("extended:"));
+    let stored_with_votes = solana_with_votes_from_cursor(cursor_state);
+    if stored_with_votes != with_votes {
+        mismatches.push(format!(
+            "with_votes: cursor={} vs current={}",
+            stored_with_votes, with_votes
+        ));
+    }
+}
+
+/// Keep `--extended` as the only switch that enables generic extended output
+/// while logging endpoint capability when available.
 fn resolve_extended_mode(extended_requested: bool, endpoint_info: &Option<EndpointInfo>) -> bool {
     let endpoint_supports_extended = supports_extended(endpoint_info);
 
@@ -3308,7 +3424,7 @@ fn resolve_extended_mode(extended_requested: bool, endpoint_info: &Option<Endpoi
             );
         }
     } else if extended_requested {
-        warn!("{}", extended_warning_message(endpoint_info));
+        warn!("{}", extended_warning_message());
     }
 
     extended_requested
@@ -3318,6 +3434,7 @@ fn resolve_extended_mode(extended_requested: bool, endpoint_info: &Option<Endpoi
 fn create_mapper(
     block_type: &str,
     extended: bool,
+    with_votes: bool,
     include_fork_step: bool,
     encode_bytes: EncodeBytes,
     synthetic_partition_routing: bool,
@@ -3335,7 +3452,7 @@ fn create_mapper(
             encode_bytes.clone(),
         ))),
         "solana" => Ok(Box::new(SolanaBlockMapper::new(
-            extended,
+            with_votes,
             include_fork_step,
             encode_bytes,
             synthetic_partition_routing,
@@ -3997,6 +4114,7 @@ async fn run_ingestion(args: &BuildArgs) -> Result<()> {
     }
 
     let mut extended = args.extended;
+    let with_votes = args.with_votes;
     let bytes_encoding_str = args.bytes_encoding.clone();
     let mut common = args.common.clone();
     if common.endpoint.is_none() {
@@ -4060,6 +4178,17 @@ async fn run_ingestion(args: &BuildArgs) -> Result<()> {
         .as_ref()
         .filter(|_| !args.cursor_override);
 
+    validate_chain_feature_flags(
+        &block_type,
+        &endpoint_info,
+        existing_cursor_state.as_ref(),
+        extended,
+        with_votes,
+    )?;
+    let solana_chain = chain_is_solana(&block_type, &endpoint_info, existing_cursor_state.as_ref());
+    let known_non_solana_chain =
+        chain_is_known_non_solana(&block_type, &endpoint_info, existing_cursor_state.as_ref());
+
     validate_ingestion_block_range(args.common.live, config.stop_block, resume_cursor_state)?;
     config.start_block = resolve_ingestion_start_block(
         config.start_block,
@@ -4087,13 +4216,19 @@ async fn run_ingestion(args: &BuildArgs) -> Result<()> {
             .set_block_range_start(effective_start_block);
     }
 
-    extended = resolve_extended_mode(extended, &endpoint_info);
+    if solana_chain {
+        extended = false;
+        log_solana_vote_mode(with_votes);
+    } else if known_non_solana_chain {
+        extended = resolve_extended_mode(extended, &endpoint_info);
+    }
 
     let include_failed_transactions = args.include_failed_transactions;
 
     info!(
         block_type,
         extended,
+        with_votes,
         bytes_encoding = %bytes_encoding_str,
         include_failed_transactions,
         "starting pipeline\n{config}"
@@ -4137,6 +4272,7 @@ async fn run_ingestion(args: &BuildArgs) -> Result<()> {
             ("compression".to_string(), config.compression.to_string()),
             ("bytes_encoding".to_string(), bytes_encoding_str.clone()),
             ("extended".to_string(), extended.to_string()),
+            ("with_votes".to_string(), with_votes.to_string()),
             (
                 "final_blocks_only".to_string(),
                 config.final_blocks_only.to_string(),
@@ -4241,6 +4377,7 @@ async fn run_ingestion(args: &BuildArgs) -> Result<()> {
             &endpoint_info,
         );
         let mut meta = meta;
+        maybe_add_solana_with_votes_metadata(&mut meta, Some(&block_type), with_votes);
         maybe_add_synthetic_timestamp_metadata(
             &mut meta,
             &block_type,
@@ -4251,6 +4388,7 @@ async fn run_ingestion(args: &BuildArgs) -> Result<()> {
         Some(create_mapper(
             &block_type,
             extended,
+            with_votes,
             include_fork_step,
             encode_bytes,
             use_synthetic_partition_routing,
@@ -4305,6 +4443,9 @@ async fn run_ingestion(args: &BuildArgs) -> Result<()> {
         &endpoint_info,
     );
     let mut cursor_file_metadata = cursor_file_metadata;
+    if solana_chain {
+        maybe_add_solana_with_votes_metadata(&mut cursor_file_metadata, Some("solana"), with_votes);
+    }
     if block_type != "auto" {
         maybe_add_synthetic_timestamp_metadata(
             &mut cursor_file_metadata,
@@ -4328,6 +4469,9 @@ async fn run_ingestion(args: &BuildArgs) -> Result<()> {
     if let Some(loaded) = existing_cursor_state.as_ref() {
         let mut mismatches = loaded.validate_params(&cursor_state_template);
         mismatches.retain(|mismatch| !mismatch.starts_with("stop_block:"));
+        if solana_chain {
+            apply_solana_cursor_feature_validation(&mut mismatches, loaded, with_votes);
+        }
         if !mismatches.is_empty() {
             if args.cursor_override {
                 warn!(
@@ -4354,6 +4498,19 @@ async fn run_ingestion(args: &BuildArgs) -> Result<()> {
             if mapper.is_none() {
                 let detected = detect_block_type(&type_url)?;
                 info!(detected_type = %detected, type_url = %type_url, "auto-detected block type");
+                validate_chain_feature_flags(
+                    &detected,
+                    &endpoint_info,
+                    existing_cursor_state.as_ref(),
+                    extended,
+                    with_votes,
+                )?;
+                if detected == "solana" {
+                    extended = false;
+                    log_solana_vote_mode(with_votes);
+                } else {
+                    extended = resolve_extended_mode(extended, &endpoint_info);
+                }
                 let encode_bytes = resolve_encode_bytes(
                     &detected,
                     &bytes_encoding_str,
@@ -4368,6 +4525,7 @@ async fn run_ingestion(args: &BuildArgs) -> Result<()> {
                     &endpoint_info,
                 );
                 let mut meta = meta;
+                maybe_add_solana_with_votes_metadata(&mut meta, Some(&detected), with_votes);
                 let detected_uses_synthetic_partition_routing =
                     use_last_known_timestamp_partition_routing(&detected, &partition_config);
                 maybe_add_synthetic_timestamp_metadata(
@@ -4386,12 +4544,14 @@ async fn run_ingestion(args: &BuildArgs) -> Result<()> {
                     &config.partition,
                     &endpoint_info,
                 );
+                maybe_add_solana_with_votes_metadata(&mut cursor_meta, Some(&detected), with_votes);
                 maybe_add_synthetic_timestamp_metadata(
                     &mut cursor_meta,
                     &detected,
                     detected_uses_synthetic_partition_routing,
                 );
                 cursor_state_template.file_metadata = cursor_meta;
+                cursor_state_template.extended = extended;
                 is_solana = detected == "solana";
                 use_synthetic_partition_routing = detected_uses_synthetic_partition_routing;
                 timestamp_backfill = TimestampBackfill::new(
@@ -4401,6 +4561,7 @@ async fn run_ingestion(args: &BuildArgs) -> Result<()> {
                 mapper = Some(create_mapper(
                     &detected,
                     extended,
+                    with_votes,
                     include_fork_step,
                     encode_bytes,
                     use_synthetic_partition_routing,
@@ -5148,6 +5309,27 @@ mod tests {
     }
 
     #[test]
+    fn test_build_subcommand_parses_with_votes_for_solana() {
+        let cli = Cli::parse_from([
+            "fireparq",
+            "build",
+            "--network",
+            "solana-mainnet-beta",
+            "--start-block",
+            "100",
+            "--stop-block",
+            "200",
+            "--with-votes",
+        ]);
+        if let Some(Commands::Build(build_args)) = cli.command {
+            assert!(build_args.with_votes);
+            assert_eq!(build_args.network.as_deref(), Some("solana-mainnet-beta"));
+        } else {
+            panic!("expected Commands::Build");
+        }
+    }
+
+    #[test]
     fn test_build_subcommand_rejects_removed_backfill_missing_timestamps_flag() {
         let err = Cli::try_parse_from([
             "fireparq",
@@ -5300,6 +5482,7 @@ mod tests {
             .expect("build subcommand should exist");
         let help = build_subcmd.clone().render_long_help().to_string();
         assert!(help.contains("fireparq build --network"));
+        assert!(help.contains("--with-votes"));
         assert!(help.contains("--start-block"));
         assert!(help.contains("--live"));
         assert!(!help.contains("--partitions-index"));
@@ -5892,7 +6075,7 @@ mod tests {
             let encode_bytes = output_encoding_policy(block_type, false)
                 .map(|policy| policy.bytes_encoding)
                 .unwrap_or(EncodeBytes::Hex);
-            let mapper = create_mapper(block_type, false, false, encode_bytes, false, false);
+            let mapper = create_mapper(block_type, false, false, false, encode_bytes, false, false);
             assert!(
                 mapper.is_ok(),
                 "create_mapper failed for block_type: {block_type}"
@@ -5902,7 +6085,16 @@ mod tests {
 
     #[test]
     fn test_create_mapper_invalid_type() {
-        assert!(create_mapper("unknown", false, false, EncodeBytes::Hex, false, false).is_err());
+        assert!(create_mapper(
+            "unknown",
+            false,
+            false,
+            false,
+            EncodeBytes::Hex,
+            false,
+            false
+        )
+        .is_err());
     }
 
     #[test]
@@ -6541,7 +6733,7 @@ mod tests {
     }
 
     #[test]
-    fn test_extended_warning_message_for_solana_mentions_vote_transactions() {
+    fn test_endpoint_chain_is_solana_matches_expected_aliases() {
         let ei = Some(EndpointInfo {
             chain_name: "solana-mainnet-beta".to_string(),
             chain_name_aliases: vec!["solana".to_string()],
@@ -6551,13 +6743,11 @@ mod tests {
             block_features: vec![],
         });
 
-        let warning = extended_warning_message(&ei);
-        assert!(warning.contains("capability-advertisement mismatch"));
-        assert!(warning.contains("vote_transactions"));
+        assert!(endpoint_chain_is_solana(&ei));
     }
 
     #[test]
-    fn test_extended_warning_message_for_non_solana_stays_generic() {
+    fn test_extended_warning_message_stays_generic() {
         let ei = Some(EndpointInfo {
             chain_name: "mainnet".to_string(),
             chain_name_aliases: vec!["eth".to_string()],
@@ -6567,8 +6757,9 @@ mod tests {
             block_features: vec![],
         });
 
+        assert!(!endpoint_chain_is_solana(&ei));
         assert_eq!(
-            extended_warning_message(&ei),
+            extended_warning_message(),
             "--extended requested but endpoint did not advertise extended block features"
         );
     }
@@ -6599,6 +6790,60 @@ mod tests {
         });
 
         assert!(resolve_extended_mode(true, &ei));
+    }
+
+    #[test]
+    fn test_validate_chain_feature_flags_rejects_extended_for_solana() {
+        let err = validate_chain_feature_flags("solana", &None, None, true, false)
+            .expect_err("Solana should reject --extended");
+        assert!(err.to_string().contains("--with-votes"));
+    }
+
+    #[test]
+    fn test_validate_chain_feature_flags_rejects_with_votes_for_non_solana() {
+        let err = validate_chain_feature_flags("evm", &None, None, false, true)
+            .expect_err("non-Solana chains should reject --with-votes");
+        assert_eq!(err.to_string(), WITH_VOTES_NON_SOLANA_ERROR);
+    }
+
+    #[test]
+    fn test_solana_cursor_feature_validation_accepts_legacy_extended_true_when_with_votes_true() {
+        let mut mismatches = vec!["extended: cursor=true vs current=false".to_string()];
+        let cursor_state = CursorState {
+            extended: true,
+            ..CursorState::default()
+        };
+
+        apply_solana_cursor_feature_validation(&mut mismatches, &cursor_state, true);
+
+        assert!(mismatches.is_empty());
+    }
+
+    #[test]
+    fn test_solana_cursor_feature_validation_reports_with_votes_mismatch() {
+        let mut mismatches = vec!["extended: cursor=true vs current=false".to_string()];
+        let cursor_state = CursorState {
+            extended: true,
+            ..CursorState::default()
+        };
+
+        apply_solana_cursor_feature_validation(&mut mismatches, &cursor_state, false);
+
+        assert_eq!(mismatches, vec!["with_votes: cursor=true vs current=false"]);
+    }
+
+    #[test]
+    fn test_maybe_add_solana_with_votes_metadata_only_for_solana() {
+        let mut solana_meta = ParquetFileMetadata::new();
+        maybe_add_solana_with_votes_metadata(&mut solana_meta, Some("solana"), true);
+        assert_eq!(
+            find_meta(&solana_meta, "firehose-parquet.with_votes"),
+            Some("true")
+        );
+
+        let mut evm_meta = ParquetFileMetadata::new();
+        maybe_add_solana_with_votes_metadata(&mut evm_meta, Some("evm"), true);
+        assert_eq!(find_meta(&evm_meta, "firehose-parquet.with_votes"), None);
     }
 
     // -- block_id_encoding_label tests --

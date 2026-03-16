@@ -343,8 +343,13 @@ Examples:
   fireparq build --network mainnet --live
 
   # Override a network alias with an env var
-  FIREHOSE_ENDPOINT_SOLANA=https://solana.internal.example.com:443 \\
-    fireparq build --network solana --start-block 250000000 --stop-block 250100000
+  FIREHOSE_ENDPOINT_SOLANA_MAINNET_BETA=https://solana.internal.example.com:443 \\
+    fireparq build --network solana-mainnet-beta --start-block 250000000 --stop-block 250100000
+
+  # Stream Solana vote transactions explicitly
+  fireparq build --network solana-mainnet-beta \\
+    --start-block 250000000 --stop-block 250001000 \\
+    --with-votes
 
   # Stream with hex encoding and extended tables
   fireparq build --network mainnet \\
@@ -387,7 +392,7 @@ pub struct BuildArgs {
     )]
     pub block_type: String,
 
-    /// Enable extended detail level (extra tables: EVM calls/balance_changes/etc., Antelope db_ops, Solana vote_transactions)
+    /// Enable extended detail level (extra tables: EVM calls/balance_changes/etc., Antelope db_ops)
     #[arg(
         long,
         env = "EXTENDED",
@@ -396,6 +401,16 @@ pub struct BuildArgs {
         help_heading = "Chain"
     )]
     pub extended: bool,
+
+    /// Include Solana `vote_transactions` output (disabled by default)
+    #[arg(
+        long,
+        env = "WITH_VOTES",
+        default_value = "false",
+        hide_env_values = true,
+        help_heading = "Chain"
+    )]
+    pub with_votes: bool,
 
     /// Byte encoding strategy for binary fields (hashes, addresses, etc.)
     /// Options: binary (raw bytes), hex (0x-prefixed), hex_no_prefix, base58, tron_base58, auto (chain-appropriate)

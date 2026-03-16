@@ -8,7 +8,7 @@ A production-grade Rust toolkit that consumes [StreamingFast Firehose](https://f
 |---|---|---|
 | `evm` | `eth.firehose.pinax.network:443` | blocks, transactions, logs |
 | `evm --extended` | | + calls, balance_changes, code_changes, storage_changes, nonce_changes, gas_changes, account_creations |
-| `solana` | `solana.firehose.pinax.network:443` | blocks, transactions, messages, instructions, rewards, token_balances, account_lookups (`--extended`: `vote_transactions`) |
+| `solana` | `solana.firehose.pinax.network:443` | blocks, transactions, messages, instructions, rewards, token_balances, account_lookups (`--with-votes`: `vote_transactions`) |
 | `bitcoin` | `btc.firehose.pinax.network:443` | blocks, transactions, inputs, outputs |
 | `beacon` | `beacon.firehose.pinax.network:443` | blocks, attestations, deposits, proposer_slashings, attester_slashings, voluntary_exits, execution_payload, blob_sidecars |
 | `tron` | `tron.firehose.pinax.network:443` | blocks, transactions, logs, internal_transactions |
@@ -51,7 +51,7 @@ cargo build --release --workspace
 
 # Stream Solana blocks to Parquet (auto-detect chain)
 ./target/release/fireparq build \
-  --network solana \
+  --network solana-mainnet-beta \
   --start-block 200000000 \
   --stop-block 200001000 \
   --output ./output \
@@ -66,6 +66,14 @@ cargo build --release --workspace
   --output ./output \
   --partition date \
   --compression zstd
+
+# Include Solana vote transactions explicitly
+./target/release/fireparq build \
+  --network solana-mainnet-beta \
+  --start-block 200000000 \
+  --stop-block 200001000 \
+  --with-votes \
+  --output ./output
 
 # Stream EVM blocks with extended traces (explicit block type)
 ./target/release/fireparq build \
@@ -144,7 +152,7 @@ fireparq --network eth --start-block 20000000 --stop-block 20001000
 
 # Canonical-name override also works for aliases
 export FIREHOSE_ENDPOINT_SOLANA_MAINNET_BETA=https://solana.internal.example.com:443
-fireparq --network solana --start-block 250000000 --stop-block 250100000
+fireparq --network solana-mainnet-beta --start-block 250000000 --stop-block 250100000
 ```
 
 ### How It Works
@@ -191,6 +199,7 @@ When output is written locally or to S3, the default cursor file is automaticall
 When resuming from an existing `cursor.parquet`, the pipeline validates that the current CLI parameters match those stored in the cursor. Checked parameters include:
 
 - `start_block`, `extended`, `final_blocks_only`, `include_failed_transactions`
+- `with_votes` for Solana cursor compatibility and vote table output
 - `endpoint`, `partition`, `block_range_size`, `compression`, `bytes_encoding` (from file metadata)
 
 On resume, the cursor's stored `start_block` is reused when present. The cursor's `stop_block` may be omitted from the CLI for bounded resume, replaced with a new explicit `--stop-block`, or omitted with `--live` to continue streaming indefinitely. Other parameter mismatches still fail fast unless `--cursor-override` is set.
@@ -314,7 +323,9 @@ Chain:
           Block type to process. Use "auto" to detect from the Firehose stream.
           Options: auto, evm, bitcoin, solana, near, antelope, cosmos, tron, beacon [env: BLOCK_TYPE] [default: auto]
       --extended
-          Enable extended detail level (extra tables: EVM calls/balance_changes/etc., Antelope db_ops, Solana vote_transactions) [env: EXTENDED]
+          Enable extended detail level (extra tables: EVM calls/balance_changes/etc., Antelope db_ops) [env: EXTENDED]
+      --with-votes
+          Include Solana vote_transactions output (disabled by default) [env: WITH_VOTES]
       --bytes-encoding <BYTES_ENCODING>
           Byte encoding strategy for binary fields (hashes, addresses, etc.)
           Options: binary (raw bytes), hex (0x-prefixed), hex_no_prefix, base58, tron_base58, auto (chain-appropriate)

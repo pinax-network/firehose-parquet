@@ -201,8 +201,8 @@ pub const BASE_TABLE_NAMES: [&str; 7] = [
     "account_lookups",
 ];
 
-/// Extended table names (available at EXTENDED detail level).
-pub const EXTENDED_TABLE_NAMES: [&str; 8] = [
+/// Table names when Solana vote transactions are enabled.
+pub const WITH_VOTES_TABLE_NAMES: [&str; 8] = [
     "blocks",
     "transactions",
     "vote_transactions",
