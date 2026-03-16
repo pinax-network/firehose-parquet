@@ -4636,7 +4636,13 @@ async fn run_ingestion(args: &BuildArgs) -> Result<()> {
                             min_timestamp,
                             max_timestamp,
                         };
-                        let wrote = writer.write_all(&batches, &metadata)?;
+                        let mut wrote = writer.write_all(&batches, &metadata)?;
+                        if rows_to_flush && !wrote {
+                            let forced = writer.flush_remaining()?;
+                            if forced {
+                                wrote = true;
+                            }
+                        }
                         let writer_buffered = writer.buffered_stats();
                         if wrote {
                             info!(
