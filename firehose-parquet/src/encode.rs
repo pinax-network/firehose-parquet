@@ -61,6 +61,11 @@ pub fn encode_base58(bytes: &[u8]) -> String {
     bs58::encode(bytes).into_string()
 }
 
+/// Decode a base58 string to bytes.
+pub fn decode_base58(value: &str) -> Result<Vec<u8>, bs58::decode::Error> {
+    bs58::decode(value).into_vec()
+}
+
 const TRON_VERSION_BYTE: u8 = 0x41;
 
 /// Double-SHA256 then take first 4 bytes.
