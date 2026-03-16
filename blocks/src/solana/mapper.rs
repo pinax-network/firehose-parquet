@@ -3,7 +3,9 @@ use super::schema;
 use arrow::array::*;
 use arrow::datatypes::Schema;
 use arrow::record_batch::RecordBatch;
-use firehose_parquet::encode::{BytesColumn, BytesListColumn, EncodeBytes};
+use firehose_parquet::encode::{
+    decode_base58, encode_hex_no_prefix, BytesColumn, BytesListColumn, EncodeBytes,
+};
 use firehose_parquet::traits::{
     est_bool, est_f64, est_i32, est_i64, est_list_str, est_list_u64, est_opt_str, est_str, est_u32,
     est_u64, BlockIdentity, BlockMapper, CanonicalBuilder,
@@ -22,6 +24,10 @@ fn finish_fork_step(builder: &mut Option<StringBuilder>, columns: &mut Vec<Arc<d
     if let Some(ref mut b) = builder {
         columns.push(Arc::new(b.finish()) as Arc<dyn Array>);
     }
+}
+
+fn solana_hash_bytes(hash: &str) -> Vec<u8> {
+    decode_base58(hash).unwrap_or_else(|_| hash.as_bytes().to_vec())
 }
 
 /// Solana Vote program ID (`Vote111111111111111111111111111111111111111`).
@@ -119,8 +125,8 @@ fn append_transaction(
 
 fn solana_canonical_identity(block: &solana::Block, identity: &BlockIdentity) -> BlockIdentity {
     let mut canonical = identity.clone();
-    canonical.block_id = block.blockhash.clone();
-    canonical.parent_id = block.previous_blockhash.clone();
+    canonical.block_id = encode_hex_no_prefix(&solana_hash_bytes(&block.blockhash));
+    canonical.parent_id = encode_hex_no_prefix(&solana_hash_bytes(&block.previous_blockhash));
     canonical
 }
 
@@ -197,10 +203,12 @@ impl SolanaBlockMapper {
             Some(bh) => self.blocks.block_height.append_value(bh.block_height),
             None => self.blocks.block_height.append_null(),
         }
-        self.blocks.blockhash.append_value(&block.blockhash);
+        let blockhash_bytes = solana_hash_bytes(&block.blockhash);
+        self.blocks.blockhash.append_value(&blockhash_bytes);
+        let previous_blockhash_bytes = solana_hash_bytes(&block.previous_blockhash);
         self.blocks
             .previous_blockhash
-            .append_value(&block.previous_blockhash);
+            .append_value(&previous_blockhash_bytes);
         match &block.block_time {
             Some(bt) => self.blocks.block_time.append_value(bt.timestamp),
             None => self.blocks.block_time.append_null(),
@@ -635,8 +643,8 @@ impl BlockMapper for SolanaBlockMapper {
             + est_u64(&self.blocks.slot)
             + est_u64(&self.blocks.parent_slot)
             + est_u64(&self.blocks.block_height)
-            + est_str(&self.blocks.blockhash)
-            + est_str(&self.blocks.previous_blockhash)
+            + self.blocks.blockhash.estimated_bytes()
+            + self.blocks.previous_blockhash.estimated_bytes()
             + est_i64(&self.blocks.block_time)
             + est_u32(&self.blocks.num_transactions)
             + est_u32(&self.blocks.num_rewards)
@@ -736,8 +744,8 @@ struct BlocksBuilder {
     slot: UInt64Builder,
     parent_slot: UInt64Builder,
     block_height: UInt64Builder,
-    blockhash: StringBuilder,
-    previous_blockhash: StringBuilder,
+    blockhash: BytesColumn,
+    previous_blockhash: BytesColumn,
     block_time: Int64Builder,
     num_transactions: UInt32Builder,
     num_rewards: UInt32Builder,
@@ -751,8 +759,8 @@ impl BlocksBuilder {
             slot: UInt64Builder::new(),
             parent_slot: UInt64Builder::new(),
             block_height: UInt64Builder::new(),
-            blockhash: StringBuilder::new(),
-            previous_blockhash: StringBuilder::new(),
+            blockhash: BytesColumn::new(encoding),
+            previous_blockhash: BytesColumn::new(encoding),
             block_time: Int64Builder::new(),
             num_transactions: UInt32Builder::new(),
             num_rewards: UInt32Builder::new(),
@@ -770,8 +778,8 @@ impl BlocksBuilder {
             Arc::new(self.slot.finish()) as Arc<dyn Array>,
             Arc::new(self.parent_slot.finish()) as Arc<dyn Array>,
             Arc::new(self.block_height.finish()) as Arc<dyn Array>,
-            Arc::new(self.blockhash.finish()) as Arc<dyn Array>,
-            Arc::new(self.previous_blockhash.finish()) as Arc<dyn Array>,
+            self.blockhash.finish(),
+            self.previous_blockhash.finish(),
             Arc::new(self.block_time.finish()) as Arc<dyn Array>,
             Arc::new(self.num_transactions.finish()) as Arc<dyn Array>,
             Arc::new(self.num_rewards.finish()) as Arc<dyn Array>,
@@ -1147,12 +1155,16 @@ impl AccountLookupsBuilder {
 mod tests {
     use super::*;
 
+    fn solana_hash(seed: u8) -> String {
+        firehose_parquet::encode::encode_base58(&[seed; 32])
+    }
+
     fn make_test_block(slot: u64) -> solana::Block {
         solana::Block {
             slot,
             parent_slot: slot.saturating_sub(1),
-            blockhash: format!("hash_{slot}"),
-            previous_blockhash: format!("hash_{}", slot.saturating_sub(1)),
+            blockhash: solana_hash(0x01),
+            previous_blockhash: solana_hash(0x02),
             block_height: Some(solana::BlockHeight { block_height: slot }),
             block_time: Some(solana::UnixTimestamp {
                 timestamp: 1_700_000_000 + slot as i64,
@@ -1305,6 +1317,55 @@ mod tests {
             .column_by_name("blockhash")
             .unwrap()
             .as_any()
+            .downcast_ref::<BinaryArray>()
+            .unwrap();
+        let previous_blockhash = blocks
+            .column_by_name("previous_blockhash")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<BinaryArray>()
+            .unwrap();
+
+        assert_eq!(block_id.value(0), blockhash.value(0));
+        assert_eq!(parent_id.value(0), previous_blockhash.value(0));
+    }
+
+    #[test]
+    fn test_solana_base58_canonical_ids_match_blockhash_fields() {
+        let block = make_test_block(100);
+        let block_bytes = prost::Message::encode_to_vec(&block);
+        let mut mapper = SolanaBlockMapper::new(false, false, EncodeBytes::Base58, false);
+
+        let identity = BlockIdentity {
+            block_num: 100,
+            block_id: "firehose-envelope-id".to_string(),
+            parent_num: 99,
+            parent_id: "firehose-envelope-parent-id".to_string(),
+            lib_num: 99,
+            timestamp: 1_700_000_100,
+            fork_step: None,
+        };
+
+        mapper.map_block(&block_bytes, &identity, None).unwrap();
+        let batches = mapper.flush().unwrap();
+        let blocks = &batches["blocks"];
+
+        let block_id = blocks
+            .column_by_name("block_id")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        let parent_id = blocks
+            .column_by_name("parent_id")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        let blockhash = blocks
+            .column_by_name("blockhash")
+            .unwrap()
+            .as_any()
             .downcast_ref::<StringArray>()
             .unwrap();
         let previous_blockhash = blocks
@@ -1314,8 +1375,8 @@ mod tests {
             .downcast_ref::<StringArray>()
             .unwrap();
 
-        assert_eq!(block_id.value(0), blockhash.value(0).as_bytes());
-        assert_eq!(parent_id.value(0), previous_blockhash.value(0).as_bytes());
+        assert_eq!(block_id.value(0), blockhash.value(0));
+        assert_eq!(parent_id.value(0), previous_blockhash.value(0));
     }
 
     #[test]

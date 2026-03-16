@@ -657,6 +657,56 @@ mod tests {
     }
 
     #[test]
+    fn test_bitcoin_hex_no_prefix_canonical_ids_match_block_hash_fields() {
+        let block = make_test_block(0);
+        let block_bytes = prost::Message::encode_to_vec(&block);
+        let mut mapper = BitcoinBlockMapper::new(false, EncodeBytes::HexNoPrefix);
+        let identity = BlockIdentity {
+            block_num: 0,
+            block_id: "firehose-envelope-id".to_string(),
+            parent_num: 0,
+            parent_id: "firehose-envelope-parent-id".to_string(),
+            lib_num: 0,
+            timestamp: block.time,
+            fork_step: None,
+        };
+
+        mapper.map_block(&block_bytes, &identity, None).unwrap();
+        let batches = mapper.flush().unwrap();
+        let blocks = &batches["blocks"];
+
+        let block_id = blocks
+            .column_by_name("block_id")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        let parent_id = blocks
+            .column_by_name("parent_id")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        let hash = blocks
+            .column_by_name("hash")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        let previous_hash = blocks
+            .column_by_name("previous_hash")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+
+        assert_eq!(block_id.value(0), hash.value(0));
+        assert_eq!(parent_id.value(0), previous_hash.value(0));
+        assert!(!block_id.value(0).starts_with("0x"));
+        assert!(!parent_id.value(0).starts_with("0x"));
+    }
+
+    #[test]
     fn test_empty_block() {
         let block = btc::Block {
             hash: "00000000".to_string(),
