@@ -602,6 +602,10 @@ fn interpolate_buffered_blocks(
         .collect())
 }
 
+fn should_emit_progress_log(counter: u64) -> bool {
+    counter > 0 && counter % 100 == 0
+}
+
 fn infer_partitions_block_type(
     chain: &str,
     endpoint_info: &Option<EndpointInfo>,
@@ -4206,6 +4210,7 @@ async fn run_ingestion(args: &BuildArgs) -> Result<()> {
         None
     };
 
+    let mut blocks_observed: u64 = 0;
     let mut blocks_processed: u64 = 0;
     let mut min_block: Option<u64> = None;
     let mut max_block: Option<u64> = None;
@@ -4351,6 +4356,7 @@ async fn run_ingestion(args: &BuildArgs) -> Result<()> {
 
             let block_number = identity.block_num;
             let ts = identity.timestamp;
+            blocks_observed += 1;
             let fork_step_owned = fork_step_str.map(str::to_owned);
             let ready_solana_blocks = if is_solana && backfill_missing_timestamps {
                 timestamp_backfill.observe_block(
@@ -4371,6 +4377,37 @@ async fn run_ingestion(args: &BuildArgs) -> Result<()> {
                 .last()
                 .map(|block| block.identity.timestamp)
                 .unwrap_or(ts);
+            if ready_solana_blocks.is_empty() {
+                if should_emit_progress_log(blocks_observed) {
+                    let elapsed_secs = progress_start.elapsed().as_secs_f64();
+                    let observed_blocks_per_sec = if elapsed_secs > 0.0 {
+                        blocks_observed as f64 / elapsed_secs
+                    } else {
+                        0.0
+                    };
+                    let block_timestamp = format_optional_probe_timestamp(current_anchor_timestamp)?;
+                    match block_timestamp.as_deref() {
+                        Some(block_timestamp) => info!(
+                            blocks_observed,
+                            blocks_processed,
+                            block_number,
+                            block_timestamp,
+                            buffered_blocks = timestamp_backfill.buffered_blocks.len(),
+                            speed = format!("{:.0} observed blocks/s", observed_blocks_per_sec),
+                            "progress (buffering timestamps)"
+                        ),
+                        None => info!(
+                            blocks_observed,
+                            blocks_processed,
+                            block_number,
+                            buffered_blocks = timestamp_backfill.buffered_blocks.len(),
+                            speed = format!("{:.0} observed blocks/s", observed_blocks_per_sec),
+                            "progress (buffering timestamps)"
+                        ),
+                    }
+                }
+                return Ok(());
+            }
             // For Solana, blocks may legitimately lack timestamps — skip the
             // genesis bootstrap and timestamp validation entirely.
             if !is_solana {
@@ -4510,7 +4547,7 @@ async fn run_ingestion(args: &BuildArgs) -> Result<()> {
                     return Err(anyhow!("__shutdown__"));
                 }
 
-                if blocks_processed % 100 == 0 {
+                if should_emit_progress_log(blocks_processed) {
                     let elapsed_secs = progress_start.elapsed().as_secs_f64();
                     let speed_per_sec = if elapsed_secs > 0.0 {
                         bytes_read as f64 / elapsed_secs
@@ -5905,6 +5942,15 @@ mod tests {
         assert_eq!(anchored[1].identity.timestamp, 1_700_000_000);
         assert_eq!(anchored[0].cursor, "cursor-0");
         assert_eq!(anchored[1].fork_step.as_deref(), Some("STEP_NEW"));
+    }
+
+    #[test]
+    fn test_should_emit_progress_log_every_hundred_blocks() {
+        assert!(!should_emit_progress_log(0));
+        assert!(!should_emit_progress_log(99));
+        assert!(should_emit_progress_log(100));
+        assert!(!should_emit_progress_log(101));
+        assert!(should_emit_progress_log(200));
     }
 
     #[test]
