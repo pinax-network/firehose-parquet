@@ -31,11 +31,10 @@ fn append_canonical_timestamp(
     builder: &mut CanonicalBuilder,
     identity: &BlockIdentity,
     block_time_opt: Option<i64>,
-    backfill_missing_timestamps: bool,
+    _backfill_missing_timestamps: bool,
 ) {
     match block_time_opt {
         Some(timestamp) => builder.append_with_optional_timestamp(identity, Some(timestamp)),
-        None if backfill_missing_timestamps => builder.append(identity),
         None => builder.append_with_optional_timestamp(identity, None),
     }
 }
@@ -1368,7 +1367,7 @@ mod tests {
     }
 
     #[test]
-    fn test_backfill_missing_canonical_timestamp_uses_identity_timestamp() {
+    fn test_missing_canonical_timestamp_remains_null_when_partition_routing_is_enabled() {
         let mut block = make_test_block(100);
         block.block_time = None;
         let block_bytes = prost::Message::encode_to_vec(&block);
@@ -1413,19 +1412,21 @@ mod tests {
             .downcast_ref::<TimestampSecondArray>()
             .unwrap();
 
-        assert_eq!(block_timestamp.value(0), identity.timestamp);
-        assert_eq!(
-            block_date.value(0),
-            firehose_parquet::traits::date32_from_timestamp_seconds(identity.timestamp)
+        assert!(
+            block_timestamp.is_null(0),
+            "canonical block timestamp should remain null when block_time is missing"
+        );
+        assert!(
+            block_date.is_null(0),
+            "canonical block date should remain null when block_time is missing"
         );
         assert!(
             block_time.is_null(0),
             "raw Solana block_time should remain null"
         );
-        assert_eq!(
-            tx_timestamp.value(0),
-            identity.timestamp,
-            "derived canonical timestamp should propagate to child tables"
+        assert!(
+            tx_timestamp.is_null(0),
+            "child table canonical timestamps should remain null when block_time is missing"
         );
     }
 

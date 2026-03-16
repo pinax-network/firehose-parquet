@@ -1,7 +1,7 @@
 use arrow::datatypes::{DataType, Field, Schema};
 use firehose_parquet::encode::{bytes_data_type, BytesListColumn, EncodeBytes};
 use firehose_parquet::traits::{
-    canonical_fields_with_encoding, canonical_fields_with_nullable_timestamps, fork_step_field,
+    canonical_fields_with_nullable_timestamps, fork_step_field,
 };
 use std::sync::Arc;
 
@@ -13,13 +13,9 @@ fn maybe_fork_step(fields: &mut Vec<Field>, include: bool) {
 
 fn solana_canonical_fields(
     encoding: &EncodeBytes,
-    backfill_missing_timestamps: bool,
+    _backfill_missing_timestamps: bool,
 ) -> Vec<Field> {
-    if backfill_missing_timestamps {
-        canonical_fields_with_encoding(encoding)
-    } else {
-        canonical_fields_with_nullable_timestamps(encoding)
-    }
+    canonical_fields_with_nullable_timestamps(encoding)
 }
 
 pub fn blocks_schema(
@@ -267,7 +263,7 @@ mod tests {
     }
 
     #[test]
-    fn test_all_solana_schemas_use_required_canonical_time_fields_when_backfill_enabled() {
+    fn test_all_solana_schemas_keep_nullable_canonical_time_fields_when_backfill_enabled() {
         let schema_builders: [fn(bool, &EncodeBytes, bool) -> Schema; 7] = [
             blocks_schema,
             transactions_schema,
@@ -281,7 +277,7 @@ mod tests {
         for include_fork_step in [false, true] {
             for build_schema in schema_builders {
                 let schema = build_schema(include_fork_step, &EncodeBytes::Binary, true);
-                assert_canonical_time_field_nullability(&schema, false);
+                assert_canonical_time_field_nullability(&schema, true);
             }
         }
     }

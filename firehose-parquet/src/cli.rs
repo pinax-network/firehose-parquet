@@ -419,11 +419,11 @@ pub struct BuildArgs {
     )]
     pub include_failed_transactions: bool,
 
-    /// Solana only: synthesize missing canonical `timestamp` / `date` values.
+    /// Solana only: use last-known synthetic timestamps for partition routing.
     ///
-    /// Missing Solana `block_time` values are derived from nearby timestamped
-    /// blocks so canonical `timestamp` and `date` become non-nullable. This
-    /// intentionally writes derived values, not chain-sourced timestamps.
+    /// Missing Solana `block_time` values keep canonical `timestamp` / `date`
+    /// null. When enabled, time-based partition routing reuses the most recent
+    /// known timestamp (seeded from the Solana genesis anchor when needed).
     #[arg(
         long,
         env = "BACKFILL_MISSING_TIMESTAMPS",
@@ -433,11 +433,11 @@ pub struct BuildArgs {
     )]
     pub backfill_missing_timestamps: bool,
 
-    /// Solana only: max unresolved timestamp-backfill buffer size in bytes.
+    /// Solana only: legacy safety limit for synthetic timestamp routing state.
     ///
-    /// Protects live ingestion from unbounded memory growth when
-    /// `--backfill-missing-timestamps` encounters a long span of blocks without
-    /// `block_time`.
+    /// Retained for CLI compatibility with earlier Solana timestamp backfill
+    /// work. The current last-known routing strategy no longer interpolates or
+    /// buffers unresolved spans during normal operation.
     #[arg(
         long,
         env = "BACKFILL_MISSING_TIMESTAMPS_BUFFER_BYTES",
