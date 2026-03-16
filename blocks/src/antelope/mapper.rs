@@ -67,11 +67,11 @@ impl AntelopeBlockMapper {
         Self {
             extended,
             include_failed_transactions,
-            blocks: BlocksBuilder::new(include_fork_step),
-            transactions: TransactionsBuilder::new(include_fork_step),
-            actions: ActionsBuilder::new(include_fork_step),
+            blocks: BlocksBuilder::new(include_fork_step, enc),
+            transactions: TransactionsBuilder::new(include_fork_step, enc),
+            actions: ActionsBuilder::new(include_fork_step, enc),
             db_ops: if extended {
-                Some(DbOpsBuilder::new(include_fork_step))
+                Some(DbOpsBuilder::new(include_fork_step, enc))
             } else {
                 None
             },
@@ -354,9 +354,9 @@ struct BlocksBuilder {
 }
 
 impl BlocksBuilder {
-    fn new(include_fork_step: bool) -> Self {
+    fn new(include_fork_step: bool, encoding: &EncodeBytes) -> Self {
         Self {
-            canonical: CanonicalBuilder::new(),
+            canonical: CanonicalBuilder::with_encoding(encoding),
             number: UInt32Builder::new(),
             hash: StringBuilder::new(),
             producer: StringBuilder::new(),
@@ -396,9 +396,9 @@ struct TransactionsBuilder {
 }
 
 impl TransactionsBuilder {
-    fn new(include_fork_step: bool) -> Self {
+    fn new(include_fork_step: bool, encoding: &EncodeBytes) -> Self {
         Self {
-            canonical: CanonicalBuilder::new(),
+            canonical: CanonicalBuilder::with_encoding(encoding),
             tx_hash: StringBuilder::new(),
             index: UInt64Builder::new(),
             status: Int32Builder::new(),
@@ -442,9 +442,9 @@ struct ActionsBuilder {
 }
 
 impl ActionsBuilder {
-    fn new(include_fork_step: bool) -> Self {
+    fn new(include_fork_step: bool, encoding: &EncodeBytes) -> Self {
         Self {
-            canonical: CanonicalBuilder::new(),
+            canonical: CanonicalBuilder::with_encoding(encoding),
             tx_hash: StringBuilder::new(),
             action_ordinal: UInt32Builder::new(),
             receiver: StringBuilder::new(),
@@ -493,9 +493,9 @@ struct DbOpsBuilder {
 }
 
 impl DbOpsBuilder {
-    fn new(include_fork_step: bool) -> Self {
+    fn new(include_fork_step: bool, encoding: &EncodeBytes) -> Self {
         Self {
-            canonical: CanonicalBuilder::new(),
+            canonical: CanonicalBuilder::with_encoding(encoding),
             tx_hash: StringBuilder::new(),
             action_index: UInt32Builder::new(),
             operation: Int32Builder::new(),
@@ -539,9 +539,13 @@ impl DbOpsBuilder {
 mod tests {
     use super::*;
 
+    fn make_test_hex_id(seed: u32) -> String {
+        format!("{seed:064x}")
+    }
+
     fn make_test_block(number: u32) -> antelope::Block {
         antelope::Block {
-            id: format!("block_hash_{number}"),
+            id: make_test_hex_id(number),
             number,
             version: 1,
             header: Some(antelope::BlockHeader {
@@ -551,7 +555,7 @@ mod tests {
                 }),
                 producer: "eosproducer1".to_string(),
                 confirmed: 0,
-                previous: format!("block_hash_{}", number.saturating_sub(1)),
+                previous: make_test_hex_id(number.saturating_sub(1)),
                 transaction_mroot: vec![],
                 action_mroot: vec![],
                 schedule_version: 42,
@@ -755,8 +759,58 @@ mod tests {
             .as_any()
             .downcast_ref::<StringArray>()
             .unwrap();
-        assert_eq!(block_id.value(0), "0x626c6f636b5f686173685f313030");
-        assert_eq!(parent_id.value(0), "0x626c6f636b5f686173685f3939");
+        let hash = blocks
+            .column_by_name("hash")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        assert_eq!(block_id.value(0), format!("0x{}", hash.value(0)));
+        assert_eq!(parent_id.value(0), format!("0x{}", make_test_hex_id(99)));
+    }
+
+    #[test]
+    fn test_antelope_hex_no_prefix_canonical_ids_match_block_hash_fields() {
+        let block = make_test_block(100);
+        let block_bytes = prost::Message::encode_to_vec(&block);
+        let mut mapper = AntelopeBlockMapper::new(true, false, EncodeBytes::HexNoPrefix, false);
+        let identity = BlockIdentity {
+            block_num: 100,
+            block_id: "firehose-envelope-id".to_string(),
+            parent_num: 99,
+            parent_id: "firehose-envelope-parent-id".to_string(),
+            lib_num: 99,
+            timestamp: 0,
+            fork_step: None,
+        };
+
+        mapper.map_block(&block_bytes, &identity, None).unwrap();
+        let batches = mapper.flush().unwrap();
+        let blocks = &batches["blocks"];
+
+        let block_id = blocks
+            .column_by_name("block_id")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        let parent_id = blocks
+            .column_by_name("parent_id")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        let hash = blocks
+            .column_by_name("hash")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+
+        assert_eq!(block_id.value(0), hash.value(0));
+        assert_eq!(parent_id.value(0), make_test_hex_id(99));
+        assert!(!block_id.value(0).starts_with("0x"));
+        assert!(!parent_id.value(0).starts_with("0x"));
     }
 
     #[test]
