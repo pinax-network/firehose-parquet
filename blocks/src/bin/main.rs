@@ -3232,6 +3232,22 @@ fn supports_extended(endpoint_info: &Option<EndpointInfo>) -> bool {
     })
 }
 
+fn chain_name_is_solana(name: &str) -> bool {
+    let normalized = name.to_ascii_lowercase();
+    normalized == "solana" || normalized.starts_with("solana-")
+}
+
+fn extended_warning_message(endpoint_info: &Option<EndpointInfo>) -> &'static str {
+    if endpoint_info.as_ref().is_some_and(|ei| {
+        chain_name_is_solana(&ei.chain_name)
+            || ei.chain_name_aliases.iter().any(|alias| chain_name_is_solana(alias))
+    }) {
+        "--extended requested but endpoint did not advertise extended block features; for Solana this may only be an endpoint capability-advertisement mismatch, and vote_transactions can still be emitted when present in the stream"
+    } else {
+        "--extended requested but endpoint did not advertise extended block features"
+    }
+}
+
 /// Keep `--extended` as the only switch that enables extended output while
 /// logging endpoint capability when available.
 fn resolve_extended_mode(extended_requested: bool, endpoint_info: &Option<EndpointInfo>) -> bool {
@@ -3246,7 +3262,7 @@ fn resolve_extended_mode(extended_requested: bool, endpoint_info: &Option<Endpoi
             );
         }
     } else if extended_requested {
-        warn!("--extended requested but endpoint did not advertise extended block features");
+        warn!("{}", extended_warning_message(endpoint_info));
     }
 
     extended_requested
@@ -6252,6 +6268,46 @@ mod tests {
     #[test]
     fn test_supports_extended_none() {
         assert!(!supports_extended(&None));
+    }
+
+    #[test]
+    fn test_chain_name_is_solana_matches_expected_aliases() {
+        assert!(chain_name_is_solana("solana"));
+        assert!(chain_name_is_solana("solana-mainnet-beta"));
+        assert!(!chain_name_is_solana("mainnet"));
+    }
+
+    #[test]
+    fn test_extended_warning_message_for_solana_mentions_vote_transactions() {
+        let ei = Some(EndpointInfo {
+            chain_name: "solana-mainnet-beta".to_string(),
+            chain_name_aliases: vec!["solana".to_string()],
+            first_streamable_block_num: 0,
+            first_streamable_block_id: String::new(),
+            block_id_encoding: 3,
+            block_features: vec![],
+        });
+
+        let warning = extended_warning_message(&ei);
+        assert!(warning.contains("capability-advertisement mismatch"));
+        assert!(warning.contains("vote_transactions"));
+    }
+
+    #[test]
+    fn test_extended_warning_message_for_non_solana_stays_generic() {
+        let ei = Some(EndpointInfo {
+            chain_name: "mainnet".to_string(),
+            chain_name_aliases: vec!["eth".to_string()],
+            first_streamable_block_num: 0,
+            first_streamable_block_id: String::new(),
+            block_id_encoding: 1,
+            block_features: vec![],
+        });
+
+        assert_eq!(
+            extended_warning_message(&ei),
+            "--extended requested but endpoint did not advertise extended block features"
+        );
     }
 
     #[test]
