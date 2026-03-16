@@ -616,7 +616,6 @@ impl TimestampBackfill {
 
 fn estimate_buffered_block_bytes(block: &BufferedBootstrapBlock) -> u64 {
     size_of::<BufferedBootstrapBlock>() as u64
-        + size_of::<BlockIdentity>() as u64
         + block.block_bytes.len() as u64
         + block.cursor.len() as u64
         + block
