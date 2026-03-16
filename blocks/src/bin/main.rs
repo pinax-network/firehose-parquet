@@ -623,7 +623,7 @@ fn detect_block_type(type_url: &str) -> Result<String> {
 fn default_encode_bytes(block_type: &str, tron_style_evm_profile: bool) -> EncodeBytes {
     match block_type {
         "evm" if tron_style_evm_profile => EncodeBytes::TronBase58,
-        "solana" => EncodeBytes::Base58,
+        "near" | "solana" => EncodeBytes::Base58,
         "tron" => EncodeBytes::TronBase58,
         _ => EncodeBytes::Hex,
     }
@@ -5119,7 +5119,7 @@ mod tests {
         assert_eq!(default_encode_bytes("bitcoin", false), EncodeBytes::Hex);
         assert_eq!(default_encode_bytes("solana", false), EncodeBytes::Base58);
         assert_eq!(default_encode_bytes("tron", false), EncodeBytes::TronBase58);
-        assert_eq!(default_encode_bytes("near", false), EncodeBytes::Hex);
+        assert_eq!(default_encode_bytes("near", false), EncodeBytes::Base58);
         assert_eq!(default_encode_bytes("antelope", false), EncodeBytes::Hex);
         assert_eq!(default_encode_bytes("cosmos", false), EncodeBytes::Hex);
         assert_eq!(default_encode_bytes("beacon", false), EncodeBytes::Hex);
@@ -5552,6 +5552,34 @@ mod tests {
         assert_eq!(
             find_meta(&meta, "firehose-parquet.block_id_encoding"),
             Some("hex_no_prefix")
+        );
+    }
+
+    #[test]
+    fn test_build_file_metadata_near_base58_overrides_endpoint_block_id_encoding() {
+        let ei = Some(EndpointInfo {
+            chain_name: "near-mainnet".to_string(),
+            chain_name_aliases: vec!["near".to_string()],
+            first_streamable_block_num: 100,
+            first_streamable_block_id: "0xabc".to_string(),
+            block_id_encoding: 2,
+            block_features: vec!["base".to_string()],
+        });
+        let meta = build_file_metadata(
+            "near",
+            &EncodeBytes::Base58,
+            "https://example.com",
+            Compression::Zstd,
+            &ei,
+        );
+
+        assert_eq!(
+            find_meta(&meta, "firehose-parquet.bytes_encoding"),
+            Some("base58")
+        );
+        assert_eq!(
+            find_meta(&meta, "firehose-parquet.block_id_encoding"),
+            Some("base58")
         );
     }
 

@@ -1186,4 +1186,131 @@ mod tests {
         assert_eq!(base64_encode(b"mykey"), "bXlrZXk=");
         assert_eq!(base64_encode(b"myvalue"), "bXl2YWx1ZQ==");
     }
+
+    #[test]
+    fn test_near_base58_encoding_aligns_canonical_ids_and_hash_fields() {
+        let block = make_test_block(100);
+        let block_bytes = prost::Message::encode_to_vec(&block);
+        let identity = BlockIdentity {
+            block_num: 100,
+            block_id: format!("0x{}", hex(&[0x01; 32])),
+            parent_num: 99,
+            parent_id: format!("0x{}", hex(&[0x00; 32])),
+            lib_num: 98,
+            timestamp: 1_700_000_000,
+            fork_step: None,
+        };
+        let mut mapper = NearBlockMapper::new(false, EncodeBytes::Base58, false);
+        mapper.map_block(&block_bytes, &identity, None).unwrap();
+
+        let batches = mapper.flush().unwrap();
+
+        let blocks_batch = &batches["blocks"];
+        let blocks_schema = blocks_batch.schema();
+        let block_id_col = blocks_batch
+            .column(blocks_schema.index_of("block_id").unwrap())
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        let parent_id_col = blocks_batch
+            .column(blocks_schema.index_of("parent_id").unwrap())
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        let hash_col = blocks_batch
+            .column(blocks_schema.index_of("hash").unwrap())
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        let prev_hash_col = blocks_batch
+            .column(blocks_schema.index_of("prev_hash").unwrap())
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        let epoch_id_col = blocks_batch
+            .column(blocks_schema.index_of("epoch_id").unwrap())
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        assert_eq!(
+            block_id_col.value(0),
+            firehose_parquet::encode::encode_base58(&[0x01; 32])
+        );
+        assert_eq!(
+            parent_id_col.value(0),
+            firehose_parquet::encode::encode_base58(&[0x00; 32])
+        );
+        assert_eq!(
+            hash_col.value(0),
+            firehose_parquet::encode::encode_base58(&[0x01; 32])
+        );
+        assert_eq!(
+            prev_hash_col.value(0),
+            firehose_parquet::encode::encode_base58(&[0x02; 32])
+        );
+        assert_eq!(
+            epoch_id_col.value(0),
+            firehose_parquet::encode::encode_base58(&[0xaa; 32])
+        );
+
+        let chunks_batch = &batches["chunks"];
+        let chunks_schema = chunks_batch.schema();
+        let chunk_hash_col = chunks_batch
+            .column(chunks_schema.index_of("chunk_hash").unwrap())
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        let prev_state_root_col = chunks_batch
+            .column(chunks_schema.index_of("prev_state_root").unwrap())
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        assert_eq!(
+            chunk_hash_col.value(0),
+            firehose_parquet::encode::encode_base58(&[0x10; 32])
+        );
+        assert_eq!(
+            prev_state_root_col.value(0),
+            firehose_parquet::encode::encode_base58(&[0x11; 32])
+        );
+
+        let transactions_batch = &batches["transactions"];
+        let transactions_schema = transactions_batch.schema();
+        let tx_hash_col = transactions_batch
+            .column(transactions_schema.index_of("hash").unwrap())
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        assert_eq!(
+            tx_hash_col.value(0),
+            firehose_parquet::encode::encode_base58(&[0x20; 32])
+        );
+
+        let receipts_batch = &batches["receipts"];
+        let receipts_schema = receipts_batch.schema();
+        let receipt_id_col = receipts_batch
+            .column(receipts_schema.index_of("receipt_id").unwrap())
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        assert_eq!(
+            receipt_id_col.value(0),
+            firehose_parquet::encode::encode_base58(&[0x30; 32])
+        );
+
+        let state_changes_batch = &batches["state_changes"];
+        let state_changes_schema = state_changes_batch.schema();
+        let key_col = state_changes_batch
+            .column(state_changes_schema.index_of("key_base64").unwrap())
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        let value_col = state_changes_batch
+            .column(state_changes_schema.index_of("value_base64").unwrap())
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        assert_eq!(key_col.value(0), "");
+        assert_eq!(value_col.value(0), "");
+    }
 }
