@@ -1002,7 +1002,6 @@ Examples:
     --stop-block 300000000 \\
     --partition block_range \\
     --block-range-size 1000000 \\
-    --strict-timestamps false \\
     --output ./output
 ")]
     Build {
@@ -6678,6 +6677,31 @@ mod tests {
         assert!(help.contains("--aws-region"));
         assert!(help.contains("--partition"));
         assert!(help.contains("--json"));
+        assert!(!help.contains("--strict-timestamps"));
+    }
+
+    #[test]
+    fn test_partitions_build_subcommand_rejects_removed_strict_timestamps_flag() {
+        let err = TestCli::try_parse_from([
+            "test-cli",
+            "partitions",
+            "build",
+            "--network",
+            "solana-mainnet-beta",
+            "--partition",
+            "block_range",
+            "--block-range-size",
+            "1000000",
+            "--strict-timestamps",
+            "false",
+            "--output",
+            "./output",
+        ])
+        .expect_err("removed strict timestamp flag should fail clap parsing");
+
+        let rendered = err.to_string();
+        assert!(rendered.contains("--strict-timestamps"));
+        assert!(rendered.contains("unexpected argument"));
     }
 
     #[test]

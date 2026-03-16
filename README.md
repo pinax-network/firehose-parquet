@@ -280,8 +280,6 @@ Block Range:
           Output directory [env: OUTPUT] [default: .]
       --partition <PARTITION>
           Partitioning mode: none, block_range, date, hour, minute, second [env: PARTITION] [default: none]
-      --strict-timestamps <STRICT_TIMESTAMPS>
-          Require non-null timestamps in output schemas and streamed blocks [env: STRICT_TIMESTAMPS] [default: true]
       --block-range-size <BLOCK_RANGE_SIZE>
           Block range size when partition=block_range [env: BLOCK_RANGE_SIZE] [default: 10000]
       --compression <COMPRESSION>
