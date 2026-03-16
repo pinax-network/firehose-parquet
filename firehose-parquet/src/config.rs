@@ -6,7 +6,7 @@ pub enum Partition {
     /// No partitioning — all data in a flat directory per table.
     None,
     /// Partition by block number ranges of the given size.
-    BlockRange(u64),
+    BlockRange { size: u64, start_block: Option<u64> },
     /// Partition by date (YYYY-MM-DD).
     Date,
     /// Partition by hour (YYYY-MM-DD/HH).
@@ -87,6 +87,35 @@ pub struct Config {
 }
 
 impl Partition {
+    pub fn block_range(size: u64) -> Self {
+        Self::BlockRange {
+            size,
+            start_block: None,
+        }
+    }
+
+    pub fn set_block_range_start(&mut self, start_block: Option<u64>) {
+        if let Self::BlockRange {
+            start_block: anchor,
+            ..
+        } = self
+        {
+            *anchor = start_block;
+        }
+    }
+
+    pub fn block_range_bounds(&self, block_number: u64) -> Option<(u64, u64)> {
+        let Self::BlockRange { size, start_block } = self else {
+            return None;
+        };
+
+        let anchor = start_block.unwrap_or(0);
+        let partition_index = block_number.saturating_sub(anchor) / *size;
+        let start = anchor.saturating_add(partition_index.saturating_mul(*size));
+        let stop = start.saturating_add(*size);
+        Some((start, stop))
+    }
+
     /// Compute the partition key for a block given its number and timestamp.
     ///
     /// Returns a string that uniquely identifies the partition bucket this block
@@ -95,10 +124,9 @@ impl Partition {
     pub fn partition_key(&self, block_number: u64, timestamp: i64) -> Option<String> {
         match self {
             Partition::None => None,
-            Partition::BlockRange(size) => {
-                let start = (block_number / size) * size;
-                Some(format!("block_range={}-{}", start, start + size))
-            }
+            Partition::BlockRange { .. } => self
+                .block_range_bounds(block_number)
+                .map(|(start, stop)| format!("block_range={start}-{stop}")),
             Partition::Date => {
                 let dt = time::OffsetDateTime::from_unix_timestamp(timestamp)
                     .unwrap_or(time::OffsetDateTime::UNIX_EPOCH);
@@ -153,7 +181,7 @@ impl std::fmt::Display for Partition {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Partition::None => write!(f, "none"),
-            Partition::BlockRange(size) => write!(f, "block_range({size})"),
+            Partition::BlockRange { size, .. } => write!(f, "block_range({size})"),
             Partition::Date => write!(f, "date"),
             Partition::Hour => write!(f, "hour"),
             Partition::Minute => write!(f, "minute"),
@@ -310,7 +338,7 @@ mod tests {
     fn test_partition_display() {
         assert_eq!(Partition::None.to_string(), "none");
         assert_eq!(
-            Partition::BlockRange(10000).to_string(),
+            Partition::block_range(10000).to_string(),
             "block_range(10000)"
         );
         assert_eq!(Partition::Date.to_string(), "date");
@@ -526,20 +554,39 @@ mod tests {
     #[test]
     fn test_partition_key_block_range() {
         assert_eq!(
-            Partition::BlockRange(1000).partition_key(1000, 0),
+            Partition::block_range(1000).partition_key(1000, 0),
             Some("block_range=1000-2000".to_string())
         );
         assert_eq!(
-            Partition::BlockRange(1000).partition_key(1500, 0),
+            Partition::block_range(1000).partition_key(1500, 0),
             Some("block_range=1000-2000".to_string())
         );
         assert_eq!(
-            Partition::BlockRange(1000).partition_key(1999, 0),
+            Partition::block_range(1000).partition_key(1999, 0),
             Some("block_range=1000-2000".to_string())
         );
         assert_eq!(
-            Partition::BlockRange(1000).partition_key(2000, 0),
+            Partition::block_range(1000).partition_key(2000, 0),
             Some("block_range=2000-3000".to_string())
+        );
+    }
+
+    #[test]
+    fn test_partition_key_block_range_uses_start_block_anchor() {
+        let mut partition = Partition::block_range(100);
+        partition.set_block_range_start(Some(9_820_210));
+
+        assert_eq!(
+            partition.partition_key(9_820_210, 0),
+            Some("block_range=9820210-9820310".to_string())
+        );
+        assert_eq!(
+            partition.partition_key(9_820_309, 0),
+            Some("block_range=9820210-9820310".to_string())
+        );
+        assert_eq!(
+            partition.partition_key(9_820_310, 0),
+            Some("block_range=9820310-9820410".to_string())
         );
     }
 

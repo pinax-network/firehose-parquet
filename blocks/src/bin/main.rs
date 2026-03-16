@@ -259,7 +259,7 @@ fn build_cursor_file_metadata(
     meta.add(
         "firehose-parquet.block_range_size",
         match partition {
-            firehose_parquet::config::Partition::BlockRange(size) => size.to_string(),
+            firehose_parquet::config::Partition::BlockRange { size, .. } => size.to_string(),
             _ => "0".to_string(),
         },
     );
@@ -753,17 +753,30 @@ fn stream_resume_cursor(
 }
 
 fn validate_block_range_alignment(
-    start_block: Option<u64>,
+    explicit_start_block: Option<u64>,
+    effective_start_block: Option<u64>,
     stop_block: Option<u64>,
     block_range_size: u64,
 ) -> Result<()> {
-    for (flag, block_num) in [("start-block", start_block), ("stop-block", stop_block)] {
-        if let Some(block_num) = block_num {
-            if block_num % block_range_size != 0 {
-                return Err(anyhow!(
-                    "--{flag} must align to --block-range-size ({block_range_size}) when --partition block_range; got {block_num}"
-                ));
-            }
+    if let Some(start_block) = explicit_start_block {
+        if start_block % block_range_size != 0 {
+            return Err(anyhow!(
+                "--start-block must align to --block-range-size ({block_range_size}) when --partition block_range; got {start_block}"
+            ));
+        }
+    }
+
+    if let Some(stop_block) = stop_block {
+        let effective_start_block = effective_start_block.expect("validated by caller");
+        if stop_block < effective_start_block
+            || stop_block
+                .saturating_sub(effective_start_block)
+                .rem_euclid(block_range_size)
+                != 0
+        {
+            return Err(anyhow!(
+                "--stop-block must align to the effective start block ({effective_start_block}) in --block-range-size ({block_range_size}) increments when --partition block_range; got {stop_block}"
+            ));
         }
     }
 
@@ -1771,7 +1784,7 @@ fn validate_block_range_bounds(
     }
 
     let block_range_size = block_range_size.expect("validated by caller");
-    validate_block_range_alignment(start_block, stop_block, block_range_size)
+    validate_block_range_alignment(start_block, Some(0), stop_block, block_range_size)
 }
 
 #[derive(Debug, Clone)]
@@ -3821,8 +3834,18 @@ async fn run_ingestion(args: &BuildArgs) -> Result<()> {
         resume_cursor_state,
         args.cursor_override,
     )?;
-    if let firehose_parquet::config::Partition::BlockRange(block_range_size) = &config.partition {
-        validate_block_range_alignment(config.start_block, config.stop_block, *block_range_size)?;
+    if let firehose_parquet::config::Partition::BlockRange { size, .. } = &mut config.partition {
+        let explicit_start_block = args.common.start_block;
+        let effective_start_block = config.start_block;
+        validate_block_range_alignment(
+            explicit_start_block,
+            effective_start_block,
+            config.stop_block,
+            *size,
+        )?;
+        config
+            .partition
+            .set_block_range_start(effective_start_block);
     }
 
     extended = resolve_extended_mode(extended, &endpoint_info);
@@ -4963,18 +4986,35 @@ mod tests {
 
     #[test]
     fn test_validate_block_range_alignment_accepts_aligned_values() {
-        validate_block_range_alignment(Some(0), Some(30_000_000), 10_000_000)
+        validate_block_range_alignment(Some(0), Some(0), Some(30_000_000), 10_000_000)
             .expect("aligned block-range bounds should be accepted");
     }
 
     #[test]
     fn test_validate_block_range_alignment_rejects_misaligned_stop_block() {
-        let err = validate_block_range_alignment(Some(0), Some(30_000_001), 10_000_000)
+        let err = validate_block_range_alignment(Some(0), Some(0), Some(30_000_001), 10_000_000)
             .expect_err("misaligned stop block should fail");
 
         assert_eq!(
             err.to_string(),
-            "--stop-block must align to --block-range-size (10000000) when --partition block_range; got 30000001"
+            "--stop-block must align to the effective start block (0) in --block-range-size (10000000) increments when --partition block_range; got 30000001"
+        );
+    }
+
+    #[test]
+    fn test_validate_block_range_alignment_accepts_implicit_start_block_anchor() {
+        validate_block_range_alignment(None, Some(9_820_210), Some(9_820_510), 100)
+            .expect("implicit start block should anchor block-range alignment");
+    }
+
+    #[test]
+    fn test_validate_block_range_alignment_rejects_misaligned_relative_stop_block() {
+        let err = validate_block_range_alignment(None, Some(9_820_210), Some(9_820_500), 100)
+            .expect_err("stop block misaligned to implicit anchor should fail");
+
+        assert_eq!(
+            err.to_string(),
+            "--stop-block must align to the effective start block (9820210) in --block-range-size (100) increments when --partition block_range; got 9820500"
         );
     }
 
@@ -5017,7 +5057,7 @@ mod tests {
 
         assert_eq!(
             err.to_string(),
-            "--stop-block must align to --block-range-size (10000000) when --partition block_range; got 30000001"
+            "--stop-block must align to the effective start block (0) in --block-range-size (10000000) increments when --partition block_range; got 30000001"
         );
     }
 
