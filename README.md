@@ -287,11 +287,11 @@ Block Range:
 
 Flush:
       --flush-rows <FLUSH_ROWS>
-          Max rows per file before flush (disabled by default) [env: FLUSH_ROWS]
+          Flush mapper state after this many rows; does not guarantee parquet files are materialized (disabled by default) [env: FLUSH_ROWS]
       --flush-bytes <FLUSH_BYTES>
-          Max bytes per file before flush [env: FLUSH_BYTES] [default: 134217728]
+          Flush mapper state at this many in-memory bytes and target roughly this many compressed bytes per parquet file [env: FLUSH_BYTES] [default: 134217728]
       --flush-interval-secs <FLUSH_INTERVAL_SECS>
-          Time-based flush interval in seconds (disabled by default) [env: FLUSH_INTERVAL_SECS]
+          Flush mapper state every N seconds; does not guarantee parquet files are materialized (disabled by default) [env: FLUSH_INTERVAL_SECS]
 
 AWS / S3:
       --aws-access-key-id <AWS_ACCESS_KEY_ID>
@@ -322,6 +322,15 @@ Chain:
       --include-failed-transactions
           Include failed/reverted transactions in output (default: false) [env: INCLUDE_FAILED_TRANSACTIONS]
 ```
+
+`--flush-rows` and `--flush-interval-secs` flush mapper state into the writer,
+not directly to disk/S3. `--flush-bytes` also sets the writer's target part
+size, but no `--flush-*` flag guarantees immediate file materialization on its
+own. Watch for the runtime logs that distinguish `mapper flush emitted record
+batches`, `writer buffered mapper flush`, and `writer materialized parquet
+output`. On graceful shutdown, the process now logs any buffered rows/bytes that
+were intentionally left unmaterialized to preserve deterministic partition
+boundaries.
 
 When `--bootstrap-missing-genesis-timestamp` is enabled in strict mode, leading
 bootstrap blocks with missing timestamps are still written to output. Their

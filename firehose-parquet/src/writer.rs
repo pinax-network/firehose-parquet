@@ -439,6 +439,16 @@ struct TableBuffer {
     partition_key: String,
 }
 
+/// Snapshot of writer state that is still buffered and not yet materialized.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct WriterBufferStats {
+    pub tables: usize,
+    pub batches: usize,
+    pub rows: usize,
+    pub estimated_arrow_bytes: u64,
+    pub estimated_compressed_bytes: u64,
+}
+
 /// High-level writer that buffers RecordBatches per table and writes to disk
 /// when the estimated **compressed** size reaches `flush_bytes`. The
 /// compression ratio is a fixed hard-coded value per codec to keep file
@@ -504,6 +514,29 @@ impl OutputWriter {
     /// Set the pipeline metrics for Prometheus instrumentation.
     pub fn set_metrics(&mut self, metrics: PipelineMetrics) {
         self.metrics = Some(metrics);
+    }
+
+    /// Return a summary of buffered data that has not been materialized yet.
+    pub fn buffered_stats(&self) -> WriterBufferStats {
+        let mut stats = WriterBufferStats {
+            tables: self.buffers.len(),
+            ..WriterBufferStats::default()
+        };
+
+        for buf in self.buffers.values() {
+            stats.batches += buf.batches.len();
+            stats.rows += buf
+                .batches
+                .iter()
+                .map(|batch| batch.num_rows())
+                .sum::<usize>();
+            stats.estimated_arrow_bytes += buf.total_bytes as u64;
+        }
+
+        stats.estimated_compressed_bytes =
+            (stats.estimated_arrow_bytes as f64 * self.compression_ratio) as u64;
+
+        stats
     }
 
     /// Current observed compression ratio (compressed / uncompressed).
@@ -1148,6 +1181,12 @@ mod tests {
             !dir.path().join("blocks").exists(),
             "should still be buffered"
         );
+        let stats = out.buffered_stats();
+        assert_eq!(stats.tables, 1);
+        assert_eq!(stats.batches, 2);
+        assert_eq!(stats.rows, 2);
+        assert!(stats.estimated_arrow_bytes > 0);
+        assert!(stats.estimated_compressed_bytes > 0);
 
         // flush_remaining writes the concatenated data.
         out.flush_remaining().unwrap();
@@ -1155,6 +1194,7 @@ mod tests {
             dir.path().join("blocks").exists(),
             "should be written after flush"
         );
+        assert_eq!(out.buffered_stats(), WriterBufferStats::default());
 
         // Verify the file has 2 rows (from the 2 batches).
         let parts: Vec<_> = std::fs::read_dir(dir.path().join("blocks"))
@@ -1207,12 +1247,19 @@ mod tests {
         // The 2024-01-16 data is still buffered.
         let jan16 = dir.path().join("blocks/year=2024/month=01/date=16");
         assert!(!jan16.exists(), "new partition should still be buffered");
+        let stats = out.buffered_stats();
+        assert_eq!(stats.tables, 1);
+        assert_eq!(stats.batches, 1);
+        assert_eq!(stats.rows, 1);
+        assert!(stats.estimated_arrow_bytes > 0);
+        assert!(stats.estimated_compressed_bytes > 0);
 
         out.flush_remaining().unwrap();
         assert!(
             jan16.exists(),
             "new partition should be written after flush"
         );
+        assert_eq!(out.buffered_stats(), WriterBufferStats::default());
     }
 
     #[test]

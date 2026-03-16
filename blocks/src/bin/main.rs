@@ -4629,8 +4629,22 @@ async fn run_ingestion(args: &BuildArgs) -> Result<()> {
                 let bytes_to_flush = m.estimated_bytes() as u64 >= flush_bytes;
 
                 if rows_to_flush || time_to_flush || bytes_to_flush {
-                    let flush_trigger = if bytes_to_flush { "bytes" } else if rows_to_flush { "rows" } else { "interval" };
+                    let flush_trigger = if bytes_to_flush {
+                        "bytes"
+                    } else if rows_to_flush {
+                        "rows"
+                    } else {
+                        "interval"
+                    };
                     let batches = m.flush()?;
+                    let flushed_tables = batches.len();
+                    let flushed_rows: usize = batches.values().map(|batch| batch.num_rows()).sum();
+                    info!(
+                        trigger = flush_trigger,
+                        tables = flushed_tables,
+                        rows = flushed_rows,
+                        "mapper flush emitted record batches"
+                    );
                     if !dry_run {
                         let metadata = BlockMetadata {
                             min_block_number: min_block.unwrap_or(0),
@@ -4638,7 +4652,39 @@ async fn run_ingestion(args: &BuildArgs) -> Result<()> {
                             min_timestamp,
                             max_timestamp,
                         };
-                        let wrote = writer.write_all(&batches, &metadata)?;
+                        let mut wrote = writer.write_all(&batches, &metadata)?;
+                        if (rows_to_flush || time_to_flush) && !wrote {
+                            let forced = writer.flush_remaining()?;
+                            if forced {
+                                wrote = true;
+                            }
+                        }
+                        let writer_buffered = writer.buffered_stats();
+                        if wrote {
+                            info!(
+                                trigger = flush_trigger,
+                                tables = flushed_tables,
+                                rows = flushed_rows,
+                                buffered_tables = writer_buffered.tables,
+                                buffered_rows = writer_buffered.rows,
+                                buffered_estimated_bytes = firehose_parquet::cli::format_bytes(
+                                    writer_buffered.estimated_compressed_bytes
+                                ),
+                                "writer materialized parquet output for mapper flush"
+                            );
+                        } else {
+                            info!(
+                                trigger = flush_trigger,
+                                tables = flushed_tables,
+                                rows = flushed_rows,
+                                buffered_tables = writer_buffered.tables,
+                                buffered_rows = writer_buffered.rows,
+                                buffered_estimated_bytes = firehose_parquet::cli::format_bytes(
+                                    writer_buffered.estimated_compressed_bytes
+                                ),
+                                "writer buffered mapper flush; no parquet files materialized yet"
+                            );
+                        }
 
                         // Only update cursor after all tables have been written.
                         if wrote {
@@ -4660,6 +4706,13 @@ async fn run_ingestion(args: &BuildArgs) -> Result<()> {
                                 }
                             }
                         }
+                    } else {
+                        info!(
+                            trigger = flush_trigger,
+                            tables = flushed_tables,
+                            rows = flushed_rows,
+                            "dry run mapper flush skipped parquet writes"
+                        );
                     }
                     min_block = None;
                     max_block = None;
@@ -4715,7 +4768,21 @@ async fn run_ingestion(args: &BuildArgs) -> Result<()> {
     // restart the stream will resume from the last saved cursor, which
     // corresponds to the last fully-written partition.
     if is_shutdown {
-        info!("skipping partial buffer flush to preserve partition determinism");
+        let mapper_buffered_rows = mapper.as_ref().map(|m| m.total_rows()).unwrap_or(0);
+        let writer_buffered = writer.buffered_stats();
+        info!(
+            mapper_buffered_rows,
+            writer_buffered_tables = writer_buffered.tables,
+            writer_buffered_rows = writer_buffered.rows,
+            writer_buffered_estimated_bytes = firehose_parquet::cli::format_bytes(
+                writer_buffered.estimated_compressed_bytes
+            ),
+            timestamp_backfill_buffered_blocks = timestamp_backfill.buffered_blocks_len(),
+            timestamp_backfill_buffered_bytes = firehose_parquet::cli::format_bytes(
+                timestamp_backfill.buffered_bytes()
+            ),
+            "graceful shutdown skipped partial flushes; buffered data was not materialized to storage"
+        );
     } else {
         let trailing_timestamp_backfill_blocks = timestamp_backfill.drain_open_span()?;
         update_timestamp_backfill_metrics(&pipeline_metrics, &timestamp_backfill);
@@ -4767,6 +4834,23 @@ async fn run_ingestion(args: &BuildArgs) -> Result<()> {
         // Flush any remaining buffered data in the writer.
         if !dry_run {
             let wrote = writer.flush_remaining()?;
+            let writer_buffered = writer.buffered_stats();
+            if wrote {
+                info!(
+                    trigger = "shutdown",
+                    buffered_tables = writer_buffered.tables,
+                    buffered_rows = writer_buffered.rows,
+                    buffered_estimated_bytes = firehose_parquet::cli::format_bytes(
+                        writer_buffered.estimated_compressed_bytes
+                    ),
+                    "writer materialized remaining parquet output before exit"
+                );
+            } else {
+                info!(
+                    trigger = "shutdown",
+                    "no writer-buffered parquet data remained to materialize before exit"
+                );
+            }
 
             // Save cursor after final flush.
             if wrote {

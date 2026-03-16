@@ -194,7 +194,7 @@ pub struct CommonArgs {
     )]
     pub compression: String,
 
-    /// Max rows per file before flush (disabled by default)
+    /// Flush mapper state after this many rows; does not guarantee parquet files are materialized (disabled by default)
     #[arg(
         long,
         env = "FLUSH_ROWS",
@@ -203,7 +203,7 @@ pub struct CommonArgs {
     )]
     pub flush_rows: Option<u32>,
 
-    /// Max bytes per file before flush (0 = disabled)
+    /// Flush mapper state at this many in-memory bytes and target roughly this many compressed bytes per parquet file
     #[arg(
         long,
         env = "FLUSH_BYTES",
@@ -213,7 +213,7 @@ pub struct CommonArgs {
     )]
     pub flush_bytes: u64,
 
-    /// Time-based flush interval in seconds (disabled by default)
+    /// Flush mapper state every N seconds; does not guarantee parquet files are materialized (disabled by default)
     #[arg(
         long,
         env = "FLUSH_INTERVAL_SECS",
@@ -6681,6 +6681,24 @@ mod tests {
         assert!(help.contains("--partition"));
         assert!(help.contains("--json"));
         assert!(!help.contains("--strict-timestamps"));
+    }
+
+    #[test]
+    fn test_build_help_clarifies_flush_semantics() {
+        let cmd = TestCli::command();
+        let build = cmd
+            .get_subcommands()
+            .find(|subcmd| subcmd.get_name() == "build")
+            .expect("build subcommand should exist");
+
+        let help = build.clone().render_long_help().to_string();
+
+        assert!(help.contains("Flush mapper state after this many rows"));
+        assert!(help.contains("does not guarantee parquet files are materialized"));
+        assert!(help.contains(
+            "Flush mapper state at this many in-memory bytes and target roughly this many compressed bytes per parquet file"
+        ));
+        assert!(help.contains("Flush mapper state every N seconds"));
     }
 
     #[test]
