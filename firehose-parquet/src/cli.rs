@@ -419,11 +419,13 @@ pub struct BuildArgs {
     )]
     pub include_failed_transactions: bool,
 
-    /// Solana only: use last-known synthetic timestamps for partition routing.
+    /// Solana only: legacy switch related to synthetic timestamp routing.
     ///
     /// Missing Solana `block_time` values keep canonical `timestamp` / `date`
-    /// null. When enabled, time-based partition routing reuses the most recent
-    /// known timestamp (seeded from the Solana genesis anchor when needed).
+    /// null. Time-based partition routing for Solana always reuses the most
+    /// recent known timestamp (seeded from the Solana genesis anchor when
+    /// needed); this flag is retained for CLI compatibility and may be a no-op
+    /// in current implementations.
     #[arg(
         long,
         env = "BACKFILL_MISSING_TIMESTAMPS",
