@@ -332,6 +332,10 @@ output`. On graceful shutdown, the process now logs any buffered rows/bytes that
 were intentionally left unmaterialized to preserve deterministic partition
 boundaries.
 
+When a partition boundary is detected during ingestion, the mapper flush for the
+old partition is forced through writer materialization immediately, and the same
+writer outcome logs are emitted for that boundary-triggered flush.
+
 When `--bootstrap-missing-genesis-timestamp` is enabled in strict mode, leading
 bootstrap blocks with missing timestamps are still written to output. Their
 timestamps are synthesized from the first later block that includes timestamp

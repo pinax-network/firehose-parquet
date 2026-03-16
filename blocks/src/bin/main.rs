@@ -1,4 +1,5 @@
 use anyhow::{anyhow, Result};
+use arrow::record_batch::RecordBatch;
 use clap::{Args, Parser};
 use firehose_parquet::cli::{
     build_config, build_partitions_index_path, build_partitions_output_root, init_tracing,
@@ -18,8 +19,9 @@ use firehose_parquet::grpc::{EndpointInfo, FirehoseClient};
 use firehose_parquet::metrics;
 use firehose_parquet::networks::{resolve_network_endpoint, EndpointSource};
 use firehose_parquet::traits::{decode_id_bytes, fork_step_name, BlockIdentity, BlockMapper};
-use firehose_parquet::writer::{OutputWriter, ParquetFileMetadata};
+use firehose_parquet::writer::{OutputWriter, ParquetFileMetadata, WriterBufferStats};
 use object_store::ObjectStore;
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -119,6 +121,62 @@ fn encode_bytes_label(encoding: &EncodeBytes) -> &'static str {
         EncodeBytes::HexNoPrefix => "hex_no_prefix",
         EncodeBytes::Base58 => "base58",
         EncodeBytes::TronBase58 => "tron_base58",
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct WriterFlushOutcome {
+    materialized: bool,
+    buffered: WriterBufferStats,
+}
+
+fn write_mapper_flush(
+    writer: &mut OutputWriter,
+    batches: &HashMap<String, RecordBatch>,
+    metadata: &BlockMetadata,
+    force_materialize: bool,
+) -> Result<WriterFlushOutcome> {
+    let mut materialized = writer.write_all(batches, metadata)?;
+    if force_materialize && !materialized {
+        if writer.flush_remaining()? {
+            materialized = true;
+        }
+    }
+
+    Ok(WriterFlushOutcome {
+        materialized,
+        buffered: writer.buffered_stats(),
+    })
+}
+
+fn log_writer_flush_outcome(
+    trigger: &str,
+    tables: usize,
+    rows: usize,
+    outcome: WriterFlushOutcome,
+) {
+    if outcome.materialized {
+        info!(
+            trigger,
+            tables,
+            rows,
+            buffered_tables = outcome.buffered.tables,
+            buffered_rows = outcome.buffered.rows,
+            buffered_estimated_bytes =
+                firehose_parquet::cli::format_bytes(outcome.buffered.estimated_compressed_bytes),
+            "writer materialized parquet output for mapper flush"
+        );
+    } else {
+        info!(
+            trigger,
+            tables,
+            rows,
+            buffered_tables = outcome.buffered.tables,
+            buffered_rows = outcome.buffered.rows,
+            buffered_estimated_bytes =
+                firehose_parquet::cli::format_bytes(outcome.buffered.estimated_compressed_bytes),
+            "writer buffered mapper flush; no parquet files materialized yet"
+        );
     }
 }
 
@@ -3225,7 +3283,10 @@ fn chain_name_is_solana(name: &str) -> bool {
 fn extended_warning_message(endpoint_info: &Option<EndpointInfo>) -> &'static str {
     if endpoint_info.as_ref().is_some_and(|ei| {
         chain_name_is_solana(&ei.chain_name)
-            || ei.chain_name_aliases.iter().any(|alias| chain_name_is_solana(alias))
+            || ei
+                .chain_name_aliases
+                .iter()
+                .any(|alias| chain_name_is_solana(alias))
     }) {
         "--extended requested but endpoint did not advertise extended block features; for Solana this may only be an endpoint capability-advertisement mismatch, and vote_transactions can still be emitted when present in the stream"
     } else {
@@ -4475,6 +4536,17 @@ async fn run_ingestion(args: &BuildArgs) -> Result<()> {
                             "partition boundary detected, flushing mapper"
                         );
                         let batches = m.flush()?;
+                        let flushed_tables = batches.len();
+                        let flushed_rows: usize = batches.values().map(|batch| batch.num_rows()).sum();
+                        info!(
+                            trigger = "partition_boundary",
+                            old_partition = %current_partition_key.as_deref().unwrap_or("?"),
+                            new_partition = %new_key,
+                            block_number,
+                            tables = flushed_tables,
+                            rows = flushed_rows,
+                            "mapper flush emitted record batches"
+                        );
                         if !dry_run {
                             let metadata = BlockMetadata {
                                 min_block_number: min_block.unwrap_or(0),
@@ -4482,8 +4554,14 @@ async fn run_ingestion(args: &BuildArgs) -> Result<()> {
                                 min_timestamp,
                                 max_timestamp,
                             };
-                            let wrote = writer.write_all(&batches, &metadata)?;
-                            if wrote {
+                            let outcome = write_mapper_flush(&mut writer, &batches, &metadata, true)?;
+                            log_writer_flush_outcome(
+                                "partition_boundary",
+                                flushed_tables,
+                                flushed_rows,
+                                outcome,
+                            );
+                            if outcome.materialized {
                                 pipeline_metrics.flushes_total.get_or_create(&metrics::FlushLabels { trigger: "partition_boundary".to_string() }).inc();
                                 if let (Some(ref loc), Some(ref cursor)) = (&cursor_location, &last_cursor) {
                                     let mut state = cursor_state_template.clone();
@@ -4502,6 +4580,13 @@ async fn run_ingestion(args: &BuildArgs) -> Result<()> {
                                     }
                                 }
                             }
+                        } else {
+                            info!(
+                                trigger = "partition_boundary",
+                                tables = flushed_tables,
+                                rows = flushed_rows,
+                                "dry run mapper flush skipped parquet writes"
+                            );
                         }
                         min_block = None;
                         max_block = None;
@@ -4637,42 +4722,11 @@ async fn run_ingestion(args: &BuildArgs) -> Result<()> {
                             min_timestamp,
                             max_timestamp,
                         };
-                        let mut wrote = writer.write_all(&batches, &metadata)?;
-                        if (rows_to_flush || time_to_flush || bytes_to_flush) && !wrote {
-                            let forced = writer.flush_remaining()?;
-                            if forced {
-                                wrote = true;
-                            }
-                        }
-                        let writer_buffered = writer.buffered_stats();
-                        if wrote {
-                            info!(
-                                trigger = flush_trigger,
-                                tables = flushed_tables,
-                                rows = flushed_rows,
-                                buffered_tables = writer_buffered.tables,
-                                buffered_rows = writer_buffered.rows,
-                                buffered_estimated_bytes = firehose_parquet::cli::format_bytes(
-                                    writer_buffered.estimated_compressed_bytes
-                                ),
-                                "writer materialized parquet output for mapper flush"
-                            );
-                        } else {
-                            info!(
-                                trigger = flush_trigger,
-                                tables = flushed_tables,
-                                rows = flushed_rows,
-                                buffered_tables = writer_buffered.tables,
-                                buffered_rows = writer_buffered.rows,
-                                buffered_estimated_bytes = firehose_parquet::cli::format_bytes(
-                                    writer_buffered.estimated_compressed_bytes
-                                ),
-                                "writer buffered mapper flush; no parquet files materialized yet"
-                            );
-                        }
+                        let outcome = write_mapper_flush(&mut writer, &batches, &metadata, true)?;
+                        log_writer_flush_outcome(flush_trigger, flushed_tables, flushed_rows, outcome);
 
                         // Only update cursor after all tables have been written.
-                        if wrote {
+                        if outcome.materialized {
                             pipeline_metrics.flushes_total.get_or_create(&metrics::FlushLabels { trigger: flush_trigger.to_string() }).inc();
                             if let (Some(ref loc), Some(ref cursor)) = (&cursor_location, &last_cursor) {
                                 let mut state = cursor_state_template.clone();
@@ -4938,9 +4992,99 @@ async fn run_ingestion(args: &BuildArgs) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use arrow::array::UInt64Builder;
+    use arrow::datatypes::{DataType, Field, Schema};
+    use arrow::record_batch::RecordBatch;
     use clap::CommandFactory;
     use firehose_parquet::cursor::CursorLocation;
+    use std::collections::HashMap;
+    use std::path::PathBuf;
     use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+    use std::sync::Arc;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn make_test_batch() -> RecordBatch {
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "block_number",
+            DataType::UInt64,
+            false,
+        )]));
+        let mut builder = UInt64Builder::new();
+        builder.append_value(42);
+        RecordBatch::try_new(schema, vec![Arc::new(builder.finish())]).unwrap()
+    }
+
+    fn make_test_batches() -> HashMap<String, RecordBatch> {
+        let mut batches = HashMap::new();
+        batches.insert("blocks".to_string(), make_test_batch());
+        batches
+    }
+
+    fn make_temp_output_dir() -> PathBuf {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "fireparq-partition-boundary-test-{}-{}",
+            std::process::id(),
+            unique
+        ));
+        std::fs::create_dir_all(&path).unwrap();
+        path
+    }
+
+    #[test]
+    fn test_write_mapper_flush_can_leave_batches_buffered() {
+        let dir = make_temp_output_dir();
+        let batches = make_test_batches();
+        let metadata = BlockMetadata {
+            min_block_number: 100,
+            max_block_number: 200,
+            min_timestamp: Some(1705320000),
+            max_timestamp: Some(1705320000),
+        };
+        let mut writer = OutputWriter::new(&dir, Partition::Date, Compression::None, 1_000_000);
+
+        let outcome = write_mapper_flush(&mut writer, &batches, &metadata, false).unwrap();
+
+        assert!(!outcome.materialized);
+        assert_eq!(outcome.buffered.tables, 1);
+        assert_eq!(outcome.buffered.batches, 1);
+        assert_eq!(outcome.buffered.rows, 1);
+        assert!(
+            outcome.buffered.estimated_arrow_bytes > 0,
+            "buffered stats should report in-memory data"
+        );
+        assert!(
+            !dir.join("blocks/year=2024/month=01/date=15").exists(),
+            "without forced materialization the partition should stay buffered"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn test_write_mapper_flush_forces_partition_boundary_materialization() {
+        let dir = make_temp_output_dir();
+        let batches = make_test_batches();
+        let metadata = BlockMetadata {
+            min_block_number: 100,
+            max_block_number: 200,
+            min_timestamp: Some(1705320000),
+            max_timestamp: Some(1705320000),
+        };
+        let mut writer = OutputWriter::new(&dir, Partition::Date, Compression::None, 1_000_000);
+
+        let outcome = write_mapper_flush(&mut writer, &batches, &metadata, true).unwrap();
+
+        assert!(outcome.materialized);
+        assert_eq!(outcome.buffered, WriterBufferStats::default());
+        assert!(
+            dir.join("blocks/year=2024/month=01/date=15").exists(),
+            "forced partition-boundary materialization should write the old partition immediately"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 
     #[test]
     fn test_cli_name_is_fireparq() {
