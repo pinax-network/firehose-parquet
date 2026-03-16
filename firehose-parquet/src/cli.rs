@@ -6,6 +6,9 @@ use clap_complete::{generate, Shell};
 use std::io;
 use std::path::{Component, Path, PathBuf};
 
+/// Default max unresolved timestamp-backfill buffer size in bytes.
+pub const DEFAULT_TIMESTAMP_BACKFILL_BUFFER_LIMIT_BYTES: u64 = 134_217_728;
+
 /// Load environment variables from `.env` file (if present).
 ///
 /// Call this **before** [`clap::Parser::parse`] so that `env` attributes
@@ -438,7 +441,7 @@ pub struct BuildArgs {
     #[arg(
         long,
         env = "BACKFILL_MISSING_TIMESTAMPS_BUFFER_BYTES",
-        default_value = "134217728",
+        default_value_t = DEFAULT_TIMESTAMP_BACKFILL_BUFFER_LIMIT_BYTES,
         hide_env_values = true,
         help_heading = "Chain"
     )]
