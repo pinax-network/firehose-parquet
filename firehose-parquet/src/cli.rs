@@ -6,6 +6,9 @@ use clap_complete::{generate, Shell};
 use std::io;
 use std::path::{Component, Path, PathBuf};
 
+/// Default max unresolved timestamp-backfill buffer size in bytes.
+pub const DEFAULT_TIMESTAMP_BACKFILL_BUFFER_LIMIT_BYTES: u64 = 134_217_728;
+
 /// Load environment variables from `.env` file (if present).
 ///
 /// Call this **before** [`clap::Parser::parse`] so that `env` attributes
@@ -429,6 +432,20 @@ pub struct BuildArgs {
         help_heading = "Chain"
     )]
     pub backfill_missing_timestamps: bool,
+
+    /// Solana only: max unresolved timestamp-backfill buffer size in bytes.
+    ///
+    /// Protects live ingestion from unbounded memory growth when
+    /// `--backfill-missing-timestamps` encounters a long span of blocks without
+    /// `block_time`.
+    #[arg(
+        long,
+        env = "BACKFILL_MISSING_TIMESTAMPS_BUFFER_BYTES",
+        default_value_t = DEFAULT_TIMESTAMP_BACKFILL_BUFFER_LIMIT_BYTES,
+        hide_env_values = true,
+        help_heading = "Chain"
+    )]
+    pub backfill_missing_timestamps_buffer_bytes: u64,
 
     /// Override cursor parameter validation and restart from the current CLI
     /// range. When a cursor file exists and its stored parameters differ from
