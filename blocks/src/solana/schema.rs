@@ -18,7 +18,7 @@ fn solana_canonical_fields(encoding: &EncodeBytes) -> Vec<Field> {
 pub fn blocks_schema(
     include_fork_step: bool,
     encoding: &EncodeBytes,
-    _backfill_missing_timestamps: bool,
+    _synthetic_partition_routing: bool,
 ) -> Schema {
     let mut fields = solana_canonical_fields(encoding);
     fields.extend(vec![
@@ -38,7 +38,7 @@ pub fn blocks_schema(
 pub fn transactions_schema(
     include_fork_step: bool,
     encoding: &EncodeBytes,
-    _backfill_missing_timestamps: bool,
+    _synthetic_partition_routing: bool,
 ) -> Schema {
     let mut fields = solana_canonical_fields(encoding);
     fields.extend(vec![
@@ -76,7 +76,7 @@ pub fn transactions_schema(
 pub fn messages_schema(
     include_fork_step: bool,
     encoding: &EncodeBytes,
-    _backfill_missing_timestamps: bool,
+    _synthetic_partition_routing: bool,
 ) -> Schema {
     let mut fields = solana_canonical_fields(encoding);
     fields.extend(vec![
@@ -107,7 +107,7 @@ pub fn messages_schema(
 pub fn instructions_schema(
     include_fork_step: bool,
     encoding: &EncodeBytes,
-    _backfill_missing_timestamps: bool,
+    _synthetic_partition_routing: bool,
 ) -> Schema {
     let mut fields = solana_canonical_fields(encoding);
     fields.extend(vec![
@@ -128,7 +128,7 @@ pub fn instructions_schema(
 pub fn rewards_schema(
     include_fork_step: bool,
     encoding: &EncodeBytes,
-    _backfill_missing_timestamps: bool,
+    _synthetic_partition_routing: bool,
 ) -> Schema {
     let mut fields = solana_canonical_fields(encoding);
     fields.extend(vec![
@@ -151,7 +151,7 @@ pub fn rewards_schema(
 pub fn token_balances_schema(
     include_fork_step: bool,
     encoding: &EncodeBytes,
-    _backfill_missing_timestamps: bool,
+    _synthetic_partition_routing: bool,
 ) -> Schema {
     let mut fields = solana_canonical_fields(encoding);
     fields.extend(vec![
@@ -177,7 +177,7 @@ pub fn token_balances_schema(
 pub fn account_lookups_schema(
     include_fork_step: bool,
     encoding: &EncodeBytes,
-    _backfill_missing_timestamps: bool,
+    _synthetic_partition_routing: bool,
 ) -> Schema {
     let mut fields = solana_canonical_fields(encoding);
     fields.extend(vec![

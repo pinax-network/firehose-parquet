@@ -177,7 +177,7 @@ impl SolanaBlockMapper {
         extended: bool,
         include_fork_step: bool,
         encoding: EncodeBytes,
-        backfill_missing_timestamps: bool,
+        synthetic_partition_routing: bool,
         include_failed_transactions: bool,
     ) -> Self {
         Self {
@@ -198,42 +198,42 @@ impl SolanaBlockMapper {
             blocks_schema: schema::blocks_schema(
                 include_fork_step,
                 &encoding,
-                backfill_missing_timestamps,
+                synthetic_partition_routing,
             ),
             transactions_schema: schema::transactions_schema(
                 include_fork_step,
                 &encoding,
-                backfill_missing_timestamps,
+                synthetic_partition_routing,
             ),
             vote_transactions_schema: schema::transactions_schema(
                 include_fork_step,
                 &encoding,
-                backfill_missing_timestamps,
+                synthetic_partition_routing,
             ),
             messages_schema: schema::messages_schema(
                 include_fork_step,
                 &encoding,
-                backfill_missing_timestamps,
+                synthetic_partition_routing,
             ),
             instructions_schema: schema::instructions_schema(
                 include_fork_step,
                 &encoding,
-                backfill_missing_timestamps,
+                synthetic_partition_routing,
             ),
             rewards_schema: schema::rewards_schema(
                 include_fork_step,
                 &encoding,
-                backfill_missing_timestamps,
+                synthetic_partition_routing,
             ),
             token_balances_schema: schema::token_balances_schema(
                 include_fork_step,
                 &encoding,
-                backfill_missing_timestamps,
+                synthetic_partition_routing,
             ),
             account_lookups_schema: schema::account_lookups_schema(
                 include_fork_step,
                 &encoding,
-                backfill_missing_timestamps,
+                synthetic_partition_routing,
             ),
         }
     }
