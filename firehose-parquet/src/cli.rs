@@ -419,36 +419,6 @@ pub struct BuildArgs {
     )]
     pub include_failed_transactions: bool,
 
-    /// Solana only: legacy switch related to synthetic timestamp routing.
-    ///
-    /// Missing Solana `block_time` values keep canonical `timestamp` / `date`
-    /// null. Time-based partition routing for Solana always reuses the most
-    /// recent known timestamp (seeded from the Solana genesis anchor when
-    /// needed); this flag is retained for CLI compatibility and may be a no-op
-    /// in current implementations.
-    #[arg(
-        long,
-        env = "BACKFILL_MISSING_TIMESTAMPS",
-        default_value = "false",
-        hide_env_values = true,
-        help_heading = "Chain"
-    )]
-    pub backfill_missing_timestamps: bool,
-
-    /// Solana only: legacy safety limit for synthetic timestamp routing state.
-    ///
-    /// Retained for CLI compatibility with earlier Solana timestamp backfill
-    /// work. The current last-known routing strategy no longer interpolates or
-    /// buffers unresolved spans during normal operation.
-    #[arg(
-        long,
-        env = "BACKFILL_MISSING_TIMESTAMPS_BUFFER_BYTES",
-        default_value_t = DEFAULT_TIMESTAMP_BACKFILL_BUFFER_LIMIT_BYTES,
-        hide_env_values = true,
-        help_heading = "Chain"
-    )]
-    pub backfill_missing_timestamps_buffer_bytes: u64,
-
     /// Override cursor parameter validation and restart from the current CLI
     /// range. When a cursor file exists and its stored parameters differ from
     /// the current CLI arguments, the pipeline normally exits with an error.

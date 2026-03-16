@@ -310,7 +310,7 @@ fn maybe_add_synthetic_timestamp_metadata(
     block_type: &str,
     synthetic_partition_routing: bool,
 ) {
-    if block_type == "solana" && synthetic_partition_routing {
+    if block_type_has_nullable_timestamps(block_type) && synthetic_partition_routing {
         meta.add("firehose-parquet.synthetic_timestamps", "true");
         meta.add(
             "firehose-parquet.synthetic_timestamp_policy",
@@ -356,15 +356,14 @@ fn partition_requires_timestamp(partition: &Partition) -> bool {
     )
 }
 
-const SOLANA_GENESIS_TIMESTAMP: i64 = 1_584_316_800;
-
-fn use_solana_synthetic_partition_routing(
-    block_type: &str,
-    partition: &Partition,
-    backfill_missing_timestamps: bool,
-) -> bool {
+fn block_type_has_nullable_timestamps(block_type: &str) -> bool {
     block_type == "solana"
-        && (backfill_missing_timestamps || partition_requires_timestamp(partition))
+}
+
+const SOLANA_GENESIS_TIMESTAMP: i64 = 1_584_368_940;
+
+fn use_last_known_timestamp_partition_routing(block_type: &str, partition: &Partition) -> bool {
+    block_type_has_nullable_timestamps(block_type) && partition_requires_timestamp(partition)
 }
 
 fn validate_block_timestamp(
@@ -550,7 +549,7 @@ impl TimestampBackfill {
             let mut current = current;
             let anchor = self.last_anchor.ok_or_else(|| {
                 anyhow!(
-                    "Solana partition routing requires a last-known timestamp anchor when --backfill-missing-timestamps is enabled"
+                    "nullable-timestamp partition routing requires a last-known timestamp anchor"
                 )
             })?;
             current.identity.timestamp = anchor.timestamp;
@@ -581,7 +580,6 @@ fn update_timestamp_backfill_metrics(
         .backfill_buffered_blocks
         .set(i64::try_from(timestamp_backfill.buffered_blocks_len()).unwrap_or(i64::MAX));
 }
-
 
 fn should_emit_progress_log(counter: u64) -> bool {
     counter > 0 && counter % 100 == 0
@@ -3260,7 +3258,7 @@ fn create_mapper(
     extended: bool,
     include_fork_step: bool,
     encode_bytes: EncodeBytes,
-    backfill_missing_timestamps: bool,
+    synthetic_partition_routing: bool,
     include_failed_transactions: bool,
 ) -> Result<Box<dyn BlockMapper>> {
     match block_type {
@@ -3278,7 +3276,7 @@ fn create_mapper(
             extended,
             include_fork_step,
             encode_bytes,
-            backfill_missing_timestamps,
+            synthetic_partition_routing,
             include_failed_transactions,
         ))),
         "near" => Ok(Box::new(NearBlockMapper::new(
@@ -4029,13 +4027,11 @@ async fn run_ingestion(args: &BuildArgs) -> Result<()> {
 
     extended = resolve_extended_mode(extended, &endpoint_info);
 
-    let backfill_missing_timestamps = args.backfill_missing_timestamps;
     let include_failed_transactions = args.include_failed_transactions;
 
     info!(
         block_type,
         extended,
-        backfill_missing_timestamps,
         bytes_encoding = %bytes_encoding_str,
         include_failed_transactions,
         "starting pipeline\n{config}"
@@ -4134,19 +4130,15 @@ async fn run_ingestion(args: &BuildArgs) -> Result<()> {
     let tron_style_evm_profile = endpoint_uses_tron_style_evm_profile(&endpoint_info);
     let mut is_solana = block_type == "solana";
     let partition_config = config.partition.clone();
-    let mut use_synthetic_partition_routing = use_solana_synthetic_partition_routing(
-        &block_type,
-        &partition_config,
-        backfill_missing_timestamps,
-    );
-    let backfill_missing_timestamps_buffer_bytes = args.backfill_missing_timestamps_buffer_bytes;
+    let mut use_synthetic_partition_routing =
+        use_last_known_timestamp_partition_routing(&block_type, &partition_config);
     let mut genesis_timestamp_bootstrap = GenesisTimestampBootstrap::new(
         args.bootstrap_missing_genesis_timestamp,
         config.start_block,
     );
     let mut timestamp_backfill = TimestampBackfill::new(
         use_synthetic_partition_routing,
-        backfill_missing_timestamps_buffer_bytes,
+        DEFAULT_TIMESTAMP_BACKFILL_BUFFER_LIMIT_BYTES,
     );
     update_timestamp_backfill_metrics(&pipeline_metrics, &timestamp_backfill);
 
@@ -4199,7 +4191,7 @@ async fn run_ingestion(args: &BuildArgs) -> Result<()> {
             extended,
             include_fork_step,
             encode_bytes,
-            backfill_missing_timestamps,
+            use_synthetic_partition_routing,
             include_failed_transactions,
         )?)
     } else {
@@ -4314,11 +4306,8 @@ async fn run_ingestion(args: &BuildArgs) -> Result<()> {
                     &endpoint_info,
                 );
                 let mut meta = meta;
-                let detected_uses_synthetic_partition_routing = use_solana_synthetic_partition_routing(
-                    &detected,
-                    &partition_config,
-                    backfill_missing_timestamps,
-                );
+                let detected_uses_synthetic_partition_routing =
+                    use_last_known_timestamp_partition_routing(&detected, &partition_config);
                 maybe_add_synthetic_timestamp_metadata(
                     &mut meta,
                     &detected,
@@ -4345,14 +4334,14 @@ async fn run_ingestion(args: &BuildArgs) -> Result<()> {
                 use_synthetic_partition_routing = detected_uses_synthetic_partition_routing;
                 timestamp_backfill = TimestampBackfill::new(
                     use_synthetic_partition_routing,
-                    backfill_missing_timestamps_buffer_bytes,
+                    DEFAULT_TIMESTAMP_BACKFILL_BUFFER_LIMIT_BYTES,
                 );
                 mapper = Some(create_mapper(
                     &detected,
                     extended,
                     include_fork_step,
                     encode_bytes,
-                    backfill_missing_timestamps,
+                    use_synthetic_partition_routing,
                     include_failed_transactions,
                 )?);
             }
@@ -4930,31 +4919,8 @@ mod tests {
     }
 
     #[test]
-    fn test_build_subcommand_backfill_missing_timestamps_default_false() {
-        let cli = Cli::parse_from([
-            "fireparq",
-            "build",
-            "--network",
-            "solana-mainnet-beta",
-            "--start-block",
-            "100",
-            "--stop-block",
-            "200",
-        ]);
-        if let Some(Commands::Build(build_args)) = cli.command {
-            assert!(!build_args.backfill_missing_timestamps);
-            assert_eq!(
-                build_args.backfill_missing_timestamps_buffer_bytes,
-                DEFAULT_TIMESTAMP_BACKFILL_BUFFER_LIMIT_BYTES
-            );
-        } else {
-            panic!("expected Commands::Build");
-        }
-    }
-
-    #[test]
-    fn test_build_subcommand_parses_backfill_missing_timestamps_flag() {
-        let cli = Cli::parse_from([
+    fn test_build_subcommand_rejects_removed_backfill_missing_timestamps_flag() {
+        let err = Cli::try_parse_from([
             "fireparq",
             "build",
             "--network",
@@ -4964,17 +4930,17 @@ mod tests {
             "--stop-block",
             "200",
             "--backfill-missing-timestamps",
-        ]);
-        if let Some(Commands::Build(build_args)) = cli.command {
-            assert!(build_args.backfill_missing_timestamps);
-        } else {
-            panic!("expected Commands::Build");
-        }
+        ])
+        .expect_err("removed backfill flag should fail clap parsing");
+
+        let rendered = err.to_string();
+        assert!(rendered.contains("--backfill-missing-timestamps"));
+        assert!(rendered.contains("unexpected argument"));
     }
 
     #[test]
-    fn test_build_subcommand_parses_backfill_missing_timestamps_buffer_limit() {
-        let cli = Cli::parse_from([
+    fn test_build_subcommand_rejects_removed_backfill_missing_timestamps_buffer_limit_flag() {
+        let err = Cli::try_parse_from([
             "fireparq",
             "build",
             "--network",
@@ -4985,12 +4951,12 @@ mod tests {
             "200",
             "--backfill-missing-timestamps-buffer-bytes",
             "2048",
-        ]);
-        if let Some(Commands::Build(build_args)) = cli.command {
-            assert_eq!(build_args.backfill_missing_timestamps_buffer_bytes, 2048);
-        } else {
-            panic!("expected Commands::Build");
-        }
+        ])
+        .expect_err("removed backfill buffer flag should fail clap parsing");
+
+        let rendered = err.to_string();
+        assert!(rendered.contains("--backfill-missing-timestamps-buffer-bytes"));
+        assert!(rendered.contains("unexpected argument"));
     }
 
     #[test]
@@ -5128,10 +5094,9 @@ mod tests {
         assert!(help.contains("first streamable block"));
         assert!(help.contains("--skip-missing-blocks"));
         assert!(help.contains("--bootstrap-missing-genesis-timestamp"));
-        assert!(help.contains("--backfill-missing-timestamps"));
-        assert!(help.contains("--backfill-missing-timestamps-buffer-bytes"));
         assert!(help.contains("synthesize their timestamp"));
-        assert!(help.contains("last-known synthetic timestamps"));
+        assert!(!help.contains("--backfill-missing-timestamps"));
+        assert!(!help.contains("--backfill-missing-timestamps-buffer-bytes"));
         assert!(!help.contains("--strict-timestamps"));
     }
 
@@ -5977,6 +5942,29 @@ mod tests {
         assert_eq!(anchored[1].identity.timestamp, 1_700_000_000);
         assert_eq!(anchored[0].cursor, "cursor-0");
         assert_eq!(anchored[1].fork_step.as_deref(), Some("STEP_NEW"));
+    }
+
+    #[test]
+    fn test_last_known_timestamp_partition_routing_is_automatic_for_solana_time_partitions() {
+        for partition in [
+            Partition::Date,
+            Partition::Hour,
+            Partition::Minute,
+            Partition::Second,
+        ] {
+            assert!(use_last_known_timestamp_partition_routing(
+                "solana", &partition
+            ));
+        }
+
+        assert!(!use_last_known_timestamp_partition_routing(
+            "solana",
+            &Partition::None
+        ));
+        assert!(!use_last_known_timestamp_partition_routing(
+            "evm",
+            &Partition::Date
+        ));
     }
 
     #[test]

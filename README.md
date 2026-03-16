@@ -321,8 +321,6 @@ Chain:
           For Tron, auto resolves to tron_base58; reserved block/transaction hashes and topics stay raw hex without 0x [env: BYTES_ENCODING] [default: auto]
       --include-failed-transactions
           Include failed/reverted transactions in output (default: false) [env: INCLUDE_FAILED_TRANSACTIONS]
-      --backfill-missing-timestamps
-          Solana only: keep canonical timestamp/date nullable while reusing the last known timestamp for time-based partition routing [env: BACKFILL_MISSING_TIMESTAMPS]
 ```
 
 When `--bootstrap-missing-genesis-timestamp` is enabled in strict mode, leading
@@ -332,8 +330,8 @@ metadata.
 
 For Solana time-based partitions, missing `block_time` values keep canonical
 `timestamp` / `date` null. Partition routing uses the last known timestamp only,
-seeded from the Solana genesis anchor for the first streamable span and updated
-whenever a real block timestamp is observed.
+seeded from the Solana first-streamable anchor (`2020-03-16 14:29:00 UTC`) for
+the initial span and updated whenever a real block timestamp is observed.
 
 ## Subcommands
 
@@ -903,10 +901,10 @@ Every Parquet file written by the pipeline embeds key-value metadata in the file
 
 `firehose-parquet.bytes_encoding` and `firehose-parquet.block_id_encoding` describe the emitted output contract, not just the upstream Firehose endpoint.
 
-When Solana `--backfill-missing-timestamps` is enabled, the `firehose-parquet.synthetic_*`
-metadata keys mark time-based partition routing as using a synthetic last-known
-timestamp anchor while canonical `timestamp` / `date` remain chain-sourced and
-nullable when `block_time` is missing.
+For Solana time-based partitions, the `firehose-parquet.synthetic_*` metadata
+keys mark routing as using a synthetic last-known timestamp anchor while
+canonical `timestamp` / `date` remain chain-sourced and nullable when
+`block_time` is missing.
 
 When `--bytes-encoding auto` is used, output encoding resolution follows this precedence:
 
