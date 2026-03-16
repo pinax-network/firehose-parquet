@@ -69,6 +69,9 @@ fn encode_bytes_label(encoding: &EncodeBytes) -> &'static str {
 
 fn block_id_encoding_to_bytes_encoding(encoding: &str) -> Option<EncodeBytes> {
     match encoding {
+        // Firehose block-id hints describe how canonical IDs are rendered, but
+        // cursor compatibility only needs the effective byte-field encoding.
+        // Both hex variants therefore normalize to the same EncodeBytes::Hex.
         "hex" | "hex_0x" => Some(EncodeBytes::Hex),
         "base58" => Some(EncodeBytes::Base58),
         _ => None,
@@ -90,7 +93,7 @@ fn metadata_has_tron_style_chain(state: &CursorState) -> bool {
             .unwrap_or(false)
 }
 
-fn output_contract_bytes_encoding(
+fn block_type_default_bytes_encoding(
     block_type: &str,
     tron_style_evm_profile: bool,
 ) -> Option<EncodeBytes> {
@@ -103,11 +106,18 @@ fn output_contract_bytes_encoding(
     }
 }
 
+/// Resolve `bytes_encoding=auto` from cursor metadata.
+///
+/// This prefers a known block-type output contract, then falls back to the
+/// stored block-id encoding hint, and finally defaults to hex when neither is
+/// available.
 fn resolve_auto_bytes_encoding(state: &CursorState) -> EncodeBytes {
     let tron_style_evm_profile = metadata_has_tron_style_chain(state);
 
     if let Some(block_type) = state.get_metadata("firehose-parquet.block_type") {
-        if let Some(encoding) = output_contract_bytes_encoding(block_type, tron_style_evm_profile) {
+        if let Some(encoding) =
+            block_type_default_bytes_encoding(block_type, tron_style_evm_profile)
+        {
             return encoding;
         }
     }
@@ -986,6 +996,9 @@ mod tests {
             ],
             &["firehose-parquet.block_type"],
         );
+        // Simulate the pre-detection current cursor template built before an
+        // auto block type has been resolved. Validation should still use the
+        // endpoint-derived metadata to resolve auto -> base58.
         let state = CursorState {
             cursor: "c1".to_string(),
             start_block: Some(100),
