@@ -149,6 +149,74 @@ fn chain_uses_tron_style_evm_profile(chain: &str, endpoint_info: &Option<Endpoin
     is_tron_style_chain_name(chain) || endpoint_uses_tron_style_evm_profile(endpoint_info)
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct OutputEncodingPolicy {
+    bytes_encoding: EncodeBytes,
+    block_id_encoding: &'static str,
+    allow_endpoint_block_id_hint: bool,
+}
+
+fn output_encoding_policy(
+    block_type: &str,
+    tron_style_evm_profile: bool,
+) -> Option<OutputEncodingPolicy> {
+    match block_type {
+        "evm" if tron_style_evm_profile => Some(OutputEncodingPolicy {
+            bytes_encoding: EncodeBytes::TronBase58,
+            block_id_encoding: "hex_no_prefix",
+            allow_endpoint_block_id_hint: false,
+        }),
+        "evm" | "bitcoin" | "antelope" | "cosmos" | "beacon" => Some(OutputEncodingPolicy {
+            bytes_encoding: EncodeBytes::Hex,
+            block_id_encoding: "hex_0x",
+            allow_endpoint_block_id_hint: false,
+        }),
+        "solana" | "near" => Some(OutputEncodingPolicy {
+            bytes_encoding: EncodeBytes::Base58,
+            block_id_encoding: "base58",
+            allow_endpoint_block_id_hint: false,
+        }),
+        "tron" => Some(OutputEncodingPolicy {
+            bytes_encoding: EncodeBytes::TronBase58,
+            block_id_encoding: "hex_no_prefix",
+            allow_endpoint_block_id_hint: false,
+        }),
+        _ => None,
+    }
+}
+
+fn default_block_id_encoding(
+    block_type: &str,
+    tron_style_evm_profile: bool,
+) -> Option<&'static str> {
+    output_encoding_policy(block_type, tron_style_evm_profile)
+        .map(|policy| policy.block_id_encoding)
+}
+
+fn resolve_auto_encode_bytes(
+    block_type: Option<&str>,
+    endpoint_info: &Option<EndpointInfo>,
+    tron_style_evm_profile: bool,
+) -> EncodeBytes {
+    if let Some(block_type) = block_type {
+        if let Some(policy) = output_encoding_policy(block_type, tron_style_evm_profile) {
+            if policy.allow_endpoint_block_id_hint {
+                return endpoint_info
+                    .as_ref()
+                    .and_then(|ei| encode_bytes_from_block_id_encoding(ei.block_id_encoding))
+                    .unwrap_or(policy.bytes_encoding);
+            }
+
+            return policy.bytes_encoding;
+        }
+    }
+
+    endpoint_info
+        .as_ref()
+        .and_then(|ei| encode_bytes_from_block_id_encoding(ei.block_id_encoding))
+        .unwrap_or(EncodeBytes::Hex)
+}
+
 fn add_common_file_metadata(
     meta: &mut ParquetFileMetadata,
     block_type: Option<&str>,
@@ -508,14 +576,8 @@ fn build_partitions_file_metadata(
 ) -> ParquetFileMetadata {
     let inferred_block_type = infer_partitions_block_type(chain, endpoint_info);
     let tron_style_evm_profile = chain_uses_tron_style_evm_profile(chain, endpoint_info);
-    let encoding = inferred_block_type
-        .map(|block_type| default_encode_bytes(block_type, tron_style_evm_profile))
-        .or_else(|| {
-            endpoint_info
-                .as_ref()
-                .and_then(|info| encode_bytes_from_block_id_encoding(info.block_id_encoding))
-        })
-        .unwrap_or(EncodeBytes::Hex);
+    let encoding =
+        resolve_auto_encode_bytes(inferred_block_type, endpoint_info, tron_style_evm_profile);
 
     let mut meta = ParquetFileMetadata::new();
     add_common_file_metadata(
@@ -621,12 +683,9 @@ fn detect_block_type(type_url: &str) -> Result<String> {
 
 /// Resolve the default `EncodeBytes` for a chain when the user specified "auto".
 fn default_encode_bytes(block_type: &str, tron_style_evm_profile: bool) -> EncodeBytes {
-    match block_type {
-        "evm" if tron_style_evm_profile => EncodeBytes::TronBase58,
-        "near" | "solana" => EncodeBytes::Base58,
-        "tron" => EncodeBytes::TronBase58,
-        _ => EncodeBytes::Hex,
-    }
+    output_encoding_policy(block_type, tron_style_evm_profile)
+        .map(|policy| policy.bytes_encoding)
+        .unwrap_or(EncodeBytes::Hex)
 }
 
 /// Resolve `EncodeBytes` from the endpoint info `block_id_encoding` field.
@@ -649,14 +708,7 @@ fn resolve_encode_bytes(
     tron_style_evm_profile: bool,
 ) -> EncodeBytes {
     parse_encode_bytes(bytes_encoding).unwrap_or_else(|| {
-        let default_encoding = default_encode_bytes(block_type, tron_style_evm_profile);
-        match default_encoding {
-            EncodeBytes::Base58 | EncodeBytes::TronBase58 => default_encoding,
-            EncodeBytes::Binary | EncodeBytes::Hex | EncodeBytes::HexNoPrefix => endpoint_info
-                .as_ref()
-                .and_then(|ei| encode_bytes_from_block_id_encoding(ei.block_id_encoding))
-                .unwrap_or(default_encoding),
-        }
+        resolve_auto_encode_bytes(Some(block_type), endpoint_info, tron_style_evm_profile)
     })
 }
 
@@ -5169,6 +5221,25 @@ mod tests {
     }
 
     #[test]
+    fn test_default_block_id_encoding_contract() {
+        assert_eq!(default_block_id_encoding("evm", false), Some("hex_0x"));
+        assert_eq!(
+            default_block_id_encoding("evm", true),
+            Some("hex_no_prefix")
+        );
+        assert_eq!(default_block_id_encoding("bitcoin", false), Some("hex_0x"));
+        assert_eq!(default_block_id_encoding("solana", false), Some("base58"));
+        assert_eq!(
+            default_block_id_encoding("tron", false),
+            Some("hex_no_prefix")
+        );
+        assert_eq!(default_block_id_encoding("near", false), Some("base58"));
+        assert_eq!(default_block_id_encoding("antelope", false), Some("hex_0x"));
+        assert_eq!(default_block_id_encoding("cosmos", false), Some("hex_0x"));
+        assert_eq!(default_block_id_encoding("beacon", false), Some("hex_0x"));
+    }
+
+    #[test]
     fn test_endpoint_uses_tron_style_evm_profile() {
         let ei = Some(EndpointInfo {
             chain_name: "tron-evm".to_string(),
@@ -5310,19 +5381,37 @@ mod tests {
     }
 
     #[test]
-    fn test_resolve_encode_bytes_generic_chain_uses_endpoint_hint_before_default() {
-        let endpoint_info = Some(EndpointInfo {
-            chain_name: "eth-mainnet".to_string(),
-            chain_name_aliases: vec!["ethereum".to_string()],
-            first_streamable_block_num: 0,
-            first_streamable_block_id: String::new(),
-            block_id_encoding: 3,
-            block_features: vec![],
-        });
+    fn test_resolve_encode_bytes_supported_contracts_override_endpoint_hints() {
+        let cases = [
+            ("evm", false, 3, EncodeBytes::Hex),
+            ("bitcoin", false, 3, EncodeBytes::Hex),
+            ("solana", false, 2, EncodeBytes::Base58),
+            ("near", false, 2, EncodeBytes::Base58),
+            ("antelope", false, 3, EncodeBytes::Hex),
+            ("cosmos", false, 3, EncodeBytes::Hex),
+            ("tron", false, 2, EncodeBytes::TronBase58),
+            ("beacon", false, 3, EncodeBytes::Hex),
+            ("evm", true, 2, EncodeBytes::TronBase58),
+        ];
 
-        let resolved = resolve_encode_bytes("evm", "auto", &endpoint_info, false);
+        for (block_type, tron_style_evm_profile, endpoint_block_id_encoding, expected) in cases {
+            let endpoint_info = Some(EndpointInfo {
+                chain_name: format!("{block_type}-mainnet"),
+                chain_name_aliases: vec![],
+                first_streamable_block_num: 0,
+                first_streamable_block_id: String::new(),
+                block_id_encoding: endpoint_block_id_encoding,
+                block_features: vec![],
+            });
 
-        assert_eq!(resolved, EncodeBytes::Base58);
+            let resolved =
+                resolve_encode_bytes(block_type, "auto", &endpoint_info, tron_style_evm_profile);
+
+            assert_eq!(
+                resolved, expected,
+                "expected explicit output contract for block_type={block_type} tron_style_evm_profile={tron_style_evm_profile}"
+            );
+        }
     }
 
     #[test]
@@ -5339,6 +5428,31 @@ mod tests {
         let resolved = resolve_encode_bytes("evm", "auto", &endpoint_info, true);
 
         assert_eq!(resolved, EncodeBytes::TronBase58);
+    }
+
+    #[test]
+    fn test_resolve_auto_encode_bytes_unknown_block_type_uses_endpoint_hint_then_generic_default() {
+        let base58_endpoint = Some(EndpointInfo {
+            chain_name: "mystery-chain".to_string(),
+            chain_name_aliases: vec![],
+            first_streamable_block_num: 0,
+            first_streamable_block_id: String::new(),
+            block_id_encoding: 3,
+            block_features: vec![],
+        });
+
+        assert_eq!(
+            resolve_auto_encode_bytes(None, &base58_endpoint, false),
+            EncodeBytes::Base58
+        );
+        assert_eq!(
+            resolve_auto_encode_bytes(Some("unknown"), &base58_endpoint, false),
+            EncodeBytes::Base58
+        );
+        assert_eq!(
+            resolve_auto_encode_bytes(None, &None, false),
+            EncodeBytes::Hex
+        );
     }
 
     #[test]
@@ -6354,6 +6468,14 @@ mod tests {
             find_meta(&meta, "firehose-parquet.block_range_size"),
             Some("0")
         );
+        assert_eq!(
+            find_meta(&meta, "firehose-parquet.bytes_encoding"),
+            Some("hex")
+        );
+        assert_eq!(
+            find_meta(&meta, "firehose-parquet.block_id_encoding"),
+            Some("hex_0x")
+        );
         assert_eq!(find_meta(&meta, "partition_type"), None);
     }
 
@@ -6670,6 +6792,36 @@ mod tests {
         assert_eq!(
             find_meta(&meta, "firehose-parquet.block_range_size"),
             Some("0")
+        );
+        assert_eq!(
+            find_meta(&meta, "firehose-parquet.block_id_encoding"),
+            Some("base58")
+        );
+    }
+
+    #[test]
+    fn test_build_partitions_file_metadata_unknown_chain_uses_endpoint_hint_fallback() {
+        let ei = Some(EndpointInfo {
+            chain_name: "mystery-mainnet".to_string(),
+            chain_name_aliases: vec![],
+            first_streamable_block_num: 0,
+            first_streamable_block_id: String::new(),
+            block_id_encoding: 3,
+            block_features: vec![],
+        });
+        let meta = build_partitions_file_metadata(
+            "https://example.com",
+            "mystery-mainnet",
+            "hour",
+            Compression::Zstd,
+            &ei,
+            None,
+        );
+
+        assert_eq!(find_meta(&meta, "firehose-parquet.block_type"), None);
+        assert_eq!(
+            find_meta(&meta, "firehose-parquet.bytes_encoding"),
+            Some("base58")
         );
         assert_eq!(
             find_meta(&meta, "firehose-parquet.block_id_encoding"),

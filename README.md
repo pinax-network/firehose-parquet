@@ -896,6 +896,29 @@ Every Parquet file written by the pipeline embeds key-value metadata in the file
 
 `firehose-parquet.bytes_encoding` and `firehose-parquet.block_id_encoding` describe the emitted output contract, not just the upstream Firehose endpoint.
 
+When `--bytes-encoding auto` is used, output encoding resolution follows this precedence:
+
+1. explicit CLI `--bytes-encoding`
+2. chain-specific output contract
+3. endpoint `block_id_encoding` fallback
+4. generic default (`hex` / `hex_0x`)
+
+Supported block types currently use explicit output contracts that override endpoint hints by default:
+
+| Block type / profile | `bytes_encoding` | `block_id_encoding` | Endpoint hint can override? |
+|---|---|---|---|
+| `evm` | `hex` | `hex_0x` | No |
+| `bitcoin` | `hex` | `hex_0x` | No |
+| `solana` | `base58` | `base58` | No |
+| `near` | `base58` | `base58` | No |
+| `antelope` | `hex` | `hex_0x` | No |
+| `cosmos` | `hex` | `hex_0x` | No |
+| `tron` | `tron_base58` | `hex_no_prefix` | No |
+| `beacon` | `hex` | `hex_0x` | No |
+| `tron-evm` (`evm` Tron-style profile) | `tron_base58` | `hex_no_prefix` | No |
+
+Endpoint `block_id_encoding` remains a fallback only when the chain does not resolve to a known block-type/profile contract.
+
 For Tron-style profiles (tron and tron-evm):
 
 - metadata reports `bytes_encoding=tron_base58`
