@@ -416,6 +416,20 @@ pub struct BuildArgs {
     )]
     pub include_failed_transactions: bool,
 
+    /// Solana only: synthesize missing canonical `timestamp` / `date` values.
+    ///
+    /// Missing Solana `block_time` values are derived from nearby timestamped
+    /// blocks so canonical `timestamp` and `date` become non-nullable. This
+    /// intentionally writes derived values, not chain-sourced timestamps.
+    #[arg(
+        long,
+        env = "BACKFILL_MISSING_TIMESTAMPS",
+        default_value = "false",
+        hide_env_values = true,
+        help_heading = "Chain"
+    )]
+    pub backfill_missing_timestamps: bool,
+
     /// Override cursor parameter validation and restart from the current CLI
     /// range. When a cursor file exists and its stored parameters differ from
     /// the current CLI arguments, the pipeline normally exits with an error.

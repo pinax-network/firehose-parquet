@@ -22,7 +22,7 @@ A production-grade Rust toolkit that consumes [StreamingFast Firehose](https://f
 
 - **Single binary** — one `fireparq` binary handles all chains via `--block-type` with auto-detection
 - **Multi-chain** — pluggable `BlockMapper` trait with per-chain mapper modules
-- **Canonical identity columns** — `block_num`, `block_id`, `parent_num`, `parent_id`, `lib_num`, `timestamp`, `date` on every table; `date` is an Arrow `Date32` derived from the UTC block timestamp and is null whenever `timestamp` is null in non-strict mode
+- **Canonical identity columns** — `block_num`, `block_id`, `parent_num`, `parent_id`, `lib_num`, `timestamp`, `date` on every table; `date` is an Arrow `Date32` derived from the UTC block timestamp. For Solana, canonical `timestamp` / `date` stay nullable by default, or can be synthesized with `--backfill-missing-timestamps`
 - **gRPC streaming** — connects to any Firehose v2 endpoint via tonic, with TLS and API key / JWT auth
 - **Network aliases** — `--network` resolves built-in Firehose names and supports `FIREHOSE_ENDPOINT_*` per-network overrides
 - **Automatic retry / resume** — exponential back-off on connection errors; resumes from the last cursor
@@ -321,12 +321,20 @@ Chain:
           For Tron, auto resolves to tron_base58; reserved block/transaction hashes and topics stay raw hex without 0x [env: BYTES_ENCODING] [default: auto]
       --include-failed-transactions
           Include failed/reverted transactions in output (default: false) [env: INCLUDE_FAILED_TRANSACTIONS]
+      --backfill-missing-timestamps
+          Solana only: synthesize missing canonical timestamp/date values from nearby timestamped blocks. This writes derived values, not chain-sourced timestamps [env: BACKFILL_MISSING_TIMESTAMPS]
 ```
 
 When `--bootstrap-missing-genesis-timestamp` is enabled in strict mode, leading
 bootstrap blocks with missing timestamps are still written to output. Their
 timestamps are synthesized from the first later block that includes timestamp
 metadata.
+
+When `--backfill-missing-timestamps` is enabled for Solana, canonical
+`timestamp` / `date` values are derived from nearby timestamped blocks. Missing
+spans between two known timestamps are interpolated by block number; leading
+spans wait for the first known timestamp; trailing frontier spans fall back to
+the most recent known timestamp when buffered data must be drained.
 
 ## Subcommands
 
@@ -891,8 +899,13 @@ Every Parquet file written by the pipeline embeds key-value metadata in the file
 | `firehose-parquet.compression` | `zstd` |
 | `firehose-parquet.partition` | `date` |
 | `firehose-parquet.block_range_size` | `10000` |
+| `firehose-parquet.synthetic_timestamps` | `true` |
+| `firehose-parquet.synthetic_timestamp_policy` | `solana_block_time_interpolation` |
 
 `firehose-parquet.bytes_encoding` and `firehose-parquet.block_id_encoding` describe the emitted output contract, not just the upstream Firehose endpoint.
+
+When Solana `--backfill-missing-timestamps` is enabled, the `firehose-parquet.synthetic_*`
+metadata keys mark canonical `timestamp` / `date` values as derived rather than directly chain-sourced.
 
 When `--bytes-encoding auto` is used, output encoding resolution follows this precedence:
 

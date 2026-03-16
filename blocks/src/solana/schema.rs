@@ -1,6 +1,8 @@
 use arrow::datatypes::{DataType, Field, Schema};
 use firehose_parquet::encode::{bytes_data_type, BytesListColumn, EncodeBytes};
-use firehose_parquet::traits::{canonical_fields_with_nullable_timestamps, fork_step_field};
+use firehose_parquet::traits::{
+    canonical_fields_with_encoding, canonical_fields_with_nullable_timestamps, fork_step_field,
+};
 use std::sync::Arc;
 
 fn maybe_fork_step(fields: &mut Vec<Field>, include: bool) {
@@ -9,8 +11,23 @@ fn maybe_fork_step(fields: &mut Vec<Field>, include: bool) {
     }
 }
 
-pub fn blocks_schema(include_fork_step: bool, encoding: &EncodeBytes) -> Schema {
-    let mut fields = canonical_fields_with_nullable_timestamps(encoding);
+fn solana_canonical_fields(
+    encoding: &EncodeBytes,
+    backfill_missing_timestamps: bool,
+) -> Vec<Field> {
+    if backfill_missing_timestamps {
+        canonical_fields_with_encoding(encoding)
+    } else {
+        canonical_fields_with_nullable_timestamps(encoding)
+    }
+}
+
+pub fn blocks_schema(
+    include_fork_step: bool,
+    encoding: &EncodeBytes,
+    backfill_missing_timestamps: bool,
+) -> Schema {
+    let mut fields = solana_canonical_fields(encoding, backfill_missing_timestamps);
     fields.extend(vec![
         Field::new("slot", DataType::UInt64, false),
         Field::new("parent_slot", DataType::UInt64, false),
@@ -25,8 +42,12 @@ pub fn blocks_schema(include_fork_step: bool, encoding: &EncodeBytes) -> Schema 
     Schema::new(fields)
 }
 
-pub fn transactions_schema(include_fork_step: bool, encoding: &EncodeBytes) -> Schema {
-    let mut fields = canonical_fields_with_nullable_timestamps(encoding);
+pub fn transactions_schema(
+    include_fork_step: bool,
+    encoding: &EncodeBytes,
+    backfill_missing_timestamps: bool,
+) -> Schema {
+    let mut fields = solana_canonical_fields(encoding, backfill_missing_timestamps);
     fields.extend(vec![
         Field::new("slot", DataType::UInt64, false),
         Field::new("transaction_index", DataType::UInt32, false),
@@ -59,8 +80,12 @@ pub fn transactions_schema(include_fork_step: bool, encoding: &EncodeBytes) -> S
     Schema::new(fields)
 }
 
-pub fn messages_schema(include_fork_step: bool, encoding: &EncodeBytes) -> Schema {
-    let mut fields = canonical_fields_with_nullable_timestamps(encoding);
+pub fn messages_schema(
+    include_fork_step: bool,
+    encoding: &EncodeBytes,
+    backfill_missing_timestamps: bool,
+) -> Schema {
+    let mut fields = solana_canonical_fields(encoding, backfill_missing_timestamps);
     fields.extend(vec![
         Field::new("slot", DataType::UInt64, false),
         Field::new("transaction_index", DataType::UInt32, false),
@@ -86,8 +111,12 @@ pub fn messages_schema(include_fork_step: bool, encoding: &EncodeBytes) -> Schem
     Schema::new(fields)
 }
 
-pub fn instructions_schema(include_fork_step: bool, encoding: &EncodeBytes) -> Schema {
-    let mut fields = canonical_fields_with_nullable_timestamps(encoding);
+pub fn instructions_schema(
+    include_fork_step: bool,
+    encoding: &EncodeBytes,
+    backfill_missing_timestamps: bool,
+) -> Schema {
+    let mut fields = solana_canonical_fields(encoding, backfill_missing_timestamps);
     fields.extend(vec![
         Field::new("slot", DataType::UInt64, false),
         Field::new("transaction_index", DataType::UInt32, false),
@@ -103,8 +132,12 @@ pub fn instructions_schema(include_fork_step: bool, encoding: &EncodeBytes) -> S
     Schema::new(fields)
 }
 
-pub fn rewards_schema(include_fork_step: bool, encoding: &EncodeBytes) -> Schema {
-    let mut fields = canonical_fields_with_nullable_timestamps(encoding);
+pub fn rewards_schema(
+    include_fork_step: bool,
+    encoding: &EncodeBytes,
+    backfill_missing_timestamps: bool,
+) -> Schema {
+    let mut fields = solana_canonical_fields(encoding, backfill_missing_timestamps);
     fields.extend(vec![
         Field::new("slot", DataType::UInt64, false),
         Field::new("reward_index", DataType::UInt32, false),
@@ -122,8 +155,12 @@ pub fn rewards_schema(include_fork_step: bool, encoding: &EncodeBytes) -> Schema
 }
 
 /// Token balance changes (pre/post) per transaction.
-pub fn token_balances_schema(include_fork_step: bool, encoding: &EncodeBytes) -> Schema {
-    let mut fields = canonical_fields_with_nullable_timestamps(encoding);
+pub fn token_balances_schema(
+    include_fork_step: bool,
+    encoding: &EncodeBytes,
+    backfill_missing_timestamps: bool,
+) -> Schema {
+    let mut fields = solana_canonical_fields(encoding, backfill_missing_timestamps);
     fields.extend(vec![
         Field::new("slot", DataType::UInt64, false),
         Field::new("transaction_index", DataType::UInt32, false),
@@ -144,8 +181,12 @@ pub fn token_balances_schema(include_fork_step: bool, encoding: &EncodeBytes) ->
 }
 
 /// Address table lookups from versioned transactions.
-pub fn account_lookups_schema(include_fork_step: bool, encoding: &EncodeBytes) -> Schema {
-    let mut fields = canonical_fields_with_nullable_timestamps(encoding);
+pub fn account_lookups_schema(
+    include_fork_step: bool,
+    encoding: &EncodeBytes,
+    backfill_missing_timestamps: bool,
+) -> Schema {
+    let mut fields = solana_canonical_fields(encoding, backfill_missing_timestamps);
     fields.extend(vec![
         Field::new("slot", DataType::UInt64, false),
         Field::new("transaction_index", DataType::UInt32, false),
@@ -185,7 +226,7 @@ pub const EXTENDED_TABLE_NAMES: [&str; 8] = [
 mod tests {
     use super::*;
 
-    fn assert_nullable_canonical_time_fields(schema: &Schema) {
+    fn assert_canonical_time_field_nullability(schema: &Schema, nullable: bool) {
         let timestamp = schema
             .field_with_name("timestamp")
             .expect("timestamp field should be present");
@@ -193,19 +234,21 @@ mod tests {
             .field_with_name("date")
             .expect("date field should be present");
 
-        assert!(
+        assert_eq!(
             timestamp.is_nullable(),
-            "timestamp field should be nullable in Solana schemas"
+            nullable,
+            "unexpected timestamp nullability in Solana schema"
         );
-        assert!(
+        assert_eq!(
             date.is_nullable(),
-            "date field should be nullable in Solana schemas"
+            nullable,
+            "unexpected date nullability in Solana schema"
         );
     }
 
     #[test]
     fn test_all_solana_schemas_use_nullable_canonical_time_fields() {
-        let schema_builders: [fn(bool, &EncodeBytes) -> Schema; 7] = [
+        let schema_builders: [fn(bool, &EncodeBytes, bool) -> Schema; 7] = [
             blocks_schema,
             transactions_schema,
             messages_schema,
@@ -217,8 +260,28 @@ mod tests {
 
         for include_fork_step in [false, true] {
             for build_schema in schema_builders {
-                let schema = build_schema(include_fork_step, &EncodeBytes::Binary);
-                assert_nullable_canonical_time_fields(&schema);
+                let schema = build_schema(include_fork_step, &EncodeBytes::Binary, false);
+                assert_canonical_time_field_nullability(&schema, true);
+            }
+        }
+    }
+
+    #[test]
+    fn test_all_solana_schemas_use_required_canonical_time_fields_when_backfill_enabled() {
+        let schema_builders: [fn(bool, &EncodeBytes, bool) -> Schema; 7] = [
+            blocks_schema,
+            transactions_schema,
+            messages_schema,
+            instructions_schema,
+            rewards_schema,
+            token_balances_schema,
+            account_lookups_schema,
+        ];
+
+        for include_fork_step in [false, true] {
+            for build_schema in schema_builders {
+                let schema = build_schema(include_fork_step, &EncodeBytes::Binary, true);
+                assert_canonical_time_field_nullability(&schema, false);
             }
         }
     }

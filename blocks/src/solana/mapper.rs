@@ -27,6 +27,19 @@ fn finish_fork_step(builder: &mut Option<StringBuilder>, columns: &mut Vec<Arc<d
     }
 }
 
+fn append_canonical_timestamp(
+    builder: &mut CanonicalBuilder,
+    identity: &BlockIdentity,
+    block_time_opt: Option<i64>,
+    backfill_missing_timestamps: bool,
+) {
+    match block_time_opt {
+        Some(timestamp) => builder.append_with_optional_timestamp(identity, Some(timestamp)),
+        None if backfill_missing_timestamps => builder.append(identity),
+        None => builder.append_with_optional_timestamp(identity, None),
+    }
+}
+
 fn solana_hash_bytes(hash: &str) -> Vec<u8> {
     match decode_base58(hash) {
         Ok(bytes) => bytes,
@@ -63,11 +76,15 @@ fn append_transaction(
     meta: &solana::TransactionStatusMeta,
     identity: &BlockIdentity,
     block_time_opt: Option<i64>,
+    backfill_missing_timestamps: bool,
     fork_step: Option<&str>,
 ) {
-    builder
-        .canonical
-        .append_with_optional_timestamp(identity, block_time_opt);
+    append_canonical_timestamp(
+        &mut builder.canonical,
+        identity,
+        block_time_opt,
+        backfill_missing_timestamps,
+    );
     builder.slot.append_value(slot);
     builder.transaction_index.append_value(tx_idx);
     if let Some(sig) = tx.signatures.first() {
@@ -143,6 +160,7 @@ fn solana_canonical_identity(block: &solana::Block, identity: &BlockIdentity) ->
 
 pub struct SolanaBlockMapper {
     extended: bool,
+    backfill_missing_timestamps: bool,
     include_failed_transactions: bool,
     blocks: BlocksBuilder,
     transactions: TransactionsBuilder,
@@ -167,10 +185,12 @@ impl SolanaBlockMapper {
         extended: bool,
         include_fork_step: bool,
         encoding: EncodeBytes,
+        backfill_missing_timestamps: bool,
         include_failed_transactions: bool,
     ) -> Self {
         Self {
             extended,
+            backfill_missing_timestamps,
             include_failed_transactions,
             blocks: BlocksBuilder::new(include_fork_step, &encoding),
             transactions: TransactionsBuilder::new(include_fork_step, &encoding),
@@ -184,14 +204,46 @@ impl SolanaBlockMapper {
             rewards: RewardsBuilder::new(include_fork_step, &encoding),
             token_balances: TokenBalancesBuilder::new(include_fork_step, &encoding),
             account_lookups: AccountLookupsBuilder::new(include_fork_step, &encoding),
-            blocks_schema: schema::blocks_schema(include_fork_step, &encoding),
-            transactions_schema: schema::transactions_schema(include_fork_step, &encoding),
-            vote_transactions_schema: schema::transactions_schema(include_fork_step, &encoding),
-            messages_schema: schema::messages_schema(include_fork_step, &encoding),
-            instructions_schema: schema::instructions_schema(include_fork_step, &encoding),
-            rewards_schema: schema::rewards_schema(include_fork_step, &encoding),
-            token_balances_schema: schema::token_balances_schema(include_fork_step, &encoding),
-            account_lookups_schema: schema::account_lookups_schema(include_fork_step, &encoding),
+            blocks_schema: schema::blocks_schema(
+                include_fork_step,
+                &encoding,
+                backfill_missing_timestamps,
+            ),
+            transactions_schema: schema::transactions_schema(
+                include_fork_step,
+                &encoding,
+                backfill_missing_timestamps,
+            ),
+            vote_transactions_schema: schema::transactions_schema(
+                include_fork_step,
+                &encoding,
+                backfill_missing_timestamps,
+            ),
+            messages_schema: schema::messages_schema(
+                include_fork_step,
+                &encoding,
+                backfill_missing_timestamps,
+            ),
+            instructions_schema: schema::instructions_schema(
+                include_fork_step,
+                &encoding,
+                backfill_missing_timestamps,
+            ),
+            rewards_schema: schema::rewards_schema(
+                include_fork_step,
+                &encoding,
+                backfill_missing_timestamps,
+            ),
+            token_balances_schema: schema::token_balances_schema(
+                include_fork_step,
+                &encoding,
+                backfill_missing_timestamps,
+            ),
+            account_lookups_schema: schema::account_lookups_schema(
+                include_fork_step,
+                &encoding,
+                backfill_missing_timestamps,
+            ),
         }
     }
 
@@ -205,9 +257,12 @@ impl SolanaBlockMapper {
         let block_time_opt = block.block_time.as_ref().map(|bt| bt.timestamp);
         let canonical_identity = solana_canonical_identity(block, identity);
 
-        self.blocks
-            .canonical
-            .append_with_optional_timestamp(&canonical_identity, block_time_opt);
+        append_canonical_timestamp(
+            &mut self.blocks.canonical,
+            &canonical_identity,
+            block_time_opt,
+            self.backfill_missing_timestamps,
+        );
         self.blocks.slot.append_value(slot);
         self.blocks.parent_slot.append_value(block.parent_slot);
         match &block.block_height {
@@ -295,6 +350,7 @@ impl SolanaBlockMapper {
                     meta,
                     identity,
                     block_time_opt,
+                    self.backfill_missing_timestamps,
                     fork_step,
                 );
             }
@@ -310,13 +366,17 @@ impl SolanaBlockMapper {
             meta,
             identity,
             block_time_opt,
+            self.backfill_missing_timestamps,
             fork_step,
         );
 
         // messages
-        self.messages
-            .canonical
-            .append_with_optional_timestamp(identity, block_time_opt);
+        append_canonical_timestamp(
+            &mut self.messages.canonical,
+            identity,
+            block_time_opt,
+            self.backfill_missing_timestamps,
+        );
         self.messages.slot.append_value(slot);
         self.messages.transaction_index.append_value(tx_idx);
         self.messages.message_index.append_value(0);
@@ -365,9 +425,12 @@ impl SolanaBlockMapper {
         // instructions (top-level)
         let mut global_instr_idx = 0u32;
         for instr in &msg.instructions {
-            self.instructions
-                .canonical
-                .append_with_optional_timestamp(identity, block_time_opt);
+            append_canonical_timestamp(
+                &mut self.instructions.canonical,
+                identity,
+                block_time_opt,
+                self.backfill_missing_timestamps,
+            );
             self.instructions.slot.append_value(slot);
             self.instructions.transaction_index.append_value(tx_idx);
             self.instructions
@@ -388,9 +451,12 @@ impl SolanaBlockMapper {
         // instructions (inner)
         for inner_set in &meta.inner_instructions {
             for inner in &inner_set.instructions {
-                self.instructions
-                    .canonical
-                    .append_with_optional_timestamp(identity, block_time_opt);
+                append_canonical_timestamp(
+                    &mut self.instructions.canonical,
+                    identity,
+                    block_time_opt,
+                    self.backfill_missing_timestamps,
+                );
                 self.instructions.slot.append_value(slot);
                 self.instructions.transaction_index.append_value(tx_idx);
                 self.instructions
@@ -434,9 +500,12 @@ impl SolanaBlockMapper {
 
         // address table lookups from the message
         for (lookup_idx, lookup) in msg.address_table_lookups.iter().enumerate() {
-            self.account_lookups
-                .canonical
-                .append_with_optional_timestamp(identity, block_time_opt);
+            append_canonical_timestamp(
+                &mut self.account_lookups.canonical,
+                identity,
+                block_time_opt,
+                self.backfill_missing_timestamps,
+            );
             self.account_lookups.slot.append_value(slot);
             self.account_lookups.transaction_index.append_value(tx_idx);
             self.account_lookups
@@ -481,9 +550,12 @@ impl SolanaBlockMapper {
         fork_step: Option<&str>,
     ) {
         for (i, tb) in balances.iter().enumerate() {
-            self.token_balances
-                .canonical
-                .append_with_optional_timestamp(identity, block_time_opt);
+            append_canonical_timestamp(
+                &mut self.token_balances.canonical,
+                identity,
+                block_time_opt,
+                self.backfill_missing_timestamps,
+            );
             self.token_balances.slot.append_value(slot);
             self.token_balances.transaction_index.append_value(tx_idx);
             self.token_balances.balance_index.append_value(i as u32);
@@ -544,9 +616,12 @@ impl SolanaBlockMapper {
         block_time_opt: Option<i64>,
         fork_step: Option<&str>,
     ) {
-        self.rewards
-            .canonical
-            .append_with_optional_timestamp(identity, block_time_opt);
+        append_canonical_timestamp(
+            &mut self.rewards.canonical,
+            identity,
+            block_time_opt,
+            self.backfill_missing_timestamps,
+        );
         self.rewards.slot.append_value(slot);
         self.rewards.reward_index.append_value(idx);
         self.rewards.pubkey.append_value(&reward.pubkey);
@@ -1274,7 +1349,7 @@ mod tests {
     fn test_map_and_flush_single_block() {
         let block = make_test_block(100);
         let block_bytes = prost::Message::encode_to_vec(&block);
-        let mut mapper = SolanaBlockMapper::new(false, false, EncodeBytes::Binary, false);
+        let mut mapper = SolanaBlockMapper::new(false, false, EncodeBytes::Binary, false, false);
         mapper
             .map_block(&block_bytes, &BlockIdentity::default(), None)
             .unwrap();
@@ -1293,10 +1368,72 @@ mod tests {
     }
 
     #[test]
+    fn test_backfill_missing_canonical_timestamp_uses_identity_timestamp() {
+        let mut block = make_test_block(100);
+        block.block_time = None;
+        let block_bytes = prost::Message::encode_to_vec(&block);
+        let identity = BlockIdentity {
+            block_num: 100,
+            block_id: "firehose-envelope-id".to_string(),
+            parent_num: 99,
+            parent_id: "firehose-envelope-parent-id".to_string(),
+            lib_num: 99,
+            timestamp: 1_700_000_123,
+            fork_step: None,
+        };
+        let mut mapper = SolanaBlockMapper::new(false, false, EncodeBytes::Binary, true, false);
+        mapper.map_block(&block_bytes, &identity, None).unwrap();
+
+        let batches = mapper.flush().unwrap();
+        let blocks = &batches["blocks"];
+        let transactions = &batches["transactions"];
+
+        let block_timestamp = blocks
+            .column_by_name("timestamp")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<TimestampSecondArray>()
+            .unwrap();
+        let block_date = blocks
+            .column_by_name("date")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<Date32Array>()
+            .unwrap();
+        let block_time = blocks
+            .column_by_name("block_time")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap();
+        let tx_timestamp = transactions
+            .column_by_name("timestamp")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<TimestampSecondArray>()
+            .unwrap();
+
+        assert_eq!(block_timestamp.value(0), identity.timestamp);
+        assert_eq!(
+            block_date.value(0),
+            firehose_parquet::traits::date32_from_timestamp_seconds(identity.timestamp)
+        );
+        assert!(
+            block_time.is_null(0),
+            "raw Solana block_time should remain null"
+        );
+        assert_eq!(
+            tx_timestamp.value(0),
+            identity.timestamp,
+            "derived canonical timestamp should propagate to child tables"
+        );
+    }
+
+    #[test]
     fn test_solana_canonical_ids_match_blockhash_fields() {
         let block = make_test_block(100);
         let block_bytes = prost::Message::encode_to_vec(&block);
-        let mut mapper = SolanaBlockMapper::new(false, false, EncodeBytes::Binary, false);
+        let mut mapper = SolanaBlockMapper::new(false, false, EncodeBytes::Binary, false, false);
 
         let identity = BlockIdentity {
             block_num: 100,
@@ -1345,7 +1482,7 @@ mod tests {
     fn test_solana_base58_canonical_ids_match_blockhash_fields() {
         let block = make_test_block(100);
         let block_bytes = prost::Message::encode_to_vec(&block);
-        let mut mapper = SolanaBlockMapper::new(false, false, EncodeBytes::Base58, false);
+        let mut mapper = SolanaBlockMapper::new(false, false, EncodeBytes::Base58, false, false);
 
         let identity = BlockIdentity {
             block_num: 100,
@@ -1433,7 +1570,7 @@ mod tests {
         });
 
         let block_bytes = prost::Message::encode_to_vec(&block);
-        let mut mapper = SolanaBlockMapper::new(true, false, EncodeBytes::Binary, false);
+        let mut mapper = SolanaBlockMapper::new(true, false, EncodeBytes::Binary, false, false);
         mapper
             .map_block(&block_bytes, &BlockIdentity::default(), None)
             .unwrap();
@@ -1489,7 +1626,7 @@ mod tests {
         });
 
         let block_bytes = prost::Message::encode_to_vec(&block);
-        let mut mapper = SolanaBlockMapper::new(true, false, EncodeBytes::Binary, false);
+        let mut mapper = SolanaBlockMapper::new(true, false, EncodeBytes::Binary, false, false);
         mapper
             .map_block(&block_bytes, &BlockIdentity::default(), None)
             .unwrap();
@@ -1546,7 +1683,7 @@ mod tests {
 
         let block_bytes = prost::Message::encode_to_vec(&block);
         // With include_failed_transactions = true, failed tx should be included
-        let mut mapper = SolanaBlockMapper::new(true, false, EncodeBytes::Binary, true);
+        let mut mapper = SolanaBlockMapper::new(true, false, EncodeBytes::Binary, false, true);
         mapper
             .map_block(&block_bytes, &BlockIdentity::default(), None)
             .unwrap();
@@ -1574,7 +1711,7 @@ mod tests {
     fn test_flush_resets_builders() {
         let block = make_test_block(1);
         let block_bytes = prost::Message::encode_to_vec(&block);
-        let mut mapper = SolanaBlockMapper::new(false, false, EncodeBytes::Binary, false);
+        let mut mapper = SolanaBlockMapper::new(false, false, EncodeBytes::Binary, false, false);
         mapper
             .map_block(&block_bytes, &BlockIdentity::default(), None)
             .unwrap();
@@ -1595,7 +1732,7 @@ mod tests {
             rewards: vec![],
         };
         let block_bytes = prost::Message::encode_to_vec(&block);
-        let mut mapper = SolanaBlockMapper::new(false, false, EncodeBytes::Binary, false);
+        let mut mapper = SolanaBlockMapper::new(false, false, EncodeBytes::Binary, false, false);
         mapper
             .map_block(&block_bytes, &BlockIdentity::default(), None)
             .unwrap();
@@ -1610,7 +1747,7 @@ mod tests {
     fn test_fork_step_column_included() {
         let block = make_test_block(100);
         let block_bytes = prost::Message::encode_to_vec(&block);
-        let mut mapper = SolanaBlockMapper::new(false, true, EncodeBytes::Binary, false);
+        let mut mapper = SolanaBlockMapper::new(false, true, EncodeBytes::Binary, false, false);
         mapper
             .map_block(&block_bytes, &BlockIdentity::default(), Some("NEW"))
             .unwrap();
@@ -1631,7 +1768,7 @@ mod tests {
     fn test_encode_bytes_hex() {
         let block = make_test_block(100);
         let block_bytes = prost::Message::encode_to_vec(&block);
-        let mut mapper = SolanaBlockMapper::new(false, false, EncodeBytes::Hex, false);
+        let mut mapper = SolanaBlockMapper::new(false, false, EncodeBytes::Hex, false, false);
         mapper
             .map_block(&block_bytes, &BlockIdentity::default(), None)
             .unwrap();
@@ -1650,7 +1787,7 @@ mod tests {
     fn test_encode_bytes_base58() {
         let block = make_test_block(100);
         let block_bytes = prost::Message::encode_to_vec(&block);
-        let mut mapper = SolanaBlockMapper::new(false, false, EncodeBytes::Base58, false);
+        let mut mapper = SolanaBlockMapper::new(false, false, EncodeBytes::Base58, false, false);
         mapper
             .map_block(&block_bytes, &BlockIdentity::default(), None)
             .unwrap();
@@ -1668,7 +1805,7 @@ mod tests {
     fn test_token_balances_content() {
         let block = make_test_block(100);
         let block_bytes = prost::Message::encode_to_vec(&block);
-        let mut mapper = SolanaBlockMapper::new(false, false, EncodeBytes::Binary, false);
+        let mut mapper = SolanaBlockMapper::new(false, false, EncodeBytes::Binary, false, false);
         mapper
             .map_block(&block_bytes, &BlockIdentity::default(), None)
             .unwrap();
@@ -1711,7 +1848,7 @@ mod tests {
     fn test_account_lookups_content() {
         let block = make_test_block(100);
         let block_bytes = prost::Message::encode_to_vec(&block);
-        let mut mapper = SolanaBlockMapper::new(false, false, EncodeBytes::Binary, false);
+        let mut mapper = SolanaBlockMapper::new(false, false, EncodeBytes::Binary, false, false);
         mapper
             .map_block(&block_bytes, &BlockIdentity::default(), None)
             .unwrap();
@@ -1732,7 +1869,7 @@ mod tests {
     fn test_rewards_source_column() {
         let block = make_test_block(100);
         let block_bytes = prost::Message::encode_to_vec(&block);
-        let mut mapper = SolanaBlockMapper::new(false, false, EncodeBytes::Binary, false);
+        let mut mapper = SolanaBlockMapper::new(false, false, EncodeBytes::Binary, false, false);
         mapper
             .map_block(&block_bytes, &BlockIdentity::default(), None)
             .unwrap();
@@ -1764,7 +1901,7 @@ mod tests {
     fn test_return_data_and_cost_units() {
         let block = make_test_block(100);
         let block_bytes = prost::Message::encode_to_vec(&block);
-        let mut mapper = SolanaBlockMapper::new(false, false, EncodeBytes::Binary, false);
+        let mut mapper = SolanaBlockMapper::new(false, false, EncodeBytes::Binary, false, false);
         mapper
             .map_block(&block_bytes, &BlockIdentity::default(), None)
             .unwrap();
@@ -1789,7 +1926,7 @@ mod tests {
     fn test_loaded_addresses() {
         let block = make_test_block(100);
         let block_bytes = prost::Message::encode_to_vec(&block);
-        let mut mapper = SolanaBlockMapper::new(false, false, EncodeBytes::Binary, false);
+        let mut mapper = SolanaBlockMapper::new(false, false, EncodeBytes::Binary, false, false);
         mapper
             .map_block(&block_bytes, &BlockIdentity::default(), None)
             .unwrap();
@@ -1809,7 +1946,7 @@ mod tests {
 
     #[test]
     fn test_table_names_base() {
-        let mapper = SolanaBlockMapper::new(false, false, EncodeBytes::Binary, false);
+        let mapper = SolanaBlockMapper::new(false, false, EncodeBytes::Binary, false, false);
         let names = mapper.table_names();
         assert_eq!(names.len(), 7);
         assert!(names.contains(&"token_balances"));
@@ -1819,7 +1956,7 @@ mod tests {
 
     #[test]
     fn test_table_names_extended() {
-        let mapper = SolanaBlockMapper::new(true, false, EncodeBytes::Binary, false);
+        let mapper = SolanaBlockMapper::new(true, false, EncodeBytes::Binary, false, false);
         let names = mapper.table_names();
         assert_eq!(names.len(), 8);
         assert!(names.contains(&"token_balances"));
@@ -1870,7 +2007,7 @@ mod tests {
         });
 
         let block_bytes = prost::Message::encode_to_vec(&block);
-        let mut mapper = SolanaBlockMapper::new(false, false, EncodeBytes::Binary, false);
+        let mut mapper = SolanaBlockMapper::new(false, false, EncodeBytes::Binary, false, false);
         mapper
             .map_block(&block_bytes, &BlockIdentity::default(), None)
             .unwrap();
