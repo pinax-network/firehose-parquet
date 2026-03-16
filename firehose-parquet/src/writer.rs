@@ -220,9 +220,16 @@ impl ParquetTableWriter {
     pub fn partition_suffix(&self, table: &str, metadata: &BlockMetadata) -> String {
         match &self.partition {
             Partition::None => table.to_string(),
-            Partition::BlockRange(size) => {
-                let start = (metadata.min_block_number / size) * size;
-                let stop = start + size;
+            Partition::BlockRange { .. } => {
+                let (start, stop) = self
+                    .partition
+                    .block_range_bounds(metadata.min_block_number)
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "expected BlockRange partition bounds for block {} while formatting block-range output path",
+                            metadata.min_block_number
+                        )
+                    });
                 format!("{table}/block_range={start}-{stop}")
             }
             Partition::Date => {
@@ -294,9 +301,16 @@ impl ParquetTableWriter {
         let base = self.output_dir.join(table);
         match &self.partition {
             Partition::None => base,
-            Partition::BlockRange(size) => {
-                let start = (metadata.min_block_number / size) * size;
-                let stop = start + size;
+            Partition::BlockRange { .. } => {
+                let (start, stop) = self
+                    .partition
+                    .block_range_bounds(metadata.min_block_number)
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "expected BlockRange partition bounds for block {} while resolving block-range output directory",
+                            metadata.min_block_number
+                        )
+                    });
                 base.join(format!("block_range={start}-{stop}"))
             }
             Partition::Date => {
@@ -511,7 +525,7 @@ impl OutputWriter {
     ) -> Result<Vec<(RecordBatch, BlockMetadata)>> {
         // Only time-based partitions need splitting.
         match &self.inner.partition {
-            Partition::None | Partition::BlockRange(_) => {
+            Partition::None | Partition::BlockRange { .. } => {
                 return Ok(vec![(batch.clone(), metadata.clone())]);
             }
             _ => {}
@@ -917,7 +931,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let batch = make_test_batch();
         let mut writer =
-            ParquetTableWriter::new(dir.path(), Partition::BlockRange(100), Compression::None);
+            ParquetTableWriter::new(dir.path(), Partition::block_range(100), Compression::None);
         let meta = BlockMetadata {
             min_block_number: 150,
             max_block_number: 150,
@@ -926,6 +940,26 @@ mod tests {
         };
         let (path, _) = writer.write_batch("blocks", &batch, &meta).unwrap();
         assert!(path.to_string_lossy().contains("block_range=100-200"));
+    }
+
+    #[test]
+    fn test_block_range_partitioning_uses_start_block_anchor() {
+        let dir = tempfile::tempdir().unwrap();
+        let batch = make_test_batch();
+        let mut partition = Partition::block_range(100);
+        partition.set_block_range_start(Some(9_820_210));
+        let mut writer = ParquetTableWriter::new(dir.path(), partition, Compression::None);
+        let meta = BlockMetadata {
+            min_block_number: 9_820_250,
+            max_block_number: 9_820_250,
+            min_timestamp: None,
+            max_timestamp: None,
+        };
+
+        let (path, _) = writer.write_batch("blocks", &batch, &meta).unwrap();
+        assert!(path
+            .to_string_lossy()
+            .contains("block_range=9820210-9820310"));
     }
 
     #[test]
@@ -1389,7 +1423,7 @@ mod tests {
 
         let mut out = OutputWriter::new(
             dir.path(),
-            Partition::BlockRange(1000),
+            Partition::block_range(1000),
             Compression::None,
             0,
         );

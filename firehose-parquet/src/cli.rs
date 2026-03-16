@@ -3293,7 +3293,7 @@ pub fn parse_compression(s: &str) -> anyhow::Result<Compression> {
 pub fn parse_partition(s: &str, block_range_size: u64) -> anyhow::Result<Partition> {
     match s.to_lowercase().as_str() {
         "none" => Ok(Partition::None),
-        "block_range" => Ok(Partition::BlockRange(block_range_size)),
+        "block_range" => Ok(Partition::block_range(block_range_size)),
         "date" => Ok(Partition::Date),
         "hour" => Ok(Partition::Hour),
         "minute" => Ok(Partition::Minute),
@@ -6138,11 +6138,11 @@ mod tests {
         assert_eq!(parse_partition("second", 10000).unwrap(), Partition::Second);
         assert_eq!(
             parse_partition("block_range", 5000).unwrap(),
-            Partition::BlockRange(5000)
+            Partition::block_range(5000)
         );
         assert_eq!(
             parse_partition("BLOCK_RANGE", 20000).unwrap(),
-            Partition::BlockRange(20000)
+            Partition::block_range(20000)
         );
         assert!(parse_partition("unknown", 10000).is_err());
     }
