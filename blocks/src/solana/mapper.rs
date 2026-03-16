@@ -148,7 +148,7 @@ fn solana_canonical_identity(block: &solana::Block, identity: &BlockIdentity) ->
 }
 
 pub struct SolanaBlockMapper {
-    extended: bool,
+    with_votes: bool,
     include_failed_transactions: bool,
     blocks: BlocksBuilder,
     transactions: TransactionsBuilder,
@@ -170,18 +170,18 @@ pub struct SolanaBlockMapper {
 
 impl SolanaBlockMapper {
     pub fn new(
-        extended: bool,
+        with_votes: bool,
         include_fork_step: bool,
         encoding: EncodeBytes,
         synthetic_partition_routing: bool,
         include_failed_transactions: bool,
     ) -> Self {
         Self {
-            extended,
+            with_votes,
             include_failed_transactions,
             blocks: BlocksBuilder::new(include_fork_step, &encoding),
             transactions: TransactionsBuilder::new(include_fork_step, &encoding),
-            vote_transactions: if extended {
+            vote_transactions: if with_votes {
                 Some(TransactionsBuilder::new(include_fork_step, &encoding))
             } else {
                 None
@@ -779,8 +779,8 @@ impl BlockMapper for SolanaBlockMapper {
     }
 
     fn table_names(&self) -> Vec<&str> {
-        if self.extended {
-            schema::EXTENDED_TABLE_NAMES.to_vec()
+        if self.with_votes {
+            schema::WITH_VOTES_TABLE_NAMES.to_vec()
         } else {
             schema::BASE_TABLE_NAMES.to_vec()
         }
@@ -1923,7 +1923,7 @@ mod tests {
     }
 
     #[test]
-    fn test_table_names_extended() {
+    fn test_table_names_with_votes() {
         let mapper = SolanaBlockMapper::new(true, false, EncodeBytes::Binary, false, false);
         let names = mapper.table_names();
         assert_eq!(names.len(), 8);
