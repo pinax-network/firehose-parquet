@@ -13,6 +13,7 @@ use firehose_parquet::traits::{
 use prost::Message;
 use std::collections::HashMap;
 use std::sync::Arc;
+use tracing::warn;
 
 fn append_fork_step(builder: &mut Option<StringBuilder>, fork_step: Option<&str>) {
     if let Some(ref mut b) = builder {
@@ -27,7 +28,17 @@ fn finish_fork_step(builder: &mut Option<StringBuilder>, columns: &mut Vec<Arc<d
 }
 
 fn solana_hash_bytes(hash: &str) -> Vec<u8> {
-    decode_base58(hash).unwrap_or_else(|_| hash.as_bytes().to_vec())
+    match decode_base58(hash) {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            warn!(
+                %hash,
+                %error,
+                "invalid solana base58 hash, falling back to raw UTF-8 bytes; output may be inconsistent across encodings"
+            );
+            hash.as_bytes().to_vec()
+        }
+    }
 }
 
 /// Solana Vote program ID (`Vote111111111111111111111111111111111111111`).
@@ -1155,16 +1166,16 @@ impl AccountLookupsBuilder {
 mod tests {
     use super::*;
 
-    fn solana_hash(seed: u8) -> String {
-        firehose_parquet::encode::encode_base58(&[seed; 32])
+    fn make_test_solana_hash(fill_byte: u8) -> String {
+        firehose_parquet::encode::encode_base58(&[fill_byte; 32])
     }
 
     fn make_test_block(slot: u64) -> solana::Block {
         solana::Block {
             slot,
             parent_slot: slot.saturating_sub(1),
-            blockhash: solana_hash(0x01),
-            previous_blockhash: solana_hash(0x02),
+            blockhash: make_test_solana_hash(0x01),
+            previous_blockhash: make_test_solana_hash(0x02),
             block_height: Some(solana::BlockHeight { block_height: slot }),
             block_time: Some(solana::UnixTimestamp {
                 timestamp: 1_700_000_000 + slot as i64,
