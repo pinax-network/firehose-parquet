@@ -2655,7 +2655,7 @@ fn format_missing_timestamp_probe_error(
     max_jump: u64,
 ) -> String {
     format!(
-        "{context}: block {block_num} is missing timestamp metadata and no finalized block with a timestamp was found within {timestamp_scan_limit} sequential probe blocks or the bounded exponential probe window (max jump {max_jump}); for legacy ranges on chains like Solana, rerun with --partition block_range --block-range-size <N> --strict-timestamps false"
+        "{context}: block {block_num} is missing timestamp metadata and no finalized block with a timestamp was found within {timestamp_scan_limit} sequential probe blocks or the bounded exponential probe window (max jump {max_jump}); for legacy ranges on chains like Solana, rerun with --partition block_range --block-range-size <N>"
     )
 }
 
@@ -4759,6 +4759,7 @@ mod tests {
         assert!(!help.contains("--partitions-index"));
         assert!(!help.contains("--partition-from"));
         assert!(!help.contains("--partition-to"));
+        assert!(!help.contains("--strict-timestamps"));
     }
 
     #[test]
@@ -4777,6 +4778,28 @@ mod tests {
         assert!(help.contains("--skip-missing-blocks"));
         assert!(help.contains("--bootstrap-missing-genesis-timestamp"));
         assert!(help.contains("synthesize their timestamp"));
+        assert!(!help.contains("--strict-timestamps"));
+    }
+
+    #[test]
+    fn test_build_subcommand_rejects_removed_strict_timestamps_flag() {
+        let err = Cli::try_parse_from([
+            "fireparq",
+            "build",
+            "--network",
+            "solana-mainnet-beta",
+            "--start-block",
+            "0",
+            "--stop-block",
+            "200",
+            "--strict-timestamps",
+            "false",
+        ])
+        .expect_err("removed strict timestamp flag should fail clap parsing");
+
+        let rendered = err.to_string();
+        assert!(rendered.contains("--strict-timestamps"));
+        assert!(rendered.contains("unexpected argument"));
     }
 
     #[test]
@@ -6404,7 +6427,7 @@ mod tests {
         );
         assert!(message.contains("--partition block_range"));
         assert!(message.contains("--block-range-size <N>"));
-        assert!(message.contains("--strict-timestamps false"));
+        assert!(!message.contains("--strict-timestamps"));
     }
 
     #[test]
