@@ -2315,6 +2315,19 @@ mod tests {
         }
     }
 
+    fn get_string_column<'a>(batch: &'a RecordBatch, name: &str) -> &'a StringArray {
+        batch
+            .column(
+                batch
+                    .schema()
+                    .index_of(name)
+                    .expect("field should exist in batch schema"),
+            )
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .expect("field should be utf8")
+    }
+
     #[test]
     fn test_base_map_and_flush() {
         let block = make_test_evm_block(100);
@@ -2498,5 +2511,78 @@ mod tests {
                 .expect("hash field should exist"),
         );
         assert_eq!(*hash_col.data_type(), arrow::datatypes::DataType::Utf8);
+    }
+
+    #[test]
+    fn test_tron_base58_mixed_encoding() {
+        let block = make_test_evm_block(100);
+        let block_bytes = prost::Message::encode_to_vec(&block);
+        let identity = BlockIdentity {
+            block_num: 100,
+            block_id: "0x010203".to_string(),
+            parent_num: 99,
+            parent_id: "0x000102".to_string(),
+            lib_num: 100,
+            timestamp: 1_700_000_000,
+            fork_step: None,
+        };
+        let mut mapper = EvmBlockMapper::new(false, false, EncodeBytes::TronBase58, false);
+        mapper.map_block(&block_bytes, &identity, None).unwrap();
+
+        let batches = mapper.flush().unwrap();
+
+        let blocks = &batches["blocks"];
+        assert_eq!(
+            get_string_column(blocks, "block_id").value(0),
+            firehose_parquet::encode::encode_id("0x010203", &EncodeBytes::TronBase58)
+        );
+        assert_eq!(
+            get_string_column(blocks, "parent_id").value(0),
+            firehose_parquet::encode::encode_id("0x000102", &EncodeBytes::TronBase58)
+        );
+        assert_eq!(
+            get_string_column(blocks, "hash").value(0),
+            firehose_parquet::encode::encode_hex_no_prefix(&[0xab; 32])
+        );
+        assert_eq!(
+            get_string_column(blocks, "parent_hash").value(0),
+            firehose_parquet::encode::encode_hex_no_prefix(&[0xcd; 32])
+        );
+        assert_eq!(
+            get_string_column(blocks, "coinbase").value(0),
+            firehose_parquet::encode::encode_tron_base58(&[0x01; 20])
+        );
+
+        let transactions = &batches["transactions"];
+        assert_eq!(
+            get_string_column(transactions, "hash").value(0),
+            firehose_parquet::encode::encode_hex_no_prefix(&[0xbb; 32])
+        );
+        assert_eq!(
+            get_string_column(transactions, "from").value(0),
+            firehose_parquet::encode::encode_tron_base58(&[0xcc; 20])
+        );
+        assert_eq!(
+            get_string_column(transactions, "to").value(0),
+            firehose_parquet::encode::encode_tron_base58(&[0xaa; 20])
+        );
+
+        let logs = &batches["logs"];
+        assert_eq!(
+            get_string_column(logs, "tx_hash").value(0),
+            firehose_parquet::encode::encode_hex_no_prefix(&[0xbb; 32])
+        );
+        assert_eq!(
+            get_string_column(logs, "address").value(0),
+            firehose_parquet::encode::encode_tron_base58(&[0xdd; 20])
+        );
+        assert_eq!(
+            get_string_column(logs, "topic0").value(0),
+            firehose_parquet::encode::encode_hex_no_prefix(&[0xee; 32])
+        );
+        assert_eq!(
+            get_string_column(logs, "data").value(0),
+            firehose_parquet::encode::encode_hex_no_prefix(&[1, 2, 3])
+        );
     }
 }

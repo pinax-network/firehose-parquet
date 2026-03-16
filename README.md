@@ -319,7 +319,8 @@ Chain:
           Enable extended detail level (EVM only: calls, balance_changes, etc.) [env: EXTENDED]
       --bytes-encoding <BYTES_ENCODING>
           Byte encoding strategy for binary fields (hashes, addresses, etc.)
-          Options: binary (raw bytes), hex (0x-prefixed), base58, tron_base58, auto (chain-appropriate) [env: BYTES_ENCODING] [default: auto]
+          Options: binary (raw bytes), hex (0x-prefixed), hex_no_prefix, base58, tron_base58, auto (chain-appropriate)
+          For Tron, auto resolves to tron_base58; reserved block/transaction hashes and topics stay raw hex without 0x [env: BYTES_ENCODING] [default: auto]
       --include-failed-transactions
           Include failed/reverted transactions in output (default: false) [env: INCLUDE_FAILED_TRANSACTIONS]
 ```
@@ -893,6 +894,15 @@ Every Parquet file written by the pipeline embeds key-value metadata in the file
 | `firehose-parquet.partition` | `date` |
 | `firehose-parquet.block_range_size` | `10000` |
 
+`firehose-parquet.bytes_encoding` and `firehose-parquet.block_id_encoding` describe the emitted output contract, not just the upstream Firehose endpoint.
+
+For Tron-style profiles (tron and tron-evm):
+
+- metadata reports `bytes_encoding=tron_base58`
+- metadata reports `block_id_encoding=hex_no_prefix`
+- canonical hash/topic-like fields stay hex without `0x`
+- address-like byte fields use Tron Base58
+
 ### Reading Metadata
 
 ```python
@@ -949,7 +959,7 @@ Every table across all chains includes these 6 columns (from Firehose `BlockMeta
 | `binary` | Raw bytes (Arrow `Binary`) | Parquet-native workflows (DuckDB, Spark) |
 | `hex` | `0x`-prefixed hex strings | EVM ecosystem tools |
 | `base58` | Base58 strings | Solana ecosystem tools |
-| `tron_base58` | Tron Base58Check addresses (hex fallback) | Tron-specific tools |
+| `tron_base58` | Tron Base58Check addresses; non-address Tron values fall back to hex without `0x` | Tron-specific tools |
 | `auto` | Chain-appropriate default | General use |
 
 ### Auto Encoding Per Chain
@@ -964,6 +974,8 @@ Every table across all chains includes these 6 columns (from Firehose `BlockMeta
 | Cosmos | `hex` |
 | Antelope | `hex` |
 | NEAR | `hex` |
+
+When `tron` resolves `auto` to `tron_base58`, account/address-like byte fields are emitted as Tron Base58Check. Reserved protocol identifiers remain lowercase hex without `0x`: block hash, parent block hash, transaction hash, and log topics. Additional Tron hash-like fields such as `tx_trie_root` and internal transaction `hash` also remain hex without `0x`.
 
 ## Environment Variables
 

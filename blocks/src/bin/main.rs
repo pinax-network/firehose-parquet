@@ -111,22 +111,65 @@ fn block_id_encoding_label(encoding: i32) -> &'static str {
     }
 }
 
-fn build_file_metadata(
-    block_type: &str,
-    encoding: &firehose_parquet::encode::EncodeBytes,
+fn encode_bytes_label(encoding: &EncodeBytes) -> &'static str {
+    match encoding {
+        EncodeBytes::Binary => "binary",
+        EncodeBytes::Hex => "hex",
+        EncodeBytes::HexNoPrefix => "hex_no_prefix",
+        EncodeBytes::Base58 => "base58",
+        EncodeBytes::TronBase58 => "tron_base58",
+    }
+}
+
+fn output_block_id_encoding_label(encoding: &EncodeBytes) -> Option<&'static str> {
+    match encoding {
+        EncodeBytes::Binary => None,
+        EncodeBytes::Hex => Some("hex_0x"),
+        EncodeBytes::HexNoPrefix => Some("hex_no_prefix"),
+        EncodeBytes::Base58 => Some("base58"),
+        EncodeBytes::TronBase58 => Some("hex_no_prefix"),
+    }
+}
+
+fn is_tron_style_chain_name(chain_name: &str) -> bool {
+    chain_name.eq_ignore_ascii_case("tron") || chain_name.eq_ignore_ascii_case("tron-evm")
+}
+
+fn endpoint_uses_tron_style_evm_profile(endpoint_info: &Option<EndpointInfo>) -> bool {
+    endpoint_info.as_ref().map_or(false, |ei| {
+        is_tron_style_chain_name(&ei.chain_name)
+            || ei
+                .chain_name_aliases
+                .iter()
+                .any(|alias| is_tron_style_chain_name(alias))
+    })
+}
+
+fn chain_uses_tron_style_evm_profile(chain: &str, endpoint_info: &Option<EndpointInfo>) -> bool {
+    is_tron_style_chain_name(chain) || endpoint_uses_tron_style_evm_profile(endpoint_info)
+}
+
+fn add_common_file_metadata(
+    meta: &mut ParquetFileMetadata,
+    block_type: Option<&str>,
+    encoding: Option<&EncodeBytes>,
+    bytes_encoding_fallback: Option<&str>,
     endpoint: &str,
-    compression: Compression,
     endpoint_info: &Option<EndpointInfo>,
-) -> ParquetFileMetadata {
-    let mut meta = ParquetFileMetadata::new();
+) {
     meta.add("firehose-parquet.version", env!("CARGO_PKG_VERSION"));
-    meta.add("firehose-parquet.block_type", block_type);
-    meta.add(
-        "firehose-parquet.bytes_encoding",
-        format!("{:?}", encoding).to_lowercase(),
-    );
+    if let Some(block_type) = block_type {
+        meta.add("firehose-parquet.block_type", block_type);
+    }
+    if let Some(encoding) = encoding {
+        meta.add(
+            "firehose-parquet.bytes_encoding",
+            encode_bytes_label(encoding),
+        );
+    } else if let Some(bytes_encoding_fallback) = bytes_encoding_fallback {
+        meta.add("firehose-parquet.bytes_encoding", bytes_encoding_fallback);
+    }
     meta.add("firehose-parquet.endpoint", endpoint);
-    meta.add("firehose-parquet.compression", compression.to_string());
     if let Some(ref ei) = endpoint_info {
         if !ei.chain_name.is_empty() {
             meta.add("firehose-parquet.chain_name", &ei.chain_name);
@@ -142,9 +185,6 @@ fn build_file_metadata(
                 "firehose-parquet.first_streamable_block_id",
                 &ei.first_streamable_block_id,
             );
-            // When first_streamable_block_id is present, always write
-            // first_streamable_block_num (even when 0) to confirm the
-            // endpoint explicitly provided genesis block info.
             meta.add(
                 "firehose-parquet.first_streamable_block_num",
                 ei.first_streamable_block_num.to_string(),
@@ -155,12 +195,6 @@ fn build_file_metadata(
                 ei.first_streamable_block_num.to_string(),
             );
         }
-        if ei.block_id_encoding > 0 {
-            meta.add(
-                "firehose-parquet.block_id_encoding",
-                block_id_encoding_label(ei.block_id_encoding),
-            );
-        }
         if !ei.block_features.is_empty() {
             meta.add(
                 "firehose-parquet.block_features",
@@ -168,6 +202,67 @@ fn build_file_metadata(
             );
         }
     }
+    if let Some(encoding) = encoding {
+        if let Some(block_id_encoding) = output_block_id_encoding_label(encoding) {
+            meta.add("firehose-parquet.block_id_encoding", block_id_encoding);
+        }
+    } else if let Some(ref ei) = endpoint_info {
+        if ei.block_id_encoding > 0 {
+            meta.add(
+                "firehose-parquet.block_id_encoding",
+                block_id_encoding_label(ei.block_id_encoding),
+            );
+        }
+    }
+}
+
+fn build_file_metadata(
+    block_type: &str,
+    encoding: &firehose_parquet::encode::EncodeBytes,
+    endpoint: &str,
+    compression: Compression,
+    endpoint_info: &Option<EndpointInfo>,
+) -> ParquetFileMetadata {
+    let mut meta = ParquetFileMetadata::new();
+    add_common_file_metadata(
+        &mut meta,
+        Some(block_type),
+        Some(encoding),
+        None,
+        endpoint,
+        endpoint_info,
+    );
+    meta.add("firehose-parquet.compression", compression.to_string());
+    meta
+}
+
+fn build_cursor_file_metadata(
+    block_type: Option<&str>,
+    encoding: Option<&EncodeBytes>,
+    bytes_encoding_fallback: &str,
+    endpoint: &str,
+    compression: Compression,
+    partition: &firehose_parquet::config::Partition,
+    endpoint_info: &Option<EndpointInfo>,
+) -> ParquetFileMetadata {
+    let mut meta = ParquetFileMetadata::new();
+    add_common_file_metadata(
+        &mut meta,
+        block_type,
+        encoding,
+        Some(bytes_encoding_fallback),
+        endpoint,
+        endpoint_info,
+    );
+    meta.add("firehose-parquet.compression", compression.to_string());
+    meta.add("firehose-parquet.partition", partition.to_string());
+    meta.add(
+        "firehose-parquet.block_range_size",
+        match partition {
+            firehose_parquet::config::Partition::BlockRange(size) => size.to_string(),
+            _ => "0".to_string(),
+        },
+    );
     meta
 }
 
@@ -319,6 +414,9 @@ fn infer_partitions_block_type(
     }
 
     for candidate in candidates {
+        if candidate.eq_ignore_ascii_case("tron-evm") {
+            return Some("evm");
+        }
         if candidate.contains("beacon") {
             return Some("beacon");
         }
@@ -409,8 +507,9 @@ fn build_partitions_file_metadata(
     block_range_size: Option<u64>,
 ) -> ParquetFileMetadata {
     let inferred_block_type = infer_partitions_block_type(chain, endpoint_info);
+    let tron_style_evm_profile = chain_uses_tron_style_evm_profile(chain, endpoint_info);
     let encoding = inferred_block_type
-        .map(default_encode_bytes)
+        .map(|block_type| default_encode_bytes(block_type, tron_style_evm_profile))
         .or_else(|| {
             endpoint_info
                 .as_ref()
@@ -419,53 +518,19 @@ fn build_partitions_file_metadata(
         .unwrap_or(EncodeBytes::Hex);
 
     let mut meta = ParquetFileMetadata::new();
-    meta.add("firehose-parquet.version", env!("CARGO_PKG_VERSION"));
-    if let Some(block_type) = inferred_block_type {
-        meta.add("firehose-parquet.block_type", block_type);
-    }
-    meta.add(
-        "firehose-parquet.bytes_encoding",
-        format!("{:?}", encoding).to_lowercase(),
+    add_common_file_metadata(
+        &mut meta,
+        inferred_block_type,
+        Some(&encoding),
+        None,
+        endpoint,
+        endpoint_info,
     );
-    meta.add("firehose-parquet.endpoint", endpoint);
     if let Some(info) = endpoint_info {
         if !info.chain_name.is_empty() {
-            meta.add("firehose-parquet.chain_name", &info.chain_name);
+            // already set by `add_common_file_metadata`
         } else {
             meta.add("firehose-parquet.chain_name", chain);
-        }
-        if !info.chain_name_aliases.is_empty() {
-            meta.add(
-                "firehose-parquet.chain_name_aliases",
-                info.chain_name_aliases.join(","),
-            );
-        }
-        if !info.first_streamable_block_id.is_empty() {
-            meta.add(
-                "firehose-parquet.first_streamable_block_id",
-                &info.first_streamable_block_id,
-            );
-            meta.add(
-                "firehose-parquet.first_streamable_block_num",
-                info.first_streamable_block_num.to_string(),
-            );
-        } else if info.first_streamable_block_num > 0 {
-            meta.add(
-                "firehose-parquet.first_streamable_block_num",
-                info.first_streamable_block_num.to_string(),
-            );
-        }
-        if info.block_id_encoding > 0 {
-            meta.add(
-                "firehose-parquet.block_id_encoding",
-                block_id_encoding_label(info.block_id_encoding),
-            );
-        }
-        if !info.block_features.is_empty() {
-            meta.add(
-                "firehose-parquet.block_features",
-                info.block_features.join(","),
-            );
         }
     } else {
         meta.add("firehose-parquet.chain_name", chain);
@@ -555,8 +620,9 @@ fn detect_block_type(type_url: &str) -> Result<String> {
 }
 
 /// Resolve the default `EncodeBytes` for a chain when the user specified "auto".
-fn default_encode_bytes(block_type: &str) -> EncodeBytes {
+fn default_encode_bytes(block_type: &str, tron_style_evm_profile: bool) -> EncodeBytes {
     match block_type {
+        "evm" if tron_style_evm_profile => EncodeBytes::TronBase58,
         "solana" => EncodeBytes::Base58,
         "tron" => EncodeBytes::TronBase58,
         _ => EncodeBytes::Hex,
@@ -574,6 +640,21 @@ fn encode_bytes_from_block_id_encoding(encoding: i32) -> Option<EncodeBytes> {
         3 => Some(EncodeBytes::Base58), // BLOCK_ID_ENCODING_BASE58
         _ => None,                      // UNSET or unknown
     }
+}
+
+fn resolve_encode_bytes(
+    block_type: &str,
+    bytes_encoding: &str,
+    endpoint_info: &Option<EndpointInfo>,
+    tron_style_evm_profile: bool,
+) -> EncodeBytes {
+    parse_encode_bytes(bytes_encoding)
+        .or_else(|| {
+            endpoint_info
+                .as_ref()
+                .and_then(|ei| encode_bytes_from_block_id_encoding(ei.block_id_encoding))
+        })
+        .unwrap_or_else(|| default_encode_bytes(block_type, tron_style_evm_profile))
 }
 
 /// Resolve the output directory, prepending `chain_name` when available.
@@ -3840,6 +3921,7 @@ async fn run_ingestion(args: &BuildArgs) -> Result<()> {
     let flush_bytes = config.flush_bytes;
     let flush_interval_secs = config.flush_interval_secs;
     let dry_run = config.dry_run;
+    let tron_style_evm_profile = endpoint_uses_tron_style_evm_profile(&endpoint_info);
     let mut is_solana = block_type == "solana";
     let mut genesis_timestamp_bootstrap = GenesisTimestampBootstrap::new(
         args.bootstrap_missing_genesis_timestamp,
@@ -3869,13 +3951,12 @@ async fn run_ingestion(args: &BuildArgs) -> Result<()> {
     // If block type is known upfront, resolve encode_bytes and create mapper immediately.
     // If "auto", defer until first block arrives.
     let mut mapper: Option<Box<dyn BlockMapper>> = if block_type != "auto" {
-        let encode_bytes = parse_encode_bytes(&bytes_encoding_str)
-            .or_else(|| {
-                endpoint_info
-                    .as_ref()
-                    .and_then(|ei| encode_bytes_from_block_id_encoding(ei.block_id_encoding))
-            })
-            .unwrap_or_else(|| default_encode_bytes(&block_type));
+        let encode_bytes = resolve_encode_bytes(
+            &block_type,
+            &bytes_encoding_str,
+            &endpoint_info,
+            tron_style_evm_profile,
+        );
         let meta = build_file_metadata(
             &block_type,
             &encode_bytes,
@@ -3917,69 +3998,32 @@ async fn run_ingestion(args: &BuildArgs) -> Result<()> {
     // Build file-level metadata for the cursor (same `firehose-parquet.*`
     // namespace as table files). Includes version, endpoint, chain info, and
     // pipeline parameters.
-    let cursor_file_metadata = {
-        let mut meta = ParquetFileMetadata::new();
-        meta.add("firehose-parquet.version", env!("CARGO_PKG_VERSION"));
-        if block_type != "auto" {
-            meta.add("firehose-parquet.block_type", &block_type);
-        }
-        meta.add("firehose-parquet.bytes_encoding", &bytes_encoding_str);
-        meta.add("firehose-parquet.endpoint", &config.endpoint);
-        if let Some(ref ei) = endpoint_info {
-            if !ei.chain_name.is_empty() {
-                meta.add("firehose-parquet.chain_name", &ei.chain_name);
-            }
-            if !ei.chain_name_aliases.is_empty() {
-                meta.add(
-                    "firehose-parquet.chain_name_aliases",
-                    ei.chain_name_aliases.join(","),
-                );
-            }
-            if !ei.first_streamable_block_id.is_empty() {
-                meta.add(
-                    "firehose-parquet.first_streamable_block_id",
-                    &ei.first_streamable_block_id,
-                );
-                meta.add(
-                    "firehose-parquet.first_streamable_block_num",
-                    ei.first_streamable_block_num.to_string(),
-                );
-            } else if ei.first_streamable_block_num > 0 {
-                meta.add(
-                    "firehose-parquet.first_streamable_block_num",
-                    ei.first_streamable_block_num.to_string(),
-                );
-            }
-            if ei.block_id_encoding > 0 {
-                meta.add(
-                    "firehose-parquet.block_id_encoding",
-                    block_id_encoding_label(ei.block_id_encoding),
-                );
-            }
-            if !ei.block_features.is_empty() {
-                meta.add(
-                    "firehose-parquet.block_features",
-                    ei.block_features.join(","),
-                );
-            }
-        }
-        meta.add("firehose-parquet.partition", config.partition.to_string());
-        meta.add(
-            "firehose-parquet.block_range_size",
-            match &config.partition {
-                firehose_parquet::config::Partition::BlockRange(size) => size.to_string(),
-                _ => "0".to_string(),
-            },
-        );
-        meta.add(
-            "firehose-parquet.compression",
-            config.compression.to_string(),
-        );
-        meta
+    let initial_cursor_encoding = if block_type != "auto" {
+        Some(resolve_encode_bytes(
+            &block_type,
+            &bytes_encoding_str,
+            &endpoint_info,
+            tron_style_evm_profile,
+        ))
+    } else {
+        None
     };
+    let cursor_file_metadata = build_cursor_file_metadata(
+        if block_type != "auto" {
+            Some(block_type.as_str())
+        } else {
+            None
+        },
+        initial_cursor_encoding.as_ref(),
+        &bytes_encoding_str,
+        &config.endpoint,
+        config.compression,
+        &config.partition,
+        &endpoint_info,
+    );
 
     // Build a template CursorState with pipeline parameters that stay constant.
-    let cursor_state_template = CursorState {
+    let mut cursor_state_template = CursorState {
         start_block: config.start_block,
         stop_block: config.stop_block,
         extended,
@@ -4019,9 +4063,12 @@ async fn run_ingestion(args: &BuildArgs) -> Result<()> {
             if mapper.is_none() {
                 let detected = detect_block_type(&type_url)?;
                 info!(detected_type = %detected, type_url = %type_url, "auto-detected block type");
-                let encode_bytes = parse_encode_bytes(&bytes_encoding_str)
-                    .or_else(|| endpoint_info.as_ref().and_then(|ei| encode_bytes_from_block_id_encoding(ei.block_id_encoding)))
-                    .unwrap_or_else(|| default_encode_bytes(&detected));
+                let encode_bytes = resolve_encode_bytes(
+                    &detected,
+                    &bytes_encoding_str,
+                    &endpoint_info,
+                    tron_style_evm_profile,
+                );
                 let meta = build_file_metadata(
                     &detected,
                     &encode_bytes,
@@ -4031,6 +4078,15 @@ async fn run_ingestion(args: &BuildArgs) -> Result<()> {
                 );
                 log_file_metadata(&meta);
                 writer.inner.set_file_metadata(meta);
+                cursor_state_template.file_metadata = build_cursor_file_metadata(
+                    Some(&detected),
+                    Some(&encode_bytes),
+                    &bytes_encoding_str,
+                    &config.endpoint,
+                    config.compression,
+                    &config.partition,
+                    &endpoint_info,
+                );
                 is_solana = detected == "solana";
                 mapper = Some(create_mapper(&detected, extended, include_fork_step, encode_bytes, include_failed_transactions)?);
             }
@@ -4646,6 +4702,18 @@ mod tests {
     }
 
     #[test]
+    fn test_build_help_mentions_tron_bytes_encoding_behavior() {
+        let cmd = Cli::command();
+        let build_subcmd = cmd
+            .get_subcommands()
+            .find(|sc| sc.get_name() == "build")
+            .expect("build subcommand should exist");
+        let help = build_subcmd.clone().render_long_help().to_string();
+        assert!(help.contains("For Tron, `auto` resolves to `tron_base58`"));
+        assert!(help.contains("hashes and topics stay raw hex without `0x`"));
+    }
+
+    #[test]
     fn test_build_subcommand_rejects_removed_partition_index_flags() {
         for (flag, value) in [
             ("--partitions-index", "./partitions.parquet"),
@@ -5046,14 +5114,41 @@ mod tests {
 
     #[test]
     fn test_default_encode_bytes() {
-        assert_eq!(default_encode_bytes("evm"), EncodeBytes::Hex);
-        assert_eq!(default_encode_bytes("bitcoin"), EncodeBytes::Hex);
-        assert_eq!(default_encode_bytes("solana"), EncodeBytes::Base58);
-        assert_eq!(default_encode_bytes("tron"), EncodeBytes::TronBase58);
-        assert_eq!(default_encode_bytes("near"), EncodeBytes::Hex);
-        assert_eq!(default_encode_bytes("antelope"), EncodeBytes::Hex);
-        assert_eq!(default_encode_bytes("cosmos"), EncodeBytes::Hex);
-        assert_eq!(default_encode_bytes("beacon"), EncodeBytes::Hex);
+        assert_eq!(default_encode_bytes("evm", false), EncodeBytes::Hex);
+        assert_eq!(default_encode_bytes("evm", true), EncodeBytes::TronBase58);
+        assert_eq!(default_encode_bytes("bitcoin", false), EncodeBytes::Hex);
+        assert_eq!(default_encode_bytes("solana", false), EncodeBytes::Base58);
+        assert_eq!(default_encode_bytes("tron", false), EncodeBytes::TronBase58);
+        assert_eq!(default_encode_bytes("near", false), EncodeBytes::Hex);
+        assert_eq!(default_encode_bytes("antelope", false), EncodeBytes::Hex);
+        assert_eq!(default_encode_bytes("cosmos", false), EncodeBytes::Hex);
+        assert_eq!(default_encode_bytes("beacon", false), EncodeBytes::Hex);
+    }
+
+    #[test]
+    fn test_endpoint_uses_tron_style_evm_profile() {
+        let ei = Some(EndpointInfo {
+            chain_name: "tron-evm".to_string(),
+            chain_name_aliases: vec!["tron-mainnet".to_string()],
+            first_streamable_block_num: 0,
+            first_streamable_block_id: String::new(),
+            block_id_encoding: 0,
+            block_features: vec![],
+        });
+        assert!(endpoint_uses_tron_style_evm_profile(&ei));
+        assert!(chain_uses_tron_style_evm_profile("eth-mainnet", &ei));
+        assert!(chain_uses_tron_style_evm_profile("tron-evm", &None));
+
+        let tron = Some(EndpointInfo {
+            chain_name: "tron".to_string(),
+            chain_name_aliases: vec![],
+            first_streamable_block_num: 0,
+            first_streamable_block_id: String::new(),
+            block_id_encoding: 0,
+            block_features: vec![],
+        });
+        assert!(endpoint_uses_tron_style_evm_profile(&tron));
+        assert!(chain_uses_tron_style_evm_profile("tron", &None));
     }
 
     #[test]
@@ -5061,7 +5156,7 @@ mod tests {
         for block_type in &[
             "evm", "bitcoin", "solana", "near", "antelope", "cosmos", "tron", "beacon",
         ] {
-            let encode_bytes = default_encode_bytes(block_type);
+            let encode_bytes = default_encode_bytes(block_type, false);
             let mapper = create_mapper(block_type, false, false, encode_bytes, false);
             assert!(
                 mapper.is_ok(),
@@ -5121,6 +5216,22 @@ mod tests {
     #[test]
     fn test_encode_bytes_from_block_id_encoding_unknown() {
         assert_eq!(encode_bytes_from_block_id_encoding(99), None);
+    }
+
+    #[test]
+    fn test_resolve_encode_bytes_uses_tron_style_profile_for_tron_chain_name() {
+        let endpoint_info = Some(EndpointInfo {
+            chain_name: "tron".to_string(),
+            chain_name_aliases: vec![],
+            first_streamable_block_num: 0,
+            first_streamable_block_id: String::new(),
+            block_id_encoding: 0,
+            block_features: vec![],
+        });
+
+        let resolved = resolve_encode_bytes("evm", "auto", &endpoint_info, true);
+
+        assert_eq!(resolved, EncodeBytes::TronBase58);
     }
 
     #[test]
@@ -5417,6 +5528,34 @@ mod tests {
     }
 
     #[test]
+    fn test_build_file_metadata_tron_contract_overrides_endpoint_block_id_encoding() {
+        let ei = Some(EndpointInfo {
+            chain_name: "tron-evm".to_string(),
+            chain_name_aliases: vec!["tron-mainnet".to_string()],
+            first_streamable_block_num: 100,
+            first_streamable_block_id: "0xabc".to_string(),
+            block_id_encoding: 2,
+            block_features: vec!["base".to_string()],
+        });
+        let meta = build_file_metadata(
+            "evm",
+            &EncodeBytes::TronBase58,
+            "https://example.com",
+            Compression::Zstd,
+            &ei,
+        );
+
+        assert_eq!(
+            find_meta(&meta, "firehose-parquet.bytes_encoding"),
+            Some("tron_base58")
+        );
+        assert_eq!(
+            find_meta(&meta, "firehose-parquet.block_id_encoding"),
+            Some("hex_no_prefix")
+        );
+    }
+
+    #[test]
     fn test_build_file_metadata_genesis_block_zero() {
         // When first_streamable_block_id is present, first_streamable_block_num
         // should be written even when it is 0.
@@ -5528,7 +5667,10 @@ mod tests {
             find_meta(&meta, "firehose-parquet.first_streamable_block_num"),
             None
         );
-        assert_eq!(find_meta(&meta, "firehose-parquet.block_id_encoding"), None);
+        assert_eq!(
+            find_meta(&meta, "firehose-parquet.block_id_encoding"),
+            Some("hex_0x")
+        );
         assert_eq!(find_meta(&meta, "firehose-parquet.block_features"), None);
         assert_eq!(
             find_meta(&meta, "firehose-parquet.compression"),
@@ -5568,7 +5710,10 @@ mod tests {
             find_meta(&meta, "firehose-parquet.first_streamable_block_num"),
             None
         );
-        assert_eq!(find_meta(&meta, "firehose-parquet.block_id_encoding"), None);
+        assert_eq!(
+            find_meta(&meta, "firehose-parquet.block_id_encoding"),
+            Some("hex_0x")
+        );
         assert_eq!(find_meta(&meta, "firehose-parquet.block_features"), None);
     }
 
@@ -5586,6 +5731,37 @@ mod tests {
             find_meta(&meta, "firehose-parquet.compression"),
             Some("snappy")
         );
+    }
+
+    #[test]
+    fn test_build_cursor_file_metadata_tron_contract() {
+        let ei = Some(EndpointInfo {
+            chain_name: "tron-evm".to_string(),
+            chain_name_aliases: vec![],
+            first_streamable_block_num: 0,
+            first_streamable_block_id: "0xabc".to_string(),
+            block_id_encoding: 2,
+            block_features: vec!["base".to_string()],
+        });
+        let meta = build_cursor_file_metadata(
+            Some("evm"),
+            Some(&EncodeBytes::TronBase58),
+            "auto",
+            "https://example.com",
+            Compression::Zstd,
+            &firehose_parquet::config::Partition::Date,
+            &ei,
+        );
+
+        assert_eq!(
+            find_meta(&meta, "firehose-parquet.bytes_encoding"),
+            Some("tron_base58")
+        );
+        assert_eq!(
+            find_meta(&meta, "firehose-parquet.block_id_encoding"),
+            Some("hex_no_prefix")
+        );
+        assert_eq!(find_meta(&meta, "firehose-parquet.partition"), Some("date"));
     }
 
     #[tokio::test]
@@ -6359,6 +6535,36 @@ mod tests {
         assert_eq!(
             find_meta(&meta, "firehose-parquet.block_range_size"),
             Some("0")
+        );
+        assert_eq!(
+            find_meta(&meta, "firehose-parquet.block_id_encoding"),
+            Some("base58")
+        );
+    }
+
+    #[test]
+    fn test_build_partitions_file_metadata_tron_evm_uses_tron_encoding_contract() {
+        let meta = build_partitions_file_metadata(
+            "https://example.com",
+            "tron-evm",
+            "hour",
+            Compression::Zstd,
+            &None,
+            None,
+        );
+
+        assert_eq!(find_meta(&meta, "firehose-parquet.block_type"), Some("evm"));
+        assert_eq!(
+            find_meta(&meta, "firehose-parquet.bytes_encoding"),
+            Some("tron_base58")
+        );
+        assert_eq!(
+            find_meta(&meta, "firehose-parquet.block_id_encoding"),
+            Some("hex_no_prefix")
+        );
+        assert_eq!(
+            find_meta(&meta, "firehose-parquet.chain_name"),
+            Some("tron-evm")
         );
     }
 
