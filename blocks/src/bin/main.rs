@@ -487,6 +487,9 @@ struct TimestampAnchor {
     timestamp: i64,
 }
 
+const SOLANA_LEGACY_BOOTSTRAP_BLOCK_NUM: u64 = 1;
+const SOLANA_LEGACY_BOOTSTRAP_TIMESTAMP: i64 = 1_584_369_540; // 2020-03-16 14:29:00 UTC
+
 #[derive(Debug, Clone, Default)]
 struct TimestampBackfill {
     enabled: bool,
@@ -497,10 +500,14 @@ struct TimestampBackfill {
 }
 
 impl TimestampBackfill {
-    fn new(enabled: bool, max_buffered_bytes: u64) -> Self {
+    fn new(
+        enabled: bool,
+        max_buffered_bytes: u64,
+        initial_anchor: Option<TimestampAnchor>,
+    ) -> Self {
         Self {
             enabled,
-            last_anchor: None,
+            last_anchor: initial_anchor,
             buffered_blocks: Vec::new(),
             buffered_bytes: 0,
             max_buffered_bytes,
@@ -576,8 +583,16 @@ impl TimestampBackfill {
         let mut ready = if self.buffered_blocks.is_empty() {
             Vec::new()
         } else if let Some(previous_anchor) = self.last_anchor {
-            let ready =
-                interpolate_buffered_blocks(&mut self.buffered_blocks, previous_anchor, anchor)?;
+            let first_buffered_block = self
+                .buffered_blocks
+                .first()
+                .map(|block| block.identity.block_num)
+                .unwrap_or(anchor.block_num);
+            let ready = if previous_anchor.block_num < first_buffered_block {
+                interpolate_buffered_blocks(&mut self.buffered_blocks, previous_anchor, anchor)?
+            } else {
+                take_anchored_bootstrap_blocks(&mut self.buffered_blocks, anchor.timestamp)
+            };
             self.buffered_bytes = 0;
             ready
         } else {
@@ -4224,9 +4239,18 @@ async fn run_ingestion(args: &BuildArgs) -> Result<()> {
         args.bootstrap_missing_genesis_timestamp,
         config.start_block,
     );
+    let initial_timestamp_backfill_anchor = if backfill_missing_timestamps {
+        Some(TimestampAnchor {
+            block_num: SOLANA_LEGACY_BOOTSTRAP_BLOCK_NUM,
+            timestamp: SOLANA_LEGACY_BOOTSTRAP_TIMESTAMP,
+        })
+    } else {
+        None
+    };
     let mut timestamp_backfill = TimestampBackfill::new(
         backfill_missing_timestamps,
         backfill_missing_timestamps_buffer_bytes,
+        initial_timestamp_backfill_anchor,
     );
     update_timestamp_backfill_metrics(&pipeline_metrics, &timestamp_backfill);
 
@@ -6058,7 +6082,7 @@ mod tests {
     #[test]
     fn test_timestamp_backfill_interpolates_between_anchors() {
         let mut backfill =
-            TimestampBackfill::new(true, DEFAULT_TIMESTAMP_BACKFILL_BUFFER_LIMIT_BYTES);
+            TimestampBackfill::new(true, DEFAULT_TIMESTAMP_BACKFILL_BUFFER_LIMIT_BYTES, None);
         let first = backfill
             .observe_block(
                 vec![0x01],
@@ -6111,7 +6135,7 @@ mod tests {
     #[test]
     fn test_timestamp_backfill_leading_blocks_wait_for_first_anchor() {
         let mut backfill =
-            TimestampBackfill::new(true, DEFAULT_TIMESTAMP_BACKFILL_BUFFER_LIMIT_BYTES);
+            TimestampBackfill::new(true, DEFAULT_TIMESTAMP_BACKFILL_BUFFER_LIMIT_BYTES, None);
         assert!(backfill
             .observe_block(
                 vec![0x01],
@@ -6145,9 +6169,57 @@ mod tests {
     }
 
     #[test]
+    fn test_timestamp_backfill_uses_initial_anchor_for_legacy_solana_blocks() {
+        let mut backfill = TimestampBackfill::new(
+            true,
+            DEFAULT_TIMESTAMP_BACKFILL_BUFFER_LIMIT_BYTES,
+            Some(TimestampAnchor {
+                block_num: SOLANA_LEGACY_BOOTSTRAP_BLOCK_NUM,
+                timestamp: SOLANA_LEGACY_BOOTSTRAP_TIMESTAMP,
+            }),
+        );
+
+        assert!(backfill
+            .observe_block(
+                vec![0x00],
+                "cursor-0".to_string(),
+                None,
+                BlockIdentity {
+                    block_num: 0,
+                    block_id: "block-0".to_string(),
+                    parent_id: "parent-0".to_string(),
+                    timestamp: 0,
+                    ..BlockIdentity::default()
+                },
+            )
+            .expect("legacy block should buffer until the next known anchor")
+            .is_empty());
+
+        let ready = backfill
+            .observe_block(
+                vec![0x01],
+                "cursor-1".to_string(),
+                None,
+                BlockIdentity {
+                    block_num: 68411,
+                    block_id: "block-68411".to_string(),
+                    parent_id: "parent-68410".to_string(),
+                    timestamp: 1_584_369_541,
+                    ..BlockIdentity::default()
+                },
+            )
+            .expect("first observed timestamped block should release the legacy span");
+
+        assert!(!ready.is_empty());
+        assert_eq!(ready[0].identity.block_num, 0);
+        assert_eq!(ready[0].identity.timestamp, 1_584_369_541);
+        assert_eq!(ready.last().unwrap().identity.block_num, 68411);
+    }
+
+    #[test]
     fn test_timestamp_backfill_frontier_uses_last_anchor_on_drain() {
         let mut backfill =
-            TimestampBackfill::new(true, DEFAULT_TIMESTAMP_BACKFILL_BUFFER_LIMIT_BYTES);
+            TimestampBackfill::new(true, DEFAULT_TIMESTAMP_BACKFILL_BUFFER_LIMIT_BYTES, None);
         backfill
             .observe_block(
                 vec![0x01],
@@ -6186,7 +6258,7 @@ mod tests {
     #[test]
     fn test_timestamp_backfill_requires_anchor_before_stream_end() {
         let mut backfill =
-            TimestampBackfill::new(true, DEFAULT_TIMESTAMP_BACKFILL_BUFFER_LIMIT_BYTES);
+            TimestampBackfill::new(true, DEFAULT_TIMESTAMP_BACKFILL_BUFFER_LIMIT_BYTES, None);
         assert!(backfill
             .observe_block(
                 vec![0x01],
@@ -6223,7 +6295,7 @@ mod tests {
             },
         };
         let limit = estimate_buffered_block_bytes(&block);
-        let mut backfill = TimestampBackfill::new(true, limit);
+        let mut backfill = TimestampBackfill::new(true, limit, None);
 
         assert!(backfill
             .observe_block(
