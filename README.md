@@ -900,7 +900,7 @@ Every Parquet file written by the pipeline embeds key-value metadata in the file
 | `firehose-parquet.partition` | `date` |
 | `firehose-parquet.block_range_size` | `10000` |
 | `firehose-parquet.synthetic_timestamps` | `true` |
-| `firehose-parquet.synthetic_timestamp_policy` | `solana_block_time_interpolation` |
+| `firehose-parquet.synthetic_timestamp_policy` | `block_time_interpolation` |
 
 `firehose-parquet.bytes_encoding` and `firehose-parquet.block_id_encoding` describe the emitted output contract, not just the upstream Firehose endpoint.
 

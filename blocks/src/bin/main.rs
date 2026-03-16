@@ -313,7 +313,7 @@ fn maybe_add_synthetic_timestamp_metadata(
         meta.add("firehose-parquet.synthetic_timestamps", "true");
         meta.add(
             "firehose-parquet.synthetic_timestamp_policy",
-            "solana_block_time_interpolation",
+            "block_time_interpolation",
         );
     }
 }
@@ -486,13 +486,13 @@ struct TimestampAnchor {
 }
 
 #[derive(Debug, Clone, Default)]
-struct SolanaTimestampBackfill {
+struct TimestampBackfill {
     enabled: bool,
     last_anchor: Option<TimestampAnchor>,
     buffered_blocks: Vec<BufferedBootstrapBlock>,
 }
 
-impl SolanaTimestampBackfill {
+impl TimestampBackfill {
     fn new(enabled: bool) -> Self {
         Self {
             enabled,
@@ -537,7 +537,7 @@ impl SolanaTimestampBackfill {
         let mut ready = if self.buffered_blocks.is_empty() {
             Vec::new()
         } else if let Some(previous_anchor) = self.last_anchor {
-            interpolate_solana_buffered_blocks(&mut self.buffered_blocks, previous_anchor, anchor)?
+            interpolate_buffered_blocks(&mut self.buffered_blocks, previous_anchor, anchor)?
         } else {
             take_anchored_bootstrap_blocks(&mut self.buffered_blocks, anchor.timestamp)
         };
@@ -566,19 +566,19 @@ impl SolanaTimestampBackfill {
             .unwrap_or_default();
         let buffered_blocks = self.buffered_blocks.len();
         Err(anyhow!(
-            "buffered {buffered_blocks} Solana block(s) starting at block {first_buffered_block} for --backfill-missing-timestamps, but no timestamped anchor block was observed before the stream ended"
+            "buffered {buffered_blocks} block(s) starting at block {first_buffered_block} for --backfill-missing-timestamps, but no timestamped anchor block was observed before the stream ended"
         ))
     }
 }
 
-fn interpolate_solana_buffered_blocks(
+fn interpolate_buffered_blocks(
     buffered_blocks: &mut Vec<BufferedBootstrapBlock>,
     start: TimestampAnchor,
     end: TimestampAnchor,
 ) -> anyhow::Result<Vec<BufferedBootstrapBlock>> {
     if end.block_num <= start.block_num {
         return Err(anyhow!(
-            "cannot interpolate Solana timestamps with non-increasing anchors: start={} end={}",
+            "cannot interpolate timestamps with non-increasing anchors: start={} end={}",
             start.block_num,
             end.block_num
         ));
@@ -593,7 +593,7 @@ fn interpolate_solana_buffered_blocks(
             let interpolated = i128::from(start.timestamp) + (delta.saturating_mul(offset) / span);
             block.identity.timestamp = i64::try_from(interpolated).unwrap_or_else(|_| {
                 panic!(
-                    "interpolated Solana timestamp {interpolated} does not fit in i64 for block {}",
+                    "interpolated timestamp {interpolated} does not fit in i64 for block {}",
                     block.identity.block_num
                 )
             });
@@ -4152,7 +4152,7 @@ async fn run_ingestion(args: &BuildArgs) -> Result<()> {
         args.bootstrap_missing_genesis_timestamp,
         config.start_block,
     );
-    let mut solana_timestamp_backfill = SolanaTimestampBackfill::new(backfill_missing_timestamps);
+    let mut timestamp_backfill = TimestampBackfill::new(backfill_missing_timestamps);
 
     let mut writer = if firehose_parquet::writer::is_s3_output(&config.output) {
         OutputWriter::new_s3(
@@ -4353,7 +4353,7 @@ async fn run_ingestion(args: &BuildArgs) -> Result<()> {
             let ts = identity.timestamp;
             let fork_step_owned = fork_step_str.map(str::to_owned);
             let ready_solana_blocks = if is_solana && backfill_missing_timestamps {
-                solana_timestamp_backfill.observe_block(
+                timestamp_backfill.observe_block(
                     block_bytes,
                     cursor_str,
                     fork_step_owned,
@@ -4667,9 +4667,9 @@ async fn run_ingestion(args: &BuildArgs) -> Result<()> {
     if is_shutdown {
         info!("skipping partial buffer flush to preserve partition determinism");
     } else {
-        let trailing_solana_blocks = solana_timestamp_backfill.drain_open_span()?;
+        let trailing_timestamp_backfill_blocks = timestamp_backfill.drain_open_span()?;
         if let Some(m) = mapper.as_mut() {
-            for buffered_block in trailing_solana_blocks {
+            for buffered_block in trailing_timestamp_backfill_blocks {
                 let block_number = buffered_block.identity.block_num;
                 let ts = buffered_block.identity.timestamp;
                 min_block = Some(min_block.map_or(block_number, |s: u64| s.min(block_number)));
@@ -5908,8 +5908,8 @@ mod tests {
     }
 
     #[test]
-    fn test_solana_timestamp_backfill_interpolates_between_anchors() {
-        let mut backfill = SolanaTimestampBackfill::new(true);
+    fn test_timestamp_backfill_interpolates_between_anchors() {
+        let mut backfill = TimestampBackfill::new(true);
         let first = backfill
             .observe_block(
                 vec![0x01],
@@ -5958,8 +5958,8 @@ mod tests {
     }
 
     #[test]
-    fn test_solana_timestamp_backfill_leading_blocks_wait_for_first_anchor() {
-        let mut backfill = SolanaTimestampBackfill::new(true);
+    fn test_timestamp_backfill_leading_blocks_wait_for_first_anchor() {
+        let mut backfill = TimestampBackfill::new(true);
         assert!(backfill
             .observe_block(
                 vec![0x01],
@@ -5993,8 +5993,8 @@ mod tests {
     }
 
     #[test]
-    fn test_solana_timestamp_backfill_frontier_uses_last_anchor_on_drain() {
-        let mut backfill = SolanaTimestampBackfill::new(true);
+    fn test_timestamp_backfill_frontier_uses_last_anchor_on_drain() {
+        let mut backfill = TimestampBackfill::new(true);
         backfill
             .observe_block(
                 vec![0x01],
@@ -6030,8 +6030,8 @@ mod tests {
     }
 
     #[test]
-    fn test_solana_timestamp_backfill_requires_anchor_before_stream_end() {
-        let mut backfill = SolanaTimestampBackfill::new(true);
+    fn test_timestamp_backfill_requires_anchor_before_stream_end() {
+        let mut backfill = TimestampBackfill::new(true);
         assert!(backfill
             .observe_block(
                 vec![0x01],
@@ -6091,7 +6091,7 @@ mod tests {
         );
         assert_eq!(
             find_meta(&metadata, "firehose-parquet.synthetic_timestamp_policy"),
-            Some("solana_block_time_interpolation")
+            Some("block_time_interpolation")
         );
     }
 
