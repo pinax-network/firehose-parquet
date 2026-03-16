@@ -180,3 +180,46 @@ pub const EXTENDED_TABLE_NAMES: [&str; 8] = [
     "token_balances",
     "account_lookups",
 ];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn assert_nullable_canonical_time_fields(schema: &Schema) {
+        let timestamp = schema
+            .field_with_name("timestamp")
+            .expect("timestamp field should be present");
+        let date = schema
+            .field_with_name("date")
+            .expect("date field should be present");
+
+        assert!(
+            timestamp.is_nullable(),
+            "timestamp field should be nullable in Solana schemas"
+        );
+        assert!(
+            date.is_nullable(),
+            "date field should be nullable in Solana schemas"
+        );
+    }
+
+    #[test]
+    fn test_all_solana_schemas_use_nullable_canonical_time_fields() {
+        let schema_builders: [fn(bool, &EncodeBytes) -> Schema; 7] = [
+            blocks_schema,
+            transactions_schema,
+            messages_schema,
+            instructions_schema,
+            rewards_schema,
+            token_balances_schema,
+            account_lookups_schema,
+        ];
+
+        for include_fork_step in [false, true] {
+            for build_schema in schema_builders {
+                let schema = build_schema(include_fork_step, &EncodeBytes::Binary);
+                assert_nullable_canonical_time_fields(&schema);
+            }
+        }
+    }
+}
