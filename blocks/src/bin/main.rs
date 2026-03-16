@@ -3388,11 +3388,10 @@ fn parse_metadata_bool(value: &str) -> Option<bool> {
     }
 }
 
-fn solana_with_votes_from_cursor(cursor_state: &CursorState) -> bool {
+fn solana_with_votes_from_cursor(cursor_state: &CursorState) -> Option<bool> {
     cursor_state
         .get_metadata("firehose-parquet.with_votes")
         .and_then(parse_metadata_bool)
-        .unwrap_or(cursor_state.extended)
 }
 
 fn apply_solana_cursor_feature_validation(
@@ -3400,12 +3399,21 @@ fn apply_solana_cursor_feature_validation(
     cursor_state: &CursorState,
     with_votes: bool,
 ) {
-    mismatches.retain(|mismatch| !mismatch.starts_with("extended:"));
-    let stored_with_votes = solana_with_votes_from_cursor(cursor_state);
-    if stored_with_votes != with_votes {
+    if let Some(stored_with_votes) = solana_with_votes_from_cursor(cursor_state) {
+        if stored_with_votes != with_votes {
+            mismatches.push(format!(
+                "with_votes: cursor={} vs current={}",
+                stored_with_votes, with_votes
+            ));
+        }
+    } else if with_votes
+        && !mismatches
+            .iter()
+            .any(|mismatch| mismatch.starts_with("extended:"))
+    {
         mismatches.push(format!(
-            "with_votes: cursor={} vs current={}",
-            stored_with_votes, with_votes
+            "with_votes: cursor=unknown vs current={}",
+            with_votes
         ));
     }
 }
@@ -6807,7 +6815,7 @@ mod tests {
     }
 
     #[test]
-    fn test_solana_cursor_feature_validation_accepts_legacy_extended_true_when_with_votes_true() {
+    fn test_solana_cursor_feature_validation_preserves_legacy_extended_mismatch() {
         let mut mismatches = vec!["extended: cursor=true vs current=false".to_string()];
         let cursor_state = CursorState {
             extended: true,
@@ -6816,20 +6824,35 @@ mod tests {
 
         apply_solana_cursor_feature_validation(&mut mismatches, &cursor_state, true);
 
-        assert!(mismatches.is_empty());
+        assert_eq!(mismatches, vec!["extended: cursor=true vs current=false"]);
     }
 
     #[test]
-    fn test_solana_cursor_feature_validation_reports_with_votes_mismatch() {
-        let mut mismatches = vec!["extended: cursor=true vs current=false".to_string()];
+    fn test_solana_cursor_feature_validation_reports_with_votes_mismatch_from_metadata() {
+        let mut mismatches = Vec::new();
+        let mut file_metadata = ParquetFileMetadata::new();
+        file_metadata.add("firehose-parquet.with_votes", "true");
         let cursor_state = CursorState {
-            extended: true,
+            file_metadata,
             ..CursorState::default()
         };
 
         apply_solana_cursor_feature_validation(&mut mismatches, &cursor_state, false);
 
         assert_eq!(mismatches, vec!["with_votes: cursor=true vs current=false"]);
+    }
+
+    #[test]
+    fn test_solana_cursor_feature_validation_reports_unknown_with_votes_for_legacy_cursor() {
+        let mut mismatches = Vec::new();
+        let cursor_state = CursorState::default();
+
+        apply_solana_cursor_feature_validation(&mut mismatches, &cursor_state, true);
+
+        assert_eq!(
+            mismatches,
+            vec!["with_votes: cursor=unknown vs current=true"]
+        );
     }
 
     #[test]
