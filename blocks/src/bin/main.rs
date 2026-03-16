@@ -4637,7 +4637,7 @@ async fn run_ingestion(args: &BuildArgs) -> Result<()> {
                             max_timestamp,
                         };
                         let mut wrote = writer.write_all(&batches, &metadata)?;
-                        if rows_to_flush && !wrote {
+                        if (rows_to_flush || time_to_flush) && !wrote {
                             let forced = writer.flush_remaining()?;
                             if forced {
                                 wrote = true;
