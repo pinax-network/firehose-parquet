@@ -11,19 +11,16 @@ fn maybe_fork_step(fields: &mut Vec<Field>, include: bool) {
     }
 }
 
-fn solana_canonical_fields(
-    encoding: &EncodeBytes,
-    _backfill_missing_timestamps: bool,
-) -> Vec<Field> {
+fn solana_canonical_fields(encoding: &EncodeBytes) -> Vec<Field> {
     canonical_fields_with_nullable_timestamps(encoding)
 }
 
 pub fn blocks_schema(
     include_fork_step: bool,
     encoding: &EncodeBytes,
-    backfill_missing_timestamps: bool,
+    _backfill_missing_timestamps: bool,
 ) -> Schema {
-    let mut fields = solana_canonical_fields(encoding, backfill_missing_timestamps);
+    let mut fields = solana_canonical_fields(encoding);
     fields.extend(vec![
         Field::new("slot", DataType::UInt64, false),
         Field::new("parent_slot", DataType::UInt64, false),
@@ -41,9 +38,9 @@ pub fn blocks_schema(
 pub fn transactions_schema(
     include_fork_step: bool,
     encoding: &EncodeBytes,
-    backfill_missing_timestamps: bool,
+    _backfill_missing_timestamps: bool,
 ) -> Schema {
-    let mut fields = solana_canonical_fields(encoding, backfill_missing_timestamps);
+    let mut fields = solana_canonical_fields(encoding);
     fields.extend(vec![
         Field::new("slot", DataType::UInt64, false),
         Field::new("transaction_index", DataType::UInt32, false),
@@ -79,9 +76,9 @@ pub fn transactions_schema(
 pub fn messages_schema(
     include_fork_step: bool,
     encoding: &EncodeBytes,
-    backfill_missing_timestamps: bool,
+    _backfill_missing_timestamps: bool,
 ) -> Schema {
-    let mut fields = solana_canonical_fields(encoding, backfill_missing_timestamps);
+    let mut fields = solana_canonical_fields(encoding);
     fields.extend(vec![
         Field::new("slot", DataType::UInt64, false),
         Field::new("transaction_index", DataType::UInt32, false),
@@ -110,9 +107,9 @@ pub fn messages_schema(
 pub fn instructions_schema(
     include_fork_step: bool,
     encoding: &EncodeBytes,
-    backfill_missing_timestamps: bool,
+    _backfill_missing_timestamps: bool,
 ) -> Schema {
-    let mut fields = solana_canonical_fields(encoding, backfill_missing_timestamps);
+    let mut fields = solana_canonical_fields(encoding);
     fields.extend(vec![
         Field::new("slot", DataType::UInt64, false),
         Field::new("transaction_index", DataType::UInt32, false),
@@ -131,9 +128,9 @@ pub fn instructions_schema(
 pub fn rewards_schema(
     include_fork_step: bool,
     encoding: &EncodeBytes,
-    backfill_missing_timestamps: bool,
+    _backfill_missing_timestamps: bool,
 ) -> Schema {
-    let mut fields = solana_canonical_fields(encoding, backfill_missing_timestamps);
+    let mut fields = solana_canonical_fields(encoding);
     fields.extend(vec![
         Field::new("slot", DataType::UInt64, false),
         Field::new("reward_index", DataType::UInt32, false),
@@ -154,9 +151,9 @@ pub fn rewards_schema(
 pub fn token_balances_schema(
     include_fork_step: bool,
     encoding: &EncodeBytes,
-    backfill_missing_timestamps: bool,
+    _backfill_missing_timestamps: bool,
 ) -> Schema {
-    let mut fields = solana_canonical_fields(encoding, backfill_missing_timestamps);
+    let mut fields = solana_canonical_fields(encoding);
     fields.extend(vec![
         Field::new("slot", DataType::UInt64, false),
         Field::new("transaction_index", DataType::UInt32, false),
@@ -180,9 +177,9 @@ pub fn token_balances_schema(
 pub fn account_lookups_schema(
     include_fork_step: bool,
     encoding: &EncodeBytes,
-    backfill_missing_timestamps: bool,
+    _backfill_missing_timestamps: bool,
 ) -> Schema {
-    let mut fields = solana_canonical_fields(encoding, backfill_missing_timestamps);
+    let mut fields = solana_canonical_fields(encoding);
     fields.extend(vec![
         Field::new("slot", DataType::UInt64, false),
         Field::new("transaction_index", DataType::UInt32, false),
