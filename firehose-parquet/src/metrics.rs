@@ -64,6 +64,10 @@ pub struct PipelineMetrics {
     pub flushes_total: Family<FlushLabels, Counter>,
     /// Current in-memory buffer size (estimated compressed).
     pub buffer_estimated_bytes: Gauge,
+    /// Current unresolved Solana timestamp backfill buffer size.
+    pub backfill_buffer_estimated_bytes: Gauge,
+    /// Current unresolved Solana timestamp backfill block count.
+    pub backfill_buffered_blocks: Gauge,
     /// Current buffered row count per table.
     pub buffer_rows: Family<TableLabels, Gauge>,
 
@@ -96,6 +100,8 @@ impl PipelineMetrics {
             file_bytes_total: Family::default(),
             flushes_total: Family::default(),
             buffer_estimated_bytes: Gauge::default(),
+            backfill_buffer_estimated_bytes: Gauge::default(),
+            backfill_buffered_blocks: Gauge::default(),
             buffer_rows: Family::default(),
 
             cursor_saves_total: Counter::default(),
@@ -170,6 +176,16 @@ impl PipelineMetrics {
             "firehose_parquet_buffer_estimated_bytes",
             "Current in-memory buffer size (estimated compressed)",
             metrics.buffer_estimated_bytes.clone(),
+        );
+        registry.register(
+            "firehose_parquet_backfill_buffer_estimated_bytes",
+            "Current unresolved Solana timestamp backfill buffer size",
+            metrics.backfill_buffer_estimated_bytes.clone(),
+        );
+        registry.register(
+            "firehose_parquet_backfill_buffered_blocks",
+            "Current unresolved Solana timestamp backfill block count",
+            metrics.backfill_buffered_blocks.clone(),
         );
         registry.register(
             "firehose_parquet_buffer_rows",

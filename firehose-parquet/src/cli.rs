@@ -430,6 +430,20 @@ pub struct BuildArgs {
     )]
     pub backfill_missing_timestamps: bool,
 
+    /// Solana only: max unresolved timestamp-backfill buffer size in bytes.
+    ///
+    /// Protects live ingestion from unbounded memory growth when
+    /// `--backfill-missing-timestamps` encounters a long span of blocks without
+    /// `block_time`.
+    #[arg(
+        long,
+        env = "BACKFILL_MISSING_TIMESTAMPS_BUFFER_BYTES",
+        default_value = "134217728",
+        hide_env_values = true,
+        help_heading = "Chain"
+    )]
+    pub backfill_missing_timestamps_buffer_bytes: u64,
+
     /// Override cursor parameter validation and restart from the current CLI
     /// range. When a cursor file exists and its stored parameters differ from
     /// the current CLI arguments, the pipeline normally exits with an error.
