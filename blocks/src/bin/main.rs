@@ -186,14 +186,6 @@ fn output_encoding_policy(
     }
 }
 
-fn default_block_id_encoding(
-    block_type: &str,
-    tron_style_evm_profile: bool,
-) -> Option<&'static str> {
-    output_encoding_policy(block_type, tron_style_evm_profile)
-        .map(|policy| policy.block_id_encoding)
-}
-
 fn resolve_auto_encode_bytes(
     block_type: Option<&str>,
     endpoint_info: &Option<EndpointInfo>,
@@ -799,13 +791,6 @@ fn detect_block_type(type_url: &str) -> Result<String> {
             "unable to auto-detect block type from type_url: {type_url}"
         ))
     }
-}
-
-/// Resolve the default `EncodeBytes` for a chain when the user specified "auto".
-fn default_encode_bytes(block_type: &str, tron_style_evm_profile: bool) -> EncodeBytes {
-    output_encoding_policy(block_type, tron_style_evm_profile)
-        .map(|policy| policy.bytes_encoding)
-        .unwrap_or(EncodeBytes::Hex)
 }
 
 /// Resolve `EncodeBytes` from the endpoint info `block_id_encoding` field.
@@ -5650,35 +5635,83 @@ mod tests {
     }
 
     #[test]
-    fn test_default_encode_bytes() {
-        assert_eq!(default_encode_bytes("evm", false), EncodeBytes::Hex);
-        assert_eq!(default_encode_bytes("evm", true), EncodeBytes::TronBase58);
-        assert_eq!(default_encode_bytes("bitcoin", false), EncodeBytes::Hex);
-        assert_eq!(default_encode_bytes("solana", false), EncodeBytes::Base58);
-        assert_eq!(default_encode_bytes("tron", false), EncodeBytes::TronBase58);
-        assert_eq!(default_encode_bytes("near", false), EncodeBytes::Base58);
-        assert_eq!(default_encode_bytes("antelope", false), EncodeBytes::Hex);
-        assert_eq!(default_encode_bytes("cosmos", false), EncodeBytes::Hex);
-        assert_eq!(default_encode_bytes("beacon", false), EncodeBytes::Hex);
+    fn test_output_encoding_policy_defaults() {
+        assert_eq!(
+            output_encoding_policy("evm", false).map(|policy| policy.bytes_encoding),
+            Some(EncodeBytes::Hex)
+        );
+        assert_eq!(
+            output_encoding_policy("evm", true).map(|policy| policy.bytes_encoding),
+            Some(EncodeBytes::TronBase58)
+        );
+        assert_eq!(
+            output_encoding_policy("bitcoin", false).map(|policy| policy.bytes_encoding),
+            Some(EncodeBytes::Hex)
+        );
+        assert_eq!(
+            output_encoding_policy("solana", false).map(|policy| policy.bytes_encoding),
+            Some(EncodeBytes::Base58)
+        );
+        assert_eq!(
+            output_encoding_policy("tron", false).map(|policy| policy.bytes_encoding),
+            Some(EncodeBytes::TronBase58)
+        );
+        assert_eq!(
+            output_encoding_policy("near", false).map(|policy| policy.bytes_encoding),
+            Some(EncodeBytes::Base58)
+        );
+        assert_eq!(
+            output_encoding_policy("antelope", false).map(|policy| policy.bytes_encoding),
+            Some(EncodeBytes::Hex)
+        );
+        assert_eq!(
+            output_encoding_policy("cosmos", false).map(|policy| policy.bytes_encoding),
+            Some(EncodeBytes::Hex)
+        );
+        assert_eq!(
+            output_encoding_policy("beacon", false).map(|policy| policy.bytes_encoding),
+            Some(EncodeBytes::Hex)
+        );
     }
 
     #[test]
     fn test_default_block_id_encoding_contract() {
-        assert_eq!(default_block_id_encoding("evm", false), Some("hex_0x"));
         assert_eq!(
-            default_block_id_encoding("evm", true),
+            output_encoding_policy("evm", false).map(|policy| policy.block_id_encoding),
+            Some("hex_0x")
+        );
+        assert_eq!(
+            output_encoding_policy("evm", true).map(|policy| policy.block_id_encoding),
             Some("hex_no_prefix")
         );
-        assert_eq!(default_block_id_encoding("bitcoin", false), Some("hex_0x"));
-        assert_eq!(default_block_id_encoding("solana", false), Some("base58"));
         assert_eq!(
-            default_block_id_encoding("tron", false),
+            output_encoding_policy("bitcoin", false).map(|policy| policy.block_id_encoding),
+            Some("hex_0x")
+        );
+        assert_eq!(
+            output_encoding_policy("solana", false).map(|policy| policy.block_id_encoding),
+            Some("base58")
+        );
+        assert_eq!(
+            output_encoding_policy("tron", false).map(|policy| policy.block_id_encoding),
             Some("hex_no_prefix")
         );
-        assert_eq!(default_block_id_encoding("near", false), Some("base58"));
-        assert_eq!(default_block_id_encoding("antelope", false), Some("hex_0x"));
-        assert_eq!(default_block_id_encoding("cosmos", false), Some("hex_0x"));
-        assert_eq!(default_block_id_encoding("beacon", false), Some("hex_0x"));
+        assert_eq!(
+            output_encoding_policy("near", false).map(|policy| policy.block_id_encoding),
+            Some("base58")
+        );
+        assert_eq!(
+            output_encoding_policy("antelope", false).map(|policy| policy.block_id_encoding),
+            Some("hex_0x")
+        );
+        assert_eq!(
+            output_encoding_policy("cosmos", false).map(|policy| policy.block_id_encoding),
+            Some("hex_0x")
+        );
+        assert_eq!(
+            output_encoding_policy("beacon", false).map(|policy| policy.block_id_encoding),
+            Some("hex_0x")
+        );
     }
 
     #[test]
@@ -5712,7 +5745,9 @@ mod tests {
         for block_type in &[
             "evm", "bitcoin", "solana", "near", "antelope", "cosmos", "tron", "beacon",
         ] {
-            let encode_bytes = default_encode_bytes(block_type, false);
+            let encode_bytes = output_encoding_policy(block_type, false)
+                .map(|policy| policy.bytes_encoding)
+                .unwrap_or(EncodeBytes::Hex);
             let mapper = create_mapper(block_type, false, false, encode_bytes, false, false);
             assert!(
                 mapper.is_ok(),
