@@ -894,7 +894,14 @@ Every Parquet file written by the pipeline embeds key-value metadata in the file
 | `firehose-parquet.partition` | `date` |
 | `firehose-parquet.block_range_size` | `10000` |
 
-`firehose-parquet.bytes_encoding` and `firehose-parquet.block_id_encoding` describe the emitted output contract, not just the upstream Firehose endpoint. For Tron-style profiles (`tron` and `tron-evm`), metadata reports `bytes_encoding=tron_base58` with `block_id_encoding=hex_no_prefix`; canonical hash/topic-like fields stay hex without `0x`, while address-like byte fields use Tron Base58.
+`firehose-parquet.bytes_encoding` and `firehose-parquet.block_id_encoding` describe the emitted output contract, not just the upstream Firehose endpoint.
+
+For Tron-style profiles (tron and tron-evm):
+
+- metadata reports `bytes_encoding=tron_base58`
+- metadata reports `block_id_encoding=hex_no_prefix`
+- canonical hash/topic-like fields stay hex without `0x`
+- address-like byte fields use Tron Base58
 
 ### Reading Metadata
 
