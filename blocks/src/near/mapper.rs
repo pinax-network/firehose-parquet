@@ -1199,13 +1199,17 @@ mod tests {
 
     #[test]
     fn test_near_base58_encoding_aligns_canonical_ids_and_hash_fields() {
+        const ENVELOPE_BLOCK_ID_BYTES: [u8; 32] = [0x09; 32];
+        const ENVELOPE_PARENT_ID_BYTES: [u8; 32] = [0x08; 32];
+
         let block = make_test_block(100);
+        let header = block.header.as_ref().unwrap();
         let block_bytes = prost::Message::encode_to_vec(&block);
         let identity = BlockIdentity {
             block_num: 100,
-            block_id: format!("0x{}", hex(&[0x09; 32])),
+            block_id: format!("0x{}", hex(&ENVELOPE_BLOCK_ID_BYTES)),
             parent_num: 99,
-            parent_id: format!("0x{}", hex(&[0x08; 32])),
+            parent_id: format!("0x{}", hex(&ENVELOPE_PARENT_ID_BYTES)),
             lib_num: 98,
             timestamp: 1_700_000_000,
             fork_step: None,
@@ -1242,6 +1246,14 @@ mod tests {
             .as_any()
             .downcast_ref::<StringArray>()
             .unwrap();
+        assert_eq!(
+            block_id_col.value(0),
+            firehose_parquet::encode::encode_base58(crypto_hash_bytes(&header.hash))
+        );
+        assert_eq!(
+            parent_id_col.value(0),
+            firehose_parquet::encode::encode_base58(crypto_hash_bytes(&header.prev_hash))
+        );
         assert_eq!(block_id_col.value(0), hash_col.value(0));
         assert_eq!(parent_id_col.value(0), prev_hash_col.value(0));
         assert_eq!(
@@ -1258,11 +1270,11 @@ mod tests {
         );
         assert_ne!(
             block_id_col.value(0),
-            firehose_parquet::encode::encode_base58(&[0x09; 32])
+            firehose_parquet::encode::encode_base58(&ENVELOPE_BLOCK_ID_BYTES)
         );
         assert_ne!(
             parent_id_col.value(0),
-            firehose_parquet::encode::encode_base58(&[0x08; 32])
+            firehose_parquet::encode::encode_base58(&ENVELOPE_PARENT_ID_BYTES)
         );
 
         let chunks_batch = &batches["chunks"];

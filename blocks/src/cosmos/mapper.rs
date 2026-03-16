@@ -38,17 +38,19 @@ fn tx_hash_bytes(raw: &[u8]) -> Vec<u8> {
     Sha256::digest(raw).to_vec()
 }
 
+fn cosmos_parent_hash(block: &cosmos::Block) -> &[u8] {
+    block
+        .header
+        .as_ref()
+        .and_then(|header| header.last_block_id.as_ref())
+        .map(|block_id| block_id.hash.as_slice())
+        .unwrap_or(&[])
+}
+
 fn cosmos_canonical_identity(block: &cosmos::Block, identity: &BlockIdentity) -> BlockIdentity {
     let mut canonical = identity.clone();
     canonical.block_id = encode_hex(&block.hash);
-    canonical.parent_id = encode_hex(
-        block
-            .header
-            .as_ref()
-            .and_then(|header| header.last_block_id.as_ref())
-            .map(|block_id| block_id.hash.as_slice())
-            .unwrap_or(&[]),
-    );
+    canonical.parent_id = encode_hex(cosmos_parent_hash(block));
     canonical
 }
 
@@ -99,10 +101,7 @@ impl CosmosBlockMapper {
         let header = block.header.as_ref();
         let chain_id = header.map_or("", |h| &h.chain_id);
         let proposer_address = header.map(|h| h.proposer_address.as_slice()).unwrap_or(&[]);
-        let last_block_id_hash = header
-            .and_then(|h| h.last_block_id.as_ref())
-            .map(|bid| bid.hash.as_slice())
-            .unwrap_or(&[]);
+        let last_block_id_hash = cosmos_parent_hash(block);
         let validators_hash = header.map(|h| h.validators_hash.as_slice()).unwrap_or(&[]);
         let next_validators_hash = header
             .map(|h| h.next_validators_hash.as_slice())

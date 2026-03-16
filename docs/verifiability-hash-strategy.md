@@ -43,7 +43,7 @@ For chains that expose a protocol-native block hash or root in the payload, mapp
 | Chain   | `block_id` source | `parent_id` source |
 |---------|-------------------|--------------------|
 | Beacon  | `blocks.root` | `blocks.parent_root` |
-| Cosmos  | `blocks.hash` | `blocks.last_block_id_hash` |
+| Cosmos  | `blocks.hash` | `blocks.header.last_block_id.hash` |
 | Near    | `blocks.hash` | `blocks.prev_hash` |
 
 ## Leaf Normalization Rules
