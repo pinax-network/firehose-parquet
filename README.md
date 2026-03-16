@@ -199,7 +199,7 @@ When output is written locally or to S3, the default cursor file is automaticall
 When resuming from an existing `cursor.parquet`, the pipeline validates that the current CLI parameters match those stored in the cursor. Checked parameters include:
 
 - `start_block`, `extended`, `final_blocks_only`, `include_failed_transactions`
-- `with_votes` for Solana cursor compatibility and vote table output
+- `with_votes` (Solana only) for cursor compatibility and vote table output
 - `endpoint`, `partition`, `block_range_size`, `compression`, `bytes_encoding` (from file metadata)
 
 On resume, the cursor's stored `start_block` is reused when present. The cursor's `stop_block` may be omitted from the CLI for bounded resume, replaced with a new explicit `--stop-block`, or omitted with `--live` to continue streaming indefinitely. Other parameter mismatches still fail fast unless `--cursor-override` is set.
