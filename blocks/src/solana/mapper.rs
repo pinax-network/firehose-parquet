@@ -31,13 +31,8 @@ fn append_canonical_timestamp(
     builder: &mut CanonicalBuilder,
     identity: &BlockIdentity,
     block_time_opt: Option<i64>,
-    backfill_missing_timestamps: bool,
 ) {
-    match block_time_opt {
-        Some(timestamp) => builder.append_with_optional_timestamp(identity, Some(timestamp)),
-        None if backfill_missing_timestamps => builder.append(identity),
-        None => builder.append_with_optional_timestamp(identity, None),
-    }
+    builder.append_with_optional_timestamp(identity, block_time_opt);
 }
 
 fn solana_hash_bytes(hash: &str) -> Vec<u8> {
@@ -76,14 +71,12 @@ fn append_transaction(
     meta: &solana::TransactionStatusMeta,
     identity: &BlockIdentity,
     block_time_opt: Option<i64>,
-    backfill_missing_timestamps: bool,
     fork_step: Option<&str>,
 ) {
     append_canonical_timestamp(
         &mut builder.canonical,
         identity,
         block_time_opt,
-        backfill_missing_timestamps,
     );
     builder.slot.append_value(slot);
     builder.transaction_index.append_value(tx_idx);
@@ -160,7 +153,6 @@ fn solana_canonical_identity(block: &solana::Block, identity: &BlockIdentity) ->
 
 pub struct SolanaBlockMapper {
     extended: bool,
-    backfill_missing_timestamps: bool,
     include_failed_transactions: bool,
     blocks: BlocksBuilder,
     transactions: TransactionsBuilder,
@@ -190,7 +182,6 @@ impl SolanaBlockMapper {
     ) -> Self {
         Self {
             extended,
-            backfill_missing_timestamps,
             include_failed_transactions,
             blocks: BlocksBuilder::new(include_fork_step, &encoding),
             transactions: TransactionsBuilder::new(include_fork_step, &encoding),
@@ -261,7 +252,6 @@ impl SolanaBlockMapper {
             &mut self.blocks.canonical,
             &canonical_identity,
             block_time_opt,
-            self.backfill_missing_timestamps,
         );
         self.blocks.slot.append_value(slot);
         self.blocks.parent_slot.append_value(block.parent_slot);
@@ -350,7 +340,6 @@ impl SolanaBlockMapper {
                     meta,
                     identity,
                     block_time_opt,
-                    self.backfill_missing_timestamps,
                     fork_step,
                 );
             }
@@ -366,7 +355,6 @@ impl SolanaBlockMapper {
             meta,
             identity,
             block_time_opt,
-            self.backfill_missing_timestamps,
             fork_step,
         );
 
@@ -375,7 +363,6 @@ impl SolanaBlockMapper {
             &mut self.messages.canonical,
             identity,
             block_time_opt,
-            self.backfill_missing_timestamps,
         );
         self.messages.slot.append_value(slot);
         self.messages.transaction_index.append_value(tx_idx);
@@ -429,7 +416,6 @@ impl SolanaBlockMapper {
                 &mut self.instructions.canonical,
                 identity,
                 block_time_opt,
-                self.backfill_missing_timestamps,
             );
             self.instructions.slot.append_value(slot);
             self.instructions.transaction_index.append_value(tx_idx);
@@ -455,7 +441,6 @@ impl SolanaBlockMapper {
                     &mut self.instructions.canonical,
                     identity,
                     block_time_opt,
-                    self.backfill_missing_timestamps,
                 );
                 self.instructions.slot.append_value(slot);
                 self.instructions.transaction_index.append_value(tx_idx);
@@ -504,7 +489,6 @@ impl SolanaBlockMapper {
                 &mut self.account_lookups.canonical,
                 identity,
                 block_time_opt,
-                self.backfill_missing_timestamps,
             );
             self.account_lookups.slot.append_value(slot);
             self.account_lookups.transaction_index.append_value(tx_idx);
@@ -554,7 +538,6 @@ impl SolanaBlockMapper {
                 &mut self.token_balances.canonical,
                 identity,
                 block_time_opt,
-                self.backfill_missing_timestamps,
             );
             self.token_balances.slot.append_value(slot);
             self.token_balances.transaction_index.append_value(tx_idx);
@@ -620,7 +603,6 @@ impl SolanaBlockMapper {
             &mut self.rewards.canonical,
             identity,
             block_time_opt,
-            self.backfill_missing_timestamps,
         );
         self.rewards.slot.append_value(slot);
         self.rewards.reward_index.append_value(idx);
@@ -1368,7 +1350,7 @@ mod tests {
     }
 
     #[test]
-    fn test_backfill_missing_canonical_timestamp_uses_identity_timestamp() {
+    fn test_missing_block_time_keeps_canonical_timestamps_null() {
         let mut block = make_test_block(100);
         block.block_time = None;
         let block_bytes = prost::Message::encode_to_vec(&block);
@@ -1413,19 +1395,21 @@ mod tests {
             .downcast_ref::<TimestampSecondArray>()
             .unwrap();
 
-        assert_eq!(block_timestamp.value(0), identity.timestamp);
-        assert_eq!(
-            block_date.value(0),
-            firehose_parquet::traits::date32_from_timestamp_seconds(identity.timestamp)
+        assert!(
+            block_timestamp.is_null(0),
+            "canonical block timestamp should remain null when block_time is missing"
+        );
+        assert!(
+            block_date.is_null(0),
+            "canonical block date should remain null when block_time is missing"
         );
         assert!(
             block_time.is_null(0),
             "raw Solana block_time should remain null"
         );
-        assert_eq!(
-            tx_timestamp.value(0),
-            identity.timestamp,
-            "derived canonical timestamp should propagate to child tables"
+        assert!(
+            tx_timestamp.is_null(0),
+            "child table canonical timestamps should remain null when block_time is missing"
         );
     }
 
