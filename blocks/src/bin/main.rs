@@ -22,6 +22,7 @@ use firehose_parquet::traits::{decode_id_bytes, fork_step_name, BlockIdentity, B
 use firehose_parquet::writer::{OutputWriter, ParquetFileMetadata, WriterBufferStats};
 use object_store::ObjectStore;
 use std::collections::HashMap;
+use std::ffi::OsStr;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -3446,7 +3447,7 @@ fn validate_chain_feature_flags(
     cursor_state: Option<&CursorState>,
     extended_requested: bool,
     extended_explicitly_requested: bool,
-    with_votes_requested: bool,
+    with_votes_explicitly_requested: bool,
 ) -> Result<()> {
     if chain_is_solana(requested_block_type, endpoint_info, cursor_state)
         && extended_explicitly_requested
@@ -3463,12 +3464,25 @@ fn validate_chain_feature_flags(
     }
 
     if chain_is_known_non_solana(requested_block_type, endpoint_info, cursor_state)
-        && with_votes_requested
+        && with_votes_explicitly_requested
     {
         return Err(anyhow!(WITH_VOTES_NON_SOLANA_ERROR));
     }
 
     Ok(())
+}
+
+fn flag_explicitly_requested<I, S>(args: I, flag: &str) -> bool
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<OsStr>,
+{
+    let flag = OsStr::new(flag);
+    let flag_with_equals = format!("{}=", flag.to_string_lossy());
+    args.into_iter().skip(1).any(|arg| {
+        let arg = arg.as_ref();
+        arg == flag || arg.to_string_lossy().starts_with(&flag_with_equals)
+    })
 }
 
 fn extended_warning_message() -> &'static str {
@@ -4240,6 +4254,8 @@ async fn run_ingestion(args: &BuildArgs) -> Result<()> {
     let mut extended = args.extended.unwrap_or(true);
     let extended_explicitly_requested = args.extended.is_some();
     let with_votes = args.with_votes;
+    let with_votes_explicitly_requested =
+        flag_explicitly_requested(std::env::args_os(), "--with-votes");
     let bytes_encoding_str = args.bytes_encoding.clone();
     let mut common = args.common.clone();
     if common.endpoint.is_none() {
@@ -4309,7 +4325,7 @@ async fn run_ingestion(args: &BuildArgs) -> Result<()> {
         existing_cursor_state.as_ref(),
         extended,
         extended_explicitly_requested,
-        with_votes,
+        with_votes_explicitly_requested,
     )?;
     let solana_chain = chain_is_solana(&block_type, &endpoint_info, existing_cursor_state.as_ref());
     let antelope_chain =
@@ -4638,7 +4654,7 @@ async fn run_ingestion(args: &BuildArgs) -> Result<()> {
                     existing_cursor_state.as_ref(),
                     extended,
                     extended_explicitly_requested,
-                    with_votes,
+                    with_votes_explicitly_requested,
                 )?;
                 if detected == "solana" {
                     extended = false;
@@ -5522,6 +5538,22 @@ mod tests {
         } else {
             panic!("expected Commands::Build");
         }
+    }
+
+    #[test]
+    fn test_flag_explicitly_requested_detects_with_votes_flag() {
+        assert!(!flag_explicitly_requested(
+            ["fireparq", "build", "--network", "mainnet"],
+            "--with-votes"
+        ));
+        assert!(flag_explicitly_requested(
+            ["fireparq", "build", "--with-votes"],
+            "--with-votes"
+        ));
+        assert!(flag_explicitly_requested(
+            ["fireparq", "build", "--with-votes=false"],
+            "--with-votes"
+        ));
     }
 
     #[test]
@@ -7150,6 +7182,12 @@ mod tests {
         let err = validate_chain_feature_flags("evm", &None, None, false, false, true)
             .expect_err("non-Solana chains should reject --with-votes");
         assert_eq!(err.to_string(), WITH_VOTES_NON_SOLANA_ERROR);
+    }
+
+    #[test]
+    fn test_validate_chain_feature_flags_allows_implicit_with_votes_default_for_non_solana() {
+        validate_chain_feature_flags("evm", &None, None, false, false, false)
+            .expect("implicit default should not reject for non-Solana chains");
     }
 
     #[test]
