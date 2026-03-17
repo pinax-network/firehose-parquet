@@ -402,14 +402,13 @@ pub struct BuildArgs {
     #[arg(
         long,
         env = "EXTENDED",
-        default_value = "true",
         default_missing_value = "true",
         num_args = 0..=1,
         value_parser = BoolishValueParser::new(),
         hide_env_values = true,
         help_heading = "Chain"
     )]
-    pub extended: bool,
+    pub extended: Option<bool>,
 
     /// Include Solana `vote_transactions` output.
     /// Enabled by default; disable with `--with-votes false`.

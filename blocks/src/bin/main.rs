@@ -3388,13 +3388,20 @@ fn validate_chain_feature_flags(
     endpoint_info: &Option<EndpointInfo>,
     cursor_state: Option<&CursorState>,
     extended_requested: bool,
+    extended_explicitly_requested: bool,
     with_votes_requested: bool,
 ) -> Result<()> {
-    if chain_is_solana(requested_block_type, endpoint_info, cursor_state) && extended_requested {
+    if chain_is_solana(requested_block_type, endpoint_info, cursor_state)
+        && extended_explicitly_requested
+        && extended_requested
+    {
         return Err(anyhow!(SOLANA_EXTENDED_ERROR));
     }
 
-    if chain_is_antelope(requested_block_type, endpoint_info, cursor_state) && extended_requested {
+    if chain_is_antelope(requested_block_type, endpoint_info, cursor_state)
+        && extended_explicitly_requested
+        && extended_requested
+    {
         return Err(anyhow!(ANTELOPE_EXTENDED_ERROR));
     }
 
@@ -4173,7 +4180,8 @@ async fn run_ingestion(args: &BuildArgs) -> Result<()> {
         ));
     }
 
-    let mut extended = args.extended;
+    let mut extended = args.extended.unwrap_or(true);
+    let extended_explicitly_requested = args.extended.is_some();
     let with_votes = args.with_votes;
     let bytes_encoding_str = args.bytes_encoding.clone();
     let mut common = args.common.clone();
@@ -4243,6 +4251,7 @@ async fn run_ingestion(args: &BuildArgs) -> Result<()> {
         &endpoint_info,
         existing_cursor_state.as_ref(),
         extended,
+        extended_explicitly_requested,
         with_votes,
     )?;
     let solana_chain = chain_is_solana(&block_type, &endpoint_info, existing_cursor_state.as_ref());
@@ -4569,6 +4578,7 @@ async fn run_ingestion(args: &BuildArgs) -> Result<()> {
                     &endpoint_info,
                     existing_cursor_state.as_ref(),
                     extended,
+                    extended_explicitly_requested,
                     with_votes,
                 )?;
                 if detected == "solana" {
@@ -5382,7 +5392,7 @@ mod tests {
             "hex",
         ]);
         if let Some(Commands::Build(build_args)) = cli.command {
-            assert!(build_args.extended);
+            assert_eq!(build_args.extended, None);
             assert_eq!(build_args.block_type, "evm");
             assert_eq!(build_args.bytes_encoding, "hex");
         } else {
@@ -5407,7 +5417,7 @@ mod tests {
             "false",
         ]);
         if let Some(Commands::Build(build_args)) = cli.command {
-            assert!(!build_args.extended);
+            assert_eq!(build_args.extended, Some(false));
             assert!(!build_args.with_votes);
         } else {
             panic!("expected Commands::Build");
@@ -5428,7 +5438,7 @@ mod tests {
         ]);
         if let Some(Commands::Build(build_args)) = cli.command {
             assert!(build_args.with_votes);
-            assert!(build_args.extended);
+            assert_eq!(build_args.extended, None);
             assert_eq!(build_args.network.as_deref(), Some("solana-mainnet-beta"));
         } else {
             panic!("expected Commands::Build");
@@ -7045,23 +7055,35 @@ mod tests {
 
     #[test]
     fn test_validate_chain_feature_flags_rejects_extended_for_solana() {
-        let err = validate_chain_feature_flags("solana", &None, None, true, false)
+        let err = validate_chain_feature_flags("solana", &None, None, true, true, false)
             .expect_err("Solana should reject --extended");
         assert!(err.to_string().contains("--with-votes"));
     }
 
     #[test]
+    fn test_validate_chain_feature_flags_allows_implicit_extended_default_for_solana() {
+        validate_chain_feature_flags("solana", &None, None, true, false, false)
+            .expect("implicit default should not reject for Solana");
+    }
+
+    #[test]
     fn test_validate_chain_feature_flags_rejects_with_votes_for_non_solana() {
-        let err = validate_chain_feature_flags("evm", &None, None, false, true)
+        let err = validate_chain_feature_flags("evm", &None, None, false, false, true)
             .expect_err("non-Solana chains should reject --with-votes");
         assert_eq!(err.to_string(), WITH_VOTES_NON_SOLANA_ERROR);
     }
 
     #[test]
     fn test_validate_chain_feature_flags_rejects_extended_for_antelope() {
-        let err = validate_chain_feature_flags("antelope", &None, None, true, false)
+        let err = validate_chain_feature_flags("antelope", &None, None, true, true, false)
             .expect_err("Antelope should reject --extended");
         assert_eq!(err.to_string(), ANTELOPE_EXTENDED_ERROR);
+    }
+
+    #[test]
+    fn test_validate_chain_feature_flags_allows_implicit_extended_default_for_antelope() {
+        validate_chain_feature_flags("antelope", &None, None, true, false, false)
+            .expect("implicit default should not reject for Antelope");
     }
 
     #[test]
