@@ -45,8 +45,7 @@ const BLOCK_TYPES: &[&str] = &[
 const DEFAULT_TIMESTAMP_BACKFILL_BUFFER_LIMIT_BYTES: u64 = 134_217_728;
 const SOLANA_EXTENDED_ERROR: &str =
     "--extended is not supported for Solana; use --with-votes to emit vote_transactions";
-const ANTELOPE_EXTENDED_ERROR: &str =
-    "--extended is not supported for Antelope";
+const ANTELOPE_EXTENDED_ERROR: &str = "--extended is not supported for Antelope";
 const WITH_VOTES_NON_SOLANA_ERROR: &str = "--with-votes is only supported for Solana";
 
 #[derive(Parser, Debug)]
@@ -94,7 +93,8 @@ struct GlobalArgs {
         env = "LOG_LEVEL",
         default_value = "info",
         hide_env_values = true,
-        global = true
+        global = true,
+        help_heading = "Runtime / Logging"
     )]
     log_level: String,
 }
@@ -5329,6 +5329,21 @@ mod tests {
         assert!(help.contains("fireparq"));
     }
 
+    fn subcommand_help(name: &str) -> String {
+        let cmd = Cli::command();
+        let subcommand = cmd
+            .get_subcommands()
+            .find(|sc| sc.get_name() == name)
+            .unwrap_or_else(|| panic!("subcommand `{name}` should exist"));
+        subcommand.clone().render_long_help().to_string()
+    }
+
+    fn command_help(args: &[&str]) -> String {
+        let err = Cli::try_parse_from(args).expect_err("`--help` should short-circuit parsing");
+        assert_eq!(err.kind(), clap::error::ErrorKind::DisplayHelp);
+        err.to_string()
+    }
+
     #[test]
     fn test_build_subcommand_parses_network_flag() {
         let cli = Cli::parse_from([
@@ -5603,14 +5618,137 @@ mod tests {
 
     #[test]
     fn test_build_help_mentions_tron_bytes_encoding_behavior() {
-        let cmd = Cli::command();
-        let build_subcmd = cmd
-            .get_subcommands()
-            .find(|sc| sc.get_name() == "build")
-            .expect("build subcommand should exist");
-        let help = build_subcmd.clone().render_long_help().to_string();
+        let help = subcommand_help("build");
         assert!(help.contains("For Tron, `auto` resolves to `tron_base58`"));
         assert!(help.contains("hashes and topics stay raw hex without `0x`"));
+    }
+
+    #[test]
+    fn test_utility_subcommand_help_uses_grouped_headings() {
+        for (name, headings, snippets) in [
+            (
+                "scan",
+                vec!["Selection:", "Display:", "AWS / S3:", "Runtime / Logging:"],
+                vec![
+                    "<PATH>",
+                    "--limit",
+                    "--vertical",
+                    "--aws-region",
+                    "--log-level",
+                ],
+            ),
+            (
+                "validate",
+                vec![
+                    "Selection:",
+                    "Validation:",
+                    "AWS / S3:",
+                    "Runtime / Logging:",
+                ],
+                vec![
+                    "<PATH>",
+                    "--cross-partition",
+                    "--allow-gaps",
+                    "--aws-region",
+                    "--log-level",
+                ],
+            ),
+            (
+                "inspect",
+                vec!["Selection:", "Display:", "AWS / S3:", "Runtime / Logging:"],
+                vec![
+                    "<PATH>",
+                    "--schema-only",
+                    "--json",
+                    "--aws-region",
+                    "--log-level",
+                ],
+            ),
+            (
+                "truncate",
+                vec![
+                    "Selection:",
+                    "Execution:",
+                    "AWS / S3:",
+                    "Runtime / Logging:",
+                ],
+                vec![
+                    "<PATH>",
+                    "--partition",
+                    "--dry-run",
+                    "--aws-region",
+                    "--log-level",
+                ],
+            ),
+            (
+                "merge",
+                vec![
+                    "Selection:",
+                    "Output:",
+                    "Execution:",
+                    "AWS / S3:",
+                    "Runtime / Logging:",
+                ],
+                vec![
+                    "<PATH>",
+                    "--compression",
+                    "--dry-run",
+                    "--cache-control",
+                    "--log-level",
+                ],
+            ),
+            (
+                "rollup",
+                vec![
+                    "Selection:",
+                    "Output:",
+                    "Execution:",
+                    "AWS / S3:",
+                    "Runtime / Logging:",
+                ],
+                vec![
+                    "<SOURCE>",
+                    "--output",
+                    "--delete-source",
+                    "--cache-control",
+                    "--log-level",
+                ],
+            ),
+            (
+                "verify",
+                vec![
+                    "Selection:",
+                    "Verification:",
+                    "Reporting:",
+                    "Registry:",
+                    "AWS / S3:",
+                    "Runtime / Logging:",
+                ],
+                vec![
+                    "<PATH>",
+                    "--chain",
+                    "--report-json",
+                    "--registry-path",
+                    "--log-level",
+                ],
+            ),
+        ] {
+            let help = command_help(&["fireparq", name, "--help"]);
+
+            for heading in headings {
+                assert!(
+                    help.contains(heading),
+                    "expected `{name}` help to contain heading `{heading}`\n{help}"
+                );
+            }
+
+            for snippet in snippets {
+                assert!(
+                    help.contains(snippet),
+                    "expected `{name}` help to mention `{snippet}`\n{help}"
+                );
+            }
+        }
     }
 
     #[test]

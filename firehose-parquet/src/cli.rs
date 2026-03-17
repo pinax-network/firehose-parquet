@@ -534,39 +534,80 @@ Lookup order:
 ")]
     Scan {
         /// Path to a .parquet file or directory, a shorthand S3 key/prefix via S3_BUCKET, or an S3 URI
+        #[arg(help_heading = "Selection")]
         path: String,
         /// Number of sample rows to display across the full scan (0 = schema only)
-        #[arg(short = 'n', long = "limit", default_value = "20")]
+        #[arg(
+            short = 'n',
+            long = "limit",
+            default_value = "20",
+            help_heading = "Selection"
+        )]
         limit: usize,
         /// Number of rows to skip before displaying (for pagination across the full scan)
-        #[arg(long, default_value = "0")]
+        #[arg(long, default_value = "0", help_heading = "Selection")]
         offset: usize,
         /// Row display order for pagination and previews
-        #[arg(long, value_enum, default_value = "asc")]
+        #[arg(long, value_enum, default_value = "asc", help_heading = "Selection")]
         order: ScanOrder,
         /// Only show file metadata (schema, row count, size) without data
-        #[arg(long, default_value = "false")]
+        #[arg(long, default_value = "false", help_heading = "Selection")]
         schema_only: bool,
         /// Use row-by-row vertical display instead of boxed table output
-        #[arg(long, default_value = "false", conflicts_with = "json")]
+        #[arg(
+            long,
+            default_value = "false",
+            conflicts_with = "json",
+            help_heading = "Display"
+        )]
         vertical: bool,
         /// Emit machine-readable JSON including file info, schema, and sampled rows
-        #[arg(long, default_value = "false", conflicts_with = "vertical")]
+        #[arg(
+            long,
+            default_value = "false",
+            conflicts_with = "vertical",
+            help_heading = "Display"
+        )]
         json: bool,
         /// AWS access key ID (for S3 paths)
-        #[arg(long, env = "AWS_ACCESS_KEY_ID", hide_env_values = true)]
+        #[arg(
+            long,
+            env = "AWS_ACCESS_KEY_ID",
+            hide_env_values = true,
+            help_heading = "AWS / S3"
+        )]
         aws_access_key_id: Option<String>,
         /// AWS secret access key (for S3 paths)
-        #[arg(long, env = "AWS_SECRET_ACCESS_KEY", hide_env_values = true)]
+        #[arg(
+            long,
+            env = "AWS_SECRET_ACCESS_KEY",
+            hide_env_values = true,
+            help_heading = "AWS / S3"
+        )]
         aws_secret_access_key: Option<String>,
         /// AWS session token (for S3 paths)
-        #[arg(long, env = "AWS_SESSION_TOKEN", hide_env_values = true)]
+        #[arg(
+            long,
+            env = "AWS_SESSION_TOKEN",
+            hide_env_values = true,
+            help_heading = "AWS / S3"
+        )]
         aws_session_token: Option<String>,
         /// AWS region (for S3 paths)
-        #[arg(long, env = "AWS_REGION", hide_env_values = true)]
+        #[arg(
+            long,
+            env = "AWS_REGION",
+            hide_env_values = true,
+            help_heading = "AWS / S3"
+        )]
         aws_region: Option<String>,
         /// AWS endpoint URL (for S3-compatible services)
-        #[arg(long, env = "AWS_ENDPOINT_URL_S3", hide_env_values = true)]
+        #[arg(
+            long,
+            env = "AWS_ENDPOINT_URL_S3",
+            hide_env_values = true,
+            help_heading = "AWS / S3"
+        )]
         aws_endpoint_url: Option<String>,
     },
     /// Validate block sequence integrity of Parquet files.
@@ -594,27 +635,53 @@ Lookup order:
 ")]
     Validate {
         /// Path to a directory of .parquet files, a shorthand S3 key/prefix via S3_BUCKET, or an S3 URI
+        #[arg(help_heading = "Selection")]
         path: String,
         /// Check continuity across partition boundaries
-        #[arg(long, default_value = "false")]
+        #[arg(long, default_value = "false", help_heading = "Validation")]
         cross_partition: bool,
         /// Allow gaps in block numbers (e.g. Solana skipped slots)
-        #[arg(long, default_value = "false")]
+        #[arg(long, default_value = "false", help_heading = "Validation")]
         allow_gaps: bool,
         /// AWS access key ID (for S3 paths)
-        #[arg(long, env = "AWS_ACCESS_KEY_ID", hide_env_values = true)]
+        #[arg(
+            long,
+            env = "AWS_ACCESS_KEY_ID",
+            hide_env_values = true,
+            help_heading = "AWS / S3"
+        )]
         aws_access_key_id: Option<String>,
         /// AWS secret access key (for S3 paths)
-        #[arg(long, env = "AWS_SECRET_ACCESS_KEY", hide_env_values = true)]
+        #[arg(
+            long,
+            env = "AWS_SECRET_ACCESS_KEY",
+            hide_env_values = true,
+            help_heading = "AWS / S3"
+        )]
         aws_secret_access_key: Option<String>,
         /// AWS session token (for S3 paths)
-        #[arg(long, env = "AWS_SESSION_TOKEN", hide_env_values = true)]
+        #[arg(
+            long,
+            env = "AWS_SESSION_TOKEN",
+            hide_env_values = true,
+            help_heading = "AWS / S3"
+        )]
         aws_session_token: Option<String>,
         /// AWS region (for S3 paths)
-        #[arg(long, env = "AWS_REGION", hide_env_values = true)]
+        #[arg(
+            long,
+            env = "AWS_REGION",
+            hide_env_values = true,
+            help_heading = "AWS / S3"
+        )]
         aws_region: Option<String>,
         /// AWS endpoint URL (for S3-compatible services)
-        #[arg(long, env = "AWS_ENDPOINT_URL_S3", hide_env_values = true)]
+        #[arg(
+            long,
+            env = "AWS_ENDPOINT_URL_S3",
+            hide_env_values = true,
+            help_heading = "AWS / S3"
+        )]
         aws_endpoint_url: Option<String>,
     },
     /// Verify deterministic partition merkle roots for table parquet data.
@@ -662,57 +729,93 @@ Lookup order for the data path:
 ")]
     Verify {
         /// Path to a directory of .parquet files, a single parquet file, a shorthand S3 key/prefix via S3_BUCKET, or an S3 URI
+        #[arg(help_heading = "Selection")]
         path: String,
         /// Chain identifier used in root registry keys
-        #[arg(long, default_value = "evm")]
+        #[arg(long, default_value = "evm", help_heading = "Selection")]
         chain: String,
         /// Table name used in root registry keys
-        #[arg(long, default_value = "blocks")]
+        #[arg(long, default_value = "blocks", help_heading = "Selection")]
         table: String,
         /// Hash strategy used for leaf+merkle hashing (auto, keccak256, sha256)
-        #[arg(long, default_value = "auto")]
+        #[arg(long, default_value = "auto", help_heading = "Verification")]
         hash_strategy: String,
         /// Check families to run (`roots`, `protocol`, `continuity`, `completeness`)
-        #[arg(long, value_enum, value_delimiter = ',')]
+        #[arg(long, value_enum, value_delimiter = ',', help_heading = "Verification")]
         checks: Vec<crate::verify::VerifyCheck>,
         /// Check profile (`quick`, `standard`, `deep`) used when --checks is not set
-        #[arg(long, value_enum, default_value = "standard")]
+        #[arg(
+            long,
+            value_enum,
+            default_value = "standard",
+            help_heading = "Verification"
+        )]
         profile: crate::verify::VerifyProfile,
         /// Report scope tag for metadata (`chain`, `table`, `partition`, `run`)
-        #[arg(long, value_enum, default_value = "table")]
+        #[arg(
+            long,
+            value_enum,
+            default_value = "table",
+            help_heading = "Verification"
+        )]
         scope: crate::verify::VerifyScope,
         /// Continue scanning and aggregate findings instead of failing on first mismatch
-        #[arg(long, default_value = "false")]
+        #[arg(long, default_value = "false", help_heading = "Verification")]
         no_fail_fast: bool,
         /// Optional path to write a JSON verification report
-        #[arg(long)]
+        #[arg(long, help_heading = "Reporting")]
         report_json: Option<PathBuf>,
         /// Publish the JSON report to the suggested verify artifact path
-        #[arg(long, default_value = "false")]
+        #[arg(long, default_value = "false", help_heading = "Reporting")]
         publish_report: bool,
         /// Explicit path to publish the JSON report (local or s3://)
-        #[arg(long)]
+        #[arg(long, help_heading = "Reporting")]
         publish_report_path: Option<String>,
         /// Explicit merkle roots registry path (local or s3://)
-        #[arg(long)]
+        #[arg(long, help_heading = "Registry")]
         registry_path: Option<String>,
         /// Overwrite mismatched roots in the registry with computed values
-        #[arg(long, default_value = "false")]
+        #[arg(long, default_value = "false", help_heading = "Registry")]
         update_registry: bool,
         /// AWS access key ID (for S3 paths)
-        #[arg(long, env = "AWS_ACCESS_KEY_ID", hide_env_values = true)]
+        #[arg(
+            long,
+            env = "AWS_ACCESS_KEY_ID",
+            hide_env_values = true,
+            help_heading = "AWS / S3"
+        )]
         aws_access_key_id: Option<String>,
         /// AWS secret access key (for S3 paths)
-        #[arg(long, env = "AWS_SECRET_ACCESS_KEY", hide_env_values = true)]
+        #[arg(
+            long,
+            env = "AWS_SECRET_ACCESS_KEY",
+            hide_env_values = true,
+            help_heading = "AWS / S3"
+        )]
         aws_secret_access_key: Option<String>,
         /// AWS session token (for S3 paths)
-        #[arg(long, env = "AWS_SESSION_TOKEN", hide_env_values = true)]
+        #[arg(
+            long,
+            env = "AWS_SESSION_TOKEN",
+            hide_env_values = true,
+            help_heading = "AWS / S3"
+        )]
         aws_session_token: Option<String>,
         /// AWS region (for S3 paths)
-        #[arg(long, env = "AWS_REGION", hide_env_values = true)]
+        #[arg(
+            long,
+            env = "AWS_REGION",
+            hide_env_values = true,
+            help_heading = "AWS / S3"
+        )]
         aws_region: Option<String>,
         /// AWS endpoint URL (for S3-compatible services)
-        #[arg(long, env = "AWS_ENDPOINT_URL_S3", hide_env_values = true)]
+        #[arg(
+            long,
+            env = "AWS_ENDPOINT_URL_S3",
+            hide_env_values = true,
+            help_heading = "AWS / S3"
+        )]
         aws_endpoint_url: Option<String>,
     },
     /// Roll up fine-grained partitioned Parquet files into coarser intervals.
@@ -743,42 +846,74 @@ Lookup order for the source path:
 ")]
     Rollup {
         /// Source path containing partitioned Parquet files (local directory, shorthand S3 key/prefix via S3_BUCKET, or S3 URI)
+        #[arg(help_heading = "Selection")]
         source: String,
         /// Output path (local directory or S3 URI). Defaults to source (in-place rollup).
-        #[arg(short = 'o', long)]
+        #[arg(short = 'o', long, help_heading = "Selection")]
         output: Option<String>,
         /// Target partition interval: hour or date
-        #[arg(short = 'p', long = "partition", default_value = "date")]
+        #[arg(
+            short = 'p',
+            long = "partition",
+            default_value = "date",
+            help_heading = "Selection"
+        )]
         partition: String,
         /// Compression codec: zstd, snappy, gzip, none
-        #[arg(long, default_value = "zstd")]
+        #[arg(long, default_value = "zstd", help_heading = "Output")]
         compression: String,
         /// Max compressed bytes per output file (0 = no limit)
-        #[arg(long, default_value = "134217728")]
+        #[arg(long, default_value = "134217728", help_heading = "Output")]
         flush_bytes: u64,
         /// Delete source files after successful rollup
-        #[arg(long, default_value = "false")]
+        #[arg(long, default_value = "false", help_heading = "Execution")]
         delete_source: bool,
         /// AWS access key ID (for S3 paths)
-        #[arg(long, env = "AWS_ACCESS_KEY_ID", hide_env_values = true)]
+        #[arg(
+            long,
+            env = "AWS_ACCESS_KEY_ID",
+            hide_env_values = true,
+            help_heading = "AWS / S3"
+        )]
         aws_access_key_id: Option<String>,
         /// AWS secret access key (for S3 paths)
-        #[arg(long, env = "AWS_SECRET_ACCESS_KEY", hide_env_values = true)]
+        #[arg(
+            long,
+            env = "AWS_SECRET_ACCESS_KEY",
+            hide_env_values = true,
+            help_heading = "AWS / S3"
+        )]
         aws_secret_access_key: Option<String>,
         /// AWS session token (for S3 paths)
-        #[arg(long, env = "AWS_SESSION_TOKEN", hide_env_values = true)]
+        #[arg(
+            long,
+            env = "AWS_SESSION_TOKEN",
+            hide_env_values = true,
+            help_heading = "AWS / S3"
+        )]
         aws_session_token: Option<String>,
         /// AWS region (for S3 paths)
-        #[arg(long, env = "AWS_REGION", hide_env_values = true)]
+        #[arg(
+            long,
+            env = "AWS_REGION",
+            hide_env_values = true,
+            help_heading = "AWS / S3"
+        )]
         aws_region: Option<String>,
         /// AWS endpoint URL (for S3-compatible services)
-        #[arg(long, env = "AWS_ENDPOINT_URL_S3", hide_env_values = true)]
+        #[arg(
+            long,
+            env = "AWS_ENDPOINT_URL_S3",
+            hide_env_values = true,
+            help_heading = "AWS / S3"
+        )]
         aws_endpoint_url: Option<String>,
         /// Cache-Control header for S3 uploads (empty string = no header)
         #[arg(
             long,
             env = "CACHE_CONTROL",
-            default_value = "public, max-age=31536000, immutable"
+            default_value = "public, max-age=31536000, immutable",
+            help_heading = "AWS / S3"
         )]
         cache_control: String,
     },
@@ -814,36 +949,63 @@ Lookup order:
 ")]
     Merge {
         /// Path to a directory of partitioned .parquet files, a shorthand S3 key/prefix via S3_BUCKET, or an S3 URI
+        #[arg(help_heading = "Selection")]
         path: String,
         /// Compression codec: zstd, snappy, gzip, none
-        #[arg(long, default_value = "zstd")]
+        #[arg(long, default_value = "zstd", help_heading = "Output")]
         compression: String,
         /// Max compressed bytes per output file
-        #[arg(long, default_value = "268435456")]
+        #[arg(long, default_value = "268435456", help_heading = "Output")]
         flush_bytes: u64,
         /// Show what would be merged without writing
-        #[arg(long, default_value = "false")]
+        #[arg(long, default_value = "false", help_heading = "Execution")]
         dry_run: bool,
         /// AWS access key ID (for S3 paths)
-        #[arg(long, env = "AWS_ACCESS_KEY_ID", hide_env_values = true)]
+        #[arg(
+            long,
+            env = "AWS_ACCESS_KEY_ID",
+            hide_env_values = true,
+            help_heading = "AWS / S3"
+        )]
         aws_access_key_id: Option<String>,
         /// AWS secret access key (for S3 paths)
-        #[arg(long, env = "AWS_SECRET_ACCESS_KEY", hide_env_values = true)]
+        #[arg(
+            long,
+            env = "AWS_SECRET_ACCESS_KEY",
+            hide_env_values = true,
+            help_heading = "AWS / S3"
+        )]
         aws_secret_access_key: Option<String>,
         /// AWS session token (for S3 paths)
-        #[arg(long, env = "AWS_SESSION_TOKEN", hide_env_values = true)]
+        #[arg(
+            long,
+            env = "AWS_SESSION_TOKEN",
+            hide_env_values = true,
+            help_heading = "AWS / S3"
+        )]
         aws_session_token: Option<String>,
         /// AWS region (for S3 paths)
-        #[arg(long, env = "AWS_REGION", hide_env_values = true)]
+        #[arg(
+            long,
+            env = "AWS_REGION",
+            hide_env_values = true,
+            help_heading = "AWS / S3"
+        )]
         aws_region: Option<String>,
         /// AWS endpoint URL (for S3-compatible services)
-        #[arg(long, env = "AWS_ENDPOINT_URL_S3", hide_env_values = true)]
+        #[arg(
+            long,
+            env = "AWS_ENDPOINT_URL_S3",
+            hide_env_values = true,
+            help_heading = "AWS / S3"
+        )]
         aws_endpoint_url: Option<String>,
         /// Cache-Control header for S3 uploads
         #[arg(
             long,
             env = "CACHE_CONTROL",
-            default_value = "public, max-age=31536000, immutable"
+            default_value = "public, max-age=31536000, immutable",
+            help_heading = "AWS / S3"
         )]
         cache_control: String,
     },
@@ -874,27 +1036,53 @@ Lookup order:
 ")]
     Inspect {
         /// Path to a single .parquet file (local path, shorthand key via S3_BUCKET, or s3:// URI)
+        #[arg(help_heading = "Selection")]
         path: String,
         /// Only show the schema, including explicit nullability
-        #[arg(long, default_value = "false")]
+        #[arg(long, default_value = "false", help_heading = "Display")]
         schema_only: bool,
         /// Emit machine-readable JSON output
-        #[arg(long, default_value = "false")]
+        #[arg(long, default_value = "false", help_heading = "Display")]
         json: bool,
         /// AWS access key ID (for S3 paths)
-        #[arg(long, env = "AWS_ACCESS_KEY_ID", hide_env_values = true)]
+        #[arg(
+            long,
+            env = "AWS_ACCESS_KEY_ID",
+            hide_env_values = true,
+            help_heading = "AWS / S3"
+        )]
         aws_access_key_id: Option<String>,
         /// AWS secret access key (for S3 paths)
-        #[arg(long, env = "AWS_SECRET_ACCESS_KEY", hide_env_values = true)]
+        #[arg(
+            long,
+            env = "AWS_SECRET_ACCESS_KEY",
+            hide_env_values = true,
+            help_heading = "AWS / S3"
+        )]
         aws_secret_access_key: Option<String>,
         /// AWS session token (for S3 paths)
-        #[arg(long, env = "AWS_SESSION_TOKEN", hide_env_values = true)]
+        #[arg(
+            long,
+            env = "AWS_SESSION_TOKEN",
+            hide_env_values = true,
+            help_heading = "AWS / S3"
+        )]
         aws_session_token: Option<String>,
         /// AWS region (for S3 paths)
-        #[arg(long, env = "AWS_REGION", hide_env_values = true)]
+        #[arg(
+            long,
+            env = "AWS_REGION",
+            hide_env_values = true,
+            help_heading = "AWS / S3"
+        )]
         aws_region: Option<String>,
         /// AWS endpoint URL (for S3-compatible services)
-        #[arg(long, env = "AWS_ENDPOINT_URL_S3", hide_env_values = true)]
+        #[arg(
+            long,
+            env = "AWS_ENDPOINT_URL_S3",
+            hide_env_values = true,
+            help_heading = "AWS / S3"
+        )]
         aws_endpoint_url: Option<String>,
     },
     /// Delete parquet files from local filesystem or S3, with optional partition filtering.
@@ -939,29 +1127,55 @@ Lookup order:
 ")]
     Truncate {
         /// Path to a .parquet file, a directory containing .parquet files, a shorthand S3 key/prefix via S3_BUCKET, or an S3 URI
+        #[arg(help_heading = "Selection")]
         path: String,
         /// Partition filter(s) — only delete files matching these partition segments.
         /// Use a key name to match all values (e.g. "date" matches all date=* partitions),
         /// or a key=value with optional glob (e.g. "date=2026-01-*"). Repeatable.
-        #[arg(long, short = 'p')]
+        #[arg(long, short = 'p', help_heading = "Selection")]
         partition: Vec<String>,
         /// Show what would be deleted without actually deleting
-        #[arg(long, default_value = "false")]
+        #[arg(long, default_value = "false", help_heading = "Execution")]
         dry_run: bool,
         /// AWS access key ID (for S3 paths)
-        #[arg(long, env = "AWS_ACCESS_KEY_ID", hide_env_values = true)]
+        #[arg(
+            long,
+            env = "AWS_ACCESS_KEY_ID",
+            hide_env_values = true,
+            help_heading = "AWS / S3"
+        )]
         aws_access_key_id: Option<String>,
         /// AWS secret access key (for S3 paths)
-        #[arg(long, env = "AWS_SECRET_ACCESS_KEY", hide_env_values = true)]
+        #[arg(
+            long,
+            env = "AWS_SECRET_ACCESS_KEY",
+            hide_env_values = true,
+            help_heading = "AWS / S3"
+        )]
         aws_secret_access_key: Option<String>,
         /// AWS session token (for S3 paths)
-        #[arg(long, env = "AWS_SESSION_TOKEN", hide_env_values = true)]
+        #[arg(
+            long,
+            env = "AWS_SESSION_TOKEN",
+            hide_env_values = true,
+            help_heading = "AWS / S3"
+        )]
         aws_session_token: Option<String>,
         /// AWS region (for S3 paths)
-        #[arg(long, env = "AWS_REGION", hide_env_values = true)]
+        #[arg(
+            long,
+            env = "AWS_REGION",
+            hide_env_values = true,
+            help_heading = "AWS / S3"
+        )]
         aws_region: Option<String>,
         /// AWS endpoint URL (for S3-compatible services)
-        #[arg(long, env = "AWS_ENDPOINT_URL_S3", hide_env_values = true)]
+        #[arg(
+            long,
+            env = "AWS_ENDPOINT_URL_S3",
+            hide_env_values = true,
+            help_heading = "AWS / S3"
+        )]
         aws_endpoint_url: Option<String>,
     },
 }
