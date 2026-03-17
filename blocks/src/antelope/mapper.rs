@@ -703,7 +703,7 @@ mod tests {
     fn test_map_and_flush_single_block() {
         let block = make_test_block(100);
         let block_bytes = prost::Message::encode_to_vec(&block);
-        let mut mapper = AntelopeBlockMapper::new(false, EncodeBytes::Hex, false);
+        let mut mapper = AntelopeBlockMapper::new(true, EncodeBytes::HexNoPrefix, false);
         mapper
             .map_block(&block_bytes, &BlockIdentity::default(), None)
             .unwrap();
@@ -721,7 +721,7 @@ mod tests {
     fn test_antelope_canonical_ids_match_block_hash_fields() {
         let block = make_test_block(100);
         let block_bytes = prost::Message::encode_to_vec(&block);
-        let mut mapper = AntelopeBlockMapper::new(false, EncodeBytes::Hex, false);
+        let mut mapper = AntelopeBlockMapper::new(true, EncodeBytes::HexNoPrefix, false);
         let identity = BlockIdentity {
             block_num: 100,
             block_id: "firehose-envelope-id".to_string(),
@@ -754,8 +754,10 @@ mod tests {
             .as_any()
             .downcast_ref::<StringArray>()
             .unwrap();
-        assert_eq!(block_id.value(0), format!("0x{}", hash.value(0)));
-        assert_eq!(parent_id.value(0), format!("0x{}", make_test_hex_id(99)));
+        assert_eq!(block_id.value(0), hash.value(0));
+        assert_eq!(parent_id.value(0), make_test_hex_id(99));
+        assert!(!block_id.value(0).starts_with("0x"));
+        assert!(!parent_id.value(0).starts_with("0x"));
     }
 
     #[test]
@@ -806,7 +808,7 @@ mod tests {
     fn test_flush_resets_builders() {
         let block = make_test_block(1);
         let block_bytes = prost::Message::encode_to_vec(&block);
-        let mut mapper = AntelopeBlockMapper::new(false, EncodeBytes::Hex, false);
+        let mut mapper = AntelopeBlockMapper::new(true, EncodeBytes::HexNoPrefix, false);
         mapper
             .map_block(&block_bytes, &BlockIdentity::default(), None)
             .unwrap();
@@ -828,7 +830,7 @@ mod tests {
             ..Default::default()
         };
         let block_bytes = prost::Message::encode_to_vec(&block);
-        let mut mapper = AntelopeBlockMapper::new(false, EncodeBytes::Hex, false);
+        let mut mapper = AntelopeBlockMapper::new(true, EncodeBytes::HexNoPrefix, false);
         mapper
             .map_block(&block_bytes, &BlockIdentity::default(), None)
             .unwrap();
