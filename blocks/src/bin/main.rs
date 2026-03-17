@@ -135,6 +135,62 @@ struct WriterFlushOutcome {
     buffered: WriterBufferStats,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MapperFlushTrigger {
+    Bytes,
+    Blocks,
+    Rows,
+    Interval,
+}
+
+impl MapperFlushTrigger {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Bytes => "bytes",
+            Self::Blocks => "blocks",
+            Self::Rows => "rows",
+            Self::Interval => "interval",
+        }
+    }
+}
+
+fn next_mapper_flush_trigger(
+    flush_rows: Option<usize>,
+    max_table_rows: usize,
+    flush_blocks: Option<u64>,
+    blocks_since_flush: u64,
+    flush_interval_secs: Option<u64>,
+    last_flush_time: Instant,
+    flush_bytes: u64,
+    estimated_bytes: u64,
+) -> Option<MapperFlushTrigger> {
+    let time_to_flush = flush_interval_secs
+        .map(|secs| last_flush_time.elapsed().as_secs() >= secs)
+        .unwrap_or(false);
+
+    let rows_to_flush = flush_rows
+        .map(|limit| max_table_rows >= limit)
+        .unwrap_or(false);
+
+    let blocks_to_flush = flush_blocks
+        .map(|limit| blocks_since_flush >= limit)
+        .unwrap_or(false);
+
+    let bytes_to_flush = estimated_bytes >= flush_bytes;
+
+    if bytes_to_flush {
+        Some(MapperFlushTrigger::Bytes)
+    } else if blocks_to_flush {
+        Some(MapperFlushTrigger::Blocks)
+    } else if rows_to_flush {
+        Some(MapperFlushTrigger::Rows)
+    } else if time_to_flush {
+        Some(MapperFlushTrigger::Interval)
+    } else {
+        None
+    }
+}
+
 fn write_mapper_flush(
     writer: &mut OutputWriter,
     batches: &HashMap<String, RecordBatch>,
@@ -1098,6 +1154,7 @@ async fn run_partitions_build(
         output: PathBuf::from(&output_root),
         partition: Partition::None,
         flush_rows: None,
+        flush_blocks: None,
         flush_bytes: 0,
         flush_interval_secs: None,
         compression,
@@ -4386,6 +4443,7 @@ async fn run_ingestion(args: &BuildArgs) -> Result<()> {
     let final_blocks_only = config.final_blocks_only;
     let include_fork_step = !final_blocks_only;
     let flush_rows = config.flush_rows.map(|r| r as usize);
+    let flush_blocks = config.flush_blocks;
     let flush_bytes = config.flush_bytes;
     let flush_interval_secs = config.flush_interval_secs;
     let dry_run = config.dry_run;
@@ -4471,6 +4529,7 @@ async fn run_ingestion(args: &BuildArgs) -> Result<()> {
     // Global accumulators (not reset on flush) for final summary.
     let mut global_min_block: Option<u64> = None;
     let mut global_max_block: Option<u64> = None;
+    let mut blocks_since_flush: u64 = 0;
     let mut last_flush_time = Instant::now();
     let mut last_cursor: Option<String> = None;
     let mut last_block_num: u64 = 0;
@@ -4821,6 +4880,7 @@ async fn run_ingestion(args: &BuildArgs) -> Result<()> {
                         max_block = None;
                         min_timestamp = None;
                         max_timestamp = None;
+                        blocks_since_flush = 0;
                         last_flush_time = Instant::now();
                     }
                 }
@@ -4837,6 +4897,7 @@ async fn run_ingestion(args: &BuildArgs) -> Result<()> {
 
                 m.map_block(block_bytes, identity, fork_step)?;
                 blocks_processed += 1;
+                blocks_since_flush += 1;
                 bytes_read += block_bytes.len() as u64;
                 last_cursor = Some(cursor.to_owned());
                 last_block_num = block_number;
@@ -4917,24 +4978,17 @@ async fn run_ingestion(args: &BuildArgs) -> Result<()> {
                     pipeline_metrics.elapsed_seconds.set(elapsed_secs);
                 }
 
-                let time_to_flush = flush_interval_secs
-                    .map(|secs| last_flush_time.elapsed().as_secs() >= secs)
-                    .unwrap_or(false);
-
-                let rows_to_flush = flush_rows
-                    .map(|limit| m.max_table_rows() >= limit)
-                    .unwrap_or(false);
-
-                let bytes_to_flush = m.estimated_bytes() as u64 >= flush_bytes;
-
-                if rows_to_flush || time_to_flush || bytes_to_flush {
-                    let flush_trigger = if bytes_to_flush {
-                        "bytes"
-                    } else if rows_to_flush {
-                        "rows"
-                    } else {
-                        "interval"
-                    };
+                if let Some(flush_trigger) = next_mapper_flush_trigger(
+                    flush_rows,
+                    m.max_table_rows(),
+                    flush_blocks,
+                    blocks_since_flush,
+                    flush_interval_secs,
+                    last_flush_time,
+                    flush_bytes,
+                    m.estimated_bytes() as u64,
+                ) {
+                    let flush_trigger = flush_trigger.as_str();
                     let batches = m.flush()?;
                     let flushed_tables = batches.len();
                     let flushed_rows: usize = batches.values().map(|batch| batch.num_rows()).sum();
@@ -4986,6 +5040,7 @@ async fn run_ingestion(args: &BuildArgs) -> Result<()> {
                     max_block = None;
                     min_timestamp = None;
                     max_timestamp = None;
+                    blocks_since_flush = 0;
                     last_flush_time = Instant::now();
                 }
 
@@ -5313,6 +5368,30 @@ mod tests {
             "forced partition-boundary materialization should write the old partition immediately"
         );
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn test_next_mapper_flush_trigger_prefers_blocks_when_configured_limit_is_reached() {
+        let trigger = next_mapper_flush_trigger(
+            Some(10),
+            10,
+            Some(3),
+            3,
+            Some(60),
+            Instant::now(),
+            1_000_000,
+            128,
+        );
+
+        assert_eq!(trigger, Some(MapperFlushTrigger::Blocks));
+    }
+
+    #[test]
+    fn test_next_mapper_flush_trigger_ignores_blocks_when_flag_is_omitted() {
+        let trigger =
+            next_mapper_flush_trigger(None, 0, None, 3, None, Instant::now(), 1_000_000, 128);
+
+        assert_eq!(trigger, None);
     }
 
     #[test]
