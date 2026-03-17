@@ -97,7 +97,11 @@ pub fn calls_schema(include_fork_step: bool, encoding: &EncodeBytes) -> Schema {
         Field::new("call_index", DataType::UInt32, false),
         Field::new("parent_index", DataType::UInt32, false),
         Field::new("depth", DataType::UInt32, false),
-        Field::new("call_type", DataType::Int32, false),
+        Field::new(
+            "call_type",
+            DataType::Dictionary(Box::new(DataType::Int32), Box::new(DataType::Utf8)),
+            false,
+        ),
         Field::new("caller", bd.clone(), false),
         Field::new("address", bd.clone(), false),
         Field::new("value", DataType::Utf8, false),
