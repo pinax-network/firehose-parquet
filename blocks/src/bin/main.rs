@@ -45,6 +45,8 @@ const BLOCK_TYPES: &[&str] = &[
 const DEFAULT_TIMESTAMP_BACKFILL_BUFFER_LIMIT_BYTES: u64 = 134_217_728;
 const SOLANA_EXTENDED_ERROR: &str =
     "--extended is not supported for Solana; use --with-votes to emit vote_transactions";
+const ANTELOPE_EXTENDED_ERROR: &str =
+    "--extended is not supported for Antelope";
 const WITH_VOTES_NON_SOLANA_ERROR: &str = "--with-votes is only supported for Solana";
 
 #[derive(Parser, Debug)]
@@ -3392,6 +3394,10 @@ fn validate_chain_feature_flags(
         return Err(anyhow!(SOLANA_EXTENDED_ERROR));
     }
 
+    if chain_is_antelope(requested_block_type, endpoint_info, cursor_state) && extended_requested {
+        return Err(anyhow!(ANTELOPE_EXTENDED_ERROR));
+    }
+
     if chain_is_known_non_solana(requested_block_type, endpoint_info, cursor_state)
         && with_votes_requested
     {
@@ -3410,14 +3416,6 @@ fn log_solana_vote_mode(with_votes: bool) {
         info!("Solana vote_transactions enabled via --with-votes");
     } else {
         info!("Solana vote_transactions remain disabled without --with-votes");
-    }
-}
-
-fn log_antelope_db_ops_mode(extended_requested: bool) {
-    if extended_requested {
-        info!("Antelope always includes db_ops; ignoring --extended for Antelope output");
-    } else {
-        info!("Antelope includes db_ops by default");
     }
 }
 
@@ -4284,7 +4282,6 @@ async fn run_ingestion(args: &BuildArgs) -> Result<()> {
         extended = false;
         log_solana_vote_mode(with_votes);
     } else if antelope_chain {
-        log_antelope_db_ops_mode(extended);
         extended = false;
     } else if known_non_solana_chain {
         extended = resolve_extended_mode(extended, &endpoint_info);
@@ -4578,7 +4575,6 @@ async fn run_ingestion(args: &BuildArgs) -> Result<()> {
                     extended = false;
                     log_solana_vote_mode(with_votes);
                 } else if detected == "antelope" {
-                    log_antelope_db_ops_mode(extended);
                     extended = false;
                 } else {
                     extended = resolve_extended_mode(extended, &endpoint_info);
@@ -6898,6 +6894,13 @@ mod tests {
         let err = validate_chain_feature_flags("evm", &None, None, false, true)
             .expect_err("non-Solana chains should reject --with-votes");
         assert_eq!(err.to_string(), WITH_VOTES_NON_SOLANA_ERROR);
+    }
+
+    #[test]
+    fn test_validate_chain_feature_flags_rejects_extended_for_antelope() {
+        let err = validate_chain_feature_flags("antelope", &None, None, true, false)
+            .expect_err("Antelope should reject --extended");
+        assert_eq!(err.to_string(), ANTELOPE_EXTENDED_ERROR);
     }
 
     #[test]

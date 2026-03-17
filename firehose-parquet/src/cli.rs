@@ -356,7 +356,7 @@ Examples:
     --start-block 20000000 --stop-block 20001000 \\
     --bytes-encoding hex --extended
 
-  # Stream Antelope blocks (db_ops are included by default)
+  # Stream Antelope blocks
   fireparq build --block-type antelope \\
     --endpoint https://eos.firehose.pinax.network:443 \\
     --start-block 1000000 --stop-block 1001000
@@ -398,7 +398,6 @@ pub struct BuildArgs {
     pub block_type: String,
 
     /// Enable extended detail level for chains that support extra tables (for example EVM calls/balance_changes/etc.)
-    /// Antelope always includes `db_ops` by default and does not require this flag.
     #[arg(
         long,
         env = "EXTENDED",
@@ -6723,7 +6722,7 @@ mod tests {
     }
 
     #[test]
-    fn test_build_help_clarifies_antelope_db_ops_are_default() {
+    fn test_build_help_does_not_mention_antelope_extended_behavior() {
         let cmd = TestCli::command();
         let build = cmd
             .get_subcommands()
@@ -6732,8 +6731,9 @@ mod tests {
 
         let help = build.clone().render_long_help().to_string();
 
-        assert!(help.contains("Antelope always includes `db_ops` by default"));
-        assert!(help.contains("Stream Antelope blocks (db_ops are included by default)"));
+        assert!(!help.contains("Antelope always includes `db_ops` by default"));
+        assert!(!help.contains("Enable extended detail level (extra tables: EVM calls/balance_changes/etc., Antelope db_ops)"));
+        assert!(help.contains("Stream Antelope blocks"));
     }
 
     #[test]

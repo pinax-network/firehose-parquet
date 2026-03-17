@@ -13,7 +13,7 @@ A production-grade Rust toolkit that consumes [StreamingFast Firehose](https://f
 | `beacon` | `beacon.firehose.pinax.network:443` | blocks, attestations, deposits, proposer_slashings, attester_slashings, voluntary_exits, execution_payload, blob_sidecars |
 | `tron` | `tron.firehose.pinax.network:443` | blocks, transactions, logs, internal_transactions |
 | `cosmos` | `cosmoshub.firehose.pinax.network:443` | blocks, transactions, events, messages |
-| `antelope` | `eos.firehose.pinax.network:443` | blocks, transactions, actions, db_ops (always included) |
+| `antelope` | `eos.firehose.pinax.network:443` | blocks, transactions, actions, db_ops |
 | `near` | `near.firehose.pinax.network:443` | blocks, chunks, transactions, receipts, state_changes |
 
 > **Tip:** Use `--block-type auto` (the default) to auto-detect the chain from the Firehose stream's protobuf `type_url`.
@@ -84,7 +84,7 @@ cargo build --release --workspace
   --extended \
   --bytes-encoding hex
 
-# Stream Antelope blocks (db_ops are included by default)
+# Stream Antelope blocks
 ./target/release/fireparq build \
   --block-type antelope \
   --endpoint https://eos.firehose.pinax.network:443 \
@@ -332,7 +332,7 @@ Chain:
           Options: auto, evm, bitcoin, solana, near, antelope, cosmos, tron, beacon [env: BLOCK_TYPE] [default: auto]
       --extended
           Enable extended detail level for chains that support extra tables (for example EVM calls/balance_changes/etc.)
-          Antelope always includes `db_ops` by default and does not require this flag. [env: EXTENDED]
+          [env: EXTENDED]
       --with-votes
           Include Solana vote_transactions output (disabled by default) [env: WITH_VOTES]
       --bytes-encoding <BYTES_ENCODING>
