@@ -3413,9 +3413,9 @@ fn extended_warning_message() -> &'static str {
 
 fn log_solana_vote_mode(with_votes: bool) {
     if with_votes {
-        info!("Solana vote_transactions enabled via --with-votes");
+        info!("Solana vote_transactions enabled");
     } else {
-        info!("Solana vote_transactions remain disabled without --with-votes");
+        info!("Solana vote_transactions disabled via --with-votes false");
     }
 }
 
@@ -3471,17 +3471,17 @@ fn apply_antelope_cursor_feature_validation(mismatches: &mut Vec<String>) {
     mismatches.retain(|mismatch| !mismatch.starts_with("extended:"));
 }
 
-/// Keep `--extended` as the only switch that enables generic extended output
-/// while logging endpoint capability when available.
+/// Keep `--extended` as the generic extended-output control while logging
+/// endpoint capability when available.
 fn resolve_extended_mode(extended_requested: bool, endpoint_info: &Option<EndpointInfo>) -> bool {
     let endpoint_supports_extended = supports_extended(endpoint_info);
 
     if endpoint_supports_extended {
         if extended_requested {
-            info!("endpoint advertises extended block features; honoring --extended");
+            info!("endpoint advertises extended block features; extended output enabled");
         } else {
             info!(
-                "endpoint advertises extended block features; extended output remains disabled without --extended"
+                "endpoint advertises extended block features; extended output disabled via --extended false"
             );
         }
     } else if extended_requested {
@@ -5376,7 +5376,6 @@ mod tests {
             "100",
             "--stop-block",
             "200",
-            "--extended",
             "--block-type",
             "evm",
             "--bytes-encoding",
@@ -5386,6 +5385,30 @@ mod tests {
             assert!(build_args.extended);
             assert_eq!(build_args.block_type, "evm");
             assert_eq!(build_args.bytes_encoding, "hex");
+        } else {
+            panic!("expected Commands::Build");
+        }
+    }
+
+    #[test]
+    fn test_build_subcommand_accepts_explicit_false_feature_flags() {
+        let cli = Cli::parse_from([
+            "fireparq",
+            "build",
+            "--network",
+            "solana-mainnet-beta",
+            "--start-block",
+            "100",
+            "--stop-block",
+            "200",
+            "--extended",
+            "false",
+            "--with-votes",
+            "false",
+        ]);
+        if let Some(Commands::Build(build_args)) = cli.command {
+            assert!(!build_args.extended);
+            assert!(!build_args.with_votes);
         } else {
             panic!("expected Commands::Build");
         }
@@ -5402,10 +5425,10 @@ mod tests {
             "100",
             "--stop-block",
             "200",
-            "--with-votes",
         ]);
         if let Some(Commands::Build(build_args)) = cli.command {
             assert!(build_args.with_votes);
+            assert!(build_args.extended);
             assert_eq!(build_args.network.as_deref(), Some("solana-mainnet-beta"));
         } else {
             panic!("expected Commands::Build");

@@ -6,9 +6,8 @@ A production-grade Rust toolkit that consumes [StreamingFast Firehose](https://f
 
 | `--block-type` | Endpoint Example | Tables |
 |---|---|---|
-| `evm` | `eth.firehose.pinax.network:443` | blocks, transactions, logs |
-| `evm --extended` | | + calls, balance_changes, code_changes, storage_changes, nonce_changes, gas_changes, account_creations |
-| `solana` | `solana.firehose.pinax.network:443` | blocks, transactions, messages, instructions, rewards, token_balances, account_lookups (`--with-votes`: `vote_transactions`) |
+| `evm` | `eth.firehose.pinax.network:443` | blocks, transactions, logs, calls, balance_changes, code_changes, storage_changes, nonce_changes, gas_changes, account_creations (`--extended false` disables extra tables) |
+| `solana` | `solana.firehose.pinax.network:443` | blocks, transactions, messages, instructions, rewards, token_balances, account_lookups, vote_transactions (`--with-votes false` disables `vote_transactions`) |
 | `bitcoin` | `btc.firehose.pinax.network:443` | blocks, transactions, inputs, outputs |
 | `beacon` | `beacon.firehose.pinax.network:443` | blocks, attestations, deposits, proposer_slashings, attester_slashings, voluntary_exits, execution_payload, blob_sidecars |
 | `tron` | `tron.firehose.pinax.network:443` | blocks, transactions, logs, internal_transactions |
@@ -67,21 +66,21 @@ cargo build --release --workspace
   --partition date \
   --compression zstd
 
-# Include Solana vote transactions explicitly
+# Disable Solana vote transactions explicitly
 ./target/release/fireparq build \
   --network solana-mainnet-beta \
   --start-block 200000000 \
   --stop-block 200001000 \
-  --with-votes \
+  --with-votes false \
   --output ./output
 
-# Stream EVM blocks with extended traces (explicit block type)
+# Disable extended EVM tables explicitly (explicit block type)
 ./target/release/fireparq build \
   --block-type evm \
   --endpoint https://eth.firehose.pinax.network:443 \
   --start-block 19000000 \
   --stop-block 19001000 \
-  --extended \
+  --extended false \
   --bytes-encoding hex
 
 # Stream Antelope blocks
@@ -330,11 +329,12 @@ Chain:
       --block-type <BLOCK_TYPE>
           Block type to process. Use "auto" to detect from the Firehose stream.
           Options: auto, evm, bitcoin, solana, near, antelope, cosmos, tron, beacon [env: BLOCK_TYPE] [default: auto]
-      --extended
+      --extended [<EXTENDED>]
           Enable extended detail level for chains that support extra tables (for example EVM calls/balance_changes/etc.)
-          [env: EXTENDED]
-      --with-votes
-          Include Solana vote_transactions output (disabled by default) [env: WITH_VOTES]
+          Enabled by default; disable with `--extended false`. [env: EXTENDED] [default: true]
+      --with-votes [<WITH_VOTES>]
+          Include Solana vote_transactions output. Enabled by default; disable with `--with-votes false`
+          [env: WITH_VOTES] [default: true]
       --bytes-encoding <BYTES_ENCODING>
           Byte encoding strategy for binary fields (hashes, addresses, etc.)
           Options: binary (raw bytes), hex (0x-prefixed), hex_no_prefix, base58, tron_base58, auto (chain-appropriate)

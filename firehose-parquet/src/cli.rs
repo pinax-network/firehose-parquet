@@ -1,6 +1,6 @@
 use crate::config::{Compression, Config, Partition};
 use crate::networks::KNOWN_NETWORK_NAMES;
-use clap::builder::PossibleValuesParser;
+use clap::builder::{BoolishValueParser, PossibleValuesParser};
 use clap::Args;
 use clap_complete::{generate, Shell};
 use std::io;
@@ -346,15 +346,15 @@ Examples:
   FIREHOSE_ENDPOINT_SOLANA_MAINNET_BETA=https://solana.internal.example.com:443 \\
     fireparq build --network solana-mainnet-beta --start-block 250000000 --stop-block 250100000
 
-  # Stream Solana vote transactions explicitly
+  # Disable Solana vote transactions explicitly
   fireparq build --network solana-mainnet-beta \\
     --start-block 250000000 --stop-block 250001000 \\
-    --with-votes
+    --with-votes false
 
-  # Stream with hex encoding and extended EVM tables
+  # Disable extended EVM tables explicitly
   fireparq build --network mainnet \\
     --start-block 20000000 --stop-block 20001000 \\
-    --bytes-encoding hex --extended
+    --bytes-encoding hex --extended false
 
   # Stream Antelope blocks
   fireparq build --block-type antelope \\
@@ -398,20 +398,28 @@ pub struct BuildArgs {
     pub block_type: String,
 
     /// Enable extended detail level for chains that support extra tables (for example EVM calls/balance_changes/etc.)
+    /// Enabled by default; disable with `--extended false`.
     #[arg(
         long,
         env = "EXTENDED",
-        default_value = "false",
+        default_value = "true",
+        default_missing_value = "true",
+        num_args = 0..=1,
+        value_parser = BoolishValueParser::new(),
         hide_env_values = true,
         help_heading = "Chain"
     )]
     pub extended: bool,
 
-    /// Include Solana `vote_transactions` output (disabled by default)
+    /// Include Solana `vote_transactions` output.
+    /// Enabled by default; disable with `--with-votes false`.
     #[arg(
         long,
         env = "WITH_VOTES",
-        default_value = "false",
+        default_value = "true",
+        default_missing_value = "true",
+        num_args = 0..=1,
+        value_parser = BoolishValueParser::new(),
         hide_env_values = true,
         help_heading = "Chain"
     )]
@@ -7018,6 +7026,10 @@ mod tests {
         assert!(!help.contains("Antelope always includes `db_ops` by default"));
         assert!(!help.contains("Enable extended detail level (extra tables: EVM calls/balance_changes/etc., Antelope db_ops)"));
         assert!(help.contains("Stream Antelope blocks"));
+        assert!(help.contains("--extended [<EXTENDED>]"));
+        assert!(help.contains("Enabled by default; disable with `--extended false`"));
+        assert!(help.contains("--with-votes [<WITH_VOTES>]"));
+        assert!(help.contains("Enabled by default; disable with `--with-votes false`"));
     }
 
     #[test]
