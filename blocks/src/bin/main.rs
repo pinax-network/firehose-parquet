@@ -228,9 +228,14 @@ fn output_encoding_policy(
             block_id_encoding: "hex_no_prefix",
             allow_endpoint_block_id_hint: false,
         }),
-        "evm" | "bitcoin" | "antelope" | "cosmos" | "beacon" => Some(OutputEncodingPolicy {
+        "evm" | "bitcoin" | "cosmos" | "beacon" => Some(OutputEncodingPolicy {
             bytes_encoding: EncodeBytes::Hex,
             block_id_encoding: "hex_0x",
+            allow_endpoint_block_id_hint: false,
+        }),
+        "antelope" => Some(OutputEncodingPolicy {
+            bytes_encoding: EncodeBytes::HexNoPrefix,
+            block_id_encoding: "hex_no_prefix",
             allow_endpoint_block_id_hint: false,
         }),
         "solana" | "near" => Some(OutputEncodingPolicy {
@@ -5997,7 +6002,7 @@ mod tests {
         );
         assert_eq!(
             output_encoding_policy("antelope", false).map(|policy| policy.bytes_encoding),
-            Some(EncodeBytes::Hex)
+            Some(EncodeBytes::HexNoPrefix)
         );
         assert_eq!(
             output_encoding_policy("cosmos", false).map(|policy| policy.bytes_encoding),
@@ -6037,7 +6042,7 @@ mod tests {
         );
         assert_eq!(
             output_encoding_policy("antelope", false).map(|policy| policy.block_id_encoding),
-            Some("hex_0x")
+            Some("hex_no_prefix")
         );
         assert_eq!(
             output_encoding_policy("cosmos", false).map(|policy| policy.block_id_encoding),
@@ -6208,7 +6213,7 @@ mod tests {
             ("bitcoin", false, 3, EncodeBytes::Hex),
             ("solana", false, 2, EncodeBytes::Base58),
             ("near", false, 2, EncodeBytes::Base58),
-            ("antelope", false, 3, EncodeBytes::Hex),
+            ("antelope", false, 3, EncodeBytes::HexNoPrefix),
             ("cosmos", false, 3, EncodeBytes::Hex),
             ("tron", false, 2, EncodeBytes::TronBase58),
             ("beacon", false, 3, EncodeBytes::Hex),
