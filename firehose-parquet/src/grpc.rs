@@ -484,6 +484,7 @@ mod tests {
             output: PathBuf::from("/tmp/output"),
             partition: Partition::None,
             flush_rows: None,
+            flush_blocks: None,
             flush_bytes: 0,
             flush_interval_secs: None,
             compression: Compression::Zstd,

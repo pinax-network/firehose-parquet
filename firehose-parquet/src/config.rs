@@ -68,6 +68,7 @@ pub struct Config {
     pub output: PathBuf,
     pub partition: Partition,
     pub flush_rows: Option<u32>,
+    pub flush_blocks: Option<u64>,
     pub flush_bytes: u64,
     pub flush_interval_secs: Option<u64>,
     pub compression: Compression,
@@ -260,6 +261,9 @@ impl std::fmt::Display for Config {
         if let Some(rows) = self.flush_rows {
             writeln!(f, "  flush_rows         {rows}")?;
         }
+        if let Some(blocks) = self.flush_blocks {
+            writeln!(f, "  flush_blocks       {blocks}")?;
+        }
         writeln!(f, "  flush_bytes        {flush_bytes}")?;
         if let Some(secs) = self.flush_interval_secs {
             writeln!(f, "  flush_interval     {secs}s")?;
@@ -321,6 +325,7 @@ impl Default for Config {
             output: PathBuf::from("."),
             partition: Partition::None,
             flush_rows: None,
+            flush_blocks: None,
             flush_bytes: 128 * 1024 * 1024, // 128 MiB; set to 0 to disable size-based rollover
             flush_interval_secs: None,
             compression: Compression::Zstd,
@@ -374,6 +379,7 @@ mod tests {
         assert!(display.contains("partition          none"));
         assert!(display.contains("compression        zstd"));
         assert!(!display.contains("flush_rows"));
+        assert!(!display.contains("flush_blocks"));
         assert!(display.contains("128 MiB"));
         assert!(display.contains("final_blocks_only  true"));
         // dry_run defaults to false, so it should not appear
@@ -452,6 +458,16 @@ mod tests {
         };
         let display = config.to_string();
         assert!(display.contains("flush_interval     60s"));
+    }
+
+    #[test]
+    fn test_config_display_with_flush_blocks() {
+        let config = Config {
+            flush_blocks: Some(25),
+            ..Config::default()
+        };
+        let display = config.to_string();
+        assert!(display.contains("flush_blocks       25"));
     }
 
     #[test]

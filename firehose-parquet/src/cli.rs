@@ -203,6 +203,16 @@ pub struct CommonArgs {
     )]
     pub flush_rows: Option<u32>,
 
+    /// Flush written files after this many processed blocks (disabled by default)
+    #[arg(
+        long,
+        env = "FLUSH_BLOCKS",
+        hide_env_values = true,
+        help_heading = "Flush",
+        value_parser = clap::value_parser!(u64).range(1..)
+    )]
+    pub flush_blocks: Option<u64>,
+
     /// Flush mapper state at this many in-memory bytes and target roughly this many compressed bytes per parquet file
     #[arg(
         long,
@@ -3601,6 +3611,7 @@ pub fn build_config(args: &CommonArgs) -> anyhow::Result<Config> {
         output,
         partition: parse_partition(&args.partition, args.block_range_size)?,
         flush_rows: args.flush_rows,
+        flush_blocks: args.flush_blocks,
         flush_bytes: args.flush_bytes,
         flush_interval_secs: args.flush_interval_secs,
         compression: parse_compression(&args.compression)?,
@@ -6338,6 +6349,7 @@ mod tests {
         assert_eq!(cli.common.partition, "none");
         assert_eq!(cli.common.block_range_size, 10000);
         assert!(cli.common.flush_rows.is_none());
+        assert!(cli.common.flush_blocks.is_none());
         assert_eq!(cli.common.flush_bytes, 134217728);
         assert_eq!(cli.common.compression, "zstd");
         assert_eq!(cli.common.log_level, "info");
@@ -6389,6 +6401,8 @@ mod tests {
             "5000",
             "--flush-rows",
             "10000",
+            "--flush-blocks",
+            "250",
             "--flush-bytes",
             "1000000",
             "--flush-interval-secs",
@@ -6421,6 +6435,7 @@ mod tests {
         assert_eq!(cli.common.partition, "date");
         assert_eq!(cli.common.block_range_size, 5000);
         assert_eq!(cli.common.flush_rows, Some(10000));
+        assert_eq!(cli.common.flush_blocks, Some(250));
         assert_eq!(cli.common.flush_bytes, 1000000);
         assert_eq!(cli.common.flush_interval_secs, Some(60));
         assert_eq!(cli.common.stream_idle_timeout_secs, Some(45));
@@ -6493,6 +6508,7 @@ mod tests {
         assert_eq!(config.compression, Compression::Gzip);
         assert_eq!(config.partition, Partition::Date);
         assert!(config.flush_rows.is_none());
+        assert!(config.flush_blocks.is_none());
         assert!(config.final_blocks_only);
         assert_eq!(config.stream_idle_timeout_secs, Some(120));
         assert_eq!(config.reconnect_stall_timeout_secs, Some(900));
@@ -7005,11 +7021,27 @@ mod tests {
         let help = build.clone().render_long_help().to_string();
 
         assert!(help.contains("Flush mapper state after this many rows"));
+        assert!(help.contains("Flush written files after this many processed blocks"));
         assert!(help.contains("does not guarantee parquet files are materialized"));
         assert!(help.contains(
             "Flush mapper state at this many in-memory bytes and target roughly this many compressed bytes per parquet file"
         ));
         assert!(help.contains("Flush mapper state every N seconds"));
+    }
+
+    #[test]
+    fn test_flush_blocks_rejects_zero() {
+        let err = try_parse(&[
+            "test-cli",
+            "--endpoint",
+            "https://example.com:443",
+            "--flush-blocks",
+            "0",
+        ])
+        .expect_err("flush-blocks=0 should fail clap parsing");
+
+        let rendered = err.to_string();
+        assert!(rendered.contains("--flush-blocks"));
     }
 
     #[test]
