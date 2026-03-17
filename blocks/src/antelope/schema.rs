@@ -68,8 +68,5 @@ pub fn db_ops_schema(include_fork_step: bool, encoding: &EncodeBytes) -> Schema 
     Schema::new(fields)
 }
 
-/// Standard table names (available at BASE detail level).
-pub const BASE_TABLE_NAMES: [&str; 3] = ["blocks", "transactions", "actions"];
-
-/// Extended table names (available at EXTENDED detail level).
-pub const EXTENDED_TABLE_NAMES: [&str; 4] = ["blocks", "transactions", "actions", "db_ops"];
+/// Antelope tables emitted by default.
+pub const TABLE_NAMES: [&str; 4] = ["blocks", "transactions", "actions", "db_ops"];

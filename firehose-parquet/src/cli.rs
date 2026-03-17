@@ -351,10 +351,15 @@ Examples:
     --start-block 250000000 --stop-block 250001000 \\
     --with-votes
 
-  # Stream with hex encoding and extended tables
+  # Stream with hex encoding and extended EVM tables
   fireparq build --network mainnet \\
     --start-block 20000000 --stop-block 20001000 \\
     --bytes-encoding hex --extended
+
+  # Stream Antelope blocks (db_ops are included by default)
+  fireparq build --block-type antelope \\
+    --endpoint https://eos.firehose.pinax.network:443 \\
+    --start-block 1000000 --stop-block 1001000
 
   # Resume from cursor
   fireparq build --network mainnet \\
@@ -392,7 +397,8 @@ pub struct BuildArgs {
     )]
     pub block_type: String,
 
-    /// Enable extended detail level (extra tables: EVM calls/balance_changes/etc., Antelope db_ops)
+    /// Enable extended detail level for chains that support extra tables (for example EVM calls/balance_changes/etc.)
+    /// Antelope always includes `db_ops` by default and does not require this flag.
     #[arg(
         long,
         env = "EXTENDED",
@@ -6714,6 +6720,20 @@ mod tests {
             "Flush mapper state at this many in-memory bytes and target roughly this many compressed bytes per parquet file"
         ));
         assert!(help.contains("Flush mapper state every N seconds"));
+    }
+
+    #[test]
+    fn test_build_help_clarifies_antelope_db_ops_are_default() {
+        let cmd = TestCli::command();
+        let build = cmd
+            .get_subcommands()
+            .find(|subcmd| subcmd.get_name() == "build")
+            .expect("build subcommand should exist");
+
+        let help = build.clone().render_long_help().to_string();
+
+        assert!(help.contains("Antelope always includes `db_ops` by default"));
+        assert!(help.contains("Stream Antelope blocks (db_ops are included by default)"));
     }
 
     #[test]

@@ -3283,6 +3283,11 @@ fn chain_name_is_solana(name: &str) -> bool {
     normalized == "solana" || normalized.starts_with("solana-")
 }
 
+fn chain_name_is_antelope(name: &str) -> bool {
+    let normalized = name.to_ascii_lowercase();
+    normalized == "antelope" || normalized.starts_with("antelope-") || normalized == "eos"
+}
+
 fn endpoint_chain_is_solana(endpoint_info: &Option<EndpointInfo>) -> bool {
     endpoint_info.as_ref().is_some_and(|ei| {
         chain_name_is_solana(&ei.chain_name)
@@ -3290,6 +3295,16 @@ fn endpoint_chain_is_solana(endpoint_info: &Option<EndpointInfo>) -> bool {
                 .chain_name_aliases
                 .iter()
                 .any(|alias| chain_name_is_solana(alias))
+    })
+}
+
+fn endpoint_chain_is_antelope(endpoint_info: &Option<EndpointInfo>) -> bool {
+    endpoint_info.as_ref().is_some_and(|ei| {
+        chain_name_is_antelope(&ei.chain_name)
+            || ei
+                .chain_name_aliases
+                .iter()
+                .any(|alias| chain_name_is_antelope(alias))
     })
 }
 
@@ -3309,6 +3324,18 @@ fn cursor_chain_is_solana(cursor_state: Option<&CursorState>) -> bool {
         })
 }
 
+fn cursor_chain_is_antelope(cursor_state: Option<&CursorState>) -> bool {
+    cursor_metadata_block_type(cursor_state).is_some_and(chain_name_is_antelope)
+        || cursor_state.is_some_and(|state| {
+            state
+                .get_metadata("firehose-parquet.chain_name")
+                .is_some_and(chain_name_is_antelope)
+                || state
+                    .get_metadata("firehose-parquet.chain_name_aliases")
+                    .is_some_and(|aliases| aliases.split(',').any(chain_name_is_antelope))
+        })
+}
+
 fn chain_is_solana(
     requested_block_type: &str,
     endpoint_info: &Option<EndpointInfo>,
@@ -3317,6 +3344,17 @@ fn chain_is_solana(
     requested_block_type == "solana"
         || (requested_block_type == "auto"
             && (endpoint_chain_is_solana(endpoint_info) || cursor_chain_is_solana(cursor_state)))
+}
+
+fn chain_is_antelope(
+    requested_block_type: &str,
+    endpoint_info: &Option<EndpointInfo>,
+    cursor_state: Option<&CursorState>,
+) -> bool {
+    requested_block_type == "antelope"
+        || (requested_block_type == "auto"
+            && (endpoint_chain_is_antelope(endpoint_info)
+                || cursor_chain_is_antelope(cursor_state)))
 }
 
 fn chain_is_known_non_solana(
@@ -3370,6 +3408,14 @@ fn log_solana_vote_mode(with_votes: bool) {
     }
 }
 
+fn log_antelope_db_ops_mode(extended_requested: bool) {
+    if extended_requested {
+        info!("Antelope always includes db_ops; ignoring --extended for Antelope output");
+    } else {
+        info!("Antelope includes db_ops by default");
+    }
+}
+
 fn maybe_add_solana_with_votes_metadata(
     meta: &mut ParquetFileMetadata,
     block_type: Option<&str>,
@@ -3416,6 +3462,10 @@ fn apply_solana_cursor_feature_validation(
             with_votes
         ));
     }
+}
+
+fn apply_antelope_cursor_feature_validation(mismatches: &mut Vec<String>) {
+    mismatches.retain(|mismatch| !mismatch.starts_with("extended:"));
 }
 
 /// Keep `--extended` as the only switch that enables generic extended output
@@ -4194,6 +4244,8 @@ async fn run_ingestion(args: &BuildArgs) -> Result<()> {
         with_votes,
     )?;
     let solana_chain = chain_is_solana(&block_type, &endpoint_info, existing_cursor_state.as_ref());
+    let antelope_chain =
+        chain_is_antelope(&block_type, &endpoint_info, existing_cursor_state.as_ref());
     let known_non_solana_chain =
         chain_is_known_non_solana(&block_type, &endpoint_info, existing_cursor_state.as_ref());
 
@@ -4227,6 +4279,9 @@ async fn run_ingestion(args: &BuildArgs) -> Result<()> {
     if solana_chain {
         extended = false;
         log_solana_vote_mode(with_votes);
+    } else if antelope_chain {
+        log_antelope_db_ops_mode(extended);
+        extended = false;
     } else if known_non_solana_chain {
         extended = resolve_extended_mode(extended, &endpoint_info);
     }
@@ -4479,6 +4534,8 @@ async fn run_ingestion(args: &BuildArgs) -> Result<()> {
         mismatches.retain(|mismatch| !mismatch.starts_with("stop_block:"));
         if solana_chain {
             apply_solana_cursor_feature_validation(&mut mismatches, loaded, with_votes);
+        } else if antelope_chain {
+            apply_antelope_cursor_feature_validation(&mut mismatches);
         }
         if !mismatches.is_empty() {
             if args.cursor_override {
@@ -4516,6 +4573,9 @@ async fn run_ingestion(args: &BuildArgs) -> Result<()> {
                 if detected == "solana" {
                     extended = false;
                     log_solana_vote_mode(with_votes);
+                } else if detected == "antelope" {
+                    log_antelope_db_ops_mode(extended);
+                    extended = false;
                 } else {
                     extended = resolve_extended_mode(extended, &endpoint_info);
                 }
@@ -6741,6 +6801,14 @@ mod tests {
     }
 
     #[test]
+    fn test_chain_name_is_antelope_matches_expected_aliases() {
+        assert!(chain_name_is_antelope("antelope"));
+        assert!(chain_name_is_antelope("antelope-mainnet"));
+        assert!(chain_name_is_antelope("eos"));
+        assert!(!chain_name_is_antelope("mainnet"));
+    }
+
+    #[test]
     fn test_endpoint_chain_is_solana_matches_expected_aliases() {
         let ei = Some(EndpointInfo {
             chain_name: "solana-mainnet-beta".to_string(),
@@ -6752,6 +6820,20 @@ mod tests {
         });
 
         assert!(endpoint_chain_is_solana(&ei));
+    }
+
+    #[test]
+    fn test_endpoint_chain_is_antelope_matches_expected_aliases() {
+        let ei = Some(EndpointInfo {
+            chain_name: "eos".to_string(),
+            chain_name_aliases: vec!["antelope-mainnet".to_string()],
+            first_streamable_block_num: 0,
+            first_streamable_block_id: String::new(),
+            block_id_encoding: 3,
+            block_features: vec![],
+        });
+
+        assert!(endpoint_chain_is_antelope(&ei));
     }
 
     #[test]
@@ -6812,6 +6894,21 @@ mod tests {
         let err = validate_chain_feature_flags("evm", &None, None, false, true)
             .expect_err("non-Solana chains should reject --with-votes");
         assert_eq!(err.to_string(), WITH_VOTES_NON_SOLANA_ERROR);
+    }
+
+    #[test]
+    fn test_antelope_cursor_feature_validation_ignores_extended_mismatch() {
+        let mut mismatches = vec![
+            "extended: cursor=true vs current=false".to_string(),
+            "include_failed_transactions: cursor=false vs current=true".to_string(),
+        ];
+
+        apply_antelope_cursor_feature_validation(&mut mismatches);
+
+        assert_eq!(
+            mismatches,
+            vec!["include_failed_transactions: cursor=false vs current=true".to_string()]
+        );
     }
 
     #[test]
