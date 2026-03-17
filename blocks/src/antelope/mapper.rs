@@ -57,7 +57,6 @@ pub struct AntelopeBlockMapper {
 
 impl AntelopeBlockMapper {
     pub fn new(
-        _extended: bool,
         include_fork_step: bool,
         encoding: EncodeBytes,
         include_failed_transactions: bool,
@@ -704,7 +703,7 @@ mod tests {
     fn test_map_and_flush_single_block() {
         let block = make_test_block(100);
         let block_bytes = prost::Message::encode_to_vec(&block);
-        let mut mapper = AntelopeBlockMapper::new(true, false, EncodeBytes::Hex, false);
+        let mut mapper = AntelopeBlockMapper::new(false, EncodeBytes::Hex, false);
         mapper
             .map_block(&block_bytes, &BlockIdentity::default(), None)
             .unwrap();
@@ -722,7 +721,7 @@ mod tests {
     fn test_antelope_canonical_ids_match_block_hash_fields() {
         let block = make_test_block(100);
         let block_bytes = prost::Message::encode_to_vec(&block);
-        let mut mapper = AntelopeBlockMapper::new(true, false, EncodeBytes::Hex, false);
+        let mut mapper = AntelopeBlockMapper::new(false, EncodeBytes::Hex, false);
         let identity = BlockIdentity {
             block_num: 100,
             block_id: "firehose-envelope-id".to_string(),
@@ -763,7 +762,7 @@ mod tests {
     fn test_antelope_hex_no_prefix_canonical_ids_match_block_hash_fields() {
         let block = make_test_block(100);
         let block_bytes = prost::Message::encode_to_vec(&block);
-        let mut mapper = AntelopeBlockMapper::new(true, false, EncodeBytes::HexNoPrefix, false);
+        let mut mapper = AntelopeBlockMapper::new(false, EncodeBytes::HexNoPrefix, false);
         let identity = BlockIdentity {
             block_num: 100,
             block_id: "firehose-envelope-id".to_string(),
@@ -807,7 +806,7 @@ mod tests {
     fn test_flush_resets_builders() {
         let block = make_test_block(1);
         let block_bytes = prost::Message::encode_to_vec(&block);
-        let mut mapper = AntelopeBlockMapper::new(true, false, EncodeBytes::Hex, false);
+        let mut mapper = AntelopeBlockMapper::new(false, EncodeBytes::Hex, false);
         mapper
             .map_block(&block_bytes, &BlockIdentity::default(), None)
             .unwrap();
@@ -829,7 +828,7 @@ mod tests {
             ..Default::default()
         };
         let block_bytes = prost::Message::encode_to_vec(&block);
-        let mut mapper = AntelopeBlockMapper::new(true, false, EncodeBytes::Hex, false);
+        let mut mapper = AntelopeBlockMapper::new(false, EncodeBytes::Hex, false);
         mapper
             .map_block(&block_bytes, &BlockIdentity::default(), None)
             .unwrap();
@@ -844,7 +843,7 @@ mod tests {
     fn test_fork_step_column_included() {
         let block = make_test_block(100);
         let block_bytes = prost::Message::encode_to_vec(&block);
-        let mut mapper = AntelopeBlockMapper::new(true, true, EncodeBytes::Hex, false);
+        let mut mapper = AntelopeBlockMapper::new(true, EncodeBytes::Hex, false);
         mapper
             .map_block(&block_bytes, &BlockIdentity::default(), Some("NEW"))
             .unwrap();
@@ -863,7 +862,7 @@ mod tests {
 
     #[test]
     fn test_table_names_include_db_ops_without_extended() {
-        let mapper = AntelopeBlockMapper::new(false, false, EncodeBytes::Hex, false);
+        let mapper = AntelopeBlockMapper::new(false, EncodeBytes::Hex, false);
         let names = mapper.table_names();
         assert_eq!(names.len(), 4);
         assert!(names.contains(&"blocks"));
@@ -874,7 +873,7 @@ mod tests {
 
     #[test]
     fn test_table_names_extended_still_include_db_ops() {
-        let mapper = AntelopeBlockMapper::new(true, false, EncodeBytes::Hex, false);
+        let mapper = AntelopeBlockMapper::new(false, EncodeBytes::Hex, false);
         let names = mapper.table_names();
         assert_eq!(names.len(), 4);
         assert!(names.contains(&"blocks"));
@@ -887,7 +886,7 @@ mod tests {
     fn test_base_includes_db_ops() {
         let block = make_test_block(100);
         let block_bytes = prost::Message::encode_to_vec(&block);
-        let mut mapper = AntelopeBlockMapper::new(false, false, EncodeBytes::Hex, false);
+        let mut mapper = AntelopeBlockMapper::new(false, EncodeBytes::Hex, false);
         mapper
             .map_block(&block_bytes, &BlockIdentity::default(), None)
             .unwrap();

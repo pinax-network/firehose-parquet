@@ -3522,7 +3522,6 @@ fn create_mapper(
             include_failed_transactions,
         ))),
         "antelope" => Ok(Box::new(AntelopeBlockMapper::new(
-            extended,
             include_fork_step,
             encode_bytes,
             include_failed_transactions,
