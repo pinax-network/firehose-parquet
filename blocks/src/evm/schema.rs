@@ -8,6 +8,10 @@ fn maybe_fork_step(fields: &mut Vec<Field>, include: bool) {
     }
 }
 
+fn enum_data_type() -> DataType {
+    DataType::Dictionary(Box::new(DataType::Int32), Box::new(DataType::Utf8))
+}
+
 // ==========================================================================
 // Standard tables (BASE detail level)
 // ==========================================================================
@@ -32,7 +36,7 @@ pub fn blocks_schema(include_fork_step: bool, encoding: &EncodeBytes) -> Schema 
         Field::new("mix_hash", bd.clone(), false),
         Field::new("extra_data", bd, false),
         Field::new("num_transactions", DataType::UInt32, false),
-        Field::new("detail_level", DataType::Int32, false),
+        Field::new("detail_level", enum_data_type(), false),
     ]);
     maybe_fork_step(&mut fields, include_fork_step);
     Schema::new(fields)
@@ -51,8 +55,8 @@ pub fn transactions_schema(include_fork_step: bool, encoding: &EncodeBytes) -> S
         Field::new("gas_limit", DataType::UInt64, false),
         Field::new("gas_used", DataType::UInt64, false),
         Field::new("gas_price", DataType::Utf8, true),
-        Field::new("type", DataType::Int32, false),
-        Field::new("status", DataType::Int32, false),
+        Field::new("type", enum_data_type(), false),
+        Field::new("status", enum_data_type(), false),
         Field::new("nonce", DataType::UInt64, false),
         Field::new("input", bd, false),
         Field::new("max_fee_per_gas", DataType::Utf8, true),
@@ -97,11 +101,7 @@ pub fn calls_schema(include_fork_step: bool, encoding: &EncodeBytes) -> Schema {
         Field::new("call_index", DataType::UInt32, false),
         Field::new("parent_index", DataType::UInt32, false),
         Field::new("depth", DataType::UInt32, false),
-        Field::new(
-            "call_type",
-            DataType::Dictionary(Box::new(DataType::Int32), Box::new(DataType::Utf8)),
-            false,
-        ),
+        Field::new("call_type", enum_data_type(), false),
         Field::new("caller", bd.clone(), false),
         Field::new("address", bd.clone(), false),
         Field::new("value", DataType::Utf8, false),
@@ -129,7 +129,7 @@ pub fn balance_changes_schema(include_fork_step: bool, encoding: &EncodeBytes) -
         Field::new("address", bd, false),
         Field::new("old_value", DataType::Utf8, false),
         Field::new("new_value", DataType::Utf8, false),
-        Field::new("reason", DataType::Int32, false),
+        Field::new("reason", enum_data_type(), false),
     ]);
     maybe_fork_step(&mut fields, include_fork_step);
     Schema::new(fields)
@@ -192,7 +192,7 @@ pub fn gas_changes_schema(include_fork_step: bool, encoding: &EncodeBytes) -> Sc
         Field::new("ordinal", DataType::UInt64, false),
         Field::new("old_value", DataType::UInt64, false),
         Field::new("new_value", DataType::UInt64, false),
-        Field::new("reason", DataType::Int32, false),
+        Field::new("reason", enum_data_type(), false),
     ]);
     maybe_fork_step(&mut fields, include_fork_step);
     Schema::new(fields)
@@ -223,7 +223,7 @@ pub fn system_calls_schema(include_fork_step: bool, encoding: &EncodeBytes) -> S
         Field::new("call_index", DataType::UInt32, false),
         Field::new("parent_index", DataType::UInt32, false),
         Field::new("depth", DataType::UInt32, false),
-        Field::new("call_type", DataType::Int32, false),
+        Field::new("call_type", enum_data_type(), false),
         Field::new("caller", bd.clone(), false),
         Field::new("address", bd.clone(), false),
         Field::new("value", DataType::Utf8, false),
@@ -250,7 +250,7 @@ pub fn system_balance_changes_schema(include_fork_step: bool, encoding: &EncodeB
         Field::new("address", bd, false),
         Field::new("old_value", DataType::Utf8, false),
         Field::new("new_value", DataType::Utf8, false),
-        Field::new("reason", DataType::Int32, false),
+        Field::new("reason", enum_data_type(), false),
     ]);
     maybe_fork_step(&mut fields, include_fork_step);
     Schema::new(fields)
@@ -308,7 +308,7 @@ pub fn system_gas_changes_schema(include_fork_step: bool, encoding: &EncodeBytes
         Field::new("ordinal", DataType::UInt64, false),
         Field::new("old_value", DataType::UInt64, false),
         Field::new("new_value", DataType::UInt64, false),
-        Field::new("reason", DataType::Int32, false),
+        Field::new("reason", enum_data_type(), false),
     ]);
     maybe_fork_step(&mut fields, include_fork_step);
     Schema::new(fields)

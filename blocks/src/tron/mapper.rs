@@ -1,11 +1,11 @@
-use super::proto::tron;
+use super::proto::{protocol, tron};
 use super::schema;
 use arrow::array::*;
-use arrow::datatypes::Schema;
+use arrow::datatypes::{Int32Type, Schema};
 use arrow::record_batch::RecordBatch;
 use firehose_parquet::encode::{BytesColumn, EncodeBytes};
 use firehose_parquet::traits::{
-    est_bool, est_i32, est_i64, est_opt_str, est_str, est_u32, est_u64, BlockIdentity, BlockMapper,
+    est_bool, est_i64, est_opt_str, est_str, est_u32, est_u64, BlockIdentity, BlockMapper,
     CanonicalBuilder,
 };
 use prost::Message;
@@ -42,6 +42,18 @@ fn tron_reserved_encoding(encoding: &EncodeBytes) -> EncodeBytes {
         EncodeBytes::TronBase58 => EncodeBytes::HexNoPrefix,
         other => other.clone(),
     }
+}
+
+fn response_code_text(value: i32) -> &'static str {
+    tron::ResponseCode::try_from(value)
+        .map(|code| code.as_str_name())
+        .unwrap_or("UNKNOWN")
+}
+
+fn contract_type_text(value: i32) -> &'static str {
+    protocol::transaction::contract::ContractType::try_from(value)
+        .map(|contract_type| contract_type.as_str_name())
+        .unwrap_or("UNKNOWN")
 }
 
 // ---------------------------------------------------------------------------
@@ -140,13 +152,17 @@ impl TronBlockMapper {
         self.transactions.block_number.append_value(block_number);
         self.transactions.txid.append_value(&tx.txid);
         self.transactions.result.append_value(tx.result);
-        self.transactions.code.append_value(tx.code);
+        self.transactions
+            .code
+            .append_value(response_code_text(tx.code));
         self.transactions.energy_used.append_value(tx.energy_used);
         self.transactions
             .energy_penalty
             .append_value(tx.energy_penalty);
         self.transactions.fee.append_value(fee);
-        self.transactions.contract_type.append_value(contract_type);
+        self.transactions
+            .contract_type
+            .append_value(contract_type_text(contract_type));
         self.transactions.expiration.append_value(tx.expiration);
         self.transactions.timestamp.append_value(tx.timestamp);
         append_fork_step(&mut self.transactions.fork_step, fork_step);
@@ -276,11 +292,11 @@ impl BlockMapper for TronBlockMapper {
             + est_u64(&self.transactions.block_number)
             + self.transactions.txid.estimated_bytes()
             + est_bool(&self.transactions.result)
-            + est_i32(&self.transactions.code)
+            + self.transactions.code.len() * std::mem::size_of::<i32>()
             + est_i64(&self.transactions.energy_used)
             + est_i64(&self.transactions.energy_penalty)
             + est_i64(&self.transactions.fee)
-            + est_i32(&self.transactions.contract_type)
+            + self.transactions.contract_type.len() * std::mem::size_of::<i32>()
             + est_i64(&self.transactions.expiration)
             + est_i64(&self.transactions.timestamp)
             + est_opt_str(&self.transactions.fork_step);
@@ -380,11 +396,11 @@ struct TransactionsBuilder {
     block_number: UInt64Builder,
     txid: BytesColumn,
     result: BooleanBuilder,
-    code: Int32Builder,
+    code: StringDictionaryBuilder<Int32Type>,
     energy_used: Int64Builder,
     energy_penalty: Int64Builder,
     fee: Int64Builder,
-    contract_type: Int32Builder,
+    contract_type: StringDictionaryBuilder<Int32Type>,
     expiration: Int64Builder,
     timestamp: Int64Builder,
     fork_step: Option<StringBuilder>,
@@ -398,11 +414,11 @@ impl TransactionsBuilder {
             block_number: UInt64Builder::new(),
             txid: BytesColumn::new(&reserved_encoding),
             result: BooleanBuilder::new(),
-            code: Int32Builder::new(),
+            code: StringDictionaryBuilder::new(),
             energy_used: Int64Builder::new(),
             energy_penalty: Int64Builder::new(),
             fee: Int64Builder::new(),
-            contract_type: Int32Builder::new(),
+            contract_type: StringDictionaryBuilder::new(),
             expiration: Int64Builder::new(),
             timestamp: Int64Builder::new(),
             fork_step: mk_fork_step(include_fork_step),
@@ -551,6 +567,26 @@ mod tests {
             .unwrap_or_else(|| panic!("column {name} is not Utf8"))
     }
 
+    fn get_string_value(batch: &RecordBatch, name: &str, row: usize) -> String {
+        let column = batch
+            .column_by_name(name)
+            .unwrap_or_else(|| panic!("missing column {name}"));
+
+        if let Some(array) = column.as_any().downcast_ref::<StringArray>() {
+            return array.value(row).to_string();
+        }
+
+        if let Some(array) = column.as_any().downcast_ref::<DictionaryArray<Int32Type>>() {
+            return array
+                .downcast_dict::<StringArray>()
+                .expect("dictionary values should be utf8")
+                .value(row)
+                .to_string();
+        }
+
+        panic!("column {name} is not Utf8 or dictionary-encoded Utf8");
+    }
+
     fn make_test_block(number: u64) -> tron::Block {
         tron::Block {
             id: vec![0x01, 0x02, 0x03],
@@ -640,6 +676,33 @@ mod tests {
         assert_eq!(batches["transactions"].num_rows(), 1);
         assert_eq!(batches["logs"].num_rows(), 1);
         assert_eq!(batches["internal_transactions"].num_rows(), 1);
+
+        let transactions = &batches["transactions"];
+        assert_eq!(
+            transactions
+                .column_by_name("code")
+                .expect("code column should exist")
+                .data_type(),
+            &arrow::datatypes::DataType::Dictionary(
+                Box::new(arrow::datatypes::DataType::Int32),
+                Box::new(arrow::datatypes::DataType::Utf8),
+            )
+        );
+        assert_eq!(
+            transactions
+                .column_by_name("contract_type")
+                .expect("contract_type column should exist")
+                .data_type(),
+            &arrow::datatypes::DataType::Dictionary(
+                Box::new(arrow::datatypes::DataType::Int32),
+                Box::new(arrow::datatypes::DataType::Utf8),
+            )
+        );
+        assert_eq!(get_string_value(transactions, "code", 0), "SUCCESS");
+        assert_eq!(
+            get_string_value(transactions, "contract_type", 0),
+            "TriggerSmartContract"
+        );
     }
 
     #[test]

@@ -5,8 +5,7 @@ use arrow::datatypes::{Int32Type, Schema};
 use arrow::record_batch::RecordBatch;
 use firehose_parquet::encode::{BytesColumn, EncodeBytes};
 use firehose_parquet::traits::{
-    est_bool, est_i32, est_opt_str, est_str, est_u32, est_u64, BlockIdentity, BlockMapper,
-    CanonicalBuilder,
+    est_bool, est_opt_str, est_str, est_u32, est_u64, BlockIdentity, BlockMapper, CanonicalBuilder,
 };
 use prost::Message;
 use std::collections::HashMap;
@@ -32,9 +31,43 @@ fn append_fork_step(builder: &mut Option<StringBuilder>, fork_step: Option<&str>
     }
 }
 
+fn enum_text(name: &'static str, prefix: &str) -> &'static str {
+    name.strip_prefix(prefix).unwrap_or(name)
+}
+
+fn detail_level_text(value: i32) -> &'static str {
+    eth::block::DetailLevel::try_from(value)
+        .map(|detail_level| enum_text(detail_level.as_str_name(), "DETAILLEVEL_"))
+        .unwrap_or("UNKNOWN")
+}
+
+fn transaction_type_text(value: i32) -> &'static str {
+    eth::transaction_trace::Type::try_from(value)
+        .map(|tx_type| enum_text(tx_type.as_str_name(), "TRX_TYPE_"))
+        .unwrap_or("UNKNOWN")
+}
+
+fn transaction_status_text(value: i32) -> &'static str {
+    eth::TransactionTraceStatus::try_from(value)
+        .map(|status| status.as_str_name())
+        .unwrap_or("UNKNOWN")
+}
+
 fn call_type_text(value: i32) -> &'static str {
     eth::CallType::try_from(value)
         .map(|call_type| call_type.as_str_name())
+        .unwrap_or("UNKNOWN")
+}
+
+fn balance_change_reason_text(value: i32) -> &'static str {
+    eth::balance_change::Reason::try_from(value)
+        .map(|reason| enum_text(reason.as_str_name(), "REASON_"))
+        .unwrap_or("UNKNOWN")
+}
+
+fn gas_change_reason_text(value: i32) -> &'static str {
+    eth::gas_change::Reason::try_from(value)
+        .map(|reason| enum_text(reason.as_str_name(), "REASON_"))
         .unwrap_or("UNKNOWN")
 }
 
@@ -271,7 +304,9 @@ impl EvmBlockMapper {
         self.blocks
             .num_transactions
             .append_value(block.transaction_traces.len() as u32);
-        self.blocks.detail_level.append_value(block.detail_level);
+        self.blocks
+            .detail_level
+            .append_value(detail_level_text(block.detail_level));
         append_fork_step(&mut self.blocks.fork_step, fork_step);
 
         // -- transaction traces --
@@ -332,8 +367,12 @@ impl EvmBlockMapper {
         } else {
             self.transactions.gas_price.append_null();
         }
-        self.transactions.r#type.append_value(tx.r#type);
-        self.transactions.status.append_value(tx.status);
+        self.transactions
+            .r#type
+            .append_value(transaction_type_text(tx.r#type));
+        self.transactions
+            .status
+            .append_value(transaction_status_text(tx.status));
         self.transactions.nonce.append_value(tx.nonce);
         self.transactions.input.append_value(&tx.input);
         if tx.max_fee_per_gas.is_some() {
@@ -739,7 +778,7 @@ impl BlockMapper for EvmBlockMapper {
             + self.blocks.mix_hash.estimated_bytes()
             + self.blocks.extra_data.estimated_bytes()
             + est_u32(&self.blocks.num_transactions)
-            + est_i32(&self.blocks.detail_level)
+            + self.blocks.detail_level.len() * std::mem::size_of::<i32>()
             + est_opt_str(&self.blocks.fork_step);
         // transactions
         let transactions = self.transactions.canonical.estimated_bytes()
@@ -752,8 +791,8 @@ impl BlockMapper for EvmBlockMapper {
             + est_u64(&self.transactions.gas_limit)
             + est_u64(&self.transactions.gas_used)
             + est_str(&self.transactions.gas_price)
-            + est_i32(&self.transactions.r#type)
-            + est_i32(&self.transactions.status)
+            + self.transactions.r#type.len() * std::mem::size_of::<i32>()
+            + self.transactions.status.len() * std::mem::size_of::<i32>()
             + est_u64(&self.transactions.nonce)
             + self.transactions.input.estimated_bytes()
             + est_str(&self.transactions.max_fee_per_gas)
@@ -813,7 +852,7 @@ impl BlockMapper for EvmBlockMapper {
                     + est_u32(&$b.call_index)
                     + est_u32(&$b.parent_index)
                     + est_u32(&$b.depth)
-                    + est_i32(&$b.call_type)
+                    + $b.call_type.len() * std::mem::size_of::<i32>()
                     + $b.caller.estimated_bytes()
                     + $b.address.estimated_bytes()
                     + est_str(&$b.value)
@@ -838,7 +877,7 @@ impl BlockMapper for EvmBlockMapper {
                     + $b.address.estimated_bytes()
                     + est_str(&$b.old_value)
                     + est_str(&$b.new_value)
-                    + est_i32(&$b.reason)
+                    + $b.reason.len() * std::mem::size_of::<i32>()
                     + est_opt_str(&$b.fork_step)
             };
         }
@@ -850,7 +889,7 @@ impl BlockMapper for EvmBlockMapper {
                     + $b.address.estimated_bytes()
                     + est_str(&$b.old_value)
                     + est_str(&$b.new_value)
-                    + est_i32(&$b.reason)
+                    + $b.reason.len() * std::mem::size_of::<i32>()
                     + est_opt_str(&$b.fork_step)
             };
         }
@@ -937,7 +976,7 @@ impl BlockMapper for EvmBlockMapper {
                     + est_u64(&$b.ordinal)
                     + est_u64(&$b.old_value)
                     + est_u64(&$b.new_value)
-                    + est_i32(&$b.reason)
+                    + $b.reason.len() * std::mem::size_of::<i32>()
                     + est_opt_str(&$b.fork_step)
             };
         }
@@ -948,7 +987,7 @@ impl BlockMapper for EvmBlockMapper {
                     + est_u64(&$b.ordinal)
                     + est_u64(&$b.old_value)
                     + est_u64(&$b.new_value)
-                    + est_i32(&$b.reason)
+                    + $b.reason.len() * std::mem::size_of::<i32>()
                     + est_opt_str(&$b.fork_step)
             };
         }
@@ -1050,7 +1089,7 @@ struct EvmBlocksBuilder {
     mix_hash: BytesColumn,
     extra_data: BytesColumn,
     num_transactions: UInt32Builder,
-    detail_level: Int32Builder,
+    detail_level: StringDictionaryBuilder<Int32Type>,
     fork_step: Option<StringBuilder>,
 }
 
@@ -1074,7 +1113,7 @@ impl EvmBlocksBuilder {
             mix_hash: BytesColumn::new(encoding),
             extra_data: BytesColumn::new(encoding),
             num_transactions: UInt32Builder::new(),
-            detail_level: Int32Builder::new(),
+            detail_level: StringDictionaryBuilder::new(),
             fork_step: mk_fork_step(include_fork_step),
         }
     }
@@ -1116,8 +1155,8 @@ struct EvmTransactionsBuilder {
     gas_limit: UInt64Builder,
     gas_used: UInt64Builder,
     gas_price: StringBuilder,
-    r#type: Int32Builder,
-    status: Int32Builder,
+    r#type: StringDictionaryBuilder<Int32Type>,
+    status: StringDictionaryBuilder<Int32Type>,
     nonce: UInt64Builder,
     input: BytesColumn,
     max_fee_per_gas: StringBuilder,
@@ -1139,8 +1178,8 @@ impl EvmTransactionsBuilder {
             gas_limit: UInt64Builder::new(),
             gas_used: UInt64Builder::new(),
             gas_price: StringBuilder::new(),
-            r#type: Int32Builder::new(),
-            status: Int32Builder::new(),
+            r#type: StringDictionaryBuilder::new(),
+            status: StringDictionaryBuilder::new(),
             nonce: UInt64Builder::new(),
             input: BytesColumn::new(encoding),
             max_fee_per_gas: StringBuilder::new(),
@@ -1349,7 +1388,7 @@ struct EvmBalanceChangesBuilder {
     address: BytesColumn,
     old_value: StringBuilder,
     new_value: StringBuilder,
-    reason: Int32Builder,
+    reason: StringDictionaryBuilder<Int32Type>,
     fork_step: Option<StringBuilder>,
 }
 
@@ -1363,7 +1402,7 @@ impl EvmBalanceChangesBuilder {
             address: BytesColumn::new(encoding),
             old_value: StringBuilder::new(),
             new_value: StringBuilder::new(),
-            reason: Int32Builder::new(),
+            reason: StringDictionaryBuilder::new(),
             fork_step: mk_fork_step(include_fork_step),
         }
     }
@@ -1383,7 +1422,8 @@ impl EvmBalanceChangesBuilder {
         self.address.append_value(&bc.address);
         self.old_value.append_value(bigint_to_string(&bc.old_value));
         self.new_value.append_value(bigint_to_string(&bc.new_value));
-        self.reason.append_value(bc.reason);
+        self.reason
+            .append_value(balance_change_reason_text(bc.reason));
         append_fork_step(&mut self.fork_step, fork_step);
     }
 
@@ -1596,7 +1636,7 @@ struct EvmGasChangesBuilder {
     ordinal: UInt64Builder,
     old_value: UInt64Builder,
     new_value: UInt64Builder,
-    reason: Int32Builder,
+    reason: StringDictionaryBuilder<Int32Type>,
     fork_step: Option<StringBuilder>,
 }
 
@@ -1609,7 +1649,7 @@ impl EvmGasChangesBuilder {
             ordinal: UInt64Builder::new(),
             old_value: UInt64Builder::new(),
             new_value: UInt64Builder::new(),
-            reason: Int32Builder::new(),
+            reason: StringDictionaryBuilder::new(),
             fork_step: mk_fork_step(include_fork_step),
         }
     }
@@ -1628,7 +1668,7 @@ impl EvmGasChangesBuilder {
         self.ordinal.append_value(gc.ordinal);
         self.old_value.append_value(gc.old_value);
         self.new_value.append_value(gc.new_value);
-        self.reason.append_value(gc.reason);
+        self.reason.append_value(gas_change_reason_text(gc.reason));
         append_fork_step(&mut self.fork_step, fork_step);
     }
 
@@ -1707,7 +1747,7 @@ struct SystemCallsBuilder {
     call_index: UInt32Builder,
     parent_index: UInt32Builder,
     depth: UInt32Builder,
-    call_type: Int32Builder,
+    call_type: StringDictionaryBuilder<Int32Type>,
     caller: BytesColumn,
     address: BytesColumn,
     value: StringBuilder,
@@ -1731,7 +1771,7 @@ impl SystemCallsBuilder {
             call_index: UInt32Builder::new(),
             parent_index: UInt32Builder::new(),
             depth: UInt32Builder::new(),
-            call_type: Int32Builder::new(),
+            call_type: StringDictionaryBuilder::new(),
             caller: BytesColumn::new(encoding),
             address: BytesColumn::new(encoding),
             value: StringBuilder::new(),
@@ -1760,7 +1800,7 @@ impl SystemCallsBuilder {
         self.call_index.append_value(call.index);
         self.parent_index.append_value(call.parent_index);
         self.depth.append_value(call.depth);
-        self.call_type.append_value(call.call_type);
+        self.call_type.append_value(call_type_text(call.call_type));
         self.caller.append_value(&call.caller);
         self.address.append_value(&call.address);
         self.value.append_value(bigint_to_string(&call.value));
@@ -1809,7 +1849,7 @@ struct SystemBalanceChangesBuilder {
     address: BytesColumn,
     old_value: StringBuilder,
     new_value: StringBuilder,
-    reason: Int32Builder,
+    reason: StringDictionaryBuilder<Int32Type>,
     fork_step: Option<StringBuilder>,
 }
 
@@ -1822,7 +1862,7 @@ impl SystemBalanceChangesBuilder {
             address: BytesColumn::new(encoding),
             old_value: StringBuilder::new(),
             new_value: StringBuilder::new(),
-            reason: Int32Builder::new(),
+            reason: StringDictionaryBuilder::new(),
             fork_step: mk_fork_step(include_fork_step),
         }
     }
@@ -1840,7 +1880,8 @@ impl SystemBalanceChangesBuilder {
         self.address.append_value(&bc.address);
         self.old_value.append_value(bigint_to_string(&bc.old_value));
         self.new_value.append_value(bigint_to_string(&bc.new_value));
-        self.reason.append_value(bc.reason);
+        self.reason
+            .append_value(balance_change_reason_text(bc.reason));
         append_fork_step(&mut self.fork_step, fork_step);
     }
 
@@ -2036,7 +2077,7 @@ struct SystemGasChangesBuilder {
     ordinal: UInt64Builder,
     old_value: UInt64Builder,
     new_value: UInt64Builder,
-    reason: Int32Builder,
+    reason: StringDictionaryBuilder<Int32Type>,
     fork_step: Option<StringBuilder>,
 }
 
@@ -2048,7 +2089,7 @@ impl SystemGasChangesBuilder {
             ordinal: UInt64Builder::new(),
             old_value: UInt64Builder::new(),
             new_value: UInt64Builder::new(),
-            reason: Int32Builder::new(),
+            reason: StringDictionaryBuilder::new(),
             fork_step: mk_fork_step(include_fork_step),
         }
     }
@@ -2065,7 +2106,7 @@ impl SystemGasChangesBuilder {
         self.ordinal.append_value(gc.ordinal);
         self.old_value.append_value(gc.old_value);
         self.new_value.append_value(gc.new_value);
-        self.reason.append_value(gc.reason);
+        self.reason.append_value(gas_change_reason_text(gc.reason));
         append_fork_step(&mut self.fork_step, fork_step);
     }
 
@@ -2357,6 +2398,24 @@ mod tests {
         panic!("field should be utf8 or dictionary-encoded utf8");
     }
 
+    fn assert_dictionary_utf8_column(batch: &RecordBatch, name: &str) {
+        let column = batch.column(
+            batch
+                .schema()
+                .index_of(name)
+                .expect("field should exist in batch schema"),
+        );
+
+        assert_eq!(
+            column.data_type(),
+            &arrow::datatypes::DataType::Dictionary(
+                Box::new(arrow::datatypes::DataType::Int32),
+                Box::new(arrow::datatypes::DataType::Utf8),
+            ),
+            "{name} should use dictionary-encoded Utf8"
+        );
+    }
+
     #[test]
     fn test_base_map_and_flush() {
         let block = make_test_evm_block(100);
@@ -2394,25 +2453,43 @@ mod tests {
         assert_eq!(batches["system_calls"].num_rows(), 0);
         assert_eq!(batches["system_balance_changes"].num_rows(), 0);
 
-        let calls_batch = &batches["calls"];
-        let call_type_col = calls_batch.column(
-            calls_batch
-                .schema()
-                .index_of("call_type")
-                .expect("call_type field should exist"),
-        );
+        let blocks_batch = &batches["blocks"];
+        assert_dictionary_utf8_column(blocks_batch, "detail_level");
         assert_eq!(
-            *call_type_col.data_type(),
-            arrow::datatypes::DataType::Dictionary(
-                Box::new(arrow::datatypes::DataType::Int32),
-                Box::new(arrow::datatypes::DataType::Utf8)
-            )
+            get_string_value(blocks_batch, "detail_level", 0),
+            "EXTENDED"
         );
-        assert!(call_type_col
-            .as_any()
-            .downcast_ref::<DictionaryArray<Int32Type>>()
-            .is_some());
+
+        let transactions_batch = &batches["transactions"];
+        assert_dictionary_utf8_column(transactions_batch, "type");
+        assert_dictionary_utf8_column(transactions_batch, "status");
+        assert_eq!(get_string_value(transactions_batch, "type", 0), "LEGACY");
+        assert_eq!(
+            get_string_value(transactions_batch, "status", 0),
+            "SUCCEEDED"
+        );
+
+        let calls_batch = &batches["calls"];
+        assert_dictionary_utf8_column(calls_batch, "call_type");
         assert_eq!(get_string_value(calls_batch, "call_type", 0), "CALL");
+
+        let balance_changes_batch = &batches["balance_changes"];
+        assert_dictionary_utf8_column(balance_changes_batch, "reason");
+        assert_eq!(
+            get_string_value(balance_changes_batch, "reason", 0),
+            "TRANSFER"
+        );
+
+        let gas_changes_batch = &batches["gas_changes"];
+        assert_dictionary_utf8_column(gas_changes_batch, "reason");
+        assert_eq!(
+            get_string_value(gas_changes_batch, "reason", 0),
+            "INTRINSIC_GAS"
+        );
+
+        assert_dictionary_utf8_column(&batches["system_calls"], "call_type");
+        assert_dictionary_utf8_column(&batches["system_balance_changes"], "reason");
+        assert_dictionary_utf8_column(&batches["system_gas_changes"], "reason");
     }
 
     #[test]

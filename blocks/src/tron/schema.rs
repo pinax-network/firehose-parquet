@@ -15,6 +15,10 @@ fn tron_reserved_encoding(encoding: &EncodeBytes) -> EncodeBytes {
     }
 }
 
+fn enum_data_type() -> DataType {
+    DataType::Dictionary(Box::new(DataType::Int32), Box::new(DataType::Utf8))
+}
+
 pub fn blocks_schema(include_fork_step: bool, encoding: &EncodeBytes) -> Schema {
     let bd = bytes_data_type(encoding);
     let reserved_bd = bytes_data_type(&tron_reserved_encoding(encoding));
@@ -40,11 +44,11 @@ pub fn transactions_schema(include_fork_step: bool, encoding: &EncodeBytes) -> S
         Field::new("block_number", DataType::UInt64, false),
         Field::new("txid", reserved_bd, false),
         Field::new("result", DataType::Boolean, false),
-        Field::new("code", DataType::Int32, false),
+        Field::new("code", enum_data_type(), false),
         Field::new("energy_used", DataType::Int64, false),
         Field::new("energy_penalty", DataType::Int64, false),
         Field::new("fee", DataType::Int64, false),
-        Field::new("contract_type", DataType::Int32, false),
+        Field::new("contract_type", enum_data_type(), false),
         Field::new("expiration", DataType::Int64, false),
         Field::new("timestamp", DataType::Int64, false),
     ]);

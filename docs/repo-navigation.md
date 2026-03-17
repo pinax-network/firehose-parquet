@@ -90,6 +90,13 @@ Related design docs:
 - Docker publish workflow: `.github/workflows/docker-publish.yml`
 - Release assets workflow: `.github/workflows/release.yml`
 
+## Parquet Enum Convention
+
+- Materialized protobuf enum-backed fields should be written to Parquet as stable protobuf label strings, not raw integer values.
+- Prefer Arrow dictionary-encoded `Utf8` (`Dictionary(Int32, Utf8)`) for enum columns that are newly materialized or migrated for readability.
+- Existing readable `Utf8` enum columns remain acceptable until they are migrated to the shared representation.
+- Bitcoin currently has no protobuf enum-backed fields materialized into Parquet.
+
 ## Source vs Generated/Artifact Directories
 
 - Source-of-truth directories:
