@@ -31,19 +31,28 @@ fn append_fork_step(builder: &mut Option<StringBuilder>, fork_step: Option<&str>
     }
 }
 
-fn enum_text(name: &'static str, prefix: &str) -> &'static str {
+fn remove_enum_prefix_if_present(name: &'static str, prefix: &str) -> &'static str {
     name.strip_prefix(prefix).unwrap_or(name)
+}
+
+fn estimated_dictionary_index_bytes(len: usize) -> usize {
+    // Largest-table tracking only needs a cheap relative estimate. For enum-backed
+    // dictionary columns, the shared string dictionary cardinality is fixed and
+    // small, so counting the per-row indices is sufficient for that comparison.
+    len * std::mem::size_of::<i32>()
 }
 
 fn detail_level_text(value: i32) -> &'static str {
     eth::block::DetailLevel::try_from(value)
-        .map(|detail_level| enum_text(detail_level.as_str_name(), "DETAILLEVEL_"))
+        .map(|detail_level| {
+            remove_enum_prefix_if_present(detail_level.as_str_name(), "DETAILLEVEL_")
+        })
         .unwrap_or("UNKNOWN")
 }
 
 fn transaction_type_text(value: i32) -> &'static str {
     eth::transaction_trace::Type::try_from(value)
-        .map(|tx_type| enum_text(tx_type.as_str_name(), "TRX_TYPE_"))
+        .map(|tx_type| remove_enum_prefix_if_present(tx_type.as_str_name(), "TRX_TYPE_"))
         .unwrap_or("UNKNOWN")
 }
 
@@ -61,13 +70,13 @@ fn call_type_text(value: i32) -> &'static str {
 
 fn balance_change_reason_text(value: i32) -> &'static str {
     eth::balance_change::Reason::try_from(value)
-        .map(|reason| enum_text(reason.as_str_name(), "REASON_"))
+        .map(|reason| remove_enum_prefix_if_present(reason.as_str_name(), "REASON_"))
         .unwrap_or("UNKNOWN")
 }
 
 fn gas_change_reason_text(value: i32) -> &'static str {
     eth::gas_change::Reason::try_from(value)
-        .map(|reason| enum_text(reason.as_str_name(), "REASON_"))
+        .map(|reason| remove_enum_prefix_if_present(reason.as_str_name(), "REASON_"))
         .unwrap_or("UNKNOWN")
 }
 
@@ -778,7 +787,7 @@ impl BlockMapper for EvmBlockMapper {
             + self.blocks.mix_hash.estimated_bytes()
             + self.blocks.extra_data.estimated_bytes()
             + est_u32(&self.blocks.num_transactions)
-            + self.blocks.detail_level.len() * std::mem::size_of::<i32>()
+            + estimated_dictionary_index_bytes(self.blocks.detail_level.len())
             + est_opt_str(&self.blocks.fork_step);
         // transactions
         let transactions = self.transactions.canonical.estimated_bytes()
@@ -791,8 +800,8 @@ impl BlockMapper for EvmBlockMapper {
             + est_u64(&self.transactions.gas_limit)
             + est_u64(&self.transactions.gas_used)
             + est_str(&self.transactions.gas_price)
-            + self.transactions.r#type.len() * std::mem::size_of::<i32>()
-            + self.transactions.status.len() * std::mem::size_of::<i32>()
+            + estimated_dictionary_index_bytes(self.transactions.r#type.len())
+            + estimated_dictionary_index_bytes(self.transactions.status.len())
             + est_u64(&self.transactions.nonce)
             + self.transactions.input.estimated_bytes()
             + est_str(&self.transactions.max_fee_per_gas)
@@ -828,7 +837,7 @@ impl BlockMapper for EvmBlockMapper {
                     + est_u32(&$b.call_index)
                     + est_u32(&$b.parent_index)
                     + est_u32(&$b.depth)
-                    + $b.call_type.len() * std::mem::size_of::<i32>()
+                    + estimated_dictionary_index_bytes($b.call_type.len())
                     + $b.caller.estimated_bytes()
                     + $b.address.estimated_bytes()
                     + est_str(&$b.value)
@@ -852,7 +861,7 @@ impl BlockMapper for EvmBlockMapper {
                     + est_u32(&$b.call_index)
                     + est_u32(&$b.parent_index)
                     + est_u32(&$b.depth)
-                    + $b.call_type.len() * std::mem::size_of::<i32>()
+                    + estimated_dictionary_index_bytes($b.call_type.len())
                     + $b.caller.estimated_bytes()
                     + $b.address.estimated_bytes()
                     + est_str(&$b.value)
@@ -877,7 +886,7 @@ impl BlockMapper for EvmBlockMapper {
                     + $b.address.estimated_bytes()
                     + est_str(&$b.old_value)
                     + est_str(&$b.new_value)
-                    + $b.reason.len() * std::mem::size_of::<i32>()
+                    + estimated_dictionary_index_bytes($b.reason.len())
                     + est_opt_str(&$b.fork_step)
             };
         }
@@ -889,7 +898,7 @@ impl BlockMapper for EvmBlockMapper {
                     + $b.address.estimated_bytes()
                     + est_str(&$b.old_value)
                     + est_str(&$b.new_value)
-                    + $b.reason.len() * std::mem::size_of::<i32>()
+                    + estimated_dictionary_index_bytes($b.reason.len())
                     + est_opt_str(&$b.fork_step)
             };
         }
@@ -976,7 +985,7 @@ impl BlockMapper for EvmBlockMapper {
                     + est_u64(&$b.ordinal)
                     + est_u64(&$b.old_value)
                     + est_u64(&$b.new_value)
-                    + $b.reason.len() * std::mem::size_of::<i32>()
+                    + estimated_dictionary_index_bytes($b.reason.len())
                     + est_opt_str(&$b.fork_step)
             };
         }
@@ -987,7 +996,7 @@ impl BlockMapper for EvmBlockMapper {
                     + est_u64(&$b.ordinal)
                     + est_u64(&$b.old_value)
                     + est_u64(&$b.new_value)
-                    + $b.reason.len() * std::mem::size_of::<i32>()
+                    + estimated_dictionary_index_bytes($b.reason.len())
                     + est_opt_str(&$b.fork_step)
             };
         }

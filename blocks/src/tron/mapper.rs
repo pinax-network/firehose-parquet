@@ -56,6 +56,13 @@ fn contract_type_text(value: i32) -> &'static str {
         .unwrap_or("UNKNOWN")
 }
 
+fn estimated_dictionary_index_bytes(len: usize) -> usize {
+    // Largest-table tracking only needs a cheap relative estimate. For enum-backed
+    // dictionary columns, the shared string dictionary cardinality is fixed and
+    // small, so counting the per-row indices is sufficient for that comparison.
+    len * std::mem::size_of::<i32>()
+}
+
 // ---------------------------------------------------------------------------
 // Tron BlockMapper
 // ---------------------------------------------------------------------------
@@ -292,11 +299,11 @@ impl BlockMapper for TronBlockMapper {
             + est_u64(&self.transactions.block_number)
             + self.transactions.txid.estimated_bytes()
             + est_bool(&self.transactions.result)
-            + self.transactions.code.len() * std::mem::size_of::<i32>()
+            + estimated_dictionary_index_bytes(self.transactions.code.len())
             + est_i64(&self.transactions.energy_used)
             + est_i64(&self.transactions.energy_penalty)
             + est_i64(&self.transactions.fee)
-            + self.transactions.contract_type.len() * std::mem::size_of::<i32>()
+            + estimated_dictionary_index_bytes(self.transactions.contract_type.len())
             + est_i64(&self.transactions.expiration)
             + est_i64(&self.transactions.timestamp)
             + est_opt_str(&self.transactions.fork_step);

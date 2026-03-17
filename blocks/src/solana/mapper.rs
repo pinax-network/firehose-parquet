@@ -55,6 +55,13 @@ fn reward_type_text(value: i32) -> &'static str {
         .unwrap_or("UNKNOWN")
 }
 
+fn estimated_dictionary_index_bytes(len: usize) -> usize {
+    // Largest-table tracking only needs a cheap relative estimate. For enum-backed
+    // dictionary columns, the shared string dictionary cardinality is fixed and
+    // small, so counting the per-row indices is sufficient for that comparison.
+    len * std::mem::size_of::<i32>()
+}
+
 /// Solana Vote program ID (`Vote111111111111111111111111111111111111111`).
 const VOTE_PROGRAM_ID: [u8; 32] = [
     7, 97, 72, 29, 53, 116, 116, 187, 124, 77, 118, 36, 235, 211, 189, 179, 216, 53, 94, 115, 209,
@@ -744,7 +751,7 @@ impl BlockMapper for SolanaBlockMapper {
             + est_str(&self.rewards.pubkey)
             + est_i64(&self.rewards.lamports)
             + est_u64(&self.rewards.post_balance)
-            + self.rewards.reward_type.len() * std::mem::size_of::<i32>()
+            + estimated_dictionary_index_bytes(self.rewards.reward_type.len())
             + est_str(&self.rewards.commission)
             + est_str(&self.rewards.source)
             + est_u32(&self.rewards.transaction_index)
