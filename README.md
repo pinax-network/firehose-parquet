@@ -84,6 +84,14 @@ cargo build --release --workspace
   --extended \
   --bytes-encoding hex
 
+# Stream Antelope blocks
+./target/release/fireparq build \
+  --block-type antelope \
+  --endpoint https://eos.firehose.pinax.network:443 \
+  --start-block 1000000 \
+  --stop-block 1001000 \
+  --output ./output
+
 # Backfill from a block and keep following finalized blocks
 ./target/release/fireparq build \
   --network solana-mainnet-beta \
@@ -323,7 +331,8 @@ Chain:
           Block type to process. Use "auto" to detect from the Firehose stream.
           Options: auto, evm, bitcoin, solana, near, antelope, cosmos, tron, beacon [env: BLOCK_TYPE] [default: auto]
       --extended
-          Enable extended detail level (extra tables: EVM calls/balance_changes/etc., Antelope db_ops) [env: EXTENDED]
+          Enable extended detail level for chains that support extra tables (for example EVM calls/balance_changes/etc.)
+          [env: EXTENDED]
       --with-votes
           Include Solana vote_transactions output (disabled by default) [env: WITH_VOTES]
       --bytes-encoding <BYTES_ENCODING>
