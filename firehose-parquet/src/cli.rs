@@ -489,7 +489,7 @@ Examples:
   # Inspect a local parquet file
   fireparq scan ./output/blocks/part-000001.parquet
 
-  # Scan all files in a directory (20 sample rows each)
+  # Scan all files in a directory (up to 20 sample rows total)
   fireparq scan ./output/blocks/
 
   # Schema only, no data preview
@@ -510,7 +510,7 @@ Examples:
   # Emit machine-readable JSON
   fireparq scan ./output/blocks/part-000001.parquet --json
 
-  # Show 50 sample rows per file
+  # Show up to 50 sample rows total across the scan
   fireparq scan ./output/blocks/ --limit 50
 
   # Paginate: skip first 20 rows, show next 20
@@ -530,10 +530,10 @@ Lookup order:
     Scan {
         /// Path to a .parquet file or directory, a shorthand S3 key/prefix via S3_BUCKET, or an S3 URI
         path: String,
-        /// Number of sample rows to display per file (0 = schema only)
+        /// Number of sample rows to display across the full scan (0 = schema only)
         #[arg(short = 'n', long = "limit", default_value = "20")]
         limit: usize,
-        /// Number of rows to skip before displaying (for pagination)
+        /// Number of rows to skip before displaying (for pagination across the full scan)
         #[arg(long, default_value = "0")]
         offset: usize,
         /// Row display order for pagination and previews
@@ -3863,6 +3863,8 @@ fn collect_scan_parquet_local(
     };
 
     let mut results = Vec::with_capacity(files.len());
+    let mut remaining_rows = rows;
+    let mut remaining_offset = offset;
     for file_path in &files {
         let display_path = if single_file {
             file_path.display().to_string()
@@ -3873,14 +3875,26 @@ fn collect_scan_parquet_local(
                 .display()
                 .to_string()
         };
-        results.push(build_scan_file_result_from_local(
+        let result = build_scan_file_result_from_local(
             file_path,
             display_path,
-            rows,
-            offset,
+            remaining_rows,
+            remaining_offset,
             order,
             schema_only,
-        )?);
+        )?;
+        update_scan_progress(
+            &mut remaining_rows,
+            &mut remaining_offset,
+            result.total_rows,
+            result.sample_rows.len(),
+            rows,
+            schema_only,
+        )?;
+        results.push(result);
+        if !schema_only && remaining_rows == 0 {
+            break;
+        }
     }
     Ok(results)
 }
@@ -3952,18 +3966,32 @@ fn collect_scan_parquet_s3(
             .map_err(|e| anyhow::anyhow!("listing S3 objects: {e}"))?;
 
     let mut results = Vec::with_capacity(parquet_objects.len());
+    let mut remaining_rows = rows;
+    let mut remaining_offset = offset;
     for obj in &parquet_objects {
         let data = block_on_async(async { client.get(&obj.location).await?.bytes().await })
             .map_err(|e| anyhow::anyhow!("reading s3://{bucket}/{}: {e}", obj.location))?;
         let display_key = scan_s3_display_key(obj.location.as_ref(), &prefix, exact_object_path);
-        results.push(build_scan_file_result_from_bytes(
+        let result = build_scan_file_result_from_bytes(
             data,
             display_key,
-            rows,
-            offset,
+            remaining_rows,
+            remaining_offset,
             order,
             schema_only,
-        )?);
+        )?;
+        update_scan_progress(
+            &mut remaining_rows,
+            &mut remaining_offset,
+            result.total_rows,
+            result.sample_rows.len(),
+            rows,
+            schema_only,
+        )?;
+        results.push(result);
+        if !schema_only && remaining_rows == 0 {
+            break;
+        }
     }
 
     Ok(results)
@@ -4133,6 +4161,23 @@ fn scan_total_rows_for_sampling(total_rows: i64) -> anyhow::Result<usize> {
             "parquet row count {total_rows} exceeds supported scan preview size on this platform"
         )
     })
+}
+
+fn update_scan_progress(
+    remaining_rows: &mut usize,
+    remaining_offset: &mut usize,
+    total_rows: i64,
+    sampled_rows: usize,
+    requested_rows: usize,
+    schema_only: bool,
+) -> anyhow::Result<()> {
+    if schema_only || requested_rows == 0 {
+        return Ok(());
+    }
+
+    *remaining_offset = remaining_offset.saturating_sub(scan_total_rows_for_sampling(total_rows)?);
+    *remaining_rows = remaining_rows.saturating_sub(sampled_rows);
+    Ok(())
 }
 
 /// Compute the 1-based inclusive absolute row bounds to sample for `scan`.
@@ -5987,6 +6032,31 @@ mod tests {
         rows: Vec<PartitionBuildRow>,
     ) -> anyhow::Result<()> {
         write_partitions_index(&path.to_string_lossy(), &rows, None)
+    }
+
+    fn write_scan_test_parquet(path: &std::path::Path, values: &[i32]) {
+        use arrow::array::Int32Array;
+        use arrow::record_batch::RecordBatch;
+        use parquet::arrow::ArrowWriter;
+        use std::fs::File;
+        use std::sync::Arc;
+
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).expect("create parquet parent");
+        }
+
+        let schema = Arc::new(arrow::datatypes::Schema::new(vec![
+            arrow::datatypes::Field::new("value", arrow::datatypes::DataType::Int32, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            Arc::clone(&schema),
+            vec![Arc::new(Int32Array::from(values.to_vec()))],
+        )
+        .expect("record batch");
+        let file = File::create(path).expect("create parquet file");
+        let mut writer = ArrowWriter::try_new(file, schema, None).expect("create arrow writer");
+        writer.write(&batch).expect("write batch");
+        writer.close().expect("close writer");
     }
 
     fn time_partition_row(
@@ -9002,6 +9072,60 @@ mod tests {
         );
 
         assert!(rows.is_empty());
+    }
+
+    #[test]
+    fn test_collect_scan_parquet_local_applies_limit_globally_across_files() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        write_scan_test_parquet(&dir.path().join("a.parquet"), &[1, 2]);
+        write_scan_test_parquet(&dir.path().join("b.parquet"), &[3, 4]);
+        write_scan_test_parquet(&dir.path().join("c.parquet"), &[5, 6]);
+
+        let files =
+            collect_scan_parquet_local(dir.path(), 3, 0, ScanOrder::Asc, false).expect("scan");
+
+        assert_eq!(
+            files
+                .iter()
+                .map(|file| file.path.as_str())
+                .collect::<Vec<_>>(),
+            vec!["a.parquet", "b.parquet"]
+        );
+        assert_eq!(
+            files
+                .iter()
+                .flat_map(|file| file.sample_rows.iter())
+                .map(|row| row.cells[0].value.as_str())
+                .collect::<Vec<_>>(),
+            vec!["1", "2", "3"]
+        );
+    }
+
+    #[test]
+    fn test_collect_scan_parquet_local_applies_offset_globally_across_files() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        write_scan_test_parquet(&dir.path().join("a.parquet"), &[1, 2]);
+        write_scan_test_parquet(&dir.path().join("b.parquet"), &[3, 4]);
+        write_scan_test_parquet(&dir.path().join("c.parquet"), &[5, 6]);
+
+        let files =
+            collect_scan_parquet_local(dir.path(), 2, 3, ScanOrder::Asc, false).expect("scan");
+
+        assert_eq!(
+            files
+                .iter()
+                .map(|file| file.path.as_str())
+                .collect::<Vec<_>>(),
+            vec!["a.parquet", "b.parquet", "c.parquet"]
+        );
+        assert_eq!(
+            files
+                .iter()
+                .flat_map(|file| file.sample_rows.iter())
+                .map(|row| row.cells[0].value.as_str())
+                .collect::<Vec<_>>(),
+            vec!["4", "5"]
+        );
     }
 
     #[test]
