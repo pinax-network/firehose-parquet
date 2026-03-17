@@ -1,7 +1,7 @@
 use super::proto::eth;
 use super::schema;
 use arrow::array::*;
-use arrow::datatypes::Schema;
+use arrow::datatypes::{Int32Type, Schema};
 use arrow::record_batch::RecordBatch;
 use firehose_parquet::encode::{BytesColumn, EncodeBytes};
 use firehose_parquet::traits::{
@@ -30,6 +30,12 @@ fn append_fork_step(builder: &mut Option<StringBuilder>, fork_step: Option<&str>
     if let Some(ref mut b) = builder {
         b.append_value(fork_step.unwrap_or("UNKNOWN"));
     }
+}
+
+fn call_type_text(value: i32) -> &'static str {
+    eth::CallType::try_from(value)
+        .map(|call_type| call_type.as_str_name())
+        .unwrap_or("UNKNOWN")
 }
 
 fn finish_fork_step(
@@ -783,7 +789,7 @@ impl BlockMapper for EvmBlockMapper {
                     + est_u32(&$b.call_index)
                     + est_u32(&$b.parent_index)
                     + est_u32(&$b.depth)
-                    + est_i32(&$b.call_type)
+                    + $b.call_type.len() * std::mem::size_of::<i32>()
                     + $b.caller.estimated_bytes()
                     + $b.address.estimated_bytes()
                     + est_str(&$b.value)
@@ -1232,7 +1238,7 @@ struct EvmCallsBuilder {
     call_index: UInt32Builder,
     parent_index: UInt32Builder,
     depth: UInt32Builder,
-    call_type: Int32Builder,
+    call_type: StringDictionaryBuilder<Int32Type>,
     caller: BytesColumn,
     address: BytesColumn,
     value: StringBuilder,
@@ -1258,7 +1264,7 @@ impl EvmCallsBuilder {
             call_index: UInt32Builder::new(),
             parent_index: UInt32Builder::new(),
             depth: UInt32Builder::new(),
-            call_type: Int32Builder::new(),
+            call_type: StringDictionaryBuilder::new(),
             caller: BytesColumn::new(encoding),
             address: BytesColumn::new(encoding),
             value: StringBuilder::new(),
@@ -1291,7 +1297,7 @@ impl EvmCallsBuilder {
         self.call_index.append_value(call.index);
         self.parent_index.append_value(call.parent_index);
         self.depth.append_value(call.depth);
-        self.call_type.append_value(call.call_type);
+        self.call_type.append_value(call_type_text(call.call_type));
         self.caller.append_value(&call.caller);
         self.address.append_value(&call.address);
         self.value.append_value(bigint_to_string(&call.value));
@@ -2328,6 +2334,29 @@ mod tests {
             .expect("field should be utf8")
     }
 
+    fn get_string_value(batch: &RecordBatch, name: &str, row: usize) -> String {
+        let column = batch.column(
+            batch
+                .schema()
+                .index_of(name)
+                .expect("field should exist in batch schema"),
+        );
+
+        if let Some(array) = column.as_any().downcast_ref::<StringArray>() {
+            return array.value(row).to_string();
+        }
+
+        if let Some(array) = column.as_any().downcast_ref::<DictionaryArray<Int32Type>>() {
+            return array
+                .downcast_dict::<StringArray>()
+                .expect("dictionary values should be utf8")
+                .value(row)
+                .to_string();
+        }
+
+        panic!("field should be utf8 or dictionary-encoded utf8");
+    }
+
     #[test]
     fn test_base_map_and_flush() {
         let block = make_test_evm_block(100);
@@ -2364,6 +2393,74 @@ mod tests {
         // System tables should be empty (no system calls in test block)
         assert_eq!(batches["system_calls"].num_rows(), 0);
         assert_eq!(batches["system_balance_changes"].num_rows(), 0);
+
+        let calls_batch = &batches["calls"];
+        let call_type_col = calls_batch.column(
+            calls_batch
+                .schema()
+                .index_of("call_type")
+                .expect("call_type field should exist"),
+        );
+        assert_eq!(
+            *call_type_col.data_type(),
+            arrow::datatypes::DataType::Dictionary(
+                Box::new(arrow::datatypes::DataType::Int32),
+                Box::new(arrow::datatypes::DataType::Utf8)
+            )
+        );
+        assert!(call_type_col
+            .as_any()
+            .downcast_ref::<DictionaryArray<Int32Type>>()
+            .is_some());
+        assert_eq!(get_string_value(calls_batch, "call_type", 0), "CALL");
+    }
+
+    #[test]
+    fn test_calls_call_type_round_trips_through_parquet_writer() {
+        use firehose_parquet::config::{BlockMetadata, Compression, Partition};
+        use firehose_parquet::writer::{read_parquet, ParquetTableWriter};
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let block = make_test_evm_block(300);
+        let block_bytes = prost::Message::encode_to_vec(&block);
+        let mut mapper = EvmBlockMapper::new(true, false, EncodeBytes::Hex, false);
+        mapper
+            .map_block(&block_bytes, &BlockIdentity::default(), None)
+            .unwrap();
+
+        let batches = mapper.flush().unwrap();
+        let calls_batch = &batches["calls"];
+
+        let temp_dir = std::env::temp_dir().join(format!(
+            "firehose-parquet-call-type-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("system time should be after unix epoch")
+                .as_nanos()
+        ));
+
+        let result = (|| -> anyhow::Result<()> {
+            let mut writer =
+                ParquetTableWriter::new(&temp_dir, Partition::None, Compression::Snappy);
+            let (path, _) = writer.write_batch(
+                "calls",
+                calls_batch,
+                &BlockMetadata {
+                    min_block_number: block.number,
+                    max_block_number: block.number,
+                    min_timestamp: Some(1_700_000_000),
+                    max_timestamp: Some(1_700_000_000),
+                },
+            )?;
+
+            let read_batches = read_parquet(&path)?;
+            assert_eq!(read_batches.len(), 1);
+            assert_eq!(get_string_value(&read_batches[0], "call_type", 0), "CALL");
+            Ok(())
+        })();
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        result.unwrap();
     }
 
     #[test]
