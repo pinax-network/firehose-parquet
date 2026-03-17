@@ -1,14 +1,14 @@
 use super::proto::solana;
 use super::schema;
 use arrow::array::*;
-use arrow::datatypes::Schema;
+use arrow::datatypes::{Int32Type, Schema};
 use arrow::record_batch::RecordBatch;
 use firehose_parquet::encode::{
     decode_base58, encode_hex_no_prefix, BytesColumn, BytesListColumn, EncodeBytes,
 };
 use firehose_parquet::traits::{
-    est_bool, est_f64, est_i32, est_i64, est_list_str, est_list_u64, est_opt_str, est_str, est_u32,
-    est_u64, BlockIdentity, BlockMapper, CanonicalBuilder,
+    est_bool, est_f64, est_i64, est_list_str, est_list_u64, est_opt_str, est_str, est_u32, est_u64,
+    BlockIdentity, BlockMapper, CanonicalBuilder,
 };
 use prost::Message;
 use std::collections::HashMap;
@@ -47,6 +47,19 @@ fn solana_hash_bytes(hash: &str) -> Vec<u8> {
             hash.as_bytes().to_vec()
         }
     }
+}
+
+fn reward_type_text(value: i32) -> &'static str {
+    solana::RewardType::try_from(value)
+        .map(|reward_type| reward_type.as_str_name())
+        .unwrap_or("UNKNOWN")
+}
+
+fn estimated_dictionary_index_bytes(len: usize) -> usize {
+    // Largest-table tracking only needs a cheap relative estimate. For enum-backed
+    // dictionary columns, the shared string dictionary cardinality is fixed and
+    // small, so counting the per-row indices is sufficient for that comparison.
+    len * std::mem::size_of::<i32>()
 }
 
 /// Solana Vote program ID (`Vote111111111111111111111111111111111111111`).
@@ -593,7 +606,9 @@ impl SolanaBlockMapper {
         self.rewards.pubkey.append_value(&reward.pubkey);
         self.rewards.lamports.append_value(reward.lamports);
         self.rewards.post_balance.append_value(reward.post_balance);
-        self.rewards.reward_type.append_value(reward.reward_type);
+        self.rewards
+            .reward_type
+            .append_value(reward_type_text(reward.reward_type));
         if reward.commission.is_empty() {
             self.rewards.commission.append_null();
         } else {
@@ -736,7 +751,7 @@ impl BlockMapper for SolanaBlockMapper {
             + est_str(&self.rewards.pubkey)
             + est_i64(&self.rewards.lamports)
             + est_u64(&self.rewards.post_balance)
-            + est_i32(&self.rewards.reward_type)
+            + estimated_dictionary_index_bytes(self.rewards.reward_type.len())
             + est_str(&self.rewards.commission)
             + est_str(&self.rewards.source)
             + est_u32(&self.rewards.transaction_index)
@@ -1047,7 +1062,7 @@ struct RewardsBuilder {
     pubkey: StringBuilder,
     lamports: Int64Builder,
     post_balance: UInt64Builder,
-    reward_type: Int32Builder,
+    reward_type: StringDictionaryBuilder<Int32Type>,
     commission: StringBuilder,
     source: StringBuilder,
     transaction_index: UInt32Builder,
@@ -1063,7 +1078,7 @@ impl RewardsBuilder {
             pubkey: StringBuilder::new(),
             lamports: Int64Builder::new(),
             post_balance: UInt64Builder::new(),
-            reward_type: Int32Builder::new(),
+            reward_type: StringDictionaryBuilder::new(),
             commission: StringBuilder::new(),
             source: StringBuilder::new(),
             transaction_index: UInt32Builder::new(),
@@ -1207,6 +1222,26 @@ impl AccountLookupsBuilder {
 mod tests {
     use super::*;
 
+    fn get_string_value(batch: &RecordBatch, name: &str, row: usize) -> String {
+        let column = batch
+            .column_by_name(name)
+            .unwrap_or_else(|| panic!("missing column {name}"));
+
+        if let Some(array) = column.as_any().downcast_ref::<StringArray>() {
+            return array.value(row).to_string();
+        }
+
+        if let Some(array) = column.as_any().downcast_ref::<DictionaryArray<Int32Type>>() {
+            return array
+                .downcast_dict::<StringArray>()
+                .expect("dictionary values should be utf8")
+                .value(row)
+                .to_string();
+        }
+
+        panic!("column {name} is not Utf8 or dictionary-encoded Utf8");
+    }
+
     fn make_test_solana_hash(fill_byte: u8) -> String {
         firehose_parquet::encode::encode_base58(&[fill_byte; 32])
     }
@@ -1331,6 +1366,20 @@ mod tests {
         assert_eq!(batches["token_balances"].num_rows(), 2);
         // 1 address table lookup
         assert_eq!(batches["account_lookups"].num_rows(), 1);
+
+        let rewards = &batches["rewards"];
+        assert_eq!(
+            rewards
+                .column_by_name("reward_type")
+                .expect("reward_type column should exist")
+                .data_type(),
+            &arrow::datatypes::DataType::Dictionary(
+                Box::new(arrow::datatypes::DataType::Int32),
+                Box::new(arrow::datatypes::DataType::Utf8),
+            )
+        );
+        assert_eq!(get_string_value(rewards, "reward_type", 0), "Fee");
+        assert_eq!(get_string_value(rewards, "reward_type", 1), "Fee");
     }
 
     #[test]

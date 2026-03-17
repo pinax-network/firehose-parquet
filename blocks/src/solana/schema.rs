@@ -13,6 +13,10 @@ fn solana_canonical_fields(encoding: &EncodeBytes) -> Vec<Field> {
     canonical_fields_with_nullable_timestamps(encoding)
 }
 
+fn enum_data_type() -> DataType {
+    DataType::Dictionary(Box::new(DataType::Int32), Box::new(DataType::Utf8))
+}
+
 pub fn blocks_schema(
     include_fork_step: bool,
     encoding: &EncodeBytes,
@@ -135,7 +139,7 @@ pub fn rewards_schema(
         Field::new("pubkey", DataType::Utf8, false),
         Field::new("lamports", DataType::Int64, false),
         Field::new("post_balance", DataType::UInt64, false),
-        Field::new("reward_type", DataType::Int32, false),
+        Field::new("reward_type", enum_data_type(), false),
         Field::new("commission", DataType::Utf8, true),
         // "block" for block-level rewards, "transaction" for per-tx rewards
         Field::new("source", DataType::Utf8, false),
