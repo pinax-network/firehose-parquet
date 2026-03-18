@@ -105,6 +105,20 @@ cargo build --release --workspace
   --output ./output
 ```
 
+### Authentication
+
+For the normal operator path, export one of the default auth environment
+variables before running `fireparq`:
+
+```bash
+export SUBSTREAMS_API_KEY=your-api-key
+# or
+export SUBSTREAMS_API_TOKEN=your-jwt-token
+```
+
+You only need `--api-key-envvar` or `--api-token-envvar` when your deployment
+stores credentials under different environment variable names.
+
 ### Docker
 
 The image is published to GitHub Container Registry on each release:
@@ -208,9 +222,18 @@ When resuming from an existing `cursor.parquet`, the pipeline validates that the
 - `with_votes` (Solana only) for vote table output
 - `endpoint`, `partition`, `block_range_size`, `compression`, `bytes_encoding` (from file metadata)
 
-On resume, the cursor's stored `start_block` is reused when present. The cursor's `stop_block` may be omitted from the CLI for bounded resume, replaced with a new explicit `--stop-block`, or omitted with `--live` to continue streaming indefinitely. Other parameter mismatches still fail fast unless `--cursor-override` is set.
+On resume, the cursor's stored `start_block` is reused when present. The
+cursor's `stop_block` may be omitted from the CLI for bounded resume, replaced
+with a new explicit `--stop-block`, or omitted with `--live` to continue
+streaming indefinitely. In the normal workflow, rerunning the same command is
+enough and no extra resume flags are needed.
 
-When `--cursor-override` is set, the CLI request takes precedence over the stored cursor range. The pipeline still loads the cursor file for validation/logging, but it restarts from the CLI-provided or endpoint-default start block and does not pass the stored stream cursor token to Firehose.
+### Advanced Cursor Override
+
+When `--cursor-override` is set, the CLI request takes precedence over the
+stored cursor range. The pipeline still loads the cursor file for
+validation/logging, but it restarts from the CLI-provided or endpoint-default
+start block and does not pass the stored stream cursor token to Firehose.
 
 ```bash
 # Restart from the requested range despite parameter changes in cursor.parquet
@@ -235,108 +258,68 @@ This prevents corrupted or partial files and ensures the next run resumes from a
 
 ## CLI Reference
 
-The top-level `fireparq` invocation is the ingestion/build pipeline. Utility workflows stay under subcommands such as `partitions`, `scan`, `inspect`, `validate`, `verify`, `rollup`, `merge`, and `truncate`.
+The top-level `fireparq build` workflow is the common ingestion path. Utility
+workflows stay under subcommands such as `partitions`, `scan`, `inspect`,
+`validate`, `verify`, `rollup`, `merge`, and `truncate`.
 
+For full CLI help, run `fireparq build --help`. The summary below keeps the
+main operator path up front and leaves the less-common deployment and recovery
+knobs to dedicated advanced sections.
+
+### Common ingestion flags
+
+| Area | Common flags |
+|---|---|
+| Connection | `--network <NETWORK>` or `--endpoint <ENDPOINT>` |
+| Range | `--start-block <START_BLOCK>`, `--stop-block <STOP_BLOCK>`, `--live` |
+| Resume | Rerun the same command and the default `cursor.parquet` is reused automatically; use `--cursor <CURSOR>` only when you want a non-default cursor file |
+| Output | `--output <OUTPUT>`, `--partition <PARTITION>`, `--compression <COMPRESSION>` |
+| Chain | `--block-type <BLOCK_TYPE>` (default `auto`), plus chain-specific toggles like `--extended false` or `--with-votes false` only when needed |
+| Runtime | `--final-blocks-only` (default), `--flush-bytes <FLUSH_BYTES>`, optional `--flush-rows` / `--flush-interval-secs` |
+
+### Advanced authentication
+
+Most deployments should keep credentials in `SUBSTREAMS_API_KEY` or
+`SUBSTREAMS_API_TOKEN` and avoid extra CLI flags. Use these options only when
+your secret names differ from the defaults:
+
+- `--api-key-envvar <API_KEY_ENVVAR>`
+- `--api-token-envvar <API_TOKEN_ENVVAR>`
+
+```bash
+fireparq build \
+  --network mainnet \
+  --api-key-envvar INTERNAL_FIREHOSE_API_KEY \
+  --start-block 20000000 \
+  --stop-block 20001000 \
+  --output ./output
 ```
-$ fireparq --help
 
-Build Apache Parquet datasets from Firehose gRPC streams
+### Advanced recovery / override behavior
 
-Usage: fireparq [OPTIONS] [COMMAND]
+These flags are intended for recovery-heavy or operator-managed deployments
+rather than the default workflow:
 
-Commands:
-  completions  Generate shell completions for the given shell
-  partitions   Partition index utilities (`partitions.parquet` workflows)
-  scan         Read and inspect Parquet files (schema, row counts, sample rows)
-  inspect      Display full metadata for a single Parquet file
-  validate     Check partition integrity (gaps, ordering, duplicates)
-  verify       Verify table roots and protocol checks (chain-aware hash strategy)
-  rollup       Roll up fine-grained partitions into coarser ones (e.g. minute → date)
-  merge        Consolidate small part files within each partition into larger files
-  truncate     Delete parquet files with optional partition filtering
-  help         Print this message or the help of the given subcommand(s)
+| Flag | Use when |
+|---|---|
+| `--cursor-override` | Intentionally restart from new CLI bounds instead of reusing the stored Firehose cursor |
+| `--skip-missing-blocks` | Sparse chains legitimately skip block numbers and you want probes/streams to continue past gaps |
+| `--stream-idle-timeout-secs <N>` | Supervising long-lived pipelines that should self-reconnect after a silent stream stall |
+| `--reconnect-stall-timeout-secs <N>` | Fail fast when reconnect loops should hand control back to an external supervisor |
 
-Options:
-      --log-level <LOG_LEVEL>  Log level: trace, debug, info, warn, error [env: LOG_LEVEL] [default: info]
-      --dry-run                Decode and map but don't write files [env: DRY_RUN]
-  -h, --help                   Print help
-  -V, --version                Print version
+### Advanced S3 / deployment knobs
 
-Connection:
-  -e, --endpoint <ENDPOINT>
-          Firehose gRPC endpoint URL [env: ENDPOINT]
-      --network <NETWORK>
-          Built-in Firehose network alias. `--endpoint` or `ENDPOINT` takes precedence. Supports per-network overrides such as `FIREHOSE_ENDPOINT_ETH` [env: NETWORK] [possible values: mainnet, eth, solana-mainnet-beta, solana, tron, tronevm]
-      --api-key-envvar <API_KEY_ENVVAR>
-          Name of environment variable containing the API key for authentication [env: API_KEY_ENVVAR] [default: SUBSTREAMS_API_KEY]
-      --api-token-envvar <API_TOKEN_ENVVAR>
-          Name of environment variable containing the JWT bearer token for authentication [env: API_TOKEN_ENVVAR] [default: SUBSTREAMS_API_TOKEN]
-      --metrics-port <METRICS_PORT>
-          Prometheus /metrics HTTP port [env: METRICS_PORT]
-      --stream-idle-timeout-secs <STREAM_IDLE_TIMEOUT_SECS>
-          Force a reconnect if no stream message is received for N seconds [env: STREAM_IDLE_TIMEOUT_SECS] [default: 120]
-      --reconnect-stall-timeout-secs <RECONNECT_STALL_TIMEOUT_SECS>
-          Exit with an error if reconnecting continuously for N seconds [env: RECONNECT_STALL_TIMEOUT_SECS] [default: 900]
+Most operators can point `--output` directly at a local path or `s3://...`
+prefix and rely on ambient AWS credentials. These flags are only needed for
+custom deployment environments:
 
-Block Range:
-  -s, --start-block <START_BLOCK>  Start block number (inclusive) [env: START_BLOCK]
-                                  In `--live` mode, omitting this resumes from an existing cursor when available, otherwise starts from the endpoint's first streamable block
-      --live                      Keep the stream open and continue following finalized blocks [env: LIVE] [default: false]
-  -t, --stop-block <STOP_BLOCK>    Stop block number (exclusive)
-                                  Required unless `--live` is set or an existing cursor provides one [env: STOP_BLOCK]
-      --skip-missing-blocks
-          Skip missing block numbers after retries are exhausted; useful for sparse chains like Solana, but may continue past gaps instead of failing fast [env: SKIP_MISSING_BLOCKS]
-  -c, --cursor <CURSOR>            Path to cursor file for resuming a previous session [env: CURSOR]
-      --cursor-override            Override cursor parameter validation on resume [env: CURSOR_OVERRIDE]
-      --final-blocks-only          Only process finalized blocks (when false, adds fork_step column) [env: FINAL_BLOCKS_ONLY]
-
-  Output:
-      --output <OUTPUT>
-          Output directory [env: OUTPUT] [default: .]
-      --partition <PARTITION>
-          Partitioning mode: none, block_range, date, hour, minute, second [env: PARTITION] [default: none]
-      --block-range-size <BLOCK_RANGE_SIZE>
-          Block range size when partition=block_range [env: BLOCK_RANGE_SIZE] [default: 10000]
-      --compression <COMPRESSION>
-          Compression codec: zstd, snappy, gzip, none [env: COMPRESSION] [default: zstd]
-
-Flush:
-      --flush-rows <FLUSH_ROWS>
-          Flush mapper state after this many rows; does not guarantee parquet files are materialized (disabled by default) [env: FLUSH_ROWS]
-      --flush-bytes <FLUSH_BYTES>
-          Flush mapper state at this many in-memory bytes and target roughly this many compressed bytes per parquet file [env: FLUSH_BYTES] [default: 134217728]
-      --flush-interval-secs <FLUSH_INTERVAL_SECS>
-          Flush mapper state every N seconds; does not guarantee parquet files are materialized (disabled by default) [env: FLUSH_INTERVAL_SECS]
-
-AWS / S3:
-      --aws-access-key-id <AWS_ACCESS_KEY_ID>
-          AWS access key ID (for S3 output) [env: AWS_ACCESS_KEY_ID]
-      --aws-secret-access-key <AWS_SECRET_ACCESS_KEY>
-          AWS secret access key (for S3 output) [env: AWS_SECRET_ACCESS_KEY]
-      --aws-session-token <AWS_SESSION_TOKEN>
-          AWS session token (for S3 output) [env: AWS_SESSION_TOKEN]
-      --aws-region <AWS_REGION>
-          AWS region (for S3 output) [env: AWS_REGION]
-      --aws-endpoint-url <AWS_ENDPOINT_URL_S3>
-          AWS endpoint URL (for S3-compatible services) [env: AWS_ENDPOINT_URL_S3]
-      --s3-bucket <S3_BUCKET>
-          S3 bucket name (when set, output is written to s3://<bucket>/<output>) [env: S3_BUCKET]
-      --cache-control <CACHE_CONTROL>
-          Cache-Control header for S3 uploads (empty string = no header) [env: CACHE_CONTROL] [default: "public, max-age=31536000, immutable"]
-
-Chain:
-      --block-type <BLOCK_TYPE>
-          Block type to process. Use "auto" to detect from the Firehose stream.
-          Options: auto, evm, bitcoin, solana, near, antelope, cosmos, tron, beacon [env: BLOCK_TYPE] [default: auto]
-      --extended [<EXTENDED>]
-          Enable extended detail level for chains that support extra tables (for example EVM calls/balance_changes/etc.)
-          Enabled by default; disable with `--extended false`. [env: EXTENDED] [default: true]
-      --with-votes [<WITH_VOTES>]
-          Include Solana vote_transactions output. Enabled by default; disable with `--with-votes false`
-          [env: WITH_VOTES] [default: true]
-      --include-failed-transactions
-          Include failed/reverted transactions in output (default: false) [env: INCLUDE_FAILED_TRANSACTIONS]
-```
+| Flag group | Purpose |
+|---|---|
+| `--s3-bucket <S3_BUCKET>` | Prefix relative output paths with `s3://<bucket>/...` |
+| `--aws-access-key-id`, `--aws-secret-access-key`, `--aws-session-token`, `--aws-region` | Override ambient AWS credential and region resolution |
+| `--aws-endpoint-url <AWS_ENDPOINT_URL_S3>` | Target S3-compatible object stores |
+| `--cache-control <CACHE_CONTROL>` | Set upload headers for CDN or static distribution workflows |
+| `--metrics-port <METRICS_PORT>` | Expose Prometheus and health endpoints for monitored deployments |
 
 `--flush-rows` and `--flush-interval-secs` flush mapper state into the writer,
 not directly to disk/S3. `--flush-bytes` also sets the writer's target part
@@ -596,9 +579,11 @@ fireparq build --network mainnet \
   --stop-block 300
 ```
 
-### Custom Cursor Paths (`--cursor-template`)
+### Advanced Cursor Management (`--cursor-template`)
 
-Use `--cursor-template` to choose a deterministic cursor path for a build run.
+Most operators can rely on the default `cursor.parquet` placement. Use
+`--cursor-template` only when you need deterministic per-run or per-deployment
+cursor paths.
 
 ```bash
 # Keep a dedicated cursor for this live pipeline
