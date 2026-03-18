@@ -67,11 +67,11 @@ Examples:
 
   # Backfill from a block and keep following finalized blocks
   fireparq build --network solana-mainnet-beta \\
-    --start-block 250000000 --live
+    --start-block 250000000
 
-  # Resume live mode from cursor.parquet, or fall back to the endpoint's
+  # Resume from cursor.parquet, or fall back to the endpoint's
   # first streamable block when no cursor exists
-  fireparq build --network mainnet --live
+  fireparq build --network mainnet
 
   # See all build options
   fireparq build --help
@@ -942,17 +942,8 @@ fn read_optional_env(name: &str) -> Option<String> {
     std::env::var(name).ok().filter(|value| !value.is_empty())
 }
 
-fn validate_ingestion_block_range(
-    live: bool,
-    stop_block: Option<u64>,
-    cursor_state: Option<&CursorState>,
-) -> Result<()> {
-    if !live && stop_block.is_none() && cursor_state.and_then(|state| state.stop_block).is_none() {
-        return Err(anyhow!(
-            "--stop-block is required unless --live is set or an existing cursor provides one"
-        ));
-    }
-    Ok(())
+fn infer_ingestion_live_mode(stop_block: Option<u64>) -> bool {
+    stop_block.is_none()
 }
 
 fn resolve_ingestion_start_block(
@@ -983,33 +974,13 @@ fn resolve_ingestion_start_block(
 }
 
 fn resolve_ingestion_stop_block(
-    live: bool,
     stop_block: Option<u64>,
-    cursor_state: Option<&CursorState>,
-    cursor_override: bool,
 ) -> Result<Option<u64>> {
     if let Some(stop_block) = stop_block {
         return Ok(Some(stop_block));
     }
 
-    if live {
-        return Ok(None);
-    }
-
-    if cursor_override {
-        return Err(anyhow!(
-            "--stop-block is required unless --live is set or an existing cursor provides one"
-        ));
-    }
-
-    cursor_state
-        .and_then(|state| state.stop_block)
-        .map(Some)
-        .ok_or_else(|| {
-            anyhow!(
-                "--stop-block is required unless --live is set or an existing cursor provides one"
-            )
-        })
+    Ok(None)
 }
 
 fn stream_resume_cursor(
@@ -4278,10 +4249,6 @@ async fn run_ingestion(args: &BuildArgs) -> Result<()> {
 
     let cursor_location = resolve_cursor_location(&config)?;
     let existing_cursor_state = cursor_location.as_ref().and_then(CursorLocation::load);
-    let resume_cursor_state = existing_cursor_state
-        .as_ref()
-        .filter(|_| !args.cursor_override);
-
     let solana_chain = chain_is_solana(&block_type, &endpoint_info, existing_cursor_state.as_ref());
     let antelope_chain =
         chain_is_antelope(&block_type, &endpoint_info, existing_cursor_state.as_ref());
@@ -4298,19 +4265,14 @@ async fn run_ingestion(args: &BuildArgs) -> Result<()> {
         warn!("{}", warning);
     }
 
-    validate_ingestion_block_range(args.common.live, config.stop_block, resume_cursor_state)?;
+    let live = infer_ingestion_live_mode(config.stop_block);
     config.start_block = resolve_ingestion_start_block(
         config.start_block,
         existing_cursor_state.as_ref(),
         &endpoint_info,
         args.cursor_override,
     )?;
-    config.stop_block = resolve_ingestion_stop_block(
-        args.common.live,
-        config.stop_block,
-        resume_cursor_state,
-        args.cursor_override,
-    )?;
+    config.stop_block = resolve_ingestion_stop_block(config.stop_block)?;
     if let firehose_parquet::config::Partition::BlockRange { size, .. } = &mut config.partition {
         let explicit_start_block = args.common.start_block;
         let effective_start_block = config.start_block;
@@ -4360,7 +4322,7 @@ async fn run_ingestion(args: &BuildArgs) -> Result<()> {
                 stored_cursor_last_block_num = cursor_state.last_block_num,
                 requested_start_block = ?config.start_block,
                 requested_stop_block = ?config.stop_block,
-                live = args.common.live,
+                live,
                 "cursor override enabled, restarting from CLI-provided/default bounds"
             );
         } else {
@@ -4368,7 +4330,7 @@ async fn run_ingestion(args: &BuildArgs) -> Result<()> {
                 stored_cursor_last_block_num = cursor_state.last_block_num,
                 requested_start_block = ?config.start_block,
                 requested_stop_block = ?config.stop_block,
-                live = args.common.live,
+                live,
                 "resuming from stored cursor"
             );
         }
@@ -4376,7 +4338,7 @@ async fn run_ingestion(args: &BuildArgs) -> Result<()> {
         info!(
             requested_start_block = ?config.start_block,
             requested_stop_block = ?config.stop_block,
-            live = args.common.live,
+            live,
             "starting without stored cursor"
         );
     }
@@ -5589,13 +5551,38 @@ mod tests {
     }
 
     #[test]
-    fn test_build_subcommand_parses_live_flag() {
-        let cli = Cli::parse_from(["fireparq", "build", "--network", "mainnet", "--live"]);
+    fn test_build_subcommand_infers_live_mode_when_stop_block_is_omitted() {
+        let cli = Cli::parse_from(["fireparq", "build", "--network", "mainnet"]);
         if let Some(Commands::Build(build_args)) = cli.command {
-            assert!(build_args.common.live);
+            assert!(infer_ingestion_live_mode(build_args.common.stop_block));
         } else {
             panic!("expected Commands::Build");
         }
+    }
+
+    #[test]
+    fn test_build_subcommand_infers_live_mode_without_stop_block_when_flush_blocks_is_set() {
+        let cli = Cli::parse_from([
+            "fireparq",
+            "build",
+            "--network",
+            "mainnet",
+            "--flush-blocks",
+            "100000",
+        ]);
+        if let Some(Commands::Build(build_args)) = cli.command {
+            assert_eq!(build_args.common.flush_blocks, Some(100000));
+            assert!(infer_ingestion_live_mode(build_args.common.stop_block));
+        } else {
+            panic!("expected Commands::Build");
+        }
+    }
+
+    #[test]
+    fn test_build_subcommand_rejects_removed_live_flag() {
+        let err = Cli::try_parse_from(["fireparq", "build", "--network", "mainnet", "--live"])
+            .expect_err("--live should no longer be accepted");
+        assert_eq!(err.kind(), clap::error::ErrorKind::UnknownArgument);
     }
 
     #[test]
@@ -5658,7 +5645,7 @@ mod tests {
         assert!(help.contains("fireparq build --network"));
         assert!(help.contains("--without-votes"));
         assert!(help.contains("--start-block"));
-        assert!(help.contains("--live"));
+        assert!(!help.contains("--live"));
         assert!(!help.contains("--partitions-index"));
         assert!(!help.contains("--partition-from"));
         assert!(!help.contains("--partition-to"));
@@ -5676,9 +5663,10 @@ mod tests {
         let help = build_subcmd.clone().render_long_help().to_string();
         assert!(help.contains("--network <NETWORK>"));
         assert!(help.contains("FIREHOSE_ENDPOINT_MAINNET"));
-        assert!(help.contains("--live"));
+        assert!(!help.contains("--live"));
         assert!(help.contains("existing cursor"));
         assert!(help.contains("first streamable block"));
+        assert!(help.contains("When omitted, the build runs in live mode"));
         assert!(help.contains("Missing blocks are skipped automatically"));
         assert!(!help.contains("--bootstrap-missing-genesis-timestamp"));
         assert!(!help.contains("--backfill-missing-timestamps"));
@@ -5907,36 +5895,24 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_ingestion_block_range_accepts_bounded_mode() {
-        validate_ingestion_block_range(false, Some(200), None)
-            .expect("bounded mode should accept --stop-block");
+    fn test_infer_ingestion_live_mode_is_false_when_stop_block_is_present() {
+        assert!(!infer_ingestion_live_mode(Some(200)));
     }
 
     #[test]
-    fn test_validate_ingestion_block_range_accepts_cursor_stop_without_live() {
+    fn test_infer_ingestion_live_mode_is_true_when_stop_block_is_omitted() {
+        assert!(infer_ingestion_live_mode(None));
+    }
+
+    #[test]
+    fn test_infer_ingestion_live_mode_ignores_cursor_stop_block() {
         let cursor_state = CursorState {
             stop_block: Some(200),
             ..CursorState::default()
         };
 
-        validate_ingestion_block_range(false, None, Some(&cursor_state))
-            .expect("bounded mode should accept a stop block from the cursor");
-    }
-
-    #[test]
-    fn test_validate_ingestion_block_range_rejects_missing_stop_without_live_or_cursor() {
-        let err = validate_ingestion_block_range(false, None, None)
-            .expect_err("missing --stop-block should require --live or cursor state");
-        assert_eq!(
-            err.to_string(),
-            "--stop-block is required unless --live is set or an existing cursor provides one"
-        );
-    }
-
-    #[test]
-    fn test_validate_ingestion_block_range_accepts_stop_block_in_live_mode() {
-        validate_ingestion_block_range(true, Some(200), None)
-            .expect("live mode should allow an explicit --stop-block");
+        assert!(infer_ingestion_live_mode(None));
+        assert_eq!(cursor_state.stop_block, Some(200));
     }
 
     #[test]
@@ -6044,57 +6020,18 @@ mod tests {
 
     #[test]
     fn test_resolve_ingestion_stop_block_prefers_explicit_stop_block() {
-        let cursor_state = CursorState {
-            stop_block: Some(200),
-            ..CursorState::default()
-        };
-
-        let stop_block = resolve_ingestion_stop_block(false, Some(300), Some(&cursor_state), false)
+        let stop_block = resolve_ingestion_stop_block(Some(300))
             .expect("ingestion should accept an explicit stop block");
 
         assert_eq!(stop_block, Some(300));
     }
 
     #[test]
-    fn test_resolve_ingestion_stop_block_uses_cursor_stop_for_bounded_resume() {
-        let cursor_state = CursorState {
-            stop_block: Some(200),
-            ..CursorState::default()
-        };
-
-        let stop_block = resolve_ingestion_stop_block(false, None, Some(&cursor_state), false)
-            .expect("bounded resume should use the cursor stop block");
-
-        assert_eq!(stop_block, Some(200));
-    }
-
-    #[test]
     fn test_resolve_ingestion_stop_block_keeps_live_stream_open_when_omitted() {
-        let cursor_state = CursorState {
-            stop_block: Some(200),
-            ..CursorState::default()
-        };
-
-        let stop_block = resolve_ingestion_stop_block(true, None, Some(&cursor_state), false)
-            .expect("live mode should keep streaming when stop block is omitted");
+        let stop_block =
+            resolve_ingestion_stop_block(None).expect("omitting stop block should keep streaming");
 
         assert_eq!(stop_block, None);
-    }
-
-    #[test]
-    fn test_resolve_ingestion_stop_block_rejects_cursor_stop_when_override_is_enabled() {
-        let cursor_state = CursorState {
-            stop_block: Some(200),
-            ..CursorState::default()
-        };
-
-        let err = resolve_ingestion_stop_block(false, None, Some(&cursor_state), true)
-            .expect_err("cursor override should not inherit the cursor stop block");
-
-        assert_eq!(
-            err.to_string(),
-            "--stop-block is required unless --live is set or an existing cursor provides one"
-        );
     }
 
     #[test]

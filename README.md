@@ -95,14 +95,12 @@ cargo build --release --workspace
 ./target/release/fireparq build \
   --network solana-mainnet-beta \
   --start-block 250000000 \
-  --live \
   --output ./output \
   --partition date
 
 # Start live mode from the endpoint's first streamable block
 ./target/release/fireparq build \
   --network mainnet \
-  --live \
   --output ./output
 ```
 

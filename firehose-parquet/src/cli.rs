@@ -72,8 +72,9 @@ pub struct CommonArgs {
 
     /// Start block number (inclusive).
     ///
-    /// In live mode, omitting this resumes from an existing cursor when
-    /// available, otherwise starts from the endpoint's first streamable block.
+    /// When `--stop-block` is omitted, omitting this resumes from an existing
+    /// cursor when available, otherwise starts from the endpoint's first
+    /// streamable block.
     #[arg(
         short = 's',
         long,
@@ -85,7 +86,8 @@ pub struct CommonArgs {
 
     /// Stop block number (exclusive).
     ///
-    /// Required unless `--live` is set or an existing cursor provides one.
+    /// When omitted, the build runs in live mode and keeps following finalized
+    /// blocks.
     #[arg(
         short = 't',
         long,
@@ -94,20 +96,6 @@ pub struct CommonArgs {
         help_heading = "Block Range"
     )]
     pub stop_block: Option<u64>,
-
-    /// Keep the stream open and continue following finalized blocks.
-    ///
-    /// When set and `--start-block` is omitted, resumes from an existing cursor
-    /// when available, otherwise starts from the endpoint's first streamable
-    /// block.
-    #[arg(
-        long,
-        env = "LIVE",
-        default_value = "false",
-        hide_env_values = true,
-        help_heading = "Block Range"
-    )]
-    pub live: bool,
 
     /// Path to cursor parquet file for resuming a previous session (must end in .parquet)
     #[arg(
@@ -335,10 +323,10 @@ Examples:
 
   # Backfill from a block and keep following finalized blocks
   fireparq build --network solana-mainnet-beta \\
-    --start-block 250000000 --live
+    --start-block 250000000
 
   # Start live mode from the endpoint's first streamable block
-  fireparq build --network mainnet --live
+  fireparq build --network mainnet
 
   # Override a network alias with an env var
   FIREHOSE_ENDPOINT_SOLANA_MAINNET_BETA=https://solana.internal.example.com:443 \\
@@ -427,7 +415,7 @@ pub struct BuildArgs {
     /// range. When a cursor file exists and its stored parameters differ from
     /// the current CLI arguments, the pipeline normally exits with an error.
     /// This flag suppresses that check and ignores the stored resume position
-    /// for start/stop/live resolution.
+    /// for start/stop/mode resolution.
     #[arg(
         long,
         env = "CURSOR_OVERRIDE",
@@ -6306,7 +6294,6 @@ mod tests {
         assert_eq!(cli.common.api_token_envvar, "SUBSTREAMS_API_TOKEN");
         assert!(cli.common.start_block.is_none());
         assert!(cli.common.stop_block.is_none());
-        assert!(!cli.common.live);
         assert_eq!(cli.common.cursor, PathBuf::from("cursor.parquet"));
         assert!(cli.common.cursor_template.is_none());
         assert!(cli.common.flush_interval_secs.is_none());
@@ -6335,7 +6322,6 @@ mod tests {
             "100",
             "-t",
             "200",
-            "--live",
             "-c",
             "cursor-mainnet-date.parquet",
             "--output",
@@ -6370,7 +6356,6 @@ mod tests {
         assert_eq!(cli.common.api_token_envvar, "MY_TOKEN_VAR");
         assert_eq!(cli.common.start_block, Some(100));
         assert_eq!(cli.common.stop_block, Some(200));
-        assert!(cli.common.live);
         assert_eq!(
             cli.common.cursor,
             PathBuf::from("cursor-mainnet-date.parquet")
@@ -6461,15 +6446,9 @@ mod tests {
 
     #[test]
     #[serial]
-    fn test_live_flag_parses_without_stop_block() {
-        let cli = parse(&[
-            "test-cli",
-            "--endpoint",
-            "https://example.com:443",
-            "--live",
-        ]);
+    fn test_stop_block_can_be_omitted_for_inferred_live_mode() {
+        let cli = parse(&["test-cli", "--endpoint", "https://example.com:443"]);
 
-        assert!(cli.common.live);
         assert!(cli.common.stop_block.is_none());
     }
 
