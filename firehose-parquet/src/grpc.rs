@@ -2,8 +2,8 @@ use crate::config::Config;
 use crate::metrics::PipelineMetrics;
 use crate::traits::BlockIdentity;
 use anyhow::{Context, Result};
-use backoff::backoff::Backoff;
 use backoff::ExponentialBackoffBuilder;
+use backoff::backoff::Backoff;
 use firehose_protos::firehose;
 use std::time::{Duration, Instant};
 use tonic::transport::{Channel, ClientTlsConfig, Endpoint};
@@ -104,6 +104,16 @@ impl FirehoseClient {
 
     async fn connect(&self) -> Result<Channel> {
         self.connect_with_log(true).await
+    }
+
+    /// Verify that the configured Firehose endpoint is reachable before
+    /// startup relies on endpoint metadata or begins streaming.
+    pub async fn healthcheck(&self) -> Result<()> {
+        let uri = self.config.endpoint.clone();
+        self.connect_with_log(false)
+            .await
+            .with_context(|| format!("Firehose endpoint `{uri}` is unavailable or unhealthy"))?;
+        Ok(())
     }
 
     /// Fetch endpoint information from the `EndpointInfo/Info` RPC.
@@ -471,6 +481,7 @@ mod tests {
     use super::*;
     use crate::config::{Compression, Partition};
     use std::path::PathBuf;
+    use tokio::net::TcpListener;
 
     fn test_config(endpoint: &str) -> Config {
         Config {
@@ -523,5 +534,23 @@ mod tests {
                 keep_alive_while_idle: true,
             }
         );
+    }
+
+    #[tokio::test]
+    async fn test_healthcheck_reports_unavailable_endpoint() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+
+        let endpoint = format!("http://127.0.0.1:{port}");
+        let client = FirehoseClient::new(test_config(&endpoint));
+        let err = client
+            .healthcheck()
+            .await
+            .expect_err("closed port should fail the endpoint healthcheck");
+
+        let error = err.to_string();
+        assert!(error.contains("unavailable or unhealthy"));
+        assert!(error.contains(&endpoint));
     }
 }

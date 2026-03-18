@@ -144,14 +144,14 @@ docker run --rm \
 
 ## Network Aliases
 
-`fireparq` can resolve a small built-in set of Firehose network aliases instead of requiring `--endpoint` every time.
+`fireparq` can resolve a checked-in set of built-in Firehose network names instead of requiring `--endpoint` every time.
 
-Supported names in `v0.5.3`:
+Examples:
 
-- `mainnet`, `eth` → `https://eth.firehose.pinax.network:443`
-- `solana-mainnet-beta`, `solana` → `https://solana.firehose.pinax.network:443`
+- `mainnet` → `https://eth.firehose.pinax.network:443`
+- `solana-mainnet-beta` → `https://solana.firehose.pinax.network:443`
 - `tron` → `https://tron.firehose.pinax.network:443`
-- `tronevm` → `https://tronevm.firehose.pinax.network:443`
+- `tron-evm` → `https://tronevm.firehose.pinax.network:443`
 
 Resolution precedence:
 
@@ -161,15 +161,17 @@ Resolution precedence:
 
 Per-network env overrides normalize network names by uppercasing and converting non-alphanumeric separators to underscores.
 
+Removed networks are rejected during argument parsing, and startup now fails early if the resolved endpoint is unavailable or unhealthy.
+
 ```bash
 # Built-in alias
-fireparq --network eth --start-block 20000000 --stop-block 20001000
+fireparq --network mainnet --start-block 20000000 --stop-block 20001000
 
-# Alias-specific override
-export FIREHOSE_ENDPOINT_ETH=https://eth.internal.example.com:443
-fireparq --network eth --start-block 20000000 --stop-block 20001000
+# Per-network override
+export FIREHOSE_ENDPOINT_MAINNET=https://eth.internal.example.com:443
+fireparq --network mainnet --start-block 20000000 --stop-block 20001000
 
-# Canonical-name override also works for aliases
+# Canonical-name override
 export FIREHOSE_ENDPOINT_SOLANA_MAINNET_BETA=https://solana.internal.example.com:443
 fireparq --network solana-mainnet-beta --start-block 250000000 --stop-block 250100000
 ```
