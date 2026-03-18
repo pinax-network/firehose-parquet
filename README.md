@@ -947,6 +947,7 @@ Byte encoding is determined internally from the resolved block type/profile. Ope
 | `tron-evm` (`evm` Tron-style profile) | `tron_base58` | `hex_no_prefix` |
 
 Endpoint `block_id_encoding` remains a fallback only when the chain does not resolve to a known block-type/profile contract.
+Antelope uses unprefixed hex for both binary fields and block IDs, matching the emitted metadata contract.
 
 For Tron-style profiles (tron and tron-evm):
 
