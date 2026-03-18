@@ -4101,6 +4101,7 @@ async fn main() -> Result<()> {
             Commands::Merge {
                 path,
                 compression,
+                flush_rows,
                 flush_bytes,
                 dry_run,
                 verbose,
@@ -4123,6 +4124,7 @@ async fn main() -> Result<()> {
                 let merge_config = firehose_parquet::merge::MergeConfig {
                     path: path.clone(),
                     compression,
+                    flush_rows: *flush_rows,
                     flush_bytes: *flush_bytes,
                     dry_run: *dry_run,
                     verbose: *verbose,

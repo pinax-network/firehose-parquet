@@ -8,6 +8,7 @@ use std::path::{Component, Path, PathBuf};
 
 /// Default max unresolved timestamp-backfill buffer size in bytes.
 pub const DEFAULT_TIMESTAMP_BACKFILL_BUFFER_LIMIT_BYTES: u64 = 134_217_728;
+pub const DEFAULT_FLUSH_BYTES: u64 = 33_554_432;
 
 /// Load environment variables from `.env` file (if present).
 ///
@@ -192,7 +193,7 @@ pub struct CommonArgs {
     #[arg(
         long,
         env = "FLUSH_BYTES",
-        default_value = "134217728",
+        default_value_t = DEFAULT_FLUSH_BYTES,
         hide_env_values = true,
         help_heading = "Flush"
     )]
@@ -879,7 +880,8 @@ Lookup order for the source path:
     ///
     /// Unlike rollup (which changes partition granularity), merge consolidates
     /// multiple small parts within each existing partition directory into fewer,
-    /// larger files. Source parts are deleted after successful merge.
+    /// larger files. Source parts are deleted after successful merge. Use
+    /// --flush-bytes and/or --flush-rows to cap merged output size.
     #[command(after_long_help = "\
 Examples:
   # Merge parts within each partition (local)
@@ -893,6 +895,9 @@ Examples:
 
   # Custom target file size (512 MB)
   fireparq merge ./output/blocks/ --flush-bytes 536870912
+
+  # Cap merged output by rows
+  fireparq merge ./output/blocks/ --flush-rows 100000
 
   # Preview what would be merged
   fireparq merge ./output/blocks/ --dry-run
@@ -915,8 +920,11 @@ Lookup order:
         /// Compression codec: zstd, snappy, gzip, none
         #[arg(long, default_value = "zstd", help_heading = "Output")]
         compression: String,
-        /// Max compressed bytes per output file
-        #[arg(long, default_value = "268435456", help_heading = "Output")]
+        /// Flush merged output after this many rows (disabled by default)
+        #[arg(long, help_heading = "Flush")]
+        flush_rows: Option<u32>,
+        /// Flush merged output at this many in-memory bytes and target roughly this many compressed bytes per parquet file
+        #[arg(long, default_value_t = DEFAULT_FLUSH_BYTES, help_heading = "Flush")]
         flush_bytes: u64,
         /// Show what would be merged without writing
         #[arg(long, default_value = "false", help_heading = "Execution")]
@@ -6291,7 +6299,7 @@ mod tests {
         assert_eq!(cli.common.block_range_size, 10000);
         assert!(cli.common.flush_rows.is_none());
         assert!(cli.common.flush_blocks.is_none());
-        assert_eq!(cli.common.flush_bytes, 134217728);
+        assert_eq!(cli.common.flush_bytes, DEFAULT_FLUSH_BYTES);
         assert_eq!(cli.common.compression, "zstd");
         assert_eq!(cli.common.log_level, "info");
         assert!(!cli.common.dry_run);
@@ -6945,6 +6953,30 @@ mod tests {
     }
 
     #[test]
+    fn test_merge_help_aligns_flush_controls_with_build() {
+        let cmd = TestCli::command();
+        let build = cmd
+            .get_subcommands()
+            .find(|subcmd| subcmd.get_name() == "build")
+            .expect("build subcommand should exist");
+        let merge = cmd
+            .get_subcommands()
+            .find(|subcmd| subcmd.get_name() == "merge")
+            .expect("merge subcommand should exist");
+
+        let build_help = build.clone().render_long_help().to_string();
+        let merge_help = merge.clone().render_long_help().to_string();
+        let default_flush_bytes = DEFAULT_FLUSH_BYTES.to_string();
+
+        assert!(build_help.contains(&default_flush_bytes));
+        assert!(merge_help.contains(&default_flush_bytes));
+        assert!(merge_help.contains("Flush:"));
+        assert!(merge_help.contains("--flush-rows"));
+        assert!(merge_help.contains("--flush-bytes"));
+        assert!(!merge_help.contains("--flush-blocks"));
+    }
+
+    #[test]
     fn test_flush_blocks_rejects_zero() {
         let err = try_parse(&[
             "test-cli",
@@ -7391,6 +7423,7 @@ mod tests {
         let merge_err = match crate::merge::run_merge(&crate::merge::MergeConfig {
             path: "./mainnet/blocks/".to_string(),
             compression: crate::config::Compression::Zstd,
+            flush_rows: None,
             flush_bytes: 1024,
             dry_run: true,
             verbose: false,
@@ -7475,6 +7508,7 @@ mod tests {
         let merge_result = crate::merge::run_merge(&crate::merge::MergeConfig {
             path: "./mainnet/blocks/".to_string(),
             compression: crate::config::Compression::Zstd,
+            flush_rows: None,
             flush_bytes: 1024,
             dry_run: true,
             verbose: false,
@@ -7562,6 +7596,30 @@ mod tests {
                 assert!(delete_source);
             }
             _ => panic!("expected rollup subcommand"),
+        }
+    }
+
+    #[test]
+    fn test_merge_subcommand_flush_rows_parse() {
+        let cli = parse(&[
+            "test-cli",
+            "merge",
+            "./output/blocks/",
+            "--flush-rows",
+            "1000",
+        ]);
+        match cli.command.expect("command should exist") {
+            Commands::Merge {
+                path,
+                flush_rows,
+                flush_bytes,
+                ..
+            } => {
+                assert_eq!(path, "./output/blocks/");
+                assert_eq!(flush_rows, Some(1000));
+                assert_eq!(flush_bytes, DEFAULT_FLUSH_BYTES);
+            }
+            _ => panic!("expected merge subcommand"),
         }
     }
 

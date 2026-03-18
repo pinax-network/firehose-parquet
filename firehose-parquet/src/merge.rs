@@ -58,6 +58,7 @@ struct StreamingPartWriter {
     schema: Arc<arrow::datatypes::Schema>,
     props: WriterProperties,
     flush_bytes: u64,
+    flush_rows: Option<usize>,
     next_part_num: u32,
     current_writer: Option<ArrowWriter<Vec<u8>>>,
 }
@@ -67,12 +68,14 @@ impl StreamingPartWriter {
         schema: Arc<arrow::datatypes::Schema>,
         props: WriterProperties,
         flush_bytes: u64,
+        flush_rows: Option<u32>,
         initial_part_num: u32,
     ) -> Self {
         Self {
             schema,
             props,
             flush_bytes,
+            flush_rows: flush_rows.filter(|rows| *rows > 0).map(|rows| rows as usize),
             next_part_num: initial_part_num,
             current_writer: None,
         }
@@ -97,7 +100,13 @@ impl StreamingPartWriter {
         let writer = self.current_writer.as_mut().expect("writer must exist");
         writer.write(batch)?;
 
-        if self.flush_bytes > 0 && writer.in_progress_size() as u64 >= self.flush_bytes {
+        let reached_flush_rows = self
+            .flush_rows
+            .is_some_and(|flush_rows| writer.in_progress_rows() >= flush_rows);
+        let reached_flush_bytes =
+            self.flush_bytes > 0 && writer.in_progress_size() as u64 >= self.flush_bytes;
+
+        if reached_flush_rows || reached_flush_bytes {
             self.flush_current(flush_part)?;
         }
 
@@ -134,6 +143,7 @@ impl StreamingPartWriter {
 pub struct MergeConfig {
     pub path: String,
     pub compression: Compression,
+    pub flush_rows: Option<u32>,
     pub flush_bytes: u64,
     pub dry_run: bool,
     pub verbose: bool,
@@ -173,6 +183,7 @@ pub fn run_merge(config: &MergeConfig) -> Result<MergeResult> {
     let resolved = MergeConfig {
         path: resolve_parquet_input_path_string(&config.path),
         compression: config.compression,
+        flush_rows: config.flush_rows,
         flush_bytes: config.flush_bytes,
         dry_run: config.dry_run,
         verbose: config.verbose,
@@ -331,6 +342,7 @@ fn process_local_partition(
                     batch.schema(),
                     props,
                     config.flush_bytes,
+                    config.flush_rows,
                     initial_part_num,
                 ));
             }
@@ -632,6 +644,7 @@ fn process_s3_partition(
         source_files = objects.len(),
         source_bytes,
         flush_bytes = config.flush_bytes,
+        flush_rows = config.flush_rows,
         dry_run = config.dry_run,
         "starting S3 partition merge"
     );
@@ -686,6 +699,7 @@ fn process_s3_partition(
                     batch.schema(),
                     props,
                     config.flush_bytes,
+                    config.flush_rows,
                     initial_part_num,
                 ));
             }
@@ -1007,6 +1021,12 @@ mod tests {
             .cloned()
     }
 
+    fn read_parquet_row_count(path: &Path) -> i64 {
+        let file = std::fs::File::open(path).unwrap();
+        let builder = ParquetRecordBatchReaderBuilder::try_new(file).unwrap();
+        builder.metadata().file_metadata().num_rows()
+    }
+
     #[test]
     fn test_merge_preserves_metadata() {
         let dir = tempfile::tempdir().unwrap();
@@ -1038,6 +1058,7 @@ mod tests {
         let config = MergeConfig {
             path: dir.path().to_string_lossy().to_string(),
             compression: Compression::None,
+            flush_rows: None,
             flush_bytes: 0,
             dry_run: false,
             verbose: false,
@@ -1063,6 +1084,43 @@ mod tests {
         };
         assert_eq!(find("firehose-parquet.version"), Some("0.1.0".to_string()));
         assert_eq!(find("firehose-parquet.chain_name"), Some("eth".to_string()));
+    }
+
+    #[test]
+    fn test_merge_flushes_on_row_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let partition = dir.path().join("blocks/year=2024/month=01/date=15");
+        std::fs::create_dir_all(&partition).unwrap();
+
+        for part_num in 1..=3 {
+            write_test_parquet_with_metadata(
+                &partition.join(format!("part-{part_num:06}.parquet")),
+                &make_test_batch(10),
+                vec![],
+            );
+        }
+
+        let config = MergeConfig {
+            path: dir.path().to_string_lossy().to_string(),
+            compression: Compression::None,
+            flush_rows: Some(15),
+            flush_bytes: 0,
+            dry_run: false,
+            verbose: false,
+            aws: None,
+            cache_control: String::new(),
+        };
+
+        let result = run_merge(&config).unwrap();
+        assert_eq!(result.partitions_merged, 1);
+        assert_eq!(result.files_written, 2);
+
+        let mut out_files = Vec::new();
+        collect_parquet_files_recursive(dir.path(), &mut out_files).unwrap();
+        out_files.sort();
+        assert_eq!(out_files.len(), 2);
+        assert_eq!(read_parquet_row_count(&out_files[0]), 20);
+        assert_eq!(read_parquet_row_count(&out_files[1]), 10);
     }
 
     #[test]
