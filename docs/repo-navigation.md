@@ -83,7 +83,7 @@ Related design docs:
 - Run tests: `cargo test --workspace`
 - Build release: `cargo build --release --workspace`
 - Run binary from source: `cargo run --bin fireparq -- --help`
-- Run ingestion (preferred form): `cargo run --bin fireparq -- build --network mainnet --start-block 100 --live`
+- Run ingestion (preferred form): `cargo run --bin fireparq -- build --network mainnet --start-block 100`
 - Install binary locally: `cargo install --path blocks`
 - Generate shell completions: `cargo run --bin fireparq -- completions zsh`
 - CI entrypoint: `.github/workflows/ci.yml`
