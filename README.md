@@ -6,8 +6,8 @@ A production-grade Rust toolkit that consumes [StreamingFast Firehose](https://f
 
 | `--block-type` | Endpoint Example | Tables |
 |---|---|---|
-| `evm` | `eth.firehose.pinax.network:443` | blocks, transactions, logs, calls, balance_changes, code_changes, storage_changes, nonce_changes, gas_changes, account_creations (`--extended false` disables extra tables) |
-| `solana` | `solana.firehose.pinax.network:443` | blocks, transactions, messages, instructions, rewards, token_balances, account_lookups, vote_transactions (`--with-votes false` disables `vote_transactions`) |
+| `evm` | `eth.firehose.pinax.network:443` | blocks, transactions, logs, calls, balance_changes, code_changes, storage_changes, nonce_changes, gas_changes, account_creations (`--without-extended` disables extra tables) |
+| `solana` | `solana.firehose.pinax.network:443` | blocks, transactions, messages, instructions, rewards, token_balances, account_lookups, vote_transactions (`--without-votes` disables `vote_transactions`) |
 | `bitcoin` | `btc.firehose.pinax.network:443` | blocks, transactions, inputs, outputs |
 | `beacon` | `beacon.firehose.pinax.network:443` | blocks, attestations, deposits, proposer_slashings, attester_slashings, voluntary_exits, execution_payload, blob_sidecars |
 | `tron` | `tron.firehose.pinax.network:443` | blocks, transactions, logs, internal_transactions |
@@ -71,7 +71,7 @@ cargo build --release --workspace
   --network solana-mainnet-beta \
   --start-block 200000000 \
   --stop-block 200001000 \
-  --with-votes false \
+  --without-votes \
   --output ./output
 
 # Disable extended EVM tables explicitly (explicit block type)
@@ -80,7 +80,8 @@ cargo build --release --workspace
   --endpoint https://eth.firehose.pinax.network:443 \
   --start-block 19000000 \
   --stop-block 19001000 \
-  --extended false
+  --without-extended \
+  --bytes-encoding hex
 
 # Stream Antelope blocks
 ./target/release/fireparq build \
