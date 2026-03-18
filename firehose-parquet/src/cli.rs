@@ -1257,11 +1257,11 @@ Examples:
         api_token_envvar: String,
         /// Start block number (inclusive).
         ///
-        /// When omitted in bounded mode, falls back to a sibling `cursor.parquet`
-        /// if present, then to the endpoint's first streamable block.
-        ///
-        /// When omitted in `--live` mode, existing `partitions.parquet` rows take
-        /// precedence as the restart anchor.
+    /// When omitted in bounded mode, falls back to a sibling `cursor.parquet`
+    /// if present, then to the endpoint's first streamable block.
+    ///
+    /// When omitted in `--live` mode, existing `partitions.parquet` rows take
+    /// precedence as the restart anchor.
         ///
         /// Use `--overwrite` to ignore any existing canonical index and rebuild it
         /// from the requested start point instead.
@@ -6819,6 +6819,7 @@ mod tests {
         ])
         .expect_err("removed skip-missing-blocks flag should fail clap parsing");
 
+        assert_eq!(err.kind(), clap::error::ErrorKind::UnknownArgument);
         let rendered = err.to_string();
         assert!(rendered.contains("--skip-missing-blocks"));
         assert!(rendered.contains("unexpected argument"));

@@ -5725,6 +5725,7 @@ mod tests {
         ])
         .expect_err("removed skip-missing-blocks flag should fail clap parsing");
 
+        assert_eq!(err.kind(), clap::error::ErrorKind::UnknownArgument);
         let rendered = err.to_string();
         assert!(rendered.contains("--skip-missing-blocks"));
         assert!(rendered.contains("unexpected argument"));
