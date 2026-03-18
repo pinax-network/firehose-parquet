@@ -335,9 +335,9 @@ When a partition boundary is detected during ingestion, the mapper flush for the
 old partition is forced through writer materialization immediately, and the same
 writer outcome logs are emitted for that boundary-triggered flush.
 
-When `--bootstrap-missing-genesis-timestamp` is enabled in strict mode, leading
-bootstrap blocks with missing timestamps are still written to output. Their
-timestamps are synthesized from the first later block that includes timestamp
+When the first streamable block is missing timestamp metadata, fireparq now
+automatically preserves those leading bootstrap blocks in output and
+synthesizes their timestamps from the first later block that includes timestamp
 metadata.
 
 For Solana time-based partitions, missing `block_time` values keep canonical
