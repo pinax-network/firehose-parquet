@@ -107,8 +107,8 @@ cargo build --release --workspace
 
 ### Authentication
 
-For the normal operator path, export one of the default auth environment
-variables before running `fireparq`:
+For the standard workflow, export one of the default auth environment variables
+before running `fireparq`:
 
 ```bash
 export SUBSTREAMS_API_KEY=your-api-key
@@ -258,13 +258,14 @@ This prevents corrupted or partial files and ensures the next run resumes from a
 
 ## CLI Reference
 
-The top-level `fireparq build` workflow is the common ingestion path. Utility
-workflows stay under subcommands such as `partitions`, `scan`, `inspect`,
-`validate`, `verify`, `rollup`, `merge`, and `truncate`.
+The primary ingestion workflow is `fireparq build`. Utility workflows stay
+under subcommands such as `partitions`, `scan`, `inspect`, `validate`,
+`verify`, `rollup`, `merge`, and `truncate`.
 
-For full CLI help, run `fireparq build --help`. The summary below keeps the
-main operator path up front and leaves the less-common deployment and recovery
-knobs to dedicated advanced sections.
+For full CLI help, run `fireparq --help` for the top-level command surface or
+`fireparq build --help` for ingestion-specific flags. The summary below keeps
+the main operator path up front and leaves the less-common deployment and
+recovery knobs to dedicated advanced sections.
 
 ### Common ingestion flags
 
