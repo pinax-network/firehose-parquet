@@ -755,10 +755,10 @@ Lookup order for the source path matches `scan` / `inspect`: explicit `s3://...`
 
 Consolidates multiple small part files within each partition directory into fewer, larger files. Unlike `rollup` (which changes partition granularity), `merge` keeps the same partition layout but reduces file count. Supports local paths, shorthand S3 keys/prefixes via `S3_BUCKET`, and explicit S3 URIs.
 
-`merge` processes one table at a time and, within each table, one partition at a time. All parts in each partition are read into memory, sorted by `block_num`, and written back as new files respecting `--flush-bytes`. Original parts are deleted after successful merge.
+`merge` processes one table at a time and, within each table, one partition at a time. All parts in each partition are read into memory, sorted by `block_num`, and written back as new files respecting `--flush-bytes` and `--flush-rows`. Original parts are deleted after successful merge.
 
 ```bash
-# Merge small parts within each partition (default 256 MB per file)
+# Merge small parts within each partition (default 32 MB target per file)
 fireparq merge ./output/blocks/
 
 # Dry run — show what would be merged without writing
@@ -766,6 +766,9 @@ fireparq merge ./output/blocks/ --dry-run
 
 # Merge with custom file size limit
 fireparq merge ./output/blocks/ --flush-bytes 536870912
+
+# Merge with a row-based flush limit
+fireparq merge ./output/blocks/ --flush-rows 100000
 
 # Merge S3-hosted data
 fireparq merge s3://my-bucket/evm/blocks/
@@ -779,7 +782,8 @@ Lookup order matches `scan` / `inspect`: explicit `s3://...` URIs win, existing 
 | Flag | Default | Description |
 |---|---|---|
 | `--compression` | `zstd` | Compression codec: zstd, snappy, gzip, none |
-| `--flush-bytes` | 256 MB | Max compressed bytes per output file |
+| `--flush-bytes` | 32 MB | Target compressed bytes per output file |
+| `--flush-rows` | disabled | Flush merged output after this many rows |
 | `--dry-run` | `false` | Show what would be merged without writing |
 
 > **Memory note:** Merge reads all parts in a partition at once. Ensure sufficient memory for the largest partition.
