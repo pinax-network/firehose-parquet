@@ -158,6 +158,15 @@ mod tests {
     }
 
     #[test]
+    fn test_resolve_network_endpoint_removed_builtin_network() {
+        let err = resolve_network_endpoint("arbitrum-nova")
+            .expect_err("removed built-in network should no longer resolve");
+        assert!(err
+            .to_string()
+            .contains("unsupported network `arbitrum-nova`"));
+    }
+
+    #[test]
     #[serial]
     fn test_resolve_network_endpoint_uses_requested_name_override() {
         unsafe {

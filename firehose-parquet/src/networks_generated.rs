@@ -2,10 +2,6 @@ use crate::networks::BuiltinNetwork;
 
 pub const GENERATED_NETWORKS: &[BuiltinNetwork] = &[
     BuiltinNetwork {
-        chain_name: "arbitrum-nova",
-        default_endpoint: "https://arbnova.firehose.pinax.network:443",
-    },
-    BuiltinNetwork {
         chain_name: "arbitrum-one",
         default_endpoint: "https://arbone.firehose.pinax.network:443",
     },
@@ -224,7 +220,6 @@ pub const GENERATED_NETWORKS: &[BuiltinNetwork] = &[
 ];
 
 pub const GENERATED_NETWORK_NAMES: &[&str] = &[
-    "arbitrum-nova",
     "arbitrum-one",
     "arbitrum-sepolia",
     "avalanche",

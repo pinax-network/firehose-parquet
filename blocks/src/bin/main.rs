@@ -942,6 +942,24 @@ fn read_optional_env(name: &str) -> Option<String> {
     std::env::var(name).ok().filter(|value| !value.is_empty())
 }
 
+async fn ensure_endpoint_available(
+    client: &FirehoseClient,
+    endpoint: &str,
+    network: Option<&str>,
+) -> Result<()> {
+    client.healthcheck().await.map_err(|err| {
+        if let Some(network) = network {
+            anyhow!(
+                "resolved endpoint for --network `{network}` is unavailable or unhealthy: {endpoint}. verify the network is still supported or provide --endpoint explicitly. root cause: {err}"
+            )
+        } else {
+            anyhow!(
+                "Firehose endpoint `{endpoint}` is unavailable or unhealthy; verify --endpoint/ENDPOINT and try again. root cause: {err}"
+            )
+        }
+    })
+}
+
 fn infer_ingestion_live_mode(stop_block: Option<u64>) -> bool {
     stop_block.is_none()
 }
@@ -1043,6 +1061,7 @@ fn resolve_cursor_location(
 
 async fn run_partitions_build(
     endpoint: &str,
+    network: Option<&str>,
     api_key_envvar: &str,
     api_token_envvar: &str,
     start_block: Option<u64>,
@@ -1130,6 +1149,7 @@ async fn run_partitions_build(
     };
 
     let info_client = FirehoseClient::new(base_config.clone());
+    ensure_endpoint_available(&info_client, endpoint, network).await?;
     let endpoint_info = info_client.info().await;
     let chain = endpoint_info
         .as_ref()
@@ -3628,6 +3648,7 @@ async fn main() -> Result<()> {
 
                     let result = run_partitions_build(
                         &resolved_endpoint,
+                        network.as_deref(),
                         api_key_envvar,
                         api_token_envvar,
                         *start_block,
@@ -4192,6 +4213,7 @@ async fn run_ingestion(args: &BuildArgs) -> Result<()> {
     let mut extended = !args.without_extended;
     let with_votes = !args.without_votes;
     let mut common = args.common.clone();
+    let mut resolved_network_name: Option<String> = None;
     if common.endpoint.is_none() {
         if let Some(network) = args.network.as_deref() {
             let resolved = resolve_network_endpoint(network)?;
@@ -4210,6 +4232,7 @@ async fn run_ingestion(args: &BuildArgs) -> Result<()> {
                     "resolved network endpoint from environment override"
                 ),
             }
+            resolved_network_name = Some(resolved.requested.clone());
             common.endpoint = Some(resolved.endpoint);
         }
     } else if let Some(network) = args.network.as_deref() {
@@ -4242,6 +4265,7 @@ async fn run_ingestion(args: &BuildArgs) -> Result<()> {
     // Fetch endpoint info for auto-detection of encoding, chain_name-based
     // output directory, and feature capability logging.
     let mut client = FirehoseClient::new(config.clone());
+    ensure_endpoint_available(&client, &config.endpoint, resolved_network_name.as_deref()).await?;
     let endpoint_info = client.info().await;
 
     // Use chain_name as a subdirectory under the output path.
@@ -5631,6 +5655,15 @@ mod tests {
         let rendered = err.to_string();
         assert!(rendered.contains("invalid value 'unknown'"));
         assert!(rendered.contains("solana-mainnet-beta"));
+    }
+
+    #[test]
+    fn test_build_subcommand_rejects_removed_builtin_network() {
+        let err = Cli::try_parse_from(["fireparq", "build", "--network", "arbitrum-nova"])
+            .expect_err("removed built-in network should fail clap parsing");
+        let rendered = err.to_string();
+        assert!(rendered.contains("invalid value 'arbitrum-nova'"));
+        assert!(rendered.contains("arbitrum-one"));
     }
 
     #[test]
