@@ -987,17 +987,17 @@ Every table across all chains includes these 6 columns (from Firehose `BlockMeta
 
 `fireparq` determines output encoding from the resolved block type/profile. Operators do not need to set a separate encoding flag. The effective values written for each file are exposed in Parquet metadata as `firehose-parquet.bytes_encoding` and `firehose-parquet.block_id_encoding`.
 
-| Block type / profile | Block encoding | Transaction / hash / address encoding | Notes |
-|---|---|---|---|
-| `evm` | `hex_0x` | `hex` | `block_id` is `0x`-prefixed hex. Other binary identifiers such as transaction hashes, log topics, and addresses follow the standard hex contract. |
-| `bitcoin` | `hex_0x` | `hex` | Block IDs are `0x`-prefixed hex. Transaction IDs and other binary fields use the standard hex contract. |
-| `solana` | `base58` | `base58` | Block IDs and other binary identifiers stay base58, matching common Solana operator tooling. |
-| `near` | `base58` | `base58` | Block IDs, transaction hashes, receipt IDs, and key-like binary fields stay base58. |
-| `antelope` | `hex_no_prefix` | `hex_no_prefix` | Uses lowercase hex without `0x` for both block IDs and other binary fields. |
-| `cosmos` | `hex_0x` | `hex` | Block IDs are `0x`-prefixed hex. Other binary identifiers follow the standard hex contract. |
-| `tron` | `hex_no_prefix` | transaction/hash: `hex_no_prefix`; address: `tron_base58` | Address-like fields use Tron Base58Check. Canonical hash/topic-like fields remain lowercase hex without `0x`. |
-| `beacon` | `hex_0x` | `hex` | Block roots and other binary identifiers use the standard hex contract. |
-| `tron-evm` (`evm` Tron-style profile) | `hex_no_prefix` | transaction/hash: `hex_no_prefix`; address: `tron_base58` | Same operator-facing contract as `tron`: address-like fields use Tron Base58Check, while canonical hashes/topics stay lowercase hex without `0x`. |
+| Block type / profile | Block encoding | Transaction / hash encoding | Address / other binary field encoding | Notes |
+|---|---|---|---|---|
+| `evm` | `hex_0x` | `hex` | `hex` | `block_id` is `0x`-prefixed hex. Transaction hashes, log topics, and addresses are `0x`-prefixed hex. |
+| `bitcoin` | `hex_0x` | `hex` | `hex` | Block IDs are `0x`-prefixed hex. Transaction IDs and other binary fields are `0x`-prefixed hex. |
+| `solana` | `base58` | `base58` | `base58` | Block IDs and other binary identifiers stay base58, matching common Solana operator tooling. |
+| `near` | `base58` | `base58` | `base58` | Block IDs, transaction hashes, receipt IDs, and key-like binary fields stay base58. |
+| `antelope` | `hex_no_prefix` | `hex_no_prefix` | `hex_no_prefix` | Uses lowercase hex without `0x` for both block IDs and other binary fields. |
+| `cosmos` | `hex_0x` | `hex` | `hex` | Block IDs are `0x`-prefixed hex. Other binary identifiers are `0x`-prefixed hex. |
+| `tron` | `hex_no_prefix` | `hex_no_prefix` | `tron_base58` for addresses; `hex_no_prefix` for other binary fields | Address-like fields use Tron Base58Check. Canonical hashes, topics, and other non-address bytes remain lowercase hex without `0x`. |
+| `beacon` | `hex_0x` | `hex` | `hex` | Block roots and other binary identifiers are `0x`-prefixed hex. |
+| `tron-evm` (`evm` Tron-style profile) | `hex_no_prefix` | `hex_no_prefix` | `tron_base58` for addresses; `hex_no_prefix` for other binary fields | Same operator-facing contract as `tron`: address-like fields use Tron Base58Check, while canonical hashes/topics stay lowercase hex without `0x`. |
 
 ## Environment Variables
 
