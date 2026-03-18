@@ -1,6 +1,6 @@
 use crate::config::{Compression, Config, Partition};
 use crate::networks::KNOWN_NETWORK_NAMES;
-use clap::builder::{BoolishValueParser, PossibleValuesParser};
+use clap::builder::PossibleValuesParser;
 use clap::Args;
 use clap_complete::{generate, Shell};
 use std::io;
@@ -347,12 +347,12 @@ Examples:
   # Disable Solana vote transactions explicitly
   fireparq build --network solana-mainnet-beta \\
     --start-block 250000000 --stop-block 250001000 \\
-    --with-votes false
+    --without-votes
 
   # Disable extended EVM tables explicitly
   fireparq build --network mainnet \\
     --start-block 20000000 --stop-block 20001000 \\
-    --extended false
+    --without-extended
 
   # Stream Antelope blocks
   fireparq build --block-type antelope \\
@@ -395,32 +395,23 @@ pub struct BuildArgs {
     )]
     pub block_type: String,
 
-    /// Enable extended detail level for chains that support extra tables (for example EVM calls/balance_changes/etc.)
-    /// Enabled by default; disable with `--extended false`.
+    /// Disable extended detail tables for chains that support them.
     #[arg(
         long,
-        env = "EXTENDED",
-        default_missing_value = "true",
-        num_args = 0..=1,
-        value_parser = BoolishValueParser::new(),
+        env = "WITHOUT_EXTENDED",
         hide_env_values = true,
         help_heading = "Chain"
     )]
-    pub extended: Option<bool>,
+    pub without_extended: bool,
 
-    /// Include Solana `vote_transactions` output.
-    /// Enabled by default; disable with `--with-votes false`.
+    /// Disable Solana `vote_transactions` output.
     #[arg(
         long,
-        env = "WITH_VOTES",
-        default_value = "true",
-        default_missing_value = "true",
-        num_args = 0..=1,
-        value_parser = BoolishValueParser::new(),
+        env = "WITHOUT_VOTES",
         hide_env_values = true,
         help_heading = "Chain"
     )]
-    pub with_votes: bool,
+    pub without_votes: bool,
 
     /// Include failed/reverted transactions in output (default: false)
     #[arg(
@@ -6996,10 +6987,12 @@ mod tests {
         assert!(!help.contains("Antelope always includes `db_ops` by default"));
         assert!(!help.contains("Enable extended detail level (extra tables: EVM calls/balance_changes/etc., Antelope db_ops)"));
         assert!(help.contains("Stream Antelope blocks"));
-        assert!(help.contains("--extended [<EXTENDED>]"));
-        assert!(help.contains("Enabled by default; disable with `--extended false`"));
-        assert!(help.contains("--with-votes [<WITH_VOTES>]"));
-        assert!(help.contains("Enabled by default; disable with `--with-votes false`"));
+        assert!(help.contains("--without-extended"));
+        assert!(help.contains("Disable extended detail tables for chains that support them"));
+        assert!(help.contains("--without-votes"));
+        assert!(help.contains("Disable Solana `vote_transactions` output"));
+        assert!(!help.contains("--extended [<EXTENDED>]"));
+        assert!(!help.contains("--with-votes [<WITH_VOTES>]"));
     }
 
     #[test]
