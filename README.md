@@ -102,6 +102,13 @@ cargo build --release --workspace
 ./target/release/fireparq build \
   --network mainnet \
   --output ./output
+
+# Add verbose operational logs for debugging without changing normal output by default
+./target/release/fireparq build \
+  --network mainnet \
+  --start-block 20000000 \
+  --stop-block 20001000 \
+  --verbose
 ```
 
 ### Authentication
