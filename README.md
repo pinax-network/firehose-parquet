@@ -32,7 +32,7 @@ A production-grade Rust toolkit that consumes [StreamingFast Firehose](https://f
 - **File rollover** — flush by row count, byte size, or time interval
 - **Fork handling** — `--final-blocks-only` (default) or include `fork_step` column (`NEW`/`UNDO`/`FINAL`)
 - **Failed transaction filtering** — `--include-failed-transactions` to opt in to failed/reverted txs (excluded by default)
-- **Byte encoding** — configurable encoding for binary fields: `binary` (raw), `hex`, `hex_no_prefix`, `base58`, `tron_base58`, `auto`
+- **Block-type-based encoding** — block IDs and binary fields follow the resolved chain/profile defaults, recorded in Parquet metadata for downstream operators
 - **Compression** — zstd (default), snappy, gzip, or none
 - **Parquet file metadata** — every file embeds pipeline provenance (`firehose-parquet.*` key-value pairs) in the Parquet footer
 - **Prometheus metrics** — opt-in `/metrics` endpoint for monitoring throughput, buffer state, and errors
@@ -925,36 +925,14 @@ Every Parquet file written by the pipeline embeds key-value metadata in the file
 | `firehose-parquet.synthetic_timestamps` | `true` |
 | `firehose-parquet.synthetic_timestamp_policy` | `last_known_partition_routing` |
 
-`firehose-parquet.bytes_encoding` and `firehose-parquet.block_id_encoding` describe the emitted output contract, not just the upstream Firehose endpoint.
+`firehose-parquet.bytes_encoding` and `firehose-parquet.block_id_encoding` describe the emitted output contract, not just the upstream Firehose endpoint. See [Output Encoding by Block Type](#output-encoding-by-block-type) for the operator-facing defaults by supported chain/profile.
 
 For Solana time-based partitions, the `firehose-parquet.synthetic_*` metadata
 keys mark routing as using a synthetic last-known timestamp anchor while
 canonical `timestamp` / `date` remain chain-sourced and nullable when
 `block_time` is missing.
 
-Byte encoding is determined internally from the resolved block type/profile. Operators no longer configure it manually.
-
-| Block type / profile | Binary field encoding (`firehose-parquet.bytes_encoding`) | Block encoding (`firehose-parquet.block_id_encoding`) |
-|---|---|---|
-| `evm` | `hex` | `hex_0x` |
-| `bitcoin` | `hex` | `hex_0x` |
-| `solana` | `base58` | `base58` |
-| `near` | `base58` | `base58` |
-| `antelope` | `hex_no_prefix` | `hex_no_prefix` |
-| `cosmos` | `hex` | `hex_0x` |
-| `tron` | `tron_base58` | `hex_no_prefix` |
-| `beacon` | `hex` | `hex_0x` |
-| `tron-evm` (`evm` Tron-style profile) | `tron_base58` | `hex_no_prefix` |
-
 Endpoint `block_id_encoding` remains a fallback only when the chain does not resolve to a known block-type/profile contract.
-Antelope uses unprefixed hex for both binary fields and block IDs, matching the emitted metadata contract.
-
-For Tron-style profiles (tron and tron-evm):
-
-- metadata reports `bytes_encoding=tron_base58`
-- metadata reports `block_id_encoding=hex_no_prefix`
-- canonical hash/topic-like fields stay hex without `0x`
-- address-like byte fields use Tron Base58
 
 ### Reading Metadata
 
@@ -999,36 +977,27 @@ Every table across all chains includes these 6 columns (from Firehose `BlockMeta
 | Column | Type | Description |
 |---|---|---|
 | `block_num` | UInt64 | Block number |
-| `block_id` | Utf8 | Block ID (hex for EVM, base58 for Solana) |
+| `block_id` | Utf8 | Block ID (format depends on block type; see [Output Encoding by Block Type](#output-encoding-by-block-type)) |
 | `parent_num` | UInt64 | Parent block number |
 | `parent_id` | Utf8 | Parent block ID |
 | `lib_num` | UInt64 | Last irreversible block number |
 | `timestamp` | Int64 | Block time (unix seconds) |
 
-## Byte Encoding
+## Output Encoding by Block Type
 
-| Mode | Description | Best For |
-|---|---|---|
-| `binary` | Raw bytes (Arrow `Binary`) | Parquet-native workflows (DuckDB, Spark) |
-| `hex` | `0x`-prefixed hex strings | EVM ecosystem tools |
-| `base58` | Base58 strings | Solana ecosystem tools |
-| `tron_base58` | Tron Base58Check addresses; non-address Tron values fall back to hex without `0x` | Tron-specific tools |
-| `auto` | Chain-appropriate default | General use |
+`fireparq` determines output encoding from the resolved block type/profile. Operators do not need to set a separate encoding flag. The effective values written for each file are exposed in Parquet metadata as `firehose-parquet.bytes_encoding` and `firehose-parquet.block_id_encoding`.
 
-### Auto Encoding Per Chain
-
-| Chain | `auto` resolves to |
-|---|---|
-| EVM | `hex` |
-| Solana | `base58` |
-| Bitcoin | `hex` |
-| Tron | `tron_base58` |
-| Beacon | `hex` |
-| Cosmos | `hex` |
-| Antelope | `hex` |
-| NEAR | `hex` |
-
-When `tron` resolves `auto` to `tron_base58`, account/address-like byte fields are emitted as Tron Base58Check. Reserved protocol identifiers remain lowercase hex without `0x`: block hash, parent block hash, transaction hash, and log topics. Additional Tron hash-like fields such as `tx_trie_root` and internal transaction `hash` also remain hex without `0x`.
+| Block type / profile | Block encoding | Transaction / hash / address encoding | Notes |
+|---|---|---|---|
+| `evm` | `hex_0x` | `hex` | `block_id` is `0x`-prefixed hex. Other binary identifiers such as transaction hashes, log topics, and addresses follow the standard hex contract. |
+| `bitcoin` | `hex_0x` | `hex` | Block IDs are `0x`-prefixed hex. Transaction IDs and other binary fields use the standard hex contract. |
+| `solana` | `base58` | `base58` | Block IDs and other binary identifiers stay base58, matching common Solana operator tooling. |
+| `near` | `base58` | `base58` | Block IDs, transaction hashes, receipt IDs, and key-like binary fields stay base58. |
+| `antelope` | `hex_no_prefix` | `hex_no_prefix` | Uses lowercase hex without `0x` for both block IDs and other binary fields. |
+| `cosmos` | `hex_0x` | `hex` | Block IDs are `0x`-prefixed hex. Other binary identifiers follow the standard hex contract. |
+| `tron` | `hex_no_prefix` | transaction/hash: `hex_no_prefix`; address: `tron_base58` | Address-like fields use Tron Base58Check. Canonical hash/topic-like fields remain lowercase hex without `0x`. |
+| `beacon` | `hex_0x` | `hex` | Block roots and other binary identifiers use the standard hex contract. |
+| `tron-evm` (`evm` Tron-style profile) | `hex_no_prefix` | transaction/hash: `hex_no_prefix`; address: `tron_base58` | Same operator-facing contract as `tron`: address-like fields use Tron Base58Check, while canonical hashes/topics stay lowercase hex without `0x`. |
 
 ## Environment Variables
 
