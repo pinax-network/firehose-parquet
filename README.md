@@ -153,6 +153,8 @@ Examples:
 - `tron` → `https://tron.firehose.pinax.network:443`
 - `tron-evm` → `https://tronevm.firehose.pinax.network:443`
 
+Provider hostnames do not always mirror the network name exactly. For example, `tron-evm` resolves to the provider hostname `tronevm.firehose.pinax.network`.
+
 Resolution precedence:
 
 1. `--endpoint` or `ENDPOINT`
