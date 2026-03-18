@@ -24,6 +24,35 @@ use tracing::{info, info_span, warn};
 
 const S3_READ_MAX_ATTEMPTS: usize = 5;
 const S3_READ_RETRY_BASE_DELAY_MS: u64 = 100;
+const S3_UPLOAD_MAX_ATTEMPTS: usize = 8;
+const S3_UPLOAD_RETRY_BASE_DELAY_MS: u64 = 250;
+const S3_DELETE_MAX_ATTEMPTS: usize = 5;
+const S3_DELETE_RETRY_BASE_DELAY_MS: u64 = 100;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MergeS3Operation {
+    Read,
+    Upload,
+    Delete,
+}
+
+impl MergeS3Operation {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Read => "read",
+            Self::Upload => "upload",
+            Self::Delete => "delete",
+        }
+    }
+
+    fn action(self) -> &'static str {
+        match self {
+            Self::Read => "reading",
+            Self::Upload => "uploading",
+            Self::Delete => "deleting",
+        }
+    }
+}
 
 struct StreamingPartWriter {
     schema: Arc<arrow::datatypes::Schema>,
@@ -107,6 +136,7 @@ pub struct MergeConfig {
     pub compression: Compression,
     pub flush_bytes: u64,
     pub dry_run: bool,
+    pub verbose: bool,
     pub aws: Option<AwsConfig>,
     pub cache_control: String,
 }
@@ -145,6 +175,7 @@ pub fn run_merge(config: &MergeConfig) -> Result<MergeResult> {
         compression: config.compression,
         flush_bytes: config.flush_bytes,
         dry_run: config.dry_run,
+        verbose: config.verbose,
         aws: config.aws.clone(),
         cache_control: config.cache_control.clone(),
     };
@@ -595,6 +626,16 @@ fn process_s3_partition(
     let source_bytes: u64 = objects.iter().map(|o| o.size as u64).sum();
     result.bytes_before += source_bytes;
 
+    info!(
+        table,
+        partition = partition_label,
+        source_files = objects.len(),
+        source_bytes,
+        flush_bytes = config.flush_bytes,
+        dry_run = config.dry_run,
+        "starting S3 partition merge"
+    );
+
     if config.dry_run {
         let est_files = estimate_output_files(source_bytes, config.flush_bytes);
         println!(
@@ -656,17 +697,31 @@ fn process_s3_partition(
                     let s3_key = format!("{partition_key}/part-{part_num:06}.parquet");
                     let s3_path = object_store::path::Path::from(s3_key.as_str());
                     let size = buf.len();
-                    let payload = object_store::PutPayload::from(bytes::Bytes::from(buf));
+                    let payload = bytes::Bytes::from(buf);
 
-                    block_on_async(async {
-                        client
-                            .put_opts(&s3_path, payload, s3_put_options(&config.cache_control))
-                            .await
-                    })
-                    .map_err(|e| anyhow::anyhow!("uploading s3://{bucket}/{s3_key}: {e}"))?;
+                    put_s3_bytes_with_retry(
+                        client,
+                        bucket,
+                        &s3_path,
+                        payload,
+                        table,
+                        partition_label,
+                        &config.cache_control,
+                    )?;
 
                     files_written += 1;
                     output_bytes += size as u64;
+                    if config.verbose {
+                        info!(
+                            operation = "upload",
+                            s3_key = %s3_path,
+                            s3_uri = %format!("s3://{bucket}/{s3_path}"),
+                            table,
+                            partition = partition_label,
+                            bytes = size,
+                            "uploaded merged S3 part"
+                        );
+                    }
                     Ok(())
                 })?;
         }
@@ -685,17 +740,31 @@ fn process_s3_partition(
             let s3_key = format!("{partition_key}/part-{part_num:06}.parquet");
             let s3_path = object_store::path::Path::from(s3_key.as_str());
             let size = buf.len();
-            let payload = object_store::PutPayload::from(bytes::Bytes::from(buf));
+            let payload = bytes::Bytes::from(buf);
 
-            block_on_async(async {
-                client
-                    .put_opts(&s3_path, payload, s3_put_options(&config.cache_control))
-                    .await
-            })
-            .map_err(|e| anyhow::anyhow!("uploading s3://{bucket}/{s3_key}: {e}"))?;
+            put_s3_bytes_with_retry(
+                client,
+                bucket,
+                &s3_path,
+                payload,
+                table,
+                partition_label,
+                &config.cache_control,
+            )?;
 
             files_written += 1;
             output_bytes += size as u64;
+            if config.verbose {
+                info!(
+                    operation = "upload",
+                    s3_key = %s3_path,
+                    s3_uri = %format!("s3://{bucket}/{s3_path}"),
+                    table,
+                    partition = partition_label,
+                    bytes = size,
+                    "uploaded merged S3 part"
+                );
+            }
             Ok(())
         })?;
 
@@ -714,14 +783,31 @@ fn process_s3_partition(
 
     for obj in objects {
         if !written_keys.contains(obj.location.as_ref()) {
-            block_on_async(async { client.delete(&obj.location).await })
-                .map_err(|e| anyhow::anyhow!("deleting s3://{bucket}/{}: {e}", obj.location))?;
+            delete_s3_object_with_retry(client, bucket, &obj.location, table, partition_label)?;
+            if config.verbose {
+                info!(
+                    operation = "delete",
+                    s3_key = %obj.location,
+                    s3_uri = %format!("s3://{bucket}/{}", obj.location),
+                    table,
+                    partition = partition_label,
+                    "deleted source S3 part after merge"
+                );
+            }
         }
     }
 
     result.bytes_after += output_bytes;
     result.files_written += files_written;
     result.partitions_merged += 1;
+    info!(
+        table,
+        partition = partition_label,
+        files_read = objects.len(),
+        files_written,
+        output_bytes,
+        "completed S3 partition merge"
+    );
     Ok(())
 }
 
@@ -733,13 +819,91 @@ fn read_s3_bytes_with_retry(
     partition_label: &str,
     max_attempts: usize,
 ) -> Result<bytes::Bytes> {
+    retry_merge_s3_operation(
+        MergeS3Operation::Read,
+        bucket,
+        location,
+        table,
+        partition_label,
+        max_attempts,
+        S3_READ_RETRY_BASE_DELAY_MS,
+        || {
+            Ok(block_on_async(async {
+                client.get(location).await?.bytes().await
+            })?)
+        },
+    )
+}
+
+fn put_s3_bytes_with_retry(
+    client: &Arc<object_store::aws::AmazonS3>,
+    bucket: &str,
+    location: &object_store::path::Path,
+    payload: bytes::Bytes,
+    table: &str,
+    partition_label: &str,
+    cache_control: &str,
+) -> Result<()> {
+    retry_merge_s3_operation(
+        MergeS3Operation::Upload,
+        bucket,
+        location,
+        table,
+        partition_label,
+        S3_UPLOAD_MAX_ATTEMPTS,
+        S3_UPLOAD_RETRY_BASE_DELAY_MS,
+        || {
+            let payload = object_store::PutPayload::from(payload.clone());
+            Ok(block_on_async(async {
+                client
+                    .put_opts(location, payload, s3_put_options(cache_control))
+                    .await
+            })
+            .map(|_| ())?)
+        },
+    )
+}
+
+fn delete_s3_object_with_retry(
+    client: &Arc<object_store::aws::AmazonS3>,
+    bucket: &str,
+    location: &object_store::path::Path,
+    table: &str,
+    partition_label: &str,
+) -> Result<()> {
+    retry_merge_s3_operation(
+        MergeS3Operation::Delete,
+        bucket,
+        location,
+        table,
+        partition_label,
+        S3_DELETE_MAX_ATTEMPTS,
+        S3_DELETE_RETRY_BASE_DELAY_MS,
+        || Ok(block_on_async(async { client.delete(location).await })?),
+    )
+}
+
+fn retry_merge_s3_operation<T, F>(
+    operation: MergeS3Operation,
+    bucket: &str,
+    location: &object_store::path::Path,
+    table: &str,
+    partition_label: &str,
+    max_attempts: usize,
+    base_delay_ms: u64,
+    mut action: F,
+) -> Result<T>
+where
+    F: FnMut() -> Result<T>,
+{
     let s3_uri = format!("s3://{bucket}/{location}");
     let mut attempt = 0usize;
 
     loop {
         attempt += 1;
-        let read_span = info_span!(
-            "merge_s3_read",
+        let io_span = info_span!(
+            "merge_s3_object",
+            operation = operation.as_str(),
             s3_key = %location,
             s3_uri = %s3_uri,
             table,
@@ -748,22 +912,22 @@ fn read_s3_bytes_with_retry(
             max_attempts,
         );
 
-        match read_span
-            .in_scope(|| block_on_async(async { client.get(location).await?.bytes().await }))
-        {
-            Ok(data) => return Ok(data),
+        match io_span.in_scope(&mut action) {
+            Ok(value) => return Ok(value),
             Err(error) => {
                 if attempt >= max_attempts {
                     return Err(anyhow::anyhow!(
-                        "failed reading s3://{bucket}/{location} after {attempt} attempts (table={table}, partition={partition_label}): {error}"
+                        "failed {} s3://{bucket}/{location} after {attempt} attempts (table={table}, partition={partition_label}): {error}",
+                        operation.action()
                     ));
                 }
 
                 let retry_in = Duration::from_millis(
-                    S3_READ_RETRY_BASE_DELAY_MS * 2u64.pow((attempt - 1) as u32),
+                    base_delay_ms.saturating_mul(2u64.pow((attempt - 1) as u32)),
                 );
 
                 warn!(
+                    operation = operation.as_str(),
                     s3_key = %location,
                     s3_uri = %s3_uri,
                     table,
@@ -772,7 +936,8 @@ fn read_s3_bytes_with_retry(
                     max_attempts,
                     retry_in_ms = retry_in.as_millis(),
                     error = %error,
-                    "failed reading S3 object during merge (attempt {attempt}/{max_attempts}) for {s3_uri} [table={table}, partition={partition_label}]; retrying"
+                    "failed {} S3 object during merge (attempt {attempt}/{max_attempts}) for {s3_uri} [table={table}, partition={partition_label}]; retrying",
+                    operation.action()
                 );
 
                 std::thread::sleep(retry_in);
@@ -875,6 +1040,7 @@ mod tests {
             compression: Compression::None,
             flush_bytes: 0,
             dry_run: false,
+            verbose: false,
             aws: None,
             cache_control: String::new(),
         };
@@ -897,5 +1063,60 @@ mod tests {
         };
         assert_eq!(find("firehose-parquet.version"), Some("0.1.0".to_string()));
         assert_eq!(find("firehose-parquet.chain_name"), Some("eth".to_string()));
+    }
+
+    #[test]
+    fn test_retry_merge_s3_operation_retries_then_succeeds() {
+        let location = object_store::path::Path::from("blocks/part-000001.parquet");
+        let mut attempts = 0usize;
+
+        let result = retry_merge_s3_operation(
+            MergeS3Operation::Upload,
+            "bucket",
+            &location,
+            "blocks",
+            "blocks",
+            3,
+            0,
+            || {
+                attempts += 1;
+                if attempts < 3 {
+                    anyhow::bail!("temporary failure");
+                }
+                Ok("ok")
+            },
+        )
+        .unwrap();
+
+        assert_eq!(result, "ok");
+        assert_eq!(attempts, 3);
+    }
+
+    #[test]
+    fn test_retry_merge_s3_operation_reports_context_after_exhaustion() {
+        let location = object_store::path::Path::from("blocks/part-000001.parquet");
+        let mut attempts = 0usize;
+
+        let err = retry_merge_s3_operation::<(), _>(
+            MergeS3Operation::Delete,
+            "bucket",
+            &location,
+            "blocks",
+            "blocks/date=2026-03-18",
+            2,
+            0,
+            || {
+                attempts += 1;
+                anyhow::bail!("permanent failure");
+            },
+        )
+        .unwrap_err();
+
+        let message = err.to_string();
+        assert!(message
+            .contains("failed deleting s3://bucket/blocks/part-000001.parquet after 2 attempts"));
+        assert!(message.contains("table=blocks"));
+        assert!(message.contains("partition=blocks/date=2026-03-18"));
+        assert_eq!(attempts, 2);
     }
 }

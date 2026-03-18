@@ -897,6 +897,9 @@ Examples:
   # Preview what would be merged
   fireparq merge ./output/blocks/ --dry-run
 
+  # Log uploaded and deleted files during merge
+  fireparq merge s3://bucket/eth-mainnet/blocks/ --verbose
+
   # Use snappy compression
   fireparq merge ./output/blocks/ --compression snappy
 
@@ -918,6 +921,9 @@ Lookup order:
         /// Show what would be merged without writing
         #[arg(long, default_value = "false", help_heading = "Execution")]
         dry_run: bool,
+        /// Log each uploaded merged file and deleted source part
+        #[arg(long, default_value = "false", help_heading = "Execution")]
+        verbose: bool,
         /// AWS access key ID (for S3 paths)
         #[arg(
             long,
@@ -7387,6 +7393,7 @@ mod tests {
             compression: crate::config::Compression::Zstd,
             flush_bytes: 1024,
             dry_run: true,
+            verbose: false,
             aws: None,
             cache_control: String::new(),
         }) {
@@ -7470,6 +7477,7 @@ mod tests {
             compression: crate::config::Compression::Zstd,
             flush_bytes: 1024,
             dry_run: true,
+            verbose: false,
             aws: None,
             cache_control: String::new(),
         })
