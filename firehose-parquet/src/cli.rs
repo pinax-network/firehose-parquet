@@ -916,7 +916,7 @@ Lookup order:
         #[arg(long, default_value = "zstd", help_heading = "Output")]
         compression: String,
         /// Max compressed bytes per output file
-        #[arg(long, default_value = "268435456", help_heading = "Output")]
+        #[arg(long, default_value = "33554432", help_heading = "Output")]
         flush_bytes: u64,
         /// Show what would be merged without writing
         #[arg(long, default_value = "false", help_heading = "Execution")]
@@ -6978,6 +6978,33 @@ mod tests {
         assert!(help.contains("Disable Solana `vote_transactions` output"));
         assert!(!help.contains("--extended [<EXTENDED>]"));
         assert!(!help.contains("--with-votes [<WITH_VOTES>]"));
+    }
+
+    #[test]
+    fn test_merge_subcommand_defaults_flush_bytes_to_32_mb() {
+        let cli = parse(&["test-cli", "merge", "./output/blocks/"]);
+
+        match cli.command.expect("command should exist") {
+            Commands::Merge { path, flush_bytes, .. } => {
+                assert_eq!(path, "./output/blocks/");
+                assert_eq!(flush_bytes, 33_554_432);
+            }
+            _ => panic!("expected merge subcommand"),
+        }
+    }
+
+    #[test]
+    fn test_merge_help_shows_32_mb_default_flush_bytes() {
+        let cmd = TestCli::command();
+        let merge = cmd
+            .get_subcommands()
+            .find(|subcmd| subcmd.get_name() == "merge")
+            .expect("merge subcommand should exist");
+
+        let help = merge.clone().render_long_help().to_string();
+
+        assert!(help.contains("--flush-bytes <FLUSH_BYTES>"));
+        assert!(help.contains("[default: 33554432]"));
     }
 
     #[test]

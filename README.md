@@ -758,7 +758,7 @@ Consolidates multiple small part files within each partition directory into fewe
 `merge` processes one table at a time and, within each table, one partition at a time. All parts in each partition are read into memory, sorted by `block_num`, and written back as new files respecting `--flush-bytes`. Original parts are deleted after successful merge.
 
 ```bash
-# Merge small parts within each partition (default 256 MB per file)
+# Merge small parts within each partition (default 32 MB per file)
 fireparq merge ./output/blocks/
 
 # Dry run — show what would be merged without writing
@@ -779,7 +779,7 @@ Lookup order matches `scan` / `inspect`: explicit `s3://...` URIs win, existing 
 | Flag | Default | Description |
 |---|---|---|
 | `--compression` | `zstd` | Compression codec: zstd, snappy, gzip, none |
-| `--flush-bytes` | 256 MB | Max compressed bytes per output file |
+| `--flush-bytes` | 32 MB | Max compressed bytes per output file |
 | `--dry-run` | `false` | Show what would be merged without writing |
 
 > **Memory note:** Merge reads all parts in a partition at once. Ensure sufficient memory for the largest partition.
