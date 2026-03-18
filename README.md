@@ -80,8 +80,7 @@ cargo build --release --workspace
   --endpoint https://eth.firehose.pinax.network:443 \
   --start-block 19000000 \
   --stop-block 19001000 \
-  --extended false \
-  --bytes-encoding hex
+  --extended false
 
 # Stream Antelope blocks
 ./target/release/fireparq build \
@@ -335,10 +334,6 @@ Chain:
       --with-votes [<WITH_VOTES>]
           Include Solana vote_transactions output. Enabled by default; disable with `--with-votes false`
           [env: WITH_VOTES] [default: true]
-      --bytes-encoding <BYTES_ENCODING>
-          Byte encoding strategy for binary fields (hashes, addresses, etc.)
-          Options: binary (raw bytes), hex (0x-prefixed), hex_no_prefix, base58, tron_base58, auto (chain-appropriate)
-          For Tron, auto resolves to tron_base58; reserved block/transaction hashes and topics stay raw hex without 0x [env: BYTES_ENCODING] [default: auto]
       --include-failed-transactions
           Include failed/reverted transactions in output (default: false) [env: INCLUDE_FAILED_TRANSACTIONS]
 ```
@@ -388,10 +383,9 @@ fireparq partitions build \
   --compression snappy \
   --output ./output
 
-# Build an hour index to S3 with an explicit chain override
+# Build an hour index to S3
 fireparq partitions build \
   --endpoint https://eth.firehose.pinax.network:443 \
-  --chain eth-mainnet \
   --stop-block 10010000 \
   --partition hour \
   --s3-bucket my-bucket \
@@ -400,7 +394,6 @@ fireparq partitions build \
 # Resume from an existing canonical index and append only missing coverage
 fireparq partitions build \
   --endpoint https://eth.firehose.pinax.network:443 \
-  --chain eth-mainnet \
   --stop-block 10020000 \
   --partition date \
   --output ./output \
@@ -443,7 +436,6 @@ Behavior:
 
 | Flag | Default | Description |
 |---|---|---|
-| `--chain` | inferred | Optional chain override when endpoint info is unavailable |
 | `--partition` | none | Partition to build: `date`, `hour`, `minute`, or `second` |
 | `--start-block` | inferred | Explicit probe seed, otherwise sibling cursor then endpoint first streamable block; bounded builds may expand downward to the enclosing partition start |
 | `--stop-block` | none in live mode | Required for bounded builds; incompatible with `--live`; bounded builds expand upward to the enclosing partition end |
@@ -940,26 +932,19 @@ keys mark routing as using a synthetic last-known timestamp anchor while
 canonical `timestamp` / `date` remain chain-sourced and nullable when
 `block_time` is missing.
 
-When `--bytes-encoding auto` is used, output encoding resolution follows this precedence:
+Byte encoding is determined internally from the resolved block type/profile. Operators no longer configure it manually.
 
-1. explicit CLI `--bytes-encoding`
-2. chain-specific output contract
-3. endpoint `block_id_encoding` fallback
-4. generic default (`hex` / `hex_0x`)
-
-Supported block types currently use explicit output contracts that override endpoint hints by default:
-
-| Block type / profile | `bytes_encoding` | `block_id_encoding` | Endpoint hint can override? |
-|---|---|---|---|
-| `evm` | `hex` | `hex_0x` | No |
-| `bitcoin` | `hex` | `hex_0x` | No |
-| `solana` | `base58` | `base58` | No |
-| `near` | `base58` | `base58` | No |
-| `antelope` | `hex` | `hex_0x` | No |
-| `cosmos` | `hex` | `hex_0x` | No |
-| `tron` | `tron_base58` | `hex_no_prefix` | No |
-| `beacon` | `hex` | `hex_0x` | No |
-| `tron-evm` (`evm` Tron-style profile) | `tron_base58` | `hex_no_prefix` | No |
+| Block type / profile | Binary field encoding (`firehose-parquet.bytes_encoding`) | Block encoding (`firehose-parquet.block_id_encoding`) |
+|---|---|---|
+| `evm` | `hex` | `hex_0x` |
+| `bitcoin` | `hex` | `hex_0x` |
+| `solana` | `base58` | `base58` |
+| `near` | `base58` | `base58` |
+| `antelope` | `hex_no_prefix` | `hex_no_prefix` |
+| `cosmos` | `hex` | `hex_0x` |
+| `tron` | `tron_base58` | `hex_no_prefix` |
+| `beacon` | `hex` | `hex_0x` |
+| `tron-evm` (`evm` Tron-style profile) | `tron_base58` | `hex_no_prefix` |
 
 Endpoint `block_id_encoding` remains a fallback only when the chain does not resolve to a known block-type/profile contract.
 
@@ -1099,7 +1084,7 @@ struct Cli {
     #[command(flatten)]
     common: CommonArgs,
 
-    // binary-specific flags (block_type, extended, bytes_encoding)
+    // binary-specific flags (block_type, extended)
 }
 ```
 

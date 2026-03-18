@@ -28,9 +28,9 @@ impl Default for EncodeBytes {
     }
 }
 
-/// Parse a CLI string into an EncodeBytes variant.
-/// Returns `None` for "auto" — the caller (chain binary) is expected to resolve
-/// auto to the chain-appropriate encoding before constructing the mapper.
+/// Parse a stored encoding label into an `EncodeBytes` variant.
+/// Returns `None` for legacy `"auto"` metadata so callers can resolve the
+/// effective chain-specific contract themselves.
 pub fn parse_encode_bytes(s: &str) -> Option<EncodeBytes> {
     match s.to_lowercase().as_str() {
         "binary" => Some(EncodeBytes::Binary),

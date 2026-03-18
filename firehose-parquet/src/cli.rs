@@ -364,7 +364,7 @@ Examples:
   # Disable extended EVM tables explicitly
   fireparq build --network mainnet \\
     --start-block 20000000 --stop-block 20001000 \\
-    --bytes-encoding hex --extended false
+    --extended false
 
   # Stream Antelope blocks
   fireparq build --block-type antelope \\
@@ -433,18 +433,6 @@ pub struct BuildArgs {
         help_heading = "Chain"
     )]
     pub with_votes: bool,
-
-    /// Byte encoding strategy for binary fields (hashes, addresses, etc.)
-    /// Options: binary (raw bytes), hex (0x-prefixed), hex_no_prefix, base58, tron_base58, auto (chain-appropriate)
-    /// For Tron, `auto` resolves to `tron_base58`; reserved block/transaction hashes and topics stay raw hex without `0x`.
-    #[arg(
-        long,
-        env = "BYTES_ENCODING",
-        default_value = "auto",
-        hide_env_values = true,
-        help_heading = "Chain"
-    )]
-    pub bytes_encoding: String,
 
     /// Include failed/reverted transactions in output (default: false)
     #[arg(
@@ -1210,10 +1198,9 @@ Examples:
     --partition date \\
     --output ./output
 
-  # Build to S3 with an explicit chain override and JSON output
+  # Build to S3 with JSON output
   fireparq partitions build \\
     --network mainnet \\
-    --chain eth-mainnet \\
     --stop-block 10010000 \\
     --partition hour \\
     --s3-bucket my-bucket \\
@@ -1293,9 +1280,6 @@ Examples:
             help_heading = "Connection"
         )]
         api_token_envvar: String,
-        /// Optional chain name override; otherwise inferred from endpoint info
-        #[arg(long, help_heading = "Connection")]
-        chain: Option<String>,
         /// Start block number (inclusive).
         ///
         /// When omitted in bounded mode, falls back to a sibling `cursor.parquet`
@@ -6694,8 +6678,6 @@ mod tests {
             "build",
             "--endpoint",
             "https://eth.firehose.pinax.network:443",
-            "--chain",
-            "eth-mainnet",
             "--stop-block",
             "200",
             "--partition",
@@ -6708,7 +6690,6 @@ mod tests {
         match cli.command.expect("command should exist") {
             Commands::Partitions(PartitionsCommands::Build {
                 endpoint,
-                chain,
                 start_block,
                 stop_block,
                 live,
@@ -6725,7 +6706,6 @@ mod tests {
                     endpoint.as_deref(),
                     Some("https://eth.firehose.pinax.network:443")
                 );
-                assert_eq!(chain.as_deref(), Some("eth-mainnet"));
                 assert_eq!(start_block, None);
                 assert_eq!(stop_block, Some(200));
                 assert!(!live);
@@ -6749,8 +6729,6 @@ mod tests {
             "build",
             "--endpoint",
             "https://eth.firehose.pinax.network:443",
-            "--chain",
-            "eth-mainnet",
             "--stop-block",
             "200",
             "--partition",
@@ -6775,8 +6753,6 @@ mod tests {
             "build",
             "--endpoint",
             "https://eth.firehose.pinax.network:443",
-            "--chain",
-            "eth-mainnet",
             "--stop-block",
             "200",
             "--partition",

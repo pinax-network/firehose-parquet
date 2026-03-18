@@ -976,8 +976,18 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_params_resolves_auto_bytes_encoding_when_compatible() {
+    fn test_validate_params_accepts_legacy_auto_bytes_encoding_metadata_when_compatible() {
         let stored_meta = metadata_with_entries(
+            &[
+                ("firehose-parquet.block_type", "solana"),
+                ("firehose-parquet.chain_name", "solana-mainnet-beta"),
+                ("firehose-parquet.chain_name_aliases", "solana"),
+                ("firehose-parquet.block_id_encoding", "base58"),
+                ("firehose-parquet.bytes_encoding", "auto"),
+            ],
+            &[],
+        );
+        let current_meta = metadata_with_entries(
             &[
                 ("firehose-parquet.block_type", "solana"),
                 ("firehose-parquet.chain_name", "solana-mainnet-beta"),
@@ -987,18 +997,6 @@ mod tests {
             ],
             &[],
         );
-        let current_meta = metadata_with_entries(
-            &[
-                ("firehose-parquet.chain_name", "solana-mainnet-beta"),
-                ("firehose-parquet.chain_name_aliases", "solana"),
-                ("firehose-parquet.block_id_encoding", "base58"),
-                ("firehose-parquet.bytes_encoding", "auto"),
-            ],
-            &["firehose-parquet.block_type"],
-        );
-        // Simulate the pre-detection current cursor template built before an
-        // auto block type has been resolved. Validation should still use the
-        // endpoint-derived metadata to resolve auto -> base58.
         let state = CursorState {
             cursor: "c1".to_string(),
             start_block: Some(100),
@@ -1023,25 +1021,26 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_params_reports_effective_bytes_encoding_mismatch() {
+    fn test_validate_params_reports_legacy_auto_bytes_encoding_mismatch() {
         let stored_meta = metadata_with_entries(
             &[
                 ("firehose-parquet.block_type", "solana"),
                 ("firehose-parquet.chain_name", "solana-mainnet-beta"),
                 ("firehose-parquet.chain_name_aliases", "solana"),
                 ("firehose-parquet.block_id_encoding", "base58"),
-                ("firehose-parquet.bytes_encoding", "base58"),
+                ("firehose-parquet.bytes_encoding", "auto"),
             ],
             &[],
         );
         let current_meta = metadata_with_entries(
             &[
+                ("firehose-parquet.block_type", "evm"),
                 ("firehose-parquet.chain_name", "eth-mainnet"),
                 ("firehose-parquet.chain_name_aliases", "ethereum,eth"),
                 ("firehose-parquet.block_id_encoding", "hex_0x"),
-                ("firehose-parquet.bytes_encoding", "auto"),
+                ("firehose-parquet.bytes_encoding", "hex"),
             ],
-            &["firehose-parquet.block_type"],
+            &[],
         );
         let state = CursorState {
             cursor: "c1".to_string(),
