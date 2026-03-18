@@ -4103,6 +4103,7 @@ async fn main() -> Result<()> {
                 compression,
                 flush_bytes,
                 dry_run,
+                verbose,
                 aws_access_key_id,
                 aws_secret_access_key,
                 aws_session_token,
@@ -4124,6 +4125,7 @@ async fn main() -> Result<()> {
                     compression,
                     flush_bytes: *flush_bytes,
                     dry_run: *dry_run,
+                    verbose: *verbose,
                     aws,
                     cache_control: cache_control.clone(),
                 };
