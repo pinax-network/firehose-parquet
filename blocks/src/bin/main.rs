@@ -485,20 +485,9 @@ fn use_last_known_timestamp_partition_routing(block_type: &str, partition: &Part
     block_type_has_nullable_timestamps(block_type) && partition_requires_timestamp(partition)
 }
 
-fn validate_block_timestamp(
-    block_num: u64,
-    timestamp: i64,
-    partition: &Partition,
-    start_block: Option<u64>,
-) -> Result<()> {
+fn validate_block_timestamp(block_num: u64, timestamp: i64, partition: &Partition) -> Result<()> {
     if timestamp != 0 {
         return Ok(());
-    }
-
-    if start_block == Some(block_num) {
-        return Err(anyhow!(
-            "block {block_num} is missing timestamp metadata; this can happen for genesis / first-streamable blocks. Rerun with --bootstrap-missing-genesis-timestamp to start from the next timestamped block"
-        ));
     }
 
     if partition_requires_timestamp(partition) {
@@ -538,9 +527,9 @@ struct BufferedBootstrapBlock {
 }
 
 impl GenesisTimestampBootstrap {
-    fn new(enabled: bool, requested_start_block: Option<u64>) -> Self {
+    fn new(requested_start_block: Option<u64>) -> Self {
         Self {
-            enabled,
+            enabled: true,
             requested_start_block,
             first_buffered_block: None,
             buffered_blocks: 0,
@@ -592,7 +581,7 @@ fn missing_genesis_timestamp_bootstrap_error(
     buffered_blocks: u64,
 ) -> anyhow::Error {
     anyhow!(
-        "buffered {buffered_blocks} timestamp-less bootstrap block(s) starting at block {first_buffered_block} because --bootstrap-missing-genesis-timestamp is enabled, but no later block with timestamp metadata was found before the stream ended"
+        "buffered {buffered_blocks} timestamp-less bootstrap block(s) starting at block {first_buffered_block}, but no later block with timestamp metadata was found before the stream ended"
     )
 }
 
@@ -4480,10 +4469,7 @@ async fn run_ingestion(args: &BuildArgs) -> Result<()> {
     let partition_config = config.partition.clone();
     let mut use_synthetic_partition_routing =
         use_last_known_timestamp_partition_routing(&block_type, &partition_config);
-    let mut genesis_timestamp_bootstrap = GenesisTimestampBootstrap::new(
-        args.bootstrap_missing_genesis_timestamp,
-        config.start_block,
-    );
+    let mut genesis_timestamp_bootstrap = GenesisTimestampBootstrap::new(config.start_block);
     let mut timestamp_backfill = TimestampBackfill::new(
         use_synthetic_partition_routing,
         DEFAULT_TIMESTAMP_BACKFILL_BUFFER_LIMIT_BYTES,
@@ -4770,37 +4756,37 @@ async fn run_ingestion(args: &BuildArgs) -> Result<()> {
             // For Solana, blocks may legitimately lack timestamps — skip the
             // genesis bootstrap and timestamp validation entirely.
             if !is_solana {
-            match genesis_timestamp_bootstrap.observe_block(blocks_processed, block_number, ts) {
-                GenesisTimestampBootstrapAction::Buffer => {
-                    if genesis_timestamp_bootstrap.buffered_blocks == 1 {
-                        warn!(
-                            requested_start_block = ?config.start_block,
-                            block_number,
-                            "buffering first streamable block because it lacks timestamp metadata; its timestamp will be synthesized from the first later timestamped block because --bootstrap-missing-genesis-timestamp is enabled"
-                        );
+                match genesis_timestamp_bootstrap.observe_block(blocks_processed, block_number, ts) {
+                    GenesisTimestampBootstrapAction::Buffer => {
+                        if genesis_timestamp_bootstrap.buffered_blocks == 1 {
+                            warn!(
+                                requested_start_block = ?config.start_block,
+                                block_number,
+                                "buffering first streamable block because it lacks timestamp metadata; its timestamp will be synthesized from the first later timestamped block automatically"
+                            );
+                        }
+                        buffered_bootstrap_blocks.push(BufferedBootstrapBlock {
+                            block_bytes: ready_solana_blocks[0].block_bytes.clone(),
+                            cursor: ready_solana_blocks[0].cursor.clone(),
+                            fork_step: ready_solana_blocks[0].fork_step.clone(),
+                            identity: ready_solana_blocks[0].identity.clone(),
+                        });
+                        return Ok(());
                     }
-                    buffered_bootstrap_blocks.push(BufferedBootstrapBlock {
-                        block_bytes: ready_solana_blocks[0].block_bytes.clone(),
-                        cursor: ready_solana_blocks[0].cursor.clone(),
-                        fork_step: ready_solana_blocks[0].fork_step.clone(),
-                        identity: ready_solana_blocks[0].identity.clone(),
-                    });
-                    return Ok(());
-                }
-                GenesisTimestampBootstrapAction::Anchored {
-                    anchor_block,
-                    buffered_blocks,
-                    first_buffered_block,
-                } => {
-                    info!(
-                        first_buffered_block,
+                    GenesisTimestampBootstrapAction::Anchored {
                         anchor_block,
                         buffered_blocks,
-                        "preserving buffered bootstrap block(s) with a synthesized timestamp from the first later timestamped block"
-                    );
+                        first_buffered_block,
+                    } => {
+                        info!(
+                            first_buffered_block,
+                            anchor_block,
+                            buffered_blocks,
+                            "preserving buffered bootstrap block(s) with a synthesized timestamp from the first later timestamped block"
+                        );
+                    }
+                    GenesisTimestampBootstrapAction::None => {}
                 }
-                GenesisTimestampBootstrapAction::None => {}
-            }
             } // end if !is_solana
             let mut process_block = |block_bytes: &[u8],
                                      identity: &BlockIdentity,
@@ -4811,12 +4797,7 @@ async fn run_ingestion(args: &BuildArgs) -> Result<()> {
                 let ts = identity.timestamp;
                 // Solana blocks may have no timestamp; skip validation for Solana.
                 if !is_solana {
-                    validate_block_timestamp(
-                        block_number,
-                        ts,
-                        &partition_config,
-                        config.start_block,
-                    )?;
+                    validate_block_timestamp(block_number, ts, &partition_config)?;
                 }
                 let has_timestamp = ts != 0;
 
@@ -5635,27 +5616,8 @@ mod tests {
     }
 
     #[test]
-    fn test_build_subcommand_bootstrap_missing_genesis_timestamp_default_false() {
-        let cli = Cli::parse_from([
-            "fireparq",
-            "build",
-            "--network",
-            "mainnet",
-            "--start-block",
-            "0",
-            "--stop-block",
-            "200",
-        ]);
-        if let Some(Commands::Build(build_args)) = cli.command {
-            assert!(!build_args.bootstrap_missing_genesis_timestamp);
-        } else {
-            panic!("expected Commands::Build");
-        }
-    }
-
-    #[test]
-    fn test_build_subcommand_parses_bootstrap_missing_genesis_timestamp_flag() {
-        let cli = Cli::parse_from([
+    fn test_build_subcommand_rejects_removed_bootstrap_missing_genesis_timestamp_flag() {
+        let err = Cli::try_parse_from([
             "fireparq",
             "build",
             "--network",
@@ -5665,12 +5627,12 @@ mod tests {
             "--stop-block",
             "200",
             "--bootstrap-missing-genesis-timestamp",
-        ]);
-        if let Some(Commands::Build(build_args)) = cli.command {
-            assert!(build_args.bootstrap_missing_genesis_timestamp);
-        } else {
-            panic!("expected Commands::Build");
-        }
+        ])
+        .expect_err("removed bootstrap flag should fail clap parsing");
+
+        let rendered = err.to_string();
+        assert!(rendered.contains("--bootstrap-missing-genesis-timestamp"));
+        assert!(rendered.contains("unexpected argument"));
     }
 
     #[test]
@@ -5713,10 +5675,8 @@ mod tests {
         assert!(help.contains("FIREHOSE_ENDPOINT_MAINNET"));
         assert!(help.contains("--live"));
         assert!(help.contains("existing cursor"));
-        assert!(help.contains("first streamable block"));
         assert!(help.contains("--skip-missing-blocks"));
-        assert!(help.contains("--bootstrap-missing-genesis-timestamp"));
-        assert!(help.contains("synthesize their timestamp"));
+        assert!(!help.contains("--bootstrap-missing-genesis-timestamp"));
         assert!(!help.contains("--backfill-missing-timestamps"));
         assert!(!help.contains("--backfill-missing-timestamps-buffer-bytes"));
         assert!(!help.contains("--strict-timestamps"));
@@ -6630,25 +6590,24 @@ mod tests {
 
     #[test]
     fn test_validate_block_timestamp_missing_errors() {
-        let err = validate_block_timestamp(42, 0, &Partition::None, Some(0))
+        let err = validate_block_timestamp(42, 0, &Partition::None)
             .expect_err("missing timestamp should error");
         assert!(err.to_string().contains("missing timestamp metadata"));
     }
 
     #[test]
-    fn test_validate_block_timestamp_missing_in_first_streamable_block_suggests_bootstrap() {
-        let err = validate_block_timestamp(0, 0, &Partition::None, Some(0)).expect_err(
-            "missing timestamp should suggest bootstrap for the first streamable block",
-        );
+    fn test_validate_block_timestamp_missing_in_first_streamable_block_is_generic() {
+        let err = validate_block_timestamp(0, 0, &Partition::None)
+            .expect_err("missing timestamp should still report a missing timestamp");
         let message = err.to_string();
 
-        assert!(message.contains("genesis / first-streamable blocks"));
-        assert!(message.contains("--bootstrap-missing-genesis-timestamp"));
+        assert!(message.contains("missing timestamp metadata"));
+        assert!(!message.contains("--bootstrap-missing-genesis-timestamp"));
     }
 
     #[test]
     fn test_validate_block_timestamp_missing_time_partition_errors() {
-        let err = validate_block_timestamp(42, 0, &Partition::Date, Some(0))
+        let err = validate_block_timestamp(42, 0, &Partition::Date)
             .expect_err("time-based partitioning requires a timestamp");
         assert!(err
             .to_string()
@@ -6657,7 +6616,7 @@ mod tests {
 
     #[test]
     fn test_genesis_timestamp_bootstrap_buffers_until_first_timestamped_block() {
-        let mut bootstrap = GenesisTimestampBootstrap::new(true, Some(0));
+        let mut bootstrap = GenesisTimestampBootstrap::new(Some(0));
 
         assert_eq!(
             bootstrap.observe_block(0, 0, 0),
@@ -6678,18 +6637,17 @@ mod tests {
     }
 
     #[test]
-    fn test_genesis_timestamp_bootstrap_disabled_when_flag_not_set() {
-        let mut bootstrap = GenesisTimestampBootstrap::new(false, Some(0));
+    fn test_genesis_timestamp_bootstrap_is_inactive_after_a_nonmatching_first_block() {
+        let mut bootstrap = GenesisTimestampBootstrap::new(Some(0));
 
+        assert_eq!(
+            bootstrap.observe_block(0, 1, 0),
+            GenesisTimestampBootstrapAction::None
+        );
         assert_eq!(
             bootstrap.observe_block(0, 0, 0),
             GenesisTimestampBootstrapAction::None
         );
-        let err = validate_block_timestamp(0, 0, &Partition::None, Some(0))
-            .expect_err("missing timestamps should still fail without bootstrap flag");
-        let message = err.to_string();
-        assert!(message.contains("missing timestamp metadata"));
-        assert!(message.contains("--bootstrap-missing-genesis-timestamp"));
     }
 
     #[test]
@@ -6697,7 +6655,6 @@ mod tests {
         let err = missing_genesis_timestamp_bootstrap_error(0, 3);
         let message = err.to_string();
 
-        assert!(message.contains("--bootstrap-missing-genesis-timestamp"));
         assert!(message.contains("no later block with timestamp metadata was found"));
         assert!(message.contains("block 0"));
     }

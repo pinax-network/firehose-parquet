@@ -457,21 +457,6 @@ pub struct BuildArgs {
         help_heading = "Block Range"
     )]
     pub cursor_override: bool,
-
-    /// In strict mode, preserve initial timestamp-less bootstrap blocks in
-    /// output and synthesize their timestamp from the first later timestamped
-    /// block.
-    ///
-    /// Intended for chains whose first streamable block (often genesis) does
-    /// not expose timestamp metadata.
-    #[arg(
-        long,
-        env = "BOOTSTRAP_MISSING_GENESIS_TIMESTAMP",
-        default_value = "false",
-        hide_env_values = true,
-        help_heading = "Block Range"
-    )]
-    pub bootstrap_missing_genesis_timestamp: bool,
 }
 
 /// Subcommands shared by all binaries.
