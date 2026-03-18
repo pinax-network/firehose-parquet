@@ -27,7 +27,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::Notify;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use blocks::antelope::mapper::AntelopeBlockMapper;
 use blocks::beacon::mapper::BeaconBlockMapper;
@@ -97,6 +97,17 @@ struct GlobalArgs {
         help_heading = "Runtime / Logging"
     )]
     log_level: String,
+
+    /// Enable verbose operational logs for debugging without making normal runs noisy
+    #[arg(
+        long,
+        env = "VERBOSE",
+        default_value = "false",
+        hide_env_values = true,
+        global = true,
+        help_heading = "Runtime / Logging"
+    )]
+    verbose: bool,
 }
 
 /// Detect block type from a protobuf `Any.type_url`.
@@ -991,9 +1002,7 @@ fn resolve_ingestion_start_block(
         })
 }
 
-fn resolve_ingestion_stop_block(
-    stop_block: Option<u64>,
-) -> Result<Option<u64>> {
+fn resolve_ingestion_stop_block(stop_block: Option<u64>) -> Result<Option<u64>> {
     if let Some(stop_block) = stop_block {
         return Ok(Some(stop_block));
     }
@@ -3601,7 +3610,7 @@ async fn main() -> Result<()> {
                 return Ok(());
             }
             Commands::Build(build_args) => {
-                run_ingestion(build_args).await?;
+                run_ingestion(build_args, &cli.global).await?;
                 return Ok(());
             }
             Commands::Partitions(subcommand) => match subcommand {
@@ -3628,7 +3637,7 @@ async fn main() -> Result<()> {
                     aws_region,
                     aws_endpoint_url,
                 } => {
-                    init_tracing(&cli.global.log_level);
+                    init_tracing(&cli.global.log_level, cli.global.verbose);
                     let compression = firehose_parquet::cli::parse_compression(compression)?;
                     let aws = AwsConfig {
                         aws_access_key_id: aws_access_key_id.clone(),
@@ -4026,7 +4035,7 @@ async fn main() -> Result<()> {
                 aws_endpoint_url,
                 cache_control,
             } => {
-                init_tracing(&cli.global.log_level);
+                init_tracing(&cli.global.log_level, cli.global.verbose);
                 let target = firehose_parquet::rollup::parse_rollup_target(partition)?;
                 let compression = firehose_parquet::cli::parse_compression(compression)?;
                 let output_path = output.clone().unwrap_or_else(|| source.clone());
@@ -4070,6 +4079,7 @@ async fn main() -> Result<()> {
                 aws_region,
                 aws_endpoint_url,
             } => {
+                init_tracing(&cli.global.log_level, cli.global.verbose);
                 let aws = firehose_parquet::cli::AwsConfig {
                     aws_access_key_id: aws_access_key_id.clone(),
                     aws_secret_access_key: aws_secret_access_key.clone(),
@@ -4104,7 +4114,6 @@ async fn main() -> Result<()> {
                 flush_rows,
                 flush_bytes,
                 dry_run,
-                verbose,
                 aws_access_key_id,
                 aws_secret_access_key,
                 aws_session_token,
@@ -4112,7 +4121,7 @@ async fn main() -> Result<()> {
                 aws_endpoint_url,
                 cache_control,
             } => {
-                init_tracing(&cli.global.log_level);
+                init_tracing(&cli.global.log_level, cli.global.verbose);
                 let compression = firehose_parquet::cli::parse_compression(compression)?;
                 let aws = Some(firehose_parquet::cli::AwsConfig {
                     aws_access_key_id: aws_access_key_id.clone(),
@@ -4127,7 +4136,7 @@ async fn main() -> Result<()> {
                     flush_rows: *flush_rows,
                     flush_bytes: *flush_bytes,
                     dry_run: *dry_run,
-                    verbose: *verbose,
+                    verbose: cli.global.verbose,
                     aws,
                     cache_control: cache_control.clone(),
                 };
@@ -4145,7 +4154,7 @@ async fn main() -> Result<()> {
                 aws_region,
                 aws_endpoint_url,
             } => {
-                init_tracing(&cli.global.log_level);
+                init_tracing(&cli.global.log_level, cli.global.verbose);
                 let aws = Some(firehose_parquet::cli::AwsConfig {
                     aws_access_key_id: aws_access_key_id.clone(),
                     aws_secret_access_key: aws_secret_access_key.clone(),
@@ -4169,8 +4178,11 @@ async fn main() -> Result<()> {
     unreachable!("clap enforces a subcommand")
 }
 
-async fn run_ingestion(args: &BuildArgs) -> Result<()> {
-    init_tracing(&args.common.log_level);
+async fn run_ingestion(args: &BuildArgs, global: &GlobalArgs) -> Result<()> {
+    init_tracing(
+        &args.common.log_level,
+        args.common.verbose || global.verbose,
+    );
 
     info!(version = env!("CARGO_PKG_VERSION"), "fireparq starting");
 
@@ -4271,6 +4283,7 @@ async fn run_ingestion(args: &BuildArgs) -> Result<()> {
     let mut client = FirehoseClient::new(config.clone());
     ensure_endpoint_available(&client, &config.endpoint, resolved_network_name.as_deref()).await?;
     let endpoint_info = client.info().await;
+    debug!(endpoint_info = ?endpoint_info, "fetched endpoint metadata");
 
     // Use chain_name as a subdirectory under the output path.
     config.output = resolve_output(&config.output, &endpoint_info);
@@ -4301,6 +4314,14 @@ async fn run_ingestion(args: &BuildArgs) -> Result<()> {
         args.cursor_override,
     )?;
     config.stop_block = resolve_ingestion_stop_block(config.stop_block)?;
+    debug!(
+        requested_start_block = ?args.common.start_block,
+        resolved_start_block = ?config.start_block,
+        resolved_stop_block = ?config.stop_block,
+        cursor_override = args.cursor_override,
+        has_cursor = existing_cursor_state.is_some(),
+        "resolved ingestion bounds"
+    );
     if let firehose_parquet::config::Partition::BlockRange { size, .. } = &mut config.partition {
         let explicit_start_block = args.common.start_block;
         let effective_start_block = config.start_block;
@@ -5410,6 +5431,35 @@ mod tests {
         } else {
             panic!("expected Commands::Build");
         }
+    }
+
+    #[test]
+    fn test_global_verbose_flag_parses_after_build_subcommand() {
+        let cli = Cli::parse_from([
+            "fireparq",
+            "build",
+            "--network",
+            "mainnet",
+            "--start-block",
+            "100",
+            "--stop-block",
+            "200",
+            "--verbose",
+        ]);
+
+        assert!(cli.global.verbose);
+        if let Some(Commands::Build(build_args)) = cli.command {
+            assert_eq!(build_args.network.as_deref(), Some("mainnet"));
+        } else {
+            panic!("expected Commands::Build");
+        }
+    }
+
+    #[test]
+    fn test_merge_help_mentions_shared_verbose_flag() {
+        let help = command_help(&["fireparq", "merge", "--help"]);
+        assert!(help.contains("--verbose"));
+        assert!(help.contains("verbose operational logs"));
     }
 
     #[test]

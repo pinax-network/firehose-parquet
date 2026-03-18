@@ -218,6 +218,10 @@ pub struct CommonArgs {
     )]
     pub log_level: String,
 
+    /// Enable verbose operational logs for debugging without changing normal default output
+    #[arg(long, env = "VERBOSE", default_value = "false", hide_env_values = true)]
+    pub verbose: bool,
+
     /// Decode and map but don't write files
     #[arg(long, env = "DRY_RUN", default_value = "false", hide_env_values = true)]
     pub dry_run: bool,
@@ -930,9 +934,6 @@ Lookup order:
         /// Show what would be merged without writing
         #[arg(long, default_value = "false", help_heading = "Execution")]
         dry_run: bool,
-        /// Log each uploaded merged file and deleted source part
-        #[arg(long, default_value = "false", help_heading = "Execution")]
-        verbose: bool,
         /// AWS access key ID (for S3 paths)
         #[arg(
             long,
@@ -1251,11 +1252,11 @@ Examples:
         api_token_envvar: String,
         /// Start block number (inclusive).
         ///
-    /// When omitted in bounded mode, falls back to a sibling `cursor.parquet`
-    /// if present, then to the endpoint's first streamable block.
-    ///
-    /// When omitted in `--live` mode, existing `partitions.parquet` rows take
-    /// precedence as the restart anchor.
+        /// When omitted in bounded mode, falls back to a sibling `cursor.parquet`
+        /// if present, then to the endpoint's first streamable block.
+        ///
+        /// When omitted in `--live` mode, existing `partitions.parquet` rows take
+        /// precedence as the restart anchor.
         ///
         /// Use `--overwrite` to ignore any existing canonical index and rebuild it
         /// from the requested start point instead.
@@ -3584,10 +3585,26 @@ pub fn build_config(args: &CommonArgs) -> anyhow::Result<Config> {
     })
 }
 
+/// Return the tracing level to use for the current CLI settings.
+///
+/// Verbose mode promotes the normal default `info` level to `debug` so operators
+/// can opt into richer logs without overriding an explicitly chosen level such as
+/// `warn`, `error`, or `trace`. For example, `--verbose --log-level warn`
+/// remains `warn`, while `--verbose` on its own uses `debug`.
+pub fn effective_log_level(log_level: &str, verbose: bool) -> &str {
+    if verbose && log_level.eq_ignore_ascii_case("info") {
+        "debug"
+    } else {
+        log_level
+    }
+}
+
 /// Initialize tracing subscriber with the given log level.
-pub fn init_tracing(log_level: &str) {
-    let filter = tracing_subscriber::EnvFilter::try_new(log_level)
-        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
+pub fn init_tracing(log_level: &str, verbose: bool) {
+    let requested_level = effective_log_level(log_level, verbose);
+    let fallback_level = if verbose { "debug" } else { "info" };
+    let filter = tracing_subscriber::EnvFilter::try_new(requested_level)
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(fallback_level));
     tracing_subscriber::fmt()
         .with_env_filter(filter)
         .with_target(false)
@@ -6303,6 +6320,7 @@ mod tests {
         assert_eq!(cli.common.flush_bytes, DEFAULT_FLUSH_BYTES);
         assert_eq!(cli.common.compression, "zstd");
         assert_eq!(cli.common.log_level, "info");
+        assert!(!cli.common.verbose);
         assert!(!cli.common.dry_run);
         assert!(cli.common.final_blocks_only);
         assert_eq!(cli.common.api_key_envvar, "SUBSTREAMS_API_KEY");
@@ -6361,6 +6379,7 @@ mod tests {
             "snappy",
             "--log-level",
             "debug",
+            "--verbose",
             "--dry-run",
         ]);
         assert_eq!(
@@ -6386,7 +6405,18 @@ mod tests {
         assert_eq!(cli.common.reconnect_stall_timeout_secs, Some(120));
         assert_eq!(cli.common.compression, "snappy");
         assert_eq!(cli.common.log_level, "debug");
+        assert!(cli.common.verbose);
         assert!(cli.common.dry_run);
+    }
+
+    #[test]
+    fn test_effective_log_level_promotes_info_when_verbose() {
+        assert_eq!(effective_log_level("info", true), "debug");
+        assert_eq!(effective_log_level("INFO", true), "debug");
+        assert_eq!(effective_log_level("Info", true), "debug");
+        assert_eq!(effective_log_level("debug", true), "debug");
+        assert_eq!(effective_log_level("warn", true), "warn");
+        assert_eq!(effective_log_level("info", false), "info");
     }
 
     #[test]
