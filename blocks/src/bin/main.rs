@@ -3637,7 +3637,6 @@ async fn main() -> Result<()> {
                     stop_block,
                     live,
                     poll_interval_secs,
-                    skip_missing_blocks,
                     partition,
                     block_range_size,
                     compression,
@@ -3678,7 +3677,7 @@ async fn main() -> Result<()> {
                         *stop_block,
                         *live,
                         *poll_interval_secs,
-                        *skip_missing_blocks,
+                        true,
                         partition,
                         *block_range_size,
                         compression,
@@ -5675,11 +5674,13 @@ mod tests {
         assert!(help.contains("FIREHOSE_ENDPOINT_MAINNET"));
         assert!(help.contains("--live"));
         assert!(help.contains("existing cursor"));
-        assert!(help.contains("--skip-missing-blocks"));
+        assert!(help.contains("first streamable block"));
+        assert!(help.contains("Missing blocks are skipped automatically"));
         assert!(!help.contains("--bootstrap-missing-genesis-timestamp"));
         assert!(!help.contains("--backfill-missing-timestamps"));
         assert!(!help.contains("--backfill-missing-timestamps-buffer-bytes"));
         assert!(!help.contains("--strict-timestamps"));
+        assert!(!help.contains("--skip-missing-blocks"));
     }
 
     #[test]
@@ -5710,10 +5711,32 @@ mod tests {
     }
 
     #[test]
+    fn test_build_subcommand_rejects_removed_skip_missing_blocks_flag() {
+        let err = Cli::try_parse_from([
+            "fireparq",
+            "build",
+            "--network",
+            "solana-mainnet-beta",
+            "--start-block",
+            "100",
+            "--stop-block",
+            "200",
+            "--skip-missing-blocks",
+        ])
+        .expect_err("removed skip-missing-blocks flag should fail clap parsing");
+
+        let rendered = err.to_string();
+        assert!(rendered.contains("--skip-missing-blocks"));
+        assert!(rendered.contains("unexpected argument"));
+    }
+
+    #[test]
     fn test_partitions_build_help_omits_chain_override_flag() {
         let help = command_help(&["fireparq", "partitions", "build", "--help"]);
         assert!(!help.contains("--chain"));
         assert!(help.contains("chainName"));
+        assert!(help.contains("Missing blocks are skipped automatically"));
+        assert!(!help.contains("--skip-missing-blocks"));
     }
 
     #[test]
