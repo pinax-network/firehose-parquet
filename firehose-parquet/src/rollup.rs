@@ -123,7 +123,7 @@ fn run_rollup_local(config: &RollupConfig) -> Result<()> {
         let mut all_batches: Vec<RecordBatch> = Vec::new();
         let mut file_kv_metadata: Option<Vec<KeyValue>> = None;
         for file_path in group_files {
-            debug!(group = %group_key, path = %file_path.display(), "reading source parquet file");
+            debug!(group = %group_key, path = %file_path.display(), "reading source Parquet file");
             let file = std::fs::File::open(file_path)
                 .with_context(|| format!("opening {}", file_path.display()))?;
             let builder = ParquetRecordBatchReaderBuilder::try_new(file)?;
@@ -180,7 +180,7 @@ fn run_rollup_local(config: &RollupConfig) -> Result<()> {
             "deleting source files"
         );
         for f in &source_files_to_delete {
-            debug!(path = %f.display(), "deleting rolled-up source parquet file");
+            debug!(path = %f.display(), "deleting rolled-up source Parquet file");
             std::fs::remove_file(f)
                 .with_context(|| format!("deleting source file {}", f.display()))?;
         }
@@ -478,7 +478,7 @@ fn run_rollup_s3(config: &RollupConfig) -> Result<()> {
         let mut all_batches: Vec<RecordBatch> = Vec::new();
         let mut file_kv_metadata: Option<Vec<KeyValue>> = None;
         for s3_key in group_keys {
-            debug!(group = %group_key, path = %s3_key, "reading source parquet file from S3");
+            debug!(group = %group_key, path = %s3_key, "reading source Parquet file from S3");
             let data = block_on_async(async {
                 let path = object_store::path::Path::from(s3_key.as_str());
                 src_client.get(&path).await?.bytes().await
@@ -539,7 +539,7 @@ fn run_rollup_s3(config: &RollupConfig) -> Result<()> {
             "deleting source files from S3"
         );
         for key in &source_keys_to_delete {
-            debug!(path = %key, "deleting rolled-up source parquet file from S3");
+            debug!(path = %key, "deleting rolled-up source Parquet file from S3");
             block_on_async(async {
                 let path = object_store::path::Path::from(key.as_str());
                 src_client.delete(&path).await

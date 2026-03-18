@@ -3576,6 +3576,12 @@ pub fn build_config(args: &CommonArgs) -> anyhow::Result<Config> {
     })
 }
 
+/// Return the tracing level to use for the current CLI settings.
+///
+/// Verbose mode promotes the normal default `info` level to `debug` so operators
+/// can opt into richer logs without overriding an explicitly chosen level such as
+/// `warn`, `error`, or `trace`. For example, `--verbose --log-level warn`
+/// remains `warn`, while `--verbose` on its own uses `debug`.
 pub fn effective_log_level(log_level: &str, verbose: bool) -> &str {
     if verbose && log_level.eq_ignore_ascii_case("info") {
         "debug"
@@ -3586,9 +3592,10 @@ pub fn effective_log_level(log_level: &str, verbose: bool) -> &str {
 
 /// Initialize tracing subscriber with the given log level.
 pub fn init_tracing(log_level: &str, verbose: bool) {
-    let default_level = if verbose { "debug" } else { "info" };
-    let filter = tracing_subscriber::EnvFilter::try_new(effective_log_level(log_level, verbose))
-        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(default_level));
+    let requested_level = effective_log_level(log_level, verbose);
+    let fallback_level = if verbose { "debug" } else { "info" };
+    let filter = tracing_subscriber::EnvFilter::try_new(requested_level)
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(fallback_level));
     tracing_subscriber::fmt()
         .with_env_filter(filter)
         .with_target(false)
@@ -6396,6 +6403,8 @@ mod tests {
     #[test]
     fn test_effective_log_level_promotes_info_when_verbose() {
         assert_eq!(effective_log_level("info", true), "debug");
+        assert_eq!(effective_log_level("INFO", true), "debug");
+        assert_eq!(effective_log_level("Info", true), "debug");
         assert_eq!(effective_log_level("debug", true), "debug");
         assert_eq!(effective_log_level("warn", true), "warn");
         assert_eq!(effective_log_level("info", false), "info");
