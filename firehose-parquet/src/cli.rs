@@ -109,19 +109,6 @@ pub struct CommonArgs {
     )]
     pub live: bool,
 
-    /// Skip over missing block numbers after retries are exhausted.
-    ///
-    /// Useful for sparse chains like Solana where not every block number exists,
-    /// but permissive mode may continue past gaps instead of failing fast.
-    #[arg(
-        long,
-        env = "SKIP_MISSING_BLOCKS",
-        default_value = "false",
-        hide_env_values = true,
-        help_heading = "Block Range"
-    )]
-    pub skip_missing_blocks: bool,
-
     /// Path to cursor parquet file for resuming a previous session (must end in .parquet)
     #[arg(
         short = 'c',
@@ -338,6 +325,7 @@ pub struct CommonArgs {
 ///
 /// Streams blocks from a Firehose gRPC endpoint and writes Apache Parquet
 /// datasets partitioned by block range, date, hour, minute, or second.
+/// Missing blocks are skipped automatically after probe retries are exhausted.
 #[derive(clap::Args, Debug, Clone)]
 #[command(after_long_help = "\
 Examples:
@@ -472,7 +460,8 @@ pub enum Commands {
     ///
     /// This is the primary ingestion workflow. Partitions output by block range,
     /// date, hour, minute, or second. Supports live mode, cursor-based resume,
-    /// and S3 output.
+    /// and S3 output. Missing blocks are skipped automatically after probe retries
+    /// are exhausted.
     Build(BuildArgs),
     /// Partition index utilities (`partitions.parquet` workflows).
     #[command(subcommand)]
@@ -1174,6 +1163,7 @@ Lookup order:
 #[derive(clap::Subcommand, Debug)]
 pub enum PartitionsCommands {
     /// Build `partitions.parquet` directly from Firehose block timestamps.
+    /// Missing blocks are skipped automatically after probe retries are exhausted.
     #[command(after_long_help = "\
 Examples:
   # Build a local date index for one chain
@@ -1267,11 +1257,11 @@ Examples:
         api_token_envvar: String,
         /// Start block number (inclusive).
         ///
-        /// When omitted in bounded mode, falls back to a sibling `cursor.parquet`
-        /// if present, then to the endpoint's first streamable block.
-        ///
-        /// When omitted in `--live` mode, existing `partitions.parquet` rows take
-        /// precedence as the restart anchor.
+    /// When omitted in bounded mode, falls back to a sibling `cursor.parquet`
+    /// if present, then to the endpoint's first streamable block.
+    ///
+    /// When omitted in `--live` mode, existing `partitions.parquet` rows take
+    /// precedence as the restart anchor.
         ///
         /// Use `--overwrite` to ignore any existing canonical index and rebuild it
         /// from the requested start point instead.
@@ -1293,9 +1283,6 @@ Examples:
         /// Poll interval used by `--live` sparse probes while waiting for new blocks.
         #[arg(long, default_value_t = 30, help_heading = "Runtime / Logging")]
         poll_interval_secs: u64,
-        /// Allow sparse probes to scan forward a small window when a chain skips block numbers.
-        #[arg(long, default_value_t = false, help_heading = "Runtime / Logging")]
-        skip_missing_blocks: bool,
         /// Partition to build: date, hour, minute, second, or block_range
         #[arg(long = "partition", help_heading = "Partitioning")]
         partition: String,
@@ -3575,7 +3562,7 @@ pub fn build_config(args: &CommonArgs) -> anyhow::Result<Config> {
         jwt_token,
         start_block: args.start_block,
         stop_block: args.stop_block,
-        skip_missing_blocks: args.skip_missing_blocks,
+        skip_missing_blocks: true,
         cursor_path: Some(args.cursor.to_string_lossy().to_string()),
         output,
         partition: parse_partition(&args.partition, args.block_range_size)?,
@@ -6329,7 +6316,6 @@ mod tests {
         assert!(cli.common.start_block.is_none());
         assert!(cli.common.stop_block.is_none());
         assert!(!cli.common.live);
-        assert!(!cli.common.skip_missing_blocks);
         assert_eq!(cli.common.cursor, PathBuf::from("cursor.parquet"));
         assert!(cli.common.cursor_template.is_none());
         assert!(cli.common.flush_interval_secs.is_none());
@@ -6359,7 +6345,6 @@ mod tests {
             "-t",
             "200",
             "--live",
-            "--skip-missing-blocks",
             "-c",
             "cursor-mainnet-date.parquet",
             "--output",
@@ -6395,7 +6380,6 @@ mod tests {
         assert_eq!(cli.common.start_block, Some(100));
         assert_eq!(cli.common.stop_block, Some(200));
         assert!(cli.common.live);
-        assert!(cli.common.skip_missing_blocks);
         assert_eq!(
             cli.common.cursor,
             PathBuf::from("cursor-mainnet-date.parquet")
@@ -6464,7 +6448,6 @@ mod tests {
             "https://example.com:443",
             "--start-block",
             "100",
-            "--skip-missing-blocks",
             "--compression",
             "gzip",
             "--partition",
@@ -6802,7 +6785,6 @@ mod tests {
                 stop_block,
                 live,
                 poll_interval_secs,
-                skip_missing_blocks,
                 partition,
                 compression,
                 output,
@@ -6812,7 +6794,6 @@ mod tests {
                 assert_eq!(stop_block, None);
                 assert!(live);
                 assert_eq!(poll_interval_secs, 15);
-                assert!(!skip_missing_blocks);
                 assert_eq!(partition, "date");
                 assert_eq!(compression, "zstd");
                 assert_eq!(output.as_deref(), Some("./output"));
@@ -6822,8 +6803,8 @@ mod tests {
     }
 
     #[test]
-    fn test_partitions_build_subcommand_skip_missing_blocks_parse() {
-        let cli = parse(&[
+    fn test_partitions_build_subcommand_rejects_removed_skip_missing_blocks_flag() {
+        let err = TestCli::try_parse_from([
             "test-cli",
             "partitions",
             "build",
@@ -6835,16 +6816,13 @@ mod tests {
             "./output",
             "--live",
             "--skip-missing-blocks",
-        ]);
-        match cli.command.expect("command should exist") {
-            Commands::Partitions(PartitionsCommands::Build {
-                skip_missing_blocks,
-                ..
-            }) => {
-                assert!(skip_missing_blocks);
-            }
-            _ => panic!("expected partitions build subcommand"),
-        }
+        ])
+        .expect_err("removed skip-missing-blocks flag should fail clap parsing");
+
+        assert_eq!(err.kind(), clap::error::ErrorKind::UnknownArgument);
+        let rendered = err.to_string();
+        assert!(rendered.contains("--skip-missing-blocks"));
+        assert!(rendered.contains("unexpected argument"));
     }
 
     #[test]

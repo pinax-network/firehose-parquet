@@ -249,9 +249,7 @@ impl std::fmt::Display for Config {
         writeln!(f, "  auth               {auth}")?;
         writeln!(f, "  start_block        {start}")?;
         writeln!(f, "  stop_block         {stop} (exclusive)")?;
-        if self.skip_missing_blocks {
-            writeln!(f, "  skip_missing_blocks true")?;
-        }
+        writeln!(f, "  missing_blocks     skip after probe retries")?;
         if let Some(ref path) = self.cursor_path {
             writeln!(f, "  cursor             {}", path)?;
         }
@@ -320,7 +318,7 @@ impl Default for Config {
             jwt_token: None,
             start_block: None,
             stop_block: None,
-            skip_missing_blocks: false,
+            skip_missing_blocks: true,
             cursor_path: None,
             output: PathBuf::from("."),
             partition: Partition::None,
@@ -376,6 +374,7 @@ mod tests {
         assert!(display.contains("auth               none"));
         assert!(display.contains("start_block        N/A"));
         assert!(display.contains("stop_block         stream forever (exclusive)"));
+        assert!(display.contains("missing_blocks     skip after probe retries"));
         assert!(display.contains("partition          none"));
         assert!(display.contains("compression        zstd"));
         assert!(!display.contains("flush_rows"));
@@ -421,13 +420,11 @@ mod tests {
     }
 
     #[test]
-    fn test_config_display_skip_missing_blocks() {
-        let config = Config {
-            skip_missing_blocks: true,
-            ..Config::default()
-        };
-        let display = config.to_string();
-        assert!(display.contains("skip_missing_blocks true"));
+    fn test_config_default_skips_missing_blocks() {
+        assert!(Config::default().skip_missing_blocks);
+        assert!(Config::default()
+            .to_string()
+            .contains("missing_blocks     skip after probe retries"));
     }
 
     #[test]

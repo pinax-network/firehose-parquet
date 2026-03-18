@@ -415,7 +415,7 @@ Behavior:
 - `--resume` reuses the trailing rows from the existing canonical index and continues from the stored frontier
 - bounded builds may expand the requested start/stop to the enclosing partition boundaries so each completed row remains exact
 - `--live` treats existing `partitions.parquet` rows as the restart anchor, polls for new finalized blocks, and keeps extending the canonical index
-- `--skip-missing-blocks` lets sparse probes scan forward a small window when a chain legitimately skips block numbers
+- sparse probes skip forward across a small window of missing block numbers by default after probe retries are exhausted
 - sparse probes treat missing/non-positive timestamps as missing metadata and borrow a nearby subsequent finalized block timestamp before partitioning
 
 | Flag | Default | Description |
@@ -425,7 +425,6 @@ Behavior:
 | `--stop-block` | none in live mode | Required for bounded builds; incompatible with `--live`; bounded builds expand upward to the enclosing partition end |
 | `--live` | `false` | Keep extending `partitions.parquet` and resume from its latest covered frontier |
 | `--poll-interval-secs` | `30` | Live-mode poll interval while waiting for the next finalized block frontier |
-| `--skip-missing-blocks` | `false` | Allow sparse probes to skip over a small window of missing block numbers after retries are exhausted |
 | `--output` | inferred from `--s3-bucket` | Output root directory or `s3://` URI prefix |
 | `--s3-bucket` | none | S3 bucket used when `--output` is omitted or should be prefixed |
 | `--resume` | `false` | Reuse the existing canonical index at the resolved output path and continue from its frontier |
