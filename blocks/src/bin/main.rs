@@ -14,7 +14,7 @@ use firehose_parquet::cli::{
 };
 use firehose_parquet::config::{BlockMetadata, Compression, Config, Partition};
 use firehose_parquet::cursor::{CursorLocation, CursorState};
-use firehose_parquet::encode::{parse_encode_bytes, EncodeBytes};
+use firehose_parquet::encode::EncodeBytes;
 use firehose_parquet::grpc::{EndpointInfo, FirehoseClient};
 use firehose_parquet::metrics;
 use firehose_parquet::networks::{resolve_network_endpoint, EndpointSource};
@@ -335,11 +335,24 @@ fn resolve_auto_encode_bytes(
         .unwrap_or(EncodeBytes::Hex)
 }
 
+fn inferred_block_type_from_endpoint_info(
+    endpoint_info: &Option<EndpointInfo>,
+) -> Option<&'static str> {
+    let info = endpoint_info.as_ref()?;
+
+    if !info.chain_name.is_empty() {
+        return infer_partitions_block_type(&info.chain_name, endpoint_info);
+    }
+
+    info.chain_name_aliases
+        .iter()
+        .find_map(|alias| infer_partitions_block_type(alias, endpoint_info))
+}
+
 fn add_common_file_metadata(
     meta: &mut ParquetFileMetadata,
     block_type: Option<&str>,
     encoding: Option<&EncodeBytes>,
-    bytes_encoding_fallback: Option<&str>,
     endpoint: &str,
     endpoint_info: &Option<EndpointInfo>,
 ) {
@@ -352,8 +365,6 @@ fn add_common_file_metadata(
             "firehose-parquet.bytes_encoding",
             encode_bytes_label(encoding),
         );
-    } else if let Some(bytes_encoding_fallback) = bytes_encoding_fallback {
-        meta.add("firehose-parquet.bytes_encoding", bytes_encoding_fallback);
     }
     meta.add("firehose-parquet.endpoint", endpoint);
     if let Some(ref ei) = endpoint_info {
@@ -414,7 +425,6 @@ fn build_file_metadata(
         &mut meta,
         Some(block_type),
         Some(encoding),
-        None,
         endpoint,
         endpoint_info,
     );
@@ -439,21 +449,13 @@ fn maybe_add_synthetic_timestamp_metadata(
 fn build_cursor_file_metadata(
     block_type: Option<&str>,
     encoding: Option<&EncodeBytes>,
-    bytes_encoding_fallback: &str,
     endpoint: &str,
     compression: Compression,
     partition: &firehose_parquet::config::Partition,
     endpoint_info: &Option<EndpointInfo>,
 ) -> ParquetFileMetadata {
     let mut meta = ParquetFileMetadata::new();
-    add_common_file_metadata(
-        &mut meta,
-        block_type,
-        encoding,
-        Some(bytes_encoding_fallback),
-        endpoint,
-        endpoint_info,
-    );
+    add_common_file_metadata(&mut meta, block_type, encoding, endpoint, endpoint_info);
     meta.add("firehose-parquet.compression", compression.to_string());
     meta.add("firehose-parquet.partition", partition.to_string());
     meta.add(
@@ -764,7 +766,7 @@ fn validate_existing_partitions_params(
         if let Some(ref existing_chain) = row.chain {
             if existing_chain != chain {
                 return Err(anyhow!(
-                    "existing partitions.parquet was built for chain '{}' but current --chain is '{}'; \
+                    "existing partitions.parquet was built for chain '{}' but current resolved chain is '{}'; \
                      cannot mix chains in the same partitions file",
                     existing_chain,
                     chain
@@ -821,7 +823,6 @@ fn build_partitions_file_metadata(
         &mut meta,
         inferred_block_type,
         Some(&encoding),
-        None,
         endpoint,
         endpoint_info,
     );
@@ -931,15 +932,12 @@ fn encode_bytes_from_block_id_encoding(encoding: i32) -> Option<EncodeBytes> {
     }
 }
 
-fn resolve_encode_bytes(
-    block_type: &str,
-    bytes_encoding: &str,
+fn resolve_output_bytes_encoding(
+    block_type: Option<&str>,
     endpoint_info: &Option<EndpointInfo>,
     tron_style_evm_profile: bool,
 ) -> EncodeBytes {
-    parse_encode_bytes(bytes_encoding).unwrap_or_else(|| {
-        resolve_auto_encode_bytes(Some(block_type), endpoint_info, tron_style_evm_profile)
-    })
+    resolve_auto_encode_bytes(block_type, endpoint_info, tron_style_evm_profile)
 }
 
 /// Resolve the output directory, prepending `chain_name` when available.
@@ -1088,7 +1086,6 @@ async fn run_partitions_build(
     endpoint: &str,
     api_key_envvar: &str,
     api_token_envvar: &str,
-    chain_override: Option<&str>,
     start_block: Option<u64>,
     stop_block: Option<u64>,
     live: bool,
@@ -1175,16 +1172,14 @@ async fn run_partitions_build(
 
     let info_client = FirehoseClient::new(base_config.clone());
     let endpoint_info = info_client.info().await;
-    let chain = chain_override
-        .map(str::to_string)
-        .or_else(|| {
-            endpoint_info
-                .as_ref()
-                .map(|info| info.chain_name.clone())
-                .filter(|name| !name.is_empty())
-        })
+    let chain = endpoint_info
+        .as_ref()
+        .map(|info| info.chain_name.clone())
+        .filter(|name| !name.is_empty())
         .ok_or_else(|| {
-            anyhow!("--chain is required when the endpoint does not expose chain_name")
+            anyhow!(
+                "partitions build requires endpoint info with chain_name; the legacy --chain override has been removed"
+            )
         })?;
 
     let partitions_file_metadata = build_partitions_file_metadata(
@@ -3649,7 +3644,6 @@ async fn main() -> Result<()> {
                     network,
                     api_key_envvar,
                     api_token_envvar,
-                    chain,
                     start_block,
                     stop_block,
                     live,
@@ -3691,7 +3685,6 @@ async fn main() -> Result<()> {
                         &resolved_endpoint,
                         api_key_envvar,
                         api_token_envvar,
-                        chain.as_deref(),
                         *start_block,
                         *stop_block,
                         *live,
@@ -4256,7 +4249,6 @@ async fn run_ingestion(args: &BuildArgs) -> Result<()> {
     let with_votes = args.with_votes;
     let with_votes_explicitly_requested =
         flag_explicitly_requested(std::env::args_os(), "--with-votes");
-    let bytes_encoding_str = args.bytes_encoding.clone();
     let mut common = args.common.clone();
     if common.endpoint.is_none() {
         if let Some(network) = args.network.as_deref() {
@@ -4370,12 +4362,21 @@ async fn run_ingestion(args: &BuildArgs) -> Result<()> {
     }
 
     let include_failed_transactions = args.include_failed_transactions;
+    let tron_style_evm_profile = endpoint_uses_tron_style_evm_profile(&endpoint_info);
+    let initial_block_type = if block_type != "auto" {
+        Some(block_type.as_str())
+    } else {
+        inferred_block_type_from_endpoint_info(&endpoint_info)
+    };
+    let initial_bytes_encoding =
+        resolve_output_bytes_encoding(initial_block_type, &endpoint_info, tron_style_evm_profile);
+    let initial_bytes_encoding_label = encode_bytes_label(&initial_bytes_encoding).to_string();
 
     info!(
         block_type,
         extended,
         with_votes,
-        bytes_encoding = %bytes_encoding_str,
+        bytes_encoding = %initial_bytes_encoding_label,
         include_failed_transactions,
         "starting pipeline\n{config}"
     );
@@ -4416,7 +4417,10 @@ async fn run_ingestion(args: &BuildArgs) -> Result<()> {
             ("endpoint".to_string(), config.endpoint.clone()),
             ("partition".to_string(), config.partition.to_string()),
             ("compression".to_string(), config.compression.to_string()),
-            ("bytes_encoding".to_string(), bytes_encoding_str.clone()),
+            (
+                "bytes_encoding".to_string(),
+                initial_bytes_encoding_label.clone(),
+            ),
             ("extended".to_string(), extended.to_string()),
             ("with_votes".to_string(), with_votes.to_string()),
             (
@@ -4472,7 +4476,6 @@ async fn run_ingestion(args: &BuildArgs) -> Result<()> {
     let flush_bytes = config.flush_bytes;
     let flush_interval_secs = config.flush_interval_secs;
     let dry_run = config.dry_run;
-    let tron_style_evm_profile = endpoint_uses_tron_style_evm_profile(&endpoint_info);
     let mut is_solana = block_type == "solana";
     let partition_config = config.partition.clone();
     let mut use_synthetic_partition_routing =
@@ -4510,12 +4513,7 @@ async fn run_ingestion(args: &BuildArgs) -> Result<()> {
     // If block type is known upfront, resolve encode_bytes and create mapper immediately.
     // If "auto", defer until first block arrives.
     let mut mapper: Option<Box<dyn BlockMapper>> = if block_type != "auto" {
-        let encode_bytes = resolve_encode_bytes(
-            &block_type,
-            &bytes_encoding_str,
-            &endpoint_info,
-            tron_style_evm_profile,
-        );
+        let encode_bytes = initial_bytes_encoding.clone();
         let meta = build_file_metadata(
             &block_type,
             &encode_bytes,
@@ -4567,24 +4565,14 @@ async fn run_ingestion(args: &BuildArgs) -> Result<()> {
     // Build file-level metadata for the cursor (same `firehose-parquet.*`
     // namespace as table files). Includes version, endpoint, chain info, and
     // pipeline parameters.
-    let initial_cursor_encoding = if block_type != "auto" {
-        Some(resolve_encode_bytes(
-            &block_type,
-            &bytes_encoding_str,
-            &endpoint_info,
-            tron_style_evm_profile,
-        ))
-    } else {
-        None
-    };
+    let initial_cursor_encoding = Some(initial_bytes_encoding.clone());
     let cursor_file_metadata = build_cursor_file_metadata(
         if block_type != "auto" {
             Some(block_type.as_str())
         } else {
-            None
+            initial_block_type
         },
         initial_cursor_encoding.as_ref(),
-        &bytes_encoding_str,
         &config.endpoint,
         config.compression,
         &config.partition,
@@ -4664,9 +4652,8 @@ async fn run_ingestion(args: &BuildArgs) -> Result<()> {
                 } else {
                     extended = resolve_extended_mode(extended, &endpoint_info);
                 }
-                let encode_bytes = resolve_encode_bytes(
-                    &detected,
-                    &bytes_encoding_str,
+                let encode_bytes = resolve_output_bytes_encoding(
+                    Some(&detected),
                     &endpoint_info,
                     tron_style_evm_profile,
                 );
@@ -4691,7 +4678,6 @@ async fn run_ingestion(args: &BuildArgs) -> Result<()> {
                 let mut cursor_meta = build_cursor_file_metadata(
                     Some(&detected),
                     Some(&encode_bytes),
-                    &bytes_encoding_str,
                     &config.endpoint,
                     config.compression,
                     &config.partition,
@@ -5483,13 +5469,10 @@ mod tests {
             "200",
             "--block-type",
             "evm",
-            "--bytes-encoding",
-            "hex",
         ]);
         if let Some(Commands::Build(build_args)) = cli.command {
             assert_eq!(build_args.extended, None);
             assert_eq!(build_args.block_type, "evm");
-            assert_eq!(build_args.bytes_encoding, "hex");
         } else {
             panic!("expected Commands::Build");
         }
@@ -5761,10 +5744,16 @@ mod tests {
     }
 
     #[test]
-    fn test_build_help_mentions_tron_bytes_encoding_behavior() {
+    fn test_build_help_mentions_tron_encoding_behavior() {
         let help = subcommand_help("build");
-        assert!(help.contains("For Tron, `auto` resolves to `tron_base58`"));
-        assert!(help.contains("hashes and topics stay raw hex without `0x`"));
+        assert!(!help.contains("--bytes-encoding"));
+    }
+
+    #[test]
+    fn test_partitions_build_help_omits_chain_override_flag() {
+        let help = command_help(&["fireparq", "partitions", "build", "--help"]);
+        assert!(!help.contains("--chain"));
+        assert!(help.contains("chainName"));
     }
 
     #[test]
@@ -6496,7 +6485,7 @@ mod tests {
     }
 
     #[test]
-    fn test_resolve_encode_bytes_uses_tron_style_profile_for_tron_chain_name() {
+    fn test_resolve_output_bytes_encoding_uses_tron_style_profile_for_tron_chain_name() {
         let endpoint_info = Some(EndpointInfo {
             chain_name: "tron".to_string(),
             chain_name_aliases: vec![],
@@ -6506,13 +6495,13 @@ mod tests {
             block_features: vec![],
         });
 
-        let resolved = resolve_encode_bytes("evm", "auto", &endpoint_info, true);
+        let resolved = resolve_output_bytes_encoding(Some("evm"), &endpoint_info, true);
 
         assert_eq!(resolved, EncodeBytes::TronBase58);
     }
 
     #[test]
-    fn test_resolve_encode_bytes_near_prefers_output_contract_over_endpoint_hint() {
+    fn test_resolve_output_bytes_encoding_near_prefers_output_contract_over_endpoint_hint() {
         let endpoint_info = Some(EndpointInfo {
             chain_name: "near-mainnet".to_string(),
             chain_name_aliases: vec!["near".to_string()],
@@ -6522,29 +6511,13 @@ mod tests {
             block_features: vec![],
         });
 
-        let resolved = resolve_encode_bytes("near", "auto", &endpoint_info, false);
+        let resolved = resolve_output_bytes_encoding(Some("near"), &endpoint_info, false);
 
         assert_eq!(resolved, EncodeBytes::Base58);
     }
 
     #[test]
-    fn test_resolve_encode_bytes_explicit_cli_override_wins_for_near() {
-        let endpoint_info = Some(EndpointInfo {
-            chain_name: "near-mainnet".to_string(),
-            chain_name_aliases: vec!["near".to_string()],
-            first_streamable_block_num: 0,
-            first_streamable_block_id: String::new(),
-            block_id_encoding: 3,
-            block_features: vec![],
-        });
-
-        let resolved = resolve_encode_bytes("near", "hex", &endpoint_info, false);
-
-        assert_eq!(resolved, EncodeBytes::Hex);
-    }
-
-    #[test]
-    fn test_resolve_encode_bytes_supported_contracts_override_endpoint_hints() {
+    fn test_resolve_output_bytes_encoding_supported_contracts_override_endpoint_hints() {
         let cases = [
             ("evm", false, 3, EncodeBytes::Hex),
             ("bitcoin", false, 3, EncodeBytes::Hex),
@@ -6567,8 +6540,11 @@ mod tests {
                 block_features: vec![],
             });
 
-            let resolved =
-                resolve_encode_bytes(block_type, "auto", &endpoint_info, tron_style_evm_profile);
+            let resolved = resolve_output_bytes_encoding(
+                Some(block_type),
+                &endpoint_info,
+                tron_style_evm_profile,
+            );
 
             assert_eq!(
                 resolved, expected,
@@ -6578,7 +6554,7 @@ mod tests {
     }
 
     #[test]
-    fn test_resolve_encode_bytes_tron_style_contract_overrides_endpoint_hint() {
+    fn test_resolve_output_bytes_encoding_tron_style_contract_overrides_endpoint_hint() {
         let endpoint_info = Some(EndpointInfo {
             chain_name: "tron-evm".to_string(),
             chain_name_aliases: vec!["tron".to_string()],
@@ -6588,7 +6564,7 @@ mod tests {
             block_features: vec![],
         });
 
-        let resolved = resolve_encode_bytes("evm", "auto", &endpoint_info, true);
+        let resolved = resolve_output_bytes_encoding(Some("evm"), &endpoint_info, true);
 
         assert_eq!(resolved, EncodeBytes::TronBase58);
     }
@@ -7586,7 +7562,6 @@ mod tests {
         let meta = build_cursor_file_metadata(
             Some("evm"),
             Some(&EncodeBytes::TronBase58),
-            "auto",
             "https://example.com",
             Compression::Zstd,
             &firehose_parquet::config::Partition::Date,
@@ -8363,7 +8338,7 @@ mod tests {
             find_meta(&meta, "firehose-parquet.endpoint"),
             Some("https://example.com")
         );
-        // Falls back to the chain_override value when no endpoint_info
+        // Falls back to the inferred chain name when no endpoint_info is available
         assert_eq!(
             find_meta(&meta, "firehose-parquet.chain_name"),
             Some("solana-mainnet")
