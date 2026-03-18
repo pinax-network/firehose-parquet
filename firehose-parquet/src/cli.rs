@@ -8,6 +8,7 @@ use std::path::{Component, Path, PathBuf};
 
 /// Default max unresolved timestamp-backfill buffer size in bytes.
 pub const DEFAULT_TIMESTAMP_BACKFILL_BUFFER_LIMIT_BYTES: u64 = 134_217_728;
+/// Shared 32 MiB default flush target for build/merge byte-based flushing.
 pub const DEFAULT_FLUSH_BYTES: u64 = 33_554_432;
 
 /// Load environment variables from `.env` file (if present).

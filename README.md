@@ -782,7 +782,7 @@ Lookup order matches `scan` / `inspect`: explicit `s3://...` URIs win, existing 
 | Flag | Default | Description |
 |---|---|---|
 | `--compression` | `zstd` | Compression codec: zstd, snappy, gzip, none |
-| `--flush-bytes` | 32 MB | Max compressed bytes per output file |
+| `--flush-bytes` | 32 MB | Target compressed bytes per output file |
 | `--flush-rows` | disabled | Flush merged output after this many rows |
 | `--dry-run` | `false` | Show what would be merged without writing |
 

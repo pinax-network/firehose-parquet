@@ -75,6 +75,8 @@ impl StreamingPartWriter {
             schema,
             props,
             flush_bytes,
+            // Treat an explicit zero like the disabled default so merge only flushes on rows when
+            // the operator provides a positive threshold.
             flush_rows: flush_rows.filter(|rows| *rows > 0).map(|rows| rows as usize),
             next_part_num: initial_part_num,
             current_writer: None,
@@ -1021,10 +1023,15 @@ mod tests {
             .cloned()
     }
 
-    fn read_parquet_row_count(path: &Path) -> i64 {
+    fn read_parquet_row_count(path: &Path) -> usize {
         let file = std::fs::File::open(path).unwrap();
         let builder = ParquetRecordBatchReaderBuilder::try_new(file).unwrap();
-        builder.metadata().file_metadata().num_rows()
+        builder
+            .metadata()
+            .file_metadata()
+            .num_rows()
+            .try_into()
+            .expect("test parquet row count should fit usize")
     }
 
     #[test]
