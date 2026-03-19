@@ -202,16 +202,14 @@ The cursor is stored as a single-row Parquet file with two layers of data:
 | `cursor` | Utf8 | Firehose opaque cursor token |
 | `last_block_num` | UInt64 | Last processed block number |
 | `last_block_id` | Binary | Last processed block ID (raw bytes) |
+| `last_timestamp` | Int64 (nullable) | Last known sparse-routing timestamp anchor used for timestamp-less resume routing |
 | `updated_at` | Utf8 | ISO 8601 timestamp of last save |
 | `start_block` | UInt64 (nullable) | Pipeline start block |
 | `stop_block` | UInt64 (nullable) | Pipeline stop block (exclusive) |
-| `extended` | Boolean | Whether extended mode was enabled |
-| `final_blocks_only` | Boolean | Whether only finalized blocks were processed |
-| `include_failed_transactions` | Boolean | Whether failed txs were included |
 
 **File-level metadata** (Parquet key-value pairs in `firehose-parquet.*` namespace):
 
-Pipeline configuration and firehose endpoint metadata are embedded in the file footer — same convention as table files. This includes `endpoint`, `chain_name`, `partition`, `compression`, `bytes_encoding`, and more.
+Pipeline configuration and firehose endpoint metadata are embedded in the file footer — same convention as table files. This includes `endpoint`, `chain_name`, `partition`, `compression`, `bytes_encoding`, plus cursor compatibility fields such as `extended`, `final_blocks_only`, and `include_failed_transactions`.
 
 ### S3-Aware Cursor
 
@@ -228,9 +226,12 @@ When output is written locally or to S3, the default cursor file is automaticall
 
 When resuming from an existing `cursor.parquet`, the pipeline validates that the current CLI parameters match those stored in the cursor. Checked parameters include:
 
-- `start_block`, `extended`, `final_blocks_only`, `include_failed_transactions`
+- `start_block` (from row data)
+- `extended`, `final_blocks_only`, `include_failed_transactions` (from cursor file metadata, with legacy row fallback in v0.7.x)
 - `with_votes` (Solana only) for vote table output
 - `endpoint`, `partition`, `block_range_size`, `compression`, `bytes_encoding` (from file metadata)
+
+For timestamp-sparse chains such as Solana time partitions, `last_timestamp` preserves the last known routing anchor across shutdown/restart. Legacy `v0.7.x` cursors without `last_timestamp` still load, but resume anchoring falls back to the older best-effort behavior and emits a warning. This legacy cursor fallback is intended for `v0.7.x` compatibility and is expected to tighten in `v0.8.0`.
 
 On resume, the cursor's stored `start_block` is reused when present. The
 cursor's `stop_block` may be omitted from the CLI for bounded resume, replaced

@@ -1,30 +1,29 @@
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use arrow::record_batch::RecordBatch;
 use clap::{Args, Parser};
 use firehose_parquet::cli::{
-    build_config, build_partitions_index_path, build_partitions_output_root, init_tracing,
-    list_partitions_from_index, load_dotenv, parse_partition_build_types,
-    parse_partition_shard_strategy, read_partitions_build_rows, resolve_cursor_template,
-    resolve_partition_command, resolve_s3_output_root, shard_partitions_from_index,
-    validate_partitions_index, validate_s3_output_credentials, write_partitions_index_strict,
     AwsConfig, BuildArgs, Commands, CursorTemplateContext, PartitionBoundsRequest,
     PartitionBuildResult, PartitionBuildRow, PartitionBuildType, PartitionIndexBuilder,
     PartitionListRequest, PartitionResolveOptions, PartitionShardRequest, PartitionValidateRequest,
-    PartitionsCommands,
+    PartitionsCommands, build_config, build_partitions_index_path, build_partitions_output_root,
+    init_tracing, list_partitions_from_index, load_dotenv, parse_partition_build_types,
+    parse_partition_shard_strategy, read_partitions_build_rows, resolve_cursor_template,
+    resolve_partition_command, resolve_s3_output_root, shard_partitions_from_index,
+    validate_partitions_index, validate_s3_output_credentials, write_partitions_index_strict,
 };
 use firehose_parquet::config::{BlockMetadata, Compression, Config, Partition};
 use firehose_parquet::cursor::{CursorLocation, CursorState};
 use firehose_parquet::encode::EncodeBytes;
 use firehose_parquet::grpc::{EndpointInfo, FirehoseClient};
 use firehose_parquet::metrics;
-use firehose_parquet::networks::{resolve_network_endpoint, EndpointSource};
-use firehose_parquet::traits::{decode_id_bytes, fork_step_name, BlockIdentity, BlockMapper};
+use firehose_parquet::networks::{EndpointSource, resolve_network_endpoint};
+use firehose_parquet::traits::{BlockIdentity, BlockMapper, decode_id_bytes, fork_step_name};
 use firehose_parquet::writer::{OutputWriter, ParquetFileMetadata, WriterBufferStats};
 use object_store::ObjectStore;
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 use tokio::sync::Notify;
 use tracing::{debug, info, warn};
@@ -456,6 +455,23 @@ fn maybe_add_synthetic_timestamp_metadata(
     }
 }
 
+fn add_cursor_compatibility_metadata(
+    meta: &mut ParquetFileMetadata,
+    extended: bool,
+    final_blocks_only: bool,
+    include_failed_transactions: bool,
+) {
+    meta.add("firehose-parquet.extended", extended.to_string());
+    meta.add(
+        "firehose-parquet.final_blocks_only",
+        final_blocks_only.to_string(),
+    );
+    meta.add(
+        "firehose-parquet.include_failed_transactions",
+        include_failed_transactions.to_string(),
+    );
+}
+
 fn build_cursor_file_metadata(
     block_type: Option<&str>,
     encoding: Option<&EncodeBytes>,
@@ -463,6 +479,9 @@ fn build_cursor_file_metadata(
     compression: Compression,
     partition: &firehose_parquet::config::Partition,
     endpoint_info: &Option<EndpointInfo>,
+    extended: bool,
+    final_blocks_only: bool,
+    include_failed_transactions: bool,
 ) -> ParquetFileMetadata {
     let mut meta = ParquetFileMetadata::new();
     add_common_file_metadata(&mut meta, block_type, encoding, endpoint, endpoint_info);
@@ -474,6 +493,12 @@ fn build_cursor_file_metadata(
             firehose_parquet::config::Partition::BlockRange { size, .. } => size.to_string(),
             _ => "0".to_string(),
         },
+    );
+    add_cursor_compatibility_metadata(
+        &mut meta,
+        extended,
+        final_blocks_only,
+        include_failed_transactions,
     );
     meta
 }
@@ -631,6 +656,20 @@ impl TimestampBackfill {
         }
     }
 
+    fn restore_anchor(&mut self, block_num: u64, timestamp: i64) {
+        if self.enabled {
+            self.last_anchor = Some(TimestampAnchor {
+                block_num,
+                timestamp,
+            });
+        }
+    }
+
+    fn current_anchor_timestamp(&self) -> Option<i64> {
+        self.enabled
+            .then(|| self.last_anchor.map(|anchor| anchor.timestamp))?
+    }
+
     fn buffered_blocks_len(&self) -> usize {
         0
     }
@@ -684,6 +723,35 @@ impl TimestampBackfill {
 
     fn drain_open_span(&mut self) -> anyhow::Result<Vec<BufferedBootstrapBlock>> {
         Ok(Vec::new())
+    }
+}
+
+fn restore_sparse_routing_cursor_anchor(
+    timestamp_backfill: &mut TimestampBackfill,
+    cursor_state: Option<&CursorState>,
+    cursor_override: bool,
+    block_type: &str,
+    partition: &Partition,
+) {
+    if cursor_override || !use_last_known_timestamp_partition_routing(block_type, partition) {
+        return;
+    }
+
+    let Some(cursor_state) = cursor_state else {
+        return;
+    };
+
+    if let Some(last_timestamp) = cursor_state.last_timestamp {
+        timestamp_backfill.restore_anchor(cursor_state.last_block_num, last_timestamp);
+        info!(
+            stored_cursor_last_block_num = cursor_state.last_block_num,
+            last_timestamp, "restored sparse-routing timestamp anchor from cursor.parquet"
+        );
+    } else {
+        warn!(
+            stored_cursor_last_block_num = cursor_state.last_block_num,
+            "legacy cursor.parquet is missing last_timestamp; resume timestamp anchoring may be less precise until a new timestamped block arrives"
+        );
     }
 }
 
@@ -1360,7 +1428,7 @@ async fn run_partitions_build(
 
             #[cfg(unix)]
             {
-                use tokio::signal::unix::{signal, SignalKind};
+                use tokio::signal::unix::{SignalKind, signal};
                 let mut sigterm =
                     signal(SignalKind::terminate()).expect("failed to install SIGTERM handler");
                 tokio::select! {
@@ -4199,7 +4267,7 @@ async fn run_ingestion(args: &BuildArgs, global: &GlobalArgs) -> Result<()> {
 
             #[cfg(unix)]
             {
-                use tokio::signal::unix::{signal, SignalKind};
+                use tokio::signal::unix::{SignalKind, signal};
                 let mut sigterm =
                     signal(SignalKind::terminate()).expect("failed to install SIGTERM handler");
                 tokio::select! {
@@ -4469,6 +4537,15 @@ async fn run_ingestion(args: &BuildArgs, global: &GlobalArgs) -> Result<()> {
         use_synthetic_partition_routing,
         DEFAULT_TIMESTAMP_BACKFILL_BUFFER_LIMIT_BYTES,
     );
+    if block_type != "auto" {
+        restore_sparse_routing_cursor_anchor(
+            &mut timestamp_backfill,
+            existing_cursor_state.as_ref(),
+            args.cursor_override,
+            &block_type,
+            &partition_config,
+        );
+    }
     update_timestamp_backfill_metrics(&pipeline_metrics, &timestamp_backfill);
 
     let mut writer = if firehose_parquet::writer::is_s3_output(&config.output) {
@@ -4558,17 +4635,13 @@ async fn run_ingestion(args: &BuildArgs, global: &GlobalArgs) -> Result<()> {
         config.compression,
         &config.partition,
         &endpoint_info,
+        extended,
+        config.final_blocks_only,
+        include_failed_transactions,
     );
     let mut cursor_file_metadata = cursor_file_metadata;
     if solana_chain {
         maybe_add_solana_with_votes_metadata(&mut cursor_file_metadata, Some("solana"), with_votes);
-    }
-    if block_type != "auto" {
-        maybe_add_synthetic_timestamp_metadata(
-            &mut cursor_file_metadata,
-            &block_type,
-            use_synthetic_partition_routing,
-        );
     }
 
     // Build a template CursorState with pipeline parameters that stay constant.
@@ -4664,13 +4737,11 @@ async fn run_ingestion(args: &BuildArgs, global: &GlobalArgs) -> Result<()> {
                     config.compression,
                     &config.partition,
                     &endpoint_info,
+                    extended,
+                    config.final_blocks_only,
+                    include_failed_transactions,
                 );
                 maybe_add_solana_with_votes_metadata(&mut cursor_meta, Some(&detected), with_votes);
-                maybe_add_synthetic_timestamp_metadata(
-                    &mut cursor_meta,
-                    &detected,
-                    detected_uses_synthetic_partition_routing,
-                );
                 cursor_state_template.file_metadata = cursor_meta;
                 cursor_state_template.extended = extended;
                 is_solana = detected == "solana";
@@ -4678,6 +4749,13 @@ async fn run_ingestion(args: &BuildArgs, global: &GlobalArgs) -> Result<()> {
                 timestamp_backfill = TimestampBackfill::new(
                     use_synthetic_partition_routing,
                     DEFAULT_TIMESTAMP_BACKFILL_BUFFER_LIMIT_BYTES,
+                );
+                restore_sparse_routing_cursor_anchor(
+                    &mut timestamp_backfill,
+                    existing_cursor_state.as_ref(),
+                    args.cursor_override,
+                    &detected,
+                    &partition_config,
                 );
                 mapper = Some(create_mapper(
                     &detected,
@@ -4845,6 +4923,7 @@ async fn run_ingestion(args: &BuildArgs, global: &GlobalArgs) -> Result<()> {
                                     state.cursor = cursor.clone();
                                     state.last_block_num = last_block_num;
                                     state.last_block_id = decode_id_bytes(&last_block_id);
+                                    state.last_timestamp = timestamp_backfill.current_anchor_timestamp();
                                     state.updated_at = time::OffsetDateTime::now_utc()
                                         .format(&time::format_description::well_known::Rfc3339)
                                         .unwrap_or_default();
@@ -5005,6 +5084,7 @@ async fn run_ingestion(args: &BuildArgs, global: &GlobalArgs) -> Result<()> {
                                 state.cursor = cursor.clone();
                                 state.last_block_num = last_block_num;
                                 state.last_block_id = decode_id_bytes(&last_block_id);
+                                state.last_timestamp = timestamp_backfill.current_anchor_timestamp();
                                 state.updated_at = time::OffsetDateTime::now_utc()
                                     .format(&time::format_description::well_known::Rfc3339)
                                     .unwrap_or_default();
@@ -5086,13 +5166,11 @@ async fn run_ingestion(args: &BuildArgs, global: &GlobalArgs) -> Result<()> {
             mapper_buffered_rows,
             writer_buffered_tables = writer_buffered.tables,
             writer_buffered_rows = writer_buffered.rows,
-            writer_buffered_estimated_bytes = firehose_parquet::cli::format_bytes(
-                writer_buffered.estimated_compressed_bytes
-            ),
+            writer_buffered_estimated_bytes =
+                firehose_parquet::cli::format_bytes(writer_buffered.estimated_compressed_bytes),
             timestamp_backfill_buffered_blocks = timestamp_backfill.buffered_blocks_len(),
-            timestamp_backfill_buffered_bytes = firehose_parquet::cli::format_bytes(
-                timestamp_backfill.buffered_bytes()
-            ),
+            timestamp_backfill_buffered_bytes =
+                firehose_parquet::cli::format_bytes(timestamp_backfill.buffered_bytes()),
             "graceful shutdown skipped partial flushes; buffered data was not materialized to storage"
         );
     } else {
@@ -5177,6 +5255,7 @@ async fn run_ingestion(args: &BuildArgs, global: &GlobalArgs) -> Result<()> {
                     state.cursor = cursor.clone();
                     state.last_block_num = last_block_num;
                     state.last_block_id = decode_id_bytes(&last_block_id);
+                    state.last_timestamp = timestamp_backfill.current_anchor_timestamp();
                     state.updated_at = time::OffsetDateTime::now_utc()
                         .format(&time::format_description::well_known::Rfc3339)
                         .unwrap_or_default();
@@ -5272,8 +5351,8 @@ mod tests {
     use firehose_parquet::cursor::CursorLocation;
     use std::collections::HashMap;
     use std::path::PathBuf;
-    use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn make_test_batch() -> RecordBatch {
@@ -6072,8 +6151,8 @@ mod tests {
     }
 
     #[test]
-    fn test_resolve_ingestion_start_block_uses_endpoint_first_streamable_block_when_override_is_enabled(
-    ) {
+    fn test_resolve_ingestion_start_block_uses_endpoint_first_streamable_block_when_override_is_enabled()
+     {
         let cursor_state = CursorState {
             start_block: Some(21),
             ..CursorState::default()
@@ -6436,16 +6515,18 @@ mod tests {
 
     #[test]
     fn test_create_mapper_invalid_type() {
-        assert!(create_mapper(
-            "unknown",
-            false,
-            false,
-            false,
-            EncodeBytes::Hex,
-            false,
-            false
-        )
-        .is_err());
+        assert!(
+            create_mapper(
+                "unknown",
+                false,
+                false,
+                false,
+                EncodeBytes::Hex,
+                false,
+                false
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -6661,9 +6742,10 @@ mod tests {
     fn test_validate_block_timestamp_missing_time_partition_errors() {
         let err = validate_block_timestamp(42, 0, &Partition::Date)
             .expect_err("time-based partitioning requires a timestamp");
-        assert!(err
-            .to_string()
-            .contains("time-based partitioning requires timestamps"));
+        assert!(
+            err.to_string()
+                .contains("time-based partitioning requires timestamps")
+        );
     }
 
     #[test]
@@ -6967,6 +7049,40 @@ mod tests {
     }
 
     #[test]
+    fn test_timestamp_backfill_routes_from_restored_cursor_anchor() {
+        let mut backfill =
+            TimestampBackfill::new(true, DEFAULT_TIMESTAMP_BACKFILL_BUFFER_LIMIT_BYTES);
+        let cursor_state = CursorState {
+            last_block_num: 99,
+            last_timestamp: Some(1_700_000_000),
+            ..CursorState::default()
+        };
+
+        restore_sparse_routing_cursor_anchor(
+            &mut backfill,
+            Some(&cursor_state),
+            false,
+            "solana",
+            &Partition::Hour,
+        );
+
+        let routed = backfill
+            .observe_block(
+                vec![0x01],
+                "cursor-100".to_string(),
+                None,
+                BlockIdentity {
+                    block_num: 100,
+                    timestamp: 0,
+                    ..BlockIdentity::default()
+                },
+            )
+            .expect("restored cursor anchor should route the first sparse block after resume");
+
+        assert_eq!(routed[0].identity.timestamp, 1_700_000_000);
+    }
+
+    #[test]
     fn test_build_file_metadata_includes_block_type() {
         let metadata = build_file_metadata(
             "solana",
@@ -6976,15 +7092,19 @@ mod tests {
             &None,
         );
 
-        assert!(metadata
-            .entries
-            .iter()
-            .any(|(key, value)| { key == "firehose-parquet.block_type" && value == "solana" }));
+        assert!(
+            metadata
+                .entries
+                .iter()
+                .any(|(key, value)| { key == "firehose-parquet.block_type" && value == "solana" })
+        );
         // strict_timestamps is no longer recorded in metadata
-        assert!(!metadata
-            .entries
-            .iter()
-            .any(|(key, _)| { key == "firehose-parquet.strict_timestamps" }));
+        assert!(
+            !metadata
+                .entries
+                .iter()
+                .any(|(key, _)| { key == "firehose-parquet.strict_timestamps" })
+        );
     }
 
     #[test]
@@ -7580,6 +7700,9 @@ mod tests {
             Compression::Zstd,
             &firehose_parquet::config::Partition::Date,
             &ei,
+            true,
+            false,
+            true,
         );
 
         assert_eq!(
@@ -7591,6 +7714,23 @@ mod tests {
             Some("hex_no_prefix")
         );
         assert_eq!(find_meta(&meta, "firehose-parquet.partition"), Some("date"));
+        assert_eq!(find_meta(&meta, "firehose-parquet.extended"), Some("true"));
+        assert_eq!(
+            find_meta(&meta, "firehose-parquet.final_blocks_only"),
+            Some("false")
+        );
+        assert_eq!(
+            find_meta(&meta, "firehose-parquet.include_failed_transactions"),
+            Some("true")
+        );
+        assert_eq!(
+            find_meta(&meta, "firehose-parquet.synthetic_timestamps"),
+            None
+        );
+        assert_eq!(
+            find_meta(&meta, "firehose-parquet.synthetic_timestamp_policy"),
+            None
+        );
     }
 
     #[tokio::test]
@@ -7827,8 +7967,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_find_first_different_block_with_fetch_returns_incomplete_boundary_on_missing_probe(
-    ) {
+    async fn test_find_first_different_block_with_fetch_returns_incomplete_boundary_on_missing_probe()
+     {
         let low_same = BlockIdentity {
             block_num: 100,
             timestamp: 1_700_000_000,
@@ -7965,9 +8105,11 @@ mod tests {
             exponential_candidates.last().copied(),
             Some(PARTITIONS_PROBE_TIMESTAMP_EXPONENTIAL_MAX_JUMP)
         );
-        assert!(exponential_candidates
-            .iter()
-            .all(|candidate| *candidate <= PARTITIONS_PROBE_TIMESTAMP_EXPONENTIAL_MAX_JUMP))
+        assert!(
+            exponential_candidates
+                .iter()
+                .all(|candidate| *candidate <= PARTITIONS_PROBE_TIMESTAMP_EXPONENTIAL_MAX_JUMP)
+        )
     }
 
     #[test]
@@ -8081,9 +8223,10 @@ mod tests {
         )
         .expect_err("block range size changes should be rejected");
 
-        assert!(err
-            .to_string()
-            .contains("cannot change block range size for an existing partitions file"));
+        assert!(
+            err.to_string()
+                .contains("cannot change block range size for an existing partitions file")
+        );
     }
 
     #[test]

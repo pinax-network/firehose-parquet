@@ -3,21 +3,28 @@ use std::path::Path;
 use std::sync::Arc;
 use tracing::{info, warn};
 
-use arrow::array::{Array, BinaryArray, BooleanArray, StringArray, UInt64Array};
+use arrow::array::{Array, BinaryArray, Int64Array, StringArray, UInt64Array};
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
 use bytes::Bytes;
 use object_store::ObjectStore;
-use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use parquet::arrow::ArrowWriter;
+use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use parquet::file::metadata::KeyValue;
 use parquet::file::properties::WriterProperties;
 
-use crate::encode::{parse_encode_bytes, EncodeBytes};
+use crate::encode::{EncodeBytes, parse_encode_bytes};
 use crate::writer::ParquetFileMetadata;
 
 /// The filename used for the cursor parquet file.
 pub const CURSOR_PARQUET_FILENAME: &str = "cursor.parquet";
+const CURSOR_METADATA_EXTENDED: &str = "firehose-parquet.extended";
+const CURSOR_METADATA_FINAL_BLOCKS_ONLY: &str = "firehose-parquet.final_blocks_only";
+const CURSOR_METADATA_INCLUDE_FAILED_TRANSACTIONS: &str =
+    "firehose-parquet.include_failed_transactions";
+const CURSOR_METADATA_SYNTHETIC_TIMESTAMPS: &str = "firehose-parquet.synthetic_timestamps";
+const CURSOR_METADATA_SYNTHETIC_TIMESTAMP_POLICY: &str =
+    "firehose-parquet.synthetic_timestamp_policy";
 
 /// Cursor state stored as a single-row Parquet file.
 ///
@@ -31,6 +38,7 @@ pub struct CursorState {
     pub last_block_num: u64,
     /// Block ID stored as raw bytes.
     pub last_block_id: Vec<u8>,
+    pub last_timestamp: Option<i64>,
     pub updated_at: String,
     pub start_block: Option<u64>,
     pub stop_block: Option<u64>,
@@ -48,12 +56,10 @@ fn cursor_schema() -> Schema {
         Field::new("cursor", DataType::Utf8, false),
         Field::new("last_block_num", DataType::UInt64, false),
         Field::new("last_block_id", DataType::Binary, false),
+        Field::new("last_timestamp", DataType::Int64, true),
         Field::new("updated_at", DataType::Utf8, false),
         Field::new("start_block", DataType::UInt64, true),
         Field::new("stop_block", DataType::UInt64, true),
-        Field::new("extended", DataType::Boolean, false),
-        Field::new("final_blocks_only", DataType::Boolean, false),
-        Field::new("include_failed_transactions", DataType::Boolean, false),
     ])
 }
 
@@ -140,6 +146,31 @@ fn effective_bytes_encoding_label(state: &CursorState, raw: &str) -> String {
     raw.to_string()
 }
 
+/// Parse a cursor metadata boolean encoded as the literal string `true` or
+/// `false`.
+///
+/// Returns `None` for missing or malformed values so callers can apply their
+/// own legacy fallback behavior.
+fn parse_cursor_metadata_bool(value: &str) -> Option<bool> {
+    match value {
+        "true" => Some(true),
+        "false" => Some(false),
+        _ => None,
+    }
+}
+
+/// Read a compatibility boolean from cursor file metadata, falling back to the
+/// legacy row value when older cursors do not carry the metadata key yet.
+///
+/// The `legacy_value` parameter preserves `v0.7.x` backward compatibility for
+/// row-based cursor formats while new cursors are validated from metadata.
+fn cursor_metadata_bool(state: &CursorState, key: &str, legacy_value: bool) -> bool {
+    state
+        .get_metadata(key)
+        .and_then(parse_cursor_metadata_bool)
+        .unwrap_or(legacy_value)
+}
+
 impl CursorState {
     /// Convert this state into a single-row RecordBatch.
     fn to_record_batch(&self) -> anyhow::Result<RecordBatch> {
@@ -150,12 +181,10 @@ impl CursorState {
                 Arc::new(StringArray::from(vec![self.cursor.as_str()])),
                 Arc::new(UInt64Array::from(vec![self.last_block_num])),
                 Arc::new(BinaryArray::from_vec(vec![self.last_block_id.as_slice()])),
+                Arc::new(Int64Array::from(vec![self.last_timestamp])),
                 Arc::new(StringArray::from(vec![self.updated_at.as_str()])),
                 Arc::new(UInt64Array::from(vec![self.start_block])),
                 Arc::new(UInt64Array::from(vec![self.stop_block])),
-                Arc::new(BooleanArray::from(vec![self.extended])),
-                Arc::new(BooleanArray::from(vec![self.final_blocks_only])),
-                Arc::new(BooleanArray::from(vec![self.include_failed_transactions])),
             ],
         )?;
         Ok(batch)
@@ -164,11 +193,36 @@ impl CursorState {
     /// Build `WriterProperties` that embed file-level metadata as Parquet KV pairs.
     fn writer_properties(&self) -> WriterProperties {
         let mut builder = WriterProperties::builder();
-        if !self.file_metadata.entries.is_empty() {
-            let kvs: Vec<KeyValue> = self
-                .file_metadata
-                .entries
-                .iter()
+        let mut metadata_entries = self.file_metadata.entries.clone();
+        // Cursor compatibility metadata is normalized here so newly written
+        // cursor.parquet files always carry the canonical metadata keys, while
+        // the older descriptive synthetic-timestamp keys are intentionally
+        // dropped as part of the v0.7.x cursor format cleanup.
+        metadata_entries.retain(|(key, _)| {
+            !matches!(
+                key.as_str(),
+                CURSOR_METADATA_EXTENDED
+                    | CURSOR_METADATA_FINAL_BLOCKS_ONLY
+                    | CURSOR_METADATA_INCLUDE_FAILED_TRANSACTIONS
+                    | CURSOR_METADATA_SYNTHETIC_TIMESTAMPS
+                    | CURSOR_METADATA_SYNTHETIC_TIMESTAMP_POLICY
+            )
+        });
+        metadata_entries.push((
+            CURSOR_METADATA_EXTENDED.to_string(),
+            self.extended.to_string(),
+        ));
+        metadata_entries.push((
+            CURSOR_METADATA_FINAL_BLOCKS_ONLY.to_string(),
+            self.final_blocks_only.to_string(),
+        ));
+        metadata_entries.push((
+            CURSOR_METADATA_INCLUDE_FAILED_TRANSACTIONS.to_string(),
+            self.include_failed_transactions.to_string(),
+        ));
+        if !metadata_entries.is_empty() {
+            let kvs: Vec<KeyValue> = metadata_entries
+                .into_iter()
                 .map(|(k, v)| KeyValue::new(k.clone(), Some(v.clone())))
                 .collect();
             builder = builder.set_key_value_metadata(Some(kvs));
@@ -188,8 +242,7 @@ impl CursorState {
     /// Validate that the current pipeline parameters match those stored in the
     /// cursor. Returns a list of human-readable mismatch descriptions.
     ///
-    /// Compares row-level fields (start_block, stop_block, extended,
-    /// final_blocks_only, include_failed_transactions) and file-level metadata
+    /// Compares row-level fields (start_block, stop_block) and file-level metadata
     /// (endpoint, partition, block_range_size, compression, bytes_encoding).
     pub fn validate_params(&self, current: &CursorState) -> Vec<String> {
         let mut mismatches = Vec::new();
@@ -207,22 +260,45 @@ impl CursorState {
                 self.stop_block, current.stop_block
             ));
         }
-        if self.extended != current.extended {
+        let stored_extended = cursor_metadata_bool(self, CURSOR_METADATA_EXTENDED, self.extended);
+        let current_extended =
+            cursor_metadata_bool(current, CURSOR_METADATA_EXTENDED, current.extended);
+        if stored_extended != current_extended {
             mismatches.push(format!(
                 "extended: cursor={} vs current={}",
-                self.extended, current.extended
+                stored_extended, current_extended
             ));
         }
-        if self.final_blocks_only != current.final_blocks_only {
+        let stored_final_blocks_only = cursor_metadata_bool(
+            self,
+            CURSOR_METADATA_FINAL_BLOCKS_ONLY,
+            self.final_blocks_only,
+        );
+        let current_final_blocks_only = cursor_metadata_bool(
+            current,
+            CURSOR_METADATA_FINAL_BLOCKS_ONLY,
+            current.final_blocks_only,
+        );
+        if stored_final_blocks_only != current_final_blocks_only {
             mismatches.push(format!(
                 "final_blocks_only: cursor={} vs current={}",
-                self.final_blocks_only, current.final_blocks_only
+                stored_final_blocks_only, current_final_blocks_only
             ));
         }
-        if self.include_failed_transactions != current.include_failed_transactions {
+        let stored_include_failed_transactions = cursor_metadata_bool(
+            self,
+            CURSOR_METADATA_INCLUDE_FAILED_TRANSACTIONS,
+            self.include_failed_transactions,
+        );
+        let current_include_failed_transactions = cursor_metadata_bool(
+            current,
+            CURSOR_METADATA_INCLUDE_FAILED_TRANSACTIONS,
+            current.include_failed_transactions,
+        );
+        if stored_include_failed_transactions != current_include_failed_transactions {
             mismatches.push(format!(
                 "include_failed_transactions: cursor={} vs current={}",
-                self.include_failed_transactions, current.include_failed_transactions
+                stored_include_failed_transactions, current_include_failed_transactions
             ));
         }
 
@@ -304,6 +380,12 @@ impl CursorState {
                 .and_then(|c| c.as_primitive_opt::<arrow::datatypes::UInt64Type>())
                 .and_then(|a| if a.is_null(0) { None } else { Some(a.value(0)) })
         };
+        let get_opt_i64 = |name: &str| -> Option<i64> {
+            batch
+                .column_by_name(name)
+                .and_then(|c| c.as_primitive_opt::<arrow::datatypes::Int64Type>())
+                .and_then(|a| if a.is_null(0) { None } else { Some(a.value(0)) })
+        };
         let get_bool = |name: &str| -> bool {
             batch
                 .column_by_name(name)
@@ -352,12 +434,28 @@ impl CursorState {
             cursor: get_str("cursor"),
             last_block_num: get_u64("last_block_num"),
             last_block_id: get_bytes("last_block_id"),
+            last_timestamp: get_opt_i64("last_timestamp"),
             updated_at: get_str("updated_at"),
             start_block: get_opt_u64("start_block"),
             stop_block: get_opt_u64("stop_block"),
-            extended: get_bool("extended"),
-            final_blocks_only: get_bool("final_blocks_only"),
-            include_failed_transactions: get_bool("include_failed_transactions"),
+            extended: file_metadata
+                .entries
+                .iter()
+                .find(|(key, _)| key == CURSOR_METADATA_EXTENDED)
+                .and_then(|(_, value)| parse_cursor_metadata_bool(value))
+                .unwrap_or_else(|| get_bool("extended")),
+            final_blocks_only: file_metadata
+                .entries
+                .iter()
+                .find(|(key, _)| key == CURSOR_METADATA_FINAL_BLOCKS_ONLY)
+                .and_then(|(_, value)| parse_cursor_metadata_bool(value))
+                .unwrap_or_else(|| get_bool("final_blocks_only")),
+            include_failed_transactions: file_metadata
+                .entries
+                .iter()
+                .find(|(key, _)| key == CURSOR_METADATA_INCLUDE_FAILED_TRANSACTIONS)
+                .and_then(|(_, value)| parse_cursor_metadata_bool(value))
+                .unwrap_or_else(|| get_bool("include_failed_transactions")),
             file_metadata,
         })
     }
@@ -660,6 +758,9 @@ mod tests {
         meta.add("firehose-parquet.compression", "zstd");
         meta.add("firehose-parquet.partition", "date");
         meta.add("firehose-parquet.block_range_size", "10000");
+        meta.add(CURSOR_METADATA_EXTENDED, "true");
+        meta.add(CURSOR_METADATA_FINAL_BLOCKS_ONLY, "true");
+        meta.add(CURSOR_METADATA_INCLUDE_FAILED_TRANSACTIONS, "false");
         meta
     }
 
@@ -683,6 +784,50 @@ mod tests {
         meta
     }
 
+    fn save_legacy_cursor_parquet(
+        path: &Path,
+        metadata: ParquetFileMetadata,
+    ) -> anyhow::Result<()> {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("cursor", DataType::Utf8, false),
+            Field::new("last_block_num", DataType::UInt64, false),
+            Field::new("last_block_id", DataType::Binary, false),
+            Field::new("updated_at", DataType::Utf8, false),
+            Field::new("start_block", DataType::UInt64, true),
+            Field::new("stop_block", DataType::UInt64, true),
+            Field::new("extended", DataType::Boolean, false),
+            Field::new("final_blocks_only", DataType::Boolean, false),
+            Field::new("include_failed_transactions", DataType::Boolean, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(StringArray::from(vec!["legacy-cursor"])),
+                Arc::new(UInt64Array::from(vec![123_u64])),
+                Arc::new(BinaryArray::from_vec(vec![b"\xaa\xbb".as_slice()])),
+                Arc::new(StringArray::from(vec!["2025-01-15T12:00:00Z"])),
+                Arc::new(UInt64Array::from(vec![Some(100_u64)])),
+                Arc::new(UInt64Array::from(vec![Some(200_u64)])),
+                Arc::new(arrow::array::BooleanArray::from(vec![true])),
+                Arc::new(arrow::array::BooleanArray::from(vec![false])),
+                Arc::new(arrow::array::BooleanArray::from(vec![true])),
+            ],
+        )?;
+        let kvs: Vec<KeyValue> = metadata
+            .entries
+            .into_iter()
+            .map(|(key, value)| KeyValue::new(key, Some(value)))
+            .collect();
+        let props = WriterProperties::builder()
+            .set_key_value_metadata(Some(kvs))
+            .build();
+        let file = fs::File::create(path)?;
+        let mut writer = ArrowWriter::try_new(file, batch.schema(), Some(props))?;
+        writer.write(&batch)?;
+        writer.close()?;
+        Ok(())
+    }
+
     #[test]
     fn test_save_and_load_cursor_parquet() {
         let dir = TempDir::new().unwrap();
@@ -692,6 +837,7 @@ mod tests {
             cursor: "cursor123".to_string(),
             last_block_num: 42000,
             last_block_id: b"\xab\xcd\xef".to_vec(),
+            last_timestamp: Some(1_700_000_000),
             updated_at: "2025-01-15T12:00:00Z".to_string(),
             start_block: Some(100),
             stop_block: Some(200),
@@ -707,11 +853,13 @@ mod tests {
         assert_eq!(loaded.cursor, "cursor123");
         assert_eq!(loaded.last_block_num, 42000);
         assert_eq!(loaded.last_block_id, b"\xab\xcd\xef".to_vec());
+        assert_eq!(loaded.last_timestamp, Some(1_700_000_000));
         assert_eq!(loaded.updated_at, "2025-01-15T12:00:00Z");
         assert_eq!(loaded.start_block, Some(100));
         assert_eq!(loaded.stop_block, Some(200));
         assert!(loaded.extended);
         assert!(loaded.final_blocks_only);
+        assert!(!loaded.include_failed_transactions);
 
         // Verify file-level metadata was round-tripped.
         let meta_map: std::collections::HashMap<_, _> = loaded
@@ -735,6 +883,20 @@ mod tests {
         );
         assert_eq!(meta_map.get("firehose-parquet.compression"), Some(&"zstd"));
         assert_eq!(meta_map.get("firehose-parquet.partition"), Some(&"date"));
+        assert_eq!(meta_map.get(CURSOR_METADATA_EXTENDED), Some(&"true"));
+        assert_eq!(
+            meta_map.get(CURSOR_METADATA_FINAL_BLOCKS_ONLY),
+            Some(&"true")
+        );
+        assert_eq!(
+            meta_map.get(CURSOR_METADATA_INCLUDE_FAILED_TRANSACTIONS),
+            Some(&"false")
+        );
+        assert_eq!(meta_map.get(CURSOR_METADATA_SYNTHETIC_TIMESTAMPS), None);
+        assert_eq!(
+            meta_map.get(CURSOR_METADATA_SYNTHETIC_TIMESTAMP_POLICY),
+            None
+        );
     }
 
     #[test]
@@ -892,6 +1054,69 @@ mod tests {
         let loaded = load_cursor_parquet(&path).expect("should load cursor");
         assert_eq!(loaded.start_block, None);
         assert_eq!(loaded.stop_block, None);
+        assert_eq!(loaded.last_timestamp, None);
+    }
+
+    #[test]
+    fn test_cursor_parquet_schema_keeps_only_resume_row_fields() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join(CURSOR_PARQUET_FILENAME);
+        let state = CursorState {
+            cursor: "schema-test".to_string(),
+            last_timestamp: Some(1_700_000_000),
+            file_metadata: test_file_metadata(),
+            ..CursorState::default()
+        };
+
+        save_cursor_parquet(&path, &state).unwrap();
+
+        let reader_builder =
+            ParquetRecordBatchReaderBuilder::try_new(fs::File::open(&path).unwrap()).unwrap();
+        let fields: Vec<String> = reader_builder
+            .schema()
+            .fields()
+            .iter()
+            .map(|field| field.name().to_string())
+            .collect();
+        assert_eq!(
+            fields,
+            vec![
+                "cursor".to_string(),
+                "last_block_num".to_string(),
+                "last_block_id".to_string(),
+                "last_timestamp".to_string(),
+                "updated_at".to_string(),
+                "start_block".to_string(),
+                "stop_block".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_load_legacy_cursor_without_last_timestamp() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join(CURSOR_PARQUET_FILENAME);
+        let legacy_metadata = metadata_with_entries(
+            &[],
+            &[
+                CURSOR_METADATA_EXTENDED,
+                CURSOR_METADATA_FINAL_BLOCKS_ONLY,
+                CURSOR_METADATA_INCLUDE_FAILED_TRANSACTIONS,
+            ],
+        );
+
+        save_legacy_cursor_parquet(&path, legacy_metadata).unwrap();
+        let loaded = load_cursor_parquet(&path).expect("should load legacy cursor");
+
+        assert_eq!(loaded.cursor, "legacy-cursor");
+        assert_eq!(loaded.last_block_num, 123);
+        assert_eq!(loaded.last_block_id, b"\xaa\xbb".to_vec());
+        assert_eq!(loaded.last_timestamp, None);
+        assert_eq!(loaded.start_block, Some(100));
+        assert_eq!(loaded.stop_block, Some(200));
+        assert!(loaded.extended);
+        assert!(!loaded.final_blocks_only);
+        assert!(loaded.include_failed_transactions);
     }
 
     #[test]
@@ -954,6 +1179,10 @@ mod tests {
         for entry in &mut different_meta.entries {
             if entry.0 == "firehose-parquet.compression" {
                 entry.1 = "snappy".to_string();
+            } else if entry.0 == CURSOR_METADATA_EXTENDED {
+                entry.1 = "false".to_string();
+            } else if entry.0 == CURSOR_METADATA_INCLUDE_FAILED_TRANSACTIONS {
+                entry.1 = "true".to_string();
             }
         }
         let current = CursorState {
@@ -969,9 +1198,11 @@ mod tests {
         assert_eq!(mismatches.len(), 4);
         assert!(mismatches.iter().any(|m| m.contains("start_block")));
         assert!(mismatches.iter().any(|m| m.contains("extended")));
-        assert!(mismatches
-            .iter()
-            .any(|m| m.contains("include_failed_transactions")));
+        assert!(
+            mismatches
+                .iter()
+                .any(|m| m.contains("include_failed_transactions"))
+        );
         assert!(mismatches.iter().any(|m| m.contains("compression")));
     }
 
