@@ -146,6 +146,11 @@ fn effective_bytes_encoding_label(state: &CursorState, raw: &str) -> String {
     raw.to_string()
 }
 
+/// Parse a cursor metadata boolean encoded as the literal string `true` or
+/// `false`.
+///
+/// Returns `None` for missing or malformed values so callers can apply their
+/// own legacy fallback behavior.
 fn parse_cursor_metadata_bool(value: &str) -> Option<bool> {
     match value {
         "true" => Some(true),
@@ -154,6 +159,11 @@ fn parse_cursor_metadata_bool(value: &str) -> Option<bool> {
     }
 }
 
+/// Read a compatibility boolean from cursor file metadata, falling back to the
+/// legacy row value when older cursors do not carry the metadata key yet.
+///
+/// The `legacy_value` parameter preserves `v0.7.x` backward compatibility for
+/// row-based cursor formats while new cursors are validated from metadata.
 fn cursor_metadata_bool(state: &CursorState, key: &str, legacy_value: bool) -> bool {
     state
         .get_metadata(key)
@@ -184,6 +194,10 @@ impl CursorState {
     fn writer_properties(&self) -> WriterProperties {
         let mut builder = WriterProperties::builder();
         let mut metadata_entries = self.file_metadata.entries.clone();
+        // Cursor compatibility metadata is normalized here so newly written
+        // cursor.parquet files always carry the canonical metadata keys, while
+        // the older descriptive synthetic-timestamp keys are intentionally
+        // dropped as part of the v0.7.x cursor format cleanup.
         metadata_entries.retain(|(key, _)| {
             !matches!(
                 key.as_str(),
@@ -1079,7 +1093,7 @@ mod tests {
     }
 
     #[test]
-    fn test_load_cursor_parquet_supports_legacy_rows_without_last_timestamp() {
+    fn test_load_legacy_cursor_without_last_timestamp() {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join(CURSOR_PARQUET_FILENAME);
         let legacy_metadata = metadata_with_entries(
