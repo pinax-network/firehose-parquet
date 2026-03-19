@@ -77,7 +77,9 @@ impl StreamingPartWriter {
             flush_bytes,
             // Treat an explicit zero like the disabled default so merge only flushes on rows when
             // the operator provides a positive threshold.
-            flush_rows: flush_rows.filter(|rows| *rows > 0).map(|rows| rows as usize),
+            flush_rows: flush_rows
+                .filter(|rows| *rows > 0)
+                .map(|rows| rows as usize),
             next_part_num: initial_part_num,
             current_writer: None,
         }
@@ -299,6 +301,28 @@ fn process_local_partition(
         .filter_map(|f| std::fs::metadata(f).ok())
         .map(|m| m.len())
         .sum();
+
+    if let Some(estimated_output_files) =
+        no_op_compaction_estimate(files.len(), source_bytes, config.flush_bytes)
+    {
+        info!(
+            partition = partition_label,
+            source_files = files.len(),
+            source_bytes,
+            flush_bytes = config.flush_bytes,
+            estimated_output_files,
+            "skipping local partition merge because no file-count reduction is expected"
+        );
+        println!(
+            "  {}: skipping merge; {} parts already estimate to ~{} file(s)",
+            partition_label,
+            files.len(),
+            estimated_output_files
+        );
+        result.partitions_skipped += 1;
+        return Ok(());
+    }
+
     result.bytes_before += source_bytes;
 
     if config.dry_run {
@@ -440,6 +464,15 @@ fn estimate_output_files(total_bytes: u64, flush_bytes: u64) -> usize {
     } else {
         ((total_bytes + flush_bytes - 1) / flush_bytes) as usize
     }
+}
+
+fn no_op_compaction_estimate(
+    source_files: usize,
+    source_bytes: u64,
+    flush_bytes: u64,
+) -> Option<usize> {
+    let estimated_output_files = estimate_output_files(source_bytes, flush_bytes);
+    (estimated_output_files >= source_files).then_some(estimated_output_files)
 }
 
 fn writer_properties(
@@ -638,6 +671,29 @@ fn process_s3_partition(
     }
 
     let source_bytes: u64 = objects.iter().map(|o| o.size as u64).sum();
+
+    if let Some(estimated_output_files) =
+        no_op_compaction_estimate(objects.len(), source_bytes, config.flush_bytes)
+    {
+        info!(
+            table,
+            partition = partition_label,
+            source_files = objects.len(),
+            source_bytes,
+            flush_bytes = config.flush_bytes,
+            estimated_output_files,
+            "skipping S3 partition merge because no file-count reduction is expected"
+        );
+        println!(
+            "  {}: skipping merge; {} parts already estimate to ~{} file(s)",
+            partition_label,
+            objects.len(),
+            estimated_output_files,
+        );
+        result.partitions_skipped += 1;
+        return Ok(());
+    }
+
     result.bytes_before += source_bytes;
 
     info!(
@@ -1128,6 +1184,53 @@ mod tests {
         assert_eq!(out_files.len(), 2);
         assert_eq!(read_parquet_row_count(&out_files[0]), 20);
         assert_eq!(read_parquet_row_count(&out_files[1]), 10);
+    }
+
+    #[test]
+    fn test_merge_skips_partition_when_estimate_has_no_compaction_benefit() {
+        let dir = tempfile::tempdir().unwrap();
+        let partition = dir.path().join("blocks/year=2024/month=01/date=15");
+        std::fs::create_dir_all(&partition).unwrap();
+
+        for part_num in 1..=3 {
+            write_test_parquet_with_metadata(
+                &partition.join(format!("part-{part_num:06}.parquet")),
+                &make_test_batch(10),
+                vec![],
+            );
+        }
+
+        let mut source_files = Vec::new();
+        collect_parquet_files_recursive(dir.path(), &mut source_files).unwrap();
+        source_files.sort();
+
+        let source_bytes: u64 = source_files
+            .iter()
+            .map(|path| std::fs::metadata(path).unwrap().len())
+            .sum();
+        let flush_bytes = source_bytes.div_ceil(source_files.len() as u64);
+
+        let config = MergeConfig {
+            path: dir.path().to_string_lossy().to_string(),
+            compression: Compression::None,
+            flush_rows: None,
+            flush_bytes,
+            dry_run: false,
+            verbose: false,
+            aws: None,
+            cache_control: String::new(),
+        };
+
+        let result = run_merge(&config).unwrap();
+        assert_eq!(result.partitions_merged, 0);
+        assert_eq!(result.partitions_skipped, 1);
+        assert_eq!(result.files_read, 0);
+        assert_eq!(result.files_written, 0);
+
+        let mut out_files = Vec::new();
+        collect_parquet_files_recursive(dir.path(), &mut out_files).unwrap();
+        out_files.sort();
+        assert_eq!(out_files, source_files);
     }
 
     #[test]
