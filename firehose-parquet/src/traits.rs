@@ -294,12 +294,13 @@ impl ForkStepBuilder {
 /// Trait for mapping raw protobuf block bytes into Arrow RecordBatches.
 pub trait BlockMapper {
     /// Map raw protobuf bytes (from Any.value) into internal builders.
+    /// Returns the number of transactions mapped for the block.
     fn map_block(
         &mut self,
         block_bytes: &[u8],
         identity: &BlockIdentity,
         fork_step: Option<&str>,
-    ) -> anyhow::Result<()>;
+    ) -> anyhow::Result<u64>;
 
     /// Flush all buffered data into RecordBatches.
     fn flush(&mut self) -> anyhow::Result<HashMap<String, RecordBatch>>;

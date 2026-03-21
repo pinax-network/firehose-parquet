@@ -621,11 +621,12 @@ impl BlockMapper for BeaconBlockMapper {
         block_bytes: &[u8],
         identity: &BlockIdentity,
         fork_step: Option<&str>,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<u64> {
         let block = beacon::Block::decode(block_bytes)?;
         let canonical = beacon_canonical_identity(&block, identity);
         self.map_beacon_block(&block, &canonical, fork_step);
-        Ok(())
+        // Beacon chain uses attestations rather than traditional transactions.
+        Ok(0)
     }
 
     fn flush(&mut self) -> anyhow::Result<HashMap<String, RecordBatch>> {
