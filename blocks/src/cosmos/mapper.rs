@@ -216,11 +216,12 @@ impl BlockMapper for CosmosBlockMapper {
         block_bytes: &[u8],
         identity: &BlockIdentity,
         fork_step: Option<&str>,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<u64> {
         let block = cosmos::Block::decode(block_bytes)?;
+        let tx_count = block.txs.len() as u64;
         let canonical = cosmos_canonical_identity(&block, identity);
         self.map_cosmos_block(&block, &canonical, fork_step);
-        Ok(())
+        Ok(tx_count)
     }
 
     fn flush(&mut self) -> anyhow::Result<HashMap<String, RecordBatch>> {

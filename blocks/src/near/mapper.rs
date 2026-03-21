@@ -477,11 +477,17 @@ impl BlockMapper for NearBlockMapper {
         block_bytes: &[u8],
         identity: &BlockIdentity,
         fork_step: Option<&str>,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<u64> {
         let block = near::Block::decode(block_bytes)?;
+        let tx_count = block
+            .shards
+            .iter()
+            .filter_map(|s| s.chunk.as_ref())
+            .map(|c| c.transactions.len() as u64)
+            .sum();
         let canonical = near_canonical_identity(&block, identity);
         self.map_near_block(&block, &canonical, fork_step);
-        Ok(())
+        Ok(tx_count)
     }
 
     fn flush(&mut self) -> anyhow::Result<HashMap<String, RecordBatch>> {

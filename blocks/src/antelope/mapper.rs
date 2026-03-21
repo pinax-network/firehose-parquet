@@ -439,10 +439,15 @@ impl BlockMapper for AntelopeBlockMapper {
         block_bytes: &[u8],
         identity: &BlockIdentity,
         fork_step: Option<&str>,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<u64> {
         let block = antelope::Block::decode(block_bytes)?;
+        let tx_count = if block.filtering_applied {
+            block.filtered_transaction_traces.len()
+        } else {
+            block.unfiltered_transaction_traces.len()
+        } as u64;
         self.map_antelope_block(&block, identity, fork_step);
-        Ok(())
+        Ok(tx_count)
     }
 
     fn flush(&mut self) -> anyhow::Result<HashMap<String, RecordBatch>> {

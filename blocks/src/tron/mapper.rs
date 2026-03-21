@@ -243,10 +243,11 @@ impl BlockMapper for TronBlockMapper {
         block_bytes: &[u8],
         identity: &BlockIdentity,
         fork_step: Option<&str>,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<u64> {
         let block = tron::Block::decode(block_bytes)?;
+        let tx_count = block.transactions.len() as u64;
         self.map_tron_block(&block, identity, fork_step);
-        Ok(())
+        Ok(tx_count)
     }
 
     fn flush(&mut self) -> anyhow::Result<HashMap<String, RecordBatch>> {

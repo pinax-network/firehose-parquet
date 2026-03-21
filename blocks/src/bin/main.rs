@@ -4603,6 +4603,7 @@ async fn run_ingestion(args: &BuildArgs, global: &GlobalArgs) -> Result<()> {
 
     let mut blocks_observed: u64 = 0;
     let mut blocks_processed: u64 = 0;
+    let mut transactions_processed: u64 = 0;
     let mut min_block: Option<u64> = None;
     let mut max_block: Option<u64> = None;
     let mut min_timestamp: Option<i64> = None;
@@ -4802,25 +4803,25 @@ async fn run_ingestion(args: &BuildArgs, global: &GlobalArgs) -> Result<()> {
                     } else {
                         0.0
                     };
-                    let block_timestamp = format_optional_probe_timestamp(current_anchor_timestamp)?;
-                    match block_timestamp.as_deref() {
-                        Some(block_timestamp) => info!(
+                    let timestamp = format_optional_probe_timestamp(current_anchor_timestamp)?;
+                    match timestamp.as_deref() {
+                        Some(timestamp) => info!(
                             blocks_observed,
-                            blocks_processed,
-                            block_number,
-                            block_timestamp,
+                            blocks = blocks_processed,
+                            block_num = block_number,
+                            timestamp,
                             buffered_blocks = timestamp_backfill.buffered_blocks_len(),
                             buffered_bytes = firehose_parquet::cli::format_bytes(timestamp_backfill.buffered_bytes()),
-                            speed = format!("{:.0} observed blocks/s", observed_blocks_per_sec),
+                            blocks_per_sec = format!("{:.0}", observed_blocks_per_sec),
                             "progress (buffering timestamps)"
                         ),
                         None => info!(
                             blocks_observed,
-                            blocks_processed,
-                            block_number,
+                            blocks = blocks_processed,
+                            block_num = block_number,
                             buffered_blocks = timestamp_backfill.buffered_blocks_len(),
                             buffered_bytes = firehose_parquet::cli::format_bytes(timestamp_backfill.buffered_bytes()),
-                            speed = format!("{:.0} observed blocks/s", observed_blocks_per_sec),
+                            blocks_per_sec = format!("{:.0}", observed_blocks_per_sec),
                             "progress (buffering timestamps)"
                         ),
                     }
@@ -4963,7 +4964,7 @@ async fn run_ingestion(args: &BuildArgs, global: &GlobalArgs) -> Result<()> {
                     max_timestamp = Some(max_timestamp.map_or(ts, |s: i64| s.max(ts)));
                 }
 
-                m.map_block(block_bytes, identity, fork_step)?;
+                transactions_processed += m.map_block(block_bytes, identity, fork_step)?;
                 blocks_processed += 1;
                 blocks_since_flush += 1;
                 bytes_read += block_bytes.len() as u64;
@@ -4990,59 +4991,63 @@ async fn run_ingestion(args: &BuildArgs, global: &GlobalArgs) -> Result<()> {
 
                 if should_emit_progress_log(blocks_processed) {
                     let elapsed_secs = progress_start.elapsed().as_secs_f64();
-                    let speed_per_sec = if elapsed_secs > 0.0 {
-                        bytes_read as f64 / elapsed_secs
-                    } else {
-                        0.0
-                    };
                     let blocks_per_sec = if elapsed_secs > 0.0 {
                         blocks_processed as f64 / elapsed_secs
                     } else {
                         0.0
                     };
-                    let block_timestamp = format_optional_probe_timestamp(ts)?;
-                    match (block_timestamp.as_deref(), current_partition_key.as_deref()) {
-                        (Some(block_timestamp), Some(partition)) => info!(
-                            blocks_processed,
-                            block_number,
-                            block_timestamp,
+                    let timestamp = format_optional_probe_timestamp(ts)?;
+                    match (timestamp.as_deref(), current_partition_key.as_deref()) {
+                        (Some(timestamp), Some(partition)) => info!(
+                            blocks = blocks_processed,
+                            transactions = transactions_processed,
+                            block_num = block_number,
+                            timestamp,
                             partition,
+                            blocks_per_sec = format!("{:.0}", blocks_per_sec),
                             total_rows = m.total_rows(),
                             bytes_read = firehose_parquet::cli::format_bytes(bytes_read),
-                            speed = format!("{}/s | {:.0} blocks/s", firehose_parquet::cli::format_bytes(speed_per_sec as u64), blocks_per_sec),
                             "progress"
                         ),
-                        (Some(block_timestamp), None) => info!(
-                            blocks_processed,
-                            block_number,
-                            block_timestamp,
+                        (Some(timestamp), None) => info!(
+                            blocks = blocks_processed,
+                            transactions = transactions_processed,
+                            block_num = block_number,
+                            timestamp,
+                            blocks_per_sec = format!("{:.0}", blocks_per_sec),
                             total_rows = m.total_rows(),
                             bytes_read = firehose_parquet::cli::format_bytes(bytes_read),
-                            speed = format!("{}/s | {:.0} blocks/s", firehose_parquet::cli::format_bytes(speed_per_sec as u64), blocks_per_sec),
                             "progress"
                         ),
                         (None, Some(partition)) => info!(
-                            blocks_processed,
-                            block_number,
+                            blocks = blocks_processed,
+                            transactions = transactions_processed,
+                            block_num = block_number,
                             partition,
+                            blocks_per_sec = format!("{:.0}", blocks_per_sec),
                             total_rows = m.total_rows(),
                             bytes_read = firehose_parquet::cli::format_bytes(bytes_read),
-                            speed = format!("{}/s | {:.0} blocks/s", firehose_parquet::cli::format_bytes(speed_per_sec as u64), blocks_per_sec),
                             "progress"
                         ),
                         (None, None) => info!(
-                            blocks_processed,
-                            block_number,
+                            blocks = blocks_processed,
+                            transactions = transactions_processed,
+                            block_num = block_number,
+                            blocks_per_sec = format!("{:.0}", blocks_per_sec),
                             total_rows = m.total_rows(),
                             bytes_read = firehose_parquet::cli::format_bytes(bytes_read),
-                            speed = format!("{}/s | {:.0} blocks/s", firehose_parquet::cli::format_bytes(speed_per_sec as u64), blocks_per_sec),
                             "progress"
                         ),
                     }
 
                     // Update rolling throughput gauges.
                     pipeline_metrics.blocks_per_second.set(blocks_per_sec);
-                    pipeline_metrics.bytes_per_second.set(speed_per_sec);
+                    let bytes_per_sec = if elapsed_secs > 0.0 {
+                        bytes_read as f64 / elapsed_secs
+                    } else {
+                        0.0
+                    };
+                    pipeline_metrics.bytes_per_second.set(bytes_per_sec);
                     pipeline_metrics.elapsed_seconds.set(elapsed_secs);
                 }
 
@@ -5189,7 +5194,7 @@ async fn run_ingestion(args: &BuildArgs, global: &GlobalArgs) -> Result<()> {
                 min_timestamp = Some(min_timestamp.map_or(ts, |s: i64| s.min(ts)));
                 max_timestamp = Some(max_timestamp.map_or(ts, |s: i64| s.max(ts)));
 
-                m.map_block(
+                transactions_processed += m.map_block(
                     &buffered_block.block_bytes,
                     &buffered_block.identity,
                     buffered_block.fork_step.as_deref(),
