@@ -302,7 +302,7 @@ async fn handle_request(stream: &mut tokio::net::TcpStream, registry: &Registry)
             )
         } else {
             format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: application/openmetrics-text; version=1.0.0; charset=utf-8\r\nContent-Length: {}\r\n\r\n{}",
+                "HTTP/1.1 200 OK\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: {}\r\n\r\n{}",
                 body.len(),
                 body,
             )

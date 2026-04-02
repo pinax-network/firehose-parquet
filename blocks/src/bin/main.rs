@@ -1,29 +1,30 @@
-use anyhow::{Result, anyhow};
+use anyhow::{anyhow, Result};
 use arrow::record_batch::RecordBatch;
 use clap::{Args, Parser};
 use firehose_parquet::cli::{
-    AwsConfig, BuildArgs, Commands, CursorTemplateContext, PartitionBoundsRequest,
-    PartitionBuildResult, PartitionBuildRow, PartitionBuildType, PartitionIndexBuilder,
-    PartitionListRequest, PartitionResolveOptions, PartitionShardRequest, PartitionValidateRequest,
-    PartitionsCommands, build_config, build_partitions_index_path, build_partitions_output_root,
-    init_tracing, list_partitions_from_index, load_dotenv, parse_partition_build_types,
+    build_config, build_partitions_index_path, build_partitions_output_root, init_tracing,
+    list_partitions_from_index, load_dotenv, parse_partition_build_types,
     parse_partition_shard_strategy, read_partitions_build_rows, resolve_cursor_template,
     resolve_partition_command, resolve_s3_output_root, shard_partitions_from_index,
     validate_partitions_index, validate_s3_output_credentials, write_partitions_index_strict,
+    AwsConfig, BuildArgs, Commands, CursorTemplateContext, PartitionBoundsRequest,
+    PartitionBuildResult, PartitionBuildRow, PartitionBuildType, PartitionIndexBuilder,
+    PartitionListRequest, PartitionResolveOptions, PartitionShardRequest, PartitionValidateRequest,
+    PartitionsCommands,
 };
 use firehose_parquet::config::{BlockMetadata, Compression, Config, Partition};
 use firehose_parquet::cursor::{CursorLocation, CursorState};
 use firehose_parquet::encode::EncodeBytes;
 use firehose_parquet::grpc::{EndpointInfo, FirehoseClient};
 use firehose_parquet::metrics;
-use firehose_parquet::networks::{EndpointSource, resolve_network_endpoint};
-use firehose_parquet::traits::{BlockIdentity, BlockMapper, decode_id_bytes, fork_step_name};
+use firehose_parquet::networks::{resolve_network_endpoint, EndpointSource};
+use firehose_parquet::traits::{decode_id_bytes, fork_step_name, BlockIdentity, BlockMapper};
 use firehose_parquet::writer::{OutputWriter, ParquetFileMetadata, WriterBufferStats};
 use object_store::ObjectStore;
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::Notify;
 use tracing::{debug, info, warn};
@@ -1428,7 +1429,7 @@ async fn run_partitions_build(
 
             #[cfg(unix)]
             {
-                use tokio::signal::unix::{SignalKind, signal};
+                use tokio::signal::unix::{signal, SignalKind};
                 let mut sigterm =
                     signal(SignalKind::terminate()).expect("failed to install SIGTERM handler");
                 tokio::select! {
@@ -4267,7 +4268,7 @@ async fn run_ingestion(args: &BuildArgs, global: &GlobalArgs) -> Result<()> {
 
             #[cfg(unix)]
             {
-                use tokio::signal::unix::{SignalKind, signal};
+                use tokio::signal::unix::{signal, SignalKind};
                 let mut sigterm =
                     signal(SignalKind::terminate()).expect("failed to install SIGTERM handler");
                 tokio::select! {
@@ -4480,6 +4481,24 @@ async fn run_ingestion(args: &BuildArgs, global: &GlobalArgs) -> Result<()> {
                 config.final_blocks_only.to_string(),
             ),
             ("version".to_string(), env!("CARGO_PKG_VERSION").to_string()),
+            (
+                "block_start".to_string(),
+                config
+                    .start_block
+                    .map_or("N/A".to_string(), |n| n.to_string()),
+            ),
+            (
+                "block_end".to_string(),
+                config
+                    .stop_block
+                    .map_or("N/A".to_string(), |n| n.to_string()),
+            ),
+            (
+                "block_restarted_at".to_string(),
+                existing_cursor_state
+                    .as_ref()
+                    .map_or("N/A".to_string(), |cs| cs.last_block_num.to_string()),
+            ),
         ];
         if let Some(ref ei) = endpoint_info {
             labels.push(("chain_name".to_string(), ei.chain_name.clone()));
@@ -5356,8 +5375,8 @@ mod tests {
     use firehose_parquet::cursor::CursorLocation;
     use std::collections::HashMap;
     use std::path::PathBuf;
-    use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+    use std::sync::Arc;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn make_test_batch() -> RecordBatch {
@@ -6156,8 +6175,8 @@ mod tests {
     }
 
     #[test]
-    fn test_resolve_ingestion_start_block_uses_endpoint_first_streamable_block_when_override_is_enabled()
-     {
+    fn test_resolve_ingestion_start_block_uses_endpoint_first_streamable_block_when_override_is_enabled(
+    ) {
         let cursor_state = CursorState {
             start_block: Some(21),
             ..CursorState::default()
@@ -6520,18 +6539,16 @@ mod tests {
 
     #[test]
     fn test_create_mapper_invalid_type() {
-        assert!(
-            create_mapper(
-                "unknown",
-                false,
-                false,
-                false,
-                EncodeBytes::Hex,
-                false,
-                false
-            )
-            .is_err()
-        );
+        assert!(create_mapper(
+            "unknown",
+            false,
+            false,
+            false,
+            EncodeBytes::Hex,
+            false,
+            false
+        )
+        .is_err());
     }
 
     #[test]
@@ -6747,10 +6764,9 @@ mod tests {
     fn test_validate_block_timestamp_missing_time_partition_errors() {
         let err = validate_block_timestamp(42, 0, &Partition::Date)
             .expect_err("time-based partitioning requires a timestamp");
-        assert!(
-            err.to_string()
-                .contains("time-based partitioning requires timestamps")
-        );
+        assert!(err
+            .to_string()
+            .contains("time-based partitioning requires timestamps"));
     }
 
     #[test]
@@ -7097,19 +7113,15 @@ mod tests {
             &None,
         );
 
-        assert!(
-            metadata
-                .entries
-                .iter()
-                .any(|(key, value)| { key == "firehose-parquet.block_type" && value == "solana" })
-        );
+        assert!(metadata
+            .entries
+            .iter()
+            .any(|(key, value)| { key == "firehose-parquet.block_type" && value == "solana" }));
         // strict_timestamps is no longer recorded in metadata
-        assert!(
-            !metadata
-                .entries
-                .iter()
-                .any(|(key, _)| { key == "firehose-parquet.strict_timestamps" })
-        );
+        assert!(!metadata
+            .entries
+            .iter()
+            .any(|(key, _)| { key == "firehose-parquet.strict_timestamps" }));
     }
 
     #[test]
@@ -7972,8 +7984,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_find_first_different_block_with_fetch_returns_incomplete_boundary_on_missing_probe()
-     {
+    async fn test_find_first_different_block_with_fetch_returns_incomplete_boundary_on_missing_probe(
+    ) {
         let low_same = BlockIdentity {
             block_num: 100,
             timestamp: 1_700_000_000,
@@ -8110,11 +8122,9 @@ mod tests {
             exponential_candidates.last().copied(),
             Some(PARTITIONS_PROBE_TIMESTAMP_EXPONENTIAL_MAX_JUMP)
         );
-        assert!(
-            exponential_candidates
-                .iter()
-                .all(|candidate| *candidate <= PARTITIONS_PROBE_TIMESTAMP_EXPONENTIAL_MAX_JUMP)
-        )
+        assert!(exponential_candidates
+            .iter()
+            .all(|candidate| *candidate <= PARTITIONS_PROBE_TIMESTAMP_EXPONENTIAL_MAX_JUMP))
     }
 
     #[test]
@@ -8228,10 +8238,9 @@ mod tests {
         )
         .expect_err("block range size changes should be rejected");
 
-        assert!(
-            err.to_string()
-                .contains("cannot change block range size for an existing partitions file")
-        );
+        assert!(err
+            .to_string()
+            .contains("cannot change block range size for an existing partitions file"));
     }
 
     #[test]

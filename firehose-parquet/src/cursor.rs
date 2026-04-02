@@ -8,12 +8,12 @@ use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
 use bytes::Bytes;
 use object_store::ObjectStore;
-use parquet::arrow::ArrowWriter;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+use parquet::arrow::ArrowWriter;
 use parquet::file::metadata::KeyValue;
 use parquet::file::properties::WriterProperties;
 
-use crate::encode::{EncodeBytes, parse_encode_bytes};
+use crate::encode::{parse_encode_bytes, EncodeBytes};
 use crate::writer::ParquetFileMetadata;
 
 /// The filename used for the cursor parquet file.
@@ -1198,11 +1198,9 @@ mod tests {
         assert_eq!(mismatches.len(), 4);
         assert!(mismatches.iter().any(|m| m.contains("start_block")));
         assert!(mismatches.iter().any(|m| m.contains("extended")));
-        assert!(
-            mismatches
-                .iter()
-                .any(|m| m.contains("include_failed_transactions"))
-        );
+        assert!(mismatches
+            .iter()
+            .any(|m| m.contains("include_failed_transactions")));
         assert!(mismatches.iter().any(|m| m.contains("compression")));
     }
 
