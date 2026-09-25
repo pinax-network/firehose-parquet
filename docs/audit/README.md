@@ -11,6 +11,7 @@ lifecycle state; a local implementation or passing test alone is not closure.
 - [#578: atomic local Parquet publication](578-atomic-local-parquet.md)
 - [#470: exact S3 cursor buckets](470-s3-cursor-buckets.md)
 - [#498: EVM log indices and optional tables](498-evm-log-indices.md)
+- [#499: offline EVM golden-block regression](499-evm-golden-fixture.md)
 - [#568: Arrow/Parquet security and compatibility](568-arrow-parquet-security.md)
 - [#572: final completion checkpoints](572-final-completion-checkpoint.md)
 - [#506: NEAR qualification blocked by quota](506-near-qualification.md)
