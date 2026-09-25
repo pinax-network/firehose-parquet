@@ -15,6 +15,19 @@ pub const DEFAULT_TIMESTAMP_BACKFILL_BUFFER_LIMIT_BYTES: u64 = 134_217_728;
 /// Shared 32 MiB default flush target for build/merge byte-based flushing.
 pub const DEFAULT_FLUSH_BYTES: u64 = 33_554_432;
 
+/// Completion of a bounded reversible stream does not establish tail finality.
+/// Pass the resolved stop bound (`None` for an unbounded live stream).
+pub fn non_final_bounded_warning(
+    final_blocks_only: bool,
+    stop_block: Option<u64>,
+) -> Option<&'static str> {
+    (!final_blocks_only && stop_block.is_some()).then_some(
+        "Completion of a bounded non-final stream does not prove its tail is final. \
+         Output retains append-only NEW/UNDO events; later UNDO events cannot be received after this stop. \
+         Use a separate final-only dataset to select finalized block identities.",
+    )
+}
+
 /// Load environment variables from `.env` file (if present).
 ///
 /// Call this **before** [`clap::Parser::parse`] so that `env` attributes
@@ -124,11 +137,15 @@ pub struct CommonArgs {
     )]
     pub cursor_template: Option<String>,
 
-    /// Only process finalized blocks (when false, adds fork_step column)
+    /// Only process finalized blocks; =false appends NEW/UNDO rows with fork_step
     #[arg(
         long,
         env = "FINAL_BLOCKS_ONLY",
         default_value = "true",
+        action = clap::ArgAction::Set,
+        num_args = 0..=1,
+        default_missing_value = "true",
+        require_equals = true,
         hide_env_values = true,
         help_heading = "Block Range"
     )]
@@ -6851,6 +6868,63 @@ mod tests {
             end_time: None,
             chain: chain.map(str::to_string),
         }
+    }
+
+    #[test]
+    #[serial]
+    fn final_blocks_only_accepts_explicit_values_and_preserves_bare_flag() {
+        let _env = EnvVarGuard::remove("FINAL_BLOCKS_ONLY");
+        for (args, expected) in [
+            (vec!["test-cli"], true),
+            (vec!["test-cli", "--final-blocks-only"], true),
+            (vec!["test-cli", "--final-blocks-only=true"], true),
+            (vec!["test-cli", "--final-blocks-only=false"], false),
+        ] {
+            let mut args = args;
+            args.extend(["--endpoint", "http://localhost:9000", "--partition", "none"]);
+            let parsed = try_parse(&args).unwrap();
+            assert_eq!(parsed.common.final_blocks_only, expected);
+            assert_eq!(
+                build_config(&parsed.common).unwrap().final_blocks_only,
+                expected
+            );
+        }
+        assert!(try_parse(&["test-cli", "--final-blocks-only=maybe"]).is_err());
+        // An optional bool must not consume the next subcommand as its value.
+        assert!(try_parse(&["test-cli", "--final-blocks-only", "completions", "zsh"]).is_ok());
+    }
+
+    #[test]
+    #[serial]
+    fn final_blocks_only_environment_is_overridden_by_explicit_cli() {
+        let _env = EnvVarGuard::set("FINAL_BLOCKS_ONLY", "false");
+        assert!(!parse(&["test-cli"]).common.final_blocks_only);
+        assert!(
+            parse(&["test-cli", "--final-blocks-only"])
+                .common
+                .final_blocks_only
+        );
+        assert!(
+            parse(&["test-cli", "--final-blocks-only=true"])
+                .common
+                .final_blocks_only
+        );
+        let _env_true = EnvVarGuard::set("FINAL_BLOCKS_ONLY", "true");
+        assert!(
+            !parse(&["test-cli", "--final-blocks-only=false"])
+                .common
+                .final_blocks_only
+        );
+    }
+
+    #[test]
+    fn bounded_tail_warning_applies_only_to_non_final_bounded_runs() {
+        assert!(non_final_bounded_warning(true, Some(100)).is_none());
+        assert!(non_final_bounded_warning(true, None).is_none());
+        assert!(non_final_bounded_warning(false, None).is_none());
+        assert!(non_final_bounded_warning(false, Some(100))
+            .unwrap()
+            .contains("does not prove its tail is final"));
     }
 
     #[test]
