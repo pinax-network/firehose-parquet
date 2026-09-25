@@ -334,10 +334,21 @@ fireparq \
 
 On SIGINT (Ctrl-C) or SIGTERM, the pipeline:
 
-1. Stops consuming new blocks from the gRPC stream after the current block
+1. Stops consuming new blocks from the gRPC stream. A block being processed is
+   finished first; waits for the endpoint (connecting, reconnect back-off, an
+   idle stream, startup checks) are interrupted without waiting for their
+   network timeout, even on a quiet chain
 2. Discards partial in-memory buffers instead of writing extra part files
 3. Leaves the cursor at the last committed flush
 4. Exits cleanly (exit code 0)
+
+An in-flight block or storage write finishes before exit. If a cursor save has
+failed, the same signal interrupts its retry backoff and the durability error
+still produces a non-zero exit.
+
+A second SIGINT or SIGTERM exits immediately with code 130, without waiting for
+the current block. In-flight writes may be interrupted: a part file may remain
+incomplete, or a cursor update may not finish its durability checks.
 
 If a write (local disk or S3), a block mapping, or the stream fails, the
 pipeline also discards partial buffers and does not save the cursor, then exits

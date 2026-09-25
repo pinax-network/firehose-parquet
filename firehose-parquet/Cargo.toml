@@ -16,6 +16,7 @@ tonic = { workspace = true, features = ["tls-ring", "tls-native-roots", "transpo
 prost.workspace = true
 prost-types.workspace = true
 tokio.workspace = true
+tokio-util = { version = "0.7", features = ["rt"] }
 clap.workspace = true
 clap_complete = "4"
 tracing.workspace = true
