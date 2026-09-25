@@ -4,6 +4,19 @@ Changes merged since the last release. Fold this file into `docs/releases/vX.Y.Z
 
 ## Breaking changes
 
+### Beacon numeric fees, binary blobs, and null presence (#505)
+
+Beacon `execution_payload.base_fee_per_gas` is now an exact unsigned decimal
+Utf8 string in wei per gas; conversion follows the producer's little-endian
+Bellatrix/Capella and big-endian Deneb+ representations. `blob_sidecars.blob`
+is always Binary, and `blocks.spec` is an Arrow string dictionary using generated
+names (`UNKNOWN` is distinct from `UNSPECIFIED`). Missing nested messages now
+produce null fields instead of fake zeros/empty bytes/lists; present zeros and
+empty values retain their meaning. Other byte fields preserve their requested
+encoding. Rebuild into a fresh root or explicitly convert and verify old files
+before mixing schemas. Old placeholder zeros require source replay to recover
+presence. See [the migration and validation record](../audit/505-beacon-values.md).
+
 ### Solana payloads use native bytes and account-index lists (#503)
 
 `instructions.data` and ordinary/vote transaction `err` / `return_data` now use
