@@ -96,4 +96,11 @@ gaps, empty events/attributes, duplicate keys and all-source decode counters.
 Every encoding with/without fork step survives repeated flushes and nested
 Parquet roundtrips. The live raw transaction is retained for CI regression.
 
-Final current-main suite, CI and lifecycle results will be recorded before closure.
+Integrated head `62b26b1` includes main `f555898`. The full workspace passed
+**890 tests** with **seven intentional ignores**; the separate capture example
+passed one test with its child helper ignored. Formatting and workspace build
+passed (the existing final-backfill unused-assignment warning is unchanged).
+All 14 focused Cosmos tests, including the captured transaction, are included.
+The final replay passed the independent source comparison; regenerated replay
+bytes matched SHA-256 `0cc9f598f5b7d7d13999a7b86337879addd95d2d08d9106b9bde2ad91f5ecfb6`.
+CI and verified merge/closure remain the final publication gates.
