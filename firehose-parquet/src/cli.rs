@@ -52,25 +52,23 @@ pub struct CommonArgs {
     )]
     pub endpoint: Option<String>,
 
-    /// Name of environment variable containing the API key for authentication
+    /// Explicit API key env var for this endpoint (default: provider-scoped credentials)
     #[arg(
         long,
         env = "API_KEY_ENVVAR",
-        default_value = "SUBSTREAMS_API_KEY",
         hide_env_values = true,
         help_heading = "Connection"
     )]
-    pub api_key_envvar: String,
+    pub api_key_envvar: Option<String>,
 
-    /// Name of environment variable containing the JWT bearer token for authentication
+    /// Explicit bearer token env var for this endpoint (default: provider-scoped credentials)
     #[arg(
         long,
         env = "API_TOKEN_ENVVAR",
-        default_value = "SUBSTREAMS_API_TOKEN",
         hide_env_values = true,
         help_heading = "Connection"
     )]
-    pub api_token_envvar: String,
+    pub api_token_envvar: Option<String>,
 
     /// Start block number (inclusive).
     ///
@@ -1279,24 +1277,22 @@ Examples:
             help_heading = "Connection"
         )]
         network: Option<String>,
-        /// Name of environment variable containing the API key for authentication
+        /// Explicit API key env var for this endpoint (default: provider-scoped credentials)
         #[arg(
             long,
             env = "API_KEY_ENVVAR",
-            default_value = "SUBSTREAMS_API_KEY",
             hide_env_values = true,
             help_heading = "Connection"
         )]
-        api_key_envvar: String,
-        /// Name of environment variable containing the JWT bearer token for authentication
+        api_key_envvar: Option<String>,
+        /// Explicit bearer token env var for this endpoint (default: provider-scoped credentials)
         #[arg(
             long,
             env = "API_TOKEN_ENVVAR",
-            default_value = "SUBSTREAMS_API_TOKEN",
             hide_env_values = true,
             help_heading = "Connection"
         )]
-        api_token_envvar: String,
+        api_token_envvar: Option<String>,
         /// Start block number (inclusive).
         ///
         /// When omitted in bounded mode, falls back to a sibling `cursor.parquet`
@@ -3684,10 +3680,11 @@ pub fn build_config(args: &CommonArgs) -> anyhow::Result<Config> {
         .clone()
         .ok_or_else(|| anyhow::anyhow!("--endpoint is required"))?;
 
-    // Resolve the actual API key / JWT token by reading the environment variable
-    // whose *name* is given by `--api-key-envvar` / `--api-token-envvar`.
-    let api_key = read_credential_env(&args.api_key_envvar);
-    let jwt_token = read_credential_env(&args.api_token_envvar);
+    let credentials = crate::auth::resolve_credentials(
+        &endpoint,
+        args.api_key_envvar.as_deref(),
+        args.api_token_envvar.as_deref(),
+    )?;
 
     validate_stop_block_after_start(args.start_block, args.stop_block)?;
 
@@ -3720,8 +3717,8 @@ pub fn build_config(args: &CommonArgs) -> anyhow::Result<Config> {
 
     Ok(Config {
         endpoint,
-        api_key,
-        jwt_token,
+        api_key: credentials.api_key,
+        jwt_token: credentials.jwt_token,
         start_block: args.start_block,
         stop_block: args.stop_block,
         skip_missing_blocks: true,
@@ -6567,8 +6564,8 @@ mod tests {
         assert!(!cli.common.verbose);
         assert!(!cli.common.dry_run);
         assert!(cli.common.final_blocks_only);
-        assert_eq!(cli.common.api_key_envvar, "SUBSTREAMS_API_KEY");
-        assert_eq!(cli.common.api_token_envvar, "SUBSTREAMS_API_TOKEN");
+        assert_eq!(cli.common.api_key_envvar, None);
+        assert_eq!(cli.common.api_token_envvar, None);
         assert!(cli.common.start_block.is_none());
         assert!(cli.common.stop_block.is_none());
         assert_eq!(cli.common.cursor, PathBuf::from("cursor.parquet"));
@@ -6630,8 +6627,8 @@ mod tests {
             cli.common.endpoint.as_deref(),
             Some("https://eth.firehose.pinax.network:443")
         );
-        assert_eq!(cli.common.api_key_envvar, "MY_KEY_VAR");
-        assert_eq!(cli.common.api_token_envvar, "MY_TOKEN_VAR");
+        assert_eq!(cli.common.api_key_envvar.as_deref(), Some("MY_KEY_VAR"));
+        assert_eq!(cli.common.api_token_envvar.as_deref(), Some("MY_TOKEN_VAR"));
         assert_eq!(cli.common.start_block, Some(100));
         assert_eq!(cli.common.stop_block, Some(200));
         assert_eq!(
@@ -8264,23 +8261,101 @@ mod tests {
 
     #[test]
     #[serial]
-    fn test_api_key_envvar_resolution() {
-        // Set up an env var with the actual API key
-        unsafe {
-            std::env::set_var("SUBSTREAMS_API_KEY", "my-test-key");
-            std::env::set_var("SUBSTREAMS_API_TOKEN", "my-test-token");
-        }
+    fn test_credentials_are_selected_from_resolved_endpoint_and_explicit_flags() {
+        let _selector_key = EnvVarGuard::remove("API_KEY_ENVVAR");
+        let _selector_token = EnvVarGuard::remove("API_TOKEN_ENVVAR");
+        let _pinax = EnvVarGuard::set("PINAX_API_KEY", "pinax-test-key");
+        let _legacy = EnvVarGuard::set("SUBSTREAMS_API_KEY", "legacy-test-key");
+        let _sf_key = EnvVarGuard::remove("STREAMINGFAST_API_KEY");
+        let _sf_token = EnvVarGuard::set("STREAMINGFAST_API_TOKEN", "sf-test-token");
+        let cli = parse(&[
+            "test-cli",
+            "--endpoint",
+            "https://mainnet.tron.streamingfast.io",
+        ]);
+        let config = build_config(&cli.common).unwrap();
+        assert_eq!(config.api_key, None);
+        assert_eq!(config.jwt_token.as_deref(), Some("sf-test-token"));
 
-        let cli = parse(&["test-cli", "--endpoint", "https://example.com:443"]);
+        let cli = parse(&["test-cli", "--endpoint", "https://custom.example"]);
+        let config = build_config(&cli.common).unwrap();
+        assert_eq!(config.api_key, None);
+        assert_eq!(config.jwt_token, None);
+
+        let cli = parse(&[
+            "test-cli",
+            "--endpoint",
+            "https://custom.example",
+            "--api-key-envvar",
+            "SUBSTREAMS_API_KEY",
+        ]);
+        let config = build_config(&cli.common).unwrap();
+        assert_eq!(config.api_key.as_deref(), Some("legacy-test-key"));
+        assert_eq!(config.jwt_token, None);
+
+        let _selector_key = EnvVarGuard::set("API_KEY_ENVVAR", "SUBSTREAMS_API_KEY");
+        let cli = parse(&["test-cli", "--endpoint", "https://custom.example"]);
+        assert_eq!(
+            build_config(&cli.common).unwrap().api_key.as_deref(),
+            Some("legacy-test-key")
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn test_partitions_auth_selectors_distinguish_default_from_explicit_legacy_name() {
+        let _selector_key = EnvVarGuard::remove("API_KEY_ENVVAR");
+        let _selector_token = EnvVarGuard::remove("API_TOKEN_ENVVAR");
+        for explicit in [false, true] {
+            let mut args = vec![
+                "test-cli",
+                "partitions",
+                "build",
+                "--partition",
+                "date",
+                "--network",
+                "tron",
+                "--stop-block",
+                "100",
+            ];
+            if explicit {
+                args.extend(["--api-token-envvar", "SUBSTREAMS_API_TOKEN"]);
+            }
+            let cli = parse(&args);
+            let Some(Commands::Partitions(PartitionsCommands::Build {
+                api_key_envvar,
+                api_token_envvar,
+                ..
+            })) = cli.command
+            else {
+                panic!("expected partitions build");
+            };
+            assert_eq!(api_key_envvar, None);
+            assert_eq!(
+                api_token_envvar.as_deref(),
+                explicit.then_some("SUBSTREAMS_API_TOKEN")
+            );
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn test_api_key_envvar_resolution() {
+        let _pinax_key = EnvVarGuard::remove("PINAX_API_KEY");
+        let _pinax_token = EnvVarGuard::remove("PINAX_API_TOKEN");
+        let _selector_key = EnvVarGuard::remove("API_KEY_ENVVAR");
+        let _selector_token = EnvVarGuard::remove("API_TOKEN_ENVVAR");
+        let _legacy_key = EnvVarGuard::set("SUBSTREAMS_API_KEY", "my-test-key");
+        let _legacy_token = EnvVarGuard::set("SUBSTREAMS_API_TOKEN", "my-test-token");
+
+        let cli = parse(&[
+            "test-cli",
+            "--endpoint",
+            "https://eth.firehose.pinax.network:443",
+        ]);
         let config = build_config(&cli.common).expect("build_config should succeed");
         assert_eq!(config.api_key.as_deref(), Some("my-test-key"));
         assert_eq!(config.jwt_token.as_deref(), Some("my-test-token"));
-
-        // Clean up
-        unsafe {
-            std::env::remove_var("SUBSTREAMS_API_KEY");
-            std::env::remove_var("SUBSTREAMS_API_TOKEN");
-        }
     }
 
     #[test]

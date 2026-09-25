@@ -113,21 +113,40 @@ cargo build --release --workspace
 
 ### Authentication
 
-For the standard workflow, export one of the default auth environment variables
-before running `fireparq`:
+Credentials are selected from the **resolved endpoint host**, including any
+`--endpoint`, `ENDPOINT`, or `FIREHOSE_ENDPOINT_*` override. The same rules apply
+to `build` and `partitions build`:
+
+| Destination | API key environment variables, in priority order | Bearer token environment variables, in priority order |
+|---|---|---|
+| Built-in Pinax host over HTTPS on port 443 | `PINAX_API_KEY`, then `SUBSTREAMS_API_KEY` | `PINAX_API_TOKEN`, then `SUBSTREAMS_API_TOKEN` |
+| Built-in StreamingFast host over HTTPS on port 443 | `STREAMINGFAST_API_KEY` | `STREAMINGFAST_API_TOKEN` |
+| Other host, port, or plaintext connection | No automatic credentials | No automatic credentials |
 
 ```bash
-export SUBSTREAMS_API_KEY=your-api-key
-# or
-export SUBSTREAMS_API_TOKEN=your-jwt-token
+export PINAX_API_KEY=your-pinax-api-key
+# For near-mainnet, near-testnet, tron, or tron-evm:
+export STREAMINGFAST_API_TOKEN=your-streamingfast-compatible-token
 ```
 
-You only need `--api-key-envvar` or `--api-token-envvar` when your deployment
-stores credentials under different environment variable names.
+`SUBSTREAMS_API_KEY` and `SUBSTREAMS_API_TOKEN` are legacy **Pinax-only**
+fallbacks. If you previously used `SUBSTREAMS_API_TOKEN` with StreamingFast,
+move that token to `STREAMINGFAST_API_TOKEN` or explicitly select it with
+`--api-token-envvar SUBSTREAMS_API_TOKEN` for that endpoint.
 
+For a custom endpoint, explicitly select the credential names with
+`--api-key-envvar` / `--api-token-envvar` (or `API_KEY_ENVVAR` /
+`API_TOKEN_ENVVAR`). An explicit selector authorizes that credential for the
+chosen destination and overrides automatic selection for that header. If the
+selected variable is unset or blank, that header is omitted; it does not fall
+back to another variable. The other header still follows its own selection
+rules. Only explicitly select a credential for a destination you intend it to reach.
+
+Startup logs identify the destination host, provider, and names of credential
+variables selected for transmission (`none` when absent), never their values.
 Surrounding whitespace is trimmed, so a key mounted from a secret file with a
-trailing newline works. A credential that still contains characters a gRPC
-header cannot carry (control characters or line breaks inside the value)
+trailing newline works. A selected credential that still contains characters a
+gRPC header cannot carry (control characters or line breaks inside the value)
 fails at startup with an error.
 
 ### Docker
@@ -167,7 +186,7 @@ Examples:
 
 Provider hostnames do not always mirror the network name exactly. For example, `matic` resolves to the provider hostname `polygon.firehose.pinax.network`. Run `fireparq build --help` to list every built-in name.
 
-Aliases use the Pinax endpoint that The Graph networks registry lists. `near-mainnet`, `near-testnet`, `tron`, and `tron-evm` use StreamingFast endpoints because Pinax no longer serves them; those need a credential StreamingFast accepts, such as a The Graph Market API token in `SUBSTREAMS_API_TOKEN`. See `docs/network-registry-integration.md` for the provider policy and the weekly endpoint check.
+Aliases use the Pinax endpoint that The Graph networks registry lists. `near-mainnet`, `near-testnet`, `tron`, and `tron-evm` use StreamingFast endpoints because Pinax no longer serves them; those need a credential StreamingFast accepts, such as a The Graph Market API token in `STREAMINGFAST_API_TOKEN`. See `docs/network-registry-integration.md` for the provider policy and the weekly endpoint check.
 
 Resolution precedence:
 
@@ -340,9 +359,9 @@ recovery knobs to dedicated advanced sections.
 
 ### Advanced authentication
 
-Most deployments should keep credentials in `SUBSTREAMS_API_KEY` or
-`SUBSTREAMS_API_TOKEN` and avoid extra CLI flags. Use these options only when
-your secret names differ from the defaults:
+Most deployments should use the provider-scoped variables in [Authentication](#authentication).
+For custom endpoints or different secret names, explicitly authorize a credential
+for the destination with:
 
 - `--api-key-envvar <API_KEY_ENVVAR>`
 - `--api-token-envvar <API_TOKEN_ENVVAR>`
@@ -1233,9 +1252,10 @@ Time-based partition directories (`year=`/`month=`/`day=`/`hour=`/…) and `date
 CLI flags can also be set via environment variables. Copy `.env.example` to `.env`:
 
 ```bash
-# Authentication — set the env vars that the CLI reads by default
-SUBSTREAMS_API_KEY=your-api-key-here
-SUBSTREAMS_API_TOKEN=your-jwt-token-here
+# Authentication — use credentials scoped to the destination provider
+PINAX_API_KEY=your-pinax-api-key-here
+# PINAX_API_TOKEN=your-pinax-jwt-token-here
+# STREAMINGFAST_API_TOKEN=your-streamingfast-compatible-token-here
 
 # Prometheus metrics (optional)
 # METRICS_PORT=9090

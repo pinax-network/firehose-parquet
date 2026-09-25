@@ -1141,10 +1141,6 @@ fn resolve_output(base: &PathBuf, endpoint_info: &Option<EndpointInfo>) -> PathB
     base.clone()
 }
 
-fn read_optional_env(name: &str) -> Option<String> {
-    firehose_parquet::cli::read_credential_env(name)
-}
-
 async fn ensure_endpoint_available(
     client: &FirehoseClient,
     endpoint: &str,
@@ -1369,8 +1365,8 @@ fn load_existing_cursor(
 async fn run_partitions_build(
     endpoint: &str,
     network: Option<&str>,
-    api_key_envvar: &str,
-    api_token_envvar: &str,
+    api_key_envvar: Option<&str>,
+    api_token_envvar: Option<&str>,
     start_block: Option<u64>,
     stop_block: Option<u64>,
     live: bool,
@@ -1426,10 +1422,12 @@ async fn run_partitions_build(
         aws.aws_secret_access_key.as_deref(),
     )?;
 
+    let credentials =
+        firehose_parquet::auth::resolve_credentials(endpoint, api_key_envvar, api_token_envvar)?;
     let base_config = Config {
         endpoint: endpoint.to_string(),
-        api_key: read_optional_env(api_key_envvar),
-        jwt_token: read_optional_env(api_token_envvar),
+        api_key: credentials.api_key,
+        jwt_token: credentials.jwt_token,
         start_block,
         stop_block,
         skip_missing_blocks,
@@ -4039,8 +4037,8 @@ async fn main() -> Result<()> {
                     let result = run_partitions_build(
                         &resolved_endpoint,
                         network.as_deref(),
-                        api_key_envvar,
-                        api_token_envvar,
+                        api_key_envvar.as_deref(),
+                        api_token_envvar.as_deref(),
                         *start_block,
                         *stop_block,
                         *live,

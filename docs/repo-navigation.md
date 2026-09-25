@@ -20,6 +20,7 @@ Related design docs:
   - `src/cli.rs`: shared CLI args (`CommonArgs`, `BuildArgs`), subcommands, parsing, validation, and utility routines.
   - `src/networks.rs`: built-in Firehose network alias registry and env override resolution.
   - `src/config.rs`: pipeline config model, partition key behavior, compression enum.
+  - `src/auth.rs`: credential selection by resolved provider host and explicit env-var selectors.
   - `src/grpc.rs`: Firehose stream client, auth headers, reconnect/backoff/timeouts.
   - `src/writer.rs`: Arrow builders to Parquet file writing, flush/rollover logic.
   - `src/cursor.rs`: resume state persistence (`cursor.parquet`) and parameter checks.

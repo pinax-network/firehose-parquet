@@ -4,6 +4,23 @@ Changes merged since the last release. Fold this file into `docs/releases/vX.Y.Z
 
 ## Breaking changes
 
+### Firehose credentials are scoped to the destination provider (#562)
+
+`build` and `partitions build` select credentials from the actual resolved host,
+after endpoint overrides. Known Pinax HTTPS hosts use `PINAX_API_KEY` /
+`PINAX_API_TOKEN`, with `SUBSTREAMS_API_KEY` / `SUBSTREAMS_API_TOKEN` as legacy
+Pinax-only fallbacks. Known StreamingFast HTTPS hosts use
+`STREAMINGFAST_API_KEY` / `STREAMINGFAST_API_TOKEN`. Automatic selection requires
+port 443. Unknown hosts, other ports, and plaintext endpoints receive no ambient
+credentials.
+
+Migration: move StreamingFast credentials out of `SUBSTREAMS_*` into
+`STREAMINGFAST_*`. For custom endpoints or custom secret names, explicitly choose
+`--api-key-envvar` / `--api-token-envvar` (also configurable through
+`API_KEY_ENVVAR` / `API_TOKEN_ENVVAR`). These selectors authorize the chosen
+credential for that endpoint; an unset/blank explicit variable omits its header.
+Startup logs show host and selected variable names, never secret values.
+
 ### Day-of-month partition directories are now `day=DD` instead of `date=DD` (#493)
 
 Time-based partitioning (`--partition date`, `hour`, `minute` and `second`) wrote the day of the month as `date=DD`, while every table also has a canonical `date` column (`Date32`). Hive-partition-aware readers treat the directory key as a column, so the two collided:
@@ -115,7 +132,7 @@ Migration:
 | `tron` | `tron.firehose.pinax.network` | `mainnet.tron.streamingfast.io` |
 | `tron-evm` | `tronevm.firehose.pinax.network` | `mainnet-evm.tron.streamingfast.io` |
 
-- These endpoints need a credential that StreamingFast accepts, such as a The Graph Market API token in `SUBSTREAMS_API_TOKEN`. Credentials are provider-specific: a token that works against Pinax can be rejected here with `invalid JWT token`, and `build` then keeps reconnecting (#472). Use `FIREHOSE_ENDPOINT_<ALIAS>` or `--endpoint` if you have another endpoint for these chains.
+- These endpoints need a credential that StreamingFast accepts, such as a The Graph Market API token in `STREAMINGFAST_API_TOKEN` (provider scoping: #562). Credentials are provider-specific: a token that works against Pinax can be rejected here with `invalid JWT token`; fatal authentication failures now stop the run (#472). Use `FIREHOSE_ENDPOINT_<ALIAS>` or `--endpoint` if you have another endpoint for these chains.
 - `cursor.parquet` records the endpoint, so resuming output written through the old Pinax endpoint fails with an `endpoint` cursor mismatch. Rerun with `--cursor-override` and an explicit `--start-block` just after the cursor's last block.
 
 **Added.** New Pinax networks in the registry: `arc`, `megaeth`, `robinhood`, `tempo`, `xlayer-mainnet`.
