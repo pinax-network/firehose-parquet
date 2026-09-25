@@ -125,9 +125,10 @@ codec rather than honoring its enabled-only set. This allows exercising a real
 gzip response and a real zstd response separately without altering production
 client code or claiming this upstream server behavior is fixed.
 
-Validation integrated main `e4bd9cf354ea7a4f75c56f82c58b64368b16e1ec` (#600):
+Final validation integrated main `937988353161eb0d1fe3d4c878454e31e48a9491` (#601),
+at source head `d3c2aa6447f87d8469f08b5b755f407a9b927a4a`:
 
-- Workspace: **999 passed, 0 failed, 9 ignored**; this includes all eight protected
+- Workspace: **1,007 passed, 0 failed, 9 ignored**; this includes all eight protected
   ingestion CLI/readiness tests, shutdown, finality, and the new parser/RPC tests.
 - CI's separately selected `refresh_evm_golden` example: **1 passed, 1 ignored**
   subprocess entrypoint; it makes no public request in this test.
@@ -135,7 +136,9 @@ Validation integrated main `e4bd9cf354ea7a4f75c56f82c58b64368b16e1ec` (#600):
   Both actual build help pages expose all three flags and their defaults.
 - Final release benchmark after the independent review's relay-error/reconnect
   guards: **1 passed**; all 18 samples had zero relay failures and one Stream RPC.
-  Exact samples above replace the preliminary pre-guard run.
+  Exact samples above replace the preliminary pre-guard run. The benchmark was
+  measured after integrating #600; the subsequent #601 Cosmos merge changed no
+  transport implementation or benchmark source.
 
 Independent review found no production blocker; its portability and benchmark
 failure-detection suggestions were applied. No live-provider qualification is
