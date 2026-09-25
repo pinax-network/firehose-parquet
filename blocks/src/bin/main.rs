@@ -78,7 +78,6 @@ fn partition_completeness(complete: Option<bool>) -> &'static str {
 const BLOCK_TYPES: &[&str] = &[
     "auto", "evm", "bitcoin", "solana", "near", "antelope", "cosmos", "tron", "beacon",
 ];
-const DEFAULT_TIMESTAMP_BACKFILL_BUFFER_LIMIT_BYTES: u64 = 134_217_728;
 const WITHOUT_EXTENDED_WARNING: &str =
     "--without-extended had no effect because extended output is not supported for this chain";
 const WITHOUT_VOTES_NON_SOLANA_WARNING: &str =
@@ -854,13 +853,13 @@ struct TimestampAnchor {
 }
 
 #[derive(Debug, Clone, Default)]
-struct TimestampBackfill {
+struct TimestampRouting {
     enabled: bool,
     last_anchor: Option<TimestampAnchor>,
 }
 
-impl TimestampBackfill {
-    fn new(enabled: bool, _max_buffered_bytes: u64) -> Self {
+impl TimestampRouting {
+    fn new(enabled: bool) -> Self {
         Self {
             enabled,
             last_anchor: enabled.then_some(TimestampAnchor {
@@ -879,21 +878,13 @@ impl TimestampBackfill {
         }
     }
 
-    fn buffered_blocks_len(&self) -> usize {
-        0
-    }
-
-    fn buffered_bytes(&self) -> u64 {
-        0
-    }
-
-    fn observe_block(
+    fn route_block(
         &mut self,
         block_bytes: impl Into<prost::bytes::Bytes>,
         cursor: String,
         fork_step: Option<String>,
         identity: BlockIdentity,
-    ) -> anyhow::Result<Vec<BufferedBootstrapBlock>> {
+    ) -> anyhow::Result<BufferedBootstrapBlock> {
         let current = BufferedBootstrapBlock {
             received_ordinal: 0,
             block_bytes: block_bytes.into(),
@@ -909,7 +900,7 @@ impl TimestampBackfill {
                     timestamp: current.identity.timestamp,
                 });
             }
-            return Ok(vec![current]);
+            return Ok(current);
         }
 
         if current.identity.timestamp == 0 {
@@ -920,7 +911,7 @@ impl TimestampBackfill {
                 )
             })?;
             current.identity.timestamp = anchor.timestamp;
-            return Ok(vec![current]);
+            return Ok(current);
         }
 
         let anchor = TimestampAnchor {
@@ -928,16 +919,12 @@ impl TimestampBackfill {
             timestamp: current.identity.timestamp,
         };
         self.last_anchor = Some(anchor);
-        Ok(vec![current])
-    }
-
-    fn drain_open_span(&mut self) -> anyhow::Result<Vec<BufferedBootstrapBlock>> {
-        Ok(Vec::new())
+        Ok(current)
     }
 }
 
 fn restore_sparse_routing_cursor_anchor(
-    timestamp_backfill: &mut TimestampBackfill,
+    timestamp_routing: &mut TimestampRouting,
     cursor_state: Option<&CursorState>,
     cursor_override: bool,
     block_type: &str,
@@ -952,7 +939,7 @@ fn restore_sparse_routing_cursor_anchor(
     };
 
     if let Some(last_timestamp) = cursor_state.last_timestamp {
-        timestamp_backfill.restore_anchor(cursor_state.last_block_num, last_timestamp);
+        timestamp_routing.restore_anchor(cursor_state.last_block_num, last_timestamp);
         info!(
             stored_cursor_last_block_num = cursor_state.last_block_num,
             last_timestamp, "restored sparse-routing timestamp anchor from cursor.parquet"
@@ -1223,14 +1210,6 @@ fn encode_bytes_from_block_id_encoding(encoding: i32) -> Option<EncodeBytes> {
     }
 }
 
-fn resolve_output_bytes_encoding(
-    block_type: Option<&str>,
-    endpoint_info: &Option<EndpointInfo>,
-    tron_style_evm_profile: bool,
-) -> EncodeBytes {
-    resolve_auto_encode_bytes(block_type, endpoint_info, tron_style_evm_profile)
-}
-
 /// Resolve the output only after a successful metadata lookup. Neither a
 /// network alias nor a block family proves the endpoint's canonical suffix.
 fn resolve_output(base: &PathBuf, endpoint_info: &Option<EndpointInfo>) -> Result<PathBuf> {
@@ -1286,14 +1265,6 @@ fn resolve_ingestion_start_block(
                 "--start-block is required when neither an existing cursor nor the endpoint exposes first_streamable_block_num"
             )
         })
-}
-
-fn resolve_ingestion_stop_block(stop_block: Option<u64>) -> Result<Option<u64>> {
-    if let Some(stop_block) = stop_block {
-        return Ok(Some(stop_block));
-    }
-
-    Ok(None)
 }
 
 fn stream_resume_cursor(
@@ -3417,7 +3388,6 @@ async fn run_ingestion(args: &BuildArgs, global: &GlobalArgs) -> Result<()> {
         &endpoint_info,
         args.cursor_override,
     )?;
-    config.stop_block = resolve_ingestion_stop_block(config.stop_block)?;
     firehose_parquet::cli::validate_stop_block_after_start(config.start_block, config.stop_block)?;
     debug!(
         requested_start_block = ?args.common.start_block,
@@ -3477,7 +3447,7 @@ async fn run_ingestion(args: &BuildArgs, global: &GlobalArgs) -> Result<()> {
         warn!("{}", warning);
     }
     let initial_bytes_encoding =
-        resolve_output_bytes_encoding(initial_block_type, &endpoint_info, tron_style_evm_profile);
+        resolve_auto_encode_bytes(initial_block_type, &endpoint_info, tron_style_evm_profile);
     let initial_bytes_encoding_label = encode_bytes_label(&initial_bytes_encoding).to_string();
 
     info!(
@@ -3622,13 +3592,10 @@ async fn run_ingestion(args: &BuildArgs, global: &GlobalArgs) -> Result<()> {
     let mut use_synthetic_partition_routing =
         use_last_known_timestamp_partition_routing(&block_type, &partition_config);
     let mut genesis_timestamp_bootstrap = GenesisTimestampBootstrap::new(config.start_block);
-    let mut timestamp_backfill = TimestampBackfill::new(
-        use_synthetic_partition_routing,
-        DEFAULT_TIMESTAMP_BACKFILL_BUFFER_LIMIT_BYTES,
-    );
+    let mut timestamp_routing = TimestampRouting::new(use_synthetic_partition_routing);
     if block_type != "auto" {
         restore_sparse_routing_cursor_anchor(
-            &mut timestamp_backfill,
+            &mut timestamp_routing,
             existing_cursor_state.as_ref(),
             args.cursor_override,
             &block_type,
@@ -3704,7 +3671,7 @@ async fn run_ingestion(args: &BuildArgs, global: &GlobalArgs) -> Result<()> {
     };
     if let Some(session) = &session {
         if let Some((source_block, seconds)) = session.routing_anchor_source() {
-            timestamp_backfill.restore_anchor(source_block, seconds);
+            timestamp_routing.restore_anchor(source_block, seconds);
         }
     }
     let already_complete = match (&session, config.stop_block) {
@@ -3720,7 +3687,6 @@ async fn run_ingestion(args: &BuildArgs, global: &GlobalArgs) -> Result<()> {
         return Ok(());
     }
 
-    let mut blocks_observed: u64 = 0;
     let mut blocks_processed: u64 = 0;
     let mut transactions_processed: u64 = 0;
     let mut min_block: Option<u64> = None;
@@ -3860,7 +3826,7 @@ async fn run_ingestion(args: &BuildArgs, global: &GlobalArgs) -> Result<()> {
                     include_failed_transactions = resolved;
                     cursor_state_template.include_failed_transactions = resolved;
                 }
-                let encode_bytes = resolve_output_bytes_encoding(
+                let encode_bytes = resolve_auto_encode_bytes(
                     Some(&detected),
                     &endpoint_info,
                     tron_style_evm_profile,
@@ -3900,12 +3866,9 @@ async fn run_ingestion(args: &BuildArgs, global: &GlobalArgs) -> Result<()> {
                 is_solana = detected == "solana";
                 resolved_block_type = Some(detected.clone());
                 use_synthetic_partition_routing = detected_uses_synthetic_partition_routing;
-                timestamp_backfill = TimestampBackfill::new(
-                    use_synthetic_partition_routing,
-                    DEFAULT_TIMESTAMP_BACKFILL_BUFFER_LIMIT_BYTES,
-                );
+                timestamp_routing = TimestampRouting::new(use_synthetic_partition_routing);
                 restore_sparse_routing_cursor_anchor(
-                    &mut timestamp_backfill,
+                    &mut timestamp_routing,
                     existing_cursor_state.as_ref(),
                     args.cursor_override,
                     &detected,
@@ -3926,68 +3889,31 @@ async fn run_ingestion(args: &BuildArgs, global: &GlobalArgs) -> Result<()> {
 
             let block_number = identity.block_num;
             let ts = identity.timestamp;
-            blocks_observed += 1;
             let fork_step_owned = fork_step_str.map(str::to_owned);
-            let mut ready_solana_blocks = if is_solana && use_synthetic_partition_routing {
-                timestamp_backfill.observe_block(
+            let mut routed_block = if is_solana && use_synthetic_partition_routing {
+                timestamp_routing.route_block(
                     block_bytes,
                     cursor_str,
                     fork_step_owned,
                     identity,
                 )?
             } else {
-                vec![BufferedBootstrapBlock {
+                BufferedBootstrapBlock {
                     received_ordinal: 0,
                     block_bytes,
                     cursor: cursor_str,
                     fork_step: fork_step_owned,
                     identity,
-                }]
+                }
             };
             let resumed_bootstrap_timestamp = (!is_solana && ts == 0)
                 .then(|| session.as_ref().and_then(IngestionSession::routing_timestamp_hint))
                 .flatten();
-            for block in &mut ready_solana_blocks {
-                block.received_ordinal = received_ordinal;
-                if let Some(seconds) = resumed_bootstrap_timestamp { block.identity.timestamp = seconds; }
+            routed_block.received_ordinal = received_ordinal;
+            if let Some(seconds) = resumed_bootstrap_timestamp {
+                routed_block.identity.timestamp = seconds;
             }
-            let current_anchor_timestamp = ready_solana_blocks
-                .last()
-                .map(|block| block.identity.timestamp)
-                .unwrap_or(ts);
-            if ready_solana_blocks.is_empty() {
-                if should_emit_progress_log(blocks_observed) {
-                    let elapsed_secs = progress_start.elapsed().as_secs_f64();
-                    let observed_blocks_per_sec = if elapsed_secs > 0.0 {
-                        blocks_observed as f64 / elapsed_secs
-                    } else {
-                        0.0
-                    };
-                    let timestamp = format_optional_probe_timestamp(current_anchor_timestamp);
-                    match timestamp.as_deref() {
-                        Some(timestamp) => info!(
-                            blocks_observed,
-                            blocks = blocks_processed,
-                            block_num = block_number,
-                            timestamp,
-                            buffered_blocks = timestamp_backfill.buffered_blocks_len(),
-                            buffered_bytes = firehose_parquet::cli::format_bytes(timestamp_backfill.buffered_bytes()),
-                            blocks_per_sec = format!("{:.0}", observed_blocks_per_sec),
-                            "progress (buffering timestamps)"
-                        ),
-                        None => info!(
-                            blocks_observed,
-                            blocks = blocks_processed,
-                            block_num = block_number,
-                            buffered_blocks = timestamp_backfill.buffered_blocks_len(),
-                            buffered_bytes = firehose_parquet::cli::format_bytes(timestamp_backfill.buffered_bytes()),
-                            blocks_per_sec = format!("{:.0}", observed_blocks_per_sec),
-                            "progress (buffering timestamps)"
-                        ),
-                    }
-                }
-                return Ok(());
-            }
+            let current_anchor_timestamp = routed_block.identity.timestamp;
             // For Solana, blocks may legitimately lack timestamps — skip the
             // genesis bootstrap and timestamp validation entirely.
             if !is_solana && resumed_bootstrap_timestamp.is_none() {
@@ -4002,10 +3928,10 @@ async fn run_ingestion(args: &BuildArgs, global: &GlobalArgs) -> Result<()> {
                         }
                         buffered_bootstrap_blocks.push(BufferedBootstrapBlock {
                             received_ordinal,
-                            block_bytes: ready_solana_blocks[0].block_bytes.clone(),
-                            cursor: ready_solana_blocks[0].cursor.clone(),
-                            fork_step: ready_solana_blocks[0].fork_step.clone(),
-                            identity: ready_solana_blocks[0].identity.clone(),
+                            block_bytes: routed_block.block_bytes.clone(),
+                            cursor: routed_block.cursor.clone(),
+                            fork_step: routed_block.fork_step.clone(),
+                            identity: routed_block.identity.clone(),
                         });
                         update_bootstrap_buffer_metrics(&pipeline_metrics, &buffered_bootstrap_blocks);
                         return Ok(());
@@ -4246,16 +4172,14 @@ async fn run_ingestion(args: &BuildArgs, global: &GlobalArgs) -> Result<()> {
                 )?;
             }
 
-            for ready_block in ready_solana_blocks {
-                process_block(
-                    &ready_block.block_bytes,
-                    &ready_block.identity,
-                    ready_block.fork_step.as_deref(),
-                    &ready_block.cursor,
-                    ready_block.received_ordinal,
-                    None,
-                )?;
-            }
+            process_block(
+                &routed_block.block_bytes,
+                &routed_block.identity,
+                routed_block.fork_step.as_deref(),
+                &routed_block.cursor,
+                routed_block.received_ordinal,
+                None,
+            )?;
 
             Ok(())
         })
@@ -4287,10 +4211,6 @@ async fn run_ingestion(args: &BuildArgs, global: &GlobalArgs) -> Result<()> {
             "stream stopped; discarded uncommitted buffers and retained the authoritative prefix"
         );
     } else if let Some(mapper) = mapper.as_mut() {
-        anyhow::ensure!(
-            timestamp_backfill.drain_open_span()?.is_empty(),
-            "unresolved timestamp routing remains at clean EOF"
-        );
         if mapper.max_table_rows() > 0
             || session
                 .as_ref()
@@ -6169,22 +6089,6 @@ mod tests {
     }
 
     #[test]
-    fn test_resolve_ingestion_stop_block_prefers_explicit_stop_block() {
-        let stop_block = resolve_ingestion_stop_block(Some(300))
-            .expect("ingestion should accept an explicit stop block");
-
-        assert_eq!(stop_block, Some(300));
-    }
-
-    #[test]
-    fn test_resolve_ingestion_stop_block_keeps_live_stream_open_when_omitted() {
-        let stop_block =
-            resolve_ingestion_stop_block(None).expect("omitting stop block should keep streaming");
-
-        assert_eq!(stop_block, None);
-    }
-
-    #[test]
     fn test_stream_resume_cursor_ignores_stored_cursor_when_override_is_enabled() {
         let cursor_state = CursorState {
             cursor: "cursor-123".to_string(),
@@ -6592,7 +6496,7 @@ mod tests {
     }
 
     #[test]
-    fn test_resolve_output_bytes_encoding_uses_tron_style_profile_for_tron_chain_name() {
+    fn test_resolve_auto_encode_bytes_uses_tron_style_profile_for_tron_chain_name() {
         let endpoint_info = Some(EndpointInfo {
             chain_name: "tron".to_string(),
             chain_name_aliases: vec![],
@@ -6602,13 +6506,13 @@ mod tests {
             block_features: vec![],
         });
 
-        let resolved = resolve_output_bytes_encoding(Some("evm"), &endpoint_info, true);
+        let resolved = resolve_auto_encode_bytes(Some("evm"), &endpoint_info, true);
 
         assert_eq!(resolved, EncodeBytes::TronBase58);
     }
 
     #[test]
-    fn test_resolve_output_bytes_encoding_near_prefers_output_contract_over_endpoint_hint() {
+    fn test_resolve_auto_encode_bytes_near_prefers_output_contract_over_endpoint_hint() {
         let endpoint_info = Some(EndpointInfo {
             chain_name: "near-mainnet".to_string(),
             chain_name_aliases: vec!["near".to_string()],
@@ -6618,13 +6522,13 @@ mod tests {
             block_features: vec![],
         });
 
-        let resolved = resolve_output_bytes_encoding(Some("near"), &endpoint_info, false);
+        let resolved = resolve_auto_encode_bytes(Some("near"), &endpoint_info, false);
 
         assert_eq!(resolved, EncodeBytes::Base58);
     }
 
     #[test]
-    fn test_resolve_output_bytes_encoding_supported_contracts_override_endpoint_hints() {
+    fn test_resolve_auto_encode_bytes_supported_contracts_override_endpoint_hints() {
         let cases = [
             ("evm", false, 3, EncodeBytes::Hex),
             ("bitcoin", false, 3, EncodeBytes::Hex),
@@ -6647,11 +6551,8 @@ mod tests {
                 block_features: vec![],
             });
 
-            let resolved = resolve_output_bytes_encoding(
-                Some(block_type),
-                &endpoint_info,
-                tron_style_evm_profile,
-            );
+            let resolved =
+                resolve_auto_encode_bytes(Some(block_type), &endpoint_info, tron_style_evm_profile);
 
             assert_eq!(
                 resolved, expected,
@@ -6661,7 +6562,7 @@ mod tests {
     }
 
     #[test]
-    fn test_resolve_output_bytes_encoding_tron_style_contract_overrides_endpoint_hint() {
+    fn test_resolve_auto_encode_bytes_tron_style_contract_overrides_endpoint_hint() {
         let endpoint_info = Some(EndpointInfo {
             chain_name: "tron-evm".to_string(),
             chain_name_aliases: vec!["tron".to_string()],
@@ -6671,7 +6572,7 @@ mod tests {
             block_features: vec![],
         });
 
-        let resolved = resolve_output_bytes_encoding(Some("evm"), &endpoint_info, true);
+        let resolved = resolve_auto_encode_bytes(Some("evm"), &endpoint_info, true);
 
         assert_eq!(resolved, EncodeBytes::TronBase58);
     }
@@ -6883,11 +6784,10 @@ mod tests {
     }
 
     #[test]
-    fn test_timestamp_backfill_uses_last_known_anchor_without_interpolation() {
-        let mut backfill =
-            TimestampBackfill::new(true, DEFAULT_TIMESTAMP_BACKFILL_BUFFER_LIMIT_BYTES);
+    fn test_timestamp_routing_uses_last_known_anchor_without_interpolation() {
+        let mut backfill = TimestampRouting::new(true);
         let first = backfill
-            .observe_block(
+            .route_block(
                 vec![0x01],
                 "cursor-10".to_string(),
                 None,
@@ -6898,10 +6798,10 @@ mod tests {
                 },
             )
             .expect("first anchor should process immediately");
-        assert_eq!(first.len(), 1);
+        assert_eq!(first.identity.timestamp, 1_000);
 
         let ready = backfill
-            .observe_block(
+            .route_block(
                 vec![0x02],
                 "cursor-15".to_string(),
                 None,
@@ -6912,13 +6812,11 @@ mod tests {
                 },
             )
             .expect("missing block should reuse the prior anchor immediately");
-        assert_eq!(ready.len(), 1);
-        assert_eq!(ready[0].identity.block_num, 15);
-        assert_eq!(ready[0].identity.timestamp, 1_000);
-        assert_eq!(backfill.buffered_bytes(), 0);
+        assert_eq!(ready.identity.block_num, 15);
+        assert_eq!(ready.identity.timestamp, 1_000);
 
         let next = backfill
-            .observe_block(
+            .route_block(
                 vec![0x03],
                 "cursor-20".to_string(),
                 None,
@@ -6929,18 +6827,15 @@ mod tests {
                 },
             )
             .expect("later anchor should update the last-known routing timestamp");
-        assert_eq!(next.len(), 1);
-        assert_eq!(next[0].identity.block_num, 20);
-        assert_eq!(next[0].identity.timestamp, 1_100);
-        assert_eq!(backfill.buffered_bytes(), 0);
+        assert_eq!(next.identity.block_num, 20);
+        assert_eq!(next.identity.timestamp, 1_100);
     }
 
     #[test]
-    fn test_timestamp_backfill_seeds_genesis_anchor_for_first_missing_block() {
-        let mut backfill =
-            TimestampBackfill::new(true, DEFAULT_TIMESTAMP_BACKFILL_BUFFER_LIMIT_BYTES);
+    fn test_timestamp_routing_seeds_genesis_anchor_for_first_missing_block() {
+        let mut backfill = TimestampRouting::new(true);
         let ready = backfill
-            .observe_block(
+            .route_block(
                 vec![0x01],
                 "cursor-0".to_string(),
                 None,
@@ -6951,55 +6846,15 @@ mod tests {
                 },
             )
             .expect("genesis anchor should route the first missing-timestamp block");
-        assert_eq!(ready.len(), 1);
-        assert_eq!(ready[0].identity.block_num, 0);
-        assert_eq!(ready[0].identity.timestamp, SOLANA_GENESIS_TIMESTAMP);
+        assert_eq!(ready.identity.block_num, 0);
+        assert_eq!(ready.identity.timestamp, SOLANA_GENESIS_TIMESTAMP);
     }
 
     #[test]
-    fn test_timestamp_backfill_drain_is_empty_with_last_known_routing() {
-        let mut backfill =
-            TimestampBackfill::new(true, DEFAULT_TIMESTAMP_BACKFILL_BUFFER_LIMIT_BYTES);
+    fn test_timestamp_routing_routes_time_partitions_from_last_known_timestamp() {
+        let mut backfill = TimestampRouting::new(true);
         backfill
-            .observe_block(
-                vec![0x01],
-                "cursor-100".to_string(),
-                None,
-                BlockIdentity {
-                    block_num: 100,
-                    timestamp: 1_700_000_000,
-                    ..BlockIdentity::default()
-                },
-            )
-            .expect("anchor should process immediately");
-        let routed = backfill
-            .observe_block(
-                vec![0x02],
-                "cursor-101".to_string(),
-                None,
-                BlockIdentity {
-                    block_num: 101,
-                    timestamp: 0,
-                    ..BlockIdentity::default()
-                },
-            )
-            .expect("missing block should reuse the prior anchor immediately");
-        assert_eq!(routed.len(), 1);
-        assert_eq!(routed[0].identity.timestamp, 1_700_000_000);
-
-        let drained = backfill
-            .drain_open_span()
-            .expect("no buffered span should remain to drain");
-        assert!(drained.is_empty());
-        assert_eq!(backfill.buffered_bytes(), 0);
-    }
-
-    #[test]
-    fn test_timestamp_backfill_routes_time_partitions_from_last_known_timestamp() {
-        let mut backfill =
-            TimestampBackfill::new(true, DEFAULT_TIMESTAMP_BACKFILL_BUFFER_LIMIT_BYTES);
-        backfill
-            .observe_block(
+            .route_block(
                 vec![0x01],
                 "cursor-100".to_string(),
                 None,
@@ -7011,7 +6866,7 @@ mod tests {
             )
             .expect("known timestamp should update the last-known anchor");
         let routed = backfill
-            .observe_block(
+            .route_block(
                 vec![0x02],
                 "cursor-101".to_string(),
                 None,
@@ -7022,7 +6877,7 @@ mod tests {
                 },
             )
             .expect("missing block should reuse the last-known timestamp");
-        let routing_timestamp = routed[0].identity.timestamp;
+        let routing_timestamp = routed.identity.timestamp;
 
         for partition in [
             Partition::Date,
@@ -7037,11 +6892,10 @@ mod tests {
     }
 
     #[test]
-    fn test_timestamp_backfill_routes_first_missing_block_from_genesis_anchor() {
-        let mut backfill =
-            TimestampBackfill::new(true, DEFAULT_TIMESTAMP_BACKFILL_BUFFER_LIMIT_BYTES);
+    fn test_timestamp_routing_routes_first_missing_block_from_genesis_anchor() {
+        let mut backfill = TimestampRouting::new(true);
         let routed = backfill
-            .observe_block(
+            .route_block(
                 vec![0x01],
                 "cursor-0".to_string(),
                 None,
@@ -7052,7 +6906,7 @@ mod tests {
                 },
             )
             .expect("genesis anchor should route the first missing-timestamp block");
-        let routing_timestamp = routed[0].identity.timestamp;
+        let routing_timestamp = routed.identity.timestamp;
 
         for partition in [
             Partition::Date,
@@ -7069,9 +6923,8 @@ mod tests {
     }
 
     #[test]
-    fn test_timestamp_backfill_routes_from_restored_cursor_anchor() {
-        let mut backfill =
-            TimestampBackfill::new(true, DEFAULT_TIMESTAMP_BACKFILL_BUFFER_LIMIT_BYTES);
+    fn test_timestamp_routing_routes_from_restored_cursor_anchor() {
+        let mut backfill = TimestampRouting::new(true);
         let cursor_state = CursorState {
             last_block_num: 99,
             last_timestamp: Some(1_700_000_000),
@@ -7087,7 +6940,7 @@ mod tests {
         );
 
         let routed = backfill
-            .observe_block(
+            .route_block(
                 vec![0x01],
                 "cursor-100".to_string(),
                 None,
@@ -7099,7 +6952,7 @@ mod tests {
             )
             .expect("restored cursor anchor should route the first sparse block after resume");
 
-        assert_eq!(routed[0].identity.timestamp, 1_700_000_000);
+        assert_eq!(routed.identity.timestamp, 1_700_000_000);
     }
 
     #[test]
