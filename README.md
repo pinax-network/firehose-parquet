@@ -226,7 +226,8 @@ destination directory. The writer completes the Parquet footer and syncs the
 file before atomically creating its final `.parquet` name without overwriting an
 existing destination. It removes the temporary name and syncs the directory
 before reporting success. Output directory ancestors are also synced, including
-newly created directories and those left by an earlier failed attempt.
+newly created directories and those left by an earlier failed attempt. Symlinked
+output paths sync both the resolved target ancestry and the alias ancestry.
 
 This requires a filesystem that supports atomic same-directory hard links,
 file sync, and directory sync, with readable directory ancestors. Unsupported

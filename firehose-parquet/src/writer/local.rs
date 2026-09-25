@@ -4,6 +4,7 @@ use anyhow::{Context, Result};
 use arrow::record_batch::RecordBatch;
 use parquet::arrow::ArrowWriter;
 use parquet::file::properties::WriterProperties;
+use std::collections::HashSet;
 use std::fs::{self, File, OpenOptions};
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
@@ -19,7 +20,15 @@ pub(super) fn create_dir_all_durable(dir: &Path) -> Result<()> {
     };
     fs::create_dir_all(&absolute)
         .with_context(|| format!("creating output directory {}", dir.display()))?;
-    for ancestor in absolute.ancestors() {
+    let target = fs::canonicalize(&absolute)
+        .with_context(|| format!("resolving output directory {}", dir.display()))?;
+    // An alias can lead to newly created directories beneath a different
+    // ancestry. Sync the target's links as well as the symlink/lexical chain.
+    let mut synced = HashSet::new();
+    for ancestor in target.ancestors().chain(absolute.ancestors()) {
+        if !synced.insert(ancestor) {
+            continue;
+        }
         #[cfg(test)]
         tests::checkpoint(tests::Stage::AncestorSync, ancestor)?;
         sync_directory(ancestor)?;
@@ -161,6 +170,7 @@ mod tests {
     #[derive(Default)]
     struct Faults {
         fail: Option<Stage>,
+        fail_path: Option<PathBuf>,
         crash: Option<Stage>,
         fail_after_bytes: Option<usize>,
         bytes_written: usize,
@@ -192,7 +202,12 @@ mod tests {
                 // Deliberately skip Drop to model abrupt process termination.
                 std::process::exit(81);
             }
-            if faults.fail == Some(stage) {
+            if faults.fail == Some(stage)
+                && faults
+                    .fail_path
+                    .as_deref()
+                    .is_none_or(|expected| expected == path)
+            {
                 anyhow::bail!("injected {stage:?} failure");
             }
             Ok(())
@@ -256,6 +271,23 @@ mod tests {
             .collect()
     }
 
+    fn assert_both_ancestor_chains_synced(dir: &Path, observed: &[(Stage, PathBuf)]) {
+        let synced: Vec<_> = observed
+            .iter()
+            .filter(|entry| entry.0 == Stage::AncestorSync)
+            .map(|entry| entry.1.as_path())
+            .collect();
+        let target = fs::canonicalize(dir).unwrap();
+        for ancestor in target.ancestors().chain(dir.ancestors()) {
+            assert!(
+                synced.contains(&ancestor),
+                "ancestor not synced: {}",
+                ancestor.display()
+            );
+        }
+        assert_eq!(synced.len(), synced.iter().collect::<HashSet<_>>().len());
+    }
+
     #[test]
     fn success_is_complete_and_durable_before_return() {
         let dir = tempfile::tempdir().unwrap();
@@ -281,16 +313,7 @@ mod tests {
                     Stage::PublishedDirectorySync,
                 ]
             );
-            let synced: Vec<_> = state
-                .observed
-                .iter()
-                .filter(|entry| entry.0 == Stage::AncestorSync)
-                .map(|entry| entry.1.as_path())
-                .collect();
-            assert_eq!(
-                synced,
-                path.parent().unwrap().ancestors().collect::<Vec<_>>()
-            );
+            assert_both_ancestor_chains_synced(path.parent().unwrap(), &state.observed);
         });
     }
 
@@ -381,16 +404,49 @@ mod tests {
         write_parquet(&path, &batch(), props()).unwrap();
         FAULTS.with(|state| {
             let state = state.borrow();
-            let synced: Vec<_> = state
-                .observed
-                .iter()
-                .filter(|entry| entry.0 == Stage::AncestorSync)
-                .map(|entry| entry.1.as_path())
-                .collect();
-            assert_eq!(
-                synced,
-                path.parent().unwrap().ancestors().collect::<Vec<_>>()
-            );
+            assert_both_ancestor_chains_synced(path.parent().unwrap(), &state.observed);
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlink_target_ancestors_are_synced_and_failure_stops_publication() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("separate/target");
+        fs::create_dir_all(&target).unwrap();
+        let alias = dir.path().join("alias");
+        std::os::unix::fs::symlink(&target, &alias).unwrap();
+        let path = alias.join("new/nested/part.parquet");
+        let target_only_ancestor = fs::canonicalize(&target)
+            .unwrap()
+            .parent()
+            .unwrap()
+            .to_owned();
+        assert!(!path
+            .ancestors()
+            .any(|ancestor| ancestor == target_only_ancestor));
+        {
+            let _reset = inject(Faults {
+                fail: Some(Stage::AncestorSync),
+                fail_path: Some(target_only_ancestor.clone()),
+                ..Default::default()
+            });
+            let error = write_parquet(&path, &batch(), props()).unwrap_err();
+            assert!(format!("{error:#}").contains("AncestorSync"));
+            assert!(entries(path.parent().unwrap()).is_empty());
+            FAULTS.with(|state| {
+                let state = state.borrow();
+                assert!(state
+                    .observed
+                    .contains(&(Stage::AncestorSync, target_only_ancestor)));
+                assert!(!state.observed.iter().any(|entry| entry.0 == Stage::Publish));
+            });
+        }
+        let _reset = inject(Faults::default());
+        write_parquet(&path, &batch(), props()).unwrap();
+        assert_round_trip(&path);
+        FAULTS.with(|state| {
+            assert_both_ancestor_chains_synced(path.parent().unwrap(), &state.borrow().observed);
         });
     }
 

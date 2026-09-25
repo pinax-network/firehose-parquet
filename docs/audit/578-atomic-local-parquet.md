@@ -17,8 +17,10 @@ It adds no dependency. Existing file-creation mode and umask behavior are retain
 
 The private `writer/local.rs` helper performs these operations:
 
-1. Create the destination directory and sync its full directory ancestry from
-   leaf to root. Syncing existing ancestors too matters after a prior attempt
+1. Create the destination directory, resolve its canonical target, and sync both
+   the target ancestry and lexical/alias ancestry from leaf to root, deduplicating
+   identical paths. This preserves symlinked output directories without missing
+   the target's parent links. Syncing existing ancestors too matters after a prior attempt
    created a directory but failed to sync its parent: existence alone is not
    proof that the directory link is durable. Empty-batch directory creation
    uses the same helper.
@@ -89,6 +91,10 @@ Focused tests in `writer/local.rs` cover:
   and the caller receives an error.
 - A retry after directory creation/sync failure syncs all already-existing
   ancestors rather than assuming they are durable.
+- A Unix symlinked output root with different target/alias ancestry syncs both
+  chains. An injected failure at a target-only ancestor is fatal before any
+  temporary or final file is created; the subsequent successful attempt syncs
+  both chains again.
 - Existing destination contents remain byte-for-byte unchanged; simultaneous
   writers racing for the same final path produce exactly one winner.
 - Child-process termination before footer close bypasses destructors and leaves
@@ -105,11 +111,15 @@ the shared Cargo target, `--locked`, and four build jobs.
   (110 + 191 + 1 + 424 + 3), with all doc tests passing.
 - `git diff --check`: passed.
 
-Final integration: `8ff1939cd6646b24f85eacdc20f1e0898cd508cd`, including main
+Arrow/Parquet 60 integration baseline: `8ff1939cd6646b24f85eacdc20f1e0898cd508cd`,
+including main
 `2793421272d8dff64c43d4b69bc4bf68a8a6cab9` (Arrow/Parquet 60).
 
-- `cargo test --workspace --locked -j4`: **732 passed, 0 failed, 4 ignored**
-  (110 + 191 + 1 + 424 + 3 + 3), including Parquet 58 compatibility fixtures and
+After the review correction to sync canonical symlink targets as well as aliases:
+
+- Focused local-publication tests: **10 passed**, including the new symlink case.
+- `cargo test --workspace --locked -j4`: **733 passed, 0 failed, 4 ignored**
+  (110 + 191 + 1 + 425 + 3 + 3), including Parquet 58 compatibility fixtures and
   all documentation tests. One of the ignored tests is the subprocess helper
   that the active crash test invokes twice.
 - `cargo build --workspace --locked -j4`: passed.
@@ -118,3 +128,7 @@ Final integration: `8ff1939cd6646b24f85eacdc20f1e0898cd508cd`, including main
 
 The existing unused `transactions_processed` assignment warning in the binary
 remains. No warning was introduced in the local publication code.
+
+Independent review of the publication protocol and symlink follow-up found no
+remaining implementation blockers before publication. The tests were repeated
+after that correction.
