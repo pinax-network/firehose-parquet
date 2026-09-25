@@ -21,6 +21,7 @@ pub fn blocks_schema(include_fork_step: bool, encoding: &EncodeBytes) -> Schema 
         Field::new("validators_hash", bd.clone(), false),
         Field::new("next_validators_hash", bd, false),
         Field::new("num_txs", DataType::UInt32, false),
+        Field::new("tx_decode_failures", DataType::UInt32, false),
     ]);
     maybe_fork_step(&mut fields, include_fork_step);
     Schema::new(fields)
@@ -32,13 +33,14 @@ pub fn transactions_schema(include_fork_step: bool, encoding: &EncodeBytes) -> S
     fields.extend(vec![
         Field::new("tx_hash", bd, false),
         Field::new("index", DataType::UInt32, false),
-        Field::new("code", DataType::UInt32, false),
-        Field::new("gas_wanted", DataType::Int64, false),
-        Field::new("gas_used", DataType::Int64, false),
-        Field::new("log", DataType::Utf8, false),
-        Field::new("info", DataType::Utf8, false),
-        Field::new("codespace", DataType::Utf8, false),
+        Field::new("code", DataType::UInt32, true),
+        Field::new("gas_wanted", DataType::Int64, true),
+        Field::new("gas_used", DataType::Int64, true),
+        Field::new("log", DataType::Utf8, true),
+        Field::new("info", DataType::Utf8, true),
+        Field::new("codespace", DataType::Utf8, true),
     ]);
+    fields.extend(super::tx_metadata::fields());
     maybe_fork_step(&mut fields, include_fork_step);
     Schema::new(fields)
 }
@@ -48,12 +50,13 @@ pub fn events_schema(include_fork_step: bool, encoding: &EncodeBytes) -> Schema 
     let mut fields = canonical_fields_with_encoding(encoding);
     fields.extend(vec![
         Field::new("source", DataType::Utf8, false),
-        Field::new("tx_hash", bd, false),
-        Field::new("tx_index", DataType::Int32, true),
+        Field::new("tx_hash", bd, true),
+        Field::new("tx_index", DataType::UInt32, true),
         Field::new("event_index", DataType::UInt32, false),
         Field::new("type", DataType::Utf8, false),
-        Field::new("key", DataType::Utf8, false),
-        Field::new("value", DataType::Utf8, false),
+        Field::new("attribute_index", DataType::UInt32, true),
+        Field::new("key", DataType::Utf8, true),
+        Field::new("value", DataType::Utf8, true),
     ]);
     maybe_fork_step(&mut fields, include_fork_step);
     Schema::new(fields)

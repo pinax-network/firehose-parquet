@@ -14,6 +14,7 @@ lifecycle state; a local implementation or passing test alone is not closure.
 - [#499: offline EVM golden-block regression](499-evm-golden-fixture.md)
 - [#511: Bitcoin amounts and input metadata](511-bitcoin-values.md)
 - [#513: recovered EVM decimal fast path](513-evm-decimal-fast-path.md)
+- [#510: Cosmos event order, unknown results and SDK metadata](510-cosmos-values.md)
 - [#508: Antelope database-operation joins](508-antelope-db-joins.md)
 - [#568: Arrow/Parquet security and compatibility](568-arrow-parquet-security.md)
 - [#572: final completion checkpoints](572-final-completion-checkpoint.md)
@@ -79,7 +80,7 @@ lifecycle state; a local implementation or passing test alone is not closure.
 | [#565](https://github.com/pinax-network/firehose-parquet/issues/565) | [#598](https://github.com/pinax-network/firehose-parquet/pull/598) | Merged as `cd6e011` on 2026-09-25; issue closed; 877 tests, independent equivalence review, 13.4–14.4x conversion/append benchmarks and CI passed. |
 | [#524](https://github.com/pinax-network/firehose-parquet/issues/524) | [#599](https://github.com/pinax-network/firehose-parquet/pull/599) | Merged as `f555898` on 2026-09-25; issue closure verified; 882 tests, projected-read/partition-check regressions, 1.8–2.7x measured local validation improvements and CI passed. |
 | #468 prerequisite | [#591](https://github.com/pinax-network/firehose-parquet/pull/591) | Historical ownership/control foundation merged as `78ceb98`; 848 tests and CI passed. This stage alone did not provide all-table crash/replay protection. |
-| [#468](https://github.com/pinax-network/firehose-parquet/issues/468) | [#600](https://github.com/pinax-network/firehose-parquet/pull/600) | Runtime PR open; complete implementation independently reviewed on main `f555898`; 995 workspace tests plus the CI capture example passed. Actual interrupted Writing rollback, 14-table/12,298-row live equality, completed-bound no-op and deleted-mirror repair passed. Issue remains open until final PR CI and merge. |
+| [#468](https://github.com/pinax-network/firehose-parquet/issues/468) | [#600](https://github.com/pinax-network/firehose-parquet/pull/600) | Merged as `e4bd9cf` on 2026-09-25; issue closure verified. 995 workspace tests plus the CI capture example and final CI passed. Actual interrupted Writing rollback, 14-table/12,298-row live equality, completed-bound no-op and deleted-mirror repair passed. |
 
 The #468 design PR accidentally triggered GitHub auto-closure through a negative
 sentence containing a recognized closing phrase. On 2026-09-25 the PR text was

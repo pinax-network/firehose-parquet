@@ -483,6 +483,7 @@ dependencies = [
  "futures",
  "num-bigint",
  "object_store",
+ "parquet",
  "prometheus-client",
  "prost",
  "prost-types",
