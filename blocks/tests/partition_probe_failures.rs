@@ -1,5 +1,7 @@
-//! Real endpoint failures must not be turned into skipped partition boundaries.
+//! Retained Fetch failures must not become nullable block-range boundaries.
+//! Exact time traversal and ancestry failures are covered in partition_coverage.rs.
 use firehose_protos::firehose;
+use futures::StreamExt;
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 use tonic::codegen::{http, BoxFuture, Service};
@@ -67,8 +69,53 @@ impl tonic::server::UnaryService<firehose::SingleBlockRequest> for Fetch {
     }
 }
 
+// The production command now proves finality before its optional boundary Fetches.
+// Keep that independent RPC valid so each injected Fetch failure is still exercised.
+#[derive(Clone)]
+struct Finality;
+impl tonic::server::ServerStreamingService<firehose::Request> for Finality {
+    type Response = firehose::Response;
+    type ResponseStream =
+        futures::stream::BoxStream<'static, Result<Self::Response, tonic::Status>>;
+    type Future = BoxFuture<tonic::Response<Self::ResponseStream>, tonic::Status>;
+    fn call(&mut self, request: tonic::Request<firehose::Request>) -> Self::Future {
+        let request = request.into_inner();
+        let number = if request.start_block_num == -1 {
+            assert!(!request.final_blocks_only);
+            200
+        } else {
+            assert_eq!(
+                (request.start_block_num, request.stop_block_num),
+                (180, 180)
+            );
+            assert!(request.final_blocks_only);
+            180
+        };
+        let response = firehose::Response {
+            step: if number == 200 { 1 } else { 3 },
+            block: Some(prost_types::Any::default()),
+            metadata: Some(firehose::BlockMetadata {
+                num: number,
+                id: format!("block-{number}"),
+                lib_num: 180,
+                time: Some(prost_types::Timestamp {
+                    seconds: 1_700_000_000,
+                    nanos: 0,
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        Box::pin(async move {
+            Ok(tonic::Response::new(
+                futures::stream::iter([Ok(response)]).boxed(),
+            ))
+        })
+    }
+}
+
 macro_rules! rpc_service {
-    ($service:ty, $name:literal) => {
+    ($service:ty, $name:literal, $method:ident) => {
         impl tonic::server::NamedService for $service {
             const NAME: &'static str = $name;
         }
@@ -86,17 +133,18 @@ macro_rules! rpc_service {
                 let service = self.clone();
                 Box::pin(async {
                     let mut grpc = tonic::server::Grpc::new(tonic_prost::ProstCodec::default());
-                    Ok(grpc.unary(service, request).await)
+                    Ok(grpc.$method(service, request).await)
                 })
             }
         }
     };
 }
-rpc_service!(Info, "sf.firehose.v2.EndpointInfo");
-rpc_service!(Fetch, "sf.firehose.v2.Fetch");
+rpc_service!(Info, "sf.firehose.v2.EndpointInfo", unary);
+rpc_service!(Fetch, "sf.firehose.v2.Fetch", unary);
+rpc_service!(Finality, "sf.firehose.v2.Stream", server_streaming);
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn invalid_probes_cannot_create_or_replace_partition_output() {
+async fn invalid_block_range_probes_cannot_create_or_replace_partition_output() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let endpoint = format!("http://{}", listener.local_addr().unwrap());
     let incoming = futures::stream::unfold(listener, |listener| async {
@@ -111,6 +159,7 @@ async fn invalid_probes_cannot_create_or_replace_partition_output() {
     let server = tokio::spawn(async {
         tonic::transport::Server::builder()
             .add_service(Info)
+            .add_service(Finality)
             .add_service(service)
             .serve_with_incoming(incoming)
             .await
@@ -159,7 +208,7 @@ async fn invalid_probes_cannot_create_or_replace_partition_output() {
     let original = std::fs::read(&index).unwrap();
     for failure_mode in 1..=5 {
         mode.store(failure_mode, Ordering::SeqCst);
-        for partition in ["date", "block_range"] {
+        for partition in ["block_range"] {
             for output in [
                 dir.path().join(format!("fresh-{failure_mode}-{partition}")),
                 existing.clone(),
