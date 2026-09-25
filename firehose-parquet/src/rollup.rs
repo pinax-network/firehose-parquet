@@ -15,10 +15,9 @@ use crate::cli::{block_on_async, format_bytes, resolve_destructive_input_path, A
 use crate::config::{Compression, DAY_PARTITION_PREFIX, LEGACY_DAY_PARTITION_PREFIX};
 use crate::dataset_lock::DatasetOwnership;
 use crate::ingest::maintenance::{self, MaintenancePolicy, MaintenanceTarget};
-use crate::merge::{SchemaCheck, StreamingPartWriter};
+use crate::maintenance::compaction::{Encoder, SchemaCheck};
 use crate::writer::parse_s3_url;
 use anyhow::{Context, Result};
-use arrow::datatypes::Schema;
 #[cfg(test)]
 use arrow::record_batch::RecordBatch;
 use object_store::ObjectStore;
@@ -26,6 +25,7 @@ use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 #[cfg(test)]
 use parquet::arrow::ArrowWriter;
 use parquet::file::metadata::KeyValue;
+#[cfg(test)]
 use parquet::file::properties::WriterProperties;
 use std::collections::{BTreeMap, HashSet};
 use std::io::Write;
@@ -314,7 +314,7 @@ fn run_rollup_local(config: &RollupConfig, ownership: &DatasetOwnership) -> Resu
                 continue 'groups;
             }
             if schema.is_none() {
-                schema = Some(crate::merge::strip_transaction_schema(
+                schema = Some(crate::maintenance::compaction::strip_transaction_schema(
                     builder.schema().clone(),
                 ));
                 file_kv_metadata = builder
@@ -341,12 +341,12 @@ fn run_rollup_local(config: &RollupConfig, ownership: &DatasetOwnership) -> Resu
         std::fs::create_dir_all(&out_dir)
             .with_context(|| format!("creating output dir {}", out_dir.display()))?;
         let schema = schema.context("rollup group has no schema")?;
-        let props = writer_properties(
+        let mut encoder = Encoder::rollup(
+            schema,
             config.compression,
-            schema.as_ref(),
             file_kv_metadata.as_deref(),
+            config.flush_bytes,
         );
-        let mut writer = StreamingPartWriter::new(schema, props, config.flush_bytes, None, 0);
         let mut group_written = Vec::new();
         let mut publish = |part: u32, bytes: Vec<u8>, part_rows: usize| -> Result<()> {
             ownership.revalidate_local_paths()?;
@@ -363,19 +363,13 @@ fn run_rollup_local(config: &RollupConfig, ownership: &DatasetOwnership) -> Resu
             let builder =
                 ParquetRecordBatchReaderBuilder::try_new(std::fs::File::open(file_path)?)?
                     .with_batch_size(READER_BATCH_ROWS);
-            for batch in builder.build()? {
-                let batch = crate::merge::strip_transaction_metadata(batch?)?;
-                written_rows = written_rows
-                    .checked_add(batch.num_rows())
-                    .context("rollup row count overflow")?;
-                writer.write_batch(&batch, &mut publish)?;
-            }
+            encoder.write_reader(builder, &mut publish, Some(&mut written_rows))?;
         }
         anyhow::ensure!(
             written_rows == rows,
             "rollup source row count changed after preflight; source files were retained"
         );
-        writer.finish(&mut publish)?;
+        encoder.finish(&mut publish)?;
         total_output_files += group_written.len();
         written.extend(group_written);
 
@@ -567,20 +561,6 @@ fn cleanup_empty_dirs(dir: &Path) -> Result<()> {
     Ok(())
 }
 
-fn writer_properties(
-    compression: Compression,
-    schema: &Schema,
-    kv_metadata: Option<&[KeyValue]>,
-) -> WriterProperties {
-    let metadata = kv_metadata.map(|kvs| {
-        kvs.iter()
-            .filter(|kv| !kv.key.starts_with("fireparq.ingest.") && kv.key != "ARROW:schema")
-            .cloned()
-            .collect()
-    });
-    crate::writer::properties::for_schema(compression, schema, metadata)
-}
-
 // ---------------------------------------------------------------------------
 // S3 rollup
 // ---------------------------------------------------------------------------
@@ -715,7 +695,7 @@ fn rollup_s3(config: &RollupConfig, src: &S3Root, out: &S3Root) -> Result<()> {
                 continue 'groups;
             }
             if schema.is_none() {
-                schema = Some(crate::merge::strip_transaction_schema(
+                schema = Some(crate::maintenance::compaction::strip_transaction_schema(
                     builder.schema().clone(),
                 ));
                 file_kv_metadata = builder
@@ -738,12 +718,12 @@ fn rollup_s3(config: &RollupConfig, src: &S3Root, out: &S3Root) -> Result<()> {
             .context("rollup row count overflow")?;
         total_input_files += group_keys.len();
         let schema = schema.context("rollup group has no schema")?;
-        let props = writer_properties(
+        let mut encoder = Encoder::rollup(
+            schema,
             config.compression,
-            schema.as_ref(),
             file_kv_metadata.as_deref(),
+            config.flush_bytes,
         );
-        let mut writer = StreamingPartWriter::new(schema, props, config.flush_bytes, None, 0);
         let mut group_written = Vec::new();
         let mut publish = |part: u32, bytes: Vec<u8>, part_rows: usize| -> Result<()> {
             let path = object_store::path::Path::from(
@@ -769,19 +749,13 @@ fn rollup_s3(config: &RollupConfig, src: &S3Root, out: &S3Root) -> Result<()> {
                 object.clone(),
             ))?
             .with_batch_size(READER_BATCH_ROWS);
-            for batch in builder.build()? {
-                let batch = crate::merge::strip_transaction_metadata(batch?)?;
-                written_rows = written_rows
-                    .checked_add(batch.num_rows())
-                    .context("rollup row count overflow")?;
-                writer.write_batch(&batch, &mut publish)?;
-            }
+            encoder.write_reader(builder, &mut publish, Some(&mut written_rows))?;
         }
         anyhow::ensure!(
             written_rows == rows,
             "rollup source row count changed after preflight; source files were retained"
         );
-        writer.finish(&mut publish)?;
+        encoder.finish(&mut publish)?;
         total_output_files += group_written.len();
         written.extend(group_written);
 

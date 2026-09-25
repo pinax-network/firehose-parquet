@@ -16,12 +16,16 @@ use crate::merge_journal::{
 };
 use crate::writer::s3_put_options;
 use anyhow::{Context, Result};
-use arrow::datatypes::{Field, Schema, SchemaRef};
+use arrow::datatypes::SchemaRef;
+#[cfg(test)]
 use arrow::record_batch::RecordBatch;
 use object_store::ObjectStore;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+#[cfg(test)]
 use parquet::arrow::ArrowWriter;
+#[cfg(test)]
 use parquet::file::metadata::KeyValue;
+#[cfg(test)]
 use parquet::file::properties::WriterProperties;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -30,6 +34,10 @@ use std::time::Duration;
 use tracing::{debug, info, info_span, warn};
 
 mod read;
+
+#[cfg(test)]
+use crate::maintenance::compaction::describe_schema_mismatch;
+use crate::maintenance::compaction::{Encoder, SchemaCheck};
 
 const S3_UPLOAD_MAX_ATTEMPTS: usize = 1;
 const S3_UPLOAD_RETRY_BASE_DELAY_MS: u64 = 250;
@@ -58,121 +66,6 @@ impl MergeS3Operation {
             Self::Upload => "uploading",
             Self::Delete => "deleting",
         }
-    }
-}
-
-// A separate finite active-row-group budget preserves useful dictionaries even
-// when the encoded output target is small. It never scales with the input group.
-const ROW_GROUP_MEMORY_BUDGET_BYTES: usize = 32 * 1024 * 1024;
-
-/// Buffers one encoded output part plus a separately bounded active row group.
-pub(crate) struct StreamingPartWriter {
-    schema: Arc<arrow::datatypes::Schema>,
-    props: WriterProperties,
-    flush_bytes: u64,
-    row_group_memory_bytes: usize,
-    flush_rows: Option<usize>,
-    next_part_num: u32,
-    current_writer: Option<ArrowWriter<Vec<u8>>>,
-    current_rows: usize,
-}
-
-impl StreamingPartWriter {
-    pub(crate) fn new(
-        schema: Arc<arrow::datatypes::Schema>,
-        props: WriterProperties,
-        flush_bytes: u64,
-        flush_rows: Option<u32>,
-        initial_part_num: u32,
-    ) -> Self {
-        Self {
-            schema,
-            props,
-            flush_bytes,
-            row_group_memory_bytes: ROW_GROUP_MEMORY_BUDGET_BYTES,
-            // Treat an explicit zero like the disabled default so merge only flushes on rows when
-            // the operator provides a positive threshold.
-            flush_rows: flush_rows
-                .filter(|rows| *rows > 0)
-                .map(|rows| rows as usize),
-            next_part_num: initial_part_num,
-            current_writer: None,
-            current_rows: 0,
-        }
-    }
-
-    pub(crate) fn write_batch<F>(&mut self, batch: &RecordBatch, flush_part: &mut F) -> Result<()>
-    where
-        F: FnMut(u32, Vec<u8>, usize) -> Result<()>,
-    {
-        if batch.num_rows() == 0 {
-            return Ok(());
-        }
-
-        if self.current_writer.is_none() {
-            self.current_writer = Some(ArrowWriter::try_new(
-                Vec::new(),
-                self.schema.clone(),
-                Some(self.props.clone()),
-            )?);
-        }
-
-        let writer = self.current_writer.as_mut().expect("writer must exist");
-        writer.write(batch)?;
-        self.current_rows = self
-            .current_rows
-            .checked_add(batch.num_rows())
-            .context("output row count overflow")?;
-
-        let reached_flush_rows = self
-            .flush_rows
-            .is_some_and(|flush_rows| self.current_rows >= flush_rows);
-        // Bound the active Arrow/dictionary buffers independently of encoded
-        // output. Closing only the row group preserves the compressed part
-        // target rather than turning every memory-bound batch into a tiny file.
-        if writer.memory_size() >= self.row_group_memory_bytes {
-            writer.flush()?;
-        }
-        // Already encoded row groups remain in the output Vec and must count.
-        let encoded = writer
-            .bytes_written()
-            .saturating_add(writer.in_progress_size());
-        let reached_flush_bytes = self.flush_bytes > 0 && encoded as u64 >= self.flush_bytes;
-
-        if reached_flush_rows || reached_flush_bytes {
-            self.flush_current(flush_part)?;
-        }
-
-        Ok(())
-    }
-
-    pub(crate) fn finish<F>(&mut self, flush_part: &mut F) -> Result<()>
-    where
-        F: FnMut(u32, Vec<u8>, usize) -> Result<()>,
-    {
-        if self.current_writer.is_some() {
-            self.flush_current(flush_part)?;
-        }
-        Ok(())
-    }
-
-    fn flush_current<F>(&mut self, flush_part: &mut F) -> Result<()>
-    where
-        F: FnMut(u32, Vec<u8>, usize) -> Result<()>,
-    {
-        let writer = self
-            .current_writer
-            .take()
-            .expect("writer must exist when flushing");
-        let rows = self.current_rows;
-        self.current_rows = 0;
-        let buf = writer.into_inner()?;
-        self.next_part_num = self
-            .next_part_num
-            .checked_add(1)
-            .context("merge part number exhausted")?;
-        flush_part(self.next_part_num, buf, rows)?;
-        Ok(())
     }
 }
 
@@ -264,94 +157,6 @@ pub fn run_merge(config: &MergeConfig) -> Result<MergeResult> {
 // ---------------------------------------------------------------------------
 // Schema checks
 // ---------------------------------------------------------------------------
-
-/// Describes how `other` differs from `reference`, or returns `None` when both have the same
-/// columns (name, type, and nullability) in the same order.
-///
-/// Arrow writers and `concat_batches` pair columns by position, so merge and rollup only
-/// combine files when this returns `None`; otherwise columns would be dropped or swapped.
-pub(crate) fn describe_schema_mismatch(reference: &Schema, other: &Schema) -> Option<String> {
-    let same_field = |a: &Field, b: &Field| {
-        a.name() == b.name() && a.data_type() == b.data_type() && a.is_nullable() == b.is_nullable()
-    };
-    let (reference_fields, other_fields) = (reference.fields(), other.fields());
-    if reference_fields.len() == other_fields.len()
-        && reference_fields
-            .iter()
-            .zip(other_fields.iter())
-            .all(|(a, b)| same_field(a, b))
-    {
-        return None;
-    }
-
-    let nullability = |field: &Field| {
-        if field.is_nullable() {
-            "nullable"
-        } else {
-            "non-nullable"
-        }
-    };
-    let mut problems = Vec::new();
-    for field in reference_fields {
-        match other.field_with_name(field.name()) {
-            Err(_) => problems.push(format!("missing column `{}`", field.name())),
-            Ok(o) if o.data_type() != field.data_type() => problems.push(format!(
-                "column `{}` is {} instead of {}",
-                field.name(),
-                o.data_type(),
-                field.data_type()
-            )),
-            Ok(o) if o.is_nullable() != field.is_nullable() => problems.push(format!(
-                "column `{}` is {} instead of {}",
-                field.name(),
-                nullability(o),
-                nullability(field)
-            )),
-            Ok(_) => {}
-        }
-    }
-    for field in other_fields {
-        if reference.field_with_name(field.name()).is_err() {
-            problems.push(format!("extra column `{}`", field.name()));
-        }
-    }
-    if problems.is_empty() {
-        // Same columns, different positions (or duplicate names).
-        let (position, (expected, found)) = reference_fields
-            .iter()
-            .zip(other_fields.iter())
-            .enumerate()
-            .find(|(_, (a, b))| !same_field(a, b))
-            .expect("schemas differ, so some position differs");
-        problems.push(format!(
-            "columns are in a different order (column {} is `{}` instead of `{}`)",
-            position + 1,
-            found.name(),
-            expected.name()
-        ));
-    }
-    Some(problems.join("; "))
-}
-
-/// Remembers the schema of the first file in a partition and reports how later files differ.
-#[derive(Default)]
-pub(crate) struct SchemaCheck {
-    reference: Option<(String, SchemaRef)>,
-}
-
-impl SchemaCheck {
-    /// Records the first file's schema. For later files, returns how `schema` differs from it.
-    pub(crate) fn check(&mut self, name: &str, schema: &SchemaRef) -> Option<String> {
-        match &self.reference {
-            None => {
-                self.reference = Some((name.to_string(), Arc::clone(schema)));
-                None
-            }
-            Some((reference_name, reference)) => describe_schema_mismatch(reference, schema)
-                .map(|diff| format!("{name} does not match {reference_name}: {diff}")),
-        }
-    }
-}
 
 /// Reports a partition left untouched because its parts have different schemas.
 fn record_schema_mismatch(partition_label: &str, reason: String, result: &mut MergeResult) {
@@ -697,8 +502,12 @@ fn process_local_partition(
         return Ok(());
     }
 
-    let mut file_kv_metadata: Option<Vec<KeyValue>> = None;
-    let mut writer_state: Option<StreamingPartWriter> = None;
+    let mut encoder = Encoder::merge(
+        config.compression,
+        config.flush_bytes,
+        config.flush_rows,
+        initial_part_num,
+    );
     let mut written_files: Vec<PathBuf> = Vec::new();
     let mut output_bytes = 0u64;
     let mut write_part = |part_num: u32, buf: Vec<u8>, rows: usize| -> Result<()> {
@@ -719,50 +528,17 @@ fn process_local_partition(
         let file = std::fs::File::open(file_path)
             .with_context(|| format!("opening {}", file_path.display()))?;
         let builder = ParquetRecordBatchReaderBuilder::try_new(file)?;
-        if file_kv_metadata.is_none() {
-            file_kv_metadata = builder
-                .metadata()
-                .file_metadata()
-                .key_value_metadata()
-                .cloned();
-        }
-        let reader = builder.build()?;
-        for batch_result in reader {
-            let batch = strip_transaction_metadata(batch_result?)?;
-            if batch.num_rows() == 0 {
-                continue;
-            }
-
-            if writer_state.is_none() {
-                let props = writer_properties(
-                    config.compression,
-                    batch.schema().as_ref(),
-                    file_kv_metadata.as_deref(),
-                );
-                writer_state = Some(StreamingPartWriter::new(
-                    batch.schema(),
-                    props,
-                    config.flush_bytes,
-                    config.flush_rows,
-                    initial_part_num,
-                ));
-            }
-
-            writer_state
-                .as_mut()
-                .expect("writer state must exist")
-                .write_batch(&batch, &mut write_part)?;
-        }
+        encoder.write_reader(builder, &mut write_part, None)?;
     }
     result.files_read += files.len();
 
-    let Some(writer_state) = writer_state.as_mut() else {
+    if !encoder.initialized() {
         // Every part was empty: nothing to write, and nothing was changed.
         partition.remove_journal()?;
         result.partitions_skipped += 1;
         return Ok(());
-    };
-    writer_state.finish(&mut write_part)?;
+    }
+    encoder.finish(&mut write_part)?;
 
     partition.sync()?;
     crash_point("after-outputs")?;
@@ -830,20 +606,6 @@ fn no_op_compaction_estimate(
 ) -> Option<usize> {
     let estimated_output_files = estimate_output_files(source_bytes, flush_bytes);
     (estimated_output_files >= source_files).then_some(estimated_output_files)
-}
-
-fn writer_properties(
-    compression: Compression,
-    schema: &Schema,
-    kv_metadata: Option<&[KeyValue]>,
-) -> WriterProperties {
-    let metadata = kv_metadata.map(|kvs| {
-        kvs.iter()
-            .filter(|kv| !kv.key.starts_with("fireparq.ingest.") && kv.key != "ARROW:schema")
-            .cloned()
-            .collect()
-    });
-    crate::writer::properties::for_schema(compression, schema, metadata)
 }
 
 fn collect_parquet_files_recursive(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
@@ -1272,8 +1034,12 @@ fn process_s3_partition(
         return Ok(());
     }
 
-    let mut file_kv_metadata: Option<Vec<KeyValue>> = None;
-    let mut writer_state: Option<StreamingPartWriter> = None;
+    let mut encoder = Encoder::merge(
+        config.compression,
+        config.flush_bytes,
+        config.flush_rows,
+        initial_part_num,
+    );
     let mut output_names: Vec<String> = Vec::new();
     let mut output_bytes = 0u64;
     let mut write_part = |part_num: u32, buf: Vec<u8>, _rows: usize| -> Result<()> {
@@ -1311,51 +1077,18 @@ fn process_s3_partition(
         let data_window = read::objects(client, window?)?;
         for data in data_window {
             let builder = ParquetRecordBatchReaderBuilder::try_new(data)?;
-            if file_kv_metadata.is_none() {
-                file_kv_metadata = builder
-                    .metadata()
-                    .file_metadata()
-                    .key_value_metadata()
-                    .cloned();
-            }
-            let reader = builder.build()?;
-            for batch_result in reader {
-                let batch = strip_transaction_metadata(batch_result?)?;
-                if batch.num_rows() == 0 {
-                    continue;
-                }
-
-                if writer_state.is_none() {
-                    let props = writer_properties(
-                        config.compression,
-                        batch.schema().as_ref(),
-                        file_kv_metadata.as_deref(),
-                    );
-                    writer_state = Some(StreamingPartWriter::new(
-                        batch.schema(),
-                        props,
-                        config.flush_bytes,
-                        config.flush_rows,
-                        initial_part_num,
-                    ));
-                }
-
-                writer_state
-                    .as_mut()
-                    .expect("writer state must exist")
-                    .write_batch(&batch, &mut write_part)?;
-            }
+            encoder.write_reader(builder, &mut write_part, None)?;
         }
     }
     result.files_read += objects.len();
 
-    let Some(writer_state) = writer_state.as_mut() else {
+    if !encoder.initialized() {
         // Every part was empty: nothing to write, and nothing was changed.
         partition.remove_journal()?;
         result.partitions_skipped += 1;
         return Ok(());
-    };
-    writer_state.finish(&mut write_part)?;
+    }
+    encoder.finish(&mut write_part)?;
 
     crash_point("after-outputs")?;
     // A changed ownership record is an error, never a time-based takeover.
@@ -1561,105 +1294,6 @@ mod tests {
             builder.append_value(i as u64);
         }
         RecordBatch::try_new(schema, vec![Arc::new(builder.finish())]).unwrap()
-    }
-
-    #[test]
-    fn streaming_writer_counts_closed_row_groups_for_row_and_byte_limits() {
-        let batch = make_test_batch(10);
-        for (bytes, rows) in [(0, Some(5)), (128, None)] {
-            let props = WriterProperties::builder()
-                .set_max_row_group_row_count(Some(2))
-                .build();
-            let mut writer = StreamingPartWriter::new(batch.schema(), props, bytes, rows, 0);
-            let mut emitted = Vec::new();
-            let mut output = |part, data: Vec<u8>, rows| {
-                let reader = ParquetRecordBatchReaderBuilder::try_new(bytes::Bytes::from(data))?;
-                assert_eq!(reader.metadata().file_metadata().num_rows() as usize, rows);
-                emitted.push((part, rows));
-                Ok(())
-            };
-            writer.write_batch(&batch, &mut output).unwrap();
-            assert!(
-                writer.current_writer.is_none(),
-                "closed row groups must count toward the flush limit"
-            );
-            writer.finish(&mut output).unwrap();
-            assert_eq!(emitted, [(1, 10)]);
-        }
-    }
-
-    #[test]
-    fn streaming_writer_flushes_dictionary_memory_without_publishing_a_small_part() {
-        let batch = make_test_batch(1024);
-        let mut writer = StreamingPartWriter::new(
-            batch.schema(),
-            WriterProperties::builder().build(),
-            32 * 1024,
-            None,
-            0,
-        );
-        writer.row_group_memory_bytes = 32 * 1024;
-        let mut outputs = Vec::new();
-        let mut publish = |_, bytes: Vec<u8>, rows| {
-            outputs.push((bytes, rows));
-            Ok(())
-        };
-        writer.write_batch(&batch, &mut publish).unwrap();
-        let active = writer
-            .current_writer
-            .as_ref()
-            .expect("memory flush should retain the compressed part");
-        assert_eq!(
-            active.in_progress_rows(),
-            0,
-            "the dictionary row group must have been flushed"
-        );
-        assert!(active.bytes_written() < 32 * 1024);
-        assert_eq!(writer.current_rows, 1024);
-        assert_eq!(writer.next_part_num, 0);
-        writer.finish(&mut publish).unwrap();
-        assert_eq!(outputs.len(), 1);
-        assert_eq!(outputs[0].1, 1024);
-    }
-
-    #[test]
-    fn streaming_writer_keeps_only_current_part_across_a_large_group() {
-        let batch = make_test_batch(1024);
-        let props = WriterProperties::builder()
-            .set_max_row_group_row_count(Some(2048))
-            .build();
-        let mut writer = StreamingPartWriter::new(batch.schema(), props, 1024 * 1024, None, 0);
-        let mut total = 0;
-        let mut output = |_, _: Vec<u8>, rows| {
-            total += rows;
-            Ok(())
-        };
-        let mut peak = 0;
-        for _ in 0..512 {
-            writer.write_batch(&batch, &mut output).unwrap();
-            if let Some(active) = &writer.current_writer {
-                let retained = active
-                    .bytes_written()
-                    .saturating_add(active.memory_size().max(active.in_progress_size()));
-                peak = peak.max(retained);
-                assert!(
-                    active.memory_size() < ROW_GROUP_MEMORY_BUDGET_BYTES,
-                    "the active row group must flush at the memory target"
-                );
-                assert!(
-                    active
-                        .bytes_written()
-                        .saturating_add(active.in_progress_size())
-                        < 1024 * 1024,
-                    "the output part must flush at the encoded byte target"
-                );
-                assert!(retained < ROW_GROUP_MEMORY_BUDGET_BYTES + 1024 * 1024);
-            }
-        }
-        writer.finish(&mut output).unwrap();
-        assert_eq!(total, 512 * 1024);
-        assert!(peak > 0);
-        assert!(writer.next_part_num > 1);
     }
 
     fn write_test_parquet_with_metadata(path: &Path, batch: &RecordBatch, kvs: Vec<KeyValue>) {
@@ -3168,33 +2802,4 @@ fn protected_stream_for_path(
         }
     }
     Ok(matched)
-}
-
-/// Compaction/export changes physical parts, so never inherit a source transaction receipt.
-pub(crate) fn strip_transaction_schema(original: Arc<Schema>) -> Arc<Schema> {
-    if !original
-        .metadata()
-        .keys()
-        .any(|key| key.starts_with("fireparq.ingest."))
-    {
-        return original;
-    }
-    let metadata: std::collections::HashMap<String, String> = original
-        .metadata()
-        .iter()
-        .filter(|(key, _)| !key.starts_with("fireparq.ingest."))
-        .map(|(key, value)| (key.clone(), value.clone()))
-        .collect();
-    Arc::new(Schema::new_with_metadata(
-        original.fields().clone(),
-        metadata,
-    ))
-}
-
-pub(crate) fn strip_transaction_metadata(batch: RecordBatch) -> Result<RecordBatch> {
-    let schema = strip_transaction_schema(batch.schema());
-    if Arc::ptr_eq(&schema, &batch.schema()) {
-        return Ok(batch);
-    }
-    Ok(RecordBatch::try_new(schema, batch.columns().to_vec())?)
 }
