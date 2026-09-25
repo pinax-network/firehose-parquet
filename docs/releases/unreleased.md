@@ -4,6 +4,17 @@ Changes merged since the last release. Fold this file into `docs/releases/vX.Y.Z
 
 ## Breaking changes
 
+### Solana reward indices are scoped to each block (#500)
+
+`rewards.reward_index` now shares one zero-based sequence across emitted
+transaction rewards and block rewards, in their existing output order. Indices
+no longer depend on the flush window or collide between the two sources. The
+UInt32 schema is unchanged, but affected row values and verification roots
+change. Rebuild affected historical ranges into a separate root before joining
+on `(block_id, reward_index)`. Reversible events can legitimately repeat that key.
+
+See [the diagnosis and regression record](../audit/500-solana-reward-index.md).
+
 ### Startup requires usable EndpointInfo (#467)
 
 Ingestion now stops before output/cursor resolution if endpoint metadata cannot
