@@ -119,6 +119,55 @@ Regression coverage includes:
 - Progress formatting handles i64 extremes without errors, and both sequential
   and exponential timestamp borrowing accept negative anchors.
 
-No new live Firehose request was needed to exercise malformed input; local RPC
-and real mapper fixtures provide deterministic failure cases. Existing live
-qualification records remain separate evidence for prior changes.
+## Built binary and bounded live qualification
+
+The workspace build passed, as did root/build help and Bash, Zsh and Fish
+completion generation. The final binary was copied to `/tmp/fireparq-476-binary`
+while holding the whole-process Cargo lock, so later shared-target builds could
+not replace the executable used for qualification.
+
+A fresh local run on 2026-09-25 requested only Ethereum blocks
+`[26049575,26049577)` from `https://eth.firehose.pinax.network:443` with the
+explicit `PINAX_API_KEY` selector and an unset bearer-token selector. The child
+process used an empty temporary working directory and an environment containing
+only `PATH` and the intended Pinax key. No StreamingFast credential or S3
+destination was supplied. Options included `--partition none --compression zstd
+--flush-blocks 1 --final-blocks-only`, with the baseline's extended EVM output,
+hex encoding and failed-transaction inclusion.
+
+The process exited successfully in 2.55 seconds, producing 26 data parts plus
+the cursor and no `.fireparq-*.tmp` files. DuckDB compared fresh output at
+`/tmp/fireparq-476-live-20260925/mainnet` against the retained reference
+`/tmp/fireparq-469-live-20260925/mainnet`. All 14 SQL schemas and full physical
+Parquet schemas (excluding filenames) match. `EXCEPT ALL` over every column in
+both directions returns zero rows for every table, checking values and duplicate
+multiplicities independently of file names or ordering:
+
+| Table | Rows in each output | Difference either direction |
+|---|---:|---:|
+| access_lists | 72 | 0 |
+| balance_changes | 1,970 | 0 |
+| blocks | 2 | 0 |
+| calls | 4,261 | 0 |
+| code_changes | 3 | 0 |
+| logs | 1,438 | 0 |
+| nonce_changes | 465 | 0 |
+| set_code_authorizations | 2 | 0 |
+| storage_changes | 3,545 | 0 |
+| system_balance_changes | 32 | 0 |
+| system_calls | 8 | 0 |
+| system_storage_changes | 10 | 0 |
+| transactions | 458 | 0 |
+| withdrawals | 32 | 0 |
+| **Total** | **12,298** | **0** |
+
+Both outputs contain exactly block numbers 26049575 and 26049576. Cursor
+semantic fields match in both directions, excluding only the opaque cursor
+value and `updated_at`; no cursor value or credential is recorded here. Raw
+comparison evidence is local at `/tmp/fireparq-476-live-comparison.json`.
+Malformed-input qualification remains deterministic in the local RPC and real
+mapper regressions; the live run validates unchanged successful output.
+
+Actual main `803ffc3` (#582 merged) was then integrated. Its source is identical
+to the already-tested #582 head `bd501f2`; this integration changes ancestry,
+not the qualified runtime code.
