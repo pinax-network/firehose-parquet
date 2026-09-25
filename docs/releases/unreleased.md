@@ -14,6 +14,17 @@ Changes merged since the last release. Fold this file into `docs/releases/vX.Y.Z
 
 ## Breaking changes
 
+### Cosmos preserves event order, unknown results and SDK metadata (#510)
+
+Empty events now produce one row; `attribute_index` preserves repeated-key order.
+Event transaction indices are UInt32, block event transaction hashes are null,
+and absent results produce nullable code/gas/text fields. Unknown results remain
+included; use `code = 0` for confirmed source success. Transactions add exact
+Binary raw bytes, subset decode status, memo, fee, signer and signature metadata;
+blocks count decode failures even for filtered rows. Start a fresh dataset or
+explicitly reconcile schemas. Lost source information requires replay. See the
+[field contract, migration and RPC-backed comparison](../audit/510-cosmos-values.md).
+
 ### All-table ingestion transactions and output authority (#468)
 
 `build` now journals each complete mapper flush and recovers it before opening
