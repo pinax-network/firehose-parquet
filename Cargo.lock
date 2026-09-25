@@ -819,6 +819,7 @@ dependencies = [
  "time",
  "tiny-keccak",
  "tokio",
+ "tokio-util",
  "tonic",
  "tonic-prost",
  "tracing",
@@ -2732,6 +2733,7 @@ dependencies = [
  "bytes",
  "futures-core",
  "futures-sink",
+ "futures-util",
  "pin-project-lite",
  "tokio",
 ]
