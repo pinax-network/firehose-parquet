@@ -670,10 +670,7 @@ mod tests {
             .expect("timestamp column in parquet schema");
         assert_eq!(
             column.logical_type_ref(),
-            Some(&LogicalType::Timestamp {
-                is_adjusted_to_u_t_c: true,
-                unit: ParquetTimeUnit::MILLIS,
-            })
+            Some(&LogicalType::timestamp(true, ParquetTimeUnit::MILLIS))
         );
 
         // The Arrow type is recoverable from the Parquet type alone, without the
