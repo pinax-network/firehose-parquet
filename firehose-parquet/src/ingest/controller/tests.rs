@@ -499,6 +499,62 @@ async fn zero_row_events_commit_and_reopen_without_creating_data_parts() {
 }
 
 #[tokio::test]
+async fn a_borrowed_owner_allows_only_one_protocol_controller_until_drop() {
+    let root = tempfile::tempdir().unwrap();
+    let descriptor = actual_descriptor(root.path());
+    let mirror = Mirror::default();
+    let owner = LocalOwnership::acquire(&[root.path().into()]).unwrap();
+    initialize(root.path(), &owner, &descriptor).await;
+    let controller = open(root.path(), &owner, &mirror, &descriptor)
+        .await
+        .unwrap();
+    assert!(open(root.path(), &owner, &mirror, &descriptor)
+        .await
+        .is_err());
+    drop(controller);
+    let controller = open(root.path(), &owner, &mirror, &descriptor)
+        .await
+        .unwrap();
+    drop(controller);
+    let backend = Arc::new(InMemory::new());
+    let owner = S3Ownership::acquire(backend, "test-ingest", vec!["dataset".into()])
+        .await
+        .unwrap();
+    let states = TransactionStateStore::s3("dataset", &owner).unwrap();
+    states
+        .initialize(AuthorityState::initial(descriptor.clone()).unwrap())
+        .await
+        .unwrap();
+    let controller = TransactionController::open(
+        states,
+        TransactionParts::s3("dataset", &owner, "").unwrap(),
+        &mirror,
+        &descriptor,
+    )
+    .await
+    .unwrap();
+    assert!(TransactionController::open(
+        TransactionStateStore::s3("dataset", &owner).unwrap(),
+        TransactionParts::s3("dataset", &owner, "").unwrap(),
+        &mirror,
+        &descriptor
+    )
+    .await
+    .is_err());
+    drop(controller);
+    let controller = TransactionController::open(
+        TransactionStateStore::s3("dataset", &owner).unwrap(),
+        TransactionParts::s3("dataset", &owner, "").unwrap(),
+        &mirror,
+        &descriptor,
+    )
+    .await
+    .unwrap();
+    drop(controller);
+    owner.release().await.unwrap();
+}
+
+#[tokio::test]
 async fn remote_conditional_publication_and_rollback_obey_same_all_table_boundary() {
     for stage in [Stage::Published(0), Stage::CommittedPersisted] {
         let backend = Arc::new(InMemory::new());

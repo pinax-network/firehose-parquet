@@ -28,6 +28,12 @@ pub enum TransactionParts<'a> {
 }
 
 impl<'a> TransactionParts<'a> {
+    pub fn acquire_session(&self) -> Result<crate::dataset_lock::session::SessionPermit<'a>> {
+        match self {
+            Self::Local { owner, .. } => owner.acquire_transaction_session(),
+            Self::S3 { owner, .. } => owner.acquire_transaction_session(),
+        }
+    }
     pub fn local(root: &Path, owner: &'a LocalOwnership) -> Result<Self> {
         Ok(Self::Local {
             root: fs::canonicalize(root)?,

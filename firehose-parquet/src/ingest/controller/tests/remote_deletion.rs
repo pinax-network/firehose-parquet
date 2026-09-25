@@ -139,6 +139,7 @@ async fn accepted_delete_error_or_cancellation_retains_owner_and_journal_with_on
             assert!(!format!("{error:#}").contains("private-backend-token"));
         } else {
             assert!(result.is_err());
+            drop(result);
         }
         assert!(owner.is_mutation_uncertain());
         assert_eq!(backend.deletes.load(Ordering::SeqCst), 1);

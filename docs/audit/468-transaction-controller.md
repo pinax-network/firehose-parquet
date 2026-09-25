@@ -16,6 +16,16 @@ must verify before Committed; then authority advances, the mirror reconciles,
 temporary names are removed and pending is durably cleared. No independent table
 acknowledgement or mirror-leading-authority transition exists.
 
+A separate fail-fast in-process session permit permits only one transaction
+controller per borrowed local or S3 owner. It lasts for the controller's lifetime
+and is distinct from each short control-record mutex. This prevents two borrowers
+from racing multi-slot decisions (in particular a completion-only state update
+versus creating Writing) while allowing the active controller's own part/control/
+mirror calls. Dropping the controller releases this in-process permit; it never
+releases persistent remote ownership. Local and S3 duplicate-controller/drop
+regressions pass, alongside the source-timestamp follow-up's combined 34 focused
+tests and one exercised subprocess-helper ignore.
+
 Every failed or cancelled commit permanently poisons that controller instance.
 The caller must stop and reopen through recovery under resolved ownership. A
 Writing journal at its predecessor rolls back. A Committed journal at its

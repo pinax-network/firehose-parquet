@@ -27,6 +27,7 @@ pub struct TransactionController<'a, M: MirrorAction> {
     authority: Versioned<AuthorityState>,
     mirror: &'a M,
     failed: bool,
+    _session: crate::dataset_lock::session::SessionPermit<'a>,
 }
 
 pub struct CommittedFlush {
@@ -48,6 +49,7 @@ impl<'a, M: MirrorAction> TransactionController<'a, M> {
         expected: &StreamDescriptor,
     ) -> Result<Self> {
         expected.validate()?;
+        let session = parts.acquire_session()?;
         let snapshot = states.load().await?;
         let mut authority = snapshot.authority.context(
             "protected ingestion authority is absent; eligible-root initialization is required",
@@ -87,6 +89,7 @@ impl<'a, M: MirrorAction> TransactionController<'a, M> {
             authority,
             mirror,
             failed: false,
+            _session: session,
         })
     }
 
