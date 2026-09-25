@@ -1,7 +1,7 @@
 # Issue #525: behavior-preserving ingestion decomposition
 
-Status: implemented and independently reviewed; publication/current-main
-integration are pending. Work began from merged main `9eddfd4` after #515 and
+Status: implemented, independently reviewed and integrated with main `5de4f16`;
+PR review/CI and merge are pending. Work began from merged main `9eddfd4` after #515 and
 #518 were merged. This refactor preserves protected ingestion and owned payloads.
 
 ## What changed since the issue was filed
@@ -218,3 +218,29 @@ On the tree containing current main `e4f990f` and the runtime extraction:
 
 The three removed tests asserted only the deleted identity/empty-return wrappers;
 no mapper, routing-value, durability or actual CLI regression was removed.
+
+### Final current-main integration
+
+After the full run, main `270af16` (#527 shared AWS configuration) was integrated.
+The resolved setup uses `AwsConfig::from(config)`, and all shared `AwsArgs` dispatch
+changes are preserved. The same **188 binary/CLI checks**, build and formatting
+passed. Main `5de4f16` (qualified Tron fields/tables) then integrated cleanly:
+**13 Tron regressions and the complete protected mapper-inventory matrix** passed,
+as did build, formatting and bash/zsh/fish completions. Fresh PR CI covers the
+combined final tree; the full local 1,058-test result above describes its
+`e4f990f` ancestry, not a repeated full run after those disjoint integrations.
+
+The EVM baseline remains valid: these Git source fingerprints are identical at
+pristine `11ac02c` and final main integration, so unrelated AWS/Tron changes did
+not alter its mapper, encoder, state model or pinned dependencies:
+
+| Source | Git object |
+|---|---|
+| `blocks/src/evm/` | `edc7d9a27e3693deeac696cbd4f63c80ee71c9ea` |
+| `writer/properties.rs` | `0841b87d81e01fa3cfa23a193170a1215e815e04` |
+| `writer/protected.rs` | `776d06d85479ac5484a467866a543a7e041cb44b` |
+| `ingest/state.rs` | `1db876263b3f1d52ad1a514ea670e86d95820bcc` |
+| `Cargo.lock` | `e5aa4dd97408321bd39536e5df094e777f5b38d7` |
+
+The runtime remains sequential. The accompanying #516 record is a proposal and
+provides no concurrency implementation or issue-closure claim.
