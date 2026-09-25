@@ -1,8 +1,8 @@
 //! Persistent, non-expiring bucket ownership for cooperating dataset mutators.
 //!
 //! The supplied store must address the bucket root, without a prefix wrapper.
-//! This primitive is deliberately not wired into ingestion yet. Never release
-//! ownership while a data mutation is unresolved. Operator recovery additionally
+//! Mutating commands hold this common guard. Never release ownership while a
+//! data mutation is unresolved. Operator recovery additionally
 //! requires provider-confirmed request quiescence; stopping a process is not
 //! proof that already-sent remote PUTs cannot still complete.
 

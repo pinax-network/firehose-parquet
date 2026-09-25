@@ -44,6 +44,29 @@ impl<'a> TransactionStateStore<'a> {
     pub async fn load(&self) -> Result<JournalSnapshot> {
         let authority = self.read::<AuthorityState>(ControlKey::State).await?;
         let pending = self.read::<PendingTransaction>(ControlKey::Pending).await?;
+        if let Self::Local(store) = self {
+            // Do not infer durable absence merely from a previous failed unlink
+            // being visible in the current process. Re-establish both slots
+            // before their recovery relationship authorizes any new mutation.
+            fn local_version(version: &Version) -> &ControlVersion {
+                match version {
+                    Version::Local(version) => version,
+                    Version::S3(_) => unreachable!("local store returns local version"),
+                }
+            }
+            store.stabilize(
+                ControlKey::State,
+                authority
+                    .as_ref()
+                    .map(|document| local_version(&document.version)),
+            )?;
+            store.stabilize(
+                ControlKey::Pending,
+                pending
+                    .as_ref()
+                    .map(|document| local_version(&document.version)),
+            )?;
+        }
         if let Some(authority) = &authority {
             authority.payload.validate()?;
             if let Some(pending) = &pending {
