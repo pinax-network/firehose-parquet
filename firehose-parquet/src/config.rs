@@ -408,7 +408,8 @@ mod tests {
         assert!(display.contains("compression        zstd"));
         assert!(!display.contains("flush_rows"));
         assert!(!display.contains("flush_blocks"));
-        assert!(display.contains("128 MiB"));
+        assert!(display.contains("32 MiB"));
+        assert!(display.contains("flush_memory_bytes 268435456 B"));
         assert!(display.contains("final_blocks_only  true"));
         // dry_run defaults to false, so it should not appear
         assert!(!display.contains("dry_run"));

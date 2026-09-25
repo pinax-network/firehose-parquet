@@ -14,6 +14,18 @@ Changes merged since the last release. Fold this file into `docs/releases/vX.Y.Z
 
 ## Breaking changes
 
+### Adaptive compressed file targets and independent mapper memory threshold (#515)
+
+`build --flush-bytes` now targets the largest compressed file using feedback from
+committed transactions. Config/build/merge/rollup share a 32 MiB default (Config
+and rollup previously used 128 MiB). Build independently flushes at a positive
+`--flush-memory-bytes` sum of mapper estimates, default 256 MiB; this remains
+active with `--flush-bytes 0`. It is not an RSS cap and one block can overshoot.
+Adaptive windows may use more memory than the old largest-table raw-byte trigger;
+memory, partition and other flushes can prevent reaching the file target.
+External Rust `BlockMapper` implementations must now implement `table_estimates`;
+`largest_table` derives its maximum. See [measurements and limits](../audit/515-adaptive-flush-sizing.md).
+
 ### Cosmos preserves event order, unknown results and SDK metadata (#510)
 
 Empty events now produce one row; `attribute_index` preserves repeated-key order.

@@ -303,6 +303,8 @@ async fn resumed_cli_reports_freshness_actual_buffers_and_saved_cursor() {
         &[
             "firehose_parquet_cursor_last_block_num 101\n",
             "firehose_parquet_mapper_buffer_rows 0\n",
+            "firehose_parquet_mapper_largest_table_estimated_bytes 0\n",
+            "firehose_parquet_mapper_buffer_estimated_bytes 0\n",
             "firehose_parquet_buffer_estimated_bytes 0\n",
             "firehose_parquet_files_written_total{table=\"blocks\"} 1\n",
         ],

@@ -984,9 +984,15 @@ fn update_mapper_buffer_metrics(
     mapper: &mut dyn BlockMapper,
 ) -> MapperBufferEstimate {
     let rows = mapper.total_rows();
-    let estimates = MapperBufferEstimate::from_table_sizes(
-        mapper.table_estimates().into_iter().map(|(_, bytes)| bytes),
-    );
+    // Empty builders can retain offset-array headers/capacity; these gauges
+    // describe populated logical buffers, not allocator reserve.
+    let estimates = if rows == 0 {
+        MapperBufferEstimate::default()
+    } else {
+        MapperBufferEstimate::from_table_sizes(
+            mapper.table_estimates().into_iter().map(|(_, bytes)| bytes),
+        )
+    };
     metrics.record_mapper_buffer(
         rows,
         usize::try_from(estimates.largest_table_bytes).unwrap_or(usize::MAX),
@@ -5033,6 +5039,46 @@ mod tests {
             assert_eq!(writer.buffered_stats().rows, 1);
             std::fs::remove_dir_all(&dir).unwrap();
         }
+    }
+
+    #[test]
+    fn mapper_memory_metrics_reset_after_flush() {
+        let mut mapper = EvmBlockMapper::new(true, false, EncodeBytes::Hex, true);
+        let (_, metrics) = metrics::init();
+        assert_eq!(
+            update_mapper_buffer_metrics(&metrics, &mut mapper),
+            MapperBufferEstimate::default()
+        );
+        let block = firehose_protos::eth::Block {
+            number: 42,
+            ..Default::default()
+        };
+        mapper
+            .map_block(
+                &prost::Message::encode_to_vec(&block),
+                &BlockIdentity {
+                    block_num: 42,
+                    timestamp: 1_700_000_000,
+                    ..Default::default()
+                },
+                None,
+            )
+            .unwrap();
+        let buffered = update_mapper_buffer_metrics(&metrics, &mut mapper);
+        assert!(buffered.total_bytes > 0);
+        assert!(buffered.total_bytes >= buffered.largest_table_bytes);
+        assert_eq!(
+            metrics.mapper_buffer_estimated_bytes.get(),
+            buffered.total_bytes as i64
+        );
+        mapper.flush().unwrap();
+        assert_eq!(
+            update_mapper_buffer_metrics(&metrics, &mut mapper),
+            MapperBufferEstimate::default()
+        );
+        assert_eq!(metrics.mapper_buffer_rows.get(), 0);
+        assert_eq!(metrics.mapper_largest_table_estimated_bytes.get(), 0);
+        assert_eq!(metrics.mapper_buffer_estimated_bytes.get(), 0);
     }
 
     #[test]
