@@ -48,26 +48,26 @@ fn payloads_are_binary_and_indices_are_lists_under_every_identity_encoding() {
         .message
         .as_mut()
         .unwrap();
-    msg.instructions[0].accounts = vec![255, 0, 255, 1];
+    msg.instructions[0].accounts = vec![255, 0, 255, 1].into();
     msg.instructions[0].data = (0..=255).cycle().take(4096).collect();
     msg.instructions
         .push(solana::CompiledInstruction::default());
-    msg.address_table_lookups[0].writable_indexes = vec![255, 0, 255];
+    msg.address_table_lookups[0].writable_indexes = vec![255, 0, 255].into();
     msg.address_table_lookups[0].readonly_indexes.clear();
     let meta = first.meta.as_mut().unwrap();
-    meta.inner_instructions[0].instructions[0].accounts = vec![255, 0];
-    meta.inner_instructions[0].instructions[0].data = vec![0, 255, 128, 0];
-    meta.return_data.as_mut().unwrap().data = vec![0, 255, 128, 0];
+    meta.inner_instructions[0].instructions[0].accounts = vec![255, 0].into();
+    meta.inner_instructions[0].instructions[0].data = vec![0, 255, 128, 0].into();
+    meta.return_data.as_mut().unwrap().data = vec![0, 255, 128, 0].into();
     meta.err = Some(solana::TransactionError {
-        err: vec![255, 0, 128],
+        err: vec![255, 0, 128].into(),
     });
     let mut absent = first.clone();
     absent.meta.as_mut().unwrap().return_data = None;
     absent.meta.as_mut().unwrap().err = Some(solana::TransactionError::default());
     let mut empty = absent.clone();
     empty.meta.as_mut().unwrap().return_data = Some(solana::ReturnData {
-        program_id: vec![3; 32],
-        data: vec![],
+        program_id: vec![3; 32].into(),
+        data: vec![].into(),
     });
     empty.meta.as_mut().unwrap().err = None;
     block.transactions.extend([absent, empty]);
@@ -173,17 +173,18 @@ fn vote_table_uses_identical_payload_types_and_retains_filtering() {
     let msg = transaction.message.as_mut().unwrap();
     msg.versioned = false;
     msg.address_table_lookups.clear();
-    msg.account_keys[1] = VOTE_PROGRAM_ID.to_vec();
+    msg.account_keys[1] = VOTE_PROGRAM_ID.to_vec().into();
     msg.instructions[0].data = bincode::serialize(&VoteInstruction::Vote(Vote {
         slots: vec![98, 99],
         ..Default::default()
     }))
-    .unwrap();
+    .unwrap()
+    .into();
     let meta = block.transactions[0].meta.as_mut().unwrap();
     meta.err = Some(solana::TransactionError {
-        err: vec![255, 128, 0],
+        err: vec![255, 128, 0].into(),
     });
-    meta.return_data.as_mut().unwrap().data = vec![0, 255, 128];
+    meta.return_data.as_mut().unwrap().data = vec![0, 255, 128].into();
     for with_votes in [false, true] {
         for include_failed in [false, true] {
             let mut mapper = SolanaBlockMapper::new(

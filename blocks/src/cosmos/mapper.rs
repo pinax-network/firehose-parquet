@@ -44,7 +44,7 @@ fn cosmos_parent_hash(block: &cosmos::Block) -> &[u8] {
         .header
         .as_ref()
         .and_then(|header| header.last_block_id.as_ref())
-        .map(|block_id| block_id.hash.as_slice())
+        .map(|block_id| block_id.hash.as_ref())
         .unwrap_or(&[])
 }
 
@@ -94,11 +94,11 @@ impl CosmosBlockMapper {
 
         let header = block.header.as_ref();
         let chain_id = header.map_or("", |h| &h.chain_id);
-        let proposer_address = header.map(|h| h.proposer_address.as_slice()).unwrap_or(&[]);
+        let proposer_address = header.map(|h| h.proposer_address.as_ref()).unwrap_or(&[]);
         let last_block_id_hash = cosmos_parent_hash(block);
-        let validators_hash = header.map(|h| h.validators_hash.as_slice()).unwrap_or(&[]);
+        let validators_hash = header.map(|h| h.validators_hash.as_ref()).unwrap_or(&[]);
         let next_validators_hash = header
-            .map(|h| h.next_validators_hash.as_slice())
+            .map(|h| h.next_validators_hash.as_ref())
             .unwrap_or(&[]);
         let block_time = block.time.as_ref().map(|t| t.seconds).unwrap_or(0);
         let num_txs = block.txs.len() as u32;
@@ -136,7 +136,7 @@ impl CosmosBlockMapper {
         // transactions, tx events, and messages
         let mut decode_failures = 0;
         for (tx_idx, raw_tx) in block.txs.iter().enumerate() {
-            let decoded = decode_tx(raw_tx);
+            let decoded = decode_tx(raw_tx.clone());
             if decoded.is_err() {
                 decode_failures += 1;
             }
@@ -211,14 +211,13 @@ impl CosmosBlockMapper {
     }
 }
 
-impl BlockMapper for CosmosBlockMapper {
-    fn map_block(
+impl CosmosBlockMapper {
+    fn map_decoded(
         &mut self,
-        block_bytes: &[u8],
+        block: cosmos::Block,
         identity: &BlockIdentity,
         fork_step: Option<&str>,
     ) -> anyhow::Result<u64> {
-        let block = cosmos::Block::decode(block_bytes)?;
         let tx_count = block.txs.len() as u64;
         let identity = self.blocks.canonical.prepare_with_ids(
             identity,
@@ -227,6 +226,26 @@ impl BlockMapper for CosmosBlockMapper {
         )?;
         self.map_cosmos_block(&block, &identity, fork_step);
         Ok(tx_count)
+    }
+}
+
+impl BlockMapper for CosmosBlockMapper {
+    fn map_block(
+        &mut self,
+        block_bytes: &[u8],
+        identity: &BlockIdentity,
+        fork_step: Option<&str>,
+    ) -> anyhow::Result<u64> {
+        self.map_decoded(cosmos::Block::decode(block_bytes)?, identity, fork_step)
+    }
+
+    fn map_block_bytes(
+        &mut self,
+        block_bytes: prost::bytes::Bytes,
+        identity: &BlockIdentity,
+        fork_step: Option<&str>,
+    ) -> anyhow::Result<u64> {
+        self.map_decoded(cosmos::Block::decode(block_bytes)?, identity, fork_step)
     }
 
     fn flush(&mut self) -> anyhow::Result<HashMap<String, RecordBatch>> {
@@ -266,7 +285,7 @@ impl BlockMapper for CosmosBlockMapper {
             + self.messages.canonical.len()
     }
 
-    fn largest_table(&mut self) -> (&str, usize) {
+    fn table_estimates(&mut self) -> Vec<(&str, usize)> {
         let blocks = self.blocks.canonical.estimated_bytes()
             + est_i64(&self.blocks.height)
             + self.blocks.hash.estimated_bytes()
@@ -314,8 +333,7 @@ impl BlockMapper for CosmosBlockMapper {
             ("messages", messages),
         ]
         .into_iter()
-        .max_by_key(|&(_, s)| s)
-        .unwrap_or(("blocks", 0))
+        .collect()
     }
 
     fn table_names(&self) -> Vec<&str> {
@@ -570,7 +588,7 @@ pub(crate) mod tests {
     pub(crate) fn make_test_block(height: i64) -> cosmos::Block {
         let raw_tx = make_raw_tx("/cosmos.bank.v1beta1.MsgSend", b"\x01\x02\x03");
         cosmos::Block {
-            hash: vec![0xab, 0xcd, 0xef],
+            hash: vec![0xab, 0xcd, 0xef].into(),
             height,
             time: Some(prost_types::Timestamp {
                 seconds: 1700000000,
@@ -585,18 +603,18 @@ pub(crate) mod tests {
                     nanos: 0,
                 }),
                 last_block_id: Some(cosmos::BlockId {
-                    hash: vec![0x11, 0x22],
+                    hash: vec![0x11, 0x22].into(),
                     part_set_header: None,
                 }),
-                last_commit_hash: vec![],
-                data_hash: vec![],
-                validators_hash: vec![0xaa, 0xbb],
-                next_validators_hash: vec![0xcc, 0xdd],
-                consensus_hash: vec![],
-                app_hash: vec![],
-                last_results_hash: vec![],
-                evidence_hash: vec![],
-                proposer_address: vec![0xde, 0xad],
+                last_commit_hash: vec![].into(),
+                data_hash: vec![].into(),
+                validators_hash: vec![0xaa, 0xbb].into(),
+                next_validators_hash: vec![0xcc, 0xdd].into(),
+                consensus_hash: vec![].into(),
+                app_hash: vec![].into(),
+                last_results_hash: vec![].into(),
+                evidence_hash: vec![].into(),
+                proposer_address: vec![0xde, 0xad].into(),
             }),
             misbehavior: vec![],
             events: vec![cosmos::Event {
@@ -612,10 +630,10 @@ pub(crate) mod tests {
                     },
                 ],
             }],
-            txs: vec![raw_tx],
+            txs: vec![raw_tx.into()],
             tx_results: vec![cosmos::TxResults {
                 code: 0,
-                data: vec![],
+                data: vec![].into(),
                 log: "success".to_string(),
                 info: String::new(),
                 gas_wanted: 200000,
@@ -654,7 +672,7 @@ pub(crate) mod tests {
     #[test]
     fn test_empty_block() {
         let block = cosmos::Block {
-            hash: vec![0x00],
+            hash: vec![0x00].into(),
             height: 1,
             time: Some(prost_types::Timestamp {
                 seconds: 1700000000,

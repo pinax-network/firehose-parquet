@@ -124,6 +124,8 @@ pub struct PipelineMetrics {
     pub mapper_buffer_rows: Gauge,
     /// Estimated Arrow bytes in the largest mapper table, used by flush limits.
     pub mapper_largest_table_estimated_bytes: Gauge,
+    /// Summed logical mapper estimates used by the independent memory trigger.
+    pub mapper_buffer_estimated_bytes: Gauge,
     /// Raw protobuf blocks awaiting a genesis timestamp anchor.
     pub bootstrap_buffered_blocks: Gauge,
     pub bootstrap_buffered_bytes: Gauge,
@@ -234,6 +236,7 @@ impl PipelineMetrics {
             buffer_rows: Family::default(),
             mapper_buffer_rows: Gauge::default(),
             mapper_largest_table_estimated_bytes: Gauge::default(),
+            mapper_buffer_estimated_bytes: Gauge::default(),
             bootstrap_buffered_blocks: Gauge::default(),
             bootstrap_buffered_bytes: Gauge::default(),
 
@@ -325,6 +328,11 @@ impl PipelineMetrics {
                 "firehose_parquet_mapper_buffer_rows",
                 "Current mapper-owned rows summed across all tables",
                 &metrics.mapper_buffer_rows,
+            ),
+            (
+                "firehose_parquet_mapper_buffer_estimated_bytes",
+                "Summed logical mapper estimates; excludes decoder, encoder and allocator overhead",
+                &metrics.mapper_buffer_estimated_bytes,
             ),
             (
                 "firehose_parquet_mapper_largest_table_estimated_bytes",

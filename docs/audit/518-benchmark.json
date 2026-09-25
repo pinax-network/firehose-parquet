@@ -1,0 +1,782 @@
+{
+  "platform": "macOS-26.5.1-arm64-arm-64bit-Mach-O",
+  "samples": 5,
+  "binary_sha256": {
+    "before": "6cdb88d0cdf42fa02ac918dcedb83fe8386b70b4ba4efe76bf4d8e062636c6f9",
+    "after": "67ded42cd1c5b313b9062ff3875ef0e65bddff4bbaff6ab16dbd3de635266970"
+  },
+  "cases": [
+    {
+      "chain": "evm",
+      "source_name": "block.pb",
+      "input_bytes": 2094485,
+      "input_sha256": "dad74257d32c66a056404add2a5f3360c288faedf0a026e5698394cd9d231b2a",
+      "output": {
+        "access_lists": {
+          "rows": 45,
+          "schema": "Schema { fields: [Field { name: \"block_num\", data_type: UInt64 }, Field { name: \"block_id\", data_type: Binary }, Field { name: \"parent_num\", data_type: UInt64 }, Field { name: \"parent_id\", data_type: Binary }, Field { name: \"lib_num\", data_type: UInt64 }, Field { name: \"timestamp\", data_type: Timestamp(Millisecond, Some(\"UTC\")) }, Field { name: \"date\", data_type: Date32 }, Field { name: \"block_number\", data_type: UInt64 }, Field { name: \"tx_hash\", data_type: Binary }, Field { name: \"tx_index\", data_type: UInt32 }, Field { name: \"access_index\", data_type: UInt32 }, Field { name: \"address\", data_type: Binary }, Field { name: \"storage_keys\", data_type: List(Field { data_type: Binary, nullable: true }) }], metadata: {} }",
+          "sha256": "cdb062013cd7f707982e8388d2b95360fbbf0c8505b306fc679289d19c503eb6"
+        },
+        "account_creations": {
+          "rows": 0,
+          "schema": "Schema { fields: [Field { name: \"block_num\", data_type: UInt64 }, Field { name: \"block_id\", data_type: Binary }, Field { name: \"parent_num\", data_type: UInt64 }, Field { name: \"parent_id\", data_type: Binary }, Field { name: \"lib_num\", data_type: UInt64 }, Field { name: \"timestamp\", data_type: Timestamp(Millisecond, Some(\"UTC\")) }, Field { name: \"date\", data_type: Date32 }, Field { name: \"block_number\", data_type: UInt64 }, Field { name: \"tx_hash\", data_type: Binary }, Field { name: \"tx_index\", data_type: UInt32 }, Field { name: \"call_index\", data_type: UInt32 }, Field { name: \"ordinal\", data_type: UInt64 }, Field { name: \"account\", data_type: Binary }, Field { name: \"state_reverted\", data_type: Boolean }, Field { name: \"persisted\", data_type: Boolean }], metadata: {} }",
+          "sha256": "1cab8784fc96ba002a182bb5e67d539594999051094eb3d930d19e440213ab31"
+        },
+        "balance_changes": {
+          "rows": 737,
+          "schema": "Schema { fields: [Field { name: \"block_num\", data_type: UInt64 }, Field { name: \"block_id\", data_type: Binary }, Field { name: \"parent_num\", data_type: UInt64 }, Field { name: \"parent_id\", data_type: Binary }, Field { name: \"lib_num\", data_type: UInt64 }, Field { name: \"timestamp\", data_type: Timestamp(Millisecond, Some(\"UTC\")) }, Field { name: \"date\", data_type: Date32 }, Field { name: \"block_number\", data_type: UInt64 }, Field { name: \"tx_hash\", data_type: Binary }, Field { name: \"tx_index\", data_type: UInt32 }, Field { name: \"call_index\", data_type: UInt32 }, Field { name: \"ordinal\", data_type: UInt64 }, Field { name: \"address\", data_type: Binary }, Field { name: \"old_value\", data_type: Utf8 }, Field { name: \"new_value\", data_type: Utf8 }, Field { name: \"reason\", data_type: Dictionary(Int32, Utf8) }, Field { name: \"state_reverted\", data_type: Boolean }, Field { name: \"persisted\", data_type: Boolean }], metadata: {} }",
+          "sha256": "a13a8f5797a0c7ab024fd682aad85971ae654c9af03738734ada4b5b1d9a45f2"
+        },
+        "blocks": {
+          "rows": 1,
+          "schema": "Schema { fields: [Field { name: \"block_num\", data_type: UInt64 }, Field { name: \"block_id\", data_type: Binary }, Field { name: \"parent_num\", data_type: UInt64 }, Field { name: \"parent_id\", data_type: Binary }, Field { name: \"lib_num\", data_type: UInt64 }, Field { name: \"timestamp\", data_type: Timestamp(Millisecond, Some(\"UTC\")) }, Field { name: \"date\", data_type: Date32 }, Field { name: \"number\", data_type: UInt64 }, Field { name: \"hash\", data_type: Binary }, Field { name: \"parent_hash\", data_type: Binary }, Field { name: \"gas_used\", data_type: UInt64 }, Field { name: \"gas_limit\", data_type: UInt64 }, Field { name: \"base_fee_per_gas\", data_type: Utf8, nullable: true }, Field { name: \"coinbase\", data_type: Binary }, Field { name: \"size\", data_type: UInt64 }, Field { name: \"nonce\", data_type: UInt64 }, Field { name: \"state_root\", data_type: Binary }, Field { name: \"transactions_root\", data_type: Binary }, Field { name: \"receipt_root\", data_type: Binary }, Field { name: \"difficulty\", data_type: Utf8, nullable: true }, Field { name: \"mix_hash\", data_type: Binary }, Field { name: \"extra_data\", data_type: Binary }, Field { name: \"num_transactions\", data_type: UInt32 }, Field { name: \"detail_level\", data_type: Dictionary(Int32, Utf8) }, Field { name: \"uncle_hash\", data_type: Binary }, Field { name: \"logs_bloom\", data_type: Binary }, Field { name: \"withdrawals_root\", data_type: Binary, nullable: true }, Field { name: \"blob_gas_used\", data_type: UInt64, nullable: true }, Field { name: \"excess_blob_gas\", data_type: UInt64, nullable: true }, Field { name: \"parent_beacon_root\", data_type: Binary, nullable: true }, Field { name: \"requests_hash\", data_type: Binary, nullable: true }], metadata: {} }",
+          "sha256": "f8406e03c4a2ce02e9f02f14134587ff5d2fdf108151fa6c8959938eb046d4fe"
+        },
+        "calls": {
+          "rows": 1778,
+          "schema": "Schema { fields: [Field { name: \"block_num\", data_type: UInt64 }, Field { name: \"block_id\", data_type: Binary }, Field { name: \"parent_num\", data_type: UInt64 }, Field { name: \"parent_id\", data_type: Binary }, Field { name: \"lib_num\", data_type: UInt64 }, Field { name: \"timestamp\", data_type: Timestamp(Millisecond, Some(\"UTC\")) }, Field { name: \"date\", data_type: Date32 }, Field { name: \"block_number\", data_type: UInt64 }, Field { name: \"tx_hash\", data_type: Binary }, Field { name: \"tx_index\", data_type: UInt32 }, Field { name: \"call_index\", data_type: UInt32 }, Field { name: \"parent_index\", data_type: UInt32 }, Field { name: \"depth\", data_type: UInt32 }, Field { name: \"call_type\", data_type: Dictionary(Int32, Utf8) }, Field { name: \"caller\", data_type: Binary }, Field { name: \"address\", data_type: Binary }, Field { name: \"value\", data_type: Utf8 }, Field { name: \"gas_limit\", data_type: UInt64 }, Field { name: \"gas_consumed\", data_type: UInt64 }, Field { name: \"input\", data_type: Binary }, Field { name: \"output\", data_type: Binary }, Field { name: \"status_failed\", data_type: Boolean }, Field { name: \"status_reverted\", data_type: Boolean }, Field { name: \"state_reverted\", data_type: Boolean }, Field { name: \"executed_code\", data_type: Boolean }, Field { name: \"suicide\", data_type: Boolean }, Field { name: \"failure_reason\", data_type: Utf8, nullable: true }, Field { name: \"address_delegates_to\", data_type: Binary, nullable: true }, Field { name: \"begin_ordinal\", data_type: UInt64 }, Field { name: \"end_ordinal\", data_type: UInt64 }], metadata: {} }",
+          "sha256": "4503184e0f6e81812cef6b37293554b653f11e5f846419883f9a259f15e6a3de"
+        },
+        "code_changes": {
+          "rows": 0,
+          "schema": "Schema { fields: [Field { name: \"block_num\", data_type: UInt64 }, Field { name: \"block_id\", data_type: Binary }, Field { name: \"parent_num\", data_type: UInt64 }, Field { name: \"parent_id\", data_type: Binary }, Field { name: \"lib_num\", data_type: UInt64 }, Field { name: \"timestamp\", data_type: Timestamp(Millisecond, Some(\"UTC\")) }, Field { name: \"date\", data_type: Date32 }, Field { name: \"block_number\", data_type: UInt64 }, Field { name: \"tx_hash\", data_type: Binary }, Field { name: \"tx_index\", data_type: UInt32 }, Field { name: \"call_index\", data_type: UInt32 }, Field { name: \"ordinal\", data_type: UInt64 }, Field { name: \"address\", data_type: Binary }, Field { name: \"old_hash\", data_type: Binary }, Field { name: \"new_hash\", data_type: Binary }, Field { name: \"old_code\", data_type: Binary }, Field { name: \"new_code\", data_type: Binary }, Field { name: \"state_reverted\", data_type: Boolean }, Field { name: \"persisted\", data_type: Boolean }], metadata: {} }",
+          "sha256": "aa6241ba5ed81cf11530784fe1f03510f86d08915d6695d2e1e2154c096b853b"
+        },
+        "gas_changes": {
+          "rows": 0,
+          "schema": "Schema { fields: [Field { name: \"block_num\", data_type: UInt64 }, Field { name: \"block_id\", data_type: Binary }, Field { name: \"parent_num\", data_type: UInt64 }, Field { name: \"parent_id\", data_type: Binary }, Field { name: \"lib_num\", data_type: UInt64 }, Field { name: \"timestamp\", data_type: Timestamp(Millisecond, Some(\"UTC\")) }, Field { name: \"date\", data_type: Date32 }, Field { name: \"block_number\", data_type: UInt64 }, Field { name: \"tx_hash\", data_type: Binary }, Field { name: \"tx_index\", data_type: UInt32 }, Field { name: \"call_index\", data_type: UInt32 }, Field { name: \"ordinal\", data_type: UInt64 }, Field { name: \"old_value\", data_type: UInt64 }, Field { name: \"new_value\", data_type: UInt64 }, Field { name: \"reason\", data_type: Dictionary(Int32, Utf8) }, Field { name: \"state_reverted\", data_type: Boolean }], metadata: {} }",
+          "sha256": "8e77b440d5e0509b922c807f269781b3c03edfcce87083c987094f6fa3a1a4c2"
+        },
+        "logs": {
+          "rows": 557,
+          "schema": "Schema { fields: [Field { name: \"block_num\", data_type: UInt64 }, Field { name: \"block_id\", data_type: Binary }, Field { name: \"parent_num\", data_type: UInt64 }, Field { name: \"parent_id\", data_type: Binary }, Field { name: \"lib_num\", data_type: UInt64 }, Field { name: \"timestamp\", data_type: Timestamp(Millisecond, Some(\"UTC\")) }, Field { name: \"date\", data_type: Date32 }, Field { name: \"block_number\", data_type: UInt64 }, Field { name: \"tx_hash\", data_type: Binary }, Field { name: \"tx_index\", data_type: UInt32 }, Field { name: \"log_index\", data_type: UInt32 }, Field { name: \"block_index\", data_type: UInt32 }, Field { name: \"address\", data_type: Binary }, Field { name: \"topic0\", data_type: Binary, nullable: true }, Field { name: \"topic1\", data_type: Binary, nullable: true }, Field { name: \"topic2\", data_type: Binary, nullable: true }, Field { name: \"topic3\", data_type: Binary, nullable: true }, Field { name: \"data\", data_type: Binary, nullable: true }, Field { name: \"ordinal\", data_type: UInt64 }], metadata: {} }",
+          "sha256": "4eac763130f68596ce90242056f27a2c1d29578af555f58b132733efa1dafdd2"
+        },
+        "nonce_changes": {
+          "rows": 182,
+          "schema": "Schema { fields: [Field { name: \"block_num\", data_type: UInt64 }, Field { name: \"block_id\", data_type: Binary }, Field { name: \"parent_num\", data_type: UInt64 }, Field { name: \"parent_id\", data_type: Binary }, Field { name: \"lib_num\", data_type: UInt64 }, Field { name: \"timestamp\", data_type: Timestamp(Millisecond, Some(\"UTC\")) }, Field { name: \"date\", data_type: Date32 }, Field { name: \"block_number\", data_type: UInt64 }, Field { name: \"tx_hash\", data_type: Binary }, Field { name: \"tx_index\", data_type: UInt32 }, Field { name: \"call_index\", data_type: UInt32 }, Field { name: \"ordinal\", data_type: UInt64 }, Field { name: \"address\", data_type: Binary }, Field { name: \"old_value\", data_type: UInt64 }, Field { name: \"new_value\", data_type: UInt64 }, Field { name: \"state_reverted\", data_type: Boolean }, Field { name: \"persisted\", data_type: Boolean }], metadata: {} }",
+          "sha256": "a8e2fd1f634b92b473e2d41723666b339d782b814f160489124d8d9a613c6069"
+        },
+        "set_code_authorizations": {
+          "rows": 0,
+          "schema": "Schema { fields: [Field { name: \"block_num\", data_type: UInt64 }, Field { name: \"block_id\", data_type: Binary }, Field { name: \"parent_num\", data_type: UInt64 }, Field { name: \"parent_id\", data_type: Binary }, Field { name: \"lib_num\", data_type: UInt64 }, Field { name: \"timestamp\", data_type: Timestamp(Millisecond, Some(\"UTC\")) }, Field { name: \"date\", data_type: Date32 }, Field { name: \"block_number\", data_type: UInt64 }, Field { name: \"tx_hash\", data_type: Binary }, Field { name: \"tx_index\", data_type: UInt32 }, Field { name: \"authorization_index\", data_type: UInt32 }, Field { name: \"chain_id\", data_type: Utf8 }, Field { name: \"address\", data_type: Binary, nullable: true }, Field { name: \"nonce\", data_type: UInt64 }, Field { name: \"v\", data_type: UInt32 }, Field { name: \"r\", data_type: Binary }, Field { name: \"s\", data_type: Binary }, Field { name: \"authority\", data_type: Binary, nullable: true }, Field { name: \"discarded\", data_type: Boolean }], metadata: {} }",
+          "sha256": "f48a6e251825bd648dc11811ca1acb6eaa820ba9a0c72a675ec9f4d00eb655aa"
+        },
+        "storage_changes": {
+          "rows": 1526,
+          "schema": "Schema { fields: [Field { name: \"block_num\", data_type: UInt64 }, Field { name: \"block_id\", data_type: Binary }, Field { name: \"parent_num\", data_type: UInt64 }, Field { name: \"parent_id\", data_type: Binary }, Field { name: \"lib_num\", data_type: UInt64 }, Field { name: \"timestamp\", data_type: Timestamp(Millisecond, Some(\"UTC\")) }, Field { name: \"date\", data_type: Date32 }, Field { name: \"block_number\", data_type: UInt64 }, Field { name: \"tx_hash\", data_type: Binary }, Field { name: \"tx_index\", data_type: UInt32 }, Field { name: \"call_index\", data_type: UInt32 }, Field { name: \"ordinal\", data_type: UInt64 }, Field { name: \"address\", data_type: Binary }, Field { name: \"key\", data_type: Binary }, Field { name: \"old_value\", data_type: Binary }, Field { name: \"new_value\", data_type: Binary }, Field { name: \"state_reverted\", data_type: Boolean }, Field { name: \"persisted\", data_type: Boolean }], metadata: {} }",
+          "sha256": "cf24fb6f2e48976327ce11b74f00e5fb9d561c1af740a826900da23139e0df13"
+        },
+        "system_account_creations": {
+          "rows": 0,
+          "schema": "Schema { fields: [Field { name: \"block_num\", data_type: UInt64 }, Field { name: \"block_id\", data_type: Binary }, Field { name: \"parent_num\", data_type: UInt64 }, Field { name: \"parent_id\", data_type: Binary }, Field { name: \"lib_num\", data_type: UInt64 }, Field { name: \"timestamp\", data_type: Timestamp(Millisecond, Some(\"UTC\")) }, Field { name: \"date\", data_type: Date32 }, Field { name: \"block_number\", data_type: UInt64 }, Field { name: \"call_index\", data_type: UInt32, nullable: true }, Field { name: \"ordinal\", data_type: UInt64 }, Field { name: \"account\", data_type: Binary }], metadata: {} }",
+          "sha256": "b651f1207fbb080121d0dcaa082cd9b89980fb8c14c730b45a22b2f98e25ec96"
+        },
+        "system_balance_changes": {
+          "rows": 16,
+          "schema": "Schema { fields: [Field { name: \"block_num\", data_type: UInt64 }, Field { name: \"block_id\", data_type: Binary }, Field { name: \"parent_num\", data_type: UInt64 }, Field { name: \"parent_id\", data_type: Binary }, Field { name: \"lib_num\", data_type: UInt64 }, Field { name: \"timestamp\", data_type: Timestamp(Millisecond, Some(\"UTC\")) }, Field { name: \"date\", data_type: Date32 }, Field { name: \"block_number\", data_type: UInt64 }, Field { name: \"call_index\", data_type: UInt32, nullable: true }, Field { name: \"ordinal\", data_type: UInt64 }, Field { name: \"address\", data_type: Binary }, Field { name: \"old_value\", data_type: Utf8 }, Field { name: \"new_value\", data_type: Utf8 }, Field { name: \"reason\", data_type: Dictionary(Int32, Utf8) }], metadata: {} }",
+          "sha256": "ffb9d83815de74e3c46621b4b388a847733aaf2522d5edc3e46a13652c4843cc"
+        },
+        "system_calls": {
+          "rows": 4,
+          "schema": "Schema { fields: [Field { name: \"block_num\", data_type: UInt64 }, Field { name: \"block_id\", data_type: Binary }, Field { name: \"parent_num\", data_type: UInt64 }, Field { name: \"parent_id\", data_type: Binary }, Field { name: \"lib_num\", data_type: UInt64 }, Field { name: \"timestamp\", data_type: Timestamp(Millisecond, Some(\"UTC\")) }, Field { name: \"date\", data_type: Date32 }, Field { name: \"block_number\", data_type: UInt64 }, Field { name: \"call_index\", data_type: UInt32 }, Field { name: \"parent_index\", data_type: UInt32 }, Field { name: \"depth\", data_type: UInt32 }, Field { name: \"call_type\", data_type: Dictionary(Int32, Utf8) }, Field { name: \"caller\", data_type: Binary }, Field { name: \"address\", data_type: Binary }, Field { name: \"value\", data_type: Utf8 }, Field { name: \"gas_limit\", data_type: UInt64 }, Field { name: \"gas_consumed\", data_type: UInt64 }, Field { name: \"input\", data_type: Binary }, Field { name: \"output\", data_type: Binary }, Field { name: \"status_failed\", data_type: Boolean }, Field { name: \"status_reverted\", data_type: Boolean }, Field { name: \"state_reverted\", data_type: Boolean }, Field { name: \"executed_code\", data_type: Boolean }, Field { name: \"suicide\", data_type: Boolean }, Field { name: \"failure_reason\", data_type: Utf8, nullable: true }, Field { name: \"address_delegates_to\", data_type: Binary, nullable: true }, Field { name: \"begin_ordinal\", data_type: UInt64 }, Field { name: \"end_ordinal\", data_type: UInt64 }], metadata: {} }",
+          "sha256": "f36d061ae55424fa690040908f7479942919baf13857474ad514cd34d1fa27b0"
+        },
+        "system_code_changes": {
+          "rows": 0,
+          "schema": "Schema { fields: [Field { name: \"block_num\", data_type: UInt64 }, Field { name: \"block_id\", data_type: Binary }, Field { name: \"parent_num\", data_type: UInt64 }, Field { name: \"parent_id\", data_type: Binary }, Field { name: \"lib_num\", data_type: UInt64 }, Field { name: \"timestamp\", data_type: Timestamp(Millisecond, Some(\"UTC\")) }, Field { name: \"date\", data_type: Date32 }, Field { name: \"block_number\", data_type: UInt64 }, Field { name: \"call_index\", data_type: UInt32, nullable: true }, Field { name: \"ordinal\", data_type: UInt64 }, Field { name: \"address\", data_type: Binary }, Field { name: \"old_hash\", data_type: Binary }, Field { name: \"new_hash\", data_type: Binary }, Field { name: \"old_code\", data_type: Binary }, Field { name: \"new_code\", data_type: Binary }], metadata: {} }",
+          "sha256": "5848f0c585b1a402c4a089f64e1c48500995babf562adf13c4a7551a577649c4"
+        },
+        "system_gas_changes": {
+          "rows": 0,
+          "schema": "Schema { fields: [Field { name: \"block_num\", data_type: UInt64 }, Field { name: \"block_id\", data_type: Binary }, Field { name: \"parent_num\", data_type: UInt64 }, Field { name: \"parent_id\", data_type: Binary }, Field { name: \"lib_num\", data_type: UInt64 }, Field { name: \"timestamp\", data_type: Timestamp(Millisecond, Some(\"UTC\")) }, Field { name: \"date\", data_type: Date32 }, Field { name: \"block_number\", data_type: UInt64 }, Field { name: \"call_index\", data_type: UInt32, nullable: true }, Field { name: \"ordinal\", data_type: UInt64 }, Field { name: \"old_value\", data_type: UInt64 }, Field { name: \"new_value\", data_type: UInt64 }, Field { name: \"reason\", data_type: Dictionary(Int32, Utf8) }], metadata: {} }",
+          "sha256": "c9238882e264283003603dac6f0415168d66292b7407f05e59c2bceb4a519731"
+        },
+        "system_nonce_changes": {
+          "rows": 0,
+          "schema": "Schema { fields: [Field { name: \"block_num\", data_type: UInt64 }, Field { name: \"block_id\", data_type: Binary }, Field { name: \"parent_num\", data_type: UInt64 }, Field { name: \"parent_id\", data_type: Binary }, Field { name: \"lib_num\", data_type: UInt64 }, Field { name: \"timestamp\", data_type: Timestamp(Millisecond, Some(\"UTC\")) }, Field { name: \"date\", data_type: Date32 }, Field { name: \"block_number\", data_type: UInt64 }, Field { name: \"call_index\", data_type: UInt32, nullable: true }, Field { name: \"ordinal\", data_type: UInt64 }, Field { name: \"address\", data_type: Binary }, Field { name: \"old_value\", data_type: UInt64 }, Field { name: \"new_value\", data_type: UInt64 }], metadata: {} }",
+          "sha256": "844cd4b152482eb08ad8189b46e4d4421b98a91042bb23b5465168a22161d7b2"
+        },
+        "system_storage_changes": {
+          "rows": 5,
+          "schema": "Schema { fields: [Field { name: \"block_num\", data_type: UInt64 }, Field { name: \"block_id\", data_type: Binary }, Field { name: \"parent_num\", data_type: UInt64 }, Field { name: \"parent_id\", data_type: Binary }, Field { name: \"lib_num\", data_type: UInt64 }, Field { name: \"timestamp\", data_type: Timestamp(Millisecond, Some(\"UTC\")) }, Field { name: \"date\", data_type: Date32 }, Field { name: \"block_number\", data_type: UInt64 }, Field { name: \"call_index\", data_type: UInt32, nullable: true }, Field { name: \"ordinal\", data_type: UInt64 }, Field { name: \"address\", data_type: Binary }, Field { name: \"key\", data_type: Binary }, Field { name: \"old_value\", data_type: Binary }, Field { name: \"new_value\", data_type: Binary }], metadata: {} }",
+          "sha256": "7911c4122ccfa0799015d5614d177d4b1469d51e1d99f20be652fd25c65fc86f"
+        },
+        "transactions": {
+          "rows": 182,
+          "schema": "Schema { fields: [Field { name: \"block_num\", data_type: UInt64 }, Field { name: \"block_id\", data_type: Binary }, Field { name: \"parent_num\", data_type: UInt64 }, Field { name: \"parent_id\", data_type: Binary }, Field { name: \"lib_num\", data_type: UInt64 }, Field { name: \"timestamp\", data_type: Timestamp(Millisecond, Some(\"UTC\")) }, Field { name: \"date\", data_type: Date32 }, Field { name: \"block_number\", data_type: UInt64 }, Field { name: \"index\", data_type: UInt32 }, Field { name: \"hash\", data_type: Binary }, Field { name: \"from\", data_type: Binary }, Field { name: \"to\", data_type: Binary }, Field { name: \"value\", data_type: Utf8 }, Field { name: \"gas_limit\", data_type: UInt64 }, Field { name: \"gas_used\", data_type: UInt64 }, Field { name: \"gas_price\", data_type: Utf8, nullable: true }, Field { name: \"type\", data_type: Dictionary(Int32, Utf8) }, Field { name: \"status\", data_type: Dictionary(Int32, Utf8) }, Field { name: \"nonce\", data_type: UInt64 }, Field { name: \"input\", data_type: Binary }, Field { name: \"max_fee_per_gas\", data_type: Utf8, nullable: true }, Field { name: \"max_priority_fee_per_gas\", data_type: Utf8, nullable: true }, Field { name: \"cumulative_gas_used\", data_type: UInt64, nullable: true }, Field { name: \"v\", data_type: Binary }, Field { name: \"r\", data_type: Binary }, Field { name: \"s\", data_type: Binary }, Field { name: \"return_data\", data_type: Binary }, Field { name: \"logs_bloom\", data_type: Binary, nullable: true }, Field { name: \"blob_gas\", data_type: UInt64, nullable: true }, Field { name: \"blob_gas_fee_cap\", data_type: Utf8, nullable: true }, Field { name: \"blob_hashes\", data_type: List(Field { data_type: Binary, nullable: true }) }, Field { name: \"blob_gas_used\", data_type: UInt64, nullable: true }, Field { name: \"blob_gas_price\", data_type: Utf8, nullable: true }, Field { name: \"begin_ordinal\", data_type: UInt64 }, Field { name: \"end_ordinal\", data_type: UInt64 }], metadata: {} }",
+          "sha256": "7ec4a2efb8361d74aaa05278a489848b31e38ab51cff4fea4453b30e23bc2d5a"
+        },
+        "withdrawals": {
+          "rows": 16,
+          "schema": "Schema { fields: [Field { name: \"block_num\", data_type: UInt64 }, Field { name: \"block_id\", data_type: Binary }, Field { name: \"parent_num\", data_type: UInt64 }, Field { name: \"parent_id\", data_type: Binary }, Field { name: \"lib_num\", data_type: UInt64 }, Field { name: \"timestamp\", data_type: Timestamp(Millisecond, Some(\"UTC\")) }, Field { name: \"date\", data_type: Date32 }, Field { name: \"block_number\", data_type: UInt64 }, Field { name: \"index\", data_type: UInt64 }, Field { name: \"validator_index\", data_type: UInt64 }, Field { name: \"address\", data_type: Binary }, Field { name: \"amount_gwei\", data_type: UInt64 }], metadata: {} }",
+          "sha256": "b581d564b8f85e55cd47ff1da025c521219bfc61eff37e8a45509ebb1f7ef73c"
+        }
+      },
+      "samples": {
+        "before": [
+          {
+            "decode_seconds": 0.408249167,
+            "map_flush_seconds": 0.681908167
+          },
+          {
+            "decode_seconds": 0.402083125,
+            "map_flush_seconds": 0.676484625
+          },
+          {
+            "decode_seconds": 0.395663459,
+            "map_flush_seconds": 0.669892625
+          },
+          {
+            "decode_seconds": 0.400448584,
+            "map_flush_seconds": 0.67720075
+          },
+          {
+            "decode_seconds": 0.398709958,
+            "map_flush_seconds": 0.671978334
+          }
+        ],
+        "after_owned": [
+          {
+            "decode_seconds": 0.2742405,
+            "map_flush_seconds": 0.386575083
+          },
+          {
+            "decode_seconds": 0.270415208,
+            "map_flush_seconds": 0.384562083
+          },
+          {
+            "decode_seconds": 0.270014666,
+            "map_flush_seconds": 0.379007834
+          },
+          {
+            "decode_seconds": 0.265126041,
+            "map_flush_seconds": 0.387582375
+          },
+          {
+            "decode_seconds": 0.266631875,
+            "map_flush_seconds": 0.377585666
+          }
+        ],
+        "after_borrowed": [
+          {
+            "decode_seconds": 0.401305917,
+            "map_flush_seconds": 0.571548459
+          },
+          {
+            "decode_seconds": 0.407448708,
+            "map_flush_seconds": 0.525556291
+          },
+          {
+            "decode_seconds": 0.404582542,
+            "map_flush_seconds": 0.53457325
+          },
+          {
+            "decode_seconds": 0.402039666,
+            "map_flush_seconds": 0.526205833
+          },
+          {
+            "decode_seconds": 0.402214083,
+            "map_flush_seconds": 0.517770833
+          }
+        ]
+      },
+      "medians": {
+        "before": {
+          "decode_seconds": 0.400448584,
+          "map_flush_seconds": 0.676484625
+        },
+        "after_owned": {
+          "decode_seconds": 0.270014666,
+          "map_flush_seconds": 0.384562083
+        },
+        "after_borrowed": {
+          "decode_seconds": 0.402214083,
+          "map_flush_seconds": 0.526205833
+        }
+      },
+      "iterations": 200
+    },
+    {
+      "chain": "solana",
+      "source_name": "300000000.pb",
+      "input_bytes": 2946958,
+      "input_sha256": "c68946ce74e66969b023d6397cff61f6cb8bd6508ff89148fb29130ea6a30dae",
+      "output": {
+        "account_lookups": {
+          "rows": 268,
+          "schema": "Schema { fields: [Field { name: \"block_num\", data_type: UInt64 }, Field { name: \"block_id\", data_type: Binary }, Field { name: \"parent_num\", data_type: UInt64 }, Field { name: \"parent_id\", data_type: Binary }, Field { name: \"lib_num\", data_type: UInt64 }, Field { name: \"timestamp\", data_type: Timestamp(Millisecond, Some(\"UTC\")), nullable: true }, Field { name: \"date\", data_type: Date32, nullable: true }, Field { name: \"slot\", data_type: UInt64 }, Field { name: \"transaction_index\", data_type: UInt32 }, Field { name: \"lookup_index\", data_type: UInt32 }, Field { name: \"account_key\", data_type: Binary }, Field { name: \"writable_indexes\", data_type: List(Field { data_type: UInt8 }) }, Field { name: \"readonly_indexes\", data_type: List(Field { data_type: UInt8 }) }], metadata: {} }",
+          "sha256": "b3de472351ca1411f38deb9ebb7862e13fd0ff0b4d648e6868c59e19b0562fd8"
+        },
+        "blocks": {
+          "rows": 1,
+          "schema": "Schema { fields: [Field { name: \"block_num\", data_type: UInt64 }, Field { name: \"block_id\", data_type: Binary }, Field { name: \"parent_num\", data_type: UInt64 }, Field { name: \"parent_id\", data_type: Binary }, Field { name: \"lib_num\", data_type: UInt64 }, Field { name: \"timestamp\", data_type: Timestamp(Millisecond, Some(\"UTC\")), nullable: true }, Field { name: \"date\", data_type: Date32, nullable: true }, Field { name: \"slot\", data_type: UInt64 }, Field { name: \"parent_slot\", data_type: UInt64 }, Field { name: \"block_height\", data_type: UInt64, nullable: true }, Field { name: \"blockhash\", data_type: Binary }, Field { name: \"previous_blockhash\", data_type: Binary }, Field { name: \"block_time\", data_type: Int64, nullable: true }, Field { name: \"num_transactions\", data_type: UInt32 }, Field { name: \"num_rewards\", data_type: UInt32 }], metadata: {} }",
+          "sha256": "ea1aa2ecf3a8f855beff82cfd70163c698109b2a52e8032e0cfb1db55bb0bcc3"
+        },
+        "instructions": {
+          "rows": 3718,
+          "schema": "Schema { fields: [Field { name: \"block_num\", data_type: UInt64 }, Field { name: \"block_id\", data_type: Binary }, Field { name: \"parent_num\", data_type: UInt64 }, Field { name: \"parent_id\", data_type: Binary }, Field { name: \"lib_num\", data_type: UInt64 }, Field { name: \"timestamp\", data_type: Timestamp(Millisecond, Some(\"UTC\")), nullable: true }, Field { name: \"date\", data_type: Date32, nullable: true }, Field { name: \"slot\", data_type: UInt64 }, Field { name: \"transaction_index\", data_type: UInt32 }, Field { name: \"instruction_index\", data_type: UInt32 }, Field { name: \"program_id_index\", data_type: UInt32 }, Field { name: \"accounts\", data_type: List(Field { data_type: UInt8 }) }, Field { name: \"data\", data_type: Binary }, Field { name: \"is_inner\", data_type: Boolean }, Field { name: \"inner_index\", data_type: UInt32, nullable: true }, Field { name: \"stack_height\", data_type: UInt32, nullable: true }, Field { name: \"parent_instruction_index\", data_type: UInt32, nullable: true }, Field { name: \"inner_instruction_index\", data_type: UInt32, nullable: true }], metadata: {} }",
+          "sha256": "9d3a35a0d64c877f4803071ed82bb3ebbb5b0491a7aae0a2175e822e12675640"
+        },
+        "messages": {
+          "rows": 572,
+          "schema": "Schema { fields: [Field { name: \"block_num\", data_type: UInt64 }, Field { name: \"block_id\", data_type: Binary }, Field { name: \"parent_num\", data_type: UInt64 }, Field { name: \"parent_id\", data_type: Binary }, Field { name: \"lib_num\", data_type: UInt64 }, Field { name: \"timestamp\", data_type: Timestamp(Millisecond, Some(\"UTC\")), nullable: true }, Field { name: \"date\", data_type: Date32, nullable: true }, Field { name: \"slot\", data_type: UInt64 }, Field { name: \"transaction_index\", data_type: UInt32 }, Field { name: \"message_index\", data_type: UInt32 }, Field { name: \"num_required_signatures\", data_type: UInt32 }, Field { name: \"num_readonly_signed_accounts\", data_type: UInt32 }, Field { name: \"num_readonly_unsigned_accounts\", data_type: UInt32 }, Field { name: \"recent_blockhash\", data_type: Binary }, Field { name: \"versioned\", data_type: Boolean }, Field { name: \"account_keys\", data_type: List(Field { data_type: Binary, nullable: true }) }, Field { name: \"loaded_writable_addresses\", data_type: List(Field { data_type: Binary, nullable: true }), nullable: true }, Field { name: \"loaded_readonly_addresses\", data_type: List(Field { data_type: Binary, nullable: true }), nullable: true }], metadata: {} }",
+          "sha256": "ae8a6fccbe6ba6a2cc824310b238745c2c76a1c34aa58906d0298a4064bf4e14"
+        },
+        "rewards": {
+          "rows": 1,
+          "schema": "Schema { fields: [Field { name: \"block_num\", data_type: UInt64 }, Field { name: \"block_id\", data_type: Binary }, Field { name: \"parent_num\", data_type: UInt64 }, Field { name: \"parent_id\", data_type: Binary }, Field { name: \"lib_num\", data_type: UInt64 }, Field { name: \"timestamp\", data_type: Timestamp(Millisecond, Some(\"UTC\")), nullable: true }, Field { name: \"date\", data_type: Date32, nullable: true }, Field { name: \"slot\", data_type: UInt64 }, Field { name: \"reward_index\", data_type: UInt32 }, Field { name: \"pubkey\", data_type: Utf8 }, Field { name: \"lamports\", data_type: Int64 }, Field { name: \"post_balance\", data_type: UInt64 }, Field { name: \"reward_type\", data_type: Dictionary(Int32, Utf8) }, Field { name: \"commission\", data_type: Utf8, nullable: true }, Field { name: \"source\", data_type: Utf8 }, Field { name: \"transaction_index\", data_type: UInt32, nullable: true }], metadata: {} }",
+          "sha256": "9a60651426177a5ba323e8849fa5a150163126a5a13f64bf03b522809a61f29d"
+        },
+        "token_balances": {
+          "rows": 2664,
+          "schema": "Schema { fields: [Field { name: \"block_num\", data_type: UInt64 }, Field { name: \"block_id\", data_type: Binary }, Field { name: \"parent_num\", data_type: UInt64 }, Field { name: \"parent_id\", data_type: Binary }, Field { name: \"lib_num\", data_type: UInt64 }, Field { name: \"timestamp\", data_type: Timestamp(Millisecond, Some(\"UTC\")), nullable: true }, Field { name: \"date\", data_type: Date32, nullable: true }, Field { name: \"slot\", data_type: UInt64 }, Field { name: \"transaction_index\", data_type: UInt32 }, Field { name: \"balance_index\", data_type: UInt32 }, Field { name: \"balance_type\", data_type: Utf8 }, Field { name: \"account_index\", data_type: UInt32 }, Field { name: \"mint\", data_type: Utf8 }, Field { name: \"owner\", data_type: Utf8 }, Field { name: \"program_id\", data_type: Utf8 }, Field { name: \"amount\", data_type: Utf8 }, Field { name: \"ui_amount\", data_type: Float64, nullable: true }, Field { name: \"decimals\", data_type: UInt32 }, Field { name: \"ui_amount_string\", data_type: Utf8 }], metadata: {} }",
+          "sha256": "38a7b9cae4b06bb68d413c53366c7e6816607735aedf6c1ef3a323750e66d4c7"
+        },
+        "transactions": {
+          "rows": 572,
+          "schema": "Schema { fields: [Field { name: \"block_num\", data_type: UInt64 }, Field { name: \"block_id\", data_type: Binary }, Field { name: \"parent_num\", data_type: UInt64 }, Field { name: \"parent_id\", data_type: Binary }, Field { name: \"lib_num\", data_type: UInt64 }, Field { name: \"timestamp\", data_type: Timestamp(Millisecond, Some(\"UTC\")), nullable: true }, Field { name: \"date\", data_type: Date32, nullable: true }, Field { name: \"slot\", data_type: UInt64 }, Field { name: \"transaction_index\", data_type: UInt32 }, Field { name: \"signature\", data_type: Binary }, Field { name: \"num_signatures\", data_type: UInt32 }, Field { name: \"fee\", data_type: UInt64 }, Field { name: \"err\", data_type: Binary, nullable: true }, Field { name: \"success\", data_type: Boolean }, Field { name: \"compute_units_consumed\", data_type: UInt64, nullable: true }, Field { name: \"log_messages\", data_type: List(Field { data_type: Utf8, nullable: true }), nullable: true }, Field { name: \"pre_balances\", data_type: List(Field { data_type: UInt64, nullable: true }), nullable: true }, Field { name: \"post_balances\", data_type: List(Field { data_type: UInt64, nullable: true }), nullable: true }, Field { name: \"cost_units\", data_type: UInt64, nullable: true }, Field { name: \"return_data_program_id\", data_type: Binary, nullable: true }, Field { name: \"return_data\", data_type: Binary, nullable: true }], metadata: {} }",
+          "sha256": "95901d727d35e9e26d185f06fb2cf19de9cffc4842a28de76906c957fb630800"
+        },
+        "vote_transactions": {
+          "rows": 1969,
+          "schema": "Schema { fields: [Field { name: \"block_num\", data_type: UInt64 }, Field { name: \"block_id\", data_type: Binary }, Field { name: \"parent_num\", data_type: UInt64 }, Field { name: \"parent_id\", data_type: Binary }, Field { name: \"lib_num\", data_type: UInt64 }, Field { name: \"timestamp\", data_type: Timestamp(Millisecond, Some(\"UTC\")), nullable: true }, Field { name: \"date\", data_type: Date32, nullable: true }, Field { name: \"slot\", data_type: UInt64 }, Field { name: \"transaction_index\", data_type: UInt32 }, Field { name: \"signature\", data_type: Binary }, Field { name: \"num_signatures\", data_type: UInt32 }, Field { name: \"fee\", data_type: UInt64 }, Field { name: \"err\", data_type: Binary, nullable: true }, Field { name: \"success\", data_type: Boolean }, Field { name: \"compute_units_consumed\", data_type: UInt64, nullable: true }, Field { name: \"log_messages\", data_type: List(Field { data_type: Utf8, nullable: true }), nullable: true }, Field { name: \"pre_balances\", data_type: List(Field { data_type: UInt64, nullable: true }), nullable: true }, Field { name: \"post_balances\", data_type: List(Field { data_type: UInt64, nullable: true }), nullable: true }, Field { name: \"cost_units\", data_type: UInt64, nullable: true }, Field { name: \"return_data_program_id\", data_type: Binary, nullable: true }, Field { name: \"return_data\", data_type: Binary, nullable: true }], metadata: {} }",
+          "sha256": "b4fb0687e48a36e27719606aed5cb58a0f500186a0caf46c750380807e190cdf"
+        }
+      },
+      "samples": {
+        "before": [
+          {
+            "decode_seconds": 0.876812416,
+            "map_flush_seconds": 1.529705417
+          },
+          {
+            "decode_seconds": 0.885506708,
+            "map_flush_seconds": 1.552284417
+          },
+          {
+            "decode_seconds": 0.874482292,
+            "map_flush_seconds": 1.5235235
+          },
+          {
+            "decode_seconds": 0.879400709,
+            "map_flush_seconds": 1.532649667
+          },
+          {
+            "decode_seconds": 0.87728725,
+            "map_flush_seconds": 1.547471834
+          }
+        ],
+        "after_owned": [
+          {
+            "decode_seconds": 0.714198584,
+            "map_flush_seconds": 1.167560875
+          },
+          {
+            "decode_seconds": 0.711506666,
+            "map_flush_seconds": 1.156522166
+          },
+          {
+            "decode_seconds": 0.725371084,
+            "map_flush_seconds": 1.170806708
+          },
+          {
+            "decode_seconds": 0.713988709,
+            "map_flush_seconds": 1.191607208
+          },
+          {
+            "decode_seconds": 0.715050209,
+            "map_flush_seconds": 1.157904917
+          }
+        ],
+        "after_borrowed": [
+          {
+            "decode_seconds": 0.929368625,
+            "map_flush_seconds": 1.355041792
+          },
+          {
+            "decode_seconds": 0.889563291,
+            "map_flush_seconds": 1.336776583
+          },
+          {
+            "decode_seconds": 0.894642667,
+            "map_flush_seconds": 1.355111875
+          },
+          {
+            "decode_seconds": 0.893995583,
+            "map_flush_seconds": 1.368107667
+          },
+          {
+            "decode_seconds": 0.891962875,
+            "map_flush_seconds": 1.350230291
+          }
+        ]
+      },
+      "medians": {
+        "before": {
+          "decode_seconds": 0.87728725,
+          "map_flush_seconds": 1.532649667
+        },
+        "after_owned": {
+          "decode_seconds": 0.714198584,
+          "map_flush_seconds": 1.167560875
+        },
+        "after_borrowed": {
+          "decode_seconds": 0.893995583,
+          "map_flush_seconds": 1.355041792
+        }
+      },
+      "iterations": 200
+    },
+    {
+      "chain": "solana",
+      "source_name": "300000001.pb",
+      "input_bytes": 2935030,
+      "input_sha256": "552dbd676ea0d3a36be535d6318dc3c920de90ce7f875d48d037f538ba026154",
+      "output": {
+        "account_lookups": {
+          "rows": 253,
+          "schema": "Schema { fields: [Field { name: \"block_num\", data_type: UInt64 }, Field { name: \"block_id\", data_type: Binary }, Field { name: \"parent_num\", data_type: UInt64 }, Field { name: \"parent_id\", data_type: Binary }, Field { name: \"lib_num\", data_type: UInt64 }, Field { name: \"timestamp\", data_type: Timestamp(Millisecond, Some(\"UTC\")), nullable: true }, Field { name: \"date\", data_type: Date32, nullable: true }, Field { name: \"slot\", data_type: UInt64 }, Field { name: \"transaction_index\", data_type: UInt32 }, Field { name: \"lookup_index\", data_type: UInt32 }, Field { name: \"account_key\", data_type: Binary }, Field { name: \"writable_indexes\", data_type: List(Field { data_type: UInt8 }) }, Field { name: \"readonly_indexes\", data_type: List(Field { data_type: UInt8 }) }], metadata: {} }",
+          "sha256": "08d90e44caf20db3273c9a2fa7c31275c43efa67155dac5555562f90235bcc37"
+        },
+        "blocks": {
+          "rows": 1,
+          "schema": "Schema { fields: [Field { name: \"block_num\", data_type: UInt64 }, Field { name: \"block_id\", data_type: Binary }, Field { name: \"parent_num\", data_type: UInt64 }, Field { name: \"parent_id\", data_type: Binary }, Field { name: \"lib_num\", data_type: UInt64 }, Field { name: \"timestamp\", data_type: Timestamp(Millisecond, Some(\"UTC\")), nullable: true }, Field { name: \"date\", data_type: Date32, nullable: true }, Field { name: \"slot\", data_type: UInt64 }, Field { name: \"parent_slot\", data_type: UInt64 }, Field { name: \"block_height\", data_type: UInt64, nullable: true }, Field { name: \"blockhash\", data_type: Binary }, Field { name: \"previous_blockhash\", data_type: Binary }, Field { name: \"block_time\", data_type: Int64, nullable: true }, Field { name: \"num_transactions\", data_type: UInt32 }, Field { name: \"num_rewards\", data_type: UInt32 }], metadata: {} }",
+          "sha256": "360282c6c1e1c58f690299295d4cb41f5c1c3ca4c31937fa0134abef884a536e"
+        },
+        "instructions": {
+          "rows": 3985,
+          "schema": "Schema { fields: [Field { name: \"block_num\", data_type: UInt64 }, Field { name: \"block_id\", data_type: Binary }, Field { name: \"parent_num\", data_type: UInt64 }, Field { name: \"parent_id\", data_type: Binary }, Field { name: \"lib_num\", data_type: UInt64 }, Field { name: \"timestamp\", data_type: Timestamp(Millisecond, Some(\"UTC\")), nullable: true }, Field { name: \"date\", data_type: Date32, nullable: true }, Field { name: \"slot\", data_type: UInt64 }, Field { name: \"transaction_index\", data_type: UInt32 }, Field { name: \"instruction_index\", data_type: UInt32 }, Field { name: \"program_id_index\", data_type: UInt32 }, Field { name: \"accounts\", data_type: List(Field { data_type: UInt8 }) }, Field { name: \"data\", data_type: Binary }, Field { name: \"is_inner\", data_type: Boolean }, Field { name: \"inner_index\", data_type: UInt32, nullable: true }, Field { name: \"stack_height\", data_type: UInt32, nullable: true }, Field { name: \"parent_instruction_index\", data_type: UInt32, nullable: true }, Field { name: \"inner_instruction_index\", data_type: UInt32, nullable: true }], metadata: {} }",
+          "sha256": "4580e75dba683a662491102c500d003b73f20cabd4d180d9b7e68bb8b1aaf3c9"
+        },
+        "messages": {
+          "rows": 587,
+          "schema": "Schema { fields: [Field { name: \"block_num\", data_type: UInt64 }, Field { name: \"block_id\", data_type: Binary }, Field { name: \"parent_num\", data_type: UInt64 }, Field { name: \"parent_id\", data_type: Binary }, Field { name: \"lib_num\", data_type: UInt64 }, Field { name: \"timestamp\", data_type: Timestamp(Millisecond, Some(\"UTC\")), nullable: true }, Field { name: \"date\", data_type: Date32, nullable: true }, Field { name: \"slot\", data_type: UInt64 }, Field { name: \"transaction_index\", data_type: UInt32 }, Field { name: \"message_index\", data_type: UInt32 }, Field { name: \"num_required_signatures\", data_type: UInt32 }, Field { name: \"num_readonly_signed_accounts\", data_type: UInt32 }, Field { name: \"num_readonly_unsigned_accounts\", data_type: UInt32 }, Field { name: \"recent_blockhash\", data_type: Binary }, Field { name: \"versioned\", data_type: Boolean }, Field { name: \"account_keys\", data_type: List(Field { data_type: Binary, nullable: true }) }, Field { name: \"loaded_writable_addresses\", data_type: List(Field { data_type: Binary, nullable: true }), nullable: true }, Field { name: \"loaded_readonly_addresses\", data_type: List(Field { data_type: Binary, nullable: true }), nullable: true }], metadata: {} }",
+          "sha256": "d5b1a55dd9d7ef3b387c3035a1c5310259918a2c98fe751f7809c2b5bc0a9626"
+        },
+        "rewards": {
+          "rows": 1,
+          "schema": "Schema { fields: [Field { name: \"block_num\", data_type: UInt64 }, Field { name: \"block_id\", data_type: Binary }, Field { name: \"parent_num\", data_type: UInt64 }, Field { name: \"parent_id\", data_type: Binary }, Field { name: \"lib_num\", data_type: UInt64 }, Field { name: \"timestamp\", data_type: Timestamp(Millisecond, Some(\"UTC\")), nullable: true }, Field { name: \"date\", data_type: Date32, nullable: true }, Field { name: \"slot\", data_type: UInt64 }, Field { name: \"reward_index\", data_type: UInt32 }, Field { name: \"pubkey\", data_type: Utf8 }, Field { name: \"lamports\", data_type: Int64 }, Field { name: \"post_balance\", data_type: UInt64 }, Field { name: \"reward_type\", data_type: Dictionary(Int32, Utf8) }, Field { name: \"commission\", data_type: Utf8, nullable: true }, Field { name: \"source\", data_type: Utf8 }, Field { name: \"transaction_index\", data_type: UInt32, nullable: true }], metadata: {} }",
+          "sha256": "6457be524656294ade87648955ac1bb89aa88cdf3d537025ce6227f12a386ecc"
+        },
+        "token_balances": {
+          "rows": 3215,
+          "schema": "Schema { fields: [Field { name: \"block_num\", data_type: UInt64 }, Field { name: \"block_id\", data_type: Binary }, Field { name: \"parent_num\", data_type: UInt64 }, Field { name: \"parent_id\", data_type: Binary }, Field { name: \"lib_num\", data_type: UInt64 }, Field { name: \"timestamp\", data_type: Timestamp(Millisecond, Some(\"UTC\")), nullable: true }, Field { name: \"date\", data_type: Date32, nullable: true }, Field { name: \"slot\", data_type: UInt64 }, Field { name: \"transaction_index\", data_type: UInt32 }, Field { name: \"balance_index\", data_type: UInt32 }, Field { name: \"balance_type\", data_type: Utf8 }, Field { name: \"account_index\", data_type: UInt32 }, Field { name: \"mint\", data_type: Utf8 }, Field { name: \"owner\", data_type: Utf8 }, Field { name: \"program_id\", data_type: Utf8 }, Field { name: \"amount\", data_type: Utf8 }, Field { name: \"ui_amount\", data_type: Float64, nullable: true }, Field { name: \"decimals\", data_type: UInt32 }, Field { name: \"ui_amount_string\", data_type: Utf8 }], metadata: {} }",
+          "sha256": "d3f851a4f89acef01836b87337f2517bb98b9fac6e3543b4dcaa026e2245f356"
+        },
+        "transactions": {
+          "rows": 587,
+          "schema": "Schema { fields: [Field { name: \"block_num\", data_type: UInt64 }, Field { name: \"block_id\", data_type: Binary }, Field { name: \"parent_num\", data_type: UInt64 }, Field { name: \"parent_id\", data_type: Binary }, Field { name: \"lib_num\", data_type: UInt64 }, Field { name: \"timestamp\", data_type: Timestamp(Millisecond, Some(\"UTC\")), nullable: true }, Field { name: \"date\", data_type: Date32, nullable: true }, Field { name: \"slot\", data_type: UInt64 }, Field { name: \"transaction_index\", data_type: UInt32 }, Field { name: \"signature\", data_type: Binary }, Field { name: \"num_signatures\", data_type: UInt32 }, Field { name: \"fee\", data_type: UInt64 }, Field { name: \"err\", data_type: Binary, nullable: true }, Field { name: \"success\", data_type: Boolean }, Field { name: \"compute_units_consumed\", data_type: UInt64, nullable: true }, Field { name: \"log_messages\", data_type: List(Field { data_type: Utf8, nullable: true }), nullable: true }, Field { name: \"pre_balances\", data_type: List(Field { data_type: UInt64, nullable: true }), nullable: true }, Field { name: \"post_balances\", data_type: List(Field { data_type: UInt64, nullable: true }), nullable: true }, Field { name: \"cost_units\", data_type: UInt64, nullable: true }, Field { name: \"return_data_program_id\", data_type: Binary, nullable: true }, Field { name: \"return_data\", data_type: Binary, nullable: true }], metadata: {} }",
+          "sha256": "a8e3445af489a9f79aaefe8341122ba8ce002d452df35d376092772bf57080a8"
+        },
+        "vote_transactions": {
+          "rows": 1320,
+          "schema": "Schema { fields: [Field { name: \"block_num\", data_type: UInt64 }, Field { name: \"block_id\", data_type: Binary }, Field { name: \"parent_num\", data_type: UInt64 }, Field { name: \"parent_id\", data_type: Binary }, Field { name: \"lib_num\", data_type: UInt64 }, Field { name: \"timestamp\", data_type: Timestamp(Millisecond, Some(\"UTC\")), nullable: true }, Field { name: \"date\", data_type: Date32, nullable: true }, Field { name: \"slot\", data_type: UInt64 }, Field { name: \"transaction_index\", data_type: UInt32 }, Field { name: \"signature\", data_type: Binary }, Field { name: \"num_signatures\", data_type: UInt32 }, Field { name: \"fee\", data_type: UInt64 }, Field { name: \"err\", data_type: Binary, nullable: true }, Field { name: \"success\", data_type: Boolean }, Field { name: \"compute_units_consumed\", data_type: UInt64, nullable: true }, Field { name: \"log_messages\", data_type: List(Field { data_type: Utf8, nullable: true }), nullable: true }, Field { name: \"pre_balances\", data_type: List(Field { data_type: UInt64, nullable: true }), nullable: true }, Field { name: \"post_balances\", data_type: List(Field { data_type: UInt64, nullable: true }), nullable: true }, Field { name: \"cost_units\", data_type: UInt64, nullable: true }, Field { name: \"return_data_program_id\", data_type: Binary, nullable: true }, Field { name: \"return_data\", data_type: Binary, nullable: true }], metadata: {} }",
+          "sha256": "3bfb80ed84b40ae023ee2efe2256e65d5845129d67ee2ec499a938c1424111e2"
+        }
+      },
+      "samples": {
+        "before": [
+          {
+            "decode_seconds": 0.884238125,
+            "map_flush_seconds": 1.4620842920000001
+          },
+          {
+            "decode_seconds": 0.866414333,
+            "map_flush_seconds": 1.435405708
+          },
+          {
+            "decode_seconds": 0.8607745,
+            "map_flush_seconds": 1.436747583
+          },
+          {
+            "decode_seconds": 0.872218708,
+            "map_flush_seconds": 1.440927667
+          },
+          {
+            "decode_seconds": 0.860452375,
+            "map_flush_seconds": 1.440433208
+          }
+        ],
+        "after_owned": [
+          {
+            "decode_seconds": 0.718812875,
+            "map_flush_seconds": 1.086428584
+          },
+          {
+            "decode_seconds": 0.7442785,
+            "map_flush_seconds": 1.098866708
+          },
+          {
+            "decode_seconds": 0.712374209,
+            "map_flush_seconds": 1.082467084
+          },
+          {
+            "decode_seconds": 0.717667125,
+            "map_flush_seconds": 1.102850625
+          },
+          {
+            "decode_seconds": 0.730157125,
+            "map_flush_seconds": 1.085466166
+          }
+        ],
+        "after_borrowed": [
+          {
+            "decode_seconds": 0.875239125,
+            "map_flush_seconds": 1.270175334
+          },
+          {
+            "decode_seconds": 0.879476792,
+            "map_flush_seconds": 1.2456565
+          },
+          {
+            "decode_seconds": 0.888461792,
+            "map_flush_seconds": 1.254382667
+          },
+          {
+            "decode_seconds": 0.8731065,
+            "map_flush_seconds": 1.250748875
+          },
+          {
+            "decode_seconds": 0.872026125,
+            "map_flush_seconds": 1.2689460000000001
+          }
+        ]
+      },
+      "medians": {
+        "before": {
+          "decode_seconds": 0.866414333,
+          "map_flush_seconds": 1.440433208
+        },
+        "after_owned": {
+          "decode_seconds": 0.718812875,
+          "map_flush_seconds": 1.086428584
+        },
+        "after_borrowed": {
+          "decode_seconds": 0.875239125,
+          "map_flush_seconds": 1.254382667
+        }
+      },
+      "iterations": 200
+    },
+    {
+      "chain": "beacon",
+      "source_name": "beacon-10597349.pb",
+      "iterations": 5000,
+      "input_bytes": 877150,
+      "input_sha256": "3f5f1ec25d1c829fb9c88891de824dd5d2b8ea4888c8553a32eb7893979d1cd5",
+      "output": {
+        "attestations": {
+          "rows": 128,
+          "schema": "Schema { fields: [Field { name: \"block_num\", data_type: UInt64 }, Field { name: \"block_id\", data_type: Binary }, Field { name: \"parent_num\", data_type: UInt64 }, Field { name: \"parent_id\", data_type: Binary }, Field { name: \"lib_num\", data_type: UInt64 }, Field { name: \"timestamp\", data_type: Timestamp(Millisecond, Some(\"UTC\")) }, Field { name: \"date\", data_type: Date32 }, Field { name: \"block_slot\", data_type: UInt64 }, Field { name: \"attestation_index\", data_type: UInt32 }, Field { name: \"slot\", data_type: UInt64, nullable: true }, Field { name: \"committee_index\", data_type: UInt64, nullable: true }, Field { name: \"aggregation_bits\", data_type: Binary }, Field { name: \"beacon_block_root\", data_type: Binary, nullable: true }, Field { name: \"source_epoch\", data_type: UInt64, nullable: true }, Field { name: \"source_root\", data_type: Binary, nullable: true }, Field { name: \"target_epoch\", data_type: UInt64, nullable: true }, Field { name: \"target_root\", data_type: Binary, nullable: true }, Field { name: \"signature\", data_type: Binary }, Field { name: \"committee_bits\", data_type: Binary, nullable: true }], metadata: {} }",
+          "sha256": "fa4fbbbb7949038c18f8b78dbd259804932de6c1c9c595f0a1515208f0a6ce40"
+        },
+        "attester_slashings": {
+          "rows": 0,
+          "schema": "Schema { fields: [Field { name: \"block_num\", data_type: UInt64 }, Field { name: \"block_id\", data_type: Binary }, Field { name: \"parent_num\", data_type: UInt64 }, Field { name: \"parent_id\", data_type: Binary }, Field { name: \"lib_num\", data_type: UInt64 }, Field { name: \"timestamp\", data_type: Timestamp(Millisecond, Some(\"UTC\")) }, Field { name: \"date\", data_type: Date32 }, Field { name: \"block_slot\", data_type: UInt64 }, Field { name: \"slashing_index\", data_type: UInt32 }, Field { name: \"attestation_1_slot\", data_type: UInt64, nullable: true }, Field { name: \"attestation_1_committee_index\", data_type: UInt64, nullable: true }, Field { name: \"attestation_1_beacon_block_root\", data_type: Binary, nullable: true }, Field { name: \"attestation_1_source_epoch\", data_type: UInt64, nullable: true }, Field { name: \"attestation_1_source_root\", data_type: Binary, nullable: true }, Field { name: \"attestation_1_target_epoch\", data_type: UInt64, nullable: true }, Field { name: \"attestation_1_target_root\", data_type: Binary, nullable: true }, Field { name: \"attestation_2_slot\", data_type: UInt64, nullable: true }, Field { name: \"attestation_2_committee_index\", data_type: UInt64, nullable: true }, Field { name: \"attestation_2_beacon_block_root\", data_type: Binary, nullable: true }, Field { name: \"attestation_2_source_epoch\", data_type: UInt64, nullable: true }, Field { name: \"attestation_2_source_root\", data_type: Binary, nullable: true }, Field { name: \"attestation_2_target_epoch\", data_type: UInt64, nullable: true }, Field { name: \"attestation_2_target_root\", data_type: Binary, nullable: true }, Field { name: \"attestation_1_attesting_indices\", data_type: List(Field { data_type: UInt64, nullable: true }), nullable: true }, Field { name: \"attestation_2_attesting_indices\", data_type: List(Field { data_type: UInt64, nullable: true }), nullable: true }], metadata: {} }",
+          "sha256": "a9edfb69052288d5dd59e55a67848d97b3f4188c04bd3de4060f2f56604104f7"
+        },
+        "blob_sidecars": {
+          "rows": 6,
+          "schema": "Schema { fields: [Field { name: \"block_num\", data_type: UInt64 }, Field { name: \"block_id\", data_type: Binary }, Field { name: \"parent_num\", data_type: UInt64 }, Field { name: \"parent_id\", data_type: Binary }, Field { name: \"lib_num\", data_type: UInt64 }, Field { name: \"timestamp\", data_type: Timestamp(Millisecond, Some(\"UTC\")) }, Field { name: \"date\", data_type: Date32 }, Field { name: \"block_slot\", data_type: UInt64 }, Field { name: \"blob_index\", data_type: UInt64 }, Field { name: \"blob\", data_type: Binary }, Field { name: \"kzg_commitment\", data_type: Binary }, Field { name: \"kzg_proof\", data_type: Binary }], metadata: {} }",
+          "sha256": "9ab392d603a50279a3ed3ec834bdedc4bff37613ab9e57c75cb2d7973daa42e1"
+        },
+        "blocks": {
+          "rows": 1,
+          "schema": "Schema { fields: [Field { name: \"block_num\", data_type: UInt64 }, Field { name: \"block_id\", data_type: Binary }, Field { name: \"parent_num\", data_type: UInt64 }, Field { name: \"parent_id\", data_type: Binary }, Field { name: \"lib_num\", data_type: UInt64 }, Field { name: \"timestamp\", data_type: Timestamp(Millisecond, Some(\"UTC\")) }, Field { name: \"date\", data_type: Date32 }, Field { name: \"slot\", data_type: UInt64 }, Field { name: \"parent_slot\", data_type: UInt64 }, Field { name: \"proposer_index\", data_type: UInt64 }, Field { name: \"root\", data_type: Binary }, Field { name: \"parent_root\", data_type: Binary }, Field { name: \"state_root\", data_type: Binary }, Field { name: \"body_root\", data_type: Binary }, Field { name: \"signature\", data_type: Binary }, Field { name: \"spec\", data_type: Dictionary(Int32, Utf8) }, Field { name: \"graffiti\", data_type: Binary, nullable: true }], metadata: {} }",
+          "sha256": "381598a053558433dbdd8b98d19de6c57f1428d784c39dccadea1e67dbe7ceda"
+        },
+        "bls_to_execution_changes": {
+          "rows": 1,
+          "schema": "Schema { fields: [Field { name: \"block_num\", data_type: UInt64 }, Field { name: \"block_id\", data_type: Binary }, Field { name: \"parent_num\", data_type: UInt64 }, Field { name: \"parent_id\", data_type: Binary }, Field { name: \"lib_num\", data_type: UInt64 }, Field { name: \"timestamp\", data_type: Timestamp(Millisecond, Some(\"UTC\")) }, Field { name: \"date\", data_type: Date32 }, Field { name: \"block_slot\", data_type: UInt64 }, Field { name: \"change_index\", data_type: UInt32 }, Field { name: \"validator_index\", data_type: UInt64, nullable: true }, Field { name: \"from_bls_pubkey\", data_type: Binary, nullable: true }, Field { name: \"to_execution_address\", data_type: Binary, nullable: true }, Field { name: \"signature\", data_type: Binary }], metadata: {} }",
+          "sha256": "e12364ff16fe0136cf026a75e9ff7073e7cb0a151f3dfde08a9b67e2bf1ae44a"
+        },
+        "consolidation_requests": {
+          "rows": 0,
+          "schema": "Schema { fields: [Field { name: \"block_num\", data_type: UInt64 }, Field { name: \"block_id\", data_type: Binary }, Field { name: \"parent_num\", data_type: UInt64 }, Field { name: \"parent_id\", data_type: Binary }, Field { name: \"lib_num\", data_type: UInt64 }, Field { name: \"timestamp\", data_type: Timestamp(Millisecond, Some(\"UTC\")) }, Field { name: \"date\", data_type: Date32 }, Field { name: \"block_slot\", data_type: UInt64 }, Field { name: \"request_index\", data_type: UInt32 }, Field { name: \"source_address\", data_type: Binary }, Field { name: \"source_pubkey\", data_type: Binary }, Field { name: \"target_pubkey\", data_type: Binary }], metadata: {} }",
+          "sha256": "d1e3ee7133ffe1230a5e18f60260af23f9219bc227337e79c35c55666e7af663"
+        },
+        "deposit_requests": {
+          "rows": 0,
+          "schema": "Schema { fields: [Field { name: \"block_num\", data_type: UInt64 }, Field { name: \"block_id\", data_type: Binary }, Field { name: \"parent_num\", data_type: UInt64 }, Field { name: \"parent_id\", data_type: Binary }, Field { name: \"lib_num\", data_type: UInt64 }, Field { name: \"timestamp\", data_type: Timestamp(Millisecond, Some(\"UTC\")) }, Field { name: \"date\", data_type: Date32 }, Field { name: \"block_slot\", data_type: UInt64 }, Field { name: \"request_index\", data_type: UInt32 }, Field { name: \"deposit_index\", data_type: UInt64 }, Field { name: \"pubkey\", data_type: Binary }, Field { name: \"withdrawal_credentials\", data_type: Binary }, Field { name: \"amount\", data_type: UInt64 }, Field { name: \"signature\", data_type: Binary }], metadata: {} }",
+          "sha256": "4eb641f6831efda58de12d6d068970de45c06ef9ef70343cd9447f6e238ce183"
+        },
+        "deposits": {
+          "rows": 0,
+          "schema": "Schema { fields: [Field { name: \"block_num\", data_type: UInt64 }, Field { name: \"block_id\", data_type: Binary }, Field { name: \"parent_num\", data_type: UInt64 }, Field { name: \"parent_id\", data_type: Binary }, Field { name: \"lib_num\", data_type: UInt64 }, Field { name: \"timestamp\", data_type: Timestamp(Millisecond, Some(\"UTC\")) }, Field { name: \"date\", data_type: Date32 }, Field { name: \"block_slot\", data_type: UInt64 }, Field { name: \"deposit_index\", data_type: UInt32 }, Field { name: \"pubkey\", data_type: Binary, nullable: true }, Field { name: \"withdrawal_credentials\", data_type: Binary, nullable: true }, Field { name: \"amount\", data_type: UInt64, nullable: true }, Field { name: \"signature\", data_type: Binary, nullable: true }], metadata: {} }",
+          "sha256": "985f379d0630f2499c872e7e12a200fbef3251c626dda12139259860a93c9a69"
+        },
+        "execution_payload": {
+          "rows": 1,
+          "schema": "Schema { fields: [Field { name: \"block_num\", data_type: UInt64 }, Field { name: \"block_id\", data_type: Binary }, Field { name: \"parent_num\", data_type: UInt64 }, Field { name: \"parent_id\", data_type: Binary }, Field { name: \"lib_num\", data_type: UInt64 }, Field { name: \"timestamp\", data_type: Timestamp(Millisecond, Some(\"UTC\")) }, Field { name: \"date\", data_type: Date32 }, Field { name: \"block_slot\", data_type: UInt64 }, Field { name: \"parent_hash\", data_type: Binary }, Field { name: \"fee_recipient\", data_type: Binary }, Field { name: \"state_root\", data_type: Binary }, Field { name: \"receipts_root\", data_type: Binary }, Field { name: \"prev_randao\", data_type: Binary }, Field { name: \"block_number\", data_type: UInt64 }, Field { name: \"gas_limit\", data_type: UInt64 }, Field { name: \"gas_used\", data_type: UInt64 }, Field { name: \"payload_timestamp\", data_type: Int64, nullable: true }, Field { name: \"block_hash\", data_type: Binary }, Field { name: \"base_fee_per_gas\", data_type: Utf8 }, Field { name: \"blob_gas_used\", data_type: UInt64, nullable: true }, Field { name: \"excess_blob_gas\", data_type: UInt64, nullable: true }], metadata: {} }",
+          "sha256": "6449b3b379d447ed7f6bd84a742d5b2b4cae2b63e47752f9b372f09b31482bbc"
+        },
+        "proposer_slashings": {
+          "rows": 0,
+          "schema": "Schema { fields: [Field { name: \"block_num\", data_type: UInt64 }, Field { name: \"block_id\", data_type: Binary }, Field { name: \"parent_num\", data_type: UInt64 }, Field { name: \"parent_id\", data_type: Binary }, Field { name: \"lib_num\", data_type: UInt64 }, Field { name: \"timestamp\", data_type: Timestamp(Millisecond, Some(\"UTC\")) }, Field { name: \"date\", data_type: Date32 }, Field { name: \"block_slot\", data_type: UInt64 }, Field { name: \"slashing_index\", data_type: UInt32 }, Field { name: \"header_1_slot\", data_type: UInt64, nullable: true }, Field { name: \"header_1_proposer_index\", data_type: UInt64, nullable: true }, Field { name: \"header_1_parent_root\", data_type: Binary, nullable: true }, Field { name: \"header_1_state_root\", data_type: Binary, nullable: true }, Field { name: \"header_1_body_root\", data_type: Binary, nullable: true }, Field { name: \"header_2_slot\", data_type: UInt64, nullable: true }, Field { name: \"header_2_proposer_index\", data_type: UInt64, nullable: true }, Field { name: \"header_2_parent_root\", data_type: Binary, nullable: true }, Field { name: \"header_2_state_root\", data_type: Binary, nullable: true }, Field { name: \"header_2_body_root\", data_type: Binary, nullable: true }], metadata: {} }",
+          "sha256": "e9066b9b72c10238040f6b96dcc9729bbb69e74fcab8b30a0889ae31f56c7a4a"
+        },
+        "voluntary_exits": {
+          "rows": 0,
+          "schema": "Schema { fields: [Field { name: \"block_num\", data_type: UInt64 }, Field { name: \"block_id\", data_type: Binary }, Field { name: \"parent_num\", data_type: UInt64 }, Field { name: \"parent_id\", data_type: Binary }, Field { name: \"lib_num\", data_type: UInt64 }, Field { name: \"timestamp\", data_type: Timestamp(Millisecond, Some(\"UTC\")) }, Field { name: \"date\", data_type: Date32 }, Field { name: \"block_slot\", data_type: UInt64 }, Field { name: \"exit_index\", data_type: UInt32 }, Field { name: \"epoch\", data_type: UInt64, nullable: true }, Field { name: \"validator_index\", data_type: UInt64, nullable: true }, Field { name: \"signature\", data_type: Binary }], metadata: {} }",
+          "sha256": "abd6ce91ce765e077fdc071e3d5fb73fe461085073a3e535fa156355cfb99d8a"
+        },
+        "withdrawal_requests": {
+          "rows": 0,
+          "schema": "Schema { fields: [Field { name: \"block_num\", data_type: UInt64 }, Field { name: \"block_id\", data_type: Binary }, Field { name: \"parent_num\", data_type: UInt64 }, Field { name: \"parent_id\", data_type: Binary }, Field { name: \"lib_num\", data_type: UInt64 }, Field { name: \"timestamp\", data_type: Timestamp(Millisecond, Some(\"UTC\")) }, Field { name: \"date\", data_type: Date32 }, Field { name: \"block_slot\", data_type: UInt64 }, Field { name: \"request_index\", data_type: UInt32 }, Field { name: \"source_address\", data_type: Binary }, Field { name: \"validator_pubkey\", data_type: Binary }, Field { name: \"amount\", data_type: UInt64 }], metadata: {} }",
+          "sha256": "0dd47349ce1211e11ccfa8de7099082138d39ba7ec78094292e8424f3dc2406e"
+        },
+        "withdrawals": {
+          "rows": 16,
+          "schema": "Schema { fields: [Field { name: \"block_num\", data_type: UInt64 }, Field { name: \"block_id\", data_type: Binary }, Field { name: \"parent_num\", data_type: UInt64 }, Field { name: \"parent_id\", data_type: Binary }, Field { name: \"lib_num\", data_type: UInt64 }, Field { name: \"timestamp\", data_type: Timestamp(Millisecond, Some(\"UTC\")) }, Field { name: \"date\", data_type: Date32 }, Field { name: \"block_slot\", data_type: UInt64 }, Field { name: \"withdrawal_index\", data_type: UInt64 }, Field { name: \"validator_index\", data_type: UInt64 }, Field { name: \"address\", data_type: Binary }, Field { name: \"amount\", data_type: UInt64 }], metadata: {} }",
+          "sha256": "6f7830841e9bce7245131ff3964ea85a4f09341de2034dc388ced9a29b533e03"
+        }
+      },
+      "samples": {
+        "before": [
+          {
+            "decode_seconds": 0.346591042,
+            "map_flush_seconds": 0.988920625
+          },
+          {
+            "decode_seconds": 0.349976459,
+            "map_flush_seconds": 1.052580084
+          },
+          {
+            "decode_seconds": 0.34287225,
+            "map_flush_seconds": 1.054969667
+          },
+          {
+            "decode_seconds": 0.349666083,
+            "map_flush_seconds": 1.037135541
+          },
+          {
+            "decode_seconds": 0.347832417,
+            "map_flush_seconds": 1.04205825
+          }
+        ],
+        "after_owned": [
+          {
+            "decode_seconds": 0.1539865,
+            "map_flush_seconds": 0.485597042
+          },
+          {
+            "decode_seconds": 0.153809084,
+            "map_flush_seconds": 0.486620833
+          },
+          {
+            "decode_seconds": 0.15379025,
+            "map_flush_seconds": 0.485493792
+          },
+          {
+            "decode_seconds": 0.153490792,
+            "map_flush_seconds": 0.48393825
+          },
+          {
+            "decode_seconds": 0.154004,
+            "map_flush_seconds": 0.487695292
+          }
+        ],
+        "after_borrowed": [
+          {
+            "decode_seconds": 0.354018792,
+            "map_flush_seconds": 0.735067542
+          },
+          {
+            "decode_seconds": 0.349576917,
+            "map_flush_seconds": 0.71798075
+          },
+          {
+            "decode_seconds": 0.353273625,
+            "map_flush_seconds": 0.730996875
+          },
+          {
+            "decode_seconds": 0.351697583,
+            "map_flush_seconds": 0.723576042
+          },
+          {
+            "decode_seconds": 0.350759458,
+            "map_flush_seconds": 0.714070292
+          }
+        ]
+      },
+      "medians": {
+        "before": {
+          "decode_seconds": 0.347832417,
+          "map_flush_seconds": 1.04205825
+        },
+        "after_owned": {
+          "decode_seconds": 0.153809084,
+          "map_flush_seconds": 0.485597042
+        },
+        "after_borrowed": {
+          "decode_seconds": 0.351697583,
+          "map_flush_seconds": 0.723576042
+        }
+      }
+    }
+  ],
+  "initial_short_beacon": {
+    "chain": "beacon",
+    "source_name": "beacon-10597349.pb",
+    "input_bytes": 877150,
+    "input_sha256": "3f5f1ec25d1c829fb9c88891de824dd5d2b8ea4888c8553a32eb7893979d1cd5",
+    "output": {
+      "attestations": {
+        "rows": 128,
+        "schema": "Schema { fields: [Field { name: \"block_num\", data_type: UInt64 }, Field { name: \"block_id\", data_type: Binary }, Field { name: \"parent_num\", data_type: UInt64 }, Field { name: \"parent_id\", data_type: Binary }, Field { name: \"lib_num\", data_type: UInt64 }, Field { name: \"timestamp\", data_type: Timestamp(Millisecond, Some(\"UTC\")) }, Field { name: \"date\", data_type: Date32 }, Field { name: \"block_slot\", data_type: UInt64 }, Field { name: \"attestation_index\", data_type: UInt32 }, Field { name: \"slot\", data_type: UInt64, nullable: true }, Field { name: \"committee_index\", data_type: UInt64, nullable: true }, Field { name: \"aggregation_bits\", data_type: Binary }, Field { name: \"beacon_block_root\", data_type: Binary, nullable: true }, Field { name: \"source_epoch\", data_type: UInt64, nullable: true }, Field { name: \"source_root\", data_type: Binary, nullable: true }, Field { name: \"target_epoch\", data_type: UInt64, nullable: true }, Field { name: \"target_root\", data_type: Binary, nullable: true }, Field { name: \"signature\", data_type: Binary }, Field { name: \"committee_bits\", data_type: Binary, nullable: true }], metadata: {} }",
+        "sha256": "fa4fbbbb7949038c18f8b78dbd259804932de6c1c9c595f0a1515208f0a6ce40"
+      },
+      "attester_slashings": {
+        "rows": 0,
+        "schema": "Schema { fields: [Field { name: \"block_num\", data_type: UInt64 }, Field { name: \"block_id\", data_type: Binary }, Field { name: \"parent_num\", data_type: UInt64 }, Field { name: \"parent_id\", data_type: Binary }, Field { name: \"lib_num\", data_type: UInt64 }, Field { name: \"timestamp\", data_type: Timestamp(Millisecond, Some(\"UTC\")) }, Field { name: \"date\", data_type: Date32 }, Field { name: \"block_slot\", data_type: UInt64 }, Field { name: \"slashing_index\", data_type: UInt32 }, Field { name: \"attestation_1_slot\", data_type: UInt64, nullable: true }, Field { name: \"attestation_1_committee_index\", data_type: UInt64, nullable: true }, Field { name: \"attestation_1_beacon_block_root\", data_type: Binary, nullable: true }, Field { name: \"attestation_1_source_epoch\", data_type: UInt64, nullable: true }, Field { name: \"attestation_1_source_root\", data_type: Binary, nullable: true }, Field { name: \"attestation_1_target_epoch\", data_type: UInt64, nullable: true }, Field { name: \"attestation_1_target_root\", data_type: Binary, nullable: true }, Field { name: \"attestation_2_slot\", data_type: UInt64, nullable: true }, Field { name: \"attestation_2_committee_index\", data_type: UInt64, nullable: true }, Field { name: \"attestation_2_beacon_block_root\", data_type: Binary, nullable: true }, Field { name: \"attestation_2_source_epoch\", data_type: UInt64, nullable: true }, Field { name: \"attestation_2_source_root\", data_type: Binary, nullable: true }, Field { name: \"attestation_2_target_epoch\", data_type: UInt64, nullable: true }, Field { name: \"attestation_2_target_root\", data_type: Binary, nullable: true }, Field { name: \"attestation_1_attesting_indices\", data_type: List(Field { data_type: UInt64, nullable: true }), nullable: true }, Field { name: \"attestation_2_attesting_indices\", data_type: List(Field { data_type: UInt64, nullable: true }), nullable: true }], metadata: {} }",
+        "sha256": "a9edfb69052288d5dd59e55a67848d97b3f4188c04bd3de4060f2f56604104f7"
+      },
+      "blob_sidecars": {
+        "rows": 6,
+        "schema": "Schema { fields: [Field { name: \"block_num\", data_type: UInt64 }, Field { name: \"block_id\", data_type: Binary }, Field { name: \"parent_num\", data_type: UInt64 }, Field { name: \"parent_id\", data_type: Binary }, Field { name: \"lib_num\", data_type: UInt64 }, Field { name: \"timestamp\", data_type: Timestamp(Millisecond, Some(\"UTC\")) }, Field { name: \"date\", data_type: Date32 }, Field { name: \"block_slot\", data_type: UInt64 }, Field { name: \"blob_index\", data_type: UInt64 }, Field { name: \"blob\", data_type: Binary }, Field { name: \"kzg_commitment\", data_type: Binary }, Field { name: \"kzg_proof\", data_type: Binary }], metadata: {} }",
+        "sha256": "9ab392d603a50279a3ed3ec834bdedc4bff37613ab9e57c75cb2d7973daa42e1"
+      },
+      "blocks": {
+        "rows": 1,
+        "schema": "Schema { fields: [Field { name: \"block_num\", data_type: UInt64 }, Field { name: \"block_id\", data_type: Binary }, Field { name: \"parent_num\", data_type: UInt64 }, Field { name: \"parent_id\", data_type: Binary }, Field { name: \"lib_num\", data_type: UInt64 }, Field { name: \"timestamp\", data_type: Timestamp(Millisecond, Some(\"UTC\")) }, Field { name: \"date\", data_type: Date32 }, Field { name: \"slot\", data_type: UInt64 }, Field { name: \"parent_slot\", data_type: UInt64 }, Field { name: \"proposer_index\", data_type: UInt64 }, Field { name: \"root\", data_type: Binary }, Field { name: \"parent_root\", data_type: Binary }, Field { name: \"state_root\", data_type: Binary }, Field { name: \"body_root\", data_type: Binary }, Field { name: \"signature\", data_type: Binary }, Field { name: \"spec\", data_type: Dictionary(Int32, Utf8) }, Field { name: \"graffiti\", data_type: Binary, nullable: true }], metadata: {} }",
+        "sha256": "381598a053558433dbdd8b98d19de6c57f1428d784c39dccadea1e67dbe7ceda"
+      },
+      "bls_to_execution_changes": {
+        "rows": 1,
+        "schema": "Schema { fields: [Field { name: \"block_num\", data_type: UInt64 }, Field { name: \"block_id\", data_type: Binary }, Field { name: \"parent_num\", data_type: UInt64 }, Field { name: \"parent_id\", data_type: Binary }, Field { name: \"lib_num\", data_type: UInt64 }, Field { name: \"timestamp\", data_type: Timestamp(Millisecond, Some(\"UTC\")) }, Field { name: \"date\", data_type: Date32 }, Field { name: \"block_slot\", data_type: UInt64 }, Field { name: \"change_index\", data_type: UInt32 }, Field { name: \"validator_index\", data_type: UInt64, nullable: true }, Field { name: \"from_bls_pubkey\", data_type: Binary, nullable: true }, Field { name: \"to_execution_address\", data_type: Binary, nullable: true }, Field { name: \"signature\", data_type: Binary }], metadata: {} }",
+        "sha256": "e12364ff16fe0136cf026a75e9ff7073e7cb0a151f3dfde08a9b67e2bf1ae44a"
+      },
+      "consolidation_requests": {
+        "rows": 0,
+        "schema": "Schema { fields: [Field { name: \"block_num\", data_type: UInt64 }, Field { name: \"block_id\", data_type: Binary }, Field { name: \"parent_num\", data_type: UInt64 }, Field { name: \"parent_id\", data_type: Binary }, Field { name: \"lib_num\", data_type: UInt64 }, Field { name: \"timestamp\", data_type: Timestamp(Millisecond, Some(\"UTC\")) }, Field { name: \"date\", data_type: Date32 }, Field { name: \"block_slot\", data_type: UInt64 }, Field { name: \"request_index\", data_type: UInt32 }, Field { name: \"source_address\", data_type: Binary }, Field { name: \"source_pubkey\", data_type: Binary }, Field { name: \"target_pubkey\", data_type: Binary }], metadata: {} }",
+        "sha256": "d1e3ee7133ffe1230a5e18f60260af23f9219bc227337e79c35c55666e7af663"
+      },
+      "deposit_requests": {
+        "rows": 0,
+        "schema": "Schema { fields: [Field { name: \"block_num\", data_type: UInt64 }, Field { name: \"block_id\", data_type: Binary }, Field { name: \"parent_num\", data_type: UInt64 }, Field { name: \"parent_id\", data_type: Binary }, Field { name: \"lib_num\", data_type: UInt64 }, Field { name: \"timestamp\", data_type: Timestamp(Millisecond, Some(\"UTC\")) }, Field { name: \"date\", data_type: Date32 }, Field { name: \"block_slot\", data_type: UInt64 }, Field { name: \"request_index\", data_type: UInt32 }, Field { name: \"deposit_index\", data_type: UInt64 }, Field { name: \"pubkey\", data_type: Binary }, Field { name: \"withdrawal_credentials\", data_type: Binary }, Field { name: \"amount\", data_type: UInt64 }, Field { name: \"signature\", data_type: Binary }], metadata: {} }",
+        "sha256": "4eb641f6831efda58de12d6d068970de45c06ef9ef70343cd9447f6e238ce183"
+      },
+      "deposits": {
+        "rows": 0,
+        "schema": "Schema { fields: [Field { name: \"block_num\", data_type: UInt64 }, Field { name: \"block_id\", data_type: Binary }, Field { name: \"parent_num\", data_type: UInt64 }, Field { name: \"parent_id\", data_type: Binary }, Field { name: \"lib_num\", data_type: UInt64 }, Field { name: \"timestamp\", data_type: Timestamp(Millisecond, Some(\"UTC\")) }, Field { name: \"date\", data_type: Date32 }, Field { name: \"block_slot\", data_type: UInt64 }, Field { name: \"deposit_index\", data_type: UInt32 }, Field { name: \"pubkey\", data_type: Binary, nullable: true }, Field { name: \"withdrawal_credentials\", data_type: Binary, nullable: true }, Field { name: \"amount\", data_type: UInt64, nullable: true }, Field { name: \"signature\", data_type: Binary, nullable: true }], metadata: {} }",
+        "sha256": "985f379d0630f2499c872e7e12a200fbef3251c626dda12139259860a93c9a69"
+      },
+      "execution_payload": {
+        "rows": 1,
+        "schema": "Schema { fields: [Field { name: \"block_num\", data_type: UInt64 }, Field { name: \"block_id\", data_type: Binary }, Field { name: \"parent_num\", data_type: UInt64 }, Field { name: \"parent_id\", data_type: Binary }, Field { name: \"lib_num\", data_type: UInt64 }, Field { name: \"timestamp\", data_type: Timestamp(Millisecond, Some(\"UTC\")) }, Field { name: \"date\", data_type: Date32 }, Field { name: \"block_slot\", data_type: UInt64 }, Field { name: \"parent_hash\", data_type: Binary }, Field { name: \"fee_recipient\", data_type: Binary }, Field { name: \"state_root\", data_type: Binary }, Field { name: \"receipts_root\", data_type: Binary }, Field { name: \"prev_randao\", data_type: Binary }, Field { name: \"block_number\", data_type: UInt64 }, Field { name: \"gas_limit\", data_type: UInt64 }, Field { name: \"gas_used\", data_type: UInt64 }, Field { name: \"payload_timestamp\", data_type: Int64, nullable: true }, Field { name: \"block_hash\", data_type: Binary }, Field { name: \"base_fee_per_gas\", data_type: Utf8 }, Field { name: \"blob_gas_used\", data_type: UInt64, nullable: true }, Field { name: \"excess_blob_gas\", data_type: UInt64, nullable: true }], metadata: {} }",
+        "sha256": "6449b3b379d447ed7f6bd84a742d5b2b4cae2b63e47752f9b372f09b31482bbc"
+      },
+      "proposer_slashings": {
+        "rows": 0,
+        "schema": "Schema { fields: [Field { name: \"block_num\", data_type: UInt64 }, Field { name: \"block_id\", data_type: Binary }, Field { name: \"parent_num\", data_type: UInt64 }, Field { name: \"parent_id\", data_type: Binary }, Field { name: \"lib_num\", data_type: UInt64 }, Field { name: \"timestamp\", data_type: Timestamp(Millisecond, Some(\"UTC\")) }, Field { name: \"date\", data_type: Date32 }, Field { name: \"block_slot\", data_type: UInt64 }, Field { name: \"slashing_index\", data_type: UInt32 }, Field { name: \"header_1_slot\", data_type: UInt64, nullable: true }, Field { name: \"header_1_proposer_index\", data_type: UInt64, nullable: true }, Field { name: \"header_1_parent_root\", data_type: Binary, nullable: true }, Field { name: \"header_1_state_root\", data_type: Binary, nullable: true }, Field { name: \"header_1_body_root\", data_type: Binary, nullable: true }, Field { name: \"header_2_slot\", data_type: UInt64, nullable: true }, Field { name: \"header_2_proposer_index\", data_type: UInt64, nullable: true }, Field { name: \"header_2_parent_root\", data_type: Binary, nullable: true }, Field { name: \"header_2_state_root\", data_type: Binary, nullable: true }, Field { name: \"header_2_body_root\", data_type: Binary, nullable: true }], metadata: {} }",
+        "sha256": "e9066b9b72c10238040f6b96dcc9729bbb69e74fcab8b30a0889ae31f56c7a4a"
+      },
+      "voluntary_exits": {
+        "rows": 0,
+        "schema": "Schema { fields: [Field { name: \"block_num\", data_type: UInt64 }, Field { name: \"block_id\", data_type: Binary }, Field { name: \"parent_num\", data_type: UInt64 }, Field { name: \"parent_id\", data_type: Binary }, Field { name: \"lib_num\", data_type: UInt64 }, Field { name: \"timestamp\", data_type: Timestamp(Millisecond, Some(\"UTC\")) }, Field { name: \"date\", data_type: Date32 }, Field { name: \"block_slot\", data_type: UInt64 }, Field { name: \"exit_index\", data_type: UInt32 }, Field { name: \"epoch\", data_type: UInt64, nullable: true }, Field { name: \"validator_index\", data_type: UInt64, nullable: true }, Field { name: \"signature\", data_type: Binary }], metadata: {} }",
+        "sha256": "abd6ce91ce765e077fdc071e3d5fb73fe461085073a3e535fa156355cfb99d8a"
+      },
+      "withdrawal_requests": {
+        "rows": 0,
+        "schema": "Schema { fields: [Field { name: \"block_num\", data_type: UInt64 }, Field { name: \"block_id\", data_type: Binary }, Field { name: \"parent_num\", data_type: UInt64 }, Field { name: \"parent_id\", data_type: Binary }, Field { name: \"lib_num\", data_type: UInt64 }, Field { name: \"timestamp\", data_type: Timestamp(Millisecond, Some(\"UTC\")) }, Field { name: \"date\", data_type: Date32 }, Field { name: \"block_slot\", data_type: UInt64 }, Field { name: \"request_index\", data_type: UInt32 }, Field { name: \"source_address\", data_type: Binary }, Field { name: \"validator_pubkey\", data_type: Binary }, Field { name: \"amount\", data_type: UInt64 }], metadata: {} }",
+        "sha256": "0dd47349ce1211e11ccfa8de7099082138d39ba7ec78094292e8424f3dc2406e"
+      },
+      "withdrawals": {
+        "rows": 16,
+        "schema": "Schema { fields: [Field { name: \"block_num\", data_type: UInt64 }, Field { name: \"block_id\", data_type: Binary }, Field { name: \"parent_num\", data_type: UInt64 }, Field { name: \"parent_id\", data_type: Binary }, Field { name: \"lib_num\", data_type: UInt64 }, Field { name: \"timestamp\", data_type: Timestamp(Millisecond, Some(\"UTC\")) }, Field { name: \"date\", data_type: Date32 }, Field { name: \"block_slot\", data_type: UInt64 }, Field { name: \"withdrawal_index\", data_type: UInt64 }, Field { name: \"validator_index\", data_type: UInt64 }, Field { name: \"address\", data_type: Binary }, Field { name: \"amount\", data_type: UInt64 }], metadata: {} }",
+        "sha256": "6f7830841e9bce7245131ff3964ea85a4f09341de2034dc388ced9a29b533e03"
+      }
+    },
+    "samples": {
+      "before": [
+        {
+          "decode_seconds": 0.013473375,
+          "map_flush_seconds": 0.040149958
+        },
+        {
+          "decode_seconds": 0.014500333,
+          "map_flush_seconds": 0.043975875
+        },
+        {
+          "decode_seconds": 0.013941958,
+          "map_flush_seconds": 0.044209708
+        },
+        {
+          "decode_seconds": 0.014079166,
+          "map_flush_seconds": 0.043948042
+        },
+        {
+          "decode_seconds": 0.013378792,
+          "map_flush_seconds": 0.041039291
+        }
+      ],
+      "after_owned": [
+        {
+          "decode_seconds": 0.006069458,
+          "map_flush_seconds": 0.019118417
+        },
+        {
+          "decode_seconds": 0.006276542,
+          "map_flush_seconds": 0.020349959
+        },
+        {
+          "decode_seconds": 0.006259792,
+          "map_flush_seconds": 0.020176625
+        },
+        {
+          "decode_seconds": 0.010961958,
+          "map_flush_seconds": 0.023173167
+        },
+        {
+          "decode_seconds": 0.006062042,
+          "map_flush_seconds": 0.018963709
+        }
+      ],
+      "after_borrowed": [
+        {
+          "decode_seconds": 0.013913084,
+          "map_flush_seconds": 0.028154667
+        },
+        {
+          "decode_seconds": 0.015369459,
+          "map_flush_seconds": 0.03028375
+        },
+        {
+          "decode_seconds": 0.014671375,
+          "map_flush_seconds": 0.030024875
+        },
+        {
+          "decode_seconds": 0.014298833,
+          "map_flush_seconds": 0.028689875
+        },
+        {
+          "decode_seconds": 0.01385,
+          "map_flush_seconds": 0.028688667
+        }
+      ]
+    },
+    "medians": {
+      "before": {
+        "decode_seconds": 0.013941958,
+        "map_flush_seconds": 0.043948042
+      },
+      "after_owned": {
+        "decode_seconds": 0.006259792,
+        "map_flush_seconds": 0.020176625
+      },
+      "after_borrowed": {
+        "decode_seconds": 0.014298833,
+        "map_flush_seconds": 0.028689875
+      }
+    },
+    "iterations": 200
+  },
+  "default_iterations": 200,
+  "machine": "Apple M1 Max",
+  "rustc": "1.93.1",
+  "profile": "release",
+  "before_source": "937988353161eb0d1fe3d4c878454e31e48a9491",
+  "after_source": "ac21c97",
+  "method": "Five rotated samples per mode/fixture. Decode/drop and decode/map/flush/drop loops, input ownership transfer and Arrow IPC equality checks outside timing. Shared process lock excludes builds and other benchmarks. Beacon final loops use 5000 iterations; its earlier 200-iteration samples are retained separately."
+}

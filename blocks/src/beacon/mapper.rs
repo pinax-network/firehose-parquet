@@ -776,14 +776,13 @@ impl BeaconBlockMapper {
     }
 }
 
-impl BlockMapper for BeaconBlockMapper {
-    fn map_block(
+impl BeaconBlockMapper {
+    fn map_decoded(
         &mut self,
-        block_bytes: &[u8],
+        block: beacon::Block,
         identity: &BlockIdentity,
         fork_step: Option<&str>,
     ) -> anyhow::Result<u64> {
-        let block = beacon::Block::decode(block_bytes)?;
         let identity =
             self.blocks
                 .canonical
@@ -791,6 +790,26 @@ impl BlockMapper for BeaconBlockMapper {
         self.map_beacon_block(&block, &identity, fork_step)?;
         // Beacon chain uses attestations rather than traditional transactions.
         Ok(0)
+    }
+}
+
+impl BlockMapper for BeaconBlockMapper {
+    fn map_block(
+        &mut self,
+        block_bytes: &[u8],
+        identity: &BlockIdentity,
+        fork_step: Option<&str>,
+    ) -> anyhow::Result<u64> {
+        self.map_decoded(beacon::Block::decode(block_bytes)?, identity, fork_step)
+    }
+
+    fn map_block_bytes(
+        &mut self,
+        block_bytes: prost::bytes::Bytes,
+        identity: &BlockIdentity,
+        fork_step: Option<&str>,
+    ) -> anyhow::Result<u64> {
+        self.map_decoded(beacon::Block::decode(block_bytes)?, identity, fork_step)
     }
 
     fn flush(&mut self) -> anyhow::Result<HashMap<String, RecordBatch>> {
@@ -891,7 +910,7 @@ impl BlockMapper for BeaconBlockMapper {
             + self.consolidation_requests.canonical.len()
     }
 
-    fn largest_table(&mut self) -> (&str, usize) {
+    fn table_estimates(&mut self) -> Vec<(&str, usize)> {
         let blocks = self.blocks.canonical.estimated_bytes()
             + est_u64(&self.blocks.slot)
             + est_u64(&self.blocks.parent_slot)
@@ -1045,8 +1064,7 @@ impl BlockMapper for BeaconBlockMapper {
             ),
         ]
         .into_iter()
-        .max_by_key(|&(_, s)| s)
-        .unwrap_or(("blocks", 0))
+        .collect()
     }
 
     fn table_names(&self) -> Vec<&str> {
@@ -1741,50 +1759,50 @@ pub(crate) mod tests {
             spec: beacon::Spec::Phase0 as i32,
             slot,
             parent_slot: slot.saturating_sub(1),
-            root: vec![0xab; 32],
-            parent_root: vec![0xcd; 32],
-            state_root: vec![0xef; 32],
+            root: vec![0xab; 32].into(),
+            parent_root: vec![0xcd; 32].into(),
+            state_root: vec![0xef; 32].into(),
             proposer_index: 42,
-            body_root: vec![0x12; 32],
-            signature: vec![0x34; 96],
+            body_root: vec![0x12; 32].into(),
+            signature: vec![0x34; 96].into(),
             timestamp: Some(prost_types::Timestamp {
                 seconds: 1700000000,
                 nanos: 0,
             }),
             body: Some(beacon::block::Body::Phase0(beacon::Phase0Body {
-                rando_reveal: vec![0x01; 96],
+                rando_reveal: vec![0x01; 96].into(),
                 eth1_data: Some(beacon::Eth1Data {
-                    deposit_root: vec![0x02; 32],
+                    deposit_root: vec![0x02; 32].into(),
                     deposit_count: 100,
-                    block_hash: vec![0x03; 32],
+                    block_hash: vec![0x03; 32].into(),
                 }),
-                graffiti: vec![0x00; 32],
+                graffiti: vec![0x00; 32].into(),
                 proposer_slashings: vec![],
                 attester_slashings: vec![],
                 attestations: vec![beacon::Attestation {
-                    aggregation_bits: vec![0xff],
+                    aggregation_bits: vec![0xff].into(),
                     data: Some(beacon::AttestationData {
                         slot: slot,
                         committee_index: 1,
-                        beacon_block_root: vec![0xaa; 32],
+                        beacon_block_root: vec![0xaa; 32].into(),
                         source: Some(beacon::Checkpoint {
                             epoch: 10,
-                            root: vec![0xbb; 32],
+                            root: vec![0xbb; 32].into(),
                         }),
                         target: Some(beacon::Checkpoint {
                             epoch: 11,
-                            root: vec![0xcc; 32],
+                            root: vec![0xcc; 32].into(),
                         }),
                     }),
-                    signature: vec![0xdd; 96],
+                    signature: vec![0xdd; 96].into(),
                 }],
                 deposits: vec![beacon::Deposit {
-                    proof: vec![vec![0x11; 32]],
+                    proof: vec![vec![0x11; 32].into()],
                     data: Some(beacon::DepositData {
-                        public_key: vec![0x22; 48],
-                        withdrawal_credentials: vec![0x33; 32],
+                        public_key: vec![0x22; 48].into(),
+                        withdrawal_credentials: vec![0x33; 32].into(),
                         gwei: 32000000000,
-                        signature: vec![0x44; 96],
+                        signature: vec![0x44; 96].into(),
                     }),
                 }],
                 voluntary_exits: vec![beacon::SignedVoluntaryExit {
@@ -1792,7 +1810,7 @@ pub(crate) mod tests {
                         epoch: 100,
                         validator_index: 5,
                     }),
-                    signature: vec![0x55; 96],
+                    signature: vec![0x55; 96].into(),
                 }],
             })),
         }
@@ -1804,24 +1822,24 @@ pub(crate) mod tests {
             spec: beacon::Spec::Deneb as i32,
             slot,
             parent_slot: slot.saturating_sub(1),
-            root: vec![0xab; 32],
-            parent_root: vec![0xcd; 32],
-            state_root: vec![0xef; 32],
+            root: vec![0xab; 32].into(),
+            parent_root: vec![0xcd; 32].into(),
+            state_root: vec![0xef; 32].into(),
             proposer_index: 42,
-            body_root: vec![0x12; 32],
-            signature: vec![0x34; 96],
+            body_root: vec![0x12; 32].into(),
+            signature: vec![0x34; 96].into(),
             timestamp: Some(prost_types::Timestamp {
                 seconds: 1700000000,
                 nanos: 0,
             }),
             body: Some(beacon::block::Body::Deneb(beacon::DenebBody {
-                rando_reveal: vec![0x01; 96],
+                rando_reveal: vec![0x01; 96].into(),
                 eth1_data: Some(beacon::Eth1Data {
-                    deposit_root: vec![0x02; 32],
+                    deposit_root: vec![0x02; 32].into(),
                     deposit_count: 200,
-                    block_hash: vec![0x03; 32],
+                    block_hash: vec![0x03; 32].into(),
                 }),
-                graffiti: vec![0x00; 32],
+                graffiti: vec![0x00; 32].into(),
                 proposer_slashings: vec![],
                 attester_slashings: vec![],
                 attestations: vec![],
@@ -1829,12 +1847,12 @@ pub(crate) mod tests {
                 voluntary_exits: vec![],
                 sync_aggregate: None,
                 execution_payload: Some(beacon::DenebExecutionPayload {
-                    parent_hash: vec![0xa1; 32],
-                    fee_recipient: vec![0xa2; 20],
-                    state_root: vec![0xa3; 32],
-                    receipts_root: vec![0xa4; 32],
-                    logs_bloom: vec![0x00; 256],
-                    prev_randao: vec![0xa5; 32],
+                    parent_hash: vec![0xa1; 32].into(),
+                    fee_recipient: vec![0xa2; 20].into(),
+                    state_root: vec![0xa3; 32].into(),
+                    receipts_root: vec![0xa4; 32].into(),
+                    logs_bloom: vec![0x00; 256].into(),
+                    prev_randao: vec![0xa5; 32].into(),
                     block_number: 12345,
                     gas_limit: 30000000,
                     gas_used: 15000000,
@@ -1842,9 +1860,9 @@ pub(crate) mod tests {
                         seconds: 1700000000,
                         nanos: 0,
                     }),
-                    extra_data: vec![],
-                    base_fee_per_gas: vec![0x01],
-                    block_hash: vec![0xa6; 32],
+                    extra_data: vec![].into(),
+                    base_fee_per_gas: vec![0x01].into(),
+                    block_hash: vec![0xa6; 32].into(),
                     transactions: vec![],
                     withdrawals: test_withdrawals(),
                     blob_gas_used: 131072,
@@ -1854,9 +1872,9 @@ pub(crate) mod tests {
                 blob_kzg_commitments: vec![],
                 embedded_blobs: vec![beacon::Blob {
                     index: 0,
-                    blob: vec![0xff; 32],
-                    kzg_commitment: vec![0xee; 48],
-                    kzg_proof: vec![0xdd; 48],
+                    blob: vec![0xff; 32].into(),
+                    kzg_commitment: vec![0xee; 48].into(),
+                    kzg_proof: vec![0xdd; 48].into(),
                     kzg_commitment_inclusion_proof: vec![],
                 }],
             })),
@@ -1868,13 +1886,13 @@ pub(crate) mod tests {
             beacon::Withdrawal {
                 withdrawal_index: 1_000,
                 validator_index: 7,
-                address: vec![0xb1; 20],
+                address: vec![0xb1; 20].into(),
                 gwei: 12_345,
             },
             beacon::Withdrawal {
                 withdrawal_index: 1_001,
                 validator_index: 8,
-                address: vec![0xb2; 20],
+                address: vec![0xb2; 20].into(),
                 gwei: 32_000_000_000,
             },
         ]
@@ -1884,10 +1902,10 @@ pub(crate) mod tests {
         beacon::SignedBlsToExecutionChange {
             message: Some(beacon::BlsToExecutionChange {
                 validator_index: 9,
-                from_bls_pub_key: vec![0xc1; 48],
-                to_execution_address: vec![0xc2; 20],
+                from_bls_pub_key: vec![0xc1; 48].into(),
+                to_execution_address: vec![0xc2; 20].into(),
             }),
-            signature: vec![0xc3; 96],
+            signature: vec![0xc3; 96].into(),
         }
     }
 
@@ -1902,27 +1920,27 @@ pub(crate) mod tests {
             body: Some(beacon::block::Body::Electra(beacon::ElectraBody {
                 rando_reveal: deneb.rando_reveal,
                 eth1_data: deneb.eth1_data,
-                graffiti: b"electra graffiti".to_vec(),
+                graffiti: b"electra graffiti".to_vec().into(),
                 proposer_slashings: vec![],
                 attester_slashings: vec![],
                 attestations: vec![beacon::ElectraAttestation {
-                    aggregation_bits: vec![0x0f],
+                    aggregation_bits: vec![0x0f].into(),
                     data: Some(beacon::AttestationData {
                         slot,
                         committee_index: 0,
-                        beacon_block_root: vec![0xaa; 32],
+                        beacon_block_root: vec![0xaa; 32].into(),
                         source: Some(beacon::Checkpoint {
                             epoch: 20,
-                            root: vec![0xbb; 32],
+                            root: vec![0xbb; 32].into(),
                         }),
                         target: Some(beacon::Checkpoint {
                             epoch: 21,
-                            root: vec![0xcc; 32],
+                            root: vec![0xcc; 32].into(),
                         }),
                     }),
-                    signature: vec![0xdd; 96],
+                    signature: vec![0xdd; 96].into(),
                     // Committees 0 and 9 of a 64-bit bitvector.
-                    committee_bits: vec![0x01, 0x02, 0, 0, 0, 0, 0, 0],
+                    committee_bits: vec![0x01, 0x02, 0, 0, 0, 0, 0, 0].into(),
                 }],
                 deposits: vec![],
                 voluntary_exits: vec![],
@@ -1932,21 +1950,21 @@ pub(crate) mod tests {
                 blob_kzg_commitments: vec![],
                 execution_requests: Some(beacon::ExecutionRequest {
                     deposits: vec![beacon::DepositRequest {
-                        pub_key: vec![0xd1; 48],
-                        withdrawal_credentials: vec![0xd2; 32],
+                        pub_key: vec![0xd1; 48].into(),
+                        withdrawal_credentials: vec![0xd2; 32].into(),
                         amount: 32_000_000_000,
-                        signature: vec![0xd3; 96],
+                        signature: vec![0xd3; 96].into(),
                         index: 2_000_000,
                     }],
                     withdrawals: vec![beacon::WithdrawalRequest {
-                        source_address: vec![0xe1; 20],
-                        validator_pub_key: vec![0xe2; 48],
+                        source_address: vec![0xe1; 20].into(),
+                        validator_pub_key: vec![0xe2; 48].into(),
                         amount: 0,
                     }],
                     consolidations: vec![beacon::ConsolidationRequest {
-                        source_address: vec![0xf1; 20],
-                        source_pub_key: vec![0xf2; 48],
-                        target_pub_key: vec![0xf3; 48],
+                        source_address: vec![0xf1; 20].into(),
+                        source_pub_key: vec![0xf2; 48].into(),
+                        target_pub_key: vec![0xf3; 48].into(),
                     }],
                 }),
                 embedded_blobs: vec![],
@@ -2045,12 +2063,12 @@ pub(crate) mod tests {
             spec: beacon::Spec::Phase0 as i32,
             slot: 0,
             parent_slot: 0,
-            root: vec![],
-            parent_root: vec![],
-            state_root: vec![],
+            root: vec![].into(),
+            parent_root: vec![].into(),
+            state_root: vec![].into(),
             proposer_index: 0,
-            body_root: vec![],
-            signature: vec![],
+            body_root: vec![].into(),
+            signature: vec![].into(),
             timestamp: None,
             body: None,
         };
@@ -2113,7 +2131,7 @@ pub(crate) mod tests {
             body: Some(beacon::block::Body::Capella(beacon::CapellaBody {
                 rando_reveal: deneb.rando_reveal,
                 eth1_data: deneb.eth1_data,
-                graffiti: b"capella".to_vec(),
+                graffiti: b"capella".to_vec().into(),
                 proposer_slashings: vec![],
                 attester_slashings: vec![],
                 attestations: vec![],
@@ -2135,7 +2153,7 @@ pub(crate) mod tests {
                     base_fee_per_gas: {
                         let mut bytes = vec![0; 32];
                         bytes[0] = 1;
-                        bytes
+                        bytes.into()
                     },
                     block_hash: payload.block_hash,
                     transactions: vec![],
@@ -2300,7 +2318,7 @@ pub(crate) mod tests {
         let indexed = |indices: Vec<u64>| beacon::IndexedAttestation {
             attesting_indices: indices,
             data: None,
-            signature: vec![],
+            signature: vec![].into(),
         };
         let mut block = make_test_block(100);
         let Some(beacon::block::Body::Phase0(body)) = block.body.as_mut() else {

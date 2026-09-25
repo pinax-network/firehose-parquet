@@ -8,6 +8,7 @@ pub mod dataset_lock_s3;
 pub mod durable_state;
 pub mod durable_state_s3;
 pub mod encode;
+pub mod flush;
 pub mod grpc;
 pub mod ingest;
 pub mod merge;

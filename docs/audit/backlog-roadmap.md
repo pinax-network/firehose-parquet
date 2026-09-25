@@ -20,8 +20,7 @@ issue labels and green CI alone are not acceptance evidence. See the
    explains why deterministic range filenames alone cannot prevent duplicates
    when replay chooses different timer or size boundaries. The complete
    [runtime implementation](468-ingestion-runtime.md) is independently reviewed
-   and published in [PR #600](https://github.com/pinax-network/firehose-parquet/pull/600),
-   awaiting final CI/merge on main `f555898`: 995 workspace tests,
+   and merged in [PR #600](https://github.com/pinax-network/firehose-parquet/pull/600): 995 workspace tests,
    the CI capture example, actual failed-Writing recovery and 14-table/12,298-row
    live equivalence passed. Its migration and S3 quiescence limits are explicit.
    PR #600 merged as `e4bd9cf` after final CI; issue #468 closure was verified.
@@ -69,7 +68,10 @@ and test against current main. Never reset or discard the previous worktree.
 
 ## Remaining backlog groups
 
-- Schema/data correctness: #507, #509 and #510 (NEAR, Tron and Cosmos).
+- Schema/data correctness: #507 and #509 (NEAR and Tron). Cosmos #510 merged
+  in PR #601 as `9379883`, with 1,003 tests, independent raw RPC-backed mapping
+  qualification and CI; issue closure was verified. This is not a captured
+  Firehose/producer transport qualification.
   Beacon numeric/blob/null semantics (#505) merged in PR #594 as `b8d6834` after
   862 tests, bounded live fee/blob comparison and CI; its issue is closed. Solana native payload types (#503) merged
   as `d417e0c` in PR #593 after 857 tests, 19,714 raw-sample row comparisons, release
@@ -97,11 +99,14 @@ and test against current main. Never reset or discard the previous worktree.
   after 882 tests, reproducible 1.8–2.7x local validation improvements and CI;
   issue closure is verified. #503's native-type work and
   bounded release benchmark are complete. #516 depends on durable
-  commit ordering; #517-#519 and #523 need the specific throughput, memory,
+  commit ordering. Transport #517 merged in PR #602 as `b364681` after 1,007
+  tests, local delayed-transport benchmarks, independent review and CI; issue
+  closure was verified. #518-#519 and #523 need the specific throughput, memory,
   file-size or lookup evidence requested by their issues.
-- Structure: #525-#530 follow correctness work. Scope must be refreshed against
-  main; for example, #530's original auth-duplication description is partly
-  obsolete after the shared provider-scoped auth helper.
+- Structure: #525-#529 follow correctness work, with scope refreshed against
+  current main. The remaining #530 auth/client duplication merged in PR #603
+  as `39d49f6` after 1,010 tests, protocol/retry regressions, independent review
+  and CI; issue closure was verified.
 
 For each issue, document diagnosis, selected behavior, reproduction/regression,
 integration results, qualification limits and verified closure. Never equate a
