@@ -1,0 +1,17 @@
+{
+  "byte_length": 2094485,
+  "chain": "mainnet",
+  "fork_step": "FINAL",
+  "format_version": 1,
+  "identity": {
+    "block_id": "75711ef3918c8a730afb8bdeea4e29643637709de2fdaa7d38b5ed5b20d78749",
+    "block_num": 26049575,
+    "lib_num": 26049497,
+    "parent_id": "7c0ed36b9917d618ec237bc7d412bb7eca11b2f3b17c6dab9c0927b944037c66",
+    "parent_num": 26049574,
+    "timestamp": 1790280203,
+    "timestamp_nanos": 0
+  },
+  "protobuf_type": "type.googleapis.com/sf.ethereum.type.v2.Block",
+  "sha256": "dad74257d32c66a056404add2a5f3360c288faedf0a026e5698394cd9d231b2a"
+}

@@ -44,7 +44,9 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Run tests
-        run: cargo test --workspace --locked
+        run: |
+          cargo test --workspace --locked
+          cargo test -p blocks --example refresh_evm_golden --locked
 
       - name: Build fireparq binary
         run: cargo build --bin fireparq --locked
