@@ -238,3 +238,22 @@ ownership are prerequisites only. Deterministic owned filenames, complete
 all-table journals, accepted-event frontiers (including empty-output events and
 routing anchors), output checkpoint authority, startup rollback/roll-forward and
 legacy migration rules remain the next stages. Issue #468 remains open.
+
+### Final stage-1 current-main qualification
+
+At `3c3852674d430bd9b0590b19bfa5253b2d2a76cc`, integrated with main
+`79793c3f2e66288430d50c00af89e6f6da230124`, the complete workspace suite passed
+**839 tests**, with five intentional ignores across its suites. Workspace build,
+formatting and diff checks passed. The combined run includes the new command
+ownership subprocess test, existing invalid-probe/startup/shutdown tests, resumed
+metrics/readiness integration, 49 verify tests, local lock/process-death tests,
+S3 conditional HTTP fixtures and actual S3 cursor/PUT/DELETE timeout/ack-loss tests.
+The build retains the pre-existing final-tail `transactions_processed` unused
+assignment warning; it does not affect the tested behavior.
+
+This is macOS plus hermetic HTTP/in-memory validation. Linux CI and complete
+transaction runtime qualification remain gates for the later end-to-end release.
+No real S3 bucket was modified, and there is no broad remote crash/replay guarantee
+from these fixtures. Root independently reviewed ingestion/recovery caller wiring
+and scope collection at this boundary without a blocker; further stages remain
+in progress on the same isolated branch.

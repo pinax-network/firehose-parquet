@@ -29,6 +29,9 @@ lifecycle state; a local implementation or passing test alone is not closure.
 - [#468: proposed crash/replay recovery design](468-crash-recovery-design.md)
 - [#468: accepted transaction implementation plan](468-ingestion-transaction-plan.md)
 - [#468: staged ownership and durable state implementation](468-stage1-ownership.md)
+- [#468: conditional S3 ownership qualification](468-s3-ownership.md)
+- [#468: single-attempt remote mutations](468-s3-mutation-attempts.md)
+- [#468: verification artifact ownership](468-verify-ownership.md)
 
 ## Verified lifecycle outcomes
 
