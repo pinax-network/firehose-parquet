@@ -1,3 +1,4 @@
+use anyhow::{ensure, Context, Result};
 use arrow::array::{
     ArrayBuilder, BinaryBuilder, BooleanBuilder, Date32Builder, Float64Builder, Int32Builder,
     Int64Builder, ListBuilder, StringBuilder, TimestampMillisecondBuilder, UInt32Builder,
@@ -106,16 +107,30 @@ pub struct BlockIdentity {
 
 impl BlockIdentity {
     /// Block time in unix milliseconds, for the canonical `timestamp` column.
-    pub fn timestamp_millis(&self) -> i64 {
+    pub fn timestamp_millis(&self) -> Result<i64> {
         timestamp_millis(self.timestamp, self.timestamp_nanos)
     }
 }
 
-/// Combine unix seconds and a protobuf-style sub-second nanos part into unix
-/// milliseconds. Nanos outside `0..1_000_000_000` are clamped.
-pub fn timestamp_millis(seconds: i64, nanos: i32) -> i64 {
-    let millis = i64::from(nanos.clamp(0, 999_999_999) / 1_000_000);
-    seconds.saturating_mul(1_000).saturating_add(millis)
+/// Validate unix seconds against the calendar range used by partition paths.
+/// Negative timestamps are valid; out-of-range values are never mapped to epoch.
+pub fn checked_timestamp(seconds: i64) -> Result<time::OffsetDateTime> {
+    time::OffsetDateTime::from_unix_timestamp(seconds)
+        .with_context(|| format!("invalid unix timestamp {seconds}"))
+}
+
+/// Combine unix seconds and a valid protobuf sub-second nanos part into unix
+/// milliseconds. Reject malformed timestamps instead of clamping or saturating.
+pub fn timestamp_millis(seconds: i64, nanos: i32) -> Result<i64> {
+    checked_timestamp(seconds)?;
+    ensure!(
+        (0..1_000_000_000).contains(&nanos),
+        "invalid timestamp nanos {nanos}: expected 0..1_000_000_000"
+    );
+    seconds
+        .checked_mul(1_000)
+        .and_then(|millis| millis.checked_add(i64::from(nanos / 1_000_000)))
+        .context("timestamp exceeds Arrow millisecond range")
 }
 
 /// Arrow type of the canonical `timestamp` column and other block-time columns:
@@ -128,15 +143,12 @@ pub fn timestamp_millis_utc_type() -> DataType {
 
 /// Convert a block timestamp expressed as UTC unix seconds into Arrow `Date32`
 /// days since epoch.
-pub fn date32_from_timestamp_seconds(timestamp_seconds: i64) -> i32 {
+pub fn date32_from_timestamp_seconds(timestamp_seconds: i64) -> Result<i32> {
+    checked_timestamp(timestamp_seconds)?;
     timestamp_seconds
         .div_euclid(86_400)
         .try_into()
-        .unwrap_or_else(|_| {
-            panic!(
-                "block timestamp {timestamp_seconds} exceeds Arrow Date32 range when converted to days"
-            )
-        })
+        .context("timestamp exceeds Arrow Date32 range")
 }
 
 /// Returns the 7 canonical identity fields to prepend to every schema.
@@ -206,7 +218,7 @@ pub struct PreparedIdentity {
 impl PreparedIdentity {
     /// Prepare `identity` with its Firehose metadata ids (hex strings, decoded by
     /// [`decode_id_bytes`]), encoded with `encoding`.
-    pub fn new(identity: &BlockIdentity, encoding: &EncodeBytes) -> Self {
+    pub fn new(identity: &BlockIdentity, encoding: &EncodeBytes) -> Result<Self> {
         Self::with_ids(
             identity,
             &decode_id_bytes(&identity.block_id),
@@ -222,25 +234,29 @@ impl PreparedIdentity {
         block_id: &[u8],
         parent_id: &[u8],
         encoding: &EncodeBytes,
-    ) -> Self {
-        Self {
+    ) -> Result<Self> {
+        Ok(Self {
             block_num: identity.block_num,
             parent_num: identity.parent_num,
             lib_num: identity.lib_num,
-            timestamp_millis: Some(identity.timestamp_millis()),
-            date: Some(date32_from_timestamp_seconds(identity.timestamp)),
+            timestamp_millis: Some(identity.timestamp_millis()?),
+            date: Some(date32_from_timestamp_seconds(identity.timestamp)?),
             block_id: EncodedBytes::new(block_id, encoding),
             parent_id: EncodedBytes::new(parent_id, encoding),
-        }
+        })
     }
 
     /// Replace the block time with an optional time in whole unix seconds. `None`
     /// (e.g. a Solana block without `block_time`) writes null `timestamp` and
     /// `date` values.
-    pub fn with_timestamp_seconds(mut self, timestamp_seconds: Option<i64>) -> Self {
-        self.timestamp_millis = timestamp_seconds.map(|seconds| timestamp_millis(seconds, 0));
-        self.date = timestamp_seconds.map(date32_from_timestamp_seconds);
-        self
+    pub fn with_timestamp_seconds(mut self, timestamp_seconds: Option<i64>) -> Result<Self> {
+        self.timestamp_millis = timestamp_seconds
+            .map(|seconds| timestamp_millis(seconds, 0))
+            .transpose()?;
+        self.date = timestamp_seconds
+            .map(date32_from_timestamp_seconds)
+            .transpose()?;
+        Ok(self)
     }
 }
 
@@ -276,7 +292,7 @@ impl CanonicalBuilder {
     /// Prepare `identity`, with its Firehose metadata ids, in this builder's
     /// encoding. Every table of a mapper shares the canonical encoding, so the
     /// result can be appended to all of them.
-    pub fn prepare(&self, identity: &BlockIdentity) -> PreparedIdentity {
+    pub fn prepare(&self, identity: &BlockIdentity) -> Result<PreparedIdentity> {
         PreparedIdentity::new(identity, &self.block_id.encoding())
     }
 
@@ -287,7 +303,7 @@ impl CanonicalBuilder {
         identity: &BlockIdentity,
         block_id: &[u8],
         parent_id: &[u8],
-    ) -> PreparedIdentity {
+    ) -> Result<PreparedIdentity> {
         PreparedIdentity::with_ids(identity, block_id, parent_id, &self.block_id.encoding())
     }
 
@@ -447,7 +463,8 @@ mod tests {
                 ),
                 Arc::new(Date32Array::from(vec![date32_from_timestamp_seconds(
                     timestamp_millis.div_euclid(1_000),
-                )])),
+                )
+                .unwrap()])),
             ],
         )
         .expect("record batch should build");
@@ -462,28 +479,100 @@ mod tests {
 
     #[test]
     fn test_timestamp_millis_combines_seconds_and_nanos() {
-        assert_eq!(timestamp_millis(1_700_000_000, 0), 1_700_000_000_000);
         assert_eq!(
-            timestamp_millis(1_700_000_000, 500_000_000),
+            timestamp_millis(1_700_000_000, 0).unwrap(),
+            1_700_000_000_000
+        );
+        assert_eq!(
+            timestamp_millis(1_700_000_000, 500_000_000).unwrap(),
             1_700_000_000_500
         );
         assert_eq!(
-            timestamp_millis(1_700_000_000, 999_999_999),
+            timestamp_millis(1_700_000_000, 999_999_999).unwrap(),
             1_700_000_000_999
         );
-        assert_eq!(timestamp_millis(1_700_000_000, -1), 1_700_000_000_000);
-        assert_eq!(
-            timestamp_millis(1_700_000_000, 2_000_000_000),
-            1_700_000_000_999
-        );
+        assert!(timestamp_millis(1_700_000_000, -1).is_err());
+        assert!(timestamp_millis(1_700_000_000, 2_000_000_000).is_err());
     }
 
     #[test]
     fn test_date32_from_timestamp_seconds_uses_utc_days() {
-        assert_eq!(date32_from_timestamp_seconds(0), 0);
-        assert_eq!(date32_from_timestamp_seconds(86_399), 0);
-        assert_eq!(date32_from_timestamp_seconds(86_400), 1);
-        assert_eq!(date32_from_timestamp_seconds(-1), -1);
+        assert_eq!(date32_from_timestamp_seconds(0).unwrap(), 0);
+        assert_eq!(date32_from_timestamp_seconds(86_399).unwrap(), 0);
+        assert_eq!(date32_from_timestamp_seconds(86_400).unwrap(), 1);
+        assert_eq!(date32_from_timestamp_seconds(-1).unwrap(), -1);
+    }
+
+    #[test]
+    fn timestamp_conversion_accepts_calendar_endpoints_and_rejects_the_next_second() {
+        // Calendar range provided by time without its large-dates feature.
+        for seconds in [-377_705_116_800_i64, 253_402_300_799] {
+            assert_eq!(
+                timestamp_millis(seconds, 999_999_999).unwrap(),
+                seconds * 1000 + 999
+            );
+            assert_eq!(
+                i64::from(date32_from_timestamp_seconds(seconds).unwrap()),
+                seconds.div_euclid(86_400)
+            );
+        }
+        for seconds in [-377_705_116_801_i64, 253_402_300_800] {
+            assert!(timestamp_millis(seconds, 0).is_err());
+            assert!(date32_from_timestamp_seconds(seconds).is_err());
+        }
+    }
+
+    #[test]
+    fn invalid_times_fail_before_canonical_builder_mutation() {
+        let mut builder = CanonicalBuilder::new();
+        let valid = builder
+            .prepare(&BlockIdentity {
+                timestamp: -1,
+                timestamp_nanos: 500_000_000,
+                ..Default::default()
+            })
+            .unwrap();
+        builder.append(&valid);
+        for timestamp in [i64::MIN, i64::MAX, 1_700_000_000_000] {
+            assert!(date32_from_timestamp_seconds(timestamp).is_err());
+            assert!(timestamp_millis(timestamp, 0).is_err());
+            assert!(builder
+                .prepare(&BlockIdentity {
+                    timestamp,
+                    ..Default::default()
+                })
+                .is_err());
+            assert!(valid
+                .clone()
+                .with_timestamp_seconds(Some(timestamp))
+                .is_err());
+        }
+        for timestamp_nanos in [-1, 1_000_000_000, i32::MAX] {
+            assert!(builder
+                .prepare(&BlockIdentity {
+                    timestamp_nanos,
+                    ..Default::default()
+                })
+                .is_err());
+        }
+        let columns = builder.finish();
+        assert_eq!(columns[0].len(), 1);
+        assert_eq!(
+            columns[5]
+                .as_any()
+                .downcast_ref::<TimestampMillisecondArray>()
+                .unwrap()
+                .value(0),
+            -500
+        );
+        assert_eq!(
+            columns[6]
+                .as_any()
+                .downcast_ref::<Date32Array>()
+                .unwrap()
+                .value(0),
+            -1
+        );
     }
 
     #[test]
@@ -501,16 +590,18 @@ mod tests {
     #[test]
     fn test_canonical_builder_derives_date_column_from_timestamp() {
         let mut builder = CanonicalBuilder::new();
-        let identity = builder.prepare(&BlockIdentity {
-            block_num: 42,
-            block_id: "aa".to_string(),
-            parent_num: 41,
-            parent_id: "bb".to_string(),
-            lib_num: 40,
-            timestamp: 1_700_000_000,
-            timestamp_nanos: 0,
-            fork_step: None,
-        });
+        let identity = builder
+            .prepare(&BlockIdentity {
+                block_num: 42,
+                block_id: "aa".to_string(),
+                parent_num: 41,
+                parent_id: "bb".to_string(),
+                lib_num: 40,
+                timestamp: 1_700_000_000,
+                timestamp_nanos: 0,
+                fork_step: None,
+            })
+            .unwrap();
         builder.append(&identity);
 
         let columns = builder.finish();
@@ -521,7 +612,7 @@ mod tests {
 
         assert_eq!(
             date_array.value(0),
-            date32_from_timestamp_seconds(1_700_000_000)
+            date32_from_timestamp_seconds(1_700_000_000).unwrap()
         );
     }
 
@@ -549,7 +640,9 @@ mod tests {
                 timestamp_nanos: 0,
                 fork_step: None,
             })
-            .with_timestamp_seconds(None);
+            .unwrap()
+            .with_timestamp_seconds(None)
+            .unwrap();
         builder.append(&identity);
 
         let columns = builder.finish();
@@ -575,7 +668,9 @@ mod tests {
                 timestamp_nanos: 500_000_000,
                 ..BlockIdentity::default()
             })
-            .with_timestamp_seconds(Some(1_700_000_000));
+            .unwrap()
+            .with_timestamp_seconds(Some(1_700_000_000))
+            .unwrap();
         builder.append(&identity);
 
         let columns = builder.finish();
@@ -590,7 +685,7 @@ mod tests {
         assert_eq!(ts_array.value(0), 1_700_000_000_000);
         assert_eq!(
             date_array.value(0),
-            date32_from_timestamp_seconds(1_700_000_000)
+            date32_from_timestamp_seconds(1_700_000_000).unwrap()
         );
     }
 
@@ -636,11 +731,13 @@ mod tests {
         // 2023-11-14T23:59:59.500Z: the timestamp keeps the 500 ms, the date
         // stays on the UTC day of the whole second.
         let mut builder = CanonicalBuilder::new();
-        let identity = builder.prepare(&BlockIdentity {
-            timestamp: 1_700_006_399,
-            timestamp_nanos: 500_000_000,
-            ..BlockIdentity::default()
-        });
+        let identity = builder
+            .prepare(&BlockIdentity {
+                timestamp: 1_700_006_399,
+                timestamp_nanos: 500_000_000,
+                ..BlockIdentity::default()
+            })
+            .unwrap();
         builder.append(&identity);
 
         let columns = builder.finish();
@@ -653,7 +750,10 @@ mod tests {
             .downcast_ref::<Date32Array>()
             .expect("date column should be Date32");
         assert_eq!(timestamps.value(0), 1_700_006_399_500);
-        assert_eq!(dates.value(0), date32_from_timestamp_seconds(1_700_006_399));
+        assert_eq!(
+            dates.value(0),
+            date32_from_timestamp_seconds(1_700_006_399).unwrap()
+        );
     }
 
     #[test]
@@ -748,7 +848,7 @@ mod tests {
                     parent_id: parent_id.clone(),
                     ..BlockIdentity::default()
                 };
-                let prepared = builder.prepare(&identity);
+                let prepared = builder.prepare(&identity).unwrap();
                 for _ in 0..3 {
                     builder.append(&prepared);
                     legacy_append_ids(&mut block_ids, &mut parent_ids, &identity);
@@ -784,7 +884,9 @@ mod tests {
                     parent_id: crate::encode::encode_hex_no_prefix(raw),
                     ..BlockIdentity::default()
                 };
-                let prepared = builder.prepare_with_ids(&BlockIdentity::default(), raw, raw);
+                let prepared = builder
+                    .prepare_with_ids(&BlockIdentity::default(), raw, raw)
+                    .unwrap();
                 builder.append(&prepared);
                 legacy_append_ids(&mut block_ids, &mut parent_ids, &identity);
             }
@@ -806,7 +908,8 @@ mod tests {
     #[test]
     #[should_panic(expected = "does not match the column encoding")]
     fn test_append_rejects_identity_prepared_with_another_encoding() {
-        let identity = PreparedIdentity::new(&BlockIdentity::default(), &EncodeBytes::Base58);
+        let identity =
+            PreparedIdentity::new(&BlockIdentity::default(), &EncodeBytes::Base58).unwrap();
         CanonicalBuilder::with_encoding(&EncodeBytes::Hex).append(&identity);
     }
 
@@ -845,8 +948,8 @@ mod tests {
                 block_num.append_value(id.block_num);
                 parent_num.append_value(id.parent_num);
                 lib_num.append_value(id.lib_num);
-                timestamp.append_value(id.timestamp_millis());
-                date.append_value(date32_from_timestamp_seconds(id.timestamp));
+                timestamp.append_value(id.timestamp_millis().unwrap());
+                date.append_value(date32_from_timestamp_seconds(id.timestamp).unwrap());
                 legacy_append_ids(&mut block_ids, &mut parent_ids, id);
             }
             let legacy = start.elapsed();
@@ -854,7 +957,7 @@ mod tests {
 
             let mut builder = CanonicalBuilder::with_encoding(&encoding);
             let start = Instant::now();
-            let prepared = builder.prepare(black_box(&identity));
+            let prepared = builder.prepare(black_box(&identity)).unwrap();
             for _ in 0..ROWS {
                 builder.append(black_box(&prepared));
             }

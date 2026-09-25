@@ -868,7 +868,7 @@ impl BlockMapper for EvmBlockMapper {
     ) -> anyhow::Result<u64> {
         let block = eth::Block::decode(block_bytes)?;
         let tx_count = block.transaction_traces.len() as u64;
-        let identity = self.blocks.canonical.prepare(identity);
+        let identity = self.blocks.canonical.prepare(identity)?;
         self.map_evm_block(&block, &identity, fork_step);
         Ok(tx_count)
     }
