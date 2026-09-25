@@ -122,3 +122,20 @@ build could not replace it between compilation and copying.
 The build retains the existing unused `transactions_processed` assignment
 warning in the terminal ingestion path. No new warning or production-source
 change was introduced by this qualification follow-up.
+
+## Final dependency integration
+
+The final integration at `099d664661ac9eb8bbe10125be7cc8a489b3312c` also contains
+the completed-stream checkpoint fix (#576) and the reviewed Arrow/Parquet 60
+upgrade (#577, head `638fe9b`). The combined full workspace suite passed
+**730 tests, 0 failed, 3 ignored**, including all 13 Beacon table schema contracts
+and the old-Parquet compatibility/malformed-footer tests. The binary build
+also passed.
+
+Using that copied Arrow/Parquet 60 binary, each of the same two exact slots was
+ingested once more into new local output. No additional raw-block fetch or
+broader scan was needed: the preserved cursor-stripped source JSON was reused.
+The committed comparator again matched both complete block rows, all 13 BLS
+columns, all 25 slashing columns, and both ordered validator lists. These two
+additional bounded stream requests verify the final dependency combination,
+rather than relying solely on the earlier Arrow/Parquet 58 live binary.
