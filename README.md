@@ -13,7 +13,7 @@ A production-grade Rust toolkit that consumes [StreamingFast Firehose](https://f
 | `tron` | `mainnet.tron.streamingfast.io:443` | blocks, transactions, logs, internal_transactions |
 | `cosmos` | `mainnet.injective.streamingfast.io:443` | blocks, transactions, events, messages |
 | `antelope` | `eos.firehose.pinax.network:443` | blocks, transactions, actions, db_ops |
-| `near` | `mainnet.near.streamingfast.io:443` | blocks, chunks, transactions, receipts, state_changes |
+| `near` | `mainnet.near.streamingfast.io:443` | blocks, chunks, transactions, receipts, receipt_actions, execution_logs, state_changes |
 
 > **Tip:** Use `--block-type auto` (the default) to auto-detect the chain from the Firehose stream's protobuf `type_url`.
 
@@ -1783,7 +1783,7 @@ Time-based partition directories (`year=`/`month=`/`day=`/`hour=`/…) and `date
 | `evm` | `hex_0x` | `hex` | `hex` | `block_id` is `0x`-prefixed hex. Transaction hashes, log topics, and addresses are `0x`-prefixed hex. |
 | `bitcoin` | `hex_0x` | Upstream text | Upstream text | Canonical IDs use `0x`-prefixed hex. Native hashes/txids/scripts/witnesses remain the original protobuf strings, normally Bitcoin Core hex without `0x`; addresses keep their native text format. |
 | `solana` | `base58` | `base58` | Identifiers: `base58`; payloads: Binary; indices: List(UInt8) | Block IDs and binary identifiers stay base58. Instruction/error/return payloads and account-index lists have fixed types; see [Solana Payloads](#solana-payloads-and-account-indices). |
-| `near` | `base58` | `base58` | `base58` | Block IDs, transaction hashes, receipt IDs, and key-like binary fields stay base58. |
+| `near` | `base58` | `base58` | `base58` | Block IDs, transaction hashes, receipt IDs, and key-like binary fields stay base58. `receipt_actions.args` is raw `Binary` under every encoding. |
 | `antelope` | `hex_no_prefix` | `hex_no_prefix` | `hex_no_prefix` | Uses lowercase hex without `0x` for both block IDs and other binary fields. |
 | `cosmos` | `hex_0x` | `hex` | `hex` | Block IDs are `0x`-prefixed hex. Other binary identifiers are `0x`-prefixed hex. |
 | `tron` | `hex_no_prefix` | `hex_no_prefix` | `tron_base58` for addresses; `hex_no_prefix` for other binary fields | Address-like fields use Tron Base58Check. Canonical hashes, topics, and other non-address bytes remain lowercase hex without `0x`. |
@@ -1853,6 +1853,77 @@ action JSON, nulls and enum labels remain unchanged.
 Use a new dataset or rebuild older ranges to populate the added columns. Schema
 union makes them null in old files; strict merge/rollup requires explicit schema
 reconciliation. See [the implementation and live comparison](docs/audit/508-antelope-db-joins.md).
+
+## NEAR: Transactions, Receipts, Actions and Logs
+
+A NEAR transaction's own outcome records its inclusion and conversion into a receipt. Contract calls run when action receipts execute, often in later blocks and on other shards. `transactions` and `receipts` carry the keys to follow that chain:
+
+| Table | Column | Type | Meaning |
+|---|---|---|---|
+| `transactions` | `transaction_index` | `UInt32` | Position in the block: chunks in shard order, then each chunk's transactions. Failed transactions left out by the filter keep their index. |
+| `transactions` | `receipt_ids` | list of bytes | The outcome's `receipt_ids`. |
+| `transactions` | `converted_into_receipt_id` | bytes, nullable | The receipt the transaction was converted into. Joins `receipts.receipt_id`. Null when the outcome has no receipt. |
+| `transactions`, `receipts` | `tokens_burnt` | `Utf8` | yoctoNEAR burnt for gas, as a decimal string. |
+| `receipts` | `receipt_index` | `UInt32` | Position of the execution outcome in the block: shards in order, then each shard's receipts. |
+| `receipts` | `tx_hash` | bytes, nullable | The originating transaction, when it is in the same block (see below). |
+| `receipts` | `signer_id` | `Utf8`, nullable | Signer of the transaction that started the receipt chain (`ReceiptAction.signer_id`). |
+| `receipts` | `receipt_ids` | list of bytes | Receipts created by this execution. |
+
+Two tables hold what each executed receipt did:
+
+- **`receipt_actions`**: one row per action, keyed by `(receipt_id, action_index)`, with `receipt_index`, `tx_hash`, `shard_id`, `predecessor_id`, `receiver_id`, `signer_id` and:
+
+  | Column | Type | Set for |
+  |---|---|---|
+  | `action_kind` | `Dictionary(Int32, Utf8)` | every row: `CreateAccount`, `DeployContract`, `FunctionCall`, `Transfer`, `Stake`, `AddKey`, `DeleteKey`, `DeleteAccount`, `Delegate` (the labels of `transactions.actions`) |
+  | `method_name` | `Utf8` | `FunctionCall` |
+  | `args` | `Binary` | `FunctionCall`. Raw bytes, usually JSON: `decode(args)` in DuckDB |
+  | `gas` | `UInt64` | `FunctionCall`: the gas attached |
+  | `deposit` | `Utf8` | `FunctionCall`, `Transfer`: yoctoNEAR, as a decimal string |
+
+  The payload columns are null for the other kinds. A `Delegate` row (NEP-366 meta-transaction) only records the kind: the delegated actions run in a receipt of their own and appear as that receipt's rows.
+- **`execution_logs`**: one row per line of the outcome's `logs`, keyed by `(receipt_id, log_index)`, with `receipt_index`, `tx_hash`, `shard_id`, `executor_id` (the account whose code logged), `predecessor_id` and `log`. NEP-297 events such as NEP-141 (fungible tokens) and NEP-171 (NFTs) are the lines that start with `EVENT_JSON:`. Transaction outcomes have no logs: converting a transaction runs no contract code.
+
+Both tables cover every receipt in `receipts`, including failed ones. Join `receipts` on `receipt_id` to check `status`:
+
+```sql
+-- NEP-141 events of receipts that did not fail
+WITH events AS (
+  SELECT receipt_id, block_num, executor_id AS token,
+         TRY_CAST(substr(log, 12) AS JSON) AS event  -- the text after 'EVENT_JSON:'
+  FROM read_parquet('output/near-mainnet/execution_logs/**/*.parquet')
+  WHERE log LIKE 'EVENT_JSON:%'
+)
+SELECT e.block_num, e.token, e.event->>'event' AS event, e.event->'data' AS data
+FROM events AS e
+JOIN read_parquet('output/near-mainnet/receipts/**/*.parquet') AS r USING (receipt_id)
+WHERE e.event->>'standard' = 'nep141'
+  AND r.status <> 'Failure';
+```
+
+`receipts.tx_hash` is only filled from the same block, which in practice means the receipt NEAR runs right away when a transaction's `signer_id` is also its `receiver_id`. Most receipts run in a later block, so most have a null `tx_hash`. Filling it from earlier blocks would make the output depend on where a run started. To find the originating transaction of every receipt, follow `converted_into_receipt_id` and `receipt_ids` over the range:
+
+```sql
+WITH RECURSIVE origin(receipt_id, tx_hash) AS (
+  SELECT converted_into_receipt_id, hash
+  FROM read_parquet('output/near-mainnet/transactions/**/*.parquet')
+  WHERE converted_into_receipt_id IS NOT NULL
+  UNION
+  SELECT child.receipt_id, origin.tx_hash
+  FROM origin
+  JOIN (
+    SELECT receipt_id AS parent_id, unnest(receipt_ids) AS receipt_id
+    FROM read_parquet('output/near-mainnet/receipts/**/*.parquet')
+  ) AS child ON child.parent_id = origin.receipt_id
+)
+SELECT r.receipt_id, origin.tx_hash
+FROM read_parquet('output/near-mainnet/receipts/**/*.parquet') AS r
+LEFT JOIN origin USING (receipt_id);
+```
+
+Receipts whose transaction or any intermediate lineage link is outside the available range stay unresolved. These queries assume a finalized dataset; append-only non-final events need the finalized-reference handling described above.
+
+These added columns and tables require a fresh dataset or an explicit rebuild; protected ingestion refuses to resume an incompatible schema inventory. See the [bounded public-source comparison and its coverage limits](docs/audit/506-near-public-qualification.md).
 
 ## Environment Variables
 

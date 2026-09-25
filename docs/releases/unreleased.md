@@ -621,6 +621,26 @@ Migration:
 - The new tables only appear in newly built ranges. Rebuild historical ranges to backfill withdrawals and execution requests.
 - Post-Electra queries that group attestations by `committee_index` should decode `committee_bits` instead.
 
+### NEAR `transactions` and `receipts`: join and position columns (#506)
+
+NEAR transactions could not be joined to the receipts they turn into, and neither table had a position column or `tokens_burnt`. New columns:
+
+| Table | Column | Type | Meaning |
+|---|---|---|---|
+| `transactions` | `transaction_index` | `UInt32` | Position in the block (chunks in shard order). Failed transactions left out by the filter keep their index. |
+| `transactions` | `receipt_ids` | list of bytes | The outcome's `receipt_ids`. |
+| `transactions` | `converted_into_receipt_id` | bytes, nullable | The receipt the transaction was converted into. Joins `receipts.receipt_id`. |
+| `transactions`, `receipts` | `tokens_burnt` | `Utf8` | yoctoNEAR burnt for gas, as a decimal string. |
+| `receipts` | `receipt_index` | `UInt32` | Position of the execution outcome in the block (shards in order). |
+| `receipts` | `tx_hash` | bytes, nullable | The originating transaction, when it is in the same block. |
+| `receipts` | `signer_id` | `Utf8`, nullable | Signer of the transaction that started the receipt chain. |
+| `receipts` | `receipt_ids` | list of bytes | Receipts created by this execution. |
+
+- `receipts.tx_hash` is only filled from the same block, which in practice means local receipts (a transaction whose `signer_id` is also its `receiver_id`). Most receipts run in a later block and have a null `tx_hash`. The output stays a function of each block, so it does not depend on where a run started. The README has a recursive query that resolves the originating transaction of every receipt through `converted_into_receipt_id` and `receipt_ids`.
+- Existing columns keep their values. `transaction_index` follows `hash`, `receipt_index` and `tx_hash` follow `receipt_id`, `signer_id` follows `receiver_id`, `tokens_burnt` follows `gas_burnt`, and the receipt id lists (and `converted_into_receipt_id`) are the last columns before `fork_step`.
+
+Migration: `transactions` and `receipts` files written before and after this change have different schemas. Query them separately or with `union_by_name`, and do not `merge` or `rollup` old and new files together. Rebuild old ranges to get the new columns and the new tables (see New features).
+
 ## New features
 
 ### EVM: new `withdrawals`, `access_lists` and `set_code_authorizations` tables (#497)
@@ -634,6 +654,17 @@ Three new EVM tables, written at both detail levels (also with `--without-extend
 - `set_code_authorizations`: one row per EIP-7702 authorization, with `tx_hash`, `tx_index`, `authorization_index`, `chain_id` (decimal), `address` (delegation target), `nonce`, `v`, `r`, `s`, `authority` and `discarded`.
 
 Rows of `access_lists` and `set_code_authorizations` follow their transaction: they are written for failed transactions and dropped by `--exclude-failed-transactions`. EVM outputs now have 6 base tables and 20 with extended detail.
+
+### NEAR: new `receipt_actions` and `execution_logs` tables (#506)
+
+Receipt actions (method, arguments, deposit, gas) and execution logs, the channel for NEP-141 and NEP-171 events, were dropped, so token transfers could not be analysed from NEAR output. Two new tables hold what each executed receipt did:
+
+- `receipt_actions`: one row per action, keyed by `receipt_id` and `action_index`. `action_kind` is dictionary-encoded and uses the labels of `transactions.actions`. `method_name`, `args` and `gas` are set for `FunctionCall`, and `deposit` for `FunctionCall` and `Transfer`. They are null for other kinds. `args` is raw `Binary` under every encoding; it is usually JSON, readable with `decode(args)` in DuckDB.
+- `execution_logs`: one row per line of the outcome's `logs`, keyed by `receipt_id` and `log_index`, with the emitting `executor_id`. NEP-297 events are the lines starting with `EVENT_JSON:`.
+
+Both tables carry `receipt_index`, `tx_hash`, `shard_id` and `predecessor_id`, like `receipts` (see the breaking change above). They cover failed receipts too; join `receipts` on `receipt_id` to check `status`. The README has a NEP-141 event query.
+
+`state_changes` is unchanged. The pinned StreamingFast NEAR producer emits an empty block-level state-change list and omits the indexer's per-shard state changes. This producer limitation does not establish behavior for every provider; #507 remains separately tracked.
 
 ## Fixes
 
