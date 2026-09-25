@@ -4,6 +4,7 @@
 //! `merge` operates within each existing partition directory, consolidating
 //! many small parts into fewer larger files.
 
+use crate::artifacts::is_reserved_artifact_path;
 use crate::cli::{block_on_async, format_bytes, resolve_parquet_input_path_string, AwsConfig};
 use crate::config::Compression;
 use crate::writer::s3_put_options;
@@ -20,7 +21,7 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
-use tracing::{info, info_span, warn};
+use tracing::{debug, info, info_span, warn};
 
 const S3_READ_MAX_ATTEMPTS: usize = 5;
 const S3_READ_RETRY_BASE_DELAY_MS: u64 = 100;
@@ -215,9 +216,18 @@ fn run_merge_local(config: &MergeConfig) -> Result<MergeResult> {
         );
     }
 
-    // Group parquet files by their parent directory (partition).
+    // Group parquet files by their parent directory (partition). Reserved dataset artifacts
+    // such as cursor.parquet are not table data and are never merged.
     let mut all_files: Vec<PathBuf> = Vec::new();
     collect_parquet_files_recursive(&root, &mut all_files)?;
+    all_files.retain(|file| {
+        let rel = file.strip_prefix(&root).unwrap_or(file).to_string_lossy();
+        let reserved = is_reserved_artifact_path(&rel);
+        if reserved {
+            debug!(path = %file.display(), "skipping reserved dataset artifact");
+        }
+        !reserved
+    });
     all_files.sort();
 
     if all_files.is_empty() {
@@ -541,7 +551,6 @@ fn max_part_number_in_s3_objects(objects: &[object_store::ObjectMeta]) -> u32 {
 
 fn run_merge_s3(config: &MergeConfig) -> Result<MergeResult> {
     use crate::writer::parse_s3_url;
-    use futures::TryStreamExt;
 
     let (bucket, prefix) = parse_s3_url(&config.path)?;
     let aws = config
@@ -549,12 +558,22 @@ fn run_merge_s3(config: &MergeConfig) -> Result<MergeResult> {
         .as_ref()
         .ok_or_else(|| anyhow::anyhow!("AWS config required for S3 paths"))?;
 
-    let client = Arc::new(aws.build_s3_client(&bucket)?);
+    let client: Arc<dyn ObjectStore> = Arc::new(aws.build_s3_client(&bucket)?);
+    merge_s3(config, &client, &bucket, &prefix)
+}
+
+fn merge_s3(
+    config: &MergeConfig,
+    client: &Arc<dyn ObjectStore>,
+    bucket: &str,
+    prefix: &str,
+) -> Result<MergeResult> {
+    use futures::TryStreamExt;
 
     let list_prefix = if prefix.is_empty() {
         None
     } else {
-        Some(object_store::path::Path::from(prefix.as_str()))
+        Some(object_store::path::Path::from(prefix))
     };
 
     let objects: Vec<object_store::ObjectMeta> =
@@ -564,6 +583,14 @@ fn run_merge_s3(config: &MergeConfig) -> Result<MergeResult> {
     let mut parquet_objects: Vec<_> = objects
         .into_iter()
         .filter(|obj| obj.location.as_ref().ends_with(".parquet"))
+        .filter(|obj| {
+            let key = obj.location.as_ref();
+            let reserved = is_reserved_artifact_path(relative_s3_key(prefix, key));
+            if reserved {
+                debug!(path = %key, "skipping reserved dataset artifact");
+            }
+            !reserved
+        })
         .collect();
     parquet_objects.sort_by(|a, b| a.location.cmp(&b.location));
 
@@ -605,13 +632,13 @@ fn run_merge_s3(config: &MergeConfig) -> Result<MergeResult> {
             Some(partition) if partition == &parent => current_objects.push(obj),
             Some(_) => {
                 let partition = current_partition.take().expect("partition must exist");
-                print_s3_table_header(&prefix, &partition, &mut current_table);
+                print_s3_table_header(prefix, &partition, &mut current_table);
                 process_s3_partition(
-                    &bucket,
-                    &prefix,
+                    bucket,
+                    prefix,
                     &partition,
                     &current_objects,
-                    &client,
+                    client,
                     config,
                     &mut result,
                 )?;
@@ -626,13 +653,13 @@ fn run_merge_s3(config: &MergeConfig) -> Result<MergeResult> {
     }
 
     if let Some(partition) = current_partition {
-        print_s3_table_header(&prefix, &partition, &mut current_table);
+        print_s3_table_header(prefix, &partition, &mut current_table);
         process_s3_partition(
-            &bucket,
-            &prefix,
+            bucket,
+            prefix,
             &partition,
             &current_objects,
-            &client,
+            client,
             config,
             &mut result,
         )?;
@@ -646,7 +673,7 @@ fn process_s3_partition(
     prefix: &str,
     partition_key: &str,
     objects: &[object_store::ObjectMeta],
-    client: &Arc<object_store::aws::AmazonS3>,
+    client: &Arc<dyn ObjectStore>,
     config: &MergeConfig,
     result: &mut MergeResult,
 ) -> Result<()> {
@@ -884,7 +911,7 @@ fn process_s3_partition(
 }
 
 fn read_s3_bytes_with_retry(
-    client: &Arc<object_store::aws::AmazonS3>,
+    client: &Arc<dyn ObjectStore>,
     bucket: &str,
     location: &object_store::path::Path,
     table: &str,
@@ -908,7 +935,7 @@ fn read_s3_bytes_with_retry(
 }
 
 fn put_s3_bytes_with_retry(
-    client: &Arc<object_store::aws::AmazonS3>,
+    client: &Arc<dyn ObjectStore>,
     bucket: &str,
     location: &object_store::path::Path,
     payload: bytes::Bytes,
@@ -937,7 +964,7 @@ fn put_s3_bytes_with_retry(
 }
 
 fn delete_s3_object_with_retry(
-    client: &Arc<object_store::aws::AmazonS3>,
+    client: &Arc<dyn ObjectStore>,
     bucket: &str,
     location: &object_store::path::Path,
     table: &str,
@@ -1018,6 +1045,13 @@ where
     }
 }
 
+/// `key` relative to the listed `prefix`.
+fn relative_s3_key<'a>(prefix: &str, key: &'a str) -> &'a str {
+    key.strip_prefix(prefix)
+        .map(|s| s.trim_start_matches('/'))
+        .unwrap_or(key)
+}
+
 fn print_s3_table_header(prefix: &str, partition_key: &str, current_table: &mut Option<String>) {
     let partition_relative = partition_key
         .strip_prefix(prefix)
@@ -1045,6 +1079,7 @@ mod tests {
     use super::*;
     use arrow::array::UInt64Builder;
     use arrow::datatypes::{DataType, Field, Schema};
+    use object_store::memory::InMemory;
 
     fn make_test_batch(rows: usize) -> RecordBatch {
         let schema = Arc::new(Schema::new(vec![Field::new(
@@ -1286,5 +1321,162 @@ mod tests {
         assert!(message.contains("table=blocks"));
         assert!(message.contains("partition=blocks/date=2026-03-18"));
         assert_eq!(attempts, 2);
+    }
+
+    const RESERVED: [&str; 5] = [
+        "cursor.parquet",
+        "merkle_roots.parquet",
+        "partitions.parquet",
+        "verify_runs/run-1/a.parquet",
+        "verify_runs/run-1/b.parquet",
+    ];
+    const DAY: &str = "blocks/year=2024/month=01/date=15";
+
+    fn test_merge_config(path: &str) -> MergeConfig {
+        MergeConfig {
+            path: path.to_string(),
+            compression: Compression::None,
+            flush_rows: None,
+            flush_bytes: 0,
+            dry_run: false,
+            verbose: false,
+            aws: None,
+            cache_control: String::new(),
+        }
+    }
+
+    fn parquet_bytes(batch: &RecordBatch) -> Vec<u8> {
+        let mut buf = Vec::new();
+        let mut writer = ArrowWriter::try_new(&mut buf, batch.schema(), None).unwrap();
+        writer.write(batch).unwrap();
+        writer.close().unwrap();
+        buf
+    }
+
+    fn put_object(store: &Arc<dyn ObjectStore>, key: &str, data: Vec<u8>) {
+        let path = object_store::path::Path::from(key);
+        block_on_async(store.put(&path, data.into())).unwrap();
+    }
+
+    fn get_object(store: &Arc<dyn ObjectStore>, key: &str) -> bytes::Bytes {
+        let path = object_store::path::Path::from(key);
+        block_on_async(async { store.get(&path).await?.bytes().await }).unwrap()
+    }
+
+    fn list_keys(store: &Arc<dyn ObjectStore>, prefix: &str) -> Vec<String> {
+        use futures::TryStreamExt;
+        let prefix = object_store::path::Path::from(prefix);
+        let objects: Vec<object_store::ObjectMeta> =
+            block_on_async(store.list(Some(&prefix)).try_collect()).unwrap();
+        let mut keys: Vec<String> = objects
+            .into_iter()
+            .map(|obj| obj.location.as_ref().to_string())
+            .collect();
+        keys.sort();
+        keys
+    }
+
+    fn object_row_count(store: &Arc<dyn ObjectStore>, key: &str) -> usize {
+        let builder = ParquetRecordBatchReaderBuilder::try_new(get_object(store, key)).unwrap();
+        builder.metadata().file_metadata().num_rows() as usize
+    }
+
+    /// Merging a network root used to merge `cursor.parquet`, `partitions.parquet`, and
+    /// `merkle_roots.parquet` into a root `part-000001.parquet` and delete them.
+    #[test]
+    fn test_merge_network_root_leaves_reserved_artifacts() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        for rel in RESERVED {
+            let path = root.join(rel);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            write_test_parquet_with_metadata(&path, &make_test_batch(3), vec![]);
+        }
+        let snapshot: Vec<Vec<u8>> = RESERVED
+            .iter()
+            .map(|rel| std::fs::read(root.join(rel)).unwrap())
+            .collect();
+        let partition = root.join(DAY);
+        std::fs::create_dir_all(&partition).unwrap();
+        write_test_parquet_with_metadata(
+            &partition.join("part-000001.parquet"),
+            &make_test_batch(10),
+            vec![],
+        );
+        write_test_parquet_with_metadata(
+            &partition.join("part-000002.parquet"),
+            &make_test_batch(20),
+            vec![],
+        );
+
+        let result = run_merge(&test_merge_config(&root.to_string_lossy())).unwrap();
+        assert_eq!(result.partitions_merged, 1);
+        assert_eq!(result.files_read, 2);
+
+        for (rel, bytes) in RESERVED.iter().zip(&snapshot) {
+            assert_eq!(&std::fs::read(root.join(rel)).unwrap(), bytes, "{rel}");
+        }
+        let mut root_files: Vec<String> = std::fs::read_dir(root)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| path.is_file())
+            .map(|path| path.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        root_files.sort();
+        assert_eq!(root_files, RESERVED[..3].to_vec());
+
+        let mut merged = Vec::new();
+        collect_parquet_files_recursive(&partition, &mut merged).unwrap();
+        assert_eq!(merged.len(), 1);
+        assert_eq!(read_parquet_row_count(&merged[0]), 30);
+    }
+
+    #[test]
+    fn test_merge_s3_network_root_leaves_reserved_artifacts() {
+        let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        for rel in RESERVED {
+            put_object(
+                &store,
+                &format!("mainnet/{rel}"),
+                parquet_bytes(&make_test_batch(3)),
+            );
+        }
+        let snapshot: Vec<bytes::Bytes> = RESERVED
+            .iter()
+            .map(|rel| get_object(&store, &format!("mainnet/{rel}")))
+            .collect();
+        put_object(
+            &store,
+            &format!("mainnet/{DAY}/part-000001.parquet"),
+            parquet_bytes(&make_test_batch(10)),
+        );
+        put_object(
+            &store,
+            &format!("mainnet/{DAY}/part-000002.parquet"),
+            parquet_bytes(&make_test_batch(20)),
+        );
+
+        let config = test_merge_config("s3://bucket/mainnet");
+        let result = merge_s3(&config, &store, "bucket", "mainnet").unwrap();
+        assert_eq!(result.partitions_merged, 1);
+        assert_eq!(result.files_read, 2);
+
+        for (rel, bytes) in RESERVED.iter().zip(&snapshot) {
+            assert_eq!(
+                &get_object(&store, &format!("mainnet/{rel}")),
+                bytes,
+                "{rel}"
+            );
+        }
+        let blocks = list_keys(&store, "mainnet/blocks");
+        assert_eq!(blocks, vec![format!("mainnet/{DAY}/part-000003.parquet")]);
+        assert_eq!(object_row_count(&store, &blocks[0]), 30);
+        let mut others = list_keys(&store, "mainnet");
+        others.retain(|key| !key.starts_with("mainnet/blocks/"));
+        let expected: Vec<String> = RESERVED
+            .iter()
+            .map(|rel| format!("mainnet/{rel}"))
+            .collect();
+        assert_eq!(others, expected);
     }
 }
