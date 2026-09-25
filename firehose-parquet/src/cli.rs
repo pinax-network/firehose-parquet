@@ -5449,7 +5449,7 @@ impl ValidateResult {
         println!("Validating blocks in {} ...\n", path);
 
         // Per-partition breakdown (if partitioned).
-        // Only show partitions with issues; valid ones are counted in the summary.
+        // Only show partitions with issues or warnings; clean ones are counted in the summary.
         if !self.partitions.is_empty() {
             let valid_count = self.partitions.iter().filter(|p| p.is_valid()).count();
             let invalid_count = self.partitions.len() - valid_count;
@@ -5461,16 +5461,21 @@ impl ValidateResult {
                 invalid_count
             );
 
+            let mut listed_any = false;
             for pr in &self.partitions {
-                if pr.is_valid() {
-                    continue; // skip valid partitions to keep output compact
+                // Skip clean partitions to keep output compact. Timestamp reversals are
+                // warnings, so a partition whose only finding is a reversal is still listed.
+                if pr.is_valid() && pr.timestamp_reversals.is_empty() {
+                    continue;
                 }
+                listed_any = true;
 
                 let range = match (pr.min_block, pr.max_block) {
                     (Some(min), Some(max)) => format!("{} — {}", min, max),
                     _ => "N/A".to_string(),
                 };
-                println!("  ✗ {}", pr.partition);
+                let marker = if pr.is_valid() { "⚠" } else { "✗" };
+                println!("  {} {}", marker, pr.partition);
                 println!(
                     "    files: {}  blocks: {}  range: {}",
                     pr.files_scanned, pr.total_blocks, range
@@ -5503,11 +5508,14 @@ impl ValidateResult {
                 for tr in &pr.timestamp_reversals {
                     println!(
                         "    timestamp reversal at block {}: {} < previous block {} timestamp {}",
-                        tr.block_num, tr.timestamp, tr.prev_block_num, tr.prev_timestamp
+                        tr.block_num,
+                        format_epoch_seconds(tr.timestamp),
+                        tr.prev_block_num,
+                        format_epoch_seconds(tr.prev_timestamp)
                     );
                 }
             }
-            if invalid_count > 0 {
+            if listed_any {
                 println!();
             }
         }
@@ -5610,7 +5618,10 @@ impl ValidateResult {
             for tr in &self.timestamp_reversals {
                 println!(
                     "    block {}: timestamp {} < previous block {} timestamp {}",
-                    tr.block_num, tr.timestamp, tr.prev_block_num, tr.prev_timestamp
+                    tr.block_num,
+                    format_epoch_seconds(tr.timestamp),
+                    tr.prev_block_num,
+                    format_epoch_seconds(tr.prev_timestamp)
                 );
             }
         }
@@ -5629,11 +5640,24 @@ impl ValidateResult {
                 self.empty_partitions.len()
             );
         }
+        if !self.timestamp_reversals.is_empty() && self.is_valid() {
+            println!(
+                "  ⚠ {} timestamp reversal(s) detected (see above); reported as warnings because some chains allow non-monotonic block times",
+                self.timestamp_reversals.len()
+            );
+        }
     }
 }
 
-/// A block tuple: (block_num, block_id, parent_id, timestamp).
-type BlockTuple = (u64, String, String, i64);
+/// Render epoch seconds as UTC `YYYY-MM-DD HH:MM:SS`, falling back to the raw value.
+fn format_epoch_seconds(timestamp: i64) -> String {
+    format_partition_timestamp(timestamp).unwrap_or_else(|_| timestamp.to_string())
+}
+
+/// A block tuple: (block_num, block_id, parent_id, timestamp in epoch seconds).
+///
+/// The timestamp is `None` when the table has no `timestamp` column or the value is null.
+type BlockTuple = (u64, String, String, Option<i64>);
 
 /// Read a string value from a column that may be Utf8 or Binary.
 fn read_id_string(
@@ -5651,6 +5675,33 @@ fn read_id_string(
     }
 }
 
+/// Read a `timestamp` column as epoch seconds, whatever its unit.
+///
+/// Accepts any Arrow `Timestamp` unit (the canonical column is `Timestamp(Second, UTC)`,
+/// and finer units such as milliseconds are truncated to whole seconds) as well as
+/// legacy `Int64` epoch seconds. Null values stay null.
+fn timestamp_column_as_epoch_seconds(
+    column: &dyn arrow::array::Array,
+) -> anyhow::Result<arrow::array::Int64Array> {
+    use arrow::array::AsArray;
+    use arrow::compute::cast;
+    use arrow::datatypes::{DataType, Int64Type, TimeUnit};
+
+    if !matches!(
+        column.data_type(),
+        DataType::Timestamp(_, _) | DataType::Int64
+    ) {
+        anyhow::bail!(
+            "timestamp column has unsupported type {}: expected Timestamp or Int64 epoch seconds",
+            column.data_type()
+        );
+    }
+    let seconds = cast(column, &DataType::Timestamp(TimeUnit::Second, None))?;
+    Ok(cast(&seconds, &DataType::Int64)?
+        .as_primitive::<Int64Type>()
+        .clone())
+}
+
 /// Extract block tuples from a parquet record batch reader.
 fn extract_block_tuples(
     reader: impl Iterator<Item = Result<arrow::record_batch::RecordBatch, arrow::error::ArrowError>>,
@@ -5659,7 +5710,7 @@ fn extract_block_tuples(
     parent_id_idx: usize,
     timestamp_idx: Option<usize>,
 ) -> anyhow::Result<Vec<BlockTuple>> {
-    use arrow::array::{Int64Array, UInt64Array};
+    use arrow::array::{Array, UInt64Array};
 
     let mut tuples = Vec::new();
     for batch_result in reader {
@@ -5672,11 +5723,14 @@ fn extract_block_tuples(
         let block_id_col = batch.column(block_id_idx).as_ref();
         let parent_id_col = batch.column(parent_id_idx).as_ref();
         let timestamps = timestamp_idx
-            .map(|idx| batch.column(idx).as_any().downcast_ref::<Int64Array>())
-            .flatten();
+            .map(|idx| timestamp_column_as_epoch_seconds(batch.column(idx).as_ref()))
+            .transpose()?;
 
         for i in 0..batch.num_rows() {
-            let ts = timestamps.map(|a| a.value(i)).unwrap_or(0);
+            let ts = timestamps
+                .as_ref()
+                .filter(|seconds| seconds.is_valid(i))
+                .map(|seconds| seconds.value(i));
             tuples.push((
                 block_nums.value(i),
                 read_id_string(block_id_col, i, "block_id")?,
@@ -5800,9 +5854,12 @@ fn check_tuples(tuples: &[BlockTuple]) -> CheckResult {
 
     // Track runs of duplicate block_num.
     let mut dup_start = 0usize;
+    // Last (block_num, timestamp) seen with a non-null timestamp, so null timestamps
+    // (e.g. Solana blocks without block_time) neither hide nor fake a reversal.
+    let mut last_timestamp = tuples.first().and_then(|t| t.3.map(|ts| (t.0, ts)));
 
     for i in 1..tuples.len() {
-        let (prev_num, ref prev_block_id, _, prev_ts) = tuples[i - 1];
+        let (prev_num, ref prev_block_id, _, _) = tuples[i - 1];
         let (curr_num, _, ref curr_parent_id, curr_ts) = tuples[i];
 
         if curr_num == prev_num {
@@ -5835,13 +5892,18 @@ fn check_tuples(tuples: &[BlockTuple]) -> CheckResult {
             });
         }
         // Timestamp monotonicity check (#87).
-        if curr_ts < prev_ts && curr_num > prev_num {
-            timestamp_reversals.push(TimestampReversal {
-                block_num: curr_num,
-                timestamp: curr_ts,
-                prev_block_num: prev_num,
-                prev_timestamp: prev_ts,
-            });
+        if let Some(curr_ts) = curr_ts {
+            if let Some((last_num, last_ts)) = last_timestamp {
+                if curr_ts < last_ts && curr_num > last_num {
+                    timestamp_reversals.push(TimestampReversal {
+                        block_num: curr_num,
+                        timestamp: curr_ts,
+                        prev_block_num: last_num,
+                        prev_timestamp: last_ts,
+                    });
+                }
+            }
+            last_timestamp = Some((curr_num, curr_ts));
         }
     }
 
@@ -8711,6 +8773,206 @@ mod tests {
             message.contains("missing required column: partition")
                 || message.contains("missing required file metadata")
         );
+    }
+
+    /// Write a minimal blocks table (blocks `1..=n` with a valid parent chain) whose
+    /// `timestamp` column is `timestamps`, so validate exercises real column types.
+    fn write_validate_blocks_file(path: &std::path::Path, timestamps: arrow::array::ArrayRef) {
+        use arrow::array::{StringArray, UInt64Array};
+        use arrow::datatypes::{DataType, Field, Schema};
+        use arrow::record_batch::RecordBatch;
+        use parquet::arrow::ArrowWriter;
+        use std::sync::Arc;
+
+        let block_nums = (1..=timestamps.len() as u64).collect::<Vec<_>>();
+        let block_ids = block_nums
+            .iter()
+            .map(|num| format!("id{num}"))
+            .collect::<Vec<_>>();
+        let parent_ids = block_nums
+            .iter()
+            .map(|num| format!("id{}", num - 1))
+            .collect::<Vec<_>>();
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("block_num", DataType::UInt64, false),
+            Field::new("block_id", DataType::Utf8, false),
+            Field::new("parent_id", DataType::Utf8, false),
+            Field::new("timestamp", timestamps.data_type().clone(), true),
+        ]));
+        let batch = RecordBatch::try_new(
+            Arc::clone(&schema),
+            vec![
+                Arc::new(UInt64Array::from(block_nums)),
+                Arc::new(StringArray::from(block_ids)),
+                Arc::new(StringArray::from(parent_ids)),
+                timestamps,
+            ],
+        )
+        .expect("record batch");
+
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).expect("create parent dir");
+        }
+        let file = std::fs::File::create(path).expect("create parquet");
+        let mut writer = ArrowWriter::try_new(file, schema, None).expect("writer");
+        writer.write(&batch).expect("write batch");
+        writer.close().expect("close writer");
+    }
+
+    fn validate_local(path: &std::path::Path) -> ValidateResult {
+        validate_parquet(&path.to_string_lossy(), None, &ValidateOptions::default())
+            .expect("validate should run")
+    }
+
+    fn reversal_summary(reversals: &[TimestampReversal]) -> Vec<(u64, i64, u64, i64)> {
+        reversals
+            .iter()
+            .map(|r| (r.block_num, r.timestamp, r.prev_block_num, r.prev_timestamp))
+            .collect()
+    }
+
+    #[test]
+    fn test_validate_parquet_reports_timestamp_reversal_in_any_timestamp_unit() {
+        use arrow::array::{
+            ArrayRef, Int64Array, TimestampMicrosecondArray, TimestampMillisecondArray,
+            TimestampNanosecondArray, TimestampSecondArray,
+        };
+        use std::sync::Arc;
+
+        // Epoch seconds with a reversal at block 3 (1_690_815_595 < 1_690_815_600).
+        let seconds = [
+            1_690_815_590_i64,
+            1_690_815_600,
+            1_690_815_595,
+            1_690_815_610,
+        ];
+        let scaled = |factor: i64| seconds.iter().map(|s| s * factor).collect::<Vec<_>>();
+        let columns: Vec<(&str, ArrayRef)> = vec![
+            (
+                "timestamp_second_utc",
+                Arc::new(TimestampSecondArray::from(scaled(1)).with_timezone("UTC")),
+            ),
+            (
+                "timestamp_millisecond_utc",
+                Arc::new(TimestampMillisecondArray::from(scaled(1_000)).with_timezone("UTC")),
+            ),
+            (
+                "timestamp_microsecond",
+                Arc::new(TimestampMicrosecondArray::from(scaled(1_000_000))),
+            ),
+            (
+                "timestamp_nanosecond_utc",
+                Arc::new(
+                    TimestampNanosecondArray::from(scaled(1_000_000_000)).with_timezone("UTC"),
+                ),
+            ),
+            (
+                "legacy_int64_seconds",
+                Arc::new(Int64Array::from(scaled(1))),
+            ),
+        ];
+
+        for (label, column) in columns {
+            let dir = tempfile::tempdir().expect("tempdir");
+            write_validate_blocks_file(&dir.path().join("blocks.parquet"), column);
+
+            let result = validate_local(dir.path());
+            assert_eq!(
+                reversal_summary(&result.timestamp_reversals),
+                [(3, 1_690_815_595, 2, 1_690_815_600)],
+                "{label}"
+            );
+            assert_eq!(result.total_blocks, 4, "{label}");
+        }
+    }
+
+    #[test]
+    fn test_validate_parquet_compares_null_timestamps_against_last_known_timestamp() {
+        use arrow::array::TimestampSecondArray;
+        use std::sync::Arc;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        write_validate_blocks_file(
+            &dir.path().join("blocks.parquet"),
+            Arc::new(
+                TimestampSecondArray::from(vec![
+                    None,
+                    Some(1_690_815_600),
+                    None,
+                    Some(1_690_815_590),
+                    Some(1_690_815_610),
+                ])
+                .with_timezone("UTC"),
+            ),
+        );
+
+        let result = validate_local(dir.path());
+        assert_eq!(
+            reversal_summary(&result.timestamp_reversals),
+            [(4, 1_690_815_590, 2, 1_690_815_600)]
+        );
+    }
+
+    #[test]
+    fn test_validate_parquet_reports_timestamp_reversal_per_partition() {
+        use arrow::array::TimestampSecondArray;
+        use std::sync::Arc;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        write_validate_blocks_file(
+            &dir.path().join("date=2023-07-31").join("blocks.parquet"),
+            Arc::new(
+                TimestampSecondArray::from(vec![1_690_815_590, 1_690_815_580]).with_timezone("UTC"),
+            ),
+        );
+        write_validate_blocks_file(
+            &dir.path().join("date=2023-08-01").join("blocks.parquet"),
+            Arc::new(
+                TimestampSecondArray::from(vec![1_690_900_000, 1_690_900_010]).with_timezone("UTC"),
+            ),
+        );
+
+        let result = validate_local(dir.path());
+        let reversals = result
+            .partitions
+            .iter()
+            .map(|p| {
+                (
+                    p.partition.as_str(),
+                    reversal_summary(&p.timestamp_reversals),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            reversals,
+            [
+                (
+                    "date=2023-07-31",
+                    vec![(2, 1_690_815_580, 1, 1_690_815_590)]
+                ),
+                ("date=2023-08-01", vec![]),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_validate_parquet_rejects_unsupported_timestamp_type() {
+        use arrow::array::StringArray;
+        use std::sync::Arc;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        write_validate_blocks_file(
+            &dir.path().join("blocks.parquet"),
+            Arc::new(StringArray::from(vec!["2023-07-31 14:59:50"])),
+        );
+
+        let err = validate_parquet(
+            &dir.path().to_string_lossy(),
+            None,
+            &ValidateOptions::default(),
+        )
+        .expect_err("a Utf8 timestamp column should be rejected, not read as 0");
+        assert!(err.to_string().contains("timestamp"), "{err}");
     }
 
     #[test]
