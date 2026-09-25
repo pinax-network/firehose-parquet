@@ -80,8 +80,25 @@ it; there is no safe generic block identity to invent from an arbitrary payload.
 ## Validation
 
 The first full workspace run on the #581 head passed 741 tests, with three
-existing ignored benchmarks. Final combined-main evidence will be recorded
-before publication.
+existing ignored benchmarks. The final combined run at `8ba2c21`, including
+#473 responsive shutdown, #578 atomic publication and the reviewed #500 head
+`bd501f2`, passed **763 tests**. Four tests were intentionally ignored: the
+three existing benchmarks and the atomic-publication subprocess helper.
+
+Validation commands used the whole-process Cargo lock and shared Arrow 60
+target, with dev/test debug information disabled and four build jobs:
+
+```sh
+python3 /tmp/fireparq-cargo-locked.py cargo test --workspace --locked -j4
+python3 /tmp/fireparq-cargo-locked.py cargo fmt --all -- --check
+git diff --check
+```
+
+The suite includes real CLI startup/shutdown tests, every-chain schema contracts,
+old-Parquet compatibility, final checkpoint regressions, atomic publication
+failure injection and the Solana reward flush/restart equality test. The
+pre-existing unused final `transactions_processed` assignment warning remains;
+no new compiler warning was introduced.
 
 Regression coverage includes:
 
