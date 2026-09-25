@@ -14,6 +14,7 @@ use firehose_parquet::cli::{
 };
 use firehose_parquet::config::{BlockMetadata, Compression, Config, Partition};
 use firehose_parquet::cursor::{CursorLocation, CursorState};
+use firehose_parquet::dataset_lock::{DatasetOwnership, MutationScope};
 use firehose_parquet::encode::EncodeBytes;
 use firehose_parquet::grpc::{
     classify_fetch_error, is_shutdown_error, unless_shutdown, CancellationToken, EndpointInfo,
@@ -1554,6 +1555,14 @@ async fn run_partitions_build(
     let partitions_index = build_partitions_index_path(&output_root, &chain);
     let chain_output_root = build_partitions_output_root(&output_root, &chain);
 
+    // The index and its sibling cursor share this chain-root scope. Acquire it
+    // before reading resume state and retain it through the last checkpoint.
+    let ownership = DatasetOwnership::acquire(
+        "partitions-build",
+        vec![MutationScope::directory(chain_output_root.clone())],
+        Some(aws),
+    )
+    .await?;
     let existing_rows = load_existing_partitions_build_rows(&partitions_index, aws, overwrite)?;
     log_existing_partitions_index_state(&partitions_index, &existing_rows, overwrite);
     ensure_existing_partitions_index_mode(
@@ -1653,6 +1662,7 @@ async fn run_partitions_build(
                 requested_stop_block = stop_block,
                 "existing partitions index already covers --stop-block; nothing to build"
             );
+            ownership.release().await?;
             return Ok(PartitionBuildResult {
                 partitions_index,
                 chain,
@@ -1912,6 +1922,7 @@ async fn run_partitions_build(
                         || enough_rollovers)
                 {
                     checkpoint_partitions_rows(
+                        Some(&ownership),
                         &rows,
                         &partitions_index,
                         compression,
@@ -1929,6 +1940,7 @@ async fn run_partitions_build(
 
         if !rows.is_empty() {
             checkpoint_partitions_rows(
+                Some(&ownership),
                 &rows,
                 &partitions_index,
                 compression,
@@ -2000,6 +2012,7 @@ async fn run_partitions_build(
                     )
                 {
                     checkpoint_partitions_builder(
+                        Some(&ownership),
                         &builder,
                         &partitions_index,
                         compression,
@@ -2034,6 +2047,7 @@ async fn run_partitions_build(
                     PARTITIONS_CHECKPOINT_ROLLOVERS,
                 ) {
                     checkpoint_partitions_builder(
+                        Some(&ownership),
                         &builder,
                         &partitions_index,
                         compression,
@@ -2099,6 +2113,7 @@ async fn run_partitions_build(
                 PARTITIONS_CHECKPOINT_ROLLOVERS,
             ) {
                 checkpoint_partitions_builder(
+                    Some(&ownership),
                     &builder,
                     &partitions_index,
                     compression,
@@ -2113,6 +2128,7 @@ async fn run_partitions_build(
 
         if builder.has_rows() {
             let rows = checkpoint_partitions_builder(
+                Some(&ownership),
                 &builder,
                 &partitions_index,
                 compression,
@@ -2194,6 +2210,7 @@ async fn run_partitions_build(
                     || enough_rollovers)
             {
                 checkpoint_partitions_rows(
+                    Some(&ownership),
                     &rows,
                     &partitions_index,
                     compression,
@@ -2209,6 +2226,7 @@ async fn run_partitions_build(
         }
 
         if rows.len() > existing_row_count {
+            ownership.revalidate_local_paths()?;
             write_partitions_index_strict(
                 &partitions_index,
                 &rows,
@@ -2287,6 +2305,7 @@ async fn run_partitions_build(
                 PARTITIONS_CHECKPOINT_ROLLOVERS,
             ) {
                 checkpoint_partitions_builder(
+                    Some(&ownership),
                     &builder,
                     &partitions_index,
                     compression,
@@ -2328,6 +2347,7 @@ async fn run_partitions_build(
                         PARTITIONS_CHECKPOINT_ROLLOVERS,
                     ) {
                         checkpoint_partitions_builder(
+                            Some(&ownership),
                             &builder,
                             &partitions_index,
                             compression,
@@ -2360,6 +2380,7 @@ async fn run_partitions_build(
         };
 
         let rows = builder.finish(final_end_block)?;
+        ownership.revalidate_local_paths()?;
         write_partitions_index_strict(
             &partitions_index,
             &rows,
@@ -2395,6 +2416,7 @@ async fn run_partitions_build(
         .max()
         .unwrap_or_else(|| stop_block.unwrap_or(effective_start_block));
 
+    ownership.release().await?;
     Ok(PartitionBuildResult {
         partitions_index,
         chain,
@@ -2606,6 +2628,7 @@ impl PartitionsCheckpointState {
 }
 
 fn checkpoint_partitions_builder(
+    ownership: Option<&DatasetOwnership>,
     builder: &PartitionIndexBuilder,
     partitions_index: &str,
     compression: Compression,
@@ -2619,6 +2642,9 @@ fn checkpoint_partitions_builder(
         .current_frontier()
         .ok_or_else(|| anyhow!("partition build is missing a checkpoint frontier"))?;
     let rows = builder.snapshot(frontier)?;
+    if let Some(ownership) = ownership {
+        ownership.revalidate_local_paths()?;
+    }
     write_partitions_index_strict(
         partitions_index,
         &rows,
@@ -2649,6 +2675,7 @@ fn checkpoint_partitions_builder(
 }
 
 fn checkpoint_partitions_rows(
+    ownership: Option<&DatasetOwnership>,
     rows: &[firehose_parquet::cli::PartitionBuildRow],
     partitions_index: &str,
     compression: Compression,
@@ -2663,6 +2690,9 @@ fn checkpoint_partitions_rows(
         .map(|row| row.stop_block)
         .max()
         .ok_or_else(|| anyhow!("partition build is missing a checkpoint frontier"))?;
+    if let Some(ownership) = ownership {
+        ownership.revalidate_local_paths()?;
+    }
     write_partitions_index_strict(
         partitions_index,
         rows,
@@ -4181,6 +4211,10 @@ async fn main() -> Result<()> {
 
     if let Some(ref cmd) = cli.command {
         match cmd {
+            Commands::Recovery(command) => {
+                firehose_parquet::recovery::run_recovery(command).await?;
+                return Ok(());
+            }
             Commands::Completions { shell } => {
                 firehose_parquet::cli::generate_completions::<Cli>(*shell);
                 return Ok(());
@@ -4763,6 +4797,32 @@ async fn main() -> Result<()> {
     unreachable!("clap enforces a subcommand")
 }
 
+/// Collect output and the fully resolved cursor before taking any ownership.
+fn ingestion_mutation_scopes(
+    config: &Config,
+    cursor: Option<&CursorLocation>,
+) -> Result<Vec<MutationScope>> {
+    let output = config.output.to_string_lossy().into_owned();
+    let mut scopes = vec![MutationScope::directory(output.clone())];
+    match cursor {
+        Some(CursorLocation::Local(path)) => {
+            scopes.push(MutationScope::file(path.to_string_lossy()));
+        }
+        Some(CursorLocation::S3 { key, .. }) => {
+            let explicit = config.cursor_path.as_deref().unwrap_or_default();
+            let bucket_source = if explicit.starts_with("s3://") {
+                explicit
+            } else {
+                &output
+            };
+            let (bucket, _) = firehose_parquet::writer::parse_s3_url(bucket_source)?;
+            scopes.push(MutationScope::file(format!("s3://{bucket}/{key}")));
+        }
+        None => {}
+    }
+    Ok(scopes)
+}
+
 async fn run_ingestion(args: &BuildArgs, global: &GlobalArgs) -> Result<()> {
     init_tracing(
         &args.common.log_level,
@@ -4868,6 +4928,25 @@ async fn run_ingestion(args: &BuildArgs, global: &GlobalArgs) -> Result<()> {
     config.output = resolve_output(&config.output, &endpoint_info)?;
 
     let cursor_location = resolve_cursor_location(&config)?;
+    let ownership = if config.dry_run {
+        None
+    } else {
+        let aws = AwsConfig {
+            aws_access_key_id: config.aws_access_key_id.clone(),
+            aws_secret_access_key: config.aws_secret_access_key.clone(),
+            aws_session_token: config.aws_session_token.clone(),
+            aws_region: config.aws_region.clone(),
+            aws_endpoint_url: config.aws_endpoint_url.clone(),
+        };
+        Some(
+            DatasetOwnership::acquire(
+                "build",
+                ingestion_mutation_scopes(&config, cursor_location.as_ref())?,
+                Some(&aws),
+            )
+            .await?,
+        )
+    };
     let existing_cursor_state =
         load_existing_cursor(cursor_location.as_ref(), args.cursor_override)?;
     let solana_chain = chain_is_solana(&block_type, &endpoint_info, existing_cursor_state.as_ref());
@@ -5501,6 +5580,7 @@ async fn run_ingestion(args: &BuildArgs, global: &GlobalArgs) -> Result<()> {
                                 min_timestamp,
                                 max_timestamp,
                             };
+                            if let Some(ownership) = &ownership { ownership.revalidate_local_paths()?; }
                             let outcome = write_mapper_flush(&mut writer, &batches, &metadata)?;
                             log_writer_flush_outcome(
                                 "partition_boundary",
@@ -5519,6 +5599,7 @@ async fn run_ingestion(args: &BuildArgs, global: &GlobalArgs) -> Result<()> {
                                     state.updated_at = time::OffsetDateTime::now_utc()
                                         .format(&time::format_description::well_known::Rfc3339)
                                         .unwrap_or_default();
+                                    if let Some(ownership) = &ownership { ownership.revalidate_local_paths()?; }
                                     loc.save_with_retry_blocking(&state, &pipeline_metrics, &cursor_shutdown)?;
                                 }
                             }
@@ -5659,7 +5740,8 @@ async fn run_ingestion(args: &BuildArgs, global: &GlobalArgs) -> Result<()> {
                             min_timestamp,
                             max_timestamp,
                         };
-                        let outcome = write_mapper_flush(&mut writer, &batches, &metadata)?;
+                        if let Some(ownership) = &ownership { ownership.revalidate_local_paths()?; }
+                            let outcome = write_mapper_flush(&mut writer, &batches, &metadata)?;
                         log_writer_flush_outcome(flush_trigger, flushed_tables, flushed_rows, outcome);
 
                         // Only update cursor after all tables have been written.
@@ -5674,6 +5756,7 @@ async fn run_ingestion(args: &BuildArgs, global: &GlobalArgs) -> Result<()> {
                                 state.updated_at = time::OffsetDateTime::now_utc()
                                     .format(&time::format_description::well_known::Rfc3339)
                                     .unwrap_or_default();
+                                if let Some(ownership) = &ownership { ownership.revalidate_local_paths()?; }
                                 loc.save_with_retry_blocking(&state, &pipeline_metrics, &cursor_shutdown)?;
                             }
                         }
@@ -5806,6 +5889,9 @@ async fn run_ingestion(args: &BuildArgs, global: &GlobalArgs) -> Result<()> {
                         min_timestamp,
                         max_timestamp,
                     };
+                    if let Some(ownership) = &ownership {
+                        ownership.revalidate_local_paths()?;
+                    }
                     final_mapper_materialized = writer.write_all(&batches, &metadata)?;
                 }
             }
@@ -5815,6 +5901,9 @@ async fn run_ingestion(args: &BuildArgs, global: &GlobalArgs) -> Result<()> {
     // Flush any remaining buffered data in the writer, then save the cursor
     // after the final flush. Both are skipped unless the stream completed.
     if !dry_run {
+        if let Some(ownership) = &ownership {
+            ownership.revalidate_local_paths()?;
+        }
         flush_writer_on_exit(
             exit,
             &mut writer,
@@ -5830,6 +5919,9 @@ async fn run_ingestion(args: &BuildArgs, global: &GlobalArgs) -> Result<()> {
                     state.updated_at = time::OffsetDateTime::now_utc()
                         .format(&time::format_description::well_known::Rfc3339)
                         .unwrap_or_default();
+                    if let Some(ownership) = &ownership {
+                        ownership.revalidate_local_paths()?;
+                    }
                     loc.save_with_retry_blocking(&state, &pipeline_metrics, &cursor_shutdown)?;
                 }
                 Ok(())
@@ -5911,6 +6003,11 @@ async fn run_ingestion(args: &BuildArgs, global: &GlobalArgs) -> Result<()> {
         ensure_bounded_stream_reached_stop(stop_block, last_block_num, block_number_gaps_allowed)?;
     }
 
+    // All synchronous writes have resolved by this point. Any earlier error or
+    // cancellation of this future drops the guard and retains remote ownership.
+    if let Some(ownership) = ownership {
+        ownership.release().await?;
+    }
     Ok(())
 }
 
@@ -10109,6 +10206,7 @@ mod tests {
         let probe_counter = std::sync::atomic::AtomicU64::new(0);
 
         checkpoint_partitions_rows(
+            None,
             &rows,
             &path.to_string_lossy(),
             Compression::Zstd,

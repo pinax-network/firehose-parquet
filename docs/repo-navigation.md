@@ -26,6 +26,9 @@ Related design docs:
   - `src/grpc.rs`: Firehose stream client, auth headers, reconnect/backoff/timeouts.
   - `src/writer.rs`: Arrow builders to Parquet file writing, flush/rollover logic.
   - `src/cursor.rs`: resume state persistence (`cursor.parquet`) and parameter checks.
+  - `src/dataset_lock/`, `src/dataset_lock_s3.rs`: common local directory and persistent S3 bucket ownership for mutating commands.
+  - `src/durable_state.rs`, `src/durable_state_s3.rs`: strict versioned local/remote control records; ingestion transaction integration remains staged.
+  - `src/recovery.rs`: read-only ownership/control summaries and explicit provider-quiescent S3 owner release.
   - `src/encode.rs`: byte encoding modes (`hex`, `base58`, `tron_base58`, etc.).
   - `src/metrics.rs`: Prometheus metrics registry and `/metrics` server helpers.
   - `src/rollup.rs`, `src/merge.rs`, `src/truncate.rs`: maintenance subcommand implementations.

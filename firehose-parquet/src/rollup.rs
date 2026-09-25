@@ -13,6 +13,7 @@
 use crate::artifacts::is_reserved_artifact_path;
 use crate::cli::{block_on_async, format_bytes, resolve_destructive_input_path, AwsConfig};
 use crate::config::{Compression, DAY_PARTITION_PREFIX, LEGACY_DAY_PARTITION_PREFIX};
+use crate::dataset_lock::{DatasetOwnership, MutationScope};
 use crate::merge::SchemaCheck;
 use crate::writer::parse_s3_url;
 use anyhow::{Context, Result};
@@ -116,11 +117,25 @@ pub fn run_rollup(config: &RollupConfig) -> Result<()> {
         );
     }
 
+    if resolved.source.starts_with("s3://") != resolved.output.starts_with("s3://") {
+        anyhow::bail!(
+            "rollup requires both source and output to use the same storage kind (local or S3)"
+        );
+    }
+    let ownership = DatasetOwnership::acquire_blocking(
+        "rollup",
+        vec![
+            MutationScope::input(resolved.source.clone())?,
+            MutationScope::directory(resolved.output.clone()),
+        ],
+        resolved.aws.as_ref(),
+    )?;
     if resolved.source.starts_with("s3://") || resolved.output.starts_with("s3://") {
         run_rollup_s3(&resolved)
     } else {
-        run_rollup_local(&resolved)
-    }
+        run_rollup_local(&resolved, &ownership)
+    }?;
+    ownership.release_blocking()
 }
 
 /// Returns true when `source` and `output` point at the same dataset root.
@@ -211,7 +226,7 @@ impl OutputNames {
 // Local filesystem rollup
 // ---------------------------------------------------------------------------
 
-fn run_rollup_local(config: &RollupConfig) -> Result<()> {
+fn run_rollup_local(config: &RollupConfig, ownership: &DatasetOwnership) -> Result<()> {
     let source = PathBuf::from(&config.source);
     if !source.is_dir() {
         anyhow::bail!(
@@ -313,6 +328,7 @@ fn run_rollup_local(config: &RollupConfig) -> Result<()> {
         total_input_files += group_files.len();
 
         // Write merged data, splitting by flush_bytes.
+        ownership.revalidate_local_paths()?;
         let out_dir = output.join(group_key);
         std::fs::create_dir_all(&out_dir)
             .with_context(|| format!("creating output dir {}", out_dir.display()))?;
@@ -327,6 +343,7 @@ fn run_rollup_local(config: &RollupConfig) -> Result<()> {
         total_output_files += group_written.len();
         written.extend(group_written);
 
+        ownership.revalidate_local_paths()?;
         remove_previous_copies_local(&out_dir, &written)?;
 
         // Delete this group's sources as soon as its output is written, so a failure in a
@@ -924,7 +941,7 @@ fn remove_previous_copies_s3(
 }
 
 fn build_s3_client(bucket: &str, aws: &AwsConfig) -> Result<Arc<dyn ObjectStore>> {
-    Ok(Arc::new(aws.build_s3_client(bucket)?))
+    Ok(Arc::new(aws.build_s3_client_for_mutation(bucket)?))
 }
 
 // ---------------------------------------------------------------------------

@@ -453,6 +453,9 @@ pub struct BuildArgs {
 /// Subcommands shared by all binaries.
 #[derive(clap::Subcommand, Debug)]
 pub enum Commands {
+    /// Inspect recovery state or explicitly release a provider-quiescent S3 owner.
+    #[command(subcommand)]
+    Recovery(crate::recovery::RecoveryCommands),
     /// Generate shell completions for the given shell
     Completions {
         /// Shell to generate completions for
@@ -948,10 +951,12 @@ verify_runs/) are skipped. A partition whose parts have different columns
 (names, types, nullability, or order) is left untouched and listed in the
 summary, and merge exits non-zero.
 
-Each partition merge is journaled in _fireparq_merge.json, so a merge interrupted
-by a crash is finished or undone by the next run instead of leaving duplicate
-rows. One merge runs per path at a time: merge holds .fireparq-merge.lock there
-and fails right away if another merge holds it.
+Each partition merge is journaled in _fireparq_merge.json. Local interrupted
+merges recover under the common directory guard. S3 mutations hold a persistent
+bucket-wide owner with no expiry or automatic takeover. After a remote error,
+recovery requires provider-confirmed request quiescence and explicit release of
+the exact owner. Legacy S3 journals using the former expiring lock are refused.
+Use recovery status to inspect ownership; process exit alone is not remote drain.
 
 The path must exist locally or be an explicit s3://bucket/... URI. Unlike scan and
 inspect, merge never falls back to s3://$S3_BUCKET/<path> for a missing local path.
@@ -3126,32 +3131,14 @@ fn write_partitions_index_impl(
     if path.starts_with("s3://") {
         use crate::writer::parse_s3_url;
         use bytes::Bytes;
-        use object_store::aws::AmazonS3Builder;
         use object_store::ObjectStore;
 
         let aws = aws
             .ok_or_else(|| anyhow::anyhow!("AWS config required for S3 partitions index output"))?;
         let (bucket, key) = parse_s3_url(path)?;
-        let mut builder = AmazonS3Builder::new().with_bucket_name(&bucket);
-        if let Some(ref value) = aws.aws_access_key_id {
-            builder = builder.with_access_key_id(value);
-        }
-        if let Some(ref value) = aws.aws_secret_access_key {
-            builder = builder.with_secret_access_key(value);
-        }
-        if let Some(ref value) = aws.aws_session_token {
-            builder = builder.with_token(value);
-        }
-        if let Some(ref value) = aws.aws_region {
-            builder = builder.with_region(value);
-        }
-        if let Some(ref value) = aws.aws_endpoint_url {
-            builder = builder.with_endpoint(value);
-        }
-
-        let client = builder
-            .build()
-            .map_err(|e| anyhow::anyhow!("building S3 client for bucket {bucket}: {e}"))?;
+        // Shared routing validation and zero transport retries are required for
+        // this guarded non-CAS checkpoint write, just as for data and cursors.
+        let client = aws.build_s3_client_for_mutation(&bucket)?;
         let mut buf = Vec::new();
         {
             let mut writer = ArrowWriter::try_new(&mut buf, schema, Some(props))?;
@@ -4088,12 +4075,35 @@ pub fn resolve_partition_window_bounds_from_index(
 }
 
 impl AwsConfig {
-    /// Build an `AmazonS3` client for the given bucket.
+    /// Build an `AmazonS3` client for read-only access to the given bucket.
     ///
     /// When no access key is provided, enables anonymous (unsigned) requests
     /// via `with_skip_signature(true)` so that public buckets can be accessed
     /// without credentials.
     pub fn build_s3_client(&self, bucket: &str) -> anyhow::Result<object_store::aws::AmazonS3> {
+        self.s3_client_builder(bucket, false)?
+            .build()
+            .map_err(|e| anyhow::anyhow!("building S3 client for bucket {bucket}: {e}"))
+    }
+
+    /// Build a mutation client with transport retries disabled. An error after
+    /// sending PUT/DELETE may leave a remote request in flight; a later success
+    /// would not prove that earlier request has stopped. The owning operation
+    /// must retain ownership on an unresolved mutation error.
+    pub fn build_s3_client_for_mutation(
+        &self,
+        bucket: &str,
+    ) -> anyhow::Result<object_store::aws::AmazonS3> {
+        self.s3_client_builder(bucket, true)?
+            .build()
+            .map_err(|e| anyhow::anyhow!("building S3 mutation client for bucket {bucket}: {e}"))
+    }
+
+    pub(crate) fn s3_client_builder(
+        &self,
+        bucket: &str,
+        mutation: bool,
+    ) -> anyhow::Result<object_store::aws::AmazonS3Builder> {
         use object_store::aws::AmazonS3Builder;
 
         let mut builder = AmazonS3Builder::new().with_bucket_name(bucket);
@@ -4117,9 +4127,10 @@ impl AwsConfig {
         if self.aws_access_key_id.is_none() {
             builder = builder.with_skip_signature(true);
         }
-        builder
-            .build()
-            .map_err(|e| anyhow::anyhow!("building S3 client for bucket {bucket}: {e}"))
+        if mutation {
+            builder = crate::s3::without_mutation_retries(builder);
+        }
+        Ok(builder)
     }
 }
 

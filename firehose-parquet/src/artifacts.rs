@@ -15,6 +15,19 @@ pub const MERKLE_ROOTS_FILENAME: &str = "merkle_roots.parquet";
 /// Directory holding per-run verify reports (`verify_runs/<run_id>/report.json`).
 pub const VERIFY_RUNS_DIR: &str = "verify_runs";
 
+/// Bucket-wide ownership record and isolated conditional-write canaries.
+pub const OWNERSHIP_FILENAME: &str = ".fireparq-owner-v1.json";
+pub const OWNERSHIP_PROBES_DIRECTORY: &str = ".fireparq-owner-probes-v1";
+
+/// Internal recovery/ownership paths are never ordinary dataset artifacts that
+/// a table maintenance command may rewrite or delete.
+pub fn is_control_path(path: &str) -> bool {
+    path.split('/').any(|component| {
+        matches!(component, OWNERSHIP_FILENAME | OWNERSHIP_PROBES_DIRECTORY)
+            || component == crate::durable_state::CONTROL_DIRECTORY
+    })
+}
+
 /// File names that are never table data, wherever they appear in a dataset tree.
 pub const RESERVED_ARTIFACT_FILENAMES: [&str; 3] = [
     CURSOR_PARQUET_FILENAME,
@@ -29,6 +42,9 @@ pub const RESERVED_ARTIFACT_FILENAMES: [&str; 3] = [
 /// `rel_path` is a `/`-separated path (local path or S3 key) relative to the directory being
 /// scanned, so ancestors of that directory do not affect the result.
 pub fn is_reserved_artifact_path(rel_path: &str) -> bool {
+    if is_control_path(rel_path) {
+        return true;
+    }
     let mut components = rel_path.split('/').filter(|part| !part.is_empty());
     let Some(file_name) = components.next_back() else {
         return false;
@@ -57,6 +73,22 @@ mod tests {
         assert!(is_reserved_artifact_path(
             "evm/mainnet/verify_runs/run-1/roots.parquet"
         ));
+    }
+
+    #[test]
+    fn transaction_and_ownership_control_paths_are_reserved() {
+        for path in [
+            ".fireparq-ingest",
+            "mainnet/.fireparq-ingest/state.json",
+            "mainnet/.fireparq-ingest/hidden.parquet",
+            ".fireparq-owner-v1.json",
+            ".fireparq-owner-probes-v1/probe",
+        ] {
+            assert!(is_control_path(path), "{path}");
+            assert!(is_reserved_artifact_path(path), "{path}");
+        }
+        assert!(!is_control_path(".fireparq-ingest-old/part-1.parquet"));
+        assert!(!is_control_path("blocks/part-v1-transaction.parquet"));
     }
 
     #[test]

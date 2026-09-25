@@ -11,6 +11,11 @@ rename as success despite not establishing crash durability.
 
 ## Behavior
 
+This section records the original #469 behavior. Stage 1 of #468 subsequently
+retains the three-attempt policy only for local cursors; S3 cursors use one
+application attempt and zero transport retries, retaining unresolved ownership.
+See [the current remote policy](468-s3-mutation-attempts.md).
+
 Every ingestion checkpoint uses `CursorLocation::save_with_retry_blocking`,
 which bridges the synchronous block handler to `save_with_retry`. The same
 checkpoint is attempted at most three times, with 1 second and 2 second backoff.
