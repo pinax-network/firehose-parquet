@@ -31,6 +31,7 @@ lifecycle state; a local implementation or passing test alone is not closure.
 - [#477: single-partition writer contract](477-writer-partition-contract.md)
 - [#475: bounded metrics and stream readiness](475-metrics-readiness.md)
 - [#524: projected validation and partition boundary performance](524-validation-performance.md)
+- [#565: safe fixed-width Base58 conversion](565-fixed-base58.md)
 
 - [#476: timestamp and streamed identity validation](476-timestamp-validation.md)
 
@@ -72,6 +73,7 @@ lifecycle state; a local implementation or passing test alone is not closure.
 | [#513](https://github.com/pinax-network/firehose-parquet/issues/513) | [#596](https://github.com/pinax-network/firehose-parquet/pull/596) | Merged as `2a3724e` on 2026-09-25; issue closed; 869 tests, independent arbitrary-size equivalence, bounded release benchmarks, review and CI passed. Original stopped-agent work remains preserved. |
 | [#505](https://github.com/pinax-network/firehose-parquet/issues/505) | [#594](https://github.com/pinax-network/firehose-parquet/pull/594) | Merged as `b8d6834` on 2026-09-25; issue closed; 862 tests, one-slot decimal fee and six-blob live equality check, independent review and CI passed. |
 | [#474](https://github.com/pinax-network/firehose-parquet/issues/474) | [#597](https://github.com/pinax-network/firehose-parquet/pull/597) | Merged as `1f2d252` on 2026-09-25; issue closed; 873 tests, real CLI fork-stream checks, executed query examples, review and CI passed. |
+| [#565](https://github.com/pinax-network/firehose-parquet/issues/565) | [#598](https://github.com/pinax-network/firehose-parquet/pull/598) | Merged as `cd6e011` on 2026-09-25; issue closed; 877 tests, independent equivalence review, 13.4–14.4x conversion/append benchmarks and CI passed. |
 | #468 prerequisite | [#591](https://github.com/pinax-network/firehose-parquet/pull/591) | Ownership/control foundation merged as `78ceb98`; 848 tests and CI passed. Full ingestion crash/replay protection remains incomplete; issue #468 stays open. |
 
 The #468 design PR accidentally triggered GitHub auto-closure through a negative

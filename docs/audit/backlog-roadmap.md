@@ -76,15 +76,19 @@ and test against current main. Never reset or discard the previous worktree.
   are now merged and closed after regression and live comparison. Vote
   classification (#501, PR #586) and explicit instruction positions (#502,
   PR #585) also passed raw-data comparisons and are merged with issues closed.
-- Operational contracts: #474 merged in PR #597 as `1f2d252` after 873 tests,
-  executed SQL examples, local CLI fork checks and CI; issue closed.
-  #475 metrics/readiness is merged. The #477 writer simplification and
+- Operational contracts: #474 reversible stream options/output semantics merged
+  in PR #597 as `1f2d252` after 873 tests, executable query and protocol checks,
+  independent review and CI; issue closure was verified. #475 metrics/readiness
+  is merged. The #477 writer simplification and
   #476 malformed-metadata handling are merged; the #468 journal is in progress.
-- Performance: #513 was recovered into an isolated worktree, with bounded exhaustive
-  and sampled equivalence tests, a reproducible conversion benchmark and 869 passing
-  integrated tests; PR #596 passed CI and merged as `2a3724e`; issue closed.
-  The original locked work is preserved. Recover #522 before duplicating that work. Measure
-  #565, #515, #520 and #524 on representative data; #503's native-type work and
+- Performance: #513 was recovered and merged in PR #596 as `2a3724e` after 869
+  integrated tests, bounded exhaustive/sampled equivalence, independent review,
+  measured conversion benchmarks and CI; issue closure was verified. The original
+  locked work is preserved. #565's safe fixed-size Base58 implementation and
+  equivalence checks are recorded in [its audit](565-fixed-base58.md); PR #598
+  merged as `cd6e011` after 877 tests, release benchmarks and CI; issue closed. Recover #522 before duplicating that work. Measure
+  #515 and #520 on representative data. #524 is in PR #599 after 878 tests
+  and reproducible 1.8–2.7x local validation improvements; merge remains pending. #503's native-type work and
   bounded release benchmark are complete. #516 depends on durable
   commit ordering; #517-#519 and #523 need the specific throughput, memory,
   file-size or lookup evidence requested by their issues.
