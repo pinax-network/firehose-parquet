@@ -4314,6 +4314,15 @@ async fn run_ingestion(args: &BuildArgs, global: &GlobalArgs) -> Result<()> {
         }
     }
 
+    if exit == StreamExit::Completed && !dry_run {
+        if let Some(message) = firehose_parquet::cli::non_final_bounded_warning(
+            config.final_blocks_only,
+            config.stop_block,
+        ) {
+            warn!("{message}");
+        }
+    }
+
     // Final metrics.
     let elapsed = progress_start.elapsed();
     let elapsed_secs = elapsed.as_secs_f64();

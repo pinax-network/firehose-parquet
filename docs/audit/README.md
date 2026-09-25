@@ -27,6 +27,7 @@ lifecycle state; a local implementation or passing test alone is not closure.
 - [#502: explicit Solana instruction positions](502-solana-instruction-order.md)
 - [#503: Binary Solana payloads and account-index lists](503-solana-binary-payloads.md)
 - [#473: responsive shutdown](473-responsive-shutdown.md)
+- [#474: append-only non-final streams and query limits](474-non-final-streams.md)
 - [#477: single-partition writer contract](477-writer-partition-contract.md)
 - [#475: bounded metrics and stream readiness](475-metrics-readiness.md)
 
@@ -67,6 +68,7 @@ lifecycle state; a local implementation or passing test alone is not closure.
 | [#508](https://github.com/pinax-network/firehose-parquet/issues/508) | [#590](https://github.com/pinax-network/firehose-parquet/pull/590) | Merged as `21de6af`; issue closed; 796 tests, all old columns preserved across 24 live EOS rows, ten raw-verified database joins, independent review and CI passed. |
 | [#486](https://github.com/pinax-network/firehose-parquet/issues/486) | [#592](https://github.com/pinax-network/firehose-parquet/pull/592) | Merged as `d5e1419`; issue closed; 855 tests, independent review, bounded finalized Ethereum coverage/resume comparison and CI passed. |
 | [#503](https://github.com/pinax-network/firehose-parquet/issues/503) | [#593](https://github.com/pinax-network/firehose-parquet/pull/593) | Merged as `d417e0c` on 2026-09-25; issue closed; 857 tests, all 19,714 retained raw-sample rows compared, bounded offline release benchmarks, independent review and CI passed. |
+| [#505](https://github.com/pinax-network/firehose-parquet/issues/505) | [#594](https://github.com/pinax-network/firehose-parquet/pull/594) | Merged as `b8d6834` on 2026-09-25; issue closed; 862 tests, one-slot decimal fee and six-blob live equality check, independent review and CI passed. |
 | #468 prerequisite | [#591](https://github.com/pinax-network/firehose-parquet/pull/591) | Ownership/control foundation merged as `78ceb98`; 848 tests and CI passed. Full ingestion crash/replay protection remains incomplete; issue #468 stays open. |
 
 | [#505](https://github.com/pinax-network/firehose-parquet/issues/505) | [#594](https://github.com/pinax-network/firehose-parquet/pull/594) | Merged as `b8d6834`; issue closed; 862 tests, independent review, exact live fee/blob comparison and CI passed. |
