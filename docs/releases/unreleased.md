@@ -206,6 +206,19 @@ New columns on `balance_changes`, `nonce_changes`, `code_changes`, `storage_chan
 
 Migration: files written before and after this change have different schemas for these 12 tables. Query them separately or with `union_by_name`, and do not `merge` or `rollup` old and new files together. Rebuild old ranges to get the new columns.
 
+### `truncate`: filters on different keys must all match, deletes need `--yes`, and destructive commands no longer fall back to `S3_BUCKET` (#481)
+
+- **Filters on different keys must all match.** `-p year=2026 -p month=01` used to delete every file under `year=2026` *or* `month=01`, including January 2025 and all of 2026. It now selects January 2026 only. Filters on the same key still match either value (`-p day=01 -p day=02`).
+- **Partition-path filters work.** A filter with `/`, such as `year=2026/month=01/day=15`, matches files whose partition directories (below the given path, in every table) start with exactly those segments. It used to match nothing, because each filter was compared with a single directory name. Empty filters, path filters with a segment that is not `key=value`, and segments with more than one `*` are now rejected.
+- **`--yes` is required to delete.** Without `--yes` (and without `--dry-run`), `truncate` prints a summary and exits non-zero without deleting anything. The summary lists the file count, total size, the first 10 paths, and any root artifacts such as `cursor.parquet`.
+- **No `S3_BUCKET` fallback for `truncate`, `merge`, and `rollup`.** A relative path that did not exist locally used to become `s3://$S3_BUCKET/<path>`, and `.env` is loaded automatically, so a typo could target a bucket. These three commands now fail with `path does not exist`, naming the `s3://` URI to pass if S3 was intended. `scan`, `inspect`, `validate`, and `verify` keep the fallback.
+
+Migration:
+
+- Add `--yes` to scripts that run `truncate` for real.
+- Check scripts that pass several `-p` filters on different keys: they now select the intersection instead of the union.
+- Pass `s3://bucket/prefix` explicitly to `truncate`, `merge`, and `rollup` for S3 data.
+
 ## Fixes
 
 - **CLI values that crashed or misbehaved are now rejected or consistent (#471).**
