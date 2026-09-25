@@ -7,6 +7,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 pub const FORMAT_VERSION: u32 = 1;
 pub const MAPPER_EPOCH: &str = "fireparq-mapping-v1";
+pub const SOLANA_GENESIS_ROUTING_SECONDS: i64 = 1_584_368_940;
 const MAX_CURSOR_BYTES: usize = 64 * 1024;
 const MAX_TABLES: usize = 256;
 
@@ -257,6 +258,9 @@ pub struct EventIdentity {
     pub block_num: u64,
     pub block_id: String,
     pub fork_step: i32,
+    /// Actual validated source time, before any routing synthesis. Missing
+    /// nullable-chain times remain None even when a synthetic anchor is used.
+    pub source_timestamp: Option<i64>,
 }
 impl EventIdentity {
     pub fn validate(&self) -> Result<()> {
@@ -265,6 +269,9 @@ impl EventIdentity {
             || !(0..=3).contains(&self.fork_step)
         {
             bail!("accepted event has an invalid block identity or fork step");
+        }
+        if let Some(seconds) = self.source_timestamp {
+            crate::traits::checked_timestamp(seconds)?;
         }
         Ok(())
     }
@@ -275,6 +282,8 @@ impl EventIdentity {
 pub enum AnchorProvenance {
     AcceptedPrefix,
     Lookahead,
+    /// Versioned existing Solana mapper fallback, not an observed input event.
+    SolanaGenesisFallback,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -297,6 +306,17 @@ impl RoutingCheckpoint {
     pub fn validate(&self, ordinal: u64) -> Result<()> {
         if let Some(anchor) = &self.anchor {
             crate::traits::checked_timestamp(anchor.seconds)?;
+            if anchor.provenance == AnchorProvenance::SolanaGenesisFallback {
+                if self.policy != RoutingPolicy::SolanaLastKnownV1
+                    || anchor.source_ordinal != 0
+                    || anchor.source_block_num != 0
+                    || !anchor.source_block_id.is_empty()
+                    || anchor.seconds != SOLANA_GENESIS_ROUTING_SECONDS
+                {
+                    bail!("invalid versioned Solana routing fallback provenance");
+                }
+                return Ok(());
+            }
             if anchor.source_ordinal == 0
                 || anchor.source_block_id.is_empty()
                 || anchor.source_block_id.len() > 4096

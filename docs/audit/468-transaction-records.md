@@ -66,3 +66,14 @@ S3-compatible store, check tombstone recreation and stale incarnations, reject
 stale receipt writers/orphan and inconsistent state, and confirm a remote owner
 with unresolved mutations cannot continue writing control records. Remote tests
 use an in-memory conditional backend and make no provider qualification claim.
+
+Accepted identities additionally preserve `source_timestamp: Option<i64>` from
+validated input, before synthetic routing. Missing Solana time stays missing.
+Real routing anchors must match the block number, ID and time of an actually
+received event or the exact saved authoritative anchor. A saved future lookahead
+source must match when that ordinal is received after restart. The existing
+Solana initial timestamp seed is represented by an explicit versioned
+`solana_genesis_fallback` provenance with its exact constant and no claimed input
+ordinal/ID. Tests reject forged source identities/times and altered fallback
+constants; this avoids inventing source time merely to preserve partition routing
+or a cursor-mirror timestamp.

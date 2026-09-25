@@ -5,7 +5,8 @@ use sha2::{Digest as _, Sha256};
 use std::collections::BTreeMap;
 
 use super::state::{
-    canonical_json, AcceptedPrefix, Checkpoint, Digest, EventIdentity, RoutingCheckpoint,
+    canonical_json, AcceptedPrefix, AnchorProvenance, Checkpoint, Digest, EventIdentity,
+    RoutingCheckpoint,
 };
 
 const MAX_BUFFERED_EVENTS: usize = 65_536;
@@ -46,6 +47,16 @@ impl AcceptedFrontier {
             .assigned_ordinal
             .checked_add(1)
             .context("accepted event ordinal exhausted")?;
+        if let Some(anchor) = self.routing.anchor.as_ref().filter(|anchor| {
+            anchor.provenance == AnchorProvenance::Lookahead && anchor.source_ordinal == ordinal
+        }) {
+            if identity.block_num != anchor.source_block_num
+                || identity.block_id != anchor.source_block_id
+                || identity.source_timestamp != Some(anchor.seconds)
+            {
+                bail!("resumed input differs from the authoritative lookahead anchor source");
+            }
+        }
         self.received.insert(
             ordinal,
             ReceivedEvent {
@@ -68,6 +79,34 @@ impl AcceptedFrontier {
             .is_some_and(|anchor| anchor.source_ordinal > self.assigned_ordinal)
         {
             bail!("routing anchor refers to an event that was never received");
+        }
+        if let Some(anchor) = &routing.anchor {
+            if anchor.provenance != AnchorProvenance::SolanaGenesisFallback {
+                let source = self
+                    .received
+                    .get(&anchor.source_ordinal)
+                    .map(|event| &event.identity)
+                    .or_else(|| {
+                        (anchor.source_ordinal == self.accepted_ordinal)
+                            .then_some(self.last_event.as_ref())
+                            .flatten()
+                    });
+                let matches_source = source.is_some_and(|event| {
+                    event.block_num == anchor.source_block_num
+                        && event.block_id == anchor.source_block_id
+                        && event.source_timestamp == Some(anchor.seconds)
+                });
+                let matches_restored = self.routing.anchor.as_ref().is_some_and(|previous| {
+                    previous.source_ordinal == anchor.source_ordinal
+                        && previous.source_block_num == anchor.source_block_num
+                        && previous.source_block_id == anchor.source_block_id
+                        && previous.seconds == anchor.seconds
+                        && previous.provenance != AnchorProvenance::SolanaGenesisFallback
+                });
+                if !matches_source && !(source.is_none() && matches_restored) {
+                    bail!("routing anchor differs from its received source or authoritative predecessor");
+                }
+            }
         }
         let event = self
             .received

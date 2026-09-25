@@ -40,6 +40,7 @@ pub(crate) fn event(number: u64, step: i32) -> EventIdentity {
         block_num: number,
         block_id: format!("block-{number}"),
         fork_step: step,
+        source_timestamp: Some(1_700_000_000),
     }
 }
 

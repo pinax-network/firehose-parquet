@@ -119,6 +119,134 @@ fn fabricated_future_or_mislabeled_anchor_does_not_accept() {
 }
 
 #[test]
+fn anchor_block_identity_and_time_must_match_actual_received_metadata() {
+    let mut tracker = frontier(RoutingPolicy::SolanaLastKnownV1);
+    tracker.receive(event(100, 1)).unwrap();
+    tracker.receive(event(101, 1)).unwrap();
+    let anchor = TimestampAnchor {
+        source_ordinal: 2,
+        source_block_num: 101,
+        source_block_id: "block-101".into(),
+        seconds: 1_700_000_000,
+        provenance: AnchorProvenance::Lookahead,
+    };
+    for field in [0, 1, 2] {
+        let mut forged = anchor.clone();
+        match field {
+            0 => forged.source_block_num = 102,
+            1 => forged.source_block_id = "foreign".into(),
+            _ => forged.seconds += 1,
+        };
+        assert!(tracker
+            .accept(
+                1,
+                RoutingCheckpoint {
+                    policy: RoutingPolicy::SolanaLastKnownV1,
+                    anchor: Some(forged)
+                }
+            )
+            .is_err());
+    }
+    tracker
+        .accept(
+            1,
+            RoutingCheckpoint {
+                policy: RoutingPolicy::SolanaLastKnownV1,
+                anchor: Some(anchor),
+            },
+        )
+        .unwrap();
+}
+
+#[test]
+fn missing_source_time_stays_missing_under_explicit_versioned_solana_fallback() {
+    let mut tracker = frontier(RoutingPolicy::SolanaLastKnownV1);
+    let mut missing = event(100, 1);
+    missing.source_timestamp = None;
+    tracker.receive(missing).unwrap();
+    let mut anchor = TimestampAnchor {
+        source_ordinal: 0,
+        source_block_num: 0,
+        source_block_id: String::new(),
+        seconds: crate::ingest::state::SOLANA_GENESIS_ROUTING_SECONDS,
+        provenance: AnchorProvenance::SolanaGenesisFallback,
+    };
+    tracker
+        .accept(
+            1,
+            RoutingCheckpoint {
+                policy: RoutingPolicy::SolanaLastKnownV1,
+                anchor: Some(anchor.clone()),
+            },
+        )
+        .unwrap();
+    let prefix = tracker.snapshot().unwrap().unwrap();
+    assert_eq!(prefix.last_event.source_timestamp, None);
+    assert_eq!(
+        prefix.routing.anchor.unwrap().seconds,
+        crate::ingest::state::SOLANA_GENESIS_ROUTING_SECONDS
+    );
+    anchor.seconds += 1;
+    assert!(RoutingCheckpoint {
+        policy: RoutingPolicy::SolanaLastKnownV1,
+        anchor: Some(anchor)
+    }
+    .validate(1)
+    .is_err());
+}
+
+#[test]
+fn resumed_lookahead_provenance_must_match_the_actual_next_source_event() {
+    use crate::ingest::state::{PartCompression, PendingTransaction, TablePlan};
+    let authority = AuthorityState::initial(descriptor(RoutingPolicy::SolanaLastKnownV1)).unwrap();
+    let mut tracker = AcceptedFrontier::resume(&authority.checkpoint);
+    tracker.receive(event(100, 1)).unwrap();
+    tracker.receive(event(101, 1)).unwrap();
+    tracker
+        .accept(
+            1,
+            RoutingCheckpoint {
+                policy: RoutingPolicy::SolanaLastKnownV1,
+                anchor: Some(TimestampAnchor {
+                    source_ordinal: 2,
+                    source_block_num: 101,
+                    source_block_id: "block-101".into(),
+                    seconds: 1_700_000_000,
+                    provenance: AnchorProvenance::Lookahead,
+                }),
+            },
+        )
+        .unwrap();
+    let tables = authority
+        .descriptor
+        .tables
+        .iter()
+        .map(|(table, schema)| TablePlan {
+            table: table.clone(),
+            rows: 0,
+            schema_sha256: schema.clone(),
+            partition: String::new(),
+        })
+        .collect();
+    let pending = PendingTransaction::prepare(
+        &authority,
+        tracker.snapshot().unwrap().unwrap(),
+        tables,
+        PartCompression::Zstd,
+    )
+    .unwrap()
+    .committed_after_verification(&authority.descriptor)
+    .unwrap();
+    let authority = authority.install(&pending).unwrap();
+    let mut resumed = AcceptedFrontier::resume(&authority.checkpoint);
+    assert!(resumed.receive(event(102, 1)).is_err());
+    let mut wrong_time = event(101, 1);
+    wrong_time.source_timestamp = Some(1_700_000_001);
+    assert!(resumed.receive(wrong_time).is_err());
+    assert_eq!(resumed.receive(event(101, 1)).unwrap(), 2);
+}
+
+#[test]
 fn acknowledgement_rejects_stale_prefix_and_duplicate_or_unknown_acceptance() {
     let mut tracker = frontier(RoutingPolicy::DirectV1);
     assert!(tracker.accept(1, routing(RoutingPolicy::DirectV1)).is_err());
