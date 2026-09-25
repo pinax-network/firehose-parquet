@@ -82,6 +82,16 @@ cargo fmt --all -- --check
 ```
 
 Local agents serialize complete Cargo commands because worktrees share a target
-cache. The focused gRPC suite passed **50 tests, 0 failed, 1 ignored** (the
-opt-in benchmark). Full-workspace results and final-main integration will be
-recorded before publication.
+cache. Validation at implementation commit `3a4a6dd`:
+
+- Focused gRPC suite: **50 passed, 0 failed, 1 ignored** (the opt-in benchmark).
+- Full workspace: **1,010 passed, 0 failed, 9 ignored**.
+- CI-selected capture example: **1 passed, 1 ignored** (subprocess entrypoint).
+- Workspace build and formatting check passed.
+
+Independent review found no production blocker. Main
+`b364681de51bcf6d98031f860bfd12e231dd80b4` was integrated after its #602 merge;
+its tree is identical to the #602 head already tested as this branch's base, so
+this ancestry merge changed no code. Subsequent changes only record evidence and
+add the unreleased note. No performance change or live-provider qualification is
+claimed.
