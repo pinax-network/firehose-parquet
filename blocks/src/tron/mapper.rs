@@ -899,7 +899,10 @@ pub(crate) mod tests {
                         hash: vec![0x11, 0x22],
                         caller_address: tron_address(0xaa),
                         transfer_to_address: tron_address(0xbb),
-                        call_value_info: vec![],
+                        call_value_info: vec![protocol::internal_transaction::CallValueInfo {
+                            call_value: 17,
+                            token_id: String::new(),
+                        }],
                         note: b"call".to_vec(),
                         rejected: false,
                         extra: String::new(),

@@ -1227,6 +1227,39 @@ These columns hold Firehose fields as they are, with bytes in the output encodin
 
 The new columns come after the existing ones in each table. Ordinals are unique within a block, so `(block_number, ordinal)` orders every log, call and state change of a block. They are not reliable for anything inside a reverted call.
 
+## Tron Contracts, Receipts and Internal Values
+
+`contracts` retains every source contract with `transaction_index`, `tx_hash`,
+`contract_index`, enum label/number, permission ID and raw Binary Any payload.
+TransferContract, TransferAssetContract and TriggerSmartContract expose typed
+owner/recipient/amount or target/data/call-value fields. Unsupported types keep
+their raw payload with null decoded fields. `transactions.contract_type` remains
+the first-contract projection and is null when the contract list is empty.
+
+`transactions` includes nullable `receipt_*` energy/net fees, usage and result,
+receipt `contract_address`, and Binary `res_message`. Missing receipts are null;
+present zero/empty values remain values. `internal_call_values` retains each
+ordered source `(call_value, token_id)` pair, including repeated or empty token
+IDs, joined by block identity, transaction index/hash and `internal_index`.
+
+`transaction_index` and `logs.block_log_index` count original source positions,
+including transactions omitted by failed filtering. Existing `logs.log_index`
+remains per transaction. Included failed effects remain source records.
+
+```sql
+SELECT t.block_num, t.txid, c.contract_index, c.contract_type,
+       c.owner_address, c.to_address, c.amount, c.contract_address,
+       hex(c.data) AS call_data_hex, c.call_value, t.receipt_energy_fee
+FROM read_parquet('output/**/transactions/*.parquet') t
+JOIN read_parquet('output/**/contracts/*.parquet') c
+  ON t.block_num = c.block_num AND t.block_id = c.block_id
+ AND t.transaction_index = c.transaction_index AND t.txid = c.tx_hash;
+```
+
+These fields require a new output root/rebuild or explicit schema migration;
+old files cannot recover dropped source fields. See the [mapping contract,
+validation and live-access blocker](docs/audit/509-tron-contract-fields.md).
+
 ## Solana Vote Filtering
 
 The optional `vote_transactions` table contains conservatively recognized simple

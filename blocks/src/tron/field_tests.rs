@@ -201,7 +201,10 @@ fn all_contracts_receipts_and_call_values_survive_every_encoding_and_flush() {
                 let labels = column::<DictionaryArray<Int32Type>>(contracts, "contract_type")
                     .downcast_dict::<StringArray>()
                     .unwrap();
-                assert_eq!(column::<Int32Array>(contracts,"contract_type_id").value(3),777);
+                assert_eq!(
+                    column::<Int32Array>(contracts, "contract_type_id").value(3),
+                    777
+                );
                 assert_eq!(labels.value(3), "UNKNOWN");
                 assert_eq!(labels.value(4), "AccountCreateContract");
                 for (row, seed) in [(0, 1), (1, 3), (2, 5)] {
@@ -276,7 +279,10 @@ fn missing_messages_are_null_but_present_defaults_are_values() {
         "TransferContract",
         protocol::TransferContract::default(),
     )];
-    block.transactions = vec![absent, present];
+    let mut missing_parameter = present.clone();
+    missing_parameter.info.as_mut().unwrap().receipt = None;
+    missing_parameter.contracts[0].parameter = None;
+    block.transactions = vec![absent, present, missing_parameter];
     let mut mapper = TronBlockMapper::new(false, EncodeBytes::Binary, true);
     mapper
         .map_block(&block.encode_to_vec(), &BlockIdentity::default(), None)
@@ -295,6 +301,16 @@ fn missing_messages_are_null_but_present_defaults_are_values() {
         assert!(!tx.column_by_name(name).unwrap().is_null(1));
     }
     assert_eq!(column::<Int64Array>(tx, "receipt_energy_fee").value(1), 0);
+    assert!(!tx.column_by_name("contract_type").unwrap().is_null(2));
+    assert!(tx.column_by_name("receipt_energy_fee").unwrap().is_null(2));
+    assert!(tx.column_by_name("receipt_result").unwrap().is_null(2));
+    assert!(!tx.column_by_name("contract_address").unwrap().is_null(2));
+    for name in ["parameter", "owner_address", "amount"] {
+        assert!(batches["contracts"]
+            .column_by_name(name)
+            .unwrap()
+            .is_null(1));
+    }
     assert_eq!(
         column::<Int64Array>(&batches["contracts"], "amount").value(0),
         0
@@ -387,4 +403,42 @@ fn pinned_transfer_wire_tags_decode_independently() {
     assert_eq!(d.owner_address.unwrap(), b"a");
     assert_eq!(d.to_address.unwrap(), b"b");
     assert_eq!(d.amount, Some(150));
+}
+
+#[test]
+fn pinned_asset_and_trigger_wire_tags_decode_independently() {
+    let make = |kind, name: &str, value| protocol::transaction::Contract {
+        r#type: kind,
+        parameter: Some(prost_types::Any {
+            type_url: format!("type.googleapis.com/protocol.{name}"),
+            value,
+        }),
+        ..Default::default()
+    };
+    // asset_name tag1, owner tag2, recipient tag3, amount tag4.
+    let asset = make(
+        2,
+        "TransferAssetContract",
+        vec![0x0a, 1, b't', 0x12, 1, b'a', 0x1a, 1, b'b', 0x20, 0x96, 1],
+    );
+    let d = super::contracts::decode(&asset).unwrap();
+    assert_eq!(d.asset_name.unwrap(), b"t");
+    assert_eq!(d.owner_address.unwrap(), b"a");
+    assert_eq!(d.to_address.unwrap(), b"b");
+    assert_eq!(d.amount, Some(150));
+    // owner/target tags1/2, call_value3, data4, token value5, token id6.
+    let trigger = make(
+        31,
+        "TriggerSmartContract",
+        vec![
+            0x0a, 1, b'a', 0x12, 1, b'b', 0x18, 0x96, 1, 0x22, 2, 255, 0, 0x28, 2, 0x30, 3,
+        ],
+    );
+    let d = super::contracts::decode(&trigger).unwrap();
+    assert_eq!(d.owner_address.unwrap(), b"a");
+    assert_eq!(d.contract_address.unwrap(), b"b");
+    assert_eq!(d.call_value, Some(150));
+    assert_eq!(d.data.unwrap(), [255, 0]);
+    assert_eq!(d.call_token_value, Some(2));
+    assert_eq!(d.token_id, Some(3));
 }
