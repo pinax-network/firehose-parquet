@@ -44,6 +44,8 @@ reliability (#485, integration `4104a1b`). The workspace suite passed **780 test
 0 failed, 4 ignored**, plus all doc tests; the binary build, formatting and
 `git diff --check` passed. One ignored helper is invoked by the active atomic
 publication subprocess test. Independent review found no blocking issues.
+The later merge of main `3cf984b` incorporates the actual #583 merge ancestry
+and its final validation note; runtime source is unchanged from the tested build.
 
 A fresh local-output run fetched exactly Solana slots `[300000000, 300000002)`
 with one block per flush, explicit Pinax provider credentials, and no ambient

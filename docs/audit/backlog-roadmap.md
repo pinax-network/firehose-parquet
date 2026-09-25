@@ -22,9 +22,9 @@ issue labels and green CI alone are not acceptance evidence. See the
    all-table durable frontier next.
    Complete this before ingestion concurrency (#516).
 4. Shutdown recovery (#473, PR #579) and malformed identity/timestamp handling
-   (#476, PR #584) are merged. Probe (#485) work was recovered into PR #583 and
-   passed 779 combined tests with the timestamp fix. Finish its CI/merge gate,
-   then correct partition-index completeness/non-monotonic timestamps (#486)
+   (#476, PR #584) are merged. Probe (#485) work was recovered into PR #583,
+   passed 779 combined tests with the timestamp fix and CI, and merged as
+   `3cf984b`; its issue is closed. Correct partition-index completeness/non-monotonic timestamps (#486)
    and health/metrics semantics (#475).
 5. Finish schema fixes with repeatable raw-to-output fixtures (#499). Prefer
    correctness and measured performance improvements before broad refactors.
