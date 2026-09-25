@@ -93,7 +93,9 @@ pub fn logs_schema(include_fork_step: bool, encoding: &EncodeBytes) -> Schema {
         Field::new("block_number", DataType::UInt64, false),
         Field::new("tx_hash", bd.clone(), false),
         Field::new("tx_index", DataType::UInt32, false),
+        // Firehose transaction-relative Log.index (guaranteed at EXTENDED detail).
         Field::new("log_index", DataType::UInt32, false),
+        // Firehose receipt Log.blockIndex, corresponding to JSON-RPC logIndex.
         Field::new("block_index", DataType::UInt32, false),
         Field::new("address", bd.clone(), false),
         Field::new("topic0", bd.clone(), true),
