@@ -50,3 +50,19 @@ These tests are protocol-model evidence, not end-to-end restart qualification.
 The focused command was `cargo test -p firehose-parquet --lib ingest:: --locked
 -j4`, through the shared whole-process Cargo lock. Formatting and diff whitespace
 checks passed.
+
+The typed `ingest/store.rs` adapter now connects these records to both durable
+backends. Loading refuses orphan pending records and any state/journal pair
+outside Writing-at-predecessor, Committed-at-predecessor or Committed-at-target.
+Every transition checks its control version. A new journal starts without
+receipts, authority cannot advance from Writing, and a committed journal cannot
+be cleared before authority reaches its target. Physical verification, mirror
+reconciliation and eligible-root initialization remain controller obligations;
+the adapter does not treat missing state as permission to adopt legacy files.
+
+The combined focused suite now passes 21 tests. Five additional tests reopen the
+local records at every commit boundary, repeat the same transitions on a stateful
+S3-compatible store, check tombstone recreation and stale incarnations, reject
+stale receipt writers/orphan and inconsistent state, and confirm a remote owner
+with unresolved mutations cannot continue writing control records. Remote tests
+use an in-memory conditional backend and make no provider qualification claim.

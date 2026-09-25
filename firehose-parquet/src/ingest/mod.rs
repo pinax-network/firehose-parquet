@@ -3,3 +3,4 @@
 
 pub(crate) mod frontier;
 pub(crate) mod state;
+pub(crate) mod store;

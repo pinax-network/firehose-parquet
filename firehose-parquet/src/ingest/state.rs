@@ -427,11 +427,20 @@ impl AuthorityState {
         self.checkpoint.validate(&self.descriptor)
     }
     pub fn install(&self, pending: &PendingTransaction) -> Result<Self> {
+        self.validate_predecessor(pending)?;
+        if pending.phase != TransactionPhase::Committed {
+            bail!("authority cannot advance before all-table commit");
+        }
+        Ok(Self {
+            descriptor: self.descriptor.clone(),
+            checkpoint: pending.target.clone(),
+        })
+    }
+    pub fn validate_predecessor(&self, pending: &PendingTransaction) -> Result<()> {
         self.validate()?;
         pending.validate(&self.descriptor)?;
-        if pending.phase != TransactionPhase::Committed || pending.predecessor != self.checkpoint.id
-        {
-            bail!("authority cannot advance from this pending phase or predecessor");
+        if pending.predecessor != self.checkpoint.id {
+            bail!("authority differs from the pending predecessor");
         }
         if pending.prefix.first_ordinal
             != self
@@ -443,10 +452,7 @@ impl AuthorityState {
         {
             bail!("pending transaction skips accepted ordinals or changes request completion");
         }
-        Ok(Self {
-            descriptor: self.descriptor.clone(),
-            checkpoint: pending.target.clone(),
-        })
+        Ok(())
     }
 }
 
