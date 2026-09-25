@@ -465,3 +465,48 @@ fn every_table_uses_the_blocks_table_canonical_ids() {
 
     assert_eq!(checked, expected_table_count());
 }
+
+#[test]
+fn invalid_identity_timestamps_leave_every_chain_mapper_unchanged() {
+    let encoding = EncodeBytes::Binary;
+    let mut baseline = cases(&encoding, true);
+    let mut subject = cases(&encoding, true);
+    for (expected, actual) in baseline.iter_mut().zip(&mut subject) {
+        let valid = identity(BLOCK_NUM, Some("NEW"));
+        expected
+            .mapper
+            .map_block(&expected.blocks[0], &valid, Some("NEW"))
+            .unwrap();
+        actual
+            .mapper
+            .map_block(&actual.blocks[0], &valid, Some("NEW"))
+            .unwrap();
+        for (timestamp, timestamp_nanos) in [
+            (i64::MIN, 0),
+            (i64::MAX, 0),
+            (1_700_000_000_000, 0),
+            (TIMESTAMP, -1),
+            (TIMESTAMP, 1_000_000_000),
+        ] {
+            let invalid = BlockIdentity {
+                timestamp,
+                timestamp_nanos,
+                ..valid.clone()
+            };
+            assert!(
+                actual
+                    .mapper
+                    .map_block(&actual.blocks[0], &invalid, Some("UNDO"))
+                    .is_err(),
+                "{} accepted malformed identity",
+                actual.label
+            );
+        }
+        assert_eq!(
+            actual.mapper.flush().unwrap(),
+            expected.mapper.flush().unwrap(),
+            "{} changed after rejected identity",
+            actual.label
+        );
+    }
+}

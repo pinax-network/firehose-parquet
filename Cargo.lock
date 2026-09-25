@@ -477,6 +477,7 @@ dependencies = [
  "time",
  "tokio",
  "tonic",
+ "tonic-prost",
  "tracing",
 ]
 

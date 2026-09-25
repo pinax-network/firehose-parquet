@@ -592,7 +592,8 @@ Behavior:
 - bounded builds refuse to touch an existing `partitions.parquet` unless `--resume` (extend it) or `--overwrite` (replace it) is passed
 - bounded builds may expand the requested start/stop to the enclosing partition boundaries so each completed row remains exact
 - `--live` treats existing `partitions.parquet` rows as the restart anchor, polls for new finalized blocks, and keeps extending the canonical index
-- sparse probes skip forward across a small window of missing block numbers by default after probe retries are exhausted
+- sparse probes skip forward across missing block numbers (for example skipped Solana slots): a 16-block window first, then exponential samples and a scan of the skipped intervals find the exact next available block; exhausting the 65,536-block search budget fails instead of claiming the chain head was reached
+- sparse probes reuse one gRPC channel, retry timeouts and transient errors (a slow endpoint is never mistaken for a missing block), and fail fast on authentication errors; endpoints that answer an out-of-range request with an earlier head block terminate the search, while an unexpected later-block reply is an error
 - sparse probes treat missing/non-positive timestamps as missing metadata and borrow a nearby subsequent finalized block timestamp before partitioning
 
 | Flag | Default | Description |
@@ -1210,6 +1211,24 @@ These columns hold Firehose fields as they are, with bytes in the output encodin
 | `logs` | `ordinal` | `UInt64` | execution order in the block |
 
 The new columns come after the existing ones in each table. Ordinals are unique within a block, so `(block_number, ordinal)` orders every log, call and state change of a block. They are not reliable for anything inside a reverted call.
+
+## Solana Reward Indices
+
+`rewards.reward_index` is a zero-based index within one block envelope. Rewards
+from included transactions are numbered in transaction order and in each
+transaction's upstream reward order, followed by block rewards in their upstream
+order. The counter restarts for every block; flush size and restarts do not change
+it. `source` identifies `transaction` or `block`, and `transaction_index` is null
+for block rewards.
+
+For finalized output, use `(block_id, reward_index)` as the reward key. Include
+the chain/network when combining datasets. With reversible output, NEW and UNDO
+rows are separate events that can share this key; apply fork semantics before
+using it as a unique key. Changing transaction filters can change indices.
+
+Older output may contain colliding indices within a block and indices offset by
+earlier buffered blocks. Rebuild affected ranges into a separate output root
+before relying on the corrected key; appending new output does not repair old rows.
 
 ## Beacon Chain Tables
 

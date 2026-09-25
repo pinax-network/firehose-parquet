@@ -4,6 +4,31 @@ Changes merged since the last release. Fold this file into `docs/releases/vX.Y.Z
 
 ## Breaking changes
 
+### Invalid timestamps and missing streamed identities now fail (#476)
+
+Malformed timestamp seconds or nanos now return errors before canonical rows or
+partition files are written. Values outside years -9999 through 9999 no longer
+fall back to 1970, saturate, or panic. Valid negative times and nullable Solana
+payload times retain their values. Streamed blocks require a metadata object;
+servers that omit it must provide one so ingestion can identify and checkpoint
+blocks safely. Progress logging no longer propagates formatting failures.
+
+Rust timestamp/date conversion, canonical identity preparation,
+`Partition::partition_key` and `ParquetTableWriter::partition_suffix` helpers now
+return `Result`; callers must handle or propagate errors. See the
+[API migration and validation record](../audit/476-timestamp-validation.md).
+
+### Solana reward indices are scoped to each block (#500)
+
+`rewards.reward_index` now shares one zero-based sequence across emitted
+transaction rewards and block rewards, in their existing output order. Indices
+no longer depend on the flush window or collide between the two sources. The
+UInt32 schema is unchanged, but affected row values and verification roots
+change. Rebuild affected historical ranges into a separate root before joining
+on `(block_id, reward_index)`. Reversible events can legitimately repeat that key.
+
+See [the diagnosis and regression record](../audit/500-solana-reward-index.md).
+
 ### Local Parquet publication requires durable filesystem operations (#578)
 
 Local table parts now become visible at their final `.parquet` name only after

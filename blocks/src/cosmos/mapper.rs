@@ -216,7 +216,7 @@ impl BlockMapper for CosmosBlockMapper {
             identity,
             &block.hash,
             cosmos_parent_hash(&block),
-        );
+        )?;
         self.map_cosmos_block(&block, &identity, fork_step);
         Ok(tx_count)
     }

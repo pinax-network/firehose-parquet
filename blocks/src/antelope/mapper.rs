@@ -61,17 +61,6 @@ fn append_optional_string(builder: &mut StringBuilder, value: Option<&str>) {
     }
 }
 
-fn append_optional_timestamp(
-    builder: &mut TimestampMillisecondBuilder,
-    timestamp: Option<&prost_types::Timestamp>,
-) {
-    if let Some(timestamp) = timestamp {
-        builder.append_value(timestamp_millis(timestamp.seconds, timestamp.nanos));
-    } else {
-        builder.append_null();
-    }
-}
-
 fn serialize_timestamp(timestamp: &prost_types::Timestamp) -> Value {
     json!({
         "seconds": timestamp.seconds,
@@ -186,8 +175,36 @@ impl AntelopeBlockMapper {
         block: &antelope::Block,
         identity: &PreparedIdentity,
         fork_step: Option<&str>,
-    ) {
+    ) -> anyhow::Result<()> {
         let header = block.header.as_ref();
+
+        // Convert every materialized action time before mutating any table.
+        let traces = if block.filtering_applied {
+            &block.filtered_transaction_traces
+        } else {
+            &block.unfiltered_transaction_traces
+        };
+        let traces = traces
+            .iter()
+            .filter(|trace| {
+                self.include_failed_transactions
+                    || trace.receipt.as_ref().map(|r| r.status).unwrap_or(0) == 1
+            })
+            .map(|trace| {
+                let times = trace
+                    .action_traces
+                    .iter()
+                    .map(|action| {
+                        action
+                            .block_time
+                            .as_ref()
+                            .map(|time| timestamp_millis(time.seconds, time.nanos))
+                            .transpose()
+                    })
+                    .collect::<anyhow::Result<Vec<_>>>()?;
+                Ok((trace, times))
+            })
+            .collect::<anyhow::Result<Vec<_>>>()?;
 
         // blocks table
         self.blocks.canonical.append(identity);
@@ -204,29 +221,16 @@ impl AntelopeBlockMapper {
             .append_value(header.map(|h| h.schedule_version).unwrap_or(0));
         append_fork_step(&mut self.blocks.fork_step, fork_step);
 
-        // Use unfiltered_transaction_traces (or filtered if filtering was applied)
-        let traces = if block.filtering_applied {
-            &block.filtered_transaction_traces
-        } else {
-            &block.unfiltered_transaction_traces
-        };
-
-        for trace in traces {
-            // Skip non-executed transactions (status != EXECUTED=1) unless flag is set.
-            // Transactions without a receipt default to NONE=0 and are also skipped.
-            if !self.include_failed_transactions {
-                let status = trace.receipt.as_ref().map(|r| r.status).unwrap_or(0);
-                if status != 1 {
-                    continue;
-                }
-            }
-            self.map_transaction(trace, identity, fork_step);
+        for (trace, times) in traces {
+            self.map_transaction(trace, &times, identity, fork_step);
         }
+        Ok(())
     }
 
     fn map_transaction(
         &mut self,
         trace: &antelope::TransactionTrace,
+        action_times: &[Option<i64>],
         identity: &PreparedIdentity,
         fork_step: Option<&str>,
     ) {
@@ -249,8 +253,8 @@ impl AntelopeBlockMapper {
         append_fork_step(&mut self.transactions.fork_step, fork_step);
 
         // actions table
-        for action_trace in &trace.action_traces {
-            self.map_action(action_trace, &trace.id, identity, fork_step);
+        for (action_trace, block_time) in trace.action_traces.iter().zip(action_times) {
+            self.map_action(action_trace, *block_time, &trace.id, identity, fork_step);
         }
 
         // db_ops table (always included for Antelope output)
@@ -264,6 +268,7 @@ impl AntelopeBlockMapper {
     fn map_action(
         &mut self,
         action_trace: &antelope::ActionTrace,
+        block_time: Option<i64>,
         tx_hash: &str,
         identity: &PreparedIdentity,
         fork_step: Option<&str>,
@@ -327,10 +332,7 @@ impl AntelopeBlockMapper {
         self.actions
             .producer_block_id
             .append_value(&action_trace.producer_block_id);
-        append_optional_timestamp(
-            &mut self.actions.block_time,
-            action_trace.block_time.as_ref(),
-        );
+        self.actions.block_time.append_option(block_time);
         if action_trace.raw_return_value.is_empty() {
             self.actions.raw_return_value.append_null();
         } else {
@@ -439,8 +441,8 @@ impl BlockMapper for AntelopeBlockMapper {
             identity,
             &decode_id_bytes(&block.id),
             &decode_id_bytes(block.header.as_ref().map_or("", |h| h.previous.as_str())),
-        );
-        self.map_antelope_block(&block, &identity, fork_step);
+        )?;
+        self.map_antelope_block(&block, &identity, fork_step)?;
         Ok(tx_count)
     }
 
@@ -1044,6 +1046,41 @@ pub(crate) mod tests {
             filtering_include_filter_expr: String::new(),
             filtering_exclude_filter_expr: String::new(),
             filtering_system_actions_include_filter_expr: String::new(),
+        }
+    }
+
+    #[test]
+    fn invalid_late_action_time_preserves_all_previously_buffered_antelope_rows() {
+        let valid = make_test_block(100);
+        for (seconds, nanos) in [
+            (i64::MIN, 0),
+            (i64::MAX, 0),
+            (1_700_000_000_000, 0),
+            (0, -1),
+            (0, 1_000_000_000),
+        ] {
+            let mut invalid = valid.clone();
+            invalid
+                .unfiltered_transaction_traces
+                .last_mut()
+                .unwrap()
+                .action_traces
+                .last_mut()
+                .unwrap()
+                .block_time = Some(prost_types::Timestamp { seconds, nanos });
+            let mut baseline = AntelopeBlockMapper::new(true, EncodeBytes::HexNoPrefix, false);
+            let mut subject = AntelopeBlockMapper::new(true, EncodeBytes::HexNoPrefix, false);
+            let identity = BlockIdentity::default();
+            baseline
+                .map_block(&valid.encode_to_vec(), &identity, None)
+                .unwrap();
+            subject
+                .map_block(&valid.encode_to_vec(), &identity, None)
+                .unwrap();
+            assert!(subject
+                .map_block(&invalid.encode_to_vec(), &identity, None)
+                .is_err());
+            assert_eq!(subject.flush().unwrap(), baseline.flush().unwrap());
         }
     }
 
