@@ -20,7 +20,8 @@ use firehose_parquet::grpc::{
     FetchErrorKind, FirehoseClient, ShutdownRequested,
 };
 use firehose_parquet::ingest::{
-    declare_inventory, load_authoritative_resume, BlockFamily, IngestionSession, MapperSemantics,
+    declare_inventory, load_authoritative_resume, prepare_partitions_index_write, BlockFamily,
+    IngestionSession, MapperSemantics,
 };
 use firehose_parquet::metrics;
 use firehose_parquet::networks::{resolve_network_endpoint, EndpointSource};
@@ -29,7 +30,7 @@ use firehose_parquet::partition_index::{
     PartitionSpanProof, RoutingWitness, VerifiedPartitionIndex, VerifiedPartitionSpan,
     INDEX_FORMAT_VERSION,
 };
-use firehose_parquet::traits::{decode_id_bytes, fork_step_name, BlockIdentity, BlockMapper};
+use firehose_parquet::traits::{fork_step_name, BlockIdentity, BlockMapper};
 #[cfg(test)]
 use firehose_parquet::writer::OutputWriter;
 use firehose_parquet::writer::{ParquetFileMetadata, WriterBufferStats};
@@ -1591,12 +1592,8 @@ async fn run_partitions_build(
             initial_finalized.exclusive_stop()?
         );
     }
-    let ownership = DatasetOwnership::acquire(
-        "partitions-build",
-        vec![MutationScope::directory(chain_output_root.clone())],
-        Some(aws),
-    )
-    .await?;
+    let ownership =
+        prepare_partitions_index_write(&chain_output_root, &partitions_index, aws).await?;
     let mut snapshot = load_existing_verified_partitions_index(&partitions_index, aws, overwrite)?;
     let existing_rows = snapshot
         .as_ref()

@@ -1,5 +1,5 @@
 //! Runtime-facing assembly of storage identity, eligibility, recovery and the
-//! accepted frontier. Still private until command and maintenance wiring pass.
+//! accepted frontier. Ownership and maintenance recovery precede stream access.
 
 use anyhow::{bail, ensure, Context, Result};
 use arrow::record_batch::RecordBatch;
@@ -244,6 +244,7 @@ impl<'a> IngestionSession<'a> {
         let expected = descriptor(config, mapper)?;
         let aws = aws_config(config);
         let permit = reserve(&expected.output, ownership)?;
+        super::maintenance::validate_ingestion_target(&expected.output, ownership).await?;
         let service = mirror_service(&expected.mirror, &aws)?;
         let mut mirror = ProtectedMirror::new(ownership, &expected.mirror, service.as_ref())?;
         if let Some(metrics) = metrics {
@@ -277,6 +278,7 @@ impl<'a> IngestionSession<'a> {
                 config.cache_control.as_deref().unwrap_or_default(),
             )?,
         };
+        super::maintenance::validate_ingestion_recovery_order(&expected.output, ownership).await?;
         let controller = TransactionController::open_reserved(
             states(&expected.output, ownership)?,
             parts,
@@ -285,8 +287,7 @@ impl<'a> IngestionSession<'a> {
             permit,
         )
         .await?;
-        // Runtime integration must run borrowed-owner merge recovery here before
-        // exposing this session to Blocks (maintenance module is staged next).
+        super::maintenance::prepare_ingestion(&expected.output, ownership, &aws).await?;
         let frontier = AcceptedFrontier::resume(&controller.authority().checkpoint);
         if let (Some(metrics), Some(event)) =
             (metrics, controller.authority().checkpoint.event.as_ref())
