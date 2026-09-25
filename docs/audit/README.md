@@ -73,3 +73,5 @@ Record the real test and live-data evidence, including unavailable qualification
 without credentials, private cursor values or generated datasets. Merge only
 after review and current integration checks pass, then verify issue closure and
 any external recovery condition, such as a dependency security rescan.
+
+- [#505 Beacon value semantics and migration](505-beacon-values.md)
