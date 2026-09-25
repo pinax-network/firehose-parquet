@@ -1,7 +1,7 @@
 use crate::config::{BlockMetadata, Compression, Config, Partition};
 use crate::metrics::PipelineMetrics;
 use anyhow::Result;
-use arrow::array::Int64Array;
+use arrow::array::Array;
 use arrow::record_batch::RecordBatch;
 use object_store::ObjectStore;
 use parquet::arrow::ArrowWriter;
@@ -380,10 +380,8 @@ fn with_root_cause_context(context: impl Display, error: anyhow::Error) -> anyho
     }
 }
 
-/// Fixed compression ratio (compressed/uncompressed) used for estimating
-/// when the buffered data will reach the target file size. These are
-/// hard-coded to keep file rollover deterministic: given identical input
-/// and configuration, the writer will produce consistent rollover behavior.
+/// Fixed compression ratio (compressed/uncompressed) used for diagnostic
+/// estimates of validated data retained after a failed table write.
 fn compression_ratio(compression: &Compression) -> f64 {
     match compression {
         Compression::None => 0.50,   // Parquet encoding alone: ~2×
@@ -393,26 +391,14 @@ fn compression_ratio(compression: &Compression) -> f64 {
     }
 }
 
-/// A batch that needs to be re-buffered after a global flush (partition change).
-struct PendingBatch {
-    table: String,
+/// One validated table write retained until publication succeeds.
+struct TableBuffer {
     batch: RecordBatch,
     metadata: BlockMetadata,
     partition_key: String,
 }
 
-/// Buffered state for a single output table.
-struct TableBuffer {
-    batches: Vec<RecordBatch>,
-    /// Accumulated Arrow memory across all buffered batches.
-    total_bytes: usize,
-    /// Merged metadata across all contributing flushes.
-    metadata: BlockMetadata,
-    /// Partition suffix for this buffer (used to detect partition changes).
-    partition_key: String,
-}
-
-/// Snapshot of writer state that is still buffered and not yet materialized.
+/// Snapshot of validated data that still needs to be materialized.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct WriterBufferStats {
     pub tables: usize,
@@ -422,28 +408,21 @@ pub struct WriterBufferStats {
     pub estimated_compressed_bytes: u64,
 }
 
-/// High-level writer that buffers RecordBatches per table and writes to disk
-/// when the estimated **compressed** size reaches `flush_bytes`. The
-/// compression ratio is a fixed hard-coded value per codec to keep file
-/// rollover deterministic.
+/// Materializes one mapper flush at a time, with one partition per table.
 ///
-/// When `flush_bytes` is `0`, size-based file rollover is disabled and data
-/// is only flushed on partition changes or when `flush_remaining()` is called.
+/// Every nonempty table is validated before any table is published. Successful
+/// writes leave no buffered rows; after an I/O failure, only the failed and
+/// unattempted tables remain visible for recovery. Retry only after confirming
+/// the failed write did not publish: a post-publication error can leave a final
+/// file, so retrying that table can duplicate output. Ingestion stops on errors.
 ///
-/// This prevents many tiny Parquet files for tables that have few rows per
-/// block (e.g. `blocks`). Small batches are concatenated into a single large
-/// RecordBatch before writing.
+/// The constructor's legacy `flush_bytes` argument is retained for source
+/// compatibility but is ignored. The ingestion loop owns flush boundaries.
+/// This writer no longer splits, accumulates or coalesces mapper batches.
 pub struct OutputWriter {
     pub inner: ParquetTableWriter,
-    /// Per-table buffer for accumulating batches before writing.
     buffers: HashMap<String, TableBuffer>,
-    /// Target **compressed** output file size in bytes. `0` disables size-based rollover.
-    flush_bytes: u64,
-    /// Fixed compression ratio (compressed_bytes / arrow_bytes).
     compression_ratio: f64,
-    /// Batches that need to be re-buffered after a global flush (from partition changes).
-    pending_after_flush: Vec<PendingBatch>,
-    /// Optional pipeline metrics for Prometheus instrumentation.
     metrics: Option<PipelineMetrics>,
 }
 
@@ -452,335 +431,225 @@ impl OutputWriter {
         output_dir: impl Into<PathBuf>,
         partition: Partition,
         compression: Compression,
-        flush_bytes: u64,
+        _flush_bytes: u64,
     ) -> Self {
-        let cr = compression_ratio(&compression);
         Self {
             inner: ParquetTableWriter::new(output_dir, partition, compression),
             buffers: HashMap::new(),
-            flush_bytes,
-            compression_ratio: cr,
-            pending_after_flush: Vec::new(),
+            compression_ratio: compression_ratio(&compression),
             metrics: None,
         }
     }
 
-    /// Create a writer that uploads Parquet files to S3.
+    /// Create a writer that uploads Parquet files to S3. The legacy
+    /// `flush_bytes` argument is ignored, as for `new`.
     pub fn new_s3(
         output_path: &str,
         partition: Partition,
         compression: Compression,
         config: &Config,
-        flush_bytes: u64,
+        _flush_bytes: u64,
     ) -> Result<Self> {
-        let cr = compression_ratio(&compression);
         Ok(Self {
             inner: ParquetTableWriter::new_s3(output_path, partition, compression, config)?,
             buffers: HashMap::new(),
-            flush_bytes,
-            compression_ratio: cr,
-            pending_after_flush: Vec::new(),
+            compression_ratio: compression_ratio(&compression),
             metrics: None,
         })
     }
 
-    /// Set the pipeline metrics for Prometheus instrumentation.
     pub fn set_metrics(&mut self, metrics: PipelineMetrics) {
         self.metrics = Some(metrics);
     }
 
-    /// Return a summary of buffered data that has not been materialized yet.
     pub fn buffered_stats(&self) -> WriterBufferStats {
         let mut stats = WriterBufferStats {
             tables: self.buffers.len(),
+            batches: self.buffers.len(),
             ..WriterBufferStats::default()
         };
-
         for buf in self.buffers.values() {
-            stats.batches += buf.batches.len();
-            stats.rows += buf
-                .batches
-                .iter()
-                .map(|batch| batch.num_rows())
-                .sum::<usize>();
-            stats.estimated_arrow_bytes += buf.total_bytes as u64;
+            stats.rows += buf.batch.num_rows();
+            stats.estimated_arrow_bytes += buf.batch.get_array_memory_size() as u64;
         }
-
         stats.estimated_compressed_bytes =
             (stats.estimated_arrow_bytes as f64 * self.compression_ratio) as u64;
-
         stats
     }
 
-    /// Current observed compression ratio (compressed / uncompressed).
+    /// Fixed compression estimate used only for buffered-data diagnostics.
     pub fn compression_ratio(&self) -> f64 {
         self.compression_ratio
     }
 
-    /// Split a RecordBatch into sub-batches when the metadata spans multiple
-    /// time-based partitions. Each returned tuple contains the sub-batch and
-    /// a BlockMetadata with timestamps scoped to that subset.
-    ///
-    /// For `Partition::None` and `Partition::BlockRange` no splitting is needed
-    /// and the original batch + metadata are returned as-is.
-    fn split_batch_by_partition(
+    fn update_buffer_metrics(&self) {
+        if let Some(m) = &self.metrics {
+            for (table, buf) in &self.buffers {
+                m.buffer_rows
+                    .get_or_create(&crate::metrics::TableLabels {
+                        table: table.clone(),
+                    })
+                    .set(buf.batch.num_rows() as i64);
+            }
+            m.buffer_estimated_bytes
+                .set(self.buffered_stats().estimated_compressed_bytes as i64);
+        }
+    }
+
+    /// Check every row against the declared destination, without assuming row
+    /// order: reversible NEW/UNDO streams may visit the same partition in either
+    /// order. Metadata describes the whole mapper flush, not each table's exact
+    /// extrema. Existing partition-key timestamp policy is shared with routing.
+    fn validate_partition(
         &self,
         table: &str,
         batch: &RecordBatch,
         metadata: &BlockMetadata,
-    ) -> Result<Vec<(RecordBatch, BlockMetadata)>> {
-        // Only time-based partitions need splitting.
+    ) -> Result<()> {
+        // Reject invalid numeric configuration before path formatting can divide
+        // by zero or use the legacy pre-anchor fallback.
+        if let Partition::BlockRange { size, start_block } = &self.inner.partition {
+            anyhow::ensure!(
+                *size > 0,
+                "block-range partition size must be greater than zero"
+            );
+            let anchor = start_block.unwrap_or(0);
+            anyhow::ensure!(
+                metadata.min_block_number >= anchor && metadata.max_block_number >= anchor,
+                "table `{table}` metadata precedes block-range start {anchor}"
+            );
+        }
+        let expected = self.inner.partition_suffix(table, metadata);
+        let check = |row_metadata: &BlockMetadata| -> Result<()> {
+            let actual = self.inner.partition_suffix(table, row_metadata);
+            anyhow::ensure!(actual == expected,
+                "table `{table}` spans partitions or disagrees with its metadata: expected `{expected}`, found `{actual}`; flush the mapper at partition boundaries");
+            Ok(())
+        };
         match &self.inner.partition {
-            Partition::None | Partition::BlockRange { .. } => {
-                return Ok(vec![(batch.clone(), metadata.clone())]);
-            }
-            _ => {}
-        }
-
-        // If timestamps are missing, no splitting possible.
-        let (Some(min_ts), Some(max_ts)) = (metadata.min_timestamp, metadata.max_timestamp) else {
-            return Ok(vec![(batch.clone(), metadata.clone())]);
-        };
-
-        // Quick check: if min and max land in the same partition, no split needed.
-        let min_meta = BlockMetadata {
-            min_timestamp: Some(min_ts),
-            max_timestamp: Some(min_ts),
-            ..*metadata
-        };
-        let max_meta = BlockMetadata {
-            min_timestamp: Some(max_ts),
-            max_timestamp: Some(max_ts),
-            ..*metadata
-        };
-        if self.inner.partition_suffix(table, &min_meta)
-            == self.inner.partition_suffix(table, &max_meta)
-        {
-            return Ok(vec![(batch.clone(), metadata.clone())]);
-        }
-
-        // Find the timestamp column.
-        let ts_col_idx = batch
-            .schema()
-            .index_of("timestamp")
-            .map_err(|_| anyhow::anyhow!("timestamp column not found in batch schema"))?;
-        let ts_array = batch
-            .column(ts_col_idx)
-            .as_any()
-            .downcast_ref::<Int64Array>()
-            .ok_or_else(|| anyhow::anyhow!("timestamp column is not Int64"))?;
-
-        // Compute the partition key for each row and group rows by partition.
-        // Use BTreeMap so partitions are ordered by time.
-        let mut partition_groups: std::collections::BTreeMap<String, Vec<usize>> =
-            std::collections::BTreeMap::new();
-        for i in 0..ts_array.len() {
-            let ts = ts_array.value(i);
-            let row_meta = BlockMetadata {
-                min_timestamp: Some(ts),
-                max_timestamp: Some(ts),
-                ..*metadata
-            };
-            let key = self.inner.partition_suffix(table, &row_meta);
-            partition_groups.entry(key).or_default().push(i);
-        }
-
-        // Build sub-batches for each partition group.
-        let mut results = Vec::with_capacity(partition_groups.len());
-        for (_key, indices) in partition_groups {
-            // Compute the range of row indices — they should be contiguous since
-            // data arrives sorted by time, but use individual indices to be safe.
-            let row_min_ts = indices.iter().map(|&i| ts_array.value(i)).min().unwrap();
-            let row_max_ts = indices.iter().map(|&i| ts_array.value(i)).max().unwrap();
-
-            // Build sub-batch by slicing. If indices are contiguous we can use
-            // RecordBatch::slice for efficiency.
-            let first = indices[0];
-            let last = *indices.last().unwrap();
-            let sub_batch = if last - first + 1 == indices.len() {
-                // Contiguous range — use zero-copy slice.
-                batch.slice(first, indices.len())
-            } else {
-                // Non-contiguous — use take (rare, but safe).
-                let idx_array = arrow::array::UInt32Array::from(
-                    indices.iter().map(|&i| i as u32).collect::<Vec<_>>(),
+            Partition::None => Ok(()),
+            Partition::BlockRange { start_block, .. } => {
+                let anchor = start_block.unwrap_or(0);
+                check(&BlockMetadata {
+                    min_block_number: metadata.max_block_number,
+                    ..metadata.clone()
+                })?;
+                let blocks = batch.column_by_name("block_num")
+                    .and_then(|column| column.as_any().downcast_ref::<arrow::array::UInt64Array>())
+                    .ok_or_else(|| anyhow::anyhow!("table `{table}` needs canonical UInt64 block_num for block-range partitioning"))?;
+                anyhow::ensure!(
+                    blocks.null_count() == 0,
+                    "table `{table}` has null block_num values"
                 );
-                let columns: Vec<Arc<dyn arrow::array::Array>> = batch
-                    .columns()
-                    .iter()
-                    .map(|col| arrow::compute::take(col.as_ref(), &idx_array, None))
-                    .collect::<std::result::Result<Vec<_>, _>>()?;
-                RecordBatch::try_new(batch.schema(), columns)?
-            };
-
-            let sub_meta = BlockMetadata {
-                min_block_number: metadata.min_block_number,
-                max_block_number: metadata.max_block_number,
-                min_timestamp: Some(row_min_ts),
-                max_timestamp: Some(row_max_ts),
-            };
-            results.push((sub_batch, sub_meta));
+                let mut previous = None;
+                for block in blocks.values() {
+                    // Canonical identities repeat across a block's table rows.
+                    // Still inspect every row, but format its destination only
+                    // when the routing value changes.
+                    if previous == Some(*block) {
+                        continue;
+                    }
+                    anyhow::ensure!(
+                        *block >= anchor,
+                        "table `{table}` block {block} precedes block-range start {anchor}"
+                    );
+                    check(&BlockMetadata {
+                        min_block_number: *block,
+                        ..metadata.clone()
+                    })?;
+                    previous = Some(*block);
+                }
+                Ok(())
+            }
+            Partition::Date | Partition::Hour | Partition::Minute | Partition::Second => {
+                let column = batch.column_by_name("timestamp").ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "table `{table}` needs canonical timestamp for time partitioning"
+                    )
+                })?;
+                anyhow::ensure!(
+                    column.data_type() == &crate::traits::timestamp_millis_utc_type(),
+                    "table `{table}` timestamp must be Timestamp(Millisecond, UTC)"
+                );
+                let timestamps = column
+                    .as_any()
+                    .downcast_ref::<arrow::array::TimestampMillisecondArray>()
+                    .expect("canonical timestamp type checked above");
+                match (metadata.min_timestamp, metadata.max_timestamp) {
+                    (Some(_), Some(max)) => check(&BlockMetadata { min_timestamp: Some(max), ..metadata.clone() })?,
+                    (None, None) => {},
+                    _ => anyhow::bail!("table `{table}` needs both minimum and maximum routing timestamps, or neither"),
+                }
+                let mut previous = None;
+                for timestamp in timestamps.iter().flatten() {
+                    let seconds = timestamp.div_euclid(1_000);
+                    if previous == Some(seconds) {
+                        continue;
+                    }
+                    anyhow::ensure!(metadata.min_timestamp.is_some(),
+                        "table `{table}` has non-null timestamps without routing timestamp metadata");
+                    check(&BlockMetadata {
+                        min_timestamp: Some(seconds),
+                        ..metadata.clone()
+                    })?;
+                    previous = Some(seconds);
+                }
+                // Null Solana payload times deliberately use the metadata's
+                // synthetic anchor. All-null rows without an anchor preserve
+                // the existing flat-table destination.
+                Ok(())
+            }
         }
-
-        Ok(results)
     }
 
-    /// Write all table batches produced by a BlockMapper::flush().
+    /// Validate all nonempty tables, then publish each immediately in table-name
+    /// order. Returns true if any data was written. A successful call leaves no
+    /// pending rows, regardless of the legacy constructor threshold.
     ///
-    /// Small tables are buffered until the estimated compressed size reaches
-    /// `flush_bytes`, or the partition changes. This prevents tiny files for
-    /// low-row-count tables like `blocks`.
-    ///
-    /// When any table triggers a rollover (partition change or size threshold),
-    /// **all** tables are flushed together so every table starts fresh for the
-    /// next block range. This keeps file boundaries deterministic and aligned.
-    ///
-    /// Returns `true` if data was actually written to disk (any table flushed).
+    /// After a confirmed pre-publication I/O failure, retry retained data with
+    /// `flush_remaining` before submitting a new mapper flush. Ambiguous
+    /// post-publication failures need external reconciliation first. Retrying
+    /// `write_all` would duplicate successful tables, so it is rejected while
+    /// any data remains.
     pub fn write_all(
         &mut self,
         batches: &HashMap<String, RecordBatch>,
         metadata: &BlockMetadata,
     ) -> Result<bool> {
-        let mut needs_global_flush = false;
-
-        for (table, batch) in batches {
-            if batch.num_rows() == 0 {
-                continue;
-            }
-
-            // Split batch if it spans multiple time-based partitions.
-            let sub_batches = self.split_batch_by_partition(table, batch, metadata)?;
-            for (sub_batch, sub_meta) in &sub_batches {
-                if self.buffer_batch(table, sub_batch, sub_meta)? {
-                    needs_global_flush = true;
-                }
-            }
+        anyhow::ensure!(self.buffers.is_empty(),
+            "a previous table write is still pending; reconcile any possibly published output, then retry flush_remaining before submitting new batches");
+        let mut tables: Vec<_> = batches
+            .iter()
+            .filter(|(_, batch)| batch.num_rows() > 0)
+            .collect();
+        tables.sort_by_key(|(table, _)| *table);
+        // Complete preflight before changing buffers, counters, metrics or files.
+        for (table, batch) in &tables {
+            self.validate_partition(table, batch, metadata)?;
         }
-
-        // Update buffer gauge metrics.
-        if let Some(ref m) = self.metrics {
-            let mut total_estimated = 0u64;
-            for (table, buf) in &self.buffers {
-                let row_count: usize = buf.batches.iter().map(|b| b.num_rows()).sum();
-                m.buffer_rows
-                    .get_or_create(&crate::metrics::TableLabels {
-                        table: table.clone(),
-                    })
-                    .set(row_count as i64);
-                total_estimated += (buf.total_bytes as f64 * self.compression_ratio) as u64;
-            }
-            m.buffer_estimated_bytes.set(total_estimated as i64);
-        }
-
-        if needs_global_flush {
-            self.flush_remaining()?;
-            return Ok(true);
-        }
-
-        Ok(false)
-    }
-
-    /// Buffer a single batch. Returns `true` if a global flush is needed
-    /// (partition change or size threshold reached for this table).
-    fn buffer_batch(
-        &mut self,
-        table: &str,
-        batch: &RecordBatch,
-        metadata: &BlockMetadata,
-    ) -> Result<bool> {
-        let partition_key = self.inner.partition_suffix(table, metadata);
-        let batch_bytes = batch.get_array_memory_size();
-
-        // Check if the partition changed for this table.
-        let needs_partition_flush = self
-            .buffers
-            .get(table)
-            .map_or(false, |buf| buf.partition_key != partition_key);
-
-        // Add to buffer.
-        {
-            // If partition changed, we'll flush everything via the global flush,
-            // but we still need to buffer the new batch under the new partition key.
-            // First, mark that we need a flush (don't clear the old buffer yet).
-            if needs_partition_flush {
-                // The old data will be flushed by the caller via flush_remaining().
-                // We don't add the new batch yet — it will be added after the flush.
-            }
-
-            if !needs_partition_flush {
-                let buf = self
-                    .buffers
-                    .entry(table.to_string())
-                    .or_insert_with(|| TableBuffer {
-                        batches: Vec::new(),
-                        total_bytes: 0,
-                        metadata: metadata.clone(),
-                        partition_key: partition_key.clone(),
-                    });
-                buf.batches.push(batch.clone());
-                buf.total_bytes += batch_bytes;
-                buf.metadata.merge(metadata);
-            }
-        }
-
-        // Coalesce many small batches into one to keep memory compact.
-        if !needs_partition_flush {
-            if let Some(buf) = self.buffers.get_mut(table) {
-                if buf.batches.len() >= 100 {
-                    let schema = buf.batches[0].schema();
-                    let merged = arrow::compute::concat_batches(&schema, &buf.batches)?;
-                    buf.batches = vec![merged];
-                }
-            }
-        }
-
-        // Check if estimated compressed size reaches the target.
-        let needs_size_flush = !needs_partition_flush
-            && self.flush_bytes > 0
-            && self.buffers.get(table).map_or(false, |buf| {
-                (buf.total_bytes as f64 * self.compression_ratio) >= self.flush_bytes as f64
-            });
-
-        if needs_partition_flush || needs_size_flush {
-            // If partition changed, we need to re-buffer the new batch after flush.
-            if needs_partition_flush {
-                // Store the pending batch info for re-buffering after flush.
-                self.pending_after_flush.push(PendingBatch {
-                    table: table.to_string(),
+        for (table, batch) in tables {
+            self.buffers.insert(
+                table.clone(),
+                TableBuffer {
                     batch: batch.clone(),
                     metadata: metadata.clone(),
-                    partition_key,
-                });
-            }
-            return Ok(true);
+                    partition_key: self.inner.partition_suffix(table, metadata),
+                },
+            );
         }
-
-        Ok(false)
+        self.update_buffer_metrics();
+        self.flush_remaining()
     }
 
-    /// Concatenate and write all buffered batches for a single table.
-    /// Returns `true` if data was written.
-    ///
-    /// The buffer is only removed once the write succeeds. On error the rows
-    /// stay buffered, so a failed write never silently drops data.
     fn flush_table(&mut self, table: &str) -> Result<bool> {
-        let buf = match self.buffers.get(table) {
-            Some(buf) if !buf.batches.is_empty() => buf,
-            Some(_) => {
-                self.buffers.remove(table);
-                return Ok(false);
-            }
-            None => return Ok(false),
+        let Some(buf) = self.buffers.get(table) else {
+            return Ok(false);
         };
-        let schema = buf.batches[0].schema();
-        let merged = arrow::compute::concat_batches(&schema, &buf.batches)?;
-        let num_rows = merged.num_rows();
+        let num_rows = buf.batch.num_rows();
         let partition_key = buf.partition_key.clone();
-        let (_path, compressed_bytes) = self.inner.write_batch(table, &merged, &buf.metadata)?;
+        let (_, compressed_bytes) = self.inner.write_batch(table, &buf.batch, &buf.metadata)?;
         self.buffers.remove(table);
-
-        // Update Prometheus metrics if available.
-        if let Some(ref m) = self.metrics {
+        if let Some(m) = &self.metrics {
             use crate::metrics::{TableLabels, TablePartitionLabels};
             m.files_written_total
                 .get_or_create(&TablePartitionLabels {
@@ -798,41 +667,29 @@ impl OutputWriter {
                     table: table.to_string(),
                 })
                 .inc_by(num_rows as u64);
+            m.buffer_rows
+                .get_or_create(&TableLabels {
+                    table: table.to_string(),
+                })
+                .set(0);
         }
-
+        self.update_buffer_metrics();
         Ok(true)
     }
 
-    /// Flush all remaining buffered data to disk, then re-buffer any
-    /// pending batches from partition changes.
-    ///
-    /// Returns `true` if any data was written. If a table fails to write, the
-    /// error is returned and that table (plus any not yet attempted) stays
-    /// buffered, along with pending partition-change batches.
+    /// Retry all retained table writes in stable order. Successful tables are
+    /// removed individually; failed and unattempted tables remain visible in
+    /// `buffered_stats`. No deferred partition data is hidden after a flush.
+    /// Callers must establish that the failed write did not already publish;
+    /// post-publication errors can otherwise duplicate that table on retry.
+    /// This is in-process recovery, not the crash/replay transaction in #468.
     pub fn flush_remaining(&mut self) -> Result<bool> {
-        let tables: Vec<String> = self.buffers.keys().cloned().collect();
+        let mut tables: Vec<_> = self.buffers.keys().cloned().collect();
+        tables.sort();
         let mut wrote = false;
         for table in tables {
-            if self.flush_table(&table)? {
-                wrote = true;
-            }
+            wrote |= self.flush_table(&table)?;
         }
-
-        // Re-buffer any batches that arrived during a partition change.
-        let pending = std::mem::take(&mut self.pending_after_flush);
-        for p in pending {
-            let buf = self.buffers.entry(p.table).or_insert_with(|| TableBuffer {
-                batches: Vec::new(),
-                total_bytes: 0,
-                metadata: p.metadata.clone(),
-                partition_key: p.partition_key,
-            });
-            let batch_bytes = p.batch.get_array_memory_size();
-            buf.batches.push(p.batch);
-            buf.total_bytes += batch_bytes;
-            buf.metadata.merge(&p.metadata);
-        }
-
         Ok(wrote)
     }
 }
@@ -1179,195 +1036,357 @@ mod tests {
         assert!(!is_s3_output(Path::new("/tmp/local")));
     }
 
-    #[test]
-    fn test_buffered_writer_accumulates_small_batches() {
-        let dir = tempfile::tempdir().unwrap();
-        let batch = make_test_batch();
-        let mut batches = HashMap::new();
-        batches.insert("blocks".to_string(), batch);
-
-        // flush_bytes large enough that a tiny batch won't trigger a write.
-        let mut out = OutputWriter::new(dir.path(), Partition::None, Compression::None, 1_000_000);
-        let meta = default_metadata();
-
-        // Write twice — both should be buffered, not written to disk yet.
-        out.write_all(&batches, &meta).unwrap();
-        out.write_all(&batches, &meta).unwrap();
-        assert!(
-            !dir.path().join("blocks").exists(),
-            "should still be buffered"
-        );
-        let stats = out.buffered_stats();
-        assert_eq!(stats.tables, 1);
-        assert_eq!(stats.batches, 2);
-        assert_eq!(stats.rows, 2);
-        assert!(stats.estimated_arrow_bytes > 0);
-        assert!(stats.estimated_compressed_bytes > 0);
-
-        // flush_remaining writes the concatenated data.
-        out.flush_remaining().unwrap();
-        assert!(
-            dir.path().join("blocks").exists(),
-            "should be written after flush"
-        );
-        assert_eq!(out.buffered_stats(), WriterBufferStats::default());
-
-        // Verify the file has 2 rows (from the 2 batches).
-        let parts: Vec<_> = std::fs::read_dir(dir.path().join("blocks"))
-            .unwrap()
-            .filter_map(|e| e.ok())
-            .filter(|e| e.path().extension().map_or(false, |ext| ext == "parquet"))
-            .collect();
-        assert_eq!(parts.len(), 1, "should be a single part file");
-
-        let file_path = parts[0].path();
-        let read_batches = read_parquet(&file_path).unwrap();
-        let total_rows: usize = read_batches.iter().map(|b| b.num_rows()).sum();
-        assert_eq!(total_rows, 2, "concatenated batch should have 2 rows");
-    }
-
     fn parquet_rows_in(dir: &Path) -> usize {
         std::fs::read_dir(dir)
             .unwrap()
-            .filter_map(|e| e.ok())
-            .filter(|e| e.path().extension().is_some_and(|ext| ext == "parquet"))
-            .flat_map(|e| read_parquet(&e.path()).unwrap())
-            .map(|b| b.num_rows())
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "parquet"))
+            .flat_map(|entry| read_parquet(&entry.path()).unwrap())
+            .map(|batch| batch.num_rows())
             .sum()
     }
 
-    #[test]
-    fn test_flush_remaining_retains_buffer_when_table_write_fails() {
+    fn partition_batch(blocks: Vec<Option<u64>>, timestamps: Vec<Option<i64>>) -> RecordBatch {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("block_num", DataType::UInt64, true),
+            Field::new(
+                "timestamp",
+                crate::traits::timestamp_millis_utc_type(),
+                true,
+            ),
+        ]));
+        RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(arrow::array::UInt64Array::from(blocks)),
+                Arc::new(
+                    arrow::array::TimestampMillisecondArray::from(timestamps).with_timezone("UTC"),
+                ),
+            ],
+        )
+        .unwrap()
+    }
+
+    fn routed_metadata(timestamp: Option<i64>) -> BlockMetadata {
+        BlockMetadata {
+            min_block_number: 500,
+            max_block_number: 599,
+            min_timestamp: timestamp,
+            max_timestamp: timestamp,
+        }
+    }
+
+    fn assert_rejected_without_publication(
+        partition: Partition,
+        batch: RecordBatch,
+        metadata: BlockMetadata,
+    ) {
         let dir = tempfile::tempdir().unwrap();
-        let mut batches = HashMap::new();
-        batches.insert("blocks".to_string(), make_test_batch());
-        batches.insert("logs".to_string(), make_test_batch());
+        let output = dir.path().join("output");
+        let mut writer = OutputWriter::new(&output, partition, Compression::None, 0);
+        let (_, metrics) = crate::metrics::init();
+        writer.set_metrics(metrics.clone());
+        assert!(writer
+            .write_all(&HashMap::from([("blocks".into(), batch)]), &metadata)
+            .is_err());
+        assert!(!output.exists());
+        assert_eq!(writer.buffered_stats(), WriterBufferStats::default());
+        assert!(writer.inner.part_counters.is_empty());
+        assert_eq!(metrics.buffer_estimated_bytes.get(), 0);
+    }
 
-        let mut out = OutputWriter::new(dir.path(), Partition::None, Compression::None, 0);
-        out.write_all(&batches, &default_metadata()).unwrap();
+    #[test]
+    fn test_mapper_batches_materialize_independently_of_legacy_threshold() {
+        for threshold in [0, 1, u64::MAX] {
+            let dir = tempfile::tempdir().unwrap();
+            let mut writer =
+                OutputWriter::new(dir.path(), Partition::None, Compression::Zstd, threshold);
+            let batches = HashMap::from([("blocks".into(), make_test_batch())]);
+            for _ in 0..2 {
+                assert!(writer.write_all(&batches, &default_metadata()).unwrap());
+                assert_eq!(writer.buffered_stats(), WriterBufferStats::default());
+                assert!(!writer.flush_remaining().unwrap());
+            }
+            assert_eq!(
+                std::fs::read_dir(dir.path().join("blocks"))
+                    .unwrap()
+                    .count(),
+                2
+            );
+            assert_eq!(parquet_rows_in(&dir.path().join("blocks")), 2);
+        }
+    }
 
-        // A regular file where the `logs` table directory belongs makes that
-        // table's write fail (like ENOSPC or a failed S3 PUT would).
+    #[test]
+    fn test_all_tables_are_preflighted_before_any_publication() {
+        let dir = tempfile::tempdir().unwrap();
+        let output = dir.path().join("output");
+        let timestamp = 1_705_320_000;
+        let valid = partition_batch(vec![Some(501)], vec![Some(timestamp * 1_000)]);
+        let invalid = partition_batch(
+            vec![Some(501), Some(502), Some(503)],
+            vec![
+                Some(timestamp * 1_000),
+                Some((timestamp + 172_800) * 1_000),
+                Some(timestamp * 1_000),
+            ],
+        );
+        let mut writer = OutputWriter::new(&output, Partition::Date, Compression::None, 0);
+        let error = writer
+            .write_all(
+                &HashMap::from([("a_valid".into(), valid), ("z_invalid".into(), invalid)]),
+                &routed_metadata(Some(timestamp)),
+            )
+            .unwrap_err();
+        assert!(error.to_string().contains("z_invalid"));
+        assert!(
+            !output.exists(),
+            "an invalid later table must not leave an earlier file"
+        );
+        assert!(writer.inner.part_counters.is_empty());
+        assert_eq!(writer.buffered_stats(), WriterBufferStats::default());
+    }
+
+    #[test]
+    fn test_time_partition_validation_checks_all_rows_and_metadata_endpoints() {
+        let timestamp = 1_705_320_000;
+        for (partition, width) in [
+            (Partition::Date, 86_400),
+            (Partition::Hour, 3_600),
+            (Partition::Minute, 60),
+            (Partition::Second, 1),
+        ] {
+            let batch = partition_batch(
+                vec![Some(501), Some(502), Some(503), Some(504)],
+                vec![
+                    Some(timestamp * 1_000),
+                    Some((timestamp + width * 2) * 1_000),
+                    Some((timestamp + width) * 1_000),
+                    Some(timestamp * 1_000),
+                ],
+            );
+            assert_rejected_without_publication(
+                partition.clone(),
+                batch,
+                routed_metadata(Some(timestamp)),
+            );
+            let batch = partition_batch(vec![Some(501)], vec![Some(timestamp * 1_000)]);
+            let mut metadata = routed_metadata(Some(timestamp));
+            metadata.max_timestamp = Some(timestamp + width);
+            assert_rejected_without_publication(partition, batch, metadata);
+        }
+    }
+
+    #[test]
+    fn test_time_partition_validation_allows_unordered_same_partition_and_null_anchor() {
+        let dir = tempfile::tempdir().unwrap();
+        let timestamp = 1_705_320_000;
+        let batch = partition_batch(
+            vec![Some(503), Some(501), Some(502)],
+            vec![
+                Some((timestamp + 2) * 1_000),
+                None,
+                Some(timestamp * 1_000 + 999),
+            ],
+        );
+        let mut writer = OutputWriter::new(dir.path(), Partition::Date, Compression::None, 0);
+        assert!(writer
+            .write_all(
+                &HashMap::from([("blocks".into(), batch.clone())]),
+                &routed_metadata(Some(timestamp))
+            )
+            .unwrap());
+        let path = std::fs::read_dir(dir.path().join("blocks/year=2024/month=01/day=15"))
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        assert_eq!(read_parquet(&path).unwrap(), vec![batch]);
+    }
+
+    #[test]
+    fn test_negative_milliseconds_use_floor_seconds_for_partition_membership() {
+        let dir = tempfile::tempdir().unwrap();
+        let batch = partition_batch(vec![Some(501), Some(502)], vec![Some(-1), Some(-999)]);
+        let mut writer = OutputWriter::new(dir.path(), Partition::Second, Compression::None, 0);
+        assert!(writer
+            .write_all(
+                &HashMap::from([("blocks".into(), batch)]),
+                &routed_metadata(Some(-1))
+            )
+            .unwrap());
+        assert!(dir
+            .path()
+            .join("blocks/year=1969/month=12/day=31/hour=23/minute=59/second=59")
+            .is_dir());
+    }
+
+    #[test]
+    fn test_null_timestamp_routes_preserve_flat_and_anchored_destinations() {
+        for timestamp in [None, Some(1_705_320_000)] {
+            let dir = tempfile::tempdir().unwrap();
+            let batch = partition_batch(vec![Some(501)], vec![None]);
+            let metadata = routed_metadata(timestamp);
+            let mut writer = OutputWriter::new(dir.path(), Partition::Date, Compression::None, 0);
+            let suffix = writer.inner.partition_suffix("blocks", &metadata);
+            assert!(writer
+                .write_all(&HashMap::from([("blocks".into(), batch)]), &metadata)
+                .unwrap());
+            assert_eq!(parquet_rows_in(&dir.path().join(suffix)), 1);
+        }
+    }
+
+    #[test]
+    fn test_time_partition_rejects_missing_mistyped_or_unanchored_timestamps() {
+        let timestamp = 1_705_320_000;
+        assert_rejected_without_publication(
+            Partition::Date,
+            make_test_batch(),
+            routed_metadata(Some(timestamp)),
+        );
+        let wrong = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![Field::new(
+                "timestamp",
+                DataType::Int64,
+                false,
+            )])),
+            vec![Arc::new(arrow::array::Int64Array::from(vec![timestamp]))],
+        )
+        .unwrap();
+        assert_rejected_without_publication(
+            Partition::Date,
+            wrong,
+            routed_metadata(Some(timestamp)),
+        );
+        let unzoned = arrow::array::TimestampMillisecondArray::from(vec![timestamp * 1_000]);
+        let wrong = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![Field::new(
+                "timestamp",
+                unzoned.data_type().clone(),
+                false,
+            )])),
+            vec![Arc::new(unzoned)],
+        )
+        .unwrap();
+        assert_rejected_without_publication(
+            Partition::Date,
+            wrong,
+            routed_metadata(Some(timestamp)),
+        );
+        let batch = partition_batch(vec![Some(501)], vec![Some(timestamp * 1_000)]);
+        assert_rejected_without_publication(Partition::Date, batch.clone(), routed_metadata(None));
+        let mut metadata = routed_metadata(Some(timestamp));
+        metadata.max_timestamp = None;
+        assert_rejected_without_publication(Partition::Date, batch, metadata);
+    }
+
+    #[test]
+    fn test_block_partition_checks_all_rows_and_anchor_without_timestamps() {
+        let mut partition = Partition::block_range(100);
+        partition.set_block_range_start(Some(500));
+        for blocks in [
+            vec![Some(501), Some(701), Some(601), Some(501)],
+            vec![None],
+            vec![Some(499)],
+        ] {
+            let len = blocks.len();
+            assert_rejected_without_publication(
+                partition.clone(),
+                partition_batch(blocks, vec![None; len]),
+                routed_metadata(None),
+            );
+        }
+        assert_rejected_without_publication(
+            partition.clone(),
+            make_test_batch(),
+            routed_metadata(None),
+        );
+        let valid = partition_batch(vec![Some(599), Some(501), Some(599)], vec![None; 3]);
+        let mut metadata = routed_metadata(None);
+        metadata.max_block_number = 600;
+        assert_rejected_without_publication(partition.clone(), valid.clone(), metadata);
+        let dir = tempfile::tempdir().unwrap();
+        let mut writer = OutputWriter::new(dir.path(), partition, Compression::None, 0);
+        assert!(writer
+            .write_all(
+                &HashMap::from([("blocks".into(), valid)]),
+                &routed_metadata(None)
+            )
+            .unwrap());
+        assert_eq!(
+            parquet_rows_in(&dir.path().join("blocks/block_range=500-600")),
+            3
+        );
+    }
+
+    #[test]
+    fn test_invalid_numeric_configuration_is_an_error_before_path_formatting() {
+        let batch = partition_batch(vec![Some(501)], vec![None]);
+        assert_rejected_without_publication(
+            Partition::block_range(0),
+            batch.clone(),
+            routed_metadata(None),
+        );
+        let mut partition = Partition::block_range(100);
+        partition.set_block_range_start(Some(600));
+        assert_rejected_without_publication(partition, batch, routed_metadata(None));
+    }
+
+    #[test]
+    fn test_failed_and_unattempted_tables_stay_visible_until_explicit_retry() {
+        let dir = tempfile::tempdir().unwrap();
         let blocker = dir.path().join("logs");
-        std::fs::write(&blocker, b"").unwrap();
-
-        assert!(
-            out.flush_remaining().is_err(),
-            "a failed table write must surface as an error"
-        );
-        let logs = out
-            .buffers
-            .get("logs")
-            .expect("the failed table must stay buffered");
-        let buffered_logs_rows: usize = logs.batches.iter().map(|b| b.num_rows()).sum();
-        assert_eq!(buffered_logs_rows, 1, "no buffered logs rows may be lost");
-
-        // Once the write can succeed again, the retained rows are written and
-        // tables that already succeeded are not written twice.
-        std::fs::remove_file(&blocker).unwrap();
-        assert!(out.flush_remaining().unwrap());
-        assert_eq!(out.buffered_stats(), WriterBufferStats::default());
-        assert_eq!(parquet_rows_in(&dir.path().join("logs")), 1);
+        std::fs::write(&blocker, b"not a directory").unwrap();
+        let mut writer = OutputWriter::new(dir.path(), Partition::None, Compression::None, 0);
+        let batches = HashMap::from([
+            ("blocks".into(), make_test_batch()),
+            ("logs".into(), make_test_batch()),
+            ("transactions".into(), make_test_batch()),
+        ]);
+        assert!(writer.write_all(&batches, &default_metadata()).is_err());
         assert_eq!(parquet_rows_in(&dir.path().join("blocks")), 1);
+        assert!(!dir.path().join("transactions").exists());
+        let stats = writer.buffered_stats();
+        assert_eq!(stats.tables, 2);
+        assert_eq!(stats.batches, 2);
+        assert_eq!(stats.rows, 2);
+        assert!(stats.estimated_arrow_bytes > 0 && stats.estimated_compressed_bytes > 0);
+        assert!(writer.flush_remaining().is_err());
+        assert!(writer
+            .write_all(&batches, &default_metadata())
+            .unwrap_err()
+            .to_string()
+            .contains("retry flush_remaining"));
+        assert_eq!(writer.buffered_stats(), stats);
+        // Directory creation failed before publication, so this specific retry
+        // is unambiguous. Post-publication failures require #468 recovery.
+        std::fs::remove_file(blocker).unwrap();
+        assert!(writer.flush_remaining().unwrap());
+        assert!(!writer.flush_remaining().unwrap());
+        assert_eq!(writer.buffered_stats(), WriterBufferStats::default());
+        for table in ["blocks", "logs", "transactions"] {
+            assert_eq!(parquet_rows_in(&dir.path().join(table)), 1);
+        }
     }
 
     #[test]
-    fn test_write_all_keeps_pending_partition_batches_when_flush_fails() {
+    fn test_empty_mapper_flush_does_not_publish_or_buffer() {
         let dir = tempfile::tempdir().unwrap();
-        let mut batches = HashMap::new();
-        batches.insert("blocks".to_string(), make_test_batch());
-
-        let mut out = OutputWriter::new(dir.path(), Partition::Date, Compression::None, 0);
-        let jan15 = BlockMetadata {
-            min_block_number: 100,
-            max_block_number: 200,
-            min_timestamp: Some(1705320000), // 2024-01-15 12:00:00 UTC
-            max_timestamp: Some(1705320000),
-        };
-        out.write_all(&batches, &jan15).unwrap();
-
-        let blocker = dir.path().join("blocks");
-        std::fs::write(&blocker, b"").unwrap();
-
-        // The partition change forces a global flush of 2024-01-15, which fails.
-        let jan16 = BlockMetadata {
-            min_block_number: 300,
-            max_block_number: 400,
-            min_timestamp: Some(1705406400), // 2024-01-16 12:00:00 UTC
-            max_timestamp: Some(1705406400),
-        };
-        assert!(out.write_all(&batches, &jan16).is_err());
-        assert_eq!(out.buffered_stats().rows, 1, "old partition stays buffered");
-        assert_eq!(
-            out.pending_after_flush.len(),
-            1,
-            "new partition stays pending"
-        );
-
-        std::fs::remove_file(&blocker).unwrap();
-        out.flush_remaining().unwrap();
-        out.flush_remaining().unwrap();
-        assert_eq!(out.buffered_stats(), WriterBufferStats::default());
-        assert_eq!(
-            parquet_rows_in(&dir.path().join("blocks/year=2024/month=01/day=15")),
-            1
-        );
-        assert_eq!(
-            parquet_rows_in(&dir.path().join("blocks/year=2024/month=01/day=16")),
-            1
-        );
-    }
-
-    #[test]
-    fn test_buffered_writer_flushes_on_partition_change() {
-        let dir = tempfile::tempdir().unwrap();
-        let batch = make_test_batch();
-        let mut batches = HashMap::new();
-        batches.insert("blocks".to_string(), batch);
-
-        let mut out = OutputWriter::new(dir.path(), Partition::Date, Compression::None, 1_000_000);
-
-        // First write: day=2024-01-15
-        let meta1 = BlockMetadata {
-            min_block_number: 100,
-            max_block_number: 200,
-            min_timestamp: Some(1705320000), // 2024-01-15 12:00:00 UTC
-            max_timestamp: Some(1705320000),
-        };
-        out.write_all(&batches, &meta1).unwrap();
-
-        // Second write: different date — should flush the first.
-        let meta2 = BlockMetadata {
-            min_block_number: 300,
-            max_block_number: 400,
-            min_timestamp: Some(1705406400), // 2024-01-16 12:00:00 UTC
-            max_timestamp: Some(1705406400),
-        };
-        out.write_all(&batches, &meta2).unwrap();
-
-        // The 2024-01-15 partition should have been written (partition change).
-        let jan15 = dir.path().join("blocks/year=2024/month=01/day=15");
-        assert!(
-            jan15.exists(),
-            "old partition should be flushed on date change"
-        );
-
-        // The 2024-01-16 data is still buffered.
-        let jan16 = dir.path().join("blocks/year=2024/month=01/day=16");
-        assert!(!jan16.exists(), "new partition should still be buffered");
-        let stats = out.buffered_stats();
-        assert_eq!(stats.tables, 1);
-        assert_eq!(stats.batches, 1);
-        assert_eq!(stats.rows, 1);
-        assert!(stats.estimated_arrow_bytes > 0);
-        assert!(stats.estimated_compressed_bytes > 0);
-
-        out.flush_remaining().unwrap();
-        assert!(
-            jan16.exists(),
-            "new partition should be written after flush"
-        );
-        assert_eq!(out.buffered_stats(), WriterBufferStats::default());
+        let output = dir.path().join("output");
+        let mut writer = OutputWriter::new(&output, Partition::Date, Compression::None, 0);
+        assert!(!writer
+            .write_all(&HashMap::new(), &default_metadata())
+            .unwrap());
+        let empty = make_test_batch().slice(0, 0);
+        assert!(!writer
+            .write_all(
+                &HashMap::from([("blocks".into(), empty)]),
+                &default_metadata()
+            )
+            .unwrap());
+        assert_eq!(writer.buffered_stats(), WriterBufferStats::default());
+        assert!(!output.exists());
     }
 
     #[test]
@@ -1389,242 +1408,5 @@ mod tests {
         assert_eq!(a.max_block_number, 300);
         assert_eq!(a.min_timestamp, Some(500));
         assert_eq!(a.max_timestamp, Some(2500));
-    }
-
-    #[test]
-    fn test_flush_bytes_zero_disables_size_rollover() {
-        let dir = tempfile::tempdir().unwrap();
-        let batch = make_test_batch();
-        let mut batches = HashMap::new();
-        batches.insert("blocks".to_string(), batch);
-
-        // flush_bytes=0 disables size-based rollover.
-        let mut out = OutputWriter::new(dir.path(), Partition::None, Compression::None, 0);
-        let meta = default_metadata();
-
-        // Write many times — nothing should be flushed to disk.
-        for _ in 0..50 {
-            out.write_all(&batches, &meta).unwrap();
-        }
-        assert!(
-            !dir.path().join("blocks").exists(),
-            "size rollover should be disabled"
-        );
-
-        // Explicit flush writes the accumulated data.
-        out.flush_remaining().unwrap();
-        assert!(
-            dir.path().join("blocks").exists(),
-            "flush_remaining should write data"
-        );
-
-        // Should produce a single part file with all 50 rows.
-        let parts: Vec<_> = std::fs::read_dir(dir.path().join("blocks"))
-            .unwrap()
-            .filter_map(|e| e.ok())
-            .filter(|e| e.path().extension().map_or(false, |ext| ext == "parquet"))
-            .collect();
-        assert_eq!(parts.len(), 1, "should be a single part file");
-        let file_path = parts[0].path();
-        let read_batches = read_parquet(&file_path).unwrap();
-        let total_rows: usize = read_batches.iter().map(|b| b.num_rows()).sum();
-        assert_eq!(total_rows, 50);
-    }
-
-    /// Helper: build a batch with block_num and timestamp columns for partition split tests.
-    fn make_timestamped_batch(timestamps: &[i64]) -> RecordBatch {
-        let schema = Arc::new(Schema::new(vec![
-            Field::new("block_number", DataType::UInt64, false),
-            Field::new("timestamp", DataType::Int64, false),
-        ]));
-        let mut block_builder = UInt64Builder::new();
-        let mut ts_builder = arrow::array::Int64Builder::new();
-        for (i, &ts) in timestamps.iter().enumerate() {
-            block_builder.append_value(i as u64);
-            ts_builder.append_value(ts);
-        }
-        RecordBatch::try_new(
-            schema,
-            vec![
-                Arc::new(block_builder.finish()),
-                Arc::new(ts_builder.finish()),
-            ],
-        )
-        .unwrap()
-    }
-
-    #[test]
-    fn test_split_batch_across_date_boundary() {
-        let dir = tempfile::tempdir().unwrap();
-        // 2024-01-15 23:59:58, 23:59:59, 2024-01-16 00:00:00, 00:00:01
-        let ts_before = 1705363198_i64; // 2024-01-15 23:59:58
-        let ts_boundary = 1705363200_i64; // 2024-01-16 00:00:00
-        let batch =
-            make_timestamped_batch(&[ts_before, ts_before + 1, ts_boundary, ts_boundary + 1]);
-
-        let mut batches = HashMap::new();
-        batches.insert("blocks".to_string(), batch);
-
-        let mut out = OutputWriter::new(dir.path(), Partition::Date, Compression::None, 0);
-        let meta = BlockMetadata {
-            min_block_number: 0,
-            max_block_number: 3,
-            min_timestamp: Some(ts_before),
-            max_timestamp: Some(ts_boundary + 1),
-        };
-        out.write_all(&batches, &meta).unwrap();
-        out.flush_remaining().unwrap();
-
-        // Both date partitions should exist.
-        let jan15 = dir.path().join("blocks/year=2024/month=01/day=15");
-        let jan16 = dir.path().join("blocks/year=2024/month=01/day=16");
-        assert!(jan15.exists(), "2024-01-15 partition should exist");
-        assert!(jan16.exists(), "2024-01-16 partition should exist");
-
-        // Check row counts.
-        let parts15: Vec<_> = std::fs::read_dir(&jan15)
-            .unwrap()
-            .filter_map(|e| e.ok())
-            .filter(|e| e.path().extension().map_or(false, |ext| ext == "parquet"))
-            .collect();
-        let rows15: usize = parts15
-            .iter()
-            .flat_map(|p| read_parquet(&p.path()).unwrap())
-            .map(|b| b.num_rows())
-            .sum();
-        assert_eq!(rows15, 2, "jan15 should have 2 rows");
-
-        let parts16: Vec<_> = std::fs::read_dir(&jan16)
-            .unwrap()
-            .filter_map(|e| e.ok())
-            .filter(|e| e.path().extension().map_or(false, |ext| ext == "parquet"))
-            .collect();
-        let rows16: usize = parts16
-            .iter()
-            .flat_map(|p| read_parquet(&p.path()).unwrap())
-            .map(|b| b.num_rows())
-            .sum();
-        assert_eq!(rows16, 2, "jan16 should have 2 rows");
-    }
-
-    #[test]
-    fn test_split_batch_across_hour_boundary() {
-        let dir = tempfile::tempdir().unwrap();
-        // 2024-01-15 13:59:59 and 14:00:00
-        let ts1 = 1705327199_i64; // 13:59:59
-        let ts2 = 1705327200_i64; // 14:00:00
-        let batch = make_timestamped_batch(&[ts1, ts2]);
-
-        let mut batches = HashMap::new();
-        batches.insert("events".to_string(), batch);
-
-        let mut out = OutputWriter::new(dir.path(), Partition::Hour, Compression::None, 0);
-        let meta = BlockMetadata {
-            min_block_number: 0,
-            max_block_number: 1,
-            min_timestamp: Some(ts1),
-            max_timestamp: Some(ts2),
-        };
-        out.write_all(&batches, &meta).unwrap();
-        out.flush_remaining().unwrap();
-
-        let h13 = dir.path().join("events/year=2024/month=01/day=15/hour=13");
-        let h14 = dir.path().join("events/year=2024/month=01/day=15/hour=14");
-        assert!(h13.exists(), "hour=13 should exist");
-        assert!(h14.exists(), "hour=14 should exist");
-    }
-
-    #[test]
-    fn test_no_split_when_same_partition() {
-        let dir = tempfile::tempdir().unwrap();
-        // Both timestamps in 2024-01-15
-        let ts1 = 1705320000_i64;
-        let ts2 = 1705320060_i64;
-        let batch = make_timestamped_batch(&[ts1, ts2]);
-
-        let mut batches = HashMap::new();
-        batches.insert("blocks".to_string(), batch);
-
-        let mut out = OutputWriter::new(dir.path(), Partition::Date, Compression::None, 0);
-        let meta = BlockMetadata {
-            min_block_number: 0,
-            max_block_number: 1,
-            min_timestamp: Some(ts1),
-            max_timestamp: Some(ts2),
-        };
-        out.write_all(&batches, &meta).unwrap();
-        out.flush_remaining().unwrap();
-
-        let jan15 = dir.path().join("blocks/year=2024/month=01/day=15");
-        assert!(jan15.exists());
-        // Only one partition should exist (one year directory)
-        let dirs: Vec<_> = std::fs::read_dir(dir.path().join("blocks"))
-            .unwrap()
-            .filter_map(|e| e.ok())
-            .filter(|e| e.file_type().map_or(false, |ft| ft.is_dir()))
-            .collect();
-        assert_eq!(dirs.len(), 1, "should only have one date partition");
-    }
-
-    #[test]
-    fn test_no_split_for_block_range_partition() {
-        let dir = tempfile::tempdir().unwrap();
-        let ts1 = 1705363198_i64;
-        let ts2 = 1705363200_i64;
-        let batch = make_timestamped_batch(&[ts1, ts2]);
-
-        let mut batches = HashMap::new();
-        batches.insert("blocks".to_string(), batch);
-
-        let mut out = OutputWriter::new(
-            dir.path(),
-            Partition::block_range(1000),
-            Compression::None,
-            0,
-        );
-        let meta = BlockMetadata {
-            min_block_number: 100,
-            max_block_number: 101,
-            min_timestamp: Some(ts1),
-            max_timestamp: Some(ts2),
-        };
-        out.write_all(&batches, &meta).unwrap();
-        out.flush_remaining().unwrap();
-
-        // Should write to a single block_range partition
-        let br = dir.path().join("blocks/block_range=0-1000");
-        assert!(br.exists());
-        let parts: Vec<_> = std::fs::read_dir(&br)
-            .unwrap()
-            .filter_map(|e| e.ok())
-            .filter(|e| e.path().extension().map_or(false, |ext| ext == "parquet"))
-            .collect();
-        let rows: usize = parts
-            .iter()
-            .flat_map(|p| read_parquet(&p.path()).unwrap())
-            .map(|b| b.num_rows())
-            .sum();
-        assert_eq!(rows, 2, "all rows should be in one partition");
-    }
-
-    #[test]
-    fn test_compression_ratio_is_fixed() {
-        let dir = tempfile::tempdir().unwrap();
-        let batch = make_test_batch();
-        let mut batches = HashMap::new();
-        batches.insert("blocks".to_string(), batch);
-
-        let mut out = OutputWriter::new(dir.path(), Partition::None, Compression::Zstd, 1_000_000);
-        let initial_ratio = out.compression_ratio();
-        let meta = default_metadata();
-
-        // Write and flush — the ratio should remain unchanged.
-        out.write_all(&batches, &meta).unwrap();
-        out.flush_remaining().unwrap();
-        assert_eq!(
-            out.compression_ratio(),
-            initial_ratio,
-            "ratio should not change after writes"
-        );
     }
 }
