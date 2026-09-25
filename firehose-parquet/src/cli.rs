@@ -812,6 +812,9 @@ partitions.parquet, merkle_roots.parquet, verify_runs/) are left untouched, so
 re-running a rollup is safe. Without --delete-source, each re-run replaces the
 part-rollup-*.parquet files it wrote earlier in the target partitions it rolls up.
 
+A target partition whose source files have different columns (names, types,
+nullability, or order) is left untouched, and rollup exits non-zero.
+
 Lookup order for the source path:
   1. Explicit s3://bucket/... URIs are used as-is.
   2. Non-URI paths use the local filesystem when the path exists.
@@ -921,6 +924,11 @@ Examples:
 
   # Use snappy compression
   fireparq merge ./output/blocks/ --compression snappy
+
+Root artifacts (cursor.parquet, partitions.parquet, merkle_roots.parquet,
+verify_runs/) are skipped. A partition whose parts have different columns
+(names, types, nullability, or order) is left untouched and listed in the
+summary, and merge exits non-zero.
 
 Lookup order:
   1. Explicit s3://bucket/... URIs are used as-is.

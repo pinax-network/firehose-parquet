@@ -4321,6 +4321,13 @@ async fn main() -> Result<()> {
                 };
                 let result = firehose_parquet::merge::run_merge(&merge_config)?;
                 result.print();
+                if !result.schema_mismatches.is_empty() {
+                    anyhow::bail!(
+                        "{} partition(s) were not merged because their parts have different \
+                         schemas; nothing was written or deleted in them",
+                        result.schema_mismatches.len()
+                    );
+                }
                 return Ok(());
             }
             Commands::Truncate {

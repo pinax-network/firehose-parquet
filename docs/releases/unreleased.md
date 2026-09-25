@@ -26,7 +26,7 @@ Migration:
   SELECT * FROM read_parquet('new/blocks/**/*.parquet');
   ```
 
-- Do not `merge` or `rollup` old and new files together (see #479: merge and rollup match columns by position). Rebuild the old range, or keep it under a separate prefix.
+- Do not `merge` or `rollup` old and new files together. Both commands now refuse (#479): they leave a partition with mixed schemas untouched and exit non-zero. Rebuild the old range, or keep it under a separate prefix.
 - `fireparq verify` roots over new files can differ from roots over old files wherever block times have milliseconds, because the stored value changed. Recompute registries for rebuilt ranges.
 
 ### Tron `transactions`: transaction time columns renamed (#492)
@@ -67,6 +67,19 @@ Migration:
 - To rebuild, keep a copy of the old registry, then run `fireparq verify <path> --update-registry --no-fail-fast` against trusted data, and run `verify` again to confirm it passes. The full procedure is in `docs/verifiability-artifact-runbook.md` ("Migrating a legacy `merkle_v1` registry").
 - Report consumers that compare roots should compare `algorithm` and `merkle_version` too (`docs/verify-report-contract.md`).
 
+### `rollup`: in-place runs need `--delete-source`, outputs have new names, and only time partitions are rolled up (#478)
+
+`rollup` used to write fixed file names (`part-000001.parquet`), so a re-run could overwrite its earlier output and then delete it (see Fixes). The fix changes three behaviors:
+
+- **In-place rollups need `--delete-source`.** `fireparq rollup <dir>` without `--output` now fails unless `--delete-source` is passed. Without that flag, the rolled-up copy was written next to its sources, so every row was stored twice under the same root.
+- **New output names.** With `--delete-source`, outputs are named like ingestion parts: `part-<run>-NNNNNN.parquet`, where `<run>` is a random id per run. Without it, outputs are named `part-rollup-<run>-NNNNNN.parquet`, and a re-run replaces the earlier `part-rollup-*` files in each target partition it rewrites. Existing files are never overwritten.
+- **Only time partitions are rolled up.** Rollup now reads only `part-*.parquet` files below a partition finer than `--partition` (`hour=`, `minute=`, or `second=`). Files in `block_range=` or unpartitioned directories are no longer concatenated; use `merge` to compact those.
+
+Migration:
+
+- Add `--delete-source` to in-place `rollup` commands, or write to a separate `--output`.
+- Don't rely on rollup outputs being named `part-000001.parquet`.
+
 ### Built-in `--network` aliases: 13 removed, 4 moved to StreamingFast (#535)
 
 17 of the 54 built-in aliases pointed at Pinax hosts that no longer resolve or fail TLS, so `fireparq build --network <alias>` failed at startup. The registry is regenerated from The Graph networks registry (v0.8.4, 2026-09-24).
@@ -98,6 +111,9 @@ How aliases are chosen, and how to refresh them, is described in `docs/network-r
 - **`build` no longer restarts from scratch when `cursor.parquet` cannot be read (#465).** Only a missing cursor, or one with no row or an empty cursor string, starts a fresh run. A cursor that exists but cannot be loaded (permission denied, S3 403/5xx/timeout, empty, truncated or corrupt file) now fails the run with an error that names the file. Previously the run logged "starting fresh", re-ingested from `--start-block` or genesis, and overwrote the good cursor on its first flush. To deliberately ignore an unreadable cursor and restart from the CLI bounds, pass `--cursor-override`. `partitions build` also fails instead of ignoring an unreadable sibling cursor when it uses it to infer `--start-block`.
 - **Local cursor saves are atomic (#465).** `cursor.parquet` is written to `cursor.parquet.tmp` in the same directory, fsynced, renamed over the target, and the directory is fsynced. A crash mid-save leaves the previous cursor intact instead of a truncated file. S3 cursor saves were already atomic (single PUT).
 - **A failed table write no longer loses rows (#464).** The writer keeps a table's buffered rows until its write succeeds. When a write, mapping or stream error ends `build`, partial buffers are discarded, `cursor.parquet` is not advanced, and the process exits non-zero, so the next run replays the uncommitted window. Previously the error path flushed the other tables and saved the cursor past the lost rows.
+- **`rollup` re-runs no longer lose or duplicate rows (#478).** An in-place re-run with `--delete-source` overwrote its earlier output and then deleted it as a source; on mainnet test data, the second run deleted the whole dataset. A re-run without `--delete-source` read the earlier output again and stacked duplicate rows. Re-runs now only roll up files that are still below the target granularity, and never overwrite or delete their own output. With `--delete-source`, each target partition's sources are deleted as soon as its output is written, so a failure partway through no longer leaves finished partitions to be rolled up a second time.
+- **`rollup` and `merge` leave root artifacts alone (#478).** `cursor.parquet`, `partitions.parquet`, `merkle_roots.parquet`, and anything under `verify_runs/` are skipped. Rolling up or merging a network root used to fold them into a `part-000001.parquet` and delete them, or fail on their mismatched schemas.
+- **`merge` and `rollup` no longer combine files with different schemas (#479).** Both commands paired columns by position. When a partition mixed files from two tool versions or two schemas, an extra column was silently dropped, and two columns of the same type in a different order swapped values. The sources were then deleted. Both commands now compare every file's columns (names, types, nullability, and order) before writing. A partition with mixed schemas is left untouched, with nothing written or deleted in it. The other partitions are still processed, and the command then exits non-zero, listing the skipped partitions and how their files differ. `merge` reads each part's footer before merging a partition, which adds one small range request per S3 object, and `merge --dry-run` reports these partitions too.
 
 ## Tests
 
