@@ -610,7 +610,7 @@ parent context, skipped-slot handling and endpoint requirements.
 |---|---|---|
 | `--partition` | none | `date`, `hour`, `minute`, `second`, or `block_range` |
 | `--block-range-size` | required for `block_range` | Width of deterministic block-number partitions |
-| `--start-block` | inferred | Fresh coverage start: explicit value, sibling cursor frontier, then endpoint first streamable block |
+| `--start-block` | inferred | Fresh bounded start: explicit value, sibling cursor frontier, then endpoint first streamable block; fresh live uses explicit value or endpoint |
 | `--stop-block` | none in live mode | Exclusive bounded stop, no later than the proven finalized block plus one; incompatible with `--live` |
 | `--live` | `false` | Poll finalized coverage and extend the stored source frontier |
 | `--poll-interval-secs` | `30` | Wait between live finalized-head checks |

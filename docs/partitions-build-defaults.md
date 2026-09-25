@@ -29,13 +29,15 @@ parent identity. Missing or contradictory metadata never establishes coverage.
 
 ## Start and resume
 
-Fresh bounded/live start resolution is:
+Fresh bounded start resolution is:
 
 1. Explicit `--start-block`.
 2. Sibling `cursor.parquet` last block plus one, if present and readable.
 3. EndpointInfo's first streamable block.
 
-EndpointInfo is mandatory. An unreadable cursor is an error. Partition index
+A fresh live run uses its explicit start or endpoint first streamable block; it
+does not inspect the sibling cursor. EndpointInfo is mandatory. An unreadable
+bounded-start cursor is an error. Partition index
 construction never writes that cursor.
 
 An existing index requires `--resume` or `--overwrite` in bounded mode. Resume
@@ -89,8 +91,11 @@ Block-range keys are aligned multiples of `--block-range-size`. Coverage still
 requires the exact finalized-head proof. Natural boundaries follow from the
 block numbers; start/end flags record clipping. Nullable boundary timestamps
 use the retained exact Fetch helper: timeouts/transient failures receive bounded
-retries, missing metadata and unexpected block numbers fail, and authentication
-fails immediately. These optional timestamps do not determine range boundaries
+retries, missing metadata and unexpectedly later block numbers fail, and
+authentication fails immediately. A missing boundary or an earlier Fetch reply
+leaves its optional timestamp null; that legacy Fetch interpretation never
+changes the separately proven coverage or establishes head/finality. These
+optional timestamps do not determine range boundaries
 or prove finality. Block ranges require no prior timestamp context.
 
 ## Live snapshots and publication
