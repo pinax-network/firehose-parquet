@@ -245,3 +245,10 @@ review found no production defect, requested the actual-Parquet schema check, an
 accepted the explicit RPC-backed live-block boundary. Raw artifacts and
 before/after outputs are temporary evidence; the scripts, hashes, full comparison
 report and scope record are durable source.
+
+Final publication also integrates main `270af16` (#527 shared AWS CLI structs).
+This merge changes no Tron mapping/schema/part encoding. All 14 targeted Tron
+matching tests passed, locked CLI build and bash/zsh/fish completions passed,
+and formatting remained clean. The complete 1,067-test run above remains the
+runtime qualification on the immediately preceding main; #527 also passed its
+own complete CI suite. Fresh combined PR CI is required for the published head.
