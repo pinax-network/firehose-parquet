@@ -957,7 +957,34 @@ For a failed or reverted transaction, `fireparq` writes:
 | `code_changes` | at most one per accepted EIP-7702 authorization (the delegation) |
 | `storage_changes`, `account_creations` | none |
 
-This follows the rule documented on `TransactionTrace.status` in `proto/ethereum.proto`. Rolled-back transfers and storage writes of failed transactions are not written. Successful transactions keep every state change, including those of calls that were reverted inside them.
+This follows the rule documented on `TransactionTrace.status` in `proto/ethereum.proto`. Rolled-back transfers and storage writes of failed transactions are not written. Successful transactions keep every state change, including those of calls that were reverted inside them. The `persisted` column tells them apart (see below).
+
+### EVM: which call recorded a change, and whether it persisted
+
+The transaction-scoped change tables (`balance_changes`, `nonce_changes`, `code_changes`, `storage_changes`, `account_creations`, `gas_changes`) carry the transaction and call that recorded each change:
+
+| Column | Type | Meaning |
+|---|---|---|
+| `tx_index` | `UInt32` | The transaction's index in the block. Joins `transactions.index`. |
+| `call_index` | `UInt32` | The recording call's Firehose index (starts at 1). Joins `calls.call_index` with `tx_hash`. |
+| `state_reverted` | `Boolean` | The recording call's `state_reverted` flag, the same value as in `calls`. |
+| `persisted` | `Boolean` | Whether the change is part of chain state after the transaction. Not on `gas_changes`: gas is consumed even in reverted calls. |
+
+`persisted` is `NOT state_reverted` for successful transactions. For failed or reverted transactions it is always `true`: only their persistent changes are written, and those come from the root call, whose `state_reverted` is `true`. To rebuild state from the change tables, filter on `persisted`:
+
+```sql
+-- Balance of each address at the end of the range
+SELECT address, new_value AS balance
+FROM read_parquet('output/mainnet/balance_changes/**/*.parquet')
+WHERE persisted
+QUALIFY row_number() OVER (PARTITION BY address ORDER BY block_number DESC, ordinal DESC) = 1;
+```
+
+Order persisted changes by `(block_number, ordinal)`; ordinals are unique within a block. Ordinals of changes in reverted calls may be `0`.
+
+The `system_*` change tables have a nullable `call_index`: the index of the system call that recorded the change, or `NULL` for block-level changes such as beacon-chain withdrawals.
+
+The `logs` table holds receipt logs only, so logs emitted by reverted calls are never in it.
 
 Resuming an EVM output whose `cursor.parquet` was written with failed transactions excluded (the default before this change) keeps excluding them, so one output does not mix both modes. `fireparq` logs a warning. Pass `--exclude-failed-transactions` to keep that and silence the warning. To switch the output to the new default, use `--cursor-override` with an explicit `--start-block`.
 

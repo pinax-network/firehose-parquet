@@ -125,11 +125,15 @@ pub fn balance_changes_schema(include_fork_step: bool, encoding: &EncodeBytes) -
     fields.extend(vec![
         Field::new("block_number", DataType::UInt64, false),
         Field::new("tx_hash", bd.clone(), false),
+        Field::new("tx_index", DataType::UInt32, false),
+        Field::new("call_index", DataType::UInt32, false),
         Field::new("ordinal", DataType::UInt64, false),
         Field::new("address", bd, false),
         Field::new("old_value", DataType::Utf8, false),
         Field::new("new_value", DataType::Utf8, false),
         Field::new("reason", enum_data_type(), false),
+        Field::new("state_reverted", DataType::Boolean, false),
+        Field::new("persisted", DataType::Boolean, false),
     ]);
     maybe_fork_step(&mut fields, include_fork_step);
     Schema::new(fields)
@@ -141,12 +145,16 @@ pub fn code_changes_schema(include_fork_step: bool, encoding: &EncodeBytes) -> S
     fields.extend(vec![
         Field::new("block_number", DataType::UInt64, false),
         Field::new("tx_hash", bd.clone(), false),
+        Field::new("tx_index", DataType::UInt32, false),
+        Field::new("call_index", DataType::UInt32, false),
         Field::new("ordinal", DataType::UInt64, false),
         Field::new("address", bd.clone(), false),
         Field::new("old_hash", bd.clone(), false),
         Field::new("new_hash", bd.clone(), false),
         Field::new("old_code", bd.clone(), false),
         Field::new("new_code", bd, false),
+        Field::new("state_reverted", DataType::Boolean, false),
+        Field::new("persisted", DataType::Boolean, false),
     ]);
     maybe_fork_step(&mut fields, include_fork_step);
     Schema::new(fields)
@@ -158,11 +166,15 @@ pub fn storage_changes_schema(include_fork_step: bool, encoding: &EncodeBytes) -
     fields.extend(vec![
         Field::new("block_number", DataType::UInt64, false),
         Field::new("tx_hash", bd.clone(), false),
+        Field::new("tx_index", DataType::UInt32, false),
+        Field::new("call_index", DataType::UInt32, false),
         Field::new("ordinal", DataType::UInt64, false),
         Field::new("address", bd.clone(), false),
         Field::new("key", bd.clone(), false),
         Field::new("old_value", bd.clone(), false),
         Field::new("new_value", bd, false),
+        Field::new("state_reverted", DataType::Boolean, false),
+        Field::new("persisted", DataType::Boolean, false),
     ]);
     maybe_fork_step(&mut fields, include_fork_step);
     Schema::new(fields)
@@ -174,10 +186,14 @@ pub fn nonce_changes_schema(include_fork_step: bool, encoding: &EncodeBytes) -> 
     fields.extend(vec![
         Field::new("block_number", DataType::UInt64, false),
         Field::new("tx_hash", bd.clone(), false),
+        Field::new("tx_index", DataType::UInt32, false),
+        Field::new("call_index", DataType::UInt32, false),
         Field::new("ordinal", DataType::UInt64, false),
         Field::new("address", bd, false),
         Field::new("old_value", DataType::UInt64, false),
         Field::new("new_value", DataType::UInt64, false),
+        Field::new("state_reverted", DataType::Boolean, false),
+        Field::new("persisted", DataType::Boolean, false),
     ]);
     maybe_fork_step(&mut fields, include_fork_step);
     Schema::new(fields)
@@ -189,10 +205,13 @@ pub fn gas_changes_schema(include_fork_step: bool, encoding: &EncodeBytes) -> Sc
     fields.extend(vec![
         Field::new("block_number", DataType::UInt64, false),
         Field::new("tx_hash", bd, false),
+        Field::new("tx_index", DataType::UInt32, false),
+        Field::new("call_index", DataType::UInt32, false),
         Field::new("ordinal", DataType::UInt64, false),
         Field::new("old_value", DataType::UInt64, false),
         Field::new("new_value", DataType::UInt64, false),
         Field::new("reason", enum_data_type(), false),
+        Field::new("state_reverted", DataType::Boolean, false),
     ]);
     maybe_fork_step(&mut fields, include_fork_step);
     Schema::new(fields)
@@ -204,8 +223,12 @@ pub fn account_creations_schema(include_fork_step: bool, encoding: &EncodeBytes)
     fields.extend(vec![
         Field::new("block_number", DataType::UInt64, false),
         Field::new("tx_hash", bd.clone(), false),
+        Field::new("tx_index", DataType::UInt32, false),
+        Field::new("call_index", DataType::UInt32, false),
         Field::new("ordinal", DataType::UInt64, false),
         Field::new("account", bd, false),
+        Field::new("state_reverted", DataType::Boolean, false),
+        Field::new("persisted", DataType::Boolean, false),
     ]);
     maybe_fork_step(&mut fields, include_fork_step);
     Schema::new(fields)
@@ -246,6 +269,7 @@ pub fn system_balance_changes_schema(include_fork_step: bool, encoding: &EncodeB
     let mut fields = canonical_fields_with_encoding(encoding);
     fields.extend(vec![
         Field::new("block_number", DataType::UInt64, false),
+        Field::new("call_index", DataType::UInt32, true),
         Field::new("ordinal", DataType::UInt64, false),
         Field::new("address", bd, false),
         Field::new("old_value", DataType::Utf8, false),
@@ -261,6 +285,7 @@ pub fn system_code_changes_schema(include_fork_step: bool, encoding: &EncodeByte
     let mut fields = canonical_fields_with_encoding(encoding);
     fields.extend(vec![
         Field::new("block_number", DataType::UInt64, false),
+        Field::new("call_index", DataType::UInt32, true),
         Field::new("ordinal", DataType::UInt64, false),
         Field::new("address", bd.clone(), false),
         Field::new("old_hash", bd.clone(), false),
@@ -277,6 +302,7 @@ pub fn system_storage_changes_schema(include_fork_step: bool, encoding: &EncodeB
     let mut fields = canonical_fields_with_encoding(encoding);
     fields.extend(vec![
         Field::new("block_number", DataType::UInt64, false),
+        Field::new("call_index", DataType::UInt32, true),
         Field::new("ordinal", DataType::UInt64, false),
         Field::new("address", bd.clone(), false),
         Field::new("key", bd.clone(), false),
@@ -292,6 +318,7 @@ pub fn system_nonce_changes_schema(include_fork_step: bool, encoding: &EncodeByt
     let mut fields = canonical_fields_with_encoding(encoding);
     fields.extend(vec![
         Field::new("block_number", DataType::UInt64, false),
+        Field::new("call_index", DataType::UInt32, true),
         Field::new("ordinal", DataType::UInt64, false),
         Field::new("address", bd, false),
         Field::new("old_value", DataType::UInt64, false),
@@ -305,6 +332,7 @@ pub fn system_gas_changes_schema(include_fork_step: bool, encoding: &EncodeBytes
     let mut fields = canonical_fields_with_encoding(encoding);
     fields.extend(vec![
         Field::new("block_number", DataType::UInt64, false),
+        Field::new("call_index", DataType::UInt32, true),
         Field::new("ordinal", DataType::UInt64, false),
         Field::new("old_value", DataType::UInt64, false),
         Field::new("new_value", DataType::UInt64, false),
@@ -319,6 +347,7 @@ pub fn system_account_creations_schema(include_fork_step: bool, encoding: &Encod
     let mut fields = canonical_fields_with_encoding(encoding);
     fields.extend(vec![
         Field::new("block_number", DataType::UInt64, false),
+        Field::new("call_index", DataType::UInt32, true),
         Field::new("ordinal", DataType::UInt64, false),
         Field::new("account", bd, false),
     ]);
