@@ -1,8 +1,9 @@
 # Issue #515: adaptive compressed file sizing
 
 Status: implementation and independent review are complete. This builds on
-protected ingestion transactions (#600), with main through #603/#530 (`39d49f6`)
-integrated. Local qualification is recorded below; the linked PR tracks the
+protected ingestion transactions (#600), with main through #604/#522 (`6cae796`)
+integrated. Local qualification is recorded below;
+[PR #605](https://github.com/pinax-network/firehose-parquet/pull/605) tracks the
 remaining CI and merge gates.
 
 ## Diagnosis and implementation
@@ -175,3 +176,15 @@ also has one intentionally ignored measurement test. Workspace build/formatting
 passed again. The full-suite ancestry above is
 explicit; the PR CI validates the combined final tree. No new live Firehose
 requests or production S3 writes were made for this issue.
+
+The subsequent streaming-rollup merge (#604/#522, main `6cae796`) was integrated
+as `5378dcf`. The two wording conflicts retain the shared **32 MiB** file target
+and explain batch/codec overhead. Its independent **32 MiB active row-group
+budget** remains separate from the ingestion **256 MiB mapper threshold**. On
+that combined tree, **228 focused checks passed**: 28 rollup, 26 merge, 150 CLI,
+four sizing, ten mapper/trigger, nine actual ingestion CLI and one metrics check.
+Workspace build and formatting also passed. The independent combined scratch
+tree `f22eff2` (including the proposed #518 owned-payload change as well) passed
+1,029 workspace tests with nine intentional ignores, both example checks, build,
+formatting and completions; this additional evidence is distinct from this PR's
+exact-head CI.

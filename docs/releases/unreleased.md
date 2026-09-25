@@ -14,7 +14,7 @@ Changes merged since the last release. Fold this file into `docs/releases/vX.Y.Z
 
 - `rollup` now validates each target group, then streams one input batch and one
   output part at a time. S3 source reads use pinned byte ranges. Positive
-  `--flush-bytes` values bound encoded parts, with a separate 32 MiB estimated
+  `--flush-bytes` values target encoded part sizes, with a separate 32 MiB estimated
   row-group memory budget. Checks occur between batches; output file counts
   can change, and a page/dictionary or wide batch can exceed these targets. Zero
   disables the output-size threshold but retains the row-group memory budget. A
