@@ -1571,6 +1571,32 @@ old and new files requires explicit schema reconciliation. Readers such as
 DuckDB may use `union_by_name=true` when intentionally comparing versions, with
 new columns null for older files.
 
+### Antelope database-operation joins
+
+`db_ops` includes `tx_hash` (the enclosing trace ID), `tx_index` (`UInt64`, the
+original trace index), and `db_op_index` (`UInt32`, zero-based within that trace).
+Filtering can leave transaction-index gaps. Operation positions restart for each
+transaction and remain stable across flushes. Scope joins to the canonical block:
+
+```sql
+SELECT d.block_id, d.tx_hash, d.db_op_index, d.operation, t.status
+FROM read_parquet('output/eos/db_ops/**/*.parquet') d
+JOIN read_parquet('output/eos/transactions/**/*.parquet') t
+  ON d.block_id = t.block_id
+ AND d.tx_hash = t.tx_hash
+ AND d.tx_index = t."index";
+```
+
+The action fields `transaction_id`, `trace_block_num`, `producer_block_id`, and
+`block_time` are deprecated for ordinary joins and routing; prefer `tx_hash` and
+canonical block identity/time. They remain verbatim action metadata, which can
+be missing or differ from canonical values. No removal is scheduled. Existing
+action JSON, nulls and enum labels remain unchanged.
+
+Use a new dataset or rebuild older ranges to populate the added columns. Schema
+union makes them null in old files; strict merge/rollup requires explicit schema
+reconciliation. See [the implementation and live comparison](docs/audit/508-antelope-db-joins.md).
+
 ## Environment Variables
 
 CLI flags can also be set via environment variables. Copy `.env.example` to `.env`:

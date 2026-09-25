@@ -1,10 +1,16 @@
 # #468 stage 1: ownership and durable control records
 
-Implementation in progress. The accepted architecture is in
+Stage 1 is implemented and independently reviewed, with final current-main
+qualification recorded below. It includes local/S3 ownership, durable control
+records, mutating-command coverage and explicit owner status/release. The earlier
+foundation sections retain their historical test checkpoints; current command
+coverage is described in the later sections.
+
+The accepted full architecture is in
 [468-ingestion-transaction-plan.md](468-ingestion-transaction-plan.md).
-These primitives do not yet establish ingestion crash/replay safety. Protected
-ingestion remains inaccessible until the transaction, frontier, recovery and
-maintenance integration stages are complete.
+Stage 1 does not establish ingestion crash/replay safety. Protected ingestion
+remains inaccessible until the transaction, frontier, startup recovery and
+protected-maintenance stages are complete.
 
 ## Local foundation
 
@@ -46,10 +52,11 @@ record is retained on a post-publication directory-sync error, so the controller
 must reload/recover instead of assuming the previous version remains current.
 
 The shared artifact filter reserves ingestion controls, the bucket ownership
-record and conditional-probe directory. This is an exclusion primitive, not yet
-proof that every mutation entry point participates in ownership.
+record and conditional-probe directory. It began as an exclusion primitive;
+subsequent stage-1 command wiring, described below, adds common ownership at
+mutating entry points.
 
-## Verification and remaining work
+## Historical local-foundation checkpoint
 
 The initial macOS Rust subprocess tests passed parent/child/equal conflicts,
 sibling progress, nested and symlink scopes, partial acquisition unwind and
@@ -68,8 +75,9 @@ parent tests). Formatting and diff whitespace checks passed. This run used the
 Arrow/Parquet 60 shared target with the whole-process Cargo lock; it is not yet
 the final stage-1 current-main/integration qualification.
 
-At this local-foundation checkpoint, S3 ownership/storage, aggregate mutator
-guards, status/explicit recovery CLI and full stage-1 integration are outstanding.
+At that earlier local-foundation checkpoint, S3 ownership/storage, aggregate
+mutator guards, status/explicit recovery CLI and full stage-1 integration were
+outstanding. Those components are now implemented and qualified below.
 No production bucket writes have been performed. In particular, stopping an S3
 writer does not prove its previously sent requests cannot arrive later. Any
 operator recovery must establish both writer cessation and provider-level request
@@ -257,3 +265,14 @@ No real S3 bucket was modified, and there is no broad remote crash/replay guaran
 from these fixtures. Root independently reviewed ingestion/recovery caller wiring
 and scope collection at this boundary without a blocker; further stages remain
 in progress on the same isolated branch.
+
+### Publication qualification against current main
+
+The isolated publication branch integrated main `21de6af` (including #499, #511
+and #508) as `d33c5ae`. The fresh workspace run passed **848 tests**, with five
+intended ignores. The separate capture-authentication example passed one test
+(with its child fixture ignored); workspace build, formatting and shell-completion
+generation also passed. The only subsequent source edit aligns the S3 module's
+historical header comment with its now-enabled common ownership integration.
+Linux CI is checked on the final PR head before merge. The existing qualification
+limits and the remaining full transaction/runtime work above still apply.

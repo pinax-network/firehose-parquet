@@ -64,7 +64,8 @@ and test against current main. Never reset or discard the previous worktree.
 ## Remaining backlog groups
 
 - Schema/data correctness: #503 (Solana), #505 (Beacon numeric/blob/null
-  semantics), #507-#511 (NEAR, Antelope, Tron, Cosmos and Bitcoin). #550 needs
+  semantics), #507-#510 (NEAR, Antelope, Tron and Cosmos). Bitcoin #511 is merged
+  in PR #589 after raw integer/input qualification and CI. #550 needs
   explicit failed-effect semantics per chain and live fixtures. #498 documents
   EVM indices and upstream-empty tables. Solana reward indices (#500, PR #582)
   are now merged and closed after regression and live comparison. Vote
