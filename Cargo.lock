@@ -446,14 +446,17 @@ dependencies = [
  "clap",
  "firehose-parquet",
  "firehose-protos",
+ "futures",
  "object_store",
  "prometheus-client",
  "prost",
  "prost-types",
  "serde_json",
  "sha2",
+ "tempfile",
  "time",
  "tokio",
+ "tonic",
  "tracing",
 ]
 

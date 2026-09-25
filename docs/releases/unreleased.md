@@ -4,6 +4,17 @@ Changes merged since the last release. Fold this file into `docs/releases/vX.Y.Z
 
 ## Breaking changes
 
+### Startup requires usable EndpointInfo (#467)
+
+Ingestion now stops before output/cursor resolution if endpoint metadata cannot
+be obtained. Info retries transient failures three times with bounded backoff;
+authentication errors, unsupported Info and empty chain names fail promptly.
+Explicit network/block type/start bounds and cursor override do not bypass this
+requirement. Older servers must expose the Info RPC. This prevents transient
+failures from silently changing the output prefix and resume checkpoint.
+
+See [the process and validation record](../audit/467-endpoint-info.md).
+
 ### Firehose credentials are scoped to the destination provider (#562)
 
 `build` and `partitions build` select credentials from the actual resolved host,

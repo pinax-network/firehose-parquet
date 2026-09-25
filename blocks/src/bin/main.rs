@@ -1131,14 +1131,12 @@ fn resolve_output_bytes_encoding(
     resolve_auto_encode_bytes(block_type, endpoint_info, tron_style_evm_profile)
 }
 
-/// Resolve the output directory, prepending `chain_name` when available.
-fn resolve_output(base: &PathBuf, endpoint_info: &Option<EndpointInfo>) -> PathBuf {
-    if let Some(ref ei) = endpoint_info {
-        if !ei.chain_name.is_empty() {
-            return base.join(&ei.chain_name);
-        }
-    }
-    base.clone()
+/// Resolve the output only after a successful metadata lookup. Neither a
+/// network alias nor a block family proves the endpoint's canonical suffix.
+fn resolve_output(base: &PathBuf, endpoint_info: &Option<EndpointInfo>) -> Result<PathBuf> {
+    let info = endpoint_info.as_ref().filter(|info| !info.chain_name.trim().is_empty())
+        .ok_or_else(|| anyhow!("EndpointInfo with a nonempty chain_name is required before resolving output and cursor paths"))?;
+    Ok(base.join(&info.chain_name))
 }
 
 async fn ensure_endpoint_available(
@@ -1455,7 +1453,7 @@ async fn run_partitions_build(
 
     let info_client = FirehoseClient::new(base_config.clone())?;
     ensure_endpoint_available(&info_client, endpoint, network).await?;
-    let endpoint_info = info_client.info().await;
+    let endpoint_info = Some(info_client.info().await?);
     let chain = endpoint_info
         .as_ref()
         .map(|info| info.chain_name.clone())
@@ -4670,11 +4668,11 @@ async fn run_ingestion(args: &BuildArgs, global: &GlobalArgs) -> Result<()> {
     // output directory, and feature capability logging.
     let mut client = FirehoseClient::new(config.clone())?;
     ensure_endpoint_available(&client, &config.endpoint, resolved_network_name.as_deref()).await?;
-    let endpoint_info = client.info().await;
+    let endpoint_info = Some(client.info().await?);
     debug!(endpoint_info = ?endpoint_info, "fetched endpoint metadata");
 
     // Use chain_name as a subdirectory under the output path.
-    config.output = resolve_output(&config.output, &endpoint_info);
+    config.output = resolve_output(&config.output, &endpoint_info)?;
 
     let cursor_location = resolve_cursor_location(&config)?;
     let existing_cursor_state =
@@ -7422,13 +7420,16 @@ mod tests {
             block_id_encoding: 0,
             block_features: vec![],
         });
-        assert_eq!(resolve_output(&base, &ei), PathBuf::from("./mainnet"));
+        assert_eq!(
+            resolve_output(&base, &ei).unwrap(),
+            PathBuf::from("./mainnet")
+        );
     }
 
     #[test]
     fn test_resolve_output_without_endpoint_info() {
         let base = PathBuf::from(".");
-        assert_eq!(resolve_output(&base, &None), PathBuf::from("."));
+        assert!(resolve_output(&base, &None).is_err());
     }
 
     #[test]
@@ -7442,7 +7443,7 @@ mod tests {
             block_id_encoding: 0,
             block_features: vec![],
         });
-        assert_eq!(resolve_output(&base, &ei), PathBuf::from("."));
+        assert!(resolve_output(&base, &ei).is_err());
     }
 
     #[test]

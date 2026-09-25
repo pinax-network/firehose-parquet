@@ -27,3 +27,8 @@ prometheus-client.workspace = true
 time = { version = "0.3", features = ["formatting"] }
 serde_json = "1"
 object_store = { version = "0.12", features = ["aws"] }
+
+[dev-dependencies]
+futures = "0.3"
+tempfile = "3"
+tonic.workspace = true

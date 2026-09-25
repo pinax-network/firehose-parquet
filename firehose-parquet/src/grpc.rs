@@ -170,50 +170,39 @@ impl FirehoseClient {
         Ok(())
     }
 
-    /// Fetch endpoint information from the `EndpointInfo/Info` RPC.
-    ///
-    /// Returns `None` if the endpoint does not support this RPC
-    /// (e.g. older servers), logging a warning instead of failing.
-    pub async fn info(&self) -> Option<EndpointInfo> {
-        let channel = match self.connect().await {
-            Ok(ch) => ch,
-            Err(e) => {
-                warn!(error = %e, "failed to connect for EndpointInfo; skipping");
-                return None;
-            }
+    /// Fetch endpoint metadata with three attempts, a ten-second timeout per
+    /// attempt, and bounded exponential backoff. Transient failures are errors,
+    /// never a successful response without a chain name.
+    pub async fn info(&self) -> Result<EndpointInfo> {
+        let response = retry_endpoint_info(
+            || async {
+                let channel = self.connect().await?;
+                let mut client = firehose::endpoint_info_client::EndpointInfoClient::new(channel)
+                    .accept_compressed(tonic::codec::CompressionEncoding::Gzip)
+                    .max_decoding_message_size(128 * 1024 * 1024);
+                let mut request = tonic::Request::new(firehose::InfoRequest {});
+                self.auth.apply(&mut request);
+                Ok(client.info(request).await?.into_inner())
+            },
+            Duration::from_secs(10),
+            Duration::from_millis(250),
+        )
+        .await?;
+        let info = EndpointInfo {
+            chain_name: response.chain_name,
+            chain_name_aliases: response.chain_name_aliases,
+            first_streamable_block_num: response.first_streamable_block_num,
+            first_streamable_block_id: response.first_streamable_block_id,
+            block_id_encoding: response.block_id_encoding,
+            block_features: response.block_features,
         };
-
-        let mut client = firehose::endpoint_info_client::EndpointInfoClient::new(channel)
-            .accept_compressed(tonic::codec::CompressionEncoding::Gzip)
-            .max_decoding_message_size(128 * 1024 * 1024);
-
-        let mut request = tonic::Request::new(firehose::InfoRequest {});
-        self.auth.apply(&mut request);
-
-        match client.info(request).await {
-            Ok(resp) => {
-                let r = resp.into_inner();
-                let ei = EndpointInfo {
-                    chain_name: r.chain_name,
-                    chain_name_aliases: r.chain_name_aliases,
-                    first_streamable_block_num: r.first_streamable_block_num,
-                    first_streamable_block_id: r.first_streamable_block_id,
-                    block_id_encoding: r.block_id_encoding,
-                    block_features: r.block_features,
-                };
-                info!(
-                    chain_name = %ei.chain_name,
-                    block_id_encoding = ei.block_id_encoding,
-                    block_features = ?ei.block_features,
-                    "received endpoint info"
-                );
-                Some(ei)
-            }
-            Err(e) => {
-                warn!(error = %e, "EndpointInfo/Info RPC not available; skipping");
-                None
-            }
-        }
+        info!(
+            chain_name = %info.chain_name,
+            block_id_encoding = info.block_id_encoding,
+            block_features = ?info.block_features,
+            "received endpoint info"
+        );
+        Ok(info)
     }
 
     pub async fn fetch_block_identity(
@@ -625,6 +614,55 @@ impl ReconnectState {
             .next_backoff()
             .unwrap_or(Duration::from_secs(60))
     }
+}
+
+/// Endpoint metadata could not be obtained. Startup must stop before resolving
+/// output and cursor paths; a network alias or block family cannot substitute
+/// for the endpoint identity and metadata.
+#[derive(Debug, thiserror::Error)]
+#[error("EndpointInfo is unavailable; refusing to infer a different output or cursor path")]
+pub struct EndpointInfoUnavailable;
+
+async fn retry_endpoint_info<F, Fut>(
+    mut request: F,
+    timeout: Duration,
+    initial_backoff: Duration,
+) -> Result<firehose::InfoResponse>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<firehose::InfoResponse>>,
+{
+    for attempt in 1..=3 {
+        let result = tokio::time::timeout(timeout, request()).await;
+        let error = match result {
+            Ok(Ok(response)) => {
+                if response.chain_name.trim().is_empty() {
+                    anyhow::bail!("EndpointInfo returned an empty chain_name; refusing to change the output or cursor path");
+                }
+                return Ok(response);
+            }
+            Ok(Err(error)) => error,
+            Err(_) => anyhow::anyhow!("EndpointInfo attempt timed out after {timeout:?}"),
+        };
+        if let Some(status) = error.downcast_ref::<tonic::Status>() {
+            if effective_status_code(status) == tonic::Code::Unimplemented {
+                return Err(error.context(EndpointInfoUnavailable));
+            }
+            if fatal_status_error(status).is_some() {
+                return Err(error.context("EndpointInfo rejected the request; not retrying"));
+            }
+        }
+        if attempt == 3 {
+            return Err(error
+                .context("EndpointInfo failed after 3 attempts")
+                .context(EndpointInfoUnavailable));
+        }
+        let backoff = initial_backoff * (1 << (attempt - 1));
+        warn!(attempt, retry_in_ms = backoff.as_millis(), error = %error,
+            "EndpointInfo failed; retrying before resolving output");
+        tokio::time::sleep(backoff).await;
+    }
+    unreachable!("the final attempt always returns")
 }
 
 /// gRPC status codes that reconnecting with the same request and credentials
@@ -1112,6 +1150,111 @@ mod tests {
             clean_end_action(Some(200), None, 0, true),
             CleanEndAction::Exhausted
         );
+    }
+
+    #[tokio::test]
+    async fn test_endpoint_info_retries_transient_failures_with_backoff() {
+        let attempts = std::sync::Mutex::new(Vec::new());
+        let response = retry_endpoint_info(
+            || {
+                let mut attempts = attempts.lock().unwrap();
+                attempts.push(Instant::now());
+                let result = if attempts.len() < 3 {
+                    Err(tonic::Status::unavailable("temporary outage").into())
+                } else {
+                    Ok(firehose::InfoResponse {
+                        chain_name: "mainnet".into(),
+                        ..Default::default()
+                    })
+                };
+                std::future::ready(result)
+            },
+            Duration::from_secs(1),
+            Duration::from_millis(2),
+        )
+        .await
+        .unwrap();
+        assert_eq!(response.chain_name, "mainnet");
+        let attempts = attempts.lock().unwrap();
+        assert_eq!(attempts.len(), 3);
+        assert!(attempts[1].duration_since(attempts[0]) >= Duration::from_millis(2));
+        assert!(attempts[2].duration_since(attempts[1]) >= Duration::from_millis(4));
+    }
+
+    #[tokio::test]
+    async fn test_endpoint_info_exhaustion_and_hanging_attempts_are_errors() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let attempts = AtomicUsize::new(0);
+        let error = retry_endpoint_info(
+            || {
+                attempts.fetch_add(1, Ordering::SeqCst);
+                std::future::ready(Err(tonic::Status::unavailable("outage").into()))
+            },
+            Duration::from_millis(5),
+            Duration::from_millis(1),
+        )
+        .await
+        .unwrap_err();
+        assert!(error.is::<EndpointInfoUnavailable>());
+        assert_eq!(attempts.load(Ordering::SeqCst), 3);
+        assert!(format!("{error:#}").contains("3 attempts"));
+
+        attempts.store(0, Ordering::SeqCst);
+        let error = retry_endpoint_info(
+            || {
+                attempts.fetch_add(1, Ordering::SeqCst);
+                std::future::pending::<Result<firehose::InfoResponse>>()
+            },
+            Duration::from_millis(5),
+            Duration::from_millis(1),
+        )
+        .await
+        .unwrap_err();
+        assert!(error.is::<EndpointInfoUnavailable>());
+        assert_eq!(attempts.load(Ordering::SeqCst), 3);
+        assert!(format!("{error:#}").contains("timed out"));
+    }
+
+    #[tokio::test]
+    async fn test_endpoint_info_rejects_fatal_statuses_and_empty_names_without_retrying() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        for status in [
+            tonic::Status::unauthenticated("invalid credential"),
+            tonic::Status::permission_denied("denied"),
+            tonic::Status::resource_exhausted("quota exceeded"),
+            tonic::Status::unimplemented("no Info RPC"),
+        ] {
+            let attempts = AtomicUsize::new(0);
+            let error = retry_endpoint_info(
+                || {
+                    attempts.fetch_add(1, Ordering::SeqCst);
+                    std::future::ready(Err(status.clone().into()))
+                },
+                Duration::from_secs(1),
+                Duration::from_millis(1),
+            )
+            .await;
+            assert!(error.is_err());
+            assert_eq!(attempts.load(Ordering::SeqCst), 1);
+        }
+        for chain_name in ["", " \t"] {
+            let attempts = AtomicUsize::new(0);
+            let error = retry_endpoint_info(
+                || {
+                    attempts.fetch_add(1, Ordering::SeqCst);
+                    std::future::ready(Ok(firehose::InfoResponse {
+                        chain_name: chain_name.into(),
+                        ..Default::default()
+                    }))
+                },
+                Duration::from_secs(1),
+                Duration::from_millis(1),
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(attempts.load(Ordering::SeqCst), 1);
+            assert!(error.to_string().contains("empty chain_name"));
+        }
     }
 
     #[tokio::test]
