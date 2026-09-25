@@ -407,7 +407,8 @@ pub struct BuildArgs {
     )]
     pub without_votes: bool,
 
-    /// Include failed/reverted transactions in output (default: false)
+    /// Include failed/reverted transactions on non-EVM chains (default: false).
+    /// Deprecated for EVM, which includes them by default; it has no effect there.
     #[arg(
         long,
         env = "INCLUDE_FAILED_TRANSACTIONS",
@@ -416,6 +417,19 @@ pub struct BuildArgs {
         help_heading = "Chain"
     )]
     pub include_failed_transactions: bool,
+
+    /// Drop failed/reverted transactions. EVM includes them by default with
+    /// only their persistent state changes (gas/fee balance changes, the
+    /// sender's nonce, EIP-7702 authorizations). Takes precedence over
+    /// --include-failed-transactions.
+    #[arg(
+        long,
+        env = "EXCLUDE_FAILED_TRANSACTIONS",
+        default_value = "false",
+        hide_env_values = true,
+        help_heading = "Chain"
+    )]
+    pub exclude_failed_transactions: bool,
 
     /// Override cursor parameter validation and restart from the current CLI
     /// range. When a cursor file exists and its stored parameters differ from

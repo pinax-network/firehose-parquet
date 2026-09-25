@@ -137,6 +137,31 @@ Migration:
 - Scripts that passed `--chain evm --table blocks` for non-EVM or non-`blocks` data now fail with a conflict error. Drop the flags, or fix them.
 - `verify` warns while a registry exists at the old default location (`<output>/<chain_name>/evm/mainnet/merkle_roots.parquet` locally, `s3://<bucket>/evm/mainnet/merkle_roots.parquet` on S3). Keep a copy of it, run `fireparq verify <output>/<chain_name>/<table> --update-registry --no-fail-fast` for each table against trusted data, then delete the old file (locally the whole `<output>/<chain_name>/evm/` directory). The details are in `docs/verifiability-artifact-runbook.md` ("Moving a registry from the old default location"). An S3 registry at the old location may mix several networks' rows, so do not reuse it as a baseline.
 
+### EVM: failed transactions are included by default, with their persistent state changes (#494)
+
+A failed or reverted EVM transaction still pays for gas, pays the fee recipients and increments the sender's nonce. `build` used to drop failed transactions by default, so `balance_changes` and `nonce_changes` could not be reconciled with on-chain balances and nonces. On ETH mainnet blocks 26049575–26049579 that was 12 of 1,148 transactions, 34 gas/fee balance changes and 12 nonce changes.
+
+EVM output now includes failed transactions by default. For each one, `build` writes the transaction, all of its calls and gas changes, and only the state changes that persist on chain. This follows the rule documented on `TransactionTrace.status` in `proto/ethereum.proto`:
+
+- `balance_changes`: root-call changes with reason `GAS_BUY`, `GAS_REFUND`, `REWARD_TRANSACTION_FEE`, or `INCREASE_MINT` (OP Stack deposits keep their mint when they fail).
+- `nonce_changes`: the sender's nonce increment, plus one per accepted EIP-7702 authorization.
+- `code_changes`: at most one per accepted EIP-7702 authorization.
+- `storage_changes`, `account_creations`, and the other balance changes (for example rolled-back `TRANSFER`s): none.
+
+On the same 5 blocks, the failed transactions carried 62 rolled-back `TRANSFER` balance changes and 127 rolled-back storage changes. None of them are written.
+
+Flags:
+
+- `--exclude-failed-transactions` (env `EXCLUDE_FAILED_TRANSACTIONS`) drops failed transactions on every chain. It restores the previous EVM output.
+- `--include-failed-transactions` is deprecated for EVM. It has no effect there and logs a warning.
+- Non-EVM chains are unchanged: they still exclude failed transactions unless `--include-failed-transactions` is set. On those chains the included transactions still carry their rolled-back effects (for example Antelope `hard_fail` actions or Solana instructions of failed transactions); that is tracked separately.
+
+Migration:
+
+- Existing EVM outputs have no failed transactions. `transactions`, `calls`, `balance_changes`, `nonce_changes`, `code_changes` and `gas_changes` gain rows for them in new files. Queries that assumed every row belongs to a successful transaction should filter on `transactions.status = 'SUCCEEDED'`, or build with `--exclude-failed-transactions`.
+- Resuming an EVM output whose `cursor.parquet` recorded `include_failed_transactions=false` (the old default, also assumed when a cursor predates the key) keeps excluding failed transactions, so one output does not mix both modes. `build` logs a warning; pass `--exclude-failed-transactions` to keep that silently. To switch an existing output to the new default, rerun with `--cursor-override` and an explicit `--start-block` just after the cursor's last block.
+- EVM outputs built with `--include-failed-transactions` before this release wrote every state change of failed transactions, including rolled-back transfers and storage writes. Rebuild them if you need the change tables to reconcile.
+
 ## Fixes
 
 - **`build --start-block` above the last irreversible block no longer writes earlier blocks (#466).** Firehose serves such a request from LIB+1, and those blocks used to be written. Blocks below the effective start block are now skipped before mapping, logged once, and counted in the new `firehose_parquet_blocks_skipped_below_start_total` metric and the `blocks_skipped_below_start` summary field.

@@ -31,7 +31,7 @@ A production-grade Rust toolkit that consumes [StreamingFast Firehose](https://f
 - **Partitioning** — `none`, `block_range`, `date`, `hour`, `minute`, or `second` layouts
 - **File rollover** — flush by row count, byte size, or time interval
 - **Fork handling** — `--final-blocks-only` (default) or include `fork_step` column (`NEW`/`UNDO`/`FINAL`)
-- **Failed transaction filtering** — `--include-failed-transactions` to opt in to failed/reverted txs (excluded by default)
+- **Failed transactions** — EVM includes failed/reverted txs by default with only their persistent state changes (`--exclude-failed-transactions` drops them); other chains exclude them unless `--include-failed-transactions` is set
 - **Block-type-based encoding** — block IDs and binary fields follow the resolved chain/profile defaults, recorded in Parquet metadata for downstream operators
 - **Compression** — zstd (default), snappy, gzip, or none
 - **Parquet file metadata** — every file embeds pipeline provenance (`firehose-parquet.*` key-value pairs) in the Parquet footer
@@ -906,14 +906,20 @@ Lookup order matches `scan` / `inspect`: explicit `s3://...` URIs win, existing 
 
 ## Failed Transaction Filtering
 
-By default, failed/reverted transactions are excluded from output. Use `--include-failed-transactions` to include them.
+EVM includes failed/reverted transactions by default. The other chains exclude them unless you pass `--include-failed-transactions`. `--exclude-failed-transactions` drops them on every chain and takes precedence.
 
-Per-chain filtering logic:
+| Flag | EVM | Other chains |
+|---|---|---|
+| *(none)* | included, with their persistent state changes | excluded |
+| `--exclude-failed-transactions` | excluded | excluded |
+| `--include-failed-transactions` | deprecated, no effect (warns) | included |
 
-| Chain | Filter condition |
+Per-chain failure condition:
+
+| Chain | Failed when |
 |---|---|
 | **Solana** | `meta.err` has non-empty bytes |
-| **EVM** | `status != 1` |
+| **EVM** | `status != SUCCEEDED` |
 | **NEAR** | `status == "Failure"` |
 | **Cosmos** | `code != 0` in `TxResult` |
 | **Tron** | `result != "SUCCESS"` |
@@ -921,6 +927,27 @@ Per-chain filtering logic:
 | **Bitcoin** | *(not applicable — Bitcoin has no failed txs)* |
 
 When failed transactions are included, chain-specific fields like Solana's `err` bytes and `success` flag reflect the actual transaction status.
+
+### EVM: persistent state changes of failed transactions
+
+A failed EVM transaction still changes chain state: the sender pays for gas, the fee recipients are paid, and the sender's nonce goes up. Everything else it did is rolled back. So `balance_changes` and `nonce_changes` only reconcile with on-chain balances and nonces when failed transactions are included, and only if their rolled-back changes are left out.
+
+For a failed or reverted transaction, `fireparq` writes:
+
+| Table | Rows written |
+|---|---|
+| `transactions` | the transaction, with `status` `FAILED` or `REVERTED` |
+| `logs` | none (failed transactions have no receipt logs) |
+| `calls` | every call (`status_failed` / `state_reverted` tell you what happened) |
+| `gas_changes` | every gas change (the gas was consumed and paid for) |
+| `balance_changes` | root-call changes with reason `GAS_BUY`, `GAS_REFUND`, `REWARD_TRANSACTION_FEE`, or `INCREASE_MINT` (OP Stack deposits keep their mint when they fail) |
+| `nonce_changes` | the sender's nonce increment (the root call's earliest nonce change), plus one per accepted EIP-7702 authorization |
+| `code_changes` | at most one per accepted EIP-7702 authorization (the delegation) |
+| `storage_changes`, `account_creations` | none |
+
+This follows the rule documented on `TransactionTrace.status` in `proto/ethereum.proto`. Rolled-back transfers and storage writes of failed transactions are not written. Successful transactions keep every state change, including those of calls that were reverted inside them.
+
+Resuming an EVM output whose `cursor.parquet` was written with failed transactions excluded (the default before this change) keeps excluding them, so one output does not mix both modes. `fireparq` logs a warning. Pass `--exclude-failed-transactions` to keep that and silence the warning. To switch the output to the new default, use `--cursor-override` with an explicit `--start-block`.
 
 ## Prometheus Metrics
 
@@ -1093,7 +1120,8 @@ SUBSTREAMS_API_TOKEN=your-jwt-token-here
 # METRICS_PORT=9090
 
 # Failed transaction filtering (optional)
-# INCLUDE_FAILED_TRANSACTIONS=true
+# EXCLUDE_FAILED_TRANSACTIONS=true   # drop failed txs (EVM includes them by default)
+# INCLUDE_FAILED_TRANSACTIONS=true   # include failed txs on non-EVM chains
 
 # AWS S3 output (optional)
 # AWS_ACCESS_KEY_ID=...
