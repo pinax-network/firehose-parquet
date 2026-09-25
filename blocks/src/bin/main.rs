@@ -876,11 +876,6 @@ impl TimestampBackfill {
         }
     }
 
-    fn current_anchor_timestamp(&self) -> Option<i64> {
-        self.enabled
-            .then(|| self.last_anchor.map(|anchor| anchor.timestamp))?
-    }
-
     fn buffered_blocks_len(&self) -> usize {
         0
     }

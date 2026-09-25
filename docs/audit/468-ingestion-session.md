@@ -1,9 +1,9 @@
-# Protected ingestion session assembly (#468, private stage)
+# Protected ingestion session assembly (#468)
 
-The runtime-facing session remains crate-private. This commit assembles reviewed
-storage/controller primitives but does not add a CLI mode or replace command
-ingestion yet. Main-loop receipt/mapping integration and maintenance preparation
-remain required before publication of the complete feature.
+This record began at the private assembly checkpoint. The runtime integration
+now uses the session for every non-dry-run build; see
+[the current runtime contract and qualification](468-ingestion-runtime.md).
+The historical focused results below qualify the assembly layer separately.
 
 A session freezes the exact schema inventory obtained from an empty mapper flush,
 resolves the output and optional mirror bindings, and reserves the output owner's
@@ -51,9 +51,10 @@ in-memory owner. Existing CLI shared-index-reader tests separately passed
 **145 tests** after the async eligibility decoder extraction. This is hermetic
 protocol evidence, not production S3 backend qualification.
 
-The next integration must call maintenance's read-only
-`validate_ingestion_recovery_order` before controller recovery and borrowed-owner
-`prepare_ingestion` after ingestion recovery, both while holding the session
-permit and before opening Firehose Blocks. It must also pass receipt ordinals
-through the actual mapper/bootstrap queues and retain the non-final bounded-tail
-warning. Those requirements intentionally keep this stage unavailable to users.
+Runtime integration now calls `validate_ingestion_target` before eligibility or
+initialization, `validate_ingestion_recovery_order` before controller recovery,
+and borrowed-owner `prepare_ingestion` afterward. The reserved session permit
+spans all three and stays held throughout ingestion. Receipt ordinals travel
+through the real bootstrap queue and the bounded non-final warning remains after
+successful completion. Standalone partition-index publication uses the common
+Artifacts policy with an explicit file destination.

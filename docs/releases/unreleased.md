@@ -14,6 +14,35 @@ Changes merged since the last release. Fold this file into `docs/releases/vX.Y.Z
 
 ## Breaking changes
 
+### All-table ingestion transactions and output authority (#468)
+
+`build` now journals each complete mapper flush and recovers it before opening
+Blocks. Output authority under `.fireparq-ingest/` selects the exact accepted
+cursor, including filtered zero-row events and persisted timestamp-routing
+provenance. Deterministic owned parts are rolled back before replay or verified
+and rolled forward after commit. `cursor.parquet` is an optional derived mirror;
+its deletion cannot rewind output, and `--cursor none` keeps mandatory authority.
+
+This requires a new empty dataset root and absent mirror. Existing random-name
+output or legacy cursors are refused rather than adopted. Protected origin,
+mapper/schema/encoding, effective feature flags, partition policy, storage and
+mirror binding are immutable; `--cursor-override` cannot bypass them. Use a new
+root for changed semantics. Unknown custom chain metadata needs an explicit
+`--block-type` before recovery. Flush thresholds and compression remain tunable.
+
+Guarded merge, metadata artifacts, and copy-only rollup remain available; protected
+truncate, in-place rollup and source-deleting rollup are refused. Discovery covers
+ancestor and descendant dataset roots plus external mirrors. `recovery recover`
+performs offline owned recovery. S3 retains its explicit provider-quiescence
+release requirement; no time-based takeover or generic request-drain claim is added.
+
+A completed bounded request must have an acknowledged boundary event. A clean
+sparse/empty tail alone no longer implies completion on skipped-height chains;
+the prefix remains durable, but the command exits nonzero. Already proven bounds
+make no Blocks request, and extensions retain their original origin and exact
+cursor. Plain-glob readers still do not get atomic multi-table query snapshots.
+See [the runtime contract and qualification](../audit/468-ingestion-runtime.md).
+
 ### Beacon numeric fees, binary blobs, and null presence (#505)
 
 Beacon `execution_payload.base_fee_per_gas` is now an exact unsigned decimal
@@ -90,9 +119,8 @@ dataset through this command. Legacy S3 merge journals using the old expiring lo
 are refused automatically and need separately reviewed migration. Local legacy
 merge recovery remains under the common OS guard.
 
-This stage prevents conflicting cooperating commands; ingestion output parts and
-its cursor still lack an all-table crash/replay transaction. No protected ingestion
-mode is exposed yet, and #468 remains open. See the
+This foundation also provides ownership for the all-table transaction protocol
+above. See the
 [scope, permissions, recovery procedure and qualification limits](../audit/468-stage1-ownership.md).
 
 ### Antelope database-operation transaction keys (#508)

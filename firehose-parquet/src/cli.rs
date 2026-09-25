@@ -456,11 +456,9 @@ pub struct BuildArgs {
     )]
     pub exclude_failed_transactions: bool,
 
-    /// Override cursor parameter validation and restart from the current CLI
-    /// range. When a cursor file exists and its stored parameters differ from
-    /// the current CLI arguments, the pipeline normally exits with an error.
-    /// This flag suppresses that check and ignores the stored resume position
-    /// for start/stop/mode resolution.
+    /// Ignore legacy cursor defaults during a read-only dry run. Protected
+    /// ingestion refuses cursor overrides; use a new empty output root and an
+    /// absent mirror to change the original range or mapper semantics.
     #[arg(
         long,
         env = "CURSOR_OVERRIDE",

@@ -201,6 +201,7 @@ impl AcceptedFrontier {
         self.digest = fresh_digest();
         Ok(())
     }
+    #[cfg(test)]
     pub fn unresolved_events(&self) -> usize {
         self.received.len()
     }
