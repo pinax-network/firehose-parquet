@@ -24,9 +24,9 @@ issue labels and green CI alone are not acceptance evidence. See the
    awaiting final CI/merge on main `f555898`: 995 workspace tests,
    the CI capture example, actual failed-Writing recovery and 14-table/12,298-row
    live equivalence passed. Its migration and S3 quiescence limits are explicit.
-   PR #591 remains the historical ownership/control foundation. Keep #468 open
-   until the runtime PR merges; ingestion concurrency (#516) remains sequenced
-   after that durable commit-order contract.
+   PR #600 merged as `e4bd9cf` after final CI; issue #468 closure was verified.
+   PR #591 remains the historical ownership/control foundation. Ingestion
+   concurrency (#516) can now build on that durable commit-order contract.
 4. Shutdown recovery (#473, PR #579) and malformed identity/timestamp handling
    (#476, PR #584) are merged. Probe (#485) work was recovered into PR #583,
    passed 779 combined tests with the timestamp fix and CI, and merged as
@@ -86,7 +86,7 @@ and test against current main. Never reset or discard the previous worktree.
   independent review and CI; issue closure was verified. #475 metrics/readiness
   is merged. The #477 writer simplification and
   #476 malformed-metadata handling are merged; the complete #468 runtime is
-  reviewed and qualified locally, awaiting runtime PR CI and merge.
+  merged in PR #600; issue closure is verified.
 - Performance: #513 was recovered and merged in PR #596 as `2a3724e` after 869
   integrated tests, bounded exhaustive/sampled equivalence, independent review,
   measured conversion benchmarks and CI; issue closure was verified. The original
