@@ -539,6 +539,28 @@ rather than the default workflow:
 | `--stream-idle-timeout-secs <N>` | Supervising long-lived pipelines that should self-reconnect after a silent stream stall (default 120; `0` disables and relies on HTTP/2 keepalive). On slow chains such as Bitcoin (~600 s blocks), set it above the block time to avoid a reconnect every 120 s. An idle reconnect is not counted as a failure. |
 | `--reconnect-stall-timeout-secs <N>` | Fail fast when reconnect loops should hand control back to an external supervisor (default 900; `0` disables). The timer starts at the first failed attempt and is reset only when a stream message arrives, not when a connection or RPC succeeds. |
 
+#### Receive transport
+
+Both `build` and `partitions build` use 16 MiB HTTP/2 stream and connection
+receive windows and accept plain, gzip, or zstd replies. The server selects the
+response encoding; requests remain uncompressed. Parquet `--compression` is
+independent of transport compression.
+
+| Flag / environment | Behavior |
+|---|---|
+| `--grpc-window-bytes` / `GRPC_WINDOW_BYTES` | Initial stream and connection receive window, default `16777216`. `0` restores the underlying library defaults. Larger windows allow more data in flight and can increase buffering. |
+| `--grpc-adaptive-window[=true\|false]` / `GRPC_ADAPTIVE_WINDOW` | Opt into automatic window tuning; default false. When true, it overrides `--grpc-window-bytes`. |
+| `--grpc-max-message-bytes` / `GRPC_MAX_MESSAGE_BYTES` | Maximum encoded or decompressed protobuf response bytes, default `134217728` (128 MiB). Values must be positive and fit UInt32. Applies to Info, Fetch, ingestion, and finalized index traversal/proof calls. |
+
+The message limit is a per-response bound, not a cap on total process memory.
+An oversized response fails with an error; increasing the limit permits larger
+allocations. To restore the previous windows explicitly, use
+`--grpc-window-bytes 0 --grpc-adaptive-window=false`.
+The selected 16 MiB default improved a bounded local transport benchmark at both
+zero added latency and 50 ms simulated round-trip latency; this is not an
+end-to-end ingestion or provider performance guarantee. See the
+[measurements and tradeoffs](docs/audit/517-grpc-transport.md).
+
 #### Connection errors
 
 - **Fatal errors fail fast.** A stream rejected with `Unauthenticated`,
@@ -550,7 +572,7 @@ rather than the default workflow:
   valid for the endpoint (for example a Pinax token used against a
   StreamingFast endpoint). A `ResourceExhausted` error that reports an
   exhausted quota (for example `billable egress bytes quota exceeded`) is
-  fatal too. They are counted in
+  fatal too, as is a local decompressed-response size limit violation. They are counted in
   `firehose_parquet_errors_total{kind="grpc_fatal"}`.
 - **Other errors are retried** with exponential back-off from 1 s to 60 s,
   including other `ResourceExhausted` errors such as rate limits. The back-off

@@ -1,0 +1,217 @@
+{
+  "environment": {
+    "rust": "rustc 1.93.1 (01f6ddf75 2026-02-11)",
+    "platform": "macOS-26.5.1-arm64-arm-64bit-Mach-O",
+    "hardware": "Apple M1 Max",
+    "base": "f555898100fbfb486e97f40162c71b223112a94f",
+    "tonic": "0.14.5",
+    "hyper": "1.8.1",
+    "mode": "release",
+    "payload": "64 protobuf responses containing 1 MiB identical bytes each; compression disabled",
+    "timing": "cold TCP/HTTP2 connection plus receive/protobuf decode and callback; local relay, no file writes",
+    "relay": "fixed 0 ms or 25 ms propagation each direction; reader independent of delayed writer; bounded queue asserts no capacity stalls; zero packet loss; no bandwidth cap",
+    "order": "3 cyclically rotated runs of each mode per delay"
+  },
+  "samples": [
+    {
+      "adaptive": false,
+      "elapsed_seconds": 0.151640333,
+      "mode": "library-fixed",
+      "one_way_delay_ms": 0,
+      "payload_bytes": 67108864,
+      "repetition": 0,
+      "server_wire_bytes": 67151120
+    },
+    {
+      "adaptive": true,
+      "elapsed_seconds": 0.165605958,
+      "mode": "adaptive",
+      "one_way_delay_ms": 0,
+      "payload_bytes": 67108864,
+      "repetition": 0,
+      "server_wire_bytes": 67151337
+    },
+    {
+      "adaptive": false,
+      "elapsed_seconds": 0.034776042,
+      "mode": "fixed-16mib",
+      "one_way_delay_ms": 0,
+      "payload_bytes": 67108864,
+      "repetition": 0,
+      "server_wire_bytes": 67151120
+    },
+    {
+      "adaptive": true,
+      "elapsed_seconds": 0.154443375,
+      "mode": "adaptive",
+      "one_way_delay_ms": 0,
+      "payload_bytes": 67108864,
+      "repetition": 1,
+      "server_wire_bytes": 67151467
+    },
+    {
+      "adaptive": false,
+      "elapsed_seconds": 0.035768292,
+      "mode": "fixed-16mib",
+      "one_way_delay_ms": 0,
+      "payload_bytes": 67108864,
+      "repetition": 1,
+      "server_wire_bytes": 67151120
+    },
+    {
+      "adaptive": false,
+      "elapsed_seconds": 0.128930208,
+      "mode": "library-fixed",
+      "one_way_delay_ms": 0,
+      "payload_bytes": 67108864,
+      "repetition": 1,
+      "server_wire_bytes": 67151129
+    },
+    {
+      "adaptive": false,
+      "elapsed_seconds": 0.0355605,
+      "mode": "fixed-16mib",
+      "one_way_delay_ms": 0,
+      "payload_bytes": 67108864,
+      "repetition": 2,
+      "server_wire_bytes": 67151120
+    },
+    {
+      "adaptive": false,
+      "elapsed_seconds": 0.126356708,
+      "mode": "library-fixed",
+      "one_way_delay_ms": 0,
+      "payload_bytes": 67108864,
+      "repetition": 2,
+      "server_wire_bytes": 67151129
+    },
+    {
+      "adaptive": true,
+      "elapsed_seconds": 0.167618125,
+      "mode": "adaptive",
+      "one_way_delay_ms": 0,
+      "payload_bytes": 67108864,
+      "repetition": 2,
+      "server_wire_bytes": 67151442
+    },
+    {
+      "adaptive": false,
+      "elapsed_seconds": 2.075797459,
+      "mode": "library-fixed",
+      "one_way_delay_ms": 25,
+      "payload_bytes": 67108864,
+      "repetition": 0,
+      "server_wire_bytes": 67151120
+    },
+    {
+      "adaptive": true,
+      "elapsed_seconds": 0.815889083,
+      "mode": "adaptive",
+      "one_way_delay_ms": 25,
+      "payload_bytes": 67108864,
+      "repetition": 0,
+      "server_wire_bytes": 67151337
+    },
+    {
+      "adaptive": false,
+      "elapsed_seconds": 0.355126625,
+      "mode": "fixed-16mib",
+      "one_way_delay_ms": 25,
+      "payload_bytes": 67108864,
+      "repetition": 0,
+      "server_wire_bytes": 67151120
+    },
+    {
+      "adaptive": true,
+      "elapsed_seconds": 0.910727375,
+      "mode": "adaptive",
+      "one_way_delay_ms": 25,
+      "payload_bytes": 67108864,
+      "repetition": 1,
+      "server_wire_bytes": 67151336
+    },
+    {
+      "adaptive": false,
+      "elapsed_seconds": 0.354219208,
+      "mode": "fixed-16mib",
+      "one_way_delay_ms": 25,
+      "payload_bytes": 67108864,
+      "repetition": 1,
+      "server_wire_bytes": 67151120
+    },
+    {
+      "adaptive": false,
+      "elapsed_seconds": 2.063803958,
+      "mode": "library-fixed",
+      "one_way_delay_ms": 25,
+      "payload_bytes": 67108864,
+      "repetition": 1,
+      "server_wire_bytes": 67151120
+    },
+    {
+      "adaptive": false,
+      "elapsed_seconds": 0.368288208,
+      "mode": "fixed-16mib",
+      "one_way_delay_ms": 25,
+      "payload_bytes": 67108864,
+      "repetition": 2,
+      "server_wire_bytes": 67151120
+    },
+    {
+      "adaptive": false,
+      "elapsed_seconds": 2.223987375,
+      "mode": "library-fixed",
+      "one_way_delay_ms": 25,
+      "payload_bytes": 67108864,
+      "repetition": 2,
+      "server_wire_bytes": 67151120
+    },
+    {
+      "adaptive": true,
+      "elapsed_seconds": 0.884562709,
+      "mode": "adaptive",
+      "one_way_delay_ms": 25,
+      "payload_bytes": 67108864,
+      "repetition": 2,
+      "server_wire_bytes": 67151327
+    }
+  ],
+  "summary": [
+    {
+      "one_way_delay_ms": 0,
+      "mode": "library-fixed",
+      "median_seconds": 0.128930208,
+      "mib_per_second": 496.39259094346613
+    },
+    {
+      "one_way_delay_ms": 0,
+      "mode": "adaptive",
+      "median_seconds": 0.165605958,
+      "mib_per_second": 386.4595258100557
+    },
+    {
+      "one_way_delay_ms": 0,
+      "mode": "fixed-16mib",
+      "median_seconds": 0.0355605,
+      "mib_per_second": 1799.749722304242
+    },
+    {
+      "one_way_delay_ms": 25,
+      "mode": "library-fixed",
+      "median_seconds": 2.075797459,
+      "mib_per_second": 30.83152439681255
+    },
+    {
+      "one_way_delay_ms": 25,
+      "mode": "adaptive",
+      "median_seconds": 0.884562709,
+      "mib_per_second": 72.35213439231701
+    },
+    {
+      "one_way_delay_ms": 25,
+      "mode": "fixed-16mib",
+      "median_seconds": 0.355126625,
+      "mib_per_second": 180.21740836807155
+    }
+  ]
+}
