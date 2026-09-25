@@ -411,13 +411,16 @@ impl SolanaBlockMapper {
             self.instructions.is_inner.append_value(false);
             self.instructions.inner_index.append_null();
             self.instructions.stack_height.append_null();
+            self.instructions.parent_instruction_index.append_null();
+            self.instructions.inner_instruction_index.append_null();
             append_fork_step(&mut self.instructions.fork_step, fork_step);
             global_instr_idx += 1;
         }
 
         // instructions (inner)
         for inner_set in &meta.inner_instructions {
-            for inner in &inner_set.instructions {
+            for (inner_position, inner) in inner_set.instructions.iter().enumerate() {
+                let inner_position = u32::try_from(inner_position)?;
                 self.instructions.canonical.append(identity);
                 self.instructions.slot.append_value(slot);
                 self.instructions.transaction_index.append_value(tx_idx);
@@ -431,6 +434,12 @@ impl SolanaBlockMapper {
                 self.instructions.data.append_value(&inner.data);
                 self.instructions.is_inner.append_value(true);
                 self.instructions.inner_index.append_value(inner_set.index);
+                self.instructions
+                    .parent_instruction_index
+                    .append_value(inner_set.index);
+                self.instructions
+                    .inner_instruction_index
+                    .append_value(inner_position);
                 match inner.stack_height {
                     Some(sh) => self.instructions.stack_height.append_value(sh),
                     None => self.instructions.stack_height.append_null(),
@@ -691,6 +700,8 @@ impl BlockMapper for SolanaBlockMapper {
             + est_bool(&self.instructions.is_inner)
             + est_u32(&self.instructions.inner_index)
             + est_u32(&self.instructions.stack_height)
+            + est_u32(&self.instructions.parent_instruction_index)
+            + est_u32(&self.instructions.inner_instruction_index)
             + est_opt_str(&self.instructions.fork_step);
         let rewards = self.rewards.canonical.estimated_bytes()
             + est_u64(&self.rewards.slot)
@@ -960,6 +971,8 @@ struct InstructionsBuilder {
     is_inner: BooleanBuilder,
     inner_index: UInt32Builder,
     stack_height: UInt32Builder,
+    parent_instruction_index: UInt32Builder,
+    inner_instruction_index: UInt32Builder,
     fork_step: Option<StringBuilder>,
 }
 
@@ -976,6 +989,8 @@ impl InstructionsBuilder {
             is_inner: BooleanBuilder::new(),
             inner_index: UInt32Builder::new(),
             stack_height: UInt32Builder::new(),
+            parent_instruction_index: UInt32Builder::new(),
+            inner_instruction_index: UInt32Builder::new(),
             fork_step: if include_fork_step {
                 Some(StringBuilder::new())
             } else {
@@ -996,6 +1011,8 @@ impl InstructionsBuilder {
             Arc::new(self.is_inner.finish()) as Arc<dyn Array>,
             Arc::new(self.inner_index.finish()) as Arc<dyn Array>,
             Arc::new(self.stack_height.finish()) as Arc<dyn Array>,
+            Arc::new(self.parent_instruction_index.finish()) as Arc<dyn Array>,
+            Arc::new(self.inner_instruction_index.finish()) as Arc<dyn Array>,
         ]);
         finish_fork_step(&mut self.fork_step, &mut columns);
         Ok(RecordBatch::try_new(Arc::new(schema.clone()), columns)?)
@@ -1830,6 +1847,117 @@ pub(crate) mod tests {
             .downcast_ref::<UInt32Array>()
             .unwrap();
         assert_eq!(li_col.value(0), 0);
+    }
+
+    #[test]
+    fn test_instruction_positions_preserve_legacy_indices_and_expose_call_order() {
+        let mut block = make_test_block(100);
+        let transaction = &mut block.transactions[0];
+        let message = transaction
+            .transaction
+            .as_mut()
+            .unwrap()
+            .message
+            .as_mut()
+            .unwrap();
+        let top = message.instructions[0].clone();
+        message.instructions.extend([top.clone(), top]);
+        let meta = transaction.meta.as_mut().unwrap();
+        let inner = meta.inner_instructions[0].instructions[0].clone();
+        let mut nested = inner.clone();
+        nested.stack_height = Some(3);
+        let mut unknown_depth = inner.clone();
+        unknown_depth.stack_height = None;
+        // Deliberately reverse the groups: the parent key, not vector order,
+        // determines which top-level instruction owns each ordered inner set.
+        meta.inner_instructions = vec![
+            solana::InnerInstructions {
+                index: 2,
+                instructions: vec![unknown_depth],
+            },
+            solana::InnerInstructions {
+                index: 0,
+                instructions: vec![inner, nested],
+            },
+        ];
+        for encoding in [EncodeBytes::Binary, EncodeBytes::Hex, EncodeBytes::Base58] {
+            for include_fork_step in [false, true] {
+                let mut mapper = SolanaBlockMapper::new(
+                    false,
+                    include_fork_step,
+                    encoding.clone(),
+                    false,
+                    false,
+                );
+                mapper
+                    .map_block(
+                        &block.encode_to_vec(),
+                        &BlockIdentity::default(),
+                        Some("NEW"),
+                    )
+                    .unwrap();
+                let batch = mapper.flush().unwrap().remove("instructions").unwrap();
+                let column = |name: &str| {
+                    batch
+                        .column_by_name(name)
+                        .unwrap()
+                        .as_any()
+                        .downcast_ref::<UInt32Array>()
+                        .unwrap()
+                };
+                let values = |name: &str| column(name).iter().collect::<Vec<_>>();
+                assert_eq!(
+                    values("instruction_index"),
+                    (0..6).map(Some).collect::<Vec<_>>()
+                );
+                let parents = vec![None, None, None, Some(2), Some(0), Some(0)];
+                assert_eq!(values("inner_index"), parents);
+                assert_eq!(values("parent_instruction_index"), parents);
+                assert_eq!(
+                    values("inner_instruction_index"),
+                    vec![None, None, None, Some(0), Some(0), Some(1)]
+                );
+                assert_eq!(
+                    values("stack_height"),
+                    vec![None, None, None, None, Some(2), Some(3)]
+                );
+                for name in ["parent_instruction_index", "inner_instruction_index"] {
+                    let schema = batch.schema();
+                    let field = schema.field_with_name(name).unwrap();
+                    assert_eq!(field.data_type(), &arrow::datatypes::DataType::UInt32);
+                    assert!(field.is_nullable());
+                }
+                let parent = column("parent_instruction_index");
+                let inner = column("inner_instruction_index");
+                let legacy = column("instruction_index");
+                let mut ordered = (0..batch.num_rows()).collect::<Vec<_>>();
+                ordered.sort_by_key(|&row| {
+                    (
+                        if parent.is_null(row) {
+                            legacy.value(row)
+                        } else {
+                            parent.value(row)
+                        },
+                        !parent.is_null(row),
+                        if inner.is_null(row) {
+                            0
+                        } else {
+                            inner.value(row)
+                        },
+                    )
+                });
+                assert_eq!(ordered, vec![0, 4, 5, 1, 2, 3]);
+                // Both new builders reset with the other instruction columns.
+                mapper
+                    .map_block(
+                        &block.encode_to_vec(),
+                        &BlockIdentity::default(),
+                        Some("NEW"),
+                    )
+                    .unwrap();
+                assert_eq!(mapper.flush().unwrap()["instructions"], batch);
+            }
+        }
     }
 
     #[test]
