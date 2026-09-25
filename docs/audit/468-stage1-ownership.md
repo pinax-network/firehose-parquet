@@ -74,3 +74,28 @@ No production bucket writes have been performed. In particular, stopping an S3
 writer does not prove its previously sent requests cannot arrive later. Any
 operator recovery must establish both writer cessation and provider-level request
 quiescence; neither a timestamp nor a process-stop assertion is sufficient.
+
+## Remote control slots and combined scopes
+
+`S3StateStore` borrows the persistent bucket owner and its shared async mutation
+mutex. Each fixed control key uses conditional create/CAS with usable object
+version evidence. Logical removal publishes a checked tombstone; recreation CASes
+that tombstone to a fresh incarnation. No fixed control key is deleted. Bounded
+strict reads and exact content/version reconciliation suppress opaque payloads
+from diagnostics. An unresolved or cancelled mutation permanently marks the
+owner uncertain, so normal release and subsequent writes fail closed.
+
+`DatasetOwnership` collects every output/source/cursor/artifact scope before one
+acquisition, reducing local roots together and acquiring each remote bucket only
+once in stable order. File scopes protect their containing directory. Missing
+mutation inputs fail without creating directories. Direct control targets are
+refused. Partial acquisitions release only earlier resolved owners that have not
+performed data writes; uncertainty retains ownership. Local-only synchronous
+callers work inside a current-thread runtime, while remote synchronous calls
+return an error there rather than panicking.
+
+The combined library check on 2026-09-25 passed **476 tests**, with four intended
+ignores. This includes eleven durable state tests, remote tombstone/recreation,
+concurrent same-version exclusion and cancellation retaining the owner. Mutator
+wiring was being implemented during this check; complete command coverage and
+CLI qualification remain required before the stage-1 review boundary.

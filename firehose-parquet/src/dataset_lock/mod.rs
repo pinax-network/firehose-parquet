@@ -4,5 +4,7 @@
 //! older binaries, external tools, or administrators replacing directory trees.
 
 mod local;
+mod operation;
 
 pub use local::LocalOwnership;
+pub use operation::{DatasetOwnership, MutationScope};

@@ -54,6 +54,7 @@ struct Envelope {
     format_version: u32,
     incarnation: String,
     revision: u64,
+    deleted: bool,
     payload: serde_json::Value,
     sha256: String,
 }
@@ -62,11 +63,12 @@ fn payload_digest(
     version: u32,
     incarnation: &str,
     revision: u64,
+    deleted: bool,
     payload: &serde_json::Value,
 ) -> Result<String> {
     // serde_json::Value's default map representation sorts object keys. The
     // tuple layout is versioned and excludes its own checksum.
-    let bytes = serde_json::to_vec(&(version, incarnation, revision, payload))?;
+    let bytes = serde_json::to_vec(&(version, incarnation, revision, deleted, payload))?;
     Ok(hex::encode(Sha256::digest(bytes)))
 }
 
@@ -75,13 +77,44 @@ pub(crate) fn encode<T: Serialize>(
     incarnation: &str,
     revision: u64,
 ) -> Result<(Vec<u8>, ControlVersion)> {
+    encode_record(payload, incarnation, revision, false)
+}
+
+/// Remote fixed slots are cleared through a conditional tombstone, never a
+/// delayed unconditional DELETE that could erase a later journal incarnation.
+pub(crate) fn encode_tombstone(expected: &ControlVersion) -> Result<(Vec<u8>, ControlVersion)> {
+    let revision = expected
+        .revision
+        .checked_add(1)
+        .context("control revision exhausted")?;
+    encode_record(
+        &serde_json::Value::Null,
+        &expected.incarnation,
+        revision,
+        true,
+    )
+}
+
+fn encode_record<T: Serialize>(
+    payload: &T,
+    incarnation: &str,
+    revision: u64,
+    deleted: bool,
+) -> Result<(Vec<u8>, ControlVersion)> {
     let payload = serde_json::to_value(payload)
         .map_err(|_| anyhow::anyhow!("could not encode control payload"))?;
-    let digest = payload_digest(CONTROL_FORMAT_VERSION, incarnation, revision, &payload)?;
+    let digest = payload_digest(
+        CONTROL_FORMAT_VERSION,
+        incarnation,
+        revision,
+        deleted,
+        &payload,
+    )?;
     let bytes = serde_json::to_vec(&Envelope {
         format_version: CONTROL_FORMAT_VERSION,
         incarnation: incarnation.to_owned(),
         revision,
+        deleted,
         payload,
         sha256: digest.clone(),
     })?;
@@ -98,7 +131,7 @@ pub(crate) fn encode<T: Serialize>(
     ))
 }
 
-pub(crate) fn decode<T: DeserializeOwned>(bytes: &[u8]) -> Result<ControlDocument<T>> {
+pub(crate) fn decode_slot(bytes: &[u8]) -> Result<(ControlVersion, Option<serde_json::Value>)> {
     if bytes.len() > MAX_CONTROL_BYTES {
         bail!("control record exceeds the {MAX_CONTROL_BYTES}-byte limit");
     }
@@ -123,21 +156,31 @@ pub(crate) fn decode<T: DeserializeOwned>(bytes: &[u8]) -> Result<ControlDocumen
             record.format_version,
             &record.incarnation,
             record.revision,
+            record.deleted,
             &record.payload,
         )?
     {
         bail!("control record checksum mismatch");
     }
-    let payload = serde_json::from_value(record.payload)
-        .map_err(|_| anyhow::anyhow!("invalid control record payload"))?;
-    Ok(ControlDocument {
-        version: ControlVersion {
+    if record.deleted && !record.payload.is_null() {
+        bail!("invalid control tombstone payload");
+    }
+    Ok((
+        ControlVersion {
             incarnation: record.incarnation,
             revision: record.revision,
             digest: record.sha256,
         },
-        payload,
-    })
+        (!record.deleted).then_some(record.payload),
+    ))
+}
+
+pub(crate) fn decode<T: DeserializeOwned>(bytes: &[u8]) -> Result<ControlDocument<T>> {
+    let (version, payload) = decode_slot(bytes)?;
+    let payload = payload.context("control record is a tombstone")?;
+    let payload = serde_json::from_value(payload)
+        .map_err(|_| anyhow::anyhow!("invalid control record payload"))?;
+    Ok(ControlDocument { version, payload })
 }
 
 /// Durable local metadata access tied to the lifetime of an exclusive guard.
