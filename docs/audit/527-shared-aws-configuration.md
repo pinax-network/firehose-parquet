@@ -96,3 +96,7 @@ passed. Independent review found no blocker and independently rechecked the
 `411026780c2145400d542f014d9fdb3fa5d39f9289cdd481f0e68e3c73a844b6`).
 Fresh CI must pass on the submitted head before merge; issue closure is verified
 only after publication and merge.
+
+Actual main `e4f990f` (#609) is integrated. It adds the shared delete module and
+new callers/tests; AWS policy source merged without conflicts. Fresh native
+S3/read integration checks and PR CI gate the final combined head.
