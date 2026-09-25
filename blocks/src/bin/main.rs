@@ -529,6 +529,55 @@ fn maybe_add_synthetic_timestamp_metadata(
     }
 }
 
+/// Resolve whether failed/reverted transactions are written (#494).
+///
+/// - `--exclude-failed-transactions` always drops them.
+/// - EVM writes them by default, with only their persistent state changes.
+///   `--include-failed-transactions` is a deprecated no-op there. A resumed EVM
+///   cursor that was written with failed transactions excluded (the default
+///   before #494) keeps excluding them, so one output does not mix both modes;
+///   `--cursor-override` opts out of that.
+/// - Other chains exclude them unless `--include-failed-transactions` is set.
+///
+/// Returns the effective value and the warnings to log.
+fn resolve_include_failed_transactions(
+    block_type: Option<&str>,
+    include_flag: bool,
+    exclude_flag: bool,
+    cursor_state: Option<&CursorState>,
+    cursor_override: bool,
+) -> (bool, Vec<String>) {
+    let mut warnings = Vec::new();
+    if exclude_flag {
+        if include_flag {
+            warnings.push(
+                "--include-failed-transactions is ignored because --exclude-failed-transactions is set"
+                    .to_string(),
+            );
+        }
+        return (false, warnings);
+    }
+    if block_type != Some("evm") {
+        return (include_flag, warnings);
+    }
+    if include_flag {
+        warnings.push(
+            "--include-failed-transactions is deprecated and has no effect on EVM: failed transactions are included by default; use --exclude-failed-transactions to drop them"
+                .to_string(),
+        );
+    }
+    if let Some(cursor_state) = cursor_state.filter(|_| !cursor_override) {
+        if !cursor_state.include_failed_transactions {
+            warnings.push(
+                "cursor.parquet was written with failed transactions excluded (the EVM default before #494); still excluding them so this output stays consistent. Pass --exclude-failed-transactions to keep this and silence the warning, or --cursor-override with --start-block to switch this output to the new default"
+                    .to_string(),
+            );
+            return (false, warnings);
+        }
+    }
+    (true, warnings)
+}
+
 fn add_cursor_compatibility_metadata(
     meta: &mut ParquetFileMetadata,
     extended: bool,
@@ -4684,13 +4733,28 @@ async fn run_ingestion(args: &BuildArgs, global: &GlobalArgs) -> Result<()> {
         extended = resolve_extended_mode(extended, args.without_extended, &endpoint_info);
     }
 
-    let include_failed_transactions = args.include_failed_transactions;
     let tron_style_evm_profile = endpoint_uses_tron_style_evm_profile(&endpoint_info);
     let initial_block_type = if block_type != "auto" {
         Some(block_type.as_str())
     } else {
         inferred_block_type_from_endpoint_info(&endpoint_info)
     };
+    // Failed-transaction handling depends on the chain, so resolve it from the
+    // best block type known before streaming; auto-detection re-resolves it.
+    let failed_transactions_block_type = initial_block_type
+        .map(str::to_string)
+        .or_else(|| cursor_metadata_block_type(existing_cursor_state.as_ref()).map(str::to_string));
+    let (mut include_failed_transactions, failed_transactions_warnings) =
+        resolve_include_failed_transactions(
+            failed_transactions_block_type.as_deref(),
+            args.include_failed_transactions,
+            args.exclude_failed_transactions,
+            existing_cursor_state.as_ref(),
+            args.cursor_override,
+        );
+    for warning in failed_transactions_warnings {
+        warn!("{}", warning);
+    }
     let initial_bytes_encoding =
         resolve_output_bytes_encoding(initial_block_type, &endpoint_info, tron_style_evm_profile);
     let initial_bytes_encoding_label = encode_bytes_label(&initial_bytes_encoding).to_string();
@@ -5004,6 +5068,20 @@ async fn run_ingestion(args: &BuildArgs, global: &GlobalArgs) -> Result<()> {
                     extended = false;
                 } else {
                     extended = resolve_extended_mode(extended, args.without_extended, &endpoint_info);
+                }
+                if failed_transactions_block_type.as_deref() != Some(detected.as_str()) {
+                    let (resolved, warnings) = resolve_include_failed_transactions(
+                        Some(&detected),
+                        args.include_failed_transactions,
+                        args.exclude_failed_transactions,
+                        existing_cursor_state.as_ref(),
+                        args.cursor_override,
+                    );
+                    for warning in warnings {
+                        warn!("{}", warning);
+                    }
+                    include_failed_transactions = resolved;
+                    cursor_state_template.include_failed_transactions = resolved;
                 }
                 let encode_bytes = resolve_output_bytes_encoding(
                     Some(&detected),
@@ -6172,6 +6250,142 @@ mod tests {
         } else {
             panic!("expected Commands::Build");
         }
+    }
+
+    #[test]
+    fn test_build_subcommand_failed_transaction_flags() {
+        let parse = |extra: &[&str]| {
+            let mut argv = vec!["fireparq", "build", "--network", "mainnet"];
+            argv.extend_from_slice(extra);
+            match Cli::parse_from(argv).command {
+                Some(Commands::Build(build_args)) => (
+                    build_args.include_failed_transactions,
+                    build_args.exclude_failed_transactions,
+                ),
+                _ => panic!("expected Commands::Build"),
+            }
+        };
+        assert_eq!(parse(&[]), (false, false));
+        assert_eq!(parse(&["--exclude-failed-transactions"]), (false, true));
+        assert_eq!(parse(&["--include-failed-transactions"]), (true, false));
+    }
+
+    #[test]
+    fn test_resolve_include_failed_transactions_evm_defaults_to_include() {
+        assert_eq!(
+            resolve_include_failed_transactions(Some("evm"), false, false, None, false),
+            (true, vec![])
+        );
+        let (include, warnings) =
+            resolve_include_failed_transactions(Some("evm"), false, true, None, false);
+        assert!(!include);
+        assert!(warnings.is_empty());
+    }
+
+    #[test]
+    fn test_resolve_include_failed_transactions_evm_include_flag_is_deprecated_no_op() {
+        let (include, warnings) =
+            resolve_include_failed_transactions(Some("evm"), true, false, None, false);
+        assert!(include);
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("deprecated"));
+    }
+
+    #[test]
+    fn test_resolve_include_failed_transactions_exclude_wins_over_include() {
+        for block_type in [Some("evm"), Some("solana"), None] {
+            let (include, warnings) =
+                resolve_include_failed_transactions(block_type, true, true, None, false);
+            assert!(!include);
+            assert_eq!(warnings.len(), 1);
+            assert!(warnings[0].contains("ignored"));
+        }
+    }
+
+    #[test]
+    fn test_resolve_include_failed_transactions_non_evm_unchanged() {
+        for block_type in [
+            Some("solana"),
+            Some("tron"),
+            Some("near"),
+            Some("antelope"),
+            Some("cosmos"),
+            None,
+        ] {
+            assert_eq!(
+                resolve_include_failed_transactions(block_type, false, false, None, false),
+                (false, vec![])
+            );
+            assert_eq!(
+                resolve_include_failed_transactions(block_type, true, false, None, false),
+                (true, vec![])
+            );
+        }
+    }
+
+    #[test]
+    fn test_resolve_include_failed_transactions_evm_resume_keeps_legacy_exclusion() {
+        let legacy_cursor = CursorState {
+            include_failed_transactions: false,
+            ..CursorState::default()
+        };
+        let (include, warnings) = resolve_include_failed_transactions(
+            Some("evm"),
+            false,
+            false,
+            Some(&legacy_cursor),
+            false,
+        );
+        assert!(!include, "resume keeps the stored exclusion");
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("still excluding"));
+        let mut current = CursorState {
+            include_failed_transactions: include,
+            ..CursorState::default()
+        };
+        current.file_metadata.add(
+            "firehose-parquet.include_failed_transactions",
+            include.to_string(),
+        );
+        assert!(legacy_cursor.validate_params(&current).is_empty());
+
+        // An explicit --exclude-failed-transactions matches silently.
+        assert_eq!(
+            resolve_include_failed_transactions(
+                Some("evm"),
+                false,
+                true,
+                Some(&legacy_cursor),
+                false
+            ),
+            (false, vec![])
+        );
+        // --cursor-override switches the output to the new default.
+        assert_eq!(
+            resolve_include_failed_transactions(
+                Some("evm"),
+                false,
+                false,
+                Some(&legacy_cursor),
+                true
+            ),
+            (true, vec![])
+        );
+        // A cursor written with failed transactions included keeps including them.
+        let included_cursor = CursorState {
+            include_failed_transactions: true,
+            ..CursorState::default()
+        };
+        assert_eq!(
+            resolve_include_failed_transactions(
+                Some("evm"),
+                false,
+                false,
+                Some(&included_cursor),
+                false
+            ),
+            (true, vec![])
+        );
     }
 
     #[test]

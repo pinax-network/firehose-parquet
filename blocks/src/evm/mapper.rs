@@ -62,6 +62,106 @@ fn transaction_status_text(value: i32) -> &'static str {
         .unwrap_or("UNKNOWN")
 }
 
+fn transaction_succeeded(tx: &eth::TransactionTrace) -> bool {
+    tx.status == eth::TransactionTraceStatus::Succeeded as i32
+}
+
+/// State changes of a failed or reverted transaction that persist on chain.
+#[derive(Debug, Default)]
+struct PersistentChanges<'a> {
+    balance_changes: Vec<&'a eth::BalanceChange>,
+    nonce_changes: Vec<&'a eth::NonceChange>,
+    code_changes: Vec<&'a eth::CodeChange>,
+}
+
+/// Select the state changes of a failed or reverted transaction that the chain
+/// keeps. Everything else it recorded was rolled back.
+///
+/// Follows the rule documented on `TransactionTrace.status` in
+/// `proto/ethereum.proto`. On the root call (`calls[0]`):
+///
+/// - balance changes for buying gas, refunding gas and paying the fee
+///   recipients (`GAS_BUY`, `GAS_REFUND`, `REWARD_TRANSACTION_FEE`), plus
+///   `INCREASE_MINT`, because OP Stack deposits keep their mint when they fail;
+/// - the sender's nonce increment, which is the earliest nonce change;
+/// - for EIP-7702 `SET_CODE` transactions, one nonce change and at most one
+///   code change per accepted (not discarded) authorization: the earliest
+///   remaining ones for its authority. An authority can appear in several
+///   authorizations, and each accepted one increments its nonce.
+///
+/// Ordinals of reverted calls may be zero, so "earliest" falls back to the
+/// recording order.
+fn failed_transaction_persistent_changes(tx: &eth::TransactionTrace) -> PersistentChanges<'_> {
+    use eth::balance_change::Reason;
+
+    let Some(root) = tx.calls.first() else {
+        return PersistentChanges::default();
+    };
+
+    let balance_changes = root
+        .balance_changes
+        .iter()
+        .filter(|bc| {
+            matches!(
+                Reason::try_from(bc.reason),
+                Ok(Reason::GasBuy
+                    | Reason::GasRefund
+                    | Reason::RewardTransactionFee
+                    | Reason::IncreaseMint)
+            )
+        })
+        .collect();
+
+    // Root-call indices in execution order (ordinal, then recording order).
+    let nonce_order = execution_order(&root.nonce_changes, |nc| nc.ordinal);
+    let code_order = execution_order(&root.code_changes, |cc| cc.ordinal);
+
+    let mut kept_nonces: Vec<usize> = nonce_order.first().copied().into_iter().collect();
+    let mut kept_codes: Vec<usize> = Vec::new();
+    for authority in tx
+        .set_code_authorizations
+        .iter()
+        .filter(|auth| !auth.discarded)
+        .filter_map(|auth| auth.authority.as_deref())
+        .filter(|authority| !authority.is_empty())
+    {
+        if let Some(&i) = nonce_order
+            .iter()
+            .find(|&&i| root.nonce_changes[i].address == authority && !kept_nonces.contains(&i))
+        {
+            kept_nonces.push(i);
+        }
+        if let Some(&i) = code_order
+            .iter()
+            .find(|&&i| root.code_changes[i].address == authority && !kept_codes.contains(&i))
+        {
+            kept_codes.push(i);
+        }
+    }
+    // Emit in recording order, like the other change rows.
+    kept_nonces.sort_unstable();
+    kept_codes.sort_unstable();
+
+    PersistentChanges {
+        balance_changes,
+        nonce_changes: kept_nonces
+            .into_iter()
+            .map(|i| &root.nonce_changes[i])
+            .collect(),
+        code_changes: kept_codes
+            .into_iter()
+            .map(|i| &root.code_changes[i])
+            .collect(),
+    }
+}
+
+/// Indices of `items` sorted by ordinal; ties keep the recording order.
+fn execution_order<T>(items: &[T], ordinal: impl Fn(&T) -> u64) -> Vec<usize> {
+    let mut indices: Vec<usize> = (0..items.len()).collect();
+    indices.sort_by_key(|&i| ordinal(&items[i]));
+    indices
+}
+
 fn call_type_text(value: i32) -> &'static str {
     eth::CallType::try_from(value)
         .map(|call_type| call_type.as_str_name())
@@ -320,8 +420,9 @@ impl EvmBlockMapper {
 
         // -- transaction traces --
         for tx in &block.transaction_traces {
-            // Skip failed transactions (status != 1) unless flag is set
-            if !self.include_failed_transactions && tx.status != 1 {
+            // Failed transactions are written unless --exclude-failed-transactions
+            // is set; only their persistent state changes are kept.
+            if !self.include_failed_transactions && !transaction_succeeded(tx) {
                 continue;
             }
             self.map_transaction(number, tx, identity, fork_step);
@@ -420,7 +521,58 @@ impl EvmBlockMapper {
                 if let Some(ref mut builder) = self.calls {
                     builder.append(block_number, tx_hash, tx.index, call, identity, fork_step);
                 }
-                self.extract_call_state_changes(block_number, tx_hash, call, identity, fork_step);
+            }
+            if transaction_succeeded(tx) {
+                for call in &tx.calls {
+                    self.extract_call_state_changes(
+                        block_number,
+                        tx_hash,
+                        call,
+                        identity,
+                        fork_step,
+                    );
+                }
+            } else {
+                self.extract_failed_transaction_state_changes(
+                    block_number,
+                    tx,
+                    identity,
+                    fork_step,
+                );
+            }
+        }
+    }
+
+    /// Write the state changes of a failed or reverted transaction that persist
+    /// on chain (see [`failed_transaction_persistent_changes`]). Gas changes are
+    /// all kept: they record gas that the transaction consumed and paid for.
+    fn extract_failed_transaction_state_changes(
+        &mut self,
+        block_number: u64,
+        tx: &eth::TransactionTrace,
+        identity: &BlockIdentity,
+        fork_step: Option<&str>,
+    ) {
+        let tx_hash = &tx.hash;
+        let persistent = failed_transaction_persistent_changes(tx);
+        if let Some(ref mut builder) = self.balance_changes {
+            for bc in persistent.balance_changes {
+                builder.append(block_number, tx_hash, bc, identity, fork_step);
+            }
+        }
+        if let Some(ref mut builder) = self.nonce_changes {
+            for nc in persistent.nonce_changes {
+                builder.append(block_number, tx_hash, nc, identity, fork_step);
+            }
+        }
+        if let Some(ref mut builder) = self.code_changes {
+            for cc in persistent.code_changes {
+                builder.append(block_number, tx_hash, cc, identity, fork_step);
+            }
+        }
+        if let Some(ref mut builder) = self.gas_changes {
+            for gc in tx.calls.iter().flat_map(|call| &call.gas_changes) {
+                builder.append(block_number, tx_hash, gc, identity, fork_step);
             }
         }
     }
@@ -2769,5 +2921,336 @@ pub(crate) mod tests {
             get_string_column(logs, "data").value(0),
             firehose_parquet::encode::encode_hex_no_prefix(&[1, 2, 3])
         );
+    }
+
+    // -- failed transactions (#494) --
+
+    const SENDER: [u8; 20] = [0xcc; 20];
+    const TO: [u8; 20] = [0xaa; 20];
+    const AUTHORITY: [u8; 20] = [0xa1; 20];
+    const DISCARDED_AUTHORITY: [u8; 20] = [0xa2; 20];
+
+    fn balance_change(address: &[u8], reason: i32, ordinal: u64) -> eth::BalanceChange {
+        eth::BalanceChange {
+            address: address.to_vec(),
+            old_value: Some(eth::BigInt { bytes: vec![0x02] }),
+            new_value: Some(eth::BigInt { bytes: vec![0x01] }),
+            reason,
+            ordinal,
+        }
+    }
+
+    fn nonce_change(address: &[u8], ordinal: u64) -> eth::NonceChange {
+        eth::NonceChange {
+            address: address.to_vec(),
+            old_value: 0,
+            new_value: 1,
+            ordinal,
+        }
+    }
+
+    fn code_change(address: &[u8], ordinal: u64) -> eth::CodeChange {
+        eth::CodeChange {
+            address: address.to_vec(),
+            old_hash: vec![0x01; 32],
+            old_code: vec![],
+            new_hash: vec![0x02; 32],
+            new_code: vec![0xef, 0x01, 0x00],
+            ordinal,
+        }
+    }
+
+    fn gas_change(ordinal: u64) -> eth::GasChange {
+        eth::GasChange {
+            old_value: 100,
+            new_value: 50,
+            reason: 1,
+            ordinal,
+        }
+    }
+
+    /// A reverted SET_CODE transaction whose root call and child call carry both
+    /// persistent and rolled-back state changes. Ordinals identify each change.
+    #[allow(deprecated)]
+    fn make_failed_set_code_tx() -> eth::TransactionTrace {
+        let block = make_test_evm_block(1);
+        let mut tx = block.transaction_traces[0].clone();
+        tx.status = eth::TransactionTraceStatus::Reverted as i32;
+        tx.r#type = eth::transaction_trace::Type::TrxTypeSetCode as i32;
+        tx.receipt.as_mut().unwrap().logs.clear();
+        tx.set_code_authorizations = vec![
+            eth::SetCodeAuthorization {
+                discarded: false,
+                authority: Some(AUTHORITY.to_vec()),
+                ..Default::default()
+            },
+            eth::SetCodeAuthorization {
+                discarded: true,
+                authority: Some(DISCARDED_AUTHORITY.to_vec()),
+                ..Default::default()
+            },
+        ];
+
+        let root = &mut tx.calls[0];
+        root.status_failed = true;
+        root.status_reverted = true;
+        root.state_reverted = true;
+        root.balance_changes = vec![
+            balance_change(&SENDER, 7, 101),     // GAS_BUY
+            balance_change(&SENDER, 5, 102),     // TRANSFER (rolled back)
+            balance_change(&TO, 18, 103),        // INCREASE_MINT
+            balance_change(&SENDER, 9, 104),     // GAS_REFUND
+            balance_change(&[0x01; 20], 8, 105), // REWARD_TRANSACTION_FEE
+        ];
+        root.nonce_changes = vec![
+            nonce_change(&AUTHORITY, 202),
+            nonce_change(&SENDER, 201),
+            nonce_change(&DISCARDED_AUTHORITY, 203),
+            nonce_change(&AUTHORITY, 204), // CREATE during execution (rolled back)
+        ];
+        root.code_changes = vec![
+            code_change(&AUTHORITY, 301),
+            code_change(&DISCARDED_AUTHORITY, 302),
+        ];
+        root.storage_changes = vec![eth::StorageChange {
+            address: TO.to_vec(),
+            key: vec![0x01; 32],
+            old_value: vec![0x00; 32],
+            new_value: vec![0x01; 32],
+            ordinal: 401,
+        }];
+        root.account_creations = vec![eth::AccountCreation {
+            account: vec![0x0f; 20],
+            ordinal: 501,
+        }];
+        root.gas_changes = vec![gas_change(601)];
+
+        let mut child = root.clone();
+        child.index = 1;
+        child.parent_index = 0;
+        child.depth = 1;
+        child.balance_changes = vec![balance_change(&TO, 5, 111)];
+        child.nonce_changes = vec![nonce_change(&TO, 211)];
+        child.code_changes = vec![code_change(&TO, 311)];
+        child.storage_changes[0].ordinal = 411;
+        child.account_creations[0].ordinal = 511;
+        child.gas_changes = vec![gas_change(611)];
+        tx.calls.push(child);
+        tx
+    }
+
+    fn ordinals(batch: &RecordBatch) -> Vec<u64> {
+        batch
+            .column(batch.schema().index_of("ordinal").unwrap())
+            .as_any()
+            .downcast_ref::<UInt64Array>()
+            .expect("ordinal should be u64")
+            .values()
+            .to_vec()
+    }
+
+    #[test]
+    fn test_failed_tx_keeps_gas_fee_and_mint_balance_changes_only() {
+        let tx = make_failed_set_code_tx();
+        let persistent = failed_transaction_persistent_changes(&tx);
+        let kept: Vec<u64> = persistent
+            .balance_changes
+            .iter()
+            .map(|bc| bc.ordinal)
+            .collect();
+        // TRANSFER on the root call and everything on the child call are rolled back.
+        assert_eq!(kept, vec![101, 103, 104, 105]);
+    }
+
+    #[test]
+    fn test_failed_tx_keeps_sender_and_accepted_authority_nonce_changes() {
+        let tx = make_failed_set_code_tx();
+        let persistent = failed_transaction_persistent_changes(&tx);
+        let kept: Vec<u64> = persistent
+            .nonce_changes
+            .iter()
+            .map(|nc| nc.ordinal)
+            .collect();
+        // Sender (earliest ordinal) and the accepted authority's first nonce
+        // change, in recording order. The discarded authority, the authority's
+        // later nonce change and the child call's nonce change are dropped.
+        assert_eq!(kept, vec![202, 201]);
+    }
+
+    #[test]
+    fn test_failed_tx_keeps_one_nonce_change_per_accepted_authorization() {
+        // Seen on mainnet (block 26000004, tx 130): the same authority signs two
+        // accepted authorizations, and both nonce increments persist.
+        let mut tx = make_failed_set_code_tx();
+        tx.set_code_authorizations.push(eth::SetCodeAuthorization {
+            discarded: false,
+            authority: Some(AUTHORITY.to_vec()),
+            ..Default::default()
+        });
+        let persistent = failed_transaction_persistent_changes(&tx);
+        let kept: Vec<u64> = persistent
+            .nonce_changes
+            .iter()
+            .map(|nc| nc.ordinal)
+            .collect();
+        assert_eq!(kept, vec![202, 201, 204]);
+        // Only one code change was recorded for the authority.
+        let codes: Vec<u64> = persistent
+            .code_changes
+            .iter()
+            .map(|cc| cc.ordinal)
+            .collect();
+        assert_eq!(codes, vec![301]);
+    }
+
+    #[test]
+    fn test_failed_self_sponsored_set_code_tx_keeps_sender_and_authorization_nonces() {
+        let mut tx = make_failed_set_code_tx();
+        tx.set_code_authorizations = vec![eth::SetCodeAuthorization {
+            discarded: false,
+            authority: Some(SENDER.to_vec()),
+            ..Default::default()
+        }];
+        tx.calls[0].nonce_changes = vec![
+            nonce_change(&SENDER, 201), // transaction nonce
+            nonce_change(&SENDER, 202), // authorization nonce
+            nonce_change(&SENDER, 205), // rolled back
+        ];
+        let persistent = failed_transaction_persistent_changes(&tx);
+        let kept: Vec<u64> = persistent
+            .nonce_changes
+            .iter()
+            .map(|nc| nc.ordinal)
+            .collect();
+        assert_eq!(kept, vec![201, 202]);
+    }
+
+    #[test]
+    fn test_failed_tx_keeps_accepted_authority_code_changes_only() {
+        let tx = make_failed_set_code_tx();
+        let persistent = failed_transaction_persistent_changes(&tx);
+        let kept: Vec<u64> = persistent
+            .code_changes
+            .iter()
+            .map(|cc| cc.ordinal)
+            .collect();
+        assert_eq!(kept, vec![301]);
+    }
+
+    #[test]
+    fn test_failed_non_set_code_tx_keeps_only_sender_nonce_change() {
+        let mut tx = make_failed_set_code_tx();
+        tx.r#type = eth::transaction_trace::Type::TrxTypeDynamicFee as i32;
+        tx.set_code_authorizations.clear();
+        let persistent = failed_transaction_persistent_changes(&tx);
+        let nonces: Vec<u64> = persistent
+            .nonce_changes
+            .iter()
+            .map(|nc| nc.ordinal)
+            .collect();
+        assert_eq!(nonces, vec![201]);
+        assert!(persistent.code_changes.is_empty());
+    }
+
+    #[test]
+    fn test_failed_tx_earliest_nonce_change_falls_back_to_recording_order() {
+        // Ordinals of reverted calls may all be zero.
+        let mut tx = make_failed_set_code_tx();
+        tx.set_code_authorizations.clear();
+        for nc in &mut tx.calls[0].nonce_changes {
+            nc.ordinal = 0;
+        }
+        let persistent = failed_transaction_persistent_changes(&tx);
+        assert_eq!(persistent.nonce_changes.len(), 1);
+        assert_eq!(persistent.nonce_changes[0].address, AUTHORITY.to_vec());
+    }
+
+    #[test]
+    fn test_failed_tx_without_calls_has_no_persistent_changes() {
+        let mut tx = make_failed_set_code_tx();
+        tx.calls.clear();
+        let persistent = failed_transaction_persistent_changes(&tx);
+        assert!(persistent.balance_changes.is_empty());
+        assert!(persistent.nonce_changes.is_empty());
+        assert!(persistent.code_changes.is_empty());
+    }
+
+    #[test]
+    fn test_failed_tx_mapped_with_persistent_state_changes_calls_and_gas_changes() {
+        let mut block = make_test_evm_block(300);
+        block.transaction_traces = vec![make_failed_set_code_tx()];
+        let block_bytes = prost::Message::encode_to_vec(&block);
+        let mut mapper = EvmBlockMapper::new(true, false, EncodeBytes::Hex, true);
+        mapper
+            .map_block(&block_bytes, &BlockIdentity::default(), None)
+            .unwrap();
+        let batches = mapper.flush().unwrap();
+
+        assert_eq!(batches["transactions"].num_rows(), 1);
+        assert_eq!(
+            get_string_value(&batches["transactions"], "status", 0),
+            "REVERTED"
+        );
+        assert_eq!(batches["logs"].num_rows(), 0);
+        // Calls and gas changes are execution traces: all of them are kept.
+        assert_eq!(batches["calls"].num_rows(), 2);
+        assert_eq!(ordinals(&batches["gas_changes"]), vec![601, 611]);
+        // State changes: only the persistent subset.
+        assert_eq!(
+            ordinals(&batches["balance_changes"]),
+            vec![101, 103, 104, 105]
+        );
+        assert_eq!(ordinals(&batches["nonce_changes"]), vec![202, 201]);
+        assert_eq!(ordinals(&batches["code_changes"]), vec![301]);
+        assert_eq!(batches["storage_changes"].num_rows(), 0);
+        assert_eq!(batches["account_creations"].num_rows(), 0);
+    }
+
+    #[test]
+    fn test_failed_tx_dropped_when_excluded() {
+        let mut block = make_test_evm_block(301);
+        block.transaction_traces = vec![make_failed_set_code_tx()];
+        let block_bytes = prost::Message::encode_to_vec(&block);
+        let mut mapper = EvmBlockMapper::new(true, false, EncodeBytes::Hex, false);
+        mapper
+            .map_block(&block_bytes, &BlockIdentity::default(), None)
+            .unwrap();
+        let batches = mapper.flush().unwrap();
+
+        assert_eq!(batches["blocks"].num_rows(), 1);
+        for table in [
+            "transactions",
+            "logs",
+            "calls",
+            "balance_changes",
+            "nonce_changes",
+            "code_changes",
+            "storage_changes",
+            "gas_changes",
+            "account_creations",
+        ] {
+            assert_eq!(batches[table].num_rows(), 0, "{table} should be empty");
+        }
+    }
+
+    #[test]
+    fn test_successful_tx_keeps_all_state_changes() {
+        let mut block = make_test_evm_block(302);
+        let mut tx = make_failed_set_code_tx();
+        tx.status = eth::TransactionTraceStatus::Succeeded as i32;
+        block.transaction_traces = vec![tx];
+        let block_bytes = prost::Message::encode_to_vec(&block);
+        let mut mapper = EvmBlockMapper::new(true, false, EncodeBytes::Hex, true);
+        mapper
+            .map_block(&block_bytes, &BlockIdentity::default(), None)
+            .unwrap();
+        let batches = mapper.flush().unwrap();
+
+        assert_eq!(batches["balance_changes"].num_rows(), 6);
+        assert_eq!(batches["nonce_changes"].num_rows(), 5);
+        assert_eq!(batches["code_changes"].num_rows(), 3);
+        assert_eq!(batches["storage_changes"].num_rows(), 2);
+        assert_eq!(batches["account_creations"].num_rows(), 2);
+        assert_eq!(batches["gas_changes"].num_rows(), 2);
     }
 }
