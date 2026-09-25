@@ -132,3 +132,46 @@ roots stay excluded, nested aliases fail, explicit root aliases work, and an
 externally retargeted alias is detected before publication. Remote test support
 includes a crate-private injected-owner constructor for hermetic command tests;
 production acquisition still validates configured routing and conditional support.
+
+## Command ownership and maintenance compatibility
+
+Real merge, truncate and rollup acquire common ownership before listing or
+changing their selected data. Truncate dry runs and unconfirmed plans, merge dry
+runs, and verify protocol-only runs with no artifact output remain read-only.
+Rollup protects both source and output, including copy-only runs. Verify protects
+its source plus every default/explicit registry and report destination in one
+acquisition; details and failure tests are in
+[468-verify-ownership.md](468-verify-ownership.md).
+
+Every S3 bucket in a mutating command is held bucket-wide, even when the command
+selects a narrow prefix. This also means a public source bucket used by a
+copy/verification operation that publishes results must grant ownership-control
+writes. Unrelated prefixes in one bucket serialize. Different buckets can be
+held together; explicit cursor buckets are independent of output buckets and
+must all be acquired before ingestion reads the cursor. Ownership/control keys
+are reserved and ordinary mutation targets cannot name them. Truncate's recursive
+cleanup also preserves control directories.
+
+S3 merge now uses the common persistent owner, with its UUID recorded as the run
+identity. Its old local file lock is retained solely for recognizing/recovering
+local pre-upgrade journals under the common directory guard. The former remote
+TTL/takeover lock implementation has been removed. Automatic recovery refuses a
+remote legacy journal whose recorded lock is not the persistent owner key: the
+old timestamp cannot establish prior request quiescence. Preserve such journals
+and data for a separately reviewed provider-confirmed migration; this stage adds
+no bypass flag.
+
+Remote merge data PUT/DELETE operations make exactly one application attempt,
+even if a future caller accidentally supplies a larger retry bound. All mutating
+S3 clients also disable transport retries. Any operation error retains `Owned`;
+normal success alone releases the exact current owner. Conditional journal
+creation has no check-then-overwrite fallback. Read retries remain bounded. The
+single-attempt transport/cursor tests and their qualification limits are in
+[468-s3-mutation-attempts.md](468-s3-mutation-attempts.md).
+
+These guards do not make existing random-name output crash/replay safe. The old
+merge journal and its rollback/roll-forward behavior remain separate from the
+future all-table ingestion journal. In particular, a remote mutation can have
+completed after its acknowledgement was lost; neither an ordinary retry nor a
+process-stop assertion proves that a delayed request cannot reappear after
+recovery. No production S3 qualification or bucket writes were performed.

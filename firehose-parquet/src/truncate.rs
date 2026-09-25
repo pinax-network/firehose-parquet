@@ -6,9 +6,10 @@
 //! [`resolve_destructive_input_path`](crate::cli::resolve_destructive_input_path), so a missing
 //! local path is never turned into an `s3://$S3_BUCKET/...` prefix.
 
-use crate::artifacts::is_reserved_artifact_path;
+use crate::artifacts::{is_control_path, is_reserved_artifact_path};
 use crate::cli::{block_on_async, format_bytes, resolve_destructive_input_path, AwsConfig};
 use crate::config::{DAY_PARTITION_PREFIX, LEGACY_DAY_PARTITION_PREFIX};
+use crate::dataset_lock::{DatasetOwnership, MutationScope};
 use anyhow::{Context, Result};
 use object_store::ObjectStore;
 use std::collections::BTreeMap;
@@ -61,12 +62,24 @@ impl TruncateResult {
 pub fn run_truncate(config: &TruncateConfig) -> Result<TruncateResult> {
     let filters = PartitionFilters::parse(&config.partitions)?;
     let path = resolve_destructive_input_path(&config.path)?;
-
-    if path.starts_with("s3://") {
+    let ownership = if config.dry_run || !config.yes {
+        None
+    } else {
+        Some(DatasetOwnership::acquire_blocking(
+            "truncate",
+            vec![MutationScope::input(path.clone())?],
+            config.aws.as_ref(),
+        )?)
+    };
+    let result = if path.starts_with("s3://") {
         run_truncate_s3(config, &path, &filters)
     } else {
-        run_truncate_local(config, &path, &filters)
+        run_truncate_local(config, &path, &filters, ownership.as_ref())
+    }?;
+    if let Some(ownership) = ownership {
+        ownership.release_blocking()?;
     }
+    Ok(result)
 }
 
 // ---------------------------------------------------------------------------
@@ -289,6 +302,7 @@ fn run_truncate_local(
     config: &TruncateConfig,
     path: &str,
     filters: &PartitionFilters,
+    ownership: Option<&DatasetOwnership>,
 ) -> Result<TruncateResult> {
     let root = PathBuf::from(path);
     if !root.exists() {
@@ -332,6 +346,9 @@ fn run_truncate_local(
         return Ok(result);
     }
 
+    if let Some(ownership) = ownership {
+        ownership.revalidate_local_paths()?;
+    }
     for m in &matched {
         std::fs::remove_file(&m.location)
             .with_context(|| format!("deleting {}", m.location.display()))?;
@@ -382,6 +399,9 @@ fn collect_parquet_files_recursive(dir: &Path, out: &mut Vec<PathBuf>) -> Result
     for entry in std::fs::read_dir(dir)? {
         let entry = entry?;
         let path = entry.path();
+        if is_control_path(&path.to_string_lossy()) {
+            continue;
+        }
         if path.is_dir() {
             collect_parquet_files_recursive(&path, out)?;
         } else if is_parquet_file(&path) {
@@ -400,6 +420,9 @@ fn cleanup_empty_dirs(dir: &Path) -> Result<usize> {
     for entry in std::fs::read_dir(dir)? {
         let entry = entry?;
         let path = entry.path();
+        if is_control_path(&path.to_string_lossy()) {
+            continue;
+        }
         if path.is_dir() {
             removed += cleanup_empty_dirs(&path)?;
             // Check if now empty.
@@ -429,7 +452,7 @@ fn run_truncate_s3(
         .as_ref()
         .ok_or_else(|| anyhow::anyhow!("AWS config required for S3 paths"))?;
 
-    let client: Arc<dyn ObjectStore> = Arc::new(aws.build_s3_client(&bucket)?);
+    let client: Arc<dyn ObjectStore> = Arc::new(aws.build_s3_client_for_mutation(&bucket)?);
     truncate_s3(config, filters, &client, &bucket, &prefix)
 }
 
@@ -460,6 +483,7 @@ fn truncate_s3(
     let parquet_objects: Vec<_> = objects
         .into_iter()
         .filter(|obj| obj.location.as_ref().ends_with(".parquet"))
+        .filter(|obj| !is_control_path(obj.location.as_ref()))
         .collect();
 
     if parquet_objects.is_empty() {
