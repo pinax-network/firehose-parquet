@@ -9,6 +9,7 @@ lifecycle state; a local implementation or passing test alone is not closure.
 - [#567: compatible dependency security refresh](dependency-security-refresh.md)
 - [#469: durable cursor persistence](469-durable-cursor-saves.md)
 - [#506: NEAR qualification blocked by quota](506-near-qualification.md)
+- [#504: Beacon live mapping qualification](504-beacon-qualification.md)
 
 - [Backlog priorities and preserved work](backlog-roadmap.md)
 - [#468: proposed crash/replay recovery design](468-crash-recovery-design.md)
