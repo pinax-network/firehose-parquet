@@ -166,6 +166,19 @@ impl AcceptedFrontier {
     pub fn unresolved_events(&self) -> usize {
         self.received.len()
     }
+
+    pub fn require_fully_acknowledged(&self, checkpoint: &Checkpoint) -> Result<()> {
+        if !self.received.is_empty()
+            || self.base_ordinal != checkpoint.ordinal
+            || self.accepted_ordinal != checkpoint.ordinal
+            || self.assigned_ordinal != checkpoint.ordinal
+            || self.last_event != checkpoint.event
+            || self.routing != checkpoint.routing
+        {
+            bail!("request completion requires the exact fully acknowledged frontier with no unresolved envelopes");
+        }
+        Ok(())
+    }
 }
 fn fresh_digest() -> Sha256 {
     let mut hash = Sha256::new();

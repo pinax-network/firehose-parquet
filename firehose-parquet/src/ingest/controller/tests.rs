@@ -555,6 +555,170 @@ async fn a_borrowed_owner_allows_only_one_protocol_controller_until_drop() {
 }
 
 #[tokio::test]
+async fn completion_authority_before_mirror_recovers_and_same_bound_is_a_true_no_op() {
+    let root = tempfile::tempdir().unwrap();
+    let descriptor = actual_descriptor(root.path());
+    let mirror = Mirror::default();
+    let owner = LocalOwnership::acquire(&[root.path().into()]).unwrap();
+    initialize(root.path(), &owner, &descriptor).await;
+    let mut controller = open(root.path(), &owner, &mirror, &descriptor)
+        .await
+        .unwrap();
+    commit(&mut controller).await.unwrap();
+    let previous = controller.authority().checkpoint.clone();
+    let frontier = AcceptedFrontier::resume(&previous);
+    let injected = fail(Stage::CompletionAuthorityAdvanced);
+    assert!(controller
+        .complete_request(102, &frontier, true)
+        .await
+        .is_err());
+    drop(injected);
+    drop(controller);
+    assert_eq!(mirror.head.borrow().as_ref().unwrap().id, previous.id);
+    let mut controller = open(root.path(), &owner, &mirror, &descriptor)
+        .await
+        .unwrap();
+    assert_eq!(controller.authority().checkpoint.completed_stop, Some(102));
+    assert_eq!(
+        controller.authority().checkpoint.previous,
+        Some(previous.id)
+    );
+    assert!(controller.request_already_complete(102).unwrap());
+    assert!(!controller.request_already_complete(104).unwrap());
+    assert!(controller.request_already_complete(101).is_err());
+    let state_path = root.path().join(".fireparq-ingest/state.json");
+    let before = fs::read(&state_path).unwrap();
+    let frontier = AcceptedFrontier::resume(&controller.authority().checkpoint);
+    assert!(!controller
+        .complete_request(102, &frontier, true)
+        .await
+        .unwrap());
+    assert_eq!(fs::read(&state_path).unwrap(), before);
+    assert_rows(root.path());
+    assert_eq!(
+        mirror.head.borrow().as_ref().unwrap().id,
+        controller.authority().checkpoint.id
+    );
+
+    // Extend the request without changing the original stream/partition origin.
+    let mut frontier = AcceptedFrontier::resume(&controller.authority().checkpoint);
+    for number in [102, 103] {
+        let ordinal = frontier.receive(event(number, 1)).unwrap();
+        frontier
+            .accept(ordinal, routing(RoutingPolicy::DirectV1))
+            .unwrap();
+    }
+    let accepted = frontier.snapshot().unwrap().unwrap();
+    let batches = data()
+        .into_iter()
+        .map(|(table, batch)| {
+            (
+                table,
+                RecordBatch::try_new(
+                    batch.schema(),
+                    vec![
+                        Arc::new(UInt64Array::from(vec![102, 103])),
+                        batch.column(1).clone(),
+                    ],
+                )
+                .unwrap(),
+            )
+        })
+        .collect();
+    controller
+        .commit(
+            accepted.clone(),
+            batches,
+            BlockMetadata {
+                min_block_number: 102,
+                max_block_number: 103,
+                ..metadata()
+            },
+            Compression::Zstd,
+            ParquetFileMetadata::new(),
+        )
+        .await
+        .unwrap();
+    frontier.acknowledge(&accepted).unwrap();
+    assert!(controller
+        .complete_request(104, &frontier, true)
+        .await
+        .unwrap());
+    assert_eq!(controller.authority().checkpoint.ordinal, 4);
+    assert_eq!(controller.authority().descriptor.origin_start, 100);
+    assert_eq!(controller.authority().checkpoint.completed_stop, Some(104));
+    assert_eq!(data_files(root.path()).len(), 4);
+}
+
+#[tokio::test]
+async fn sparse_or_empty_clean_eof_never_invents_request_completion() {
+    let root = tempfile::tempdir().unwrap();
+    let descriptor = actual_descriptor(root.path());
+    let mirror = Mirror::default();
+    let owner = LocalOwnership::acquire(&[root.path().into()]).unwrap();
+    initialize(root.path(), &owner, &descriptor).await;
+    let mut controller = open(root.path(), &owner, &mirror, &descriptor)
+        .await
+        .unwrap();
+    let frontier = AcceptedFrontier::resume(&controller.authority().checkpoint);
+    assert!(controller
+        .complete_request(102, &frontier, true)
+        .await
+        .is_err());
+    drop(controller);
+    let mut controller = open(root.path(), &owner, &mirror, &descriptor)
+        .await
+        .unwrap();
+    commit(&mut controller).await.unwrap();
+    let frontier = AcceptedFrontier::resume(&controller.authority().checkpoint);
+    let error = controller
+        .complete_request(105, &frontier, true)
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("durable prefix is retained"));
+    drop(controller);
+    let controller = open(root.path(), &owner, &mirror, &descriptor)
+        .await
+        .unwrap();
+    assert_eq!(controller.authority().checkpoint.ordinal, 2);
+    assert_eq!(controller.authority().checkpoint.completed_stop, None);
+    assert_rows(root.path());
+}
+
+#[tokio::test]
+async fn unresolved_unacknowledged_or_interrupted_frontier_cannot_mark_a_bound_complete() {
+    let root = tempfile::tempdir().unwrap();
+    let descriptor = actual_descriptor(root.path());
+    let mirror = Mirror::default();
+    let owner = LocalOwnership::acquire(&[root.path().into()]).unwrap();
+    initialize(root.path(), &owner, &descriptor).await;
+    let mut controller = open(root.path(), &owner, &mirror, &descriptor)
+        .await
+        .unwrap();
+    commit(&mut controller).await.unwrap();
+    drop(controller);
+    for case in 0..3 {
+        let mut controller = open(root.path(), &owner, &mirror, &descriptor)
+            .await
+            .unwrap();
+        let mut frontier = AcceptedFrontier::resume(&controller.authority().checkpoint);
+        if case < 2 {
+            let ordinal = frontier.receive(event(102, 1)).unwrap();
+            if case == 1 {
+                frontier
+                    .accept(ordinal, routing(RoutingPolicy::DirectV1))
+                    .unwrap();
+            }
+        }
+        assert!(controller
+            .complete_request(102, &frontier, case != 2)
+            .await
+            .is_err());
+        assert_eq!(controller.authority().checkpoint.completed_stop, None);
+    }
+}
+
+#[tokio::test]
 async fn remote_conditional_publication_and_rollback_obey_same_all_table_boundary() {
     for stage in [Stage::Published(0), Stage::CommittedPersisted] {
         let backend = Arc::new(InMemory::new());

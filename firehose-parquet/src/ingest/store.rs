@@ -179,6 +179,38 @@ impl<'a> TransactionStateStore<'a> {
         })
     }
 
+    /// Only the uniquely permitted controller calls this after proving clean
+    /// stream completion and an exact fully acknowledged boundary. There are
+    /// no data mutations in this transition, so the one authority CAS is enough.
+    pub async fn complete_request(
+        &self,
+        authority: &Versioned<AuthorityState>,
+        stop: u64,
+    ) -> Result<Versioned<AuthorityState>> {
+        let observed = self.load().await?;
+        if observed.pending.is_some() {
+            bail!("cannot complete a request while an ingestion journal remains");
+        }
+        if observed.authority.as_ref().map(|state| &state.version) != Some(&authority.version) {
+            bail!("authority changed before request completion");
+        }
+        let checkpoint = authority
+            .payload
+            .checkpoint
+            .complete_request(&authority.payload.descriptor, stop)?;
+        let next = AuthorityState {
+            descriptor: authority.payload.descriptor.clone(),
+            checkpoint,
+        };
+        let version = self
+            .replace(ControlKey::State, &authority.version, &next)
+            .await?;
+        Ok(Versioned {
+            version,
+            payload: next,
+        })
+    }
+
     /// Only after verified rollback (Writing) or verified roll-forward + mirror
     /// reconciliation (Committed). Version checks cannot prove physical cleanup.
     pub async fn clear(

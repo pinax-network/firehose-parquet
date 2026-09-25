@@ -7,6 +7,7 @@ use arrow::record_batch::RecordBatch;
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 
+use super::frontier::AcceptedFrontier;
 use super::parts::{writer_plan, TransactionParts};
 use super::state::{
     AcceptedPrefix, AuthorityState, Digest, PartCompression, PartReceipt, PartitionPolicy,
@@ -95,6 +96,42 @@ impl<'a, M: MirrorAction> TransactionController<'a, M> {
 
     pub fn authority(&self) -> &AuthorityState {
         &self.authority.payload
+    }
+
+    pub fn request_already_complete(&self, stop: u64) -> Result<bool> {
+        if let Some(completed) = self.authority.payload.checkpoint.completed_stop {
+            if stop < completed {
+                bail!("requested stop rewinds an already completed output; use a new root for a shorter range");
+            }
+            return Ok(stop == completed);
+        }
+        Ok(false)
+    }
+
+    pub async fn complete_request(
+        &mut self,
+        stop: u64,
+        frontier: &AcceptedFrontier,
+        clean_stream_completed: bool,
+    ) -> Result<bool> {
+        if self.failed {
+            bail!("ingestion controller stopped after an unresolved operation; reopen through recovery");
+        }
+        self.failed = true;
+        if !clean_stream_completed {
+            bail!("interrupted or failed stream cannot prove bounded request completion");
+        }
+        frontier.require_fully_acknowledged(&self.authority.payload.checkpoint)?;
+        if self.request_already_complete(stop)? {
+            self.failed = false;
+            return Ok(false);
+        }
+        self.authority = self.states.complete_request(&self.authority, stop).await?;
+        checkpoint(Stage::CompletionAuthorityAdvanced)?;
+        self.mirror.reconcile(&self.authority.payload).await?;
+        checkpoint(Stage::CompletionMirrorReconciled)?;
+        self.failed = false;
+        Ok(true)
     }
 
     /// Own and retain the complete batch map through commit. Any error or
@@ -265,6 +302,8 @@ enum Stage {
     MirrorReconciled,
     PendingCleared,
     RollbackComplete,
+    CompletionAuthorityAdvanced,
+    CompletionMirrorReconciled,
 }
 fn checkpoint(stage: Stage) -> Result<()> {
     #[cfg(test)]

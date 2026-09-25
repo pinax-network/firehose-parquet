@@ -365,7 +365,10 @@ impl Checkpoint {
             bail!("checkpoint ordinal and accepted event disagree");
         }
         if (self.ordinal > 0 && self.previous.is_none())
-            || (self.ordinal == 0 && self.routing.anchor.is_some())
+            || (self.ordinal == 0
+                && (self.routing.anchor.is_some()
+                    || self.previous.is_some()
+                    || self.completed_stop.is_some()))
         {
             bail!("checkpoint lacks a predecessor or gives an empty prefix a routing anchor");
         }
@@ -422,6 +425,26 @@ impl Checkpoint {
             routing: prefix.routing.clone(),
             completed_stop: self.completed_stop,
         };
+        next.id = next.identity(&descriptor.id()?)?;
+        next.validate(descriptor)?;
+        Ok(next)
+    }
+
+    pub fn complete_request(&self, descriptor: &StreamDescriptor, stop: u64) -> Result<Self> {
+        self.validate(descriptor)?;
+        if stop <= descriptor.origin_start {
+            bail!("completed stop must follow the stream's original start");
+        }
+        if self.completed_stop.is_some_and(|previous| stop <= previous) {
+            bail!("completion must extend the previous completed bound; repeat detection is a separate no-op check");
+        }
+        let event=self.event.as_ref().context("no accepted boundary event proves completion; choose a range with an observed final requested block")?;
+        if event.block_num < stop - 1 {
+            bail!("accepted block {} does not prove requested stop {}; the durable prefix is retained, but sparse/empty EOF cannot establish completion; use a bound ending at an observed block",event.block_num,stop);
+        }
+        let mut next = self.clone();
+        next.previous = Some(self.id.clone());
+        next.completed_stop = Some(stop);
         next.id = next.identity(&descriptor.id()?)?;
         next.validate(descriptor)?;
         Ok(next)

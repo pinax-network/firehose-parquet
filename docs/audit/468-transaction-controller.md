@@ -6,6 +6,19 @@ the real protected cursor mirror, received-envelope/routing integration, bounded
 completion and protected maintenance behavior remain required before enabling
 the complete path or declaring issue 468 satisfied.
 
+Bounded completion is now a separate authority-only transition. It requires a
+clean stream result, the exact fully acknowledged frontier with no received or
+accepted-but-uncommitted envelopes, and an accepted last event at the final
+requested block or beyond. Rows and a clean sparse/empty EOF are insufficient.
+An unproven tail retains the durable accepted prefix and returns a diagnostic
+requesting an observed ending bound. The completed stop may only extend; the same
+bound is a true no-op and a shorter bound requires a new output. Completion
+changes neither the accepted ordinal nor original partition origin. A crash
+after authority but before mirror is repaired from that authority on reopen.
+The focused suite now passes 37 tests and one exercised child-helper ignore,
+including no-op byte preservation, extended-stop append and rejection of empty,
+sparse, unresolved, unacknowledged or interrupted completion evidence.
+
 `ingest/controller.rs` owns a flush's entire batch map until all-table commit. It
 builds the complete sorted inventory from the authoritative descriptor, checks
 every batch/schema/partition and planned destination before writing, and refuses
