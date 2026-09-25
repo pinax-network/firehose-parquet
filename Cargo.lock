@@ -485,6 +485,7 @@ dependencies = [
  "prometheus-client",
  "prost",
  "prost-types",
+ "serde",
  "serde_json",
  "sha2",
  "solana-vote-interface",
