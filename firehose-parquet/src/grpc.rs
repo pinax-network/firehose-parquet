@@ -1026,7 +1026,7 @@ mod tests {
             let mut handled = 0;
             let result = tokio::time::timeout(
                 Duration::from_secs(5),
-                client.stream_blocks(None, |_, _, _, _, _| {
+                client.stream_blocks(None, &CancellationToken::new(), |_, _, _, _, _| {
                     handled += 1;
                     std::fs::write(&cursor, b"advanced checkpoint")?;
                     std::fs::write(dir.path().join("published.parquet"), b"published")?;
