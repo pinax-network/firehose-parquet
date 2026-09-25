@@ -930,16 +930,23 @@ fn restore_sparse_routing_cursor_anchor(
     }
 }
 
-fn update_timestamp_backfill_metrics(
+fn update_bootstrap_buffer_metrics(
     pipeline_metrics: &metrics::PipelineMetrics,
-    timestamp_backfill: &TimestampBackfill,
+    buffered: &[BufferedBootstrapBlock],
 ) {
     pipeline_metrics
-        .backfill_buffer_estimated_bytes
-        .set(i64::try_from(timestamp_backfill.buffered_bytes()).unwrap_or(i64::MAX));
+        .bootstrap_buffered_bytes
+        .set(buffered.iter().fold(0_i64, |sum, block| {
+            sum.saturating_add(i64::try_from(block.block_bytes.len()).unwrap_or(i64::MAX))
+        }));
     pipeline_metrics
-        .backfill_buffered_blocks
-        .set(i64::try_from(timestamp_backfill.buffered_blocks_len()).unwrap_or(i64::MAX));
+        .bootstrap_buffered_blocks
+        .set(i64::try_from(buffered.len()).unwrap_or(i64::MAX));
+}
+
+fn update_mapper_buffer_metrics(metrics: &metrics::PipelineMetrics, mapper: &mut dyn BlockMapper) {
+    let rows = mapper.total_rows();
+    metrics.record_mapper_buffer(rows, mapper.estimated_bytes());
 }
 
 fn should_emit_progress_log(counter: u64) -> bool {
@@ -4983,6 +4990,14 @@ async fn run_ingestion(args: &BuildArgs, global: &GlobalArgs) -> Result<()> {
 
     // Initialize Prometheus metrics if --metrics-port is set.
     let (mut metrics_registry, pipeline_metrics) = metrics::init();
+    let _pipeline_activity = pipeline_metrics.begin_pipeline();
+    pipeline_metrics
+        .set_readiness_timeout(Duration::from_secs(args.common.metrics_stale_after_secs));
+    if let Some(cursor) = existing_cursor_state.as_ref() {
+        pipeline_metrics
+            .cursor_last_block_num
+            .set(i64::try_from(cursor.last_block_num).unwrap_or(i64::MAX));
+    }
 
     // Register the info metric with endpoint metadata labels.
     {
@@ -5054,7 +5069,11 @@ async fn run_ingestion(args: &BuildArgs, global: &GlobalArgs) -> Result<()> {
     // Spawn the metrics HTTP server if a port was provided.
     let metrics_registry = Arc::new(metrics_registry);
     if let Some(port) = config.metrics_port {
-        metrics::serve(Arc::clone(&metrics_registry), port);
+        metrics::serve(
+            Arc::clone(&metrics_registry),
+            pipeline_metrics.clone(),
+            port,
+        );
     }
 
     // Pass metrics to the gRPC client for reconnect tracking.
@@ -5095,7 +5114,6 @@ async fn run_ingestion(args: &BuildArgs, global: &GlobalArgs) -> Result<()> {
             &partition_config,
         );
     }
-    update_timestamp_backfill_metrics(&pipeline_metrics, &timestamp_backfill);
 
     let mut writer = if firehose_parquet::writer::is_s3_output(&config.output) {
         OutputWriter::new_s3(
@@ -5362,7 +5380,6 @@ async fn run_ingestion(args: &BuildArgs, global: &GlobalArgs) -> Result<()> {
                     identity,
                 }]
             };
-            update_timestamp_backfill_metrics(&pipeline_metrics, &timestamp_backfill);
             let current_anchor_timestamp = ready_solana_blocks
                 .last()
                 .map(|block| block.identity.timestamp)
@@ -5418,6 +5435,7 @@ async fn run_ingestion(args: &BuildArgs, global: &GlobalArgs) -> Result<()> {
                             fork_step: ready_solana_blocks[0].fork_step.clone(),
                             identity: ready_solana_blocks[0].identity.clone(),
                         });
+                        update_bootstrap_buffer_metrics(&pipeline_metrics, &buffered_bootstrap_blocks);
                         return Ok(());
                     }
                     GenesisTimestampBootstrapAction::Anchored {
@@ -5464,6 +5482,7 @@ async fn run_ingestion(args: &BuildArgs, global: &GlobalArgs) -> Result<()> {
                             "partition boundary detected, flushing mapper"
                         );
                         let batches = m.flush()?;
+                        update_mapper_buffer_metrics(&pipeline_metrics, m.as_mut());
                         let flushed_tables = batches.len();
                         let flushed_rows: usize = batches.values().map(|batch| batch.num_rows()).sum();
                         info!(
@@ -5521,7 +5540,9 @@ async fn run_ingestion(args: &BuildArgs, global: &GlobalArgs) -> Result<()> {
                 }
                 current_partition_key = new_partition_key;
 
-                transactions_processed += m.map_block(block_bytes, identity, fork_step)?;
+                let mapped = m.map_block(block_bytes, identity, fork_step);
+                update_mapper_buffer_metrics(&pipeline_metrics, m.as_mut());
+                transactions_processed += mapped?;
 
                 // Only count the block in the file metadata once it is mapped.
                 min_block = Some(min_block.map_or(block_number, |s: u64| s.min(block_number)));
@@ -5608,15 +5629,6 @@ async fn run_ingestion(args: &BuildArgs, global: &GlobalArgs) -> Result<()> {
                         ),
                     }
 
-                    // Update rolling throughput gauges.
-                    pipeline_metrics.blocks_per_second.set(blocks_per_sec);
-                    let bytes_per_sec = if elapsed_secs > 0.0 {
-                        bytes_read as f64 / elapsed_secs
-                    } else {
-                        0.0
-                    };
-                    pipeline_metrics.bytes_per_second.set(bytes_per_sec);
-                    pipeline_metrics.elapsed_seconds.set(elapsed_secs);
                 }
 
                 if let Some(flush_trigger) = next_mapper_flush_trigger(
@@ -5631,6 +5643,7 @@ async fn run_ingestion(args: &BuildArgs, global: &GlobalArgs) -> Result<()> {
                 ) {
                     let flush_trigger = flush_trigger.as_str();
                     let batches = m.flush()?;
+                    update_mapper_buffer_metrics(&pipeline_metrics, m.as_mut());
                     let flushed_tables = batches.len();
                     let flushed_rows: usize = batches.values().map(|batch| batch.num_rows()).sum();
                     info!(
@@ -5683,10 +5696,12 @@ async fn run_ingestion(args: &BuildArgs, global: &GlobalArgs) -> Result<()> {
                 Ok(())
             };
 
-            for buffered_block in take_anchored_bootstrap_blocks(
+            let anchored_blocks = take_anchored_bootstrap_blocks(
                 &mut buffered_bootstrap_blocks,
                 current_anchor_timestamp,
-            ) {
+            );
+            update_bootstrap_buffer_metrics(&pipeline_metrics, &buffered_bootstrap_blocks);
+            for buffered_block in anchored_blocks {
                 process_block(
                     &buffered_block.block_bytes,
                     &buffered_block.identity,
@@ -5747,16 +5762,17 @@ async fn run_ingestion(args: &BuildArgs, global: &GlobalArgs) -> Result<()> {
         );
     } else {
         let trailing_timestamp_backfill_blocks = timestamp_backfill.drain_open_span()?;
-        update_timestamp_backfill_metrics(&pipeline_metrics, &timestamp_backfill);
         if let Some(m) = mapper.as_mut() {
             for buffered_block in trailing_timestamp_backfill_blocks {
                 let block_number = buffered_block.identity.block_num;
                 let ts = buffered_block.identity.timestamp;
-                transactions_processed += m.map_block(
+                let mapped = m.map_block(
                     &buffered_block.block_bytes,
                     &buffered_block.identity,
                     buffered_block.fork_step.as_deref(),
-                )?;
+                );
+                update_mapper_buffer_metrics(&pipeline_metrics, m.as_mut());
+                transactions_processed += mapped?;
 
                 min_block = Some(min_block.map_or(block_number, |s: u64| s.min(block_number)));
                 max_block = Some(max_block.map_or(block_number, |s: u64| s.max(block_number)));
@@ -5782,6 +5798,7 @@ async fn run_ingestion(args: &BuildArgs, global: &GlobalArgs) -> Result<()> {
             }
             if m.max_table_rows() > 0 {
                 let batches = m.flush()?;
+                update_mapper_buffer_metrics(&pipeline_metrics, m.as_mut());
                 if !dry_run {
                     let metadata = BlockMetadata {
                         min_block_number: min_block.unwrap_or(0),

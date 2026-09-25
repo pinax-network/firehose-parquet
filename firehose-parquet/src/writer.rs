@@ -287,7 +287,6 @@ fn compression_ratio(compression: &Compression) -> f64 {
 struct TableBuffer {
     batch: RecordBatch,
     metadata: BlockMetadata,
-    partition_key: String,
 }
 
 /// Snapshot of validated data that still needs to be materialized.
@@ -525,7 +524,6 @@ impl OutputWriter {
                 TableBuffer {
                     batch: batch.clone(),
                     metadata: metadata.clone(),
-                    partition_key: self.inner.partition_suffix(table, metadata)?,
                 },
             );
         }
@@ -538,15 +536,13 @@ impl OutputWriter {
             return Ok(false);
         };
         let num_rows = buf.batch.num_rows();
-        let partition_key = buf.partition_key.clone();
         let (_, compressed_bytes) = self.inner.write_batch(table, &buf.batch, &buf.metadata)?;
         self.buffers.remove(table);
         if let Some(m) = &self.metrics {
-            use crate::metrics::{TableLabels, TablePartitionLabels};
+            use crate::metrics::TableLabels;
             m.files_written_total
-                .get_or_create(&TablePartitionLabels {
+                .get_or_create(&TableLabels {
                     table: table.to_string(),
-                    partition: partition_key,
                 })
                 .inc();
             m.file_bytes_total
@@ -1007,6 +1003,45 @@ mod tests {
             );
             assert_eq!(parquet_rows_in(&dir.path().join("blocks")), 2);
         }
+    }
+
+    #[test]
+    fn metrics_keep_one_file_series_across_partitions_and_reset_writer_buffers() {
+        let dir = tempfile::tempdir().unwrap();
+        let (registry, metrics) = crate::metrics::init();
+        let mut writer = OutputWriter::new(dir.path(), Partition::Minute, Compression::None, 0);
+        writer.set_metrics(metrics.clone());
+        for offset in 0..3 {
+            let timestamp = 1_705_320_000 + offset * 60;
+            let batch = partition_batch(vec![Some(501)], vec![Some(timestamp * 1000)]);
+            writer
+                .write_all(
+                    &HashMap::from([("blocks".into(), batch)]),
+                    &routed_metadata(Some(timestamp)),
+                )
+                .unwrap();
+            assert_eq!(metrics.buffer_estimated_bytes.get(), 0);
+            assert_eq!(
+                metrics
+                    .buffer_rows
+                    .get_or_create(&crate::metrics::TableLabels {
+                        table: "blocks".into()
+                    })
+                    .get(),
+                0
+            );
+        }
+        let mut encoded = String::new();
+        prometheus_client::encoding::text::encode(&mut encoded, &registry).unwrap();
+        let series = encoded
+            .lines()
+            .filter(|line| line.starts_with("firehose_parquet_files_written_total{"))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            series,
+            ["firehose_parquet_files_written_total{table=\"blocks\"} 3"]
+        );
+        assert!(!encoded.contains("partition="));
     }
 
     #[test]

@@ -230,6 +230,10 @@ pub struct CommonArgs {
     #[arg(long, env = "METRICS_PORT", hide_env_values = true)]
     pub metrics_port: Option<u16>,
 
+    /// Return /ready 503 after N seconds without a valid stream message
+    #[arg(long, env = "METRICS_STALE_AFTER_SECS", default_value = "120", value_parser = clap::value_parser!(u64).range(1..), hide_env_values = true)]
+    pub metrics_stale_after_secs: u64,
+
     /// Force a reconnect if no stream message is received for N seconds (0 disables)
     #[arg(
         long,
