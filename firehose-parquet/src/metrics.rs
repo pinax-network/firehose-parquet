@@ -75,6 +75,10 @@ pub struct PipelineMetrics {
 
     /// Number of times the cursor was persisted.
     pub cursor_saves_total: Counter,
+    /// Failed cursor persistence attempts, including failures recovered by retry.
+    pub cursor_save_failures_total: Counter,
+    /// Unix timestamp of the last successful save in this process, or zero.
+    pub cursor_last_success_timestamp_seconds: Gauge,
     /// Block number from the last saved cursor.
     pub cursor_last_block_num: Gauge,
 
@@ -108,6 +112,8 @@ impl PipelineMetrics {
             buffer_rows: Family::default(),
 
             cursor_saves_total: Counter::default(),
+            cursor_save_failures_total: Counter::default(),
+            cursor_last_success_timestamp_seconds: Gauge::default(),
             cursor_last_block_num: Gauge::default(),
 
             errors_total: Family::default(),
@@ -205,6 +211,16 @@ impl PipelineMetrics {
             "firehose_parquet_cursor_saves_total",
             "Number of times the cursor was persisted",
             metrics.cursor_saves_total.clone(),
+        );
+        registry.register(
+            "firehose_parquet_cursor_save_failures",
+            "Failed cursor persistence attempts, including failures recovered by retry",
+            metrics.cursor_save_failures_total.clone(),
+        );
+        registry.register(
+            "firehose_parquet_cursor_last_success_timestamp_seconds",
+            "Unix timestamp of the last successful cursor save in this process, or zero before the first save",
+            metrics.cursor_last_success_timestamp_seconds.clone(),
         );
         registry.register(
             "firehose_parquet_cursor_last_block_num",

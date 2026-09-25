@@ -292,7 +292,7 @@ fn flush_writer_on_exit(
     exit: StreamExit,
     writer: &mut OutputWriter,
     pipeline_metrics: &metrics::PipelineMetrics,
-    commit_cursor: impl FnOnce(),
+    commit_cursor: impl FnOnce() -> Result<()>,
 ) -> Result<bool> {
     if !exit.materializes_buffers() {
         return Ok(false);
@@ -322,7 +322,7 @@ fn flush_writer_on_exit(
             trigger: "shutdown".to_string(),
         })
         .inc();
-    commit_cursor();
+    commit_cursor()?;
     Ok(true)
 }
 
@@ -1131,18 +1131,12 @@ fn resolve_output_bytes_encoding(
     resolve_auto_encode_bytes(block_type, endpoint_info, tron_style_evm_profile)
 }
 
-/// Resolve the output directory, prepending `chain_name` when available.
-fn resolve_output(base: &PathBuf, endpoint_info: &Option<EndpointInfo>) -> PathBuf {
-    if let Some(ref ei) = endpoint_info {
-        if !ei.chain_name.is_empty() {
-            return base.join(&ei.chain_name);
-        }
-    }
-    base.clone()
-}
-
-fn read_optional_env(name: &str) -> Option<String> {
-    firehose_parquet::cli::read_credential_env(name)
+/// Resolve the output only after a successful metadata lookup. Neither a
+/// network alias nor a block family proves the endpoint's canonical suffix.
+fn resolve_output(base: &PathBuf, endpoint_info: &Option<EndpointInfo>) -> Result<PathBuf> {
+    let info = endpoint_info.as_ref().filter(|info| !info.chain_name.trim().is_empty())
+        .ok_or_else(|| anyhow!("EndpointInfo with a nonempty chain_name is required before resolving output and cursor paths"))?;
+    Ok(base.join(&info.chain_name))
 }
 
 async fn ensure_endpoint_available(
@@ -1369,8 +1363,8 @@ fn load_existing_cursor(
 async fn run_partitions_build(
     endpoint: &str,
     network: Option<&str>,
-    api_key_envvar: &str,
-    api_token_envvar: &str,
+    api_key_envvar: Option<&str>,
+    api_token_envvar: Option<&str>,
     start_block: Option<u64>,
     stop_block: Option<u64>,
     live: bool,
@@ -1426,10 +1420,12 @@ async fn run_partitions_build(
         aws.aws_secret_access_key.as_deref(),
     )?;
 
+    let credentials =
+        firehose_parquet::auth::resolve_credentials(endpoint, api_key_envvar, api_token_envvar)?;
     let base_config = Config {
         endpoint: endpoint.to_string(),
-        api_key: read_optional_env(api_key_envvar),
-        jwt_token: read_optional_env(api_token_envvar),
+        api_key: credentials.api_key,
+        jwt_token: credentials.jwt_token,
         start_block,
         stop_block,
         skip_missing_blocks,
@@ -1457,7 +1453,7 @@ async fn run_partitions_build(
 
     let info_client = FirehoseClient::new(base_config.clone())?;
     ensure_endpoint_available(&info_client, endpoint, network).await?;
-    let endpoint_info = info_client.info().await;
+    let endpoint_info = Some(info_client.info().await?);
     let chain = endpoint_info
         .as_ref()
         .map(|info| info.chain_name.clone())
@@ -4039,8 +4035,8 @@ async fn main() -> Result<()> {
                     let result = run_partitions_build(
                         &resolved_endpoint,
                         network.as_deref(),
-                        api_key_envvar,
-                        api_token_envvar,
+                        api_key_envvar.as_deref(),
+                        api_token_envvar.as_deref(),
                         *start_block,
                         *stop_block,
                         *live,
@@ -4672,11 +4668,11 @@ async fn run_ingestion(args: &BuildArgs, global: &GlobalArgs) -> Result<()> {
     // output directory, and feature capability logging.
     let mut client = FirehoseClient::new(config.clone())?;
     ensure_endpoint_available(&client, &config.endpoint, resolved_network_name.as_deref()).await?;
-    let endpoint_info = client.info().await;
+    let endpoint_info = Some(client.info().await?);
     debug!(endpoint_info = ?endpoint_info, "fetched endpoint metadata");
 
     // Use chain_name as a subdirectory under the output path.
-    config.output = resolve_output(&config.output, &endpoint_info);
+    config.output = resolve_output(&config.output, &endpoint_info)?;
 
     let cursor_location = resolve_cursor_location(&config)?;
     let existing_cursor_state =
@@ -5318,13 +5314,7 @@ async fn run_ingestion(args: &BuildArgs, global: &GlobalArgs) -> Result<()> {
                                     state.updated_at = time::OffsetDateTime::now_utc()
                                         .format(&time::format_description::well_known::Rfc3339)
                                         .unwrap_or_default();
-                                    if let Err(e) = loc.save(&state) {
-                                        warn!(error = %e, "failed to save cursor.parquet");
-                                        pipeline_metrics.errors_total.get_or_create(&metrics::ErrorLabels { kind: "cursor_save".to_string() }).inc();
-                                    } else {
-                                        pipeline_metrics.cursor_saves_total.inc();
-                                        pipeline_metrics.cursor_last_block_num.set(last_block_num as i64);
-                                    }
+                                    loc.save_with_retry_blocking(&state, &pipeline_metrics, &shutdown)?;
                                 }
                             }
                         } else {
@@ -5485,13 +5475,7 @@ async fn run_ingestion(args: &BuildArgs, global: &GlobalArgs) -> Result<()> {
                                 state.updated_at = time::OffsetDateTime::now_utc()
                                     .format(&time::format_description::well_known::Rfc3339)
                                     .unwrap_or_default();
-                                if let Err(e) = loc.save(&state) {
-                                    warn!(error = %e, "failed to save cursor.parquet");
-                                    pipeline_metrics.errors_total.get_or_create(&metrics::ErrorLabels { kind: "cursor_save".to_string() }).inc();
-                                } else {
-                                    pipeline_metrics.cursor_saves_total.inc();
-                                    pipeline_metrics.cursor_last_block_num.set(last_block_num as i64);
-                                }
+                                loc.save_with_retry_blocking(&state, &pipeline_metrics, &shutdown)?;
                             }
                         }
                     } else {
@@ -5637,21 +5621,9 @@ async fn run_ingestion(args: &BuildArgs, global: &GlobalArgs) -> Result<()> {
                 state.updated_at = time::OffsetDateTime::now_utc()
                     .format(&time::format_description::well_known::Rfc3339)
                     .unwrap_or_default();
-                if let Err(e) = loc.save(&state) {
-                    warn!(error = %e, "failed to save cursor.parquet");
-                    pipeline_metrics
-                        .errors_total
-                        .get_or_create(&metrics::ErrorLabels {
-                            kind: "cursor_save".to_string(),
-                        })
-                        .inc();
-                } else {
-                    pipeline_metrics.cursor_saves_total.inc();
-                    pipeline_metrics
-                        .cursor_last_block_num
-                        .set(last_block_num as i64);
-                }
+                loc.save_with_retry_blocking(&state, &pipeline_metrics, &shutdown)?;
             }
+            Ok(())
         })?;
     }
 
@@ -5876,13 +5848,11 @@ mod tests {
         assert_eq!(exit, StreamExit::Failed);
 
         let save_cursor = || {
-            cursor_location
-                .save(&CursorState {
-                    cursor: "cursor-at-block-200".to_string(),
-                    last_block_num: 200,
-                    ..CursorState::default()
-                })
-                .unwrap();
+            cursor_location.save(&CursorState {
+                cursor: "cursor-at-block-200".to_string(),
+                last_block_num: 200,
+                ..CursorState::default()
+            })
         };
         let committed =
             flush_writer_on_exit(exit, &mut writer, &pipeline_metrics, save_cursor).unwrap();
@@ -5908,6 +5878,42 @@ mod tests {
         assert!(committed);
         assert!(cursor_path.exists());
         assert!(output.join("logs").is_dir());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn test_final_cursor_failure_is_not_a_successful_completion() {
+        let dir = make_temp_output_dir();
+        let mut writer = OutputWriter::new(&dir, Partition::None, Compression::None, u64::MAX);
+        let metadata = BlockMetadata {
+            min_block_number: 100,
+            max_block_number: 200,
+            min_timestamp: Some(1705320000),
+            max_timestamp: Some(1705320000),
+        };
+        writer.write_all(&make_test_batches(), &metadata).unwrap();
+        let invalid_parent = dir.join("not-a-directory");
+        std::fs::write(&invalid_parent, b"file").unwrap();
+        let location = CursorLocation::Local(invalid_parent.join("cursor.parquet"));
+        let (_, metrics) = metrics::init();
+        let error = flush_writer_on_exit(StreamExit::Completed, &mut writer, &metrics, || {
+            location.save_with_retry_blocking(
+                &CursorState {
+                    last_block_num: 200,
+                    ..CursorState::default()
+                },
+                &metrics,
+                &AtomicBool::new(false),
+            )
+        })
+        .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("cursor persistence failed after 3 attempts"));
+        assert_eq!(StreamExit::from_result(&Err(error)), StreamExit::Failed);
+        assert_eq!(metrics.cursor_save_failures_total.get(), 3);
+        assert_eq!(metrics.cursor_saves_total.get(), 0);
+        assert_eq!(metrics.cursor_last_success_timestamp_seconds.get(), 0);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -7424,13 +7430,16 @@ mod tests {
             block_id_encoding: 0,
             block_features: vec![],
         });
-        assert_eq!(resolve_output(&base, &ei), PathBuf::from("./mainnet"));
+        assert_eq!(
+            resolve_output(&base, &ei).unwrap(),
+            PathBuf::from("./mainnet")
+        );
     }
 
     #[test]
     fn test_resolve_output_without_endpoint_info() {
         let base = PathBuf::from(".");
-        assert_eq!(resolve_output(&base, &None), PathBuf::from("."));
+        assert!(resolve_output(&base, &None).is_err());
     }
 
     #[test]
@@ -7444,7 +7453,7 @@ mod tests {
             block_id_encoding: 0,
             block_features: vec![],
         });
-        assert_eq!(resolve_output(&base, &ei), PathBuf::from("."));
+        assert!(resolve_output(&base, &ei).is_err());
     }
 
     #[test]

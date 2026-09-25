@@ -113,21 +113,40 @@ cargo build --release --workspace
 
 ### Authentication
 
-For the standard workflow, export one of the default auth environment variables
-before running `fireparq`:
+Credentials are selected from the **resolved endpoint host**, including any
+`--endpoint`, `ENDPOINT`, or `FIREHOSE_ENDPOINT_*` override. The same rules apply
+to `build` and `partitions build`:
+
+| Destination | API key environment variables, in priority order | Bearer token environment variables, in priority order |
+|---|---|---|
+| Built-in Pinax host over HTTPS on port 443 | `PINAX_API_KEY`, then `SUBSTREAMS_API_KEY` | `PINAX_API_TOKEN`, then `SUBSTREAMS_API_TOKEN` |
+| Built-in StreamingFast host over HTTPS on port 443 | `STREAMINGFAST_API_KEY` | `STREAMINGFAST_API_TOKEN` |
+| Other host, port, or plaintext connection | No automatic credentials | No automatic credentials |
 
 ```bash
-export SUBSTREAMS_API_KEY=your-api-key
-# or
-export SUBSTREAMS_API_TOKEN=your-jwt-token
+export PINAX_API_KEY=your-pinax-api-key
+# For near-mainnet, near-testnet, tron, or tron-evm:
+export STREAMINGFAST_API_TOKEN=your-streamingfast-compatible-token
 ```
 
-You only need `--api-key-envvar` or `--api-token-envvar` when your deployment
-stores credentials under different environment variable names.
+`SUBSTREAMS_API_KEY` and `SUBSTREAMS_API_TOKEN` are legacy **Pinax-only**
+fallbacks. If you previously used `SUBSTREAMS_API_TOKEN` with StreamingFast,
+move that token to `STREAMINGFAST_API_TOKEN` or explicitly select it with
+`--api-token-envvar SUBSTREAMS_API_TOKEN` for that endpoint.
 
+For a custom endpoint, explicitly select the credential names with
+`--api-key-envvar` / `--api-token-envvar` (or `API_KEY_ENVVAR` /
+`API_TOKEN_ENVVAR`). An explicit selector authorizes that credential for the
+chosen destination and overrides automatic selection for that header. If the
+selected variable is unset or blank, that header is omitted; it does not fall
+back to another variable. The other header still follows its own selection
+rules. Only explicitly select a credential for a destination you intend it to reach.
+
+Startup logs identify the destination host, provider, and names of credential
+variables selected for transmission (`none` when absent), never their values.
 Surrounding whitespace is trimmed, so a key mounted from a secret file with a
-trailing newline works. A credential that still contains characters a gRPC
-header cannot carry (control characters or line breaks inside the value)
+trailing newline works. A selected credential that still contains characters a
+gRPC header cannot carry (control characters or line breaks inside the value)
 fails at startup with an error.
 
 ### Docker
@@ -167,7 +186,7 @@ Examples:
 
 Provider hostnames do not always mirror the network name exactly. For example, `matic` resolves to the provider hostname `polygon.firehose.pinax.network`. Run `fireparq build --help` to list every built-in name.
 
-Aliases use the Pinax endpoint that The Graph networks registry lists. `near-mainnet`, `near-testnet`, `tron`, and `tron-evm` use StreamingFast endpoints because Pinax no longer serves them; those need a credential StreamingFast accepts, such as a The Graph Market API token in `SUBSTREAMS_API_TOKEN`. See `docs/network-registry-integration.md` for the provider policy and the weekly endpoint check.
+Aliases use the Pinax endpoint that The Graph networks registry lists. `near-mainnet`, `near-testnet`, `tron`, and `tron-evm` use StreamingFast endpoints because Pinax no longer serves them; those need a credential StreamingFast accepts, such as a The Graph Market API token in `STREAMINGFAST_API_TOKEN`. See `docs/network-registry-integration.md` for the provider policy and the weekly endpoint check.
 
 Resolution precedence:
 
@@ -177,7 +196,9 @@ Resolution precedence:
 
 Per-network env overrides normalize network names by uppercasing and converting non-alphanumeric separators to underscores.
 
-Removed networks are rejected during argument parsing, and startup now fails early if the resolved endpoint is unavailable or unhealthy.
+Removed networks are rejected during argument parsing, and startup fails early if the resolved endpoint is unavailable or unhealthy.
+
+Both `build` and `partitions build` require EndpointInfo with a nonempty chain name before resolving output or cursor paths. Transient Info failures get three attempts with bounded backoff; exhausted retries, authentication errors, or unsupported Info stop startup. `--network`, `--block-type`, and `--cursor-override` do not bypass this requirement. This prevents a temporary metadata failure from changing the output root or hiding the existing cursor. Older servers must expose the Info RPC. See [the implementation record](docs/audit/467-endpoint-info.md) for retry limits and validation.
 
 ```bash
 # Built-in alias
@@ -260,6 +281,12 @@ Local cursor saves are atomic: the new cursor is written to a `.tmp` sibling
 (for example `cursor.parquet.tmp`) in the same directory, fsynced, and renamed
 over the old one, so a crash mid-save keeps the previous cursor.
 
+Cursor save failures pause ingestion and retry the same checkpoint up to three
+times, with 1 second and 2 second backoff. Exhausted retries, including a failed
+final checkpoint, exit nonzero. A shutdown during retry backoff also reports the
+durability failure. Local directory fsync errors count as failed saves. See
+[cursor persistence guarantees and metrics](docs/audit/469-durable-cursor-saves.md).
+
 ### Advanced Cursor Override
 
 When `--cursor-override` is set, the CLI request takes precedence over the
@@ -340,9 +367,9 @@ recovery knobs to dedicated advanced sections.
 
 ### Advanced authentication
 
-Most deployments should keep credentials in `SUBSTREAMS_API_KEY` or
-`SUBSTREAMS_API_TOKEN` and avoid extra CLI flags. Use these options only when
-your secret names differ from the defaults:
+Most deployments should use the provider-scoped variables in [Authentication](#authentication).
+For custom endpoints or different secret names, explicitly authorize a credential
+for the destination with:
 
 - `--api-key-envvar <API_KEY_ENVVAR>`
 - `--api-token-envvar <API_TOKEN_ENVVAR>`
@@ -858,7 +885,7 @@ Which files rollup reads, writes, and deletes:
 
 Consolidates multiple small part files within each partition directory into fewer, larger files. Unlike `rollup` (which changes partition granularity), `merge` keeps the same partition layout but reduces file count. Supports local paths and explicit S3 URIs.
 
-`merge` processes one table at a time and, within each table, one partition at a time. All parts in each partition are read into memory, sorted by `block_num`, and written back as new files respecting `--flush-bytes` and `--flush-rows`. Original parts are deleted after successful merge. Root artifacts (`cursor.parquet`, `partitions.parquet`, `merkle_roots.parquet`, and anything under `verify_runs/`) are skipped, so merging a network root is safe.
+`merge` processes one table at a time and, within each table, one partition at a time. It reads the parts of a partition one after another in file-name order and streams their rows into new files, starting a new file at `--flush-bytes` or `--flush-rows`. Rows keep the order of the parts they came from; they are not re-sorted, so when a partition holds parts from several writers, `block_num` is not necessarily ascending across the merged file. The original parts are deleted once the merged files are written. Root artifacts (`cursor.parquet`, `partitions.parquet`, `merkle_roots.parquet`, and anything under `verify_runs/`) are skipped, so merging a network root is safe.
 
 Parts are only merged when every part in the partition has the same columns: the same names, types, nullability, and order. Merge checks each part's footer before writing anything. A partition with mixed schemas, such as files from two tool versions or with `--without-extended` toggled, is left untouched and listed in the summary, and `merge` exits non-zero after processing the other partitions. `--dry-run` reports these partitions too.
 
@@ -888,7 +915,14 @@ The path must exist locally or be an explicit `s3://...` URI. Unlike `scan` and 
 | `--flush-rows` | disabled | Flush merged output after this many rows |
 | `--dry-run` | `false` | Show what would be merged without writing |
 
-> **Memory note:** Merge reads all parts in a partition at once. Ensure sufficient memory for the largest partition.
+> **Memory note:** Merge holds one source part at a time plus the output file being built (up to `--flush-bytes`). On S3, each source object is downloaded whole before it is read, so peak memory is roughly the largest part plus `--flush-bytes`.
+
+Interrupted merges are recovered, so a crash never leaves duplicate rows:
+
+- Each partition merge is recorded in a journal, `_fireparq_merge.json`, in the partition directory. The journal is created before any output is written. It is committed once every output is written, and removed after the original parts are deleted. Local outputs are written to a temporary file, fsynced, and renamed into place, so a partial file is never visible.
+- A merge that was interrupted (crash, `kill`, failed upload) is finished or undone by the next run before it does anything else. If the journal was committed, the remaining original parts are deleted. Otherwise the partial outputs are deleted, and the partition is merged again from its untouched original parts. The summary reports `Interrupted merges recovered`.
+- One merge runs per path at a time. `merge` holds `.fireparq-merge.lock` at the path and fails right away if another merge holds it. Locally this is an OS file lock, released when the process exits however it exits. On S3 it is a conditionally created lock object, refreshed while the run is active. A lock that has not been refreshed for 30 minutes is taken over by the next run. If the store has no conditional writes, merge warns and the lock is best effort.
+- A partition that a merge on an enclosing or nested path is working on is skipped and listed as `In use by another merge`.
 
 > **Metadata preservation:** Both `merge` and `rollup` preserve Parquet file-level metadata (`firehose-parquet.*` keys) from the source files into the output files.
 
@@ -1125,6 +1159,8 @@ Enable the metrics server with `--metrics-port <PORT>` (env: `METRICS_PORT`). A 
 | `firehose_parquet_buffer_estimated_bytes` | Gauge | `table` | Current in-memory buffer size |
 | `firehose_parquet_buffer_rows` | Gauge | `table` | Current buffered row count |
 | `firehose_parquet_cursor_saves_total` | Counter | — | Cursor persistence count |
+| `firehose_parquet_cursor_save_failures_total` | Counter | — | Failed cursor save attempts, including retries |
+| `firehose_parquet_cursor_last_success_timestamp_seconds` | Gauge | — | Unix time of the last successful cursor save in this process; 0 before the first save |
 | `firehose_parquet_cursor_last_block_num` | Gauge | — | Block number from last saved cursor |
 | `firehose_parquet_errors_total` | Counter | `kind` | Errors by category |
 | `firehose_parquet_grpc_reconnects_total` | Counter | — | gRPC stream reconnections |
@@ -1259,9 +1295,10 @@ Time-based partition directories (`year=`/`month=`/`day=`/`hour=`/…) and `date
 CLI flags can also be set via environment variables. Copy `.env.example` to `.env`:
 
 ```bash
-# Authentication — set the env vars that the CLI reads by default
-SUBSTREAMS_API_KEY=your-api-key-here
-SUBSTREAMS_API_TOKEN=your-jwt-token-here
+# Authentication — use credentials scoped to the destination provider
+PINAX_API_KEY=your-pinax-api-key-here
+# PINAX_API_TOKEN=your-pinax-jwt-token-here
+# STREAMINGFAST_API_TOKEN=your-streamingfast-compatible-token-here
 
 # Prometheus metrics (optional)
 # METRICS_PORT=9090

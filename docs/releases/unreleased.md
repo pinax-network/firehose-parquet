@@ -4,6 +4,34 @@ Changes merged since the last release. Fold this file into `docs/releases/vX.Y.Z
 
 ## Breaking changes
 
+### Startup requires usable EndpointInfo (#467)
+
+Ingestion now stops before output/cursor resolution if endpoint metadata cannot
+be obtained. Info retries transient failures three times with bounded backoff;
+authentication errors, unsupported Info and empty chain names fail promptly.
+Explicit network/block type/start bounds and cursor override do not bypass this
+requirement. Older servers must expose the Info RPC. This prevents transient
+failures from silently changing the output prefix and resume checkpoint.
+
+See [the process and validation record](../audit/467-endpoint-info.md).
+
+### Firehose credentials are scoped to the destination provider (#562)
+
+`build` and `partitions build` select credentials from the actual resolved host,
+after endpoint overrides. Known Pinax HTTPS hosts use `PINAX_API_KEY` /
+`PINAX_API_TOKEN`, with `SUBSTREAMS_API_KEY` / `SUBSTREAMS_API_TOKEN` as legacy
+Pinax-only fallbacks. Known StreamingFast HTTPS hosts use
+`STREAMINGFAST_API_KEY` / `STREAMINGFAST_API_TOKEN`. Automatic selection requires
+port 443. Unknown hosts, other ports, and plaintext endpoints receive no ambient
+credentials.
+
+Migration: move StreamingFast credentials out of `SUBSTREAMS_*` into
+`STREAMINGFAST_*`. For custom endpoints or custom secret names, explicitly choose
+`--api-key-envvar` / `--api-token-envvar` (also configurable through
+`API_KEY_ENVVAR` / `API_TOKEN_ENVVAR`). These selectors authorize the chosen
+credential for that endpoint; an unset/blank explicit variable omits its header.
+Startup logs show host and selected variable names, never secret values.
+
 ### Day-of-month partition directories are now `day=DD` instead of `date=DD` (#493)
 
 Time-based partitioning (`--partition date`, `hour`, `minute` and `second`) wrote the day of the month as `date=DD`, while every table also has a canonical `date` column (`Date32`). Hive-partition-aware readers treat the directory key as a column, so the two collided:
@@ -115,7 +143,7 @@ Migration:
 | `tron` | `tron.firehose.pinax.network` | `mainnet.tron.streamingfast.io` |
 | `tron-evm` | `tronevm.firehose.pinax.network` | `mainnet-evm.tron.streamingfast.io` |
 
-- These endpoints need a credential that StreamingFast accepts, such as a The Graph Market API token in `SUBSTREAMS_API_TOKEN`. Credentials are provider-specific: a token that works against Pinax can be rejected here with `invalid JWT token`, and `build` then keeps reconnecting (#472). Use `FIREHOSE_ENDPOINT_<ALIAS>` or `--endpoint` if you have another endpoint for these chains.
+- These endpoints need a credential that StreamingFast accepts, such as a The Graph Market API token in `STREAMINGFAST_API_TOKEN` (provider scoping: #562). Credentials are provider-specific: a token that works against Pinax can be rejected here with `invalid JWT token`; fatal authentication failures now stop the run (#472). Use `FIREHOSE_ENDPOINT_<ALIAS>` or `--endpoint` if you have another endpoint for these chains.
 - `cursor.parquet` records the endpoint, so resuming output written through the old Pinax endpoint fails with an `endpoint` cursor mismatch. Rerun with `--cursor-override` and an explicit `--start-block` just after the cursor's last block.
 
 **Added.** New Pinax networks in the registry: `arc`, `megaeth`, `robinhood`, `tempo`, `xlayer-mainnet`.
@@ -303,9 +331,15 @@ Rows of `access_lists` and `set_code_authorizations` follow their transaction: t
 - **`rollup` and `merge` leave root artifacts alone (#478).** `cursor.parquet`, `partitions.parquet`, `merkle_roots.parquet`, and anything under `verify_runs/` are skipped. Rolling up or merging a network root used to fold them into a `part-000001.parquet` and delete them, or fail on their mismatched schemas.
 - **`merge` and `rollup` no longer combine files with different schemas (#479).** Both commands paired columns by position. When a partition mixed files from two tool versions or two schemas, an extra column was silently dropped, and two columns of the same type in a different order swapped values. The sources were then deleted. Both commands now compare every file's columns (names, types, nullability, and order) before writing. A partition with mixed schemas is left untouched, with nothing written or deleted in it. The other partitions are still processed, and the command then exits non-zero, listing the skipped partitions and how their files differ. `merge` reads each part's footer before merging a partition, which adds one small range request per S3 object, and `merge --dry-run` reports these partitions too.
 
+- **An interrupted `merge` no longer leaves duplicate rows (#480).** A crash, a `kill`, or a failed upload between writing a partition's merged files and deleting its original parts used to leave both, and the next merge folded them into one file for good. Each partition merge is now journaled in `_fireparq_merge.json`, and the next run finishes or undoes an interrupted merge before doing anything else: it deletes the remaining original parts if the merge had committed, and otherwise it deletes the partial outputs and merges the partition again. Local outputs are written to a temporary file, fsynced, and renamed, so a partial Parquet file is never visible.
+- **Overlapping `merge` runs are refused (#480).** `merge` holds `.fireparq-merge.lock` at its path: an OS file lock locally, and a conditionally created object on S3 that is refreshed while the run is active and taken over after 30 minutes without a refresh. A second merge on the same path now fails right away, and a partition that a merge on an enclosing or nested path is working on is skipped. On an S3 store without conditional writes, merge warns and the lock is best effort.
+
 ## Performance
 
 - **Canonical identity columns are encoded once per block (#512).** `block_id` and `parent_id` used to be hex-decoded and re-encoded on every row of every table. Mappers now prepare them once per block and append the encoded values. The output is byte-identical. The canonical columns cost about 40 ns per row instead of 380 ns (binary), 830 ns (hex) or 3.1 µs (base58). Mapping a synthetic 1,000-transaction Solana block (base58) takes 19 ms instead of 43 ms, and a 200-transaction EVM block with 2,000 logs (hex) takes 3.7 ms instead of 6.0 ms.
+- **Hex and base58 columns no longer allocate a string per value (#514).** Byte columns encode into a reused buffer (`hex::encode_to_slice`, `bs58` into a `Vec`), and byte and canonical column builders keep their capacity across flushes. The output is byte-identical. A 32-byte hex value costs about 32 ns instead of 230 ns, and the 200-transaction EVM block (hex) now maps in 1.55 ms instead of 3.8 ms. Base58 is dominated by the encoding itself (about 1.3 µs per 32-byte value), so Solana mapping changes little.
+
+- **`verify` memory no longer grows with row count, and protocol-only runs skip hashing (#521).** Partition roots are built as rows stream in, with O(log n) memory per partition instead of 32 bytes per row. The roots are identical. `--checks protocol` reads only the columns the protocol checks use, and hashes nothing. S3 objects are prefetched, up to 4 at a time with a 256 MiB budget. On 300 EVM mainnet blocks, verifying `gas_changes` (9.0 million rows) peaks at 30 MiB instead of 940 MiB, in about the same time (14 s). A protocol-only run on `calls` (1.7 million rows) takes 0.2 s instead of 5.2 s.
 
 ## Tests
 

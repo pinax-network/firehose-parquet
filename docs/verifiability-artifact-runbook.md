@@ -225,6 +225,12 @@ Current recommendation:
 - Keep JSON as the primary machine-readable run artifact.
 - Add summary parquet only when multi-run fleet analytics require it.
 
+## Resource Use
+
+- **Memory does not grow with row count.** Each partition's Merkle root is built as rows stream in, keeping one 32-byte node per tree height (O(log n)), not one leaf per row. Verifying 9 million rows peaks at about 30 MiB of resident memory.
+- **Protocol-only runs do not hash.** With `--checks protocol` (no `roots`), `verify` reads only the columns the protocol checks use (for example `block_num` and `block_number` for EVM `transactions`, `logs` and `calls`). For tables without protocol checks it reads only file footers, and it never encodes or hashes rows.
+- **S3 reads are prefetched.** Objects are fetched up to 4 at a time, ahead of the scan and in listing order, with at most 256 MiB of object data held ahead of it. An object larger than that budget is fetched on its own. A protocol-only run on S3 still downloads each object whole: the column projection saves decoding and hashing, not transfer.
+
 ## S3 Operations Guidance
 
 ### Bucket Layout

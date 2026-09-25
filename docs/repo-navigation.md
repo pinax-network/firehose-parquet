@@ -4,6 +4,8 @@ This document is a tool-agnostic map of the `firehose-parquet` workspace: where 
 
 Related design docs:
 
+- `docs/audit/README.md`: issue-by-issue implementation process and validation records.
+
 - `docs/verifiability-hash-strategy.md`: cross-chain verify hash defaults, normalization rules, and onboarding path.
 - `docs/partition-vocabulary.md`: naming convention for partition-related CLI flags.
 - `docs/partitions-build-defaults.md`: inference and bounded-range rules for `fireparq partitions build`.
@@ -20,6 +22,7 @@ Related design docs:
   - `src/cli.rs`: shared CLI args (`CommonArgs`, `BuildArgs`), subcommands, parsing, validation, and utility routines.
   - `src/networks.rs`: built-in Firehose network alias registry and env override resolution.
   - `src/config.rs`: pipeline config model, partition key behavior, compression enum.
+  - `src/auth.rs`: credential selection by resolved provider host and explicit env-var selectors.
   - `src/grpc.rs`: Firehose stream client, auth headers, reconnect/backoff/timeouts.
   - `src/writer.rs`: Arrow builders to Parquet file writing, flush/rollover logic.
   - `src/cursor.rs`: resume state persistence (`cursor.parquet`) and parameter checks.

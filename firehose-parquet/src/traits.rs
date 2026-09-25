@@ -305,8 +305,11 @@ impl CanonicalBuilder {
         self.parent_id.append_encoded(&id.parent_id);
     }
 
+    /// Finish all columns. The builders are re-created with the capacity the
+    /// finished batch used, so the next batch of similar size does not regrow them.
     pub fn finish(&mut self) -> Vec<Arc<dyn arrow::array::Array>> {
-        vec![
+        let rows = self.len();
+        let columns: Vec<Arc<dyn arrow::array::Array>> = vec![
             Arc::new(self.block_num.finish()),
             self.block_id.finish(),
             Arc::new(self.parent_num.finish()),
@@ -314,7 +317,13 @@ impl CanonicalBuilder {
             Arc::new(self.lib_num.finish()),
             Arc::new(self.timestamp.finish()),
             Arc::new(self.date.finish()),
-        ]
+        ];
+        self.block_num = UInt64Builder::with_capacity(rows);
+        self.parent_num = UInt64Builder::with_capacity(rows);
+        self.lib_num = UInt64Builder::with_capacity(rows);
+        self.timestamp = TimestampMillisecondBuilder::with_capacity(rows).with_timezone("UTC");
+        self.date = Date32Builder::with_capacity(rows);
+        columns
     }
 
     pub fn len(&self) -> usize {

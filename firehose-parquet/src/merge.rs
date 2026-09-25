@@ -7,6 +7,10 @@
 use crate::artifacts::is_reserved_artifact_path;
 use crate::cli::{block_on_async, format_bytes, resolve_destructive_input_path, AwsConfig};
 use crate::config::Compression;
+use crate::merge_journal::{
+    crash_point, write_local_output, Journal, LocalPartition, LocalRunLock, PartitionFiles,
+    RunContext, S3Partition, S3RunLock, JOURNAL_FILE,
+};
 use crate::writer::s3_put_options;
 use anyhow::{Context, Result};
 use arrow::datatypes::{Field, Schema, SchemaRef};
@@ -174,6 +178,10 @@ pub struct MergeResult {
     /// Partitions left untouched because their parts have different schemas, each as
     /// `<partition>: <reason>`.
     pub schema_mismatches: Vec<String>,
+    /// Interrupted partition merges from earlier runs that were finished or undone first.
+    pub merges_recovered: usize,
+    /// Partitions another running merge was working on, left alone.
+    pub partitions_in_use: Vec<String>,
 }
 
 impl MergeResult {
@@ -188,6 +196,15 @@ impl MergeResult {
         let saved = self.bytes_before.saturating_sub(self.bytes_after);
         if saved > 0 {
             println!("  Space saved:        {}", format_bytes(saved));
+        }
+        if self.merges_recovered > 0 {
+            println!("  Interrupted merges recovered: {}", self.merges_recovered);
+        }
+        if !self.partitions_in_use.is_empty() {
+            println!(
+                "  In use by another merge: {}",
+                self.partitions_in_use.join(", ")
+            );
         }
         if !self.schema_mismatches.is_empty() {
             println!(
@@ -355,12 +372,97 @@ fn run_merge_local(config: &MergeConfig) -> Result<MergeResult> {
         );
     }
 
+    // A dry run changes nothing, so it takes no lock and only reports interrupted merges.
+    let lock = if config.dry_run {
+        None
+    } else {
+        Some(LocalRunLock::acquire(&root)?)
+    };
+    let run = RunContext {
+        run_id: new_run_id(),
+        lock: lock
+            .as_ref()
+            .map(LocalRunLock::location)
+            .unwrap_or_default(),
+    };
+
+    let mut result = MergeResult::default();
+    recover_local_merges(&root, lock.as_ref(), &mut result)?;
+    merge_local_partitions(&root, config, &run, &mut result)?;
+
+    if let Some(lock) = lock {
+        lock.release()?;
+    }
+    Ok(result)
+}
+
+/// A fresh id for one merge run, recorded in its journals and temporary file names.
+fn new_run_id() -> String {
+    uuid::Uuid::new_v4().simple().to_string()[..12].to_string()
+}
+
+fn local_partition_label(root: &Path, partition_dir: &Path) -> String {
+    let name = partition_dir
+        .strip_prefix(root)
+        .unwrap_or(partition_dir)
+        .to_string_lossy()
+        .to_string();
+    if name.is_empty() {
+        "(root)".to_string()
+    } else {
+        name
+    }
+}
+
+/// Finishes or undoes the partition merges that earlier runs left interrupted under `root`.
+///
+/// Journals whose run is still alive (a merge on an enclosing or nested directory) are left
+/// for that run. Without a lock (dry run), journals are only reported.
+fn recover_local_merges(
+    root: &Path,
+    lock: Option<&LocalRunLock>,
+    result: &mut MergeResult,
+) -> Result<()> {
+    let mut journals = Vec::new();
+    collect_named_files_recursive(root, JOURNAL_FILE, &mut journals)?;
+    journals.sort();
+    for journal_path in journals {
+        let dir = journal_path.parent().unwrap_or(root);
+        let label = local_partition_label(root, dir);
+        let partition = LocalPartition::new(dir);
+        let Some(journal) = partition.read_journal()? else {
+            continue;
+        };
+        let Some(lock) = lock else {
+            println!(
+                "  {label}: has an interrupted merge ({:?}); a real run recovers it first",
+                journal.state
+            );
+            continue;
+        };
+        if lock.owner_alive(&journal)? {
+            continue;
+        }
+        let recovery = crate::merge_journal::recover(&partition, &journal)?;
+        warn!(partition = label, run_id = journal.run_id, %recovery, "recovered an interrupted merge");
+        println!("  {label}: {recovery}");
+        result.merges_recovered += 1;
+    }
+    Ok(())
+}
+
+fn merge_local_partitions(
+    root: &Path,
+    config: &MergeConfig,
+    run: &RunContext,
+    result: &mut MergeResult,
+) -> Result<()> {
     // Group parquet files by their parent directory (partition). Reserved dataset artifacts
     // such as cursor.parquet are not table data and are never merged.
     let mut all_files: Vec<PathBuf> = Vec::new();
-    collect_parquet_files_recursive(&root, &mut all_files)?;
+    collect_parquet_files_recursive(root, &mut all_files)?;
     all_files.retain(|file| {
-        let rel = file.strip_prefix(&root).unwrap_or(file).to_string_lossy();
+        let rel = file.strip_prefix(root).unwrap_or(file).to_string_lossy();
         let reserved = is_reserved_artifact_path(&rel);
         if reserved {
             debug!(path = %file.display(), "skipping reserved dataset artifact");
@@ -371,10 +473,8 @@ fn run_merge_local(config: &MergeConfig) -> Result<MergeResult> {
 
     if all_files.is_empty() {
         info!("no parquet files found in {}", root.display());
-        return Ok(MergeResult::default());
+        return Ok(());
     }
-
-    let mut result = MergeResult::default();
 
     println!("Merging partitions in {} ...\n", root.display());
 
@@ -383,13 +483,13 @@ fn run_merge_local(config: &MergeConfig) -> Result<MergeResult> {
     let mut current_files: Vec<PathBuf> = Vec::new();
 
     for file in all_files {
-        let parent = file.parent().unwrap_or(&root).to_path_buf();
+        let parent = file.parent().unwrap_or(root).to_path_buf();
         match &current_partition {
             Some(partition) if partition == &parent => current_files.push(file),
             Some(_) => {
                 let partition = current_partition.take().expect("partition must exist");
-                print_local_table_header(&root, &partition, &mut current_table);
-                process_local_partition(&root, &partition, &current_files, config, &mut result)?;
+                print_local_table_header(root, &partition, &mut current_table);
+                process_local_partition(root, &partition, &current_files, config, run, result)?;
                 current_partition = Some(parent);
                 current_files = vec![file];
             }
@@ -401,11 +501,22 @@ fn run_merge_local(config: &MergeConfig) -> Result<MergeResult> {
     }
 
     if let Some(partition) = current_partition {
-        print_local_table_header(&root, &partition, &mut current_table);
-        process_local_partition(&root, &partition, &current_files, config, &mut result)?;
+        print_local_table_header(root, &partition, &mut current_table);
+        process_local_partition(root, &partition, &current_files, config, run, result)?;
     }
 
-    Ok(result)
+    Ok(())
+}
+
+/// Reports a partition that another running merge has claimed.
+fn record_partition_in_use(partition_label: &str, result: &mut MergeResult) {
+    warn!(
+        partition = partition_label,
+        "not merging partition: another merge is working on it"
+    );
+    println!("  {partition_label}: skipped; another merge is working on it");
+    result.partitions_skipped += 1;
+    result.partitions_in_use.push(partition_label.to_string());
 }
 
 fn process_local_partition(
@@ -413,18 +524,10 @@ fn process_local_partition(
     partition_dir: &Path,
     files: &[PathBuf],
     config: &MergeConfig,
+    run: &RunContext,
     result: &mut MergeResult,
 ) -> Result<()> {
-    let partition_name = partition_dir
-        .strip_prefix(root)
-        .unwrap_or(partition_dir)
-        .to_string_lossy()
-        .to_string();
-    let partition_label = if partition_name.is_empty() {
-        "(root)".to_string()
-    } else {
-        partition_name
-    };
+    let partition_label = local_partition_label(root, partition_dir);
 
     if files.len() <= 1 {
         result.partitions_skipped += 1;
@@ -484,11 +587,46 @@ fn process_local_partition(
         return Ok(());
     }
 
+    // Claim the partition with a journal before writing anything; see `merge_journal`.
+    let initial_part_num = max_part_number_in_local_files(files);
+    let partition = LocalPartition::new(partition_dir);
+    let journal = Journal::new(
+        run,
+        files.iter().map(|f| file_name_string(f)).collect(),
+        initial_part_num + 1,
+    );
+    if !partition.create_journal(&journal)? {
+        record_partition_in_use(&partition_label, result);
+        return Ok(());
+    }
+    // A merge that finished just before the claim may have replaced these parts.
+    if let Some(missing) = files.iter().find(|f| !f.exists()) {
+        partition.remove_journal()?;
+        println!(
+            "  {partition_label}: skipped; {} changed while the merge started",
+            missing.display()
+        );
+        result.partitions_skipped += 1;
+        return Ok(());
+    }
+
     let mut file_kv_metadata: Option<Vec<KeyValue>> = None;
     let mut writer_state: Option<StreamingPartWriter> = None;
     let mut written_files: Vec<PathBuf> = Vec::new();
     let mut output_bytes = 0u64;
-    let initial_part_num = max_part_number_in_local_files(files);
+    let mut write_part = |part_num: u32, buf: Vec<u8>, rows: usize| -> Result<()> {
+        let name = format!("part-{part_num:06}.parquet");
+        let path = write_local_output(partition_dir, &name, &buf, &run.run_id)?;
+        output_bytes += buf.len() as u64;
+        info!(
+            path = %path.display(),
+            rows,
+            bytes = buf.len(),
+            "wrote merged part"
+        );
+        written_files.push(path);
+        Ok(())
+    };
 
     for file_path in files {
         let file = std::fs::File::open(file_path)
@@ -522,49 +660,24 @@ fn process_local_partition(
             writer_state
                 .as_mut()
                 .expect("writer state must exist")
-                .write_batch(&batch, &mut |part_num, buf, rows| {
-                    let path = partition_dir.join(format!("part-{part_num:06}.parquet"));
-                    std::fs::write(&path, &buf)
-                        .with_context(|| format!("writing {}", path.display()))?;
-
-                    output_bytes += buf.len() as u64;
-                    info!(
-                        path = %path.display(),
-                        rows,
-                        bytes = buf.len(),
-                        "wrote merged part"
-                    );
-
-                    written_files.push(path);
-                    Ok(())
-                })?;
+                .write_batch(&batch, &mut write_part)?;
         }
     }
     result.files_read += files.len();
 
-    if writer_state.is_none() {
+    let Some(writer_state) = writer_state.as_mut() else {
+        // Every part was empty: nothing to write, and nothing was changed.
+        partition.remove_journal()?;
         result.partitions_skipped += 1;
         return Ok(());
-    }
+    };
+    writer_state.finish(&mut write_part)?;
 
-    writer_state
-        .as_mut()
-        .expect("writer state must exist")
-        .finish(&mut |part_num, buf, rows| {
-            let path = partition_dir.join(format!("part-{part_num:06}.parquet"));
-            std::fs::write(&path, &buf).with_context(|| format!("writing {}", path.display()))?;
-
-            output_bytes += buf.len() as u64;
-            info!(
-                path = %path.display(),
-                rows,
-                bytes = buf.len(),
-                "wrote merged part"
-            );
-
-            written_files.push(path);
-            Ok(())
-        })?;
+    partition.sync()?;
+    crash_point("after-outputs")?;
+    let outputs = written_files.iter().map(|f| file_name_string(f)).collect();
+    partition.replace_journal(&journal.committed(outputs))?;
+    crash_point("after-commit")?;
 
     result.bytes_after += output_bytes;
 
@@ -579,8 +692,12 @@ fn process_local_partition(
     for f in files {
         if !written_files.contains(f) {
             std::fs::remove_file(f).with_context(|| format!("deleting {}", f.display()))?;
+            crash_point("after-first-delete")?;
         }
     }
+    partition.sync()?;
+    partition.remove_journal()?;
+    partition.sync()?;
 
     result.files_written += written_files.len();
     result.partitions_merged += 1;
@@ -656,7 +773,24 @@ fn collect_parquet_files_recursive(dir: &Path, out: &mut Vec<PathBuf>) -> Result
     Ok(())
 }
 
-fn parse_part_number(filename: &str) -> Option<u32> {
+/// Recursively collect files named `name` under `dir`.
+fn collect_named_files_recursive(dir: &Path, name: &str, out: &mut Vec<PathBuf>) -> Result<()> {
+    if !dir.is_dir() {
+        return Ok(());
+    }
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.is_dir() {
+            collect_named_files_recursive(&path, name, out)?;
+        } else if path.file_name().is_some_and(|file_name| file_name == name) {
+            out.push(path);
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn parse_part_number(filename: &str) -> Option<u32> {
     filename
         .strip_prefix("part-")
         .and_then(|s| s.strip_suffix(".parquet"))
@@ -698,25 +832,112 @@ fn run_merge_s3(config: &MergeConfig) -> Result<MergeResult> {
     merge_s3(config, &client, &bucket, &prefix)
 }
 
+/// One S3 merge run: where it merges, its identity, and the lock it holds.
+struct S3Merge<'a> {
+    client: &'a Arc<dyn ObjectStore>,
+    bucket: &'a str,
+    prefix: &'a str,
+    run: RunContext,
+    /// `None` for a dry run.
+    lock: Option<S3RunLock>,
+}
+
 fn merge_s3(
     config: &MergeConfig,
     client: &Arc<dyn ObjectStore>,
     bucket: &str,
     prefix: &str,
 ) -> Result<MergeResult> {
-    use futures::TryStreamExt;
-
-    let list_prefix = if prefix.is_empty() {
+    let run_id = new_run_id();
+    // A dry run changes nothing, so it takes no lock and only reports interrupted merges.
+    let lock = if config.dry_run {
         None
     } else {
-        Some(object_store::path::Path::from(prefix))
+        Some(S3RunLock::acquire(client, bucket, prefix, &run_id)?)
+    };
+    let mut s3 = S3Merge {
+        client,
+        bucket,
+        prefix,
+        run: RunContext {
+            run_id,
+            lock: lock.as_ref().map(S3RunLock::location).unwrap_or_default(),
+        },
+        lock,
     };
 
-    let objects: Vec<object_store::ObjectMeta> =
-        block_on_async(async { client.list(list_prefix.as_ref()).try_collect().await })
-            .map_err(|e| anyhow::anyhow!("listing S3 objects: {e}"))?;
+    let mut result = MergeResult::default();
+    let outcome = recover_s3_merges(&mut s3, &mut result)
+        .and_then(|()| merge_s3_partitions(&mut s3, config, &mut result));
+    // Release the lock even after an error, so the next run need not wait for it to go stale;
+    // that run recovers this run's journals because it then holds the same lock.
+    if let Some(lock) = s3.lock.take() {
+        let released = lock.release();
+        outcome?;
+        released?;
+    } else {
+        outcome?;
+    }
+    Ok(result)
+}
 
-    let mut parquet_objects: Vec<_> = objects
+fn list_s3_objects(s3: &S3Merge<'_>) -> Result<Vec<object_store::ObjectMeta>> {
+    use futures::TryStreamExt;
+
+    let list_prefix = if s3.prefix.is_empty() {
+        None
+    } else {
+        Some(object_store::path::Path::from(s3.prefix))
+    };
+    block_on_async(async { s3.client.list(list_prefix.as_ref()).try_collect().await })
+        .map_err(|e| anyhow::anyhow!("listing S3 objects: {e}"))
+}
+
+/// Finishes or undoes the partition merges that earlier runs left interrupted under the prefix.
+fn recover_s3_merges(s3: &mut S3Merge<'_>, result: &mut MergeResult) -> Result<()> {
+    let objects = list_s3_objects(s3)?;
+    for obj in &objects {
+        if obj.location.filename() != Some(JOURNAL_FILE) {
+            continue;
+        }
+        let key = obj.location.as_ref();
+        let partition_key = key.rsplit_once('/').map(|(dir, _)| dir).unwrap_or("");
+        let label = relative_s3_key(s3.prefix, partition_key);
+        let label = if label.is_empty() { "(root)" } else { label };
+        let partition = S3Partition {
+            client: s3.client,
+            bucket: s3.bucket,
+            key: partition_key,
+        };
+        let Some(journal) = partition.read_journal()? else {
+            continue;
+        };
+        let Some(lock) = s3.lock.as_mut() else {
+            println!(
+                "  {label}: has an interrupted merge ({:?}); a real run recovers it first",
+                journal.state
+            );
+            continue;
+        };
+        if lock.owner_alive(&journal)? {
+            continue;
+        }
+        lock.refresh()?;
+        let recovery = crate::merge_journal::recover(&partition, &journal)?;
+        warn!(partition = label, run_id = journal.run_id, %recovery, "recovered an interrupted merge");
+        println!("  {label}: {recovery}");
+        result.merges_recovered += 1;
+    }
+    Ok(())
+}
+
+fn merge_s3_partitions(
+    s3: &mut S3Merge<'_>,
+    config: &MergeConfig,
+    result: &mut MergeResult,
+) -> Result<()> {
+    let prefix = s3.prefix;
+    let mut parquet_objects: Vec<_> = list_s3_objects(s3)?
         .into_iter()
         .filter(|obj| obj.location.as_ref().ends_with(".parquet"))
         .filter(|obj| {
@@ -732,10 +953,8 @@ fn merge_s3(
 
     if parquet_objects.is_empty() {
         info!("no parquet files found in {}", config.path);
-        return Ok(MergeResult::default());
+        return Ok(());
     }
-
-    let mut result = MergeResult::default();
 
     println!("Merging partitions in {} ...\n", config.path);
 
@@ -755,15 +974,7 @@ fn merge_s3(
             Some(_) => {
                 let partition = current_partition.take().expect("partition must exist");
                 print_s3_table_header(prefix, &partition, &mut current_table);
-                process_s3_partition(
-                    bucket,
-                    prefix,
-                    &partition,
-                    &current_objects,
-                    client,
-                    config,
-                    &mut result,
-                )?;
+                process_s3_partition(s3, &partition, &current_objects, config, result)?;
                 current_partition = Some(parent);
                 current_objects = vec![obj];
             }
@@ -776,29 +987,20 @@ fn merge_s3(
 
     if let Some(partition) = current_partition {
         print_s3_table_header(prefix, &partition, &mut current_table);
-        process_s3_partition(
-            bucket,
-            prefix,
-            &partition,
-            &current_objects,
-            client,
-            config,
-            &mut result,
-        )?;
+        process_s3_partition(s3, &partition, &current_objects, config, result)?;
     }
 
-    Ok(result)
+    Ok(())
 }
 
 fn process_s3_partition(
-    bucket: &str,
-    prefix: &str,
+    s3: &mut S3Merge<'_>,
     partition_key: &str,
     objects: &[object_store::ObjectMeta],
-    client: &Arc<dyn ObjectStore>,
     config: &MergeConfig,
     result: &mut MergeResult,
 ) -> Result<()> {
+    let (client, bucket, prefix) = (s3.client, s3.bucket, s3.prefix);
     let partition_label = partition_key
         .strip_prefix(prefix)
         .map(|s| s.trim_start_matches('/'))
@@ -888,11 +1090,61 @@ fn process_s3_partition(
         return Ok(());
     }
 
+    // Claim the partition with a journal before writing anything; see `merge_journal`.
+    let initial_part_num = max_part_number_in_s3_objects(objects);
+    if let Some(lock) = s3.lock.as_mut() {
+        lock.refresh()?;
+    }
+    let partition = S3Partition {
+        client,
+        bucket,
+        key: partition_key,
+    };
+    let journal = Journal::new(
+        &s3.run,
+        objects
+            .iter()
+            .filter_map(|obj| obj.location.filename().map(str::to_string))
+            .collect(),
+        initial_part_num + 1,
+    );
+    if !partition.create_journal(&journal)? {
+        record_partition_in_use(partition_label, result);
+        return Ok(());
+    }
+
     let mut file_kv_metadata: Option<Vec<KeyValue>> = None;
     let mut writer_state: Option<StreamingPartWriter> = None;
-    let mut files_written = 0usize;
+    let mut output_names: Vec<String> = Vec::new();
     let mut output_bytes = 0u64;
-    let initial_part_num = max_part_number_in_s3_objects(objects);
+    let mut write_part = |part_num: u32, buf: Vec<u8>, _rows: usize| -> Result<()> {
+        let name = format!("part-{part_num:06}.parquet");
+        let s3_path = object_store::path::Path::from(format!("{partition_key}/{name}"));
+        let size = buf.len();
+        put_s3_bytes_with_retry(
+            client,
+            bucket,
+            &s3_path,
+            bytes::Bytes::from(buf),
+            table,
+            partition_label,
+            &config.cache_control,
+        )?;
+        output_names.push(name);
+        output_bytes += size as u64;
+        if config.verbose {
+            info!(
+                operation = "upload",
+                s3_key = %s3_path,
+                s3_uri = %format!("s3://{bucket}/{s3_path}"),
+                table,
+                partition = partition_label,
+                bytes = size,
+                "uploaded merged S3 part"
+            );
+        }
+        Ok(())
+    };
 
     for obj in objects {
         let data = read_s3_bytes_with_retry(
@@ -933,80 +1185,31 @@ fn process_s3_partition(
             writer_state
                 .as_mut()
                 .expect("writer state must exist")
-                .write_batch(&batch, &mut |part_num, buf, _rows| {
-                    let s3_key = format!("{partition_key}/part-{part_num:06}.parquet");
-                    let s3_path = object_store::path::Path::from(s3_key.as_str());
-                    let size = buf.len();
-                    let payload = bytes::Bytes::from(buf);
-
-                    put_s3_bytes_with_retry(
-                        client,
-                        bucket,
-                        &s3_path,
-                        payload,
-                        table,
-                        partition_label,
-                        &config.cache_control,
-                    )?;
-
-                    files_written += 1;
-                    output_bytes += size as u64;
-                    if config.verbose {
-                        info!(
-                            operation = "upload",
-                            s3_key = %s3_path,
-                            s3_uri = %format!("s3://{bucket}/{s3_path}"),
-                            table,
-                            partition = partition_label,
-                            bytes = size,
-                            "uploaded merged S3 part"
-                        );
-                    }
-                    Ok(())
-                })?;
+                .write_batch(&batch, &mut write_part)?;
         }
     }
     result.files_read += objects.len();
 
-    if writer_state.is_none() {
+    let Some(writer_state) = writer_state.as_mut() else {
+        // Every part was empty: nothing to write, and nothing was changed.
+        partition.remove_journal()?;
         result.partitions_skipped += 1;
         return Ok(());
+    };
+    writer_state.finish(&mut write_part)?;
+
+    crash_point("after-outputs")?;
+    // Fails if another run took over the lock, before anything is deleted.
+    if let Some(lock) = s3.lock.as_mut() {
+        lock.refresh()?;
     }
-
-    writer_state
-        .as_mut()
-        .expect("writer state must exist")
-        .finish(&mut |part_num, buf, _rows| {
-            let s3_key = format!("{partition_key}/part-{part_num:06}.parquet");
-            let s3_path = object_store::path::Path::from(s3_key.as_str());
-            let size = buf.len();
-            let payload = bytes::Bytes::from(buf);
-
-            put_s3_bytes_with_retry(
-                client,
-                bucket,
-                &s3_path,
-                payload,
-                table,
-                partition_label,
-                &config.cache_control,
-            )?;
-
-            files_written += 1;
-            output_bytes += size as u64;
-            if config.verbose {
-                info!(
-                    operation = "upload",
-                    s3_key = %s3_path,
-                    s3_uri = %format!("s3://{bucket}/{s3_path}"),
-                    table,
-                    partition = partition_label,
-                    bytes = size,
-                    "uploaded merged S3 part"
-                );
-            }
-            Ok(())
-        })?;
+    let files_written = output_names.len();
+    let written: HashSet<String> = output_names
+        .iter()
+        .map(|name| format!("{partition_key}/{name}"))
+        .collect();
+    partition.replace_journal(&journal.committed(output_names))?;
+    crash_point("after-commit")?;
 
     println!(
         "  {}: {} parts → {} file(s) ({})",
@@ -1016,14 +1219,10 @@ fn process_s3_partition(
         format_bytes(output_bytes),
     );
 
-    let written_keys: HashSet<String> = (initial_part_num + 1
-        ..=initial_part_num + files_written as u32)
-        .map(|part_num| format!("{partition_key}/part-{part_num:06}.parquet"))
-        .collect();
-
     for obj in objects {
-        if !written_keys.contains(obj.location.as_ref()) {
+        if !written.contains(obj.location.as_ref()) {
             delete_s3_object_with_retry(client, bucket, &obj.location, table, partition_label)?;
+            crash_point("after-first-delete")?;
             if config.verbose {
                 info!(
                     operation = "delete",
@@ -1036,6 +1235,7 @@ fn process_s3_partition(
             }
         }
     }
+    partition.remove_journal()?;
 
     result.bytes_after += output_bytes;
     result.files_written += files_written;
@@ -1884,5 +2084,345 @@ mod tests {
                 "prefetch={prefetch}"
             );
         }
+    }
+
+    // -- Crash safety (#480) --
+
+    use crate::merge_journal::{
+        Journal, LocalPartition, LocalRunLock, PartitionFiles, RunContext, INJECTED_CRASH,
+        JOURNAL_FILE, LOCK_FILE,
+    };
+
+    /// Makes `crash_point(step)` fail on this thread while the guard lives.
+    struct InjectCrash;
+
+    impl InjectCrash {
+        fn at(step: &'static str) -> Self {
+            INJECTED_CRASH.with(|crash| *crash.borrow_mut() = Some(step));
+            InjectCrash
+        }
+    }
+
+    impl Drop for InjectCrash {
+        fn drop(&mut self) {
+            INJECTED_CRASH.with(|crash| *crash.borrow_mut() = None);
+        }
+    }
+
+    const CRASH_PARTITION: &str = "blocks/year=2024/month=01/day=15";
+
+    fn make_range_batch(start: u64, rows: u64) -> RecordBatch {
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "block_number",
+            DataType::UInt64,
+            false,
+        )]));
+        let values = arrow::array::UInt64Array::from_iter_values(start..start + rows);
+        RecordBatch::try_new(schema, vec![Arc::new(values)]).unwrap()
+    }
+
+    fn batch_values(batches: impl IntoIterator<Item = RecordBatch>) -> Vec<u64> {
+        batches
+            .into_iter()
+            .flat_map(|batch| {
+                batch
+                    .column(0)
+                    .as_any()
+                    .downcast_ref::<arrow::array::UInt64Array>()
+                    .unwrap()
+                    .values()
+                    .to_vec()
+            })
+            .collect()
+    }
+
+    /// Every `block_number` in the `.parquet` files under `dir`, sorted.
+    fn local_values(dir: &Path) -> Vec<u64> {
+        let mut files = Vec::new();
+        collect_parquet_files_recursive(dir, &mut files).unwrap();
+        let mut values: Vec<u64> = files
+            .iter()
+            .flat_map(|f| {
+                let reader =
+                    ParquetRecordBatchReaderBuilder::try_new(std::fs::File::open(f).unwrap())
+                        .unwrap()
+                        .build()
+                        .unwrap();
+                batch_values(reader.map(|batch| batch.unwrap()))
+            })
+            .collect();
+        values.sort_unstable();
+        values
+    }
+
+    /// Names of every file directly in `dir` (hidden ones included), sorted.
+    fn entries(dir: &Path) -> Vec<String> {
+        LocalPartition::new(dir).list_names().unwrap()
+    }
+
+    /// A partition of three parts (`block_number` 0..30) whose merge crashed at `step`.
+    fn crashed_local_merge(step: &'static str) -> (tempfile::TempDir, PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let partition = dir.path().join(CRASH_PARTITION);
+        std::fs::create_dir_all(&partition).unwrap();
+        for part in 0..3u64 {
+            write_test_parquet_with_metadata(
+                &partition.join(format!("part-{:06}.parquet", part + 1)),
+                &make_range_batch(part * 10, 10),
+                vec![],
+            );
+        }
+        let _crash = InjectCrash::at(step);
+        let err = run_merge(&test_merge_config(&dir.path().to_string_lossy()))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains(&format!("injected crash at {step}")), "{err}");
+        (dir, partition)
+    }
+
+    /// A crash after the output was written and committed, before the sources were deleted,
+    /// used to leave both, and the next merge folded them into one file (60 rows for 30).
+    #[test]
+    fn test_merge_recovers_a_crash_after_commit() {
+        let (dir, partition) = crashed_local_merge("after-commit");
+        assert_eq!(
+            entries(&partition),
+            vec![
+                JOURNAL_FILE,
+                "part-000001.parquet",
+                "part-000002.parquet",
+                "part-000003.parquet",
+                "part-000004.parquet",
+            ]
+        );
+        assert_eq!(
+            local_values(&partition).len(),
+            60,
+            "sources and output coexist"
+        );
+
+        let result = run_merge(&test_merge_config(&dir.path().to_string_lossy())).unwrap();
+
+        assert_eq!(result.merges_recovered, 1);
+        assert_eq!(entries(&partition), vec!["part-000004.parquet"]);
+        assert_eq!(local_values(&partition), (0..30).collect::<Vec<_>>());
+        assert!(!dir.path().join(LOCK_FILE).exists());
+    }
+
+    #[test]
+    fn test_merge_rolls_back_a_crash_before_commit() {
+        let (dir, partition) = crashed_local_merge("after-outputs");
+        let journal = LocalPartition::new(&partition)
+            .read_journal()
+            .unwrap()
+            .unwrap();
+        assert_eq!(journal.state, crate::merge_journal::JournalState::Writing);
+
+        let result = run_merge(&test_merge_config(&dir.path().to_string_lossy())).unwrap();
+
+        // The partial output was deleted, and the partition was merged again from its sources.
+        assert_eq!(result.merges_recovered, 1);
+        assert_eq!(result.partitions_merged, 1);
+        assert_eq!(entries(&partition), vec!["part-000004.parquet"]);
+        assert_eq!(local_values(&partition), (0..30).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn test_merge_finishes_a_crash_between_source_deletes() {
+        let (dir, partition) = crashed_local_merge("after-first-delete");
+        assert_eq!(local_values(&partition).len(), 50);
+
+        let result = run_merge(&test_merge_config(&dir.path().to_string_lossy())).unwrap();
+
+        assert_eq!(result.merges_recovered, 1);
+        assert_eq!(entries(&partition), vec!["part-000004.parquet"]);
+        assert_eq!(local_values(&partition), (0..30).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn test_merge_dry_run_leaves_an_interrupted_merge_alone() {
+        let (dir, partition) = crashed_local_merge("after-commit");
+        let before = entries(&partition);
+
+        let mut config = test_merge_config(&dir.path().to_string_lossy());
+        config.dry_run = true;
+        let result = run_merge(&config).unwrap();
+
+        assert_eq!(result.merges_recovered, 0);
+        assert_eq!(entries(&partition), before);
+    }
+
+    #[test]
+    fn test_merge_refuses_to_run_while_another_merge_holds_the_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let partition = dir.path().join(CRASH_PARTITION);
+        std::fs::create_dir_all(&partition).unwrap();
+        for part in 0..2u64 {
+            write_test_parquet_with_metadata(
+                &partition.join(format!("part-{:06}.parquet", part + 1)),
+                &make_range_batch(part * 10, 10),
+                vec![],
+            );
+        }
+        let config = test_merge_config(&dir.path().to_string_lossy());
+
+        let lock = LocalRunLock::acquire(dir.path()).unwrap();
+        let err = run_merge(&config).unwrap_err().to_string();
+        assert!(err.contains("another merge is running"), "{err}");
+        assert_eq!(entries(&partition).len(), 2);
+
+        lock.release().unwrap();
+        assert_eq!(run_merge(&config).unwrap().partitions_merged, 1);
+    }
+
+    /// A merge started on an enclosing directory must not recover a partition that a live
+    /// merge on a nested directory is working on.
+    #[test]
+    fn test_merge_leaves_a_partition_claimed_by_a_live_run() {
+        let dir = tempfile::tempdir().unwrap();
+        let partition = dir.path().join(CRASH_PARTITION);
+        std::fs::create_dir_all(&partition).unwrap();
+        for part in 0..2u64 {
+            write_test_parquet_with_metadata(
+                &partition.join(format!("part-{:06}.parquet", part + 1)),
+                &make_range_batch(part * 10, 10),
+                vec![],
+            );
+        }
+        let live_lock = LocalRunLock::acquire(&dir.path().join("blocks")).unwrap();
+        let live = RunContext {
+            run_id: "live".to_string(),
+            lock: live_lock.location(),
+        };
+        let journal = Journal::new(
+            &live,
+            vec![
+                "part-000001.parquet".to_string(),
+                "part-000002.parquet".to_string(),
+            ],
+            3,
+        );
+        assert!(LocalPartition::new(&partition)
+            .create_journal(&journal)
+            .unwrap());
+        let config = test_merge_config(&dir.path().to_string_lossy());
+
+        let result = run_merge(&config).unwrap();
+        assert_eq!(result.merges_recovered, 0);
+        assert_eq!(result.partitions_in_use, vec![CRASH_PARTITION.to_string()]);
+        assert_eq!(entries(&partition).len(), 3);
+
+        // Once that run is gone, its unfinished merge is rolled back and redone.
+        drop(live_lock);
+        let result = run_merge(&config).unwrap();
+        assert_eq!(result.merges_recovered, 1);
+        assert_eq!(result.partitions_merged, 1);
+        assert_eq!(entries(&partition), vec!["part-000003.parquet"]);
+        assert_eq!(local_values(&partition), (0..20).collect::<Vec<_>>());
+    }
+
+    fn s3_values(store: &Arc<dyn ObjectStore>, prefix: &str) -> Vec<u64> {
+        let mut values: Vec<u64> = list_keys(store, prefix)
+            .iter()
+            .filter(|key| key.ends_with(".parquet"))
+            .flat_map(|key| {
+                let reader = ParquetRecordBatchReaderBuilder::try_new(get_object(store, key))
+                    .unwrap()
+                    .build()
+                    .unwrap();
+                batch_values(reader.map(|batch| batch.unwrap()))
+            })
+            .collect();
+        values.sort_unstable();
+        values
+    }
+
+    fn crashed_s3_merge(step: &'static str) -> Arc<dyn ObjectStore> {
+        let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        for part in 0..3u64 {
+            put_object(
+                &store,
+                &format!("evm/{CRASH_PARTITION}/part-{:06}.parquet", part + 1),
+                parquet_bytes(&make_range_batch(part * 10, 10)),
+            );
+        }
+        let _crash = InjectCrash::at(step);
+        let err = merge_s3(
+            &test_merge_config("s3://bucket/evm"),
+            &store,
+            "bucket",
+            "evm",
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains(&format!("injected crash at {step}")), "{err}");
+        store
+    }
+
+    #[test]
+    fn test_merge_s3_recovers_a_crash_after_commit() {
+        let store = crashed_s3_merge("after-commit");
+        let partition = format!("evm/{CRASH_PARTITION}");
+        assert_eq!(
+            list_keys(&store, "evm"),
+            vec![
+                format!("{partition}/{JOURNAL_FILE}"),
+                format!("{partition}/part-000001.parquet"),
+                format!("{partition}/part-000002.parquet"),
+                format!("{partition}/part-000003.parquet"),
+                format!("{partition}/part-000004.parquet"),
+            ]
+        );
+
+        let config = test_merge_config("s3://bucket/evm");
+        let result = merge_s3(&config, &store, "bucket", "evm").unwrap();
+
+        assert_eq!(result.merges_recovered, 1);
+        assert_eq!(
+            list_keys(&store, "evm"),
+            vec![format!("{partition}/part-000004.parquet")]
+        );
+        assert_eq!(s3_values(&store, "evm"), (0..30).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn test_merge_s3_rolls_back_a_crash_before_commit() {
+        let store = crashed_s3_merge("after-outputs");
+
+        let config = test_merge_config("s3://bucket/evm");
+        let result = merge_s3(&config, &store, "bucket", "evm").unwrap();
+
+        assert_eq!(result.merges_recovered, 1);
+        assert_eq!(result.partitions_merged, 1);
+        assert_eq!(
+            list_keys(&store, "evm"),
+            vec![format!("evm/{CRASH_PARTITION}/part-000004.parquet")]
+        );
+        assert_eq!(s3_values(&store, "evm"), (0..30).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn test_merge_s3_refuses_to_run_while_the_prefix_is_locked() {
+        let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        for part in 0..2u64 {
+            put_object(
+                &store,
+                &format!("evm/{CRASH_PARTITION}/part-{:06}.parquet", part + 1),
+                parquet_bytes(&make_range_batch(part * 10, 10)),
+            );
+        }
+        let lock =
+            crate::merge_journal::S3RunLock::acquire(&store, "bucket", "evm", "other").unwrap();
+        let config = test_merge_config("s3://bucket/evm");
+
+        let err = merge_s3(&config, &store, "bucket", "evm")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("another merge is running"), "{err}");
+
+        lock.release().unwrap();
+        let result = merge_s3(&config, &store, "bucket", "evm").unwrap();
+        assert_eq!(result.partitions_merged, 1);
+        assert_eq!(list_keys(&store, "evm").len(), 1);
     }
 }

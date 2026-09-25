@@ -50,7 +50,7 @@ Networks in `EXCLUDED_NETWORKS` are skipped even though the registry lists an en
 
 The fallback list is explicit on purpose. New registry networks served only by another provider are not added automatically, and an alias never switches provider without a reviewed change to the generator.
 
-Current fallbacks, all verified by streaming blocks with a `SUBSTREAMS_API_TOKEN` on 2026-09-24 (#535):
+Current fallbacks, all verified by streaming blocks with a StreamingFast-compatible token on 2026-09-24 (#535):
 
 | Alias | Endpoint | Reason |
 |---|---|---|
@@ -59,7 +59,7 @@ Current fallbacks, all verified by streaming blocks with a `SUBSTREAMS_API_TOKEN
 | `tron` | `mainnet.tron.streamingfast.io:443` | Pinax no longer serves Tron |
 | `tron-evm` | `mainnet-evm.tron.streamingfast.io:443` | Pinax no longer serves Tron |
 
-StreamingFast endpoints need a credential that StreamingFast accepts, for example a The Graph Market API token in `SUBSTREAMS_API_TOKEN`.
+StreamingFast endpoints need a credential that StreamingFast accepts, for example a The Graph Market API token in `STREAMINGFAST_API_TOKEN`. Since #562, legacy `SUBSTREAMS_*` variables are Pinax-only defaults; custom endpoints require explicit credential selectors. See the README Authentication section.
 
 Current exclusions:
 
