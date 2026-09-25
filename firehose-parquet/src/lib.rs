@@ -23,3 +23,5 @@ pub mod traits;
 pub mod truncate;
 pub mod verify;
 pub mod writer;
+
+pub mod partition_index;

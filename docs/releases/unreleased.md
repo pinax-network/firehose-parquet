@@ -4,6 +4,26 @@ Changes merged since the last release. Fold this file into `docs/releases/vX.Y.Z
 
 ## Breaking changes
 
+### Partition indexes require verified finalized coverage (#486)
+
+Time index construction now checks every finalized canonical block and preserves
+backward/repeated timestamp runs. Bounded requests stay clipped to their exact
+bounds; current-head and clipped time spans remain incomplete. A bounded Stream
+proof establishes the finalized anchor before accepting coverage. Sparse Fetch
+head inference and future timestamp borrowing no longer determine time spans.
+Long backfills should use successive bounded runs; scans now cost work
+proportional to covered blocks and publish only validated snapshots.
+
+V2 adds explicit coverage and span proof fields. Legacy indexes remain
+inspectable with unknown completeness, but resolution, sharding and resume
+require rebuilding. Default resolution refuses incomplete or disjoint matches;
+`--all-spans --json` returns separate complete runs and their coverage. Complete
+means a natural contiguous span in the observed snapshot, not globally complete
+calendar coverage. Range helpers also refuse unseen initial routing context.
+Solana uses proven prior anchors; unsupported metadata or missing context fails
+closed without changing ingestion routing. See [the file contract](../partitions-parquet-contract.md)
+and [design and validation record](../audit/486-partition-index-design.md).
+
 ### Mutations require common ownership (#468 prerequisite)
 
 Build, partition-index construction, maintenance, and verification that writes

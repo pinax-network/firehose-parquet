@@ -1,115 +1,125 @@
 # Partitions Build Defaults
 
-This note records the intended defaults and inference rules for `fireparq partitions build`.
+`fireparq partitions build` creates one verified v2 snapshot in
+`<output>/<chain>/partitions.parquet`. It does not change normal ingestion or
+writer timestamp routing. See [the file contract](partitions-parquet-contract.md)
+and [the correctness decision and tests](audit/486-partition-index-design.md).
 
-## Decision
+## Coverage and finality
 
-`fireparq partitions build` should be easy to resume and automate without repeating values that can be inferred safely, while still keeping the build range bounded and deterministic.
+Bounded builds require `--stop-block`, exclusive. The requested interval is never
+expanded to a calendar boundary. Every row declares whether its start and end
+are proven natural boundaries; clipped edges remain incomplete. A complete
+observed span is not globally complete calendar coverage. A date can recur later
+when canonical timestamps move backward.
 
-## Start Block
+Before acquiring output ownership, two Stream RPCs establish a finalized anchor:
+`start=-1` obtains a candidate last-irreversible block number, then an exact
+final-only request must return that candidate with `STEP_FINAL` and a nonempty
+block ID. A shared five-second deadline and response limits bound the proof.
+Candidate zero is handled without treating stop zero as a finite server bound;
+the client accepts exactly one matching final response and drops the stream.
+Values beyond the signed request range are rejected.
 
-`--start-block` is optional.
+The exclusive coverage stop cannot exceed this anchor plus one. A server that
+cannot supply the proof fails closed; an earlier Fetch reply is not finality
+proof. Time snapshots reaching the anchor must end at its exact block identity.
+Historical snapshots also record the first canonical successor and check its
+parent identity. Missing or contradictory metadata never establishes coverage.
 
-Bounded-mode resolution order:
+## Start and resume
 
-1. explicit `--start-block`
-2. sibling `cursor.parquet` under the resolved chain output root
-3. Firehose endpoint `first_streamable_block_num`
+Fresh bounded start resolution is:
 
-This lets operators resume partition index generation from an existing artifact directory without manually looking up the last written block.
+1. Explicit `--start-block`.
+2. Sibling `cursor.parquet` last block plus one, if present and readable.
+3. EndpointInfo's first streamable block.
 
-## Existing Index
+A fresh live run uses its explicit start or endpoint first streamable block; it
+does not inspect the sibling cursor. EndpointInfo is mandatory. An unreadable
+bounded-start cursor is an error. Partition index
+construction never writes that cursor.
 
-A bounded build never modifies an existing `partitions.parquet` implicitly. When the index already exists, one of these is required:
+An existing index requires `--resume` or `--overwrite` in bounded mode. Resume
+and live mode require verified v2 coverage and use its source-block frontier,
+last canonical identity and stored routing anchor. They do not consult the
+sibling cursor or sort calendar keys to find progress. A bounded explicit start
+past the frontier fails; an earlier start still resumes at the frontier. In live
+mode an explicit start must equal the frontier. A bounded stop already covered
+makes no change after endpoint/finality validation.
 
-- `--resume`: continue from the stored frontier (the `stop_block` of the terminal row)
-- `--overwrite`: ignore the stored rows and replace the index
+Legacy files have unknown completeness. Rebuild with `--overwrite` or into a
+fresh output root; there is no compatibility switch that invents proof. A failed
+rebuild scan leaves the prior file intact. Resume rejects changed chain, type,
+interval, routing policy, same-height finalized identity or a first block that
+contradicts a previously observed successor.
 
-Without either flag the build fails before probing, for both time-based and `block_range` partitions. Previously a time-based build silently replaced the index with only the new range, and a `block_range` build appended rows that overlapped the stored ones.
+## Exact time spans
 
-When resuming (bounded `--resume` or `--live`):
+Time indexes stream every finalized canonical block in coverage. Each block's
+parent number and ID must link to the prior observed block. The first covered
+block cannot claim a parent still inside coverage, which would prove an omitted
+block. Skipped slots are represented by the parent chain rather than guessed
+from sparse samples. Endpoints that omit parent numbers/IDs cannot establish
+this contract.
 
-- the stored frontier is the start block; the sibling `cursor.parquet` and endpoint metadata are not consulted
-- an explicit `--start-block` past the frontier is rejected, because the terminal row would otherwise be stretched across unprobed blocks (live mode requires an explicit value to equal the frontier)
-- an explicit `--start-block` before the frontier is accepted and the build still resumes from the frontier
-- time-based builds never backtrack past the frontier when locating the first partition, so a terminal row that ends mid-partition (after a live run) is extended instead of rebuilt
-- a `block_range` terminal row shorter than `--block-range-size` is rebuilt from its aligned start rather than duplicated
-- a bounded run whose `--stop-block` is already covered by the stored frontier is a no-op
+Raw canonical timestamp routing is preserved. `[A, B, A]` yields three maximal
+contiguous runs; it does not become `[A, B, B]` through a running maximum. This
+requires work proportional to covered blocks. Use successive bounded runs for
+long backfills. A requested time interval with no canonical block is refused
+rather than published as an empty or complete snapshot.
 
-For bounded builds, the first emitted row may expand downward from the requested seed block so that the stored row begins at the exact first block in that partition.
+Solana missing timestamps use a verified prior timestamp, without changing the
+nullable canonical timestamp columns. A fresh start follows at most 64 canonical
+parents under a five-second deadline to obtain the prior anchor. Actual block
+zero with its genesis parent can use the same genesis seed as ingestion.
+Insufficient required context fails. Missing-time bootstrap on other chains is
+also refused: borrowing a future timestamp can assign an initial block to the
+wrong partition. Use `block_range` when a time-routing proof is unavailable.
+The existing UInt64 time-key file format still rejects pre-1970 partition keys.
 
-## Live Mode
+For historical coverage, one right-edge request spans at most 65,536 slot numbers
+and has a five-second deadline. Its first final response must link to the last
+covered block. A successor exactly at stop with a different key closes the last
+span; a successor beyond stop proves a gap but leaves the clipped span
+incomplete. The declared stop is never extended. Timeout, an empty response
+window or an ancestry contradiction is an error, not evidence of chain head.
 
-`fireparq partitions build --live` is the intended follow-up to a bounded backfill.
+## Deterministic block ranges
 
-In live mode:
+Block-range keys are aligned multiples of `--block-range-size`. Coverage still
+requires the exact finalized-head proof. Natural boundaries follow from the
+block numbers; start/end flags record clipping. Nullable boundary timestamps
+use the retained exact Fetch helper: timeouts/transient failures receive bounded
+retries, missing metadata and unexpectedly later block numbers fail, and
+authentication fails immediately. A missing boundary or an earlier Fetch reply
+leaves its optional timestamp null; that legacy Fetch interpretation never
+changes the separately proven coverage or establishes head/finality. These
+optional timestamps do not determine range boundaries
+or prove finality. Block ranges require no prior timestamp context.
 
-- `partitions.parquet` is the restart anchor
-- the process resumes from the latest covered frontier already stored in that file
-- `--stop-block` is not used
-- `--poll-interval-secs` controls how long the process waits between sparse live probes
-- no `partitions.lookup.json` sidecar is involved
+## Live snapshots and publication
 
-The public artifact remains one stable canonical path:
+`--live` conflicts with `--stop-block` and extends coverage only to a newly proven
+finalized frontier. `--poll-interval-secs` defaults to 30. Head-check timeouts and
+known transient errors back off; fatal statuses and contradictory proof fail.
+An in-progress time span at the finalized head remains incomplete until a later
+canonical key transition establishes its end. Full block-range boundaries can
+be complete by arithmetic.
 
-- `partitions.parquet`
+One fully validated snapshot is published after each bounded run or live
+extension. Scans do not checkpoint partial evidence. Cancellation during a scan
+preserves the last published file. The first shutdown signal cancels network
+waits; a second signal can interrupt an in-flight index write. Common dataset
+ownership guards reads and publication; storage errors retain the existing
+ownership/recovery rules. This feature does not establish an ingestion-wide
+crash/replay transaction.
 
-Within that artifact, `chain` is a required non-null column on every row.
+## Output root
 
-Implementations may still use temporary or staging paths internally for safe rewrites, but the canonical artifact name stays stable.
-
-## Output Root
-
-`--output` is optional when `--s3-bucket` (or `S3_BUCKET`) is set.
-
-- `--output ./prefix --s3-bucket my-bucket` resolves to `s3://my-bucket/prefix`
-- `--s3-bucket my-bucket` resolves to `s3://my-bucket`
-- an explicit `s3://...` `--output` remains authoritative
-
-This keeps S3-oriented automation concise while preserving explicit override behavior.
-
-## Stop Block
-
-`--stop-block` remains required for bounded mode.
-
-Unlike the main ingestion pipeline, `partitions build` produces a canonical bounded artifact (`partitions.parquet`). Requiring a finite upper bound keeps that artifact deterministic, reviewable, and safe to rerun in scheduled jobs.
-
-In short:
-
-- ingestion may stream indefinitely
-- bounded `partitions build` must describe a closed coverage interval
-- `partitions build --live` keeps extending the canonical artifact from its stored frontier
-
-Bounded mode uses `--start-block` / `--stop-block` as discovery seeds, then expands to the enclosing partition boundaries so each emitted row is exact. If the trailing boundary has not happened yet, bounded mode should fail instead of writing an inexact terminal row.
-
-## Sparse Probe Methodology
-
-`partitions build` should not stream every block just to inspect timestamps.
-
-For both bounded and live mode, the intended implementation is:
-
-- fetch individual finalized block identities as sparse probes
-- use the Firehose single-block fetch RPC for exact-height probes
-- use exponential search to jump ahead within a partition
-- use binary search to find the exact first block of the next partition
-- write contiguous `[start_block, stop_block)` rows to `partitions.parquet`
-- create an initial checkpoint as soon as the first row can be materialized
-- continue checkpointing long runs based on elapsed time and partition rollovers
-
-If a sparse probe returns a missing/non-positive timestamp, the probe logic should borrow the nearest subsequent finalized block timestamp within a small bounded scan window (linear scan of up to 16 blocks) and log that normalization. If no timestamp is found within the small window, the probe falls back to an exponential forward search — doubling the jump distance on each step — so that chains with large timestamp-less ranges (e.g. Solana legacy blocks) can still be partitioned without streaming every block. If the exponential search also fails to find any reachable block with a timestamp, the build fails instead of silently partitioning at `1970-01-01 00:00:00`.
-
-This keeps the command lightweight while still producing exact partition boundaries.
-
-### Probe outcomes
-
-Each probe fetches one block number over a single reused gRPC channel and resolves to one of:
-
-- **found**: the endpoint returned the requested block
-- **missing**: the endpoint returned gRPC `NotFound`, or the precise supported `Unknown` wrapper of the upstream missing-block status (for example a skipped Solana slot). Arbitrary error messages mentioning a missing block do not establish absence. Missing responses are retried before being accepted, and skipped only when skipping missing blocks is enabled (the default).
-- **past the chain head**: an endpoint answered an out-of-range request with its earlier head block. After an exponential sample, the skipped interval is still checked before concluding that no block is available.
-
-The earlier-reply head interpretation preserves endpoint behavior already used by sparse probing. It is not guaranteed by the checked-in Fetch protobuf for every server implementation.
-
-Timeouts and known transient errors (unavailable endpoint, dropped connection) are retried with exponential backoff and never count as missing blocks. After retries run out, a bounded build fails and live frontier polling backs off and polls again. Authentication, permission, and invalid-request errors fail immediately. Unrecognized failures are retried a bounded number of times, then returned; text such as "timeout" in an internal server error does not justify indefinite live retries. Missing response metadata and unexpected later-block replies are errors. Block-range boundary timestamp probes use the same rules, so an endpoint failure cannot silently become a nullable timestamp.
-
-When the 16 blocks after a probed number are all missing, the run of missing blocks may just be long. The probe then looks further ahead exponentially (up to 65,536 blocks) until it finds an available block or the chain head, and scans the skipped gap linearly, so it returns the exact first available block. The gap is checked even when every exponential sample is missing: valid blocks need not coincide with sample offsets. If the entire budget is missing and no head response establishes an upper bound, the build fails with an explicit search-budget error. It does not invent a head boundary or repeatedly poll the same unresolved range forever. Reaching the block-number limit likewise fails without probing the `u64::MAX` sentinel.
+`--output` accepts a local directory or explicit S3 URI. Without it,
+`--s3-bucket`/`S3_BUCKET` can supply the S3 root. An explicit local output overrides
+an environment bucket. An explicitly supplied bucket and conflicting S3 output
+are rejected. See the README's storage options for credentials and endpoint
+addressing. The artifact path remains `partitions.parquet`; there is no lookup
+sidecar.

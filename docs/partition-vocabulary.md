@@ -28,7 +28,10 @@ Use `--partition` for partition granularity or output layout, and keep `--partit
   - Mean an inclusive/exclusive partition-value window inside the selected `--partition-type`.
 
 - `--partition-chain`
-  - Means an optional chain filter when a partition index contains multiple chains.
+  - Means an optional chain filter. Verified v2 indexes have one chain; legacy inspection can still filter multi-chain files.
+
+- `--all-spans`
+  - Requires `--json` on `partitions resolve` and returns separate complete runs for a repeated calendar key, within declared finalized coverage. It never merges intervening blocks into one range.
 
 ## Output directory keys
 

@@ -24,6 +24,8 @@ Related design docs:
   - `src/config.rs`: pipeline config model, partition key behavior, compression enum.
   - `src/auth.rs`: credential selection by resolved provider host and explicit env-var selectors.
   - `src/grpc.rs`: Firehose stream client, auth headers, reconnect/backoff/timeouts.
+  - `src/grpc/{finality,finalized_range}.rs`: bounded explicit finalized-anchor proof and exact metadata traversal.
+  - `src/partition_index.rs`, `src/partition_index/{builder,scan}.rs`: v2 finalized coverage, contiguous raw-time spans, ancestry/routing context and resume.
   - `src/writer.rs`: Arrow builders to Parquet file writing, flush/rollover logic.
   - `src/cursor.rs`: resume state persistence (`cursor.parquet`) and parameter checks.
   - `src/dataset_lock/`, `src/dataset_lock_s3.rs`: common local directory and persistent S3 bucket ownership for mutating commands.
@@ -66,6 +68,11 @@ Related design docs:
 - Change partitioning or output file layout:
   - `firehose-parquet/src/config.rs` (`Partition::partition_key`)
   - `firehose-parquet/src/writer.rs` (directory/file naming and flush behavior)
+- Change partition index building/consumption:
+  - `firehose-parquet/src/partition_index{.rs,/}` (proof model, scanner and span builder)
+  - `firehose-parquet/src/cli.rs` (v2 IO and strict range/inspection helpers)
+  - `blocks/src/bin/main.rs` (`run_partitions_build` lifecycle and publication)
+  - `docs/partitions-parquet-contract.md`, `docs/partitions-build-defaults.md` (coverage and migration contract)
 - Change resume/cursor behavior:
   - `firehose-parquet/src/cursor.rs`
   - `blocks/src/bin/main.rs` (resume flow and validation overrides)
