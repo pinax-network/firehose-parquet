@@ -1,4 +1,6 @@
-# NEAR live qualification remains blocked (#506 / PR #559)
+# Earlier NEAR Firehose qualification attempt (#506 / PR #559)
+
+This is the historical Firehose-only attempt. The later [public-source plan](506-near-public-qualification.md) supersedes its proposed next step and does not retry the exhausted Firehose account.
 
 ## Preserved work and integration
 
