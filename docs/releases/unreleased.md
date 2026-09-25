@@ -263,6 +263,8 @@ Migration: files written before and after this change have different schemas for
 
 - **Canonical identity columns are encoded once per block (#512).** `block_id` and `parent_id` used to be hex-decoded and re-encoded on every row of every table. Mappers now prepare them once per block and append the encoded values. The output is byte-identical. The canonical columns cost about 40 ns per row instead of 380 ns (binary), 830 ns (hex) or 3.1 µs (base58). Mapping a synthetic 1,000-transaction Solana block (base58) takes 19 ms instead of 43 ms, and a 200-transaction EVM block with 2,000 logs (hex) takes 3.7 ms instead of 6.0 ms.
 
+- **`verify` memory no longer grows with row count, and protocol-only runs skip hashing (#521).** Partition roots are built as rows stream in, with O(log n) memory per partition instead of 32 bytes per row. The roots are identical. `--checks protocol` reads only the columns the protocol checks use, and hashes nothing. S3 objects are prefetched, up to 4 at a time with a 256 MiB budget. On 300 EVM mainnet blocks, verifying `gas_changes` (9.0 million rows) peaks at 30 MiB instead of 940 MiB, in about the same time (14 s). A protocol-only run on `calls` (1.7 million rows) takes 0.2 s instead of 5.2 s.
+
 ## Tests
 
 - A new cross-chain schema contract test maps one fixture batch for every table of every chain, under every bytes encoding and both `fork_step` settings. It checks that column names are unique, that each batch round-trips through the Parquet writer and reader with the same schema and values, and that every table's canonical `block_id` / `parent_id` match the `blocks` table.
