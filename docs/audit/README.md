@@ -17,6 +17,7 @@ lifecycle state; a local implementation or passing test alone is not closure.
 - [#504: Beacon live mapping qualification](504-beacon-qualification.md)
 - [#485: partition probe reliability](485-partition-probe-reliability.md)
 - [#500: stable Solana reward indices](500-solana-reward-index.md)
+- [#502: explicit Solana instruction positions](502-solana-instruction-order.md)
 - [#473: responsive shutdown](473-responsive-shutdown.md)
 - [#477: single-partition writer contract](477-writer-partition-contract.md)
 
@@ -41,6 +42,9 @@ lifecycle state; a local implementation or passing test alone is not closure.
 | [#477](https://github.com/pinax-network/firehose-parquet/issues/477) | [#581](https://github.com/pinax-network/firehose-parquet/pull/581) | Merged as `3f74ebf`; issue closed; 732 tests, 14-table live equality check and CI passed. |
 | [#473](https://github.com/pinax-network/firehose-parquet/issues/473) | [#579](https://github.com/pinax-network/firehose-parquet/pull/579) | Merged as `fdb1f98`; issue closed; 739 tests and CI passed, plus combined validation with #477 and atomic publication. |
 | [#578](https://github.com/pinax-network/firehose-parquet/issues/578) | [#580](https://github.com/pinax-network/firehose-parquet/pull/580) | Merged as `73257c2`; issue closed; 751 combined tests, atomic publication fault tests, two-block live equality check and CI passed. #468 remains open. |
+| [#500](https://github.com/pinax-network/firehose-parquet/issues/500) | [#582](https://github.com/pinax-network/firehose-parquet/pull/582) | Merged as `803ffc3`; issue closed; 752 combined tests, two-block Solana comparison across flush windows and CI passed. |
+| [#476](https://github.com/pinax-network/firehose-parquet/issues/476) | [#584](https://github.com/pinax-network/firehose-parquet/pull/584) | Merged as `34cb6e2`; issue closed; 763 tests, malformed metadata and calendar-boundary regressions, 14-table live comparison and CI passed. |
+| [#485](https://github.com/pinax-network/firehose-parquet/issues/485) | [#583](https://github.com/pinax-network/firehose-parquet/pull/583) | Merged as `3cf984b`; issue closed; 779 combined tests, local gRPC/CLI failure scenarios, two-probe live check and CI passed. |
 
 The #468 design PR accidentally triggered GitHub auto-closure through a negative
 sentence containing a recognized closing phrase. On 2026-09-25 the PR text was

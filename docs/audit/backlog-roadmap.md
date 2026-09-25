@@ -21,9 +21,11 @@ issue labels and green CI alone are not acceptance evidence. See the
    when replay chooses different timer or size boundaries. The writer split path has been removed (#477, PR #581); establish an
    all-table durable frontier next.
    Complete this before ingestion concurrency (#516).
-4. Shutdown recovery (#473, PR #579) is merged. Recover probe (#485) work, then correct
-   partition-index completeness/non-monotonic timestamps (#486), malformed
-   identity/timestamp handling (#476), and health/metrics semantics (#475).
+4. Shutdown recovery (#473, PR #579) and malformed identity/timestamp handling
+   (#476, PR #584) are merged. Probe (#485) work was recovered into PR #583,
+   passed 779 combined tests with the timestamp fix and CI, and merged as
+   `3cf984b`; its issue is closed. Correct partition-index completeness/non-monotonic timestamps (#486)
+   and health/metrics semantics (#475).
 5. Finish schema fixes with repeatable raw-to-output fixtures (#499). Prefer
    correctness and measured performance improvements before broad refactors.
 
@@ -59,13 +61,14 @@ and test against current main. Never reset or discard the previous worktree.
 
 ## Remaining backlog groups
 
-- Schema/data correctness: #500-#503 (Solana), #505 (Beacon numeric/blob/null
+- Schema/data correctness: #501-#503 (Solana), #505 (Beacon numeric/blob/null
   semantics), #507-#511 (NEAR, Antelope, Tron, Cosmos and Bitcoin). #550 needs
   explicit failed-effect semantics per chain and live fixtures. #498 documents
-  EVM indices and upstream-empty tables.
+  EVM indices and upstream-empty tables. Solana reward indices (#500, PR #582)
+  are now merged and closed after regression and live comparison.
 - Operational contracts: #474 covers reversible stream options/output semantics;
-  #475 metrics/readiness and #476 malformed metadata remain independently
-  actionable. #477 should simplify writer behavior before the #468 journal.
+  #475 metrics/readiness remains actionable. The #477 writer simplification and
+  #476 malformed-metadata handling are merged; the #468 journal is in progress.
 - Performance: recover #513 and #522 before starting duplicate work. Measure
   #503/#565, #515, #520 and #524 on representative data. #516 depends on durable
   commit ordering; #517-#519 and #523 need the specific throughput, memory,
