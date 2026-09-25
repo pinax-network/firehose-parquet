@@ -38,8 +38,6 @@ const S3_READ_MAX_ATTEMPTS: usize = 5;
 const S3_READ_RETRY_BASE_DELAY_MS: u64 = 100;
 const S3_UPLOAD_MAX_ATTEMPTS: usize = 1;
 const S3_UPLOAD_RETRY_BASE_DELAY_MS: u64 = 250;
-const S3_DELETE_MAX_ATTEMPTS: usize = 1;
-const S3_DELETE_RETRY_BASE_DELAY_MS: u64 = 100;
 /// Bytes read from the end of an S3 object to get its Parquet footer in one request.
 const S3_FOOTER_PREFETCH_BYTES: u64 = 64 * 1024;
 
@@ -1394,22 +1392,24 @@ fn process_s3_partition(
         format_bytes(output_bytes),
     );
 
-    for obj in objects {
-        if !written.contains(obj.location.as_ref()) {
-            delete_s3_object_once(client, bucket, &obj.location, table, partition_label)?;
+    let source_keys = objects
+        .iter()
+        .filter(|object| !written.contains(object.location.as_ref()))
+        .map(|object| object.location.clone())
+        .collect::<Vec<_>>();
+    block_on_async(crate::s3::delete::delete_objects_observed(
+        client,
+        &source_keys,
+        |key| {
             crash_point("after-first-delete")?;
             if config.verbose {
-                info!(
-                    operation = "delete",
-                    s3_key = %obj.location,
-                    s3_uri = %format!("s3://{bucket}/{}", obj.location),
-                    table,
-                    partition = partition_label,
-                    "deleted source S3 part after merge"
-                );
+                info!(operation = MergeS3Operation::Delete.as_str(), s3_key = %key,
+                s3_uri = %format!("s3://{bucket}/{key}"), table, partition = partition_label,
+                "deleted source S3 part after merge");
             }
-        }
-    }
+            Ok(())
+        },
+    ))?;
     partition.remove_journal()?;
 
     result.bytes_after += output_bytes;
@@ -1526,25 +1526,6 @@ fn put_s3_bytes_once(
             })
             .map(|_| ())?)
         },
-    )
-}
-
-fn delete_s3_object_once(
-    client: &Arc<dyn ObjectStore>,
-    bucket: &str,
-    location: &object_store::path::Path,
-    table: &str,
-    partition_label: &str,
-) -> Result<()> {
-    retry_merge_s3_operation(
-        MergeS3Operation::Delete,
-        bucket,
-        location,
-        table,
-        partition_label,
-        S3_DELETE_MAX_ATTEMPTS,
-        S3_DELETE_RETRY_BASE_DELAY_MS,
-        || Ok(block_on_async(async { client.delete(location).await })?),
     )
 }
 
@@ -2779,6 +2760,165 @@ mod tests {
             crate::dataset_lock_s3::OwnerState::Owned
         );
     }
+
+    #[test]
+    fn s3_source_delete_failure_retains_committed_journal_and_owned_bucket() {
+        use crate::s3::delete::test_store::DelayedStore;
+        use std::sync::atomic::Ordering;
+        let partition = format!("evm/{CRASH_PARTITION}");
+        let mut fake = DelayedStore::new(std::time::Duration::from_millis(40));
+        fake.fail = Some(object_store::path::Path::from(format!(
+            "{partition}/part-000001.parquet"
+        )));
+        fake.lose_response = true;
+        let fake = Arc::new(fake);
+        let store: Arc<dyn ObjectStore> = fake.clone();
+        for part in 0..20u64 {
+            put_object(
+                &store,
+                &format!("{partition}/part-{:06}.parquet", part + 1),
+                parquet_bytes(&make_range_batch(part * 10, 10)),
+            );
+        }
+        assert!(merge_s3(
+            &test_merge_config("s3://bucket/evm"),
+            &store,
+            "bucket",
+            "evm"
+        )
+        .is_err());
+        let journal = S3Partition {
+            client: &store,
+            bucket: "bucket",
+            key: &partition,
+        }
+        .read_journal()
+        .unwrap()
+        .unwrap();
+        assert_eq!(journal.state, crate::merge_journal::JournalState::Committed);
+        assert_eq!(journal.sources.len(), 20);
+        assert_eq!(journal.outputs, ["part-000021.parquet"]);
+        assert_eq!(
+            batch_values(
+                ParquetRecordBatchReaderBuilder::try_new(get_object(
+                    &store,
+                    &format!("{partition}/part-000021.parquet")
+                ))
+                .unwrap()
+                .build()
+                .unwrap()
+                .map(|batch| batch.unwrap())
+            ),
+            (0..200).collect::<Vec<_>>()
+        );
+        assert_eq!(fake.counters.started.lock().unwrap().len(), 10);
+        assert_eq!(fake.counters.completed.load(Ordering::SeqCst), 10);
+        assert_eq!(fake.counters.active.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            block_on_async(S3Ownership::status(&store))
+                .unwrap()
+                .unwrap()
+                .state(),
+            crate::dataset_lock_s3::OwnerState::Owned
+        );
+        assert!(
+            block_on_async(store.head(&object_store::path::Path::from(format!(
+                "{partition}/part-000020.parquet"
+            ))))
+            .is_ok()
+        );
+    }
+
+    #[tokio::test]
+    async fn remote_recovery_data_error_never_removes_journal_or_other_phase_keys() {
+        use crate::merge_journal::JournalState;
+        use crate::s3::delete::test_store::DelayedStore;
+        use std::sync::atomic::Ordering;
+        for committed in [false, true] {
+            let mut fake = DelayedStore::new(std::time::Duration::from_millis(40));
+            let delete_part = if committed { 1 } else { 31 };
+            fake.fail = Some(object_store::path::Path::from(format!(
+                "blocks/part-{delete_part:06}.parquet"
+            )));
+            fake.lose_response = true;
+            let fake = Arc::new(fake);
+            let store: Arc<dyn ObjectStore> = fake.clone();
+            let owner = S3Ownership::acquire(store.clone(), "recover-test", vec!["blocks".into()])
+                .await
+                .unwrap();
+            let sources = (1..=30)
+                .map(|part| format!("part-{part:06}.parquet"))
+                .collect::<Vec<_>>();
+            let outputs = (31..=60)
+                .map(|part| format!("part-{part:06}.parquet"))
+                .collect::<Vec<_>>();
+            let writing = Journal::new(
+                &RunContext {
+                    run_id: owner.record().owner_id().into(),
+                    lock: OWNER_KEY.into(),
+                },
+                sources.clone(),
+                31,
+            );
+            let journal = if committed {
+                writing.committed(outputs.clone())
+            } else {
+                writing
+            };
+            assert_eq!(
+                journal.state,
+                if committed {
+                    JournalState::Committed
+                } else {
+                    JournalState::Writing
+                }
+            );
+            for name in sources.iter().chain(&outputs) {
+                store
+                    .put(
+                        &object_store::path::Path::from(format!("blocks/{name}")),
+                        bytes::Bytes::from_static(b"retained").into(),
+                    )
+                    .await
+                    .unwrap();
+            }
+            let journal_key = object_store::path::Path::from(format!("blocks/{JOURNAL_FILE}"));
+            let journal_bytes = bytes::Bytes::from(serde_json::to_vec(&journal).unwrap());
+            store
+                .put(&journal_key, journal_bytes.clone().into())
+                .await
+                .unwrap();
+            assert!(recover_remote_journal(&owner, "blocks", &journal)
+                .await
+                .is_err());
+            assert!(owner.is_mutation_uncertain());
+            assert_eq!(
+                store
+                    .get(&journal_key)
+                    .await
+                    .unwrap()
+                    .bytes()
+                    .await
+                    .unwrap(),
+                journal_bytes
+            );
+            let retained = if committed { &outputs } else { &sources };
+            for name in retained {
+                assert!(store
+                    .head(&object_store::path::Path::from(format!("blocks/{name}")))
+                    .await
+                    .is_ok());
+            }
+            assert_eq!(fake.counters.started.lock().unwrap().len(), 10);
+            assert_eq!(fake.counters.completed.load(Ordering::SeqCst), 10);
+            assert_eq!(fake.counters.active.load(Ordering::SeqCst), 0);
+            assert!(owner.release().await.is_err());
+            assert_eq!(
+                S3Ownership::status(&store).await.unwrap().unwrap().state(),
+                crate::dataset_lock_s3::OwnerState::Owned
+            );
+        }
+    }
 }
 
 /// Finish protected compaction under the caller's already-held common owner.
@@ -2929,7 +3069,6 @@ async fn recover_remote_journal(
         }
     }
     remove.sort();
-    remove.push(JOURNAL_FILE.into());
     struct Attempt<'a> {
         owner: &'a S3Ownership,
         resolved: bool,
@@ -2941,20 +3080,37 @@ async fn recover_remote_journal(
             }
         }
     }
-    for name in remove {
-        let key = object_store::path::Path::from(if directory.is_empty() {
-            name
+    let path = |name: &str| {
+        object_store::path::Path::from(if directory.is_empty() {
+            name.to_owned()
         } else {
             format!("{directory}/{name}")
-        });
-        let mut attempt = Attempt {
-            owner,
-            resolved: false,
-        };
-        match tokio::time::timeout(std::time::Duration::from_secs(60),client.delete(&key)).await {
-            Ok(Ok(())) | Ok(Err(object_store::Error::NotFound{..}))=>attempt.resolved=true,
-            _=>anyhow::bail!("remote merge cleanup was unresolved; retain ownership for provider-quiescent recovery"),
+        })
+    };
+    let keys = remove.iter().map(|name| path(name)).collect::<Vec<_>>();
+    let mut data_attempt = Attempt {
+        owner,
+        resolved: false,
+    };
+    crate::s3::delete::delete_objects_once(client, &keys).await?;
+    data_attempt.resolved = true;
+    // The journal is a distinct final barrier, never part of concurrent data cleanup.
+    let mut journal_attempt = Attempt {
+        owner,
+        resolved: false,
+    };
+    match tokio::time::timeout(
+        std::time::Duration::from_secs(60),
+        client.delete(&path(JOURNAL_FILE)),
+    )
+    .await
+    {
+        Ok(Ok(())) | Ok(Err(object_store::Error::NotFound { .. })) => {
+            journal_attempt.resolved = true
         }
+        _ => anyhow::bail!(
+            "remote merge cleanup was unresolved; retain ownership for provider-quiescent recovery"
+        ),
     }
     Ok(())
 }
