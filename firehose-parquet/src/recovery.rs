@@ -8,7 +8,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::cli::AwsConfig;
+use crate::cli::{AwsArgs, AwsConfig};
 use crate::dataset_lock::LocalOwnership;
 use crate::dataset_lock_s3::{OwnerRecord, OwnerState, RecoveryAuthorization, S3Ownership};
 use crate::durable_state::{
@@ -32,19 +32,12 @@ pub enum RecoveryCommands {
 }
 
 #[derive(Args)]
+#[command(mut_arg("aws_endpoint_url", |arg| arg.env("AWS_ENDPOINT_URL")))]
 pub struct RecoveryStorageArgs {
     /// Existing local dataset root or explicit s3://bucket/prefix URI.
     pub path: String,
-    #[arg(long, env = "AWS_ACCESS_KEY_ID", hide_env_values = true)]
-    pub aws_access_key_id: Option<String>,
-    #[arg(long, env = "AWS_SECRET_ACCESS_KEY", hide_env_values = true)]
-    pub aws_secret_access_key: Option<String>,
-    #[arg(long, env = "AWS_SESSION_TOKEN", hide_env_values = true)]
-    pub aws_session_token: Option<String>,
-    #[arg(long, env = "AWS_REGION", hide_env_values = true)]
-    pub aws_region: Option<String>,
-    #[arg(long, env = "AWS_ENDPOINT_URL", hide_env_values = true)]
-    pub aws_endpoint_url: Option<String>,
+    #[command(flatten)]
+    pub aws: AwsArgs,
 }
 
 impl std::fmt::Debug for RecoveryStorageArgs {
@@ -56,13 +49,7 @@ impl std::fmt::Debug for RecoveryStorageArgs {
 
 impl RecoveryStorageArgs {
     fn aws(&self) -> AwsConfig {
-        AwsConfig {
-            aws_access_key_id: self.aws_access_key_id.clone(),
-            aws_secret_access_key: self.aws_secret_access_key.clone(),
-            aws_session_token: self.aws_session_token.clone(),
-            aws_region: self.aws_region.clone(),
-            aws_endpoint_url: self.aws_endpoint_url.clone(),
-        }
+        AwsConfig::from(&self.aws)
     }
 }
 
@@ -158,8 +145,8 @@ pub async fn run_recovery(command: &RecoveryCommands) -> Result<()> {
             let (bucket, prefix) = remote_path(&args.storage.path)?;
             crate::cli::validate_s3_output_credentials(
                 &args.storage.path,
-                args.storage.aws_access_key_id.as_deref(),
-                args.storage.aws_secret_access_key.as_deref(),
+                args.storage.aws.aws_access_key_id.as_deref(),
+                args.storage.aws.aws_secret_access_key.as_deref(),
             )?;
             let store: Arc<dyn ObjectStore> =
                 Arc::new(args.storage.aws().build_s3_client_for_mutation(&bucket)?);
@@ -394,11 +381,7 @@ mod tests {
         RecoveryReleaseArgs {
             storage: RecoveryStorageArgs {
                 path: "s3://fixture/data".into(),
-                aws_access_key_id: None,
-                aws_secret_access_key: None,
-                aws_session_token: None,
-                aws_region: None,
-                aws_endpoint_url: None,
+                aws: AwsArgs::default(),
             },
             expected_owner: owner.owner_id().to_owned(),
             expected_generation: owner.generation(),

@@ -95,6 +95,8 @@ lifecycle state; a local implementation or passing test alone is not closure.
 | [#550](https://github.com/pinax-network/firehose-parquet/issues/550), Solana slice | [#607](https://github.com/pinax-network/firehose-parquet/pull/607) | Merged as `955b8b2` on 2026-09-25; issue remains open. Parent outcome context added; all legacy values preserved in 300 table comparisons, 1,030 tests and CI passed. Other chains remain outstanding. |
 | [#519](https://github.com/pinax-network/firehose-parquet/issues/519) | [#608](https://github.com/pinax-network/firehose-parquet/pull/608) | Merged as `11ac02c` on 2026-09-25; issue closure verified. Shared bounded lookup properties, 120 schema/row-preserving encodes and 3,510 exact-result lookup probes, independent review and CI passed. |
 
+| [#523](https://github.com/pinax-network/firehose-parquet/issues/523) | [#609](https://github.com/pinax-network/firehose-parquet/pull/609) | Merged as `e4f990f` on 2026-09-25; issue closure verified. 1,054 workspace tests, 128 current-main integration tests, exact-result synthetic delete/read benchmarks, independent review and CI passed. |
+
 The #468 design PR accidentally triggered GitHub auto-closure through a negative
 sentence containing a recognized closing phrase. On 2026-09-25 the PR text was
 corrected and #468 was reopened; its open state was verified. The proposal and
@@ -111,3 +113,5 @@ any external recovery condition, such as a dependency security rescan.
   decoding, compatibility boundary, all-chain equivalence and offline benchmarks.
 
 - [#519 Parquet lookup properties and explicit compression](519-parquet-lookup-properties.md).
+
+- [#527 shared AWS options and S3 construction](527-shared-aws-configuration.md).

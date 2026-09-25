@@ -19,7 +19,7 @@ Related design docs:
   - `firehose-protos/build.rs`: compiles `proto/*.proto` into Rust modules with `tonic-prost-build`.
   - `firehose-protos/src/lib.rs`: exposes compiled protobuf modules and aliases (`firehose`, `eth`, `solana`, etc.).
 - `firehose-parquet/`: core library crate used by the binary.
-  - `src/cli.rs`: shared CLI args (`CommonArgs`, `BuildArgs`), subcommands, parsing, validation, and utility routines.
+  - `src/cli.rs`: shared CLI args (`AwsArgs`, `CommonArgs`, `BuildArgs`), subcommands, parsing, validation, and utility routines.
   - `src/networks.rs`: built-in Firehose network alias registry and env override resolution.
   - `src/config.rs`: pipeline config model, partition key behavior, compression enum.
   - `src/auth.rs`: credential selection by resolved provider host and explicit env-var selectors.
@@ -37,7 +37,7 @@ Related design docs:
   - `src/metrics.rs`: Prometheus metrics registry and `/metrics` server helpers.
   - `src/rollup.rs`, `src/merge.rs`, `src/truncate.rs`: maintenance subcommand implementations.
   - `src/artifacts.rs`: reserved dataset artifact names (`cursor.parquet`, `partitions.parquet`, `merkle_roots.parquet`, `verify_runs/`) and `is_reserved_artifact_path`, which commands that walk a dataset tree use to skip them.
-  - `src/s3.rs`: object_store/S3 helpers used by writer/cursor/tools.
+  - `src/s3.rs`: shared AWS configuration and S3 builder with explicit credential/retry policies used by writer/cursor/tools.
 - `blocks/`: chain-specific mapping crate and the unified binary.
   - `src/bin/main.rs`: `fireparq` executable entrypoint.
   - `src/<chain>/{mapper,proto,schema}.rs`: per-chain decode, table schema, row mapping.
