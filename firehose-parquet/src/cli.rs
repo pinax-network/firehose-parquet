@@ -54,11 +54,45 @@ pub fn block_on_async<F: std::future::Future>(f: F) -> F::Output {
     }
 }
 
+/// Transport options shared by ingestion and partition index construction.
+#[derive(Args, Debug, Clone)]
+pub struct GrpcArgs {
+    /// Adapt HTTP/2 receive windows to measured bandwidth/latency, overriding --grpc-window-bytes
+    #[arg(long = "grpc-adaptive-window", env = "GRPC_ADAPTIVE_WINDOW", default_value = "false",
+        action = clap::ArgAction::Set, num_args = 0..=1, default_missing_value = "true",
+        require_equals = true, hide_env_values = true, help_heading = "Connection")]
+    pub adaptive_window: bool,
+
+    /// Initial HTTP/2 stream and connection receive window bytes (0 uses library defaults; adaptive mode overrides)
+    #[arg(long = "grpc-window-bytes", env = "GRPC_WINDOW_BYTES", default_value = "16777216",
+        value_parser = clap::value_parser!(u32).range(0..=2147483647), hide_env_values = true,
+        help_heading = "Connection")]
+    pub window_bytes: u32,
+
+    /// Maximum encoded or decompressed gRPC response bytes (128 MiB by default)
+    #[arg(long = "grpc-max-message-bytes", env = "GRPC_MAX_MESSAGE_BYTES",
+        default_value = "134217728", value_parser = clap::value_parser!(u32).range(1..),
+        hide_env_values = true, help_heading = "Connection")]
+    pub max_message_bytes: u32,
+}
+
+impl GrpcArgs {
+    pub fn config(&self) -> crate::config::GrpcConfig {
+        crate::config::GrpcConfig {
+            adaptive_window: self.adaptive_window,
+            initial_window_bytes: (self.window_bytes != 0).then_some(self.window_bytes),
+            max_message_bytes: self.max_message_bytes,
+        }
+    }
+}
+
 // Shared CLI arguments for all fireparq binaries.
 //
 // Embed in a per-chain `#[derive(Parser)]` struct with `#[command(flatten)]`.
 #[derive(Args, Debug, Clone)]
 pub struct CommonArgs {
+    #[command(flatten)]
+    pub grpc: GrpcArgs,
     /// Firehose gRPC endpoint URL
     #[arg(
         short = 'e',
@@ -1289,6 +1323,8 @@ Examples:
     --output ./output
 ")]
     Build {
+        #[command(flatten)]
+        grpc: GrpcArgs,
         /// Firehose gRPC endpoint URL
         #[arg(
             long,
@@ -4080,6 +4116,7 @@ pub fn build_config(args: &CommonArgs) -> anyhow::Result<Config> {
 
     Ok(Config {
         endpoint,
+        grpc: args.grpc.config(),
         api_key: credentials.api_key,
         jwt_token: credentials.jwt_token,
         start_block: args.start_block,
@@ -6926,6 +6963,101 @@ mod tests {
         assert!(non_final_bounded_warning(false, Some(100))
             .unwrap()
             .contains("does not prove its tail is final"));
+    }
+
+    #[test]
+    #[serial]
+    fn grpc_transport_flags_validate_limits_and_apply_to_both_build_commands() {
+        let _adaptive = EnvVarGuard::set("GRPC_ADAPTIVE_WINDOW", "false");
+        let _window = EnvVarGuard::set("GRPC_WINDOW_BYTES", "16777216");
+        let _limit = EnvVarGuard::set("GRPC_MAX_MESSAGE_BYTES", "134217728");
+        let parsed = parse(&[
+            "test-cli",
+            "--endpoint",
+            "http://localhost",
+            "--partition",
+            "none",
+        ]);
+        let default = build_config(&parsed.common).unwrap();
+        assert_eq!(default.grpc, crate::config::GrpcConfig::default());
+        for args in [
+            vec![
+                "test-cli",
+                "--endpoint",
+                "http://localhost",
+                "--partition",
+                "none",
+                "--grpc-adaptive-window=false",
+                "--grpc-max-message-bytes",
+                "268435456",
+            ],
+            vec![
+                "test-cli",
+                "partitions",
+                "build",
+                "--endpoint",
+                "http://localhost",
+                "--partition",
+                "date",
+                "--stop-block",
+                "10",
+                "--grpc-adaptive-window=false",
+                "--grpc-max-message-bytes",
+                "268435456",
+            ],
+        ] {
+            let parsed = try_parse(&args).unwrap();
+            let grpc = match parsed.command {
+                Some(Commands::Partitions(PartitionsCommands::Build { grpc, .. })) => grpc.config(),
+                None => build_config(&parsed.common).unwrap().grpc,
+                _ => unreachable!(),
+            };
+            assert!(!grpc.adaptive_window);
+            assert_eq!(grpc.max_message_bytes, 268435456);
+        }
+        for value in ["0", "-1", "4294967296", "nope"] {
+            assert!(try_parse(&["test-cli", "--grpc-max-message-bytes", value]).is_err());
+        }
+        assert!(try_parse(&["test-cli", "--grpc-adaptive-window=maybe"]).is_err());
+        for value in ["-1", "2147483648", "nope"] {
+            assert!(try_parse(&["test-cli", "--grpc-window-bytes", value]).is_err());
+        }
+        assert_eq!(
+            parse(&["test-cli", "--grpc-window-bytes", "0"])
+                .common
+                .grpc
+                .config()
+                .initial_window_bytes,
+            None
+        );
+        assert_eq!(
+            parse(&["test-cli", "--grpc-window-bytes", "65535"])
+                .common
+                .grpc
+                .config()
+                .initial_window_bytes,
+            Some(65535)
+        );
+        let _enabled = EnvVarGuard::set("GRPC_ADAPTIVE_WINDOW", "true");
+        assert!(
+            !parse(&["test-cli", "--grpc-adaptive-window=false"])
+                .common
+                .grpc
+                .adaptive_window
+        );
+        let _adaptive = EnvVarGuard::set("GRPC_ADAPTIVE_WINDOW", "false");
+        let _limit = EnvVarGuard::set("GRPC_MAX_MESSAGE_BYTES", "4096");
+        let parsed = parse(&["test-cli"]);
+        assert!(!parsed.common.grpc.adaptive_window);
+        assert_eq!(parsed.common.grpc.max_message_bytes, 4096);
+        let parsed = parse(&[
+            "test-cli",
+            "--grpc-adaptive-window",
+            "--grpc-max-message-bytes",
+            "8192",
+        ]);
+        assert!(parsed.common.grpc.adaptive_window);
+        assert_eq!(parsed.common.grpc.max_message_bytes, 8192);
     }
 
     #[test]

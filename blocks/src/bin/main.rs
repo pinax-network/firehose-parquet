@@ -1461,6 +1461,7 @@ fn load_existing_cursor(
 
 async fn run_partitions_build(
     endpoint: &str,
+    grpc: firehose_parquet::config::GrpcConfig,
     network: Option<&str>,
     api_key_envvar: Option<&str>,
     api_token_envvar: Option<&str>,
@@ -1518,6 +1519,7 @@ async fn run_partitions_build(
         firehose_parquet::auth::resolve_credentials(endpoint, api_key_envvar, api_token_envvar)?;
     let base_config = Config {
         endpoint: endpoint.to_string(),
+        grpc,
         api_key: credentials.api_key,
         jwt_token: credentials.jwt_token,
         start_block,
@@ -2554,6 +2556,7 @@ async fn main() -> Result<()> {
             }
             Commands::Partitions(subcommand) => match subcommand {
                 PartitionsCommands::Build {
+                    grpc,
                     endpoint,
                     network,
                     api_key_envvar,
@@ -2596,6 +2599,7 @@ async fn main() -> Result<()> {
 
                     let result = run_partitions_build(
                         &resolved_endpoint,
+                        grpc.config(),
                         network.as_deref(),
                         api_key_envvar.as_deref(),
                         api_token_envvar.as_deref(),
