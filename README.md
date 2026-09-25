@@ -171,7 +171,7 @@ docker run --rm \
 
 ## Cursor & Resume
 
-`fireparq` persists pipeline state in a `cursor.parquet` file so streams can be interrupted and resumed without re-processing blocks. The cursor system provides deterministic, crash-safe resume with full parameter validation.
+`fireparq` persists pipeline state in a `cursor.parquet` file so streams can resume from their last successful checkpoint, with parameter validation. Output files and the cursor are separate writes; interrupted flushes can still replay already-published rows.
 
 ## Network Aliases
 
@@ -218,6 +218,31 @@ fireparq --network solana-mainnet-beta --start-block 250000000 --stop-block 2501
 1. **Synchronized flush** — when any table triggers a file rollover (partition change or size threshold), *all* tables are flushed together. This ensures every table is consistent at the cursor point.
 2. **Cursor saved after writes** — `cursor.parquet` is only updated *after* all table files have been successfully written to disk (or S3). If the process crashes mid-write, the cursor still points to the last complete flush.
 3. **Resume from cursor** — on startup, if `cursor.parquet` exists, the pipeline sends the stored Firehose cursor token to resume the gRPC stream exactly where it left off.
+
+### Local part publication
+
+Local table parts are written under hidden `.fireparq-<uuid>.tmp` names in the
+destination directory. The writer completes the Parquet footer and syncs the
+file before atomically creating its final `.parquet` name without overwriting an
+existing destination. It removes the temporary name and syncs the directory
+before reporting success. Output directory ancestors are also synced, including
+newly created directories and those left by an earlier failed attempt. Symlinked
+output paths sync both the resolved target ancestry and the alias ancestry.
+
+This requires a filesystem that supports atomic same-directory hard links,
+file sync, and directory sync, with readable directory ancestors. Unsupported
+operations or sync failures stop the write; there is no weaker fallback. Final
+filenames retain the existing random process prefix and counter. S3 publication
+is unchanged.
+
+Readers of final `.parquet` files see complete individual parts. This does not
+make a multi-table flush or its cursor update atomic. A failure after final-name
+publication can leave a complete part even though the write reports an error;
+ingestion stops, and replay can duplicate it. A process crash can leave hidden
+`.tmp` files, which are not Parquet inputs and are not automatically removed.
+Do not remove another active writer's temporary files. See the
+[implementation and failure tests](docs/audit/578-atomic-local-parquet.md) and
+the remaining [transaction/recovery design](docs/audit/468-crash-recovery-design.md).
 
 ### Cursor File Format
 
