@@ -1,12 +1,13 @@
-use super::proto::{cosmos, cosmos_tx};
+use super::proto::cosmos;
 use super::schema;
+use super::tx_metadata::{decode_tx, TxMetadataBuilder};
 use arrow::array::*;
 use arrow::datatypes::Schema;
 use arrow::record_batch::RecordBatch;
 use firehose_parquet::encode::{BytesColumn, EncodeBytes};
 use firehose_parquet::traits::{
-    est_bin, est_i32, est_i64, est_opt_str, est_str, est_u32, BlockIdentity, BlockMapper,
-    CanonicalBuilder, PreparedIdentity,
+    est_bin, est_i64, est_opt_str, est_str, est_u32, BlockIdentity, BlockMapper, CanonicalBuilder,
+    PreparedIdentity,
 };
 use prost::Message;
 use sha2::{Digest, Sha256};
@@ -119,23 +120,26 @@ impl CosmosBlockMapper {
         self.blocks.num_txs.append_value(num_txs);
         append_fork_step(&mut self.blocks.fork_step, fork_step);
 
-        // block-level events (begin_block / end_block)
+        // Preserve every event and every attribute in source order, including empty events.
         for (event_index, event) in block.events.iter().enumerate() {
-            for attr in &event.attributes {
-                self.events.canonical.append(identity);
-                self.events.source.append_value("block");
-                self.events.tx_hash.append_value(&[]);
-                self.events.tx_index.append_null();
-                self.events.event_index.append_value(event_index as u32);
-                self.events.r#type.append_value(&event.r#type);
-                self.events.key.append_value(&attr.key);
-                self.events.value.append_value(&attr.value);
-                append_fork_step(&mut self.events.fork_step, fork_step);
-            }
+            self.events.append_event(
+                identity,
+                "block",
+                None,
+                None,
+                event_index as u32,
+                event,
+                fork_step,
+            );
         }
 
         // transactions, tx events, and messages
+        let mut decode_failures = 0;
         for (tx_idx, raw_tx) in block.txs.iter().enumerate() {
+            let decoded = decode_tx(raw_tx);
+            if decoded.is_err() {
+                decode_failures += 1;
+            }
             let hash = tx_hash_bytes(raw_tx);
             let tx_result = block.tx_results.get(tx_idx);
 
@@ -150,43 +154,44 @@ impl CosmosBlockMapper {
             self.transactions.index.append_value(tx_idx as u32);
             self.transactions
                 .code
-                .append_value(tx_result.map_or(0, |r| r.code));
+                .append_option(tx_result.map(|r| r.code));
             self.transactions
                 .gas_wanted
-                .append_value(tx_result.map_or(0, |r| r.gas_wanted));
+                .append_option(tx_result.map(|r| r.gas_wanted));
             self.transactions
                 .gas_used
-                .append_value(tx_result.map_or(0, |r| r.gas_used));
+                .append_option(tx_result.map(|r| r.gas_used));
             self.transactions
                 .log
-                .append_value(tx_result.map_or("", |r| &r.log));
+                .append_option(tx_result.map(|r| r.log.as_str()));
             self.transactions
                 .info
-                .append_value(tx_result.map_or("", |r| &r.info));
+                .append_option(tx_result.map(|r| r.info.as_str()));
             self.transactions
                 .codespace
-                .append_value(tx_result.map_or("", |r| &r.codespace));
+                .append_option(tx_result.map(|r| r.codespace.as_str()));
+            self.transactions
+                .metadata
+                .append(raw_tx, decoded.as_ref().ok());
             append_fork_step(&mut self.transactions.fork_step, fork_step);
 
-            // tx-level events
+            // Transaction events use the same UInt32 source index as the parent row.
             if let Some(result) = tx_result {
                 for (event_index, event) in result.events.iter().enumerate() {
-                    for attr in &event.attributes {
-                        self.events.canonical.append(identity);
-                        self.events.source.append_value("transaction");
-                        self.events.tx_hash.append_value(&hash);
-                        self.events.tx_index.append_value(tx_idx as i32);
-                        self.events.event_index.append_value(event_index as u32);
-                        self.events.r#type.append_value(&event.r#type);
-                        self.events.key.append_value(&attr.key);
-                        self.events.value.append_value(&attr.value);
-                        append_fork_step(&mut self.events.fork_step, fork_step);
-                    }
+                    self.events.append_event(
+                        identity,
+                        "transaction",
+                        Some(&hash),
+                        Some(tx_idx as u32),
+                        event_index as u32,
+                        event,
+                        fork_step,
+                    );
                 }
             }
 
             // decode messages from raw tx bytes
-            if let Ok(tx) = cosmos_tx::Tx::decode(raw_tx.as_ref()) {
+            if let Ok(tx) = decoded {
                 if let Some(body) = tx.body {
                     for (msg_idx, msg) in body.messages.iter().enumerate() {
                         self.messages.canonical.append(identity);
@@ -200,6 +205,9 @@ impl CosmosBlockMapper {
                 }
             }
         }
+        // Count malformed raw transactions across the complete source block,
+        // including a malformed failed transaction omitted by the row filter.
+        self.blocks.tx_decode_failures.append_value(decode_failures);
     }
 }
 
@@ -269,6 +277,7 @@ impl BlockMapper for CosmosBlockMapper {
             + self.blocks.validators_hash.estimated_bytes()
             + self.blocks.next_validators_hash.estimated_bytes()
             + est_u32(&self.blocks.num_txs)
+            + est_u32(&self.blocks.tx_decode_failures)
             + est_opt_str(&self.blocks.fork_step);
         let transactions = self.transactions.canonical.estimated_bytes()
             + self.transactions.tx_hash.estimated_bytes()
@@ -279,12 +288,14 @@ impl BlockMapper for CosmosBlockMapper {
             + est_str(&self.transactions.log)
             + est_str(&self.transactions.info)
             + est_str(&self.transactions.codespace)
+            + self.transactions.metadata.estimated_bytes()
             + est_opt_str(&self.transactions.fork_step);
         let events = self.events.canonical.estimated_bytes()
             + est_str(&self.events.source)
             + self.events.tx_hash.estimated_bytes()
-            + est_i32(&self.events.tx_index)
+            + est_u32(&self.events.tx_index)
             + est_u32(&self.events.event_index)
+            + est_u32(&self.events.attribute_index)
             + est_str(&self.events.r#type)
             + est_str(&self.events.key)
             + est_str(&self.events.value)
@@ -327,6 +338,7 @@ struct BlocksBuilder {
     validators_hash: BytesColumn,
     next_validators_hash: BytesColumn,
     num_txs: UInt32Builder,
+    tx_decode_failures: UInt32Builder,
     fork_step: Option<StringBuilder>,
 }
 
@@ -343,6 +355,7 @@ impl BlocksBuilder {
             validators_hash: BytesColumn::new(encoding),
             next_validators_hash: BytesColumn::new(encoding),
             num_txs: UInt32Builder::new(),
+            tx_decode_failures: UInt32Builder::new(),
             fork_step: mk_fork_step(include_fork_step),
         }
     }
@@ -359,6 +372,7 @@ impl BlocksBuilder {
             self.validators_hash.finish(),
             self.next_validators_hash.finish(),
             Arc::new(self.num_txs.finish()) as Arc<dyn Array>,
+            Arc::new(self.tx_decode_failures.finish()) as Arc<dyn Array>,
         ]);
         finish_fork_step(&mut self.fork_step, &mut columns);
         Ok(RecordBatch::try_new(Arc::new(schema.clone()), columns)?)
@@ -375,6 +389,7 @@ struct TransactionsBuilder {
     log: StringBuilder,
     info: StringBuilder,
     codespace: StringBuilder,
+    metadata: TxMetadataBuilder,
     fork_step: Option<StringBuilder>,
 }
 
@@ -390,6 +405,7 @@ impl TransactionsBuilder {
             log: StringBuilder::new(),
             info: StringBuilder::new(),
             codespace: StringBuilder::new(),
+            metadata: TxMetadataBuilder::new(),
             fork_step: mk_fork_step(include_fork_step),
         }
     }
@@ -406,6 +422,7 @@ impl TransactionsBuilder {
             Arc::new(self.info.finish()) as Arc<dyn Array>,
             Arc::new(self.codespace.finish()) as Arc<dyn Array>,
         ]);
+        columns.extend(self.metadata.finish());
         finish_fork_step(&mut self.fork_step, &mut columns);
         Ok(RecordBatch::try_new(Arc::new(schema.clone()), columns)?)
     }
@@ -415,8 +432,9 @@ struct EventsBuilder {
     canonical: CanonicalBuilder,
     source: StringBuilder,
     tx_hash: BytesColumn,
-    tx_index: Int32Builder,
+    tx_index: UInt32Builder,
     event_index: UInt32Builder,
+    attribute_index: UInt32Builder,
     r#type: StringBuilder,
     key: StringBuilder,
     value: StringBuilder,
@@ -429,12 +447,45 @@ impl EventsBuilder {
             canonical: CanonicalBuilder::with_encoding(encoding),
             source: StringBuilder::new(),
             tx_hash: BytesColumn::new(encoding),
-            tx_index: Int32Builder::new(),
+            tx_index: UInt32Builder::new(),
             event_index: UInt32Builder::new(),
+            attribute_index: UInt32Builder::new(),
             r#type: StringBuilder::new(),
             key: StringBuilder::new(),
             value: StringBuilder::new(),
             fork_step: mk_fork_step(include_fork_step),
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn append_event(
+        &mut self,
+        identity: &PreparedIdentity,
+        source: &str,
+        tx_hash: Option<&[u8]>,
+        tx_index: Option<u32>,
+        event_index: u32,
+        event: &cosmos::Event,
+        fork_step: Option<&str>,
+    ) {
+        for attribute in 0..event.attributes.len().max(1) {
+            self.canonical.append(identity);
+            self.source.append_value(source);
+            match tx_hash {
+                Some(hash) => self.tx_hash.append_value(hash),
+                None => self.tx_hash.append_null(),
+            }
+            self.tx_index.append_option(tx_index);
+            self.event_index.append_value(event_index);
+            self.r#type.append_value(&event.r#type);
+            let value = event.attributes.get(attribute);
+            self.attribute_index
+                .append_option(value.map(|_| attribute as u32));
+            self.key
+                .append_option(value.map(|value| value.key.as_str()));
+            self.value
+                .append_option(value.map(|value| value.value.as_str()));
+            append_fork_step(&mut self.fork_step, fork_step);
         }
     }
 
@@ -446,6 +497,7 @@ impl EventsBuilder {
             Arc::new(self.tx_index.finish()) as Arc<dyn Array>,
             Arc::new(self.event_index.finish()) as Arc<dyn Array>,
             Arc::new(self.r#type.finish()) as Arc<dyn Array>,
+            Arc::new(self.attribute_index.finish()) as Arc<dyn Array>,
             Arc::new(self.key.finish()) as Arc<dyn Array>,
             Arc::new(self.value.finish()) as Arc<dyn Array>,
         ]);
@@ -497,6 +549,7 @@ impl MessagesBuilder {
 
 #[cfg(test)]
 pub(crate) mod tests {
+    use super::super::proto::cosmos_tx;
     use super::*;
 
     fn make_raw_tx(type_url: &str, value: &[u8]) -> Vec<u8> {
@@ -509,6 +562,7 @@ pub(crate) mod tests {
                 memo: String::new(),
                 timeout_height: 0,
             }),
+            ..Default::default()
         };
         prost::Message::encode_to_vec(&tx)
     }

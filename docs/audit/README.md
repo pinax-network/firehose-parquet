@@ -14,6 +14,7 @@ lifecycle state; a local implementation or passing test alone is not closure.
 - [#499: offline EVM golden-block regression](499-evm-golden-fixture.md)
 - [#511: Bitcoin amounts and input metadata](511-bitcoin-values.md)
 - [#513: recovered EVM decimal fast path](513-evm-decimal-fast-path.md)
+- [#510: Cosmos event order, unknown results and SDK metadata](510-cosmos-values.md)
 - [#508: Antelope database-operation joins](508-antelope-db-joins.md)
 - [#568: Arrow/Parquet security and compatibility](568-arrow-parquet-security.md)
 - [#572: final completion checkpoints](572-final-completion-checkpoint.md)

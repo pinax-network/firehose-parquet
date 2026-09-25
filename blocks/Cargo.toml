@@ -34,6 +34,7 @@ solana-vote-interface = { version = "=7.1.0", default-features = false, features
 
 [dev-dependencies]
 futures = "0.3"
+parquet = { version = "60", features = ["arrow"] }
 tempfile = "3"
 tonic.workspace = true
 tonic-prost = "0.14"
