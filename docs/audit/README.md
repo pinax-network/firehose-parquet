@@ -110,3 +110,5 @@ any external recovery condition, such as a dependency security rescan.
   decoding, compatibility boundary, all-chain equivalence and offline benchmarks.
 
 - [#519 Parquet lookup properties and explicit compression](519-parquet-lookup-properties.md).
+
+- [#527 shared AWS options and S3 construction](527-shared-aws-configuration.md).
