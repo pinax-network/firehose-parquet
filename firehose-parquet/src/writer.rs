@@ -17,6 +17,8 @@ use tracing::info;
 use uuid::Uuid;
 
 mod local;
+pub(crate) use local::create_dir_all_durable;
+pub mod protected;
 
 /// Key-value metadata to embed in every Parquet file's footer.
 #[derive(Debug, Clone, Default)]
@@ -236,6 +238,112 @@ impl ParquetTableWriter {
         self.file_metadata = metadata;
     }
 
+    /// Check every row against the declared destination, without assuming row
+    /// order: reversible NEW/UNDO streams may visit the same partition in either
+    /// order. Metadata describes the whole mapper flush, not each table's exact
+    /// extrema. Existing partition-key timestamp policy is shared with routing.
+    fn validate_partition(
+        &self,
+        table: &str,
+        batch: &RecordBatch,
+        metadata: &BlockMetadata,
+    ) -> Result<()> {
+        // Reject invalid numeric configuration before path formatting can divide
+        // by zero or use the legacy pre-anchor fallback.
+        if let Partition::BlockRange { size, start_block } = &self.partition {
+            anyhow::ensure!(
+                *size > 0,
+                "block-range partition size must be greater than zero"
+            );
+            let anchor = start_block.unwrap_or(0);
+            anyhow::ensure!(
+                metadata.min_block_number >= anchor && metadata.max_block_number >= anchor,
+                "table `{table}` metadata precedes block-range start {anchor}"
+            );
+        }
+        let expected = self.partition_suffix(table, metadata)?;
+        let check = |row_metadata: &BlockMetadata| -> Result<()> {
+            let actual = self.partition_suffix(table, row_metadata)?;
+            anyhow::ensure!(actual == expected,
+                "table `{table}` spans partitions or disagrees with its metadata: expected `{expected}`, found `{actual}`; flush the mapper at partition boundaries");
+            Ok(())
+        };
+        match &self.partition {
+            Partition::None => Ok(()),
+            Partition::BlockRange { start_block, .. } => {
+                let anchor = start_block.unwrap_or(0);
+                check(&BlockMetadata {
+                    min_block_number: metadata.max_block_number,
+                    ..metadata.clone()
+                })?;
+                let blocks = batch.column_by_name("block_num")
+                    .and_then(|column| column.as_any().downcast_ref::<arrow::array::UInt64Array>())
+                    .ok_or_else(|| anyhow::anyhow!("table `{table}` needs canonical UInt64 block_num for block-range partitioning"))?;
+                anyhow::ensure!(
+                    blocks.null_count() == 0,
+                    "table `{table}` has null block_num values"
+                );
+                let mut previous = None;
+                for block in blocks.values() {
+                    // Canonical identities repeat across a block's table rows.
+                    // Still inspect every row, but format its destination only
+                    // when the routing value changes.
+                    if previous == Some(*block) {
+                        continue;
+                    }
+                    anyhow::ensure!(
+                        *block >= anchor,
+                        "table `{table}` block {block} precedes block-range start {anchor}"
+                    );
+                    check(&BlockMetadata {
+                        min_block_number: *block,
+                        ..metadata.clone()
+                    })?;
+                    previous = Some(*block);
+                }
+                Ok(())
+            }
+            Partition::Date | Partition::Hour | Partition::Minute | Partition::Second => {
+                let column = batch.column_by_name("timestamp").ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "table `{table}` needs canonical timestamp for time partitioning"
+                    )
+                })?;
+                anyhow::ensure!(
+                    column.data_type() == &crate::traits::timestamp_millis_utc_type(),
+                    "table `{table}` timestamp must be Timestamp(Millisecond, UTC)"
+                );
+                let timestamps = column
+                    .as_any()
+                    .downcast_ref::<arrow::array::TimestampMillisecondArray>()
+                    .expect("canonical timestamp type checked above");
+                match (metadata.min_timestamp, metadata.max_timestamp) {
+                    (Some(_), Some(max)) => check(&BlockMetadata { min_timestamp: Some(max), ..metadata.clone() })?,
+                    (None, None) => {},
+                    _ => anyhow::bail!("table `{table}` needs both minimum and maximum routing timestamps, or neither"),
+                }
+                let mut previous = None;
+                for timestamp in timestamps.iter().flatten() {
+                    let seconds = timestamp.div_euclid(1_000);
+                    if previous == Some(seconds) {
+                        continue;
+                    }
+                    anyhow::ensure!(metadata.min_timestamp.is_some(),
+                        "table `{table}` has non-null timestamps without routing timestamp metadata");
+                    check(&BlockMetadata {
+                        min_timestamp: Some(seconds),
+                        ..metadata.clone()
+                    })?;
+                    previous = Some(seconds);
+                }
+                // Null Solana payload times deliberately use the metadata's
+                // synthetic anchor. All-null rows without an anchor preserve
+                // the existing flat-table destination.
+                Ok(())
+            }
+        }
+    }
+
     fn writer_properties(&self) -> WriterProperties {
         use parquet::file::metadata::KeyValue;
 
@@ -274,7 +382,7 @@ fn with_root_cause_context(context: impl Display, error: anyhow::Error) -> anyho
 
 /// Fixed compression ratio (compressed/uncompressed) used for diagnostic
 /// estimates of validated data retained after a failed table write.
-fn compression_ratio(compression: &Compression) -> f64 {
+pub(crate) fn compression_ratio(compression: &Compression) -> f64 {
     match compression {
         Compression::None => 0.50,   // Parquet encoding alone: ~2×
         Compression::Snappy => 0.25, // Parquet + Snappy: ~4×
@@ -387,112 +495,6 @@ impl OutputWriter {
         }
     }
 
-    /// Check every row against the declared destination, without assuming row
-    /// order: reversible NEW/UNDO streams may visit the same partition in either
-    /// order. Metadata describes the whole mapper flush, not each table's exact
-    /// extrema. Existing partition-key timestamp policy is shared with routing.
-    fn validate_partition(
-        &self,
-        table: &str,
-        batch: &RecordBatch,
-        metadata: &BlockMetadata,
-    ) -> Result<()> {
-        // Reject invalid numeric configuration before path formatting can divide
-        // by zero or use the legacy pre-anchor fallback.
-        if let Partition::BlockRange { size, start_block } = &self.inner.partition {
-            anyhow::ensure!(
-                *size > 0,
-                "block-range partition size must be greater than zero"
-            );
-            let anchor = start_block.unwrap_or(0);
-            anyhow::ensure!(
-                metadata.min_block_number >= anchor && metadata.max_block_number >= anchor,
-                "table `{table}` metadata precedes block-range start {anchor}"
-            );
-        }
-        let expected = self.inner.partition_suffix(table, metadata)?;
-        let check = |row_metadata: &BlockMetadata| -> Result<()> {
-            let actual = self.inner.partition_suffix(table, row_metadata)?;
-            anyhow::ensure!(actual == expected,
-                "table `{table}` spans partitions or disagrees with its metadata: expected `{expected}`, found `{actual}`; flush the mapper at partition boundaries");
-            Ok(())
-        };
-        match &self.inner.partition {
-            Partition::None => Ok(()),
-            Partition::BlockRange { start_block, .. } => {
-                let anchor = start_block.unwrap_or(0);
-                check(&BlockMetadata {
-                    min_block_number: metadata.max_block_number,
-                    ..metadata.clone()
-                })?;
-                let blocks = batch.column_by_name("block_num")
-                    .and_then(|column| column.as_any().downcast_ref::<arrow::array::UInt64Array>())
-                    .ok_or_else(|| anyhow::anyhow!("table `{table}` needs canonical UInt64 block_num for block-range partitioning"))?;
-                anyhow::ensure!(
-                    blocks.null_count() == 0,
-                    "table `{table}` has null block_num values"
-                );
-                let mut previous = None;
-                for block in blocks.values() {
-                    // Canonical identities repeat across a block's table rows.
-                    // Still inspect every row, but format its destination only
-                    // when the routing value changes.
-                    if previous == Some(*block) {
-                        continue;
-                    }
-                    anyhow::ensure!(
-                        *block >= anchor,
-                        "table `{table}` block {block} precedes block-range start {anchor}"
-                    );
-                    check(&BlockMetadata {
-                        min_block_number: *block,
-                        ..metadata.clone()
-                    })?;
-                    previous = Some(*block);
-                }
-                Ok(())
-            }
-            Partition::Date | Partition::Hour | Partition::Minute | Partition::Second => {
-                let column = batch.column_by_name("timestamp").ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "table `{table}` needs canonical timestamp for time partitioning"
-                    )
-                })?;
-                anyhow::ensure!(
-                    column.data_type() == &crate::traits::timestamp_millis_utc_type(),
-                    "table `{table}` timestamp must be Timestamp(Millisecond, UTC)"
-                );
-                let timestamps = column
-                    .as_any()
-                    .downcast_ref::<arrow::array::TimestampMillisecondArray>()
-                    .expect("canonical timestamp type checked above");
-                match (metadata.min_timestamp, metadata.max_timestamp) {
-                    (Some(_), Some(max)) => check(&BlockMetadata { min_timestamp: Some(max), ..metadata.clone() })?,
-                    (None, None) => {},
-                    _ => anyhow::bail!("table `{table}` needs both minimum and maximum routing timestamps, or neither"),
-                }
-                let mut previous = None;
-                for timestamp in timestamps.iter().flatten() {
-                    let seconds = timestamp.div_euclid(1_000);
-                    if previous == Some(seconds) {
-                        continue;
-                    }
-                    anyhow::ensure!(metadata.min_timestamp.is_some(),
-                        "table `{table}` has non-null timestamps without routing timestamp metadata");
-                    check(&BlockMetadata {
-                        min_timestamp: Some(seconds),
-                        ..metadata.clone()
-                    })?;
-                    previous = Some(seconds);
-                }
-                // Null Solana payload times deliberately use the metadata's
-                // synthetic anchor. All-null rows without an anchor preserve
-                // the existing flat-table destination.
-                Ok(())
-            }
-        }
-    }
-
     /// Validate all nonempty tables, then publish each immediately in table-name
     /// order. Returns true if any data was written. A successful call leaves no
     /// pending rows, regardless of the legacy constructor threshold.
@@ -516,7 +518,7 @@ impl OutputWriter {
         tables.sort_by_key(|(table, _)| *table);
         // Complete preflight before changing buffers, counters, metrics or files.
         for (table, batch) in &tables {
-            self.validate_partition(table, batch, metadata)?;
+            self.inner.validate_partition(table, batch, metadata)?;
         }
         for (table, batch) in tables {
             self.buffers.insert(

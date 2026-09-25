@@ -108,6 +108,11 @@ async fn run(cwd: &std::path::Path, args: &[&str]) -> std::process::Output {
         .env_clear()
         .current_dir(cwd)
         .args(args);
+    if args.first() == Some(&"build") {
+        // The deliberately unknown test-chain name cannot choose a mapper
+        // before protected recovery; this fixture supplies its actual family.
+        command.args(["--block-type", "evm"]);
+    }
     tokio::time::timeout(std::time::Duration::from_secs(10), command.output())
         .await
         .unwrap()
