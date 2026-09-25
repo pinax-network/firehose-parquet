@@ -69,8 +69,11 @@ and test against current main. Never reset or discard the previous worktree.
 ## Remaining backlog groups
 
 - Schema/data correctness: #507 and #509 (NEAR and Tron). Draft PR #595 preserves
-  the reviewed Tron field implementation; its Firehose qualification is blocked by
-  StreamingFast quota. A separately bounded public RPC qualification is underway. Cosmos #510 merged
+  the reviewed Tron field implementation; its Firehose transport is blocked by
+  StreamingFast quota. A separately approved two-read native RPC capture now passes
+  all populated mapper/Parquet and legacy-value comparisons; absent internal-call
+  and failed-execution categories remain synthetic-only. See the
+  [qualification boundary](509-tron-rpc-qualification.md). Cosmos #510 merged
   in PR #601 as `9379883`, with 1,003 tests, independent raw RPC-backed mapping
   qualification and CI; issue closure was verified. This is not a captured
   Firehose/producer transport qualification.

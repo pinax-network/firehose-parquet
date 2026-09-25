@@ -86,7 +86,7 @@ all three supported contract field tags rather than constructing those expectati
 with the same generated serializer. The seven existing Tron tests remain applicable,
 with their table-count contract updated from four to six.
 
-The current-main integration includes main `d417e0c`. All **863 workspace tests**
+The initial draft integration included main `d417e0c`. All **863 workspace tests**
 passed with five intentional child/helper skips, including all thirteen Tron
 tests and the cross-chain schema round-trip contract. The capture-auth example
 passed its additional regression; formatting and locked workspace build passed.
@@ -96,7 +96,7 @@ all-tables coverage. Independent review found no blocking code defect and prompt
 the additional wire vectors and missing-parameter cases. Passing offline checks
 does not satisfy the issue's live criterion.
 
-## Live qualification blocker
+## Original Firehose transport blocker
 
 On 2026-09-25, one TLS `sf.firehose.v2.Stream/Blocks` request was made to
 `mainnet.tron.streamingfast.io:443` for finalized block `80000000` (inclusive
@@ -118,15 +118,54 @@ expanded range, or production storage write was attempted. The provider's public
 [Tron network page](https://thegraph.market/networks/tron) confirms this endpoint;
 the current Pinax endpoint catalog does not list a Tron Firehose service.
 
-**PR remains a draft; issue #509 remains open.** The StreamingFast account
-administrator must restore quota or provide an intended authorized credential
-with available access. Then capture one finalized Tron block, compare the raw
-contract envelopes and independently decoded fields, every receipt field,
-internal call-value pairs and original positions against Parquet, and compare
-all legacy values except the intentional empty-contract null change. Check the
-real saved checkpoint, current-main tests, independent review and CI before
-merging and verifying issue closure. Extend the read only if that exact sample
-lacks needed contract coverage, and document the bound first.
+The Firehose transport/cursor boundary remains unqualified; this account was never
+retried. The separately approved native RPC alternative below supplies the issue's
+live-block **mapper and Parquet** evidence without asserting that provider access
+or remote cursor continuity has been restored. Issue #550's execution outcome
+policy remains open and this PR preserves its existing wrapper-based filter.
+
+## Native RPC-backed qualification (2026-09-25)
+
+Exactly two credential-free unary reads to the officially documented public
+Solidity endpoint returned block **80000000** and its ordered transaction receipts.
+No Firehose retry, additional height or receipt request was made. The native
+responses were independently converted using the pinned Firehose producer's
+existing field assignments, after verifying the exact block and transaction ID
+hashes, ordered receipt identities, height and timestamp. The full bounds, primary
+sources, conversion fixtures, hashes and offline reproduction are in
+[the qualification record](509-tron-rpc-qualification.md).
+
+The integrated branch includes main `11ac02c` (#519 shared Parquet properties),
+#515 table estimates and #518 owned Bytes decoding. The same saved block was
+replayed through the production mapper and local Parquet writer on that main
+baseline and the candidate across all **20** combinations of five encodings,
+failed filtering and fork columns. Independent Python decoding of the upstream
+RPC/contract schemas matched **377,560 values** across **14,600 row occurrences**.
+All **136,720 legacy values**, order and legacy schema fields matched the baseline;
+the documented first-contract nullability change is the only permitted legacy
+schema difference. These counts repeat the same block across settings; they are
+not additional live blocks or distinct transactions.
+
+The block contains 336 transactions/contracts and 57 logs: TransferContract 159,
+TransferAssetContract 18, TriggerSmartContract 57, DelegateResourceContract 39 and
+UnDelegateResourceContract 63. Thus all three typed projections and unsupported
+raw Any retention have real source coverage. All wrappers are true/SUCCESS, all
+TransactionInfo results are the protocol's `SUCESS`, and receipt results are
+DEFAULT 279 / SUCCESS 57. DEFAULT is retained as source data; wrapper success
+is not presented as proof of TVM execution. No outcome/filter policy was changed.
+
+This sample has **no internal calls/call values, failed receipts, multiple-contract
+transactions, missing parameters or empty contract lists**. Those paths retain
+explicit synthetic regression coverage only. All eight receipt fields and exact
+Any payloads were compared even when their values were zero or empty. Empty
+internal tables produced no data files; their full schemas and zero counts were
+recorded. No claim is made about live Firehose transport, protected CLI ingestion,
+a real saved remote cursor, independent finality or absent sample categories.
+
+Four converter/wire/fake-channel tests passed before the live reads; a fifth
+independent-comparator fixture also exercises internal signed values, absent
+receipts/contracts and wrapper filtering. Final integrated workspace/build/CI
+example validation is recorded in the qualification record.
 
 ## Migration
 

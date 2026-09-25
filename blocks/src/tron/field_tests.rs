@@ -43,8 +43,8 @@ fn sample() -> tron::Block {
             1,
             "TransferContract",
             protocol::TransferContract {
-                owner_address: address(1),
-                to_address: address(2),
+                owner_address: address(1).into(),
+                to_address: address(2).into(),
                 amount: 1234567890123456789,
             },
         ),
@@ -52,9 +52,9 @@ fn sample() -> tron::Block {
             2,
             "TransferAssetContract",
             protocol::TransferAssetContract {
-                asset_name: b"1000001".to_vec(),
-                owner_address: address(3),
-                to_address: address(4),
+                asset_name: b"1000001".to_vec().into(),
+                owner_address: address(3).into(),
+                to_address: address(4).into(),
                 amount: 17,
             },
         ),
@@ -62,10 +62,10 @@ fn sample() -> tron::Block {
             31,
             "TriggerSmartContract",
             protocol::TriggerSmartContract {
-                owner_address: address(5),
-                contract_address: address(6),
+                owner_address: address(5).into(),
+                contract_address: address(6).into(),
                 call_value: 19,
-                data: vec![0, 255, 128],
+                data: vec![0, 255, 128].into(),
                 call_token_value: 23,
                 token_id: 1000001,
             },
@@ -94,8 +94,8 @@ fn sample() -> tron::Block {
         result: 2,
         energy_penalty_total: 18,
     });
-    info.contract_address = address(7);
-    info.res_message = vec![0, 255, 128];
+    info.contract_address = address(7).into();
+    info.res_message = vec![0, 255, 128].into();
     info.internal_transactions[0].call_value_info = vec![
         protocol::internal_transaction::CallValueInfo {
             call_value: i64::MAX,
@@ -400,8 +400,8 @@ fn pinned_transfer_wire_tags_decode_independently() {
         ..Default::default()
     };
     let d = super::contracts::decode(&c).unwrap();
-    assert_eq!(d.owner_address.unwrap(), b"a");
-    assert_eq!(d.to_address.unwrap(), b"b");
+    assert_eq!(d.owner_address.unwrap().as_ref(), b"a");
+    assert_eq!(d.to_address.unwrap().as_ref(), b"b");
     assert_eq!(d.amount, Some(150));
 }
 
@@ -422,9 +422,9 @@ fn pinned_asset_and_trigger_wire_tags_decode_independently() {
         vec![0x0a, 1, b't', 0x12, 1, b'a', 0x1a, 1, b'b', 0x20, 0x96, 1],
     );
     let d = super::contracts::decode(&asset).unwrap();
-    assert_eq!(d.asset_name.unwrap(), b"t");
-    assert_eq!(d.owner_address.unwrap(), b"a");
-    assert_eq!(d.to_address.unwrap(), b"b");
+    assert_eq!(d.asset_name.unwrap().as_ref(), b"t");
+    assert_eq!(d.owner_address.unwrap().as_ref(), b"a");
+    assert_eq!(d.to_address.unwrap().as_ref(), b"b");
     assert_eq!(d.amount, Some(150));
     // owner/target tags1/2, call_value3, data4, token value5, token id6.
     let trigger = make(
@@ -435,10 +435,10 @@ fn pinned_asset_and_trigger_wire_tags_decode_independently() {
         ],
     );
     let d = super::contracts::decode(&trigger).unwrap();
-    assert_eq!(d.owner_address.unwrap(), b"a");
-    assert_eq!(d.contract_address.unwrap(), b"b");
+    assert_eq!(d.owner_address.unwrap().as_ref(), b"a");
+    assert_eq!(d.contract_address.unwrap().as_ref(), b"b");
     assert_eq!(d.call_value, Some(150));
-    assert_eq!(d.data.unwrap(), [255, 0]);
+    assert_eq!(d.data.unwrap().as_ref(), [255, 0]);
     assert_eq!(d.call_token_value, Some(2));
     assert_eq!(d.token_id, Some(3));
 }

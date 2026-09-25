@@ -1,0 +1,681 @@
+{
+  "cases": {
+    "base58-failedfalse-forkfalse": {
+      "blocks": {
+        "columns": 15,
+        "legacy_columns": 15,
+        "rows": 1
+      },
+      "contracts": {
+        "columns": 24,
+        "legacy_columns": 0,
+        "rows": 336
+      },
+      "internal_call_values": {
+        "columns": 13,
+        "legacy_columns": 0,
+        "rows": 0
+      },
+      "internal_transactions": {
+        "columns": 16,
+        "legacy_columns": 15,
+        "rows": 0
+      },
+      "logs": {
+        "columns": 18,
+        "legacy_columns": 16,
+        "rows": 57
+      },
+      "transactions": {
+        "columns": 28,
+        "legacy_columns": 17,
+        "rows": 336
+      }
+    },
+    "base58-failedfalse-forktrue": {
+      "blocks": {
+        "columns": 16,
+        "legacy_columns": 16,
+        "rows": 1
+      },
+      "contracts": {
+        "columns": 25,
+        "legacy_columns": 0,
+        "rows": 336
+      },
+      "internal_call_values": {
+        "columns": 14,
+        "legacy_columns": 0,
+        "rows": 0
+      },
+      "internal_transactions": {
+        "columns": 17,
+        "legacy_columns": 16,
+        "rows": 0
+      },
+      "logs": {
+        "columns": 19,
+        "legacy_columns": 17,
+        "rows": 57
+      },
+      "transactions": {
+        "columns": 29,
+        "legacy_columns": 18,
+        "rows": 336
+      }
+    },
+    "base58-failedtrue-forkfalse": {
+      "blocks": {
+        "columns": 15,
+        "legacy_columns": 15,
+        "rows": 1
+      },
+      "contracts": {
+        "columns": 24,
+        "legacy_columns": 0,
+        "rows": 336
+      },
+      "internal_call_values": {
+        "columns": 13,
+        "legacy_columns": 0,
+        "rows": 0
+      },
+      "internal_transactions": {
+        "columns": 16,
+        "legacy_columns": 15,
+        "rows": 0
+      },
+      "logs": {
+        "columns": 18,
+        "legacy_columns": 16,
+        "rows": 57
+      },
+      "transactions": {
+        "columns": 28,
+        "legacy_columns": 17,
+        "rows": 336
+      }
+    },
+    "base58-failedtrue-forktrue": {
+      "blocks": {
+        "columns": 16,
+        "legacy_columns": 16,
+        "rows": 1
+      },
+      "contracts": {
+        "columns": 25,
+        "legacy_columns": 0,
+        "rows": 336
+      },
+      "internal_call_values": {
+        "columns": 14,
+        "legacy_columns": 0,
+        "rows": 0
+      },
+      "internal_transactions": {
+        "columns": 17,
+        "legacy_columns": 16,
+        "rows": 0
+      },
+      "logs": {
+        "columns": 19,
+        "legacy_columns": 17,
+        "rows": 57
+      },
+      "transactions": {
+        "columns": 29,
+        "legacy_columns": 18,
+        "rows": 336
+      }
+    },
+    "binary-failedfalse-forkfalse": {
+      "blocks": {
+        "columns": 15,
+        "legacy_columns": 15,
+        "rows": 1
+      },
+      "contracts": {
+        "columns": 24,
+        "legacy_columns": 0,
+        "rows": 336
+      },
+      "internal_call_values": {
+        "columns": 13,
+        "legacy_columns": 0,
+        "rows": 0
+      },
+      "internal_transactions": {
+        "columns": 16,
+        "legacy_columns": 15,
+        "rows": 0
+      },
+      "logs": {
+        "columns": 18,
+        "legacy_columns": 16,
+        "rows": 57
+      },
+      "transactions": {
+        "columns": 28,
+        "legacy_columns": 17,
+        "rows": 336
+      }
+    },
+    "binary-failedfalse-forktrue": {
+      "blocks": {
+        "columns": 16,
+        "legacy_columns": 16,
+        "rows": 1
+      },
+      "contracts": {
+        "columns": 25,
+        "legacy_columns": 0,
+        "rows": 336
+      },
+      "internal_call_values": {
+        "columns": 14,
+        "legacy_columns": 0,
+        "rows": 0
+      },
+      "internal_transactions": {
+        "columns": 17,
+        "legacy_columns": 16,
+        "rows": 0
+      },
+      "logs": {
+        "columns": 19,
+        "legacy_columns": 17,
+        "rows": 57
+      },
+      "transactions": {
+        "columns": 29,
+        "legacy_columns": 18,
+        "rows": 336
+      }
+    },
+    "binary-failedtrue-forkfalse": {
+      "blocks": {
+        "columns": 15,
+        "legacy_columns": 15,
+        "rows": 1
+      },
+      "contracts": {
+        "columns": 24,
+        "legacy_columns": 0,
+        "rows": 336
+      },
+      "internal_call_values": {
+        "columns": 13,
+        "legacy_columns": 0,
+        "rows": 0
+      },
+      "internal_transactions": {
+        "columns": 16,
+        "legacy_columns": 15,
+        "rows": 0
+      },
+      "logs": {
+        "columns": 18,
+        "legacy_columns": 16,
+        "rows": 57
+      },
+      "transactions": {
+        "columns": 28,
+        "legacy_columns": 17,
+        "rows": 336
+      }
+    },
+    "binary-failedtrue-forktrue": {
+      "blocks": {
+        "columns": 16,
+        "legacy_columns": 16,
+        "rows": 1
+      },
+      "contracts": {
+        "columns": 25,
+        "legacy_columns": 0,
+        "rows": 336
+      },
+      "internal_call_values": {
+        "columns": 14,
+        "legacy_columns": 0,
+        "rows": 0
+      },
+      "internal_transactions": {
+        "columns": 17,
+        "legacy_columns": 16,
+        "rows": 0
+      },
+      "logs": {
+        "columns": 19,
+        "legacy_columns": 17,
+        "rows": 57
+      },
+      "transactions": {
+        "columns": 29,
+        "legacy_columns": 18,
+        "rows": 336
+      }
+    },
+    "hex-failedfalse-forkfalse": {
+      "blocks": {
+        "columns": 15,
+        "legacy_columns": 15,
+        "rows": 1
+      },
+      "contracts": {
+        "columns": 24,
+        "legacy_columns": 0,
+        "rows": 336
+      },
+      "internal_call_values": {
+        "columns": 13,
+        "legacy_columns": 0,
+        "rows": 0
+      },
+      "internal_transactions": {
+        "columns": 16,
+        "legacy_columns": 15,
+        "rows": 0
+      },
+      "logs": {
+        "columns": 18,
+        "legacy_columns": 16,
+        "rows": 57
+      },
+      "transactions": {
+        "columns": 28,
+        "legacy_columns": 17,
+        "rows": 336
+      }
+    },
+    "hex-failedfalse-forktrue": {
+      "blocks": {
+        "columns": 16,
+        "legacy_columns": 16,
+        "rows": 1
+      },
+      "contracts": {
+        "columns": 25,
+        "legacy_columns": 0,
+        "rows": 336
+      },
+      "internal_call_values": {
+        "columns": 14,
+        "legacy_columns": 0,
+        "rows": 0
+      },
+      "internal_transactions": {
+        "columns": 17,
+        "legacy_columns": 16,
+        "rows": 0
+      },
+      "logs": {
+        "columns": 19,
+        "legacy_columns": 17,
+        "rows": 57
+      },
+      "transactions": {
+        "columns": 29,
+        "legacy_columns": 18,
+        "rows": 336
+      }
+    },
+    "hex-failedtrue-forkfalse": {
+      "blocks": {
+        "columns": 15,
+        "legacy_columns": 15,
+        "rows": 1
+      },
+      "contracts": {
+        "columns": 24,
+        "legacy_columns": 0,
+        "rows": 336
+      },
+      "internal_call_values": {
+        "columns": 13,
+        "legacy_columns": 0,
+        "rows": 0
+      },
+      "internal_transactions": {
+        "columns": 16,
+        "legacy_columns": 15,
+        "rows": 0
+      },
+      "logs": {
+        "columns": 18,
+        "legacy_columns": 16,
+        "rows": 57
+      },
+      "transactions": {
+        "columns": 28,
+        "legacy_columns": 17,
+        "rows": 336
+      }
+    },
+    "hex-failedtrue-forktrue": {
+      "blocks": {
+        "columns": 16,
+        "legacy_columns": 16,
+        "rows": 1
+      },
+      "contracts": {
+        "columns": 25,
+        "legacy_columns": 0,
+        "rows": 336
+      },
+      "internal_call_values": {
+        "columns": 14,
+        "legacy_columns": 0,
+        "rows": 0
+      },
+      "internal_transactions": {
+        "columns": 17,
+        "legacy_columns": 16,
+        "rows": 0
+      },
+      "logs": {
+        "columns": 19,
+        "legacy_columns": 17,
+        "rows": 57
+      },
+      "transactions": {
+        "columns": 29,
+        "legacy_columns": 18,
+        "rows": 336
+      }
+    },
+    "hex_no_prefix-failedfalse-forkfalse": {
+      "blocks": {
+        "columns": 15,
+        "legacy_columns": 15,
+        "rows": 1
+      },
+      "contracts": {
+        "columns": 24,
+        "legacy_columns": 0,
+        "rows": 336
+      },
+      "internal_call_values": {
+        "columns": 13,
+        "legacy_columns": 0,
+        "rows": 0
+      },
+      "internal_transactions": {
+        "columns": 16,
+        "legacy_columns": 15,
+        "rows": 0
+      },
+      "logs": {
+        "columns": 18,
+        "legacy_columns": 16,
+        "rows": 57
+      },
+      "transactions": {
+        "columns": 28,
+        "legacy_columns": 17,
+        "rows": 336
+      }
+    },
+    "hex_no_prefix-failedfalse-forktrue": {
+      "blocks": {
+        "columns": 16,
+        "legacy_columns": 16,
+        "rows": 1
+      },
+      "contracts": {
+        "columns": 25,
+        "legacy_columns": 0,
+        "rows": 336
+      },
+      "internal_call_values": {
+        "columns": 14,
+        "legacy_columns": 0,
+        "rows": 0
+      },
+      "internal_transactions": {
+        "columns": 17,
+        "legacy_columns": 16,
+        "rows": 0
+      },
+      "logs": {
+        "columns": 19,
+        "legacy_columns": 17,
+        "rows": 57
+      },
+      "transactions": {
+        "columns": 29,
+        "legacy_columns": 18,
+        "rows": 336
+      }
+    },
+    "hex_no_prefix-failedtrue-forkfalse": {
+      "blocks": {
+        "columns": 15,
+        "legacy_columns": 15,
+        "rows": 1
+      },
+      "contracts": {
+        "columns": 24,
+        "legacy_columns": 0,
+        "rows": 336
+      },
+      "internal_call_values": {
+        "columns": 13,
+        "legacy_columns": 0,
+        "rows": 0
+      },
+      "internal_transactions": {
+        "columns": 16,
+        "legacy_columns": 15,
+        "rows": 0
+      },
+      "logs": {
+        "columns": 18,
+        "legacy_columns": 16,
+        "rows": 57
+      },
+      "transactions": {
+        "columns": 28,
+        "legacy_columns": 17,
+        "rows": 336
+      }
+    },
+    "hex_no_prefix-failedtrue-forktrue": {
+      "blocks": {
+        "columns": 16,
+        "legacy_columns": 16,
+        "rows": 1
+      },
+      "contracts": {
+        "columns": 25,
+        "legacy_columns": 0,
+        "rows": 336
+      },
+      "internal_call_values": {
+        "columns": 14,
+        "legacy_columns": 0,
+        "rows": 0
+      },
+      "internal_transactions": {
+        "columns": 17,
+        "legacy_columns": 16,
+        "rows": 0
+      },
+      "logs": {
+        "columns": 19,
+        "legacy_columns": 17,
+        "rows": 57
+      },
+      "transactions": {
+        "columns": 29,
+        "legacy_columns": 18,
+        "rows": 336
+      }
+    },
+    "tron_base58-failedfalse-forkfalse": {
+      "blocks": {
+        "columns": 15,
+        "legacy_columns": 15,
+        "rows": 1
+      },
+      "contracts": {
+        "columns": 24,
+        "legacy_columns": 0,
+        "rows": 336
+      },
+      "internal_call_values": {
+        "columns": 13,
+        "legacy_columns": 0,
+        "rows": 0
+      },
+      "internal_transactions": {
+        "columns": 16,
+        "legacy_columns": 15,
+        "rows": 0
+      },
+      "logs": {
+        "columns": 18,
+        "legacy_columns": 16,
+        "rows": 57
+      },
+      "transactions": {
+        "columns": 28,
+        "legacy_columns": 17,
+        "rows": 336
+      }
+    },
+    "tron_base58-failedfalse-forktrue": {
+      "blocks": {
+        "columns": 16,
+        "legacy_columns": 16,
+        "rows": 1
+      },
+      "contracts": {
+        "columns": 25,
+        "legacy_columns": 0,
+        "rows": 336
+      },
+      "internal_call_values": {
+        "columns": 14,
+        "legacy_columns": 0,
+        "rows": 0
+      },
+      "internal_transactions": {
+        "columns": 17,
+        "legacy_columns": 16,
+        "rows": 0
+      },
+      "logs": {
+        "columns": 19,
+        "legacy_columns": 17,
+        "rows": 57
+      },
+      "transactions": {
+        "columns": 29,
+        "legacy_columns": 18,
+        "rows": 336
+      }
+    },
+    "tron_base58-failedtrue-forkfalse": {
+      "blocks": {
+        "columns": 15,
+        "legacy_columns": 15,
+        "rows": 1
+      },
+      "contracts": {
+        "columns": 24,
+        "legacy_columns": 0,
+        "rows": 336
+      },
+      "internal_call_values": {
+        "columns": 13,
+        "legacy_columns": 0,
+        "rows": 0
+      },
+      "internal_transactions": {
+        "columns": 16,
+        "legacy_columns": 15,
+        "rows": 0
+      },
+      "logs": {
+        "columns": 18,
+        "legacy_columns": 16,
+        "rows": 57
+      },
+      "transactions": {
+        "columns": 28,
+        "legacy_columns": 17,
+        "rows": 336
+      }
+    },
+    "tron_base58-failedtrue-forktrue": {
+      "blocks": {
+        "columns": 16,
+        "legacy_columns": 16,
+        "rows": 1
+      },
+      "contracts": {
+        "columns": 25,
+        "legacy_columns": 0,
+        "rows": 336
+      },
+      "internal_call_values": {
+        "columns": 14,
+        "legacy_columns": 0,
+        "rows": 0
+      },
+      "internal_transactions": {
+        "columns": 17,
+        "legacy_columns": 16,
+        "rows": 0
+      },
+      "logs": {
+        "columns": 19,
+        "legacy_columns": 17,
+        "rows": 57
+      },
+      "transactions": {
+        "columns": 29,
+        "legacy_columns": 18,
+        "rows": 336
+      }
+    }
+  },
+  "coverage": {
+    "call_values": 0,
+    "contract_types": {
+      "DelegateResourceContract": 39,
+      "TransferAssetContract": 18,
+      "TransferContract": 159,
+      "TriggerSmartContract": 57,
+      "UnDelegateResourceContract": 63
+    },
+    "empty_contract_transactions": 0,
+    "internal_transactions": 0,
+    "logs": 57,
+    "missing_parameter": 0,
+    "multi_contract_transactions": 0,
+    "receipt_result": {
+      "DEFAULT": 279,
+      "SUCCESS": 57
+    },
+    "transaction_info_result": {
+      "SUCESS": 336
+    },
+    "transactions": 336,
+    "wrapper_result_and_code": {
+      "True/SUCCESS": 336
+    }
+  },
+  "descriptor_sha256": "8e53fd91182e15c8be95832cfc77e59da5fa3ec5272737bb40d7e8fb93200c77",
+  "legacy_value_comparisons": 136720,
+  "qualification": "native RPC backed; pinned producer conversion; no Firehose transport or cursor proof",
+  "raw_sha256": {
+    "block-extension.pb": "6153f568a8b2e73a3fb6a966e17e292bd77cdbacb295035a983d220ea2b350b4",
+    "block.pb": "c2ddd99e3b6d1ec971dd8327acd6f414b5dd48487c8f402d415c927d00b0fc62",
+    "transaction-info-list.pb": "04334ee5a3b760098d4d4db9d59ce97093e34fc0c8882b2d9f0bb7401c6e83d9"
+  },
+  "raw_value_comparisons": 377560,
+  "row_occurrences": 14600,
+  "status": "passed"
+}

@@ -1397,7 +1397,7 @@ JOIN read_parquet('output/**/contracts/*.parquet') c
 
 These fields require a new output root/rebuild or explicit schema migration;
 old files cannot recover dropped source fields. See the [mapping contract,
-validation and live-access blocker](docs/audit/509-tron-contract-fields.md).
+validation and RPC-backed qualification limits](docs/audit/509-tron-contract-fields.md).
 
 ## Solana Vote Filtering
 
