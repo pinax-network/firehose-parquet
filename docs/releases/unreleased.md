@@ -12,6 +12,16 @@ Changes merged since the last release. Fold this file into `docs/releases/vX.Y.Z
   selected using a bounded local benchmark, not a live-provider speed claim.
   See [#517 evidence](../audit/517-grpc-transport.md).
 
+- `rollup` now validates each target group, then streams one input batch and one
+  output part at a time. S3 source reads use pinned byte ranges. Positive
+  `--flush-bytes` values bound encoded parts, with a separate 32 MiB estimated
+  row-group memory budget. Checks occur between batches; output file counts
+  can change, and a page/dictionary or wide batch can exceed these targets. Zero
+  disables the output-size threshold but retains the row-group memory budget. A
+  corrupt later input is rejected before that group publishes output or deletes
+  sources. See
+  [#522 validation](../audit/522-streaming-rollup.md).
+
 - `--final-blocks-only=false` now enables append-only reversible output directly;
   the default and bare flag remain true. Optional values use `=`, and explicit
   CLI values override `FINAL_BLOCKS_ONLY`. Successful bounded non-final runs warn

@@ -880,7 +880,7 @@ Lookup order for the data path:
     /// Roll up fine-grained partitioned Parquet files into coarser intervals.
     ///
     /// Reads minute/hour-partitioned files and merges them into hourly or daily
-    /// partitions, respecting --flush-bytes for file size limits.
+    /// partitions, streaming one output part at a time with a --flush-bytes target.
     #[command(after_long_help = "\
 Examples:
   # Roll up minute partitions into daily, replacing the minute files (in-place)
@@ -926,7 +926,7 @@ local path.
         /// Compression codec: zstd, snappy, gzip, none
         #[arg(long, default_value = "zstd", help_heading = "Output")]
         compression: String,
-        /// Target compressed bytes per output file (0 disables size-based closure; a batch can overshoot)
+        /// Target compressed bytes per part, with batch/codec overhead (0 = unlimited output size)
         #[arg(long, default_value_t = DEFAULT_FLUSH_BYTES, help_heading = "Output")]
         flush_bytes: u64,
         /// Delete each source file once its target partition is written (required for in-place rollup)
