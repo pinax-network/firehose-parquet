@@ -1,0 +1,95 @@
+{
+  "all_context_values_match_raw_metadata": true,
+  "all_legacy_schemas_and_values_equal": true,
+  "baseline_commit": "39d49f6b19b1baea0673bf12ebda836e82d0ee27",
+  "case_count": 40,
+  "compared_rows": 645230,
+  "matrix": {
+    "encodings": [
+      "binary",
+      "base58",
+      "hex",
+      "hex_no_prefix",
+      "tron_base58"
+    ],
+    "flush_each": [
+      false,
+      true
+    ],
+    "include_failed": [
+      false,
+      true
+    ],
+    "with_votes": [
+      false,
+      true
+    ]
+  },
+  "raw_counts": {
+    "failed_transactions": 252,
+    "failed_with_inner_calls": 82,
+    "transactions": 4448
+  },
+  "raw_sha256": {
+    "300000000": "c68946ce74e66969b023d6397cff61f6cb8bd6508ff89148fb29130ea6a30dae",
+    "300000001": "552dbd676ea0d3a36be535d6318dc3c920de90ce7f875d48d037f538ba026154"
+  },
+  "representative_included_failure_and_vote_case": {
+    "account_lookups": {
+      "context_counts": {
+        "failed": 187,
+        "success": 334
+      },
+      "legacy_columns": 14,
+      "rows": 521
+    },
+    "blocks": {
+      "context_counts": {},
+      "legacy_columns": 16,
+      "rows": 2
+    },
+    "instructions": {
+      "context_counts": {
+        "failed": 1524,
+        "success": 6179
+      },
+      "legacy_columns": 19,
+      "rows": 7703
+    },
+    "messages": {
+      "context_counts": {
+        "failed": 243,
+        "success": 916
+      },
+      "legacy_columns": 19,
+      "rows": 1159
+    },
+    "rewards": {
+      "context_counts": {
+        "block_null": 2
+      },
+      "legacy_columns": 17,
+      "rows": 2
+    },
+    "token_balances": {
+      "context_counts": {
+        "failed": 1676,
+        "success": 4203
+      },
+      "legacy_columns": 20,
+      "rows": 5879
+    },
+    "transactions": {
+      "context_counts": {},
+      "legacy_columns": 22,
+      "rows": 1159
+    },
+    "vote_transactions": {
+      "context_counts": {},
+      "legacy_columns": 22,
+      "rows": 3289
+    }
+  },
+  "scope": "Offline replay of retained source blocks; no new transport or per-instruction result claim",
+  "table_comparisons": 300
+}

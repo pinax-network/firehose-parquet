@@ -293,6 +293,7 @@ impl SolanaBlockMapper {
                 reward,
                 "block",
                 None,
+                None,
                 identity,
                 fork_step,
             )?;
@@ -320,8 +321,8 @@ impl SolanaBlockMapper {
         // Skip failed transactions unless --include-failed-transactions is set.
         // Some Firehose endpoints include `TransactionError { err: vec![] }` for
         // successful txs instead of omitting the field, so check the inner bytes.
-        if !self.include_failed_transactions && meta.err.as_ref().is_some_and(|e| !e.err.is_empty())
-        {
+        let transaction_success = !meta.err.as_ref().is_some_and(|e| !e.err.is_empty());
+        if !self.include_failed_transactions && !transaction_success {
             return Ok(());
         }
         let msg = match tx.message.as_ref() {
@@ -337,7 +338,7 @@ impl SolanaBlockMapper {
             return Ok(());
         }
 
-        // Successful non-vote transaction
+        // Included non-vote transaction (the success flag describes its parent outcome).
         append_transaction(
             &mut self.transactions,
             slot,
@@ -394,6 +395,9 @@ impl SolanaBlockMapper {
             self.messages.loaded_readonly_addresses.append(true);
         }
         append_fork_step(&mut self.messages.fork_step, fork_step);
+        self.messages
+            .transaction_success
+            .append_value(transaction_success);
 
         // instructions (top-level)
         let mut global_instr_idx = 0u32;
@@ -415,6 +419,9 @@ impl SolanaBlockMapper {
             self.instructions.parent_instruction_index.append_null();
             self.instructions.inner_instruction_index.append_null();
             append_fork_step(&mut self.instructions.fork_step, fork_step);
+            self.instructions
+                .transaction_success
+                .append_value(transaction_success);
             global_instr_idx += 1;
         }
 
@@ -446,6 +453,9 @@ impl SolanaBlockMapper {
                     None => self.instructions.stack_height.append_null(),
                 }
                 append_fork_step(&mut self.instructions.fork_step, fork_step);
+                self.instructions
+                    .transaction_success
+                    .append_value(transaction_success);
                 global_instr_idx += 1;
             }
         }
@@ -456,6 +466,7 @@ impl SolanaBlockMapper {
             tx_idx,
             "pre",
             &meta.pre_token_balances,
+            transaction_success,
             identity,
             fork_step,
         );
@@ -464,6 +475,7 @@ impl SolanaBlockMapper {
             tx_idx,
             "post",
             &meta.post_token_balances,
+            transaction_success,
             identity,
             fork_step,
         );
@@ -488,6 +500,9 @@ impl SolanaBlockMapper {
                 &lookup.readonly_indexes,
             );
             append_fork_step(&mut self.account_lookups.fork_step, fork_step);
+            self.account_lookups
+                .transaction_success
+                .append_value(transaction_success);
         }
 
         // per-transaction rewards
@@ -498,6 +513,7 @@ impl SolanaBlockMapper {
                 reward,
                 "transaction",
                 Some(tx_idx),
+                Some(transaction_success),
                 identity,
                 fork_step,
             )?;
@@ -511,6 +527,7 @@ impl SolanaBlockMapper {
         tx_idx: u32,
         balance_type: &str,
         balances: &[solana::TokenBalance],
+        transaction_success: bool,
         identity: &PreparedIdentity,
         fork_step: Option<&str>,
     ) {
@@ -541,6 +558,9 @@ impl SolanaBlockMapper {
                 self.token_balances.ui_amount_string.append_value("");
             }
             append_fork_step(&mut self.token_balances.fork_step, fork_step);
+            self.token_balances
+                .transaction_success
+                .append_value(transaction_success);
         }
     }
 
@@ -551,6 +571,7 @@ impl SolanaBlockMapper {
         reward: &solana::Reward,
         source: &str,
         tx_idx: Option<u32>,
+        transaction_success: Option<bool>,
         identity: &PreparedIdentity,
         fork_step: Option<&str>,
     ) -> anyhow::Result<()> {
@@ -576,6 +597,9 @@ impl SolanaBlockMapper {
             None => self.rewards.transaction_index.append_null(),
         }
         append_fork_step(&mut self.rewards.fork_step, fork_step);
+        self.rewards
+            .transaction_success
+            .append_option(transaction_success);
         *next_reward_index += 1;
         Ok(())
     }
@@ -692,7 +716,8 @@ impl BlockMapper for SolanaBlockMapper {
             + self.messages.account_keys.estimated_bytes()
             + self.messages.loaded_writable_addresses.estimated_bytes()
             + self.messages.loaded_readonly_addresses.estimated_bytes()
-            + est_opt_str(&self.messages.fork_step);
+            + est_opt_str(&self.messages.fork_step)
+            + est_bool(&self.messages.transaction_success);
         let instructions = self.instructions.canonical.estimated_bytes()
             + est_u64(&self.instructions.slot)
             + est_u32(&self.instructions.transaction_index)
@@ -705,7 +730,8 @@ impl BlockMapper for SolanaBlockMapper {
             + est_u32(&self.instructions.stack_height)
             + est_u32(&self.instructions.parent_instruction_index)
             + est_u32(&self.instructions.inner_instruction_index)
-            + est_opt_str(&self.instructions.fork_step);
+            + est_opt_str(&self.instructions.fork_step)
+            + est_bool(&self.instructions.transaction_success);
         let rewards = self.rewards.canonical.estimated_bytes()
             + est_u64(&self.rewards.slot)
             + est_u32(&self.rewards.reward_index)
@@ -716,7 +742,8 @@ impl BlockMapper for SolanaBlockMapper {
             + est_str(&self.rewards.commission)
             + est_str(&self.rewards.source)
             + est_u32(&self.rewards.transaction_index)
-            + est_opt_str(&self.rewards.fork_step);
+            + est_opt_str(&self.rewards.fork_step)
+            + est_bool(&self.rewards.transaction_success);
         let token_balances = self.token_balances.canonical.estimated_bytes()
             + est_u64(&self.token_balances.slot)
             + est_u32(&self.token_balances.transaction_index)
@@ -730,7 +757,8 @@ impl BlockMapper for SolanaBlockMapper {
             + est_f64(&self.token_balances.ui_amount)
             + est_u32(&self.token_balances.decimals)
             + est_str(&self.token_balances.ui_amount_string)
-            + est_opt_str(&self.token_balances.fork_step);
+            + est_opt_str(&self.token_balances.fork_step)
+            + est_bool(&self.token_balances.transaction_success);
         let account_lookups = self.account_lookups.canonical.estimated_bytes()
             + est_u64(&self.account_lookups.slot)
             + est_u32(&self.account_lookups.transaction_index)
@@ -738,7 +766,8 @@ impl BlockMapper for SolanaBlockMapper {
             + self.account_lookups.account_key.estimated_bytes()
             + estimated_index_list_bytes(&mut self.account_lookups.writable_indexes)
             + estimated_index_list_bytes(&mut self.account_lookups.readonly_indexes)
-            + est_opt_str(&self.account_lookups.fork_step);
+            + est_opt_str(&self.account_lookups.fork_step)
+            + est_bool(&self.account_lookups.transaction_success);
         [
             ("blocks", blocks),
             ("transactions", transactions),
@@ -918,12 +947,14 @@ struct MessagesBuilder {
     loaded_writable_addresses: BytesListColumn,
     loaded_readonly_addresses: BytesListColumn,
     fork_step: Option<StringBuilder>,
+    transaction_success: BooleanBuilder,
 }
 
 impl MessagesBuilder {
     fn new(include_fork_step: bool, encoding: &EncodeBytes) -> Self {
         Self {
             canonical: CanonicalBuilder::with_encoding(encoding),
+            transaction_success: BooleanBuilder::new(),
             slot: UInt64Builder::new(),
             transaction_index: UInt32Builder::new(),
             message_index: UInt32Builder::new(),
@@ -959,6 +990,7 @@ impl MessagesBuilder {
             self.loaded_readonly_addresses.finish(),
         ]);
         finish_fork_step(&mut self.fork_step, &mut columns);
+        columns.push(Arc::new(self.transaction_success.finish()) as Arc<dyn Array>);
         Ok(RecordBatch::try_new(Arc::new(schema.clone()), columns)?)
     }
 }
@@ -977,12 +1009,14 @@ struct InstructionsBuilder {
     parent_instruction_index: UInt32Builder,
     inner_instruction_index: UInt32Builder,
     fork_step: Option<StringBuilder>,
+    transaction_success: BooleanBuilder,
 }
 
 impl InstructionsBuilder {
     fn new(include_fork_step: bool, encoding: &EncodeBytes) -> Self {
         Self {
             canonical: CanonicalBuilder::with_encoding(encoding),
+            transaction_success: BooleanBuilder::new(),
             slot: UInt64Builder::new(),
             transaction_index: UInt32Builder::new(),
             instruction_index: UInt32Builder::new(),
@@ -1018,6 +1052,7 @@ impl InstructionsBuilder {
             Arc::new(self.inner_instruction_index.finish()) as Arc<dyn Array>,
         ]);
         finish_fork_step(&mut self.fork_step, &mut columns);
+        columns.push(Arc::new(self.transaction_success.finish()) as Arc<dyn Array>);
         Ok(RecordBatch::try_new(Arc::new(schema.clone()), columns)?)
     }
 }
@@ -1034,12 +1069,14 @@ struct RewardsBuilder {
     source: StringBuilder,
     transaction_index: UInt32Builder,
     fork_step: Option<StringBuilder>,
+    transaction_success: BooleanBuilder,
 }
 
 impl RewardsBuilder {
     fn new(include_fork_step: bool, encoding: &EncodeBytes) -> Self {
         Self {
             canonical: CanonicalBuilder::with_encoding(encoding),
+            transaction_success: BooleanBuilder::new(),
             slot: UInt64Builder::new(),
             reward_index: UInt32Builder::new(),
             pubkey: StringBuilder::new(),
@@ -1071,6 +1108,7 @@ impl RewardsBuilder {
             Arc::new(self.transaction_index.finish()) as Arc<dyn Array>,
         ]);
         finish_fork_step(&mut self.fork_step, &mut columns);
+        columns.push(Arc::new(self.transaction_success.finish()) as Arc<dyn Array>);
         Ok(RecordBatch::try_new(Arc::new(schema.clone()), columns)?)
     }
 }
@@ -1090,12 +1128,14 @@ struct TokenBalancesBuilder {
     decimals: UInt32Builder,
     ui_amount_string: StringBuilder,
     fork_step: Option<StringBuilder>,
+    transaction_success: BooleanBuilder,
 }
 
 impl TokenBalancesBuilder {
     fn new(include_fork_step: bool, encoding: &EncodeBytes) -> Self {
         Self {
             canonical: CanonicalBuilder::with_encoding(encoding),
+            transaction_success: BooleanBuilder::new(),
             slot: UInt64Builder::new(),
             transaction_index: UInt32Builder::new(),
             balance_index: UInt32Builder::new(),
@@ -1133,6 +1173,7 @@ impl TokenBalancesBuilder {
             Arc::new(self.ui_amount_string.finish()) as Arc<dyn Array>,
         ]);
         finish_fork_step(&mut self.fork_step, &mut columns);
+        columns.push(Arc::new(self.transaction_success.finish()) as Arc<dyn Array>);
         Ok(RecordBatch::try_new(Arc::new(schema.clone()), columns)?)
     }
 }
@@ -1146,12 +1187,14 @@ struct AccountLookupsBuilder {
     writable_indexes: ListBuilder<UInt8Builder>,
     readonly_indexes: ListBuilder<UInt8Builder>,
     fork_step: Option<StringBuilder>,
+    transaction_success: BooleanBuilder,
 }
 
 impl AccountLookupsBuilder {
     fn new(include_fork_step: bool, encoding: &EncodeBytes) -> Self {
         Self {
             canonical: CanonicalBuilder::with_encoding(encoding),
+            transaction_success: BooleanBuilder::new(),
             slot: UInt64Builder::new(),
             transaction_index: UInt32Builder::new(),
             lookup_index: UInt32Builder::new(),
@@ -1177,6 +1220,7 @@ impl AccountLookupsBuilder {
             Arc::new(self.readonly_indexes.finish()) as Arc<dyn Array>,
         ]);
         finish_fork_step(&mut self.fork_step, &mut columns);
+        columns.push(Arc::new(self.transaction_success.finish()) as Arc<dyn Array>);
         Ok(RecordBatch::try_new(Arc::new(schema.clone()), columns)?)
     }
 }

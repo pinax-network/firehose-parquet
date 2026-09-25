@@ -22,6 +22,17 @@ Changes merged since the last release. Fold this file into `docs/releases/vX.Y.Z
 
 ## Breaking changes
 
+### Solana detail rows expose parent transaction outcome (#550, partial)
+
+`messages`, `instructions`, `token_balances`, and `account_lookups` append Boolean
+`transaction_success`; rewards append the same field with null for block-level
+rewards. Existing values, row filters and vote treatment are unchanged. This is
+parent outcome context, not proof of individual instruction execution or
+reversion. Balance snapshots and fees remain literal source observations.
+Rebuild into a fresh dataset; old missing context must not become false.
+See the [contract and retained-source comparison](../audit/550-solana-execution-context.md).
+The other chains and remaining qualification in #550 are still open.
+
 ### Cosmos preserves event order, unknown results and SDK metadata (#510)
 
 Empty events now produce one row; `attribute_index` preserves repeated-key order.
