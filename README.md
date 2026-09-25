@@ -1910,7 +1910,7 @@ FROM read_parquet('output/near-mainnet/receipts/**/*.parquet') AS r
 LEFT JOIN origin USING (receipt_id);
 ```
 
-Receipts whose transaction is before the range stay unresolved.
+Receipts whose transaction or any intermediate lineage link is outside the available range stay unresolved. These queries assume a finalized dataset; append-only non-final events need the finalized-reference handling described above.
 
 These added columns and tables require a fresh dataset or an explicit rebuild; protected ingestion refuses to resume an incompatible schema inventory. See the [bounded public-source comparison and its coverage limits](docs/audit/506-near-public-qualification.md).
 

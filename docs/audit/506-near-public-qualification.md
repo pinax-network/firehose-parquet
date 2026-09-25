@@ -1,7 +1,7 @@
 # NEAR public-source qualification of recovered PR #559 (#506)
 
 Status: the single approved public capture and independent offline comparison
-passed. Full repository validation and final review are in progress. The earlier
+passed. Full repository validation passed; independent final review is pending. The earlier
 single Firehose request remains quota-blocked and was not retried. #506, #507 and
 #550 remain open until their respective acceptance/merge gates are satisfied.
 
@@ -107,7 +107,7 @@ Intentional source losses are reproduced, not silently repaired:
 
 - BigInt is fixed 16-byte **big-endian unsigned u128**, including zero.
 - At selected height 150000000, receipt outcomes are sorted by decoded ID bytes
-  per shard, because the pinned producer restores that ordering below193444226.
+  per shard, because the pinned producer restores that ordering below 193444226.
   Other list/shard order is preserved.
 - `state_changes` is always empty: the pinned producer drops per-shard changes.
   Raw NearData changes remain in the source document. This cannot close #507.
@@ -165,14 +165,14 @@ capture. No further data read is authorized by missing coverage.
 ## Executed capture: exactly three requests
 
 The normal supervised `capture` command ran once, from 2026-09-25
-22:15:43.618813 UTC to22:15:48.048240 UTC (4.43seconds). It received:
+22:15:43.618813 UTC to 22:15:48.048240 UTC (4.43 seconds). It received:
 
-1. HTTP302 from the exact original height150000000 URL, with an empty body.
-2. HTTP200 from the permitted `https://a2.mainnet.neardata.xyz/v0/block/150000000`
-   archive URL, with334,930 original JSON bytes.
-3. HTTP200 from the exact archival RPC, with16,891 bytes for the source's exact
-   `last_final_block` hash. Its verified height is149999998; the source parent
-   height is149999999.
+1. HTTP 302 from the exact original height 150000000 URL, with an empty body.
+2. HTTP 200 from the permitted `https://a2.mainnet.neardata.xyz/v0/block/150000000`
+   archive URL, with 334,930 original JSON bytes.
+3. HTTP 200 from the exact archival RPC, with 16,891 bytes for the source's exact
+   `last_final_block` hash. Its verified height is 149999998; the source parent
+   height is 149999999.
 
 There were no retries, fallback, credentials, additional selected heights or
 Firehose calls. All subsequent work is offline. Raw artifacts and request
@@ -185,27 +185,27 @@ provenance are retained at
 | `lib-anchor.json` |16891|`b3757b2ed5458321bc484e6fd98fffed9e4b0b2d6c7cd92d981b9cce2e3dee14`|
 | `block.pb` |108483|`8bec28c855cc0f4b95e59bcbec36cb3621669f0479c2c12dd06689ecee7afca5`|
 
-The eight shards all have chunks. The21 transaction inclusion outcomes are
+The eight shards all have chunks. The 21 transaction inclusion outcomes are
 literally `SuccessReceiptId`; this is not an aggregate claim about the later
-receipt tree. The70 receipt outcomes are68 `SuccessValue`,1 `SuccessReceiptId`,
+receipt tree. The 70 receipt outcomes are 68 `SuccessValue`, 1 `SuccessReceiptId`,
 and1 `Failure`. The failure is `ActionError::DelegateActionInvalidNonce` at
-index0, with no logs. All70 executed receipts are Action receipts:2 AddKey,
-32 Transfer,15 Delegate and21 FunctionCall actions. Their54 logs include42
-NEP-141 events:8 `ft_transfer` and34 `ft_mint`. The README event query, with only
+index 0, with no logs. All 70 executed receipts are Action receipts: 2 AddKey,
+32 Transfer, 15 Delegate and21 FunctionCall actions. Their 54 logs include 42
+NEP-141 events: 8 `ft_transfer` and 34 `ft_mint`. The README event query, with only
 its local file paths adapted, returns exactly those counts.
 
 **No receipt has an origin derivable from a transaction in this same block.**
-All70 new mapper tx_hash values therefore stay NULL, despite all70 NearData
+All 70 new mapper tx_hash values therefore stay NULL, despite all 70 NearData
 records containing externally enriched hashes. Positive same-block lineage,
 cross-block unresolved lineage, Data receipts, failed transaction inclusion,
-and the other action kinds have synthetic fixture coverage only. The221 native
+and the other action kinds have synthetic fixture coverage only. The 221 native
 per-shard state changes remain in raw JSON but are deliberately absent from the
 producer-compatible protobuf and Parquet. They do not qualify #507.
 
 ## Independent comparison and current integration
 
 Recovery is integrated with actual main `81f5b79` as `e8a3347`. A separate
-current-main baseline checkout at81f5b79 and the candidate both use the same
+current-main baseline checkout at 81f5b79 and the candidate both use the same
 [offline replay example](../../blocks/examples/replay_near.rs), with no baseline
 production edits. Stable binaries were copied inside the Cargo lock before
 running. Each reads only a saved protobuf and writes a fresh local directory.
@@ -218,9 +218,9 @@ legacy receipt-ID ordering and explicitly checks the ignored external tx_hash
 and state-change boundaries.
 
 For every one of five encodings × two transaction filters × optional fork-step
-column settings (20cases), the live comparison passes:
+column settings (20 cases), the live comparison passes:
 
-- 4,480 row occurrences and83,920 raw-source value comparisons across the seven
+- 4,480 row occurrences and 83,920 raw-source value comparisons across the seven
   declared tables (state_changes empty).
 - 29,800 existing-column value comparisons against main81f5b79. Every legacy
   Arrow field, order, type, nullability and metadata is preserved when the new
@@ -234,8 +234,8 @@ column settings (20cases), the live comparison passes:
 Report: `/tmp/fireparq-506-live-comparison.json`; local datasets:
 `/tmp/fireparq-506-live-before` and `/tmp/fireparq-506-live-after`.
 The synthetic all-action/data-receipt document also passes converter→mapper→
-Parquet comparison over20cases:360row occurrences,6,780raw-source values and
-1,570legacy values (`/tmp/fireparq-506-synthetic-comparison.json`). Four separate
+Parquet comparison over20 cases:360row occurrences, 6,780 raw-source values and
+1,570 legacy values (`/tmp/fireparq-506-synthetic-comparison.json`). Four separate
 oracle/schema tests check exact sample expectations, same-block origins versus
 filtering, raw args under all encodings, and rejection of nested type/nullability
 or metadata changes.
@@ -253,5 +253,4 @@ The live-block mapper comparison passes under the explicitly reviewed
 NearData/indexer-JSON plus pinned-producer-conversion boundary. It does not prove
 Firehose transport/cursor behavior, globally complete lineage, #507 state-change
 rows or #550 execution/filter semantics. Those remain separately open.
-Current-main workspace tests/build/standard CI example and independent final
-review remain required before publishing or merging the recovered PR.
+Validation on integrated main `81f5b79` plus the recovered changes passed: **1,073 workspace tests, 0 failures, 12 ignored**; the standard `refresh_evm_golden` CI example passed 1 test with 1 subprocess fixture ignored. Formatting, binary build and Bash/Zsh/Fish completions passed. All shared-target Cargo commands used the whole-command lock. Independent final review and current-head GitHub CI remain required before merging the recovered PR.
