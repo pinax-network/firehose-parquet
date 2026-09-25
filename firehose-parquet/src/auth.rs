@@ -174,6 +174,29 @@ mod tests {
 
     #[test]
     fn startup_log_names_credentials_without_values() {
+        // Tracing caches callsite interest process-wide. Isolate this capture
+        // from concurrent resolver tests that hit the same callsite without a
+        // subscriber, while still asserting the actual production log output.
+        const CHILD: &str = "FIREPARQ_AUTH_LOG_TEST_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let child = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "auth::tests::startup_log_names_credentials_without_values",
+                    "--nocapture",
+                ])
+                .env(CHILD, "1")
+                .output()
+                .unwrap();
+            assert!(
+                child.status.success()
+                    && String::from_utf8_lossy(&child.stdout).contains("1 passed; 0 failed"),
+                "isolated log test failed: {}{}",
+                String::from_utf8_lossy(&child.stdout),
+                String::from_utf8_lossy(&child.stderr)
+            );
+            return;
+        }
         let output = tempfile::NamedTempFile::new().unwrap();
         let subscriber = tracing_subscriber::fmt()
             .without_time()
