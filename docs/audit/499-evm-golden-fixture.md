@@ -39,10 +39,25 @@ cursor. The documented refresh process requires independent raw-field review.
   production output writes. Original payload: 2,094,485 bytes, SHA-256
   `dad74257d32c66a056404add2a5f3360c288faedf0a026e5698394cd9d231b2a`.
 - The independent decode found 182 transactions, 557 receipt logs, 16 withdrawals
-  and four system calls. All 283 selected values and exact table counts passed
-  in all eight test configurations on the first mapper-test run (0.43 seconds).
+  and four system calls. The applicable selected values and exact table counts passed
+  in all eight test configurations on the first mapper-test run (0.43 seconds);
+  extended mode covers all 283 values.
 - Eight tables have no source rows in this fixture. Their absence is checked,
   but nonempty mappings and other Ethereum forks still need appropriate fixtures
   or existing synthetic tests. This is the issue's requested EVM starting point,
   not live qualification of every chain or all upstream data shapes.
-- Full current-main integration and independent review are recorded before merge.
+- Current-main integration (including #475) passed **788 workspace tests**, with
+  four intentionally ignored tests, plus formatting, binary and capture-example
+  builds. The golden test itself takes about half a second and needs no network.
+- Independent review decoded the retained raw block again and verified all 20
+  counts (5,049 extended rows), 283 selected values, the checksum and canonical
+  identity/date. No oracle change was needed after the mapper test ran.
+- Review caught a credential-routing defect in the new helper's implicit default
+  selectors: a custom endpoint alone could have authorized ambient Pinax headers.
+  Selectors are now optional with no defaults and the shared resolver scopes
+  ambient credentials. An actual loopback subprocess regression passed with all
+  four Pinax/legacy fixture variables present and no credential headers sent.
+  CI explicitly runs this example test (one passed, one child fixture skipped
+  by the parent harness and invoked separately). No live recapture was needed;
+  the original bounded capture used the intended Pinax endpoint and an isolated
+  environment. The final review has no remaining blockers.

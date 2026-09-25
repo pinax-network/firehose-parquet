@@ -36,10 +36,13 @@ it does not calculate its expected values using the mapper under test.
 ## Refresh or add a fixture
 
 1. Use an explicitly selected provider credential in the environment. The
-   capture helper does not load `.env`, and its default selectors are
-   `PINAX_API_KEY` / `PINAX_API_TOKEN`; unrelated legacy token variables are not
-   consulted. For another endpoint, explicitly select credentials appropriate
-   to that destination. Never put a secret value on the command line.
+   capture helper does not load `.env`. With no selector flags, it uses the
+   shared provider-scoped credential resolver; known HTTPS Pinax hosts accept
+   `PINAX_API_KEY` / `PINAX_API_TOKEN` and legacy `SUBSTREAMS_*` fallbacks. Keep
+   those variables appropriate to the provider, or choose explicit variable
+   names with `--api-key-envvar` / `--api-token-envvar`. Merely changing the
+   endpoint does not authorize credentials for an unknown or insecure host.
+   Never put a secret value on the command line.
 2. Capture one exact finalized block into a **new staging directory**:
 
    ```sh
