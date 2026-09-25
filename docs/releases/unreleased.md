@@ -164,6 +164,13 @@ Migration:
 
 ## Fixes
 
+- **CLI values that crashed or misbehaved are now rejected or consistent (#471).**
+  - `--block-range-size 0` (for `build` and `partitions build`) and `--stop-block 0` are rejected by the parser. `build` also rejects a `--stop-block` at or below the start block (`--stop-block` is exclusive). `--block-range-size 0` used to panic with a division by zero, and `--stop-block 0` streamed from genesis forever.
+  - A bounded run never sends Firehose `stop_block_num = 0`, which means "stream forever": `--start-block 0 --stop-block 1` now ingests block 0 and stops instead of never ending.
+  - `--flush-bytes 0` now means "byte-based flushing disabled" in `build`, as it already did in the writer, `merge` and `rollup`. It used to flush after every block, writing one file per table per block.
+  - `--stream-idle-timeout-secs 0` and `--reconnect-stall-timeout-secs 0` disable those timeouts. They used to cause a reconnect storm and an immediate exit on the first connection error, respectively.
+  - API keys and JWT tokens are trimmed, so a secret file with a trailing newline works, and they are parsed once when the client is created. A credential that cannot be sent as a gRPC header is a startup error instead of a panic (exit code 101).
+
 - **`build --start-block` above the last irreversible block no longer writes earlier blocks (#466).** Firehose serves such a request from LIB+1, and those blocks used to be written. Blocks below the effective start block are now skipped before mapping, logged once, and counted in the new `firehose_parquet_blocks_skipped_below_start_total` metric and the `blocks_skipped_below_start` summary field.
 - **Bounded `build` runs verify the stop block (#466).** A run with `--stop-block` exits 0 only once block `stop_block - 1` was received. A stream that ends earlier is resumed from the cursor. If the server then has no more blocks, the run completes with a warning on chains with skipped slots or heights (Solana, NEAR, Beacon), and otherwise writes what it received, saves the cursor there, and exits non-zero.
 - **Live `build` runs reconnect when the stream closes cleanly (#466).** Previously a clean close by the server or a proxy ended the process with exit code 0, so `Restart=on-failure` supervisors never restarted it.

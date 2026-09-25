@@ -187,7 +187,8 @@ fn next_mapper_flush_trigger(
         .map(|limit| blocks_since_flush >= limit)
         .unwrap_or(false);
 
-    let bytes_to_flush = estimated_bytes >= flush_bytes;
+    // `--flush-bytes 0` disables byte-based flushing, as in the writer.
+    let bytes_to_flush = flush_bytes > 0 && estimated_bytes >= flush_bytes;
 
     if bytes_to_flush {
         Some(MapperFlushTrigger::Bytes)
@@ -1141,7 +1142,7 @@ fn resolve_output(base: &PathBuf, endpoint_info: &Option<EndpointInfo>) -> PathB
 }
 
 fn read_optional_env(name: &str) -> Option<String> {
-    std::env::var(name).ok().filter(|value| !value.is_empty())
+    firehose_parquet::cli::read_credential_env(name)
 }
 
 async fn ensure_endpoint_available(
@@ -1454,7 +1455,7 @@ async fn run_partitions_build(
         reconnect_stall_timeout_secs: None,
     };
 
-    let info_client = FirehoseClient::new(base_config.clone());
+    let info_client = FirehoseClient::new(base_config.clone())?;
     ensure_endpoint_available(&info_client, endpoint, network).await?;
     let endpoint_info = info_client.info().await;
     let chain = endpoint_info
@@ -1602,7 +1603,7 @@ async fn run_partitions_build(
         }
     }
 
-    let stream_client = FirehoseClient::new(base_config.clone());
+    let stream_client = FirehoseClient::new(base_config.clone())?;
 
     info!(
         version = env!("CARGO_PKG_VERSION"),
@@ -4667,7 +4668,7 @@ async fn run_ingestion(args: &BuildArgs, global: &GlobalArgs) -> Result<()> {
 
     // Fetch endpoint info for auto-detection of encoding, chain_name-based
     // output directory, and feature capability logging.
-    let mut client = FirehoseClient::new(config.clone());
+    let mut client = FirehoseClient::new(config.clone())?;
     ensure_endpoint_available(&client, &config.endpoint, resolved_network_name.as_deref()).await?;
     let endpoint_info = client.info().await;
     debug!(endpoint_info = ?endpoint_info, "fetched endpoint metadata");
@@ -4702,6 +4703,7 @@ async fn run_ingestion(args: &BuildArgs, global: &GlobalArgs) -> Result<()> {
         args.cursor_override,
     )?;
     config.stop_block = resolve_ingestion_stop_block(config.stop_block)?;
+    firehose_parquet::cli::validate_stop_block_after_start(config.start_block, config.stop_block)?;
     debug!(
         requested_start_block = ?args.common.start_block,
         resolved_start_block = ?config.start_block,
@@ -4883,6 +4885,16 @@ async fn run_ingestion(args: &BuildArgs, global: &GlobalArgs) -> Result<()> {
     let dry_run = config.dry_run;
     let mut is_solana = block_type == "solana";
     let partition_config = config.partition.clone();
+    if flush_bytes == 0
+        && flush_rows.is_none()
+        && flush_blocks.is_none()
+        && flush_interval_secs.is_none()
+        && partition_config == Partition::None
+    {
+        warn!(
+            "--flush-bytes 0 disables byte-based flushing and no other flush trigger is set (--flush-rows, --flush-blocks, --flush-interval-secs or --partition); all output stays in memory until the run ends"
+        );
+    }
     let mut use_synthetic_partition_routing =
         use_last_known_timestamp_partition_routing(&block_type, &partition_config);
     let mut genesis_timestamp_bootstrap = GenesisTimestampBootstrap::new(config.start_block);
@@ -5914,6 +5926,39 @@ mod tests {
             next_mapper_flush_trigger(None, 0, None, 3, None, Instant::now(), 1_000_000, 128);
 
         assert_eq!(trigger, None);
+    }
+
+    #[test]
+    fn test_next_mapper_flush_trigger_flush_bytes_zero_is_disabled() {
+        // `--flush-bytes 0` used to flush after every block (`estimated >= 0`).
+        for estimated_bytes in [0, 128, u64::MAX] {
+            let trigger = next_mapper_flush_trigger(
+                None,
+                0,
+                None,
+                1,
+                None,
+                Instant::now(),
+                0,
+                estimated_bytes,
+            );
+            assert_eq!(trigger, None);
+        }
+
+        // Other triggers still apply.
+        let trigger = next_mapper_flush_trigger(None, 0, Some(1), 1, None, Instant::now(), 0, 128);
+        assert_eq!(trigger, Some(MapperFlushTrigger::Blocks));
+    }
+
+    #[test]
+    fn test_build_subcommand_rejects_zero_block_range_size_and_stop_block() {
+        for (flag, value) in [("--block-range-size", "0"), ("--stop-block", "0")] {
+            let error =
+                Cli::try_parse_from(["fireparq", "build", "--network", "mainnet", flag, value])
+                    .expect_err("zero should be rejected");
+            assert_eq!(error.kind(), clap::error::ErrorKind::ValueValidation);
+            assert!(error.to_string().contains(flag), "{error}");
+        }
     }
 
     #[test]

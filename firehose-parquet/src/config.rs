@@ -282,12 +282,20 @@ impl std::fmt::Display for Config {
         if let Some(port) = self.metrics_port {
             writeln!(f, "  metrics_port       {port}")?;
         }
-        if let Some(secs) = self.stream_idle_timeout_secs {
-            writeln!(f, "  stream_idle_timeout {secs}s")?;
-        }
-        if let Some(secs) = self.reconnect_stall_timeout_secs {
-            writeln!(f, "  reconnect_stall_timeout {secs}s")?;
-        }
+        let timeout = |secs: Option<u64>| match secs {
+            Some(secs) if secs > 0 => format!("{secs}s"),
+            _ => "disabled".to_string(),
+        };
+        writeln!(
+            f,
+            "  stream_idle_timeout {}",
+            timeout(self.stream_idle_timeout_secs)
+        )?;
+        writeln!(
+            f,
+            "  reconnect_stall_timeout {}",
+            timeout(self.reconnect_stall_timeout_secs)
+        )?;
         // AWS / S3 section — only shown when output is actually targeting S3.
         if self.output.to_string_lossy().starts_with("s3://")
             && (self.aws_access_key_id.is_some()
