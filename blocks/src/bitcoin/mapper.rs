@@ -6,8 +6,8 @@ use arrow::datatypes::Schema;
 use arrow::record_batch::RecordBatch;
 use firehose_parquet::encode::EncodeBytes;
 use firehose_parquet::traits::{
-    est_f64, est_i32, est_i64, est_list_str, est_opt_str, est_str, est_u32, BlockIdentity,
-    BlockMapper, CanonicalBuilder,
+    decode_id_bytes, est_f64, est_i32, est_i64, est_list_str, est_opt_str, est_str, est_u32,
+    BlockIdentity, BlockMapper, CanonicalBuilder, PreparedIdentity,
 };
 use prost::Message;
 use std::collections::HashMap;
@@ -31,13 +31,6 @@ fn mk_fork_step(include: bool) -> Option<StringBuilder> {
     } else {
         None
     }
-}
-
-fn bitcoin_canonical_identity(block: &btc::Block, identity: &BlockIdentity) -> BlockIdentity {
-    let mut canonical = identity.clone();
-    canonical.block_id = block.hash.clone();
-    canonical.parent_id = block.previous_hash.clone();
-    canonical
 }
 
 // ---------------------------------------------------------------------------
@@ -72,15 +65,14 @@ impl BitcoinBlockMapper {
     fn map_btc_block(
         &mut self,
         block: &btc::Block,
-        identity: &BlockIdentity,
+        identity: &PreparedIdentity,
         fork_step: Option<&str>,
     ) {
         let height = block.height;
         let block_hash = &block.hash;
         let block_time = block.time;
-        let canonical_identity = bitcoin_canonical_identity(block, identity);
 
-        self.blocks.canonical.append(&canonical_identity);
+        self.blocks.canonical.append(identity);
         self.blocks.hash.append_value(&block.hash);
         self.blocks.height.append_value(height);
         self.blocks.previous_hash.append_value(&block.previous_hash);
@@ -105,7 +97,7 @@ impl BitcoinBlockMapper {
                 block_time,
                 tx_index as u32,
                 tx,
-                &canonical_identity,
+                identity,
                 fork_step,
             );
         }
@@ -118,7 +110,7 @@ impl BitcoinBlockMapper {
         block_time: i64,
         tx_index: u32,
         tx: &btc::Transaction,
-        identity: &BlockIdentity,
+        identity: &PreparedIdentity,
         fork_step: Option<&str>,
     ) {
         let tx_hash = &tx.txid;
@@ -195,7 +187,13 @@ impl BlockMapper for BitcoinBlockMapper {
     ) -> anyhow::Result<u64> {
         let block = btc::Block::decode(block_bytes)?;
         let tx_count = block.tx.len() as u64;
-        self.map_btc_block(&block, identity, fork_step);
+        // Canonical ids come from the block's own hex hashes.
+        let identity = self.blocks.canonical.prepare_with_ids(
+            identity,
+            &decode_id_bytes(&block.hash),
+            &decode_id_bytes(&block.previous_hash),
+        );
+        self.map_btc_block(&block, &identity, fork_step);
         Ok(tx_count)
     }
 

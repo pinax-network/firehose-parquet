@@ -3,12 +3,10 @@ use super::schema;
 use arrow::array::*;
 use arrow::datatypes::{Int32Type, Schema};
 use arrow::record_batch::RecordBatch;
-use firehose_parquet::encode::{
-    decode_base58, encode_hex_no_prefix, BytesColumn, BytesListColumn, EncodeBytes,
-};
+use firehose_parquet::encode::{decode_base58, BytesColumn, BytesListColumn, EncodeBytes};
 use firehose_parquet::traits::{
     est_bool, est_f64, est_i64, est_list_str, est_list_u64, est_opt_str, est_str, est_u32, est_u64,
-    BlockIdentity, BlockMapper, CanonicalBuilder,
+    BlockIdentity, BlockMapper, CanonicalBuilder, PreparedIdentity,
 };
 use prost::Message;
 use std::collections::HashMap;
@@ -25,14 +23,6 @@ fn finish_fork_step(builder: &mut Option<StringBuilder>, columns: &mut Vec<Arc<d
     if let Some(ref mut b) = builder {
         columns.push(Arc::new(b.finish()) as Arc<dyn Array>);
     }
-}
-
-fn append_canonical_timestamp(
-    builder: &mut CanonicalBuilder,
-    identity: &BlockIdentity,
-    block_time_opt: Option<i64>,
-) {
-    builder.append_with_optional_timestamp(identity, block_time_opt);
 }
 
 fn solana_hash_bytes(hash: &str) -> Vec<u8> {
@@ -82,11 +72,10 @@ fn append_transaction(
     tx_idx: u32,
     tx: &solana::Transaction,
     meta: &solana::TransactionStatusMeta,
-    identity: &BlockIdentity,
-    block_time_opt: Option<i64>,
+    identity: &PreparedIdentity,
     fork_step: Option<&str>,
 ) {
-    append_canonical_timestamp(&mut builder.canonical, identity, block_time_opt);
+    builder.canonical.append(identity);
     builder.slot.append_value(slot);
     builder.transaction_index.append_value(tx_idx);
     if let Some(sig) = tx.signatures.first() {
@@ -151,13 +140,6 @@ fn append_transaction(
         }
     }
     append_fork_step(&mut builder.fork_step, fork_step);
-}
-
-fn solana_canonical_identity(block: &solana::Block, identity: &BlockIdentity) -> BlockIdentity {
-    let mut canonical = identity.clone();
-    canonical.block_id = encode_hex_no_prefix(&solana_hash_bytes(&block.blockhash));
-    canonical.parent_id = encode_hex_no_prefix(&solana_hash_bytes(&block.previous_blockhash));
-    canonical
 }
 
 pub struct SolanaBlockMapper {
@@ -250,18 +232,12 @@ impl SolanaBlockMapper {
     fn map_solana_block(
         &mut self,
         block: &solana::Block,
-        identity: &BlockIdentity,
+        identity: &PreparedIdentity,
         fork_step: Option<&str>,
     ) {
         let slot = block.slot;
-        let block_time_opt = block.block_time.as_ref().map(|bt| bt.timestamp);
-        let canonical_identity = solana_canonical_identity(block, identity);
 
-        append_canonical_timestamp(
-            &mut self.blocks.canonical,
-            &canonical_identity,
-            block_time_opt,
-        );
+        self.blocks.canonical.append(identity);
         self.blocks.slot.append_value(slot);
         self.blocks.parent_slot.append_value(block.parent_slot);
         match &block.block_height {
@@ -287,25 +263,11 @@ impl SolanaBlockMapper {
         append_fork_step(&mut self.blocks.fork_step, fork_step);
 
         for (tx_idx, confirmed_tx) in block.transactions.iter().enumerate() {
-            self.map_transaction(
-                slot,
-                tx_idx as u32,
-                confirmed_tx,
-                &canonical_identity,
-                block_time_opt,
-                fork_step,
-            );
+            self.map_transaction(slot, tx_idx as u32, confirmed_tx, identity, fork_step);
         }
 
         for (reward_idx, reward) in block.rewards.iter().enumerate() {
-            self.map_reward(
-                slot,
-                reward_idx as u32,
-                reward,
-                &canonical_identity,
-                block_time_opt,
-                fork_step,
-            );
+            self.map_reward(slot, reward_idx as u32, reward, identity, fork_step);
         }
     }
 
@@ -314,8 +276,7 @@ impl SolanaBlockMapper {
         slot: u64,
         tx_idx: u32,
         confirmed: &solana::ConfirmedTransaction,
-        identity: &BlockIdentity,
-        block_time_opt: Option<i64>,
+        identity: &PreparedIdentity,
         fork_step: Option<&str>,
     ) {
         let tx = match confirmed.transaction.as_ref() {
@@ -341,16 +302,7 @@ impl SolanaBlockMapper {
         // Vote transactions go to a separate table (no messages/instructions)
         if is_vote_transaction(msg) {
             if let Some(ref mut vote_txs) = self.vote_transactions {
-                append_transaction(
-                    vote_txs,
-                    slot,
-                    tx_idx,
-                    tx,
-                    meta,
-                    identity,
-                    block_time_opt,
-                    fork_step,
-                );
+                append_transaction(vote_txs, slot, tx_idx, tx, meta, identity, fork_step);
             }
             return;
         }
@@ -363,12 +315,11 @@ impl SolanaBlockMapper {
             tx,
             meta,
             identity,
-            block_time_opt,
             fork_step,
         );
 
         // messages
-        append_canonical_timestamp(&mut self.messages.canonical, identity, block_time_opt);
+        self.messages.canonical.append(identity);
         self.messages.slot.append_value(slot);
         self.messages.transaction_index.append_value(tx_idx);
         self.messages.message_index.append_value(0);
@@ -417,7 +368,7 @@ impl SolanaBlockMapper {
         // instructions (top-level)
         let mut global_instr_idx = 0u32;
         for instr in &msg.instructions {
-            append_canonical_timestamp(&mut self.instructions.canonical, identity, block_time_opt);
+            self.instructions.canonical.append(identity);
             self.instructions.slot.append_value(slot);
             self.instructions.transaction_index.append_value(tx_idx);
             self.instructions
@@ -438,11 +389,7 @@ impl SolanaBlockMapper {
         // instructions (inner)
         for inner_set in &meta.inner_instructions {
             for inner in &inner_set.instructions {
-                append_canonical_timestamp(
-                    &mut self.instructions.canonical,
-                    identity,
-                    block_time_opt,
-                );
+                self.instructions.canonical.append(identity);
                 self.instructions.slot.append_value(slot);
                 self.instructions.transaction_index.append_value(tx_idx);
                 self.instructions
@@ -471,7 +418,6 @@ impl SolanaBlockMapper {
             "pre",
             &meta.pre_token_balances,
             identity,
-            block_time_opt,
             fork_step,
         );
         self.map_token_balances(
@@ -480,17 +426,12 @@ impl SolanaBlockMapper {
             "post",
             &meta.post_token_balances,
             identity,
-            block_time_opt,
             fork_step,
         );
 
         // address table lookups from the message
         for (lookup_idx, lookup) in msg.address_table_lookups.iter().enumerate() {
-            append_canonical_timestamp(
-                &mut self.account_lookups.canonical,
-                identity,
-                block_time_opt,
-            );
+            self.account_lookups.canonical.append(identity);
             self.account_lookups.slot.append_value(slot);
             self.account_lookups.transaction_index.append_value(tx_idx);
             self.account_lookups
@@ -518,7 +459,6 @@ impl SolanaBlockMapper {
                 "transaction",
                 Some(tx_idx),
                 identity,
-                block_time_opt,
                 fork_step,
             );
         }
@@ -530,16 +470,11 @@ impl SolanaBlockMapper {
         tx_idx: u32,
         balance_type: &str,
         balances: &[solana::TokenBalance],
-        identity: &BlockIdentity,
-        block_time_opt: Option<i64>,
+        identity: &PreparedIdentity,
         fork_step: Option<&str>,
     ) {
         for (i, tb) in balances.iter().enumerate() {
-            append_canonical_timestamp(
-                &mut self.token_balances.canonical,
-                identity,
-                block_time_opt,
-            );
+            self.token_balances.canonical.append(identity);
             self.token_balances.slot.append_value(slot);
             self.token_balances.transaction_index.append_value(tx_idx);
             self.token_balances.balance_index.append_value(i as u32);
@@ -573,20 +508,10 @@ impl SolanaBlockMapper {
         slot: u64,
         idx: u32,
         reward: &solana::Reward,
-        identity: &BlockIdentity,
-        block_time_opt: Option<i64>,
+        identity: &PreparedIdentity,
         fork_step: Option<&str>,
     ) {
-        self.append_reward(
-            slot,
-            idx,
-            reward,
-            "block",
-            None,
-            identity,
-            block_time_opt,
-            fork_step,
-        );
+        self.append_reward(slot, idx, reward, "block", None, identity, fork_step);
     }
 
     fn append_reward(
@@ -596,11 +521,10 @@ impl SolanaBlockMapper {
         reward: &solana::Reward,
         source: &str,
         tx_idx: Option<u32>,
-        identity: &BlockIdentity,
-        block_time_opt: Option<i64>,
+        identity: &PreparedIdentity,
         fork_step: Option<&str>,
     ) {
-        append_canonical_timestamp(&mut self.rewards.canonical, identity, block_time_opt);
+        self.rewards.canonical.append(identity);
         self.rewards.slot.append_value(slot);
         self.rewards.reward_index.append_value(idx);
         self.rewards.pubkey.append_value(&reward.pubkey);
@@ -632,7 +556,18 @@ impl BlockMapper for SolanaBlockMapper {
     ) -> anyhow::Result<u64> {
         let block = solana::Block::decode(block_bytes)?;
         let tx_count = block.transactions.len() as u64;
-        self.map_solana_block(&block, identity, fork_step);
+        // Canonical ids and time come from the block: its base58 blockhashes and
+        // `block_time` (null timestamp and date when missing).
+        let identity = self
+            .blocks
+            .canonical
+            .prepare_with_ids(
+                identity,
+                &solana_hash_bytes(&block.blockhash),
+                &solana_hash_bytes(&block.previous_blockhash),
+            )
+            .with_timestamp_seconds(block.block_time.as_ref().map(|bt| bt.timestamp));
+        self.map_solana_block(&block, &identity, fork_step);
         Ok(tx_count)
     }
 

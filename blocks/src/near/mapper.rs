@@ -3,9 +3,10 @@ use super::schema;
 use arrow::array::*;
 use arrow::datatypes::Schema;
 use arrow::record_batch::RecordBatch;
-use firehose_parquet::encode::{encode_hex, BytesColumn, EncodeBytes};
+use firehose_parquet::encode::{BytesColumn, EncodeBytes};
 use firehose_parquet::traits::{
     est_opt_str, est_str, est_u32, est_u64, BlockIdentity, BlockMapper, CanonicalBuilder,
+    PreparedIdentity,
 };
 use prost::Message;
 use std::collections::HashMap;
@@ -37,15 +38,6 @@ fn crypto_hash_bytes(hash: &Option<near::CryptoHash>) -> &[u8] {
         Some(h) => &h.bytes,
         None => &[],
     }
-}
-
-fn near_canonical_identity(block: &near::Block, identity: &BlockIdentity) -> BlockIdentity {
-    let mut canonical = identity.clone();
-    if let Some(header) = &block.header {
-        canonical.block_id = encode_hex(crypto_hash_bytes(&header.hash));
-        canonical.parent_id = encode_hex(crypto_hash_bytes(&header.prev_hash));
-    }
-    canonical
 }
 
 /// Convert a BigInt (big-endian two's complement) to a decimal string.
@@ -266,7 +258,7 @@ impl NearBlockMapper {
     fn map_near_block(
         &mut self,
         block: &near::Block,
-        identity: &BlockIdentity,
+        identity: &PreparedIdentity,
         fork_step: Option<&str>,
     ) {
         let header = match &block.header {
@@ -331,7 +323,7 @@ impl NearBlockMapper {
         &mut self,
         header: &near::ChunkHeader,
         author: &str,
-        identity: &BlockIdentity,
+        identity: &PreparedIdentity,
         fork_step: Option<&str>,
     ) {
         self.chunks.canonical.append(identity);
@@ -359,7 +351,7 @@ impl NearBlockMapper {
         &mut self,
         shard_id: u64,
         tx_with_outcome: &near::IndexerTransactionWithOutcome,
-        identity: &BlockIdentity,
+        identity: &PreparedIdentity,
         fork_step: Option<&str>,
     ) {
         let tx = match &tx_with_outcome.transaction {
@@ -400,7 +392,7 @@ impl NearBlockMapper {
         &mut self,
         shard_id: u64,
         receipt_outcome: &near::IndexerExecutionOutcomeWithReceipt,
-        identity: &BlockIdentity,
+        identity: &PreparedIdentity,
         fork_step: Option<&str>,
     ) {
         let receipt = match &receipt_outcome.receipt {
@@ -439,7 +431,7 @@ impl NearBlockMapper {
     fn map_state_change(
         &mut self,
         sc: &near::StateChangeWithCause,
-        identity: &BlockIdentity,
+        identity: &PreparedIdentity,
         fork_step: Option<&str>,
     ) {
         let value = match &sc.value {
@@ -485,8 +477,15 @@ impl BlockMapper for NearBlockMapper {
             .filter_map(|s| s.chunk.as_ref())
             .map(|c| c.transactions.len() as u64)
             .sum();
-        let canonical = near_canonical_identity(&block, identity);
-        self.map_near_block(&block, &canonical, fork_step);
+        let identity = match &block.header {
+            Some(header) => self.blocks.canonical.prepare_with_ids(
+                identity,
+                crypto_hash_bytes(&header.hash),
+                crypto_hash_bytes(&header.prev_hash),
+            ),
+            None => self.blocks.canonical.prepare(identity),
+        };
+        self.map_near_block(&block, &identity, fork_step);
         Ok(tx_count)
     }
 

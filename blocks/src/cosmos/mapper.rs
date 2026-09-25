@@ -3,10 +3,10 @@ use super::schema;
 use arrow::array::*;
 use arrow::datatypes::Schema;
 use arrow::record_batch::RecordBatch;
-use firehose_parquet::encode::{encode_hex, BytesColumn, EncodeBytes};
+use firehose_parquet::encode::{BytesColumn, EncodeBytes};
 use firehose_parquet::traits::{
     est_bin, est_i32, est_i64, est_opt_str, est_str, est_u32, BlockIdentity, BlockMapper,
-    CanonicalBuilder,
+    CanonicalBuilder, PreparedIdentity,
 };
 use prost::Message;
 use sha2::{Digest, Sha256};
@@ -45,13 +45,6 @@ fn cosmos_parent_hash(block: &cosmos::Block) -> &[u8] {
         .and_then(|header| header.last_block_id.as_ref())
         .map(|block_id| block_id.hash.as_slice())
         .unwrap_or(&[])
-}
-
-fn cosmos_canonical_identity(block: &cosmos::Block, identity: &BlockIdentity) -> BlockIdentity {
-    let mut canonical = identity.clone();
-    canonical.block_id = encode_hex(&block.hash);
-    canonical.parent_id = encode_hex(cosmos_parent_hash(block));
-    canonical
 }
 
 // ---------------------------------------------------------------------------
@@ -93,7 +86,7 @@ impl CosmosBlockMapper {
     fn map_cosmos_block(
         &mut self,
         block: &cosmos::Block,
-        identity: &BlockIdentity,
+        identity: &PreparedIdentity,
         fork_step: Option<&str>,
     ) {
         let height = block.height;
@@ -219,8 +212,12 @@ impl BlockMapper for CosmosBlockMapper {
     ) -> anyhow::Result<u64> {
         let block = cosmos::Block::decode(block_bytes)?;
         let tx_count = block.txs.len() as u64;
-        let canonical = cosmos_canonical_identity(&block, identity);
-        self.map_cosmos_block(&block, &canonical, fork_step);
+        let identity = self.blocks.canonical.prepare_with_ids(
+            identity,
+            &block.hash,
+            cosmos_parent_hash(&block),
+        );
+        self.map_cosmos_block(&block, &identity, fork_step);
         Ok(tx_count)
     }
 
