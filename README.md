@@ -281,6 +281,12 @@ Local cursor saves are atomic: the new cursor is written to a `.tmp` sibling
 (for example `cursor.parquet.tmp`) in the same directory, fsynced, and renamed
 over the old one, so a crash mid-save keeps the previous cursor.
 
+Cursor save failures pause ingestion and retry the same checkpoint up to three
+times, with 1 second and 2 second backoff. Exhausted retries, including a failed
+final checkpoint, exit nonzero. A shutdown during retry backoff also reports the
+durability failure. Local directory fsync errors count as failed saves. See
+[cursor persistence guarantees and metrics](docs/audit/469-durable-cursor-saves.md).
+
 ### Advanced Cursor Override
 
 When `--cursor-override` is set, the CLI request takes precedence over the
@@ -1120,6 +1126,8 @@ Enable the metrics server with `--metrics-port <PORT>` (env: `METRICS_PORT`). A 
 | `firehose_parquet_buffer_estimated_bytes` | Gauge | `table` | Current in-memory buffer size |
 | `firehose_parquet_buffer_rows` | Gauge | `table` | Current buffered row count |
 | `firehose_parquet_cursor_saves_total` | Counter | — | Cursor persistence count |
+| `firehose_parquet_cursor_save_failures_total` | Counter | — | Failed cursor save attempts, including retries |
+| `firehose_parquet_cursor_last_success_timestamp_seconds` | Gauge | — | Unix time of the last successful cursor save in this process; 0 before the first save |
 | `firehose_parquet_cursor_last_block_num` | Gauge | — | Block number from last saved cursor |
 | `firehose_parquet_errors_total` | Counter | `kind` | Errors by category |
 | `firehose_parquet_grpc_reconnects_total` | Counter | — | gRPC stream reconnections |

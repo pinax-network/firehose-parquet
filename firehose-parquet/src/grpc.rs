@@ -809,6 +809,130 @@ mod tests {
     use std::path::PathBuf;
     use tokio::net::TcpListener;
 
+    /// A real local gRPC stream, so handler failure is checked through the
+    /// production reconnect loop rather than a model of its control flow.
+    #[derive(Clone)]
+    struct TwoBlockService;
+
+    impl tonic::server::ServerStreamingService<firehose::Request> for TwoBlockService {
+        type Response = firehose::Response;
+        type ResponseStream =
+            futures::stream::BoxStream<'static, Result<firehose::Response, tonic::Status>>;
+        type Future =
+            tonic::codegen::BoxFuture<tonic::Response<Self::ResponseStream>, tonic::Status>;
+
+        fn call(&mut self, _: tonic::Request<firehose::Request>) -> Self::Future {
+            Box::pin(async {
+                let stream = futures::stream::iter([100, 101].map(|num| {
+                    Ok(firehose::Response {
+                        block: Some(prost_types::Any {
+                            type_url: "test.Block".into(),
+                            value: vec![],
+                        }),
+                        step: 3,
+                        cursor: format!("cursor-{num}"),
+                        metadata: Some(firehose::BlockMetadata {
+                            num,
+                            ..Default::default()
+                        }),
+                    })
+                }));
+                Ok(tonic::Response::new(
+                    Box::pin(stream) as Self::ResponseStream
+                ))
+            })
+        }
+    }
+
+    impl tonic::server::NamedService for TwoBlockService {
+        const NAME: &'static str = "sf.firehose.v2.Stream";
+    }
+
+    impl tonic::codegen::Service<tonic::codegen::http::Request<tonic::body::Body>> for TwoBlockService {
+        type Response = tonic::codegen::http::Response<tonic::body::Body>;
+        type Error = std::convert::Infallible;
+        type Future = tonic::codegen::BoxFuture<Self::Response, Self::Error>;
+
+        fn poll_ready(
+            &mut self,
+            _: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Result<(), Self::Error>> {
+            std::task::Poll::Ready(Ok(()))
+        }
+
+        fn call(
+            &mut self,
+            request: tonic::codegen::http::Request<tonic::body::Body>,
+        ) -> Self::Future {
+            Box::pin(async {
+                let mut grpc = tonic::server::Grpc::new(tonic_prost::ProstCodec::default());
+                Ok(grpc.server_streaming(TwoBlockService, request).await)
+            })
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cursor_save_exhaustion_stops_stream_before_the_next_block() {
+        use crate::cursor::{CursorLocation, CursorState};
+        use std::sync::atomic::AtomicBool;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let incoming = futures::stream::unfold(listener, |listener| async {
+            Some((listener.accept().await.map(|(socket, _)| socket), listener))
+        });
+        let (stop, stopped) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async {
+            tonic::transport::Server::builder()
+                .add_service(TwoBlockService)
+                .serve_with_incoming_shutdown(incoming, async {
+                    let _ = stopped.await;
+                })
+                .await
+                .unwrap();
+        });
+        let dir = tempfile::tempdir().unwrap();
+        let blocked_parent = dir.path().join("not-a-directory");
+        std::fs::write(&blocked_parent, b"file").unwrap();
+        let location = CursorLocation::Local(blocked_parent.join("cursor.parquet"));
+        let (_, metrics) = crate::metrics::init();
+        let mut config = test_config(&endpoint);
+        config.start_block = Some(100);
+        config.stop_block = Some(102);
+        let mut client = FirehoseClient::new(config).unwrap();
+        client.set_metrics(metrics.clone());
+        let mut processed = vec![];
+        let result = client
+            .stream_blocks(None, |_, _, cursor, identity, _| {
+                processed.push(identity.block_num);
+                location.save_with_retry_blocking(
+                    &CursorState {
+                        cursor,
+                        last_block_num: identity.block_num,
+                        ..Default::default()
+                    },
+                    &metrics,
+                    &AtomicBool::new(false),
+                )
+            })
+            .await;
+        stop.send(()).unwrap();
+        server.await.unwrap();
+        let error = result.unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("cursor persistence failed after 3 attempts"));
+        assert_eq!(
+            processed,
+            vec![100],
+            "a failed checkpoint must stop ingestion"
+        );
+        assert_eq!(metrics.cursor_save_failures_total.get(), 3);
+        assert_eq!(metrics.cursor_saves_total.get(), 0);
+        assert_eq!(metrics.cursor_last_success_timestamp_seconds.get(), 0);
+        assert_eq!(metrics.grpc_reconnects_total.get(), 0);
+    }
+
     fn test_config(endpoint: &str) -> Config {
         Config {
             endpoint: endpoint.to_string(),

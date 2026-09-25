@@ -806,6 +806,7 @@ dependencies = [
  "tiny-keccak",
  "tokio",
  "tonic",
+ "tonic-prost",
  "tracing",
  "tracing-subscriber",
  "uuid",
