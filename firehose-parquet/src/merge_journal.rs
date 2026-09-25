@@ -234,6 +234,13 @@ pub(crate) trait PartitionFiles {
     fn remove_journal(&self) -> Result<()>;
     /// Deletes a file; a file that is already gone is not an error.
     fn delete(&self, name: &str) -> Result<()>;
+    /// Delete one already-validated recovery phase; controls are handled separately.
+    fn delete_many(&self, names: &[String]) -> Result<()> {
+        for name in names {
+            self.delete(name)?;
+        }
+        Ok(())
+    }
     /// Makes earlier creates, renames and deletes durable (fsyncs the directory locally).
     fn sync(&self) -> Result<()>;
 }
@@ -269,18 +276,20 @@ pub(crate) fn recover(files: &dyn PartitionFiles, journal: &Journal) -> Result<R
         JournalState::Writing => {
             let sources: HashSet<&str> = journal.sources.iter().map(String::as_str).collect();
             let temp_suffix = format!(".{}.tmp", journal.run_id);
-            let mut deleted_outputs = 0;
+            let mut remove = Vec::new();
             for name in &names {
                 let partial_output = crate::merge::parse_part_number(name)
                     .is_some_and(|part| part >= journal.first_output_part)
                     && !sources.contains(name.as_str());
                 let temp_file = name.starts_with('.') && name.ends_with(&temp_suffix);
                 if partial_output || temp_file {
-                    files.delete(name)?;
-                    deleted_outputs += 1;
+                    remove.push(name.clone());
                 }
             }
-            Recovery::RolledBack { deleted_outputs }
+            files.delete_many(&remove)?;
+            Recovery::RolledBack {
+                deleted_outputs: remove.len(),
+            }
         }
         JournalState::Committed => {
             let present: HashSet<&str> = names.iter().map(String::as_str).collect();
@@ -296,14 +305,16 @@ pub(crate) fn recover(files: &dyn PartitionFiles, journal: &Journal) -> Result<R
                     files.label()
                 );
             }
-            let mut deleted_sources = 0;
-            for source in &journal.sources {
-                if present.contains(source.as_str()) {
-                    files.delete(source)?;
-                    deleted_sources += 1;
-                }
+            let remove = journal
+                .sources
+                .iter()
+                .filter(|source| present.contains(source.as_str()))
+                .cloned()
+                .collect::<Vec<_>>();
+            files.delete_many(&remove)?;
+            Recovery::RolledForward {
+                deleted_sources: remove.len(),
             }
-            Recovery::RolledForward { deleted_sources }
         }
     };
     files.sync()?;
@@ -687,6 +698,11 @@ impl PartitionFiles for S3Partition<'_> {
             Ok(()) | Err(object_store::Error::NotFound { .. }) => Ok(()),
             Err(err) => Err(err).with_context(|| format!("deleting s3://{}/{path}", self.bucket)),
         }
+    }
+
+    fn delete_many(&self, names: &[String]) -> Result<()> {
+        let keys = names.iter().map(|name| self.path(name)).collect::<Vec<_>>();
+        block_on_async(crate::s3::delete::delete_objects_once(self.client, &keys))
     }
 
     fn sync(&self) -> Result<()> {

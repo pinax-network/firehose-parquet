@@ -1,0 +1,241 @@
+{
+  "benchmark": "ordered pinned GET windows in a delayed InMemory store",
+  "clock": "sum of monotonic read-window durations; seeding and exact full-byte checks excluded",
+  "first_object_delay_multiplier": 4,
+  "measurements": [
+    {
+      "bytes_read": 8388608,
+      "elapsed_read_window_seconds": 0.686140204,
+      "maximum_active_gets": 1,
+      "maximum_window_reserved_bytes": 65536,
+      "objects": 128,
+      "request_limit": 1,
+      "sample": 0,
+      "scenario": "128 small objects",
+      "windows": 128
+    },
+    {
+      "bytes_read": 8388608,
+      "elapsed_read_window_seconds": 0.187236499,
+      "maximum_active_gets": 4,
+      "maximum_window_reserved_bytes": 262144,
+      "objects": 128,
+      "request_limit": 4,
+      "sample": 0,
+      "scenario": "128 small objects",
+      "windows": 32
+    },
+    {
+      "bytes_read": 8388608,
+      "elapsed_read_window_seconds": 0.173112873,
+      "maximum_active_gets": 4,
+      "maximum_window_reserved_bytes": 262144,
+      "objects": 128,
+      "request_limit": 4,
+      "sample": 1,
+      "scenario": "128 small objects",
+      "windows": 32
+    },
+    {
+      "bytes_read": 8388608,
+      "elapsed_read_window_seconds": 0.662573716,
+      "maximum_active_gets": 1,
+      "maximum_window_reserved_bytes": 65536,
+      "objects": 128,
+      "request_limit": 1,
+      "sample": 1,
+      "scenario": "128 small objects",
+      "windows": 128
+    },
+    {
+      "bytes_read": 8388608,
+      "elapsed_read_window_seconds": 0.707073663,
+      "maximum_active_gets": 1,
+      "maximum_window_reserved_bytes": 65536,
+      "objects": 128,
+      "request_limit": 1,
+      "sample": 2,
+      "scenario": "128 small objects",
+      "windows": 128
+    },
+    {
+      "bytes_read": 8388608,
+      "elapsed_read_window_seconds": 0.182155665,
+      "maximum_active_gets": 4,
+      "maximum_window_reserved_bytes": 262144,
+      "objects": 128,
+      "request_limit": 4,
+      "sample": 2,
+      "scenario": "128 small objects",
+      "windows": 32
+    },
+    {
+      "bytes_read": 226492416,
+      "elapsed_read_window_seconds": 0.093938917,
+      "maximum_active_gets": 1,
+      "maximum_window_reserved_bytes": 25165824,
+      "objects": 12,
+      "request_limit": 1,
+      "sample": 0,
+      "scenario": "mixed sizes under byte budget",
+      "windows": 12
+    },
+    {
+      "bytes_read": 226492416,
+      "elapsed_read_window_seconds": 0.043581708,
+      "maximum_active_gets": 3,
+      "maximum_window_reserved_bytes": 54525952,
+      "objects": 12,
+      "request_limit": 4,
+      "sample": 0,
+      "scenario": "mixed sizes under byte budget",
+      "windows": 5
+    },
+    {
+      "bytes_read": 226492416,
+      "elapsed_read_window_seconds": 0.040702416,
+      "maximum_active_gets": 3,
+      "maximum_window_reserved_bytes": 54525952,
+      "objects": 12,
+      "request_limit": 4,
+      "sample": 1,
+      "scenario": "mixed sizes under byte budget",
+      "windows": 5
+    },
+    {
+      "bytes_read": 226492416,
+      "elapsed_read_window_seconds": 0.074000957,
+      "maximum_active_gets": 1,
+      "maximum_window_reserved_bytes": 25165824,
+      "objects": 12,
+      "request_limit": 1,
+      "sample": 1,
+      "scenario": "mixed sizes under byte budget",
+      "windows": 12
+    },
+    {
+      "bytes_read": 226492416,
+      "elapsed_read_window_seconds": 0.080608708,
+      "maximum_active_gets": 1,
+      "maximum_window_reserved_bytes": 25165824,
+      "objects": 12,
+      "request_limit": 1,
+      "sample": 2,
+      "scenario": "mixed sizes under byte budget",
+      "windows": 12
+    },
+    {
+      "bytes_read": 226492416,
+      "elapsed_read_window_seconds": 0.037483626,
+      "maximum_active_gets": 3,
+      "maximum_window_reserved_bytes": 54525952,
+      "objects": 12,
+      "request_limit": 4,
+      "sample": 2,
+      "scenario": "mixed sizes under byte budget",
+      "windows": 5
+    },
+    {
+      "bytes_read": 76546048,
+      "elapsed_read_window_seconds": 0.036362958,
+      "maximum_active_gets": 1,
+      "maximum_window_reserved_bytes": 68157440,
+      "objects": 3,
+      "request_limit": 1,
+      "sample": 0,
+      "scenario": "one oversized input",
+      "windows": 3
+    },
+    {
+      "bytes_read": 76546048,
+      "elapsed_read_window_seconds": 0.022495375,
+      "maximum_active_gets": 2,
+      "maximum_window_reserved_bytes": 68157440,
+      "objects": 3,
+      "request_limit": 4,
+      "sample": 0,
+      "scenario": "one oversized input",
+      "windows": 2
+    },
+    {
+      "bytes_read": 76546048,
+      "elapsed_read_window_seconds": 0.023971125,
+      "maximum_active_gets": 2,
+      "maximum_window_reserved_bytes": 68157440,
+      "objects": 3,
+      "request_limit": 4,
+      "sample": 1,
+      "scenario": "one oversized input",
+      "windows": 2
+    },
+    {
+      "bytes_read": 76546048,
+      "elapsed_read_window_seconds": 0.027149084,
+      "maximum_active_gets": 1,
+      "maximum_window_reserved_bytes": 68157440,
+      "objects": 3,
+      "request_limit": 1,
+      "sample": 1,
+      "scenario": "one oversized input",
+      "windows": 3
+    },
+    {
+      "bytes_read": 76546048,
+      "elapsed_read_window_seconds": 0.027122042,
+      "maximum_active_gets": 1,
+      "maximum_window_reserved_bytes": 68157440,
+      "objects": 3,
+      "request_limit": 1,
+      "sample": 2,
+      "scenario": "one oversized input",
+      "windows": 3
+    },
+    {
+      "bytes_read": 76546048,
+      "elapsed_read_window_seconds": 0.023127625,
+      "maximum_active_gets": 2,
+      "maximum_window_reserved_bytes": 68157440,
+      "objects": 3,
+      "request_limit": 4,
+      "sample": 2,
+      "scenario": "one oversized input",
+      "windows": 2
+    }
+  ],
+  "runtime": "synchronous bridge to Tokio current-thread; no external data",
+  "synthetic_delay_milliseconds": 3,
+  "window_byte_budget": 67108864,
+  "summary": [
+    {
+      "scenario": "128 small objects",
+      "sequential_median_seconds": 0.686140204,
+      "windowed_median_seconds": 0.182155665,
+      "speedup": 3.7667793861914753
+    },
+    {
+      "scenario": "mixed sizes under byte budget",
+      "sequential_median_seconds": 0.080608708,
+      "windowed_median_seconds": 0.040702416,
+      "speedup": 1.980440374841631
+    },
+    {
+      "scenario": "one oversized input",
+      "sequential_median_seconds": 0.027149084,
+      "windowed_median_seconds": 0.023127625,
+      "speedup": 1.1738811918647074
+    }
+  ],
+  "provenance": {
+    "base_commit": "35b21347d8ac3cda887f1aa6e2fc04ac3d2ad690",
+    "platform": "macOS-26.5.1-arm64-arm-64bit-Mach-O",
+    "rustc": "rustc 1.93.1 (01f6ddf75 2026-02-11)",
+    "whole_command_lock": "/tmp/fireparq-cargo-session.lock",
+    "serialized": true,
+    "profile": "test, unoptimized, debug info disabled",
+    "source_sha256": {
+      "firehose-parquet/src/merge/read.rs": "e231ffdb21cd5ba326e372ada4806f4c35f232b0fb7b8dde41d8e9e0e85beff7",
+      "firehose-parquet/src/merge/read/tests.rs": "15e2f3dd121434566eca43c978ea3828bf1e1c5290710fa7ccfc03d89ad4688a",
+      "firehose-parquet/src/merge/read/tests/benchmark.rs": "a9a198b45cb7c03174505191a2aa9ac8f049ae5dc4b51e8e383fc85dee632ae4"
+    }
+  }
+}
