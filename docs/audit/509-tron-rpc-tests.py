@@ -125,6 +125,41 @@ class ConversionTests(unittest.TestCase):
         self.assertEqual(len(rows["internal_call_values"]), 2)
         self.assertEqual(rows["contracts"], [])
 
+    def test_actual_parquet_schema_check_rejects_type_nullability_and_metadata_drift(self):
+        import copy
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+        spec = importlib.util.spec_from_file_location("tron_compare_schema", Path(__file__).with_name("509-compare-tron-rpc.py"))
+        compare = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(compare)
+        types = [("payload", "Binary", True), ("status", {"Dictionary": ["Int32", "Utf8"]}, True),
+                 ("timestamp", {"Timestamp": ["Millisecond", "UTC"]}, False)]
+        recorded = {"fields": [{"name": name, "data_type": dtype, "nullable": nullable,
+                                  "dict_is_ordered": False, "metadata": {"field-key": "value"}}
+                                 for name, dtype, nullable in types], "metadata": {"schema-key": "value"}}
+        schema = pa.schema([pa.field(name, compare.arrow_type(dtype), nullable=nullable,
+                                    metadata={b"field-key": b"value"}) for name, dtype, nullable in types],
+                           metadata={b"schema-key": b"value"})
+        arrays = [pa.array([b""], pa.binary()), pa.array(["SUCCESS"]).dictionary_encode(),
+                  pa.array([1700000000123], pa.timestamp('ms', tz='UTC'))]
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp)/"schema.parquet"
+            pq.write_table(pa.Table.from_arrays(arrays, schema=schema), path)
+            restored = pq.ParquetFile(path).read().schema
+            compare.check_schema(restored, recorded)
+            for mutate in (
+                lambda r: r['fields'][0].update(nullable=False),
+                lambda r: r['fields'][0].update(data_type='Utf8'),
+                lambda r: r['fields'][1].update(data_type={'Dictionary': ['Int64', 'Utf8']}),
+                lambda r: r['fields'][2].update(data_type={'Timestamp': ['Millisecond', None]}),
+                lambda r: r['fields'][0].update(metadata={'field-key': 'different'}),
+                lambda r: r.update(metadata={'schema-key': 'different'}),
+            ):
+                modified = copy.deepcopy(recorded)
+                mutate(modified)
+                with self.assertRaises(AssertionError):
+                    compare.check_schema(restored, modified)
+
     def test_bad_identity_missing_envelopes_and_wire_are_rejected(self):
         raw, infos = fixture()
         block_type = cls("protocol.BlockExtention")

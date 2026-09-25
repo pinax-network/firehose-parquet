@@ -116,12 +116,43 @@ def expected_rows(block, infos, cls, mode, fork, include_failed):
     return rows
 
 
-def read_table(root, case, table, count):
+def arrow_type(recorded, ordered=False):
+    scalars = {'UInt64': pa.uint64(), 'UInt32': pa.uint32(), 'Int64': pa.int64(),
+               'Int32': pa.int32(), 'Boolean': pa.bool_(), 'Binary': pa.binary(),
+               'Utf8': pa.string(), 'Date32': pa.date32()}
+    if isinstance(recorded, str):
+        return scalars[recorded]  # Unexpected types must fail qualification.
+    if set(recorded) == {'Dictionary'}:
+        index, value = recorded['Dictionary']
+        return pa.dictionary(arrow_type(index), arrow_type(value), ordered=ordered)
+    assert set(recorded) == {'Timestamp'}, ('unsupported Arrow type', recorded)
+    unit, timezone = recorded['Timestamp']
+    assert unit == 'Millisecond'
+    return pa.timestamp('ms', tz=timezone)
+
+
+def check_schema(actual, recorded):
+    metadata = lambda values: {key.encode(): value.encode() for key, value in values.items()}
+    assert (actual.metadata or {}) == metadata(recorded['metadata']), 'schema metadata changed'
+    assert actual.names == [field['name'] for field in recorded['fields']], 'schema field order changed'
+    for actual_field, expected in zip(actual, recorded['fields']):
+        name = expected['name']
+        assert actual_field.type == arrow_type(expected['data_type'], expected['dict_is_ordered']), (name, 'physical round-trip Arrow type changed', actual_field.type, expected['data_type'])
+        assert actual_field.nullable == expected['nullable'], (name, 'field nullability changed')
+        assert (actual_field.metadata or {}) == metadata(expected['metadata']), (name, 'field metadata changed')
+
+
+def read_table(root, case, table, count, schema):
     files = sorted((root/case/table).glob('*.parquet'))
     assert bool(files) == (count > 0), (case, table, 'empty/nonempty file contract')
     if not files:
         return None
-    result = pa.concat_tables([pq.ParquetFile(path).read() for path in files])
+    parts = []
+    for path in files:
+        part = pq.ParquetFile(path).read()
+        check_schema(part.schema, schema)
+        parts.append(part)
+    result = pa.concat_tables(parts)
     assert result.num_rows == count
     return result
 
@@ -170,8 +201,8 @@ def main():
         tables = {}
         for table, count in new['rows'].items():
             assert count == len(expected[table]), (case, table, 'raw row count')
-            current = read_table(args.after, case, table, count)
             schema = new['schemas'][table]
+            current = read_table(args.after, case, table, count, schema)
             if count:
                 actual = normalized_rows(current)
                 assert set(actual[0]) == set(expected[table][0]), (case, table, 'complete expected column inventory')
@@ -191,7 +222,7 @@ def main():
                     assert field['nullable'] is True
                     field['nullable'] = False
                 assert projected == old_schema, (case, table, 'legacy schema changed')
-                previous = read_table(args.before, case, table, count)
+                previous = read_table(args.before, case, table, count, old_schema)
                 if count:
                     for name in previous.column_names:
                         assert previous.column(name).equals(current.column(name)), (case, table, name, 'legacy values changed')
@@ -215,6 +246,7 @@ def main():
     report = {'status': 'passed', 'qualification': 'native RPC backed; pinned producer conversion; no Firehose transport or cursor proof',
               'raw_sha256': {'block-extension.pb': hashlib.sha256(raw_block).hexdigest(), 'transaction-info-list.pb': hashlib.sha256(raw_infos).hexdigest(), 'block.pb': after['block_sha256']},
               'descriptor_sha256': hashlib.sha256(args.descriptor.read_bytes()).hexdigest(), 'coverage': coverage,
+              'actual_parquet_schema_checks': 'every baseline/candidate nonempty part: field order, Arrow types including dictionaries and UTC timestamps, nullability, field/schema metadata; empty tables have manifest schemas only',
               'cases': cases, 'row_occurrences': total_rows, 'legacy_value_comparisons': legacy_values, 'raw_value_comparisons': raw_values}
     args.report.write_text(json.dumps(report, indent=2, sort_keys=True)+'\n')
     print(json.dumps({key: value for key, value in report.items() if key != 'cases'}, indent=2))

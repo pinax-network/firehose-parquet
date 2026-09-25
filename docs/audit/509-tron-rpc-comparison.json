@@ -1,4 +1,5 @@
 {
+  "actual_parquet_schema_checks": "every baseline/candidate nonempty part: field order, Arrow types including dictionaries and UTC timestamps, nullability, field/schema metadata; empty tables have manifest schemas only",
   "cases": {
     "base58-failedfalse-forkfalse": {
       "blocks": {

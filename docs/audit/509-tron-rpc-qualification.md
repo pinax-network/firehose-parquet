@@ -133,7 +133,9 @@ coverage must be reported honestly and cannot be replaced by a wider automatic s
 Original draft PR head `4014e87772b3fc5e3584efb795a93ef350547c2b` and its
 checkout were preserved. Qualification runs use a separate checkout, integrated
 through actual main `11ac02c`; the independent baseline is exactly that main.
-The only required integration adaptations are the shared owned Bytes mapper
+Final integration also includes actual main `e4f990f` (#523 S3 maintenance),
+which changes no Tron mapper/schema/replay or part-encoding path. The only
+required mapper integration adaptations are the shared owned Bytes mapper
 entry point, Bytes fixtures/typed decoder buffers, and both new table estimates.
 No unrelated execution filter or transport behavior changed.
 
@@ -158,7 +160,13 @@ opaque remote cursor were used or retained.
 120 table inventories (80 nonempty parts), 14,600 row occurrences,
 377,560 independently expected value comparisons and 136,720 unchanged legacy
 value comparisons. Every legacy Arrow field definition is also compared, allowing
-only the intended nullable first-contract projection. These are repeated settings
+only the intended nullable first-contract projection. Every actual nonempty Parquet
+part on both sides (140 files total) is also checked against its recorded Rust
+Arrow schema: names/order, exact types including dictionary indices and ordering,
+Binary fields and UTC millisecond timestamps, nullability, field metadata and
+schema metadata. Empty tables have no physical files, so only their mapper
+schemas/zero counts are recorded here; synthetic Rust tests round-trip them when
+populated. These are repeated settings
 of **one** live block: 1 block row, 336 transaction rows, 336 contract rows and
 57 log rows per case; internal transaction/value tables are empty.
 
@@ -220,8 +228,20 @@ isolated build directory.
 
 ## Integrated check record
 
-Final checks on main `11ac02c` integration are in progress; this record is completed
-before publication. Four converter tests passed before the two reads; all five
-final converter/comparator fixture tests pass. The raw comparison passed for all
-20 cases. Raw artifacts and before/after outputs are temporary evidence; the
-scripts, hashes, full comparison report and scope record are durable source.
+The first integrated full run on main `11ac02c` passed 1,043 workspace tests
+with nine intentional helper/benchmark skips. After integrating actual main
+`e4f990f`, all **1,067 workspace tests passed** with eleven intentional skips.
+The exact CI example `refresh_evm_golden` passed its auth regression with one
+intentional child skip. Locked binary build, formatting and bash/zsh/fish
+completions passed. This was source head `a56886d`; later changes only strengthen
+Python schema comparison and finish this evidence record.
+
+Four converter tests passed before the two reads; all **six** final Python
+converter/comparator fixture tests pass. The added schema regression writes a
+real Parquet file and rejects wrong Binary/string or dictionary index types,
+nullability, timestamp timezone, field metadata and schema metadata. The refreshed
+raw comparison passed every schema/value/legacy check for all 20 cases. Independent
+review found no production defect, requested the actual-Parquet schema check, and
+accepted the explicit RPC-backed live-block boundary. Raw artifacts and
+before/after outputs are temporary evidence; the scripts, hashes, full comparison
+report and scope record are durable source.

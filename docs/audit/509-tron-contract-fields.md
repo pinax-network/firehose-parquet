@@ -162,10 +162,13 @@ internal tables produced no data files; their full schemas and zero counts were
 recorded. No claim is made about live Firehose transport, protected CLI ingestion,
 a real saved remote cursor, independent finality or absent sample categories.
 
-Four converter/wire/fake-channel tests passed before the live reads; a fifth
-independent-comparator fixture also exercises internal signed values, absent
-receipts/contracts and wrapper filtering. Final integrated workspace/build/CI
-example validation is recorded in the qualification record.
+Four converter/wire/fake-channel tests passed before the live reads; two further
+fixtures exercise independent expected internal signed values, absent
+receipts/contracts, wrapper filtering and actual Parquet schema rejection. Final
+main `e4f990f` integration passed **1,067 workspace tests**, the exact CI example,
+locked build, formatting and all three shell completions. Actual nonempty Parquet
+types/nullability/metadata are checked against every recorded mapper schema; full
+evidence is in the qualification record.
 
 ## Migration
 
