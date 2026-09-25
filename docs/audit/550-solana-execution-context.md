@@ -73,7 +73,7 @@ selection semantics changed, and the exact schema binding already changes.
 
 The dedicated mapper matrix covers all five identifier encodings, fork column
 on/off, include-failed on/off and votes on/off, with combined versus per-block
-flushes. It includes success, a real serialized first-instruction failure,
+flushes through both borrowed and owned protobuf APIs. It includes success, a real serialized first-instruction failure,
 present-empty error, opaque nonempty error, missing metadata/transaction/message,
 successful/failed recognized votes, submitted instructions after the failed
 instruction, recorded inner calls, token snapshots, and transaction/block
@@ -82,8 +82,13 @@ transaction rewards exercise nullable context even though the retained live
 sample has only block rewards.
 
 `cargo test -p blocks --lib solana --locked -j4`: **32 passed** at the initial
-implementation boundary. Full integrated validation is recorded below before
-publication.
+implementation boundary. After integrating #515 and #518 at source
+`9260d0b9f92e2db933051c6d596158846b13e048`, `cargo test --workspace --locked -j4`
+passed **1,030 tests, 0 failures, 9 ignored**. The later main merge
+`d7db588` changed ancestry only. The CI `refresh_evm_golden` example passed
+**1 test, 1 ignored subprocess helper**; workspace build, replay-example build
+and formatting checks passed. All five new Boolean estimates remain included
+in the new `table_estimates` API.
 
 Two retained Firehose payloads were replayed without network access:
 
@@ -93,7 +98,9 @@ Two retained Firehose payloads were replayed without network access:
 | 300000001 | 2,935,030 | `552dbd676ea0d3a36be535d6318dc3c920de90ce7f875d48d037f538ba026154` |
 
 Baseline source is main `39d49f6b19b1baea0673bf12ebda836e82d0ee27`, with the
-same offline replay example copied into a separate baseline checkout. Each
+offline replay example copied into a separate baseline checkout. The baseline
+uses the borrowed API available there; the final integrated candidate uses
+the example's `--owned` option to exercise ingestion's owned Bytes path. Each
 binary runs all five encodings × two failed-filter choices × two vote choices ×
 two flush choices: 40 cases. Both emit Parquet plus a manifest containing full
 Arrow schemas; the comparator checks every legacy field and every retained row,
@@ -105,7 +112,8 @@ schema/value matched and every added context value matched raw metadata. This
 counts repeated qualification cases, not distinct chain rows. The
 [recorded summary](550-solana-context-comparison.json) includes hashes, the matrix
 and representative per-table counts. The full case report was retained locally
-as `/tmp/fireparq-550-comparison.json`.
+as `/tmp/fireparq-550-integrated-comparison.json`. The initial borrowed-input
+candidate comparison also passed the same complete matrix.
 
 The raw sample contains 4,448 transactions and 252 failures, 82 with inner calls.
 For every failed transaction, pre/post token snapshots match and the only
@@ -122,12 +130,15 @@ sources and keep distinct binaries. Use fresh, separate output directories:
 
 ```sh
 cargo build --locked -p blocks --example replay_solana_context
-replay_solana_context --raw 300000000.pb --raw 300000001.pb --output after
+replay_solana_context --owned --raw 300000000.pb --raw 300000001.pb --output after
 protoc -I proto --include_imports --descriptor_set_out=solana.desc proto/solana.proto
 uv run --with pyarrow --with protobuf python docs/audit/550-compare-solana-context.py \
   --before before --after after --descriptor solana.desc \
   --raw 300000000.pb --raw 300000001.pb --report comparison.json
 ```
+
+For the pre-#518 baseline, use the example version from commit `620ce45` and
+omit `--owned`; that baseline predates the owned-input trait method.
 
 The original captures are temporary qualification artifacts, not checked-in
 fixtures. This audit used serialized Cargo commands and copied binaries while
