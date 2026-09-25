@@ -4,6 +4,8 @@ This document is a tool-agnostic map of the `firehose-parquet` workspace: where 
 
 Related design docs:
 
+- `docs/audit/README.md`: issue-by-issue implementation process and validation records.
+
 - `docs/verifiability-hash-strategy.md`: cross-chain verify hash defaults, normalization rules, and onboarding path.
 - `docs/partition-vocabulary.md`: naming convention for partition-related CLI flags.
 - `docs/partitions-build-defaults.md`: inference and bounded-range rules for `fireparq partitions build`.

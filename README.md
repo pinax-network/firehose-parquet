@@ -196,7 +196,9 @@ Resolution precedence:
 
 Per-network env overrides normalize network names by uppercasing and converting non-alphanumeric separators to underscores.
 
-Removed networks are rejected during argument parsing, and startup now fails early if the resolved endpoint is unavailable or unhealthy.
+Removed networks are rejected during argument parsing, and startup fails early if the resolved endpoint is unavailable or unhealthy.
+
+Both `build` and `partitions build` require EndpointInfo with a nonempty chain name before resolving output or cursor paths. Transient Info failures get three attempts with bounded backoff; exhausted retries, authentication errors, or unsupported Info stop startup. `--network`, `--block-type`, and `--cursor-override` do not bypass this requirement. This prevents a temporary metadata failure from changing the output root or hiding the existing cursor. Older servers must expose the Info RPC. See [the implementation record](docs/audit/467-endpoint-info.md) for retry limits and validation.
 
 ```bash
 # Built-in alias
