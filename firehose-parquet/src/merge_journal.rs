@@ -15,10 +15,11 @@
 //! ([`recover`]): a `writing` journal is rolled back (its outputs are deleted; the sources were
 //! never touched), and a `committed` one is rolled forward (the remaining sources are deleted).
 //!
-//! Each run holds a lock on the merge root: an OS file lock locally ([`LocalRunLock`]), released
-//! by the OS when the process exits, and a conditionally created object on S3 ([`S3RunLock`]),
-//! refreshed while the run is active and taken over once it is stale. A journal records its
-//! run's lock, which is how a live run's journal is told apart from a crashed run's.
+//! Local runs retain their legacy file lock inside common directory-inode
+//! ownership. S3 runs use the persistent bucket-wide owner in `dataset_lock_s3`;
+//! there is no timeout takeover or warning-only conditional-write fallback.
+//! Legacy S3 journals whose old prefix locks cannot prove request quiescence
+//! require explicit diagnosis and are not automatically recovered.
 
 use anyhow::{Context, Result};
 use object_store::ObjectStore;
@@ -28,7 +29,6 @@ use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
 
 use crate::cli::block_on_async;
 
@@ -41,12 +41,6 @@ pub(crate) const LOCK_FILE: &str = ".fireparq-merge.lock";
 /// Environment variable that aborts `merge` at a named step, to test crash recovery:
 /// `after-outputs`, `after-commit`, or `after-first-delete`.
 pub(crate) const CRASH_ENV: &str = "FIREPARQ_TEST_MERGE_CRASH_AT";
-
-/// An S3 lock not refreshed for this long belongs to a run that is no longer alive.
-const S3_LOCK_STALE_AFTER: Duration = Duration::from_secs(30 * 60);
-
-/// Minimum time between refreshes of an S3 lock.
-const S3_LOCK_HEARTBEAT_EVERY: Duration = Duration::from_secs(60);
 
 const JOURNAL_VERSION: u32 = 1;
 
@@ -245,13 +239,6 @@ fn now_rfc3339() -> String {
     time::OffsetDateTime::now_utc()
         .format(&time::format_description::well_known::Rfc3339)
         .unwrap_or_default()
-}
-
-fn host_name() -> String {
-    std::env::var("HOSTNAME")
-        .ok()
-        .filter(|name| !name.is_empty())
-        .unwrap_or_else(|| "unknown".to_string())
 }
 
 // ---------------------------------------------------------------------------
@@ -554,13 +541,9 @@ impl PartitionFiles for S3Partition<'_> {
                 | object_store::Error::Precondition { .. },
             ) => Ok(false),
             Err(object_store::Error::NotImplemented | object_store::Error::NotSupported { .. }) => {
-                // No conditional writes: claim with a check, which the run lock backs up.
-                if self.read_journal()?.is_some() {
-                    return Ok(false);
-                }
-                block_on_async(self.client.put(&path, payload))
-                    .with_context(|| format!("writing s3://{}/{path}", self.bucket))?;
-                Ok(true)
+                anyhow::bail!(
+                    "S3 merge requires conditional journal creation; refusing unsafe fallback"
+                )
             }
             Err(err) => Err(err).with_context(|| format!("writing s3://{}/{path}", self.bucket)),
         }
@@ -591,230 +574,6 @@ impl PartitionFiles for S3Partition<'_> {
     fn sync(&self) -> Result<()> {
         Ok(())
     }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct LockRecord {
-    run_id: String,
-    host: String,
-    pid: u32,
-    started_at: String,
-}
-
-/// The lock an S3 merge run holds on its root prefix: the object `<prefix>/.fireparq-merge.lock`,
-/// created only if absent and refreshed while the run is active.
-///
-/// A lock not refreshed for 30 minutes belongs to a run that is no longer alive, and the next
-/// run takes it over with a conditional update, so two runs cannot both take it.
-pub(crate) struct S3RunLock {
-    client: Arc<dyn ObjectStore>,
-    location: object_store::path::Path,
-    bucket: String,
-    record: LockRecord,
-    version: Option<object_store::UpdateVersion>,
-    /// False when the store has no conditional writes, so the lock is best effort.
-    enforced: bool,
-    /// When the lock was last written; `None` forces the next [`Self::refresh`].
-    last_refresh: Option<Instant>,
-    stale_after: Duration,
-}
-
-impl S3RunLock {
-    pub(crate) fn acquire(
-        client: &Arc<dyn ObjectStore>,
-        bucket: &str,
-        prefix: &str,
-        run_id: &str,
-    ) -> Result<Self> {
-        Self::acquire_with_stale_after(client, bucket, prefix, run_id, S3_LOCK_STALE_AFTER)
-    }
-
-    pub(crate) fn acquire_with_stale_after(
-        client: &Arc<dyn ObjectStore>,
-        bucket: &str,
-        prefix: &str,
-        run_id: &str,
-        stale_after: Duration,
-    ) -> Result<Self> {
-        let key = if prefix.is_empty() {
-            LOCK_FILE.to_string()
-        } else {
-            format!("{prefix}/{LOCK_FILE}")
-        };
-        let mut lock = Self {
-            client: Arc::clone(client),
-            location: object_store::path::Path::from(key),
-            bucket: bucket.to_string(),
-            record: LockRecord {
-                run_id: run_id.to_string(),
-                host: host_name(),
-                pid: std::process::id(),
-                started_at: now_rfc3339(),
-            },
-            version: None,
-            enforced: true,
-            last_refresh: Some(Instant::now()),
-            stale_after,
-        };
-        let data = serde_json::to_vec_pretty(&lock.record)?;
-        let uri = lock.uri();
-
-        match block_on_async(lock.client.put_opts(
-            &lock.location,
-            object_store::PutPayload::from(data.clone()),
-            object_store::PutMode::Create.into(),
-        )) {
-            Ok(result) => {
-                lock.version = Some(update_version(result));
-                return Ok(lock);
-            }
-            Err(
-                object_store::Error::AlreadyExists { .. }
-                | object_store::Error::Precondition { .. },
-            ) => {}
-            Err(object_store::Error::NotImplemented | object_store::Error::NotSupported { .. }) => {
-                tracing::warn!(
-                    lock = %uri,
-                    "the S3 store does not support conditional writes; the merge lock is best effort, so do not run overlapping merges on this prefix"
-                );
-                block_on_async(
-                    lock.client
-                        .put(&lock.location, object_store::PutPayload::from(data)),
-                )
-                .with_context(|| format!("writing {uri}"))?;
-                lock.enforced = false;
-                return Ok(lock);
-            }
-            Err(err) => return Err(err).with_context(|| format!("creating {uri}")),
-        }
-
-        // The lock exists. Take it over only if its run stopped refreshing it.
-        let existing = block_on_async(lock.client.get(&lock.location))
-            .with_context(|| format!("reading {uri}"))?;
-        let meta = existing.meta.clone();
-        let holder = block_on_async(existing.bytes())
-            .ok()
-            .and_then(|data| serde_json::from_slice::<LockRecord>(&data).ok());
-        let holder_text = holder
-            .as_ref()
-            .map(|h| {
-                format!(
-                    "run {} on host {} (pid {}), started {}",
-                    h.run_id, h.host, h.pid, h.started_at
-                )
-            })
-            .unwrap_or_else(|| "an unreadable lock".to_string());
-        if !is_stale(meta.last_modified.timestamp(), lock.stale_after) {
-            anyhow::bail!(
-                "another merge is running on s3://{bucket}/{prefix}: {uri} is held by \
-                 {holder_text}, last refreshed {}. Wait for it to finish; if no merge is \
-                 running, delete that object or wait until it is 30 minutes old",
-                meta.last_modified
-            );
-        }
-        let takeover = object_store::PutMode::Update(object_store::UpdateVersion {
-            e_tag: meta.e_tag.clone(),
-            version: meta.version.clone(),
-        });
-        match block_on_async(lock.client.put_opts(
-            &lock.location,
-            object_store::PutPayload::from(data),
-            takeover.into(),
-        )) {
-            Ok(result) => {
-                tracing::warn!(
-                    lock = %uri,
-                    previous = %holder_text,
-                    "took over a stale merge lock; its interrupted merges are recovered first"
-                );
-                lock.version = Some(update_version(result));
-                Ok(lock)
-            }
-            Err(object_store::Error::Precondition { .. }) => {
-                anyhow::bail!("another merge took the stale lock {uri} at the same time; try again")
-            }
-            Err(err) => Err(err).with_context(|| format!("taking over {uri}")),
-        }
-    }
-
-    fn uri(&self) -> String {
-        format!("s3://{}/{}", self.bucket, self.location)
-    }
-
-    pub(crate) fn location(&self) -> String {
-        self.location.as_ref().to_string()
-    }
-
-    /// Refreshes the lock (at most once a minute) and fails if another run took it over.
-    pub(crate) fn refresh(&mut self) -> Result<()> {
-        if self
-            .last_refresh
-            .is_some_and(|at| at.elapsed() < S3_LOCK_HEARTBEAT_EVERY)
-        {
-            return Ok(());
-        }
-        let data = object_store::PutPayload::from(serde_json::to_vec_pretty(&self.record)?);
-        let mode = match (&self.version, self.enforced) {
-            (Some(version), true) if version.e_tag.is_some() => {
-                object_store::PutMode::Update(version.clone())
-            }
-            _ => object_store::PutMode::Overwrite,
-        };
-        match block_on_async(self.client.put_opts(&self.location, data, mode.into())) {
-            Ok(result) => {
-                self.version = Some(update_version(result));
-                self.last_refresh = Some(Instant::now());
-                Ok(())
-            }
-            Err(object_store::Error::Precondition { .. }) => anyhow::bail!(
-                "lost the merge lock {}: another run took it over; stopping before deleting anything",
-                self.uri()
-            ),
-            Err(err) => Err(err).with_context(|| format!("refreshing {}", self.uri())),
-        }
-    }
-
-    /// Deletes the lock object.
-    pub(crate) fn release(self) -> Result<()> {
-        match block_on_async(self.client.delete(&self.location)) {
-            Ok(()) | Err(object_store::Error::NotFound { .. }) => Ok(()),
-            Err(err) => Err(err).with_context(|| format!("deleting {}", self.uri())),
-        }
-    }
-
-    /// Returns true when the run that wrote `journal` may still be running.
-    pub(crate) fn owner_alive(&self, journal: &Journal) -> Result<bool> {
-        if journal.lock == self.location() {
-            // This run holds that lock now, so the journal's run has ended.
-            return Ok(false);
-        }
-        let location = object_store::path::Path::from(journal.lock.as_str());
-        match block_on_async(self.client.head(&location)) {
-            // Whoever holds that lock now is responsible for the partition.
-            Ok(meta) => Ok(!is_stale(meta.last_modified.timestamp(), self.stale_after)),
-            Err(object_store::Error::NotFound { .. }) => Ok(false),
-            Err(err) => {
-                Err(err).with_context(|| format!("checking lock s3://{}/{location}", self.bucket))
-            }
-        }
-    }
-}
-
-fn update_version(result: object_store::PutResult) -> object_store::UpdateVersion {
-    object_store::UpdateVersion {
-        e_tag: result.e_tag,
-        version: result.version,
-    }
-}
-
-/// Returns true when an object last modified at `last_modified_unix` (seconds) is older than
-/// `stale_after`.
-fn is_stale(last_modified_unix: i64, stale_after: Duration) -> bool {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|elapsed| elapsed.as_secs() as i64)
-        .unwrap_or(0);
-    now.saturating_sub(last_modified_unix) >= stale_after.as_secs() as i64
 }
 
 #[cfg(test)]
@@ -974,43 +733,6 @@ mod tests {
             .unwrap()
             .release()
             .unwrap();
-    }
-
-    #[test]
-    fn test_s3_run_lock_refuses_a_fresh_lock_and_takes_over_a_stale_one() {
-        let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let mut first = S3RunLock::acquire(&store, "bucket", "evm", "first").unwrap();
-        assert_eq!(first.location(), format!("evm/{LOCK_FILE}"));
-
-        let err = S3RunLock::acquire(&store, "bucket", "evm", "second")
-            .err()
-            .unwrap()
-            .to_string();
-        assert!(err.contains("another merge is running"), "{err}");
-        assert!(err.contains("run first"), "{err}");
-
-        // Treat any lock as stale: the next run takes it over.
-        let taker =
-            S3RunLock::acquire_with_stale_after(&store, "bucket", "evm", "third", Duration::ZERO)
-                .unwrap();
-        // The first run notices at its next refresh, before deleting anything.
-        first.last_refresh = None;
-        let err = first.refresh().unwrap_err().to_string();
-        assert!(err.contains("lost the merge lock"), "{err}");
-
-        // Journals written under the lock this run now holds are from an earlier run.
-        let journal = Journal::new(&run(&taker.location()), vec![], 1);
-        assert!(!taker.owner_alive(&journal).unwrap());
-        taker.release().unwrap();
-
-        // A fresh lock of a nested run protects its journals until it is released.
-        let fourth = S3RunLock::acquire(&store, "bucket", "evm", "fourth").unwrap();
-        let nested = S3RunLock::acquire(&store, "bucket", "evm/blocks", "nested").unwrap();
-        let nested_journal = Journal::new(&run(&nested.location()), vec![], 1);
-        assert!(fourth.owner_alive(&nested_journal).unwrap());
-        nested.release().unwrap();
-        assert!(!fourth.owner_alive(&nested_journal).unwrap());
-        fourth.release().unwrap();
     }
 
     #[test]

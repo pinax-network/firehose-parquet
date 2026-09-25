@@ -481,6 +481,7 @@ dependencies = [
  "prometheus-client",
  "prost",
  "prost-types",
+ "serde",
  "serde_json",
  "sha2",
  "solana-vote-interface",
@@ -853,6 +854,7 @@ version = "0.7.1"
 dependencies = [
  "anyhow",
  "arrow",
+ "async-trait",
  "backoff",
  "bs58",
  "bytes",

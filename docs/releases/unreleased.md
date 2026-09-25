@@ -19,6 +19,70 @@ conversion, and verification roots change. Default-profile mapping was 72–80%
 faster on two retained blocks; this is not an end-to-end throughput or memory
 reduction claim. See [the benchmark and 19,714-row comparison](../audit/503-solana-binary-payloads.md).
 
+### Partition indexes require verified finalized coverage (#486)
+
+Time index construction now checks every finalized canonical block and preserves
+backward/repeated timestamp runs. Bounded requests stay clipped to their exact
+bounds; current-head and clipped time spans remain incomplete. A bounded Stream
+proof establishes the finalized anchor before accepting coverage. Sparse Fetch
+head inference and future timestamp borrowing no longer determine time spans.
+Long backfills should use successive bounded runs; scans now cost work
+proportional to covered blocks and publish only validated snapshots.
+
+V2 adds explicit coverage and span proof fields. Legacy indexes remain
+inspectable with unknown completeness, but resolution, sharding and resume
+require rebuilding. Default resolution refuses incomplete or disjoint matches;
+`--all-spans --json` returns separate complete runs and their coverage. Complete
+means a natural contiguous span in the observed snapshot, not globally complete
+calendar coverage. Range helpers also refuse unseen initial routing context.
+Solana uses proven prior anchors; unsupported metadata or missing context fails
+closed without changing ingestion routing. See [the file contract](../partitions-parquet-contract.md)
+and [design and validation record](../audit/486-partition-index-design.md).
+
+### Mutations require common ownership (#468 prerequisite)
+
+Build, partition-index construction, maintenance, and verification that writes
+artifacts now coordinate ownership over their source/output/cursor locations.
+Local mutation requires supported macOS/Linux directory inode locking and readable
+ancestry. Nested symlinks inside guarded trees are refused; explicit root aliases
+remain supported. Missing output roots are protected through their existing
+ancestors without being created before input validation. Directory preflight adds
+a recursive traversal.
+
+S3 mutation holds a persistent bucket-wide owner, including copy/verification
+sources that must remain stable while artifacts are written. It requires proven
+conditional Create/Update support, usable object versions, and read/write access
+to `.fireparq-owner-v1.json` plus read/write/delete access below
+`.fireparq-owner-probes-v1/`. Distinct prefixes in one bucket serialize. Unsupported
+conditional stores have no best-effort fallback. Remote data writes/deletes and
+cursor saves make one attempt with zero transport retries; errors retain ownership
+for explicit provider-quiescent recovery. Read retries and bounded local cursor
+retries remain.
+
+`recovery status` reads ownership/control summaries. Remote `recovery release`
+requires the exact UUID/generation, stopped-writer evidence, and provider-confirmed
+quiescence of every prior request. Process exit or elapsed time alone is
+insufficient. Providers without that assurance cannot safely recover a plain-glob
+dataset through this command. Legacy S3 merge journals using the old expiring lock
+are refused automatically and need separately reviewed migration. Local legacy
+merge recovery remains under the common OS guard.
+
+This stage prevents conflicting cooperating commands; ingestion output parts and
+its cursor still lack an all-table crash/replay transaction. No protected ingestion
+mode is exposed yet, and #468 remains open. See the
+[scope, permissions, recovery procedure and qualification limits](../audit/468-stage1-ownership.md).
+
+### Antelope database-operation transaction keys (#508)
+
+`db_ops` adds non-null `tx_hash: Utf8`, `tx_index: UInt64` (original source trace
+index), and `db_op_index: UInt32` (position within that transaction). Join through
+canonical block identity; indices are not renumbered after filtering. Old files
+need rebuilding or explicit schema reconciliation to use these fields. The action
+aliases `transaction_id`, `trace_block_num`, `producer_block_id`, and `block_time`
+are deprecated for ordinary joins/routing but remain verbatim source metadata
+with no planned removal. Existing text values and row order are unchanged.
+See [the validation and migration record](../audit/508-antelope-db-joins.md).
+
 ### Metrics names, labels and readiness reflect actual state (#475)
 
 Counter names now emit one `_total` suffix; dashboards using accidental

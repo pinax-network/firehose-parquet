@@ -13,11 +13,13 @@ lifecycle state; a local implementation or passing test alone is not closure.
 - [#498: EVM log indices and optional tables](498-evm-log-indices.md)
 - [#499: offline EVM golden-block regression](499-evm-golden-fixture.md)
 - [#511: Bitcoin amounts and input metadata](511-bitcoin-values.md)
+- [#508: Antelope database-operation joins](508-antelope-db-joins.md)
 - [#568: Arrow/Parquet security and compatibility](568-arrow-parquet-security.md)
 - [#572: final completion checkpoints](572-final-completion-checkpoint.md)
 - [#506: NEAR qualification blocked by quota](506-near-qualification.md)
 - [#504: Beacon live mapping qualification](504-beacon-qualification.md)
 - [#485: partition probe reliability](485-partition-probe-reliability.md)
+- [#486: exact finalized partition coverage and strict consumers](486-partition-index-design.md)
 - [#500: stable Solana reward indices](500-solana-reward-index.md)
 - [#501: conservative Solana vote classification](501-solana-vote-classification.md)
 - [#502: explicit Solana instruction positions](502-solana-instruction-order.md)
@@ -30,6 +32,11 @@ lifecycle state; a local implementation or passing test alone is not closure.
 
 - [Backlog priorities and preserved work](backlog-roadmap.md)
 - [#468: proposed crash/replay recovery design](468-crash-recovery-design.md)
+- [#468: accepted transaction implementation plan](468-ingestion-transaction-plan.md)
+- [#468: staged ownership and durable state implementation](468-stage1-ownership.md)
+- [#468: conditional S3 ownership qualification](468-s3-ownership.md)
+- [#468: single-attempt remote mutations](468-s3-mutation-attempts.md)
+- [#468: verification artifact ownership](468-verify-ownership.md)
 
 ## Verified lifecycle outcomes
 
@@ -50,13 +57,14 @@ lifecycle state; a local implementation or passing test alone is not closure.
 | [#500](https://github.com/pinax-network/firehose-parquet/issues/500) | [#582](https://github.com/pinax-network/firehose-parquet/pull/582) | Merged as `803ffc3`; issue closed; 752 combined tests, two-block Solana comparison across flush windows and CI passed. |
 | [#476](https://github.com/pinax-network/firehose-parquet/issues/476) | [#584](https://github.com/pinax-network/firehose-parquet/pull/584) | Merged as `34cb6e2`; issue closed; 763 tests, malformed metadata and calendar-boundary regressions, 14-table live comparison and CI passed. |
 | [#485](https://github.com/pinax-network/firehose-parquet/issues/485) | [#583](https://github.com/pinax-network/firehose-parquet/pull/583) | Merged as `3cf984b`; issue closed; 779 combined tests, local gRPC/CLI failure scenarios, two-probe live check and CI passed. |
-
 | [#502](https://github.com/pinax-network/firehose-parquet/issues/502) | [#585](https://github.com/pinax-network/firehose-parquet/pull/585) | Merged as `0b38efc`; issue closed; 780 tests, all 6,179 instruction positions checked against raw Solana data, 15,832 prior-column rows unchanged and CI passed. |
 | [#501](https://github.com/pinax-network/firehose-parquet/issues/501) | [#586](https://github.com/pinax-network/firehose-parquet/pull/586) | Merged as `a6a1712`; issue closed; 783 tests, independent raw classification and both vote-detail output modes checked on two slots, prior rows unchanged and CI passed. |
-
 | [#475](https://github.com/pinax-network/firehose-parquet/issues/475) | [#587](https://github.com/pinax-network/firehose-parquet/pull/587) | Merged as `79793c3`; issue closed; 787 tests, real CLI readiness/buffer/cursor regression, independent review and CI passed. |
-
 | [#499](https://github.com/pinax-network/firehose-parquet/issues/499) | [#588](https://github.com/pinax-network/firehose-parquet/pull/588) | Merged as `806bf60`; issue closed; 788 workspace tests, capture-auth regression, independent raw fixture review and CI passed. |
+| [#511](https://github.com/pinax-network/firehose-parquet/issues/511) | [#589](https://github.com/pinax-network/firehose-parquet/pull/589) | Merged as `4b0f72f`; issue closed; 793 workspace tests, independent raw comparison of 3,904 outputs and 4,387 inputs, review and CI passed. |
+| [#508](https://github.com/pinax-network/firehose-parquet/issues/508) | [#590](https://github.com/pinax-network/firehose-parquet/pull/590) | Merged as `21de6af`; issue closed; 796 tests, all old columns preserved across 24 live EOS rows, ten raw-verified database joins, independent review and CI passed. |
+| [#486](https://github.com/pinax-network/firehose-parquet/issues/486) | [#592](https://github.com/pinax-network/firehose-parquet/pull/592) | Merged as `d5e1419`; issue closed; 855 tests, independent review, bounded finalized Ethereum coverage/resume comparison and CI passed. |
+| #468 prerequisite | [#591](https://github.com/pinax-network/firehose-parquet/pull/591) | Ownership/control foundation merged as `78ceb98`; 848 tests and CI passed. Full ingestion crash/replay protection remains incomplete; issue #468 stays open. |
 
 The #468 design PR accidentally triggered GitHub auto-closure through a negative
 sentence containing a recognized closing phrase. On 2026-09-25 the PR text was

@@ -331,11 +331,27 @@ Local cursor saves are atomic: the new cursor is written to a `.tmp` sibling
 (for example `cursor.parquet.tmp`) in the same directory, fsynced, and renamed
 over the old one, so a crash mid-save keeps the previous cursor.
 
-Cursor save failures pause ingestion and retry the same checkpoint up to three
-times, with 1 second and 2 second backoff. Exhausted retries, including a failed
-final checkpoint, exit nonzero. A shutdown during retry backoff also reports the
-durability failure. Local directory fsync errors count as failed saves. See
-[cursor persistence guarantees and metrics](docs/audit/469-durable-cursor-saves.md).
+Local cursor save failures pause ingestion and retry the same checkpoint up to
+three times, with 1 second and 2 second backoff. S3 cursor saves make one attempt,
+with transport retries disabled: a timed-out request might still finish remotely.
+A failed final checkpoint also exits nonzero. A shutdown during local retry
+backoff reports the durability failure. Local directory fsync errors count as
+failed saves. See [cursor persistence](docs/audit/469-durable-cursor-saves.md) and
+[remote mutation limits](docs/audit/468-s3-mutation-attempts.md).
+
+Mutating commands hold common ownership over output, source and external cursor
+or artifact locations. Local ownership uses macOS/Linux directory locks; nested
+symlinks inside mutation trees are refused. S3 ownership covers the whole bucket
+and requires conditional-write support plus access to reserved control keys.
+Unresolved remote errors retain ownership without an expiry or automatic takeover.
+`fireparq recovery status <path>` reads a summary. Explicit remote release requires
+the exact owner/generation and evidence that both the writer and all prior remote
+requests are quiescent; stopping the process alone is insufficient. See the
+[ownership and recovery runbook](docs/audit/468-stage1-ownership.md).
+
+Ownership currently prevents concurrent cooperating mutations. Output parts and
+the cursor are still separate writes; full ingestion crash/replay recovery and
+its authoritative output checkpoint remain under implementation in #468.
 
 ### Advanced Cursor Override
 
@@ -577,41 +593,36 @@ fireparq partitions build \
 
 Behavior:
 
-- writes one row per discovered partition to `/<chain>/partitions.parquet`
-- writes `partitions.parquet` with `zstd` compression by default (overridable with `--compression`)
-- writes a required non-null `chain` column on every partition row
-- writes exact partition envelopes when the enclosing boundaries are discoverable
-- supports one partition granularity per run (`date`, `hour`, `minute`, `second`)
-- derives canonical UTC partition keys using rounded interval starts
-- uses sparse single-block probes plus exponential/binary search to skip across ranges instead of streaming every block
-- uses the Firehose single-block fetch path for sparse probes instead of a normal block stream
-- writes contract metadata including schema version, chain scope, and covered block range
-- writes an initial checkpoint as soon as the first row exists
-- checkpoints long bounded and live runs continuously by elapsed time and partition rollovers
-- `--resume` reuses the trailing rows from the existing canonical index and continues from the stored frontier; the sibling cursor is not consulted, an explicit `--start-block` past the frontier is rejected, and a run whose `--stop-block` is already covered is a no-op
-- bounded builds refuse to touch an existing `partitions.parquet` unless `--resume` (extend it) or `--overwrite` (replace it) is passed
-- bounded builds may expand the requested start/stop to the enclosing partition boundaries so each completed row remains exact
-- `--live` treats existing `partitions.parquet` rows as the restart anchor, polls for new finalized blocks, and keeps extending the canonical index
-- sparse probes skip forward across missing block numbers (for example skipped Solana slots): a 16-block window first, then exponential samples and a scan of the skipped intervals find the exact next available block; exhausting the 65,536-block search budget fails instead of claiming the chain head was reached
-- sparse probes reuse one gRPC channel, retry timeouts and transient errors (a slow endpoint is never mistaken for a missing block), and fail fast on authentication errors; endpoints that answer an out-of-range request with an earlier head block terminate the search, while an unexpected later-block reply is an error
-- sparse probes treat missing/non-positive timestamps as missing metadata and borrow a nearby subsequent finalized block timestamp before partitioning
+- Writes a v2 finalized snapshot to `/<chain>/partitions.parquet`, with `zstd` compression by default. Chain and partition type are stored in file metadata.
+- Time indexes traverse every finalized block in the requested interval and check canonical parent links. They preserve the existing raw-timestamp routing: timestamps `[A, B, A]` produce three contiguous runs, including two separate runs for A.
+- `--start-block` is inclusive and `--stop-block` is exclusive. Bounds are never expanded. Clipped first/last spans and the current finalized-head time span carry `complete=false`.
+- A complete span has both natural boundaries established within the declared snapshot. It does **not** establish globally complete calendar coverage: the same date can recur elsewhere or later.
+- A bounded two-call Stream check proves an exact finalized block identity before accepting coverage. A future stop, non-final response, missing identity, contradictory ancestry or unresolved boundary fails without publishing a new snapshot.
+- Solana missing timestamps use a verified prior anchor, matching ongoing ingestion routing. Missing required context fails; there is no future-timestamp borrowing. Non-Solana missing-time bootstrap is refused for time indexes. `block_range` remains available without timestamp routing.
+- `--resume` and `--live` continue from the stored source-block frontier and verified context, including an open final span. They do not resume by the greatest calendar key. A bounded stop already covered is a no-op after endpoint/finality validation.
+- Existing files require `--resume` or `--overwrite`. Legacy indexes lack trustworthy completeness and must be rebuilt with `--overwrite` or into a fresh output root.
+- Each successful bounded run or live extension publishes one validated snapshot. A failed or cancelled scan leaves the previous snapshot intact. Long backfills should use successive bounded runs; time index construction now reads every covered block.
+
+See [the build contract and limits](docs/partitions-build-defaults.md) for finality,
+parent context, skipped-slot handling and endpoint requirements.
 
 | Flag | Default | Description |
 |---|---|---|
-| `--partition` | none | Partition to build: `date`, `hour`, `minute`, or `second` |
-| `--start-block` | inferred | Explicit probe seed, otherwise sibling cursor then endpoint first streamable block; bounded builds may expand downward to the enclosing partition start |
-| `--stop-block` | none in live mode | Required for bounded builds; incompatible with `--live`; bounded builds expand upward to the enclosing partition end |
-| `--live` | `false` | Keep extending `partitions.parquet` and resume from its latest covered frontier |
-| `--poll-interval-secs` | `30` | Live-mode poll interval while waiting for the next finalized block frontier |
+| `--partition` | none | `date`, `hour`, `minute`, `second`, or `block_range` |
+| `--block-range-size` | required for `block_range` | Width of deterministic block-number partitions |
+| `--start-block` | inferred | Fresh bounded start: explicit value, sibling cursor frontier, then endpoint first streamable block; fresh live uses explicit value or endpoint |
+| `--stop-block` | none in live mode | Exclusive bounded stop, no later than the proven finalized block plus one; incompatible with `--live` |
+| `--live` | `false` | Poll finalized coverage and extend the stored source frontier |
+| `--poll-interval-secs` | `30` | Wait between live finalized-head checks |
 | `--output` | inferred from `--s3-bucket` | Output root directory or `s3://` URI prefix |
-| `--s3-bucket` | none | S3 bucket used when `--output` is omitted or should be prefixed |
-| `--resume` | `false` | Reuse the existing canonical index at the resolved output path and continue from its frontier |
-| `--overwrite` | `false` | Ignore and replace the existing canonical index (conflicts with `--resume`) |
-| `--json` | `false` | Emit machine-readable output |
+| `--s3-bucket` | none | S3 bucket used when no explicit local output overrides the environment default |
+| `--resume` | `false` | Extend an existing verified v2 index |
+| `--overwrite` | `false` | Rebuild and replace the index after successful validation; conflicts with `--resume` |
+| `--json` | `false` | Emit result and declared coverage as JSON; use `--log-level error` for stdout without progress logs |
 
 ### `partitions ls` — Query Partition Index Rows
 
-Lists rows from `partitions.parquet` with optional filters and deterministic ascending order by partition value. Ordering and `--from` / `--to` filters use the numeric partition value (start block for `block_range`, UTC epoch seconds otherwise), so block ranges such as `8000000` sort before `10000000`.
+Lists rows from `partitions.parquet` with declared coverage, per-span completeness, required prior routing context, optional filters and deterministic ascending order by partition value. Legacy completeness is reported as unknown. Ordering and `--from` / `--to` filters use the numeric partition value (start block for `block_range`, UTC epoch seconds otherwise), so block ranges such as `8000000` sort before `10000000`.
 
 ```bash
 # List hour partitions from a local index
@@ -641,7 +652,7 @@ fireparq partitions ls \
 
 ### `partitions shard` — Deterministic Partition Assignment
 
-Assigns filtered partition rows to one shard for multi-container runs.
+Assigns complete, independently routable v2 spans to one shard for multi-container runs. Any selected incomplete or legacy row is refused. Each returned row carries its own exact bounds; repeated calendar values are never collapsed into one range. Hash assignment keeps repeated values on the same shard.
 
 ```bash
 # Ordinal assignment: shard 1 of 4
@@ -693,17 +704,19 @@ fireparq partitions validate \
   --json
 ```
 
-Checks:
-
-- `start_block < stop_block` for every row
-- adjacent rows in the same `(chain, partition_type)` do not overlap
-- adjacent rows are contiguous unless `--allow-gaps` is set
+V2 validation checks the entire snapshot's source-order continuity, declared
+finalized bounds, span flags, identity links and routing evidence. Repeated
+calendar values are valid. The report separately counts incomplete spans;
+`valid=true` means structurally valid, not that every span is complete or that a
+calendar date is globally covered. Legacy files retain geometry checks, report
+unknown completeness and cannot be used for strict resolution. `--allow-gaps`
+applies only to legacy geometry checks. Malformed v2 files fail regardless of it.
 
 Violations exit non-zero for CI gating.
 
 ### `partitions resolve` — Resolve Partition Block Bounds
 
-Resolves one row from `partitions.parquet` and prints the exact ingestion range (`start_block` inclusive, `stop_block` exclusive).
+Resolves one complete, independently routable span from a v2 index and prints its exact bounds (`start_block` inclusive, `stop_block` exclusive) plus the declared finalized coverage. Incomplete, legacy and ambiguous repeated-value lookups fail. This is coverage within the observed snapshot, not a promise that every occurrence of the date has been found.
 
 ```bash
 # Local index
@@ -721,17 +734,19 @@ fireparq partitions resolve \
   --partition-chain eth-mainnet \
   --json
 
-# Require a unique chain match when using a global index
-fireparq partitions resolve \
-  --partitions-index s3://my-bucket/partitions.parquet \
+# Inspect every complete run for a repeated calendar value
+fireparq --log-level error partitions resolve \
+  --partitions-index ./output/eth-mainnet/partitions.parquet \
   --partition-type date \
   --partition-value '2015-07-30 00:00:00' \
-  --strict-single-chain
+  --all-spans --json
 ```
 
-Helpful guard:
-
-- `--strict-single-chain` fails fast when a global index contains multiple chain rows for the same partition descriptor and `--partition-chain` was omitted
+`--all-spans` requires `--json` and returns ordered separate spans without an
+enclosing `start_block`/`stop_block`. It still rejects incomplete matches and
+marks any span whose routing requires prior timestamp context. Such a span is
+inspection evidence, not an independently usable ingestion range. `--strict-single-chain`
+remains accepted for compatibility; v2 already requires one chain per index.
 
 See `docs/partitions-parquet-contract.md` for the versioned `partitions.parquet` schema and metadata compatibility contract.
 
@@ -982,12 +997,12 @@ The path must exist locally or be an explicit `s3://...` URI. Unlike `scan` and 
 
 > **Memory note:** Merge holds one source part at a time plus the output file being built (up to `--flush-bytes`). On S3, each source object is downloaded whole before it is read, so peak memory is roughly the largest part plus `--flush-bytes`.
 
-Interrupted merges are recovered, so a crash never leaves duplicate rows:
+Local interrupted merges recover under exclusive ownership:
 
-- Each partition merge is recorded in a journal, `_fireparq_merge.json`, in the partition directory. The journal is created before any output is written. It is committed once every output is written, and removed after the original parts are deleted. Local outputs are written to a temporary file, fsynced, and renamed into place, so a partial file is never visible.
-- A merge that was interrupted (crash, `kill`, failed upload) is finished or undone by the next run before it does anything else. If the journal was committed, the remaining original parts are deleted. Otherwise the partial outputs are deleted, and the partition is merged again from its untouched original parts. The summary reports `Interrupted merges recovered`.
-- One merge runs per path at a time. `merge` holds `.fireparq-merge.lock` at the path and fails right away if another merge holds it. Locally this is an OS file lock, released when the process exits however it exits. On S3 it is a conditionally created lock object, refreshed while the run is active. A lock that has not been refreshed for 30 minutes is taken over by the next run. If the store has no conditional writes, merge warns and the lock is best effort.
-- A partition that a merge on an enclosing or nested path is working on is skipped and listed as `In use by another merge`.
+- Each partition merge has a journal, `_fireparq_merge.json`, created before output. It is committed after all outputs complete and removed after source deletion. Local output is completed and synced before publication.
+- Under the common local directory guard, the next run finishes a committed journal or removes an uncommitted run's outputs before retrying. The legacy local `.fireparq-merge.lock` remains for recognizing old journals.
+- S3 uses the persistent bucket-wide owner. An interrupted remote run retains ownership until an operator establishes writer cessation and provider-confirmed request quiescence and explicitly releases that exact owner. The subsequent guarded merge can recover journals written under this ownership protocol. Legacy S3 journals using the old expiring lock require separately reviewed migration and are refused automatically.
+- There is no timestamp takeover or best-effort conditional-write fallback. Conflicting local parent/child operations and all mutations in one S3 bucket fail immediately. See [the recovery limits and procedure](docs/audit/468-stage1-ownership.md).
 
 > **Metadata preservation:** Both `merge` and `rollup` preserve Parquet file-level metadata (`firehose-parquet.*` keys) from the source files into the output files.
 
@@ -1584,6 +1599,32 @@ Use a new output dataset or rebuild the affected tables when upgrading; merging
 old and new files requires explicit schema reconciliation. Readers such as
 DuckDB may use `union_by_name=true` when intentionally comparing versions, with
 new columns null for older files.
+
+### Antelope database-operation joins
+
+`db_ops` includes `tx_hash` (the enclosing trace ID), `tx_index` (`UInt64`, the
+original trace index), and `db_op_index` (`UInt32`, zero-based within that trace).
+Filtering can leave transaction-index gaps. Operation positions restart for each
+transaction and remain stable across flushes. Scope joins to the canonical block:
+
+```sql
+SELECT d.block_id, d.tx_hash, d.db_op_index, d.operation, t.status
+FROM read_parquet('output/eos/db_ops/**/*.parquet') d
+JOIN read_parquet('output/eos/transactions/**/*.parquet') t
+  ON d.block_id = t.block_id
+ AND d.tx_hash = t.tx_hash
+ AND d.tx_index = t."index";
+```
+
+The action fields `transaction_id`, `trace_block_num`, `producer_block_id`, and
+`block_time` are deprecated for ordinary joins and routing; prefer `tx_hash` and
+canonical block identity/time. They remain verbatim action metadata, which can
+be missing or differ from canonical values. No removal is scheduled. Existing
+action JSON, nulls and enum labels remain unchanged.
+
+Use a new dataset or rebuild older ranges to populate the added columns. Schema
+union makes them null in old files; strict merge/rollup requires explicit schema
+reconciliation. See [the implementation and live comparison](docs/audit/508-antelope-db-joins.md).
 
 ## Environment Variables
 

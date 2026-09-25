@@ -12,6 +12,11 @@ use tracing::{debug, info, warn};
 
 pub use tokio_util::sync::CancellationToken;
 
+mod finality;
+mod finalized_range;
+pub use finality::{FinalityTimeoutError, FinalizedAnchor};
+pub use finalized_range::FinalizedMetadataStream;
+
 /// Error returned when work stops because shutdown was requested
 /// (SIGINT/SIGTERM). Callers detect it with [`is_shutdown_error`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
@@ -80,7 +85,7 @@ pub fn classify_fetch_error(error: &anyhow::Error) -> FetchErrorKind {
     use tonic::Code;
 
     for cause in error.chain() {
-        if cause.is::<FetchTimeoutError>() {
+        if cause.is::<FetchTimeoutError>() || cause.is::<FinalityTimeoutError>() {
             return FetchErrorKind::Timeout;
         }
         if let Some(status) = cause.downcast_ref::<tonic::Status>() {
@@ -1171,7 +1176,7 @@ mod tests {
         assert_eq!(identity.fork_step.as_deref(), Some("UNDO"));
     }
 
-    fn test_config(endpoint: &str) -> Config {
+    pub(super) fn test_config(endpoint: &str) -> Config {
         Config {
             endpoint: endpoint.to_string(),
             api_key: None,
