@@ -284,12 +284,14 @@ impl StreamExit {
 }
 
 /// Final writer flush when the stream ends. Remaining buffers are written, and
-/// `commit_cursor` runs, only when the stream completed and data was written
-/// (see [`StreamExit::materializes_buffers`]). Returns whether the cursor
-/// commit ran.
+/// `commit_cursor` runs, only when the stream completed and either its final
+/// mapper write or this remaining-buffer flush materialized data. Earlier
+/// normal-loop writes have already been checkpointed and do not count here.
+/// Returns whether the cursor commit ran.
 fn flush_writer_on_exit(
     exit: StreamExit,
     writer: &mut OutputWriter,
+    final_mapper_materialized: bool,
     pipeline_metrics: &metrics::PipelineMetrics,
     commit_cursor: impl FnOnce() -> Result<()>,
 ) -> Result<bool> {
@@ -297,8 +299,10 @@ fn flush_writer_on_exit(
         return Ok(false);
     }
 
-    let wrote = writer.flush_remaining()?;
-    if !wrote {
+    // Always drain before committing: a mapper write can materialize one
+    // partition while leaving the next partition's batches buffered.
+    let wrote_remaining = writer.flush_remaining()?;
+    if !final_mapper_materialized && !wrote_remaining {
         info!(
             trigger = "shutdown",
             "no writer-buffered parquet data remained to materialize before exit"
@@ -313,7 +317,7 @@ fn flush_writer_on_exit(
         buffered_rows = writer_buffered.rows,
         buffered_estimated_bytes =
             firehose_parquet::cli::format_bytes(writer_buffered.estimated_compressed_bytes),
-        "writer materialized remaining parquet output before exit"
+        "writer materialized final parquet output before exit"
     );
     pipeline_metrics
         .flushes_total
@@ -5553,6 +5557,7 @@ async fn run_ingestion(args: &BuildArgs, global: &GlobalArgs) -> Result<()> {
     // already flushed during normal processing are preserved, and on restart
     // the stream resumes from the last saved cursor, which corresponds to the
     // last fully-written flush.
+    let mut final_mapper_materialized = false;
     if !exit.materializes_buffers() {
         let skipped_message = if exit == StreamExit::Failed {
             "stream error skipped partial flushes; buffered data was not materialized to storage and the cursor was not advanced"
@@ -5616,7 +5621,7 @@ async fn run_ingestion(args: &BuildArgs, global: &GlobalArgs) -> Result<()> {
                         min_timestamp,
                         max_timestamp,
                     };
-                    writer.write_all(&batches, &metadata)?;
+                    final_mapper_materialized = writer.write_all(&batches, &metadata)?;
                 }
             }
         }
@@ -5625,20 +5630,26 @@ async fn run_ingestion(args: &BuildArgs, global: &GlobalArgs) -> Result<()> {
     // Flush any remaining buffered data in the writer, then save the cursor
     // after the final flush. Both are skipped unless the stream completed.
     if !dry_run {
-        flush_writer_on_exit(exit, &mut writer, &pipeline_metrics, || {
-            if let (Some(ref loc), Some(ref cursor)) = (&cursor_location, &last_cursor) {
-                let mut state = cursor_state_template.clone();
-                state.cursor = cursor.clone();
-                state.last_block_num = last_block_num;
-                state.last_block_id = decode_id_bytes(&last_block_id);
-                state.last_timestamp = timestamp_backfill.current_anchor_timestamp();
-                state.updated_at = time::OffsetDateTime::now_utc()
-                    .format(&time::format_description::well_known::Rfc3339)
-                    .unwrap_or_default();
-                loc.save_with_retry_blocking(&state, &pipeline_metrics, &shutdown)?;
-            }
-            Ok(())
-        })?;
+        flush_writer_on_exit(
+            exit,
+            &mut writer,
+            final_mapper_materialized,
+            &pipeline_metrics,
+            || {
+                if let (Some(ref loc), Some(ref cursor)) = (&cursor_location, &last_cursor) {
+                    let mut state = cursor_state_template.clone();
+                    state.cursor = cursor.clone();
+                    state.last_block_num = last_block_num;
+                    state.last_block_id = decode_id_bytes(&last_block_id);
+                    state.last_timestamp = timestamp_backfill.current_anchor_timestamp();
+                    state.updated_at = time::OffsetDateTime::now_utc()
+                        .format(&time::format_description::well_known::Rfc3339)
+                        .unwrap_or_default();
+                    loc.save_with_retry_blocking(&state, &pipeline_metrics, &shutdown)?;
+                }
+                Ok(())
+            },
+        )?;
     }
 
     if exit == StreamExit::Completed && genesis_timestamp_bootstrap.enabled {
@@ -5869,7 +5880,7 @@ mod tests {
             })
         };
         let committed =
-            flush_writer_on_exit(exit, &mut writer, &pipeline_metrics, save_cursor).unwrap();
+            flush_writer_on_exit(exit, &mut writer, false, &pipeline_metrics, save_cursor).unwrap();
         assert!(!committed);
         assert!(
             !cursor_path.exists(),
@@ -5885,6 +5896,7 @@ mod tests {
         let committed = flush_writer_on_exit(
             StreamExit::Completed,
             &mut writer,
+            false,
             &pipeline_metrics,
             save_cursor,
         )
@@ -5897,38 +5909,270 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
     async fn test_final_cursor_failure_is_not_a_successful_completion() {
-        let dir = make_temp_output_dir();
-        let mut writer = OutputWriter::new(&dir, Partition::None, Compression::None, u64::MAX);
-        let metadata = BlockMetadata {
-            min_block_number: 100,
-            max_block_number: 200,
-            min_timestamp: Some(1705320000),
-            max_timestamp: Some(1705320000),
-        };
-        writer.write_all(&make_test_batches(), &metadata).unwrap();
-        let invalid_parent = dir.join("not-a-directory");
-        std::fs::write(&invalid_parent, b"file").unwrap();
-        let location = CursorLocation::Local(invalid_parent.join("cursor.parquet"));
-        let (_, metrics) = metrics::init();
-        let error = flush_writer_on_exit(StreamExit::Completed, &mut writer, &metrics, || {
-            location.save_with_retry_blocking(
-                &CursorState {
-                    last_block_num: 200,
-                    ..CursorState::default()
-                },
+        // Exercise both a buffered batch and one already materialized by the
+        // final mapper write. Either must surface an exhausted cursor save.
+        for flush_bytes in [u64::MAX, 1] {
+            let dir = make_temp_output_dir();
+            let mut writer =
+                OutputWriter::new(&dir, Partition::None, Compression::None, flush_bytes);
+            let metadata = BlockMetadata {
+                min_block_number: 100,
+                max_block_number: 200,
+                min_timestamp: Some(1705320000),
+                max_timestamp: Some(1705320000),
+            };
+            let final_mapper_materialized =
+                writer.write_all(&make_test_batches(), &metadata).unwrap();
+            assert_eq!(final_mapper_materialized, flush_bytes == 1);
+            let invalid_parent = dir.join("not-a-directory");
+            std::fs::write(&invalid_parent, b"file").unwrap();
+            let location = CursorLocation::Local(invalid_parent.join("cursor.parquet"));
+            let (_, metrics) = metrics::init();
+            let error = flush_writer_on_exit(
+                StreamExit::Completed,
+                &mut writer,
+                final_mapper_materialized,
                 &metrics,
-                &AtomicBool::new(false),
+                || {
+                    location.save_with_retry_blocking(
+                        &CursorState {
+                            last_block_num: 200,
+                            ..CursorState::default()
+                        },
+                        &metrics,
+                        &AtomicBool::new(false),
+                    )
+                },
             )
-        })
-        .unwrap_err();
-        assert!(error
-            .to_string()
-            .contains("cursor persistence failed after 3 attempts"));
-        assert_eq!(StreamExit::from_result(&Err(error)), StreamExit::Failed);
-        assert_eq!(metrics.cursor_save_failures_total.get(), 3);
-        assert_eq!(metrics.cursor_saves_total.get(), 0);
-        assert_eq!(metrics.cursor_last_success_timestamp_seconds.get(), 0);
+            .unwrap_err();
+            assert!(error
+                .to_string()
+                .contains("cursor persistence failed after 3 attempts"));
+            assert_eq!(StreamExit::from_result(&Err(error)), StreamExit::Failed);
+            assert_eq!(metrics.cursor_save_failures_total.get(), 3);
+            assert_eq!(metrics.cursor_saves_total.get(), 0);
+            assert_eq!(metrics.cursor_last_success_timestamp_seconds.get(), 0);
+            std::fs::remove_dir_all(&dir).unwrap();
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn test_final_mapper_auto_flush_commits_cursor_with_empty_writer_buffers() {
+        let dir = make_temp_output_dir();
+        let output = dir.join("output");
+        let location = CursorLocation::Local(dir.join("cursor.parquet"));
+        let mut mapper = SolanaBlockMapper::new(false, false, EncodeBytes::Binary, false, false);
+        let block = firehose_protos::sf::solana::r#type::v1::Block {
+            slot: 42,
+            parent_slot: 41,
+            block_time: Some(firehose_protos::sf::solana::r#type::v1::UnixTimestamp {
+                timestamp: 1_705_320_000,
+            }),
+            ..Default::default()
+        };
+        let identity = BlockIdentity {
+            block_num: 42,
+            timestamp: 1_705_320_000,
+            ..Default::default()
+        };
+        mapper
+            .map_block(&prost::Message::encode_to_vec(&block), &identity, None)
+            .unwrap();
+        let flush_bytes = 4_096;
+        let mapper_estimate = mapper.estimated_bytes() as u64;
+        assert!(next_mapper_flush_trigger(
+            None,
+            mapper.max_table_rows(),
+            None,
+            1,
+            None,
+            Instant::now(),
+            flush_bytes,
+            mapper_estimate,
+        )
+        .is_none());
+
+        let batches = mapper.flush().unwrap();
+        let mut writer =
+            OutputWriter::new(&output, Partition::None, Compression::Zstd, flush_bytes);
+        let metadata = BlockMetadata {
+            min_block_number: 42,
+            max_block_number: 42,
+            min_timestamp: Some(identity.timestamp),
+            max_timestamp: Some(identity.timestamp),
+        };
+        // Finalized Arrow allocations exceed the writer threshold even though
+        // the mapper's logical byte estimate did not trigger a normal flush.
+        let materialized = writer.write_all(&batches, &metadata).unwrap();
+        assert!(materialized);
+        assert_eq!(writer.buffered_stats(), WriterBufferStats::default());
+        assert_eq!(std::fs::read_dir(output.join("blocks")).unwrap().count(), 1);
+        let (_, metrics) = metrics::init();
+        let committed = flush_writer_on_exit(
+            StreamExit::Completed,
+            &mut writer,
+            materialized,
+            &metrics,
+            || {
+                location.save_with_retry_blocking(
+                    &CursorState {
+                        cursor: "cursor-42".to_string(),
+                        last_block_num: 42,
+                        ..Default::default()
+                    },
+                    &metrics,
+                    &AtomicBool::new(false),
+                )
+            },
+        )
+        .unwrap();
+        assert!(committed);
+        let saved = location.load().unwrap().unwrap();
+        assert_eq!(saved.cursor, "cursor-42");
+        assert_eq!(saved.last_block_num, 42);
+        assert_eq!(metrics.cursor_saves_total.get(), 1);
+        assert_eq!(metrics.cursor_save_failures_total.get(), 0);
+        assert!(metrics.cursor_last_success_timestamp_seconds.get() > 0);
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    // Reproduce a final mapper write that materializes the old partition and
+    // defers the new partition. The completion drain must still write the latter.
+    fn writer_with_deferred_completion_partition(
+        output: &std::path::Path,
+    ) -> (OutputWriter, PathBuf) {
+        let mut writer = OutputWriter::new(output, Partition::Date, Compression::None, u64::MAX);
+        let batches = make_test_batches();
+        let mut metadata = BlockMetadata {
+            min_block_number: 41,
+            max_block_number: 41,
+            min_timestamp: Some(1_705_320_000),
+            max_timestamp: Some(1_705_320_000),
+        };
+        assert!(!writer.write_all(&batches, &metadata).unwrap());
+        metadata.min_block_number = 42;
+        metadata.max_block_number = 42;
+        metadata.min_timestamp = Some(1_705_406_400);
+        metadata.max_timestamp = Some(1_705_406_400);
+        assert!(writer.write_all(&batches, &metadata).unwrap());
+        assert_eq!(writer.buffered_stats().rows, 1);
+        assert_eq!(
+            std::fs::read_dir(output.join("blocks/year=2024/month=01/day=15"))
+                .unwrap()
+                .count(),
+            1
+        );
+        let pending_path = output.join("blocks/year=2024/month=01/day=16");
+        assert!(!pending_path.exists());
+        (writer, pending_path)
+    }
+
+    #[test]
+    fn test_completion_drains_deferred_partition_before_one_checkpoint() {
+        let dir = make_temp_output_dir();
+        let (mut writer, pending_path) = writer_with_deferred_completion_partition(&dir);
+        let (_, metrics) = metrics::init();
+        let mut commits = 0;
+        let committed =
+            flush_writer_on_exit(StreamExit::Completed, &mut writer, true, &metrics, || {
+                assert_eq!(std::fs::read_dir(&pending_path).unwrap().count(), 1);
+                commits += 1;
+                Ok(())
+            })
+            .unwrap();
+        assert!(committed);
+        assert_eq!(commits, 1);
+        assert_eq!(writer.buffered_stats(), WriterBufferStats::default());
+        assert_eq!(
+            metrics
+                .flushes_total
+                .get_or_create(&metrics::FlushLabels {
+                    trigger: "shutdown".into()
+                })
+                .get(),
+            1
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn test_completion_drain_failure_prevents_checkpoint_after_materialization() {
+        let dir = make_temp_output_dir();
+        let (mut writer, pending_path) = writer_with_deferred_completion_partition(&dir);
+        std::fs::write(&pending_path, b"not-a-directory").unwrap();
+        let (_, metrics) = metrics::init();
+        let error =
+            flush_writer_on_exit(StreamExit::Completed, &mut writer, true, &metrics, || {
+                panic!("a failed deferred write must prevent checkpointing");
+            })
+            .unwrap_err();
+        assert_eq!(StreamExit::from_result(&Err(error)), StreamExit::Failed);
+        assert_eq!(writer.buffered_stats().rows, 1);
+        assert_eq!(
+            metrics
+                .flushes_total
+                .get_or_create(&metrics::FlushLabels {
+                    trigger: "shutdown".into()
+                })
+                .get(),
+            0
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn test_completion_without_new_output_does_not_checkpoint() {
+        for previously_materialized in [false, true] {
+            let dir = make_temp_output_dir();
+            let mut writer = OutputWriter::new(&dir, Partition::None, Compression::None, u64::MAX);
+            if previously_materialized {
+                let metadata = BlockMetadata {
+                    min_block_number: 42,
+                    max_block_number: 42,
+                    min_timestamp: None,
+                    max_timestamp: None,
+                };
+                assert!(
+                    write_mapper_flush(&mut writer, &make_test_batches(), &metadata, true)
+                        .unwrap()
+                        .materialized
+                );
+            }
+            let (_, metrics) = metrics::init();
+            let committed =
+                flush_writer_on_exit(StreamExit::Completed, &mut writer, false, &metrics, || {
+                    panic!("earlier normal-loop output must not trigger another final checkpoint");
+                })
+                .unwrap();
+            assert!(!committed);
+            assert_eq!(
+                metrics
+                    .flushes_total
+                    .get_or_create(&metrics::FlushLabels {
+                        trigger: "shutdown".into()
+                    })
+                    .get(),
+                0
+            );
+            std::fs::remove_dir_all(&dir).unwrap();
+        }
+    }
+
+    #[test]
+    fn test_interrupted_exit_does_not_drain_or_checkpoint_after_materialization() {
+        for exit in [StreamExit::Failed, StreamExit::Shutdown] {
+            let dir = make_temp_output_dir();
+            let (mut writer, pending_path) = writer_with_deferred_completion_partition(&dir);
+            let (_, metrics) = metrics::init();
+            let committed = flush_writer_on_exit(exit, &mut writer, true, &metrics, || {
+                panic!("failed or shutdown exits must not checkpoint");
+            })
+            .unwrap();
+            assert!(!committed);
+            assert!(!pending_path.exists());
+            assert_eq!(writer.buffered_stats().rows, 1);
+            std::fs::remove_dir_all(&dir).unwrap();
+        }
     }
 
     #[test]

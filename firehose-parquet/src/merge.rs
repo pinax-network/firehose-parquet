@@ -1913,7 +1913,7 @@ mod tests {
         let a_with_metadata = a.clone().with_metadata(
             [("comment".to_string(), "x".to_string())]
                 .into_iter()
-                .collect(),
+                .collect::<arrow::datatypes::Metadata>(),
         );
         assert_eq!(
             describe_schema_mismatch(&ab, &Schema::new(vec![a_with_metadata, b.clone()])),
