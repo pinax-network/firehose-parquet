@@ -41,4 +41,19 @@ failed-transaction filter settings are exercised. It separately checks dense
 per-envelope indices and unchanged source/fork ordering.
 
 The new regression failed against the original implementation and passed with
-the fix. Final integration test evidence will be recorded before publication.
+the fix. Independent code review found no functional blockers. The integrated
+implementation `f0bb91c`, including writer simplification, responsive shutdown
+and atomic publication, passed **752 workspace tests**, zero failed and four
+ignored (three benchmark helpers and one child-process helper invoked by its
+parent tests). Build, formatting and whitespace checks passed. Subsequent
+integration changed only documentation and commit ancestry.
+
+A bounded live run used the explicit Pinax Solana endpoint with provider-scoped
+credentials and fresh local output for slots `[300000000, 300000002)`. Two runs
+used `--flush-blocks 1` and `--flush-blocks 2`, with the other triggers set above
+the sample. Both completed at cursor block 300000001. DuckDB 1.1.1 found equal
+schemas and zero differences in both directions with `EXCEPT ALL` across all
+**eight tables / 15,832 rows**. Each slot's one block reward had index zero.
+The sample contained no transaction rewards; the mixed-source indexing defect
+is covered by the reproducing regression, not claimed as live-qualified from
+this sample. No production S3 writes were performed.
