@@ -36,7 +36,7 @@ A production-grade Rust toolkit that consumes [StreamingFast Firehose](https://f
 - **Compression** — zstd (default), snappy, gzip, or none
 - **Parquet file metadata** — every file embeds pipeline provenance (`firehose-parquet.*` key-value pairs) in the Parquet footer
 - **Prometheus metrics** — opt-in `/metrics` endpoint for monitoring throughput, buffer state, and errors
-- **Graceful shutdown** — SIGINT/SIGTERM flush all buffers and save cursor before exit
+- **Graceful shutdown** — SIGINT/SIGTERM and write/stream errors never save the cursor past unwritten data; the next run resumes from the last committed flush
 - **Docker support** — multi-stage Dockerfile, published to GHCR
 - **Arrow-native pipeline** — column builders produce `RecordBatch`es that flush to Parquet
 
@@ -260,12 +260,19 @@ fireparq \
 
 On SIGINT (Ctrl-C) or SIGTERM, the pipeline:
 
-1. Stops consuming new blocks from the gRPC stream
-2. Flushes all in-memory buffers to Parquet files
-3. Saves the cursor for the last successfully written block
-4. Exits cleanly
+1. Stops consuming new blocks from the gRPC stream after the current block
+2. Discards partial in-memory buffers instead of writing extra part files
+3. Leaves the cursor at the last committed flush
+4. Exits cleanly (exit code 0)
 
-This prevents corrupted or partial files and ensures the next run resumes from a consistent point.
+If a write (local disk or S3), a block mapping, or the stream fails, the
+pipeline also discards partial buffers and does not save the cursor, then exits
+non-zero. A table whose write failed is never skipped: the next run resumes from
+the last committed cursor and replays the uncommitted window. Tables that were
+already written in the failed flush may be written again on that replay.
+
+Only a stream that ends cleanly (for example, by reaching `--stop-block`)
+flushes the remaining buffers and saves the final cursor.
 
 ## CLI Reference
 
