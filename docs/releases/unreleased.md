@@ -236,6 +236,20 @@ Details:
 
 Migration: files written before and after this change have different schemas for these 5 tables. Query them separately or with `union_by_name`, and do not `merge` or `rollup` old and new files together.
 
+## New features
+
+### EVM: new `withdrawals`, `access_lists` and `set_code_authorizations` tables (#497)
+
+Firehose provides beacon-chain withdrawals (16 per mainnet block), transaction access lists (EIP-2930) and EIP-7702 authorizations, but none of them were written. Withdrawals only showed up as `system_balance_changes` rows with reason `WITHDRAWAL`, in wei and without the validator or withdrawal index.
+
+Three new EVM tables, written at both detail levels (also with `--without-extended`):
+
+- `withdrawals`: one row per withdrawal, with `index`, `validator_index`, `address` and `amount_gwei` (in gwei, not wei).
+- `access_lists`: one row per access-list entry, with `tx_hash`, `tx_index`, `access_index`, `address` and `storage_keys` (a list).
+- `set_code_authorizations`: one row per EIP-7702 authorization, with `tx_hash`, `tx_index`, `authorization_index`, `chain_id` (decimal), `address` (delegation target), `nonce`, `v`, `r`, `s`, `authority` and `discarded`.
+
+Rows of `access_lists` and `set_code_authorizations` follow their transaction: they are written for failed transactions and dropped by `--exclude-failed-transactions`. EVM outputs now have 6 base tables and 20 with extended detail.
+
 ## Fixes
 
 - **`build` no longer retries fatal gRPC errors forever (#472).** `Unauthenticated`, `PermissionDenied`, `InvalidArgument`, `FailedPrecondition`, `OutOfRange` and `Unimplemented` now end the run with an error and a hint, including statuses Firehose relays as `Unknown` with the real code in the message. So does `ResourceExhausted` when it reports an exhausted quota (e.g. `billable egress bytes quota exceeded`); other `ResourceExhausted` errors such as rate limits are still retried with back-off. An invalid cursor, a message over 128 MiB, or credentials that are not valid for the endpoint (such as a Pinax token against a StreamingFast endpoint after #535) used to reconnect about once a second indefinitely. Fatal errors are counted in `firehose_parquet_errors_total{kind="grpc_fatal"}`.

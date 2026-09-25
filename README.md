@@ -6,7 +6,7 @@ A production-grade Rust toolkit that consumes [StreamingFast Firehose](https://f
 
 | `--block-type` | Endpoint Example | Tables |
 |---|---|---|
-| `evm` | `eth.firehose.pinax.network:443` | blocks, transactions, logs, calls, balance_changes, code_changes, storage_changes, nonce_changes, gas_changes, account_creations (`--without-extended` disables extra tables) |
+| `evm` | `eth.firehose.pinax.network:443` | blocks, transactions, logs, withdrawals, access_lists, set_code_authorizations, calls, balance_changes, code_changes, storage_changes, nonce_changes, gas_changes, account_creations, system_* (`--without-extended` disables the call and state-change tables) |
 | `solana` | `solana.firehose.pinax.network:443` | blocks, transactions, messages, instructions, rewards, token_balances, account_lookups, vote_transactions (`--without-votes` disables `vote_transactions`) |
 | `bitcoin` | `bitcoin.firehose.pinax.network:443` | blocks, transactions, inputs, outputs |
 | `beacon` | `eth-cl.firehose.pinax.network:443` | blocks, attestations, deposits, proposer_slashings, attester_slashings, voluntary_exits, execution_payload, blob_sidecars |
@@ -1023,6 +1023,20 @@ JOIN read_parquet('output/mainnet/system_calls/**/*.parquet') s
 ```
 
 The `logs` table holds receipt logs only, so logs emitted by reverted calls are never in it.
+
+### EVM: withdrawals, access lists and EIP-7702 authorizations
+
+Three tables hold block and transaction data that is not a column of `blocks` or `transactions`. They are written at both detail levels, including with `--without-extended`. Their rows follow their transaction: they are written for failed transactions too, and dropped with `--exclude-failed-transactions`.
+
+| Table | One row per | Columns |
+|---|---|---|
+| `withdrawals` | beacon-chain withdrawal in the block (Shanghai and later) | `block_number`, `index` (the global withdrawal index), `validator_index`, `address`, `amount_gwei` (`UInt64`, in gwei, not wei) |
+| `access_lists` | entry of a transaction's access list (EIP-2930) | `block_number`, `tx_hash`, `tx_index`, `access_index` (position in the list), `address`, `storage_keys` (list of bytes, may be empty) |
+| `set_code_authorizations` | authorization of a `SET_CODE` transaction (EIP-7702) | `block_number`, `tx_hash`, `tx_index`, `authorization_index` (position in the list), `chain_id` (decimal string; `0` allows any chain), `address` (delegation target), `nonce`, `v`, `r`, `s`, `authority` (recovered signer), `discarded` |
+
+- A withdrawal also appears in `system_balance_changes` with reason `WITHDRAWAL`, in wei and without the validator. `sum(amount_gwei) * 1e9` per block and address equals the summed balance delta there.
+- `authority` is `NULL` when it can't be recovered from the signature, and those authorizations are `discarded`. `address` is `NULL` on the few testnet blocks where Firehose did not record it.
+- `discarded = true` means the chain skipped the authorization as invalid. Accepted authorizations take effect even when the transaction fails (see failed transactions above).
 
 ### EVM: header, signature, blob and ordinal columns
 
