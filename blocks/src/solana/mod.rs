@@ -1,3 +1,5 @@
+#[cfg(test)]
+mod context_tests;
 pub mod mapper;
 #[cfg(test)]
 mod payload_tests;
