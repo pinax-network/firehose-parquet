@@ -265,3 +265,14 @@ No real S3 bucket was modified, and there is no broad remote crash/replay guaran
 from these fixtures. Root independently reviewed ingestion/recovery caller wiring
 and scope collection at this boundary without a blocker; further stages remain
 in progress on the same isolated branch.
+
+### Publication qualification against current main
+
+The isolated publication branch integrated main `21de6af` (including #499, #511
+and #508) as `d33c5ae`. The fresh workspace run passed **848 tests**, with five
+intended ignores. The separate capture-authentication example passed one test
+(with its child fixture ignored); workspace build, formatting and shell-completion
+generation also passed. The only subsequent source edit aligns the S3 module's
+historical header comment with its now-enabled common ownership integration.
+Linux CI is checked on the final PR head before merge. The existing qualification
+limits and the remaining full transaction/runtime work above still apply.
