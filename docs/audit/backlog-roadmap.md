@@ -10,11 +10,12 @@ issue labels and green CI alone are not acceptance evidence. See the
 1. Credential destination isolation (#562), compatible security updates (#567),
    stable startup identity (#467), exact S3 cursor destinations (#470), and
    fatal persistence failures (#469). These affect where credentials and durable
-   state go and whether ingestion can safely continue. PRs #566, #569, #570 and #571
-   are merged; remaining records must be checked for their current lifecycle.
-2. Complete the Arrow/Parquet security migration (#568) and the separately
-   reproduced missing final checkpoint (#572). Dependency upgrades need old-file
-   compatibility and malformed-footer tests, not only a lockfile diff.
+   state go and whether ingestion can safely continue. PRs #566, #569, #570, #571 and #573
+   are merged; their linked issues are closed.
+2. The Arrow/Parquet security migration (#568, PR #577) and separately
+   reproduced missing final checkpoint (#572, PR #576) are now merged and
+   closed. Old-file compatibility, malformed-footer and live-output checks
+   passed; GitHub reports no open dependency alerts after rescan.
 3. Crash/replay publication (#468). The [design](468-crash-recovery-design.md)
    explains why deterministic range filenames alone cannot prevent duplicates
    when replay chooses different timer or size boundaries. Remove the unreachable,
@@ -31,7 +32,7 @@ issue labels and green CI alone are not acceptance evidence. See the
 | PR / issue | Review finding | Still needed before closure |
 |---|---|---|
 | #559 / #506, NEAR joins and events | No actionable code defect found at `8056a07`. Same-block `tx_hash` is intentional and documented. | Current-main validation and a raw/output live comparison for action/log counts, order, receipt lineage and exact event strings. One fresh request on 2026-09-25 was again rejected by StreamingFast egress quota. See the [qualification record](506-near-qualification.md); no further requests were made. |
-| #560 / #504, Beacon coverage | No actionable code defect found at `26d96f9`. Existing live comparisons cover withdrawals, committee bits, graffiti and all three request types. | Current-main validation and targeted live BLS/slashing samples. Capella BLS changes are absent from the upstream protobuf; that limitation remains documented. |
+| #560 / #504, Beacon coverage | No actionable code defect found at `26d96f9`. Existing live comparisons cover withdrawals, committee bits, graffiti and all three request types. | The [targeted live BLS/slashing comparisons](504-beacon-qualification.md) now pass, including the integrated Arrow/Parquet 60 build and 730-test suite. Final PR CI/merge must still be verified. Capella BLS changes remain absent from the upstream protobuf. |
 
 Both historical CI runs predate newer shared-encoding and durability changes.
 Do not close either issue merely because its PR is mergeable. Later validation

@@ -9,7 +9,7 @@ A production-grade Rust toolkit that consumes [StreamingFast Firehose](https://f
 | `evm` | `eth.firehose.pinax.network:443` | blocks, transactions, logs, withdrawals, access_lists, set_code_authorizations, calls, balance_changes, code_changes, storage_changes, nonce_changes, gas_changes, account_creations, system_* (`--without-extended` disables the call and state-change tables) |
 | `solana` | `solana.firehose.pinax.network:443` | blocks, transactions, messages, instructions, rewards, token_balances, account_lookups, vote_transactions (`--without-votes` disables `vote_transactions`) |
 | `bitcoin` | `bitcoin.firehose.pinax.network:443` | blocks, transactions, inputs, outputs |
-| `beacon` | `eth-cl.firehose.pinax.network:443` | blocks, attestations, deposits, proposer_slashings, attester_slashings, voluntary_exits, execution_payload, blob_sidecars |
+| `beacon` | `eth-cl.firehose.pinax.network:443` | blocks, attestations, deposits, proposer_slashings, attester_slashings, voluntary_exits, execution_payload, blob_sidecars, withdrawals, bls_to_execution_changes, deposit_requests, withdrawal_requests, consolidation_requests ([details](#beacon-chain-tables)) |
 | `tron` | `mainnet.tron.streamingfast.io:443` | blocks, transactions, logs, internal_transactions |
 | `cosmos` | `mainnet.injective.streamingfast.io:443` | blocks, transactions, events, messages |
 | `antelope` | `eos.firehose.pinax.network:443` | blocks, transactions, actions, db_ops |
@@ -1196,6 +1196,39 @@ These columns hold Firehose fields as they are, with bytes in the output encodin
 | `logs` | `ordinal` | `UInt64` | execution order in the block |
 
 The new columns come after the existing ones in each table. Ordinals are unique within a block, so `(block_number, ordinal)` orders every log, call and state change of a block. They are not reliable for anything inside a reverted call.
+
+## Beacon Chain Tables
+
+Each Beacon table gets rows from the fork that introduced its data. Blocks from earlier forks add no rows to it, so a range from before that fork writes no file for the table.
+
+| Table | Rows from | Source |
+|---|---|---|
+| `blocks` | Phase0 | Block header, plus the body's `graffiti` |
+| `attestations` | Phase0 | `body.attestations`; `committee_bits` from Electra |
+| `deposits` | Phase0 | Deposits from the Eth1 bridge (`body.deposits`) |
+| `proposer_slashings`, `attester_slashings`, `voluntary_exits` | Phase0 | `body.proposer_slashings`, `body.attester_slashings`, `body.voluntary_exits` |
+| `execution_payload` | Bellatrix | `body.execution_payload` |
+| `withdrawals` | Capella | `execution_payload.withdrawals` (up to 16 per block) |
+| `bls_to_execution_changes` | Deneb | `body.bls_to_execution_changes`. The Firehose Capella body has no such field, so changes included in Capella blocks are not available. |
+| `blob_sidecars` | Deneb | `body.embedded_blobs` |
+| `deposit_requests` | Electra | `execution_requests.deposits` (EIP-6110) |
+| `withdrawal_requests` | Electra | `execution_requests.withdrawals` (EIP-7002) |
+| `consolidation_requests` | Electra | `execution_requests.consolidations` (EIP-7251) |
+
+Amounts (`amount`) are in Gwei. `block_slot` joins `blocks.slot`. `withdrawals.withdrawal_index` is the chain-wide withdrawal index; `change_index` and `request_index` are positions within the block.
+
+- **Attestations after Electra.** EIP-7549 moved the committee out of the signed data: `committee_index` is always `0`, and `committee_bits` (8 bytes, a 64-bit bitvector) says which committees an aggregate covers. Bit `i` is bit `i % 8` of byte `i / 8`. `aggregation_bits` then spans those committees in index order. `committee_bits` is null before Electra.
+- **Deposits after Electra.** New deposits reach the chain as `deposit_requests`, whose `deposit_index` is the deposit contract index (the `index` of EIP-6110). `deposits` only holds deposits from the Eth1 bridge, which stop once its backlog is processed. `deposits.deposit_index` is the position within the block.
+- **Withdrawal requests.** `amount` `0` requests a full exit; any other value is a partial withdrawal.
+- **Consolidation requests.** A request whose `source_pubkey` equals its `target_pubkey` switches the validator to compounding withdrawal credentials.
+- **Attester slashings.** `attestation_1_attesting_indices` and `attestation_2_attesting_indices` (`List<UInt64>`) are the two conflicting attestations' validators. The slashed validators are in both lists:
+
+  ```sql
+  SELECT block_slot, list_intersect(attestation_1_attesting_indices, attestation_2_attesting_indices) AS slashed
+  FROM read_parquet('output/mainnet-cl/attester_slashings/**/*.parquet');
+  ```
+
+- **Graffiti.** `blocks.graffiti` is the proposer's raw 32 bytes, usually zero-padded text. It is null only for a block without a body.
 
 ## Prometheus Metrics
 

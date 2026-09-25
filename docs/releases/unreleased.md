@@ -277,6 +277,36 @@ Details:
 
 Migration: files written before and after this change have different schemas for these 5 tables. Query them separately or with `union_by_name`, and do not `merge` or `rollup` old and new files together.
 
+### Beacon: withdrawals, execution requests, BLS changes, committee bits and slashing indices (#504)
+
+Beacon output dropped several parts of the block body. Since Electra, deposits reach the chain as execution requests, so post-Electra deposits were missing entirely: `deposits` only holds Eth1 bridge deposits, which stop once the bridge backlog is processed. Post-Electra attestations could not be tied to a committee either, because EIP-7549 fixed `committee_index` at `0`.
+
+Five new tables:
+
+| Table | Rows from | Content |
+|---|---|---|
+| `withdrawals` | Capella | `execution_payload.withdrawals`: `withdrawal_index`, `validator_index`, `address`, `amount` (Gwei) |
+| `bls_to_execution_changes` | Deneb | `validator_index`, `from_bls_pubkey`, `to_execution_address`, `signature` |
+| `deposit_requests` | Electra | EIP-6110 deposits: `deposit_index` (the deposit contract index), `pubkey`, `withdrawal_credentials`, `amount`, `signature` |
+| `withdrawal_requests` | Electra | EIP-7002: `source_address`, `validator_pubkey`, `amount` (`0` = full exit) |
+| `consolidation_requests` | Electra | EIP-7251: `source_address`, `source_pubkey`, `target_pubkey` |
+
+New columns on existing tables:
+
+- `blocks.graffiti`: the proposer's 32 graffiti bytes, on every fork.
+- `attestations.committee_bits`: the committees an Electra attestation aggregates, as an 8-byte bitvector. Null before Electra.
+- `attester_slashings.attestation_1_attesting_indices` / `attestation_2_attesting_indices`: `List<UInt64>` of each attestation's validators. The slashed validators are in both lists.
+
+Blocks from before a table's fork add no rows to it. The Firehose Capella body has no BLS-to-execution changes, so the changes included in Capella blocks are not available; `bls_to_execution_changes` starts at Deneb. The README section "Beacon Chain Tables" describes every table.
+
+On mainnet, slots 15292390–15292397 and 15292636–15292641 (Fusaka) and 6209540–6209548 (Capella) match the Firehose blocks row for row and value for value: 16 withdrawals per Fusaka block, 29 in the Capella blocks, and one deposit, one withdrawal and two consolidation requests.
+
+Migration:
+
+- `blocks`, `attestations` and `attester_slashings` have new columns. Do not `merge` or `rollup` files written before and after this change together; both commands refuse partitions with mixed schemas (#479). Rebuild existing Beacon output, or keep the old files under a separate prefix.
+- The new tables only appear in newly built ranges. Rebuild historical ranges to backfill withdrawals and execution requests.
+- Post-Electra queries that group attestations by `committee_index` should decode `committee_bits` instead.
+
 ## New features
 
 ### EVM: new `withdrawals`, `access_lists` and `set_code_authorizations` tables (#497)

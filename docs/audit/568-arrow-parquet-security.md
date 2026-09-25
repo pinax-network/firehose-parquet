@@ -142,7 +142,15 @@ validation passed:
 The existing `transactions_processed` unused-assignment warning remains in the
 binary; no new build warnings were introduced.
 
-The GitHub alert remains a default-branch observation until this upgrade is
-merged and GitHub rescans its dependency graph. After merge, refresh open
+The GitHub alert was a default-branch observation until this upgrade merged
+and GitHub rescanned its dependency graph. The required release check is to refresh open
 Dependabot alerts and confirm #11 closes. Do not dismiss the alert manually or
 claim its server-side closure based only on the local lockfile.
+
+## Verified lifecycle outcome
+
+PR #577 merged as `2793421272d8dff64c43d4b69bc4bf68a8a6cab9` on
+2026-09-25 at 15:54:50 UTC; issue #568 closed at 15:54:52 UTC. GitHub's
+dependency rescan marked alert #11 **fixed** at 15:54:54 UTC, with no dismissal.
+A fresh open-alert query returned an empty list. This verifies server-side
+closure of the remaining advisory, in addition to removing Thrift locally.
