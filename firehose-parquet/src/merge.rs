@@ -7,8 +7,9 @@
 use crate::artifacts::is_reserved_artifact_path;
 use crate::cli::{block_on_async, format_bytes, resolve_destructive_input_path, AwsConfig};
 use crate::config::Compression;
-use crate::dataset_lock::{DatasetOwnership, MutationScope};
+use crate::dataset_lock::DatasetOwnership;
 use crate::dataset_lock_s3::{S3Ownership, OWNER_KEY};
+use crate::ingest::maintenance::{self, MaintenancePolicy, MaintenanceTarget, ProtectedRoot};
 use crate::merge_journal::{
     crash_point, write_local_output, Journal, LocalPartition, LocalRunLock, PartitionFiles,
     RunContext, S3Partition, JOURNAL_FILE,
@@ -150,7 +151,10 @@ impl StreamingPartWriter {
             .expect("writer must exist when flushing");
         let rows = writer.in_progress_rows();
         let buf = writer.into_inner()?;
-        self.next_part_num += 1;
+        self.next_part_num = self
+            .next_part_num
+            .checked_add(1)
+            .context("merge part number exhausted")?;
         flush_part(self.next_part_num, buf, rows)?;
         Ok(())
     }
@@ -374,15 +378,20 @@ fn run_merge_local(config: &MergeConfig) -> Result<MergeResult> {
         );
     }
 
-    let ownership = if config.dry_run {
+    let prepared = if config.dry_run {
         None
     } else {
-        Some(DatasetOwnership::acquire_blocking(
+        Some(maintenance::acquire_blocking(
             "merge",
-            vec![MutationScope::input(config.path.clone())?],
-            None,
+            vec![MaintenanceTarget::input(config.path.clone())?],
+            MaintenancePolicy::Merge,
+            config.aws.as_ref(),
         )?)
     };
+    let ownership = prepared.as_ref().map(|prepared| &prepared.ownership);
+    let protected_roots = prepared
+        .as_ref()
+        .map_or(&[][..], |prepared| prepared.roots.as_slice());
     // Retain the old local file lock for recognition of pre-upgrade journals;
     // the directory guard provides shared cross-command/ancestor ownership.
     let lock = if config.dry_run {
@@ -398,12 +407,24 @@ fn run_merge_local(config: &MergeConfig) -> Result<MergeResult> {
             .unwrap_or_default(),
     };
 
-    let mut result = MergeResult::default();
-    recover_local_merges(&root, lock.as_ref(), ownership.as_ref(), &mut result)?;
-    merge_local_partitions(&root, config, &run, ownership.as_ref(), &mut result)?;
+    let mut result = MergeResult {
+        merges_recovered: prepared.as_ref().map_or(0, |value| value.recovered_merges),
+        ..MergeResult::default()
+    };
+    recover_local_merges(
+        &root,
+        lock.as_ref(),
+        ownership,
+        protected_roots,
+        &mut result,
+    )?;
+    merge_local_partitions(&root, config, &run, ownership, protected_roots, &mut result)?;
 
     if let Some(lock) = lock {
         lock.release()?;
+    }
+    if let Some(prepared) = prepared {
+        prepared.ownership.release_blocking()?;
     }
     Ok(result)
 }
@@ -434,6 +455,7 @@ fn recover_local_merges(
     root: &Path,
     lock: Option<&LocalRunLock>,
     ownership: Option<&DatasetOwnership>,
+    protected_roots: &[ProtectedRoot],
     result: &mut MergeResult,
 ) -> Result<()> {
     let mut journals = Vec::new();
@@ -453,6 +475,9 @@ fn recover_local_merges(
             );
             continue;
         };
+        journal.validate_protection(
+            protected_stream_for_path(protected_roots, &dir.to_string_lossy())?.as_ref(),
+        )?;
         if lock.owner_alive(&journal)? {
             continue;
         }
@@ -472,6 +497,7 @@ fn merge_local_partitions(
     config: &MergeConfig,
     run: &RunContext,
     ownership: Option<&DatasetOwnership>,
+    protected_roots: &[ProtectedRoot],
     result: &mut MergeResult,
 ) -> Result<()> {
     // Group parquet files by their parent directory (partition). Reserved dataset artifacts
@@ -513,6 +539,7 @@ fn merge_local_partitions(
                     config,
                     run,
                     ownership,
+                    protected_roots,
                     result,
                 )?;
                 current_partition = Some(parent);
@@ -534,6 +561,7 @@ fn merge_local_partitions(
             config,
             run,
             ownership,
+            protected_roots,
             result,
         )?;
     }
@@ -559,6 +587,7 @@ fn process_local_partition(
     config: &MergeConfig,
     run: &RunContext,
     ownership: Option<&DatasetOwnership>,
+    protected_roots: &[ProtectedRoot],
     result: &mut MergeResult,
 ) -> Result<()> {
     let partition_label = local_partition_label(root, partition_dir);
@@ -627,7 +656,12 @@ fn process_local_partition(
     let journal = Journal::new(
         run,
         files.iter().map(|f| file_name_string(f)).collect(),
-        initial_part_num + 1,
+        initial_part_num
+            .checked_add(1)
+            .context("merge part number exhausted")?,
+    )
+    .with_protected_stream(
+        protected_stream_for_path(protected_roots, &partition_dir.to_string_lossy())?.as_ref(),
     );
     if let Some(ownership) = ownership {
         ownership.revalidate_local_paths()?;
@@ -678,7 +712,7 @@ fn process_local_partition(
         }
         let reader = builder.build()?;
         for batch_result in reader {
-            let batch = batch_result?;
+            let batch = strip_transaction_metadata(batch_result?)?;
             if batch.num_rows() == 0 {
                 continue;
             }
@@ -791,7 +825,14 @@ fn writer_properties(
     let mut builder = WriterProperties::builder().set_compression(pq_compression);
     if let Some(kvs) = kv_metadata {
         if !kvs.is_empty() {
-            builder = builder.set_key_value_metadata(Some(kvs.to_vec()));
+            builder = builder.set_key_value_metadata(Some(
+                kvs.iter()
+                    .filter(|kv| {
+                        !kv.key.starts_with("fireparq.ingest.") && kv.key != "ARROW:schema"
+                    })
+                    .cloned()
+                    .collect(),
+            ));
         }
     }
     builder.build()
@@ -866,49 +907,83 @@ fn max_part_number_in_s3_objects(objects: &[object_store::ObjectMeta]) -> u32 {
 // ---------------------------------------------------------------------------
 
 fn run_merge_s3(config: &MergeConfig) -> Result<MergeResult> {
-    use crate::writer::parse_s3_url;
-
-    let (bucket, prefix) = parse_s3_url(&config.path)?;
+    let (bucket, prefix) = crate::writer::parse_s3_url(&config.path)?;
     let aws = config
         .aws
         .as_ref()
-        .ok_or_else(|| anyhow::anyhow!("AWS config required for S3 paths"))?;
-
-    let client: Arc<dyn ObjectStore> = Arc::new(aws.build_s3_client_for_mutation(&bucket)?);
-    merge_s3(config, &client, &bucket, &prefix)
+        .context("AWS config required for S3 paths")?;
+    if config.dry_run {
+        let client: Arc<dyn ObjectStore> = Arc::new(aws.build_s3_client(&bucket)?);
+        return merge_s3_owned(config, &client, &bucket, &prefix, None, &[]);
+    }
+    let prepared = maintenance::acquire_blocking(
+        "merge",
+        vec![MaintenanceTarget::directory(config.path.clone())],
+        MaintenancePolicy::Merge,
+        Some(aws),
+    )?;
+    let owner = prepared
+        .ownership
+        .remote(&bucket)
+        .context("merge bucket is not owned")?;
+    let mut result = merge_s3_owned(
+        config,
+        owner.object_store(),
+        &bucket,
+        &prefix,
+        Some(owner),
+        &prepared.roots,
+    )?;
+    result.merges_recovered += prepared.recovered_merges;
+    prepared.ownership.release_blocking()?;
+    Ok(result)
 }
 
-/// One S3 merge run: where it merges, its identity, and the lock it holds.
+/// One S3 merge run borrows the complete operation capability (including mirrors).
 struct S3Merge<'a> {
     client: &'a Arc<dyn ObjectStore>,
     bucket: &'a str,
     prefix: &'a str,
     run: RunContext,
-    /// `None` for a dry run.
-    lock: Option<S3Ownership>,
+    lock: Option<&'a S3Ownership>,
+    protected_roots: &'a [ProtectedRoot],
 }
 
+#[cfg(test)]
 fn merge_s3(
     config: &MergeConfig,
     client: &Arc<dyn ObjectStore>,
     bucket: &str,
     prefix: &str,
 ) -> Result<MergeResult> {
-    if !config.dry_run && crate::artifacts::is_control_path(prefix) {
-        anyhow::bail!("recovery and ownership controls cannot be ordinary mutation targets");
-    }
-    // A dry run changes nothing, so it takes no lock and only reports interrupted merges.
-    let lock = if config.dry_run {
+    let owner = if config.dry_run {
         None
     } else {
         Some(block_on_async(S3Ownership::acquire(
-            Arc::clone(client),
+            client.clone(),
             "merge",
             vec![prefix.to_owned()],
         ))?)
     };
-    let run_id = lock
-        .as_ref()
+    let result = merge_s3_owned(config, client, bucket, prefix, owner.as_ref(), &[])?;
+    if let Some(owner) = owner {
+        block_on_async(owner.release())?;
+    }
+    Ok(result)
+}
+
+fn merge_s3_owned(
+    config: &MergeConfig,
+    client: &Arc<dyn ObjectStore>,
+    bucket: &str,
+    prefix: &str,
+    owner: Option<&S3Ownership>,
+    protected_roots: &[ProtectedRoot],
+) -> Result<MergeResult> {
+    if !config.dry_run && crate::artifacts::is_control_path(prefix) {
+        anyhow::bail!("recovery and ownership controls cannot be ordinary mutation targets");
+    }
+    let run_id = owner
         .map(|owner| owner.record().owner_id().to_owned())
         .unwrap_or_else(new_run_id);
     let mut s3 = S3Merge {
@@ -917,23 +992,14 @@ fn merge_s3(
         prefix,
         run: RunContext {
             run_id,
-            lock: lock
-                .as_ref()
-                .map(|_| OWNER_KEY.to_owned())
-                .unwrap_or_default(),
+            lock: owner.map(|_| OWNER_KEY.to_owned()).unwrap_or_default(),
         },
-        lock,
+        lock: owner,
+        protected_roots,
     };
-
     let mut result = MergeResult::default();
-    let outcome = recover_s3_merges(&mut s3, &mut result)
-        .and_then(|()| merge_s3_partitions(&mut s3, config, &mut result));
-    // Any error retains Owned. Process exit is insufficient to establish that
-    // previous remote requests cannot arrive after a recovery rollback.
-    outcome?;
-    if let Some(lock) = s3.lock.take() {
-        block_on_async(lock.release())?;
-    }
+    recover_s3_merges(&mut s3, &mut result)?;
+    merge_s3_partitions(&mut s3, config, &mut result)?;
     Ok(result)
 }
 
@@ -989,6 +1055,13 @@ fn recover_s3_merges(s3: &mut S3Merge<'_>, result: &mut MergeResult) -> Result<(
             );
             continue;
         };
+        journal.validate_protection(
+            protected_stream_for_path(
+                s3.protected_roots,
+                &format!("s3://{}/{partition_key}", s3.bucket),
+            )?
+            .as_ref(),
+        )?;
         if journal.lock != OWNER_KEY {
             anyhow::bail!("legacy S3 merge journal cannot be recovered automatically: its old prefix lock does not prove writer and remote-request quiescence; preserve its files and obtain provider-confirmed recovery before migration");
         }
@@ -1176,7 +1249,16 @@ fn process_s3_partition(
             .iter()
             .filter_map(|obj| obj.location.filename().map(str::to_string))
             .collect(),
-        initial_part_num + 1,
+        initial_part_num
+            .checked_add(1)
+            .context("merge part number exhausted")?,
+    )
+    .with_protected_stream(
+        protected_stream_for_path(
+            s3.protected_roots,
+            &format!("s3://{bucket}/{partition_key}"),
+        )?
+        .as_ref(),
     );
     if !partition.create_journal(&journal)? {
         record_partition_in_use(partition_label, result);
@@ -1236,7 +1318,7 @@ fn process_s3_partition(
         }
         let reader = builder.build()?;
         for batch_result in reader {
-            let batch = batch_result?;
+            let batch = strip_transaction_metadata(batch_result?)?;
             if batch.num_rows() == 0 {
                 continue;
             }
@@ -2575,4 +2657,238 @@ mod tests {
             crate::dataset_lock_s3::OwnerState::Owned
         );
     }
+}
+
+/// Finish protected compaction under the caller's already-held common owner.
+/// No file listing or recovery here grants permission to acquire another owner.
+pub(crate) async fn recover_guarded_for_ingestion(
+    output: &crate::ingest::state::StorageIdentity,
+    ownership: &DatasetOwnership,
+    protected: Option<&crate::ingest::state::Digest>,
+) -> Result<usize> {
+    use crate::ingest::state::StorageIdentity;
+    match output {
+        StorageIdentity::Local { canonical_root } => {
+            let root = Path::new(canonical_root);
+            if !root.exists() {
+                return Ok(0);
+            }
+            ownership.revalidate_local_paths()?;
+            let owner = ownership
+                .local()
+                .context("merge recovery has no local owner")?;
+
+            let mut paths = Vec::new();
+            collect_named_files_recursive(root, JOURNAL_FILE, &mut paths)?;
+            paths.sort();
+            if paths.is_empty() {
+                return Ok(0);
+            }
+            let states = crate::ingest::store::TransactionStateStore::local(root, owner)?;
+            anyhow::ensure!(
+                states.load().await?.pending.is_none(),
+                "ingestion and merge journals coexist; refusing ambiguous recovery ordering"
+            );
+            let lock = LocalRunLock::acquire(root)?;
+            let mut journals = Vec::new();
+            for path in paths {
+                let partition =
+                    LocalPartition::new(path.parent().context("merge journal has no partition")?);
+                let journal = partition
+                    .read_journal()?
+                    .context("merge journal disappeared under ownership")?;
+                journal.validate_protection(protected)?;
+                anyhow::ensure!(
+                    !lock.owner_alive(&journal)?,
+                    "an earlier merge is still active; protected recovery cannot continue"
+                );
+                journals.push((partition, journal));
+            }
+            let recovered = journals.len();
+            for (partition, journal) in journals {
+                ownership.revalidate_local_paths()?;
+                crate::merge_journal::recover(&partition, &journal)?;
+            }
+            lock.release()?;
+            Ok(recovered)
+        }
+        StorageIdentity::S3 { bucket, prefix, .. } => {
+            let owner = ownership
+                .remote(bucket)
+                .context("merge recovery has no bucket owner")?;
+
+            let client = owner.object_store();
+            let list_prefix =
+                (!prefix.is_empty()).then(|| object_store::path::Path::from(prefix.as_str()));
+            use futures::StreamExt;
+            let journals=tokio::time::timeout(std::time::Duration::from_secs(60),async {
+                let mut stream=client.list(list_prefix.as_ref()); let mut journals=Vec::new();
+                while let Some(object)=stream.next().await {
+                    let object=object.map_err(|_|anyhow::anyhow!("listing guarded merge journals failed"))?;
+                    let key=object.location.as_ref();
+                    if !(prefix.is_empty() || key==prefix || key.strip_prefix(prefix).is_some_and(|tail|tail.starts_with('/'))) {continue;}
+                    if object.location.filename()!=Some(JOURNAL_FILE) || crate::artifacts::is_control_path(key) {continue;}
+                    let journal=crate::merge_journal::read_remote_journal(client,&object.location).await?.context("merge journal disappeared under ownership")?;
+                    journal.validate_protection(protected)?;
+                    anyhow::ensure!(journal.lock==OWNER_KEY,"legacy S3 merge ownership cannot prove prior request quiescence; preserve its journal for explicit recovery");
+                    let directory=key.rsplit_once('/').map_or("",|(directory,_)|directory).to_owned();
+                    journals.push((directory,journal));
+                }
+                Ok::<_,anyhow::Error>(journals)
+            }).await.map_err(|_|anyhow::anyhow!("guarded merge journal discovery timed out"))??;
+            if journals.is_empty() {
+                return Ok(0);
+            }
+            let states = crate::ingest::store::TransactionStateStore::s3(prefix, owner)?;
+            anyhow::ensure!(
+                states.load().await?.pending.is_none(),
+                "ingestion and merge journals coexist; refusing ambiguous recovery ordering"
+            );
+            let recovered = journals.len();
+            for (directory, journal) in journals {
+                recover_remote_journal(owner, &directory, &journal).await?;
+            }
+            Ok(recovered)
+        }
+    }
+}
+
+async fn recover_remote_journal(
+    owner: &S3Ownership,
+    directory: &str,
+    journal: &Journal,
+) -> Result<()> {
+    use crate::merge_journal::JournalState;
+    let _mutation = owner.lock_control_mutation().await;
+    anyhow::ensure!(
+        !owner.is_mutation_uncertain()
+            && S3Ownership::status(owner.object_store()).await?.as_ref() == Some(owner.record()),
+        "remote merge recovery requires resolved provider-quiescent ownership"
+    );
+    let client = owner.object_store();
+    let prefix = (!directory.is_empty()).then(|| object_store::path::Path::from(directory));
+    let objects = tokio::time::timeout(
+        std::time::Duration::from_secs(60),
+        client.list_with_delimiter(prefix.as_ref()),
+    )
+    .await
+    .map_err(|_| anyhow::anyhow!("listing merge recovery partition timed out"))?
+    .map_err(|_| anyhow::anyhow!("listing merge recovery partition failed"))?;
+    let names: std::collections::HashSet<_> = objects
+        .objects
+        .iter()
+        .filter_map(|object| object.location.filename().map(str::to_owned))
+        .collect();
+    let mut remove = Vec::new();
+    match journal.state {
+        JournalState::Writing => {
+            let suffix = format!(".{}.tmp", journal.run_id);
+            for name in &names {
+                if (parse_part_number(name).is_some_and(|part| part >= journal.first_output_part)
+                    && !journal.sources.contains(name))
+                    || (name.starts_with('.') && name.ends_with(&suffix))
+                {
+                    remove.push(name.clone());
+                }
+            }
+        }
+        JournalState::Committed => {
+            anyhow::ensure!(
+                journal.outputs.iter().all(|name| names.contains(name)),
+                "committed merge output is missing; source files were preserved"
+            );
+            remove.extend(
+                journal
+                    .sources
+                    .iter()
+                    .filter(|name| names.contains(*name))
+                    .cloned(),
+            );
+        }
+    }
+    remove.sort();
+    remove.push(JOURNAL_FILE.into());
+    struct Attempt<'a> {
+        owner: &'a S3Ownership,
+        resolved: bool,
+    }
+    impl Drop for Attempt<'_> {
+        fn drop(&mut self) {
+            if !self.resolved {
+                self.owner.mark_mutation_uncertain();
+            }
+        }
+    }
+    for name in remove {
+        let key = object_store::path::Path::from(if directory.is_empty() {
+            name
+        } else {
+            format!("{directory}/{name}")
+        });
+        let mut attempt = Attempt {
+            owner,
+            resolved: false,
+        };
+        match tokio::time::timeout(std::time::Duration::from_secs(60),client.delete(&key)).await {
+            Ok(Ok(())) | Ok(Err(object_store::Error::NotFound{..}))=>attempt.resolved=true,
+            _=>anyhow::bail!("remote merge cleanup was unresolved; retain ownership for provider-quiescent recovery"),
+        }
+    }
+    Ok(())
+}
+
+fn protected_stream_for_path(
+    roots: &[ProtectedRoot],
+    path: &str,
+) -> Result<Option<crate::ingest::state::Digest>> {
+    let canonical = if path.starts_with("s3://") {
+        path.to_owned()
+    } else {
+        std::fs::canonicalize(path)?.to_string_lossy().into_owned()
+    };
+    let mut matched = None;
+    for root in roots {
+        let base = crate::ingest::binding::output_path(&root.identity);
+        let within = if base.starts_with("s3://") {
+            canonical == base
+                || canonical
+                    .strip_prefix(&base)
+                    .is_some_and(|tail| tail.starts_with('/'))
+        } else {
+            Path::new(&canonical).starts_with(&base)
+        };
+        if within {
+            anyhow::ensure!(
+                matched.is_none(),
+                "partition overlaps multiple protected streams"
+            );
+            matched = Some(root.descriptor.id()?);
+        }
+    }
+    Ok(matched)
+}
+
+/// Compaction/export changes physical parts, so never inherit a source transaction receipt.
+pub(crate) fn strip_transaction_metadata(batch: RecordBatch) -> Result<RecordBatch> {
+    let original = batch.schema();
+    if !original
+        .metadata()
+        .keys()
+        .any(|key| key.starts_with("fireparq.ingest."))
+    {
+        return Ok(batch);
+    }
+    let metadata: std::collections::HashMap<String, String> = original
+        .metadata()
+        .iter()
+        .filter(|(key, _)| !key.starts_with("fireparq.ingest."))
+        .map(|(key, value)| (key.clone(), value.clone()))
+        .collect();
+    Ok(RecordBatch::try_new(
+        Arc::new(Schema::new_with_metadata(
+            original.fields().clone(),
+            metadata,
+        )),
+        batch.columns().to_vec(),
+    )?)
 }

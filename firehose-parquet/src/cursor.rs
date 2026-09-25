@@ -55,7 +55,7 @@ pub struct CursorState {
 }
 
 /// Build the Arrow schema for the cursor.parquet row data.
-fn cursor_schema() -> Schema {
+pub(crate) fn cursor_schema() -> Schema {
     Schema::new(vec![
         Field::new("cursor", DataType::Utf8, false),
         Field::new("last_block_num", DataType::UInt64, false),
@@ -348,7 +348,7 @@ impl CursorState {
     /// Non-critical fields use lenient defaults for forward/backward
     /// compatibility — a file written by a newer or older version can still
     /// be read.
-    fn from_record_batch(
+    pub(crate) fn from_record_batch(
         batch: &RecordBatch,
         kv_metadata: Option<&[KeyValue]>,
     ) -> anyhow::Result<Self> {
@@ -473,7 +473,7 @@ impl CursorState {
 }
 
 /// Serialize cursor state to `cursor.parquet` bytes.
-fn encode_cursor(state: &CursorState) -> anyhow::Result<Vec<u8>> {
+pub(crate) fn encode_cursor(state: &CursorState) -> anyhow::Result<Vec<u8>> {
     let batch = state.to_record_batch()?;
     let props = state.writer_properties();
     let mut buf = Vec::new();

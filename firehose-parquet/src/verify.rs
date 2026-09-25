@@ -1,7 +1,8 @@
 use crate::artifacts::{is_reserved_artifact_path, MERKLE_ROOTS_FILENAME, VERIFY_RUNS_DIR};
 use crate::cli::{block_on_async, resolve_parquet_input_path_string, AwsConfig};
 use crate::cursor::{parse_cursor, CURSOR_PARQUET_FILENAME};
-use crate::dataset_lock::{DatasetOwnership, MutationScope};
+use crate::dataset_lock::DatasetOwnership;
+use crate::ingest::maintenance::{self, MaintenancePolicy, MaintenanceTarget};
 use crate::writer::parse_s3_url;
 use anyhow::{anyhow, Context, Result};
 use arrow::array::{Array, AsArray, Int64Array, LargeStringArray, StringArray, UInt64Array};
@@ -534,7 +535,7 @@ pub fn verify_parquet(
 
 struct VerifyMutationPlan {
     chain_root: String,
-    scopes: Vec<MutationScope>,
+    scopes: Vec<MaintenanceTarget>,
 }
 
 impl VerifyMutationPlan {
@@ -554,10 +555,10 @@ impl VerifyMutationPlan {
             list_verify_files(path)?.1[0].clone()
         };
         let chain_root = file_layout(&first).chain_root;
-        let mut scopes = vec![MutationScope::input(path)?];
+        let mut scopes = vec![MaintenanceTarget::input(path)?];
         if opts.runs_roots() {
             // Missing roots are inserted even without --update-registry.
-            scopes.push(MutationScope::file(
+            scopes.push(MaintenanceTarget::file(
                 opts.registry_path
                     .clone()
                     .unwrap_or_else(|| join_artifact_path(&chain_root, MERKLE_ROOTS_FILENAME)),
@@ -571,10 +572,10 @@ impl VerifyMutationPlan {
             } else {
                 std::env::current_dir()?.join(path)
             };
-            scopes.push(MutationScope::file(local.to_string_lossy()));
+            scopes.push(MaintenanceTarget::file(local.to_string_lossy()));
         }
         if opts.publish_report || opts.publish_report_path.is_some() {
-            scopes.push(MutationScope::file(
+            scopes.push(MaintenanceTarget::file(
                 opts.publish_report_path.clone().unwrap_or_else(|| {
                     join_artifact_path(
                         &chain_root,
@@ -597,11 +598,15 @@ fn verify_with_plan(
 ) -> Result<VerifyReport> {
     let (ownership, expected_root) = match plan {
         Some(plan) => (
-            Some(DatasetOwnership::acquire_blocking(
-                "verify",
-                plan.scopes,
-                aws,
-            )?),
+            Some(
+                maintenance::acquire_blocking(
+                    "verify",
+                    plan.scopes,
+                    MaintenancePolicy::Artifacts,
+                    aws,
+                )?
+                .ownership,
+            ),
             Some(plan.chain_root),
         ),
         None => (None, None),

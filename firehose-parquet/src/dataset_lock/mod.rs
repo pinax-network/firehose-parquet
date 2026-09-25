@@ -5,6 +5,7 @@
 
 mod local;
 mod operation;
+pub(crate) mod session;
 
 pub use local::LocalOwnership;
 pub use operation::{DatasetOwnership, MutationScope};
