@@ -6,6 +6,7 @@ use arrow::record_batch::RecordBatch;
 use firehose_parquet::encode::{BytesColumn, EncodeBytes};
 use firehose_parquet::traits::{
     est_bool, est_opt_str, est_str, est_u32, est_u64, BlockIdentity, BlockMapper, CanonicalBuilder,
+    PreparedIdentity,
 };
 use prost::Message;
 use std::collections::HashMap;
@@ -252,7 +253,7 @@ impl EvmBlockMapper {
     fn map_evm_block(
         &mut self,
         block: &eth::Block,
-        identity: &BlockIdentity,
+        identity: &PreparedIdentity,
         fork_step: Option<&str>,
     ) {
         let number = block.number;
@@ -352,7 +353,7 @@ impl EvmBlockMapper {
         &mut self,
         block_number: u64,
         tx: &eth::TransactionTrace,
-        identity: &BlockIdentity,
+        identity: &PreparedIdentity,
         fork_step: Option<&str>,
     ) {
         let tx_hash = &tx.hash;
@@ -431,7 +432,7 @@ impl EvmBlockMapper {
         tx_hash: &[u8],
         tx_index: u32,
         log: &eth::Log,
-        identity: &BlockIdentity,
+        identity: &PreparedIdentity,
         fork_step: Option<&str>,
     ) {
         self.logs.canonical.append(identity);
@@ -470,7 +471,7 @@ impl EvmBlockMapper {
         block_number: u64,
         tx_hash: &[u8],
         call: &eth::Call,
-        identity: &BlockIdentity,
+        identity: &PreparedIdentity,
         fork_step: Option<&str>,
     ) {
         if !self.extended {
@@ -515,7 +516,7 @@ impl EvmBlockMapper {
         &mut self,
         block_number: u64,
         call: &eth::Call,
-        identity: &BlockIdentity,
+        identity: &PreparedIdentity,
         fork_step: Option<&str>,
     ) {
         if !self.extended {
@@ -565,7 +566,8 @@ impl BlockMapper for EvmBlockMapper {
     ) -> anyhow::Result<u64> {
         let block = eth::Block::decode(block_bytes)?;
         let tx_count = block.transaction_traces.len() as u64;
-        self.map_evm_block(&block, identity, fork_step);
+        let identity = self.blocks.canonical.prepare(identity);
+        self.map_evm_block(&block, &identity, fork_step);
         Ok(tx_count)
     }
 
@@ -1336,7 +1338,7 @@ impl EvmCallsBuilder {
         tx_hash: &[u8],
         tx_index: u32,
         call: &eth::Call,
-        identity: &BlockIdentity,
+        identity: &PreparedIdentity,
         fork_step: Option<&str>,
     ) {
         self.canonical.append(identity);
@@ -1422,7 +1424,7 @@ impl EvmBalanceChangesBuilder {
         block_number: u64,
         tx_hash: &[u8],
         bc: &eth::BalanceChange,
-        identity: &BlockIdentity,
+        identity: &PreparedIdentity,
         fork_step: Option<&str>,
     ) {
         self.canonical.append(identity);
@@ -1487,7 +1489,7 @@ impl EvmCodeChangesBuilder {
         block_number: u64,
         tx_hash: &[u8],
         cc: &eth::CodeChange,
-        identity: &BlockIdentity,
+        identity: &PreparedIdentity,
         fork_step: Option<&str>,
     ) {
         self.canonical.append(identity);
@@ -1551,7 +1553,7 @@ impl EvmStorageChangesBuilder {
         block_number: u64,
         tx_hash: &[u8],
         sc: &eth::StorageChange,
-        identity: &BlockIdentity,
+        identity: &PreparedIdentity,
         fork_step: Option<&str>,
     ) {
         self.canonical.append(identity);
@@ -1611,7 +1613,7 @@ impl EvmNonceChangesBuilder {
         block_number: u64,
         tx_hash: &[u8],
         nc: &eth::NonceChange,
-        identity: &BlockIdentity,
+        identity: &PreparedIdentity,
         fork_step: Option<&str>,
     ) {
         self.canonical.append(identity);
@@ -1669,7 +1671,7 @@ impl EvmGasChangesBuilder {
         block_number: u64,
         tx_hash: &[u8],
         gc: &eth::GasChange,
-        identity: &BlockIdentity,
+        identity: &PreparedIdentity,
         fork_step: Option<&str>,
     ) {
         self.canonical.append(identity);
@@ -1723,7 +1725,7 @@ impl EvmAccountCreationsBuilder {
         block_number: u64,
         tx_hash: &[u8],
         ac: &eth::AccountCreation,
-        identity: &BlockIdentity,
+        identity: &PreparedIdentity,
         fork_step: Option<&str>,
     ) {
         self.canonical.append(identity);
@@ -1802,7 +1804,7 @@ impl SystemCallsBuilder {
         &mut self,
         block_number: u64,
         call: &eth::Call,
-        identity: &BlockIdentity,
+        identity: &PreparedIdentity,
         fork_step: Option<&str>,
     ) {
         self.canonical.append(identity);
@@ -1881,7 +1883,7 @@ impl SystemBalanceChangesBuilder {
         &mut self,
         block_number: u64,
         bc: &eth::BalanceChange,
-        identity: &BlockIdentity,
+        identity: &PreparedIdentity,
         fork_step: Option<&str>,
     ) {
         self.canonical.append(identity);
@@ -1941,7 +1943,7 @@ impl SystemCodeChangesBuilder {
         &mut self,
         block_number: u64,
         cc: &eth::CodeChange,
-        identity: &BlockIdentity,
+        identity: &PreparedIdentity,
         fork_step: Option<&str>,
     ) {
         self.canonical.append(identity);
@@ -2000,7 +2002,7 @@ impl SystemStorageChangesBuilder {
         &mut self,
         block_number: u64,
         sc: &eth::StorageChange,
-        identity: &BlockIdentity,
+        identity: &PreparedIdentity,
         fork_step: Option<&str>,
     ) {
         self.canonical.append(identity);
@@ -2055,7 +2057,7 @@ impl SystemNonceChangesBuilder {
         &mut self,
         block_number: u64,
         nc: &eth::NonceChange,
-        identity: &BlockIdentity,
+        identity: &PreparedIdentity,
         fork_step: Option<&str>,
     ) {
         self.canonical.append(identity);
@@ -2108,7 +2110,7 @@ impl SystemGasChangesBuilder {
         &mut self,
         block_number: u64,
         gc: &eth::GasChange,
-        identity: &BlockIdentity,
+        identity: &PreparedIdentity,
         fork_step: Option<&str>,
     ) {
         self.canonical.append(identity);
@@ -2157,7 +2159,7 @@ impl SystemAccountCreationsBuilder {
         &mut self,
         block_number: u64,
         ac: &eth::AccountCreation,
-        identity: &BlockIdentity,
+        identity: &PreparedIdentity,
         fork_step: Option<&str>,
     ) {
         self.canonical.append(identity);

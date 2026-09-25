@@ -148,6 +148,28 @@ pub fn bytes_data_type(encoding: &EncodeBytes) -> DataType {
 }
 
 // ---------------------------------------------------------------------------
+// EncodedBytes — a byte value encoded once, appended many times
+// ---------------------------------------------------------------------------
+
+/// A byte value already encoded for a [`BytesColumn`], for values that repeat on
+/// many rows (e.g. the canonical `block_id`), so they are encoded only once.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EncodedBytes {
+    Binary(Vec<u8>),
+    String(String, EncodeBytes),
+}
+
+impl EncodedBytes {
+    /// Encode `bytes` the way a [`BytesColumn`] with `encoding` would.
+    pub fn new(bytes: &[u8], encoding: &EncodeBytes) -> Self {
+        match encoding {
+            EncodeBytes::Binary => EncodedBytes::Binary(bytes.to_vec()),
+            other => EncodedBytes::String(encode_bytes(bytes, other), other.clone()),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // BytesColumn — unified builder for byte fields
 // ---------------------------------------------------------------------------
 
@@ -174,6 +196,42 @@ impl BytesColumn {
                 let s = encode_bytes(bytes, enc);
                 b.append_value(&s);
             }
+        }
+    }
+
+    /// Encode `bytes` once for repeated [`BytesColumn::append_encoded`] calls.
+    pub fn encode(&self, bytes: &[u8]) -> EncodedBytes {
+        match self {
+            BytesColumn::Binary(_) => EncodedBytes::Binary(bytes.to_vec()),
+            BytesColumn::String(_, enc) => EncodedBytes::new(bytes, enc),
+        }
+    }
+
+    /// Append a value encoded by [`BytesColumn::encode`] (or [`EncodedBytes::new`])
+    /// with this column's encoding.
+    ///
+    /// # Panics
+    /// If `value` was encoded for a different encoding.
+    pub fn append_encoded(&mut self, value: &EncodedBytes) {
+        match (self, value) {
+            (BytesColumn::Binary(b), EncodedBytes::Binary(bytes)) => b.append_value(bytes),
+            (BytesColumn::String(b, enc), EncodedBytes::String(s, value_enc))
+                if enc == value_enc =>
+            {
+                b.append_value(s)
+            }
+            (column, value) => panic!(
+                "value encoded as {value:?} does not match the column encoding {:?}",
+                column.encoding()
+            ),
+        }
+    }
+
+    /// The encoding this column writes.
+    pub fn encoding(&self) -> EncodeBytes {
+        match self {
+            BytesColumn::Binary(_) => EncodeBytes::Binary,
+            BytesColumn::String(_, enc) => enc.clone(),
         }
     }
 

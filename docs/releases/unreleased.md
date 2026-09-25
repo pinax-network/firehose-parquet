@@ -150,6 +150,10 @@ Migration:
 - **`rollup` and `merge` leave root artifacts alone (#478).** `cursor.parquet`, `partitions.parquet`, `merkle_roots.parquet`, and anything under `verify_runs/` are skipped. Rolling up or merging a network root used to fold them into a `part-000001.parquet` and delete them, or fail on their mismatched schemas.
 - **`merge` and `rollup` no longer combine files with different schemas (#479).** Both commands paired columns by position. When a partition mixed files from two tool versions or two schemas, an extra column was silently dropped, and two columns of the same type in a different order swapped values. The sources were then deleted. Both commands now compare every file's columns (names, types, nullability, and order) before writing. A partition with mixed schemas is left untouched, with nothing written or deleted in it. The other partitions are still processed, and the command then exits non-zero, listing the skipped partitions and how their files differ. `merge` reads each part's footer before merging a partition, which adds one small range request per S3 object, and `merge --dry-run` reports these partitions too.
 
+## Performance
+
+- **Canonical identity columns are encoded once per block (#512).** `block_id` and `parent_id` used to be hex-decoded and re-encoded on every row of every table. Mappers now prepare them once per block and append the encoded values. The output is byte-identical. The canonical columns cost about 40 ns per row instead of 380 ns (binary), 830 ns (hex) or 3.1 µs (base58). Mapping a synthetic 1,000-transaction Solana block (base58) takes 19 ms instead of 43 ms, and a 200-transaction EVM block with 2,000 logs (hex) takes 3.7 ms instead of 6.0 ms.
+
 ## Tests
 
 - A new cross-chain schema contract test maps one fixture batch for every table of every chain, under every bytes encoding and both `fork_step` settings. It checks that column names are unique, that each batch round-trips through the Parquet writer and reader with the same schema and values, and that every table's canonical `block_id` / `parent_id` match the `blocks` table.
