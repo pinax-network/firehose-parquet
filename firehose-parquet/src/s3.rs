@@ -6,6 +6,8 @@ use object_store::ObjectStore;
 
 use crate::config::Config;
 
+pub(crate) mod upload;
+
 pub(crate) mod delete;
 
 /// Reject ambiguous S3 output configuration before any network or storage work.

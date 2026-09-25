@@ -197,6 +197,7 @@ impl RecoveryAuthorization {
 /// An acquired bucket-wide guard. Dropping it never releases ownership.
 pub struct S3Ownership {
     store: Arc<dyn ObjectStore>,
+    native_upload: Option<crate::s3::upload::NativeS3Upload>,
     owned: OwnerRecord,
     version: UpdateVersion,
     mutation_uncertain: AtomicBool,
@@ -251,12 +252,27 @@ impl S3Ownership {
         let version = transition(&store, &owned, mode).await?;
         Ok(Self {
             store,
+            native_upload: None,
             owned,
             version,
             mutation_uncertain: AtomicBool::new(false),
             control_mutation: tokio::sync::Mutex::new(()),
             transaction_session: Default::default(),
         })
+    }
+
+    pub(crate) async fn acquire_native(
+        upload: crate::s3::upload::NativeS3Upload,
+        operation: &str,
+        scopes: Vec<String>,
+    ) -> Result<Self> {
+        let mut owner = Self::acquire(upload.object_store(), operation, scopes).await?;
+        owner.native_upload = Some(upload);
+        Ok(owner)
+    }
+
+    pub(crate) fn native_upload(&self) -> Option<&crate::s3::upload::NativeS3Upload> {
+        self.native_upload.as_ref()
     }
 
     /// Read-only inspection. Never probes, renews, releases or creates an object.
