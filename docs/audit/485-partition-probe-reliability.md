@@ -81,13 +81,16 @@ index. This tests the actual startup, auth, probing, and output path together.
 
 Validation uses a whole-command Cargo lock, the shared audit target,
 `CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0`, and four build jobs.
-Integration includes main `fdb1f98`, including the merged shutdown (#473) and
-single-partition writer (#477) fixes. The initial import conflict in the blocks
+Final integration `a8a562a` includes main `73257c2`, including shutdown (#473),
+the single-partition writer contract (#477), and atomic local publication
+(#578), plus the reviewed reward-index fix at `bd501f2` (#500). The initial import conflict in the blocks
 manifest and the integration conflicts in gRPC test additions and main imports
 were resolved by retaining both behaviors and all regressions.
 
-- `cargo test --workspace --locked -j4`: **757 passed, 0 failed, 3 ignored**
-  (117 + 206 + 1 + 1 + 1 + 425 + 3 + 3); all doc tests passed.
+- `cargo test --workspace --locked -j4`: **768 passed, 0 failed, 4 ignored**
+  (118 + 206 + 1 + 1 + 1 + 435 + 3 + 3); all doc tests passed. One ignored
+  helper is exercised by the active atomic-publication subprocess regression.
+- The preceding integration on `fdb1f98` passed its then-current 757 tests.
 - Binary build, formatting, `git diff --check`, and Bash/Zsh/Fish completions
   passed. The existing unused `transactions_processed` assignment warning remains.
 - The CLI failure test completed all 20 combinations of failure type, partition
@@ -96,8 +99,8 @@ were resolved by retaining both behaviors and all regressions.
 - The original worktree HEAD, two modified files, and exact combined diff hash
   were checked again after implementation and remain unchanged.
 
-A bounded live check on 2026-09-25 used a binary built and copied under the
-whole-command lock, the explicit Pinax Ethereum endpoint, provider-scoped
+A bounded live check on 2026-09-25 used the probe source committed as `9e5fa99`,
+built and copied under the whole-command lock, the explicit Pinax Ethereum endpoint, provider-scoped
 credentials, and fresh local output. `partitions build --partition block_range
 --block-range-size 1 --start-block 26049575 --stop-block 26049577` completed with
 exactly two fetch probes and two rows: `[26049575, 26049576)` and
@@ -106,6 +109,9 @@ exactly two fetch probes and two rows: `[26049575, 26049576)` and
 from #469. No cursor file was created. Local inspection used the existing
 integer-second Parquet timestamp columns; it did not repeat the live fetch.
 Evidence is in `/tmp/fireparq-485-live-859e2_2_/summary.json` on the audit host.
+The subsequent atomic-part writer and reward-index integration changes neither
+this probe code nor the partitions index writer; its combined offline suite
+passed as recorded above.
 
 This live check qualifies two historical block-range boundaries only. It does
 not qualify long missing-slot behavior against a production endpoint, live head
