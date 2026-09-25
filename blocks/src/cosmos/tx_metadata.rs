@@ -5,16 +5,16 @@ use arrow::datatypes::{DataType, Field, Fields};
 use prost::Message;
 use std::sync::Arc;
 
-pub(super) fn decode_tx(raw: &[u8]) -> Result<cosmos_tx::Tx, prost::DecodeError> {
+pub(super) fn decode_tx(raw: impl prost::bytes::Buf) -> Result<cosmos_tx::Tx, prost::DecodeError> {
     let tx = cosmos_tx::TxRaw::decode(raw)?;
     Ok(cosmos_tx::Tx {
         body: tx
             .body_bytes
-            .map(|bytes| cosmos_tx::TxBody::decode(bytes.as_slice()))
+            .map(|bytes| cosmos_tx::TxBody::decode(bytes))
             .transpose()?,
         auth_info: tx
             .auth_info_bytes
-            .map(|bytes| cosmos_tx::AuthInfo::decode(bytes.as_slice()))
+            .map(|bytes| cosmos_tx::AuthInfo::decode(bytes))
             .transpose()?,
         signatures: tx.signatures,
     })
@@ -157,7 +157,11 @@ impl TxMetadataBuilder {
                 values.append(true);
                 self.estimated_bytes += 32
                     + key.map_or(0, |k| k.type_url.len() + k.value.len())
-                    + signer.mode_info.iter().map(Vec::len).sum::<usize>();
+                    + signer
+                        .mode_info
+                        .iter()
+                        .map(|mode| mode.len())
+                        .sum::<usize>();
             }
         }
         self.signers.append(auth.is_some());

@@ -581,6 +581,19 @@ impl SolanaBlockMapper {
     }
 }
 
+impl SolanaBlockMapper {
+    fn map_decoded(
+        &mut self,
+        block: solana::Block,
+        identity: &BlockIdentity,
+        fork_step: Option<&str>,
+    ) -> anyhow::Result<u64> {
+        let tx_count = block.transactions.len() as u64;
+        self.map_solana_block(&block, identity, fork_step)?;
+        Ok(tx_count)
+    }
+}
+
 impl BlockMapper for SolanaBlockMapper {
     fn map_block(
         &mut self,
@@ -588,10 +601,16 @@ impl BlockMapper for SolanaBlockMapper {
         identity: &BlockIdentity,
         fork_step: Option<&str>,
     ) -> anyhow::Result<u64> {
-        let block = solana::Block::decode(block_bytes)?;
-        let tx_count = block.transactions.len() as u64;
-        self.map_solana_block(&block, identity, fork_step)?;
-        Ok(tx_count)
+        self.map_decoded(solana::Block::decode(block_bytes)?, identity, fork_step)
+    }
+
+    fn map_block_bytes(
+        &mut self,
+        block_bytes: prost::bytes::Bytes,
+        identity: &BlockIdentity,
+        fork_step: Option<&str>,
+    ) -> anyhow::Result<u64> {
+        self.map_decoded(solana::Block::decode(block_bytes)?, identity, fork_step)
     }
 
     fn flush(&mut self) -> anyhow::Result<HashMap<String, RecordBatch>> {
@@ -664,7 +683,7 @@ impl BlockMapper for SolanaBlockMapper {
         total
     }
 
-    fn largest_table(&mut self) -> (&str, usize) {
+    fn table_estimates(&mut self) -> Vec<(&str, usize)> {
         let blocks = self.blocks.canonical.estimated_bytes()
             + est_u64(&self.blocks.slot)
             + est_u64(&self.blocks.parent_slot)
@@ -750,8 +769,7 @@ impl BlockMapper for SolanaBlockMapper {
             ("account_lookups", account_lookups),
         ]
         .into_iter()
-        .max_by_key(|&(_, s)| s)
-        .unwrap_or(("blocks", 0))
+        .collect()
     }
 
     fn table_names(&self) -> Vec<&str> {
@@ -1252,25 +1270,25 @@ pub(crate) mod tests {
             }),
             transactions: vec![solana::ConfirmedTransaction {
                 transaction: Some(solana::Transaction {
-                    signatures: vec![vec![1u8; 64]],
+                    signatures: vec![vec![1u8; 64].into()],
                     message: Some(solana::Message {
                         header: Some(solana::MessageHeader {
                             num_required_signatures: 1,
                             num_readonly_signed_accounts: 0,
                             num_readonly_unsigned_accounts: 1,
                         }),
-                        account_keys: vec![vec![2u8; 32], vec![3u8; 32]],
-                        recent_blockhash: vec![4u8; 32],
+                        account_keys: vec![vec![2u8; 32].into(), vec![3u8; 32].into()],
+                        recent_blockhash: vec![4u8; 32].into(),
                         instructions: vec![solana::CompiledInstruction {
                             program_id_index: 1,
-                            accounts: vec![0],
-                            data: vec![5, 6, 7],
+                            accounts: vec![0].into(),
+                            data: vec![5, 6, 7].into(),
                         }],
                         versioned: true,
                         address_table_lookups: vec![solana::MessageAddressTableLookup {
-                            account_key: vec![10u8; 32],
-                            writable_indexes: vec![0, 1],
-                            readonly_indexes: vec![2],
+                            account_key: vec![10u8; 32].into(),
+                            writable_indexes: vec![0, 1].into(),
+                            readonly_indexes: vec![2].into(),
                         }],
                     }),
                 }),
@@ -1283,8 +1301,8 @@ pub(crate) mod tests {
                         index: 0,
                         instructions: vec![solana::InnerInstruction {
                             program_id_index: 1,
-                            accounts: vec![0],
-                            data: vec![8, 9],
+                            accounts: vec![0].into(),
+                            data: vec![8, 9].into(),
                             stack_height: Some(2),
                         }],
                     }],
@@ -1320,11 +1338,11 @@ pub(crate) mod tests {
                         reward_type: 1,
                         commission: String::new(),
                     }],
-                    loaded_writable_addresses: vec![vec![20u8; 32]],
-                    loaded_readonly_addresses: vec![vec![21u8; 32], vec![22u8; 32]],
+                    loaded_writable_addresses: vec![vec![20u8; 32].into()],
+                    loaded_readonly_addresses: vec![vec![21u8; 32].into(), vec![22u8; 32].into()],
                     return_data: Some(solana::ReturnData {
-                        program_id: vec![3u8; 32],
-                        data: vec![42, 43, 44],
+                        program_id: vec![3u8; 32].into(),
+                        data: vec![42, 43, 44].into(),
                     }),
                     compute_units_consumed: Some(1234),
                     cost_units: Some(5678),
@@ -1607,8 +1625,8 @@ pub(crate) mod tests {
             .unwrap();
         message.versioned = false;
         message.address_table_lookups.clear();
-        message.account_keys[1] = VOTE_PROGRAM_ID.to_vec();
-        message.instructions[0].data = data;
+        message.account_keys[1] = VOTE_PROGRAM_ID.to_vec().into();
+        message.instructions[0].data = data.into();
         block
     }
 
@@ -1721,11 +1739,11 @@ pub(crate) mod tests {
             .message
             .as_mut()
             .unwrap();
-        message.account_keys.push(vec![3; 32]);
+        message.account_keys.push(vec![3; 32].into());
         message.instructions.push(solana::CompiledInstruction {
             program_id_index: 2,
-            accounts: vec![0],
-            data: vec![42],
+            accounts: vec![0].into(),
+            data: vec![42].into(),
         });
         assert_vote_activity_retained("vote plus another instruction", &mixed);
 
@@ -1739,13 +1757,13 @@ pub(crate) mod tests {
             .message
             .as_mut()
             .unwrap();
-        message.account_keys.push(vec![0; 32]); // System-program create + Vote-program initialize.
+        message.account_keys.push(vec![0; 32].into()); // System-program create + Vote-program initialize.
         message.instructions.insert(
             0,
             solana::CompiledInstruction {
                 program_id_index: 2,
-                accounts: vec![0],
-                data: vec![0; 4],
+                accounts: vec![0].into(),
+                data: vec![0; 4].into(),
             },
         );
         assert_vote_activity_retained("create vote account", &create);
@@ -1758,7 +1776,7 @@ pub(crate) mod tests {
             .message
             .as_mut()
             .unwrap();
-        message.account_keys.push(VOTE_PROGRAM_ID.to_vec());
+        message.account_keys.push(VOTE_PROGRAM_ID.to_vec().into());
         assert_vote_activity_retained("unused Vote key with address lookup", &mention);
         let mut versioned = make_test_block(100);
         let message = versioned.transactions[0]
@@ -1768,8 +1786,8 @@ pub(crate) mod tests {
             .message
             .as_mut()
             .unwrap();
-        message.account_keys[1] = VOTE_PROGRAM_ID.to_vec();
-        message.instructions[0].data = vote_payloads().remove(0);
+        message.account_keys[1] = VOTE_PROGRAM_ID.to_vec().into();
+        message.instructions[0].data = vote_payloads().remove(0).into();
         assert_vote_activity_retained("versioned transaction with address lookup", &versioned);
     }
 
@@ -1799,10 +1817,13 @@ pub(crate) mod tests {
             let tx = block.transactions[0].transaction.as_mut().unwrap();
             match case {
                 0 => tx.message.as_mut().unwrap().instructions[0].program_id_index = u32::MAX,
-                1 => tx.message.as_mut().unwrap().instructions[0].accounts = vec![255],
+                1 => tx.message.as_mut().unwrap().instructions[0].accounts = vec![255].into(),
                 2 => tx.signatures.clear(),
-                3 => tx.signatures = vec![vec![1; 64]; 3],
-                4 => tx.signatures[0].pop().map(|_| ()).unwrap(),
+                3 => tx.signatures = vec![vec![1; 64].into(); 3],
+                4 => {
+                    let len = tx.signatures[0].len();
+                    tx.signatures[0].truncate(len - 1);
+                }
                 5 => tx.message.as_mut().unwrap().header = None,
                 6 => {
                     tx.message
@@ -1828,9 +1849,9 @@ pub(crate) mod tests {
                 let mut block = block_with_vote_payload(payload.clone());
                 if signature_count == 2 {
                     let tx = block.transactions[0].transaction.as_mut().unwrap();
-                    tx.signatures.push(vec![2; 64]);
+                    tx.signatures.push(vec![2; 64].into());
                     let message = tx.message.as_mut().unwrap();
-                    message.account_keys.insert(1, vec![3; 32]);
+                    message.account_keys.insert(1, vec![3; 32].into());
                     message.instructions[0].program_id_index = 2;
                     message.header.as_mut().unwrap().num_required_signatures = 2;
                 }
@@ -1874,19 +1895,19 @@ pub(crate) mod tests {
         // Add a vote transaction: account_keys[1] = Vote program ID
         block.transactions.push(solana::ConfirmedTransaction {
             transaction: Some(solana::Transaction {
-                signatures: vec![vec![99u8; 64]],
+                signatures: vec![vec![99u8; 64].into()],
                 message: Some(solana::Message {
                     header: Some(solana::MessageHeader {
                         num_required_signatures: 1,
                         num_readonly_signed_accounts: 0,
                         num_readonly_unsigned_accounts: 1,
                     }),
-                    account_keys: vec![vec![2u8; 32], VOTE_PROGRAM_ID.to_vec()],
-                    recent_blockhash: vec![4u8; 32],
+                    account_keys: vec![vec![2u8; 32].into(), VOTE_PROGRAM_ID.to_vec().into()],
+                    recent_blockhash: vec![4u8; 32].into(),
                     instructions: vec![solana::CompiledInstruction {
                         program_id_index: 1,
-                        accounts: vec![0],
-                        data: vote_payloads().remove(0),
+                        accounts: vec![0].into(),
+                        data: vote_payloads().remove(0).into(),
                     }],
                     versioned: false,
                     address_table_lookups: vec![],
@@ -1930,26 +1951,28 @@ pub(crate) mod tests {
         // Add a failed transaction
         block.transactions.push(solana::ConfirmedTransaction {
             transaction: Some(solana::Transaction {
-                signatures: vec![vec![88u8; 64]],
+                signatures: vec![vec![88u8; 64].into()],
                 message: Some(solana::Message {
                     header: Some(solana::MessageHeader {
                         num_required_signatures: 1,
                         num_readonly_signed_accounts: 0,
                         num_readonly_unsigned_accounts: 1,
                     }),
-                    account_keys: vec![vec![2u8; 32], vec![3u8; 32]],
-                    recent_blockhash: vec![4u8; 32],
+                    account_keys: vec![vec![2u8; 32].into(), vec![3u8; 32].into()],
+                    recent_blockhash: vec![4u8; 32].into(),
                     instructions: vec![solana::CompiledInstruction {
                         program_id_index: 1,
-                        accounts: vec![0],
-                        data: vec![9, 9, 9],
+                        accounts: vec![0].into(),
+                        data: vec![9, 9, 9].into(),
                     }],
                     versioned: false,
                     address_table_lookups: vec![],
                 }),
             }),
             meta: Some(solana::TransactionStatusMeta {
-                err: Some(solana::TransactionError { err: vec![1, 2, 3] }),
+                err: Some(solana::TransactionError {
+                    err: vec![1, 2, 3].into(),
+                }),
                 fee: 5000,
                 pre_balances: vec![100_000, 0],
                 post_balances: vec![95_000, 0],
@@ -1986,26 +2009,28 @@ pub(crate) mod tests {
         // Add a failed transaction
         block.transactions.push(solana::ConfirmedTransaction {
             transaction: Some(solana::Transaction {
-                signatures: vec![vec![88u8; 64]],
+                signatures: vec![vec![88u8; 64].into()],
                 message: Some(solana::Message {
                     header: Some(solana::MessageHeader {
                         num_required_signatures: 1,
                         num_readonly_signed_accounts: 0,
                         num_readonly_unsigned_accounts: 1,
                     }),
-                    account_keys: vec![vec![2u8; 32], vec![3u8; 32]],
-                    recent_blockhash: vec![4u8; 32],
+                    account_keys: vec![vec![2u8; 32].into(), vec![3u8; 32].into()],
+                    recent_blockhash: vec![4u8; 32].into(),
                     instructions: vec![solana::CompiledInstruction {
                         program_id_index: 1,
-                        accounts: vec![0],
-                        data: vec![9, 9, 9],
+                        accounts: vec![0].into(),
+                        data: vec![9, 9, 9].into(),
                     }],
                     versioned: false,
                     address_table_lookups: vec![],
                 }),
             }),
             meta: Some(solana::TransactionStatusMeta {
-                err: Some(solana::TransactionError { err: vec![1, 2, 3] }),
+                err: Some(solana::TransactionError {
+                    err: vec![1, 2, 3].into(),
+                }),
                 fee: 5000,
                 pre_balances: vec![100_000, 0],
                 post_balances: vec![95_000, 0],
@@ -2335,7 +2360,9 @@ pub(crate) mod tests {
                     ..Default::default()
                 });
             let mut failed_tx = block.transactions[0].clone();
-            failed_tx.meta.as_mut().unwrap().err = Some(solana::TransactionError { err: vec![1] });
+            failed_tx.meta.as_mut().unwrap().err = Some(solana::TransactionError {
+                err: vec![1].into(),
+            });
             block.transactions.extend([second_tx, failed_tx]);
             block.rewards.push(solana::Reward {
                 pubkey: "SecondBlockReward".to_string(),
@@ -2511,19 +2538,19 @@ pub(crate) mod tests {
         // Add a vote transaction
         block.transactions.push(solana::ConfirmedTransaction {
             transaction: Some(solana::Transaction {
-                signatures: vec![vec![99u8; 64]],
+                signatures: vec![vec![99u8; 64].into()],
                 message: Some(solana::Message {
                     header: Some(solana::MessageHeader {
                         num_required_signatures: 1,
                         num_readonly_signed_accounts: 0,
                         num_readonly_unsigned_accounts: 1,
                     }),
-                    account_keys: vec![vec![2u8; 32], VOTE_PROGRAM_ID.to_vec()],
-                    recent_blockhash: vec![4u8; 32],
+                    account_keys: vec![vec![2u8; 32].into(), VOTE_PROGRAM_ID.to_vec().into()],
+                    recent_blockhash: vec![4u8; 32].into(),
                     instructions: vec![solana::CompiledInstruction {
                         program_id_index: 1,
-                        accounts: vec![0],
-                        data: vote_payloads().remove(0),
+                        accounts: vec![0].into(),
+                        data: vote_payloads().remove(0).into(),
                     }],
                     versioned: false,
                     address_table_lookups: vec![],

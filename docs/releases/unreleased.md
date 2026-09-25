@@ -14,7 +14,7 @@ Changes merged since the last release. Fold this file into `docs/releases/vX.Y.Z
 
 - `rollup` now validates each target group, then streams one input batch and one
   output part at a time. S3 source reads use pinned byte ranges. Positive
-  `--flush-bytes` values bound encoded parts, with a separate 32 MiB estimated
+  `--flush-bytes` values target encoded part sizes, with a separate 32 MiB estimated
   row-group memory budget. Checks occur between batches; output file counts
   can change, and a page/dictionary or wide batch can exceed these targets. Zero
   disables the output-size threshold but retains the row-group memory budget. A
@@ -31,6 +31,18 @@ Changes merged since the last release. Fold this file into `docs/releases/vX.Y.Z
   from unordered files. See [#474 validation](../audit/474-non-final-streams.md).
 
 ## Breaking changes
+
+### Adaptive compressed file targets and independent mapper memory threshold (#515)
+
+`build --flush-bytes` now targets the largest compressed file using feedback from
+committed transactions. Config/build/merge/rollup share a 32 MiB default (Config
+and rollup previously used 128 MiB). Build independently flushes at a positive
+`--flush-memory-bytes` sum of mapper estimates, default 256 MiB; this remains
+active with `--flush-bytes 0`. It is not an RSS cap and one block can overshoot.
+Adaptive windows may use more memory than the old largest-table raw-byte trigger;
+memory, partition and other flushes can prevent reaching the file target.
+External Rust `BlockMapper` implementations must now implement `table_estimates`;
+`largest_table` derives its maximum. See [measurements and limits](../audit/515-adaptive-flush-sizing.md).
 
 ### Cosmos preserves event order, unknown results and SDK metadata (#510)
 
@@ -644,3 +656,9 @@ now use nulls, with real zero indices and present empty scripts preserved.
 Output addresses support the legacy first-address fallback. Native protobuf text
 encoding is unchanged and now documented accurately. These are intentional schema
 changes; use a new/rebuilt dataset or explicit reader-side schema reconciliation.
+
+- Chain protobuf byte fields now share owned Firehose payload storage during
+  mapping (#518). Existing borrowed mapper calls remain available; generated
+  Rust protobuf byte fields are now `Bytes` (`Vec` callers can use `.into()`).
+  Protobuf wire and Parquet schemas are unchanged. See
+  [decoding validation and benchmark](../audit/518-owned-protobuf-bytes.md).
