@@ -1,4 +1,3 @@
-
 use super::*;
 use crate::config::{Compression, Partition};
 use crate::traits::BlockIdentity;
