@@ -1,8 +1,10 @@
 # #523: bounded S3 maintenance concurrency
 
 Issue: [#523](https://github.com/pinax-network/firehose-parquet/issues/523).
-This first implementation covers deletion scheduling. Ordered, byte-bounded merge
-read prefetch remains separate work; this stage alone does not complete the issue.
+The implementation is split into independently reviewable deletion and read
+stages. Deletion landed locally as `e83ebe2`; the following stage adds ordered,
+byte-bounded merge reads. Issue closure requires review and combined qualification
+of both stages.
 
 ## Diagnosis and selected contract
 
@@ -67,6 +69,44 @@ There is no timeout-based takeover or new mutation retry.
   Protected destructive/in-place rollup remains refused. No whole-object prefetch
   is added to its pinned range-reader path.
 
+## Ordered merge reads
+
+Merge preflight and full-object reads now use windows of at most four listed
+objects and 64 MiB of summed listed compressed bytes. A single object above that
+budget runs alone. Checked arithmetic rejects overflow. The entire window is
+validated before any GET, including its request/byte bounds and usable immutable
+snapshot identities. Completed buffers remain owned until every object in the
+window has been consumed in source order; no next window starts early.
+
+Footer preflight retains the 64 KiB initial suffix read, with a checked larger
+suffix only when Parquet metadata requests it. Reserving the listed full-object
+size for footer windows is deliberately conservative. All footer windows finish
+before journal/output creation. Body windows follow the existing Writing journal
+and leave its recovery path intact if a later window fails. Source order, first
+schema/metadata selection, protected metadata stripping, row counts and output
+publication remain unchanged. There are no detached/background read tasks and no
+new CPU/read overlap or whole-object rollup prefetch.
+
+Every GET carries the original listed ETag and/or version. Returned key, total
+object size, exact range, ETag/version and bounded streamed body length must
+match. Wildcard, null-only or missing version identities fail before requests;
+backends unable to provide a usable identity can no longer use an unpinned merge
+fallback. A missing/changed source, ignored conditions, inconsistent metadata or
+short/oversized returned body is fatal. Safe read request/body failures and timeouts
+retain the existing five-attempt application retry policy (100 ms exponential
+backoff, 60-second attempt deadline), with identical snapshot conditions on every
+attempt. The pinned SDK can reject a malformed/ignored HTTP range before
+returning metadata, then expose only an opaque request error shared with transport
+failures. That class also uses bounded identical-snapshot read retries; it never
+turns into an unpinned request. Returned metadata/body mismatches fail immediately.
+Mutation transport/application retries remain disabled.
+
+The 64 MiB value bounds retained compressed **byte lengths** within an ordinary
+window, not total process RSS. One oversized source is still a lower bound, and
+Parquet decoded batches, dictionaries, footer structures, writer/codec state,
+transport chunks and allocator overhead are additional memory. The synchronous
+maintenance API still has its existing current-thread-runtime restriction.
+
 ## Validation
 
 The tests cover zero/one/ten/1,001 keys, exact membership, no more than ten active
@@ -86,13 +126,29 @@ preserve the other phase's files and journal; rollup cleanup failure preserves
 sources and later groups; and truncate failure preserves unselected keys.
 Existing crash, protected-maintenance and schema/value tests remain in the suite.
 
+Read tests additionally exercise deliberately out-of-order completion, window
+count/byte reservations, oversized inputs alone, invalid later identities before
+any GET, immutable retries, ignored conditions, changed same-size objects,
+metadata/range/body mismatches and timeout exhaustion. Actual merge regressions
+prove that a corrupt later footer leaves all original bytes and no journal or
+output; a later body-window failure after partial publication retains Writing,
+then recovery produces exactly the original 80 rows. A real signed AmazonS3
+loopback fixture checks Range, If-Match and versionId on both original requests
+and safe retries, and rejects ignored ranges or changed response versions.
+The wire fixture observes one successful request, one immediate changed-version
+rejection, two pinned failed requests for an SDK-rejected ignored range, and two
+identically pinned requests for each recoverable 503, lost-header response and
+truncated response body. No mutation is part of these read tests. The read-stage focused merge suite
+passed 39 tests; its separately invoked latency benchmark also passed.
+
+
 The full workspace suite on main `137ab32` plus this deletion change passed
 **1,039 tests**, with 10 explicit ignores (including the separately run
 latency benchmark). `cargo fmt --all -- --check` and `git diff --check` passed.
 The native request tests and actual command/recovery regressions run in that
 suite. No production request was made.
 
-## Measurement method and limits
+## Deletion measurements and limits
 
 The ignored test `s3::delete::tests::benchmark::delayed_store_deletion_benchmark`
 compares concurrency one and ten using the same helper and exact key sets in a
@@ -137,3 +193,38 @@ FIREPARQ_DELETE_BENCH_OUTPUT=/tmp/fireparq-delete-benchmark.json \
 Run it without concurrent CPU-heavy work; in this audit the whole command is
 wrapped by the shared file lock. The machine-readable evidence accompanies this
 record as `523-delete-benchmark.json`.
+
+## Read-window measurement method
+
+The separately ignored `merge::read::tests::benchmark::bounded_read_window_benchmark`
+compares one-object windows with the production four-object/64 MiB windows on
+three source layouts: 128 small objects, heterogeneous objects that hit the byte
+budget before the request bound, and one oversized object that must run alone.
+A delayed in-memory store sleeps 3 ms per GET, with the first object deliberately
+four times slower. Three samples alternate execution order. Timings sum only the
+read-window calls; source creation and complete byte-for-byte verification are
+excluded. Every run verifies exact bytes, request count and maximum active GETs.
+This isolates bounded scheduling and buffer handling, not provider throughput,
+CPU/encoding overlap or complete CLI runtime. The whole invocation uses the same
+shared benchmark lock. Measured on the same macOS/Rust host and test profile,
+base `35b2134` plus the read stage, the three-sample medians were:
+
+| Source layout | Sequential | Bounded windows | Ratio | Maximum window bytes / active GETs |
+|---|---:|---:|---:|---:|
+| 128 × 64 KiB | 0.6861 s | 0.1822 s | 3.77× | 256 KiB / 4 |
+| 12 heterogeneous objects, 216 MiB total | 0.0806 s | 0.0407 s | 1.98× | 52 MiB / 3 |
+| 65 MiB + 4 MiB + 4 MiB | 0.0271 s | 0.0231 s | 1.17× | 65 MiB alone; later two GETs |
+
+The larger windows retain more compressed input than a single-object reader:
+256 versus 64 KiB in the small case, and up to 52 versus 24 MiB in the mixed
+case. The oversized object's memory lower bound is unchanged. There is no
+request-count or egress reduction. The improvement is intentionally modest when
+one object dominates the window. All 18 runs returned exactly the listed bytes
+in order and issued exactly one GET per object. [Raw samples and source
+fingerprints](523-read-benchmark.json) accompany this record. The complete test
+harness invocation took 3.38 seconds, excluding compilation.
+
+Reproduce with `FIREPARQ_READ_BENCH_OUTPUT=/tmp/fireparq-read-benchmark.json`
+and the ignored test name above, using the same whole-command serialization as
+for deletion. This is synthetic latency/copy evidence; production S3 speed and
+RSS were not measured.

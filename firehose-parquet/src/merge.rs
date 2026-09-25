@@ -19,14 +19,11 @@ use anyhow::{Context, Result};
 use arrow::datatypes::{Field, Schema, SchemaRef};
 use arrow::record_batch::RecordBatch;
 use object_store::ObjectStore;
-use parquet::arrow::arrow_reader::{
-    ArrowReaderMetadata, ArrowReaderOptions, ParquetRecordBatchReaderBuilder,
-};
+use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use parquet::arrow::ArrowWriter;
 use parquet::basic::Compression as PqCompression;
 use parquet::basic::ZstdLevel;
-use parquet::errors::ParquetError;
-use parquet::file::metadata::{KeyValue, ParquetMetaDataReader};
+use parquet::file::metadata::KeyValue;
 use parquet::file::properties::WriterProperties;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -34,8 +31,8 @@ use std::sync::Arc;
 use std::time::Duration;
 use tracing::{debug, info, info_span, warn};
 
-const S3_READ_MAX_ATTEMPTS: usize = 5;
-const S3_READ_RETRY_BASE_DELAY_MS: u64 = 100;
+mod read;
+
 const S3_UPLOAD_MAX_ATTEMPTS: usize = 1;
 const S3_UPLOAD_RETRY_BASE_DELAY_MS: u64 = 250;
 /// Bytes read from the end of an S3 object to get its Parquet footer in one request.
@@ -1185,7 +1182,10 @@ fn process_s3_partition(
         return Ok(());
     }
 
-    let source_bytes: u64 = objects.iter().map(|o| o.size as u64).sum();
+    let source_bytes = objects.iter().try_fold(0u64, |sum, object| {
+        sum.checked_add(object.size)
+            .context("S3 merge source size overflow")
+    })?;
 
     if let Some(estimated_output_files) =
         no_op_compaction_estimate(objects.len(), source_bytes, config.flush_bytes)
@@ -1212,19 +1212,15 @@ fn process_s3_partition(
     // Check every part's footer before writing anything, so a partition with mixed schemas is
     // left exactly as it was.
     let mut schema_check = SchemaCheck::default();
-    for obj in objects {
-        let schema = read_s3_arrow_schema(
-            client,
-            bucket,
-            obj,
-            table,
-            partition_label,
-            S3_FOOTER_PREFETCH_BYTES,
-        )?;
-        let name = obj.location.filename().unwrap_or(obj.location.as_ref());
-        if let Some(reason) = schema_check.check(name, &schema) {
-            record_schema_mismatch(partition_label, reason, result);
-            return Ok(());
+    for window in read::windows(objects) {
+        let window = window?;
+        let schemas = read::schemas(client, window)?;
+        for (obj, schema) in window.iter().zip(schemas) {
+            let name = obj.location.filename().unwrap_or(obj.location.as_ref());
+            if let Some(reason) = schema_check.check(name, &schema) {
+                record_schema_mismatch(partition_label, reason, result);
+                return Ok(());
+            }
         }
     }
 
@@ -1319,46 +1315,42 @@ fn process_s3_partition(
         Ok(())
     };
 
-    for obj in objects {
-        let data = read_s3_bytes_with_retry(
-            client,
-            bucket,
-            &obj.location,
-            table,
-            partition_label,
-            S3_READ_MAX_ATTEMPTS,
-        )?;
-
-        let builder = ParquetRecordBatchReaderBuilder::try_new(data)?;
-        if file_kv_metadata.is_none() {
-            file_kv_metadata = builder
-                .metadata()
-                .file_metadata()
-                .key_value_metadata()
-                .cloned();
-        }
-        let reader = builder.build()?;
-        for batch_result in reader {
-            let batch = strip_transaction_metadata(batch_result?)?;
-            if batch.num_rows() == 0 {
-                continue;
+    for window in read::windows(objects) {
+        // The complete compressed-byte reservation remains held until every
+        // returned object has been consumed in order; no next window starts early.
+        let data_window = read::objects(client, window?)?;
+        for data in data_window {
+            let builder = ParquetRecordBatchReaderBuilder::try_new(data)?;
+            if file_kv_metadata.is_none() {
+                file_kv_metadata = builder
+                    .metadata()
+                    .file_metadata()
+                    .key_value_metadata()
+                    .cloned();
             }
+            let reader = builder.build()?;
+            for batch_result in reader {
+                let batch = strip_transaction_metadata(batch_result?)?;
+                if batch.num_rows() == 0 {
+                    continue;
+                }
 
-            if writer_state.is_none() {
-                let props = writer_properties(config.compression, file_kv_metadata.as_deref());
-                writer_state = Some(StreamingPartWriter::new(
-                    batch.schema(),
-                    props,
-                    config.flush_bytes,
-                    config.flush_rows,
-                    initial_part_num,
-                ));
+                if writer_state.is_none() {
+                    let props = writer_properties(config.compression, file_kv_metadata.as_deref());
+                    writer_state = Some(StreamingPartWriter::new(
+                        batch.schema(),
+                        props,
+                        config.flush_bytes,
+                        config.flush_rows,
+                        initial_part_num,
+                    ));
+                }
+
+                writer_state
+                    .as_mut()
+                    .expect("writer state must exist")
+                    .write_batch(&batch, &mut write_part)?;
             }
-
-            writer_state
-                .as_mut()
-                .expect("writer state must exist")
-                .write_batch(&batch, &mut write_part)?;
         }
     }
     result.files_read += objects.len();
@@ -1424,77 +1416,6 @@ fn process_s3_partition(
         "completed S3 partition merge"
     );
     Ok(())
-}
-
-/// Reads the Arrow schema of a Parquet object from its footer, without downloading the data.
-///
-/// Fetches the last `prefetch` bytes first and asks for more only when the footer is larger.
-fn read_s3_arrow_schema(
-    client: &Arc<dyn ObjectStore>,
-    bucket: &str,
-    obj: &object_store::ObjectMeta,
-    table: &str,
-    partition_label: &str,
-    prefetch: u64,
-) -> Result<SchemaRef> {
-    let size = obj.size;
-    let mut tail_len = size.min(prefetch);
-    let mut reader = ParquetMetaDataReader::new();
-    loop {
-        let tail = retry_merge_s3_operation(
-            MergeS3Operation::Read,
-            bucket,
-            &obj.location,
-            table,
-            partition_label,
-            S3_READ_MAX_ATTEMPTS,
-            S3_READ_RETRY_BASE_DELAY_MS,
-            || {
-                Ok(block_on_async(
-                    client.get_range(&obj.location, size - tail_len..size),
-                )?)
-            },
-        )?;
-        match reader.try_parse_sized(&tail, size) {
-            Ok(()) => break,
-            Err(ParquetError::NeedMoreData(needed)) if needed as u64 > tail_len => {
-                tail_len = needed as u64;
-            }
-            Err(error) => {
-                return Err(anyhow::Error::new(error).context(format!(
-                    "reading Parquet footer of s3://{bucket}/{}",
-                    obj.location
-                )))
-            }
-        }
-    }
-    let metadata =
-        ArrowReaderMetadata::try_new(Arc::new(reader.finish()?), ArrowReaderOptions::default())?;
-    Ok(Arc::clone(metadata.schema()))
-}
-
-fn read_s3_bytes_with_retry(
-    client: &Arc<dyn ObjectStore>,
-    bucket: &str,
-    location: &object_store::path::Path,
-    table: &str,
-    partition_label: &str,
-    max_attempts: usize,
-) -> Result<bytes::Bytes> {
-    retry_merge_s3_operation(
-        MergeS3Operation::Read,
-        bucket,
-        location,
-        table,
-        partition_label,
-        max_attempts,
-        S3_READ_RETRY_BASE_DELAY_MS,
-        || {
-            Ok(block_on_async(async {
-                client.get(location).await?.bytes().await
-            })?)
-        },
-    )
 }
 
 // Data PUT/DELETE are single attempts on a zero-transport-retry client. An
@@ -2342,7 +2263,7 @@ mod tests {
 
         // A 16-byte prefetch holds only the footer tail, so the metadata is fetched again.
         for prefetch in [16, S3_FOOTER_PREFETCH_BYTES] {
-            let schema = read_s3_arrow_schema(&store, "bucket", &meta, "t", "t", prefetch).unwrap();
+            let schema = block_on_async(read::arrow_schema(&store, &meta, prefetch)).unwrap();
             assert_eq!(
                 schema.fields(),
                 batch.schema().fields(),
@@ -2758,6 +2679,115 @@ mod tests {
                 .unwrap()
                 .state(),
             crate::dataset_lock_s3::OwnerState::Owned
+        );
+    }
+
+    #[test]
+    fn s3_late_footer_failure_precedes_any_journal_or_output_publication() {
+        let fake = Arc::new(read::tests::Store::default());
+        let store: Arc<dyn ObjectStore> = fake.clone();
+        let partition = format!("evm/{CRASH_PARTITION}");
+        let mut sources = Vec::new();
+        for part in 1..=10 {
+            let key = format!("{partition}/part-{part:06}.parquet");
+            let data = if part == 10 {
+                b"invalid later footer".to_vec()
+            } else {
+                parquet_bytes(&make_range_batch(part * 10, 10))
+            };
+            put_object(&store, &key, data.clone());
+            sources.push((key, data));
+        }
+        assert!(merge_s3(
+            &test_merge_config("s3://bucket/evm"),
+            &store,
+            "bucket",
+            "evm"
+        )
+        .is_err());
+        assert_eq!(list_keys(&store, "evm").len(), sources.len());
+        for (key, data) in sources {
+            assert_eq!(get_object(&store, &key).as_ref(), data);
+        }
+        assert!(
+            block_on_async(store.head(&object_store::path::Path::from(format!(
+                "{partition}/{JOURNAL_FILE}"
+            ))))
+            .is_err()
+        );
+        assert_eq!(
+            block_on_async(S3Ownership::status(&store))
+                .unwrap()
+                .unwrap()
+                .state(),
+            crate::dataset_lock_s3::OwnerState::Owned
+        );
+    }
+
+    #[test]
+    fn s3_later_body_window_failure_retains_writing_and_recovery_replays_exact_rows() {
+        use std::sync::atomic::Ordering;
+        let partition = format!("evm/{CRASH_PARTITION}");
+        let mut fake = read::tests::Store::default();
+        fake.body_failure_key = Some(object_store::path::Path::from(format!(
+            "{partition}/part-000005.parquet"
+        )));
+        fake.fault.store(10, Ordering::SeqCst);
+        let fake = Arc::new(fake);
+        let store: Arc<dyn ObjectStore> = fake.clone();
+        let mut sources = Vec::new();
+        for part in 0..8 {
+            let key = format!("{partition}/part-{:06}.parquet", part + 1);
+            let data = parquet_bytes(&make_range_batch(part * 10, 10));
+            put_object(&store, &key, data.clone());
+            sources.push((key, data));
+        }
+        let mut config = test_merge_config("s3://bucket/evm");
+        config.flush_rows = Some(15);
+        assert!(merge_s3(&config, &store, "bucket", "evm").is_err());
+        let journal = S3Partition {
+            client: &store,
+            bucket: "bucket",
+            key: &partition,
+        }
+        .read_journal()
+        .unwrap()
+        .unwrap();
+        assert_eq!(journal.state, crate::merge_journal::JournalState::Writing);
+        assert!(journal.outputs.is_empty());
+        let keys = list_keys(&store, "evm");
+        assert!(
+            keys.len() > sources.len() + 1,
+            "first window must have actually published partial output"
+        );
+        let failed_reads = fake
+            .requests
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(key, _)| key.as_ref().ends_with("part-000005.parquet"))
+            .count();
+        assert_eq!(
+            failed_reads, 6,
+            "one footer plus five pinned read-only body attempts"
+        );
+        fake.fault.store(0, Ordering::SeqCst);
+        for (key, data) in &sources {
+            assert_eq!(get_object(&store, key).as_ref(), data);
+        }
+        release_quiescent_fixture_owner(&store);
+        let result = merge_s3(&config, &store, "bucket", "evm").unwrap();
+        assert_eq!(result.merges_recovered, 1);
+        assert_eq!(s3_values(&store, "evm"), (0..80).collect::<Vec<_>>());
+        assert!(!list_keys(&store, "evm")
+            .iter()
+            .any(|key| key.ends_with(JOURNAL_FILE)));
+        assert_eq!(
+            block_on_async(S3Ownership::status(&store))
+                .unwrap()
+                .unwrap()
+                .state(),
+            crate::dataset_lock_s3::OwnerState::Released
         );
     }
 
