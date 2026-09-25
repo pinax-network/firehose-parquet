@@ -61,6 +61,14 @@ clarify that it counts scheduled retries, not only successful reconnections.
 - Focused metrics/writer/cursor checks passed (14 tests), the complete CLI
   regression passed, and all workspace targets compiled on 2026-09-25.
 
-Full current-main validation and the final lifecycle outcome are recorded before
-merge. The artifact names and endpoint semantics are intentional monitoring/API
-changes; no chain schema, partition routing or persistence ordering is changed.
+- Current-main integration `20ded72` (including #501 and #502) passed **787
+  workspace tests**, with four intentionally ignored tests, plus `cargo fmt
+  --all -- --check`, the binary build and Bash/Zsh/Fish completion generation.
+  The existing unused final-backfill counter assignment warning is unchanged.
+- An independent code review identified only the liveness lifetime problem
+  described above; the corrected stream/pipeline separation is covered by the
+  endpoint lifecycle test. The real CLI regression passed on the integrated tree.
+
+The metric names and endpoint semantics are intentional monitoring/API changes;
+no chain schema, partition routing or persistence ordering is changed. GitHub CI
+and merge/issue closure are verified separately from this local validation.
