@@ -93,3 +93,8 @@ height regressions; the deliberately valid benchmark does not exercise that fix.
 Final integration with main `1f2d252` passed **878 workspace tests**, six
 intentional skips, the workspace build, formatting and shell-completion checks.
 The strengthened nested-root fixture was reviewed independently after its change.
+
+After #565 merged, integration with main `cd6e011` passed **882 workspace
+tests**, seven intentional skips, formatting and workspace build. Generated
+protobuf cache contents were refreshed for the correct source branch before
+this final run; no source changes were needed for the cache conflict.
