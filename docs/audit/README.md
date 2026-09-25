@@ -16,6 +16,9 @@ lifecycle state; a local implementation or passing test alone is not closure.
 - [#506: NEAR qualification blocked by quota](506-near-qualification.md)
 - [#504: Beacon live mapping qualification](504-beacon-qualification.md)
 - [#485: partition probe reliability](485-partition-probe-reliability.md)
+- [#500: stable Solana reward indices](500-solana-reward-index.md)
+- [#473: responsive shutdown](473-responsive-shutdown.md)
+- [#477: single-partition writer contract](477-writer-partition-contract.md)
 
 - [Backlog priorities and preserved work](backlog-roadmap.md)
 - [#468: proposed crash/replay recovery design](468-crash-recovery-design.md)
@@ -32,6 +35,15 @@ lifecycle state; a local implementation or passing test alone is not closure.
 | [#498](https://github.com/pinax-network/firehose-parquet/issues/498) | [#575](https://github.com/pinax-network/firehose-parquet/pull/575) | Merged as `c25b9e9`; issue closed; documented query verified against 1,438 live-sample logs; independent review and CI passed. |
 | [#572](https://github.com/pinax-network/firehose-parquet/issues/572) | [#576](https://github.com/pinax-network/firehose-parquet/pull/576) | Merged as `ad17332`; issue closed; 720 combined tests, bounded live Solana final checkpoint and CI passed. |
 | [#568](https://github.com/pinax-network/firehose-parquet/issues/568) | [#577](https://github.com/pinax-network/firehose-parquet/pull/577) | Merged as `2793421`; issue closed; 723 combined tests, old-file compatibility and 14-table live comparison passed. GitHub marked the remaining alert fixed at 2026-09-25 15:54:54 UTC; zero open alerts verified. |
+| [#504](https://github.com/pinax-network/firehose-parquet/issues/504) | [#560](https://github.com/pinax-network/firehose-parquet/pull/560) | Merged as `c88abcc`; issue closed; 730 integrated tests, targeted live BLS/slashing field comparisons and CI passed. |
+| [#477](https://github.com/pinax-network/firehose-parquet/issues/477) | [#581](https://github.com/pinax-network/firehose-parquet/pull/581) | Merged as `3f74ebf`; issue closed; 732 tests, 14-table live equality check and CI passed. |
+| [#473](https://github.com/pinax-network/firehose-parquet/issues/473) | [#579](https://github.com/pinax-network/firehose-parquet/pull/579) | Merged as `fdb1f98`; issue closed; 739 tests and CI passed, plus combined validation with #477 and atomic publication. |
+| [#578](https://github.com/pinax-network/firehose-parquet/issues/578) | [#580](https://github.com/pinax-network/firehose-parquet/pull/580) | Merged as `73257c2`; issue closed; 751 combined tests, atomic publication fault tests, two-block live equality check and CI passed. #468 remains open. |
+
+The #468 design PR accidentally triggered GitHub auto-closure through a negative
+sentence containing a recognized closing phrase. On 2026-09-25 the PR text was
+corrected and #468 was reopened; its open state was verified. The proposal and
+single-file durability work do not satisfy full crash/replay recovery acceptance.
 
 For each next fix, add an issue-specific record here and reference it in the PR.
 Record the real test and live-data evidence, including unavailable qualification,
