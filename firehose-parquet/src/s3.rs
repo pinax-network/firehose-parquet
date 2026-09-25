@@ -6,6 +6,8 @@ use object_store::ObjectStore;
 
 use crate::config::Config;
 
+pub(crate) mod delete;
+
 /// Reject ambiguous S3 output configuration before any network or storage work.
 /// Explicit local output paths keep their local meaning even when S3_BUCKET is set.
 pub fn validate_output_bucket(output: &str, configured_bucket: Option<&str>) -> Result<()> {

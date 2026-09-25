@@ -530,10 +530,11 @@ fn truncate_s3(
         return Ok(result);
     }
 
-    for m in &matched {
-        block_on_async(async { client.delete(&m.location).await })
-            .map_err(|e| anyhow::anyhow!("deleting {}: {e}", m.display))?;
-    }
+    let keys = matched
+        .iter()
+        .map(|entry| entry.location.clone())
+        .collect::<Vec<_>>();
+    block_on_async(crate::s3::delete::delete_objects_once(client, &keys))?;
 
     Ok(result)
 }
@@ -845,6 +846,74 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("path does not exist"), "{err}");
+    }
+
+    #[test]
+    fn truncate_s3_failure_preserves_unselected_keys_and_stops_further_dispatch() {
+        use crate::s3::delete::test_store::DelayedStore;
+        use std::sync::atomic::Ordering;
+        let mut fake = DelayedStore::new(std::time::Duration::from_millis(30));
+        fake.fail = Some(object_store::path::Path::from(
+            "evm/blocks/year=2026/part-000000.parquet",
+        ));
+        fake.lose_response = true;
+        let fake = Arc::new(fake);
+        let store: Arc<dyn ObjectStore> = fake.clone();
+        for part in 0..30 {
+            let key = object_store::path::Path::from(format!(
+                "evm/blocks/year=2026/part-{part:06}.parquet"
+            ));
+            block_on_async(store.put(&key, b"selected".to_vec().into())).unwrap();
+        }
+        let retained = [
+            "evm/cursor.parquet",
+            "evm/blocks/year=2025/part-old.parquet",
+            "other/blocks/year=2026/part-outside.parquet",
+        ];
+        for key in retained {
+            block_on_async(store.put(
+                &object_store::path::Path::from(key),
+                b"unchanged".to_vec().into(),
+            ))
+            .unwrap();
+        }
+        let config = TruncateConfig {
+            path: "s3://bucket/evm".into(),
+            partitions: vec!["year=2026".into()],
+            dry_run: false,
+            yes: true,
+            aws: None,
+        };
+        assert!(truncate_s3(
+            &config,
+            &PartitionFilters::parse(&config.partitions).unwrap(),
+            &store,
+            "bucket",
+            "evm"
+        )
+        .is_err());
+        for key in retained {
+            assert_eq!(
+                block_on_async(async {
+                    store
+                        .get(&object_store::path::Path::from(key))
+                        .await
+                        .unwrap()
+                        .bytes()
+                        .await
+                        .unwrap()
+                })
+                .as_ref(),
+                b"unchanged"
+            );
+        }
+        assert_eq!(fake.counters.started.lock().unwrap().len(), 10);
+        assert_eq!(fake.counters.completed.load(Ordering::SeqCst), 10);
+        assert_eq!(fake.counters.active.load(Ordering::SeqCst), 0);
+        assert!(block_on_async(store.head(&object_store::path::Path::from(
+            "evm/blocks/year=2026/part-000029.parquet"
+        )))
+        .is_ok());
     }
 
     #[test]

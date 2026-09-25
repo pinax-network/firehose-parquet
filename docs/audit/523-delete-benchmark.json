@@ -1,0 +1,185 @@
+{
+  "benchmark": "individual DELETE scheduling with a delayed InMemory store",
+  "clock": "Instant monotonic wall time; seed and exact-result checks excluded",
+  "measurements": [
+    {
+      "concurrency": 1,
+      "delete_calls": 100,
+      "elapsed_seconds": 0.258436916,
+      "keys": 100,
+      "maximum_active": 1,
+      "sample": 0
+    },
+    {
+      "concurrency": 10,
+      "delete_calls": 100,
+      "elapsed_seconds": 0.028297334,
+      "keys": 100,
+      "maximum_active": 10,
+      "sample": 0
+    },
+    {
+      "concurrency": 10,
+      "delete_calls": 100,
+      "elapsed_seconds": 0.029405333,
+      "keys": 100,
+      "maximum_active": 10,
+      "sample": 1
+    },
+    {
+      "concurrency": 1,
+      "delete_calls": 100,
+      "elapsed_seconds": 0.261600459,
+      "keys": 100,
+      "maximum_active": 1,
+      "sample": 1
+    },
+    {
+      "concurrency": 1,
+      "delete_calls": 100,
+      "elapsed_seconds": 0.258036792,
+      "keys": 100,
+      "maximum_active": 1,
+      "sample": 2
+    },
+    {
+      "concurrency": 10,
+      "delete_calls": 100,
+      "elapsed_seconds": 0.027464375,
+      "keys": 100,
+      "maximum_active": 10,
+      "sample": 2
+    },
+    {
+      "concurrency": 1,
+      "delete_calls": 1000,
+      "elapsed_seconds": 2.607219458,
+      "keys": 1000,
+      "maximum_active": 1,
+      "sample": 0
+    },
+    {
+      "concurrency": 10,
+      "delete_calls": 1000,
+      "elapsed_seconds": 0.257074208,
+      "keys": 1000,
+      "maximum_active": 10,
+      "sample": 0
+    },
+    {
+      "concurrency": 10,
+      "delete_calls": 1000,
+      "elapsed_seconds": 0.268189,
+      "keys": 1000,
+      "maximum_active": 10,
+      "sample": 1
+    },
+    {
+      "concurrency": 1,
+      "delete_calls": 1000,
+      "elapsed_seconds": 2.574635333,
+      "keys": 1000,
+      "maximum_active": 1,
+      "sample": 1
+    },
+    {
+      "concurrency": 1,
+      "delete_calls": 1000,
+      "elapsed_seconds": 2.547335333,
+      "keys": 1000,
+      "maximum_active": 1,
+      "sample": 2
+    },
+    {
+      "concurrency": 10,
+      "delete_calls": 1000,
+      "elapsed_seconds": 0.268462667,
+      "keys": 1000,
+      "maximum_active": 10,
+      "sample": 2
+    },
+    {
+      "concurrency": 1,
+      "delete_calls": 10000,
+      "elapsed_seconds": 25.805471833,
+      "keys": 10000,
+      "maximum_active": 1,
+      "sample": 0
+    },
+    {
+      "concurrency": 10,
+      "delete_calls": 10000,
+      "elapsed_seconds": 2.684152709,
+      "keys": 10000,
+      "maximum_active": 10,
+      "sample": 0
+    },
+    {
+      "concurrency": 10,
+      "delete_calls": 10000,
+      "elapsed_seconds": 2.67121875,
+      "keys": 10000,
+      "maximum_active": 10,
+      "sample": 1
+    },
+    {
+      "concurrency": 1,
+      "delete_calls": 10000,
+      "elapsed_seconds": 26.480071208,
+      "keys": 10000,
+      "maximum_active": 1,
+      "sample": 1
+    },
+    {
+      "concurrency": 1,
+      "delete_calls": 10000,
+      "elapsed_seconds": 26.141685042,
+      "keys": 10000,
+      "maximum_active": 1,
+      "sample": 2
+    },
+    {
+      "concurrency": 10,
+      "delete_calls": 10000,
+      "elapsed_seconds": 2.682888417,
+      "keys": 10000,
+      "maximum_active": 10,
+      "sample": 2
+    }
+  ],
+  "runtime": "Tokio current-thread; no network or external bucket",
+  "synthetic_delay_milliseconds": 1,
+  "summary": [
+    {
+      "keys": 100,
+      "sequential_median_seconds": 0.258436916,
+      "ten_active_median_seconds": 0.028297334,
+      "speedup": 9.132906866774093
+    },
+    {
+      "keys": 1000,
+      "sequential_median_seconds": 2.574635333,
+      "ten_active_median_seconds": 0.268189,
+      "speedup": 9.600078053164
+    },
+    {
+      "keys": 10000,
+      "sequential_median_seconds": 26.141685042,
+      "ten_active_median_seconds": 2.682888417,
+      "speedup": 9.743858475944958
+    }
+  ],
+  "provenance": {
+    "base_commit": "137ab325d2c6ad1b5c4e52a38f4a3a47c1086658",
+    "platform": "macOS-26.5.1-arm64-arm-64bit-Mach-O",
+    "rustc": "rustc 1.93.1 (01f6ddf75 2026-02-11)",
+    "whole_command_lock": "/tmp/fireparq-cargo-session.lock",
+    "serialized": true,
+    "profile": "test, unoptimized, debug info disabled",
+    "source_sha256": {
+      "firehose-parquet/src/s3/delete.rs": "dc06a3e05b42cb3144e7159c768b16e5d5f723b97b8b49a15f7415b0ccf29518",
+      "firehose-parquet/src/s3/delete/test_store.rs": "07723eaa06d7f25c0b32e351669eecc77b60ab75408c3108f1312302ca44f569",
+      "firehose-parquet/src/s3/delete/tests/benchmark.rs": "042cf13c00d0f7c8711e85921744ada5cba5a21a5aae5c42855302e8994ba7c2"
+    }
+  }
+}
