@@ -9592,6 +9592,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_find_first_available_block_exhausts_full_budget_without_false_head() {
+        let mut requested = std::collections::BTreeSet::new();
+        let error = find_first_available_block(100, ProbeScan::standard(true), |number, _| {
+            requested.insert(number);
+            std::future::ready(Ok::<ProbeFetch<u64>, anyhow::Error>(ProbeFetch::Missing))
+        })
+        .await
+        .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("65536-block missing-slot budget"));
+        assert!(!is_transient_live_probe_error(&error));
+        assert_eq!(requested.len(), 65_537);
+        assert_eq!(requested.first(), Some(&100));
+        assert_eq!(requested.last(), Some(&(100 + 65_536)));
+    }
+
+    #[tokio::test]
+    async fn test_find_first_available_block_never_fetches_the_max_number_sentinel() {
+        let mut requested = Vec::new();
+        let error =
+            find_first_available_block(u64::MAX - 2, ProbeScan::standard(true), |number, _| {
+                requested.push(number);
+                std::future::ready(Ok::<ProbeFetch<u64>, anyhow::Error>(ProbeFetch::Missing))
+            })
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("block-number limit"));
+        assert_eq!(requested, [u64::MAX - 2, u64::MAX - 1]);
+    }
+
+    #[tokio::test]
     async fn test_find_timestamp_borrow_probe_skips_missing_exponential_probe() {
         #[derive(Clone, Debug)]
         struct Probe {
