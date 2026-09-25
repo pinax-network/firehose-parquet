@@ -365,8 +365,26 @@ rather than the default workflow:
 |---|---|
 | `--cursor-override` | Intentionally restart from new CLI bounds instead of reusing the stored Firehose cursor |
 | `--skip-missing-blocks` | Sparse chains legitimately skip block numbers and you want probes/streams to continue past gaps |
-| `--stream-idle-timeout-secs <N>` | Supervising long-lived pipelines that should self-reconnect after a silent stream stall (default 120; `0` disables) |
-| `--reconnect-stall-timeout-secs <N>` | Fail fast when reconnect loops should hand control back to an external supervisor (default 900; `0` disables) |
+| `--stream-idle-timeout-secs <N>` | Supervising long-lived pipelines that should self-reconnect after a silent stream stall (default 120; `0` disables and relies on HTTP/2 keepalive). On slow chains such as Bitcoin (~600 s blocks), set it above the block time to avoid a reconnect every 120 s. An idle reconnect is not counted as a failure. |
+| `--reconnect-stall-timeout-secs <N>` | Fail fast when reconnect loops should hand control back to an external supervisor (default 900; `0` disables). The timer starts at the first failed attempt and is reset only when a stream message arrives, not when a connection or RPC succeeds. |
+
+#### Connection errors
+
+- **Fatal errors fail fast.** A stream rejected with `Unauthenticated`,
+  `PermissionDenied`, `InvalidArgument`, `FailedPrecondition`, `OutOfRange` or
+  `Unimplemented` ends the run with an error and a hint (credentials, range or
+  cursor), instead of reconnecting. This includes statuses Firehose relays as
+  `Unknown` with the original code in the message
+  (`rpc error: code = InvalidArgument desc = ...`), and credentials that are not
+  valid for the endpoint (for example a Pinax token used against a
+  StreamingFast endpoint). They are counted in
+  `firehose_parquet_errors_total{kind="grpc_fatal"}`.
+- **Other errors are retried** with exponential back-off from 1 s to 60 s. The
+  back-off resets only once a stream message arrives.
+- **Limits.** A run gives up when `--reconnect-stall-timeout-secs` passes
+  without a stream message, or after 30 consecutive failed attempts without a
+  message (over 20 minutes at the maximum back-off), even when the stall
+  timeout is disabled.
 
 ### Advanced S3 / deployment knobs
 

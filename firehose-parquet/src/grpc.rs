@@ -283,11 +283,6 @@ impl FirehoseClient {
         F: FnMut(Vec<u8>, String, String, BlockIdentity, i32) -> Result<()>,
     {
         let mut cursor = initial_cursor;
-        let mut reconnect_backoff = ExponentialBackoffBuilder::default()
-            .with_initial_interval(Duration::from_secs(1))
-            .with_max_interval(Duration::from_secs(60))
-            .with_max_elapsed_time(None) // retry forever
-            .build();
         // A timeout of 0 means disabled.
         let stream_idle_timeout = self
             .config
@@ -300,54 +295,26 @@ impl FirehoseClient {
             .filter(|secs| *secs > 0)
             .map(Duration::from_secs);
 
-        let mut attempt = 0u64;
-        let mut reconnect_stall_started_at: Option<Instant> = None;
+        let mut reconnect = ReconnectState::new(reconnect_stall_timeout);
         // Highest block number received so far, across reconnects.
         let mut last_block_num: Option<u64> = None;
         // Set once a bounded stream ended before its last requested block.
         let mut resumed_after_early_end = false;
 
         loop {
-            attempt += 1;
             let mut blocks_this_connection = 0u64;
+            let mut received_message = false;
             let channel = match self.connect().await {
-                Ok(ch) => {
-                    attempt = 0;
-                    ch
-                }
+                Ok(ch) => ch,
                 Err(e) => {
-                    let stall_elapsed = reconnect_stall_started_at
-                        .get_or_insert_with(Instant::now)
-                        .elapsed();
-                    if let Some(max_stall) = reconnect_stall_timeout {
-                        if stall_elapsed >= max_stall {
-                            return Err(anyhow::anyhow!(
-                                "reconnect stalled for {:?} (limit {:?}) after {} attempts; last error: {}",
-                                stall_elapsed,
-                                max_stall,
-                                attempt,
-                                e
-                            ));
-                        }
-                    }
-                    let wait = reconnect_backoff
-                        .next_backoff()
-                        .unwrap_or(Duration::from_secs(60));
+                    let wait = reconnect.record_failure(Instant::now(), &e)?;
                     warn!(
-                        attempt,
+                        attempt = reconnect.failed_attempts,
                         error = %e,
                         retry_in = ?wait,
-                        reconnect_stall_elapsed = ?stall_elapsed,
                         "connection failed, retrying"
                     );
-                    if let Some(ref m) = self.metrics {
-                        m.grpc_reconnects_total.inc();
-                        m.errors_total
-                            .get_or_create(&crate::metrics::ErrorLabels {
-                                kind: "grpc_reconnect".to_string(),
-                            })
-                            .inc();
-                    }
+                    self.record_reconnect_metric();
                     tokio::time::sleep(wait).await;
                     continue;
                 }
@@ -373,45 +340,20 @@ impl FirehoseClient {
             let mut request = tonic::Request::new(req);
             self.auth.apply(&mut request);
 
+            // Accepting the RPC is not progress: the back-off and the stall
+            // timer are only reset once a message arrives.
             let stream = match client.blocks(request).await {
-                Ok(resp) => {
-                    reconnect_backoff.reset();
-                    reconnect_stall_started_at = None;
-                    resp.into_inner()
-                }
-                Err(e) => {
-                    let stall_elapsed = reconnect_stall_started_at
-                        .get_or_insert_with(Instant::now)
-                        .elapsed();
-                    if let Some(max_stall) = reconnect_stall_timeout {
-                        if stall_elapsed >= max_stall {
-                            return Err(anyhow::anyhow!(
-                                "reconnect stalled for {:?} (limit {:?}) after {} attempts; last error: {}",
-                                stall_elapsed,
-                                max_stall,
-                                attempt,
-                                e
-                            ));
-                        }
-                    }
-                    let wait = reconnect_backoff
-                        .next_backoff()
-                        .unwrap_or(Duration::from_secs(60));
+                Ok(resp) => resp.into_inner(),
+                Err(status) => {
+                    self.fail_on_fatal_status(&status)?;
+                    let wait = reconnect.record_failure(Instant::now(), &status)?;
                     warn!(
-                        attempt,
-                        error = %e,
+                        attempt = reconnect.failed_attempts,
+                        error = %status,
                         retry_in = ?wait,
-                        reconnect_stall_elapsed = ?stall_elapsed,
                         "Blocks RPC failed, will retry"
                     );
-                    if let Some(ref m) = self.metrics {
-                        m.grpc_reconnects_total.inc();
-                        m.errors_total
-                            .get_or_create(&crate::metrics::ErrorLabels {
-                                kind: "grpc_reconnect".to_string(),
-                            })
-                            .inc();
-                    }
+                    self.record_reconnect_metric();
                     tokio::time::sleep(wait).await;
                     continue;
                 }
@@ -419,21 +361,13 @@ impl FirehoseClient {
 
             let mut stream = stream;
 
-            loop {
+            let session_end = loop {
                 let next_message = if let Some(timeout) = stream_idle_timeout {
                     match tokio::time::timeout(timeout, stream.message()).await {
                         Ok(msg) => msg,
                         Err(_) => {
                             warn!(idle_for = ?timeout, "stream idle timeout reached, will reconnect");
-                            if let Some(ref m) = self.metrics {
-                                m.grpc_reconnects_total.inc();
-                                m.errors_total
-                                    .get_or_create(&crate::metrics::ErrorLabels {
-                                        kind: "grpc_reconnect".to_string(),
-                                    })
-                                    .inc();
-                            }
-                            break;
+                            break SessionEnd::Idle;
                         }
                     }
                 } else {
@@ -442,6 +376,10 @@ impl FirehoseClient {
 
                 match next_message {
                     Ok(Some(resp)) => {
+                        if !received_message {
+                            received_message = true;
+                            reconnect.record_progress();
+                        }
                         let new_cursor = resp.cursor.clone();
                         debug!(cursor = %new_cursor, step = ?resp.step, "received response");
 
@@ -546,39 +484,226 @@ impl FirehoseClient {
                                         "live stream closed by the server, will reconnect"
                                     );
                                 }
-                                if let Some(ref m) = self.metrics {
-                                    m.grpc_reconnects_total.inc();
-                                    m.errors_total
-                                        .get_or_create(&crate::metrics::ErrorLabels {
-                                            kind: "grpc_reconnect".to_string(),
-                                        })
-                                        .inc();
-                                }
-                                break;
+                                break SessionEnd::Closed;
                             }
                         }
                     }
-                    Err(e) => {
-                        warn!(error = %e, "stream error, will reconnect");
-                        if let Some(ref m) = self.metrics {
-                            m.grpc_reconnects_total.inc();
-                            m.errors_total
-                                .get_or_create(&crate::metrics::ErrorLabels {
-                                    kind: "grpc_reconnect".to_string(),
-                                })
-                                .inc();
-                        }
-                        break;
+                    Err(status) => {
+                        self.fail_on_fatal_status(&status)?;
+                        warn!(
+                            attempt = reconnect.failed_attempts + 1,
+                            error = %status,
+                            "stream error, will reconnect"
+                        );
+                        break SessionEnd::Failed(status);
                     }
                 }
-            }
+            };
 
-            let wait = reconnect_backoff
-                .next_backoff()
-                .unwrap_or(Duration::from_secs(60));
+            self.record_reconnect_metric();
+            let wait = match session_end {
+                // A quiet stream is not a failure (e.g. slow block times).
+                SessionEnd::Idle => reconnect.next_delay(),
+                SessionEnd::Closed if received_message => reconnect.next_delay(),
+                SessionEnd::Closed => reconnect.record_failure(
+                    Instant::now(),
+                    &"stream closed by the server without sending a message",
+                )?,
+                SessionEnd::Failed(status) => reconnect.record_failure(Instant::now(), &status)?,
+            };
             tokio::time::sleep(wait).await;
         }
     }
+
+    fn record_reconnect_metric(&self) {
+        if let Some(ref m) = self.metrics {
+            m.grpc_reconnects_total.inc();
+            m.errors_total
+                .get_or_create(&crate::metrics::ErrorLabels {
+                    kind: "grpc_reconnect".to_string(),
+                })
+                .inc();
+        }
+    }
+
+    /// Return an error for a gRPC status that reconnecting cannot fix.
+    fn fail_on_fatal_status(&self, status: &tonic::Status) -> Result<()> {
+        let Some(error) = fatal_status_error(status) else {
+            return Ok(());
+        };
+        if let Some(ref m) = self.metrics {
+            m.errors_total
+                .get_or_create(&crate::metrics::ErrorLabels {
+                    kind: "grpc_fatal".to_string(),
+                })
+                .inc();
+        }
+        Err(error)
+    }
+}
+
+/// How a streaming session ended without finishing the run.
+enum SessionEnd {
+    /// No message arrived within the idle timeout.
+    Idle,
+    /// The server closed the stream cleanly and the loop reconnects.
+    Closed,
+    /// The stream failed with a retryable status.
+    Failed(tonic::Status),
+}
+
+/// Consecutive failed attempts without receiving a message after which the
+/// stream gives up, even when `--reconnect-stall-timeout-secs` is disabled.
+/// With the 60 s maximum back-off this takes over 20 minutes.
+const MAX_FAILED_ATTEMPTS_WITHOUT_PROGRESS: u64 = 30;
+
+/// Reconnect bookkeeping for [`FirehoseClient::stream_blocks`].
+///
+/// Only a received message counts as progress. Connection failures, failed
+/// RPCs, stream errors and clean closes without a message are failures: they
+/// grow the back-off, run the stall timer and count toward
+/// [`MAX_FAILED_ATTEMPTS_WITHOUT_PROGRESS`].
+struct ReconnectState {
+    backoff: backoff::ExponentialBackoff,
+    stall_timeout: Option<Duration>,
+    stall_started_at: Option<Instant>,
+    failed_attempts: u64,
+}
+
+impl ReconnectState {
+    fn new(stall_timeout: Option<Duration>) -> Self {
+        Self {
+            backoff: ExponentialBackoffBuilder::default()
+                .with_initial_interval(Duration::from_secs(1))
+                .with_max_interval(Duration::from_secs(60))
+                .with_max_elapsed_time(None) // limits are enforced here
+                .build(),
+            stall_timeout,
+            stall_started_at: None,
+            failed_attempts: 0,
+        }
+    }
+
+    /// A message arrived: reset the back-off, the stall timer and the count.
+    fn record_progress(&mut self) {
+        self.backoff.reset();
+        self.stall_started_at = None;
+        self.failed_attempts = 0;
+    }
+
+    /// Record a failed attempt. Returns the delay before the next attempt, or
+    /// an error once the stall timeout or the attempt cap is reached.
+    fn record_failure(&mut self, now: Instant, error: &dyn std::fmt::Display) -> Result<Duration> {
+        self.failed_attempts += 1;
+        let stall_elapsed =
+            now.saturating_duration_since(*self.stall_started_at.get_or_insert(now));
+        if let Some(stall_timeout) = self.stall_timeout {
+            if stall_elapsed >= stall_timeout {
+                return Err(anyhow::anyhow!(
+                    "reconnect stalled: no stream message for {:?} (limit {:?}) after {} failed attempts; last error: {}",
+                    stall_elapsed,
+                    stall_timeout,
+                    self.failed_attempts,
+                    error
+                ));
+            }
+        }
+        if self.failed_attempts >= MAX_FAILED_ATTEMPTS_WITHOUT_PROGRESS {
+            return Err(anyhow::anyhow!(
+                "giving up after {} consecutive failed attempts without a stream message ({:?} since the first failure); last error: {}",
+                self.failed_attempts,
+                stall_elapsed,
+                error
+            ));
+        }
+        Ok(self.next_delay())
+    }
+
+    /// Delay before reconnecting, without recording a failure.
+    fn next_delay(&mut self) -> Duration {
+        self.backoff
+            .next_backoff()
+            .unwrap_or(Duration::from_secs(60))
+    }
+}
+
+/// gRPC status codes that reconnecting with the same request and credentials
+/// cannot fix.
+fn is_fatal_code(code: tonic::Code) -> bool {
+    matches!(
+        code,
+        tonic::Code::Unauthenticated
+            | tonic::Code::PermissionDenied
+            | tonic::Code::InvalidArgument
+            | tonic::Code::FailedPrecondition
+            | tonic::Code::OutOfRange
+            | tonic::Code::Unimplemented
+    )
+}
+
+/// The code a status really carries. Firehose can relay an upstream error as
+/// `Unknown` with the original status in the message, e.g.
+/// `rpc error: code = InvalidArgument desc = start block 5 is after stop block 4`.
+fn effective_status_code(status: &tonic::Status) -> tonic::Code {
+    if status.code() != tonic::Code::Unknown {
+        return status.code();
+    }
+    status
+        .message()
+        .split_once("code = ")
+        .and_then(|(_, rest)| rest.split_whitespace().next())
+        .and_then(status_code_from_name)
+        .unwrap_or(tonic::Code::Unknown)
+}
+
+/// Parse a gRPC status code name as Go's `status` package prints it.
+fn status_code_from_name(name: &str) -> Option<tonic::Code> {
+    use tonic::Code;
+    Some(match name {
+        "OK" => Code::Ok,
+        "Canceled" => Code::Cancelled,
+        "Unknown" => Code::Unknown,
+        "InvalidArgument" => Code::InvalidArgument,
+        "DeadlineExceeded" => Code::DeadlineExceeded,
+        "NotFound" => Code::NotFound,
+        "AlreadyExists" => Code::AlreadyExists,
+        "PermissionDenied" => Code::PermissionDenied,
+        "ResourceExhausted" => Code::ResourceExhausted,
+        "FailedPrecondition" => Code::FailedPrecondition,
+        "Aborted" => Code::Aborted,
+        "OutOfRange" => Code::OutOfRange,
+        "Unimplemented" => Code::Unimplemented,
+        "Internal" => Code::Internal,
+        "Unavailable" => Code::Unavailable,
+        "DataLoss" => Code::DataLoss,
+        "Unauthenticated" => Code::Unauthenticated,
+        _ => return None,
+    })
+}
+
+/// Build the error for a fatal status, with a hint on what to fix, or `None`
+/// when the status is worth retrying.
+fn fatal_status_error(status: &tonic::Status) -> Option<anyhow::Error> {
+    let code = effective_status_code(status);
+    if !is_fatal_code(code) {
+        return None;
+    }
+    let hint = match code {
+        tonic::Code::Unauthenticated | tonic::Code::PermissionDenied => {
+            "check that the API key or token (--api-key-envvar / --api-token-envvar) is valid for this endpoint"
+        }
+        tonic::Code::InvalidArgument | tonic::Code::FailedPrecondition => {
+            "check --start-block, --stop-block and the stored cursor (--cursor-override restarts from the CLI bounds)"
+        }
+        tonic::Code::OutOfRange => {
+            "the request or a response is out of range, e.g. a block past the chain head or larger than the 128 MiB message limit"
+        }
+        _ => "the endpoint does not serve the Firehose v2 Stream API",
+    };
+    Some(anyhow::anyhow!(
+        "Firehose rejected the stream with {code:?}: {}; not retrying: {hint}",
+        status.message()
+    ))
 }
 
 /// Convert the exclusive `--stop-block` into Firehose's inclusive
@@ -746,6 +871,121 @@ mod tests {
         assert_eq!(firehose_stop_block_num(Some(1)), 1);
         assert_eq!(firehose_stop_block_num(Some(2)), 1);
         assert_eq!(firehose_stop_block_num(Some(200)), 199);
+    }
+
+    #[test]
+    fn test_fatal_status_codes_fail_fast() {
+        for status in [
+            tonic::Status::unauthenticated("invalid JWT token"),
+            tonic::Status::permission_denied("quota plan does not allow this network"),
+            tonic::Status::invalid_argument("invalid cursor"),
+            tonic::Status::failed_precondition("cursor is on a forked block"),
+            tonic::Status::out_of_range(
+                "Error, decoded message length too large: found 200000000 bytes, the limit is: 134217728 bytes",
+            ),
+            tonic::Status::unimplemented("unknown service sf.firehose.v2.Stream"),
+        ] {
+            assert!(
+                fatal_status_error(&status).is_some(),
+                "{:?} should be fatal",
+                status.code()
+            );
+        }
+    }
+
+    #[test]
+    fn test_transient_status_codes_are_retried() {
+        for status in [
+            tonic::Status::unavailable("connection reset"),
+            tonic::Status::internal("h2 protocol error"),
+            tonic::Status::resource_exhausted("rate limited"),
+            tonic::Status::deadline_exceeded("timeout"),
+            tonic::Status::cancelled("stream cancelled"),
+            tonic::Status::aborted("aborted"),
+            tonic::Status::unknown("transport error"),
+        ] {
+            assert!(
+                fatal_status_error(&status).is_none(),
+                "{:?} should be retried",
+                status.code()
+            );
+        }
+    }
+
+    #[test]
+    fn test_status_relayed_as_unknown_uses_the_wrapped_code() {
+        // Seen live: start > stop comes back as `Unknown` with the upstream
+        // status in the message, and used to be retried forever.
+        let status = tonic::Status::unknown(
+            "rpc error: code = InvalidArgument desc = start block 24000005 is after stop block 24000004",
+        );
+        assert_eq!(effective_status_code(&status), tonic::Code::InvalidArgument);
+        let error = fatal_status_error(&status).expect("fatal").to_string();
+        assert!(error.contains("InvalidArgument"), "{error}");
+        assert!(error.contains("start block 24000005"), "{error}");
+        assert!(error.contains("--cursor-override"), "{error}");
+
+        let status = tonic::Status::unknown("rpc error: code = Unavailable desc = backend down");
+        assert_eq!(effective_status_code(&status), tonic::Code::Unavailable);
+        assert!(fatal_status_error(&status).is_none());
+    }
+
+    #[test]
+    fn test_unauthenticated_error_points_at_the_credentials() {
+        let error = fatal_status_error(&tonic::Status::unauthenticated("invalid JWT token"))
+            .expect("fatal")
+            .to_string();
+        assert!(error.contains("invalid JWT token"), "{error}");
+        assert!(error.contains("--api-token-envvar"), "{error}");
+    }
+
+    #[test]
+    fn test_stall_timer_runs_from_first_failure_and_resets_only_on_progress() {
+        let t0 = Instant::now();
+        let mut state = ReconnectState::new(Some(Duration::from_secs(900)));
+
+        // Failed sessions whose RPC was accepted but that never delivered a
+        // message do not reset the timer.
+        assert!(state.record_failure(t0, &"accepted, then Internal").is_ok());
+        assert!(state
+            .record_failure(t0 + Duration::from_secs(899), &"accepted, then Internal")
+            .is_ok());
+        let error = state
+            .record_failure(t0 + Duration::from_secs(900), &"accepted, then Internal")
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("reconnect stalled"), "{error}");
+        assert!(error.contains("3 failed attempts"), "{error}");
+
+        // A received message restarts the timer at the next failure.
+        let mut state = ReconnectState::new(Some(Duration::from_secs(900)));
+        assert!(state.record_failure(t0, &"down").is_ok());
+        state.record_progress();
+        assert!(state
+            .record_failure(t0 + Duration::from_secs(1000), &"down")
+            .is_ok());
+        assert!(state
+            .record_failure(t0 + Duration::from_secs(1899), &"down")
+            .is_ok());
+        assert!(state
+            .record_failure(t0 + Duration::from_secs(1900), &"down")
+            .is_err());
+    }
+
+    #[test]
+    fn test_failed_attempts_are_counted_and_capped_without_stall_timeout() {
+        let t0 = Instant::now();
+        let mut state = ReconnectState::new(None);
+        for attempt in 1..MAX_FAILED_ATTEMPTS_WITHOUT_PROGRESS {
+            assert!(state.record_failure(t0, &"down").is_ok());
+            assert_eq!(state.failed_attempts, attempt);
+        }
+        let error = state.record_failure(t0, &"down").unwrap_err().to_string();
+        assert!(error.contains("30 consecutive failed attempts"), "{error}");
+
+        state.record_progress();
+        assert_eq!(state.failed_attempts, 0);
+        assert!(state.record_failure(t0, &"down").is_ok());
     }
 
     #[test]
