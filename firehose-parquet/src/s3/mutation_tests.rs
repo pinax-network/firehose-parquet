@@ -19,6 +19,7 @@ enum LostResponse {
 #[derive(Default)]
 struct Observed {
     requests: Vec<String>,
+    authorization_present: Vec<bool>,
     body: Vec<u8>,
 }
 
@@ -136,6 +137,9 @@ async fn handle(
     let first = {
         let mut state = observed.lock().unwrap();
         state.requests.push(method.clone());
+        state.authorization_present.push(headers.lines().any(|line| {
+            line.split_once(':').is_some_and(|(key, _)| key.eq_ignore_ascii_case("authorization"))
+        }));
         if method == "PUT" {
             state.body = input[header_end..header_end + length].to_vec();
         }
@@ -259,5 +263,25 @@ async fn read_builder_retains_read_retry_policy() {
     .await
     .unwrap()
     .unwrap();
+    assert_eq!(server.finish().await, ["GET", "GET"]);
+}
+
+#[tokio::test]
+async fn anonymous_read_keeps_unsigned_requests_and_read_retries() {
+    let server = Server::start(LostResponse::Close).await;
+    let config = AwsConfig {
+        aws_access_key_id: None,
+        aws_secret_access_key: None,
+        aws_session_token: None,
+        aws_region: Some("us-east-1".into()),
+        aws_endpoint_url: Some(server.endpoint.clone()),
+    };
+    let client = store_builder(&config, "public", S3Operation::ReadOnly,
+        CredentialPolicy::AnonymousWithoutAccessKey).unwrap()
+        .with_allow_http(true).build().unwrap();
+    tokio::time::timeout(Duration::from_secs(5),
+        client.get(&object_store::path::Path::from("part.parquet")))
+        .await.unwrap().unwrap();
+    assert_eq!(server.observed.lock().unwrap().authorization_present, [false, false]);
     assert_eq!(server.finish().await, ["GET", "GET"]);
 }
