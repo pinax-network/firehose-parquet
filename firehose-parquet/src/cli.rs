@@ -650,7 +650,7 @@ Lookup order:
     },
     /// Verify deterministic partition merkle roots for table parquet data.
     ///
-    /// Reads parquet data, computes partition-level roots, compares to
+    /// Reads parquet data, computes partition-level `merkle_v2` roots, compares to
     /// `merkle_roots.parquet`, and optionally writes missing/updated entries.
     #[command(after_long_help = "\
 Examples:
@@ -685,6 +685,9 @@ Examples:
 
   # Update mismatched registry roots (default behavior only fills missing roots)
   fireparq verify ./output/evm/mainnet/blocks --update-registry
+
+  # Rebuild a registry written with an older Merkle version (e.g. legacy merkle_v1 roots)
+  fireparq verify ./output/evm/mainnet/blocks --update-registry --no-fail-fast
 
 Lookup order for the data path:
   1. Explicit s3://bucket/... URIs are used as-is.
@@ -738,7 +741,7 @@ Lookup order for the data path:
         /// Explicit merkle roots registry path (local or s3://)
         #[arg(long, help_heading = "Registry")]
         registry_path: Option<String>,
-        /// Overwrite mismatched roots in the registry with computed values
+        /// Overwrite mismatched roots (including roots from an older Merkle version) in the registry with computed values
         #[arg(long, default_value = "false", help_heading = "Registry")]
         update_registry: bool,
         /// AWS access key ID (for S3 paths)

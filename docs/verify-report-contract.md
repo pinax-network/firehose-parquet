@@ -12,11 +12,18 @@ This document defines the versioned JSON report contract emitted by `fireparq ve
 ## Schema Versioning
 
 - Contract field: `report_schema_version`
-- Current version: `1.0.0`
+- Current version: `2.0.0`
 - Policy:
   - Backward-compatible additions increment **minor**.
   - Breaking shape/semantic changes increment **major**.
   - Consumers should gate parsing on `report_schema_version`.
+
+### Version History
+
+| Version | Change |
+|---------|--------|
+| `2.0.0` | Roots use the `merkle_v2` construction, so `computed_root` changes for identical data. Added `merkle_version`. |
+| `1.0.0` | Initial contract. Roots used the legacy `merkle_v1` construction. |
 
 ## Required Run Metadata
 
@@ -33,7 +40,24 @@ Each report includes stable run-level metadata:
 - `requested_checks`
 - `effective_checks`
 - `algorithm`
+- `merkle_version`
 - `registry_path`
+
+## Root Comparability
+
+A root is defined by the data plus two fields:
+
+- `algorithm`: hash strategy (`keccak256` or `sha256`)
+- `merkle_version`: Merkle construction (currently `merkle_v2`), specified in `docs/verifiability-hash-strategy.md`
+
+Roots are comparable only when both fields are equal. Future changes to row encoding or tree construction bump `merkle_version`, so consumers that compare roots must check it, not only `report_schema_version`.
+
+When a registry row was written with a different `algorithm` or `merkle_version`, the finding has `status: "mismatch"`, `expected_root` set to the registry value, and an `error` that starts with one or both of these reasons, joined by `; `:
+
+- `algorithm mismatch: registry=<registry algorithm> runtime=<algorithm>`
+- `merkle version mismatch: registry=<registry merkle_version> runtime=<merkle_version>; ...`
+
+Registries without a `merkle_version` column predate it and are read as `merkle_v1`.
 
 ## Artifact Location Contract
 

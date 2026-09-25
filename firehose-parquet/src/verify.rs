@@ -19,7 +19,20 @@ use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
 use tiny_keccak::{Hasher, Keccak};
 
-const VERIFY_REPORT_SCHEMA_VERSION: &str = "1.0.0";
+const VERIFY_REPORT_SCHEMA_VERSION: &str = "2.0.0";
+
+/// Row-to-root construction recorded as `merkle_version` in the registry and
+/// report. Bump it whenever row encoding or tree construction changes, so roots
+/// computed by an older algorithm are detected instead of silently compared.
+const MERKLE_VERSION: &str = "merkle_v2";
+/// Version assumed for registry files written before `merkle_version` existed.
+const LEGACY_MERKLE_VERSION: &str = "merkle_v1";
+
+/// Domain-separation prefixes for `merkle_v2` leaf, interior node, and
+/// row-count commitment hashes.
+const MERKLE_LEAF_PREFIX: u8 = 0x00;
+const MERKLE_NODE_PREFIX: u8 = 0x01;
+const MERKLE_ROOT_PREFIX: u8 = 0x02;
 
 #[derive(Debug, Clone, Copy, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -276,6 +289,7 @@ pub struct VerifyReport {
     pub report_json_path: Option<String>,
     pub published_report_path: Option<String>,
     pub algorithm: String,
+    pub merkle_version: String,
     pub summary: VerifySummary,
     pub findings: Vec<VerifyFinding>,
     pub protocol_findings: Vec<ProtocolCheckFinding>,
@@ -315,6 +329,7 @@ impl VerifyReport {
             println!("  published rpt: {}", report_path);
         }
         println!("  algorithm:     {}", self.algorithm);
+        println!("  merkle ver:    {}", self.merkle_version);
         println!("  partitions:    {}", self.summary.partitions_scanned);
         println!("  matches:       {}", self.summary.matches);
         println!("  missing roots: {}", self.summary.missing_expected);
@@ -432,6 +447,7 @@ struct RegistryRow {
     table: String,
     partition: String,
     algorithm: String,
+    merkle_version: String,
     merkle_root: String,
     updated_at: String,
 }
@@ -481,7 +497,10 @@ pub fn verify_parquet(
         for (partition, computed_root) in &partition_roots {
             let key = registry_key(&opts.chain, &opts.table, partition);
             match registry.get(&key) {
-                Some(row) if row.algorithm.as_str() != algorithm.as_str() => {
+                Some(row)
+                    if row.algorithm.as_str() != algorithm.as_str()
+                        || row.merkle_version != MERKLE_VERSION =>
+                {
                     mismatches += 1;
                     findings.push(VerifyFinding {
                         chain: opts.chain.clone(),
@@ -490,10 +509,7 @@ pub fn verify_parquet(
                         status: FindingStatus::Mismatch,
                         expected_root: Some(row.merkle_root.clone()),
                         computed_root: computed_root.clone(),
-                        error: Some(format!(
-                            "algorithm mismatch: registry={} runtime={}",
-                            row.algorithm, algorithm
-                        )),
+                        error: Some(incomparable_root_error(row, &algorithm)),
                     });
                     if opts.update_registry {
                         needs_registry_write = true;
@@ -504,6 +520,7 @@ pub fn verify_parquet(
                                 table: opts.table.clone(),
                                 partition: partition.clone(),
                                 algorithm: algorithm.clone(),
+                                merkle_version: MERKLE_VERSION.to_string(),
                                 merkle_root: computed_root.clone(),
                                 updated_at: now_rfc3339(),
                             },
@@ -545,6 +562,7 @@ pub fn verify_parquet(
                                 table: opts.table.clone(),
                                 partition: partition.clone(),
                                 algorithm: algorithm.clone(),
+                                merkle_version: MERKLE_VERSION.to_string(),
                                 merkle_root: computed_root.clone(),
                                 updated_at: now_rfc3339(),
                             },
@@ -573,6 +591,7 @@ pub fn verify_parquet(
                             table: opts.table.clone(),
                             partition: partition.clone(),
                             algorithm: algorithm.clone(),
+                            merkle_version: MERKLE_VERSION.to_string(),
                             merkle_root: computed_root.clone(),
                             updated_at: now_rfc3339(),
                         },
@@ -663,6 +682,7 @@ pub fn verify_parquet(
             .map(|path| path.display().to_string()),
         published_report_path,
         algorithm,
+        merkle_version: MERKLE_VERSION.to_string(),
         summary: VerifySummary {
             partitions_scanned: partition_roots.len(),
             matches,
@@ -921,15 +941,7 @@ fn read_parquet_leaves_local(
         if opts.runs_protocol() {
             run_protocol_checks_for_batch(opts, &batch, protocol_state);
         }
-        for row in 0..batch.num_rows() {
-            let mut encoded = Vec::new();
-            for (idx, field) in batch.schema().fields().iter().enumerate() {
-                append_len_prefixed(&mut encoded, field.name().as_bytes());
-                let value = array_value_bytes(batch.column(idx).as_ref(), row);
-                append_len_prefixed(&mut encoded, &value);
-            }
-            leaves.push(hash_strategy.hash(&encoded));
-        }
+        append_batch_leaves(&batch, hash_strategy, &mut leaves);
     }
 
     Ok(leaves)
@@ -955,18 +967,25 @@ fn read_parquet_leaves_s3(
         if opts.runs_protocol() {
             run_protocol_checks_for_batch(opts, &batch, protocol_state);
         }
-        for row in 0..batch.num_rows() {
-            let mut encoded = Vec::new();
-            for (idx, field) in batch.schema().fields().iter().enumerate() {
-                append_len_prefixed(&mut encoded, field.name().as_bytes());
-                let value = array_value_bytes(batch.column(idx).as_ref(), row);
-                append_len_prefixed(&mut encoded, &value);
-            }
-            leaves.push(hash_strategy.hash(&encoded));
-        }
+        append_batch_leaves(&batch, hash_strategy, &mut leaves);
     }
 
     Ok(leaves)
+}
+
+/// Appends one `merkle_v2` leaf per row: `H(0x00 || encoded_row)`, where the
+/// row encodes every column as length-prefixed name and normalized value bytes.
+fn append_batch_leaves(batch: &RecordBatch, hash_strategy: HashStrategy, out: &mut Vec<[u8; 32]>) {
+    let schema = batch.schema();
+    for row in 0..batch.num_rows() {
+        let mut encoded = vec![MERKLE_LEAF_PREFIX];
+        for (idx, field) in schema.fields().iter().enumerate() {
+            append_len_prefixed(&mut encoded, field.name().as_bytes());
+            let value = array_value_bytes(batch.column(idx).as_ref(), row);
+            append_len_prefixed(&mut encoded, &value);
+        }
+        out.push(hash_strategy.hash(&encoded));
+    }
 }
 
 fn append_len_prefixed(out: &mut Vec<u8>, data: &[u8]) {
@@ -1440,31 +1459,43 @@ fn array_value_bytes(array: &dyn Array, row: usize) -> Vec<u8> {
     }
 }
 
+/// Computes a `merkle_v2` partition root over row leaves.
+///
+/// Interior nodes are `H(0x01 || left || right)` and an odd trailing node is
+/// promoted to the next level unchanged instead of being paired with itself.
+/// The tree root (`H("")` for an empty partition) is then bound to the row
+/// count as `H(0x02 || row_count_u64_le || tree_root)`, so `[a, b, c]` and
+/// `[a, b, c, c]` never share a root.
 fn merkle_root(leaves: &[[u8; 32]], hash_strategy: HashStrategy) -> [u8; 32] {
-    if leaves.is_empty() {
-        return hash_strategy.hash(&[]);
-    }
-
-    let mut level = leaves.to_vec();
-    while level.len() > 1 {
-        let mut next = Vec::with_capacity((level.len() + 1) / 2);
-        let mut i = 0usize;
-        while i < level.len() {
-            let left = level[i];
-            let right = if i + 1 < level.len() {
-                level[i + 1]
-            } else {
-                level[i]
-            };
-            let mut combined = [0u8; 64];
-            combined[..32].copy_from_slice(&left);
-            combined[32..].copy_from_slice(&right);
-            next.push(hash_strategy.hash(&combined));
-            i += 2;
+    let tree_root = if leaves.is_empty() {
+        hash_strategy.hash(&[])
+    } else {
+        let mut level = leaves.to_vec();
+        while level.len() > 1 {
+            let mut next = Vec::with_capacity(level.len().div_ceil(2));
+            for pair in level.chunks(2) {
+                match pair {
+                    [left, right] => {
+                        let mut combined = [0u8; 65];
+                        combined[0] = MERKLE_NODE_PREFIX;
+                        combined[1..33].copy_from_slice(left);
+                        combined[33..].copy_from_slice(right);
+                        next.push(hash_strategy.hash(&combined));
+                    }
+                    [odd] => next.push(*odd),
+                    _ => unreachable!("chunks(2) yields one or two nodes"),
+                }
+            }
+            level = next;
         }
-        level = next;
-    }
-    level[0]
+        level[0]
+    };
+
+    let mut committed = [0u8; 41];
+    committed[0] = MERKLE_ROOT_PREFIX;
+    committed[1..9].copy_from_slice(&(leaves.len() as u64).to_le_bytes());
+    committed[9..].copy_from_slice(&tree_root);
+    hash_strategy.hash(&committed)
 }
 
 fn collect_parquet_files(dir: &PathBuf, out: &mut Vec<PathBuf>) -> Result<()> {
@@ -1515,6 +1546,25 @@ fn registry_key(chain: &str, table: &str, partition: &str) -> String {
     format!("{chain}|{table}|{partition}")
 }
 
+/// Explains why a registry root cannot be compared with the computed root
+/// because it was produced by a different hash algorithm or Merkle version.
+fn incomparable_root_error(row: &RegistryRow, algorithm: &str) -> String {
+    let mut reasons = Vec::new();
+    if row.algorithm != algorithm {
+        reasons.push(format!(
+            "algorithm mismatch: registry={} runtime={}",
+            row.algorithm, algorithm
+        ));
+    }
+    if row.merkle_version != MERKLE_VERSION {
+        reasons.push(format!(
+            "merkle version mismatch: registry={} runtime={}; roots from different Merkle versions are not comparable, rebuild the registry from trusted data with --update-registry --no-fail-fast",
+            row.merkle_version, MERKLE_VERSION
+        ));
+    }
+    reasons.join("; ")
+}
+
 fn load_registry(
     path: &str,
     aws: Option<&AwsConfig>,
@@ -1536,6 +1586,8 @@ fn load_registry(
         let idx_table = schema.index_of("table")?;
         let idx_partition = schema.index_of("partition")?;
         let idx_algorithm = schema.index_of("algorithm")?;
+        // Registries written before merkle_v2 have no `merkle_version` column.
+        let idx_merkle_version = schema.index_of("merkle_version").ok();
         let idx_merkle_root = schema.index_of("merkle_root")?;
         let idx_updated_at = schema.index_of("updated_at")?;
 
@@ -1546,6 +1598,10 @@ fn load_registry(
                 required_string(batch.column(idx_partition).as_ref(), row, "partition")?;
             let algorithm =
                 required_string(batch.column(idx_algorithm).as_ref(), row, "algorithm")?;
+            let merkle_version = match idx_merkle_version {
+                Some(idx) => required_string(batch.column(idx).as_ref(), row, "merkle_version")?,
+                None => LEGACY_MERKLE_VERSION.to_string(),
+            };
             let merkle_root =
                 required_string(batch.column(idx_merkle_root).as_ref(), row, "merkle_root")?;
             let updated_at =
@@ -1558,6 +1614,7 @@ fn load_registry(
                     table,
                     partition,
                     algorithm,
+                    merkle_version,
                     merkle_root,
                     updated_at,
                 },
@@ -1599,6 +1656,8 @@ fn write_registry(
     let table_values: Vec<&str> = ordered.iter().map(|r| r.table.as_str()).collect();
     let partition_values: Vec<&str> = ordered.iter().map(|r| r.partition.as_str()).collect();
     let algorithm_values: Vec<&str> = ordered.iter().map(|r| r.algorithm.as_str()).collect();
+    let merkle_version_values: Vec<&str> =
+        ordered.iter().map(|r| r.merkle_version.as_str()).collect();
     let merkle_values: Vec<&str> = ordered.iter().map(|r| r.merkle_root.as_str()).collect();
     let updated_values: Vec<&str> = ordered.iter().map(|r| r.updated_at.as_str()).collect();
 
@@ -1607,6 +1666,7 @@ fn write_registry(
         arrow::datatypes::Field::new("table", arrow::datatypes::DataType::Utf8, false),
         arrow::datatypes::Field::new("partition", arrow::datatypes::DataType::Utf8, false),
         arrow::datatypes::Field::new("algorithm", arrow::datatypes::DataType::Utf8, false),
+        arrow::datatypes::Field::new("merkle_version", arrow::datatypes::DataType::Utf8, false),
         arrow::datatypes::Field::new("merkle_root", arrow::datatypes::DataType::Utf8, false),
         arrow::datatypes::Field::new("updated_at", arrow::datatypes::DataType::Utf8, false),
     ]);
@@ -1618,6 +1678,7 @@ fn write_registry(
             std::sync::Arc::new(StringArray::from(table_values)),
             std::sync::Arc::new(StringArray::from(partition_values)),
             std::sync::Arc::new(StringArray::from(algorithm_values)),
+            std::sync::Arc::new(StringArray::from(merkle_version_values)),
             std::sync::Arc::new(StringArray::from(merkle_values)),
             std::sync::Arc::new(StringArray::from(updated_values)),
         ],
@@ -1709,7 +1770,215 @@ fn read_registry_bytes(path: &str, aws: Option<&AwsConfig>) -> Result<Option<Vec
 
 #[cfg(test)]
 mod tests {
-    use super::{derive_run_report_path, VerifyCheck, VerifyOptions, VerifyProfile, VerifyScope};
+    use super::{
+        append_batch_leaves, derive_run_report_path, load_registry, merkle_root, registry_key,
+        verify_parquet, FindingStatus, HashStrategy, VerifyCheck, VerifyOptions, VerifyProfile,
+        VerifyScope,
+    };
+    use arrow::array::{ArrayRef, StringArray, UInt64Array};
+    use arrow::datatypes::{DataType, Field, Schema};
+    use arrow::record_batch::RecordBatch;
+    use parquet::arrow::ArrowWriter;
+    use std::path::Path;
+    use std::sync::Arc;
+
+    fn write_block_nums(path: &Path, values: &[u64]) {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "block_num",
+            DataType::UInt64,
+            false,
+        )]));
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![Arc::new(UInt64Array::from(values.to_vec()))],
+        )
+        .unwrap();
+        let mut writer = ArrowWriter::try_new(std::fs::File::create(path).unwrap(), schema, None)
+            .expect("parquet writer");
+        writer.write(&batch).unwrap();
+        writer.close().unwrap();
+    }
+
+    fn roots_opts(registry_path: &Path) -> VerifyOptions {
+        let mut opts = base_opts();
+        opts.checks = vec![VerifyCheck::Roots];
+        opts.registry_path = Some(registry_path.display().to_string());
+        opts
+    }
+
+    #[test]
+    fn merkle_root_distinguishes_duplicated_trailing_leaf() {
+        let (a, b, c) = ([1u8; 32], [2u8; 32], [3u8; 32]);
+        for strategy in [HashStrategy::Keccak256, HashStrategy::Sha256] {
+            assert_ne!(
+                merkle_root(&[a, b, c], strategy),
+                merkle_root(&[a, b, c, c], strategy)
+            );
+            assert_ne!(merkle_root(&[a], strategy), merkle_root(&[a, a], strategy));
+        }
+    }
+
+    #[test]
+    fn merkle_root_matches_golden_vectors() {
+        // Independently computed with Python hashlib from the merkle_v2 spec in
+        // docs/verifiability-hash-strategy.md.
+        let leaves = [[0x11u8; 32], [0x22u8; 32], [0x33u8; 32]];
+        let root = |leaves: &[[u8; 32]]| hex::encode(merkle_root(leaves, HashStrategy::Sha256));
+
+        assert_eq!(
+            root(&leaves),
+            "79bb7e7bb65485d80aa1d3dff65e289bf1bb3b61d907f4e74479ca86f5e9284f"
+        );
+        assert_eq!(
+            root(&[leaves[0], leaves[1], leaves[2], leaves[2]]),
+            "c8a726a66e34b05683e336c825e06e6c0344a7374461742b971826398bbe4071"
+        );
+        assert_eq!(
+            root(&leaves[..1]),
+            "fa7177e96fa95228912cf7bf30ef2d53380818778322c98117119b33fbce0069"
+        );
+        assert_eq!(
+            root(&[]),
+            "f0c1e0b4cd1983b9c92909f8145cc102993e4c797489c0ba98639fd93056b82f"
+        );
+    }
+
+    #[test]
+    fn verify_detects_duplicated_trailing_row() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let data = dir.path().join("blocks");
+        let file = data.join("date=2024-01-01").join("part-0.parquet");
+        let registry = dir.path().join("merkle_roots.parquet");
+        let opts = roots_opts(&registry);
+
+        write_block_nums(&file, &[1, 2, 3]);
+        let first = verify_parquet(data.to_str().unwrap(), None, &opts).unwrap();
+        assert_eq!(first.summary.missing_expected, 1);
+        assert!(first.summary.wrote_registry);
+
+        let second = verify_parquet(data.to_str().unwrap(), None, &opts).unwrap();
+        assert_eq!(second.summary.matches, 1);
+        assert!(second.is_valid());
+
+        // A final block re-emitted on resume duplicates the trailing row.
+        write_block_nums(&file, &[1, 2, 3, 3]);
+        let tampered = verify_parquet(data.to_str().unwrap(), None, &opts).unwrap();
+        assert_eq!(tampered.summary.mismatches, 1);
+        assert!(matches!(
+            tampered.findings[0].status,
+            FindingStatus::Mismatch
+        ));
+        assert!(!tampered.is_valid());
+    }
+
+    #[test]
+    fn row_leaf_is_domain_separated_from_nodes() {
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "block_num",
+            DataType::UInt64,
+            false,
+        )]));
+        let batch =
+            RecordBatch::try_new(schema, vec![Arc::new(UInt64Array::from(vec![1u64]))]).unwrap();
+        let mut leaves = Vec::new();
+        append_batch_leaves(&batch, HashStrategy::Sha256, &mut leaves);
+
+        // sha256(0x00 || u32le(9) || "block_num" || u32le(1) || "1")
+        assert_eq!(
+            hex::encode(leaves[0]),
+            "80b2af297ca5db8ec6ff8a35f122e313548c6a9c8583e99bcac99b6822f1decb"
+        );
+    }
+
+    /// Writes a registry in the pre-merkle_v2 layout (no `merkle_version` column).
+    fn write_legacy_registry(path: &Path, rows: &[(&str, &str)]) {
+        let columns = [
+            "chain",
+            "table",
+            "partition",
+            "algorithm",
+            "merkle_root",
+            "updated_at",
+        ];
+        let schema = Arc::new(Schema::new(
+            columns
+                .iter()
+                .map(|name| Field::new(*name, DataType::Utf8, false))
+                .collect::<Vec<_>>(),
+        ));
+        let column = |values: Vec<&str>| Arc::new(StringArray::from(values)) as ArrayRef;
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                column(rows.iter().map(|_| "evm").collect()),
+                column(rows.iter().map(|_| "blocks").collect()),
+                column(rows.iter().map(|(partition, _)| *partition).collect()),
+                column(rows.iter().map(|_| "keccak256").collect()),
+                column(rows.iter().map(|(_, root)| *root).collect()),
+                column(rows.iter().map(|_| "2026-01-01T00:00:00Z").collect()),
+            ],
+        )
+        .unwrap();
+        let mut writer =
+            ArrowWriter::try_new(std::fs::File::create(path).unwrap(), schema, None).unwrap();
+        writer.write(&batch).unwrap();
+        writer.close().unwrap();
+    }
+
+    #[test]
+    fn legacy_registry_rows_are_flagged_and_rebuilt_on_update() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let data = dir.path().join("blocks");
+        write_block_nums(
+            &data.join("date=2024-01-01").join("part-0.parquet"),
+            &[1, 2, 3],
+        );
+        let registry = dir.path().join("merkle_roots.parquet");
+        let legacy_root = "11".repeat(32);
+        write_legacy_registry(
+            &registry,
+            &[
+                ("date=2023-12-31", legacy_root.as_str()),
+                ("date=2024-01-01", legacy_root.as_str()),
+            ],
+        );
+        let registry_str = registry.display().to_string();
+        let mut opts = roots_opts(&registry);
+
+        let (_, rows) = load_registry(&registry_str, None).unwrap();
+        assert!(rows.values().all(|r| r.merkle_version == "merkle_v1"));
+
+        let legacy = verify_parquet(data.to_str().unwrap(), None, &opts).unwrap();
+        assert_eq!(legacy.merkle_version, "merkle_v2");
+        assert_eq!(legacy.summary.mismatches, 1);
+        assert!(!legacy.summary.wrote_registry);
+        assert!(!legacy.is_valid());
+        let error = legacy.findings[0].error.as_deref().unwrap();
+        assert!(
+            error.starts_with("merkle version mismatch: registry=merkle_v1 runtime=merkle_v2"),
+            "unexpected error: {error}"
+        );
+        assert!(error.contains("--update-registry"));
+
+        opts.update_registry = true;
+        let rebuild = verify_parquet(data.to_str().unwrap(), None, &opts).unwrap();
+        assert!(rebuild.summary.wrote_registry);
+
+        let (_, rows) = load_registry(&registry_str, None).unwrap();
+        let rebuilt = &rows[&registry_key("evm", "blocks", "date=2024-01-01")];
+        assert_eq!(rebuilt.merkle_version, "merkle_v2");
+        assert_eq!(rebuilt.merkle_root, rebuild.findings[0].computed_root);
+        // Rows outside the scanned data keep an explicit legacy label.
+        let untouched = &rows[&registry_key("evm", "blocks", "date=2023-12-31")];
+        assert_eq!(untouched.merkle_version, "merkle_v1");
+        assert_eq!(untouched.merkle_root, legacy_root);
+
+        opts.update_registry = false;
+        let after = verify_parquet(data.to_str().unwrap(), None, &opts).unwrap();
+        assert_eq!(after.summary.matches, 1);
+        assert!(after.is_valid());
+    }
 
     fn base_opts() -> VerifyOptions {
         VerifyOptions {

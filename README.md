@@ -725,6 +725,8 @@ Lookup order for the data path matches `scan` / `inspect`: explicit `s3://...` U
 
 Migration note: existing verify flags (`--no-fail-fast`, `--report-json`, `--registry-path`, `--update-registry`) remain unchanged.
 
+Roots use the versioned `merkle_v2` construction, recorded as `merkle_version` in `merkle_roots.parquet` and in the report. Registries written by v0.7.1 and earlier hold legacy `merkle_v1` roots: `verify` reports them as mismatches until they are rebuilt with `--update-registry --no-fail-fast`. See the [runbook](docs/verifiability-artifact-runbook.md#migrating-a-legacy-merkle_v1-registry) for the procedure.
+
 See [Cross-chain verifiability hash strategy](docs/verifiability-hash-strategy.md) for defaults and normalization rules.
 
 See [Verify report contract](docs/verify-report-contract.md) for schema versioning, run metadata fields, and artifact path guidance.
