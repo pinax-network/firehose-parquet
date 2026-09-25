@@ -1,0 +1,540 @@
+{
+  "source": {
+    "before": "f555898100fbfb486e97f40162c71b223112a94f clean main",
+    "after": "937988353161eb0d1fe3d4c878454e31e48a9491 plus reviewed issue522 source changes",
+    "combined_validation_base": "b364681",
+    "note": "The benchmark binaries are immutable copies identified by SHA256. Final source was then integrated with the transport-only main update and tested separately."
+  },
+  "runs": {
+    "encoded_target_4mib": {
+      "platform": "macOS-26.5.1-arm64-arm-64bit-Mach-O",
+      "samples_per_version": 3,
+      "serialization_lock": "/tmp/fireparq-cargo-session.lock",
+      "started_at": "2026-09-25T20:17:10.020635+00:00",
+      "duckdb_version": "v1.1.1 af39bd0dcf",
+      "input_fixture_sha256": "d4bfb20e15e871380a5358e435dd881ea0b42b9a42ba484eef69e2ef32b7fee0",
+      "configuration": {
+        "flush_bytes": 4194304,
+        "compression": "zstd",
+        "rows_per_input": 8192,
+        "columns": 33
+      },
+      "method": "Whole CLI, cached local files, debug builds with debuginfo disabled; includes startup and two-pass decoding. Inputs are identical file copies. macOS time peak RSS is bytes. Output verification is outside the measured process.",
+      "binaries": {
+        "before": {
+          "path": "/tmp/fireparq-522-before",
+          "sha256": "0080ee8a07e6bc073a84f4bd9646ec1cb275a79a39b6e501695379a21b975604"
+        },
+        "after": {
+          "path": "/tmp/fireparq-522-final-after",
+          "sha256": "012ebf43673cac89e266d916227fa7c304f87afb064c712974e62a1dbbc65ab2"
+        }
+      },
+      "datasets": [
+        {
+          "input_files": 8,
+          "input_bytes": 17405984,
+          "input_rows": 65536,
+          "samples": {
+            "before": [
+              {
+                "elapsed_ms": 771.88025,
+                "user_seconds": 0.72,
+                "system_seconds": 0.02,
+                "peak_rss_bytes": 100204544,
+                "output_files": 1,
+                "output_bytes": 3737729,
+                "difference_rows": 0
+              },
+              {
+                "elapsed_ms": 740.117833,
+                "user_seconds": 0.71,
+                "system_seconds": 0.01,
+                "peak_rss_bytes": 99483648,
+                "output_files": 1,
+                "output_bytes": 3737729,
+                "difference_rows": 0
+              },
+              {
+                "elapsed_ms": 741.089875,
+                "user_seconds": 0.71,
+                "system_seconds": 0.01,
+                "peak_rss_bytes": 100122624,
+                "output_files": 1,
+                "output_bytes": 3737729,
+                "difference_rows": 0
+              }
+            ],
+            "after": [
+              {
+                "elapsed_ms": 781.713333,
+                "user_seconds": 0.75,
+                "system_seconds": 0.02,
+                "peak_rss_bytes": 75055104,
+                "output_files": 1,
+                "output_bytes": 3661564,
+                "difference_rows": 0
+              },
+              {
+                "elapsed_ms": 780.818459,
+                "user_seconds": 0.75,
+                "system_seconds": 0.02,
+                "peak_rss_bytes": 74858496,
+                "output_files": 1,
+                "output_bytes": 3661564,
+                "difference_rows": 0
+              },
+              {
+                "elapsed_ms": 792.924042,
+                "user_seconds": 0.76,
+                "system_seconds": 0.02,
+                "peak_rss_bytes": 74907648,
+                "output_files": 1,
+                "output_bytes": 3661564,
+                "difference_rows": 0
+              }
+            ]
+          },
+          "medians": {
+            "before": {
+              "elapsed_ms": 741.089875,
+              "user_seconds": 0.71,
+              "system_seconds": 0.01,
+              "peak_rss_bytes": 100122624
+            },
+            "after": {
+              "elapsed_ms": 781.713333,
+              "user_seconds": 0.75,
+              "system_seconds": 0.02,
+              "peak_rss_bytes": 74907648
+            }
+          }
+        },
+        {
+          "input_files": 32,
+          "input_bytes": 69623936,
+          "input_rows": 262144,
+          "samples": {
+            "before": [
+              {
+                "elapsed_ms": 5487.010666,
+                "user_seconds": 5.34,
+                "system_seconds": 0.06,
+                "peak_rss_bytes": 222642176,
+                "output_files": 2,
+                "output_bytes": 10201479,
+                "difference_rows": 0
+              },
+              {
+                "elapsed_ms": 5369.2675,
+                "user_seconds": 5.3,
+                "system_seconds": 0.05,
+                "peak_rss_bytes": 224264192,
+                "output_files": 2,
+                "output_bytes": 10201479,
+                "difference_rows": 0
+              },
+              {
+                "elapsed_ms": 5403.213291,
+                "user_seconds": 5.33,
+                "system_seconds": 0.05,
+                "peak_rss_bytes": 221855744,
+                "output_files": 2,
+                "output_bytes": 10201479,
+                "difference_rows": 0
+              }
+            ],
+            "after": [
+              {
+                "elapsed_ms": 3103.650042,
+                "user_seconds": 3.03,
+                "system_seconds": 0.05,
+                "peak_rss_bytes": 82313216,
+                "output_files": 4,
+                "output_bytes": 14646066,
+                "difference_rows": 0
+              },
+              {
+                "elapsed_ms": 3083.176833,
+                "user_seconds": 3.01,
+                "system_seconds": 0.05,
+                "peak_rss_bytes": 78495744,
+                "output_files": 4,
+                "output_bytes": 14646066,
+                "difference_rows": 0
+              },
+              {
+                "elapsed_ms": 3070.266125,
+                "user_seconds": 3.0,
+                "system_seconds": 0.05,
+                "peak_rss_bytes": 77578240,
+                "output_files": 4,
+                "output_bytes": 14646066,
+                "difference_rows": 0
+              }
+            ]
+          },
+          "medians": {
+            "before": {
+              "elapsed_ms": 5403.213291,
+              "user_seconds": 5.33,
+              "system_seconds": 0.05,
+              "peak_rss_bytes": 222642176
+            },
+            "after": {
+              "elapsed_ms": 3083.176833,
+              "user_seconds": 3.01,
+              "system_seconds": 0.05,
+              "peak_rss_bytes": 78495744
+            }
+          }
+        },
+        {
+          "input_files": 128,
+          "input_bytes": 278495744,
+          "input_rows": 1048576,
+          "samples": {
+            "before": [
+              {
+                "elapsed_ms": 21222.072792,
+                "user_seconds": 20.99,
+                "system_seconds": 0.2,
+                "peak_rss_bytes": 690929664,
+                "output_files": 7,
+                "output_bytes": 39073086,
+                "difference_rows": 0
+              },
+              {
+                "elapsed_ms": 21294.123541,
+                "user_seconds": 21.05,
+                "system_seconds": 0.19,
+                "peak_rss_bytes": 695877632,
+                "output_files": 7,
+                "output_bytes": 39073086,
+                "difference_rows": 0
+              },
+              {
+                "elapsed_ms": 21393.522875,
+                "user_seconds": 21.11,
+                "system_seconds": 0.19,
+                "peak_rss_bytes": 692633600,
+                "output_files": 7,
+                "output_bytes": 39073086,
+                "difference_rows": 0
+              }
+            ],
+            "after": [
+              {
+                "elapsed_ms": 12220.936125,
+                "user_seconds": 11.98,
+                "system_seconds": 0.2,
+                "peak_rss_bytes": 98238464,
+                "output_files": 15,
+                "output_bytes": 54989162,
+                "difference_rows": 0
+              },
+              {
+                "elapsed_ms": 12122.880958,
+                "user_seconds": 11.9,
+                "system_seconds": 0.19,
+                "peak_rss_bytes": 91865088,
+                "output_files": 15,
+                "output_bytes": 54989162,
+                "difference_rows": 0
+              },
+              {
+                "elapsed_ms": 12943.048542,
+                "user_seconds": 12.53,
+                "system_seconds": 0.22,
+                "peak_rss_bytes": 102137856,
+                "output_files": 15,
+                "output_bytes": 54989162,
+                "difference_rows": 0
+              }
+            ]
+          },
+          "medians": {
+            "before": {
+              "elapsed_ms": 21294.123541,
+              "user_seconds": 21.05,
+              "system_seconds": 0.19,
+              "peak_rss_bytes": 692633600
+            },
+            "after": {
+              "elapsed_ms": 12220.936125,
+              "user_seconds": 11.98,
+              "system_seconds": 0.2,
+              "peak_rss_bytes": 98238464
+            }
+          }
+        }
+      ],
+      "completed_at": "2026-09-25T20:19:40.032401+00:00"
+    },
+    "encoded_target_32mib": {
+      "platform": "macOS-26.5.1-arm64-arm-64bit-Mach-O",
+      "samples_per_version": 3,
+      "serialization_lock": "/tmp/fireparq-cargo-session.lock",
+      "started_at": "2026-09-25T20:24:58.704213+00:00",
+      "duckdb_version": "v1.1.1 af39bd0dcf",
+      "input_fixture_sha256": "d4bfb20e15e871380a5358e435dd881ea0b42b9a42ba484eef69e2ef32b7fee0",
+      "configuration": {
+        "flush_bytes": 33554432,
+        "compression": "zstd",
+        "rows_per_input": 8192,
+        "columns": 33
+      },
+      "method": "Whole CLI, cached local files, debug builds with debuginfo disabled; includes startup and two-pass decoding. Inputs are identical file copies. macOS time peak RSS is bytes. Output verification is outside the measured process.",
+      "binaries": {
+        "before": {
+          "path": "/tmp/fireparq-522-before",
+          "sha256": "0080ee8a07e6bc073a84f4bd9646ec1cb275a79a39b6e501695379a21b975604"
+        },
+        "after": {
+          "path": "/tmp/fireparq-522-final-after",
+          "sha256": "012ebf43673cac89e266d916227fa7c304f87afb064c712974e62a1dbbc65ab2"
+        }
+      },
+      "datasets": [
+        {
+          "input_files": 8,
+          "input_bytes": 17405984,
+          "input_rows": 65536,
+          "samples": {
+            "before": [
+              {
+                "elapsed_ms": 764.548,
+                "user_seconds": 0.71,
+                "system_seconds": 0.03,
+                "peak_rss_bytes": 103645184,
+                "output_files": 1,
+                "output_bytes": 3737729,
+                "difference_rows": 0
+              },
+              {
+                "elapsed_ms": 748.541083,
+                "user_seconds": 0.72,
+                "system_seconds": 0.02,
+                "peak_rss_bytes": 100433920,
+                "output_files": 1,
+                "output_bytes": 3737729,
+                "difference_rows": 0
+              },
+              {
+                "elapsed_ms": 742.872333,
+                "user_seconds": 0.71,
+                "system_seconds": 0.01,
+                "peak_rss_bytes": 99860480,
+                "output_files": 1,
+                "output_bytes": 3737729,
+                "difference_rows": 0
+              }
+            ],
+            "after": [
+              {
+                "elapsed_ms": 799.861209,
+                "user_seconds": 0.75,
+                "system_seconds": 0.03,
+                "peak_rss_bytes": 77447168,
+                "output_files": 1,
+                "output_bytes": 3661564,
+                "difference_rows": 0
+              },
+              {
+                "elapsed_ms": 782.356083,
+                "user_seconds": 0.75,
+                "system_seconds": 0.02,
+                "peak_rss_bytes": 74465280,
+                "output_files": 1,
+                "output_bytes": 3661564,
+                "difference_rows": 0
+              },
+              {
+                "elapsed_ms": 778.205625,
+                "user_seconds": 0.75,
+                "system_seconds": 0.02,
+                "peak_rss_bytes": 74743808,
+                "output_files": 1,
+                "output_bytes": 3661564,
+                "difference_rows": 0
+              }
+            ]
+          },
+          "medians": {
+            "before": {
+              "elapsed_ms": 748.541083,
+              "user_seconds": 0.71,
+              "system_seconds": 0.02,
+              "peak_rss_bytes": 100433920
+            },
+            "after": {
+              "elapsed_ms": 782.356083,
+              "user_seconds": 0.75,
+              "system_seconds": 0.02,
+              "peak_rss_bytes": 74743808
+            }
+          }
+        },
+        {
+          "input_files": 32,
+          "input_bytes": 69623936,
+          "input_rows": 262144,
+          "samples": {
+            "before": [
+              {
+                "elapsed_ms": 2770.275167,
+                "user_seconds": 2.65,
+                "system_seconds": 0.05,
+                "peak_rss_bytes": 216629248,
+                "output_files": 1,
+                "output_bytes": 7970031,
+                "difference_rows": 0
+              },
+              {
+                "elapsed_ms": 2766.436875,
+                "user_seconds": 2.68,
+                "system_seconds": 0.05,
+                "peak_rss_bytes": 220282880,
+                "output_files": 1,
+                "output_bytes": 7970031,
+                "difference_rows": 0
+              },
+              {
+                "elapsed_ms": 2725.864958,
+                "user_seconds": 2.66,
+                "system_seconds": 0.04,
+                "peak_rss_bytes": 218693632,
+                "output_files": 1,
+                "output_bytes": 7970031,
+                "difference_rows": 0
+              }
+            ],
+            "after": [
+              {
+                "elapsed_ms": 2865.602208,
+                "user_seconds": 2.8,
+                "system_seconds": 0.05,
+                "peak_rss_bytes": 83738624,
+                "output_files": 1,
+                "output_bytes": 7860474,
+                "difference_rows": 0
+              },
+              {
+                "elapsed_ms": 2899.272583,
+                "user_seconds": 2.83,
+                "system_seconds": 0.06,
+                "peak_rss_bytes": 83476480,
+                "output_files": 1,
+                "output_bytes": 7860474,
+                "difference_rows": 0
+              },
+              {
+                "elapsed_ms": 2898.072292,
+                "user_seconds": 2.83,
+                "system_seconds": 0.05,
+                "peak_rss_bytes": 84049920,
+                "output_files": 1,
+                "output_bytes": 7860474,
+                "difference_rows": 0
+              }
+            ]
+          },
+          "medians": {
+            "before": {
+              "elapsed_ms": 2766.436875,
+              "user_seconds": 2.66,
+              "system_seconds": 0.05,
+              "peak_rss_bytes": 218693632
+            },
+            "after": {
+              "elapsed_ms": 2898.072292,
+              "user_seconds": 2.83,
+              "system_seconds": 0.05,
+              "peak_rss_bytes": 83738624
+            }
+          }
+        },
+        {
+          "input_files": 128,
+          "input_bytes": 278495744,
+          "input_rows": 1048576,
+          "samples": {
+            "before": [
+              {
+                "elapsed_ms": 10870.806042,
+                "user_seconds": 10.47,
+                "system_seconds": 0.18,
+                "peak_rss_bytes": 683638784,
+                "output_files": 1,
+                "output_bytes": 25508240,
+                "difference_rows": 0
+              },
+              {
+                "elapsed_ms": 10573.241208,
+                "user_seconds": 10.4,
+                "system_seconds": 0.14,
+                "peak_rss_bytes": 683098112,
+                "output_files": 1,
+                "output_bytes": 25508240,
+                "difference_rows": 0
+              },
+              {
+                "elapsed_ms": 10566.605958,
+                "user_seconds": 10.4,
+                "system_seconds": 0.14,
+                "peak_rss_bytes": 683458560,
+                "output_files": 1,
+                "output_bytes": 25508240,
+                "difference_rows": 0
+              }
+            ],
+            "after": [
+              {
+                "elapsed_ms": 11294.524375,
+                "user_seconds": 11.09,
+                "system_seconds": 0.18,
+                "peak_rss_bytes": 126058496,
+                "output_files": 1,
+                "output_bytes": 26978066,
+                "difference_rows": 0
+              },
+              {
+                "elapsed_ms": 11295.786916,
+                "user_seconds": 11.08,
+                "system_seconds": 0.19,
+                "peak_rss_bytes": 120078336,
+                "output_files": 1,
+                "output_bytes": 26978066,
+                "difference_rows": 0
+              },
+              {
+                "elapsed_ms": 11322.649334,
+                "user_seconds": 11.11,
+                "system_seconds": 0.19,
+                "peak_rss_bytes": 120438784,
+                "output_files": 1,
+                "output_bytes": 26978066,
+                "difference_rows": 0
+              }
+            ]
+          },
+          "medians": {
+            "before": {
+              "elapsed_ms": 10573.241208,
+              "user_seconds": 10.4,
+              "system_seconds": 0.14,
+              "peak_rss_bytes": 683458560
+            },
+            "after": {
+              "elapsed_ms": 11295.786916,
+              "user_seconds": 11.09,
+              "system_seconds": 0.19,
+              "peak_rss_bytes": 120438784
+            }
+          }
+        }
+      ],
+      "completed_at": "2026-09-25T20:26:44.450682+00:00"
+    }
+  }
+}
