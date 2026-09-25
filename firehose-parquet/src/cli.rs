@@ -1441,10 +1441,10 @@ Examples:
         /// Optional chain filter (matches `chain` column)
         #[arg(long)]
         partition_chain: Option<String>,
-        /// Lower bound (inclusive) for partition_start_ts (`YYYY-MM-DD HH:MM:SS`)
+        /// Lower bound (inclusive) on the partition value (`YYYY-MM-DD HH:MM:SS`, or a start block for block_range)
         #[arg(long)]
         from: Option<String>,
-        /// Upper bound (inclusive) for partition_start_ts (`YYYY-MM-DD HH:MM:SS`)
+        /// Upper bound (inclusive) on the partition value (`YYYY-MM-DD HH:MM:SS`, or a start block for block_range)
         #[arg(long)]
         to: Option<String>,
         /// Total number of shards
@@ -1503,13 +1503,13 @@ Examples:
         /// Optional chain filter (matches `chain` column)
         #[arg(long)]
         partition_chain: Option<String>,
-        /// Lower bound (inclusive) for partition_start_ts (`YYYY-MM-DD HH:MM:SS`)
+        /// Lower bound (inclusive) on the partition value (`YYYY-MM-DD HH:MM:SS`, or a start block for block_range)
         #[arg(long)]
         from: Option<String>,
-        /// Upper bound (inclusive) for partition_start_ts (`YYYY-MM-DD HH:MM:SS`)
+        /// Upper bound (inclusive) on the partition value (`YYYY-MM-DD HH:MM:SS`, or a start block for block_range)
         #[arg(long)]
         to: Option<String>,
-        /// Maximum rows to return (sorted ascending by partition_start_ts)
+        /// Maximum rows to return (sorted ascending by numeric partition value)
         #[arg(long, default_value = "100")]
         limit: usize,
         /// Emit machine-readable JSON output
@@ -1556,7 +1556,7 @@ Examples:
         /// Partition type to resolve (e.g. hour, date)
         #[arg(long)]
         partition_type: String,
-        /// Partition value to resolve (e.g. "2015-07-30 15:00:00")
+        /// Partition value to resolve (e.g. "2015-07-30 15:00:00", or a start block for block_range)
         #[arg(long)]
         partition_value: String,
         /// Optional chain filter (matches `chain` column)
@@ -1931,15 +1931,7 @@ impl PartitionIndexBuilder {
             }
         }
 
-        self.rows.sort_by(|left, right| {
-            left.partition_type
-                .cmp(&right.partition_type)
-                .then_with(|| left.partition_start_ts.cmp(&right.partition_start_ts))
-                .then_with(|| left.start_block.cmp(&right.start_block))
-                .then_with(|| left.stop_block.cmp(&right.stop_block))
-        });
-
-        Ok(self.rows)
+        sort_partition_build_rows(self.rows)
     }
 
     pub fn snapshot(&self, stop_block: u64) -> anyhow::Result<Vec<PartitionBuildRow>> {
@@ -1963,15 +1955,7 @@ impl PartitionIndexBuilder {
             }
         }
 
-        rows.sort_by(|left, right| {
-            left.partition_type
-                .cmp(&right.partition_type)
-                .then_with(|| left.partition_start_ts.cmp(&right.partition_start_ts))
-                .then_with(|| left.start_block.cmp(&right.start_block))
-                .then_with(|| left.stop_block.cmp(&right.stop_block))
-        });
-
-        Ok(rows)
+        sort_partition_build_rows(rows)
     }
 
     pub fn current_frontier(&self) -> Option<u64> {
@@ -2013,10 +1997,11 @@ impl PartitionIndexBuilder {
                 .iter()
                 .enumerate()
                 .filter(|(_, row)| row.partition_type == partition_type.as_str())
-                .collect::<Vec<_>>();
+                .map(|(index, row)| Ok((row.partition_key()?, index, row)))
+                .collect::<anyhow::Result<Vec<_>>>()?;
             sort_resume_rows(partition_type, &mut matching);
 
-            let Some((last_index, last_row)) = matching.pop() else {
+            let Some((_, last_index, last_row)) = matching.pop() else {
                 anyhow::bail!(
                     "cannot resume partition build for chain {}: missing existing rows for partition type {}",
                     chain,
@@ -2093,28 +2078,28 @@ impl PartitionIndexBuilder {
     }
 }
 
+/// Sort `(partition_key, index, row)` resume candidates so the terminal row is last.
 fn sort_resume_rows(
     partition_type: PartitionBuildType,
-    matching: &mut Vec<(usize, &PartitionBuildRow)>,
+    matching: &mut [(u64, usize, &PartitionBuildRow)],
 ) {
-    matching.sort_by(|left, right| match partition_type {
-        PartitionBuildType::BlockRange => left
-            .1
-            .start_block
-            .cmp(&right.1.start_block)
-            .then_with(|| left.1.stop_block.cmp(&right.1.stop_block))
-            .then_with(|| left.1.partition_start_ts.cmp(&right.1.partition_start_ts)),
-        _ => left
-            .1
-            .partition_start_ts
-            .cmp(&right.1.partition_start_ts)
-            .then_with(|| left.1.start_block.cmp(&right.1.start_block))
-            .then_with(|| left.1.stop_block.cmp(&right.1.stop_block)),
-    });
+    matching.sort_by(
+        |(left_key, _, left), (right_key, _, right)| match partition_type {
+            PartitionBuildType::BlockRange => left
+                .start_block
+                .cmp(&right.start_block)
+                .then_with(|| left.stop_block.cmp(&right.stop_block))
+                .then_with(|| left_key.cmp(right_key)),
+            _ => left_key
+                .cmp(right_key)
+                .then_with(|| left.start_block.cmp(&right.start_block))
+                .then_with(|| left.stop_block.cmp(&right.stop_block)),
+        },
+    );
 }
 
 fn validate_block_range_resume_rows(
-    completed_rows: &[(usize, &PartitionBuildRow)],
+    completed_rows: &[(u64, usize, &PartitionBuildRow)],
     terminal_row: &PartitionBuildRow,
 ) -> anyhow::Result<u64> {
     let block_range_size = u64::try_from(terminal_row.partition_interval_seconds)
@@ -2130,7 +2115,7 @@ fn validate_block_range_resume_rows(
     let mut previous: Option<&PartitionBuildRow> = None;
     for row in completed_rows
         .iter()
-        .map(|(_, row)| *row)
+        .map(|(_, _, row)| *row)
         .chain(std::iter::once(terminal_row))
     {
         if row.start_block >= row.stop_block {
@@ -2580,10 +2565,85 @@ fn parse_partition_timestamp(value: &str) -> anyhow::Result<i64> {
         .unix_timestamp())
 }
 
+/// Numeric key of a partition value, matching the canonical `partition` column: the
+/// start block for `block_range` partitions and UTC epoch seconds for time-based
+/// partitions (`YYYY-MM-DD HH:MM:SS`).
+///
+/// Partition rows must be ordered and range-filtered on this key rather than on the
+/// rendered string, because block numbers do not sort lexicographically
+/// (`"10000000" < "8000000"`).
+pub fn partition_value_key(partition_type: &str, partition_value: &str) -> anyhow::Result<u64> {
+    if PartitionBuildType::from_cli_value(partition_type)? == PartitionBuildType::BlockRange {
+        return partition_value.parse::<u64>().map_err(|error| {
+            anyhow::anyhow!(
+                "'{partition_value}' is not a valid block_range partition value: expected a start block number ({error})"
+            )
+        });
+    }
+
+    let timestamp = parse_partition_timestamp(partition_value).map_err(|error| {
+        anyhow::anyhow!(
+            "'{partition_value}' is not a valid {partition_type} partition value: expected YYYY-MM-DD HH:MM:SS ({error})"
+        )
+    })?;
+    u64::try_from(timestamp).map_err(|_| {
+        anyhow::anyhow!(
+            "'{partition_value}' is not a valid {partition_type} partition value: timestamps before 1970-01-01 00:00:00 are not supported"
+        )
+    })
+}
+
+impl PartitionBuildRow {
+    /// Numeric partition key used for ordering and range filters (see [`partition_value_key`]).
+    pub fn partition_key(&self) -> anyhow::Result<u64> {
+        partition_value_key(&self.partition_type, &self.partition_value)
+    }
+}
+
+/// Order rows by partition type, then numeric partition key, then block bounds.
+fn sort_keyed_partition_rows(rows: &mut [(u64, PartitionBuildRow)]) {
+    rows.sort_by(|(left_key, left), (right_key, right)| {
+        left.partition_type
+            .cmp(&right.partition_type)
+            .then_with(|| left_key.cmp(right_key))
+            .then_with(|| left.start_block.cmp(&right.start_block))
+            .then_with(|| left.stop_block.cmp(&right.stop_block))
+    });
+}
+
+fn sort_partition_build_rows(
+    rows: Vec<PartitionBuildRow>,
+) -> anyhow::Result<Vec<PartitionBuildRow>> {
+    let mut keyed = rows
+        .into_iter()
+        .map(|row| Ok((row.partition_key()?, row)))
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    sort_keyed_partition_rows(&mut keyed);
+    Ok(keyed.into_iter().map(|(_, row)| row).collect())
+}
+
+/// Parse a user-supplied partition bound (for example `--from`) against a partition type.
+fn parse_partition_bound(flag: &str, partition_type: &str, value: &str) -> anyhow::Result<u64> {
+    partition_value_key(partition_type, value)
+        .map_err(|error| anyhow::anyhow!("invalid {flag}: {error}"))
+}
+
 pub fn read_partitions_build_rows(
     path: &str,
     aws: Option<&AwsConfig>,
 ) -> anyhow::Result<Vec<PartitionBuildRow>> {
+    Ok(read_keyed_partitions_build_rows(path, aws)?
+        .into_iter()
+        .map(|(_, row)| row)
+        .collect())
+}
+
+/// Read `partitions.parquet` rows paired with their numeric `partition` column value,
+/// sorted by partition type, partition key, and block bounds.
+fn read_keyed_partitions_build_rows(
+    path: &str,
+    aws: Option<&AwsConfig>,
+) -> anyhow::Result<Vec<(u64, PartitionBuildRow)>> {
     let path = resolve_parquet_input_path_string(path);
     use arrow::array::{
         Array, Int32Array, Int64Array, LargeStringArray, StringArray, TimestampSecondArray,
@@ -2661,7 +2721,7 @@ pub fn read_partitions_build_rows(
 
     fn collect_rows(
         batch: &arrow::record_batch::RecordBatch,
-        rows: &mut Vec<PartitionBuildRow>,
+        rows: &mut Vec<(u64, PartitionBuildRow)>,
         read_utf8_value: &impl Fn(&dyn Array, usize) -> anyhow::Result<Option<String>>,
         read_u64_value: &impl Fn(&dyn Array, usize) -> anyhow::Result<Option<u64>>,
         file_ctx: &PartitionsFileContext,
@@ -2725,17 +2785,20 @@ pub fn read_partitions_build_rows(
                     .flatten()
             });
 
-            rows.push(PartitionBuildRow {
-                partition_type: partition_type.clone(),
-                partition_interval_seconds,
-                partition_start_ts,
-                partition_value,
-                start_block,
-                stop_block,
-                start_time,
-                end_time,
-                chain,
-            });
+            rows.push((
+                partition_raw,
+                PartitionBuildRow {
+                    partition_type: partition_type.clone(),
+                    partition_interval_seconds,
+                    partition_start_ts,
+                    partition_value,
+                    start_block,
+                    stop_block,
+                    start_time,
+                    end_time,
+                    chain,
+                },
+            ));
         }
 
         Ok(())
@@ -2819,13 +2882,7 @@ pub fn read_partitions_build_rows(
         }
     }
 
-    rows.sort_by(|left, right| {
-        left.partition_type
-            .cmp(&right.partition_type)
-            .then_with(|| left.partition_start_ts.cmp(&right.partition_start_ts))
-            .then_with(|| left.start_block.cmp(&right.start_block))
-            .then_with(|| left.stop_block.cmp(&right.stop_block))
-    });
+    sort_keyed_partition_rows(&mut rows);
     Ok(rows)
 }
 
@@ -2925,28 +2982,9 @@ fn write_partitions_index_impl(
         .iter()
         .enumerate()
         .map(|(index, row)| {
-            if row.partition_type == "block_range" {
-                row.partition_value.parse::<u64>().map_err(|error| {
-                    anyhow::anyhow!(
-                        "invalid partition value for block_range row at index {}: {} ({})",
-                        index,
-                        row.partition_value,
-                        error
-                    )
-                })
-            } else {
-                parse_partition_timestamp(&row.partition_value)
-                    .map(|ts| ts as u64)
-                    .map_err(|error| {
-                        anyhow::anyhow!(
-                            "invalid partition for partition row {} ({}) at index {}: {}",
-                            row.partition_type,
-                            row.partition_value,
-                            index,
-                            error
-                        )
-                    })
-            }
+            row.partition_key().map_err(|error| {
+                anyhow::anyhow!("invalid partition for partition row at index {index}: {error}")
+            })
         })
         .collect::<anyhow::Result<Vec<_>>>()?;
 
@@ -3198,11 +3236,14 @@ fn resolve_partition_chains(
     let request = normalize_partition_bounds_request(request.clone())?;
     use std::collections::BTreeSet;
 
+    let partition_key = parse_partition_bound(
+        "--partition-value",
+        &request.partition_type,
+        &request.partition_value,
+    )?;
     let mut chains = BTreeSet::new();
-    for row in read_partitions_build_rows(&request.index_path, aws)? {
-        if row.partition_type != request.partition_type
-            || row.partition_value != request.partition_value
-        {
+    for (key, row) in read_keyed_partitions_build_rows(&request.index_path, aws)? {
+        if row.partition_type != request.partition_type || key != partition_key {
             continue;
         }
         chains.insert(row.chain);
@@ -3262,49 +3303,68 @@ pub fn list_partitions_from_index(
     if request.limit == 0 {
         anyhow::bail!("--limit must be greater than 0");
     }
-    let mut rows = read_partitions_build_rows(&request.index_path, aws)?
-        .into_iter()
-        .filter(|row| {
-            request
-                .partition_type
-                .as_deref()
-                .map(|value| row.partition_type.eq_ignore_ascii_case(value))
-                .unwrap_or(true)
-                && request
-                    .chain
-                    .as_deref()
-                    .map(|value| row.chain.as_deref() == Some(value))
-                    .unwrap_or(true)
-                && request
-                    .from
-                    .as_deref()
-                    .map(|value| row.partition_start_ts.as_str() >= value)
-                    .unwrap_or(true)
-                && request
-                    .to
-                    .as_deref()
-                    .map(|value| row.partition_start_ts.as_str() <= value)
-                    .unwrap_or(true)
-        })
-        .map(|row| PartitionListRow {
-            partition_type: row.partition_type,
-            partition_value: row.partition_value,
-            partition_start_ts: row.partition_start_ts,
-            start_block: row.start_block,
-            stop_block: row.stop_block,
-            chain: row.chain,
-        })
-        .collect::<Vec<_>>();
+
+    // `--from`/`--to` are start blocks for block_range rows and timestamps otherwise,
+    // so they are parsed (once) against each row's partition type.
+    let mut bounds_by_type =
+        std::collections::BTreeMap::<String, (Option<u64>, Option<u64>)>::new();
+    let mut rows = Vec::new();
+    for (key, row) in read_keyed_partitions_build_rows(&request.index_path, aws)? {
+        let type_matches = request
+            .partition_type
+            .as_deref()
+            .map(|value| row.partition_type.eq_ignore_ascii_case(value))
+            .unwrap_or(true);
+        let chain_matches = request
+            .chain
+            .as_deref()
+            .map(|value| row.chain.as_deref() == Some(value))
+            .unwrap_or(true);
+        if !type_matches || !chain_matches {
+            continue;
+        }
+
+        let (from, to) = match bounds_by_type.get(&row.partition_type) {
+            Some(bounds) => *bounds,
+            None => {
+                let parse = |flag: &str, value: &Option<String>| {
+                    value
+                        .as_deref()
+                        .map(|value| parse_partition_bound(flag, &row.partition_type, value))
+                        .transpose()
+                };
+                let bounds = (parse("--from", &request.from)?, parse("--to", &request.to)?);
+                bounds_by_type.insert(row.partition_type.clone(), bounds);
+                bounds
+            }
+        };
+        if from.is_some_and(|from| key < from) || to.is_some_and(|to| key > to) {
+            continue;
+        }
+
+        rows.push((
+            key,
+            PartitionListRow {
+                partition_type: row.partition_type,
+                partition_value: row.partition_value,
+                partition_start_ts: row.partition_start_ts,
+                start_block: row.start_block,
+                stop_block: row.stop_block,
+                chain: row.chain,
+            },
+        ));
+    }
     let total_matches = rows.len();
-    rows.sort_by(|left, right| {
-        left.partition_start_ts
-            .cmp(&right.partition_start_ts)
+    rows.sort_by(|(left_key, left), (right_key, right)| {
+        left_key
+            .cmp(right_key)
             .then_with(|| left.partition_type.cmp(&right.partition_type))
             .then_with(|| left.chain.cmp(&right.chain))
             .then_with(|| left.start_block.cmp(&right.start_block))
             .then_with(|| left.stop_block.cmp(&right.stop_block))
     });
     rows.truncate(request.limit);
+    let rows = rows.into_iter().map(|(_, row)| row).collect::<Vec<_>>();
 
     Ok(PartitionListResult {
         partitions_index: request.index_path.clone(),
@@ -3430,7 +3490,9 @@ pub fn validate_partitions_index(
             let current = pair[0];
             let next = pair[1];
 
-            if current.partition_start_ts > next.partition_start_ts {
+            if partition_value_key(&current.partition_type, &current.partition_value)?
+                > partition_value_key(&next.partition_type, &next.partition_value)?
+            {
                 issues.push(PartitionValidationIssue {
                     kind: PartitionValidationIssueKind::OutOfOrder,
                     partition_type: next.partition_type.clone(),
@@ -3749,18 +3811,23 @@ pub fn resolve_partition_bounds_from_index(
     aws: Option<&AwsConfig>,
 ) -> anyhow::Result<PartitionBounds> {
     let request = normalize_partition_bounds_request(request.clone())?;
-    let matches = read_partitions_build_rows(&request.index_path, aws)?
+    let partition_key = parse_partition_bound(
+        "--partition-value",
+        &request.partition_type,
+        &request.partition_value,
+    )?;
+    let matches = read_keyed_partitions_build_rows(&request.index_path, aws)?
         .into_iter()
-        .filter(|row| {
+        .filter(|(key, row)| {
             row.partition_type == request.partition_type
-                && row.partition_value == request.partition_value
+                && *key == partition_key
                 && request
                     .chain
                     .as_deref()
                     .map(|chain| row.chain.as_deref() == Some(chain))
                     .unwrap_or(true)
         })
-        .map(|row| (row.start_block, row.stop_block))
+        .map(|(_, row)| (row.start_block, row.stop_block))
         .collect::<Vec<_>>();
 
     if matches.is_empty() {
@@ -3817,19 +3884,28 @@ pub fn resolve_partition_window_bounds_from_index(
     aws: Option<&AwsConfig>,
 ) -> anyhow::Result<PartitionWindowBounds> {
     let request = normalize_partition_window_request(request.clone())?;
-    let mut matches = read_partitions_build_rows(&request.index_path, aws)?
+    let partition_from = parse_partition_bound(
+        "--partition-from",
+        &request.partition_type,
+        &request.partition_from,
+    )?;
+    let partition_to = parse_partition_bound(
+        "--partition-to",
+        &request.partition_type,
+        &request.partition_to,
+    )?;
+    let mut matches = read_keyed_partitions_build_rows(&request.index_path, aws)?
         .into_iter()
-        .filter(|row| {
+        .filter(|(key, row)| {
             row.partition_type == request.partition_type
-                && row.partition_value.as_str() >= request.partition_from.as_str()
-                && row.partition_value.as_str() < request.partition_to.as_str()
+                && (partition_from..partition_to).contains(key)
                 && request
                     .chain
                     .as_deref()
                     .map(|chain| row.chain.as_deref() == Some(chain))
                     .unwrap_or(true)
         })
-        .map(|row| (row.partition_value, row.start_block, row.stop_block))
+        .map(|(key, row)| (key, row.partition_value, row.start_block, row.stop_block))
         .collect::<Vec<_>>();
 
     if matches.is_empty() {
@@ -3847,46 +3923,46 @@ pub fn resolve_partition_window_bounds_from_index(
         );
     }
 
-    matches.sort_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.cmp(&right.1)));
+    matches.sort_by(|left, right| left.0.cmp(&right.0).then_with(|| left.2.cmp(&right.2)));
 
     for (idx, window) in matches.windows(2).enumerate() {
-        let current = &window[0];
-        let next = &window[1];
-        if current.0 == next.0 {
+        let (current_key, current_value, _, current_stop) = &window[0];
+        let (next_key, next_value, next_start, _) = &window[1];
+        if current_key == next_key {
             anyhow::bail!(
                 "partition window is ambiguous in {}: multiple rows for partition_value={} (rows {} and {})",
                 request.index_path,
-                current.0,
+                current_value,
                 idx,
                 idx + 1
             );
         }
-        if current.2 != next.1 {
+        if current_stop != next_start {
             anyhow::bail!(
                 "partition window has non-contiguous bounds in {} between {} and {}: stop_block={} next_start_block={}",
                 request.index_path,
-                current.0,
-                next.0,
-                current.2,
-                next.1
+                current_value,
+                next_value,
+                current_stop,
+                next_start
             );
         }
     }
 
-    let first = matches.first().expect("non-empty checked above");
-    let last = matches.last().expect("non-empty checked above");
-    if last.2 <= first.1 {
+    let start_block = matches.first().expect("non-empty checked above").2;
+    let stop_block = matches.last().expect("non-empty checked above").3;
+    if stop_block <= start_block {
         anyhow::bail!(
             "invalid partition window bounds in {}: start_block={} stop_block={}",
             request.index_path,
-            first.1,
-            last.2
+            start_block,
+            stop_block
         );
     }
 
     Ok(PartitionWindowBounds {
-        start_block: first.1,
-        stop_block: last.2,
+        start_block,
+        stop_block,
         partitions_count: matches.len(),
         partition_from: request.partition_from.clone(),
         partition_to: request.partition_to.clone(),
@@ -8934,6 +9010,252 @@ mod tests {
         assert!(err
             .to_string()
             .contains("partition type block_range has gap"));
+    }
+
+    #[test]
+    fn test_partition_value_key_orders_block_ranges_and_timestamps_numerically() {
+        let key = |partition_type, value| {
+            partition_value_key(partition_type, value).expect("valid partition value")
+        };
+        assert_eq!(key("block_range", "10000000"), 10_000_000);
+        assert!(key("block_range", "8000000") < key("block_range", "10000000"));
+        assert_eq!(key("date", "2015-07-30 00:00:00"), 1_438_214_400);
+        assert_eq!(key("hour", "1970-01-01 01:00:00"), 3_600);
+        assert!(key("hour", "2015-07-30 09:00:00") < key("hour", "2015-07-30 10:00:00"));
+
+        for (partition_type, value) in [
+            ("block_range", "2015-07-30 00:00:00"),
+            ("block_range", "-1"),
+            ("date", "10000000"),
+            ("date", "2015-07-30"),
+            ("date", "1969-12-31 00:00:00"),
+            ("unknown", "0"),
+        ] {
+            assert!(
+                partition_value_key(partition_type, value).is_err(),
+                "expected {partition_type}={value} to be rejected"
+            );
+        }
+    }
+
+    /// Block-range rows for [8M, 12M) written out of order, so that lexicographic
+    /// sorting (`"10000000" < "8000000"`) and numeric sorting disagree.
+    fn write_multi_digit_block_range_index(path: &std::path::Path) {
+        write_test_partitions_index(
+            path,
+            vec![
+                block_range_row(10_000_000, 11_000_000, 1_000_000),
+                block_range_row(8_000_000, 9_000_000, 1_000_000),
+                block_range_row(11_000_000, 12_000_000, 1_000_000),
+                block_range_row(9_000_000, 10_000_000, 1_000_000),
+            ],
+        )
+        .expect("write partitions index");
+    }
+
+    fn block_range_list_request(path: &std::path::Path) -> PartitionListRequest {
+        PartitionListRequest {
+            index_path: path.to_string_lossy().to_string(),
+            partition_type: Some("block_range".to_string()),
+            chain: None,
+            from: None,
+            to: None,
+            limit: usize::MAX,
+        }
+    }
+
+    #[test]
+    fn test_read_partitions_build_rows_sorts_block_range_numerically() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("partitions.parquet");
+        write_multi_digit_block_range_index(&path);
+
+        let rows = read_partitions_build_rows(&path.to_string_lossy(), None).expect("read rows");
+        let values = rows
+            .iter()
+            .map(|row| row.partition_value.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(values, ["8000000", "9000000", "10000000", "11000000"]);
+    }
+
+    #[test]
+    fn test_partition_index_builder_sorts_block_range_rows_numerically() {
+        let mut builder =
+            PartitionIndexBuilder::new("solana-mainnet-beta", vec![PartitionBuildType::BlockRange])
+                .expect("builder")
+                .with_block_range_size(1_000_000);
+        for block_num in [8_000_000, 9_000_000, 10_000_000, 11_000_000] {
+            builder
+                .observe_block(&BlockIdentity {
+                    block_num,
+                    timestamp: 1_690_815_540,
+                    ..Default::default()
+                })
+                .expect("observe block");
+        }
+
+        let starts =
+            |rows: &[PartitionBuildRow]| rows.iter().map(|row| row.start_block).collect::<Vec<_>>();
+        let expected = [8_000_000, 9_000_000, 10_000_000, 11_000_000];
+        let snapshot = builder.snapshot(11_500_000).expect("snapshot rows");
+        assert_eq!(starts(&snapshot), expected);
+        let rows = builder.finish(12_000_000).expect("finish rows");
+        assert_eq!(starts(&rows), expected);
+    }
+
+    #[test]
+    fn test_list_partitions_from_index_orders_and_filters_block_range_numerically() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("partitions.parquet");
+        write_multi_digit_block_range_index(&path);
+
+        let mut request = block_range_list_request(&path);
+        request.limit = 2;
+        let result = list_partitions_from_index(&request, None).expect("list should succeed");
+        assert_eq!(result.total_matches, 4);
+        let starts = result
+            .rows
+            .iter()
+            .map(|row| row.start_block)
+            .collect::<Vec<_>>();
+        assert_eq!(starts, [8_000_000, 9_000_000]);
+
+        let mut request = block_range_list_request(&path);
+        request.from = Some("9000000".to_string());
+        request.to = Some("10000000".to_string());
+        let result = list_partitions_from_index(&request, None).expect("list should succeed");
+        let starts = result
+            .rows
+            .iter()
+            .map(|row| row.start_block)
+            .collect::<Vec<_>>();
+        assert_eq!(starts, [9_000_000, 10_000_000]);
+    }
+
+    #[test]
+    fn test_list_partitions_from_index_rejects_bound_in_wrong_format() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("partitions.parquet");
+        write_multi_digit_block_range_index(&path);
+
+        let mut request = block_range_list_request(&path);
+        request.from = Some("2015-07-29 00:00:00".to_string());
+        let err = list_partitions_from_index(&request, None)
+            .expect_err("timestamp bound should be rejected for block_range rows");
+        assert!(err.to_string().contains("--from"), "{err}");
+    }
+
+    #[test]
+    fn test_shard_partitions_from_index_ordinal_uses_numeric_block_range_order() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("partitions.parquet");
+        write_multi_digit_block_range_index(&path);
+
+        let shard_starts = |shard_index| {
+            shard_partitions_from_index(
+                &PartitionShardRequest {
+                    list: block_range_list_request(&path),
+                    shard_count: 2,
+                    shard_index,
+                    strategy: PartitionShardStrategy::Ordinal,
+                },
+                None,
+            )
+            .expect("shard should succeed")
+            .rows
+            .iter()
+            .map(|row| row.start_block)
+            .collect::<Vec<_>>()
+        };
+        assert_eq!(shard_starts(0), [8_000_000, 10_000_000]);
+        assert_eq!(shard_starts(1), [9_000_000, 11_000_000]);
+    }
+
+    #[test]
+    fn test_validate_partitions_index_accepts_contiguous_multi_digit_block_ranges() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("partitions.parquet");
+        write_multi_digit_block_range_index(&path);
+
+        let result = validate_partitions_index(
+            &PartitionValidateRequest {
+                list: block_range_list_request(&path),
+                allow_gaps: false,
+            },
+            None,
+        )
+        .expect("validation should run");
+        assert!(result.valid, "unexpected issues: {:?}", result.issues);
+        assert_eq!(result.total_rows, 4);
+    }
+
+    #[test]
+    fn test_validate_partitions_index_reports_single_multi_digit_block_range_gap() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("partitions.parquet");
+        write_test_partitions_index(
+            &path,
+            vec![
+                block_range_row(11_000_000, 12_000_000, 1_000_000),
+                block_range_row(8_000_000, 9_000_000, 1_000_000),
+                block_range_row(9_000_000, 10_000_000, 1_000_000),
+            ],
+        )
+        .expect("write partitions index");
+
+        let result = validate_partitions_index(
+            &PartitionValidateRequest {
+                list: block_range_list_request(&path),
+                allow_gaps: false,
+            },
+            None,
+        )
+        .expect("validation should run");
+        assert_eq!(result.issue_count, 1, "issues: {:?}", result.issues);
+        assert_eq!(result.issues[0].kind, PartitionValidationIssueKind::Gap);
+        assert_eq!(result.issues[0].partition_value, "11000000");
+    }
+
+    #[test]
+    fn test_resolve_partition_window_bounds_from_index_block_range_numeric() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("partitions.parquet");
+        write_multi_digit_block_range_index(&path);
+
+        let bounds = resolve_partition_window_bounds_from_index(
+            &PartitionWindowRequest {
+                index_path: path.to_string_lossy().to_string(),
+                partition_type: "block_range".to_string(),
+                partition_from: "9000000".to_string(),
+                partition_to: "11000000".to_string(),
+                chain: None,
+            },
+            None,
+        )
+        .expect("partition window bounds should resolve");
+        assert_eq!(bounds.start_block, 9_000_000);
+        assert_eq!(bounds.stop_block, 11_000_000);
+        assert_eq!(bounds.partitions_count, 2);
+    }
+
+    #[test]
+    fn test_resolve_partition_bounds_from_index_block_range_multi_digit() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("partitions.parquet");
+        write_multi_digit_block_range_index(&path);
+
+        let bounds = resolve_partition_bounds_from_index(
+            &PartitionBoundsRequest {
+                index_path: path.to_string_lossy().to_string(),
+                partition_type: "block_range".to_string(),
+                partition_value: "10000000".to_string(),
+                chain: None,
+            },
+            None,
+        )
+        .expect("partition bounds should resolve");
+        assert_eq!(bounds.start_block, 10_000_000);
+        assert_eq!(bounds.stop_block, 11_000_000);
     }
 
     #[test]

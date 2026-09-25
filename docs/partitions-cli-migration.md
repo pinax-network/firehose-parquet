@@ -91,7 +91,7 @@ Current checks:
 - invalid ranges (`start_block >= stop_block`)
 - overlaps between adjacent rows in the same `(chain, partition_type)`
 - gaps between adjacent rows unless `--allow-gaps` is enabled
-- ordering issues based on `partition_start_ts`
+- ordering issues based on the numeric partition value
 
 ### New command
 
@@ -103,9 +103,9 @@ Current checks:
 - `--limit` (default `100`)
 - optional `--json`
 
-Output is sorted ascending by `partition_start_ts`, and JSON mode returns machine-readable rows for schedulers/UI.
+Output is sorted ascending by the numeric partition value (start block for `block_range`, UTC epoch seconds otherwise), and JSON mode returns machine-readable rows for schedulers/UI. `--from` / `--to` are compared numerically too, so they take a start block for `block_range` indexes and `YYYY-MM-DD HH:MM:SS` otherwise.
 
-Implementation note: rows are streamed in record batches and retained in a bounded in-memory top-N heap keyed by ascending sort order, capped by `--limit`.
+Implementation note: rows are read in record batches, filtered, sorted by ascending partition value, and truncated to `--limit`.
 
 ### Existing command
 
