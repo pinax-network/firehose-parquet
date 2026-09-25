@@ -1845,7 +1845,7 @@ reconciliation. See [the implementation and live comparison](docs/audit/508-ante
 
 ## NEAR: Transactions, Receipts, Actions and Logs
 
-A NEAR transaction runs nothing itself. It is converted into a receipt, and that receipt, and the receipts it creates, run the actions, usually in later blocks and on other shards. `transactions` and `receipts` carry the keys to follow that chain:
+A NEAR transaction's own outcome records its inclusion and conversion into a receipt. Contract calls run when action receipts execute, often in later blocks and on other shards. `transactions` and `receipts` carry the keys to follow that chain:
 
 | Table | Column | Type | Meaning |
 |---|---|---|---|
@@ -1911,6 +1911,8 @@ LEFT JOIN origin USING (receipt_id);
 ```
 
 Receipts whose transaction is before the range stay unresolved.
+
+These added columns and tables require a fresh dataset or an explicit rebuild; protected ingestion refuses to resume an incompatible schema inventory. See the [bounded public-source comparison and its coverage limits](docs/audit/506-near-public-qualification.md).
 
 ## Environment Variables
 

@@ -1,9 +1,9 @@
 # NEAR public-source qualification of recovered PR #559 (#506)
 
-Status: offline preparation complete; public capture awaits independent review.
-No NEAR public-data request has been made in this attempt. The earlier single
-Firehose request remains quota-blocked and will not be retried. #506, #507 and
-#550 remain open at this boundary.
+Status: the single approved public capture and independent offline comparison
+passed. Full repository validation and final review are in progress. The earlier
+single Firehose request remains quota-blocked and was not retried. #506, #507 and
+#550 remain open until their respective acceptance/merge gates are satisfied.
 
 ## Recovery and current compatibility
 
@@ -38,8 +38,8 @@ aggregate transaction status:
 - [Lake S3 reader](https://github.com/near/near-lake-framework-rs/blob/e611fc888b3bcf579b21943e93b4a492484af23a/lake-framework/src/s3_fetchers.rs): explicit `RequestPayer::Requester`.
 - [Official RPC providers](https://docs.near.org/api/rpc/providers): the exact public archival RPC used solely for the LIB hash-to-height lookup.
 
-After review releases the capture, at most three sequential HTTP application
-request attempts are allowed:
+The independently reviewed capture permits at most three sequential HTTP
+application request attempts:
 
 1. GET `https://mainnet.neardata.xyz/v0/block/150000000`.
 2. Only if that returns exactly HTTP 302, one manual GET to its Location, whose
@@ -148,30 +148,110 @@ At recovery merge `4ebdb8e` plus this audit tooling:
   limits; truncation; real request/process alarm; hard supervisor kill; partial
   anchor-failure and forcibly killed-worker evidence.
 
-Portable reproduction (requires Python protobuf and protoc):
+Reproduction (requires `uv`, a cached protobuf environment and `protoc`; for first setup, omit `--offline` once to resolve the Python dependency):
 
 ```sh
-python docs/audit/506-near-public-tests.py
+uv run --offline --with protobuf python docs/audit/506-near-public-tests.py
 cargo test --locked -p blocks near:: --lib -j4
 cargo test --locked -p blocks schema_contract_tests --lib -j4
 cargo fmt --all -- --check
 ```
 
 Shared-target Cargo runs in this audit are serialized under a whole-command
-lock. No new external chain request is part of these tests. Actual capture must
-wait for independent review of the code and this boundary, even though its
-precise scope has been accepted.
+lock. No new external chain request is part of these tests. The coordinator independently reran all 16 tests at tooling commit `0ac6643`,
+reviewed the final transport/provenance code, and released exactly the stated
+capture. No further data read is authorized by missing coverage.
 
-## Remaining qualification
+## Executed capture: exactly three requests
 
-After the permitted read succeeds, derive expected rows independently from the
-original JSON and compare all new values, physical schema/type/nullability and
-metadata, plus every legacy column against the current-main baseline across
-encodings/filter/fork modes. Report exact action/status/log/missing-data coverage;
-missing categories remain synthetic-only, with no automatic extra reads.
+The normal supervised `capture` command ran once, from 2026-09-25
+22:15:43.618813 UTC to22:15:48.048240 UTC (4.43seconds). It received:
 
-Successful public-source conversion would qualify #506's live-block mapper
-criterion only under this explicit boundary. It would not prove Firehose
-transport/cursor behavior, globally complete lineage, #507 state-change rows or
-#550 execution/filter semantics. Workspace tests/build/standard CI example,
-current-main integration and review remain required before publishing or merging.
+1. HTTP302 from the exact original height150000000 URL, with an empty body.
+2. HTTP200 from the permitted `https://a2.mainnet.neardata.xyz/v0/block/150000000`
+   archive URL, with334,930 original JSON bytes.
+3. HTTP200 from the exact archival RPC, with16,891 bytes for the source's exact
+   `last_final_block` hash. Its verified height is149999998; the source parent
+   height is149999999.
+
+There were no retries, fallback, credentials, additional selected heights or
+Firehose calls. All subsequent work is offline. Raw artifacts and request
+provenance are retained at
+`/tmp/fireparq-506-neardata-150000000-20260925`:
+
+| Artifact | Bytes | SHA-256 |
+|---|---:|---|
+| `neardata.json` |334930|`794e00c1c14d952e2e2f84c05807c6cd68b913cc61e818bd981d0be6d6a9220c`|
+| `lib-anchor.json` |16891|`b3757b2ed5458321bc484e6fd98fffed9e4b0b2d6c7cd92d981b9cce2e3dee14`|
+| `block.pb` |108483|`8bec28c855cc0f4b95e59bcbec36cb3621669f0479c2c12dd06689ecee7afca5`|
+
+The eight shards all have chunks. The21 transaction inclusion outcomes are
+literally `SuccessReceiptId`; this is not an aggregate claim about the later
+receipt tree. The70 receipt outcomes are68 `SuccessValue`,1 `SuccessReceiptId`,
+and1 `Failure`. The failure is `ActionError::DelegateActionInvalidNonce` at
+index0, with no logs. All70 executed receipts are Action receipts:2 AddKey,
+32 Transfer,15 Delegate and21 FunctionCall actions. Their54 logs include42
+NEP-141 events:8 `ft_transfer` and34 `ft_mint`. The README event query, with only
+its local file paths adapted, returns exactly those counts.
+
+**No receipt has an origin derivable from a transaction in this same block.**
+All70 new mapper tx_hash values therefore stay NULL, despite all70 NearData
+records containing externally enriched hashes. Positive same-block lineage,
+cross-block unresolved lineage, Data receipts, failed transaction inclusion,
+and the other action kinds have synthetic fixture coverage only. The221 native
+per-shard state changes remain in raw JSON but are deliberately absent from the
+producer-compatible protobuf and Parquet. They do not qualify #507.
+
+## Independent comparison and current integration
+
+Recovery is integrated with actual main `81f5b79` as `e8a3347`. A separate
+current-main baseline checkout at81f5b79 and the candidate both use the same
+[offline replay example](../../blocks/examples/replay_near.rs), with no baseline
+production edits. Stable binaries were copied inside the Cargo lock before
+running. Each reads only a saved protobuf and writes a fresh local directory.
+
+[506-compare-near-public.py](506-compare-near-public.py) derives expected rows
+from original NearData JSON and the exact anchor reply. It does not import the
+converter, read the converted protobuf for expected values, or derive expected
+row selection/positions from mapper output. It independently applies the pinned
+legacy receipt-ID ordering and explicitly checks the ignored external tx_hash
+and state-change boundaries.
+
+For every one of five encodings × two transaction filters × optional fork-step
+column settings (20cases), the live comparison passes:
+
+- 4,480 row occurrences and83,920 raw-source value comparisons across the seven
+  declared tables (state_changes empty).
+- 29,800 existing-column value comparisons against main81f5b79. Every legacy
+  Arrow field, order, type, nullability and metadata is preserved when the new
+  fields are projected out.
+- Actual physical Parquet schemas on every nonempty baseline/candidate part,
+  including recursive List child nullability, dictionary indices/value types,
+  UTC millisecond timestamps, and field/schema metadata. Empty tables have
+  manifest-schema checks only.
+- No rows retained after mapper flush.
+
+Report: `/tmp/fireparq-506-live-comparison.json`; local datasets:
+`/tmp/fireparq-506-live-before` and `/tmp/fireparq-506-live-after`.
+The synthetic all-action/data-receipt document also passes converter→mapper→
+Parquet comparison over20cases:360row occurrences,6,780raw-source values and
+1,570legacy values (`/tmp/fireparq-506-synthetic-comparison.json`). Four separate
+oracle/schema tests check exact sample expectations, same-block origins versus
+filtering, raw args under all encodings, and rejection of nested type/nullability
+or metadata changes.
+
+```sh
+uv run --offline --with protobuf --with pyarrow python docs/audit/506-compare-near-public-tests.py
+cargo run --locked -p blocks --example replay_near -- --block /path/block.pb --output /fresh/output
+uv run --offline --with pyarrow python docs/audit/506-compare-near-public.py \
+  --before /path/baseline --after /path/candidate --raw /path/raw --report /path/report.json
+```
+
+## Acceptance boundary
+
+The live-block mapper comparison passes under the explicitly reviewed
+NearData/indexer-JSON plus pinned-producer-conversion boundary. It does not prove
+Firehose transport/cursor behavior, globally complete lineage, #507 state-change
+rows or #550 execution/filter semantics. Those remain separately open.
+Current-main workspace tests/build/standard CI example and independent final
+review remain required before publishing or merging the recovered PR.
