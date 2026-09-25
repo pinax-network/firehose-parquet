@@ -837,7 +837,7 @@ Which files rollup reads, writes, and deletes:
 
 Consolidates multiple small part files within each partition directory into fewer, larger files. Unlike `rollup` (which changes partition granularity), `merge` keeps the same partition layout but reduces file count. Supports local paths and explicit S3 URIs.
 
-`merge` processes one table at a time and, within each table, one partition at a time. All parts in each partition are read into memory, sorted by `block_num`, and written back as new files respecting `--flush-bytes` and `--flush-rows`. Original parts are deleted after successful merge. Root artifacts (`cursor.parquet`, `partitions.parquet`, `merkle_roots.parquet`, and anything under `verify_runs/`) are skipped, so merging a network root is safe.
+`merge` processes one table at a time and, within each table, one partition at a time. It reads the parts of a partition one after another in file-name order and streams their rows into new files, starting a new file at `--flush-bytes` or `--flush-rows`. Rows keep the order of the parts they came from; they are not re-sorted, so when a partition holds parts from several writers, `block_num` is not necessarily ascending across the merged file. The original parts are deleted once the merged files are written. Root artifacts (`cursor.parquet`, `partitions.parquet`, `merkle_roots.parquet`, and anything under `verify_runs/`) are skipped, so merging a network root is safe.
 
 Parts are only merged when every part in the partition has the same columns: the same names, types, nullability, and order. Merge checks each part's footer before writing anything. A partition with mixed schemas, such as files from two tool versions or with `--without-extended` toggled, is left untouched and listed in the summary, and `merge` exits non-zero after processing the other partitions. `--dry-run` reports these partitions too.
 
@@ -867,7 +867,14 @@ The path must exist locally or be an explicit `s3://...` URI. Unlike `scan` and 
 | `--flush-rows` | disabled | Flush merged output after this many rows |
 | `--dry-run` | `false` | Show what would be merged without writing |
 
-> **Memory note:** Merge reads all parts in a partition at once. Ensure sufficient memory for the largest partition.
+> **Memory note:** Merge holds one source part at a time plus the output file being built (up to `--flush-bytes`). On S3, each source object is downloaded whole before it is read, so peak memory is roughly the largest part plus `--flush-bytes`.
+
+Interrupted merges are recovered, so a crash never leaves duplicate rows:
+
+- Each partition merge is recorded in a journal, `_fireparq_merge.json`, in the partition directory. The journal is created before any output is written. It is committed once every output is written, and removed after the original parts are deleted. Local outputs are written to a temporary file, fsynced, and renamed into place, so a partial file is never visible.
+- A merge that was interrupted (crash, `kill`, failed upload) is finished or undone by the next run before it does anything else. If the journal was committed, the remaining original parts are deleted. Otherwise the partial outputs are deleted, and the partition is merged again from its untouched original parts. The summary reports `Interrupted merges recovered`.
+- One merge runs per path at a time. `merge` holds `.fireparq-merge.lock` at the path and fails right away if another merge holds it. Locally this is an OS file lock, released when the process exits however it exits. On S3 it is a conditionally created lock object, refreshed while the run is active. A lock that has not been refreshed for 30 minutes is taken over by the next run. If the store has no conditional writes, merge warns and the lock is best effort.
+- A partition that a merge on an enclosing or nested path is working on is skipped and listed as `In use by another merge`.
 
 > **Metadata preservation:** Both `merge` and `rollup` preserve Parquet file-level metadata (`firehose-parquet.*` keys) from the source files into the output files.
 
