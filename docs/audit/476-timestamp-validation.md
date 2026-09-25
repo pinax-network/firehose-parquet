@@ -34,7 +34,8 @@ representation for genesis bootstrap and nullable-chain routing. Unary missing
 metadata keeps its explicit `Option::None` return for the probe caller to handle.
 
 Time partition keys are fallible. Local directories and S3 keys share one path
-formatter, which rejects invalid minimum or maximum metadata timestamps before
+formatter, which rejects invalid minimum or maximum metadata timestamps for
+nonempty writes before
 part counters, directories, temporary files, final files or objects change.
 `OutputWriter` continues to preflight every nonempty table before publication,
 including canonical row timestamps. Numeric and unpartitioned routing retain

@@ -171,7 +171,7 @@ docker run --rm \
 
 ## Cursor & Resume
 
-`fireparq` persists pipeline state in a `cursor.parquet` file so streams can be interrupted and resumed without re-processing blocks. The cursor system provides deterministic, crash-safe resume with full parameter validation.
+`fireparq` persists pipeline state in a `cursor.parquet` file so streams can resume from their last successful checkpoint, with parameter validation. Output files and the cursor are separate writes; interrupted flushes can still replay already-published rows.
 
 ## Network Aliases
 
@@ -218,6 +218,31 @@ fireparq --network solana-mainnet-beta --start-block 250000000 --stop-block 2501
 1. **Synchronized flush** — when any table triggers a file rollover (partition change or size threshold), *all* tables are flushed together. This ensures every table is consistent at the cursor point.
 2. **Cursor saved after writes** — `cursor.parquet` is only updated *after* all table files have been successfully written to disk (or S3). If the process crashes mid-write, the cursor still points to the last complete flush.
 3. **Resume from cursor** — on startup, if `cursor.parquet` exists, the pipeline sends the stored Firehose cursor token to resume the gRPC stream exactly where it left off.
+
+### Local part publication
+
+Local table parts are written under hidden `.fireparq-<uuid>.tmp` names in the
+destination directory. The writer completes the Parquet footer and syncs the
+file before atomically creating its final `.parquet` name without overwriting an
+existing destination. It removes the temporary name and syncs the directory
+before reporting success. Output directory ancestors are also synced, including
+newly created directories and those left by an earlier failed attempt. Symlinked
+output paths sync both the resolved target ancestry and the alias ancestry.
+
+This requires a filesystem that supports atomic same-directory hard links,
+file sync, and directory sync, with readable directory ancestors. Unsupported
+operations or sync failures stop the write; there is no weaker fallback. Final
+filenames retain the existing random process prefix and counter. S3 publication
+is unchanged.
+
+Readers of final `.parquet` files see complete individual parts. This does not
+make a multi-table flush or its cursor update atomic. A failure after final-name
+publication can leave a complete part even though the write reports an error;
+ingestion stops, and replay can duplicate it. A process crash can leave hidden
+`.tmp` files, which are not Parquet inputs and are not automatically removed.
+Do not remove another active writer's temporary files. See the
+[implementation and failure tests](docs/audit/578-atomic-local-parquet.md) and
+the remaining [transaction/recovery design](docs/audit/468-crash-recovery-design.md).
 
 ### Cursor File Format
 
@@ -334,10 +359,23 @@ fireparq \
 
 On SIGINT (Ctrl-C) or SIGTERM, the pipeline:
 
-1. Stops consuming new blocks from the gRPC stream after the current block
+1. Stops consuming new blocks from the gRPC stream. A block being processed is
+   finished first; waits for the endpoint (connecting, reconnect back-off, an
+   idle stream, startup checks) are interrupted without waiting for their
+   network timeout, even on a quiet chain
 2. Discards partial in-memory buffers instead of writing extra part files
 3. Leaves the cursor at the last committed flush
 4. Exits cleanly (exit code 0)
+
+An in-flight block or storage write finishes before exit. If a cursor save has
+failed, the same signal interrupts its retry backoff and the durability error
+still produces a non-zero exit.
+
+A second SIGINT or SIGTERM exits immediately with code 130, without waiting for
+the current block. In-flight writes may be interrupted: a hidden temporary part
+may remain incomplete, or a cursor update may not finish its durability checks.
+A published local table part already has a complete footer, but replay can still
+duplicate complete parts until recovery across tables and the cursor is implemented (#468).
 
 If a write (local disk or S3), a block mapping, or the stream fails, the
 pipeline also discards partial buffers and does not save the cursor, then exits
@@ -1172,6 +1210,24 @@ These columns hold Firehose fields as they are, with bytes in the output encodin
 | `logs` | `ordinal` | `UInt64` | execution order in the block |
 
 The new columns come after the existing ones in each table. Ordinals are unique within a block, so `(block_number, ordinal)` orders every log, call and state change of a block. They are not reliable for anything inside a reverted call.
+
+## Solana Reward Indices
+
+`rewards.reward_index` is a zero-based index within one block envelope. Rewards
+from included transactions are numbered in transaction order and in each
+transaction's upstream reward order, followed by block rewards in their upstream
+order. The counter restarts for every block; flush size and restarts do not change
+it. `source` identifies `transaction` or `block`, and `transaction_index` is null
+for block rewards.
+
+For finalized output, use `(block_id, reward_index)` as the reward key. Include
+the chain/network when combining datasets. With reversible output, NEW and UNDO
+rows are separate events that can share this key; apply fork semantics before
+using it as a unique key. Changing transaction filters can change indices.
+
+Older output may contain colliding indices within a block and indices offset by
+earlier buffered blocks. Rebuild affected ranges into a separate output root
+before relying on the corrected key; appending new output does not repair old rows.
 
 ## Beacon Chain Tables
 

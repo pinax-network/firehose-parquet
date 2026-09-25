@@ -18,6 +18,30 @@ Rust timestamp/date conversion, canonical identity preparation,
 return `Result`; callers must handle or propagate errors. See the
 [API migration and validation record](../audit/476-timestamp-validation.md).
 
+### Solana reward indices are scoped to each block (#500)
+
+`rewards.reward_index` now shares one zero-based sequence across emitted
+transaction rewards and block rewards, in their existing output order. Indices
+no longer depend on the flush window or collide between the two sources. The
+UInt32 schema is unchanged, but affected row values and verification roots
+change. Rebuild affected historical ranges into a separate root before joining
+on `(block_id, reward_index)`. Reversible events can legitimately repeat that key.
+
+See [the diagnosis and regression record](../audit/500-solana-reward-index.md).
+
+### Local Parquet publication requires durable filesystem operations (#578)
+
+Local table parts now become visible at their final `.parquet` name only after
+the footer is complete and the file is synced. Final-name publication is atomic
+and never overwrites an existing destination. Directory sync failures are fatal,
+including sync of output directory ancestors. Filesystems must support atomic
+hard links and file/directory sync; directory ancestors must be readable.
+
+Final filenames and S3 writes are unchanged. This is single-file publication,
+not a transaction across tables and the cursor: an error after publication can
+leave a complete part, and replay may duplicate it. Abrupt termination may leave
+hidden `.tmp` files. See [the guarantees and tests](../audit/578-atomic-local-parquet.md).
+
 ### Startup requires usable EndpointInfo (#467)
 
 Ingestion now stops before output/cursor resolution if endpoint metadata cannot
@@ -323,6 +347,8 @@ Three new EVM tables, written at both detail levels (also with `--without-extend
 Rows of `access_lists` and `set_code_authorizations` follow their transaction: they are written for failed transactions and dropped by `--exclude-failed-transactions`. EVM outputs now have 6 base tables and 20 with extended detail.
 
 ## Fixes
+
+- **SIGINT/SIGTERM interrupt endpoint waits promptly (#473).** The shutdown flag used to be checked only after a block was processed, so a stop request was ignored during idle waits (up to the 120 s idle timeout), reconnect back-off (up to 60 s), connection attempts (30 s) and startup checks, and Kubernetes escalated to SIGKILL on quiet chains. A cancellation token now interrupts every stream wait; a block being processed still finishes first. A second signal exits immediately with code 130. Shutdown is detected with a typed error instead of matching the string `"__shutdown__"`.
 
 - **`build` no longer retries fatal gRPC errors forever (#472).** `Unauthenticated`, `PermissionDenied`, `InvalidArgument`, `FailedPrecondition`, `OutOfRange` and `Unimplemented` now end the run with an error and a hint, including statuses Firehose relays as `Unknown` with the real code in the message. So does `ResourceExhausted` when it reports an exhausted quota (e.g. `billable egress bytes quota exceeded`); other `ResourceExhausted` errors such as rate limits are still retried with back-off. An invalid cursor, a message over 128 MiB, or credentials that are not valid for the endpoint (such as a Pinax token against a StreamingFast endpoint after #535) used to reconnect about once a second indefinitely. Fatal errors are counted in `firehose_parquet_errors_total{kind="grpc_fatal"}`.
 - **Reconnect back-off and the stall timer reset only when a stream message arrives (#472),** not when a connection or the `Blocks` RPC is accepted, so repeated failures now back off up to 60 s and trip `--reconnect-stall-timeout-secs`. A run also gives up after 30 consecutive failed attempts without a message, even with the stall timeout disabled. Idle-timeout reconnects are not counted as failures. The logged `attempt` now counts failures since the last message (it used to reset to 0 on every connection).

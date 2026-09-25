@@ -270,12 +270,31 @@ impl SolanaBlockMapper {
             .append_value(block.rewards.len() as u32);
         append_fork_step(&mut self.blocks.fork_step, fork_step);
 
+        // Each accepted block envelope owns its reward numbering, independent
+        // of earlier buffered blocks or mapper flushes. Preserve source order:
+        // transaction rewards first, then block rewards.
+        let mut next_reward_index = 0_u64;
         for (tx_idx, confirmed_tx) in block.transactions.iter().enumerate() {
-            self.map_transaction(slot, tx_idx as u32, confirmed_tx, identity, fork_step);
+            self.map_transaction(
+                slot,
+                tx_idx as u32,
+                confirmed_tx,
+                identity,
+                fork_step,
+                &mut next_reward_index,
+            )?;
         }
 
-        for (reward_idx, reward) in block.rewards.iter().enumerate() {
-            self.map_reward(slot, reward_idx as u32, reward, identity, fork_step);
+        for reward in &block.rewards {
+            self.append_reward(
+                slot,
+                &mut next_reward_index,
+                reward,
+                "block",
+                None,
+                identity,
+                fork_step,
+            )?;
         }
         Ok(())
     }
@@ -287,25 +306,26 @@ impl SolanaBlockMapper {
         confirmed: &solana::ConfirmedTransaction,
         identity: &PreparedIdentity,
         fork_step: Option<&str>,
-    ) {
+        next_reward_index: &mut u64,
+    ) -> anyhow::Result<()> {
         let tx = match confirmed.transaction.as_ref() {
             Some(t) => t,
-            None => return,
+            None => return Ok(()),
         };
         let meta = match confirmed.meta.as_ref() {
             Some(m) => m,
-            None => return,
+            None => return Ok(()),
         };
         // Skip failed transactions unless --include-failed-transactions is set.
         // Some Firehose endpoints include `TransactionError { err: vec![] }` for
         // successful txs instead of omitting the field, so check the inner bytes.
         if !self.include_failed_transactions && meta.err.as_ref().is_some_and(|e| !e.err.is_empty())
         {
-            return;
+            return Ok(());
         }
         let msg = match tx.message.as_ref() {
             Some(m) => m,
-            None => return,
+            None => return Ok(()),
         };
 
         // Vote transactions go to a separate table (no messages/instructions)
@@ -313,7 +333,7 @@ impl SolanaBlockMapper {
             if let Some(ref mut vote_txs) = self.vote_transactions {
                 append_transaction(vote_txs, slot, tx_idx, tx, meta, identity, fork_step);
             }
-            return;
+            return Ok(());
         }
 
         // Successful non-vote transaction
@@ -459,18 +479,18 @@ impl SolanaBlockMapper {
         }
 
         // per-transaction rewards
-        let reward_base = self.rewards.canonical.len() as u32;
-        for (i, reward) in meta.rewards.iter().enumerate() {
+        for reward in &meta.rewards {
             self.append_reward(
                 slot,
-                reward_base + i as u32,
+                next_reward_index,
                 reward,
                 "transaction",
                 Some(tx_idx),
                 identity,
                 fork_step,
-            );
+            )?;
         }
+        Ok(())
     }
 
     fn map_token_balances(
@@ -512,27 +532,18 @@ impl SolanaBlockMapper {
         }
     }
 
-    fn map_reward(
-        &mut self,
-        slot: u64,
-        idx: u32,
-        reward: &solana::Reward,
-        identity: &PreparedIdentity,
-        fork_step: Option<&str>,
-    ) {
-        self.append_reward(slot, idx, reward, "block", None, identity, fork_step);
-    }
-
     fn append_reward(
         &mut self,
         slot: u64,
-        idx: u32,
+        next_reward_index: &mut u64,
         reward: &solana::Reward,
         source: &str,
         tx_idx: Option<u32>,
         identity: &PreparedIdentity,
         fork_step: Option<&str>,
-    ) {
+    ) -> anyhow::Result<()> {
+        let idx = u32::try_from(*next_reward_index)
+            .map_err(|_| anyhow::anyhow!("slot {slot} has more rewards than UInt32 can index"))?;
         self.rewards.canonical.append(identity);
         self.rewards.slot.append_value(slot);
         self.rewards.reward_index.append_value(idx);
@@ -553,6 +564,8 @@ impl SolanaBlockMapper {
             None => self.rewards.transaction_index.append_null(),
         }
         append_fork_step(&mut self.rewards.fork_step, fork_step);
+        *next_reward_index += 1;
+        Ok(())
     }
 }
 
@@ -1872,6 +1885,95 @@ pub(crate) mod tests {
             .downcast_ref::<UInt32Array>()
             .unwrap();
         assert_eq!(li_col.value(0), 0);
+    }
+
+    #[test]
+    fn test_reward_indexes_are_stable_across_flushes_and_restarts() {
+        use arrow::compute::concat_batches;
+
+        fn block_with_rewards(slot: u64) -> solana::Block {
+            let mut block = make_test_block(slot);
+            let mut second_tx = block.transactions[0].clone();
+            second_tx
+                .meta
+                .as_mut()
+                .unwrap()
+                .rewards
+                .push(solana::Reward {
+                    pubkey: "SecondTransactionReward".to_string(),
+                    lamports: -2,
+                    ..Default::default()
+                });
+            let mut failed_tx = block.transactions[0].clone();
+            failed_tx.meta.as_mut().unwrap().err = Some(solana::TransactionError { err: vec![1] });
+            block.transactions.extend([second_tx, failed_tx]);
+            block.rewards.push(solana::Reward {
+                pubkey: "SecondBlockReward".to_string(),
+                lamports: 3,
+                ..Default::default()
+            });
+            block
+        }
+
+        // Repeated envelopes deliberately include NEW(A), UNDO(A), NEW(A).
+        // Numbering belongs to each envelope, never to prior buffered rows.
+        let events = [(100, "NEW"), (101, "NEW"), (101, "UNDO"), (101, "NEW")];
+        for include_failed in [false, true] {
+            let mut results = Vec::new();
+            for (flush_every, restart_after_flush) in
+                [(4, false), (2, false), (1, false), (1, true)]
+            {
+                let new_mapper = || {
+                    SolanaBlockMapper::new(false, true, EncodeBytes::Binary, false, include_failed)
+                };
+                let mut mapper = new_mapper();
+                let mut batches = Vec::new();
+                for (event_index, (slot, step)) in events.iter().enumerate() {
+                    let block = block_with_rewards(*slot);
+                    let identity = BlockIdentity {
+                        block_num: *slot,
+                        ..Default::default()
+                    };
+                    mapper
+                        .map_block(&block.encode_to_vec(), &identity, Some(step))
+                        .unwrap();
+                    if (event_index + 1) % flush_every == 0 {
+                        batches.push(mapper.flush().unwrap().remove("rewards").unwrap());
+                        if restart_after_flush {
+                            mapper = new_mapper();
+                        }
+                    }
+                }
+                results.push(concat_batches(&batches[0].schema(), &batches).unwrap());
+            }
+            for result in &results[1..] {
+                assert_eq!(result, &results[0], "flush/restart changed reward output");
+            }
+            let result = &results[0];
+            let indices = result
+                .column_by_name("reward_index")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<UInt32Array>()
+                .unwrap();
+            let rewards_per_event = if include_failed { 6 } else { 5 };
+            assert_eq!(result.num_rows(), events.len() * rewards_per_event);
+            for event in 0..events.len() {
+                for index in 0..rewards_per_event {
+                    let row = event * rewards_per_event + index;
+                    assert_eq!(indices.value(row), index as u32);
+                    assert_eq!(get_string_value(result, "fork_step", row), events[event].1);
+                    assert_eq!(
+                        get_string_value(result, "source", row),
+                        if index < rewards_per_event - 2 {
+                            "transaction"
+                        } else {
+                            "block"
+                        }
+                    );
+                }
+            }
+        }
     }
 
     #[test]
