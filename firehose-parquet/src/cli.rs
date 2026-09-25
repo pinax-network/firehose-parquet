@@ -791,20 +791,26 @@ Lookup order for the data path:
     /// partitions, respecting --flush-bytes for file size limits.
     #[command(after_long_help = "\
 Examples:
-  # Roll up minute partitions into daily (in-place)
-  fireparq rollup ./output/blocks/
+  # Roll up minute partitions into daily, replacing the minute files (in-place)
+  fireparq rollup ./output/blocks/ --delete-source
 
-  # Roll up to hourly partitions with a separate output
+  # Roll up to hourly partitions with a separate output, keeping the source files
   fireparq rollup ./output/blocks/ -o ./merged/ -p hour
 
   # Roll up S3 data, delete source files after
   fireparq rollup s3://bucket/blocks/ --delete-source
 
   # Resolve a shorthand S3 source path in-place when no local match exists
-  S3_BUCKET=my-bucket fireparq rollup eth-mainnet/blocks/
+  S3_BUCKET=my-bucket fireparq rollup eth-mainnet/blocks/ --delete-source
 
   # Custom file size limit (256 MB)
-  fireparq rollup ./output/blocks/ --flush-bytes 268435456
+  fireparq rollup ./output/blocks/ -o ./daily/blocks/ --flush-bytes 268435456
+
+Only part-*.parquet files below a partition finer than --partition are read.
+Files already at the target granularity and root artifacts (cursor.parquet,
+partitions.parquet, merkle_roots.parquet, verify_runs/) are left untouched, so
+re-running a rollup is safe. Without --delete-source, each re-run replaces the
+part-rollup-*.parquet files it wrote earlier in the target partitions it rolls up.
 
 Lookup order for the source path:
   1. Explicit s3://bucket/... URIs are used as-is.
@@ -815,7 +821,7 @@ Lookup order for the source path:
         /// Source path containing partitioned Parquet files (local directory, shorthand S3 key/prefix via S3_BUCKET, or S3 URI)
         #[arg(help_heading = "Selection")]
         source: String,
-        /// Output path (local directory or S3 URI). Defaults to source (in-place rollup).
+        /// Output path (local directory or S3 URI). Defaults to source (in-place rollup, which requires --delete-source).
         #[arg(short = 'o', long, help_heading = "Selection")]
         output: Option<String>,
         /// Target partition interval: hour or date
@@ -832,7 +838,7 @@ Lookup order for the source path:
         /// Max compressed bytes per output file (0 = no limit)
         #[arg(long, default_value = "134217728", help_heading = "Output")]
         flush_bytes: u64,
-        /// Delete source files after successful rollup
+        /// Delete each source file once its target partition is written (required for in-place rollup)
         #[arg(long, default_value = "false", help_heading = "Execution")]
         delete_source: bool,
         /// AWS access key ID (for S3 paths)
@@ -7553,7 +7559,7 @@ mod tests {
             target: crate::rollup::RollupTarget::Date,
             compression: crate::config::Compression::Zstd,
             flush_bytes: 1024,
-            delete_source: false,
+            delete_source: true,
             aws: None,
             cache_control: String::new(),
         })
@@ -7634,7 +7640,7 @@ mod tests {
             target: crate::rollup::RollupTarget::Date,
             compression: crate::config::Compression::Zstd,
             flush_bytes: 1024,
-            delete_source: false,
+            delete_source: true,
             aws: None,
             cache_control: String::new(),
         })

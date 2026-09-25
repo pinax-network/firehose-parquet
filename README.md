@@ -745,28 +745,34 @@ See [Verifiability artifact runbook](docs/verifiability-artifact-runbook.md) for
 Rolls up fine-grained partitions (e.g. `minute` or `hour`) into coarser ones (e.g. `date`). Reads source files, concatenates them by target partition, and writes new files respecting `--flush-bytes`. The source path supports local paths, shorthand S3 keys/prefixes via `S3_BUCKET`, and explicit S3 URIs.
 
 ```bash
-# Roll up minute-partitioned data into daily partitions
-fireparq rollup ./output/blocks/ -p date
-
-# Roll up to a different output directory
-fireparq rollup ./output/blocks/ -o ./rolled-up/blocks/ -p date
-
-# Delete source files after successful rollup
+# Roll up minute-partitioned data into daily partitions, replacing the minute files
 fireparq rollup ./output/blocks/ -p date --delete-source
 
+# Roll up into a different output directory, keeping the source files
+fireparq rollup ./output/blocks/ -o ./rolled-up/blocks/ -p date
+
 # Resolve a shorthand S3 source path when no local match exists
-S3_BUCKET=my-bucket fireparq rollup evm/blocks/ -p date
+S3_BUCKET=my-bucket fireparq rollup evm/blocks/ -p date --delete-source
 ```
 
 Lookup order for the source path matches `scan` / `inspect`: explicit `s3://...` URIs win, existing local paths win over shorthand S3 resolution, and only missing relative paths fall back to `s3://<S3_BUCKET>/<path>`.
 
+Which files rollup reads, writes, and deletes:
+
+- Only `part-*.parquet` files below a partition finer than `--partition` are read (for `-p date`, files under `hour=`, `minute=`, or `second=` directories). Files already at the target granularity, including earlier rollup outputs, are never re-read or deleted. The same goes for files outside time partitions (`block_range=` or unpartitioned tables).
+- Root artifacts (`cursor.parquet`, `partitions.parquet`, `merkle_roots.parquet`, and anything under `verify_runs/`) are skipped, so rolling up a network root is safe.
+- Every run writes new, uniquely named files and never overwrites existing ones.
+- With `--delete-source`, outputs are named like ingestion parts (`part-<run>-NNNNNN.parquet`), and each source file is deleted once its target partition is written. A re-run after new data arrives only rolls up the new files.
+- Without `--delete-source`, outputs are named `part-rollup-<run>-NNNNNN.parquet`. They are copies of source files that are kept, so a re-run replaces the `part-rollup-*` files it wrote earlier in each target partition it rolls up, and leaves other files there alone. Because the re-run rebuilds those partitions from the source files that exist at that point, don't delete source files by hand between runs; use `--delete-source` instead.
+- An in-place rollup (no `--output`) requires `--delete-source`. Keeping the sources next to their rolled-up copy would store every row twice under the same root.
+
 | Flag | Default | Description |
 |---|---|---|
-| `-o, --output` | same as source | Output path (local or S3 URI) |
+| `-o, --output` | same as source | Output path (local or S3 URI). In-place rollups require `--delete-source` |
 | `-p, --partition` | `date` | Target partition interval: `hour` or `date` |
 | `--compression` | `zstd` | Compression codec: zstd, snappy, gzip, none |
 | `--flush-bytes` | 128 MB | Max compressed bytes per output file |
-| `--delete-source` | `false` | Delete source files after successful rollup |
+| `--delete-source` | `false` | Delete each source file once its target partition is written (required in place) |
 
 ### `merge` — Consolidate Part Files
 
@@ -1108,6 +1114,7 @@ firehose-parquet/
 │   └── src/lib.rs                          # include_proto! modules and aliases
 ├── firehose-parquet/                       # Core library
 │   └── src/
+│       ├── artifacts.rs                    # Reserved dataset artifact names (cursor, partitions, verify)
 │       ├── cli.rs                          # Shared CLI args, subcommands, helpers
 │       ├── config.rs                       # Config, partitioning, compression enums
 │       ├── cursor.rs                       # Cursor persistence (parquet format)

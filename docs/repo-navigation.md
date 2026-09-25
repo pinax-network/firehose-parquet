@@ -25,6 +25,7 @@ Related design docs:
   - `src/encode.rs`: byte encoding modes (`hex`, `base58`, `tron_base58`, etc.).
   - `src/metrics.rs`: Prometheus metrics registry and `/metrics` server helpers.
   - `src/rollup.rs`, `src/merge.rs`, `src/truncate.rs`: maintenance subcommand implementations.
+  - `src/artifacts.rs`: reserved dataset artifact names (`cursor.parquet`, `partitions.parquet`, `merkle_roots.parquet`, `verify_runs/`) and `is_reserved_artifact_path`, which commands that walk a dataset tree use to skip them.
   - `src/s3.rs`: object_store/S3 helpers used by writer/cursor/tools.
 - `blocks/`: chain-specific mapping crate and the unified binary.
   - `src/bin/main.rs`: `fireparq` executable entrypoint.
