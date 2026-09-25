@@ -365,10 +365,20 @@ Proposed CLI: `fireparq recovery release-owner --bucket <bucket>
 First `recovery status` reports the owner and affected scopes without cursors.
 The operator must stop every process holding that owner, wait for termination,
 and revoke its write capability if termination cannot be established. The
-command records the explicit assertion, verifies the exact owner/generation
-and CASes to Released. It cannot infer death from elapsed time. A mismatched
+command must additionally require explicit provider-level evidence that every
+previously sent write has completed or has been conclusively revoked/drained.
+Process termination alone cannot prove this: a delayed old PUT could arrive
+after Writing rollback and recreate a removed part. If the generic backend
+cannot establish that quiescence, plain-glob recovery is refused; a timeout or
+operator process-stop assertion is insufficient. The CLI must expose separate
+process-stopped and remote-requests-quiescent assertions/evidence, rather than
+presenting the preliminary spelling above as sufficient authorization.
+The command records those assertions, verifies the exact owner/generation
+and CASes to Released. It cannot infer quiescence from elapsed time. A mismatched
 generation or ambiguous response stops; it never "force deletes" ownership.
-The next normal invocation acquires ownership and runs journal recovery. Merely
+An ambiguous S3 mutation error retains Owned rather than running ordinary release.
+The next normal invocation acquires ownership and runs journal recovery only
+after the explicit quiescence requirement has been established. Merely
 removing a lock object is not a supported recovery procedure.
 
 Permissions: `GetObject` and conditional `PutObject` for the exact ownership
@@ -477,7 +487,7 @@ atomic parts, or an unconnected journal resolve crash replay by themselves.
 | I/O faults | ENOSPC/encode/close/file-sync/ancestor-sync/link/directory-sync/journal/state/mirror/cleanup failures. Normal errors stop; invalid final Parquet is never exposed; unrelated legacy objects remain unchanged. |
 | Recovery corruption | Unknown version, unsafe paths, checksum mismatch, foreign final collision, missing Committed file, Writing with advanced head, lost state, corrupt mirror. Fail closed with retained evidence and no new stream. |
 | Local ownership | Separate child ingesters and merge/truncate against equal, ancestor, descendant, sibling and symlink scopes; nested external cursor; two destinations sharing ancestors; partial acquisition unwind; owner SIGKILL then recovery; replaced inode detection. Run macOS and Ubuntu. |
-| S3 ownership | Stateful fake with conditional create/update, ambiguous successful PUT/release, missing ETag, unsupported conditions, stale reads, two buckets with partial acquisition, and paused old owner. Time alone never changes ownership; explicit wrong-generation release fails. |
+| S3 ownership | Stateful fake with conditional create/update, ambiguous successful PUT/release, missing ETag, unsupported conditions, stale reads, two buckets with partial acquisition, paused old owner, and an old in-flight PUT delayed until after attempted rollback. Process death/time alone never permits recovery; missing provider quiescence and wrong-generation release fail. |
 | S3 transactions | Lost part PUT, journal/state CAS failure, rollback delete failure, cross-bucket mirror failure, committed missing/corrupt part. Exact checksum GET resolves ambiguity; no overwrite fallback. |
 | Maintenance | Ingest pending plus merge at root/table/ancestor; interrupted merge before ingest; protected truncate/rollup refuse before any write; default verify registry fill and custom artifacts acquire guard; control paths excluded everywhere. |
 | Migration | Existing random files with missing/stale cursor refuse append; missing protected mirror repairs; advanced/foreign mirror refuses; cursor-none remains protected; incompatible semantics refuse; completed rerun has identical file set/count. |

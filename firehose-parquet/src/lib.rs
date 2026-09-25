@@ -3,6 +3,8 @@ pub mod auth;
 pub mod cli;
 pub mod config;
 pub mod cursor;
+pub mod dataset_lock;
+pub mod durable_state;
 pub mod encode;
 pub mod grpc;
 pub mod merge;

@@ -18,6 +18,8 @@ lifecycle state; a local implementation or passing test alone is not closure.
 
 - [Backlog priorities and preserved work](backlog-roadmap.md)
 - [#468: proposed crash/replay recovery design](468-crash-recovery-design.md)
+- [#468: accepted transaction implementation plan](468-ingestion-transaction-plan.md)
+- [#468: staged ownership and durable state implementation](468-stage1-ownership.md)
 
 ## Verified lifecycle outcomes
 
