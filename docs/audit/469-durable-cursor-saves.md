@@ -80,8 +80,19 @@ checkpoints. A long interval without a flush is not itself a persistence error.
   `git diff --check` passed. The pre-existing unused `transactions_processed`
   assignment warning remains unchanged.
 
-All tests are offline. No production bucket policy or live Firehose endpoint
-was changed or contacted. This does not make data files and cursor updates one
+A bounded live check on 2026-09-25 used the explicit Pinax Ethereum endpoint,
+blocks 26,049,575 through 26,049,576, one-block flushes, and a fresh local `/tmp`
+output directory. It completed successfully and wrote Parquet plus a cursor.
+No production output or bucket policy was changed. Failure injection remains
+offline so persistence errors do not affect shared services. This does not make data files and cursor updates one
 transaction: a failed checkpoint can still require replaying the most recent
 already-written flush after restart, but the pipeline can no longer continue
 indefinitely past that failure.
+
+## Related follow-up
+
+Review exposed a pre-existing completion path that skips the save entirely when
+the final mapper write auto-materializes and empties the writer buffers. That
+separate bug is tracked in #572 with a deterministic real-Solana-mapper
+regression. This change makes attempted checkpoint saves durable or fatal; #572
+ensures that finalization invokes the checkpoint when needed.
