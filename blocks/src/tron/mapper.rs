@@ -246,7 +246,7 @@ impl BlockMapper for TronBlockMapper {
     ) -> anyhow::Result<u64> {
         let block = tron::Block::decode(block_bytes)?;
         let tx_count = block.transactions.len() as u64;
-        let identity = self.blocks.canonical.prepare(identity);
+        let identity = self.blocks.canonical.prepare(identity)?;
         self.map_tron_block(&block, &identity, fork_step);
         Ok(tx_count)
     }

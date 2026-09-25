@@ -99,3 +99,17 @@ For both bounded and live mode, the intended implementation is:
 If a sparse probe returns a missing/non-positive timestamp, the probe logic should borrow the nearest subsequent finalized block timestamp within a small bounded scan window (linear scan of up to 16 blocks) and log that normalization. If no timestamp is found within the small window, the probe falls back to an exponential forward search — doubling the jump distance on each step — so that chains with large timestamp-less ranges (e.g. Solana legacy blocks) can still be partitioned without streaming every block. If the exponential search also fails to find any reachable block with a timestamp, the build fails instead of silently partitioning at `1970-01-01 00:00:00`.
 
 This keeps the command lightweight while still producing exact partition boundaries.
+
+### Probe outcomes
+
+Each probe fetches one block number over a single reused gRPC channel and resolves to one of:
+
+- **found**: the endpoint returned the requested block
+- **missing**: the endpoint returned gRPC `NotFound`, or the precise supported `Unknown` wrapper of the upstream missing-block status (for example a skipped Solana slot). Arbitrary error messages mentioning a missing block do not establish absence. Missing responses are retried before being accepted, and skipped only when skipping missing blocks is enabled (the default).
+- **past the chain head**: an endpoint answered an out-of-range request with its earlier head block. After an exponential sample, the skipped interval is still checked before concluding that no block is available.
+
+The earlier-reply head interpretation preserves endpoint behavior already used by sparse probing. It is not guaranteed by the checked-in Fetch protobuf for every server implementation.
+
+Timeouts and known transient errors (unavailable endpoint, dropped connection) are retried with exponential backoff and never count as missing blocks. After retries run out, a bounded build fails and live frontier polling backs off and polls again. Authentication, permission, and invalid-request errors fail immediately. Unrecognized failures are retried a bounded number of times, then returned; text such as "timeout" in an internal server error does not justify indefinite live retries. Missing response metadata and unexpected later-block replies are errors. Block-range boundary timestamp probes use the same rules, so an endpoint failure cannot silently become a nullable timestamp.
+
+When the 16 blocks after a probed number are all missing, the run of missing blocks may just be long. The probe then looks further ahead exponentially (up to 65,536 blocks) until it finds an available block or the chain head, and scans the skipped gap linearly, so it returns the exact first available block. The gap is checked even when every exponential sample is missing: valid blocks need not coincide with sample offsets. If the entire budget is missing and no head response establishes an upper bound, the build fails with an explicit search-budget error. It does not invent a head boundary or repeatedly poll the same unresolved range forever. Reaching the block-number limit likewise fails without probing the `u64::MAX` sentinel.

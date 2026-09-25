@@ -34,3 +34,4 @@ solana-vote-interface = { version = "=7.1.0", default-features = false, features
 futures = "0.3"
 tempfile = "3"
 tonic.workspace = true
+tonic-prost = "0.14"
