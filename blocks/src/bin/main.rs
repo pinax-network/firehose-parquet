@@ -642,6 +642,7 @@ fn use_last_known_timestamp_partition_routing(block_type: &str, partition: &Part
 }
 
 fn validate_block_timestamp(block_num: u64, timestamp: i64, partition: &Partition) -> Result<()> {
+    firehose_parquet::traits::checked_timestamp(timestamp)?;
     if timestamp != 0 {
         return Ok(());
     }
@@ -1754,7 +1755,7 @@ async fn run_partitions_build(
             };
 
             let latest_finalized_block_time =
-                format_optional_probe_timestamp(latest_available.timestamp)?;
+                format_optional_probe_timestamp(latest_available.timestamp);
             let completed_frontier =
                 completed_block_range_frontier(latest_available.block_num, block_range_size);
             if completed_frontier <= frontier {
@@ -2735,7 +2736,7 @@ where
         let Some((resolved_block_num, probe)) = fetch(search_start, allowed_skip).await? else {
             break;
         };
-        if get_timestamp(&probe) > 0 {
+        if get_timestamp(&probe) != 0 {
             return Ok(Some((resolved_block_num, probe)));
         }
         search_start = resolved_block_num.saturating_add(1);
@@ -2757,7 +2758,7 @@ where
             };
             continue;
         };
-        if get_timestamp(&probe) > 0 {
+        if get_timestamp(&probe) != 0 {
             return Ok(Some((resolved_block_num, probe)));
         }
         jump = match jump.checked_mul(2) {
@@ -3013,7 +3014,7 @@ async fn normalize_probe_block_identity(
     skip_missing_blocks: bool,
     probe_counter: &AtomicU64,
 ) -> Result<BlockIdentity> {
-    if block.timestamp > 0 {
+    if block.timestamp != 0 {
         return Ok(block);
     }
     let max_skip_blocks = if skip_missing_blocks {
@@ -3278,12 +3279,12 @@ fn format_probe_timestamp(timestamp: i64) -> Result<String> {
     ))
 }
 
-fn format_optional_probe_timestamp(timestamp: i64) -> Result<Option<String>> {
-    if timestamp > 0 {
-        Ok(Some(format_probe_timestamp(timestamp)?))
-    } else {
-        Ok(None)
-    }
+// Progress logging must never turn an otherwise successful operation into an error.
+fn format_optional_probe_timestamp(timestamp: i64) -> Option<String> {
+    (timestamp != 0).then(|| {
+        format_probe_timestamp(timestamp)
+            .unwrap_or_else(|_| format!("invalid unix timestamp {timestamp}"))
+    })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -5201,7 +5202,7 @@ async fn run_ingestion(args: &BuildArgs, global: &GlobalArgs) -> Result<()> {
                     } else {
                         0.0
                     };
-                    let timestamp = format_optional_probe_timestamp(current_anchor_timestamp)?;
+                    let timestamp = format_optional_probe_timestamp(current_anchor_timestamp);
                     match timestamp.as_deref() {
                         Some(timestamp) => info!(
                             blocks_observed,
@@ -5277,7 +5278,7 @@ async fn run_ingestion(args: &BuildArgs, global: &GlobalArgs) -> Result<()> {
                 // Flush the mapper at partition boundaries to ensure each flush
                 // produces batches belonging to exactly one partition.
                 // See: https://github.com/pinax-network/firehose-parquet/issues/110
-                let new_partition_key = partition_config.partition_key(block_number, ts);
+                let new_partition_key = partition_config.partition_key(block_number, ts)?;
                 if let Some(ref new_key) = new_partition_key {
                     let partition_changed = current_partition_key
                         .as_ref()
@@ -5390,7 +5391,7 @@ async fn run_ingestion(args: &BuildArgs, global: &GlobalArgs) -> Result<()> {
                     } else {
                         0.0
                     };
-                    let timestamp = format_optional_probe_timestamp(ts)?;
+                    let timestamp = format_optional_probe_timestamp(ts);
                     match (timestamp.as_deref(), current_partition_key.as_deref()) {
                         (Some(timestamp), Some(partition)) => info!(
                             blocks = blocks_processed,
@@ -8148,8 +8149,8 @@ mod tests {
             Partition::Minute,
             Partition::Second,
         ] {
-            let anchor_key = partition.partition_key(100, 1_700_000_000);
-            let routed_key = partition.partition_key(101, routing_timestamp);
+            let anchor_key = partition.partition_key(100, 1_700_000_000).unwrap();
+            let routed_key = partition.partition_key(101, routing_timestamp).unwrap();
             assert_eq!(routed_key, anchor_key);
         }
     }
@@ -8178,8 +8179,10 @@ mod tests {
             Partition::Minute,
             Partition::Second,
         ] {
-            let expected = partition.partition_key(0, SOLANA_GENESIS_TIMESTAMP);
-            let routed_key = partition.partition_key(0, routing_timestamp);
+            let expected = partition
+                .partition_key(0, SOLANA_GENESIS_TIMESTAMP)
+                .unwrap();
+            let routed_key = partition.partition_key(0, routing_timestamp).unwrap();
             assert_eq!(routed_key, expected);
         }
     }
@@ -9049,6 +9052,27 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn negative_timestamp_is_a_valid_sequential_or_exponential_probe_anchor() {
+        for scan_limit in [0, 16] {
+            let mut attempts = 0;
+            let result = find_timestamp_borrow_probe(
+                100,
+                scan_limit,
+                0,
+                |candidate, _| {
+                    attempts += 1;
+                    async move { Ok(Some((candidate, -1_i64))) }
+                },
+                |timestamp| *timestamp,
+            )
+            .await
+            .unwrap();
+            assert_eq!(result, Some((if scan_limit == 0 { 132 } else { 101 }, -1)));
+            assert_eq!(attempts, 1);
+        }
+    }
+
+    #[tokio::test]
     async fn test_find_timestamp_borrow_probe_skips_missing_exponential_probe() {
         #[derive(Clone, Debug)]
         struct Probe {
@@ -9548,13 +9572,18 @@ mod tests {
     #[test]
     fn test_format_optional_probe_timestamp_handles_missing_timestamp() {
         assert_eq!(
-            format_optional_probe_timestamp(0).expect("missing timestamp should be allowed"),
-            None
+            format_optional_probe_timestamp(-1).as_deref(),
+            Some("1969-12-31 23:59:59")
         );
+        for timestamp in [i64::MIN, i64::MAX, 1_700_000_000_000] {
+            assert_eq!(
+                format_optional_probe_timestamp(timestamp),
+                Some(format!("invalid unix timestamp {timestamp}"))
+            );
+        }
+        assert_eq!(format_optional_probe_timestamp(0), None);
         assert_eq!(
-            format_optional_probe_timestamp(1_690_815_590)
-                .expect("valid timestamp")
-                .as_deref(),
+            format_optional_probe_timestamp(1_690_815_590).as_deref(),
             Some("2023-07-31 14:59:50")
         );
     }

@@ -227,16 +227,11 @@ impl FirehoseClient {
             self.auth.apply(&mut request);
 
             let response = client.block(request).await?.into_inner();
-            Ok(response.metadata.as_ref().map(|m| BlockIdentity {
-                block_num: m.num,
-                block_id: m.id.clone(),
-                parent_num: m.parent_num,
-                parent_id: m.parent_id.clone(),
-                lib_num: m.lib_num,
-                timestamp: m.time.as_ref().map_or(0, |t| t.seconds),
-                timestamp_nanos: m.time.as_ref().map_or(0, |t| t.nanos),
-                fork_step: None,
-            }))
+            response
+                .metadata
+                .as_ref()
+                .map(|metadata| checked_block_identity(metadata, None))
+                .transpose()
         };
 
         match wait_timeout {
@@ -383,20 +378,9 @@ impl FirehoseClient {
                             })
                         };
 
-                        let identity = resp
-                            .metadata
-                            .as_ref()
-                            .map(|m| BlockIdentity {
-                                block_num: m.num,
-                                block_id: m.id.clone(),
-                                parent_num: m.parent_num,
-                                parent_id: m.parent_id.clone(),
-                                lib_num: m.lib_num,
-                                timestamp: m.time.as_ref().map_or(0, |t| t.seconds),
-                                timestamp_nanos: m.time.as_ref().map_or(0, |t| t.nanos),
-                                fork_step: fork_step.clone(),
-                            })
-                            .unwrap_or_default();
+                        let metadata = resp.metadata.as_ref().ok_or_else(|| anyhow::anyhow!(
+                            "Firehose response is missing block metadata; cannot safely identify or checkpoint this block"))?;
+                        let identity = checked_block_identity(metadata, fork_step)?;
 
                         if let Some(any) = resp.block {
                             blocks_this_connection += 1;
@@ -802,6 +786,27 @@ fn clean_end_action(
     }
 }
 
+/// Build an identity only after all present time metadata has been validated.
+fn checked_block_identity(
+    metadata: &firehose::BlockMetadata,
+    fork_step: Option<String>,
+) -> Result<BlockIdentity> {
+    if let Some(time) = &metadata.time {
+        crate::traits::timestamp_millis(time.seconds, time.nanos)
+            .with_context(|| format!("invalid timestamp metadata for block {}", metadata.num))?;
+    }
+    Ok(BlockIdentity {
+        block_num: metadata.num,
+        block_id: metadata.id.clone(),
+        parent_num: metadata.parent_num,
+        parent_id: metadata.parent_id.clone(),
+        lib_num: metadata.lib_num,
+        timestamp: metadata.time.as_ref().map_or(0, |time| time.seconds),
+        timestamp_nanos: metadata.time.as_ref().map_or(0, |time| time.nanos),
+        fork_step,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -812,7 +817,7 @@ mod tests {
     /// A real local gRPC stream, so handler failure is checked through the
     /// production reconnect loop rather than a model of its control flow.
     #[derive(Clone)]
-    struct TwoBlockService;
+    struct TwoBlockService(Vec<firehose::Response>);
 
     impl tonic::server::ServerStreamingService<firehose::Request> for TwoBlockService {
         type Response = firehose::Response;
@@ -822,25 +827,28 @@ mod tests {
             tonic::codegen::BoxFuture<tonic::Response<Self::ResponseStream>, tonic::Status>;
 
         fn call(&mut self, _: tonic::Request<firehose::Request>) -> Self::Future {
-            Box::pin(async {
-                let stream = futures::stream::iter([100, 101].map(|num| {
-                    Ok(firehose::Response {
-                        block: Some(prost_types::Any {
-                            type_url: "test.Block".into(),
-                            value: vec![],
-                        }),
-                        step: 3,
-                        cursor: format!("cursor-{num}"),
-                        metadata: Some(firehose::BlockMetadata {
-                            num,
-                            ..Default::default()
-                        }),
-                    })
-                }));
+            let responses = self.0.clone();
+            Box::pin(async move {
+                let stream = futures::stream::iter(responses.into_iter().map(Ok));
                 Ok(tonic::Response::new(
                     Box::pin(stream) as Self::ResponseStream
                 ))
             })
+        }
+    }
+
+    fn test_response(num: u64) -> firehose::Response {
+        firehose::Response {
+            block: Some(prost_types::Any {
+                type_url: "test.Block".into(),
+                value: vec![],
+            }),
+            step: 3,
+            cursor: format!("cursor-{num}"),
+            metadata: Some(firehose::BlockMetadata {
+                num,
+                ..Default::default()
+            }),
         }
     }
 
@@ -864,9 +872,10 @@ mod tests {
             &mut self,
             request: tonic::codegen::http::Request<tonic::body::Body>,
         ) -> Self::Future {
-            Box::pin(async {
+            let service = self.clone();
+            Box::pin(async move {
                 let mut grpc = tonic::server::Grpc::new(tonic_prost::ProstCodec::default());
-                Ok(grpc.server_streaming(TwoBlockService, request).await)
+                Ok(grpc.server_streaming(service, request).await)
             })
         }
     }
@@ -884,7 +893,10 @@ mod tests {
         let (stop, stopped) = tokio::sync::oneshot::channel();
         let server = tokio::spawn(async {
             tonic::transport::Server::builder()
-                .add_service(TwoBlockService)
+                .add_service(TwoBlockService(vec![
+                    test_response(100),
+                    test_response(101),
+                ]))
                 .serve_with_incoming_shutdown(incoming, async {
                     let _ = stopped.await;
                 })
@@ -931,6 +943,85 @@ mod tests {
         assert_eq!(metrics.cursor_saves_total.get(), 0);
         assert_eq!(metrics.cursor_last_success_timestamp_seconds.get(), 0);
         assert_eq!(metrics.grpc_reconnects_total.get(), 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn malformed_stream_identity_never_reaches_handler_or_checkpoint() {
+        for invalid in [
+            None,
+            Some((i64::MIN, 0)),
+            Some((i64::MAX, 0)),
+            Some((1_700_000_000_000, 0)),
+            Some((0, -1)),
+            Some((0, 1_000_000_000)),
+        ] {
+            let mut bad = test_response(100);
+            bad.metadata = invalid.map(|(seconds, nanos)| firehose::BlockMetadata {
+                num: 100,
+                time: Some(prost_types::Timestamp { seconds, nanos }),
+                ..Default::default()
+            });
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let endpoint = format!("http://{}", listener.local_addr().unwrap());
+            let incoming = futures::stream::unfold(listener, |listener| async {
+                Some((listener.accept().await.map(|(socket, _)| socket), listener))
+            });
+            let (stop, stopped) = tokio::sync::oneshot::channel();
+            let server = tokio::spawn(async move {
+                tonic::transport::Server::builder()
+                    .add_service(TwoBlockService(vec![bad, test_response(101)]))
+                    .serve_with_incoming_shutdown(incoming, async {
+                        let _ = stopped.await;
+                    })
+                    .await
+                    .unwrap();
+            });
+            let mut config = test_config(&endpoint);
+            config.start_block = Some(100);
+            config.stop_block = Some(102);
+            let client = FirehoseClient::new(config).unwrap();
+            let dir = tempfile::tempdir().unwrap();
+            let cursor = dir.path().join("cursor.parquet");
+            std::fs::write(&cursor, b"existing checkpoint").unwrap();
+            let mut handled = 0;
+            let result = tokio::time::timeout(
+                Duration::from_secs(5),
+                client.stream_blocks(None, |_, _, _, _, _| {
+                    handled += 1;
+                    std::fs::write(&cursor, b"advanced checkpoint")?;
+                    std::fs::write(dir.path().join("published.parquet"), b"published")?;
+                    Ok(())
+                }),
+            )
+            .await
+            .expect("invalid metadata must fail promptly");
+            stop.send(()).unwrap();
+            server.await.unwrap();
+            let error = format!("{:#}", result.unwrap_err());
+            assert!(error.contains("metadata"), "{error}");
+            assert_eq!(handled, 0);
+            assert_eq!(std::fs::read(&cursor).unwrap(), b"existing checkpoint");
+            assert!(!dir.path().join("published.parquet").exists());
+        }
+    }
+
+    #[test]
+    fn metadata_identity_preserves_negative_and_absent_times() {
+        let mut metadata = firehose::BlockMetadata {
+            num: 42,
+            ..Default::default()
+        };
+        assert_eq!(
+            checked_block_identity(&metadata, None).unwrap().timestamp,
+            0
+        );
+        metadata.time = Some(prost_types::Timestamp {
+            seconds: -1,
+            nanos: 500_000_000,
+        });
+        let identity = checked_block_identity(&metadata, Some("UNDO".into())).unwrap();
+        assert_eq!(identity.timestamp_millis().unwrap(), -500);
+        assert_eq!(identity.fork_step.as_deref(), Some("UNDO"));
     }
 
     fn test_config(endpoint: &str) -> Config {

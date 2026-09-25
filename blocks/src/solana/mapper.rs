@@ -234,7 +234,7 @@ impl SolanaBlockMapper {
         block: &solana::Block,
         identity: &BlockIdentity,
         fork_step: Option<&str>,
-    ) {
+    ) -> anyhow::Result<()> {
         let slot = block.slot;
         let blockhash_bytes = solana_hash_bytes(&block.blockhash);
         let previous_blockhash_bytes = solana_hash_bytes(&block.previous_blockhash);
@@ -243,8 +243,8 @@ impl SolanaBlockMapper {
         let prepared = self
             .blocks
             .canonical
-            .prepare_with_ids(identity, &blockhash_bytes, &previous_blockhash_bytes)
-            .with_timestamp_seconds(block.block_time.as_ref().map(|bt| bt.timestamp));
+            .prepare_with_ids(identity, &blockhash_bytes, &previous_blockhash_bytes)?
+            .with_timestamp_seconds(block.block_time.as_ref().map(|bt| bt.timestamp))?;
         let identity = &prepared;
 
         self.blocks.canonical.append(identity);
@@ -277,6 +277,7 @@ impl SolanaBlockMapper {
         for (reward_idx, reward) in block.rewards.iter().enumerate() {
             self.map_reward(slot, reward_idx as u32, reward, identity, fork_step);
         }
+        Ok(())
     }
 
     fn map_transaction(
@@ -564,7 +565,7 @@ impl BlockMapper for SolanaBlockMapper {
     ) -> anyhow::Result<u64> {
         let block = solana::Block::decode(block_bytes)?;
         let tx_count = block.transactions.len() as u64;
-        self.map_solana_block(&block, identity, fork_step);
+        self.map_solana_block(&block, identity, fork_step)?;
         Ok(tx_count)
     }
 
@@ -1276,6 +1277,61 @@ pub(crate) mod tests {
                 reward_type: 1,
                 commission: String::new(),
             }],
+        }
+    }
+
+    #[test]
+    fn invalid_payload_time_preserves_all_previously_buffered_solana_rows() {
+        let valid = make_test_block(100);
+        for timestamp in [i64::MIN, i64::MAX, 1_700_000_000_000] {
+            let mut invalid = valid.clone();
+            invalid.block_time.as_mut().unwrap().timestamp = timestamp;
+            let mut baseline =
+                SolanaBlockMapper::new(false, true, EncodeBytes::Binary, false, false);
+            let mut subject =
+                SolanaBlockMapper::new(false, true, EncodeBytes::Binary, false, false);
+            let identity = BlockIdentity::default();
+            baseline
+                .map_block(&valid.encode_to_vec(), &identity, None)
+                .unwrap();
+            subject
+                .map_block(&valid.encode_to_vec(), &identity, None)
+                .unwrap();
+            assert!(subject
+                .map_block(&invalid.encode_to_vec(), &identity, None)
+                .is_err());
+            assert_eq!(subject.flush().unwrap(), baseline.flush().unwrap());
+        }
+    }
+
+    #[test]
+    fn negative_payload_time_is_preserved_in_solana_timestamp_and_date() {
+        let mut block = make_test_block(100);
+        block.block_time.as_mut().unwrap().timestamp = -1;
+        let mut mapper = SolanaBlockMapper::new(false, false, EncodeBytes::Binary, false, false);
+        mapper
+            .map_block(&block.encode_to_vec(), &BlockIdentity::default(), None)
+            .unwrap();
+        for batch in mapper
+            .flush()
+            .unwrap()
+            .values()
+            .filter(|batch| batch.num_rows() > 0)
+        {
+            let timestamps = batch
+                .column_by_name("timestamp")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<arrow::array::TimestampMillisecondArray>()
+                .unwrap();
+            let dates = batch
+                .column_by_name("date")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<arrow::array::Date32Array>()
+                .unwrap();
+            assert_eq!(timestamps.value(0), -1000);
+            assert_eq!(dates.value(0), -1);
         }
     }
 

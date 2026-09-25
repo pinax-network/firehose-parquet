@@ -13,7 +13,6 @@ use std::fmt::Display;
 use std::fs::{self, File};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use time::OffsetDateTime;
 use tracing::info;
 use uuid::Uuid;
 
@@ -117,7 +116,7 @@ impl ParquetTableWriter {
             return Ok((dir, 0));
         }
 
-        let dir = self.partition_dir(table, metadata);
+        let dir = self.partition_dir(table, metadata)?;
 
         let counter_key = dir.to_string_lossy().to_string();
         let counter = self.part_counters.entry(counter_key).or_insert(0);
@@ -136,7 +135,7 @@ impl ParquetTableWriter {
             writer.close()?;
             compressed_bytes = buf.len();
 
-            let s3_key = self.s3_object_key(table, metadata, &filename);
+            let s3_key = self.s3_object_key(table, metadata, &filename)?;
             let s3_path = object_store::path::Path::from(s3_key.as_str());
             let s3_client = Arc::clone(s3);
             let payload = object_store::PutPayload::from(bytes::Bytes::from(buf));
@@ -185,164 +184,57 @@ impl ParquetTableWriter {
     }
 
     /// Compute the S3 object key for a partition + filename.
-    fn s3_object_key(&self, table: &str, metadata: &BlockMetadata, filename: &str) -> String {
+    fn s3_object_key(
+        &self,
+        table: &str,
+        metadata: &BlockMetadata,
+        filename: &str,
+    ) -> Result<String> {
         let prefix = self.s3_prefix.as_deref().unwrap_or("");
-        let partition_suffix = self.partition_suffix(table, metadata);
-        if prefix.is_empty() {
+        let partition_suffix = self.partition_suffix(table, metadata)?;
+        Ok(if prefix.is_empty() {
             format!("{partition_suffix}/{filename}")
         } else {
             format!("{prefix}/{partition_suffix}/{filename}")
-        }
+        })
     }
 
-    /// Return the partition-relative path component (e.g. `blocks/year=2024/month=01/day=15`).
-    pub fn partition_suffix(&self, table: &str, metadata: &BlockMetadata) -> String {
-        match &self.partition {
-            Partition::None => table.to_string(),
-            Partition::BlockRange { .. } => {
-                let (start, stop) = self
-                    .partition
-                    .block_range_bounds(metadata.min_block_number)
-                    .unwrap_or_else(|| {
-                        panic!(
-                            "expected BlockRange partition bounds for block {} while formatting block-range output path",
-                            metadata.min_block_number
-                        )
-                    });
-                format!("{table}/block_range={start}-{stop}")
-            }
-            Partition::Date => {
-                if let Some(ts) = metadata.min_timestamp {
-                    let dt = OffsetDateTime::from_unix_timestamp(ts)
-                        .unwrap_or(OffsetDateTime::UNIX_EPOCH);
-                    format!(
-                        "{table}/year={:04}/month={:02}/day={:02}",
-                        dt.year(),
-                        dt.month() as u8,
-                        dt.day()
-                    )
-                } else {
-                    table.to_string()
-                }
-            }
-            Partition::Hour => {
-                if let Some(ts) = metadata.min_timestamp {
-                    let dt = OffsetDateTime::from_unix_timestamp(ts)
-                        .unwrap_or(OffsetDateTime::UNIX_EPOCH);
-                    format!(
-                        "{table}/year={:04}/month={:02}/day={:02}/hour={:02}",
-                        dt.year(),
-                        dt.month() as u8,
-                        dt.day(),
-                        dt.hour()
-                    )
-                } else {
-                    table.to_string()
-                }
-            }
-            Partition::Minute => {
-                if let Some(ts) = metadata.min_timestamp {
-                    let dt = OffsetDateTime::from_unix_timestamp(ts)
-                        .unwrap_or(OffsetDateTime::UNIX_EPOCH);
-                    format!(
-                        "{table}/year={:04}/month={:02}/day={:02}/hour={:02}/minute={:02}",
-                        dt.year(),
-                        dt.month() as u8,
-                        dt.day(),
-                        dt.hour(),
-                        dt.minute()
-                    )
-                } else {
-                    table.to_string()
-                }
-            }
-            Partition::Second => {
-                if let Some(ts) = metadata.min_timestamp {
-                    let dt = OffsetDateTime::from_unix_timestamp(ts)
-                        .unwrap_or(OffsetDateTime::UNIX_EPOCH);
-                    format!(
-                        "{table}/year={:04}/month={:02}/day={:02}/hour={:02}/minute={:02}/second={:02}",
-                        dt.year(),
-                        dt.month() as u8,
-                        dt.day(),
-                        dt.hour(),
-                        dt.minute(),
-                        dt.second()
-                    )
-                } else {
-                    table.to_string()
-                }
+    /// Return the partition-relative path, rejecting invalid time metadata.
+    /// Missing time retains the nullable-chain unpartitioned fallback.
+    pub fn partition_suffix(&self, table: &str, metadata: &BlockMetadata) -> Result<String> {
+        if !matches!(
+            self.partition,
+            Partition::None | Partition::BlockRange { .. }
+        ) {
+            for timestamp in [metadata.min_timestamp, metadata.max_timestamp]
+                .into_iter()
+                .flatten()
+            {
+                crate::traits::checked_timestamp(timestamp)?;
             }
         }
+        if !matches!(
+            self.partition,
+            Partition::None | Partition::BlockRange { .. }
+        ) && metadata.min_timestamp.is_none()
+        {
+            return Ok(table.to_string());
+        }
+        Ok(
+            match self.partition.partition_key(
+                metadata.min_block_number,
+                metadata.min_timestamp.unwrap_or(0),
+            )? {
+                Some(key) => format!("{table}/{key}"),
+                None => table.to_string(),
+            },
+        )
     }
 
-    fn partition_dir(&self, table: &str, metadata: &BlockMetadata) -> PathBuf {
-        let base = self.output_dir.join(table);
-        match &self.partition {
-            Partition::None => base,
-            Partition::BlockRange { .. } => {
-                let (start, stop) = self
-                    .partition
-                    .block_range_bounds(metadata.min_block_number)
-                    .unwrap_or_else(|| {
-                        panic!(
-                            "expected BlockRange partition bounds for block {} while resolving block-range output directory",
-                            metadata.min_block_number
-                        )
-                    });
-                base.join(format!("block_range={start}-{stop}"))
-            }
-            Partition::Date => {
-                if let Some(ts) = metadata.min_timestamp {
-                    let dt = OffsetDateTime::from_unix_timestamp(ts)
-                        .unwrap_or(OffsetDateTime::UNIX_EPOCH);
-                    base.join(format!("year={:04}", dt.year()))
-                        .join(format!("month={:02}", dt.month() as u8))
-                        .join(format!("day={:02}", dt.day()))
-                } else {
-                    base
-                }
-            }
-            Partition::Hour => {
-                if let Some(ts) = metadata.min_timestamp {
-                    let dt = OffsetDateTime::from_unix_timestamp(ts)
-                        .unwrap_or(OffsetDateTime::UNIX_EPOCH);
-                    base.join(format!("year={:04}", dt.year()))
-                        .join(format!("month={:02}", dt.month() as u8))
-                        .join(format!("day={:02}", dt.day()))
-                        .join(format!("hour={:02}", dt.hour()))
-                } else {
-                    base
-                }
-            }
-            Partition::Minute => {
-                if let Some(ts) = metadata.min_timestamp {
-                    let dt = OffsetDateTime::from_unix_timestamp(ts)
-                        .unwrap_or(OffsetDateTime::UNIX_EPOCH);
-                    base.join(format!("year={:04}", dt.year()))
-                        .join(format!("month={:02}", dt.month() as u8))
-                        .join(format!("day={:02}", dt.day()))
-                        .join(format!("hour={:02}", dt.hour()))
-                        .join(format!("minute={:02}", dt.minute()))
-                } else {
-                    base
-                }
-            }
-            Partition::Second => {
-                if let Some(ts) = metadata.min_timestamp {
-                    let dt = OffsetDateTime::from_unix_timestamp(ts)
-                        .unwrap_or(OffsetDateTime::UNIX_EPOCH);
-                    base.join(format!("year={:04}", dt.year()))
-                        .join(format!("month={:02}", dt.month() as u8))
-                        .join(format!("day={:02}", dt.day()))
-                        .join(format!("hour={:02}", dt.hour()))
-                        .join(format!("minute={:02}", dt.minute()))
-                        .join(format!("second={:02}", dt.second()))
-                } else {
-                    base
-                }
-            }
-        }
+    fn partition_dir(&self, table: &str, metadata: &BlockMetadata) -> Result<PathBuf> {
+        Ok(self
+            .output_dir
+            .join(self.partition_suffix(table, metadata)?))
     }
 
     /// Set file-level metadata to embed in every Parquet file footer.
@@ -525,9 +417,9 @@ impl OutputWriter {
                 "table `{table}` metadata precedes block-range start {anchor}"
             );
         }
-        let expected = self.inner.partition_suffix(table, metadata);
+        let expected = self.inner.partition_suffix(table, metadata)?;
         let check = |row_metadata: &BlockMetadata| -> Result<()> {
-            let actual = self.inner.partition_suffix(table, row_metadata);
+            let actual = self.inner.partition_suffix(table, row_metadata)?;
             anyhow::ensure!(actual == expected,
                 "table `{table}` spans partitions or disagrees with its metadata: expected `{expected}`, found `{actual}`; flush the mapper at partition boundaries");
             Ok(())
@@ -639,7 +531,7 @@ impl OutputWriter {
                 TableBuffer {
                     batch: batch.clone(),
                     metadata: metadata.clone(),
-                    partition_key: self.inner.partition_suffix(table, metadata),
+                    partition_key: self.inner.partition_suffix(table, metadata)?,
                 },
             );
         }
@@ -1212,6 +1104,42 @@ mod tests {
     }
 
     #[test]
+    fn invalid_times_never_publish_files_or_advance_part_counters() {
+        for partition in [
+            Partition::Date,
+            Partition::Hour,
+            Partition::Minute,
+            Partition::Second,
+        ] {
+            for timestamp in [i64::MIN, i64::MAX, 1_700_000_000_000] {
+                let batch = partition_batch(vec![Some(501)], vec![Some(0)]);
+                assert_rejected_without_publication(
+                    partition.clone(),
+                    batch.clone(),
+                    routed_metadata(Some(timestamp)),
+                );
+                let mut metadata = routed_metadata(Some(0));
+                metadata.max_timestamp = Some(timestamp);
+                assert_rejected_without_publication(partition.clone(), batch.clone(), metadata);
+                let dir = tempfile::tempdir().unwrap();
+                let output = dir.path().join("output");
+                let mut writer =
+                    ParquetTableWriter::new(&output, partition.clone(), Compression::None);
+                assert!(writer
+                    .write_batch("blocks", &batch, &routed_metadata(Some(timestamp)))
+                    .is_err());
+                assert!(!output.exists());
+                assert!(writer.part_counters.is_empty());
+                assert!(writer
+                    .s3_object_key("blocks", &routed_metadata(Some(timestamp)), "part.parquet")
+                    .is_err());
+            }
+            let batch = partition_batch(vec![Some(501)], vec![Some(i64::MAX)]);
+            assert_rejected_without_publication(partition, batch, routed_metadata(Some(0)));
+        }
+    }
+
+    #[test]
     fn test_negative_milliseconds_use_floor_seconds_for_partition_membership() {
         let dir = tempfile::tempdir().unwrap();
         let batch = partition_batch(vec![Some(501), Some(502)], vec![Some(-1), Some(-999)]);
@@ -1235,7 +1163,7 @@ mod tests {
             let batch = partition_batch(vec![Some(501)], vec![None]);
             let metadata = routed_metadata(timestamp);
             let mut writer = OutputWriter::new(dir.path(), Partition::Date, Compression::None, 0);
-            let suffix = writer.inner.partition_suffix("blocks", &metadata);
+            let suffix = writer.inner.partition_suffix("blocks", &metadata).unwrap();
             assert!(writer
                 .write_all(&HashMap::from([("blocks".into(), batch)]), &metadata)
                 .unwrap());
