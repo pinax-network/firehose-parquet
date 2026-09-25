@@ -3,7 +3,7 @@ use super::schema;
 use arrow::array::*;
 use arrow::datatypes::{Int32Type, Schema};
 use arrow::record_batch::RecordBatch;
-use firehose_parquet::encode::{BytesColumn, EncodeBytes};
+use firehose_parquet::encode::{BytesColumn, BytesListColumn, EncodeBytes};
 use firehose_parquet::traits::{
     est_bool, est_opt_str, est_str, est_u32, est_u64, BlockIdentity, BlockMapper, CanonicalBuilder,
     PreparedIdentity,
@@ -23,6 +23,25 @@ fn bigint_to_string(bi: &Option<eth::BigInt>) -> String {
             n.to_string()
         }
         _ => "0".to_string(),
+    }
+}
+
+/// Append `bytes`, or null when empty. For header fields that are absent
+/// before the fork that introduced them (e.g. `withdrawals_root`).
+fn append_non_empty_bytes(builder: &mut BytesColumn, bytes: &[u8]) {
+    if bytes.is_empty() {
+        builder.append_null();
+    } else {
+        builder.append_value(bytes);
+    }
+}
+
+/// Append a decimal string for `value`, or null when absent.
+fn append_optional_bigint(builder: &mut StringBuilder, value: &Option<eth::BigInt>) {
+    if value.is_some() {
+        builder.append_value(bigint_to_string(value));
+    } else {
+        builder.append_null();
     }
 }
 
@@ -445,6 +464,30 @@ impl EvmBlockMapper {
         self.blocks
             .detail_level
             .append_value(detail_level_text(block.detail_level));
+        self.blocks
+            .uncle_hash
+            .append_value(header.map_or(&[][..], |h| &h.uncle_hash));
+        self.blocks
+            .logs_bloom
+            .append_value(header.map_or(&[][..], |h| &h.logs_bloom));
+        append_non_empty_bytes(
+            &mut self.blocks.withdrawals_root,
+            header.map_or(&[][..], |h| &h.withdrawals_root),
+        );
+        self.blocks
+            .blob_gas_used
+            .append_option(header.and_then(|h| h.blob_gas_used));
+        self.blocks
+            .excess_blob_gas
+            .append_option(header.and_then(|h| h.excess_blob_gas));
+        append_non_empty_bytes(
+            &mut self.blocks.parent_beacon_root,
+            header.map_or(&[][..], |h| &h.parent_beacon_root),
+        );
+        append_non_empty_bytes(
+            &mut self.blocks.requests_hash,
+            header.map_or(&[][..], |h| &h.requests_hash),
+        );
         append_fork_step(&mut self.blocks.fork_step, fork_step);
 
         // -- transaction traces --
@@ -535,6 +578,38 @@ impl EvmBlockMapper {
         } else {
             self.transactions.cumulative_gas_used.append_null();
         }
+        self.transactions.v.append_value(&tx.v);
+        self.transactions.r.append_value(&tx.r);
+        self.transactions.s.append_value(&tx.s);
+        self.transactions.return_data.append_value(&tx.return_data);
+        let receipt = tx.receipt.as_ref();
+        match receipt {
+            Some(receipt) => self
+                .transactions
+                .logs_bloom
+                .append_value(&receipt.logs_bloom),
+            None => self.transactions.logs_bloom.append_null(),
+        }
+        self.transactions.blob_gas.append_option(tx.blob_gas);
+        append_optional_bigint(
+            &mut self.transactions.blob_gas_fee_cap,
+            &tx.blob_gas_fee_cap,
+        );
+        for blob_hash in &tx.blob_hashes {
+            self.transactions.blob_hashes.append_value(blob_hash);
+        }
+        self.transactions.blob_hashes.append(true);
+        self.transactions
+            .blob_gas_used
+            .append_option(receipt.and_then(|r| r.blob_gas_used));
+        append_optional_bigint(
+            &mut self.transactions.blob_gas_price,
+            receipt.map_or(&None, |r| &r.blob_gas_price),
+        );
+        self.transactions
+            .begin_ordinal
+            .append_value(tx.begin_ordinal);
+        self.transactions.end_ordinal.append_value(tx.end_ordinal);
         append_fork_step(&mut self.transactions.fork_step, fork_step);
 
         // -- logs from receipt --
@@ -642,6 +717,7 @@ impl EvmBlockMapper {
         } else {
             self.logs.data.append_value(&log.data);
         }
+        self.logs.ordinal.append_value(log.ordinal);
         append_fork_step(&mut self.logs.fork_step, fork_step);
     }
 
@@ -972,6 +1048,13 @@ impl BlockMapper for EvmBlockMapper {
             + self.blocks.extra_data.estimated_bytes()
             + est_u32(&self.blocks.num_transactions)
             + estimated_dictionary_index_bytes(self.blocks.detail_level.len())
+            + self.blocks.uncle_hash.estimated_bytes()
+            + self.blocks.logs_bloom.estimated_bytes()
+            + self.blocks.withdrawals_root.estimated_bytes()
+            + est_u64(&self.blocks.blob_gas_used)
+            + est_u64(&self.blocks.excess_blob_gas)
+            + self.blocks.parent_beacon_root.estimated_bytes()
+            + self.blocks.requests_hash.estimated_bytes()
             + est_opt_str(&self.blocks.fork_step);
         // transactions
         let transactions = self.transactions.canonical.estimated_bytes()
@@ -991,6 +1074,18 @@ impl BlockMapper for EvmBlockMapper {
             + est_str(&self.transactions.max_fee_per_gas)
             + est_str(&self.transactions.max_priority_fee_per_gas)
             + est_u64(&self.transactions.cumulative_gas_used)
+            + self.transactions.v.estimated_bytes()
+            + self.transactions.r.estimated_bytes()
+            + self.transactions.s.estimated_bytes()
+            + self.transactions.return_data.estimated_bytes()
+            + self.transactions.logs_bloom.estimated_bytes()
+            + est_u64(&self.transactions.blob_gas)
+            + est_str(&self.transactions.blob_gas_fee_cap)
+            + self.transactions.blob_hashes.estimated_bytes()
+            + est_u64(&self.transactions.blob_gas_used)
+            + est_str(&self.transactions.blob_gas_price)
+            + est_u64(&self.transactions.begin_ordinal)
+            + est_u64(&self.transactions.end_ordinal)
             + est_opt_str(&self.transactions.fork_step);
         // logs
         let logs = self.logs.canonical.estimated_bytes()
@@ -1005,6 +1100,7 @@ impl BlockMapper for EvmBlockMapper {
             + self.logs.topic2.estimated_bytes()
             + self.logs.topic3.estimated_bytes()
             + self.logs.data.estimated_bytes()
+            + est_u64(&self.logs.ordinal)
             + est_opt_str(&self.logs.fork_step);
         let mut tables: Vec<(&str, usize)> = vec![
             ("blocks", blocks),
@@ -1034,6 +1130,10 @@ impl BlockMapper for EvmBlockMapper {
                     + est_bool(&$b.state_reverted)
                     + est_bool(&$b.executed_code)
                     + est_bool(&$b.suicide)
+                    + est_str(&$b.failure_reason)
+                    + $b.address_delegates_to.estimated_bytes()
+                    + est_u64(&$b.begin_ordinal)
+                    + est_u64(&$b.end_ordinal)
                     + est_opt_str(&$b.fork_step)
             };
         }
@@ -1058,6 +1158,10 @@ impl BlockMapper for EvmBlockMapper {
                     + est_bool(&$b.state_reverted)
                     + est_bool(&$b.executed_code)
                     + est_bool(&$b.suicide)
+                    + est_str(&$b.failure_reason)
+                    + $b.address_delegates_to.estimated_bytes()
+                    + est_u64(&$b.begin_ordinal)
+                    + est_u64(&$b.end_ordinal)
                     + est_opt_str(&$b.fork_step)
             };
         }
@@ -1312,6 +1416,13 @@ struct EvmBlocksBuilder {
     extra_data: BytesColumn,
     num_transactions: UInt32Builder,
     detail_level: StringDictionaryBuilder<Int32Type>,
+    uncle_hash: BytesColumn,
+    logs_bloom: BytesColumn,
+    withdrawals_root: BytesColumn,
+    blob_gas_used: UInt64Builder,
+    excess_blob_gas: UInt64Builder,
+    parent_beacon_root: BytesColumn,
+    requests_hash: BytesColumn,
     fork_step: Option<StringBuilder>,
 }
 
@@ -1336,6 +1447,13 @@ impl EvmBlocksBuilder {
             extra_data: BytesColumn::new(encoding),
             num_transactions: UInt32Builder::new(),
             detail_level: StringDictionaryBuilder::new(),
+            uncle_hash: BytesColumn::new(encoding),
+            logs_bloom: BytesColumn::new(encoding),
+            withdrawals_root: BytesColumn::new(encoding),
+            blob_gas_used: UInt64Builder::new(),
+            excess_blob_gas: UInt64Builder::new(),
+            parent_beacon_root: BytesColumn::new(encoding),
+            requests_hash: BytesColumn::new(encoding),
             fork_step: mk_fork_step(include_fork_step),
         }
     }
@@ -1360,6 +1478,13 @@ impl EvmBlocksBuilder {
             self.extra_data.finish(),
             Arc::new(self.num_transactions.finish()),
             Arc::new(self.detail_level.finish()),
+            self.uncle_hash.finish(),
+            self.logs_bloom.finish(),
+            self.withdrawals_root.finish(),
+            Arc::new(self.blob_gas_used.finish()),
+            Arc::new(self.excess_blob_gas.finish()),
+            self.parent_beacon_root.finish(),
+            self.requests_hash.finish(),
         ]);
         finish_fork_step(&mut self.fork_step, &mut columns);
         Ok(RecordBatch::try_new(Arc::new(schema.clone()), columns)?)
@@ -1384,6 +1509,18 @@ struct EvmTransactionsBuilder {
     max_fee_per_gas: StringBuilder,
     max_priority_fee_per_gas: StringBuilder,
     cumulative_gas_used: UInt64Builder,
+    v: BytesColumn,
+    r: BytesColumn,
+    s: BytesColumn,
+    return_data: BytesColumn,
+    logs_bloom: BytesColumn,
+    blob_gas: UInt64Builder,
+    blob_gas_fee_cap: StringBuilder,
+    blob_hashes: BytesListColumn,
+    blob_gas_used: UInt64Builder,
+    blob_gas_price: StringBuilder,
+    begin_ordinal: UInt64Builder,
+    end_ordinal: UInt64Builder,
     fork_step: Option<StringBuilder>,
 }
 
@@ -1407,6 +1544,18 @@ impl EvmTransactionsBuilder {
             max_fee_per_gas: StringBuilder::new(),
             max_priority_fee_per_gas: StringBuilder::new(),
             cumulative_gas_used: UInt64Builder::new(),
+            v: BytesColumn::new(encoding),
+            r: BytesColumn::new(encoding),
+            s: BytesColumn::new(encoding),
+            return_data: BytesColumn::new(encoding),
+            logs_bloom: BytesColumn::new(encoding),
+            blob_gas: UInt64Builder::new(),
+            blob_gas_fee_cap: StringBuilder::new(),
+            blob_hashes: BytesListColumn::new(encoding),
+            blob_gas_used: UInt64Builder::new(),
+            blob_gas_price: StringBuilder::new(),
+            begin_ordinal: UInt64Builder::new(),
+            end_ordinal: UInt64Builder::new(),
             fork_step: mk_fork_step(include_fork_step),
         }
     }
@@ -1430,6 +1579,18 @@ impl EvmTransactionsBuilder {
             Arc::new(self.max_fee_per_gas.finish()),
             Arc::new(self.max_priority_fee_per_gas.finish()),
             Arc::new(self.cumulative_gas_used.finish()),
+            self.v.finish(),
+            self.r.finish(),
+            self.s.finish(),
+            self.return_data.finish(),
+            self.logs_bloom.finish(),
+            Arc::new(self.blob_gas.finish()),
+            Arc::new(self.blob_gas_fee_cap.finish()),
+            self.blob_hashes.finish(),
+            Arc::new(self.blob_gas_used.finish()),
+            Arc::new(self.blob_gas_price.finish()),
+            Arc::new(self.begin_ordinal.finish()),
+            Arc::new(self.end_ordinal.finish()),
         ]);
         finish_fork_step(&mut self.fork_step, &mut columns);
         Ok(RecordBatch::try_new(Arc::new(schema.clone()), columns)?)
@@ -1449,6 +1610,7 @@ struct EvmLogsBuilder {
     topic2: BytesColumn,
     topic3: BytesColumn,
     data: BytesColumn,
+    ordinal: UInt64Builder,
     fork_step: Option<StringBuilder>,
 }
 
@@ -1467,6 +1629,7 @@ impl EvmLogsBuilder {
             topic2: BytesColumn::new(encoding),
             topic3: BytesColumn::new(encoding),
             data: BytesColumn::new(encoding),
+            ordinal: UInt64Builder::new(),
             fork_step: mk_fork_step(include_fork_step),
         }
     }
@@ -1485,6 +1648,7 @@ impl EvmLogsBuilder {
             self.topic2.finish(),
             self.topic3.finish(),
             self.data.finish(),
+            Arc::new(self.ordinal.finish()),
         ]);
         finish_fork_step(&mut self.fork_step, &mut columns);
         Ok(RecordBatch::try_new(Arc::new(schema.clone()), columns)?)
@@ -1512,6 +1676,10 @@ struct EvmCallsBuilder {
     state_reverted: BooleanBuilder,
     executed_code: BooleanBuilder,
     suicide: BooleanBuilder,
+    failure_reason: StringBuilder,
+    address_delegates_to: BytesColumn,
+    begin_ordinal: UInt64Builder,
+    end_ordinal: UInt64Builder,
     fork_step: Option<StringBuilder>,
 }
 
@@ -1538,6 +1706,10 @@ impl EvmCallsBuilder {
             state_reverted: BooleanBuilder::new(),
             executed_code: BooleanBuilder::new(),
             suicide: BooleanBuilder::new(),
+            failure_reason: StringBuilder::new(),
+            address_delegates_to: BytesColumn::new(encoding),
+            begin_ordinal: UInt64Builder::new(),
+            end_ordinal: UInt64Builder::new(),
             fork_step: mk_fork_step(include_fork_step),
         }
     }
@@ -1571,6 +1743,17 @@ impl EvmCallsBuilder {
         self.state_reverted.append_value(call.state_reverted);
         self.executed_code.append_value(call.executed_code);
         self.suicide.append_value(call.suicide);
+        if call.failure_reason.is_empty() {
+            self.failure_reason.append_null();
+        } else {
+            self.failure_reason.append_value(&call.failure_reason);
+        }
+        append_non_empty_bytes(
+            &mut self.address_delegates_to,
+            call.address_delegates_to.as_deref().unwrap_or_default(),
+        );
+        self.begin_ordinal.append_value(call.begin_ordinal);
+        self.end_ordinal.append_value(call.end_ordinal);
         append_fork_step(&mut self.fork_step, fork_step);
     }
 
@@ -1596,6 +1779,10 @@ impl EvmCallsBuilder {
             Arc::new(self.state_reverted.finish()),
             Arc::new(self.executed_code.finish()),
             Arc::new(self.suicide.finish()),
+            Arc::new(self.failure_reason.finish()),
+            self.address_delegates_to.finish(),
+            Arc::new(self.begin_ordinal.finish()),
+            Arc::new(self.end_ordinal.finish()),
         ]);
         finish_fork_step(&mut self.fork_step, &mut columns);
         Ok(RecordBatch::try_new(Arc::new(schema.clone()), columns)?)
@@ -2074,6 +2261,10 @@ struct SystemCallsBuilder {
     state_reverted: BooleanBuilder,
     executed_code: BooleanBuilder,
     suicide: BooleanBuilder,
+    failure_reason: StringBuilder,
+    address_delegates_to: BytesColumn,
+    begin_ordinal: UInt64Builder,
+    end_ordinal: UInt64Builder,
     fork_step: Option<StringBuilder>,
 }
 
@@ -2098,6 +2289,10 @@ impl SystemCallsBuilder {
             state_reverted: BooleanBuilder::new(),
             executed_code: BooleanBuilder::new(),
             suicide: BooleanBuilder::new(),
+            failure_reason: StringBuilder::new(),
+            address_delegates_to: BytesColumn::new(encoding),
+            begin_ordinal: UInt64Builder::new(),
+            end_ordinal: UInt64Builder::new(),
             fork_step: mk_fork_step(include_fork_step),
         }
     }
@@ -2127,6 +2322,17 @@ impl SystemCallsBuilder {
         self.state_reverted.append_value(call.state_reverted);
         self.executed_code.append_value(call.executed_code);
         self.suicide.append_value(call.suicide);
+        if call.failure_reason.is_empty() {
+            self.failure_reason.append_null();
+        } else {
+            self.failure_reason.append_value(&call.failure_reason);
+        }
+        append_non_empty_bytes(
+            &mut self.address_delegates_to,
+            call.address_delegates_to.as_deref().unwrap_or_default(),
+        );
+        self.begin_ordinal.append_value(call.begin_ordinal);
+        self.end_ordinal.append_value(call.end_ordinal);
         append_fork_step(&mut self.fork_step, fork_step);
     }
 
@@ -2150,6 +2356,10 @@ impl SystemCallsBuilder {
             Arc::new(self.state_reverted.finish()),
             Arc::new(self.executed_code.finish()),
             Arc::new(self.suicide.finish()),
+            Arc::new(self.failure_reason.finish()),
+            self.address_delegates_to.finish(),
+            Arc::new(self.begin_ordinal.finish()),
+            Arc::new(self.end_ordinal.finish()),
         ]);
         finish_fork_step(&mut self.fork_step, &mut columns);
         Ok(RecordBatch::try_new(Arc::new(schema.clone()), columns)?)
@@ -3688,5 +3898,261 @@ pub(crate) mod tests {
                 "{name}"
             );
         }
+    }
+
+    // -- missing Firehose fields (#496) --
+
+    fn hex(bytes: &[u8]) -> String {
+        firehose_parquet::encode::encode_hex(bytes)
+    }
+
+    fn string_values(batch: &RecordBatch, name: &str) -> Vec<Option<String>> {
+        let column = batch.column(batch.schema().index_of(name).unwrap());
+        let array = column
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .expect("column should be utf8");
+        array.iter().map(|v| v.map(str::to_string)).collect()
+    }
+
+    fn u64_values(batch: &RecordBatch, name: &str) -> Vec<Option<u64>> {
+        batch
+            .column(batch.schema().index_of(name).unwrap())
+            .as_any()
+            .downcast_ref::<UInt64Array>()
+            .expect("column should be u64")
+            .iter()
+            .collect()
+    }
+
+    fn list_values(batch: &RecordBatch, name: &str, row: usize) -> Vec<String> {
+        let list = batch
+            .column(batch.schema().index_of(name).unwrap())
+            .as_any()
+            .downcast_ref::<ListArray>()
+            .expect("column should be a list");
+        let values = list.value(row);
+        let values = values.as_any().downcast_ref::<StringArray>().unwrap();
+        values.iter().map(|v| v.unwrap().to_string()).collect()
+    }
+
+    /// A post-Prague block with a blob transaction whose root call delegates
+    /// (EIP-7702) and whose child call failed.
+    fn make_post_prague_block() -> eth::Block {
+        let mut block = make_test_evm_block(500);
+        let header = block.header.as_mut().unwrap();
+        header.uncle_hash = vec![0x1d; 32];
+        header.logs_bloom = vec![0x0b; 256];
+        header.withdrawals_root = vec![0x0c; 32];
+        header.blob_gas_used = Some(393_216);
+        header.excess_blob_gas = Some(0);
+        header.parent_beacon_root = vec![0x0d; 32];
+        header.requests_hash = vec![0x0e; 32];
+
+        let tx = &mut block.transaction_traces[0];
+        tx.r#type = eth::transaction_trace::Type::TrxTypeBlob as i32;
+        tx.v = vec![0x01];
+        tx.r = vec![0x02; 32];
+        tx.s = vec![0x03; 32];
+        tx.return_data = vec![0x04, 0x05];
+        tx.blob_gas = Some(262_144);
+        tx.blob_gas_fee_cap = Some(eth::BigInt {
+            bytes: vec![0x01, 0x00],
+        });
+        tx.blob_hashes = vec![vec![0x01; 32], vec![0x02; 32]];
+        tx.begin_ordinal = 11;
+        tx.end_ordinal = 99;
+        let receipt = tx.receipt.as_mut().unwrap();
+        receipt.logs_bloom = vec![0x0f; 256];
+        receipt.blob_gas_used = Some(262_144);
+        receipt.blob_gas_price = Some(eth::BigInt { bytes: vec![0x07] });
+        receipt.logs[0].ordinal = 42;
+
+        let root = &mut tx.calls[0];
+        root.address_delegates_to = Some(vec![0xde; 20]);
+        root.begin_ordinal = 12;
+        root.end_ordinal = 98;
+        let mut child = root.clone();
+        child.index = 2;
+        child.address_delegates_to = None;
+        child.status_failed = true;
+        child.status_reverted = true;
+        child.state_reverted = true;
+        child.failure_reason = "execution reverted".to_string();
+        child.begin_ordinal = 20;
+        child.end_ordinal = 30;
+        let mut system_call = root.clone();
+        tx.calls.push(child);
+
+        system_call.index = 1;
+        system_call.failure_reason = "out of gas".to_string();
+        system_call.address_delegates_to = None;
+        system_call.begin_ordinal = 1;
+        system_call.end_ordinal = 2;
+        block.system_calls = vec![system_call];
+        block
+    }
+
+    #[test]
+    fn test_blocks_header_fields_written() {
+        let batches = map_extended(&make_post_prague_block());
+        let blocks = &batches["blocks"];
+        assert_eq!(get_string_value(blocks, "uncle_hash", 0), hex(&[0x1d; 32]));
+        assert_eq!(get_string_value(blocks, "logs_bloom", 0), hex(&[0x0b; 256]));
+        assert_eq!(
+            string_values(blocks, "withdrawals_root"),
+            vec![Some(hex(&[0x0c; 32]))]
+        );
+        assert_eq!(u64_values(blocks, "blob_gas_used"), vec![Some(393_216)]);
+        assert_eq!(u64_values(blocks, "excess_blob_gas"), vec![Some(0)]);
+        assert_eq!(
+            string_values(blocks, "parent_beacon_root"),
+            vec![Some(hex(&[0x0d; 32]))]
+        );
+        assert_eq!(
+            string_values(blocks, "requests_hash"),
+            vec![Some(hex(&[0x0e; 32]))]
+        );
+    }
+
+    #[test]
+    fn test_blocks_pre_fork_header_fields_are_null() {
+        // make_test_evm_block has no withdrawals, blob, beacon or requests fields.
+        let batches = map_extended(&make_test_evm_block(501));
+        let blocks = &batches["blocks"];
+        for column in ["withdrawals_root", "parent_beacon_root", "requests_hash"] {
+            assert_eq!(string_values(blocks, column), vec![None], "{column}");
+        }
+        assert_eq!(u64_values(blocks, "blob_gas_used"), vec![None]);
+        assert_eq!(u64_values(blocks, "excess_blob_gas"), vec![None]);
+    }
+
+    #[test]
+    fn test_transactions_signature_blob_and_ordinal_fields_written() {
+        let batches = map_extended(&make_post_prague_block());
+        let txs = &batches["transactions"];
+        assert_eq!(get_string_value(txs, "type", 0), "BLOB");
+        assert_eq!(get_string_value(txs, "v", 0), hex(&[0x01]));
+        assert_eq!(get_string_value(txs, "r", 0), hex(&[0x02; 32]));
+        assert_eq!(get_string_value(txs, "s", 0), hex(&[0x03; 32]));
+        assert_eq!(get_string_value(txs, "return_data", 0), hex(&[0x04, 0x05]));
+        assert_eq!(
+            string_values(txs, "logs_bloom"),
+            vec![Some(hex(&[0x0f; 256]))]
+        );
+        assert_eq!(u64_values(txs, "blob_gas"), vec![Some(262_144)]);
+        assert_eq!(
+            string_values(txs, "blob_gas_fee_cap"),
+            vec![Some("256".to_string())]
+        );
+        assert_eq!(
+            list_values(txs, "blob_hashes", 0),
+            vec![hex(&[0x01; 32]), hex(&[0x02; 32])]
+        );
+        assert_eq!(u64_values(txs, "blob_gas_used"), vec![Some(262_144)]);
+        assert_eq!(
+            string_values(txs, "blob_gas_price"),
+            vec![Some("7".to_string())]
+        );
+        assert_eq!(u64_values(txs, "begin_ordinal"), vec![Some(11)]);
+        assert_eq!(u64_values(txs, "end_ordinal"), vec![Some(99)]);
+    }
+
+    #[test]
+    fn test_transactions_non_blob_and_receipt_less_fields() {
+        let mut block = make_test_evm_block(502);
+        block.transaction_traces[0].receipt = None;
+        let batches = map_extended(&block);
+        let txs = &batches["transactions"];
+        assert_eq!(string_values(txs, "logs_bloom"), vec![None]);
+        assert_eq!(u64_values(txs, "blob_gas"), vec![None]);
+        assert_eq!(string_values(txs, "blob_gas_fee_cap"), vec![None]);
+        assert!(list_values(txs, "blob_hashes", 0).is_empty());
+        assert_eq!(u64_values(txs, "blob_gas_used"), vec![None]);
+        assert_eq!(string_values(txs, "blob_gas_price"), vec![None]);
+    }
+
+    #[test]
+    fn test_calls_failure_reason_delegation_and_ordinals_written() {
+        let batches = map_extended(&make_post_prague_block());
+        let calls = &batches["calls"];
+        assert_eq!(
+            string_values(calls, "failure_reason"),
+            vec![None, Some("execution reverted".to_string())]
+        );
+        assert_eq!(
+            string_values(calls, "address_delegates_to"),
+            vec![Some(hex(&[0xde; 20])), None]
+        );
+        assert_eq!(u64_values(calls, "begin_ordinal"), vec![Some(12), Some(20)]);
+        assert_eq!(u64_values(calls, "end_ordinal"), vec![Some(98), Some(30)]);
+
+        let system_calls = &batches["system_calls"];
+        assert_eq!(
+            string_values(system_calls, "failure_reason"),
+            vec![Some("out of gas".to_string())]
+        );
+        assert_eq!(
+            string_values(system_calls, "address_delegates_to"),
+            vec![None]
+        );
+        assert_eq!(u64_values(system_calls, "begin_ordinal"), vec![Some(1)]);
+        assert_eq!(u64_values(system_calls, "end_ordinal"), vec![Some(2)]);
+    }
+
+    #[test]
+    fn test_logs_ordinal_written() {
+        let batches = map_extended(&make_post_prague_block());
+        assert_eq!(u64_values(&batches["logs"], "ordinal"), vec![Some(42)]);
+    }
+
+    #[test]
+    fn test_blob_hashes_binary_encoding_round_trips_through_parquet() {
+        use firehose_parquet::config::{BlockMetadata, Compression, Partition};
+        use firehose_parquet::writer::{read_parquet, ParquetTableWriter};
+
+        let block = make_post_prague_block();
+        let block_bytes = prost::Message::encode_to_vec(&block);
+        let mut mapper = EvmBlockMapper::new(true, false, EncodeBytes::Binary, true);
+        mapper
+            .map_block(&block_bytes, &BlockIdentity::default(), None)
+            .unwrap();
+        let batches = mapper.flush().unwrap();
+        let schema = batches["transactions"].schema();
+        let temp_dir = std::env::temp_dir().join(format!(
+            "firehose-parquet-blob-hashes-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let result = (|| -> anyhow::Result<Vec<RecordBatch>> {
+            let mut writer =
+                ParquetTableWriter::new(&temp_dir, Partition::None, Compression::Snappy);
+            let (path, _) = writer.write_batch(
+                "transactions",
+                &batches["transactions"],
+                &BlockMetadata {
+                    min_block_number: 500,
+                    max_block_number: 500,
+                    min_timestamp: Some(1_700_000_000),
+                    max_timestamp: Some(1_700_000_000),
+                },
+            )?;
+            read_parquet(&path)
+        })();
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        let read = result.unwrap();
+        assert_eq!(read[0].schema(), schema);
+        let list = read[0]
+            .column(schema.index_of("blob_hashes").unwrap())
+            .as_any()
+            .downcast_ref::<ListArray>()
+            .unwrap()
+            .value(0);
+        let hashes = list.as_any().downcast_ref::<BinaryArray>().unwrap();
+        assert_eq!(hashes.value(0), [0x01; 32].as_slice());
+        assert_eq!(hashes.value(1), [0x02; 32].as_slice());
     }
 }

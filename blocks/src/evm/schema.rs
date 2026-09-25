@@ -1,5 +1,5 @@
 use arrow::datatypes::{DataType, Field, Schema};
-use firehose_parquet::encode::{bytes_data_type, EncodeBytes};
+use firehose_parquet::encode::{bytes_data_type, BytesListColumn, EncodeBytes};
 use firehose_parquet::traits::{canonical_fields_with_encoding, fork_step_field};
 
 fn maybe_fork_step(fields: &mut Vec<Field>, include: bool) {
@@ -34,9 +34,16 @@ pub fn blocks_schema(include_fork_step: bool, encoding: &EncodeBytes) -> Schema 
         Field::new("receipt_root", bd.clone(), false),
         Field::new("difficulty", DataType::Utf8, true),
         Field::new("mix_hash", bd.clone(), false),
-        Field::new("extra_data", bd, false),
+        Field::new("extra_data", bd.clone(), false),
         Field::new("num_transactions", DataType::UInt32, false),
         Field::new("detail_level", enum_data_type(), false),
+        Field::new("uncle_hash", bd.clone(), false),
+        Field::new("logs_bloom", bd.clone(), false),
+        Field::new("withdrawals_root", bd.clone(), true),
+        Field::new("blob_gas_used", DataType::UInt64, true),
+        Field::new("excess_blob_gas", DataType::UInt64, true),
+        Field::new("parent_beacon_root", bd.clone(), true),
+        Field::new("requests_hash", bd, true),
     ]);
     maybe_fork_step(&mut fields, include_fork_step);
     Schema::new(fields)
@@ -58,10 +65,22 @@ pub fn transactions_schema(include_fork_step: bool, encoding: &EncodeBytes) -> S
         Field::new("type", enum_data_type(), false),
         Field::new("status", enum_data_type(), false),
         Field::new("nonce", DataType::UInt64, false),
-        Field::new("input", bd, false),
+        Field::new("input", bd.clone(), false),
         Field::new("max_fee_per_gas", DataType::Utf8, true),
         Field::new("max_priority_fee_per_gas", DataType::Utf8, true),
         Field::new("cumulative_gas_used", DataType::UInt64, true),
+        Field::new("v", bd.clone(), false),
+        Field::new("r", bd.clone(), false),
+        Field::new("s", bd.clone(), false),
+        Field::new("return_data", bd.clone(), false),
+        Field::new("logs_bloom", bd, true),
+        Field::new("blob_gas", DataType::UInt64, true),
+        Field::new("blob_gas_fee_cap", DataType::Utf8, true),
+        Field::new("blob_hashes", BytesListColumn::data_type(encoding), false),
+        Field::new("blob_gas_used", DataType::UInt64, true),
+        Field::new("blob_gas_price", DataType::Utf8, true),
+        Field::new("begin_ordinal", DataType::UInt64, false),
+        Field::new("end_ordinal", DataType::UInt64, false),
     ]);
     maybe_fork_step(&mut fields, include_fork_step);
     Schema::new(fields)
@@ -82,6 +101,7 @@ pub fn logs_schema(include_fork_step: bool, encoding: &EncodeBytes) -> Schema {
         Field::new("topic2", bd.clone(), true),
         Field::new("topic3", bd.clone(), true),
         Field::new("data", bd, true),
+        Field::new("ordinal", DataType::UInt64, false),
     ]);
     maybe_fork_step(&mut fields, include_fork_step);
     Schema::new(fields)
@@ -108,12 +128,16 @@ pub fn calls_schema(include_fork_step: bool, encoding: &EncodeBytes) -> Schema {
         Field::new("gas_limit", DataType::UInt64, false),
         Field::new("gas_consumed", DataType::UInt64, false),
         Field::new("input", bd.clone(), false),
-        Field::new("output", bd, false),
+        Field::new("output", bd.clone(), false),
         Field::new("status_failed", DataType::Boolean, false),
         Field::new("status_reverted", DataType::Boolean, false),
         Field::new("state_reverted", DataType::Boolean, false),
         Field::new("executed_code", DataType::Boolean, false),
         Field::new("suicide", DataType::Boolean, false),
+        Field::new("failure_reason", DataType::Utf8, true),
+        Field::new("address_delegates_to", bd, true),
+        Field::new("begin_ordinal", DataType::UInt64, false),
+        Field::new("end_ordinal", DataType::UInt64, false),
     ]);
     maybe_fork_step(&mut fields, include_fork_step);
     Schema::new(fields)
@@ -253,12 +277,16 @@ pub fn system_calls_schema(include_fork_step: bool, encoding: &EncodeBytes) -> S
         Field::new("gas_limit", DataType::UInt64, false),
         Field::new("gas_consumed", DataType::UInt64, false),
         Field::new("input", bd.clone(), false),
-        Field::new("output", bd, false),
+        Field::new("output", bd.clone(), false),
         Field::new("status_failed", DataType::Boolean, false),
         Field::new("status_reverted", DataType::Boolean, false),
         Field::new("state_reverted", DataType::Boolean, false),
         Field::new("executed_code", DataType::Boolean, false),
         Field::new("suicide", DataType::Boolean, false),
+        Field::new("failure_reason", DataType::Utf8, true),
+        Field::new("address_delegates_to", bd, true),
+        Field::new("begin_ordinal", DataType::UInt64, false),
+        Field::new("end_ordinal", DataType::UInt64, false),
     ]);
     maybe_fork_step(&mut fields, include_fork_step);
     Schema::new(fields)

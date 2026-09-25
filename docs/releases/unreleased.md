@@ -219,6 +219,23 @@ Migration:
 - Check scripts that pass several `-p` filters on different keys: they now select the intersection instead of the union.
 - Pass `s3://bucket/prefix` explicitly to `truncate`, `merge`, and `rollup` for S3 data.
 
+### EVM: missing Firehose fields on `blocks`, `transactions`, `calls`, `system_calls` and `logs` (#496)
+
+A field-by-field comparison with live ETH mainnet blocks showed that every value `build` wrote was correct, but some populated fields were not written. They are now, appended after the existing columns of each table:
+
+- `blocks`: `uncle_hash`, `logs_bloom`, `withdrawals_root`, `blob_gas_used`, `excess_blob_gas`, `parent_beacon_root`, `requests_hash`.
+- `transactions`: `v`, `r`, `s`, `return_data`, the receipt's `logs_bloom`, `blob_gas`, `blob_gas_fee_cap`, `blob_hashes` (a list), the receipt's `blob_gas_used` and `blob_gas_price`, `begin_ordinal`, `end_ordinal`.
+- `calls` and `system_calls`: `failure_reason`, `address_delegates_to` (EIP-7702), `begin_ordinal`, `end_ordinal`.
+- `logs`: `ordinal`.
+
+Details:
+
+- Fields introduced by a fork are `NULL` before it: `withdrawals_root` (Shanghai), the blob fields and `parent_beacon_root` (Cancun), `requests_hash` (Prague). The blob transaction fields are `NULL` for non-blob transactions, and `blob_hashes` is an empty list. `failure_reason` and `address_delegates_to` are `NULL` when absent.
+- `blob_gas_fee_cap` and `blob_gas_price` are decimal strings, like the other big-integer columns.
+- System call indexes restart at 1 for the system calls that run after the transactions (EIP-7002 and EIP-7251 requests), so `system_calls.call_index` alone does not identify a system call within a block. Join the `system_*` change tables (#495) on `call_index` and `ordinal BETWEEN begin_ordinal AND end_ordinal`. The README has the query.
+
+Migration: files written before and after this change have different schemas for these 5 tables. Query them separately or with `union_by_name`, and do not `merge` or `rollup` old and new files together.
+
 ## Fixes
 
 - **CLI values that crashed or misbehaved are now rejected or consistent (#471).**
