@@ -68,7 +68,12 @@ and test against current main. Never reset or discard the previous worktree.
 
 ## Remaining backlog groups
 
-- Schema/data correctness: #507 and #509 (NEAR and Tron). Cosmos #510 merged
+- Schema/data correctness: #507 and #509 (NEAR and Tron). Draft PR #595 preserves
+  the reviewed Tron field implementation; its Firehose transport is blocked by
+  StreamingFast quota. A separately approved two-read native RPC capture now passes
+  all populated mapper/Parquet and legacy-value comparisons; absent internal-call
+  and failed-execution categories remain synthetic-only. See the
+  [qualification boundary](509-tron-rpc-qualification.md). Cosmos #510 merged
   in PR #601 as `9379883`, with 1,003 tests, independent raw RPC-backed mapping
   qualification and CI; issue closure was verified. This is not a captured
   Firehose/producer transport qualification.
@@ -103,8 +108,10 @@ and test against current main. Never reset or discard the previous worktree.
   tests, local delayed-transport benchmarks, independent review and CI; issue
   closure was verified. #518-#519 and #523 need the specific throughput, memory,
   file-size or lookup evidence requested by their issues.
-- Structure: #525-#529 follow correctness work, with scope refreshed against
-  current main. The remaining #530 auth/client duplication merged in PR #603
+- Structure: #525 now has a behavior-preserving setup/runtime/flush implementation
+  under review; [its record](525-ingestion-decomposition.md) tracks qualification
+  and publication separately. #526-#529 follow correctness work, with scope refreshed against
+  current main. [#516 concurrency](516-concurrency-design.md) remains a proposal only. The remaining #530 auth/client duplication merged in PR #603
   as `39d49f6` after 1,010 tests, protocol/retry regressions, independent review
   and CI; issue closure was verified.
 

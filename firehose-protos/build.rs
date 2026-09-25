@@ -31,6 +31,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 proto_root.join("cosmos_tx.proto"),
                 // Tron
                 proto_root.join("tron.proto"),
+                proto_root.join("tron_contract.proto"),
                 // Beacon
                 proto_root.join("beacon.proto"),
             ],

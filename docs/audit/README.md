@@ -13,6 +13,9 @@ lifecycle state; a local implementation or passing test alone is not closure.
 - [#498: EVM log indices and optional tables](498-evm-log-indices.md)
 - [#499: offline EVM golden-block regression](499-evm-golden-fixture.md)
 - [#511: Bitcoin amounts and input metadata](511-bitcoin-values.md)
+- [#509: Tron contracts, receipts and internal values](509-tron-contract-fields.md)
+- [#509: bounded native RPC qualification and retained evidence](509-tron-rpc-qualification.md)
+
 - [#513: recovered EVM decimal fast path](513-evm-decimal-fast-path.md)
 - [#510: Cosmos event order, unknown results and SDK metadata](510-cosmos-values.md)
 - [#508: Antelope database-operation joins](508-antelope-db-joins.md)
@@ -38,6 +41,8 @@ lifecycle state; a local implementation or passing test alone is not closure.
 - [#517: measured gRPC receive transport](517-grpc-transport.md)
 - [#515: adaptive compressed flush sizing and summed mapper limit](515-adaptive-flush-sizing.md)
 - [#530: shared authenticated gRPC clients](530-grpc-client-deduplication.md)
+- [#525: ingestion setup, runtime and flush decomposition](525-ingestion-decomposition.md)
+- [#516: proposed bounded ingestion concurrency; not implemented](516-concurrency-design.md)
 - [#565: safe fixed-width Base58 conversion](565-fixed-base58.md)
 
 - [#476: timestamp and streamed identity validation](476-timestamp-validation.md)
