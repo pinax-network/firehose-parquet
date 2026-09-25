@@ -34,6 +34,7 @@ lifecycle state; a local implementation or passing test alone is not closure.
 - [#522: streaming rollup memory and remote range reads](522-streaming-rollup.md)
 - [#524: projected validation and partition boundary performance](524-validation-performance.md)
 - [#517: measured gRPC receive transport](517-grpc-transport.md)
+- [#515: adaptive compressed flush sizing and summed mapper limit](515-adaptive-flush-sizing.md)
 - [#530: shared authenticated gRPC clients](530-grpc-client-deduplication.md)
 - [#565: safe fixed-width Base58 conversion](565-fixed-base58.md)
 

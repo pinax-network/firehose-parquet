@@ -412,7 +412,7 @@ impl BlockMapper for AntelopeBlockMapper {
         total
     }
 
-    fn largest_table(&mut self) -> (&str, usize) {
+    fn table_estimates(&mut self) -> Vec<(&str, usize)> {
         let blocks = self.blocks.canonical.estimated_bytes()
             + est_u32(&self.blocks.number)
             + est_str(&self.blocks.hash)
@@ -486,10 +486,7 @@ impl BlockMapper for AntelopeBlockMapper {
                     + est_opt_str(&db_ops.fork_step),
             ));
         }
-        tables
-            .into_iter()
-            .max_by_key(|&(_, s)| s)
-            .unwrap_or(("blocks", 0))
+        tables.into_iter().collect()
     }
 
     fn table_names(&self) -> Vec<&str> {

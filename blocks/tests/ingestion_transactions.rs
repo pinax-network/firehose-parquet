@@ -239,6 +239,25 @@ fn command_with_flush(
     stop: u64,
     flush_blocks: u64,
 ) -> tokio::process::Command {
+    command_with_limits(
+        server,
+        dir,
+        origin,
+        stop,
+        flush_blocks,
+        1_000_000_000,
+        268_435_456,
+    )
+}
+fn command_with_limits(
+    server: &MockFirehose,
+    dir: &Path,
+    origin: u64,
+    stop: u64,
+    flush_blocks: u64,
+    flush_bytes: u64,
+    flush_memory_bytes: u64,
+) -> tokio::process::Command {
     let mut child = tokio::process::Command::new(env!("CARGO_BIN_EXE_fireparq"));
     child
         .kill_on_drop(true)
@@ -259,7 +278,9 @@ fn command_with_flush(
             "--flush-blocks",
             &flush_blocks.to_string(),
             "--flush-bytes",
-            "1000000000",
+            &flush_bytes.to_string(),
+            "--flush-memory-bytes",
+            &flush_memory_bytes.to_string(),
             "--flush-interval-secs",
             "1000000000",
             "--stream-idle-timeout-secs",
@@ -738,5 +759,133 @@ async fn abrupt_restart_replays_only_accepted_unflushed_events_without_duplicate
         assert_eq!(recovered.get(&path), Some(&digest));
     }
     assert_eq!(server.calls(), 3);
+    server.assert_drained();
+}
+
+fn response_with_sizing_payload(number: u64, two_tables: bool) -> firehose::Response {
+    let mut event = response(number, firehose::ForkStep::StepNew as i32);
+    let block = eth::Block {
+        number,
+        header: Some(eth::BlockHeader {
+            extra_data: vec![0x71; 16_384].into(),
+            ..Default::default()
+        }),
+        transaction_traces: if two_tables {
+            vec![eth::TransactionTrace {
+                input: vec![0x82; 16_384].into(),
+                ..Default::default()
+            }]
+        } else {
+            vec![]
+        },
+        ..Default::default()
+    };
+    event.block.as_mut().unwrap().value = block.encode_to_vec().into();
+    event
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn compressed_receipts_train_later_cli_flush_windows() {
+    let events = (100..130)
+        .map(|height| response_with_sizing_payload(height, false))
+        .collect();
+    let server = MockFirehose::start(events, vec![Plan::complete("", 100, 129)]).await;
+    let dir = tempfile::tempdir().unwrap();
+    let output = success(command_with_limits(
+        &server,
+        dir.path(),
+        100,
+        130,
+        1_000_000,
+        65_536,
+        2_097_152,
+    ))
+    .await;
+    let root = root(dir.path());
+    let mut windows: Vec<_> = parts(&root)
+        .keys()
+        .filter(|path| path.starts_with("blocks"))
+        .map(|path| {
+            let batches = read_parquet(&root.join(path)).unwrap();
+            let first = batches[0]
+                .column_by_name("block_num")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<UInt64Array>()
+                .unwrap()
+                .value(0);
+            (
+                first,
+                batches.iter().map(|batch| batch.num_rows()).sum::<usize>(),
+            )
+        })
+        .collect();
+    windows.sort_unstable();
+    assert!(windows.len() >= 2, "{windows:?}");
+    assert!(
+        windows[1].1 > windows[0].1,
+        "successful receipt must expand the next window: {windows:?}"
+    );
+    assert_eq!(windows.iter().map(|(_, rows)| rows).sum::<usize>(), 30);
+    assert_eq!(block_numbers(&root), (100..130).collect::<Vec<_>>());
+    assert_checkpoint(&root, 30, 129, 130);
+    assert!(logs(&output).contains("committed flush size observation"));
+    server.assert_drained();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn summed_memory_flushes_cli_when_each_table_is_below_the_limit() {
+    use firehose_parquet::{
+        encode::EncodeBytes,
+        traits::{BlockIdentity, BlockMapper},
+    };
+    let events: Vec<_> = (100..103)
+        .map(|height| response_with_sizing_payload(height, true))
+        .collect();
+    let mut mapper = blocks::evm::mapper::EvmBlockMapper::new(false, false, EncodeBytes::Hex, true);
+    mapper
+        .map_block(
+            &events[0].block.as_ref().unwrap().value,
+            &BlockIdentity {
+                block_num: 100,
+                timestamp: 1_700_000_000,
+                ..Default::default()
+            },
+            None,
+        )
+        .unwrap();
+    let sizes = mapper.table_estimates();
+    assert!(sizes.iter().all(|(_, bytes)| *bytes < 49_152));
+    assert!(sizes.iter().map(|(_, bytes)| bytes).sum::<usize>() > 49_152);
+    let server = MockFirehose::start(events, vec![Plan::complete("", 100, 102)]).await;
+    let dir = tempfile::tempdir().unwrap();
+    let output = success(command_with_limits(
+        &server,
+        dir.path(),
+        100,
+        103,
+        1_000_000,
+        1_000_000_000,
+        49_152,
+    ))
+    .await;
+    let root = root(dir.path());
+    assert_eq!(
+        parts(&root)
+            .keys()
+            .filter(|path| path.starts_with("blocks"))
+            .count(),
+        3
+    );
+    assert_eq!(
+        parts(&root)
+            .keys()
+            .filter(|path| path.starts_with("transactions"))
+            .count(),
+        3
+    );
+    assert_eq!(block_numbers(&root), vec![100, 101, 102]);
+    assert_checkpoint(&root, 3, 102, 103);
+    assert!(logs(&output).contains("memory"));
     server.assert_drained();
 }

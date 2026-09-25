@@ -303,12 +303,31 @@ fn flush_all_cases() -> Vec<Flushed> {
                     .into_iter()
                     .map(str::to_string)
                     .collect();
+                let estimates: HashMap<String, usize> = case
+                    .mapper
+                    .table_estimates()
+                    .into_iter()
+                    .map(|(name, bytes)| (name.to_owned(), bytes))
+                    .collect();
                 let batches = case
                     .mapper
                     .flush()
                     .unwrap_or_else(|err| panic!("{context}: flush failed: {err:#}"));
                 let tables: BTreeSet<String> = batches.keys().cloned().collect();
                 assert_eq!(tables, declared, "{context}: flushed tables");
+                for (table, batch) in &batches {
+                    if batch.num_rows() > 0 {
+                        assert!(
+                            estimates.get(table).is_some_and(|bytes| *bytes > 0),
+                            "{context}: nonempty {table} is missing from memory estimates"
+                        );
+                    }
+                }
+                assert!(
+                    estimates.values().sum::<usize>()
+                        > estimates.values().copied().max().unwrap_or_default(),
+                    "{context}: the complete buffer estimate must include multiple tables"
+                );
 
                 flushed.push(Flushed {
                     context,

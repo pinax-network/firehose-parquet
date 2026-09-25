@@ -1,0 +1,2065 @@
+{
+  "date": "2026-09-25",
+  "machine": "Apple M1 Max, macOS arm64",
+  "profile": "release",
+  "compression": "Zstd",
+  "encoding": {
+    "evm": "Hex",
+    "solana": "Base58"
+  },
+  "scope": "Offline sizing simulations; no source/network throughput measurement or production traffic distribution claim. RSS from /usr/bin/time -l is process observation, not the logical mapper threshold.",
+  "source_base": "e4bd9cf354ea7a4f75c56f82c58b64368b16e1ec",
+  "harness_commit": "dda3ada",
+  "cases": [
+    {
+      "adaptive": true,
+      "family": "evm",
+      "memory_threshold_bytes": 268435456,
+      "notes": "Repeated retained payload sizing simulation, not real network throughput. Raw payloads and source identities are unchanged; all tables are flushed together. Files use the production Zstd table writer. Physical protected transaction footer adds small per-file overhead.",
+      "sources": [
+        {
+          "block": 26049575,
+          "bytes": 2094485,
+          "sha256": "dad74257d32c66a056404add2a5f3360c288faedf0a026e5698394cd9d231b2a"
+        }
+      ],
+      "target_bytes": 262144,
+      "windows": [
+        {
+          "arrow_allocated_bytes": 7336752,
+          "blocks": 1,
+          "max_estimated_bytes": 1802338,
+          "max_file_bytes": 157213,
+          "ratio_after": 0.0872272570405773,
+          "ratio_before": 1.0,
+          "rows": 5049,
+          "sum_estimated_bytes": 3920064,
+          "trigger": "bytes"
+        },
+        {
+          "arrow_allocated_bytes": 8046442,
+          "blocks": 2,
+          "max_estimated_bytes": 3604631,
+          "max_file_bytes": 167438,
+          "ratio_after": 0.06683902940043421,
+          "ratio_before": 0.0872272570405773,
+          "rows": 10098,
+          "sum_estimated_bytes": 7839560,
+          "trigger": "bytes"
+        },
+        {
+          "arrow_allocated_bytes": 15980080,
+          "blocks": 3,
+          "max_estimated_bytes": 5406924,
+          "max_file_bytes": 174967,
+          "ratio_after": 0.04959941661857216,
+          "ratio_before": 0.06683902940043421,
+          "rows": 15147,
+          "sum_estimated_bytes": 11759061,
+          "trigger": "bytes"
+        },
+        {
+          "arrow_allocated_bytes": 12340042,
+          "blocks": 3,
+          "max_estimated_bytes": 5406924,
+          "max_file_bytes": 174967,
+          "ratio_after": 0.04097961022764114,
+          "ratio_before": 0.04959941661857216,
+          "rows": 15147,
+          "sum_estimated_bytes": 11759061,
+          "trigger": "bytes"
+        },
+        {
+          "arrow_allocated_bytes": 23327700,
+          "blocks": 4,
+          "max_estimated_bytes": 7209217,
+          "max_file_bytes": 182495,
+          "ratio_after": 0.033146866206585565,
+          "ratio_before": 0.04097961022764114,
+          "rows": 20196,
+          "sum_estimated_bytes": 15678553,
+          "trigger": "bytes"
+        },
+        {
+          "arrow_allocated_bytes": 31326220,
+          "blocks": 5,
+          "max_estimated_bytes": 9011515,
+          "max_file_bytes": 182624,
+          "ratio_after": 0.026706246509251713,
+          "ratio_before": 0.033146866206585565,
+          "rows": 25245,
+          "sum_estimated_bytes": 19598059,
+          "trigger": "bytes"
+        },
+        {
+          "arrow_allocated_bytes": 39196272,
+          "blocks": 6,
+          "max_estimated_bytes": 10813808,
+          "max_file_bytes": 182720,
+          "ratio_after": 0.021801581004199364,
+          "ratio_before": 0.026706246509251713,
+          "rows": 30294,
+          "sum_estimated_bytes": 23517555,
+          "trigger": "bytes"
+        },
+        {
+          "arrow_allocated_bytes": 46485940,
+          "blocks": 7,
+          "max_estimated_bytes": 12616101,
+          "max_file_bytes": 182834,
+          "ratio_after": 0.01814684853540173,
+          "ratio_before": 0.021801581004199364,
+          "rows": 35343,
+          "sum_estimated_bytes": 27437056,
+          "trigger": "bytes"
+        },
+        {
+          "arrow_allocated_bytes": 53921832,
+          "blocks": 9,
+          "max_estimated_bytes": 16220692,
+          "max_file_bytes": 183021,
+          "ratio_after": 0.014715014651144432,
+          "ratio_before": 0.01814684853540173,
+          "rows": 45441,
+          "sum_estimated_bytes": 35276056,
+          "trigger": "bytes"
+        },
+        {
+          "arrow_allocated_bytes": 69888560,
+          "blocks": 10,
+          "max_estimated_bytes": 18022985,
+          "max_file_bytes": 183179,
+          "ratio_after": 0.01243932368396124,
+          "ratio_before": 0.014715014651144432,
+          "rows": 50490,
+          "sum_estimated_bytes": 39195552,
+          "trigger": "bytes"
+        },
+        {
+          "arrow_allocated_bytes": 78349620,
+          "blocks": 12,
+          "max_estimated_bytes": 21627571,
+          "max_file_bytes": 195682,
+          "ratio_after": 0.010743563300910058,
+          "ratio_before": 0.01243932368396124,
+          "rows": 60588,
+          "sum_estimated_bytes": 47034545,
+          "trigger": "bytes"
+        },
+        {
+          "arrow_allocated_bytes": 92929724,
+          "blocks": 14,
+          "max_estimated_bytes": 25232162,
+          "max_file_bytes": 219675,
+          "ratio_after": 0.009724856904172883,
+          "ratio_before": 0.010743563300910058,
+          "rows": 70686,
+          "sum_estimated_bytes": 54873547,
+          "trigger": "bytes"
+        },
+        {
+          "arrow_allocated_bytes": 107737284,
+          "blocks": 15,
+          "max_estimated_bytes": 27034455,
+          "max_file_bytes": 227211,
+          "ratio_after": 0.009064677027099328,
+          "ratio_before": 0.009724856904172883,
+          "rows": 75735,
+          "sum_estimated_bytes": 58793048,
+          "trigger": "bytes"
+        },
+        {
+          "arrow_allocated_bytes": 115075688,
+          "blocks": 17,
+          "max_estimated_bytes": 30639046,
+          "max_file_bytes": 231399,
+          "ratio_after": 0.008308549430821696,
+          "ratio_before": 0.009064677027099328,
+          "rows": 85833,
+          "sum_estimated_bytes": 66632048,
+          "trigger": "bytes"
+        },
+        {
+          "arrow_allocated_bytes": 129638000,
+          "blocks": 18,
+          "max_estimated_bytes": 32441339,
+          "max_file_bytes": 231471,
+          "ratio_after": 0.007721806252872974,
+          "ratio_before": 0.008308549430821696,
+          "rows": 90882,
+          "sum_estimated_bytes": 70551544,
+          "trigger": "bytes"
+        },
+        {
+          "arrow_allocated_bytes": 139415348,
+          "blocks": 19,
+          "max_estimated_bytes": 34243632,
+          "max_file_bytes": 231573,
+          "ratio_after": 0.007242159530546893,
+          "ratio_before": 0.007721806252872974,
+          "rows": 95931,
+          "sum_estimated_bytes": 74471045,
+          "trigger": "bytes"
+        },
+        {
+          "arrow_allocated_bytes": 147013624,
+          "blocks": 21,
+          "max_estimated_bytes": 37848223,
+          "max_file_bytes": 231726,
+          "ratio_after": 0.006682333129797324,
+          "ratio_before": 0.007242159530546893,
+          "rows": 106029,
+          "sum_estimated_bytes": 82310043,
+          "trigger": "bytes"
+        },
+        {
+          "arrow_allocated_bytes": 162367104,
+          "blocks": 22,
+          "max_estimated_bytes": 39650516,
+          "max_file_bytes": 231823,
+          "ratio_after": 0.006264495481980095,
+          "ratio_before": 0.006682333129797324,
+          "rows": 111078,
+          "sum_estimated_bytes": 86229539,
+          "trigger": "bytes"
+        },
+        {
+          "arrow_allocated_bytes": 171214788,
+          "blocks": 24,
+          "max_estimated_bytes": 43255102,
+          "max_file_bytes": 254412,
+          "ratio_after": 0.006073080015527281,
+          "ratio_before": 0.006264495481980095,
+          "rows": 121176,
+          "sum_estimated_bytes": 94068532,
+          "trigger": "bytes"
+        },
+        {
+          "arrow_allocated_bytes": 98425624,
+          "blocks": 24,
+          "max_estimated_bytes": 43255102,
+          "max_file_bytes": 254412,
+          "ratio_after": 0.0059773722823008735,
+          "ratio_before": 0.006073080015527281,
+          "rows": 121176,
+          "sum_estimated_bytes": 94068532,
+          "trigger": "bytes"
+        },
+        {
+          "arrow_allocated_bytes": 185773132,
+          "blocks": 25,
+          "max_estimated_bytes": 45057400,
+          "max_file_bytes": 267505,
+          "ratio_after": 0.005957177443356068,
+          "ratio_before": 0.0059773722823008735,
+          "rows": 126225,
+          "sum_estimated_bytes": 97988040,
+          "trigger": "bytes"
+        },
+        {
+          "arrow_allocated_bytes": 102065018,
+          "blocks": 25,
+          "max_estimated_bytes": 45057400,
+          "max_file_bytes": 267505,
+          "ratio_after": 0.0059470800238836646,
+          "ratio_before": 0.005957177443356068,
+          "rows": 126225,
+          "sum_estimated_bytes": 97988040,
+          "trigger": "bytes"
+        },
+        {
+          "arrow_allocated_bytes": 102065018,
+          "blocks": 25,
+          "max_estimated_bytes": 45057400,
+          "max_file_bytes": 267505,
+          "ratio_after": 0.005942031314147464,
+          "ratio_before": 0.0059470800238836646,
+          "rows": 126225,
+          "sum_estimated_bytes": 97988040,
+          "trigger": "bytes"
+        },
+        {
+          "arrow_allocated_bytes": 102065018,
+          "blocks": 25,
+          "max_estimated_bytes": 45057400,
+          "max_file_bytes": 267505,
+          "ratio_after": 0.005939506959279363,
+          "ratio_before": 0.005942031314147464,
+          "rows": 126225,
+          "sum_estimated_bytes": 97988040,
+          "trigger": "bytes"
+        }
+      ],
+      "case": "evm-eligible-adaptive-24",
+      "peak_rss_bytes": 631734272
+    },
+    {
+      "adaptive": true,
+      "family": "evm",
+      "memory_threshold_bytes": 268435456,
+      "notes": "Repeated retained payload sizing simulation, not real network throughput. Raw payloads and source identities are unchanged; all tables are flushed together. Files use the production Zstd table writer. Physical protected transaction footer adds small per-file overhead.",
+      "sources": [
+        {
+          "block": 26049575,
+          "bytes": 2094485,
+          "sha256": "dad74257d32c66a056404add2a5f3360c288faedf0a026e5698394cd9d231b2a"
+        }
+      ],
+      "target_bytes": 262144,
+      "windows": [
+        {
+          "arrow_allocated_bytes": 7336752,
+          "blocks": 1,
+          "max_estimated_bytes": 1802338,
+          "max_file_bytes": 157213,
+          "ratio_after": 0.0872272570405773,
+          "ratio_before": 1.0,
+          "rows": 5049,
+          "sum_estimated_bytes": 3920064,
+          "trigger": "bytes"
+        },
+        {
+          "arrow_allocated_bytes": 8046442,
+          "blocks": 2,
+          "max_estimated_bytes": 3604631,
+          "max_file_bytes": 167438,
+          "ratio_after": 0.06683902940043421,
+          "ratio_before": 0.0872272570405773,
+          "rows": 10098,
+          "sum_estimated_bytes": 7839560,
+          "trigger": "bytes"
+        },
+        {
+          "arrow_allocated_bytes": 15980080,
+          "blocks": 3,
+          "max_estimated_bytes": 5406924,
+          "max_file_bytes": 174967,
+          "ratio_after": 0.04959941661857216,
+          "ratio_before": 0.06683902940043421,
+          "rows": 15147,
+          "sum_estimated_bytes": 11759061,
+          "trigger": "bytes"
+        },
+        {
+          "arrow_allocated_bytes": 12340042,
+          "blocks": 3,
+          "max_estimated_bytes": 5406924,
+          "max_file_bytes": 174967,
+          "ratio_after": 0.04097961022764114,
+          "ratio_before": 0.04959941661857216,
+          "rows": 15147,
+          "sum_estimated_bytes": 11759061,
+          "trigger": "bytes"
+        },
+        {
+          "arrow_allocated_bytes": 23327700,
+          "blocks": 4,
+          "max_estimated_bytes": 7209217,
+          "max_file_bytes": 182495,
+          "ratio_after": 0.033146866206585565,
+          "ratio_before": 0.04097961022764114,
+          "rows": 20196,
+          "sum_estimated_bytes": 15678553,
+          "trigger": "bytes"
+        },
+        {
+          "arrow_allocated_bytes": 31326220,
+          "blocks": 5,
+          "max_estimated_bytes": 9011515,
+          "max_file_bytes": 182624,
+          "ratio_after": 0.026706246509251713,
+          "ratio_before": 0.033146866206585565,
+          "rows": 25245,
+          "sum_estimated_bytes": 19598059,
+          "trigger": "bytes"
+        },
+        {
+          "arrow_allocated_bytes": 39196272,
+          "blocks": 6,
+          "max_estimated_bytes": 10813808,
+          "max_file_bytes": 182720,
+          "ratio_after": 0.021801581004199364,
+          "ratio_before": 0.026706246509251713,
+          "rows": 30294,
+          "sum_estimated_bytes": 23517555,
+          "trigger": "bytes"
+        },
+        {
+          "arrow_allocated_bytes": 46485940,
+          "blocks": 7,
+          "max_estimated_bytes": 12616101,
+          "max_file_bytes": 182834,
+          "ratio_after": 0.01814684853540173,
+          "ratio_before": 0.021801581004199364,
+          "rows": 35343,
+          "sum_estimated_bytes": 27437056,
+          "trigger": "bytes"
+        },
+        {
+          "arrow_allocated_bytes": 53921832,
+          "blocks": 9,
+          "max_estimated_bytes": 16220692,
+          "max_file_bytes": 183021,
+          "ratio_after": 0.014715014651144432,
+          "ratio_before": 0.01814684853540173,
+          "rows": 45441,
+          "sum_estimated_bytes": 35276056,
+          "trigger": "bytes"
+        },
+        {
+          "arrow_allocated_bytes": 69888560,
+          "blocks": 10,
+          "max_estimated_bytes": 18022985,
+          "max_file_bytes": 183179,
+          "ratio_after": 0.01243932368396124,
+          "ratio_before": 0.014715014651144432,
+          "rows": 50490,
+          "sum_estimated_bytes": 39195552,
+          "trigger": "bytes"
+        },
+        {
+          "arrow_allocated_bytes": 78349620,
+          "blocks": 12,
+          "max_estimated_bytes": 21627571,
+          "max_file_bytes": 195682,
+          "ratio_after": 0.010743563300910058,
+          "ratio_before": 0.01243932368396124,
+          "rows": 60588,
+          "sum_estimated_bytes": 47034545,
+          "trigger": "bytes"
+        },
+        {
+          "arrow_allocated_bytes": 92929724,
+          "blocks": 14,
+          "max_estimated_bytes": 25232162,
+          "max_file_bytes": 219675,
+          "ratio_after": 0.009724856904172883,
+          "ratio_before": 0.010743563300910058,
+          "rows": 70686,
+          "sum_estimated_bytes": 54873547,
+          "trigger": "bytes"
+        }
+      ],
+      "case": "evm-eligible-adaptive",
+      "peak_rss_bytes": 274579456
+    },
+    {
+      "adaptive": false,
+      "family": "evm",
+      "memory_threshold_bytes": 268435456,
+      "notes": "Repeated retained payload sizing simulation, not real network throughput. Raw payloads and source identities are unchanged; all tables are flushed together. Files use the production Zstd table writer. Physical protected transaction footer adds small per-file overhead.",
+      "sources": [
+        {
+          "block": 26049575,
+          "bytes": 2094485,
+          "sha256": "dad74257d32c66a056404add2a5f3360c288faedf0a026e5698394cd9d231b2a"
+        }
+      ],
+      "target_bytes": 262144,
+      "windows": [
+        {
+          "arrow_allocated_bytes": 7336752,
+          "blocks": 1,
+          "max_estimated_bytes": 1802338,
+          "max_file_bytes": 157213,
+          "ratio_after": 1.0,
+          "ratio_before": 1.0,
+          "rows": 5049,
+          "sum_estimated_bytes": 3920064,
+          "trigger": "bytes"
+        },
+        {
+          "arrow_allocated_bytes": 4044539,
+          "blocks": 1,
+          "max_estimated_bytes": 1802338,
+          "max_file_bytes": 157213,
+          "ratio_after": 1.0,
+          "ratio_before": 1.0,
+          "rows": 5049,
+          "sum_estimated_bytes": 3920064,
+          "trigger": "bytes"
+        },
+        {
+          "arrow_allocated_bytes": 4044539,
+          "blocks": 1,
+          "max_estimated_bytes": 1802338,
+          "max_file_bytes": 157213,
+          "ratio_after": 1.0,
+          "ratio_before": 1.0,
+          "rows": 5049,
+          "sum_estimated_bytes": 3920064,
+          "trigger": "bytes"
+        },
+        {
+          "arrow_allocated_bytes": 4044539,
+          "blocks": 1,
+          "max_estimated_bytes": 1802338,
+          "max_file_bytes": 157213,
+          "ratio_after": 1.0,
+          "ratio_before": 1.0,
+          "rows": 5049,
+          "sum_estimated_bytes": 3920064,
+          "trigger": "bytes"
+        },
+        {
+          "arrow_allocated_bytes": 4044539,
+          "blocks": 1,
+          "max_estimated_bytes": 1802338,
+          "max_file_bytes": 157213,
+          "ratio_after": 1.0,
+          "ratio_before": 1.0,
+          "rows": 5049,
+          "sum_estimated_bytes": 3920064,
+          "trigger": "bytes"
+        },
+        {
+          "arrow_allocated_bytes": 4044539,
+          "blocks": 1,
+          "max_estimated_bytes": 1802338,
+          "max_file_bytes": 157213,
+          "ratio_after": 1.0,
+          "ratio_before": 1.0,
+          "rows": 5049,
+          "sum_estimated_bytes": 3920064,
+          "trigger": "bytes"
+        },
+        {
+          "arrow_allocated_bytes": 4044539,
+          "blocks": 1,
+          "max_estimated_bytes": 1802338,
+          "max_file_bytes": 157213,
+          "ratio_after": 1.0,
+          "ratio_before": 1.0,
+          "rows": 5049,
+          "sum_estimated_bytes": 3920064,
+          "trigger": "bytes"
+        },
+        {
+          "arrow_allocated_bytes": 4044539,
+          "blocks": 1,
+          "max_estimated_bytes": 1802338,
+          "max_file_bytes": 157213,
+          "ratio_after": 1.0,
+          "ratio_before": 1.0,
+          "rows": 5049,
+          "sum_estimated_bytes": 3920064,
+          "trigger": "bytes"
+        },
+        {
+          "arrow_allocated_bytes": 4044539,
+          "blocks": 1,
+          "max_estimated_bytes": 1802338,
+          "max_file_bytes": 157213,
+          "ratio_after": 1.0,
+          "ratio_before": 1.0,
+          "rows": 5049,
+          "sum_estimated_bytes": 3920064,
+          "trigger": "bytes"
+        },
+        {
+          "arrow_allocated_bytes": 4044539,
+          "blocks": 1,
+          "max_estimated_bytes": 1802338,
+          "max_file_bytes": 157213,
+          "ratio_after": 1.0,
+          "ratio_before": 1.0,
+          "rows": 5049,
+          "sum_estimated_bytes": 3920064,
+          "trigger": "bytes"
+        },
+        {
+          "arrow_allocated_bytes": 4044539,
+          "blocks": 1,
+          "max_estimated_bytes": 1802338,
+          "max_file_bytes": 157213,
+          "ratio_after": 1.0,
+          "ratio_before": 1.0,
+          "rows": 5049,
+          "sum_estimated_bytes": 3920064,
+          "trigger": "bytes"
+        },
+        {
+          "arrow_allocated_bytes": 4044539,
+          "blocks": 1,
+          "max_estimated_bytes": 1802338,
+          "max_file_bytes": 157213,
+          "ratio_after": 1.0,
+          "ratio_before": 1.0,
+          "rows": 5049,
+          "sum_estimated_bytes": 3920064,
+          "trigger": "bytes"
+        }
+      ],
+      "case": "evm-eligible-baseline",
+      "peak_rss_bytes": 46923776
+    },
+    {
+      "adaptive": true,
+      "family": "evm",
+      "memory_threshold_bytes": 268435456,
+      "notes": "Repeated retained payload sizing simulation, not real network throughput. Raw payloads and source identities are unchanged; all tables are flushed together. Files use the production Zstd table writer. Physical protected transaction footer adds small per-file overhead.",
+      "sources": [
+        {
+          "block": 26049575,
+          "bytes": 2094485,
+          "sha256": "dad74257d32c66a056404add2a5f3360c288faedf0a026e5698394cd9d231b2a"
+        }
+      ],
+      "target_bytes": 33554432,
+      "windows": [
+        {
+          "arrow_allocated_bytes": 107322368,
+          "blocks": 19,
+          "max_estimated_bytes": 34243632,
+          "max_file_bytes": 231573,
+          "ratio_after": 0.006762512808220811,
+          "ratio_before": 1.0,
+          "rows": 95931,
+          "sum_estimated_bytes": 74471045,
+          "trigger": "bytes"
+        },
+        {
+          "arrow_allocated_bytes": 300057804,
+          "blocks": 69,
+          "max_estimated_bytes": 124358347,
+          "max_file_bytes": 438533,
+          "ratio_after": 0.005144439216439038,
+          "ratio_before": 0.006762512808220811,
+          "rows": 348381,
+          "sum_estimated_bytes": 270445995,
+          "trigger": "memory"
+        },
+        {
+          "arrow_allocated_bytes": 274580562,
+          "blocks": 69,
+          "max_estimated_bytes": 124358347,
+          "max_file_bytes": 438533,
+          "ratio_after": 0.004335402420548152,
+          "ratio_before": 0.005144439216439038,
+          "rows": 348381,
+          "sum_estimated_bytes": 270445995,
+          "trigger": "memory"
+        },
+        {
+          "arrow_allocated_bytes": 274580562,
+          "blocks": 69,
+          "max_estimated_bytes": 124358347,
+          "max_file_bytes": 438533,
+          "ratio_after": 0.003930884022602709,
+          "ratio_before": 0.004335402420548152,
+          "rows": 348381,
+          "sum_estimated_bytes": 270445995,
+          "trigger": "memory"
+        }
+      ],
+      "case": "evm-target32-memory256-adaptive",
+      "peak_rss_bytes": 662208512
+    },
+    {
+      "adaptive": false,
+      "family": "evm",
+      "memory_threshold_bytes": 268435456,
+      "notes": "Repeated retained payload sizing simulation, not real network throughput. Raw payloads and source identities are unchanged; all tables are flushed together. Files use the production Zstd table writer. Physical protected transaction footer adds small per-file overhead.",
+      "sources": [
+        {
+          "block": 26049575,
+          "bytes": 2094485,
+          "sha256": "dad74257d32c66a056404add2a5f3360c288faedf0a026e5698394cd9d231b2a"
+        }
+      ],
+      "target_bytes": 33554432,
+      "windows": [
+        {
+          "arrow_allocated_bytes": 107322368,
+          "blocks": 19,
+          "max_estimated_bytes": 34243632,
+          "max_file_bytes": 231573,
+          "ratio_after": 1.0,
+          "ratio_before": 1.0,
+          "rows": 95931,
+          "sum_estimated_bytes": 74471045,
+          "trigger": "bytes"
+        },
+        {
+          "arrow_allocated_bytes": 77544110,
+          "blocks": 19,
+          "max_estimated_bytes": 34243632,
+          "max_file_bytes": 231573,
+          "ratio_after": 1.0,
+          "ratio_before": 1.0,
+          "rows": 95931,
+          "sum_estimated_bytes": 74471045,
+          "trigger": "bytes"
+        }
+      ],
+      "case": "evm-target32-memory256-baseline",
+      "peak_rss_bytes": 235847680
+    },
+    {
+      "adaptive": true,
+      "family": "evm",
+      "memory_threshold_bytes": 536870912,
+      "notes": "Repeated retained payload sizing simulation, not real network throughput. Raw payloads and source identities are unchanged; all tables are flushed together. Files use the production Zstd table writer. Physical protected transaction footer adds small per-file overhead.",
+      "sources": [
+        {
+          "block": 26049575,
+          "bytes": 2094485,
+          "sha256": "dad74257d32c66a056404add2a5f3360c288faedf0a026e5698394cd9d231b2a"
+        }
+      ],
+      "target_bytes": 33554432,
+      "windows": [
+        {
+          "arrow_allocated_bytes": 107322368,
+          "blocks": 19,
+          "max_estimated_bytes": 34243632,
+          "max_file_bytes": 231573,
+          "ratio_after": 0.006762512808220811,
+          "ratio_before": 1.0,
+          "rows": 95931,
+          "sum_estimated_bytes": 74471045,
+          "trigger": "bytes"
+        },
+        {
+          "arrow_allocated_bytes": 600074612,
+          "blocks": 137,
+          "max_estimated_bytes": 246914356,
+          "max_file_bytes": 728345,
+          "ratio_after": 0.0048561503952884635,
+          "ratio_before": 0.006762512808220811,
+          "rows": 691713,
+          "sum_estimated_bytes": 536971928,
+          "trigger": "memory"
+        },
+        {
+          "arrow_allocated_bytes": 545480026,
+          "blocks": 137,
+          "max_estimated_bytes": 246914356,
+          "max_file_bytes": 728345,
+          "ratio_after": 0.0039029691888222903,
+          "ratio_before": 0.0048561503952884635,
+          "rows": 691713,
+          "sum_estimated_bytes": 536971928,
+          "trigger": "memory"
+        },
+        {
+          "arrow_allocated_bytes": 545480026,
+          "blocks": 137,
+          "max_estimated_bytes": 246914356,
+          "max_file_bytes": 728345,
+          "ratio_after": 0.0034263785855892038,
+          "ratio_before": 0.0039029691888222903,
+          "rows": 691713,
+          "sum_estimated_bytes": 536971928,
+          "trigger": "memory"
+        }
+      ],
+      "case": "evm-target32-memory512-adaptive",
+      "peak_rss_bytes": 1270857728
+    },
+    {
+      "adaptive": true,
+      "family": "evm",
+      "memory_threshold_bytes": 268435456,
+      "notes": "Repeated retained payload sizing simulation, not real network throughput. Raw payloads and source identities are unchanged; all tables are flushed together. Files use the production Zstd table writer. Physical protected transaction footer adds small per-file overhead.",
+      "sources": [
+        {
+          "block": 26049575,
+          "bytes": 2094485,
+          "sha256": "dad74257d32c66a056404add2a5f3360c288faedf0a026e5698394cd9d231b2a"
+        }
+      ],
+      "target_bytes": 4194304,
+      "windows": [
+        {
+          "arrow_allocated_bytes": 18806312,
+          "blocks": 3,
+          "max_estimated_bytes": 5406924,
+          "max_file_bytes": 174967,
+          "ratio_after": 0.03235980383671012,
+          "ratio_before": 1.0,
+          "rows": 15147,
+          "sum_estimated_bytes": 11759061,
+          "trigger": "bytes"
+        },
+        {
+          "arrow_allocated_bytes": 372864228,
+          "blocks": 69,
+          "max_estimated_bytes": 124358347,
+          "max_file_bytes": 438533,
+          "ratio_after": 0.017943084730683692,
+          "ratio_before": 0.03235980383671012,
+          "rows": 348381,
+          "sum_estimated_bytes": 270445995,
+          "trigger": "memory"
+        },
+        {
+          "arrow_allocated_bytes": 274580562,
+          "blocks": 69,
+          "max_estimated_bytes": 124358347,
+          "max_file_bytes": 438533,
+          "ratio_after": 0.01073472517767048,
+          "ratio_before": 0.017943084730683692,
+          "rows": 348381,
+          "sum_estimated_bytes": 270445995,
+          "trigger": "memory"
+        },
+        {
+          "arrow_allocated_bytes": 274580562,
+          "blocks": 69,
+          "max_estimated_bytes": 124358347,
+          "max_file_bytes": 438533,
+          "ratio_after": 0.007130545401163872,
+          "ratio_before": 0.01073472517767048,
+          "rows": 348381,
+          "sum_estimated_bytes": 270445995,
+          "trigger": "memory"
+        },
+        {
+          "arrow_allocated_bytes": 274580562,
+          "blocks": 69,
+          "max_estimated_bytes": 124358347,
+          "max_file_bytes": 438533,
+          "ratio_after": 0.005328455512910569,
+          "ratio_before": 0.007130545401163872,
+          "rows": 348381,
+          "sum_estimated_bytes": 270445995,
+          "trigger": "memory"
+        },
+        {
+          "arrow_allocated_bytes": 274580562,
+          "blocks": 69,
+          "max_estimated_bytes": 124358347,
+          "max_file_bytes": 438533,
+          "ratio_after": 0.004427410568783917,
+          "ratio_before": 0.005328455512910569,
+          "rows": 348381,
+          "sum_estimated_bytes": 270445995,
+          "trigger": "memory"
+        }
+      ],
+      "case": "evm-target4-memory256-adaptive",
+      "peak_rss_bytes": 702545920
+    },
+    {
+      "adaptive": true,
+      "family": "evm",
+      "memory_threshold_bytes": 268435456,
+      "notes": "Offline sizing simulation, not real network throughput. Without variation, payloads and identities repeat unchanged. Variation deterministically changes EVM transaction/call/log/storage byte values while preserving lengths, row-producing counts, flags and scalars. All tables flush together through the production Zstd table writer. Protected transaction footer adds small per-file overhead.",
+      "sources": [
+        {
+          "block": 26049575,
+          "bytes": 2094485,
+          "sha256": "dad74257d32c66a056404add2a5f3360c288faedf0a026e5698394cd9d231b2a"
+        }
+      ],
+      "synthetic_byte_variation": true,
+      "target_bytes": 33554432,
+      "windows": [
+        {
+          "arrow_allocated_bytes": 107322368,
+          "blocks": 19,
+          "max_estimated_bytes": 34243632,
+          "max_file_bytes": 9241294,
+          "ratio_after": 0.2698689788513088,
+          "ratio_before": 1.0,
+          "rows": 95931,
+          "sum_estimated_bytes": 74471045,
+          "trigger": "bytes"
+        },
+        {
+          "arrow_allocated_bytes": 300057804,
+          "blocks": 69,
+          "max_estimated_bytes": 124358347,
+          "max_file_bytes": 33507597,
+          "ratio_after": 0.2696564353518092,
+          "ratio_before": 0.2698689788513088,
+          "rows": 348381,
+          "sum_estimated_bytes": 270445995,
+          "trigger": "memory"
+        },
+        {
+          "arrow_allocated_bytes": 274580562,
+          "blocks": 69,
+          "max_estimated_bytes": 124358347,
+          "max_file_bytes": 33501974,
+          "ratio_after": 0.2695275555498633,
+          "ratio_before": 0.2696564353518092,
+          "rows": 348381,
+          "sum_estimated_bytes": 270445995,
+          "trigger": "memory"
+        },
+        {
+          "arrow_allocated_bytes": 274580562,
+          "blocks": 69,
+          "max_estimated_bytes": 124358347,
+          "max_file_bytes": 33501365,
+          "ratio_after": 0.26946066707983696,
+          "ratio_before": 0.2695275555498633,
+          "rows": 348381,
+          "sum_estimated_bytes": 270445995,
+          "trigger": "memory"
+        },
+        {
+          "arrow_allocated_bytes": 274580562,
+          "blocks": 69,
+          "max_estimated_bytes": 124358347,
+          "max_file_bytes": 33499642,
+          "ratio_after": 0.26942029528410283,
+          "ratio_before": 0.26946066707983696,
+          "rows": 348381,
+          "sum_estimated_bytes": 270445995,
+          "trigger": "memory"
+        },
+        {
+          "arrow_allocated_bytes": 274580562,
+          "blocks": 69,
+          "max_estimated_bytes": 124358347,
+          "max_file_bytes": 33498794,
+          "ratio_after": 0.2693966998844996,
+          "ratio_before": 0.26942029528410283,
+          "rows": 348381,
+          "sum_estimated_bytes": 270445995,
+          "trigger": "memory"
+        },
+        {
+          "arrow_allocated_bytes": 274580562,
+          "blocks": 69,
+          "max_estimated_bytes": 124358347,
+          "max_file_bytes": 33497828,
+          "ratio_after": 0.26938101824757876,
+          "ratio_before": 0.2693966998844996,
+          "rows": 348381,
+          "sum_estimated_bytes": 270445995,
+          "trigger": "memory"
+        },
+        {
+          "arrow_allocated_bytes": 274580562,
+          "blocks": 69,
+          "max_estimated_bytes": 124358347,
+          "max_file_bytes": 33497973,
+          "ratio_after": 0.2693737604217501,
+          "ratio_before": 0.26938101824757876,
+          "rows": 348381,
+          "sum_estimated_bytes": 270445995,
+          "trigger": "memory"
+        },
+        {
+          "arrow_allocated_bytes": 274580562,
+          "blocks": 69,
+          "max_estimated_bytes": 124358347,
+          "max_file_bytes": 33499720,
+          "ratio_after": 0.2693771555648889,
+          "ratio_before": 0.2693737604217501,
+          "rows": 348381,
+          "sum_estimated_bytes": 270445995,
+          "trigger": "memory"
+        },
+        {
+          "arrow_allocated_bytes": 274580562,
+          "blocks": 69,
+          "max_estimated_bytes": 124358347,
+          "max_file_bytes": 33498498,
+          "ratio_after": 0.26937393991579606,
+          "ratio_before": 0.2693771555648889,
+          "rows": 348381,
+          "sum_estimated_bytes": 270445995,
+          "trigger": "memory"
+        },
+        {
+          "arrow_allocated_bytes": 274580562,
+          "blocks": 69,
+          "max_estimated_bytes": 124358347,
+          "max_file_bytes": 33499363,
+          "ratio_after": 0.269375809943846,
+          "ratio_before": 0.26937393991579606,
+          "rows": 348381,
+          "sum_estimated_bytes": 270445995,
+          "trigger": "memory"
+        },
+        {
+          "arrow_allocated_bytes": 274580562,
+          "blocks": 69,
+          "max_estimated_bytes": 124358347,
+          "max_file_bytes": 33500253,
+          "ratio_after": 0.26938032332643846,
+          "ratio_before": 0.269375809943846,
+          "rows": 348381,
+          "sum_estimated_bytes": 270445995,
+          "trigger": "memory"
+        }
+      ],
+      "case": "evm-varied32-adaptive",
+      "peak_rss_bytes": 791953408
+    },
+    {
+      "adaptive": false,
+      "family": "evm",
+      "memory_threshold_bytes": 268435456,
+      "notes": "Offline sizing simulation, not real network throughput. Without variation, payloads and identities repeat unchanged. Variation deterministically changes EVM transaction/call/log/storage byte values while preserving lengths, row-producing counts, flags and scalars. All tables flush together through the production Zstd table writer. Protected transaction footer adds small per-file overhead.",
+      "sources": [
+        {
+          "block": 26049575,
+          "bytes": 2094485,
+          "sha256": "dad74257d32c66a056404add2a5f3360c288faedf0a026e5698394cd9d231b2a"
+        }
+      ],
+      "synthetic_byte_variation": true,
+      "target_bytes": 33554432,
+      "windows": [
+        {
+          "arrow_allocated_bytes": 107322368,
+          "blocks": 19,
+          "max_estimated_bytes": 34243632,
+          "max_file_bytes": 9241294,
+          "ratio_after": 1.0,
+          "ratio_before": 1.0,
+          "rows": 95931,
+          "sum_estimated_bytes": 74471045,
+          "trigger": "bytes"
+        },
+        {
+          "arrow_allocated_bytes": 77544110,
+          "blocks": 19,
+          "max_estimated_bytes": 34243632,
+          "max_file_bytes": 9241878,
+          "ratio_after": 1.0,
+          "ratio_before": 1.0,
+          "rows": 95931,
+          "sum_estimated_bytes": 74471045,
+          "trigger": "bytes"
+        },
+        {
+          "arrow_allocated_bytes": 77544110,
+          "blocks": 19,
+          "max_estimated_bytes": 34243632,
+          "max_file_bytes": 9241980,
+          "ratio_after": 1.0,
+          "ratio_before": 1.0,
+          "rows": 95931,
+          "sum_estimated_bytes": 74471045,
+          "trigger": "bytes"
+        }
+      ],
+      "case": "evm-varied32-baseline",
+      "peak_rss_bytes": 247218176
+    },
+    {
+      "adaptive": true,
+      "family": "evm",
+      "memory_threshold_bytes": 536870912,
+      "notes": "Offline sizing simulation, not real network throughput. Without variation, payloads and identities repeat unchanged. Variation deterministically changes EVM transaction/call/log/storage byte values while preserving lengths, row-producing counts, flags and scalars. All tables flush together through the production Zstd table writer. Protected transaction footer adds small per-file overhead.",
+      "sources": [
+        {
+          "block": 26049575,
+          "bytes": 2094485,
+          "sha256": "dad74257d32c66a056404add2a5f3360c288faedf0a026e5698394cd9d231b2a"
+        }
+      ],
+      "synthetic_byte_variation": true,
+      "target_bytes": 33554432,
+      "windows": [
+        {
+          "arrow_allocated_bytes": 107322368,
+          "blocks": 19,
+          "max_estimated_bytes": 34243632,
+          "max_file_bytes": 9241294,
+          "ratio_after": 0.2698689788513088,
+          "ratio_before": 1.0,
+          "rows": 95931,
+          "sum_estimated_bytes": 74471045,
+          "trigger": "bytes"
+        },
+        {
+          "arrow_allocated_bytes": 300057804,
+          "blocks": 69,
+          "max_estimated_bytes": 124358347,
+          "max_file_bytes": 33507597,
+          "ratio_after": 0.2696564353518092,
+          "ratio_before": 0.2698689788513088,
+          "rows": 348381,
+          "sum_estimated_bytes": 270445995,
+          "trigger": "bytes"
+        },
+        {
+          "arrow_allocated_bytes": 525703424,
+          "blocks": 70,
+          "max_estimated_bytes": 126160640,
+          "max_file_bytes": 33991418,
+          "ratio_after": 0.26954304632610804,
+          "ratio_before": 0.2696564353518092,
+          "rows": 353430,
+          "sum_estimated_bytes": 274365491,
+          "trigger": "bytes"
+        },
+        {
+          "arrow_allocated_bytes": 278220020,
+          "blocks": 70,
+          "max_estimated_bytes": 126160640,
+          "max_file_bytes": 33992089,
+          "ratio_after": 0.2694890111212635,
+          "ratio_before": 0.26954304632610804,
+          "rows": 353430,
+          "sum_estimated_bytes": 274365491,
+          "trigger": "bytes"
+        },
+        {
+          "arrow_allocated_bytes": 278220020,
+          "blocks": 70,
+          "max_estimated_bytes": 126160640,
+          "max_file_bytes": 33987538,
+          "ratio_after": 0.2694439569901743,
+          "ratio_before": 0.2694890111212635,
+          "rows": 353430,
+          "sum_estimated_bytes": 274365491,
+          "trigger": "bytes"
+        },
+        {
+          "arrow_allocated_bytes": 278220020,
+          "blocks": 70,
+          "max_estimated_bytes": 126160640,
+          "max_file_bytes": 33987558,
+          "ratio_after": 0.2694215091886537,
+          "ratio_before": 0.2694439569901743,
+          "rows": 353430,
+          "sum_estimated_bytes": 274365491,
+          "trigger": "bytes"
+        },
+        {
+          "arrow_allocated_bytes": 278220020,
+          "blocks": 70,
+          "max_estimated_bytes": 126160640,
+          "max_file_bytes": 33989196,
+          "ratio_after": 0.26941677701146105,
+          "ratio_before": 0.2694215091886537,
+          "rows": 353430,
+          "sum_estimated_bytes": 274365491,
+          "trigger": "bytes"
+        },
+        {
+          "arrow_allocated_bytes": 278220020,
+          "blocks": 70,
+          "max_estimated_bytes": 126160640,
+          "max_file_bytes": 33989148,
+          "ratio_after": 0.26941422068920706,
+          "ratio_before": 0.26941677701146105,
+          "rows": 353430,
+          "sum_estimated_bytes": 274365491,
+          "trigger": "bytes"
+        },
+        {
+          "arrow_allocated_bytes": 278220020,
+          "blocks": 70,
+          "max_estimated_bytes": 126160640,
+          "max_file_bytes": 33997002,
+          "ratio_after": 0.2694440695103148,
+          "ratio_before": 0.26941422068920706,
+          "rows": 353430,
+          "sum_estimated_bytes": 274365491,
+          "trigger": "bytes"
+        },
+        {
+          "arrow_allocated_bytes": 278220020,
+          "blocks": 70,
+          "max_estimated_bytes": 126160640,
+          "max_file_bytes": 33989377,
+          "ratio_after": 0.26942877451170905,
+          "ratio_before": 0.2694440695103148,
+          "rows": 353430,
+          "sum_estimated_bytes": 274365491,
+          "trigger": "bytes"
+        },
+        {
+          "arrow_allocated_bytes": 278220020,
+          "blocks": 70,
+          "max_estimated_bytes": 126160640,
+          "max_file_bytes": 33985485,
+          "ratio_after": 0.2694057022333308,
+          "ratio_before": 0.26942877451170905,
+          "rows": 353430,
+          "sum_estimated_bytes": 274365491,
+          "trigger": "bytes"
+        },
+        {
+          "arrow_allocated_bytes": 278220020,
+          "blocks": 70,
+          "max_estimated_bytes": 126160640,
+          "max_file_bytes": 33990129,
+          "ratio_after": 0.2694125712005204,
+          "ratio_before": 0.2694057022333308,
+          "rows": 353430,
+          "sum_estimated_bytes": 274365491,
+          "trigger": "bytes"
+        }
+      ],
+      "case": "evm-varied32-memory512-adaptive",
+      "peak_rss_bytes": 1046511616
+    },
+    {
+      "adaptive": true,
+      "family": "solana",
+      "memory_threshold_bytes": 268435456,
+      "notes": "Repeated retained payload sizing simulation, not real network throughput. Raw payloads and source identities are unchanged; all tables are flushed together. Files use the production Zstd table writer. Physical protected transaction footer adds small per-file overhead.",
+      "sources": [
+        {
+          "block": 300000000,
+          "bytes": 2946958,
+          "sha256": "c68946ce74e66969b023d6397cff61f6cb8bd6508ff89148fb29130ea6a30dae"
+        },
+        {
+          "block": 300000001,
+          "bytes": 2935030,
+          "sha256": "552dbd676ea0d3a36be535d6318dc3c920de90ce7f875d48d037f538ba026154"
+        }
+      ],
+      "target_bytes": 1048576,
+      "windows": [
+        {
+          "arrow_allocated_bytes": 5943392,
+          "blocks": 1,
+          "max_estimated_bytes": 1176564,
+          "max_file_bytes": 199444,
+          "ratio_after": 0.16951394059311692,
+          "ratio_before": 1.0,
+          "rows": 9765,
+          "sum_estimated_bytes": 4383454,
+          "trigger": "bytes"
+        },
+        {
+          "arrow_allocated_bytes": 32344488,
+          "blocks": 5,
+          "max_estimated_bytes": 6299376,
+          "max_file_bytes": 363614,
+          "ratio_after": 0.11361808288929781,
+          "ratio_before": 0.16951394059311692,
+          "rows": 49377,
+          "sum_estimated_bytes": 22449131,
+          "trigger": "bytes"
+        },
+        {
+          "arrow_allocated_bytes": 45953066,
+          "blocks": 8,
+          "max_estimated_bytes": 9967852,
+          "max_file_bytes": 408235,
+          "ratio_after": 0.07728662277310362,
+          "ratio_before": 0.11361808288929781,
+          "rows": 78856,
+          "sum_estimated_bytes": 35776409,
+          "trigger": "bytes"
+        },
+        {
+          "arrow_allocated_bytes": 73084288,
+          "blocks": 11,
+          "max_estimated_bytes": 13636328,
+          "max_file_bytes": 453015,
+          "ratio_after": 0.055253904795569256,
+          "ratio_before": 0.07728662277310362,
+          "rows": 108335,
+          "sum_estimated_bytes": 49103687,
+          "trigger": "bytes"
+        },
+        {
+          "arrow_allocated_bytes": 104786518,
+          "blocks": 16,
+          "max_estimated_bytes": 19935663,
+          "max_file_bytes": 539852,
+          "ratio_after": 0.041166808082544144,
+          "ratio_before": 0.055253904795569256,
+          "rows": 157712,
+          "sum_estimated_bytes": 71552594,
+          "trigger": "bytes"
+        },
+        {
+          "arrow_allocated_bytes": 141664760,
+          "blocks": 21,
+          "max_estimated_bytes": 26234999,
+          "max_file_bytes": 609262,
+          "ratio_after": 0.03219503017474362,
+          "ratio_before": 0.041166808082544144,
+          "rows": 207089,
+          "sum_estimated_bytes": 94001505,
+          "trigger": "bytes"
+        },
+        {
+          "arrow_allocated_bytes": 180415642,
+          "blocks": 27,
+          "max_estimated_bytes": 33571951,
+          "max_file_bytes": 709177,
+          "ratio_after": 0.026659561362251696,
+          "ratio_before": 0.03219503017474362,
+          "rows": 266047,
+          "sum_estimated_bytes": 120656061,
+          "trigger": "bytes"
+        },
+        {
+          "arrow_allocated_bytes": 225076934,
+          "blocks": 32,
+          "max_estimated_bytes": 39871286,
+          "max_file_bytes": 786983,
+          "ratio_after": 0.023198825286308636,
+          "ratio_before": 0.026659561362251696,
+          "rows": 315424,
+          "sum_estimated_bytes": 143104968,
+          "trigger": "bytes"
+        },
+        {
+          "arrow_allocated_bytes": 254347368,
+          "blocks": 37,
+          "max_estimated_bytes": 46170622,
+          "max_file_bytes": 855405,
+          "ratio_after": 0.020862933069628102,
+          "ratio_before": 0.023198825286308636,
+          "rows": 364801,
+          "sum_estimated_bytes": 165553879,
+          "trigger": "bytes"
+        },
+        {
+          "arrow_allocated_bytes": 306201866,
+          "blocks": 41,
+          "max_estimated_bytes": 51015621,
+          "max_file_bytes": 930794,
+          "ratio_after": 0.019554103697262785,
+          "ratio_before": 0.020862933069628102,
+          "rows": 404045,
+          "sum_estimated_bytes": 183264388,
+          "trigger": "bytes"
+        },
+        {
+          "arrow_allocated_bytes": 311353896,
+          "blocks": 43,
+          "max_estimated_bytes": 53646480,
+          "max_file_bytes": 958743,
+          "ratio_after": 0.018712801221190414,
+          "ratio_before": 0.019554103697262785,
+          "rows": 423943,
+          "sum_estimated_bytes": 192386018,
+          "trigger": "bytes"
+        },
+        {
+          "arrow_allocated_bytes": 359244724,
+          "blocks": 46,
+          "max_estimated_bytes": 57314957,
+          "max_file_bytes": 999080,
+          "ratio_after": 0.01807210112137113,
+          "ratio_before": 0.018712801221190414,
+          "rows": 453422,
+          "sum_estimated_bytes": 205713298,
+          "trigger": "bytes"
+        },
+        {
+          "arrow_allocated_bytes": 368616650,
+          "blocks": 47,
+          "max_estimated_bytes": 58491480,
+          "max_file_bytes": 1015760,
+          "ratio_after": 0.017719024559633787,
+          "ratio_before": 0.01807210112137113,
+          "rows": 463187,
+          "sum_estimated_bytes": 210096528,
+          "trigger": "bytes"
+        },
+        {
+          "arrow_allocated_bytes": 356499666,
+          "blocks": 48,
+          "max_estimated_bytes": 59806909,
+          "max_file_bytes": 1032418,
+          "ratio_after": 0.01749077259123008,
+          "ratio_before": 0.017719024559633787,
+          "rows": 473136,
+          "sum_estimated_bytes": 214657342,
+          "trigger": "bytes"
+        },
+        {
+          "arrow_allocated_bytes": 361015768,
+          "blocks": 49,
+          "max_estimated_bytes": 61122339,
+          "max_file_bytes": 1043988,
+          "ratio_after": 0.01728553722144921,
+          "ratio_before": 0.01749077259123008,
+          "rows": 483085,
+          "sum_estimated_bytes": 219218159,
+          "trigger": "bytes"
+        },
+        {
+          "arrow_allocated_bytes": 322332161,
+          "blocks": 49,
+          "max_estimated_bytes": 60983433,
+          "max_file_bytes": 1044528,
+          "ratio_after": 0.017206799435292977,
+          "ratio_before": 0.01728553722144921,
+          "rows": 482901,
+          "sum_estimated_bytes": 219040576,
+          "trigger": "bytes"
+        },
+        {
+          "arrow_allocated_bytes": 343359494,
+          "blocks": 49,
+          "max_estimated_bytes": 61122339,
+          "max_file_bytes": 1043988,
+          "ratio_after": 0.017143550643480658,
+          "ratio_before": 0.017206799435292977,
+          "rows": 483085,
+          "sum_estimated_bytes": 219218159,
+          "trigger": "bytes"
+        },
+        {
+          "arrow_allocated_bytes": 377913950,
+          "blocks": 50,
+          "max_estimated_bytes": 62298862,
+          "max_file_bytes": 1058063,
+          "ratio_after": 0.017063607804972528,
+          "ratio_before": 0.017143550643480658,
+          "rows": 492850,
+          "sum_estimated_bytes": 223601390,
+          "trigger": "bytes"
+        },
+        {
+          "arrow_allocated_bytes": 303274135,
+          "blocks": 50,
+          "max_estimated_bytes": 62298862,
+          "max_file_bytes": 1058063,
+          "ratio_after": 0.017023636385718462,
+          "ratio_before": 0.017063607804972528,
+          "rows": 492850,
+          "sum_estimated_bytes": 223601390,
+          "trigger": "bytes"
+        },
+        {
+          "arrow_allocated_bytes": 303274135,
+          "blocks": 50,
+          "max_estimated_bytes": 62298862,
+          "max_file_bytes": 1058063,
+          "ratio_after": 0.017003650676091428,
+          "ratio_before": 0.017023636385718462,
+          "rows": 492850,
+          "sum_estimated_bytes": 223601390,
+          "trigger": "bytes"
+        },
+        {
+          "arrow_allocated_bytes": 303274135,
+          "blocks": 50,
+          "max_estimated_bytes": 62298862,
+          "max_file_bytes": 1058063,
+          "ratio_after": 0.016993657821277913,
+          "ratio_before": 0.017003650676091428,
+          "rows": 492850,
+          "sum_estimated_bytes": 223601390,
+          "trigger": "bytes"
+        },
+        {
+          "arrow_allocated_bytes": 303274135,
+          "blocks": 50,
+          "max_estimated_bytes": 62298862,
+          "max_file_bytes": 1058063,
+          "ratio_after": 0.016988661393871153,
+          "ratio_before": 0.016993657821277913,
+          "rows": 492850,
+          "sum_estimated_bytes": 223601390,
+          "trigger": "bytes"
+        },
+        {
+          "arrow_allocated_bytes": 303274135,
+          "blocks": 50,
+          "max_estimated_bytes": 62298862,
+          "max_file_bytes": 1058063,
+          "ratio_after": 0.016986163180167775,
+          "ratio_before": 0.016988661393871153,
+          "rows": 492850,
+          "sum_estimated_bytes": 223601390,
+          "trigger": "bytes"
+        },
+        {
+          "arrow_allocated_bytes": 303274135,
+          "blocks": 50,
+          "max_estimated_bytes": 62298862,
+          "max_file_bytes": 1058063,
+          "ratio_after": 0.016984914073316086,
+          "ratio_before": 0.016986163180167775,
+          "rows": 492850,
+          "sum_estimated_bytes": 223601390,
+          "trigger": "bytes"
+        }
+      ],
+      "case": "solana-eligible-adaptive-24",
+      "peak_rss_bytes": 767606784
+    },
+    {
+      "adaptive": true,
+      "family": "solana",
+      "memory_threshold_bytes": 268435456,
+      "notes": "Repeated retained payload sizing simulation, not real network throughput. Raw payloads and source identities are unchanged; all tables are flushed together. Files use the production Zstd table writer. Physical protected transaction footer adds small per-file overhead.",
+      "sources": [
+        {
+          "block": 300000000,
+          "bytes": 2946958,
+          "sha256": "c68946ce74e66969b023d6397cff61f6cb8bd6508ff89148fb29130ea6a30dae"
+        },
+        {
+          "block": 300000001,
+          "bytes": 2935030,
+          "sha256": "552dbd676ea0d3a36be535d6318dc3c920de90ce7f875d48d037f538ba026154"
+        }
+      ],
+      "target_bytes": 1048576,
+      "windows": [
+        {
+          "arrow_allocated_bytes": 5943392,
+          "blocks": 1,
+          "max_estimated_bytes": 1176564,
+          "max_file_bytes": 199444,
+          "ratio_after": 0.16951394059311692,
+          "ratio_before": 1.0,
+          "rows": 9765,
+          "sum_estimated_bytes": 4383454,
+          "trigger": "bytes"
+        },
+        {
+          "arrow_allocated_bytes": 32344488,
+          "blocks": 5,
+          "max_estimated_bytes": 6299376,
+          "max_file_bytes": 363614,
+          "ratio_after": 0.11361808288929781,
+          "ratio_before": 0.16951394059311692,
+          "rows": 49377,
+          "sum_estimated_bytes": 22449131,
+          "trigger": "bytes"
+        },
+        {
+          "arrow_allocated_bytes": 45953066,
+          "blocks": 8,
+          "max_estimated_bytes": 9967852,
+          "max_file_bytes": 408235,
+          "ratio_after": 0.07728662277310362,
+          "ratio_before": 0.11361808288929781,
+          "rows": 78856,
+          "sum_estimated_bytes": 35776409,
+          "trigger": "bytes"
+        },
+        {
+          "arrow_allocated_bytes": 73084288,
+          "blocks": 11,
+          "max_estimated_bytes": 13636328,
+          "max_file_bytes": 453015,
+          "ratio_after": 0.055253904795569256,
+          "ratio_before": 0.07728662277310362,
+          "rows": 108335,
+          "sum_estimated_bytes": 49103687,
+          "trigger": "bytes"
+        },
+        {
+          "arrow_allocated_bytes": 104786518,
+          "blocks": 16,
+          "max_estimated_bytes": 19935663,
+          "max_file_bytes": 539852,
+          "ratio_after": 0.041166808082544144,
+          "ratio_before": 0.055253904795569256,
+          "rows": 157712,
+          "sum_estimated_bytes": 71552594,
+          "trigger": "bytes"
+        },
+        {
+          "arrow_allocated_bytes": 141664760,
+          "blocks": 21,
+          "max_estimated_bytes": 26234999,
+          "max_file_bytes": 609262,
+          "ratio_after": 0.03219503017474362,
+          "ratio_before": 0.041166808082544144,
+          "rows": 207089,
+          "sum_estimated_bytes": 94001505,
+          "trigger": "bytes"
+        },
+        {
+          "arrow_allocated_bytes": 180415642,
+          "blocks": 27,
+          "max_estimated_bytes": 33571951,
+          "max_file_bytes": 709177,
+          "ratio_after": 0.026659561362251696,
+          "ratio_before": 0.03219503017474362,
+          "rows": 266047,
+          "sum_estimated_bytes": 120656061,
+          "trigger": "bytes"
+        },
+        {
+          "arrow_allocated_bytes": 225076934,
+          "blocks": 32,
+          "max_estimated_bytes": 39871286,
+          "max_file_bytes": 786983,
+          "ratio_after": 0.023198825286308636,
+          "ratio_before": 0.026659561362251696,
+          "rows": 315424,
+          "sum_estimated_bytes": 143104968,
+          "trigger": "bytes"
+        },
+        {
+          "arrow_allocated_bytes": 254347368,
+          "blocks": 37,
+          "max_estimated_bytes": 46170622,
+          "max_file_bytes": 855405,
+          "ratio_after": 0.020862933069628102,
+          "ratio_before": 0.023198825286308636,
+          "rows": 364801,
+          "sum_estimated_bytes": 165553879,
+          "trigger": "bytes"
+        },
+        {
+          "arrow_allocated_bytes": 306201866,
+          "blocks": 41,
+          "max_estimated_bytes": 51015621,
+          "max_file_bytes": 930794,
+          "ratio_after": 0.019554103697262785,
+          "ratio_before": 0.020862933069628102,
+          "rows": 404045,
+          "sum_estimated_bytes": 183264388,
+          "trigger": "bytes"
+        },
+        {
+          "arrow_allocated_bytes": 311353896,
+          "blocks": 43,
+          "max_estimated_bytes": 53646480,
+          "max_file_bytes": 958743,
+          "ratio_after": 0.018712801221190414,
+          "ratio_before": 0.019554103697262785,
+          "rows": 423943,
+          "sum_estimated_bytes": 192386018,
+          "trigger": "bytes"
+        },
+        {
+          "arrow_allocated_bytes": 359244724,
+          "blocks": 46,
+          "max_estimated_bytes": 57314957,
+          "max_file_bytes": 999080,
+          "ratio_after": 0.01807210112137113,
+          "ratio_before": 0.018712801221190414,
+          "rows": 453422,
+          "sum_estimated_bytes": 205713298,
+          "trigger": "bytes"
+        }
+      ],
+      "case": "solana-eligible-adaptive",
+      "peak_rss_bytes": 620838912
+    },
+    {
+      "adaptive": false,
+      "family": "solana",
+      "memory_threshold_bytes": 268435456,
+      "notes": "Repeated retained payload sizing simulation, not real network throughput. Raw payloads and source identities are unchanged; all tables are flushed together. Files use the production Zstd table writer. Physical protected transaction footer adds small per-file overhead.",
+      "sources": [
+        {
+          "block": 300000000,
+          "bytes": 2946958,
+          "sha256": "c68946ce74e66969b023d6397cff61f6cb8bd6508ff89148fb29130ea6a30dae"
+        },
+        {
+          "block": 300000001,
+          "bytes": 2935030,
+          "sha256": "552dbd676ea0d3a36be535d6318dc3c920de90ce7f875d48d037f538ba026154"
+        }
+      ],
+      "target_bytes": 1048576,
+      "windows": [
+        {
+          "arrow_allocated_bytes": 5943392,
+          "blocks": 1,
+          "max_estimated_bytes": 1176564,
+          "max_file_bytes": 199444,
+          "ratio_after": 1.0,
+          "ratio_before": 1.0,
+          "rows": 9765,
+          "sum_estimated_bytes": 4383454,
+          "trigger": "bytes"
+        },
+        {
+          "arrow_allocated_bytes": 7196799,
+          "blocks": 1,
+          "max_estimated_bytes": 1315470,
+          "max_file_bytes": 151875,
+          "ratio_after": 1.0,
+          "ratio_before": 1.0,
+          "rows": 9949,
+          "sum_estimated_bytes": 4561037,
+          "trigger": "bytes"
+        },
+        {
+          "arrow_allocated_bytes": 5559171,
+          "blocks": 1,
+          "max_estimated_bytes": 1176564,
+          "max_file_bytes": 199444,
+          "ratio_after": 1.0,
+          "ratio_before": 1.0,
+          "rows": 9765,
+          "sum_estimated_bytes": 4383454,
+          "trigger": "bytes"
+        },
+        {
+          "arrow_allocated_bytes": 7196799,
+          "blocks": 1,
+          "max_estimated_bytes": 1315470,
+          "max_file_bytes": 151875,
+          "ratio_after": 1.0,
+          "ratio_before": 1.0,
+          "rows": 9949,
+          "sum_estimated_bytes": 4561037,
+          "trigger": "bytes"
+        },
+        {
+          "arrow_allocated_bytes": 5559171,
+          "blocks": 1,
+          "max_estimated_bytes": 1176564,
+          "max_file_bytes": 199444,
+          "ratio_after": 1.0,
+          "ratio_before": 1.0,
+          "rows": 9765,
+          "sum_estimated_bytes": 4383454,
+          "trigger": "bytes"
+        },
+        {
+          "arrow_allocated_bytes": 7196799,
+          "blocks": 1,
+          "max_estimated_bytes": 1315470,
+          "max_file_bytes": 151875,
+          "ratio_after": 1.0,
+          "ratio_before": 1.0,
+          "rows": 9949,
+          "sum_estimated_bytes": 4561037,
+          "trigger": "bytes"
+        },
+        {
+          "arrow_allocated_bytes": 5559171,
+          "blocks": 1,
+          "max_estimated_bytes": 1176564,
+          "max_file_bytes": 199444,
+          "ratio_after": 1.0,
+          "ratio_before": 1.0,
+          "rows": 9765,
+          "sum_estimated_bytes": 4383454,
+          "trigger": "bytes"
+        },
+        {
+          "arrow_allocated_bytes": 7196799,
+          "blocks": 1,
+          "max_estimated_bytes": 1315470,
+          "max_file_bytes": 151875,
+          "ratio_after": 1.0,
+          "ratio_before": 1.0,
+          "rows": 9949,
+          "sum_estimated_bytes": 4561037,
+          "trigger": "bytes"
+        },
+        {
+          "arrow_allocated_bytes": 5559171,
+          "blocks": 1,
+          "max_estimated_bytes": 1176564,
+          "max_file_bytes": 199444,
+          "ratio_after": 1.0,
+          "ratio_before": 1.0,
+          "rows": 9765,
+          "sum_estimated_bytes": 4383454,
+          "trigger": "bytes"
+        },
+        {
+          "arrow_allocated_bytes": 7196799,
+          "blocks": 1,
+          "max_estimated_bytes": 1315470,
+          "max_file_bytes": 151875,
+          "ratio_after": 1.0,
+          "ratio_before": 1.0,
+          "rows": 9949,
+          "sum_estimated_bytes": 4561037,
+          "trigger": "bytes"
+        },
+        {
+          "arrow_allocated_bytes": 5559171,
+          "blocks": 1,
+          "max_estimated_bytes": 1176564,
+          "max_file_bytes": 199444,
+          "ratio_after": 1.0,
+          "ratio_before": 1.0,
+          "rows": 9765,
+          "sum_estimated_bytes": 4383454,
+          "trigger": "bytes"
+        },
+        {
+          "arrow_allocated_bytes": 7196799,
+          "blocks": 1,
+          "max_estimated_bytes": 1315470,
+          "max_file_bytes": 151875,
+          "ratio_after": 1.0,
+          "ratio_before": 1.0,
+          "rows": 9949,
+          "sum_estimated_bytes": 4561037,
+          "trigger": "bytes"
+        }
+      ],
+      "case": "solana-eligible-baseline",
+      "peak_rss_bytes": 55623680
+    },
+    {
+      "adaptive": true,
+      "family": "solana",
+      "memory_threshold_bytes": 268435456,
+      "notes": "Repeated retained payload sizing simulation, not real network throughput. Raw payloads and source identities are unchanged; all tables are flushed together. Files use the production Zstd table writer. Physical protected transaction footer adds small per-file overhead.",
+      "sources": [
+        {
+          "block": 300000000,
+          "bytes": 2946958,
+          "sha256": "c68946ce74e66969b023d6397cff61f6cb8bd6508ff89148fb29130ea6a30dae"
+        },
+        {
+          "block": 300000001,
+          "bytes": 2935030,
+          "sha256": "552dbd676ea0d3a36be535d6318dc3c920de90ce7f875d48d037f538ba026154"
+        }
+      ],
+      "target_bytes": 33554432,
+      "windows": [
+        {
+          "arrow_allocated_bytes": 168907128,
+          "blocks": 27,
+          "max_estimated_bytes": 33571951,
+          "max_file_bytes": 709177,
+          "ratio_after": 0.02112409254975977,
+          "ratio_before": 1.0,
+          "rows": 266047,
+          "sum_estimated_bytes": 120656061,
+          "trigger": "bytes"
+        },
+        {
+          "arrow_allocated_bytes": 441354948,
+          "blocks": 61,
+          "max_estimated_bytes": 76074056,
+          "max_file_bytes": 1232548,
+          "ratio_after": 0.018663020935676202,
+          "ratio_before": 0.02112409254975977,
+          "rows": 601369,
+          "sum_estimated_bytes": 272882439,
+          "trigger": "memory"
+        },
+        {
+          "arrow_allocated_bytes": 355149067,
+          "blocks": 61,
+          "max_estimated_bytes": 75935150,
+          "max_file_bytes": 1231916,
+          "ratio_after": 0.01744314256443632,
+          "ratio_before": 0.018663020935676202,
+          "rows": 601185,
+          "sum_estimated_bytes": 272704855,
+          "trigger": "memory"
+        },
+        {
+          "arrow_allocated_bytes": 437216538,
+          "blocks": 61,
+          "max_estimated_bytes": 76074056,
+          "max_file_bytes": 1232548,
+          "ratio_after": 0.016822545943014477,
+          "ratio_before": 0.01744314256443632,
+          "rows": 601369,
+          "sum_estimated_bytes": 272882439,
+          "trigger": "memory"
+        }
+      ],
+      "case": "solana-target32-memory256-adaptive",
+      "peak_rss_bytes": 652247040
+    },
+    {
+      "adaptive": false,
+      "family": "solana",
+      "memory_threshold_bytes": 268435456,
+      "notes": "Repeated retained payload sizing simulation, not real network throughput. Raw payloads and source identities are unchanged; all tables are flushed together. Files use the production Zstd table writer. Physical protected transaction footer adds small per-file overhead.",
+      "sources": [
+        {
+          "block": 300000000,
+          "bytes": 2946958,
+          "sha256": "c68946ce74e66969b023d6397cff61f6cb8bd6508ff89148fb29130ea6a30dae"
+        },
+        {
+          "block": 300000001,
+          "bytes": 2935030,
+          "sha256": "552dbd676ea0d3a36be535d6318dc3c920de90ce7f875d48d037f538ba026154"
+        }
+      ],
+      "target_bytes": 33554432,
+      "windows": [
+        {
+          "arrow_allocated_bytes": 168907128,
+          "blocks": 27,
+          "max_estimated_bytes": 33571951,
+          "max_file_bytes": 709177,
+          "ratio_after": 1.0,
+          "ratio_before": 1.0,
+          "rows": 266047,
+          "sum_estimated_bytes": 120656061,
+          "trigger": "bytes"
+        },
+        {
+          "arrow_allocated_bytes": 180749452,
+          "blocks": 27,
+          "max_estimated_bytes": 33710857,
+          "max_file_bytes": 705015,
+          "ratio_after": 1.0,
+          "ratio_before": 1.0,
+          "rows": 266231,
+          "sum_estimated_bytes": 120833644,
+          "trigger": "bytes"
+        }
+      ],
+      "case": "solana-target32-memory256-baseline",
+      "peak_rss_bytes": 287178752
+    },
+    {
+      "adaptive": true,
+      "family": "solana",
+      "memory_threshold_bytes": 536870912,
+      "notes": "Repeated retained payload sizing simulation, not real network throughput. Raw payloads and source identities are unchanged; all tables are flushed together. Files use the production Zstd table writer. Physical protected transaction footer adds small per-file overhead.",
+      "sources": [
+        {
+          "block": 300000000,
+          "bytes": 2946958,
+          "sha256": "c68946ce74e66969b023d6397cff61f6cb8bd6508ff89148fb29130ea6a30dae"
+        },
+        {
+          "block": 300000001,
+          "bytes": 2935030,
+          "sha256": "552dbd676ea0d3a36be535d6318dc3c920de90ce7f875d48d037f538ba026154"
+        }
+      ],
+      "target_bytes": 33554432,
+      "windows": [
+        {
+          "arrow_allocated_bytes": 168907128,
+          "blocks": 27,
+          "max_estimated_bytes": 33571951,
+          "max_file_bytes": 709177,
+          "ratio_after": 0.02112409254975977,
+          "ratio_before": 1.0,
+          "rows": 266047,
+          "sum_estimated_bytes": 120656061,
+          "trigger": "bytes"
+        },
+        {
+          "arrow_allocated_bytes": 882693568,
+          "blocks": 121,
+          "max_estimated_bytes": 150832642,
+          "max_file_bytes": 2176888,
+          "ratio_after": 0.017778282664878277,
+          "ratio_before": 0.02112409254975977,
+          "rows": 1192789,
+          "sum_estimated_bytes": 541203841,
+          "trigger": "memory"
+        },
+        {
+          "arrow_allocated_bytes": 708397437,
+          "blocks": 121,
+          "max_estimated_bytes": 150693736,
+          "max_file_bytes": 2169284,
+          "ratio_after": 0.016086799501853693,
+          "ratio_before": 0.017778282664878277,
+          "rows": 1192605,
+          "sum_estimated_bytes": 541026258,
+          "trigger": "memory"
+        },
+        {
+          "arrow_allocated_bytes": 871766398,
+          "blocks": 121,
+          "max_estimated_bytes": 150832642,
+          "max_file_bytes": 2176888,
+          "ratio_after": 0.01525963614092524,
+          "ratio_before": 0.016086799501853693,
+          "rows": 1192789,
+          "sum_estimated_bytes": 541203841,
+          "trigger": "memory"
+        }
+      ],
+      "case": "solana-target32-memory512-adaptive",
+      "peak_rss_bytes": 1268121600
+    },
+    {
+      "adaptive": true,
+      "family": "solana",
+      "memory_threshold_bytes": 268435456,
+      "notes": "Repeated retained payload sizing simulation, not real network throughput. Raw payloads and source identities are unchanged; all tables are flushed together. Files use the production Zstd table writer. Physical protected transaction footer adds small per-file overhead.",
+      "sources": [
+        {
+          "block": 300000000,
+          "bytes": 2946958,
+          "sha256": "c68946ce74e66969b023d6397cff61f6cb8bd6508ff89148fb29130ea6a30dae"
+        },
+        {
+          "block": 300000001,
+          "bytes": 2935030,
+          "sha256": "552dbd676ea0d3a36be535d6318dc3c920de90ce7f875d48d037f538ba026154"
+        }
+      ],
+      "target_bytes": 4194304,
+      "windows": [
+        {
+          "arrow_allocated_bytes": 24610272,
+          "blocks": 4,
+          "max_estimated_bytes": 4983946,
+          "max_file_bytes": 351988,
+          "ratio_after": 0.07062436069732697,
+          "ratio_before": 1.0,
+          "rows": 39428,
+          "sum_estimated_bytes": 17888315,
+          "trigger": "bytes"
+        },
+        {
+          "arrow_allocated_bytes": 325056936,
+          "blocks": 48,
+          "max_estimated_bytes": 59806909,
+          "max_file_bytes": 1027162,
+          "ratio_after": 0.04389949924855848,
+          "ratio_before": 0.07062436069732697,
+          "rows": 473136,
+          "sum_estimated_bytes": 214657342,
+          "trigger": "bytes"
+        },
+        {
+          "arrow_allocated_bytes": 383915992,
+          "blocks": 61,
+          "max_estimated_bytes": 75935150,
+          "max_file_bytes": 1231916,
+          "ratio_after": 0.030061381720877457,
+          "ratio_before": 0.04389949924855848,
+          "rows": 601185,
+          "sum_estimated_bytes": 272704855,
+          "trigger": "memory"
+        },
+        {
+          "arrow_allocated_bytes": 437216538,
+          "blocks": 61,
+          "max_estimated_bytes": 76074056,
+          "max_file_bytes": 1232548,
+          "ratio_after": 0.023131665521235044,
+          "ratio_before": 0.030061381720877457,
+          "rows": 601369,
+          "sum_estimated_bytes": 272882439,
+          "trigger": "memory"
+        },
+        {
+          "arrow_allocated_bytes": 355149067,
+          "blocks": 61,
+          "max_estimated_bytes": 75935150,
+          "max_file_bytes": 1231916,
+          "ratio_after": 0.019677464857215738,
+          "ratio_before": 0.023131665521235044,
+          "rows": 601185,
+          "sum_estimated_bytes": 272704855,
+          "trigger": "memory"
+        },
+        {
+          "arrow_allocated_bytes": 437216538,
+          "blocks": 61,
+          "max_estimated_bytes": 76074056,
+          "max_file_bytes": 1232548,
+          "ratio_after": 0.017939707089404185,
+          "ratio_before": 0.019677464857215738,
+          "rows": 601369,
+          "sum_estimated_bytes": 272882439,
+          "trigger": "memory"
+        }
+      ],
+      "case": "solana-target4-memory256-adaptive",
+      "peak_rss_bytes": 676528128
+    }
+  ],
+  "harness_note": "Measurements were collected during implementation on the stated source base. The committed reproduction harness is dda3ada: initial unchanged-payload runs used the same policy locally in the example; later varied-byte runs used the production FlushSizing module. The policy arithmetic is unchanged by that extraction. Subsequent main integration changes Cosmos and transport, not these EVM/Solana payload schemas."
+}

@@ -12,8 +12,8 @@ use std::path::{Component, Path, PathBuf};
 
 /// Default max unresolved timestamp-backfill buffer size in bytes.
 pub const DEFAULT_TIMESTAMP_BACKFILL_BUFFER_LIMIT_BYTES: u64 = 134_217_728;
-/// Shared 32 MiB default flush target for build/merge byte-based flushing.
-pub const DEFAULT_FLUSH_BYTES: u64 = 33_554_432;
+pub use crate::config::DEFAULT_FLUSH_BYTES;
+use crate::config::DEFAULT_FLUSH_MEMORY_BYTES;
 
 /// Completion of a bounded reversible stream does not establish tail finality.
 /// Pass the resolved stop bound (`None` for an unbounded live stream).
@@ -245,7 +245,7 @@ pub struct CommonArgs {
     )]
     pub flush_blocks: Option<u64>,
 
-    /// Flush mapper state and write Parquet at this many estimated mapper bytes (0 disables byte-based flushing)
+    /// Target compressed bytes in the largest table file, learned from committed files (0 disables this target; other triggers can write smaller files)
     #[arg(
         long,
         env = "FLUSH_BYTES",
@@ -254,6 +254,17 @@ pub struct CommonArgs {
         help_heading = "Flush"
     )]
     pub flush_bytes: u64,
+
+    /// Flush at this summed mapper byte estimate, even below the file target (positive; not RSS, excludes decoder/encoder/allocator overhead; one block can overshoot)
+    #[arg(
+        long,
+        env = "FLUSH_MEMORY_BYTES",
+        default_value_t = DEFAULT_FLUSH_MEMORY_BYTES,
+        value_parser = clap::value_parser!(u64).range(1..),
+        hide_env_values = true,
+        help_heading = "Flush"
+    )]
+    pub flush_memory_bytes: u64,
 
     /// Flush mapper state and write Parquet every N seconds (disabled by default)
     #[arg(
@@ -916,7 +927,7 @@ local path.
         #[arg(long, default_value = "zstd", help_heading = "Output")]
         compression: String,
         /// Target compressed bytes per part, with batch/codec overhead (0 = unlimited output size)
-        #[arg(long, default_value = "134217728", help_heading = "Output")]
+        #[arg(long, default_value_t = DEFAULT_FLUSH_BYTES, help_heading = "Output")]
         flush_bytes: u64,
         /// Delete each source file once its target partition is written (required for in-place rollup)
         #[arg(long, default_value = "false", help_heading = "Execution")]
@@ -4128,6 +4139,7 @@ pub fn build_config(args: &CommonArgs) -> anyhow::Result<Config> {
         flush_rows: args.flush_rows,
         flush_blocks: args.flush_blocks,
         flush_bytes: args.flush_bytes,
+        flush_memory_bytes: args.flush_memory_bytes,
         flush_interval_secs: args.flush_interval_secs,
         compression: parse_compression(&args.compression)?,
         final_blocks_only: args.final_blocks_only,
@@ -7093,6 +7105,7 @@ mod tests {
         assert!(cli.common.flush_rows.is_none());
         assert!(cli.common.flush_blocks.is_none());
         assert_eq!(cli.common.flush_bytes, DEFAULT_FLUSH_BYTES);
+        assert_eq!(cli.common.flush_memory_bytes, DEFAULT_FLUSH_MEMORY_BYTES);
         assert_eq!(cli.common.compression, "zstd");
         assert_eq!(cli.common.log_level, "info");
         assert!(!cli.common.verbose);
@@ -7899,8 +7912,9 @@ mod tests {
 
         assert!(help.contains("Flush mapper state and write Parquet after this many rows"));
         assert!(help.contains("Flush written files after this many processed blocks"));
-        assert!(help
-            .contains("Flush mapper state and write Parquet at this many estimated mapper bytes"));
+        assert!(help.contains("Target compressed bytes in the largest table file"));
+        assert!(help.contains("--flush-memory-bytes"));
+        assert!(help.contains("summed mapper byte estimate"));
         assert!(help.contains("Flush mapper state and write Parquet every N seconds"));
     }
 
@@ -7922,10 +7936,46 @@ mod tests {
 
         assert!(build_help.contains(&default_flush_bytes));
         assert!(merge_help.contains(&default_flush_bytes));
+        let rollup_help = cmd
+            .get_subcommands()
+            .find(|command| command.get_name() == "rollup")
+            .unwrap()
+            .clone()
+            .render_long_help()
+            .to_string();
+        assert!(rollup_help.contains(&default_flush_bytes));
+        assert_eq!(Config::default().flush_bytes, DEFAULT_FLUSH_BYTES);
+        assert_eq!(
+            Config::default().flush_memory_bytes,
+            DEFAULT_FLUSH_MEMORY_BYTES
+        );
         assert!(merge_help.contains("Flush:"));
         assert!(merge_help.contains("--flush-rows"));
         assert!(merge_help.contains("--flush-bytes"));
         assert!(!merge_help.contains("--flush-blocks"));
+    }
+
+    #[test]
+    fn test_flush_memory_threshold_is_positive_and_propagated() {
+        assert!(TestCli::try_parse_from([
+            "test-cli",
+            "--endpoint",
+            "http://localhost",
+            "--flush-memory-bytes",
+            "0"
+        ])
+        .is_err());
+        let cli = parse(&[
+            "test-cli",
+            "--endpoint",
+            "http://localhost",
+            "--flush-memory-bytes",
+            "123456",
+        ]);
+        assert_eq!(
+            build_config(&cli.common).unwrap().flush_memory_bytes,
+            123456
+        );
     }
 
     #[test]
