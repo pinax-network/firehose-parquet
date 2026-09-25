@@ -1,6 +1,6 @@
 # Partition index correctness design (#486)
 
-Status: contract approved; implementation is in progress in reviewable stages.
+Status: implementation, strict consumers, combined validation and bounded live qualification are complete; publication is awaiting the ownership foundation base.
 
 Issue: <https://github.com/pinax-network/firehose-parquet/issues/486>
 Base: `0b38efcf1eb417503cc0be15b4901a359019e75f`.
@@ -320,3 +320,56 @@ metadata `parent_num=0`. Such metadata cannot prove the exact ancestry required
 by a time index and remains a fail-closed endpoint limitation. No parent number
 is inferred from its block ID. Deterministic block ranges remain distinct from
 canonical time-span proof. No EOS index qualification is claimed.
+
+## Combined and bounded live qualification
+
+At source `d65e16f` (main `4b0f72f` plus the reviewed ownership foundation),
+`cargo test --workspace -j4` passed **852 tests**, with five existing ignored
+and no failures. Workspace build and formatting passed. Initial full runs found
+stale help wording and a retained #485 test fixture that lacked the newly
+mandatory finality Stream. The fixture now supplies valid finality before the
+same block-range Fetch timeout/internal/auth/missing-metadata/later-block
+failures, retaining retry and unchanged-output assertions. Time traversal
+failures remain covered by the exact-coverage command tests.
+Log: `/tmp/fireparq-486-combined.log`.
+
+A binary copied while holding the whole Cargo lock was used on 2026-09-25 for
+one tiny Pinax Ethereum second-index build, `[26049575,26049577)`, into fresh
+local output. Its SHA256 was
+`9aff36ed8a3a3ee0b653c531ac11f50535ad1281f19da40e85dad24a29250861`.
+The explicit Stream proof established finalized block **26056138**. Coverage
+stayed exactly at the requested bounds, with linked first/last/right-witness
+identities. Both rows had complete natural boundaries:
+
+| Span | Partition / start / end epoch seconds |
+|---|---|
+| `[26049575,26049576)` | `1790280203` |
+| `[26049576,26049577)` | `1790280215` |
+
+All three timestamps per row matched the independently retained block-table
+sample at `/tmp/fireparq-469-live-20260925/mainnet/blocks`. Both default resolve
+calls returned their exact one-block bounds and the same declared coverage.
+Validation reported two complete rows, zero incomplete/unknown spans. A bounded
+no-op resume retained the index bytes exactly (SHA256
+`173243802a7e75f02997b675d5d37eccc29b80cac2174c1ef70418862ac94941`), and
+no cursor was created. Evidence is in
+`/tmp/fireparq-486-live-orqz9ayb/{build,resolve-0,resolve-1,resume,validate,comparison}.json`.
+The comparison reads index second timestamps as INT64 in DuckDB and compares
+with `epoch(timestamp)` in the retained block table; Arrow schema metadata still
+preserves Timestamp(Second, UTC). Correcting that offline SQL type assumption
+did not repeat the live build.
+
+This qualifies one two-block Ethereum snapshot, strict local consumption and
+no-op resume. It is not a broad history scan, global calendar-coverage proof,
+other-chain endpoint qualification or live S3 qualification. The local protocol
+tests cover the adversarial/missing-time/finality cases absent from that sample.
+
+Foundation PR #591 head `5b20182`, including main `21de6af` and the Antelope fix,
+was then merged cleanly as `27d929c`. The partition runtime is unchanged from
+the live-qualified binary; final combined validation is recorded below.
+
+The final integrated `27d929c` workspace run passed **855 tests**, with five
+existing ignored and no failures. Workspace build and formatting passed; log:
+`/tmp/fireparq-486-foundation-combined.log`. The existing unused-assignment
+warning in final mapper metrics remains unchanged. No additional live request
+was needed for this Antelope/ownership-doc integration.
