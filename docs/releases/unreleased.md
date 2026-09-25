@@ -17,6 +17,21 @@ encoding. Rebuild into a fresh root or explicitly convert and verify old files
 before mixing schemas. Old placeholder zeros require source replay to recover
 presence. See [the migration and validation record](../audit/505-beacon-values.md).
 
+### Solana payloads use native bytes and account-index lists (#503)
+
+`instructions.data` and ordinary/vote transaction `err` / `return_data` now use
+Binary for every identifier encoding. `instructions.accounts` and account lookup
+`writable_indexes` / `readonly_indexes` use non-null lists of non-null UInt8.
+Keys, signatures, hashes and return-data program IDs keep their selected encoding.
+Null/empty distinctions, list order, duplicate indices and filtering are preserved.
+
+Use a new output root and rebuild, or explicitly convert old payloads and index
+arrays into a separate dataset. This also affects existing Binary-mode output,
+where index columns were Binary. Mixed-schema append/union does not perform this
+conversion, and verification roots change. Default-profile mapping was 72–80%
+faster on two retained blocks; this is not an end-to-end throughput or memory
+reduction claim. See [the benchmark and 19,714-row comparison](../audit/503-solana-binary-payloads.md).
+
 ### Partition indexes require verified finalized coverage (#486)
 
 Time index construction now checks every finalized canonical block and preserves

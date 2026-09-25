@@ -32,7 +32,7 @@ A production-grade Rust toolkit that consumes [StreamingFast Firehose](https://f
 - **File rollover** — flush by row count, byte size, or time interval
 - **Fork handling** — `--final-blocks-only` (default) or include `fork_step` column (`NEW`/`UNDO`/`FINAL`)
 - **Failed transactions** — EVM includes failed/reverted txs by default with only their persistent state changes (`--exclude-failed-transactions` drops them); other chains exclude them unless `--include-failed-transactions` is set
-- **Block-type-based encoding** — block IDs and binary fields follow the resolved chain/profile defaults, recorded in Parquet metadata for downstream operators
+- **Block-type-based encoding** — identifiers follow the resolved chain/profile defaults, recorded in Parquet metadata; opaque Solana payloads use Binary and account indices use UInt8 lists
 - **Compression** — zstd (default), snappy, gzip, or none
 - **Parquet file metadata** — every file embeds pipeline provenance (`firehose-parquet.*` key-value pairs) in the Parquet footer
 - **Prometheus metrics** — opt-in `/metrics` endpoint for monitoring throughput, buffer state, and errors
@@ -1254,6 +1254,37 @@ row counts without changing schemas. Rebuild affected ranges into a separate
 output root to recover missing rows; appending a corrected replay to old results
 does not remove existing rows or guarantee deduplication.
 
+## Solana Payloads and Account Indices
+
+Opaque `instructions.data`, `transactions.err` / `return_data` and
+`vote_transactions.err` / `return_data` are native Binary, independently of the
+identifier encoding. Signatures, hashes, keys and `return_data_program_id` retain
+the selected identifier format (base58 by default). Missing return data is null;
+a present empty payload stays empty. Absent or empty errors remain null.
+
+`instructions.accounts`, `account_lookups.writable_indexes` and
+`account_lookups.readonly_indexes` are non-null lists of non-null UInt8. They retain
+source order, duplicates and empty lists. These are indices, not resolved keys.
+
+```sql
+-- Inspect payload bytes without requiring base58 conversion.
+SELECT block_num, block_id, transaction_index, instruction_index,
+       is_inner, inner_instruction_index, hex(data) AS data_hex, accounts
+FROM read_parquet('output/**/instructions/*.parquet');
+
+-- Expand instruction account indices while preserving their source positions.
+SELECT block_num, block_id, transaction_index, instruction_index,
+       is_inner, inner_instruction_index,
+       generate_subscripts(accounts, 1) - 1 AS account_position,
+       unnest(accounts) AS account_index
+FROM read_parquet('output/**/instructions/*.parquet');
+```
+
+This changes older output schemas, including Binary-mode index columns. Start a
+new output root and rebuild, or explicitly convert into a separate dataset; do
+not append these types into an old dataset. Verification roots change with the
+schema. See the [migration and measured validation](docs/audit/503-solana-binary-payloads.md).
+
 ## Solana Instruction Order
 
 The `instructions` table preserves the upstream order inside each top-level
@@ -1541,7 +1572,7 @@ Time-based partition directories (`year=`/`month=`/`day=`/`hour=`/…) and `date
 |---|---|---|---|---|
 | `evm` | `hex_0x` | `hex` | `hex` | `block_id` is `0x`-prefixed hex. Transaction hashes, log topics, and addresses are `0x`-prefixed hex. |
 | `bitcoin` | `hex_0x` | Upstream text | Upstream text | Canonical IDs use `0x`-prefixed hex. Native hashes/txids/scripts/witnesses remain the original protobuf strings, normally Bitcoin Core hex without `0x`; addresses keep their native text format. |
-| `solana` | `base58` | `base58` | `base58` | Block IDs and other binary identifiers stay base58, matching common Solana operator tooling. |
+| `solana` | `base58` | `base58` | Identifiers: `base58`; payloads: Binary; indices: List(UInt8) | Block IDs and binary identifiers stay base58. Instruction/error/return payloads and account-index lists have fixed types; see [Solana Payloads](#solana-payloads-and-account-indices). |
 | `near` | `base58` | `base58` | `base58` | Block IDs, transaction hashes, receipt IDs, and key-like binary fields stay base58. |
 | `antelope` | `hex_no_prefix` | `hex_no_prefix` | `hex_no_prefix` | Uses lowercase hex without `0x` for both block IDs and other binary fields. |
 | `cosmos` | `hex_0x` | `hex` | `hex` | Block IDs are `0x`-prefixed hex. Other binary identifiers are `0x`-prefixed hex. |

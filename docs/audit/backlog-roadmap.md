@@ -19,13 +19,14 @@ issue labels and green CI alone are not acceptance evidence. See the
 3. Crash/replay publication (#468). The [design](468-crash-recovery-design.md)
    explains why deterministic range filenames alone cannot prevent duplicates
    when replay chooses different timer or size boundaries. The writer split path has been removed (#477, PR #581); establish an
-   all-table durable frontier next.
+   all-table durable frontier next. The common ownership/control foundation is
+   merged in PR #591; it does not yet provide protected ingestion.
    Complete this before ingestion concurrency (#516).
 4. Shutdown recovery (#473, PR #579) and malformed identity/timestamp handling
    (#476, PR #584) are merged. Probe (#485) work was recovered into PR #583,
    passed 779 combined tests with the timestamp fix and CI, and merged as
    `3cf984b`; its issue is closed. Correct partition-index completeness/non-monotonic timestamps (#486)
-   remains in progress. Health/metrics semantics (#475, PR #587) are merged
+   is merged as PR #592 after 855 tests, bounded finalized-source verification and CI. Health/metrics semantics (#475, PR #587) are merged
    after 787 tests, real CLI regression and CI.
 5. The initial EVM golden fixture (#499, PR #588) is merged and runs offline
    in CI. Continue schema fixes and add field-specific fixtures as needed. Prefer
@@ -63,8 +64,8 @@ and test against current main. Never reset or discard the previous worktree.
 
 ## Remaining backlog groups
 
-- Schema/data correctness: #503 (Solana), #505 (Beacon numeric/blob/null
-  semantics), #507-#510 (NEAR, Antelope, Tron and Cosmos). Bitcoin #511 is merged
+- Schema/data correctness: #505 (Beacon numeric/blob/null semantics), #507, #509 and #510 (NEAR, Tron and Cosmos). Solana native payload types (#503) merged as `d417e0c` in PR #593 after 857 tests, 19,714 raw-sample row comparisons, release benchmarks and CI; issue closure is verified. Antelope #508 is merged in
+  PR #590 after raw join checks, byte-for-byte legacy-column comparison and CI. Bitcoin #511 is merged
   in PR #589 after raw integer/input qualification and CI. #550 needs
   explicit failed-effect semantics per chain and live fixtures. #498 documents
   EVM indices and upstream-empty tables. Solana reward indices (#500, PR #582)
@@ -75,7 +76,7 @@ and test against current main. Never reset or discard the previous worktree.
   #475 metrics/readiness is merged. The #477 writer simplification and
   #476 malformed-metadata handling are merged; the #468 journal is in progress.
 - Performance: recover #513 and #522 before starting duplicate work. Measure
-  #503/#565, #515, #520 and #524 on representative data. #516 depends on durable
+  #565, #515, #520 and #524 on representative data; #503's native-type work and bounded release benchmark are complete. #516 depends on durable
   commit ordering; #517-#519 and #523 need the specific throughput, memory,
   file-size or lookup evidence requested by their issues.
 - Structure: #525-#530 follow correctness work. Scope must be refreshed against
