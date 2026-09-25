@@ -192,7 +192,7 @@ impl BlockMapper for BitcoinBlockMapper {
             identity,
             &decode_id_bytes(&block.hash),
             &decode_id_bytes(&block.previous_hash),
-        );
+        )?;
         self.map_btc_block(&block, &identity, fork_step);
         Ok(tx_count)
     }

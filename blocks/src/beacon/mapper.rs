@@ -745,7 +745,7 @@ impl BlockMapper for BeaconBlockMapper {
         let identity =
             self.blocks
                 .canonical
-                .prepare_with_ids(identity, &block.root, &block.parent_root);
+                .prepare_with_ids(identity, &block.root, &block.parent_root)?;
         self.map_beacon_block(&block, &identity, fork_step);
         // Beacon chain uses attestations rather than traditional transactions.
         Ok(0)

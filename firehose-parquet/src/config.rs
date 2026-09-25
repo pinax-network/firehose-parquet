@@ -141,15 +141,18 @@ impl Partition {
     /// Returns a string that uniquely identifies the partition bucket this block
     /// belongs to. Two blocks in the same partition return the same key.
     /// Returns `None` for `Partition::None` (no partitioning).
-    pub fn partition_key(&self, block_number: u64, timestamp: i64) -> Option<String> {
-        match self {
+    pub fn partition_key(
+        &self,
+        block_number: u64,
+        timestamp: i64,
+    ) -> anyhow::Result<Option<String>> {
+        Ok(match self {
             Partition::None => None,
             Partition::BlockRange { .. } => self
                 .block_range_bounds(block_number)
                 .map(|(start, stop)| format!("block_range={start}-{stop}")),
             Partition::Date => {
-                let dt = time::OffsetDateTime::from_unix_timestamp(timestamp)
-                    .unwrap_or(time::OffsetDateTime::UNIX_EPOCH);
+                let dt = crate::traits::checked_timestamp(timestamp)?;
                 Some(format!(
                     "year={:04}/month={:02}/day={:02}",
                     dt.year(),
@@ -158,8 +161,7 @@ impl Partition {
                 ))
             }
             Partition::Hour => {
-                let dt = time::OffsetDateTime::from_unix_timestamp(timestamp)
-                    .unwrap_or(time::OffsetDateTime::UNIX_EPOCH);
+                let dt = crate::traits::checked_timestamp(timestamp)?;
                 Some(format!(
                     "year={:04}/month={:02}/day={:02}/hour={:02}",
                     dt.year(),
@@ -169,8 +171,7 @@ impl Partition {
                 ))
             }
             Partition::Minute => {
-                let dt = time::OffsetDateTime::from_unix_timestamp(timestamp)
-                    .unwrap_or(time::OffsetDateTime::UNIX_EPOCH);
+                let dt = crate::traits::checked_timestamp(timestamp)?;
                 Some(format!(
                     "year={:04}/month={:02}/day={:02}/hour={:02}/minute={:02}",
                     dt.year(),
@@ -181,8 +182,7 @@ impl Partition {
                 ))
             }
             Partition::Second => {
-                let dt = time::OffsetDateTime::from_unix_timestamp(timestamp)
-                    .unwrap_or(time::OffsetDateTime::UNIX_EPOCH);
+                let dt = crate::traits::checked_timestamp(timestamp)?;
                 Some(format!(
                     "year={:04}/month={:02}/day={:02}/hour={:02}/minute={:02}/second={:02}",
                     dt.year(),
@@ -193,7 +193,7 @@ impl Partition {
                     dt.second()
                 ))
             }
-        }
+        })
     }
 }
 
@@ -587,26 +587,45 @@ mod tests {
     }
 
     #[test]
+    fn time_partitions_reject_invalid_seconds_and_preserve_negative_dates() {
+        for partition in [
+            Partition::Date,
+            Partition::Hour,
+            Partition::Minute,
+            Partition::Second,
+        ] {
+            for seconds in [i64::MIN, i64::MAX, 1_700_000_000_000] {
+                assert!(partition.partition_key(1, seconds).is_err());
+            }
+            assert!(partition
+                .partition_key(1, -1)
+                .unwrap()
+                .unwrap()
+                .starts_with("year=1969/month=12/day=31"));
+        }
+    }
+
+    #[test]
     fn test_partition_key_none() {
-        assert_eq!(Partition::None.partition_key(100, 1000), None);
+        assert_eq!(Partition::None.partition_key(100, 1000).unwrap(), None);
     }
 
     #[test]
     fn test_partition_key_block_range() {
         assert_eq!(
-            Partition::block_range(1000).partition_key(1000, 0),
+            Partition::block_range(1000).partition_key(1000, 0).unwrap(),
             Some("block_range=1000-2000".to_string())
         );
         assert_eq!(
-            Partition::block_range(1000).partition_key(1500, 0),
+            Partition::block_range(1000).partition_key(1500, 0).unwrap(),
             Some("block_range=1000-2000".to_string())
         );
         assert_eq!(
-            Partition::block_range(1000).partition_key(1999, 0),
+            Partition::block_range(1000).partition_key(1999, 0).unwrap(),
             Some("block_range=1000-2000".to_string())
         );
         assert_eq!(
-            Partition::block_range(1000).partition_key(2000, 0),
+            Partition::block_range(1000).partition_key(2000, 0).unwrap(),
             Some("block_range=2000-3000".to_string())
         );
     }
@@ -617,15 +636,15 @@ mod tests {
         partition.set_block_range_start(Some(9_820_210));
 
         assert_eq!(
-            partition.partition_key(9_820_210, 0),
+            partition.partition_key(9_820_210, 0).unwrap(),
             Some("block_range=9820210-9820310".to_string())
         );
         assert_eq!(
-            partition.partition_key(9_820_309, 0),
+            partition.partition_key(9_820_309, 0).unwrap(),
             Some("block_range=9820210-9820310".to_string())
         );
         assert_eq!(
-            partition.partition_key(9_820_310, 0),
+            partition.partition_key(9_820_310, 0).unwrap(),
             Some("block_range=9820310-9820410".to_string())
         );
     }
@@ -634,12 +653,12 @@ mod tests {
     fn test_partition_key_date() {
         // 2024-01-15 12:00:00 UTC = 1705320000
         assert_eq!(
-            Partition::Date.partition_key(100, 1705320000),
+            Partition::Date.partition_key(100, 1705320000).unwrap(),
             Some("year=2024/month=01/day=15".to_string())
         );
         // 2024-01-16 00:00:00 UTC = 1705363200
         assert_eq!(
-            Partition::Date.partition_key(200, 1705363200),
+            Partition::Date.partition_key(200, 1705363200).unwrap(),
             Some("year=2024/month=01/day=16".to_string())
         );
     }
@@ -648,7 +667,7 @@ mod tests {
     fn test_partition_key_hour() {
         // 2024-01-15 14:30:00 UTC = 1705329000
         assert_eq!(
-            Partition::Hour.partition_key(100, 1705329000),
+            Partition::Hour.partition_key(100, 1705329000).unwrap(),
             Some("year=2024/month=01/day=15/hour=14".to_string())
         );
     }
@@ -656,8 +675,8 @@ mod tests {
     #[test]
     fn test_partition_key_detects_boundary() {
         // Last second of 2024-01-15 vs first second of 2024-01-16
-        let key1 = Partition::Date.partition_key(100, 1705363199); // 23:59:59
-        let key2 = Partition::Date.partition_key(101, 1705363200); // 00:00:00
+        let key1 = Partition::Date.partition_key(100, 1705363199).unwrap(); // 23:59:59
+        let key2 = Partition::Date.partition_key(101, 1705363200).unwrap(); // 00:00:00
         assert_ne!(key1, key2);
     }
 }
