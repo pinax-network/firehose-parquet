@@ -1801,6 +1801,8 @@ pub struct PartitionBuildRow {
 
 #[derive(Debug, Clone, serde::Serialize, PartialEq, Eq)]
 pub struct PartitionBuildResult {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub coverage: Option<PartitionCoverage>,
     pub partitions_index: String,
     pub chain: String,
     pub partition: String,
@@ -2830,6 +2832,12 @@ fn read_partition_index_snapshot(
     }
 
     fn read_u64_value(column: &dyn Array, row: usize) -> anyhow::Result<Option<u64>> {
+        if column.is_null(row) {
+            return Ok(None);
+        }
+        if let Some(values) = column.as_any().downcast_ref::<UInt64Array>() {
+            return Ok(Some(values.value(row)));
+        }
         read_i64_value(column, row)?.map_or(Ok(None), |value| {
             if value < 0 {
                 anyhow::bail!("negative integer value: {value}");
@@ -2983,7 +2991,7 @@ fn read_partition_index_snapshot(
         let client = aws.build_s3_client(&bucket)?;
         let object_path = object_store::path::Path::from(key.as_str());
         let data = block_on_async(async { client.get(&object_path).await?.bytes().await })
-            .map_err(|e| anyhow::anyhow!("reading {path}: {e}"))?;
+            .map_err(|error| anyhow::Error::from(error).context(format!("reading {path}")))?;
         let builder = ParquetRecordBatchReaderBuilder::try_new(data)?;
         let schema = builder.schema();
         validate_partitions_schema(&schema)?;
@@ -3002,8 +3010,8 @@ fn read_partition_index_snapshot(
             )?;
         }
     } else {
-        let file =
-            std::fs::File::open(&path).map_err(|e| anyhow::anyhow!("opening {path}: {e}"))?;
+        let file = std::fs::File::open(&path)
+            .map_err(|error| anyhow::Error::from(error).context(format!("opening {path}")))?;
         let builder = ParquetRecordBatchReaderBuilder::try_new(file)?;
         let schema = builder.schema();
         validate_partitions_schema(&schema)?;

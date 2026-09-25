@@ -238,6 +238,17 @@ pub fn append_verified_extension(
         extension.coverage.finalized.block_num >= previous.coverage.finalized.block_num,
         "partition resume finalized anchor moved backwards"
     );
+    ensure!(
+        extension.coverage.finalized.block_num != previous.coverage.finalized.block_num
+            || extension.coverage.finalized.block_id == previous.coverage.finalized.block_id,
+        "partition resume contradicts the stored finalized anchor identity"
+    );
+    if let Some(witness) = &previous.coverage.next_observed {
+        ensure!(
+            extension.coverage.first_observed.as_ref() == Some(witness),
+            "partition resume contradicts the previously observed right-edge identity"
+        );
+    }
     let old = previous.spans.last_mut().unwrap();
     let first = &extension.spans[0];
     ensure!(
@@ -477,5 +488,72 @@ mod tests {
         value.observe_final(&identity(10, 9, A), 3).unwrap();
         value.observe_final(&identity(13, 10, B), 3).unwrap();
         assert!(value.observe_final(&identity(14, 13, A), 3).is_err());
+    }
+    #[test]
+    fn resume_rejects_same_height_anchor_and_previously_observed_child_contradictions() {
+        let mut original = builder(
+            10,
+            13,
+            IndexRoutingPolicy::CanonicalTimestamp,
+            Some(parent(B)),
+        );
+        for block in [
+            identity(10, 9, A),
+            identity(11, 10, B),
+            identity(12, 11, A),
+            identity(13, 12, B),
+        ] {
+            original.observe_final(&block, 3).unwrap();
+        }
+        let original = original.finish().unwrap();
+        let mut extension = builder(
+            13,
+            14,
+            IndexRoutingPolicy::CanonicalTimestamp,
+            Some(RoutingWitness {
+                block: CoveredBlock::from(&identity(12, 11, A)),
+                timestamp: A,
+            }),
+        );
+        extension.observe_final(&identity(13, 12, B), 3).unwrap();
+        extension.observe_final(&identity(14, 13, A), 3).unwrap();
+        let extension = extension.finish().unwrap();
+        append_verified_extension(original.clone(), extension.clone()).unwrap();
+        let mut conflicting = extension.clone();
+        conflicting.coverage.finalized.block_id = "other-final-id".into();
+        assert!(append_verified_extension(original.clone(), conflicting)
+            .unwrap_err()
+            .to_string()
+            .contains("stored finalized anchor"));
+        let mut conflicting = extension;
+        conflicting
+            .coverage
+            .first_observed
+            .as_mut()
+            .unwrap()
+            .block_id = "other-child".into();
+        conflicting
+            .coverage
+            .last_observed
+            .as_mut()
+            .unwrap()
+            .block_id = "other-child".into();
+        conflicting
+            .coverage
+            .next_observed
+            .as_mut()
+            .unwrap()
+            .parent_id = "other-child".into();
+        conflicting.spans[0]
+            .proof
+            .first_block
+            .as_mut()
+            .unwrap()
+            .block_id = "other-child".into();
+        conflicting.validate().unwrap();
+        assert!(append_verified_extension(original, conflicting)
+            .unwrap_err()
+            .to_string()
+            .contains("previously observed right-edge"));
     }
 }

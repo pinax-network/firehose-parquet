@@ -260,3 +260,36 @@ missing metadata, wrong finality/identity, omitted blocks, skipped slots,
 genesis zero, future-stop rejection before any RPC, and header/message/witness
 cancellation and deadlines. No live endpoint was contacted. These are validated
 building blocks; runtime command wiring and strict consumers remain in progress.
+
+## Stage 4 command validation
+
+`partitions build` now preflights the finalized bound, acquires the existing
+chain-root ownership guard before index/cursor reads, and publishes only a
+validated v2 snapshot. Live snapshots include the open final span with
+`complete=false`; resume uses the source coverage frontier and verified prior
+routing context. Deterministic block ranges keep nullable boundary timestamps
+and the existing typed Fetch retry behavior, with clipped edges marked
+incomplete. The removed sparse search/checkpoint helpers and their obsolete-only
+tests no longer drive production behavior. Timeouts, retry exhaustion, malformed
+Fetch metadata, and fatal statuses remain covered by the retained boundary-probe
+and gRPC tests.
+
+Four real CLI/local-server tests, the existing ownership-contention integration
+test, all 177 binary unit tests, and 15 index model/builder tests passed on
+2026-09-25 (`/tmp/fireparq-486-command-tests.log`). These prove backward-run
+publication/source-order resume, legacy refusal, unchanged index/cursor bytes
+after future-stop or omitted-block rejection, no new output directory after a
+future-stop rejection, clipped gaps, and live SIGTERM preservation for time and
+block-range snapshots. JSON assertions use `--log-level error` because the
+existing tracing default writes logs to stdout. No live chain endpoint was used.
+
+Review follow-ups additionally reject a right witness contradicting the exact
+finalized anchor, a same-height changed anchor during resume/no-growth polling,
+and a resumed first block contradicting the previously observed right witness.
+Index IO errors now preserve typed causes, so only actual not-found responses
+mean a new index; corrupt contents containing those words remain errors.
+
+The current `build` CLI has no index-bound ingestion mode (its removed flags are
+already rejected by regression tests). The remaining stage therefore applies
+the strict contract to `partitions resolve`, bounds/window library helpers,
+shards, and inspection/validation output without adding a new ingestion mode.

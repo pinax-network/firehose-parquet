@@ -91,6 +91,10 @@ impl PartitionCoverage {
         if self.routing_policy == IndexRoutingPolicy::BlockNumber {
             return Ok(());
         }
+        ensure!(
+            self.last_routing_timestamp.is_some(),
+            "time coverage has no verified routing frontier"
+        );
         let first = self
             .first_observed
             .as_ref()
@@ -127,6 +131,11 @@ impl PartitionCoverage {
                 ensure!(
                     next.parent_num == last.block_num && next.parent_id == last.block_id,
                     "right-edge witness does not link to the last covered block"
+                );
+                ensure!(
+                    next.block_num != self.finalized.block_num
+                        || next.block_id == self.finalized.block_id,
+                    "right-edge witness contradicts the proven finalized anchor identity"
                 );
             }
             None => {
@@ -210,19 +219,21 @@ impl VerifiedPartitionIndex {
             if kind == PartitionBuildType::BlockRange {
                 let size = u64::try_from(row.partition_interval_seconds)
                     .context("invalid block-range interval")?;
+                let partition_start = row.partition_value.parse::<u64>()?;
+                let partition_stop = partition_start
+                    .checked_add(size)
+                    .context("block-range boundary overflow")?;
                 ensure!(
                     size > 0
-                        && row.partition_value.parse::<u64>()? == row.start_block
-                        && row.start_block % size == 0,
-                    "block-range span must begin at its aligned partition value"
+                        && partition_start % size == 0
+                        && partition_start <= row.start_block
+                        && row.stop_block <= partition_stop,
+                    "block-range span lies outside its aligned partition"
                 );
                 ensure!(
-                    row.stop_block - row.start_block <= size,
-                    "block-range span exceeds its partition interval"
-                );
-                ensure!(
-                    !span.proof.complete() || row.stop_block - row.start_block == size,
-                    "a clipped block-range span cannot be complete"
+                    span.proof.start_complete == (row.start_block == partition_start)
+                        && span.proof.end_complete == (row.stop_block == partition_stop),
+                    "block-range completeness disagrees with its clipped bounds"
                 );
             } else {
                 ensure!(
@@ -717,5 +728,17 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("clipped right edge"));
+    }
+    #[test]
+    fn right_witness_at_finalized_height_must_match_the_exact_anchor_identity() {
+        let mut value = coverage();
+        value.next_observed = Some(block(20, 12));
+        value.validate().unwrap();
+        value.next_observed.as_mut().unwrap().block_id = "contradictory-final-id".into();
+        assert!(value
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("finalized anchor identity"));
     }
 }
