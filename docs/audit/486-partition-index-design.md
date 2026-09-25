@@ -293,3 +293,30 @@ The current `build` CLI has no index-bound ingestion mode (its removed flags are
 already rejected by regression tests). The remaining stage therefore applies
 the strict contract to `partitions resolve`, bounds/window library helpers,
 shards, and inspection/validation output without adding a new ingestion mode.
+
+## Stage 5 strict consumers
+
+Default resolve and the public single-span/window helpers now require verified
+v2 coverage, complete natural spans and an independently reproducible initial
+routing context. Repeated calendar values require `--all-spans --json`, which
+returns separate source-ordered ranges with evidence and no enclosing bounds.
+A window cannot silently include an unselected intervening run. Sharding checks
+all selected spans before assignment. `ls` and `validate` expose declared
+coverage, incomplete counts or legacy unknown completeness; structural validity
+is not a claim of globally complete calendar coverage. V2 timestamps/schema
+errors fail rather than becoming null routing context. The existing main
+`build` flags and routing remain unchanged.
+
+On 2026-09-25, 145 core CLI tests and all five real CLI/local-server integration
+tests passed (`/tmp/fireparq-486-consumers-final.log`). Coverage includes A/B/A all-spans
+JSON, ambiguous default resolution, no enclosing holes, incomplete and legacy
+refusal across every range helper, context-dependent null starts, proven genesis
+exception, plain-text coverage labels and the actual `--all-spans`/`--json`
+parser requirement, plus malformed canonical-time rejection. Final combined
+validation follows below. No live chain request was used in this stage.
+
+An independently captured EOS block 400000000 in #508 had a real parent ID but
+metadata `parent_num=0`. Such metadata cannot prove the exact ancestry required
+by a time index and remains a fail-closed endpoint limitation. No parent number
+is inferred from its block ID. Deterministic block ranges remain distinct from
+canonical time-span proof. No EOS index qualification is claimed.

@@ -447,3 +447,132 @@ async fn cli_live_snapshots_keep_the_head_span_incomplete_on_shutdown() {
         assert!(!index.spans.last().unwrap().proof.complete());
     }
 }
+
+async fn utility(root: &std::path::Path, subcommand: &str, extra: &[&str]) -> std::process::Output {
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        tokio::process::Command::new(env!("CARGO_BIN_EXE_fireparq"))
+            .kill_on_drop(true)
+            .env_clear()
+            .current_dir(root)
+            .args([
+                "--log-level",
+                "error",
+                "partitions",
+                subcommand,
+                "--partitions-index",
+            ])
+            .arg(index_path(root))
+            .args(extra)
+            .output(),
+    )
+    .await
+    .unwrap()
+    .unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cli_consumers_expose_coverage_and_preserve_disjoint_runs() {
+    let root = tempfile::tempdir().unwrap();
+    let server = spawn_server(Fixture::regular()).await;
+    assert_ok(
+        &run(
+            root.path(),
+            &server.url,
+            &[
+                "--partition",
+                "hour",
+                "--start-block",
+                "10",
+                "--stop-block",
+                "13",
+            ],
+        )
+        .await,
+    );
+    let select = [
+        "--partition-type",
+        "hour",
+        "--partition-value",
+        "2023-11-14 22:00:00",
+    ];
+    let ambiguous = utility(root.path(), "resolve", &select).await;
+    assert!(!ambiguous.status.success());
+    assert!(String::from_utf8_lossy(&ambiguous.stderr).contains("ambiguous"));
+    let mut all = select.to_vec();
+    all.push("--all-spans");
+    let parser = utility(root.path(), "resolve", &all).await;
+    assert!(!parser.status.success());
+    assert!(String::from_utf8_lossy(&parser.stderr).contains("--json"));
+    all.push("--json");
+    let result = utility(root.path(), "resolve", &all).await;
+    assert_ok(&result);
+    let json: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
+    assert_eq!(json["coverage"]["start_block"], 10);
+    assert_eq!(json["coverage"]["stop_block"], 13);
+    assert!(json.get("start_block").is_none());
+    assert!(json.get("stop_block").is_none());
+    let spans = json["spans"].as_array().unwrap();
+    assert_eq!(spans.len(), 2);
+    assert_eq!(
+        (
+            spans[0]["start_block"].as_u64(),
+            spans[0]["stop_block"].as_u64()
+        ),
+        (Some(10), Some(11))
+    );
+    assert_eq!(
+        (
+            spans[1]["start_block"].as_u64(),
+            spans[1]["stop_block"].as_u64()
+        ),
+        (Some(12), Some(13))
+    );
+    let single = utility(
+        root.path(),
+        "resolve",
+        &[
+            "--partition-type",
+            "hour",
+            "--partition-value",
+            "2023-11-14 23:00:00",
+        ],
+    )
+    .await;
+    assert_ok(&single);
+    let text = String::from_utf8_lossy(&single.stdout);
+    assert!(text.contains("[10, 13) (finalized snapshot)"));
+    assert!(text.contains("start_block:      11"));
+    let list = utility(root.path(), "ls", &[]).await;
+    assert_ok(&list);
+    assert!(String::from_utf8_lossy(&list.stdout).contains("complete"));
+    let report = utility(root.path(), "validate", &["--json"]).await;
+    assert_ok(&report);
+    let json: serde_json::Value = serde_json::from_slice(&report.stdout).unwrap();
+    assert_eq!(json["valid"], true);
+    assert_eq!(json["incomplete_spans"], 0);
+
+    // A legacy artifact remains inspectable but cannot silently produce a range.
+    let old =
+        read_verified_partitions_index(index_path(root.path()).to_str().unwrap(), None).unwrap();
+    write_partitions_index(
+        index_path(root.path()).to_str().unwrap(),
+        &old.spans
+            .into_iter()
+            .map(|span| span.row)
+            .collect::<Vec<_>>(),
+        None,
+    )
+    .unwrap();
+    let result = utility(root.path(), "resolve", &all).await;
+    assert!(!result.status.success());
+    assert!(String::from_utf8_lossy(&result.stderr).contains("rebuild"));
+    let list = utility(root.path(), "ls", &[]).await;
+    assert_ok(&list);
+    let text = String::from_utf8_lossy(&list.stdout);
+    assert!(text.contains("unknown (legacy index"));
+    assert!(!root
+        .path()
+        .join("output/test-chain/cursor.parquet")
+        .exists());
+}

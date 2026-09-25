@@ -1216,7 +1216,7 @@ inspect, truncate never falls back to s3://$S3_BUCKET/<path> for a missing local
 #[derive(clap::Subcommand, Debug)]
 pub enum PartitionsCommands {
     /// Build `partitions.parquet` directly from Firehose block timestamps.
-    /// Missing blocks are skipped automatically after probe retries are exhausted.
+    /// Time spans traverse exact finalized ancestry; clipped spans stay incomplete.
     #[command(after_long_help = "\
 Examples:
   # Build a local date index for one chain
@@ -1335,14 +1335,14 @@ Examples:
         /// Keep extending `partitions.parquet` from its latest covered frontier.
         #[arg(long, default_value = "false", help_heading = "Block Range")]
         live: bool,
-        /// Poll interval used by `--live` sparse probes while waiting for new blocks.
+        /// Poll interval used by `--live` finalized-head checks while waiting for new blocks.
         #[arg(long, default_value_t = 30, help_heading = "Runtime / Logging")]
         poll_interval_secs: u64,
         /// Partition to build: date, hour, minute, second, or block_range
         #[arg(long = "partition", help_heading = "Partitioning")]
         partition: String,
         /// Block range size (required when --partition block_range).
-        /// Each partition covers exactly this many blocks (e.g. 1000000).
+        /// Natural partitions have this width; inferred/live edge spans can be clipped.
         #[arg(
             long,
             help_heading = "Partitioning",
@@ -1450,7 +1450,7 @@ Examples:
         /// Optional partition type filter (e.g. hour, date)
         #[arg(long)]
         partition_type: Option<String>,
-        /// Optional chain filter (matches `chain` column)
+        /// Optional chain filter (matches the index chain scope)
         #[arg(long)]
         partition_chain: Option<String>,
         /// Allow gaps between adjacent partitions in the same chain/type
@@ -1504,7 +1504,7 @@ Examples:
         /// Optional partition type filter (e.g. hour, date)
         #[arg(long)]
         partition_type: Option<String>,
-        /// Optional chain filter (matches `chain` column)
+        /// Optional chain filter (matches the index chain scope)
         #[arg(long)]
         partition_chain: Option<String>,
         /// Lower bound (inclusive) on the partition value (`YYYY-MM-DD HH:MM:SS`, or a start block for block_range)
@@ -1566,7 +1566,7 @@ Examples:
         /// Optional partition type filter (e.g. hour, date)
         #[arg(long)]
         partition_type: Option<String>,
-        /// Optional chain filter (matches `chain` column)
+        /// Optional chain filter (matches the index chain scope)
         #[arg(long)]
         partition_chain: Option<String>,
         /// Lower bound (inclusive) on the partition value (`YYYY-MM-DD HH:MM:SS`, or a start block for block_range)
@@ -1597,7 +1597,7 @@ Examples:
         #[arg(long, env = "AWS_ENDPOINT_URL_S3", hide_env_values = true)]
         aws_endpoint_url: Option<String>,
     },
-    /// Resolve exact [start_block, stop_block) for one partition.
+    /// Resolve one complete span within declared finalized coverage.
     #[command(after_long_help = "\
 Examples:
   # Resolve from local index
@@ -1625,12 +1625,15 @@ Examples:
         /// Partition value to resolve (e.g. "2015-07-30 15:00:00", or a start block for block_range)
         #[arg(long)]
         partition_value: String,
-        /// Optional chain filter (matches `chain` column)
+        /// Optional chain filter (matches the index chain scope)
         #[arg(long)]
         partition_chain: Option<String>,
         /// Require that the partition resolves to exactly one chain when `--partition-chain` is omitted
         #[arg(long, default_value = "false")]
         strict_single_chain: bool,
+        /// Return every matching complete span in source order, with finalized coverage.
+        #[arg(long, requires = "json", default_value = "false")]
+        all_spans: bool,
         /// Emit machine-readable JSON output
         #[arg(long, default_value = "false")]
         json: bool,
@@ -1657,15 +1660,30 @@ pub struct PartitionResolveResult {
     pub partitions_index: String,
     pub partition_type: String,
     pub partition_value: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub partition_chain: Option<String>,
+    pub coverage: PartitionCoverage,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub start_block: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stop_block: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub spans: Option<Vec<PartitionResolvedSpan>>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct PartitionResolvedSpan {
+    pub routing_context_required: bool,
     pub start_block: u64,
     pub stop_block: u64,
+    pub complete: bool,
+    pub first_observed: Option<crate::grpc::FinalizedAnchor>,
+    pub routing_start_timestamp: Option<i64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PartitionResolveOptions {
     pub strict_single_chain: bool,
+    pub all_spans: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize)]
@@ -2275,6 +2293,9 @@ pub struct PartitionShardRequest {
 
 #[derive(Debug, Clone, serde::Serialize, PartialEq, Eq)]
 pub struct PartitionListRow {
+    pub routing_context_required: Option<bool>,
+    /// None means legacy/unknown, never implicitly complete.
+    pub complete: Option<bool>,
     pub partition_type: String,
     pub partition_value: String,
     pub partition_start_ts: String,
@@ -2286,6 +2307,7 @@ pub struct PartitionListRow {
 
 #[derive(Debug, Clone, serde::Serialize, PartialEq, Eq)]
 pub struct PartitionListResult {
+    pub coverage: Option<PartitionCoverage>,
     pub partitions_index: String,
     pub limit: usize,
     pub total_matches: usize,
@@ -2295,6 +2317,7 @@ pub struct PartitionListResult {
 
 #[derive(Debug, Clone, serde::Serialize, PartialEq, Eq)]
 pub struct PartitionShardResult {
+    pub coverage: PartitionCoverage,
     pub partitions_index: String,
     pub shard_count: usize,
     pub shard_index: usize,
@@ -2331,6 +2354,9 @@ pub struct PartitionValidationIssue {
 
 #[derive(Debug, Clone, serde::Serialize, PartialEq, Eq)]
 pub struct PartitionValidateResult {
+    pub coverage: Option<PartitionCoverage>,
+    pub incomplete_spans: usize,
+    pub unknown_spans: usize,
     pub partitions_index: String,
     pub total_rows: usize,
     pub issue_count: usize,
@@ -2750,9 +2776,14 @@ pub fn read_verified_partitions_index(
     path: &str,
     aws: Option<&AwsConfig>,
 ) -> anyhow::Result<VerifiedPartitionIndex> {
-    let snapshot = read_partition_index_snapshot(path, aws)?;
+    verified_index_from_snapshot(read_partition_index_snapshot(path, aws)?)
+}
+
+fn verified_index_from_snapshot(
+    snapshot: PartitionIndexSnapshot,
+) -> anyhow::Result<VerifiedPartitionIndex> {
     let coverage = snapshot.coverage.ok_or_else(|| anyhow::anyhow!(
-        "partition index {path} has no verified coverage/completeness metadata; rebuild legacy indexes before resolution or resume"))?;
+        "partition index has no verified coverage/completeness metadata; rebuild legacy indexes before resolution or resume"))?;
     anyhow::ensure!(
         snapshot.rows.len() == snapshot.proofs.len(),
         "partition index has missing span proofs"
@@ -2864,6 +2895,30 @@ fn read_partition_index_snapshot(
         file_ctx: &PartitionsFileContext,
     ) -> anyhow::Result<()> {
         let schema = batch.schema();
+        if file_ctx.coverage.is_some() {
+            use arrow::datatypes::{DataType, Field, TimeUnit};
+            for expected in [
+                Field::new("partition", DataType::UInt64, false),
+                Field::new("start_block", DataType::UInt64, false),
+                Field::new("stop_block", DataType::UInt64, false),
+                Field::new(
+                    "start_time",
+                    DataType::Timestamp(TimeUnit::Second, Some("UTC".into())),
+                    true,
+                ),
+                Field::new(
+                    "end_time",
+                    DataType::Timestamp(TimeUnit::Second, Some("UTC".into())),
+                    true,
+                ),
+            ] {
+                anyhow::ensure!(
+                    schema.field_with_name(expected.name())? == &expected,
+                    "verified partition column {} has an unexpected type/nullability",
+                    expected.name()
+                );
+            }
+        }
         let partition_type = file_ctx
             .partition_type
             .as_ref()
@@ -2910,17 +2965,20 @@ fn read_partition_index_snapshot(
                 file_ctx.chain.clone()
             };
 
-            // start_time and end_time are now nullable
-            let start_time = start_time_idx.and_then(|idx| {
-                read_timestamp_as_string(batch.column(idx).as_ref(), row_index)
-                    .ok()
-                    .flatten()
-            });
-            let end_time = end_time_idx.and_then(|idx| {
-                read_timestamp_as_string(batch.column(idx).as_ref(), row_index)
-                    .ok()
-                    .flatten()
-            });
+            let read_time = |idx: Option<usize>| -> anyhow::Result<Option<String>> {
+                let result = idx
+                    .map(|idx| read_timestamp_as_string(batch.column(idx).as_ref(), row_index))
+                    .transpose()
+                    .map(Option::flatten);
+                if file_ctx.coverage.is_some() {
+                    // A malformed verified timestamp must not become nullable routing context.
+                    result
+                } else {
+                    Ok(result.unwrap_or(None))
+                }
+            };
+            let start_time = read_time(start_time_idx)?;
+            let end_time = read_time(end_time_idx)?;
 
             if file_ctx.coverage.is_some() {
                 proofs.push(crate::partition_index::read_proof(batch, row_index)?);
@@ -3437,68 +3495,117 @@ fn validate_partitions_metadata(
     Ok(())
 }
 
-/// Resolve partition bounds and return a response payload suitable for CLI output.
-fn resolve_partition_chains(
-    request: &PartitionBoundsRequest,
-    aws: Option<&AwsConfig>,
-) -> anyhow::Result<Vec<Option<String>>> {
-    let request = normalize_partition_bounds_request(request.clone())?;
-    use std::collections::BTreeSet;
+fn require_complete_span(span: &VerifiedPartitionSpan) -> anyhow::Result<()> {
+    anyhow::ensure!(span.proof.complete(),
+        "incomplete partition span [{}, {}) for {}; rebuild with both natural boundaries inside proven finalized coverage",
+        span.row.start_block, span.row.stop_block, span.row.partition_value);
+    Ok(())
+}
 
-    let partition_key = parse_partition_bound(
+/// A plain numeric range cannot carry an unseen timestamp anchor into ingestion.
+/// Natural internal Solana runs start at non-null times; the actual genesis seed
+/// is the only missing-time start reproducible without external routing context.
+fn require_independent_routing_start(
+    coverage: &PartitionCoverage,
+    span: &VerifiedPartitionSpan,
+) -> anyhow::Result<()> {
+    use crate::partition_index::{IndexRoutingPolicy, SOLANA_GENESIS_TIMESTAMP};
+    if coverage.routing_policy == IndexRoutingPolicy::BlockNumber || span.row.start_time.is_some() {
+        return Ok(());
+    }
+    let genesis = coverage.first_observed.as_ref().is_some_and(|first| {
+        first.block_num == 0 && first.parent_num == 0 && first.parent_id.is_empty()
+    });
+    anyhow::ensure!(coverage.routing_policy == IndexRoutingPolicy::SolanaPriorTimestamp
+        && span.row.start_block == 0 && genesis
+        && span.proof.routing_start_timestamp == Some(SOLANA_GENESIS_TIMESTAMP),
+        "partition span requires unseen prior timestamp context; inspect --all-spans --json or rebuild from an independently routable boundary");
+    Ok(())
+}
+
+fn select_exact_partition<'a>(
+    index: &'a VerifiedPartitionIndex,
+    request: &PartitionBoundsRequest,
+) -> anyhow::Result<Vec<&'a VerifiedPartitionSpan>> {
+    let key = parse_partition_bound(
         "--partition-value",
         &request.partition_type,
         &request.partition_value,
     )?;
-    let mut chains = BTreeSet::new();
-    for (key, row) in read_keyed_partitions_build_rows(&request.index_path, aws)? {
-        if row.partition_type != request.partition_type || key != partition_key {
-            continue;
-        }
-        chains.insert(row.chain);
+    let spans = index
+        .spans
+        .iter()
+        .filter(|span| {
+            span.row.partition_type == request.partition_type
+                && span.row.partition_key().is_ok_and(|value| value == key)
+                && request
+                    .chain
+                    .as_deref()
+                    .is_none_or(|chain| span.row.chain.as_deref() == Some(chain))
+        })
+        .collect::<Vec<_>>();
+    anyhow::ensure!(
+        !spans.is_empty(),
+        "no partition row found for {}={}",
+        request.partition_type,
+        request.partition_value
+    );
+    for span in &spans {
+        require_complete_span(span)?;
     }
+    Ok(spans)
+}
 
-    Ok(chains.into_iter().collect())
+fn require_single_span(spans: &[&VerifiedPartitionSpan]) -> anyhow::Result<()> {
+    anyhow::ensure!(spans.len() == 1,
+        "partition lookup is ambiguous: {} disjoint spans; use --all-spans --json to inspect every complete span within declared coverage", spans.len());
+    Ok(())
 }
 
 pub fn resolve_partition_command(
-    mut request: PartitionBoundsRequest,
+    request: PartitionBoundsRequest,
     aws: Option<&AwsConfig>,
     options: &PartitionResolveOptions,
 ) -> anyhow::Result<PartitionResolveResult> {
-    request = normalize_partition_bounds_request(request)?;
-    if options.strict_single_chain && request.chain.is_none() {
-        let chains = resolve_partition_chains(&request, aws)?;
-        match chains.as_slice() {
-            [] => {}
-            [Some(chain)] => {
-                request.chain = Some(chain.clone());
-            }
-            [None] => {}
-            _ => {
-                let labels = chains
-                    .into_iter()
-                    .map(|chain| chain.unwrap_or_else(|| "<null>".to_string()))
-                    .collect::<Vec<_>>();
-                anyhow::bail!(
-                    "partition resolves to multiple chains in {} for partition_type={}, partition_value={}: {}. Re-run with --partition-chain to disambiguate",
-                    request.index_path,
-                    request.partition_type,
-                    request.partition_value,
-                    labels.join(", ")
-                );
-            }
-        }
+    let request = normalize_partition_bounds_request(request)?;
+    // V2 itself enforces one chain; strict_single_chain remains accepted for CLI compatibility.
+    let index = read_verified_partitions_index(&request.index_path, aws)?;
+    let selected = select_exact_partition(&index, &request)?;
+    if !options.all_spans {
+        require_single_span(&selected)?;
+        require_independent_routing_start(&index.coverage, selected[0])?;
     }
-
-    let bounds = resolve_partition_bounds_from_index(&request, aws)?;
+    let (start_block, stop_block) = if options.all_spans {
+        (None, None)
+    } else {
+        (
+            Some(selected[0].row.start_block),
+            Some(selected[0].row.stop_block),
+        )
+    };
+    let spans = options.all_spans.then(|| {
+        selected
+            .iter()
+            .map(|span| PartitionResolvedSpan {
+                routing_context_required: require_independent_routing_start(&index.coverage, span)
+                    .is_err(),
+                start_block: span.row.start_block,
+                stop_block: span.row.stop_block,
+                complete: span.proof.complete(),
+                first_observed: span.proof.first_block.clone(),
+                routing_start_timestamp: span.proof.routing_start_timestamp,
+            })
+            .collect()
+    });
     Ok(PartitionResolveResult {
         partitions_index: request.index_path,
         partition_type: request.partition_type,
         partition_value: request.partition_value,
-        partition_chain: request.chain,
-        start_block: bounds.start_block,
-        stop_block: bounds.stop_block,
+        partition_chain: index.spans[0].row.chain.clone(),
+        coverage: index.coverage,
+        start_block,
+        stop_block,
+        spans,
     })
 }
 
@@ -3518,7 +3625,31 @@ pub fn list_partitions_from_index(
     let mut bounds_by_type =
         std::collections::BTreeMap::<String, (Option<u64>, Option<u64>)>::new();
     let mut rows = Vec::new();
-    for (key, row) in read_keyed_partitions_build_rows(&request.index_path, aws)? {
+    let snapshot = read_partition_index_snapshot(&request.index_path, aws)?;
+    let coverage = snapshot.coverage.clone();
+    let inspected = if coverage.is_some() {
+        let index = verified_index_from_snapshot(snapshot)?;
+        index
+            .spans
+            .into_iter()
+            .map(|span| {
+                let context = require_independent_routing_start(&index.coverage, &span).is_err();
+                Ok((
+                    span.row.partition_key()?,
+                    span.row,
+                    Some(span.proof.complete()),
+                    Some(context),
+                ))
+            })
+            .collect::<anyhow::Result<Vec<_>>>()?
+    } else {
+        snapshot
+            .rows
+            .into_iter()
+            .map(|(key, row)| (key, row, None, None))
+            .collect()
+    };
+    for (key, row, complete, routing_context_required) in inspected {
         let type_matches = request
             .partition_type
             .as_deref()
@@ -3554,6 +3685,8 @@ pub fn list_partitions_from_index(
         rows.push((
             key,
             PartitionListRow {
+                routing_context_required,
+                complete,
                 partition_type: row.partition_type,
                 partition_value: row.partition_value,
                 partition_start_ts: row.partition_start_ts,
@@ -3576,6 +3709,7 @@ pub fn list_partitions_from_index(
     let rows = rows.into_iter().map(|(_, row)| row).collect::<Vec<_>>();
 
     Ok(PartitionListResult {
+        coverage,
         partitions_index: request.index_path.clone(),
         limit: request.limit,
         total_matches,
@@ -3637,7 +3771,22 @@ pub fn shard_partitions_from_index(
     let mut list_request = request.list.clone();
     list_request.limit = usize::MAX;
     let list_result = list_partitions_from_index(&list_request, aws)?;
-
+    let coverage = list_result
+        .coverage
+        .clone()
+        .ok_or_else(|| anyhow::anyhow!("rebuild legacy indexes before sharding"))?;
+    for row in &list_result.rows {
+        anyhow::ensure!(
+            row.complete == Some(true),
+            "cannot shard incomplete partition span [{}, {})",
+            row.start_block,
+            row.stop_block
+        );
+        anyhow::ensure!(
+            row.routing_context_required == Some(false),
+            "cannot shard a span requiring unseen routing context"
+        );
+    }
     let rows = list_result
         .rows
         .into_iter()
@@ -3650,6 +3799,7 @@ pub fn shard_partitions_from_index(
         .collect::<Vec<_>>();
 
     Ok(PartitionShardResult {
+        coverage,
         partitions_index: request.list.index_path.clone(),
         shard_count: request.shard_count,
         shard_index: request.shard_index,
@@ -3668,6 +3818,30 @@ pub fn validate_partitions_index(
     list_request.limit = usize::MAX;
     let list_result = list_partitions_from_index(&list_request, aws)?;
 
+    let incomplete_spans = list_result
+        .rows
+        .iter()
+        .filter(|row| row.complete == Some(false))
+        .count();
+    let unknown_spans = list_result
+        .rows
+        .iter()
+        .filter(|row| row.complete.is_none())
+        .count();
+    // V2 validation already checked global source-ordered coverage. Repeated
+    // calendar values are valid and filtering can deliberately select disjoint runs.
+    if list_result.coverage.is_some() {
+        return Ok(PartitionValidateResult {
+            partitions_index: request.list.index_path.clone(),
+            coverage: list_result.coverage,
+            incomplete_spans,
+            unknown_spans,
+            total_rows: list_result.total_matches,
+            issue_count: 0,
+            valid: true,
+            issues: Vec::new(),
+        });
+    }
     let mut issues = Vec::new();
 
     for row in &list_result.rows {
@@ -3743,6 +3917,9 @@ pub fn validate_partitions_index(
     }
 
     Ok(PartitionValidateResult {
+        coverage: list_result.coverage,
+        incomplete_spans,
+        unknown_spans,
         partitions_index: request.list.index_path.clone(),
         total_rows: list_result.total_matches,
         issue_count: issues.len(),
@@ -3957,12 +4134,14 @@ pub struct PartitionWindowRequest {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PartitionBounds {
+    pub coverage: PartitionCoverage,
     pub start_block: u64,
     pub stop_block: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PartitionWindowBounds {
+    pub coverage: PartitionCoverage,
     pub start_block: u64,
     pub stop_block: u64,
     pub partitions_count: usize,
@@ -4053,167 +4232,81 @@ pub fn resolve_cursor_template(
     Ok(out)
 }
 
-/// Resolve `[start_block, stop_block)` from a canonical `partitions.parquet` index file.
+/// Resolve one complete independently routable span inside declared finalized coverage.
 pub fn resolve_partition_bounds_from_index(
     request: &PartitionBoundsRequest,
     aws: Option<&AwsConfig>,
 ) -> anyhow::Result<PartitionBounds> {
     let request = normalize_partition_bounds_request(request.clone())?;
-    let partition_key = parse_partition_bound(
-        "--partition-value",
-        &request.partition_type,
-        &request.partition_value,
-    )?;
-    let matches = read_keyed_partitions_build_rows(&request.index_path, aws)?
-        .into_iter()
-        .filter(|(key, row)| {
-            row.partition_type == request.partition_type
-                && *key == partition_key
-                && request
-                    .chain
-                    .as_deref()
-                    .map(|chain| row.chain.as_deref() == Some(chain))
-                    .unwrap_or(true)
-        })
-        .map(|(_, row)| (row.start_block, row.stop_block))
-        .collect::<Vec<_>>();
-
-    if matches.is_empty() {
-        let chain_filter = request
-            .chain
-            .as_ref()
-            .map(|c| format!(", chain={c}"))
-            .unwrap_or_default();
-        anyhow::bail!(
-            "no partition row found in {} for partition_type={}, partition_value={}{}",
-            request.index_path,
-            request.partition_type,
-            request.partition_value,
-            chain_filter
-        );
-    }
-
-    if matches.len() > 1 {
-        anyhow::bail!(
-            "partition lookup is ambiguous in {}: found {} rows for partition_type={}, partition_value={}{}",
-            request.index_path,
-            matches.len(),
-            request.partition_type,
-            request.partition_value,
-            request
-                .chain
-                .as_ref()
-                .map(|c| format!(", chain={c}"))
-                .unwrap_or_default()
-        );
-    }
-
-    let (start_block, stop_block) = matches[0];
-    if stop_block <= start_block {
-        anyhow::bail!(
-            "invalid partition bounds in {}: start_block={} stop_block={}",
-            request.index_path,
-            start_block,
-            stop_block
-        );
-    }
-
+    let index = read_verified_partitions_index(&request.index_path, aws)?;
+    let selected = select_exact_partition(&index, &request)?;
+    require_single_span(&selected)?;
+    require_independent_routing_start(&index.coverage, selected[0])?;
+    let (start_block, stop_block) = (selected[0].row.start_block, selected[0].row.stop_block);
     Ok(PartitionBounds {
         start_block,
         stop_block,
+        coverage: index.coverage,
     })
 }
 
-/// Resolve a partition window `[partition_from, partition_to)` from `partitions.parquet`.
-///
-/// All matching rows must be contiguous and non-overlapping by block bounds.
+/// Select calendar keys in [from,to), but join ranges only in source block order.
+/// A filtered-out intervening run must never be silently included by min/max.
 pub fn resolve_partition_window_bounds_from_index(
     request: &PartitionWindowRequest,
     aws: Option<&AwsConfig>,
 ) -> anyhow::Result<PartitionWindowBounds> {
     let request = normalize_partition_window_request(request.clone())?;
-    let partition_from = parse_partition_bound(
+    let from = parse_partition_bound(
         "--partition-from",
         &request.partition_type,
         &request.partition_from,
     )?;
-    let partition_to = parse_partition_bound(
+    let to = parse_partition_bound(
         "--partition-to",
         &request.partition_type,
         &request.partition_to,
     )?;
-    let mut matches = read_keyed_partitions_build_rows(&request.index_path, aws)?
-        .into_iter()
-        .filter(|(key, row)| {
-            row.partition_type == request.partition_type
-                && (partition_from..partition_to).contains(key)
+    anyhow::ensure!(
+        from < to,
+        "partition window must have increasing calendar bounds"
+    );
+    let index = read_verified_partitions_index(&request.index_path, aws)?;
+    let selected = index
+        .spans
+        .iter()
+        .filter(|span| {
+            span.row.partition_type == request.partition_type
+                && span
+                    .row
+                    .partition_key()
+                    .is_ok_and(|key| (from..to).contains(&key))
                 && request
                     .chain
                     .as_deref()
-                    .map(|chain| row.chain.as_deref() == Some(chain))
-                    .unwrap_or(true)
+                    .is_none_or(|chain| span.row.chain.as_deref() == Some(chain))
         })
-        .map(|(key, row)| (key, row.partition_value, row.start_block, row.stop_block))
         .collect::<Vec<_>>();
-
-    if matches.is_empty() {
-        anyhow::bail!(
-            "no partition rows found in {} for partition_type={} in [{}, {}){}",
-            request.index_path,
-            request.partition_type,
-            request.partition_from,
-            request.partition_to,
-            request
-                .chain
-                .as_ref()
-                .map(|chain| format!(", chain={chain}"))
-                .unwrap_or_default()
-        );
+    anyhow::ensure!(
+        !selected.is_empty(),
+        "no partition rows found in the requested window"
+    );
+    for span in &selected {
+        require_complete_span(span)?;
     }
-
-    matches.sort_by(|left, right| left.0.cmp(&right.0).then_with(|| left.2.cmp(&right.2)));
-
-    for (idx, window) in matches.windows(2).enumerate() {
-        let (current_key, current_value, _, current_stop) = &window[0];
-        let (next_key, next_value, next_start, _) = &window[1];
-        if current_key == next_key {
-            anyhow::bail!(
-                "partition window is ambiguous in {}: multiple rows for partition_value={} (rows {} and {})",
-                request.index_path,
-                current_value,
-                idx,
-                idx + 1
-            );
-        }
-        if current_stop != next_start {
-            anyhow::bail!(
-                "partition window has non-contiguous bounds in {} between {} and {}: stop_block={} next_start_block={}",
-                request.index_path,
-                current_value,
-                next_value,
-                current_stop,
-                next_start
-            );
-        }
+    for pair in selected.windows(2) {
+        anyhow::ensure!(pair[0].row.stop_block == pair[1].row.start_block,
+            "partition window has non-contiguous bounds: an unselected run separates [{}, {}) and [{}, {})",
+            pair[0].row.start_block, pair[0].row.stop_block, pair[1].row.start_block, pair[1].row.stop_block);
     }
-
-    let start_block = matches.first().expect("non-empty checked above").2;
-    let stop_block = matches.last().expect("non-empty checked above").3;
-    if stop_block <= start_block {
-        anyhow::bail!(
-            "invalid partition window bounds in {}: start_block={} stop_block={}",
-            request.index_path,
-            start_block,
-            stop_block
-        );
-    }
-
+    require_independent_routing_start(&index.coverage, selected[0])?;
     Ok(PartitionWindowBounds {
-        start_block,
-        stop_block,
-        partitions_count: matches.len(),
-        partition_from: request.partition_from.clone(),
-        partition_to: request.partition_to.clone(),
+        start_block: selected[0].row.start_block,
+        stop_block: selected.last().unwrap().row.stop_block,
+        partitions_count: selected.len(),
+        partition_from: request.partition_from,
+        partition_to: request.partition_to,
+        coverage: index.coverage,
     })
 }
 
@@ -6641,6 +6734,78 @@ mod tests {
         write_partitions_index(&path.to_string_lossy(), &rows, None)
     }
 
+    fn write_test_verified_partitions_index(
+        path: &std::path::Path,
+        mut rows: Vec<PartitionBuildRow>,
+    ) -> anyhow::Result<()> {
+        use crate::grpc::FinalizedAnchor;
+        use crate::partition_index::{CoveredBlock, IndexRoutingPolicy};
+        rows.sort_by_key(|row| row.start_block);
+        let first = rows.first().unwrap().start_block;
+        let stop = rows.last().unwrap().stop_block;
+        let block_number = rows[0].partition_type == "block_range";
+        let identity = |number| CoveredBlock {
+            block_num: number,
+            block_id: format!("id-{number}"),
+            parent_num: number.saturating_sub(1),
+            parent_id: if number == 0 {
+                String::new()
+            } else {
+                format!("id-{}", number - 1)
+            },
+        };
+        let mut last_timestamp = None;
+        let spans = rows
+            .into_iter()
+            .map(|mut row| {
+                let timestamp = if block_number {
+                    None
+                } else {
+                    Some(parse_partition_timestamp(&row.partition_value)?)
+                };
+                if row.start_time.is_none() {
+                    row.start_time = timestamp.map(format_partition_timestamp).transpose()?;
+                }
+                last_timestamp = timestamp;
+                let proof = PartitionSpanProof {
+                    start_complete: true,
+                    end_complete: true,
+                    first_block: (!block_number).then(|| FinalizedAnchor {
+                        block_num: row.start_block,
+                        block_id: format!("id-{}", row.start_block),
+                    }),
+                    routing_start_timestamp: timestamp,
+                };
+                Ok(VerifiedPartitionSpan { row, proof })
+            })
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        let coverage = PartitionCoverage {
+            version: 2,
+            start_block: first,
+            stop_block: stop,
+            finalized: FinalizedAnchor {
+                block_num: stop + 5,
+                block_id: format!("id-{}", stop + 5),
+            },
+            routing_policy: if block_number {
+                IndexRoutingPolicy::BlockNumber
+            } else {
+                IndexRoutingPolicy::CanonicalTimestamp
+            },
+            first_observed: (!block_number).then(|| identity(first)),
+            last_observed: (!block_number).then(|| identity(stop - 1)),
+            next_observed: (!block_number).then(|| identity(stop)),
+            last_routing_timestamp: last_timestamp,
+        };
+        write_verified_partitions_index(
+            path.to_str().unwrap(),
+            &VerifiedPartitionIndex { coverage, spans },
+            Compression::Zstd,
+            None,
+            None,
+        )
+    }
+
     fn write_scan_test_parquet(path: &std::path::Path, values: &[i32]) {
         use arrow::array::Int32Array;
         use arrow::record_batch::RecordBatch;
@@ -8802,7 +8967,7 @@ mod tests {
     fn test_resolve_partition_bounds_from_index_local() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("partitions.parquet");
-        write_test_partitions_index(
+        write_test_verified_partitions_index(
             &path,
             vec![
                 time_partition_row(Some("eth-mainnet"), "hour", "2015-07-30 14:00:00", 100, 200),
@@ -8827,11 +8992,12 @@ mod tests {
     fn test_resolve_partition_bounds_from_index_ambiguous() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("partitions.parquet");
-        write_test_partitions_index(
+        write_test_verified_partitions_index(
             &path,
             vec![
                 time_partition_row(Some("eth-mainnet"), "hour", "2015-07-30 15:00:00", 200, 300),
-                time_partition_row(Some("eth-mainnet"), "hour", "2015-07-30 15:00:00", 201, 301),
+                time_partition_row(Some("eth-mainnet"), "hour", "2015-07-30 16:00:00", 300, 400),
+                time_partition_row(Some("eth-mainnet"), "hour", "2015-07-30 15:00:00", 400, 500),
             ],
         )
         .expect("write partitions index");
@@ -8848,7 +9014,7 @@ mod tests {
     }
 
     #[test]
-    fn test_resolve_partition_command_strict_single_chain_rejects_multi_chain() {
+    fn test_resolve_partition_command_rejects_unverified_multi_chain_index() {
         use arrow::array::{StringArray, UInt64Array};
         use arrow::record_batch::RecordBatch;
         use parquet::arrow::ArrowWriter;
@@ -8898,18 +9064,18 @@ mod tests {
             None,
             &PartitionResolveOptions {
                 strict_single_chain: true,
+                all_spans: false,
             },
         )
         .expect_err("strict single chain should fail on multi-chain match");
-        assert!(err.to_string().contains("multiple chains"));
-        assert!(err.to_string().contains("--partition-chain"));
+        assert!(err.to_string().contains("rebuild"));
     }
 
     #[test]
     fn test_resolve_partition_window_bounds_from_index_local() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("partitions.parquet");
-        write_test_partitions_index(
+        write_test_verified_partitions_index(
             &path,
             vec![
                 time_partition_row(Some("eth-mainnet"), "hour", "2015-07-30 14:00:00", 100, 200),
@@ -9050,7 +9216,7 @@ mod tests {
                 )
             })
             .collect::<Vec<_>>();
-        write_test_partitions_index(&path, rows).expect("write partitions index");
+        write_test_verified_partitions_index(&path, rows).expect("write partitions index");
 
         let base_request = PartitionListRequest {
             index_path: path.to_string_lossy().to_string(),
@@ -9979,6 +10145,8 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("partitions.parquet");
         write_multi_digit_block_range_index(&path);
+        let rows = read_partitions_build_rows(path.to_str().unwrap(), None).unwrap();
+        write_test_verified_partitions_index(&path, rows).unwrap();
 
         let shard_starts = |shard_index| {
             shard_partitions_from_index(
@@ -10050,6 +10218,8 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("partitions.parquet");
         write_multi_digit_block_range_index(&path);
+        let rows = read_partitions_build_rows(path.to_str().unwrap(), None).unwrap();
+        write_test_verified_partitions_index(&path, rows).unwrap();
 
         let bounds = resolve_partition_window_bounds_from_index(
             &PartitionWindowRequest {
@@ -10072,6 +10242,8 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("partitions.parquet");
         write_multi_digit_block_range_index(&path);
+        let rows = read_partitions_build_rows(path.to_str().unwrap(), None).unwrap();
+        write_test_verified_partitions_index(&path, rows).unwrap();
 
         let bounds = resolve_partition_bounds_from_index(
             &PartitionBoundsRequest {
@@ -10692,5 +10864,357 @@ mod tests {
         assert!(rendered.contains("Row 1:"));
         assert!(rendered.contains("block_num"));
         assert!(rendered.contains("42"));
+    }
+    fn verified_test_request(path: &std::path::Path, value: &str) -> PartitionBoundsRequest {
+        PartitionBoundsRequest {
+            index_path: path.to_string_lossy().into(),
+            partition_type: "hour".into(),
+            partition_value: value.into(),
+            chain: Some("test-chain".into()),
+        }
+    }
+    fn verified_test_rows() -> Vec<PartitionBuildRow> {
+        [
+            (10, "2023-11-14 22:00:00"),
+            (11, "2023-11-14 23:00:00"),
+            (12, "2023-11-14 22:00:00"),
+        ]
+        .into_iter()
+        .map(|(number, value)| {
+            time_partition_row(Some("test-chain"), "hour", value, number, number + 1)
+        })
+        .collect()
+    }
+    fn verified_list_request(path: &std::path::Path) -> PartitionListRequest {
+        PartitionListRequest {
+            index_path: path.to_string_lossy().into(),
+            partition_type: Some("hour".into()),
+            chain: Some("test-chain".into()),
+            from: None,
+            to: None,
+            limit: 100,
+        }
+    }
+
+    #[test]
+    fn verified_consumers_preserve_disjoint_runs_and_refuse_enclosing_holes() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("index.parquet");
+        write_test_verified_partitions_index(&path, verified_test_rows()).unwrap();
+        let request = verified_test_request(&path, "2023-11-14 22:00:00");
+        assert!(resolve_partition_bounds_from_index(&request, None)
+            .unwrap_err()
+            .to_string()
+            .contains("ambiguous"));
+        let all = resolve_partition_command(
+            request,
+            None,
+            &PartitionResolveOptions {
+                strict_single_chain: true,
+                all_spans: true,
+            },
+        )
+        .unwrap();
+        assert_eq!(all.start_block, None);
+        assert_eq!(all.stop_block, None);
+        assert_eq!(all.coverage.start_block, 10);
+        assert_eq!(all.coverage.stop_block, 13);
+        let spans = all.spans.unwrap();
+        assert_eq!(
+            spans
+                .iter()
+                .map(|span| (span.start_block, span.stop_block))
+                .collect::<Vec<_>>(),
+            vec![(10, 11), (12, 13)]
+        );
+        let mut window = PartitionWindowRequest {
+            index_path: path.to_string_lossy().into(),
+            partition_type: "hour".into(),
+            partition_from: "2023-11-14 22:00:00".into(),
+            partition_to: "2023-11-14 23:00:00".into(),
+            chain: None,
+        };
+        assert!(resolve_partition_window_bounds_from_index(&window, None)
+            .unwrap_err()
+            .to_string()
+            .contains("non-contiguous"));
+        window.partition_to = "2023-11-15 00:00:00".into();
+        let bounds = resolve_partition_window_bounds_from_index(&window, None).unwrap();
+        assert_eq!(
+            (
+                bounds.start_block,
+                bounds.stop_block,
+                bounds.partitions_count
+            ),
+            (10, 13, 3)
+        );
+        let report = validate_partitions_index(
+            &PartitionValidateRequest {
+                list: verified_list_request(&path),
+                allow_gaps: false,
+            },
+            None,
+        )
+        .unwrap();
+        assert!(report.valid);
+        assert_eq!(report.incomplete_spans, 0);
+        assert_eq!(report.unknown_spans, 0);
+    }
+
+    #[test]
+    fn incomplete_edges_remain_inspectable_but_never_resolve_or_shard() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("index.parquet");
+        write_test_verified_partitions_index(&path, verified_test_rows()).unwrap();
+        let mut index = read_verified_partitions_index(path.to_str().unwrap(), None).unwrap();
+        index.spans[2].proof.end_complete = false;
+        write_verified_partitions_index(
+            path.to_str().unwrap(),
+            &index,
+            Compression::Zstd,
+            None,
+            None,
+        )
+        .unwrap();
+        for all_spans in [false, true] {
+            assert!(resolve_partition_command(
+                verified_test_request(&path, "2023-11-14 22:00:00"),
+                None,
+                &PartitionResolveOptions {
+                    strict_single_chain: false,
+                    all_spans
+                }
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("incomplete"));
+        }
+        let list = verified_list_request(&path);
+        let inspected = list_partitions_from_index(&list, None).unwrap();
+        assert!(inspected.coverage.is_some());
+        assert!(inspected
+            .rows
+            .iter()
+            .any(|row| row.start_block == 12 && row.complete == Some(false)));
+        assert!(shard_partitions_from_index(
+            &PartitionShardRequest {
+                list: list.clone(),
+                shard_count: 2,
+                shard_index: 0,
+                strategy: PartitionShardStrategy::Ordinal
+            },
+            None
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("incomplete"));
+        let report = validate_partitions_index(
+            &PartitionValidateRequest {
+                list,
+                allow_gaps: false,
+            },
+            None,
+        )
+        .unwrap();
+        assert!(report.valid);
+        assert_eq!(report.incomplete_spans, 1);
+    }
+
+    #[test]
+    fn legacy_completeness_is_unknown_for_inspection_and_refused_by_all_range_helpers() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("legacy.parquet");
+        write_test_partitions_index(&path, verified_test_rows()).unwrap();
+        let list = verified_list_request(&path);
+        let inspected = list_partitions_from_index(&list, None).unwrap();
+        assert_eq!(inspected.coverage, None);
+        assert!(inspected.rows.iter().all(|row| row.complete.is_none()));
+        assert!(resolve_partition_command(
+            verified_test_request(&path, "2023-11-14 23:00:00"),
+            None,
+            &PartitionResolveOptions {
+                strict_single_chain: false,
+                all_spans: true
+            }
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("rebuild"));
+        assert!(resolve_partition_bounds_from_index(
+            &verified_test_request(&path, "2023-11-14 23:00:00"),
+            None
+        )
+        .is_err());
+        assert!(resolve_partition_window_bounds_from_index(
+            &PartitionWindowRequest {
+                index_path: path.to_string_lossy().into(),
+                partition_type: "hour".into(),
+                partition_from: "2023-11-14 22:00:00".into(),
+                partition_to: "2023-11-15 00:00:00".into(),
+                chain: None
+            },
+            None
+        )
+        .is_err());
+        assert!(shard_partitions_from_index(
+            &PartitionShardRequest {
+                list: list.clone(),
+                shard_count: 1,
+                shard_index: 0,
+                strategy: PartitionShardStrategy::Ordinal
+            },
+            None
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("rebuild"));
+        let report = validate_partitions_index(
+            &PartitionValidateRequest {
+                list,
+                allow_gaps: false,
+            },
+            None,
+        )
+        .unwrap();
+        assert_eq!(report.unknown_spans, 3);
+        assert_eq!(report.coverage, None);
+    }
+
+    #[test]
+    fn numeric_ranges_refuse_unseen_routing_context_but_inspection_preserves_evidence() {
+        use crate::grpc::FinalizedAnchor;
+        use crate::partition_index::{
+            ExactTimeIndexBuilder, IndexRoutingPolicy, SOLANA_GENESIS_TIMESTAMP,
+        };
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("index.parquet");
+        write_test_verified_partitions_index(&path, vec![verified_test_rows()[0].clone()]).unwrap();
+        let mut index = read_verified_partitions_index(path.to_str().unwrap(), None).unwrap();
+        index.coverage.routing_policy = IndexRoutingPolicy::SolanaPriorTimestamp;
+        index.spans[0].row.start_time = None;
+        write_verified_partitions_index(
+            path.to_str().unwrap(),
+            &index,
+            Compression::Zstd,
+            None,
+            None,
+        )
+        .unwrap();
+        let request = verified_test_request(&path, "2023-11-14 22:00:00");
+        assert!(resolve_partition_bounds_from_index(&request, None)
+            .unwrap_err()
+            .to_string()
+            .contains("unseen prior"));
+        let all = resolve_partition_command(
+            request,
+            None,
+            &PartitionResolveOptions {
+                strict_single_chain: false,
+                all_spans: true,
+            },
+        )
+        .unwrap();
+        assert!(all.spans.unwrap()[0].routing_context_required);
+        assert!(shard_partitions_from_index(
+            &PartitionShardRequest {
+                list: verified_list_request(&path),
+                shard_count: 1,
+                shard_index: 0,
+                strategy: PartitionShardStrategy::Ordinal
+            },
+            None
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("unseen routing"));
+        // Only actual block zero with its canonical genesis parent and shared seed is independent.
+        let mut builder = ExactTimeIndexBuilder::new(
+            "test-chain".into(),
+            PartitionBuildType::Hour,
+            0,
+            1,
+            FinalizedAnchor {
+                block_num: 1,
+                block_id: "id-1".into(),
+            },
+            IndexRoutingPolicy::SolanaPriorTimestamp,
+            None,
+        )
+        .unwrap();
+        builder
+            .observe_final(
+                &crate::traits::BlockIdentity {
+                    block_num: 0,
+                    block_id: "id-0".into(),
+                    ..Default::default()
+                },
+                3,
+            )
+            .unwrap();
+        builder
+            .observe_final(
+                &crate::traits::BlockIdentity {
+                    block_num: 1,
+                    block_id: "id-1".into(),
+                    parent_num: 0,
+                    parent_id: "id-0".into(),
+                    timestamp: SOLANA_GENESIS_TIMESTAMP + 3_600,
+                    ..Default::default()
+                },
+                3,
+            )
+            .unwrap();
+        let genesis = builder.finish().unwrap();
+        let key = genesis.spans[0].row.partition_value.clone();
+        write_verified_partitions_index(
+            path.to_str().unwrap(),
+            &genesis,
+            Compression::Zstd,
+            None,
+            None,
+        )
+        .unwrap();
+        let bounds =
+            resolve_partition_bounds_from_index(&verified_test_request(&path, &key), None).unwrap();
+        assert_eq!((bounds.start_block, bounds.stop_block), (0, 1));
+    }
+    #[test]
+    fn verified_reader_rejects_invalid_canonical_times_instead_of_nulling_them() {
+        use arrow::{array::TimestampSecondArray, record_batch::RecordBatch};
+        use parquet::{
+            arrow::{arrow_reader::ParquetRecordBatchReaderBuilder, ArrowWriter},
+            file::properties::WriterProperties,
+        };
+        use std::sync::Arc;
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("index.parquet");
+        write_test_verified_partitions_index(&path, verified_test_rows()).unwrap();
+        let reader =
+            ParquetRecordBatchReaderBuilder::try_new(std::fs::File::open(&path).unwrap()).unwrap();
+        let metadata = reader
+            .metadata()
+            .file_metadata()
+            .key_value_metadata()
+            .cloned();
+        let schema = reader.schema().clone();
+        let batch = reader.build().unwrap().next().unwrap().unwrap();
+        let mut columns = batch.columns().to_vec();
+        columns[3] = Arc::new(
+            TimestampSecondArray::from(vec![Some(i64::MAX); batch.num_rows()]).with_timezone("UTC"),
+        );
+        let bad = RecordBatch::try_new(schema.clone(), columns).unwrap();
+        let properties = WriterProperties::builder()
+            .set_key_value_metadata(metadata)
+            .build();
+        let mut writer = ArrowWriter::try_new(
+            std::fs::File::create(&path).unwrap(),
+            schema,
+            Some(properties),
+        )
+        .unwrap();
+        writer.write(&bad).unwrap();
+        writer.close().unwrap();
+        assert!(read_verified_partitions_index(path.to_str().unwrap(), None).is_err());
+        assert!(list_partitions_from_index(&verified_list_request(&path), None).is_err());
     }
 }

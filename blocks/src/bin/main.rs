@@ -44,6 +44,29 @@ use blocks::near::mapper::NearBlockMapper;
 use blocks::solana::mapper::SolanaBlockMapper;
 use blocks::tron::mapper::TronBlockMapper;
 
+fn print_partition_coverage(coverage: Option<&PartitionCoverage>) {
+    match coverage {
+        Some(coverage) => {
+            println!(
+                "coverage:         [{}, {}) (finalized snapshot)",
+                coverage.start_block, coverage.stop_block
+            );
+            println!("finalized_block:  {}", coverage.finalized.block_num);
+            println!("finalized_id:     {}", coverage.finalized.block_id);
+            println!("routing_policy:   {:?}", coverage.routing_policy);
+        }
+        None => println!("coverage:         unknown (legacy index; rebuild before resolving)"),
+    }
+}
+
+fn partition_completeness(complete: Option<bool>) -> &'static str {
+    match complete {
+        Some(true) => "complete",
+        Some(false) => "incomplete",
+        None => "unknown",
+    }
+}
+
 /// Supported block types.
 const BLOCK_TYPES: &[&str] = &[
     "auto", "evm", "bitcoin", "solana", "near", "antelope", "cosmos", "tron", "beacon",
@@ -2586,6 +2609,7 @@ async fn main() -> Result<()> {
                         println!("start_block:      {}", result.start_block);
                         println!("stop_block:       {}", result.stop_block);
                         println!("resumed:          {}", result.resumed);
+                        print_partition_coverage(result.coverage.as_ref());
                         if let Some(resumed_from_block) = result.resumed_from_block {
                             println!("resumed_from:     {}", resumed_from_block);
                         }
@@ -2632,6 +2656,9 @@ async fn main() -> Result<()> {
                         println!("total_rows:       {}", result.total_rows);
                         println!("issue_count:      {}", result.issue_count);
                         println!("valid:            {}", result.valid);
+                        println!("incomplete_spans: {}", result.incomplete_spans);
+                        println!("unknown_spans:    {}", result.unknown_spans);
+                        print_partition_coverage(result.coverage.as_ref());
                         for issue in &result.issues {
                             let chain = issue.chain.as_deref().unwrap_or("<none>");
                             println!(
@@ -2698,25 +2725,34 @@ async fn main() -> Result<()> {
                         println!("strategy:         {:?}", result.strategy);
                         println!("total_matches:    {}", result.total_matches);
                         println!("returned_rows:    {}", result.returned_rows);
+                        print_partition_coverage(Some(&result.coverage));
                         if !result.rows.is_empty() {
                             println!();
                             println!(
-                                "{:<15} {:<19} {:<19} {:>12} {:>12} {}",
+                                "{:<15} {:<19} {:<19} {:>12} {:>12} {:<10} {:<16} {}",
                                 "partition_type",
                                 "partition_value",
                                 "partition_start_ts",
                                 "start_block",
                                 "stop_block",
+                                "span",
+                                "prior_context",
                                 "chain"
                             );
                             for row in result.rows {
                                 println!(
-                                    "{:<15} {:<19} {:<19} {:>12} {:>12} {}",
+                                    "{:<15} {:<19} {:<19} {:>12} {:>12} {:<10} {:<16} {}",
                                     row.partition_type,
                                     row.partition_value,
                                     row.partition_start_ts,
                                     row.start_block,
                                     row.stop_block,
+                                    partition_completeness(row.complete),
+                                    match row.routing_context_required {
+                                        Some(true) => "required",
+                                        Some(false) => "independent",
+                                        None => "unknown",
+                                    },
                                     row.chain.unwrap_or_default()
                                 );
                             }
@@ -2763,25 +2799,34 @@ async fn main() -> Result<()> {
                         println!("limit:            {}", result.limit);
                         println!("total_matches:    {}", result.total_matches);
                         println!("returned_rows:    {}", result.returned_rows);
+                        print_partition_coverage(result.coverage.as_ref());
                         if !result.rows.is_empty() {
                             println!();
                             println!(
-                                "{:<15} {:<19} {:<19} {:>12} {:>12} {}",
+                                "{:<15} {:<19} {:<19} {:>12} {:>12} {:<10} {:<16} {}",
                                 "partition_type",
                                 "partition_value",
                                 "partition_start_ts",
                                 "start_block",
                                 "stop_block",
+                                "span",
+                                "prior_context",
                                 "chain"
                             );
                             for row in result.rows {
                                 println!(
-                                    "{:<15} {:<19} {:<19} {:>12} {:>12} {}",
+                                    "{:<15} {:<19} {:<19} {:>12} {:>12} {:<10} {:<16} {}",
                                     row.partition_type,
                                     row.partition_value,
                                     row.partition_start_ts,
                                     row.start_block,
                                     row.stop_block,
+                                    partition_completeness(row.complete),
+                                    match row.routing_context_required {
+                                        Some(true) => "required",
+                                        Some(false) => "independent",
+                                        None => "unknown",
+                                    },
                                     row.chain.unwrap_or_default()
                                 );
                             }
@@ -2796,6 +2841,7 @@ async fn main() -> Result<()> {
                     partition_value,
                     partition_chain,
                     strict_single_chain,
+                    all_spans,
                     json,
                     aws_access_key_id,
                     aws_secret_access_key,
@@ -2821,6 +2867,7 @@ async fn main() -> Result<()> {
                         Some(&aws),
                         &PartitionResolveOptions {
                             strict_single_chain: *strict_single_chain,
+                            all_spans: *all_spans,
                         },
                     )?;
 
@@ -2830,11 +2877,18 @@ async fn main() -> Result<()> {
                         println!("partitions_index: {}", result.partitions_index);
                         println!("partition_type:   {}", result.partition_type);
                         println!("partition_value:  {}", result.partition_value);
+                        print_partition_coverage(Some(&result.coverage));
                         if let Some(chain) = result.partition_chain {
                             println!("partition_chain:  {chain}");
                         }
-                        println!("start_block:      {}", result.start_block);
-                        println!("stop_block:       {}", result.stop_block);
+                        println!(
+                            "start_block:      {}",
+                            result.start_block.expect("single span")
+                        );
+                        println!(
+                            "stop_block:       {}",
+                            result.stop_block.expect("single span")
+                        );
                     }
 
                     return Ok(());
