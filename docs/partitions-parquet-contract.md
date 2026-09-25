@@ -55,4 +55,6 @@ Older experimental layouts such as `partition_type`/`partition_value` row column
 
 `partitions resolve` reads the canonical `partitions.parquet` artifact directly.
 
+Readers order, match, and range-filter rows on the numeric `partition` value (start block or epoch seconds), never on its rendered string form. Lexicographic ordering is wrong for block ranges (`10000000` would sort before `8000000`).
+
 `partitions.parquet` remains the only source of truth for partition lookups.

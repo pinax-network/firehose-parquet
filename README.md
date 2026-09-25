@@ -443,7 +443,7 @@ Behavior:
 
 ### `partitions ls` — Query Partition Index Rows
 
-Lists rows from `partitions.parquet` with optional filters and deterministic ascending order by `partition_start_ts`.
+Lists rows from `partitions.parquet` with optional filters and deterministic ascending order by partition value. Ordering and `--from` / `--to` filters use the numeric partition value (start block for `block_range`, UTC epoch seconds otherwise), so block ranges such as `8000000` sort before `10000000`.
 
 ```bash
 # List hour partitions from a local index
@@ -466,8 +466,8 @@ fireparq partitions ls \
 |---|---|---|
 | `--partition-type` | none | Optional partition type filter |
 | `--partition-chain` | none | Optional chain filter |
-| `--from` | none | Inclusive lower bound for `partition_start_ts` |
-| `--to` | none | Inclusive upper bound for `partition_start_ts` |
+| `--from` | none | Inclusive lower bound on the partition value (`YYYY-MM-DD HH:MM:SS`, or a start block for `block_range`) |
+| `--to` | none | Inclusive upper bound on the partition value (`YYYY-MM-DD HH:MM:SS`, or a start block for `block_range`) |
 | `--limit` | `100` | Maximum rows returned |
 | `--json` | `false` | Emit machine-readable output |
 
