@@ -592,7 +592,8 @@ Behavior:
 - bounded builds refuse to touch an existing `partitions.parquet` unless `--resume` (extend it) or `--overwrite` (replace it) is passed
 - bounded builds may expand the requested start/stop to the enclosing partition boundaries so each completed row remains exact
 - `--live` treats existing `partitions.parquet` rows as the restart anchor, polls for new finalized blocks, and keeps extending the canonical index
-- sparse probes skip forward across a small window of missing block numbers by default after probe retries are exhausted
+- sparse probes skip forward across missing block numbers (for example skipped Solana slots): a 16-block window first, then exponential samples and a scan of the skipped intervals find the exact next available block; exhausting the 65,536-block search budget fails instead of claiming the chain head was reached
+- sparse probes reuse one gRPC channel, retry timeouts and transient errors (a slow endpoint is never mistaken for a missing block), and fail fast on authentication errors; endpoints that answer an out-of-range request with an earlier head block terminate the search, while an unexpected later-block reply is an error
 - sparse probes treat missing/non-positive timestamps as missing metadata and borrow a nearby subsequent finalized block timestamp before partitioning
 
 | Flag | Default | Description |

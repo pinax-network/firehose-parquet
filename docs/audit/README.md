@@ -15,6 +15,7 @@ lifecycle state; a local implementation or passing test alone is not closure.
 - [#572: final completion checkpoints](572-final-completion-checkpoint.md)
 - [#506: NEAR qualification blocked by quota](506-near-qualification.md)
 - [#504: Beacon live mapping qualification](504-beacon-qualification.md)
+- [#485: partition probe reliability](485-partition-probe-reliability.md)
 - [#500: stable Solana reward indices](500-solana-reward-index.md)
 - [#502: explicit Solana instruction positions](502-solana-instruction-order.md)
 - [#473: responsive shutdown](473-responsive-shutdown.md)
