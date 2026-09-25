@@ -606,3 +606,6 @@ impl Drop for SessionBufferMetrics<'_> {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod maintenance_tests;
