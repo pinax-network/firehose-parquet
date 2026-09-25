@@ -232,10 +232,20 @@ impl SolanaBlockMapper {
     fn map_solana_block(
         &mut self,
         block: &solana::Block,
-        identity: &PreparedIdentity,
+        identity: &BlockIdentity,
         fork_step: Option<&str>,
     ) {
         let slot = block.slot;
+        let blockhash_bytes = solana_hash_bytes(&block.blockhash);
+        let previous_blockhash_bytes = solana_hash_bytes(&block.previous_blockhash);
+        // Canonical ids and time come from the block: its base58 blockhashes and
+        // `block_time` (null timestamp and date when missing).
+        let prepared = self
+            .blocks
+            .canonical
+            .prepare_with_ids(identity, &blockhash_bytes, &previous_blockhash_bytes)
+            .with_timestamp_seconds(block.block_time.as_ref().map(|bt| bt.timestamp));
+        let identity = &prepared;
 
         self.blocks.canonical.append(identity);
         self.blocks.slot.append_value(slot);
@@ -244,9 +254,7 @@ impl SolanaBlockMapper {
             Some(bh) => self.blocks.block_height.append_value(bh.block_height),
             None => self.blocks.block_height.append_null(),
         }
-        let blockhash_bytes = solana_hash_bytes(&block.blockhash);
         self.blocks.blockhash.append_value(&blockhash_bytes);
-        let previous_blockhash_bytes = solana_hash_bytes(&block.previous_blockhash);
         self.blocks
             .previous_blockhash
             .append_value(&previous_blockhash_bytes);
@@ -556,18 +564,7 @@ impl BlockMapper for SolanaBlockMapper {
     ) -> anyhow::Result<u64> {
         let block = solana::Block::decode(block_bytes)?;
         let tx_count = block.transactions.len() as u64;
-        // Canonical ids and time come from the block: its base58 blockhashes and
-        // `block_time` (null timestamp and date when missing).
-        let identity = self
-            .blocks
-            .canonical
-            .prepare_with_ids(
-                identity,
-                &solana_hash_bytes(&block.blockhash),
-                &solana_hash_bytes(&block.previous_blockhash),
-            )
-            .with_timestamp_seconds(block.block_time.as_ref().map(|bt| bt.timestamp));
-        self.map_solana_block(&block, &identity, fork_step);
+        self.map_solana_block(&block, identity, fork_step);
         Ok(tx_count)
     }
 
