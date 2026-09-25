@@ -19,6 +19,9 @@ use firehose_parquet::grpc::{
     classify_fetch_error, is_shutdown_error, unless_shutdown, CancellationToken, EndpointInfo,
     FetchErrorKind, FirehoseClient, ShutdownRequested,
 };
+use firehose_parquet::ingest::{
+    declare_inventory, load_authoritative_resume, BlockFamily, IngestionSession, MapperSemantics,
+};
 use firehose_parquet::metrics;
 use firehose_parquet::networks::{resolve_network_endpoint, EndpointSource};
 use firehose_parquet::partition_index::{
@@ -27,7 +30,9 @@ use firehose_parquet::partition_index::{
     INDEX_FORMAT_VERSION,
 };
 use firehose_parquet::traits::{decode_id_bytes, fork_step_name, BlockIdentity, BlockMapper};
-use firehose_parquet::writer::{OutputWriter, ParquetFileMetadata, WriterBufferStats};
+#[cfg(test)]
+use firehose_parquet::writer::OutputWriter;
+use firehose_parquet::writer::{ParquetFileMetadata, WriterBufferStats};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -232,6 +237,7 @@ fn next_mapper_flush_trigger(
     }
 }
 
+#[cfg(test)]
 fn write_mapper_flush(
     writer: &mut OutputWriter,
     batches: &HashMap<String, RecordBatch>,
@@ -362,6 +368,7 @@ impl StreamExit {
 /// mapper write or this remaining-buffer flush materialized data. Earlier
 /// normal-loop writes have already been checkpointed and do not count here.
 /// Returns whether the cursor commit ran.
+#[cfg(test)]
 fn flush_writer_on_exit(
     exit: StreamExit,
     writer: &mut OutputWriter,
@@ -757,6 +764,7 @@ struct GenesisTimestampBootstrap {
 
 #[derive(Debug, Clone)]
 struct BufferedBootstrapBlock {
+    received_ordinal: u64,
     block_bytes: Vec<u8>,
     cursor: String,
     fork_step: Option<String>,
@@ -888,6 +896,7 @@ impl TimestampBackfill {
         identity: BlockIdentity,
     ) -> anyhow::Result<Vec<BufferedBootstrapBlock>> {
         let current = BufferedBootstrapBlock {
+            received_ordinal: 0,
             block_bytes,
             cursor,
             fork_step,
@@ -1143,6 +1152,20 @@ fn log_existing_partitions_index_state(
             "no existing partitions index found; starting with a fresh canonical index"
         );
     }
+}
+
+fn protected_block_family(label: &str) -> Result<BlockFamily> {
+    Ok(match label {
+        "evm" => BlockFamily::Evm,
+        "bitcoin" => BlockFamily::Bitcoin,
+        "solana" => BlockFamily::Solana,
+        "near" => BlockFamily::Near,
+        "antelope" => BlockFamily::Antelope,
+        "cosmos" => BlockFamily::Cosmos,
+        "tron" => BlockFamily::Tron,
+        "beacon" => BlockFamily::Beacon,
+        _ => return Err(anyhow!("unsupported resolved mapper family")),
+    })
 }
 
 fn detect_block_type(type_url: &str) -> Result<String> {
@@ -3167,6 +3190,30 @@ fn ingestion_mutation_scopes(
     Ok(scopes)
 }
 
+fn commit_ingestion_flush(
+    session: &mut IngestionSession<'_>,
+    batches: HashMap<String, RecordBatch>,
+    metadata: BlockMetadata,
+    compression: Compression,
+    file_metadata: ParquetFileMetadata,
+    metrics: &metrics::PipelineMetrics,
+    trigger: &str,
+) -> Result<WriterFlushOutcome> {
+    let committed = session.flush_blocking(batches, metadata, compression, file_metadata)?;
+    if committed.is_some() {
+        metrics
+            .flushes_total
+            .get_or_create(&metrics::FlushLabels {
+                trigger: trigger.into(),
+            })
+            .inc();
+    }
+    Ok(WriterFlushOutcome {
+        materialized: committed.is_some_and(|flush| flush.files > 0),
+        buffered: WriterBufferStats::default(),
+    })
+}
+
 async fn run_ingestion(args: &BuildArgs, global: &GlobalArgs) -> Result<()> {
     init_tracing(
         &args.common.log_level,
@@ -3185,7 +3232,7 @@ async fn run_ingestion(args: &BuildArgs, global: &GlobalArgs) -> Result<()> {
     let cursor_shutdown = Arc::new(AtomicBool::new(false));
     spawn_ingestion_shutdown_handler(shutdown.clone(), Arc::clone(&cursor_shutdown));
 
-    let block_type = args.block_type.to_lowercase();
+    let mut block_type = args.block_type.to_lowercase();
     if block_type != "auto" && !BLOCK_TYPES.contains(&block_type.as_str()) {
         return Err(anyhow!(
             "unsupported block type: {block_type}. Supported: {}",
@@ -3271,8 +3318,14 @@ async fn run_ingestion(args: &BuildArgs, global: &GlobalArgs) -> Result<()> {
     // Use chain_name as a subdirectory under the output path.
     config.output = resolve_output(&config.output, &endpoint_info)?;
 
+    // Protected authority must bind the actual mapper before opening Blocks.
+    // Unknown custom endpoint metadata therefore requires an explicit family.
+    if !config.dry_run && block_type == "auto" {
+        block_type = inferred_block_type_from_endpoint_info(&endpoint_info)
+            .context("cannot resolve the mapper from EndpointInfo before protected recovery; provide --block-type explicitly")?.to_owned();
+    }
     let cursor_location = resolve_cursor_location(&config)?;
-    let ownership = if config.dry_run {
+    let mut ownership = if config.dry_run {
         None
     } else {
         let aws = AwsConfig {
@@ -3291,8 +3344,11 @@ async fn run_ingestion(args: &BuildArgs, global: &GlobalArgs) -> Result<()> {
             .await?,
         )
     };
-    let existing_cursor_state =
-        load_existing_cursor(cursor_location.as_ref(), args.cursor_override)?;
+    let existing_cursor_state = if let Some(ownership) = &ownership {
+        load_authoritative_resume(&config, ownership, args.cursor_override).await?
+    } else {
+        load_existing_cursor(cursor_location.as_ref(), args.cursor_override)?
+    };
     let solana_chain = chain_is_solana(&block_type, &endpoint_info, existing_cursor_state.as_ref());
     let antelope_chain =
         chain_is_antelope(&block_type, &endpoint_info, existing_cursor_state.as_ref());
@@ -3347,6 +3403,10 @@ async fn run_ingestion(args: &BuildArgs, global: &GlobalArgs) -> Result<()> {
         extended = false;
     } else if known_non_solana_chain {
         extended = resolve_extended_mode(extended, args.without_extended, &endpoint_info);
+    }
+
+    if !config.dry_run && block_type != "evm" {
+        extended = false;
     }
 
     let tron_style_evm_profile = endpoint_uses_tron_style_evm_profile(&endpoint_info);
@@ -3500,6 +3560,9 @@ async fn run_ingestion(args: &BuildArgs, global: &GlobalArgs) -> Result<()> {
     }
 
     // Pass metrics to the gRPC client for reconnect tracking.
+    // Metadata/default resolution may have supplied an original start that was
+    // absent when the startup Info client was built. Blocks uses the resolved request.
+    client = FirehoseClient::new(config.clone())?;
     client.set_metrics(pipeline_metrics.clone());
 
     let final_blocks_only = config.final_blocks_only;
@@ -3538,28 +3601,9 @@ async fn run_ingestion(args: &BuildArgs, global: &GlobalArgs) -> Result<()> {
         );
     }
 
-    let mut writer = if firehose_parquet::writer::is_s3_output(&config.output) {
-        OutputWriter::new_s3(
-            &config.output.to_string_lossy(),
-            config.partition.clone(),
-            config.compression,
-            &config,
-            flush_bytes,
-        )?
-    } else {
-        OutputWriter::new(
-            &config.output,
-            config.partition.clone(),
-            config.compression,
-            flush_bytes,
-        )
-    };
-
-    // Pass metrics to the writer for file/byte/row tracking.
-    writer.set_metrics(pipeline_metrics.clone());
-
     // If block type is known upfront, resolve encode_bytes and create mapper immediately.
     // If "auto", defer until first block arrives.
+    let mut current_file_metadata = ParquetFileMetadata::new();
     let mut mapper: Option<Box<dyn BlockMapper>> = if block_type != "auto" {
         let encode_bytes = initial_bytes_encoding.clone();
         let meta = build_file_metadata(
@@ -3577,7 +3621,7 @@ async fn run_ingestion(args: &BuildArgs, global: &GlobalArgs) -> Result<()> {
             use_synthetic_partition_routing,
         );
         log_file_metadata(&meta);
-        writer.inner.set_file_metadata(meta);
+        current_file_metadata = meta;
         Some(create_mapper(
             &block_type,
             extended,
@@ -3591,6 +3635,56 @@ async fn run_ingestion(args: &BuildArgs, global: &GlobalArgs) -> Result<()> {
         None
     };
 
+    let mut session = if let Some(owner) = &ownership {
+        let mapper = mapper
+            .as_mut()
+            .context("protected ingestion requires a mapper before recovery")?;
+        let empty_batches = mapper.flush()?;
+        let tables = declare_inventory(&empty_batches, &mapper.table_names())?;
+        let semantics = MapperSemantics {
+            chain: endpoint_info
+                .as_ref()
+                .context("endpoint identity is required")?
+                .chain_name
+                .clone(),
+            family: protected_block_family(&block_type)?,
+            bytes_encoding: initial_bytes_encoding_label.clone(),
+            extended,
+            with_votes,
+            include_failed_transactions,
+            tables,
+        };
+        Some(
+            IngestionSession::open(
+                &config,
+                semantics,
+                owner,
+                Some(&pipeline_metrics),
+                Some(&cursor_shutdown),
+            )
+            .await?,
+        )
+    } else {
+        None
+    };
+    if let Some(session) = &session {
+        if let Some((source_block, seconds)) = session.routing_anchor_source() {
+            timestamp_backfill.restore_anchor(source_block, seconds);
+        }
+    }
+    let already_complete = match (&session, config.stop_block) {
+        (Some(session), Some(stop)) => session.request_already_complete(stop)?,
+        _ => false,
+    };
+    if already_complete {
+        info!(stop_block=?config.stop_block, "requested range is already complete; recovered authority and cursor mirror without opening Blocks");
+        drop(session);
+        if let Some(owner) = ownership.take() {
+            owner.release().await?;
+        }
+        return Ok(());
+    }
+
     let mut blocks_observed: u64 = 0;
     let mut blocks_processed: u64 = 0;
     let mut transactions_processed: u64 = 0;
@@ -3603,9 +3697,6 @@ async fn run_ingestion(args: &BuildArgs, global: &GlobalArgs) -> Result<()> {
     let mut global_max_block: Option<u64> = None;
     let mut blocks_since_flush: u64 = 0;
     let mut last_flush_time = Instant::now();
-    let mut last_cursor: Option<String> = None;
-    let mut last_block_num: u64 = 0;
-    let mut last_block_id: String = String::new();
     let mut bytes_read: u64 = 0;
     let mut buffered_bootstrap_blocks: Vec<BufferedBootstrapBlock> = Vec::new();
     let progress_start = Instant::now();
@@ -3651,7 +3742,7 @@ async fn run_ingestion(args: &BuildArgs, global: &GlobalArgs) -> Result<()> {
     };
 
     // Validate cursor parameters against current CLI arguments.
-    if let Some(loaded) = existing_cursor_state.as_ref() {
+    if let Some(loaded) = existing_cursor_state.as_ref().filter(|_| dry_run) {
         let mut mismatches = loaded.validate_params(&cursor_state_template);
         mismatches.retain(|mismatch| !mismatch.starts_with("stop_block:"));
         if solana_chain {
@@ -3674,14 +3765,24 @@ async fn run_ingestion(args: &BuildArgs, global: &GlobalArgs) -> Result<()> {
         }
     }
 
+    let resume_cursor = match &session {
+        Some(session) => session.resume_cursor().map(str::to_owned),
+        None => stream_resume_cursor(existing_cursor_state.as_ref(), args.cursor_override),
+    };
     let stream_result = client
-        .stream_blocks(stream_resume_cursor(existing_cursor_state.as_ref(), args.cursor_override), &shutdown, |block_bytes, type_url, cursor_str, identity: BlockIdentity, step: i32| {
+        .stream_blocks(resume_cursor, &shutdown, |block_bytes, type_url, cursor_str, identity: BlockIdentity, step: i32| {
+            let received_ordinal = if let Some(session) = session.as_mut() {
+                let family = protected_block_family(&detect_block_type(&type_url)?)?;
+                session.receive(cursor_str.clone(), &identity, step, family)?
+            } else { 0 };
             let fork_step_str = fork_step_name(step);
             if final_blocks_only && step == 2 {
+                if let Some(session) = session.as_mut() { session.accept_filtered(received_ordinal)?; }
                 return Ok(());
             }
             if !start_block_filter.admit(identity.block_num) {
                 pipeline_metrics.blocks_skipped_below_start_total.inc();
+                if let Some(session) = session.as_mut() { session.accept_filtered(received_ordinal)?; }
                 return Ok(());
             }
 
@@ -3742,7 +3843,7 @@ async fn run_ingestion(args: &BuildArgs, global: &GlobalArgs) -> Result<()> {
                     detected_uses_synthetic_partition_routing,
                 );
                 log_file_metadata(&meta);
-                writer.inner.set_file_metadata(meta);
+                current_file_metadata = meta;
                 let mut cursor_meta = build_cursor_file_metadata(
                     Some(&detected),
                     Some(&encode_bytes),
@@ -3788,7 +3889,7 @@ async fn run_ingestion(args: &BuildArgs, global: &GlobalArgs) -> Result<()> {
             let ts = identity.timestamp;
             blocks_observed += 1;
             let fork_step_owned = fork_step_str.map(str::to_owned);
-            let ready_solana_blocks = if is_solana && use_synthetic_partition_routing {
+            let mut ready_solana_blocks = if is_solana && use_synthetic_partition_routing {
                 timestamp_backfill.observe_block(
                     block_bytes,
                     cursor_str,
@@ -3797,12 +3898,20 @@ async fn run_ingestion(args: &BuildArgs, global: &GlobalArgs) -> Result<()> {
                 )?
             } else {
                 vec![BufferedBootstrapBlock {
+                    received_ordinal: 0,
                     block_bytes,
                     cursor: cursor_str,
                     fork_step: fork_step_owned,
                     identity,
                 }]
             };
+            let resumed_bootstrap_timestamp = (!is_solana && ts == 0)
+                .then(|| session.as_ref().and_then(IngestionSession::routing_timestamp_hint))
+                .flatten();
+            for block in &mut ready_solana_blocks {
+                block.received_ordinal = received_ordinal;
+                if let Some(seconds) = resumed_bootstrap_timestamp { block.identity.timestamp = seconds; }
+            }
             let current_anchor_timestamp = ready_solana_blocks
                 .last()
                 .map(|block| block.identity.timestamp)
@@ -3842,7 +3951,7 @@ async fn run_ingestion(args: &BuildArgs, global: &GlobalArgs) -> Result<()> {
             }
             // For Solana, blocks may legitimately lack timestamps — skip the
             // genesis bootstrap and timestamp validation entirely.
-            if !is_solana {
+            if !is_solana && resumed_bootstrap_timestamp.is_none() {
                 match genesis_timestamp_bootstrap.observe_block(blocks_processed, block_number, ts) {
                     GenesisTimestampBootstrapAction::Buffer => {
                         if genesis_timestamp_bootstrap.buffered_blocks == 1 {
@@ -3853,6 +3962,7 @@ async fn run_ingestion(args: &BuildArgs, global: &GlobalArgs) -> Result<()> {
                             );
                         }
                         buffered_bootstrap_blocks.push(BufferedBootstrapBlock {
+                            received_ordinal,
                             block_bytes: ready_solana_blocks[0].block_bytes.clone(),
                             cursor: ready_solana_blocks[0].cursor.clone(),
                             fork_step: ready_solana_blocks[0].fork_step.clone(),
@@ -3879,7 +3989,9 @@ async fn run_ingestion(args: &BuildArgs, global: &GlobalArgs) -> Result<()> {
             let mut process_block = |block_bytes: &[u8],
                                      identity: &BlockIdentity,
                                      fork_step: Option<&str>,
-                                     cursor: &str|
+                                     _cursor: &str,
+                                     received_ordinal: u64,
+                                     lookahead_ordinal: Option<u64>|
              -> Result<()> {
                 let block_number = identity.block_num;
                 let ts = identity.timestamp;
@@ -3897,7 +4009,7 @@ async fn run_ingestion(args: &BuildArgs, global: &GlobalArgs) -> Result<()> {
                     let partition_changed = current_partition_key
                         .as_ref()
                         .map_or(false, |cur| cur != new_key);
-                    if partition_changed && m.max_table_rows() > 0 {
+                    if partition_changed && (m.max_table_rows() > 0 || session.as_ref().map(IngestionSession::has_accepted).transpose()?.unwrap_or(false)) {
                         info!(
                             old_partition = %current_partition_key.as_deref().unwrap_or("?"),
                             new_partition = %new_key,
@@ -3919,34 +4031,10 @@ async fn run_ingestion(args: &BuildArgs, global: &GlobalArgs) -> Result<()> {
                         );
                         if !dry_run {
                             let metadata = BlockMetadata {
-                                min_block_number: min_block.unwrap_or(0),
-                                max_block_number: max_block.unwrap_or(0),
-                                min_timestamp,
-                                max_timestamp,
+                                min_block_number: min_block.unwrap_or(0), max_block_number: max_block.unwrap_or(0), min_timestamp, max_timestamp,
                             };
-                            if let Some(ownership) = &ownership { ownership.revalidate_local_paths()?; }
-                            let outcome = write_mapper_flush(&mut writer, &batches, &metadata)?;
-                            log_writer_flush_outcome(
-                                "partition_boundary",
-                                flushed_tables,
-                                flushed_rows,
-                                outcome,
-                            );
-                            if outcome.materialized {
-                                pipeline_metrics.flushes_total.get_or_create(&metrics::FlushLabels { trigger: "partition_boundary".to_string() }).inc();
-                                if let (Some(ref loc), Some(ref cursor)) = (&cursor_location, &last_cursor) {
-                                    let mut state = cursor_state_template.clone();
-                                    state.cursor = cursor.clone();
-                                    state.last_block_num = last_block_num;
-                                    state.last_block_id = decode_id_bytes(&last_block_id);
-                                    state.last_timestamp = timestamp_backfill.current_anchor_timestamp();
-                                    state.updated_at = time::OffsetDateTime::now_utc()
-                                        .format(&time::format_description::well_known::Rfc3339)
-                                        .unwrap_or_default();
-                                    if let Some(ownership) = &ownership { ownership.revalidate_local_paths()?; }
-                                    loc.save_with_retry_blocking(&state, &pipeline_metrics, &cursor_shutdown)?;
-                                }
-                            }
+                            let outcome = commit_ingestion_flush(session.as_mut().context("protected session is required")?, batches, metadata, config.compression, current_file_metadata.clone(), &pipeline_metrics, "partition_boundary")?;
+                            log_writer_flush_outcome("partition_boundary", flushed_tables, flushed_rows, outcome);
                         } else {
                             info!(
                                 trigger = "partition_boundary",
@@ -3968,6 +4056,9 @@ async fn run_ingestion(args: &BuildArgs, global: &GlobalArgs) -> Result<()> {
                 let mapped = m.map_block(block_bytes, identity, fork_step);
                 update_mapper_buffer_metrics(&pipeline_metrics, m.as_mut());
                 transactions_processed += mapped?;
+                if let Some(session) = session.as_mut() {
+                    session.accept_mapped(received_ordinal, (ts != 0).then_some(ts), lookahead_ordinal)?;
+                }
 
                 // Only count the block in the file metadata once it is mapped.
                 min_block = Some(min_block.map_or(block_number, |s: u64| s.min(block_number)));
@@ -3982,9 +4073,6 @@ async fn run_ingestion(args: &BuildArgs, global: &GlobalArgs) -> Result<()> {
                 blocks_processed += 1;
                 blocks_since_flush += 1;
                 bytes_read += block_bytes.len() as u64;
-                last_cursor = Some(cursor.to_owned());
-                last_block_num = block_number;
-                last_block_id = identity.block_id.clone();
 
                 // Update Prometheus metrics.
                 pipeline_metrics.blocks_processed_total.inc();
@@ -4079,31 +4167,10 @@ async fn run_ingestion(args: &BuildArgs, global: &GlobalArgs) -> Result<()> {
                     );
                     if !dry_run {
                         let metadata = BlockMetadata {
-                            min_block_number: min_block.unwrap_or(0),
-                            max_block_number: max_block.unwrap_or(0),
-                            min_timestamp,
-                            max_timestamp,
+                            min_block_number: min_block.unwrap_or(0), max_block_number: max_block.unwrap_or(0), min_timestamp, max_timestamp,
                         };
-                        if let Some(ownership) = &ownership { ownership.revalidate_local_paths()?; }
-                            let outcome = write_mapper_flush(&mut writer, &batches, &metadata)?;
+                        let outcome = commit_ingestion_flush(session.as_mut().context("protected session is required")?, batches, metadata, config.compression, current_file_metadata.clone(), &pipeline_metrics, flush_trigger)?;
                         log_writer_flush_outcome(flush_trigger, flushed_tables, flushed_rows, outcome);
-
-                        // Only update cursor after all tables have been written.
-                        if outcome.materialized {
-                            pipeline_metrics.flushes_total.get_or_create(&metrics::FlushLabels { trigger: flush_trigger.to_string() }).inc();
-                            if let (Some(ref loc), Some(ref cursor)) = (&cursor_location, &last_cursor) {
-                                let mut state = cursor_state_template.clone();
-                                state.cursor = cursor.clone();
-                                state.last_block_num = last_block_num;
-                                state.last_block_id = decode_id_bytes(&last_block_id);
-                                state.last_timestamp = timestamp_backfill.current_anchor_timestamp();
-                                state.updated_at = time::OffsetDateTime::now_utc()
-                                    .format(&time::format_description::well_known::Rfc3339)
-                                    .unwrap_or_default();
-                                if let Some(ownership) = &ownership { ownership.revalidate_local_paths()?; }
-                                loc.save_with_retry_blocking(&state, &pipeline_metrics, &cursor_shutdown)?;
-                            }
-                        }
                     } else {
                         info!(
                             trigger = flush_trigger,
@@ -4134,6 +4201,8 @@ async fn run_ingestion(args: &BuildArgs, global: &GlobalArgs) -> Result<()> {
                     &buffered_block.identity,
                     buffered_block.fork_step.as_deref(),
                     &buffered_block.cursor,
+                    buffered_block.received_ordinal,
+                    Some(received_ordinal),
                 )?;
             }
 
@@ -4143,6 +4212,8 @@ async fn run_ingestion(args: &BuildArgs, global: &GlobalArgs) -> Result<()> {
                     &ready_block.identity,
                     ready_block.fork_step.as_deref(),
                     &ready_block.cursor,
+                    ready_block.received_ordinal,
+                    None,
                 )?;
             }
 
@@ -4167,110 +4238,54 @@ async fn run_ingestion(args: &BuildArgs, global: &GlobalArgs) -> Result<()> {
     // already flushed during normal processing are preserved, and on restart
     // the stream resumes from the last saved cursor, which corresponds to the
     // last fully-written flush.
-    let mut final_mapper_materialized = false;
     if !exit.materializes_buffers() {
-        let skipped_message = if exit == StreamExit::Failed {
-            "stream error skipped partial flushes; buffered data was not materialized to storage and the cursor was not advanced"
-        } else {
-            "graceful shutdown skipped partial flushes; buffered data was not materialized to storage"
-        };
-        let mapper_buffered_rows = mapper.as_ref().map(|m| m.total_rows()).unwrap_or(0);
-        let writer_buffered = writer.buffered_stats();
         info!(
-            mapper_buffered_rows,
-            writer_buffered_tables = writer_buffered.tables,
-            writer_buffered_rows = writer_buffered.rows,
-            writer_buffered_estimated_bytes =
-                firehose_parquet::cli::format_bytes(writer_buffered.estimated_compressed_bytes),
-            timestamp_backfill_buffered_blocks = timestamp_backfill.buffered_blocks_len(),
-            timestamp_backfill_buffered_bytes =
-                firehose_parquet::cli::format_bytes(timestamp_backfill.buffered_bytes()),
-            "{skipped_message}"
+            mapper_buffered_rows = mapper
+                .as_ref()
+                .map(|mapper| mapper.total_rows())
+                .unwrap_or(0),
+            "stream stopped; discarded uncommitted buffers and retained the authoritative prefix"
         );
-    } else {
-        let trailing_timestamp_backfill_blocks = timestamp_backfill.drain_open_span()?;
-        if let Some(m) = mapper.as_mut() {
-            for buffered_block in trailing_timestamp_backfill_blocks {
-                let block_number = buffered_block.identity.block_num;
-                let ts = buffered_block.identity.timestamp;
-                let mapped = m.map_block(
-                    &buffered_block.block_bytes,
-                    &buffered_block.identity,
-                    buffered_block.fork_step.as_deref(),
-                );
-                update_mapper_buffer_metrics(&pipeline_metrics, m.as_mut());
-                transactions_processed += mapped?;
-
-                min_block = Some(min_block.map_or(block_number, |s: u64| s.min(block_number)));
-                max_block = Some(max_block.map_or(block_number, |s: u64| s.max(block_number)));
-                global_min_block =
-                    Some(global_min_block.map_or(block_number, |s: u64| s.min(block_number)));
-                global_max_block =
-                    Some(global_max_block.map_or(block_number, |s: u64| s.max(block_number)));
-                min_timestamp = Some(min_timestamp.map_or(ts, |s: i64| s.min(ts)));
-                max_timestamp = Some(max_timestamp.map_or(ts, |s: i64| s.max(ts)));
-
-                blocks_processed += 1;
-                bytes_read += buffered_block.block_bytes.len() as u64;
-                last_cursor = Some(buffered_block.cursor);
-                last_block_num = block_number;
-                last_block_id = buffered_block.identity.block_id.clone();
-                pipeline_metrics.blocks_processed_total.inc();
-                pipeline_metrics
-                    .bytes_read_total
-                    .inc_by(buffered_block.block_bytes.len() as u64);
-                pipeline_metrics
-                    .current_block_number
-                    .set(block_number as i64);
-            }
-            if m.max_table_rows() > 0 {
-                let batches = m.flush()?;
-                update_mapper_buffer_metrics(&pipeline_metrics, m.as_mut());
-                if !dry_run {
-                    let metadata = BlockMetadata {
-                        min_block_number: min_block.unwrap_or(0),
-                        max_block_number: max_block.unwrap_or(0),
-                        min_timestamp,
-                        max_timestamp,
-                    };
-                    if let Some(ownership) = &ownership {
-                        ownership.revalidate_local_paths()?;
-                    }
-                    final_mapper_materialized = writer.write_all(&batches, &metadata)?;
+    } else if let Some(mapper) = mapper.as_mut() {
+        anyhow::ensure!(
+            timestamp_backfill.drain_open_span()?.is_empty(),
+            "unresolved timestamp routing remains at clean EOF"
+        );
+        if mapper.max_table_rows() > 0
+            || session
+                .as_ref()
+                .map(IngestionSession::has_accepted)
+                .transpose()?
+                .unwrap_or(false)
+        {
+            let batches = mapper.flush()?;
+            update_mapper_buffer_metrics(&pipeline_metrics, mapper.as_mut());
+            if let Some(session) = session.as_mut() {
+                let metadata = BlockMetadata {
+                    min_block_number: min_block.unwrap_or(0),
+                    max_block_number: max_block.unwrap_or(0),
+                    min_timestamp,
+                    max_timestamp,
+                };
+                if session
+                    .flush(
+                        batches,
+                        metadata,
+                        config.compression,
+                        current_file_metadata.clone(),
+                    )
+                    .await?
+                    .is_some()
+                {
+                    pipeline_metrics
+                        .flushes_total
+                        .get_or_create(&metrics::FlushLabels {
+                            trigger: "stream_end".into(),
+                        })
+                        .inc();
                 }
             }
         }
-    }
-
-    // Flush any remaining buffered data in the writer, then save the cursor
-    // after the final flush. Both are skipped unless the stream completed.
-    if !dry_run {
-        if let Some(ownership) = &ownership {
-            ownership.revalidate_local_paths()?;
-        }
-        flush_writer_on_exit(
-            exit,
-            &mut writer,
-            final_mapper_materialized,
-            &pipeline_metrics,
-            || {
-                if let (Some(ref loc), Some(ref cursor)) = (&cursor_location, &last_cursor) {
-                    let mut state = cursor_state_template.clone();
-                    state.cursor = cursor.clone();
-                    state.last_block_num = last_block_num;
-                    state.last_block_id = decode_id_bytes(&last_block_id);
-                    state.last_timestamp = timestamp_backfill.current_anchor_timestamp();
-                    state.updated_at = time::OffsetDateTime::now_utc()
-                        .format(&time::format_description::well_known::Rfc3339)
-                        .unwrap_or_default();
-                    if let Some(ownership) = &ownership {
-                        ownership.revalidate_local_paths()?;
-                    }
-                    loc.save_with_retry_blocking(&state, &pipeline_metrics, &cursor_shutdown)?;
-                }
-                Ok(())
-            },
-        )?;
     }
 
     if exit == StreamExit::Completed && genesis_timestamp_bootstrap.enabled {
@@ -4279,6 +4294,26 @@ async fn run_ingestion(args: &BuildArgs, global: &GlobalArgs) -> Result<()> {
                 first_buffered_block,
                 genesis_timestamp_bootstrap.buffered_blocks,
             ));
+        }
+    }
+
+    if let (StreamExit::Completed, Some(stop)) = (exit, config.stop_block) {
+        if let Some(session) = session.as_mut() {
+            session.complete_request(stop, true).await?;
+        } else {
+            let resumed_block_num =
+                stream_resume_cursor(existing_cursor_state.as_ref(), args.cursor_override)
+                    .and(existing_cursor_state.as_ref())
+                    .map(|state| state.last_block_num);
+            let gaps_allowed = resolved_block_type
+                .as_deref()
+                .or(initial_block_type)
+                .is_some_and(block_type_allows_block_number_gaps);
+            ensure_bounded_stream_reached_stop(
+                stop,
+                global_max_block.max(resumed_block_num),
+                gaps_allowed,
+            )?;
         }
     }
 
@@ -4332,20 +4367,7 @@ async fn run_ingestion(args: &BuildArgs, global: &GlobalArgs) -> Result<()> {
         return stream_result;
     }
 
-    // A bounded stream that ended cleanly must have reached its last requested
-    // block. The final flush above only committed the blocks received.
-    if let (StreamExit::Completed, Some(stop_block)) = (exit, config.stop_block) {
-        let resumed_block_num =
-            stream_resume_cursor(existing_cursor_state.as_ref(), args.cursor_override)
-                .and(existing_cursor_state.as_ref())
-                .map(|state| state.last_block_num);
-        let last_block_num = global_max_block.max(resumed_block_num);
-        let block_number_gaps_allowed = resolved_block_type
-            .as_deref()
-            .or(initial_block_type)
-            .is_some_and(block_type_allows_block_number_gaps);
-        ensure_bounded_stream_reached_stop(stop_block, last_block_num, block_number_gaps_allowed)?;
-    }
+    drop(session);
 
     // All synchronous writes have resolved by this point. Any earlier error or
     // cancellation of this future drops the guard and retains remote ownership.
@@ -4368,6 +4390,48 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
     use std::sync::Arc;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn protected_inventory_declares_every_effective_mapper_schema_before_receipt() {
+        for family in BLOCK_TYPES
+            .iter()
+            .copied()
+            .filter(|family| *family != "auto")
+        {
+            for encoding in [
+                EncodeBytes::Binary,
+                EncodeBytes::Hex,
+                EncodeBytes::HexNoPrefix,
+                EncodeBytes::Base58,
+                EncodeBytes::TronBase58,
+            ] {
+                for fork_steps in [false, true] {
+                    for feature in [false, true] {
+                        let mut mapper = create_mapper(
+                            family,
+                            feature,
+                            feature,
+                            fork_steps,
+                            encoding.clone(),
+                            family == "solana" && feature,
+                            feature,
+                        )
+                        .unwrap();
+                        let first = mapper.flush().unwrap();
+                        let inventory = declare_inventory(&first, &mapper.table_names())
+                            .unwrap_or_else(|error| panic!("{family} empty inventory: {error}"));
+                        assert!(!inventory.is_empty());
+                        let second = mapper.flush().unwrap();
+                        assert_eq!(
+                            inventory,
+                            declare_inventory(&second, &mapper.table_names()).unwrap(),
+                            "{family} empty schema changes between flushes"
+                        );
+                    }
+                }
+            }
+        }
+    }
 
     fn make_test_batch() -> RecordBatch {
         let schema = Arc::new(Schema::new(vec![
@@ -6621,6 +6685,7 @@ mod tests {
     fn test_take_anchored_bootstrap_blocks_preserves_block_numbers() {
         let mut buffered_blocks = vec![
             BufferedBootstrapBlock {
+                received_ordinal: 0,
                 block_bytes: vec![0x01],
                 cursor: "cursor-0".to_string(),
                 fork_step: None,
@@ -6632,6 +6697,7 @@ mod tests {
                 },
             },
             BufferedBootstrapBlock {
+                received_ordinal: 0,
                 block_bytes: vec![0x02],
                 cursor: "cursor-1".to_string(),
                 fork_step: Some("STEP_NEW".to_string()),

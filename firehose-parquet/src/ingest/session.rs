@@ -27,7 +27,7 @@ use crate::writer::ParquetFileMetadata;
 /// The caller gets schemas by flushing a newly constructed, empty mapper. No
 /// blockchain payload is consumed and the complete inventory is frozen before
 /// opening Blocks, including tables which emit zero rows in this run.
-pub(crate) fn declare_inventory(
+pub fn declare_inventory(
     empty_batches: &HashMap<String, RecordBatch>,
     declared_names: &[&str],
 ) -> Result<BTreeMap<String, Digest>> {
@@ -60,7 +60,7 @@ pub(crate) fn declare_inventory(
         .collect()
 }
 
-pub(crate) struct MapperSemantics {
+pub struct MapperSemantics {
     pub chain: String,
     pub family: BlockFamily,
     pub bytes_encoding: String,
@@ -195,7 +195,7 @@ async fn existing(
 /// Compatibility fields used only to resolve CLI defaults. This reads mandatory
 /// authority, never an optional cursor file. The final open revalidates the full
 /// mapper descriptor and performs pending recovery before Blocks may connect.
-pub(crate) async fn load_authoritative_resume(
+pub async fn load_authoritative_resume(
     config: &Config,
     ownership: &DatasetOwnership,
     cursor_override: bool,
@@ -222,7 +222,7 @@ pub(crate) async fn load_authoritative_resume(
     Ok(Some(super::mirror::resume_parameters(&authority)?))
 }
 
-pub(crate) struct IngestionSession<'a> {
+pub struct IngestionSession<'a> {
     controller: TransactionController<'a, ProtectedMirror<'a>>,
     frontier: AcceptedFrontier,
     failed: bool,
@@ -230,7 +230,7 @@ pub(crate) struct IngestionSession<'a> {
 }
 
 impl<'a> IngestionSession<'a> {
-    pub(crate) async fn open(
+    pub async fn open(
         config: &Config,
         mapper: MapperSemantics,
         ownership: &'a DatasetOwnership,
@@ -303,27 +303,55 @@ impl<'a> IngestionSession<'a> {
         })
     }
 
+    pub fn routing_anchor_source(&self) -> Option<(u64, i64)> {
+        self.frontier
+            .routing()
+            .anchor
+            .as_ref()
+            .map(|anchor| (anchor.source_block_num, anchor.seconds))
+    }
+
+    /// Bridge the synchronous Blocks callback while allowing the multi-thread
+    /// runtime to continue driving storage, metrics and shutdown signals.
+    pub fn flush_blocking(
+        &mut self,
+        batches: HashMap<String, RecordBatch>,
+        metadata: BlockMetadata,
+        compression: Compression,
+        file_metadata: ParquetFileMetadata,
+    ) -> Result<Option<CommittedFlush>> {
+        let runtime = tokio::runtime::Handle::try_current()
+            .context("ingestion callback requires a Tokio runtime")?;
+        ensure!(
+            runtime.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread,
+            "ingestion callback requires a multi-thread runtime; await flush in async code"
+        );
+        tokio::task::block_in_place(|| {
+            runtime.block_on(self.flush(batches, metadata, compression, file_metadata))
+        })
+    }
+
     pub(crate) fn authority(&self) -> &AuthorityState {
         self.controller.authority()
     }
-    pub(crate) fn resume_cursor(&self) -> Option<&str> {
+    pub fn resume_cursor(&self) -> Option<&str> {
         self.authority()
             .checkpoint
             .event
             .as_ref()
             .map(|event| event.cursor.as_str())
     }
-    pub(crate) fn routing_timestamp_hint(&self) -> Option<i64> {
+    pub fn routing_timestamp_hint(&self) -> Option<i64> {
         self.frontier
             .routing()
             .anchor
             .as_ref()
             .map(|anchor| anchor.seconds)
     }
-    pub(crate) fn has_accepted(&self) -> Result<bool> {
+    pub fn has_accepted(&self) -> Result<bool> {
         Ok(self.frontier.snapshot()?.is_some())
     }
-    pub(crate) fn request_already_complete(&self, stop: u64) -> Result<bool> {
+    pub fn request_already_complete(&self, stop: u64) -> Result<bool> {
         self.controller.request_already_complete(stop)
     }
 
@@ -334,7 +362,7 @@ impl<'a> IngestionSession<'a> {
         );
         Ok(())
     }
-    pub(crate) fn receive(
+    pub fn receive(
         &mut self,
         cursor: String,
         identity: &BlockIdentity,
@@ -357,7 +385,7 @@ impl<'a> IngestionSession<'a> {
         self.failed = false;
         Ok(ordinal)
     }
-    pub(crate) fn accept_filtered(&mut self, ordinal: u64) -> Result<()> {
+    pub fn accept_filtered(&mut self, ordinal: u64) -> Result<()> {
         self.ready()?;
         self.failed = true;
         let event = self.frontier.received(ordinal)?;
@@ -374,7 +402,7 @@ impl<'a> IngestionSession<'a> {
 
     /// Call only after mapping succeeds. The source event and optional future
     /// anchor are resolved from received metadata here, not trusted caller labels.
-    pub(crate) fn accept_mapped(
+    pub fn accept_mapped(
         &mut self,
         ordinal: u64,
         effective_timestamp: Option<i64>,
@@ -462,7 +490,7 @@ impl<'a> IngestionSession<'a> {
         Ok(())
     }
 
-    pub(crate) async fn flush(
+    pub async fn flush(
         &mut self,
         batches: HashMap<String, RecordBatch>,
         metadata: BlockMetadata,
@@ -510,7 +538,7 @@ impl<'a> IngestionSession<'a> {
         self.failed = false;
         Ok(Some(committed))
     }
-    pub(crate) async fn complete_request(
+    pub async fn complete_request(
         &mut self,
         stop: u64,
         clean_stream_completed: bool,
