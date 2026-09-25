@@ -125,3 +125,27 @@ endpoint startup, metrics and partition-probe suites all passed. Commands used t
 whole-process Cargo lock and the shared Arrow 60 target with debug symbols disabled.
 Formatting and diff whitespace checks passed. This is hermetic/local qualification;
 there were no live Firehose requests or production S3 writes for this prerequisite.
+
+### Physical dictionary schema qualification
+
+The first bounded real EVM protected flush exposed a digest mismatch at the
+transactions table before that table was staged or published. Arrow 60's JSON
+serialization includes `Field::dict_id`, while the Parquet Arrow IPC hint assigns
+new IDs to each dictionary column. These IDs identify IPC dictionary messages,
+not logical table columns. Earlier simple and single-dictionary fixtures did not
+expose the mismatch.
+
+The digest now recursively rebuilds typed fields with dictionary ID zero before
+canonical JSON hashing. It retains dictionary key/value types and orderedness,
+field names/order/nullability, nested fields, and every schema/field metadata key
+(including metadata named `dict_id`). Existing mapper schemas use zero IDs, so
+their expected hashes remain unchanged. Receipt byte hashes, physical schema
+reconstruction, row counts, and exact footer identity checks remain mandatory.
+
+Validation: all 15 protected writer tests passed. New tests exercise nonempty
+multiple and nested dictionary columns through actual Parquet encoding and
+physical verification, and verify that changed dictionary ordering or metadata
+still changes the schema digest. The integration owner's all-chain, nonempty,
+all-encoding schema matrix independently reproduced this failure before the fix.
+The original bounded live output was inspected read-only; recovery and renewed
+live qualification belong to the combined runtime validation.

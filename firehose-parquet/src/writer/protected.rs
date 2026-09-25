@@ -11,7 +11,7 @@ use crate::config::{BlockMetadata, Compression, Partition};
 use crate::dataset_lock::LocalOwnership;
 use crate::dataset_lock_s3::{usable_version, S3Ownership};
 use anyhow::{ensure, Context, Result};
-use arrow::datatypes::Schema;
+use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
 use bytes::Bytes;
 use futures::StreamExt;
@@ -23,6 +23,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 
 const SCHEMA_DOMAIN: &[u8] = b"fireparq-arrow-schema-json-v1\0";
@@ -33,6 +34,46 @@ const DATA_TIMEOUT: Duration = Duration::from_secs(60);
 /// metadata/object keys. A future Arrow serialization change requires a new
 /// schema epoch; hashes never depend on Rust Debug or HashMap iteration order.
 pub fn schema_sha256(schema: &Schema) -> Result<String> {
+    // IPC assigns dictionary IDs while serializing each schema. Those IDs may
+    // differ from the mapper's defaults and do not describe table semantics.
+    // Rebuild typed fields recursively so only these transport IDs become zero;
+    // arbitrary user metadata (even a key named "dict_id") remains untouched.
+    fn field(value: &Field) -> Field {
+        Field::new(
+            value.name(),
+            data_type(value.data_type()),
+            value.is_nullable(),
+        )
+        .with_metadata(value.metadata().clone())
+        .with_dict_is_ordered(value.dict_is_ordered().unwrap_or(false))
+    }
+    fn data_type(value: &DataType) -> DataType {
+        match value {
+            DataType::List(inner) => DataType::List(Arc::new(field(inner))),
+            DataType::ListView(inner) => DataType::ListView(Arc::new(field(inner))),
+            DataType::LargeList(inner) => DataType::LargeList(Arc::new(field(inner))),
+            DataType::LargeListView(inner) => DataType::LargeListView(Arc::new(field(inner))),
+            DataType::FixedSizeList(inner, size) => {
+                DataType::FixedSizeList(Arc::new(field(inner)), *size)
+            }
+            DataType::Struct(fields) => DataType::Struct(fields.iter().map(|f| field(f)).collect()),
+            DataType::Union(fields, mode) => DataType::Union(
+                fields
+                    .iter()
+                    .map(|(id, f)| (id, Arc::new(field(f))))
+                    .collect(),
+                *mode,
+            ),
+            DataType::Dictionary(key, value) => {
+                DataType::Dictionary(Box::new(data_type(key)), Box::new(data_type(value)))
+            }
+            DataType::Map(inner, ordered) => DataType::Map(Arc::new(field(inner)), *ordered),
+            DataType::RunEndEncoded(run_ends, values) => {
+                DataType::RunEndEncoded(Arc::new(field(run_ends)), Arc::new(field(values)))
+            }
+            _ => value.clone(),
+        }
+    }
     fn canonical(value: serde_json::Value) -> serde_json::Value {
         match value {
             serde_json::Value::Object(values) => {
@@ -48,7 +89,11 @@ pub fn schema_sha256(schema: &Schema) -> Result<String> {
             value => value,
         }
     }
-    let value = canonical(serde_json::to_value(schema).context("encoding Arrow schema")?);
+    let normalized = Schema::new_with_metadata(
+        schema.fields().iter().map(|f| field(f)).collect::<Vec<_>>(),
+        schema.metadata().clone(),
+    );
+    let value = canonical(serde_json::to_value(normalized).context("encoding Arrow schema")?);
     let mut hasher = Sha256::new();
     hasher.update(SCHEMA_DOMAIN);
     hasher.update(serde_json::to_vec(&value)?);

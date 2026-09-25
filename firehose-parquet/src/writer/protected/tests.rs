@@ -379,6 +379,112 @@ fn historical_rich_arrow_schema_roundtrips_with_exact_digest_and_values() {
 }
 
 #[test]
+fn multiple_and_nested_dictionary_fields_survive_physical_schema_verification() {
+    use arrow::array::{DictionaryArray, StructArray};
+    use arrow::datatypes::Int32Type;
+    let dictionary: ArrayRef = Arc::new(DictionaryArray::<Int32Type>::from_iter([
+        "first", "second", "first",
+    ]));
+    let nested_field =
+        Field::new("nested_enum", dictionary.data_type().clone(), false).with_metadata(
+            HashMap::from([("dict_id".into(), "user-metadata-is-semantic".into())]),
+        );
+    let nested: ArrayRef = Arc::new(StructArray::from(vec![(
+        Arc::new(nested_field),
+        dictionary.clone(),
+    )]));
+    let batch = RecordBatch::try_new(
+        Arc::new(Schema::new(vec![
+            Field::new("block_num", DataType::UInt64, false),
+            Field::new("type", dictionary.data_type().clone(), false),
+            Field::new("status", dictionary.data_type().clone(), false),
+            Field::new("nested", nested.data_type().clone(), false),
+        ])),
+        vec![
+            Arc::new(UInt64Array::from(vec![10, 11, 11])),
+            dictionary.clone(),
+            dictionary,
+            nested,
+        ],
+    )
+    .unwrap();
+    let encoded = prepare(batch.clone(), Partition::None, metadata())
+        .encode(0)
+        .unwrap();
+    verify_bytes(&encoded.plan, &encoded.receipt, encoded.bytes.clone()).unwrap();
+    let actual: Vec<_> = ParquetRecordBatchReaderBuilder::try_new(encoded.bytes)
+        .unwrap()
+        .build()
+        .unwrap()
+        .map(|row| row.unwrap().with_schema(batch.schema()).unwrap())
+        .collect();
+    assert_eq!(
+        arrow::compute::concat_batches(&batch.schema(), &actual).unwrap(),
+        batch
+    );
+}
+
+#[test]
+#[allow(deprecated)] // Deliberately emulate IDs reassigned by the IPC transport.
+fn schema_digest_normalizes_only_dictionary_transport_ids() {
+    fn schema(id: i64, ordered: bool, metadata: &str) -> Schema {
+        let dictionary = || {
+            Field::new_dict(
+                "enum",
+                DataType::Dictionary(Box::new(DataType::Int32), Box::new(DataType::Utf8)),
+                false,
+                id,
+                ordered,
+            )
+            .with_metadata(HashMap::from([("dict_id".into(), metadata.into())]))
+        };
+        Schema::new_with_metadata(
+            vec![
+                dictionary(),
+                Field::new("list", DataType::List(Arc::new(dictionary())), true),
+                Field::new("struct", DataType::Struct(vec![dictionary()].into()), true),
+                Field::new(
+                    "map",
+                    DataType::Map(
+                        Arc::new(Field::new(
+                            "entries",
+                            DataType::Struct(
+                                vec![Field::new("key", DataType::Utf8, false), dictionary()].into(),
+                            ),
+                            false,
+                        )),
+                        false,
+                    ),
+                    false,
+                ),
+                Field::new(
+                    "union",
+                    DataType::Union(
+                        [(0, Arc::new(dictionary()))].into_iter().collect(),
+                        arrow::datatypes::UnionMode::Sparse,
+                    ),
+                    true,
+                ),
+            ],
+            HashMap::from([("dict_id".into(), metadata.into())]),
+        )
+    }
+    let expected = schema_sha256(&schema(0, false, "preserved")).unwrap();
+    assert_eq!(
+        expected,
+        schema_sha256(&schema(29, false, "preserved")).unwrap()
+    );
+    assert_ne!(
+        expected,
+        schema_sha256(&schema(29, true, "preserved")).unwrap()
+    );
+    assert_ne!(
+        expected,
+        schema_sha256(&schema(29, false, "changed")).unwrap()
+    );
+}
+
+#[test]
 fn local_stage_and_publish_are_separate_durable_and_never_clobber() {
     let dir = tempfile::tempdir().unwrap();
     let owner = LocalOwnership::acquire(&[dir.path().to_owned()]).unwrap();
