@@ -68,28 +68,28 @@ fn beacon_block_with_slashings() -> beacon_pb::Block {
         message: Some(beacon_pb::BeaconBlockHeader {
             slot,
             proposer_index: 7,
-            parent_root: vec![0x01; 32],
-            state_root: vec![0x02; 32],
-            body_root: vec![0x03; 32],
+            parent_root: vec![0x01; 32].into(),
+            state_root: vec![0x02; 32].into(),
+            body_root: vec![0x03; 32].into(),
         }),
-        signature: vec![0x04; 96],
+        signature: vec![0x04; 96].into(),
     };
     let attestation = |epoch| beacon_pb::IndexedAttestation {
         attesting_indices: vec![1, 2],
         data: Some(beacon_pb::AttestationData {
             slot: BLOCK_NUM,
             committee_index: 1,
-            beacon_block_root: vec![0x05; 32],
+            beacon_block_root: vec![0x05; 32].into(),
             source: Some(beacon_pb::Checkpoint {
                 epoch,
-                root: vec![0x06; 32],
+                root: vec![0x06; 32].into(),
             }),
             target: Some(beacon_pb::Checkpoint {
                 epoch: epoch + 1,
-                root: vec![0x07; 32],
+                root: vec![0x07; 32].into(),
             }),
         }),
-        signature: vec![0x08; 96],
+        signature: vec![0x08; 96].into(),
     };
 
     let mut block = beacon::mapper::tests::make_test_block(BLOCK_NUM);
@@ -112,22 +112,22 @@ fn evm_block_with_every_table() -> eth::Block {
     let mut block = evm::mapper::tests::make_test_evm_block(BLOCK_NUM);
     let call = &mut block.transaction_traces[0].calls[0];
     call.code_changes.push(eth::CodeChange {
-        address: vec![0xaa; 20],
-        old_hash: vec![0x01; 32],
-        old_code: vec![],
-        new_hash: vec![0x02; 32],
-        new_code: vec![0x60, 0x00],
+        address: vec![0xaa; 20].into(),
+        old_hash: vec![0x01; 32].into(),
+        old_code: vec![].into(),
+        new_hash: vec![0x02; 32].into(),
+        new_code: vec![0x60, 0x00].into(),
         ordinal: 4,
     });
     call.storage_changes.push(eth::StorageChange {
-        address: vec![0xaa; 20],
-        key: vec![0x03; 32],
-        old_value: vec![0x00; 32],
-        new_value: vec![0x04; 32],
+        address: vec![0xaa; 20].into(),
+        key: vec![0x03; 32].into(),
+        old_value: vec![0x00; 32].into(),
+        new_value: vec![0x04; 32].into(),
         ordinal: 6,
     });
     call.account_creations.push(eth::AccountCreation {
-        account: vec![0xaa; 20],
+        account: vec![0xaa; 20].into(),
         ordinal: 7,
     });
     // A system call carrying one of each state change feeds every system_* table.
@@ -136,13 +136,13 @@ fn evm_block_with_every_table() -> eth::Block {
     block.withdrawals.push(eth::Withdrawal {
         index: 1,
         validator_index: 2,
-        address: vec![0xaa; 20],
+        address: vec![0xaa; 20].into(),
         amount: 3,
     });
     let tx = &mut block.transaction_traces[0];
     tx.access_list.push(eth::AccessTuple {
-        address: vec![0xaa; 20],
-        storage_keys: vec![vec![0x05; 32]],
+        address: vec![0xaa; 20].into(),
+        storage_keys: vec![vec![0x05; 32].into()],
     });
     tx.set_code_authorizations
         .push(evm::mapper::tests::make_test_set_code_authorization());
@@ -155,9 +155,9 @@ fn solana_block_with_vote() -> Vec<u8> {
     let mut block = solana::mapper::tests::make_test_block(BLOCK_NUM);
     let mut vote = block.transactions[0].clone();
     let tx = vote.transaction.as_mut().expect("fixture transaction");
-    tx.signatures = vec![vec![9u8; 64]];
+    tx.signatures = vec![vec![9u8; 64].into()];
     let message = tx.message.as_mut().expect("fixture message");
-    message.account_keys[1] = vote_program;
+    message.account_keys[1] = vote_program.into();
     message.versioned = false;
     message.address_table_lookups.clear();
     message.instructions[0].data =
@@ -167,7 +167,8 @@ fn solana_block_with_vote() -> Vec<u8> {
                 ..Default::default()
             },
         ))
-        .expect("serialize canonical vote fixture");
+        .expect("serialize canonical vote fixture")
+        .into();
     block.transactions.push(vote);
     block.encode_to_vec()
 }
@@ -562,5 +563,120 @@ fn protected_dictionary_digest_preserves_existing_v1_evm_schema_identity() {
         ))
         .unwrap(),
         "44b18c11097fad9f240941e6c670cb01f04386d7a990a91ca644b935b01c2563"
+    );
+}
+
+/// The owned payload path must preserve every mapper option, table, value,
+/// schema and flush/reset behavior of the borrowed compatibility path.
+#[test]
+fn owned_payload_mapping_matches_borrowed_for_every_chain_and_encoding() {
+    for encoding in all_encodings() {
+        for include_fork_step in [false, true] {
+            let fork_step = include_fork_step.then_some("NEW");
+            for (mut borrowed, mut owned) in cases(&encoding, include_fork_step)
+                .into_iter()
+                .zip(cases(&encoding, include_fork_step))
+            {
+                let context = format!("{} {encoding:?} fork={include_fork_step}", owned.label);
+                for _ in 0..2 {
+                    for (offset, block) in borrowed.blocks.iter().enumerate() {
+                        let identity = identity(BLOCK_NUM + offset as u64, fork_step);
+                        let payload = prost::bytes::Bytes::from(block.clone());
+                        let expected = borrowed
+                            .mapper
+                            .map_block(block, &identity, fork_step)
+                            .unwrap();
+                        let actual = owned
+                            .mapper
+                            .map_block_bytes(payload.clone(), &identity, fork_step)
+                            .unwrap();
+                        drop(payload); // Arrow output must outlive the original protobuf allocation.
+                        assert_eq!(actual, expected, "{context}: mapped transaction count");
+                    }
+                    assert_eq!(
+                        owned.mapper.total_rows(),
+                        borrowed.mapper.total_rows(),
+                        "{context}: buffered rows"
+                    );
+                    let expected = borrowed.mapper.flush().unwrap();
+                    let actual = owned.mapper.flush().unwrap();
+                    assert_eq!(actual, expected, "{context}: complete output after flush");
+                }
+                let identity = identity(BLOCK_NUM, fork_step);
+                let expected = borrowed
+                    .mapper
+                    .map_block(&[255], &identity, fork_step)
+                    .unwrap_err();
+                let actual = owned
+                    .mapper
+                    .map_block_bytes(
+                        prost::bytes::Bytes::from_static(&[255]),
+                        &identity,
+                        fork_step,
+                    )
+                    .unwrap_err();
+                assert_eq!(
+                    actual.to_string(),
+                    expected.to_string(),
+                    "{context}: malformed wire payload"
+                );
+            }
+        }
+    }
+}
+
+/// These pointer checks distinguish true shared-buffer decoding from a
+/// byte-identical result that secretly allocated/copied each bytes field.
+#[test]
+fn owned_decoding_shares_nested_payload_storage_and_retains_its_lifetime() {
+    use prost::bytes::Bytes;
+    fn shared<M: Message + Default>(block: M, select: impl Fn(&M) -> &Bytes) {
+        let encoded = block.encode_to_vec();
+        let allocation = encoded.as_ptr();
+        let payload = Bytes::from(encoded);
+        assert_eq!(
+            allocation,
+            payload.as_ptr(),
+            "Vec-to-Bytes ownership transfer copied"
+        );
+        let start = payload.as_ptr() as usize;
+        let end = start + payload.len();
+        let decoded = M::decode(payload.clone()).unwrap();
+        let field = select(&decoded);
+        assert!(!field.is_empty());
+        let pointer = field.as_ptr() as usize;
+        assert!(
+            pointer >= start && pointer + field.len() <= end,
+            "nested bytes did not share original allocation"
+        );
+        let expected = field.to_vec();
+        let retained = field.clone();
+        drop(payload);
+        drop(decoded);
+        assert_eq!(
+            retained.as_ref(),
+            expected,
+            "field must keep the shared allocation alive"
+        );
+    }
+    shared(evm_block_with_every_table(), |b| {
+        &b.transaction_traces[0].calls[0].code_changes[0].new_code
+    });
+    shared(solana::mapper::tests::make_test_block(BLOCK_NUM), |b| {
+        &b.transactions[0]
+            .transaction
+            .as_ref()
+            .unwrap()
+            .message
+            .as_ref()
+            .unwrap()
+            .account_keys[0]
+    });
+    shared(beacon::mapper::tests::make_deneb_block(BLOCK_NUM), |b| {
+        &b.root
+    });
+    shared(
+        cosmos::mapper::tests::make_test_block(BLOCK_NUM as i64),
+        |b| &b.txs[0],
     );
 }

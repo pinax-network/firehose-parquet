@@ -835,6 +835,20 @@ impl EvmBlockMapper {
     }
 }
 
+impl EvmBlockMapper {
+    fn map_decoded(
+        &mut self,
+        block: eth::Block,
+        identity: &BlockIdentity,
+        fork_step: Option<&str>,
+    ) -> anyhow::Result<u64> {
+        let tx_count = block.transaction_traces.len() as u64;
+        let identity = self.blocks.canonical.prepare(identity)?;
+        self.map_evm_block(&block, &identity, fork_step);
+        Ok(tx_count)
+    }
+}
+
 impl BlockMapper for EvmBlockMapper {
     fn map_block(
         &mut self,
@@ -842,11 +856,16 @@ impl BlockMapper for EvmBlockMapper {
         identity: &BlockIdentity,
         fork_step: Option<&str>,
     ) -> anyhow::Result<u64> {
-        let block = eth::Block::decode(block_bytes)?;
-        let tx_count = block.transaction_traces.len() as u64;
-        let identity = self.blocks.canonical.prepare(identity)?;
-        self.map_evm_block(&block, &identity, fork_step);
-        Ok(tx_count)
+        self.map_decoded(eth::Block::decode(block_bytes)?, identity, fork_step)
+    }
+
+    fn map_block_bytes(
+        &mut self,
+        block_bytes: prost::bytes::Bytes,
+        identity: &BlockIdentity,
+        fork_step: Option<&str>,
+    ) -> anyhow::Result<u64> {
+        self.map_decoded(eth::Block::decode(block_bytes)?, identity, fork_step)
     }
 
     fn flush(&mut self) -> anyhow::Result<HashMap<String, RecordBatch>> {
@@ -3018,18 +3037,20 @@ pub(crate) mod tests {
     pub(crate) fn make_test_evm_block(number: u64) -> eth::Block {
         eth::Block {
             ver: 4,
-            hash: vec![0xab; 32],
+            hash: vec![0xab; 32].into(),
             number,
             size: 1000,
             header: Some(eth::BlockHeader {
-                parent_hash: vec![0xcd; 32],
-                uncle_hash: vec![],
-                coinbase: vec![0x01; 20],
-                state_root: vec![0x02; 32],
-                transactions_root: vec![0x03; 32],
-                receipt_root: vec![0x04; 32],
-                logs_bloom: vec![],
-                difficulty: Some(eth::BigInt { bytes: vec![0x01] }),
+                parent_hash: vec![0xcd; 32].into(),
+                uncle_hash: vec![].into(),
+                coinbase: vec![0x01; 20].into(),
+                state_root: vec![0x02; 32].into(),
+                transactions_root: vec![0x03; 32].into(),
+                receipt_root: vec![0x04; 32].into(),
+                logs_bloom: vec![].into(),
+                difficulty: Some(eth::BigInt {
+                    bytes: vec![0x01].into(),
+                }),
                 total_difficulty: None,
                 number,
                 gas_limit: 30_000_000,
@@ -3038,54 +3059,56 @@ pub(crate) mod tests {
                     seconds: 1700000000,
                     nanos: 0,
                 }),
-                extra_data: vec![],
-                mix_hash: vec![0x05; 32],
+                extra_data: vec![].into(),
+                mix_hash: vec![0x05; 32].into(),
                 nonce: 0,
-                hash: vec![0xab; 32],
+                hash: vec![0xab; 32].into(),
                 base_fee_per_gas: Some(eth::BigInt {
-                    bytes: vec![0x3B, 0x9A, 0xCA, 0x00],
+                    bytes: vec![0x3B, 0x9A, 0xCA, 0x00].into(),
                 }),
-                withdrawals_root: vec![],
+                withdrawals_root: vec![].into(),
                 tx_dependency: None,
                 blob_gas_used: None,
                 excess_blob_gas: None,
-                parent_beacon_root: vec![],
-                requests_hash: vec![],
+                parent_beacon_root: vec![].into(),
+                requests_hash: vec![].into(),
             }),
             uncles: vec![],
             transaction_traces: vec![eth::TransactionTrace {
-                to: vec![0xaa; 20],
+                to: vec![0xaa; 20].into(),
                 nonce: 1,
                 gas_price: Some(eth::BigInt {
-                    bytes: vec![0x3B, 0x9A, 0xCA, 0x00],
+                    bytes: vec![0x3B, 0x9A, 0xCA, 0x00].into(),
                 }),
                 gas_limit: 21000,
-                value: Some(eth::BigInt { bytes: vec![0x01] }),
-                input: vec![],
-                v: vec![],
-                r: vec![],
-                s: vec![],
+                value: Some(eth::BigInt {
+                    bytes: vec![0x01].into(),
+                }),
+                input: vec![].into(),
+                v: vec![].into(),
+                r: vec![].into(),
+                s: vec![].into(),
                 gas_used: 21000,
                 r#type: 0,
                 access_list: vec![],
                 max_fee_per_gas: None,
                 max_priority_fee_per_gas: None,
                 index: 0,
-                hash: vec![0xbb; 32],
-                from: vec![0xcc; 20],
-                return_data: vec![],
-                public_key: vec![],
+                hash: vec![0xbb; 32].into(),
+                from: vec![0xcc; 20].into(),
+                return_data: vec![].into(),
+                public_key: vec![].into(),
                 begin_ordinal: 0,
                 end_ordinal: 10,
                 status: 1,
                 receipt: Some(eth::TransactionReceipt {
-                    state_root: vec![],
+                    state_root: vec![].into(),
                     cumulative_gas_used: 21000,
-                    logs_bloom: vec![],
+                    logs_bloom: vec![].into(),
                     logs: vec![eth::Log {
-                        address: vec![0xdd; 20],
-                        topics: vec![vec![0xee; 32], vec![0xff; 32]],
-                        data: vec![1, 2, 3],
+                        address: vec![0xdd; 20].into(),
+                        topics: vec![vec![0xee; 32].into(), vec![0xff; 32].into()],
+                        data: vec![1, 2, 3].into(),
                         index: 0,
                         block_index: 0,
                         ordinal: 5,
@@ -3098,27 +3121,33 @@ pub(crate) mod tests {
                     parent_index: 0,
                     depth: 0,
                     call_type: 1,
-                    caller: vec![0xcc; 20],
-                    address: vec![0xaa; 20],
+                    caller: vec![0xcc; 20].into(),
+                    address: vec![0xaa; 20].into(),
                     address_delegates_to: None,
-                    value: Some(eth::BigInt { bytes: vec![0x01] }),
+                    value: Some(eth::BigInt {
+                        bytes: vec![0x01].into(),
+                    }),
                     gas_limit: 21000,
                     gas_consumed: 21000,
-                    return_data: vec![],
-                    input: vec![],
+                    return_data: vec![].into(),
+                    input: vec![].into(),
                     executed_code: false,
                     suicide: false,
                     keccak_preimages: Default::default(),
                     storage_changes: vec![],
                     balance_changes: vec![eth::BalanceChange {
-                        address: vec![0xcc; 20],
-                        old_value: Some(eth::BigInt { bytes: vec![0x01] }),
-                        new_value: Some(eth::BigInt { bytes: vec![0x00] }),
+                        address: vec![0xcc; 20].into(),
+                        old_value: Some(eth::BigInt {
+                            bytes: vec![0x01].into(),
+                        }),
+                        new_value: Some(eth::BigInt {
+                            bytes: vec![0x00].into(),
+                        }),
                         reason: 5,
                         ordinal: 3,
                     }],
                     nonce_changes: vec![eth::NonceChange {
-                        address: vec![0xcc; 20],
+                        address: vec![0xcc; 20].into(),
                         old_value: 0,
                         new_value: 1,
                         ordinal: 1,
@@ -3347,34 +3376,34 @@ pub(crate) mod tests {
     fn test_empty_block() {
         let block = eth::Block {
             ver: 4,
-            hash: vec![0x00; 32],
+            hash: vec![0x00; 32].into(),
             number: 0,
             size: 0,
             header: Some(eth::BlockHeader {
-                parent_hash: vec![],
-                uncle_hash: vec![],
-                coinbase: vec![],
-                state_root: vec![],
-                transactions_root: vec![],
-                receipt_root: vec![],
-                logs_bloom: vec![],
+                parent_hash: vec![].into(),
+                uncle_hash: vec![].into(),
+                coinbase: vec![].into(),
+                state_root: vec![].into(),
+                transactions_root: vec![].into(),
+                receipt_root: vec![].into(),
+                logs_bloom: vec![].into(),
                 difficulty: None,
                 total_difficulty: None,
                 number: 0,
                 gas_limit: 0,
                 gas_used: 0,
                 timestamp: None,
-                extra_data: vec![],
-                mix_hash: vec![],
+                extra_data: vec![].into(),
+                mix_hash: vec![].into(),
                 nonce: 0,
-                hash: vec![],
+                hash: vec![].into(),
                 base_fee_per_gas: None,
-                withdrawals_root: vec![],
+                withdrawals_root: vec![].into(),
                 tx_dependency: None,
                 blob_gas_used: None,
                 excess_blob_gas: None,
-                parent_beacon_root: vec![],
-                requests_hash: vec![],
+                parent_beacon_root: vec![].into(),
+                requests_hash: vec![].into(),
             }),
             uncles: vec![],
             transaction_traces: vec![],
@@ -3398,14 +3427,16 @@ pub(crate) mod tests {
     #[test]
     fn test_bigint_conversion() {
         let bi = Some(eth::BigInt {
-            bytes: vec![0x3B, 0x9A, 0xCA, 0x00],
+            bytes: vec![0x3B, 0x9A, 0xCA, 0x00].into(),
         });
         assert_eq!(bigint_to_string(&bi), "1000000000");
         assert_eq!(bigint_to_string(&None), "0");
-        let bi = Some(eth::BigInt { bytes: vec![0x01] });
+        let bi = Some(eth::BigInt {
+            bytes: vec![0x01].into(),
+        });
         assert_eq!(bigint_to_string(&bi), "1");
         let bi = Some(eth::BigInt {
-            bytes: vec![0x01, 0x00],
+            bytes: vec![0x01, 0x00].into(),
         });
         assert_eq!(bigint_to_string(&bi), "256");
     }
@@ -3560,9 +3591,13 @@ pub(crate) mod tests {
 
     fn balance_change(address: &[u8], reason: i32, ordinal: u64) -> eth::BalanceChange {
         eth::BalanceChange {
-            address: address.to_vec(),
-            old_value: Some(eth::BigInt { bytes: vec![0x02] }),
-            new_value: Some(eth::BigInt { bytes: vec![0x01] }),
+            address: address.to_vec().into(),
+            old_value: Some(eth::BigInt {
+                bytes: vec![0x02].into(),
+            }),
+            new_value: Some(eth::BigInt {
+                bytes: vec![0x01].into(),
+            }),
             reason,
             ordinal,
         }
@@ -3570,7 +3605,7 @@ pub(crate) mod tests {
 
     fn nonce_change(address: &[u8], ordinal: u64) -> eth::NonceChange {
         eth::NonceChange {
-            address: address.to_vec(),
+            address: address.to_vec().into(),
             old_value: 0,
             new_value: 1,
             ordinal,
@@ -3579,11 +3614,11 @@ pub(crate) mod tests {
 
     fn code_change(address: &[u8], ordinal: u64) -> eth::CodeChange {
         eth::CodeChange {
-            address: address.to_vec(),
-            old_hash: vec![0x01; 32],
-            old_code: vec![],
-            new_hash: vec![0x02; 32],
-            new_code: vec![0xef, 0x01, 0x00],
+            address: address.to_vec().into(),
+            old_hash: vec![0x01; 32].into(),
+            old_code: vec![].into(),
+            new_hash: vec![0x02; 32].into(),
+            new_code: vec![0xef, 0x01, 0x00].into(),
             ordinal,
         }
     }
@@ -3609,12 +3644,12 @@ pub(crate) mod tests {
         tx.set_code_authorizations = vec![
             eth::SetCodeAuthorization {
                 discarded: false,
-                authority: Some(AUTHORITY.to_vec()),
+                authority: Some(AUTHORITY.to_vec().into()),
                 ..Default::default()
             },
             eth::SetCodeAuthorization {
                 discarded: true,
-                authority: Some(DISCARDED_AUTHORITY.to_vec()),
+                authority: Some(DISCARDED_AUTHORITY.to_vec().into()),
                 ..Default::default()
             },
         ];
@@ -3641,14 +3676,14 @@ pub(crate) mod tests {
             code_change(&DISCARDED_AUTHORITY, 302),
         ];
         root.storage_changes = vec![eth::StorageChange {
-            address: TO.to_vec(),
-            key: vec![0x01; 32],
-            old_value: vec![0x00; 32],
-            new_value: vec![0x01; 32],
+            address: TO.to_vec().into(),
+            key: vec![0x01; 32].into(),
+            old_value: vec![0x00; 32].into(),
+            new_value: vec![0x01; 32].into(),
             ordinal: 401,
         }];
         root.account_creations = vec![eth::AccountCreation {
-            account: vec![0x0f; 20],
+            account: vec![0x0f; 20].into(),
             ordinal: 501,
         }];
         root.gas_changes = vec![gas_change(601)];
@@ -3712,7 +3747,7 @@ pub(crate) mod tests {
         let mut tx = make_failed_set_code_tx();
         tx.set_code_authorizations.push(eth::SetCodeAuthorization {
             discarded: false,
-            authority: Some(AUTHORITY.to_vec()),
+            authority: Some(AUTHORITY.to_vec().into()),
             ..Default::default()
         });
         let persistent = failed_transaction_persistent_changes(&tx);
@@ -3736,7 +3771,7 @@ pub(crate) mod tests {
         let mut tx = make_failed_set_code_tx();
         tx.set_code_authorizations = vec![eth::SetCodeAuthorization {
             discarded: false,
-            authority: Some(SENDER.to_vec()),
+            authority: Some(SENDER.to_vec().into()),
             ..Default::default()
         }];
         tx.calls[0].nonce_changes = vec![
@@ -4177,35 +4212,37 @@ pub(crate) mod tests {
     fn make_post_prague_block() -> eth::Block {
         let mut block = make_test_evm_block(500);
         let header = block.header.as_mut().unwrap();
-        header.uncle_hash = vec![0x1d; 32];
-        header.logs_bloom = vec![0x0b; 256];
-        header.withdrawals_root = vec![0x0c; 32];
+        header.uncle_hash = vec![0x1d; 32].into();
+        header.logs_bloom = vec![0x0b; 256].into();
+        header.withdrawals_root = vec![0x0c; 32].into();
         header.blob_gas_used = Some(393_216);
         header.excess_blob_gas = Some(0);
-        header.parent_beacon_root = vec![0x0d; 32];
-        header.requests_hash = vec![0x0e; 32];
+        header.parent_beacon_root = vec![0x0d; 32].into();
+        header.requests_hash = vec![0x0e; 32].into();
 
         let tx = &mut block.transaction_traces[0];
         tx.r#type = eth::transaction_trace::Type::TrxTypeBlob as i32;
-        tx.v = vec![0x01];
-        tx.r = vec![0x02; 32];
-        tx.s = vec![0x03; 32];
-        tx.return_data = vec![0x04, 0x05];
+        tx.v = vec![0x01].into();
+        tx.r = vec![0x02; 32].into();
+        tx.s = vec![0x03; 32].into();
+        tx.return_data = vec![0x04, 0x05].into();
         tx.blob_gas = Some(262_144);
         tx.blob_gas_fee_cap = Some(eth::BigInt {
-            bytes: vec![0x01, 0x00],
+            bytes: vec![0x01, 0x00].into(),
         });
-        tx.blob_hashes = vec![vec![0x01; 32], vec![0x02; 32]];
+        tx.blob_hashes = vec![vec![0x01; 32].into(), vec![0x02; 32].into()];
         tx.begin_ordinal = 11;
         tx.end_ordinal = 99;
         let receipt = tx.receipt.as_mut().unwrap();
-        receipt.logs_bloom = vec![0x0f; 256];
+        receipt.logs_bloom = vec![0x0f; 256].into();
         receipt.blob_gas_used = Some(262_144);
-        receipt.blob_gas_price = Some(eth::BigInt { bytes: vec![0x07] });
+        receipt.blob_gas_price = Some(eth::BigInt {
+            bytes: vec![0x07].into(),
+        });
         receipt.logs[0].ordinal = 42;
 
         let root = &mut tx.calls[0];
-        root.address_delegates_to = Some(vec![0xde; 20]);
+        root.address_delegates_to = Some(vec![0xde; 20].into());
         root.begin_ordinal = 12;
         root.end_ordinal = 98;
         let mut child = root.clone();
@@ -4397,13 +4434,13 @@ pub(crate) mod tests {
     pub(crate) fn make_test_set_code_authorization() -> eth::SetCodeAuthorization {
         eth::SetCodeAuthorization {
             discarded: false,
-            chain_id: vec![0x01],
-            address: vec![0xde; 20],
+            chain_id: vec![0x01].into(),
+            address: vec![0xde; 20].into(),
             nonce: 7,
             v: 1,
-            r: vec![0x0a; 32],
-            s: vec![0x0b; 32],
-            authority: Some(vec![0xa1; 20]),
+            r: vec![0x0a; 32].into(),
+            s: vec![0x0b; 32].into(),
+            authority: Some(vec![0xa1; 20].into()),
         }
     }
 
@@ -4413,13 +4450,13 @@ pub(crate) mod tests {
             eth::Withdrawal {
                 index: 100,
                 validator_index: 200,
-                address: vec![0x11; 20],
+                address: vec![0x11; 20].into(),
                 amount: 18_000_000,
             },
             eth::Withdrawal {
                 index: 101,
                 validator_index: 201,
-                address: vec![0x12; 20],
+                address: vec![0x12; 20].into(),
                 amount: 0,
             },
         ];
@@ -4427,19 +4464,19 @@ pub(crate) mod tests {
         tx.index = 4;
         tx.access_list = vec![
             eth::AccessTuple {
-                address: vec![0x21; 20],
-                storage_keys: vec![vec![0x01; 32], vec![0x02; 32]],
+                address: vec![0x21; 20].into(),
+                storage_keys: vec![vec![0x01; 32].into(), vec![0x02; 32].into()],
             },
             eth::AccessTuple {
-                address: vec![0x22; 20],
+                address: vec![0x22; 20].into(),
                 storage_keys: vec![],
             },
         ];
         let mut discarded = make_test_set_code_authorization();
         discarded.discarded = true;
         discarded.authority = None;
-        discarded.address = vec![];
-        discarded.chain_id = vec![];
+        discarded.address = vec![].into();
+        discarded.chain_id = vec![].into();
         tx.set_code_authorizations = vec![make_test_set_code_authorization(), discarded];
         block
     }

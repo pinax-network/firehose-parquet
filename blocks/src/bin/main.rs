@@ -769,7 +769,7 @@ struct GenesisTimestampBootstrap {
 #[derive(Debug, Clone)]
 struct BufferedBootstrapBlock {
     received_ordinal: u64,
-    block_bytes: Vec<u8>,
+    block_bytes: prost::bytes::Bytes,
     cursor: String,
     fork_step: Option<String>,
     identity: BlockIdentity,
@@ -889,14 +889,14 @@ impl TimestampBackfill {
 
     fn observe_block(
         &mut self,
-        block_bytes: Vec<u8>,
+        block_bytes: impl Into<prost::bytes::Bytes>,
         cursor: String,
         fork_step: Option<String>,
         identity: BlockIdentity,
     ) -> anyhow::Result<Vec<BufferedBootstrapBlock>> {
         let current = BufferedBootstrapBlock {
             received_ordinal: 0,
-            block_bytes,
+            block_bytes: block_bytes.into(),
             cursor,
             fork_step,
             identity,
@@ -3821,6 +3821,10 @@ async fn run_ingestion(args: &BuildArgs, global: &GlobalArgs) -> Result<()> {
                 return Ok(());
             }
 
+            // Transfer the owned gRPC payload without copying. Buffered routing
+            // and chain decoding share slices of this allocation.
+            let block_bytes = prost::bytes::Bytes::from(block_bytes);
+
             // Lazy mapper creation for "auto" mode.
             if mapper.is_none() {
                 let detected = detect_block_type(&type_url)?;
@@ -4021,7 +4025,7 @@ async fn run_ingestion(args: &BuildArgs, global: &GlobalArgs) -> Result<()> {
                     GenesisTimestampBootstrapAction::None => {}
                 }
             } // end if !is_solana
-            let mut process_block = |block_bytes: &[u8],
+            let mut process_block = |block_bytes: &prost::bytes::Bytes,
                                      identity: &BlockIdentity,
                                      fork_step: Option<&str>,
                                      _cursor: &str,
@@ -4089,7 +4093,7 @@ async fn run_ingestion(args: &BuildArgs, global: &GlobalArgs) -> Result<()> {
                 }
                 current_partition_key = new_partition_key;
 
-                let mapped = m.map_block(block_bytes, identity, fork_step);
+                let mapped = m.map_block_bytes(block_bytes.clone(), identity, fork_step);
                 let mapper_estimate = update_mapper_buffer_metrics(&pipeline_metrics, m.as_mut());
                 transactions_processed += mapped?;
                 if let Some(session) = session.as_mut() {
@@ -6810,7 +6814,7 @@ mod tests {
         let mut buffered_blocks = vec![
             BufferedBootstrapBlock {
                 received_ordinal: 0,
-                block_bytes: vec![0x01],
+                block_bytes: vec![0x01].into(),
                 cursor: "cursor-0".to_string(),
                 fork_step: None,
                 identity: BlockIdentity {
@@ -6822,7 +6826,7 @@ mod tests {
             },
             BufferedBootstrapBlock {
                 received_ordinal: 0,
-                block_bytes: vec![0x02],
+                block_bytes: vec![0x02].into(),
                 cursor: "cursor-1".to_string(),
                 fork_step: Some("STEP_NEW".to_string()),
                 identity: BlockIdentity {
