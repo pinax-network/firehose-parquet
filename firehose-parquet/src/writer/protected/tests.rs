@@ -827,3 +827,65 @@ async fn remote_cancelled_successful_put_latches_uncertainty_before_release() {
     assert!(owner.is_mutation_uncertain());
     assert!(owner.release().await.is_err());
 }
+
+#[test]
+fn protected_and_legacy_parts_share_lookup_metadata_without_changing_rows() {
+    use arrow::array::StringArray;
+    use arrow::compute::concat_batches;
+    for (heights, sorted) in [(vec![10, 10, 11], true), (vec![11, 10, 11], false)] {
+        let batch = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![
+                Field::new("block_num", DataType::UInt64, false),
+                Field::new("hash", DataType::Utf8, false),
+            ])),
+            vec![
+                Arc::new(UInt64Array::from(heights)),
+                Arc::new(StringArray::from(vec!["first", "second", "third"])),
+            ],
+        )
+        .unwrap();
+        let protected = prepare(batch.clone(), Partition::None, metadata())
+            .encode(0)
+            .unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let mut legacy =
+            ParquetTableWriter::new(directory.path(), Partition::None, Compression::Zstd);
+        let (path, _) = legacy.write_batch("blocks", &batch, &metadata()).unwrap();
+        for (bytes, is_protected) in [
+            (protected.bytes.clone(), true),
+            (Bytes::from(std::fs::read(path).unwrap()), false),
+        ] {
+            let reader = ParquetRecordBatchReaderBuilder::try_new(bytes).unwrap();
+            let footer = reader.metadata().file_metadata();
+            assert_eq!(
+                footer
+                    .key_value_metadata()
+                    .unwrap()
+                    .iter()
+                    .any(|entry| entry.key.starts_with(FOOTER_PREFIX)),
+                is_protected
+            );
+            assert_eq!(
+                reader.metadata().row_group(0).sorting_columns().is_some(),
+                sorted
+            );
+            let filter = reader
+                .get_row_group_column_bloom_filter(0, 1)
+                .unwrap()
+                .unwrap();
+            for hash in ["first", "second", "third"] {
+                assert!(filter.check(hash));
+            }
+            let actual = concat_batches(
+                &batch.schema(),
+                &reader
+                    .build()
+                    .unwrap()
+                    .collect::<Result<Vec<_>, _>>()
+                    .unwrap(),
+            )
+            .unwrap();
+            assert_eq!(actual, batch);
+        }
+    }
+}

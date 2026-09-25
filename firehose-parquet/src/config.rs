@@ -33,6 +33,31 @@ pub enum Compression {
     Snappy,
     Gzip,
     Zstd,
+    /// A validated explicit level; level 3 is normalized to `Zstd` by the CLI.
+    ZstdWithLevel(parquet::basic::ZstdLevel),
+}
+
+impl Compression {
+    /// Normalize library-level default aliases. CLI level zero is rejected;
+    /// direct Rust callers using zero receive our documented default level 3.
+    pub(crate) fn canonical(self) -> Self {
+        match self {
+            Self::ZstdWithLevel(level) if matches!(level.compression_level(), 0 | 3) => Self::Zstd,
+            other => other,
+        }
+    }
+
+    /// Shared codec conversion for every Parquet output path.
+    pub fn parquet(self) -> parquet::basic::Compression {
+        use parquet::basic::{Compression as PqCompression, ZstdLevel};
+        match self.canonical() {
+            Self::None => PqCompression::UNCOMPRESSED,
+            Self::Snappy => PqCompression::SNAPPY,
+            Self::Gzip => PqCompression::GZIP(Default::default()),
+            Self::Zstd => PqCompression::ZSTD(ZstdLevel::try_new(3).expect("valid constant")),
+            Self::ZstdWithLevel(level) => PqCompression::ZSTD(level),
+        }
+    }
 }
 
 /// Metadata about a batch of blocks, used for partitioning decisions.
@@ -241,11 +266,12 @@ impl std::fmt::Display for Partition {
 
 impl std::fmt::Display for Compression {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
+        match self.canonical() {
             Compression::None => write!(f, "none"),
             Compression::Snappy => write!(f, "snappy"),
             Compression::Gzip => write!(f, "gzip"),
             Compression::Zstd => write!(f, "zstd"),
+            Compression::ZstdWithLevel(level) => write!(f, "zstd:{}", level.compression_level()),
         }
     }
 }

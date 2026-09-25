@@ -271,8 +271,11 @@ impl PreparedFlush {
         let mut writer = ParquetTableWriter::new(PathBuf::new(), Partition::None, self.compression);
         writer.set_file_metadata(metadata);
         let mut bytes = Vec::new();
-        let mut parquet =
-            ArrowWriter::try_new(&mut bytes, batch.schema(), Some(writer.writer_properties()))?;
+        let mut parquet = ArrowWriter::try_new(
+            &mut bytes,
+            batch.schema(),
+            Some(writer.writer_properties(batch)?),
+        )?;
         parquet.write(batch)?;
         parquet.close()?;
         let receipt = PartReceipt {
