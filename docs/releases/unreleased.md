@@ -2,6 +2,16 @@
 
 Changes merged since the last release. Fold this file into `docs/releases/vX.Y.Z.md` when the next release is cut.
 
+## CLI and query semantics
+
+- `--final-blocks-only=false` now enables append-only reversible output directly;
+  the default and bare flag remain true. Optional values use `=`, and explicit
+  CLI values override `FINAL_BLOCKS_ONLY`. Successful bounded non-final runs warn
+  that completion does not establish tail finality. The README documents NEW/UNDO
+  recurrence, the absence of global event order, and a safe finalized-reference
+  intersection query with explicit limits; it does not promise a canonical tail
+  from unordered files. See [#474 validation](../audit/474-non-final-streams.md).
+
 ## Breaking changes
 
 ### Solana payloads use native bytes and account-index lists (#503)

@@ -25,6 +25,7 @@ lifecycle state; a local implementation or passing test alone is not closure.
 - [#502: explicit Solana instruction positions](502-solana-instruction-order.md)
 - [#503: Binary Solana payloads and account-index lists](503-solana-binary-payloads.md)
 - [#473: responsive shutdown](473-responsive-shutdown.md)
+- [#474: append-only non-final streams and query limits](474-non-final-streams.md)
 - [#477: single-partition writer contract](477-writer-partition-contract.md)
 - [#475: bounded metrics and stream readiness](475-metrics-readiness.md)
 
