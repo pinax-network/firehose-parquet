@@ -111,3 +111,23 @@ roots. Cursor bindings preserve lexical aliases for the mirror's dual ancestry
 sync. Explicit remote cursors keep their independent bucket; disabled mirrors do
 not disable authoritative state. Five focused binding tests passed after merging
 strict v2 index main d5e1419 and the reviewed mirror adapter 7e03c09.
+
+## Initialization eligibility and owned mirror assembly
+
+New authority can be initialized only after an ownership-protected inspection of
+an empty local directory tree or remote prefix, plus proof that the configured
+mirror is absent. The sole data artifact permitted beforehand is root-level
+`partitions.parquet`, decoded through the strict v2 reader and bound to the same
+chain. Its granularity can differ and its last span may be incomplete because
+initialization does not consume its bounds. Legacy random-name parts, any cursor,
+unrelated files, orphan control directories and nested controls are refused.
+The tree inspection is bounded at 100,000 entries; remote listing has a 60-second
+limit. At bucket root, the exact common owner key and its reserved probe prefix
+are outside the dataset inventory.
+
+The controller can own the already-reviewed mirror adapter, avoiding a
+self-referential session while retaining borrowed ownership. Local identity
+resolution is idempotent before and after missing directories are created.
+The combined private ingestion suite passed 60 tests with one intentionally
+ignored subprocess child fixture (invoked by its parent crash test). Runtime
+selection remains unavailable until caller and maintenance integration finish.

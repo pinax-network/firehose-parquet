@@ -129,7 +129,7 @@ async fn open<'a>(
     owner: &'a LocalOwnership,
     mirror: &'a Mirror,
     descriptor: &StreamDescriptor,
-) -> Result<TransactionController<'a, Mirror>> {
+) -> Result<TransactionController<'a, &'a Mirror>> {
     TransactionController::open(
         TransactionStateStore::local(root, owner)?,
         TransactionParts::local(root, owner)?,
@@ -138,7 +138,7 @@ async fn open<'a>(
     )
     .await
 }
-async fn commit(controller: &mut TransactionController<'_, Mirror>) -> Result<CommittedFlush> {
+async fn commit(controller: &mut TransactionController<'_, &Mirror>) -> Result<CommittedFlush> {
     controller
         .commit(
             prefix(controller.authority()),

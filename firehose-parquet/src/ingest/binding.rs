@@ -231,7 +231,10 @@ pub(crate) fn canonical_directory(path: &Path) -> Result<PathBuf> {
                     canonical.is_dir(),
                     "protected output ancestor is not a directory"
                 );
-                canonical.push(path.strip_prefix(existing)?);
+                let suffix = path.strip_prefix(existing)?;
+                if !suffix.as_os_str().is_empty() {
+                    canonical.push(suffix);
+                }
                 return Ok(canonical);
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -383,9 +386,11 @@ mod tests {
         let output = alias.join("new/chain");
         let identity = resolve_output_identity(output.to_str().unwrap(), &aws(None)).unwrap();
         assert!(
-            matches!(identity,StorageIdentity::Local{canonical_root} if Path::new(&canonical_root)==std::fs::canonicalize(target).unwrap().join("new/chain"))
+            matches!(&identity,StorageIdentity::Local{canonical_root} if Path::new(&canonical_root)==std::fs::canonicalize(target).unwrap().join("new/chain"))
         );
         assert!(!output.exists());
+        let identity_again = resolve_output_identity(&output_path(&identity), &aws(None)).unwrap();
+        assert!(identity == identity_again);
         let mirror =
             resolve_mirror_binding(output.to_str().unwrap(), Some("cursor.parquet"), &aws(None))
                 .unwrap();

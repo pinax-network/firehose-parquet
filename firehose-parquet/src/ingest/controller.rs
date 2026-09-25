@@ -22,6 +22,12 @@ pub trait MirrorAction {
     async fn reconcile(&self, authority: &AuthorityState) -> Result<()>;
 }
 
+impl<T: MirrorAction> MirrorAction for &T {
+    async fn reconcile(&self, authority: &AuthorityState) -> Result<()> {
+        T::reconcile(self, authority).await
+    }
+}
+
 impl MirrorAction for super::mirror::ProtectedMirror<'_> {
     async fn reconcile(&self, authority: &AuthorityState) -> Result<()> {
         super::mirror::ProtectedMirror::reconcile(self, authority).await?;
@@ -33,7 +39,7 @@ pub struct TransactionController<'a, M: MirrorAction> {
     states: TransactionStateStore<'a>,
     parts: TransactionParts<'a>,
     authority: Versioned<AuthorityState>,
-    mirror: &'a M,
+    mirror: M,
     failed: bool,
     _session: crate::dataset_lock::session::SessionPermit<'a>,
 }
@@ -53,7 +59,7 @@ impl<'a, M: MirrorAction> TransactionController<'a, M> {
     pub async fn open(
         states: TransactionStateStore<'a>,
         parts: TransactionParts<'a>,
-        mirror: &'a M,
+        mirror: M,
         expected: &StreamDescriptor,
     ) -> Result<Self> {
         expected.validate()?;
