@@ -1,23 +1,36 @@
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use object_store::aws::AmazonS3Builder;
+use object_store::aws::{AmazonS3, AmazonS3Builder};
 use object_store::ObjectStore;
 
 use crate::config::Config;
 
-/// Build an S3 `ObjectStore` client from pipeline config credentials.
-pub fn build_s3_client(config: &Config) -> Result<Arc<dyn ObjectStore>> {
-    let output = config.output.to_string_lossy();
-    let bucket = if let Some(ref b) = config.s3_bucket {
-        b.clone()
-    } else if output.starts_with("s3://") {
-        crate::writer::parse_s3_url(&output)?.0
-    } else {
-        anyhow::bail!("no S3 bucket configured");
-    };
+/// Reject ambiguous S3 output configuration before any network or storage work.
+/// Explicit local output paths keep their local meaning even when S3_BUCKET is set.
+pub fn validate_output_bucket(output: &str, configured_bucket: Option<&str>) -> Result<()> {
+    if output.starts_with("s3://") {
+        let (bucket, _) = crate::writer::parse_s3_url(output)?;
+        if let Some(configured) = configured_bucket.map(str::trim).filter(|b| !b.is_empty()) {
+            if configured != bucket {
+                anyhow::bail!(
+                    "S3 output bucket `{bucket}` disagrees with --s3-bucket / S3_BUCKET `{configured}`; \
+                     use the same bucket or unset the bucket option"
+                );
+            }
+        }
+    }
+    Ok(())
+}
 
-    let mut builder = AmazonS3Builder::new().with_bucket_name(&bucket);
+/// Build an S3 client for the bucket selected by a data or cursor URI.
+/// The configured default output bucket must not override an explicit cursor bucket.
+pub fn build_s3_client(config: &Config, bucket: &str) -> Result<Arc<dyn ObjectStore>> {
+    Ok(Arc::new(build_s3_store(config, bucket)?))
+}
+
+fn build_s3_store(config: &Config, bucket: &str) -> Result<AmazonS3> {
+    let mut builder = AmazonS3Builder::new().with_bucket_name(bucket);
 
     if let Some(ref key) = config.aws_access_key_id {
         builder = builder.with_access_key_id(key);
@@ -32,12 +45,212 @@ pub fn build_s3_client(config: &Config) -> Result<Arc<dyn ObjectStore>> {
         builder = builder.with_region(region);
     }
     if let Some(ref endpoint_url) = config.aws_endpoint_url {
-        builder = builder.with_endpoint(endpoint_url);
+        builder = configure_endpoint(builder, endpoint_url, bucket)?;
     }
 
     let client = builder
         .build()
         .with_context(|| format!("building S3 client for bucket {bucket}"))?;
 
-    Ok(Arc::new(client))
+    Ok(client)
+}
+
+/// Configure the addressing style from the endpoint's host, never its path/query.
+/// Known bucket-bound AWS and Tigris endpoints may only serve that exact bucket.
+/// Other custom endpoints must be service endpoints supporting path-style access.
+pub(crate) fn configure_endpoint(
+    builder: AmazonS3Builder,
+    endpoint: &str,
+    bucket: &str,
+) -> Result<AmazonS3Builder> {
+    Ok(builder
+        .with_endpoint(endpoint)
+        .with_virtual_hosted_style_request(endpoint_is_bucket_bound(endpoint, bucket)?))
+}
+
+/// Check a known bucket-bound endpoint before connecting or selecting credentials.
+pub fn endpoint_is_bucket_bound(endpoint: &str, bucket: &str) -> Result<bool> {
+    let uri: tonic::codegen::http::Uri = endpoint.parse().context("invalid AWS endpoint URL")?;
+    let host = uri
+        .host()
+        .context("AWS endpoint URL must contain a host")?
+        .to_ascii_lowercase();
+    let bound_bucket = if let Some(prefix) = host.strip_suffix(".fly.storage.tigris.dev") {
+        Some(prefix.to_string())
+    } else if let Some(prefix) = host
+        .strip_suffix(".amazonaws.com")
+        .or_else(|| host.strip_suffix(".amazonaws.com.cn"))
+    {
+        let labels: Vec<_> = prefix.split('.').collect();
+        labels
+            .iter()
+            .rposition(|label| {
+                *label == "s3" || label.starts_with("s3-") || label.starts_with("s3express-")
+            })
+            .filter(|index| *index > 0)
+            .map(|index| labels[..index].join("."))
+    } else {
+        None
+    };
+    if let Some(bound) = bound_bucket {
+        anyhow::ensure!(
+            bound == bucket,
+            "AWS endpoint host `{host}` is bound to bucket `{bound}`, but the requested bucket is `{bucket}`; \
+             use a service endpoint for multiple buckets, or omit the endpoint for standard AWS S3"
+        );
+        Ok(true)
+    } else {
+        Ok(false)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cli::AwsConfig;
+    use object_store::signer::Signer;
+
+    fn credentials(endpoint: &str) -> Config {
+        Config {
+            aws_access_key_id: Some("test-key".into()),
+            aws_secret_access_key: Some("test-secret".into()),
+            aws_region: Some("us-east-1".into()),
+            aws_endpoint_url: Some(endpoint.into()),
+            ..Default::default()
+        }
+    }
+
+    fn maintenance_config(config: &Config) -> AwsConfig {
+        AwsConfig {
+            aws_access_key_id: config.aws_access_key_id.clone(),
+            aws_secret_access_key: config.aws_secret_access_key.clone(),
+            aws_session_token: None,
+            aws_region: config.aws_region.clone(),
+            aws_endpoint_url: config.aws_endpoint_url.clone(),
+        }
+    }
+
+    #[tokio::test]
+    async fn both_s3_builders_sign_the_correct_bucket_and_key() {
+        for (endpoint, bucket, expected_host, expected_path) in [
+            (
+                "https://data.s3.amazonaws.com",
+                "data",
+                "data.s3.amazonaws.com",
+                "/worker/c.parquet",
+            ),
+            (
+                "https://data.s3.us-east-1.amazonaws.com",
+                "data",
+                "data.s3.us-east-1.amazonaws.com",
+                "/worker/c.parquet",
+            ),
+            (
+                "https://data.logs.s3.dualstack.us-east-1.amazonaws.com",
+                "data.logs",
+                "data.logs.s3.dualstack.us-east-1.amazonaws.com",
+                "/worker/c.parquet",
+            ),
+            (
+                "https://data.s3-accelerate.amazonaws.com",
+                "data",
+                "data.s3-accelerate.amazonaws.com",
+                "/worker/c.parquet",
+            ),
+            (
+                "https://data.s3-us-west-2.amazonaws.com",
+                "data",
+                "data.s3-us-west-2.amazonaws.com",
+                "/worker/c.parquet",
+            ),
+            (
+                "https://data.s3.cn-north-1.amazonaws.com.cn",
+                "data",
+                "data.s3.cn-north-1.amazonaws.com.cn",
+                "/worker/c.parquet",
+            ),
+            (
+                "https://data.fly.storage.tigris.dev",
+                "data",
+                "data.fly.storage.tigris.dev",
+                "/worker/c.parquet",
+            ),
+            (
+                "https://s3.us-east-1.amazonaws.com",
+                "data",
+                "s3.us-east-1.amazonaws.com",
+                "/data/worker/c.parquet",
+            ),
+            (
+                "https://s3.us-east-1.amazonaws.com",
+                "state",
+                "s3.us-east-1.amazonaws.com",
+                "/state/worker/c.parquet",
+            ),
+            (
+                "https://storage.example.com",
+                "state",
+                "storage.example.com",
+                "/state/worker/c.parquet",
+            ),
+        ] {
+            let config = credentials(endpoint);
+            let stores = [
+                build_s3_store(&config, bucket).unwrap(),
+                maintenance_config(&config).build_s3_client(bucket).unwrap(),
+            ];
+            for store in stores {
+                let url = store
+                    .signed_url(
+                        "PUT".parse().unwrap(),
+                        &object_store::path::Path::from("worker/c.parquet"),
+                        std::time::Duration::from_secs(60),
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(url.host_str(), Some(expected_host));
+                assert_eq!(url.path(), expected_path);
+            }
+        }
+    }
+
+    #[test]
+    fn both_s3_builders_reject_a_different_bucket_on_bound_endpoints() {
+        for endpoint in [
+            "https://data.s3.amazonaws.com",
+            "https://data.s3.us-east-1.amazonaws.com",
+            "https://data.logs.s3.dualstack.us-east-1.amazonaws.com",
+            "https://data.s3-accelerate.amazonaws.com",
+            "https://data.s3-us-west-2.amazonaws.com",
+            "https://data.s3.cn-north-1.amazonaws.com.cn",
+            "https://data.fly.storage.tigris.dev",
+        ] {
+            let config = credentials(endpoint);
+            for error in [
+                build_s3_client(&config, "state").unwrap_err(),
+                maintenance_config(&config)
+                    .build_s3_client("state")
+                    .unwrap_err(),
+            ] {
+                assert!(
+                    error.to_string().contains("requested bucket is `state`"),
+                    "{error}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn endpoint_binding_checks_host_components_only() {
+        for endpoint in [
+            "https://data.fly.storage.tigris.dev.example.com",
+            "https://data.s3.amazonaws.com.example.com",
+            "https://storage.example.com/data.fly.storage.tigris.dev",
+            "https://storage.example.com/?host=data.s3.amazonaws.com",
+            "https://s3.dualstack.us-east-1.amazonaws.com",
+            "https://fly.storage.tigris.dev",
+        ] {
+            assert!(!endpoint_is_bucket_bound(endpoint, "state").unwrap());
+        }
+    }
 }

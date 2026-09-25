@@ -20,7 +20,6 @@ use firehose_parquet::metrics;
 use firehose_parquet::networks::{resolve_network_endpoint, EndpointSource};
 use firehose_parquet::traits::{decode_id_bytes, fork_step_name, BlockIdentity, BlockMapper};
 use firehose_parquet::writer::{OutputWriter, ParquetFileMetadata, WriterBufferStats};
-use object_store::ObjectStore;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -1315,17 +1314,38 @@ fn validate_block_range_alignment(
     Ok(())
 }
 
+/// Validate the effective cursor after any template expansion, before startup I/O.
+fn validate_cursor_storage(config: &Config) -> Result<()> {
+    firehose_parquet::s3::validate_output_bucket(
+        config.output.to_string_lossy().as_ref(),
+        config.s3_bucket.as_deref(),
+    )?;
+    for path in std::iter::once(config.output.to_string_lossy().into_owned())
+        .chain(config.cursor_path.iter().cloned())
+        .filter(|path| path.starts_with("s3://"))
+    {
+        validate_s3_output_credentials(
+            &path,
+            config.aws_access_key_id.as_deref(),
+            config.aws_secret_access_key.as_deref(),
+        )?;
+        let (bucket, _) = firehose_parquet::writer::parse_s3_url(&path)?;
+        if let Some(endpoint) = config.aws_endpoint_url.as_deref() {
+            firehose_parquet::s3::endpoint_is_bucket_bound(endpoint, &bucket)?;
+        }
+    }
+    Ok(())
+}
+
 fn resolve_cursor_location(
     config: &firehose_parquet::config::Config,
 ) -> Result<Option<CursorLocation>> {
+    validate_cursor_storage(config)?;
     if let Some(ref cp) = config.cursor_path {
         let output_str = config.output.to_string_lossy().to_string();
-        let s3_client = if firehose_parquet::writer::is_s3_output(&config.output) {
-            Some(firehose_parquet::s3::build_s3_client(config)?)
-        } else {
-            None
-        };
-        Ok(Some(CursorLocation::resolve(&output_str, cp, s3_client)?))
+        Ok(Some(CursorLocation::resolve(&output_str, cp, |bucket| {
+            firehose_parquet::s3::build_s3_client(config, bucket)
+        })?))
     } else {
         Ok(None)
     }
@@ -1511,19 +1531,11 @@ async fn run_partitions_build(
     };
     let resumed_from_block = resumed.as_ref().map(|(_, frontier)| *frontier);
 
-    let cursor_location = if !live && chain_output_root.starts_with("s3://") {
-        let (bucket, _) = firehose_parquet::writer::parse_s3_url(&chain_output_root)?;
-        let s3_client = Arc::new(aws.build_s3_client(&bucket)?) as Arc<dyn ObjectStore>;
+    let cursor_location = if !live {
         Some(CursorLocation::resolve(
             &chain_output_root,
             firehose_parquet::cursor::CURSOR_PARQUET_FILENAME,
-            Some(s3_client),
-        )?)
-    } else if !live {
-        Some(CursorLocation::resolve(
-            &chain_output_root,
-            firehose_parquet::cursor::CURSOR_PARQUET_FILENAME,
-            None,
+            |bucket| Ok(Arc::new(aws.build_s3_client(bucket)?)),
         )?)
     } else {
         None
@@ -4664,6 +4676,8 @@ async fn run_ingestion(args: &BuildArgs, global: &GlobalArgs) -> Result<()> {
         );
     }
 
+    validate_cursor_storage(&config)?;
+
     // Fetch endpoint info for auto-detection of encoding, chain_name-based
     // output directory, and feature capability logging.
     let mut client = FirehoseClient::new(config.clone())?;
@@ -6192,6 +6206,103 @@ mod tests {
         let rendered = err.to_string();
         assert!(rendered.contains("--backfill-missing-timestamps-buffer-bytes"));
         assert!(rendered.contains("unexpected argument"));
+    }
+
+    #[test]
+    fn test_effective_s3_cursor_template_requires_complete_credentials() {
+        let cursor = resolve_cursor_template(
+            "s3://state/worker.parquet",
+            &CursorTemplateContext {
+                chain: None,
+                partition_type: None,
+                partition_value: None,
+                partition_from: None,
+                partition_to: None,
+            },
+        )
+        .unwrap();
+        for (key, secret) in [(None, None), (Some("key"), None), (None, Some("secret"))] {
+            let config = Config {
+                output: "./local".into(),
+                cursor_path: Some(cursor.clone()),
+                aws_access_key_id: key.map(str::to_string),
+                aws_secret_access_key: secret.map(str::to_string),
+                ..Default::default()
+            };
+            let error = resolve_cursor_location(&config).unwrap_err();
+            assert!(error
+                .to_string()
+                .contains("refusing to fall back silently to metadata providers"));
+        }
+    }
+
+    #[test]
+    fn test_effective_cursor_rejects_bucket_bound_endpoint_mismatch() {
+        let config = Config {
+            output: "s3://data/mainnet".into(),
+            cursor_path: Some("s3://state/c.parquet".into()),
+            aws_access_key_id: Some("test-key".into()),
+            aws_secret_access_key: Some("test-secret".into()),
+            aws_endpoint_url: Some("https://data.s3.us-east-1.amazonaws.com".into()),
+            ..Default::default()
+        };
+        let error = validate_cursor_storage(&config).unwrap_err();
+        assert!(error.to_string().contains("requested bucket is `state`"));
+    }
+
+    #[test]
+    fn test_resolve_cursor_location_builds_store_for_cursor_bucket() {
+        for (output, cursor, bucket, key) in [
+            (
+                "s3://data/mainnet",
+                "cursor.parquet",
+                "data",
+                "mainnet/cursor.parquet",
+            ),
+            (
+                "s3://data/mainnet",
+                "workers/a.parquet",
+                "data",
+                "mainnet/workers/a.parquet",
+            ),
+            ("s3://data/mainnet", "s3://x/c.parquet", "x", "c.parquet"),
+            ("s3://data/mainnet", "s3://y/c.parquet", "y", "c.parquet"),
+            ("./output/mainnet", "s3://x/c.parquet", "x", "c.parquet"),
+        ] {
+            let config = Config {
+                output: output.into(),
+                cursor_path: Some(cursor.into()),
+                s3_bucket: Some("data".into()),
+                aws_access_key_id: Some("test-key".into()),
+                aws_secret_access_key: Some("test-secret".into()),
+                aws_region: Some("us-east-1".into()),
+                ..Config::default()
+            };
+            match resolve_cursor_location(&config).unwrap().unwrap() {
+                CursorLocation::S3 {
+                    client,
+                    key: actual_key,
+                } => {
+                    assert_eq!(client.to_string(), format!("AmazonS3({bucket})"));
+                    assert_eq!(actual_key, key);
+                }
+                other => panic!("expected S3 cursor, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn test_resolve_cursor_location_rejects_conflicting_output_bucket() {
+        let config = Config {
+            output: "s3://data/mainnet".into(),
+            cursor_path: Some("s3://independent/cursor.parquet".into()),
+            s3_bucket: Some("wrong-bucket".into()),
+            ..Config::default()
+        };
+        let error = resolve_cursor_location(&config).unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("S3 output bucket `data` disagrees"));
     }
 
     #[test]
