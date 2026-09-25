@@ -966,6 +966,8 @@ For a failed or reverted transaction, `fireparq` writes:
 
 This follows the rule documented on `TransactionTrace.status` in `proto/ethereum.proto`. Rolled-back transfers and storage writes of failed transactions are not written. Successful transactions keep every state change, including those of calls that were reverted inside them. The `persisted` column tells them apart (see below).
 
+Resuming an EVM output whose `cursor.parquet` was written with failed transactions excluded (the default before this change) keeps excluding them, so one output does not mix both modes. `fireparq` logs a warning. Pass `--exclude-failed-transactions` to keep that and silence the warning. To switch the output to the new default, use `--cursor-override` with an explicit `--start-block`.
+
 ### EVM: which call recorded a change, and whether it persisted
 
 The transaction-scoped change tables (`balance_changes`, `nonce_changes`, `code_changes`, `storage_changes`, `account_creations`, `gas_changes`) carry the transaction and call that recorded each change:
@@ -989,11 +991,42 @@ QUALIFY row_number() OVER (PARTITION BY address ORDER BY block_number DESC, ordi
 
 Order persisted changes by `(block_number, ordinal)`; ordinals are unique within a block. Ordinals of changes in reverted calls may be `0`.
 
-The `system_*` change tables have a nullable `call_index`: the index of the system call that recorded the change, or `NULL` for block-level changes such as beacon-chain withdrawals.
+The `system_*` change tables have a nullable `call_index`: the index of the system call that recorded the change, or `NULL` for block-level changes such as beacon-chain withdrawals. System call indexes are not unique within a block: the system calls that run after the transactions (EIP-7002 and EIP-7251 requests) restart at 1. Join a change to its system call on the ordinal range as well:
+
+```sql
+SELECT c.*, s.address AS system_contract
+FROM read_parquet('output/mainnet/system_storage_changes/**/*.parquet') c
+JOIN read_parquet('output/mainnet/system_calls/**/*.parquet') s
+  ON s.block_number = c.block_number AND s.call_index = c.call_index
+ AND c.ordinal BETWEEN s.begin_ordinal AND s.end_ordinal;
+```
 
 The `logs` table holds receipt logs only, so logs emitted by reverted calls are never in it.
 
-Resuming an EVM output whose `cursor.parquet` was written with failed transactions excluded (the default before this change) keeps excluding them, so one output does not mix both modes. `fireparq` logs a warning. Pass `--exclude-failed-transactions` to keep that and silence the warning. To switch the output to the new default, use `--cursor-override` with an explicit `--start-block`.
+### EVM: header, signature, blob and ordinal columns
+
+These columns hold Firehose fields as they are, with bytes in the output encoding and big integers as decimal strings like the other value columns. Fields introduced by a fork are `NULL` in blocks and transactions from before it.
+
+| Table | Column | Type | Notes |
+|---|---|---|---|
+| `blocks` | `uncle_hash`, `logs_bloom` | bytes | |
+| `blocks` | `withdrawals_root` | bytes, nullable | Shanghai |
+| `blocks` | `blob_gas_used`, `excess_blob_gas` | `UInt64`, nullable | Cancun (EIP-4844) |
+| `blocks` | `parent_beacon_root` | bytes, nullable | Cancun (EIP-4788) |
+| `blocks` | `requests_hash` | bytes, nullable | Prague (EIP-7685) |
+| `transactions` | `v`, `r`, `s` | bytes | signature |
+| `transactions` | `return_data` | bytes | |
+| `transactions` | `logs_bloom` | bytes, nullable | from the receipt; `NULL` without a receipt |
+| `transactions` | `blob_gas`, `blob_gas_fee_cap` | `UInt64` / decimal `Utf8`, nullable | blob transactions only |
+| `transactions` | `blob_hashes` | list of bytes | empty for non-blob transactions |
+| `transactions` | `blob_gas_used`, `blob_gas_price` | `UInt64` / decimal `Utf8`, nullable | from the receipt, blob transactions only |
+| `transactions` | `begin_ordinal`, `end_ordinal` | `UInt64` | execution-order range of the transaction in the block |
+| `calls`, `system_calls` | `failure_reason` | `Utf8`, nullable | `NULL` when the call did not fail |
+| `calls`, `system_calls` | `address_delegates_to` | bytes, nullable | EIP-7702 delegation target of the called account |
+| `calls`, `system_calls` | `begin_ordinal`, `end_ordinal` | `UInt64` | execution-order range of the call |
+| `logs` | `ordinal` | `UInt64` | execution order in the block |
+
+The new columns come after the existing ones in each table. Ordinals are unique within a block, so `(block_number, ordinal)` orders every log, call and state change of a block. They are not reliable for anything inside a reverted call.
 
 ## Prometheus Metrics
 
