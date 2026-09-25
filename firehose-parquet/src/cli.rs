@@ -1085,8 +1085,8 @@ Examples:
   # Delete a single parquet file directly
   fireparq truncate ./output/mainnet/partitions.parquet
 
-  # Delete only a specific date partition
-  fireparq truncate ./output/blocks/ -p \"date=01\"
+  # Delete only day-of-month 01 partitions (also matches legacy date=01 directories)
+  fireparq truncate ./output/blocks/ -p \"day=01\"
 
   # Delete with glob pattern (all of January)
   fireparq truncate s3://bucket/blocks/ -p \"month=01\"
@@ -1113,8 +1113,9 @@ Lookup order:
         #[arg(help_heading = "Selection")]
         path: String,
         /// Partition filter(s) — only delete files matching these partition segments.
-        /// Use a key name to match all values (e.g. "date" matches all date=* partitions),
-        /// or a key=value with optional glob (e.g. "date=2026-01-*"). Repeatable.
+        /// Use a key name to match all values (e.g. "minute" matches all minute=* partitions),
+        /// or a key=value with optional glob (e.g. "day=0*"). `day` also matches the legacy
+        /// `date=DD` day directories written by earlier releases. Repeatable.
         #[arg(long, short = 'p', help_heading = "Selection")]
         partition: Vec<String>,
         /// Show what would be deleted without actually deleting

@@ -1,5 +1,14 @@
 use std::path::PathBuf;
 
+/// Hive prefix of the day-of-month directory written by time-based partitioning
+/// (`year=YYYY/month=MM/day=DD/...`).
+pub const DAY_PARTITION_PREFIX: &str = "day=";
+
+/// Day-of-month prefix written by earlier releases (`date=DD`). Under hive
+/// partitioning it collided with the canonical `date` column, so new output uses
+/// [`DAY_PARTITION_PREFIX`]. Readers accept both.
+pub const LEGACY_DAY_PARTITION_PREFIX: &str = "date=";
+
 /// Partitioning strategy for output files.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Partition {
@@ -7,13 +16,13 @@ pub enum Partition {
     None,
     /// Partition by block number ranges of the given size.
     BlockRange { size: u64, start_block: Option<u64> },
-    /// Partition by date (YYYY-MM-DD).
+    /// Partition by date (`year=YYYY/month=MM/day=DD`).
     Date,
-    /// Partition by hour (YYYY-MM-DD/HH).
+    /// Partition by hour (`.../day=DD/hour=HH`).
     Hour,
-    /// Partition by minute (YYYY-MM-DD/HH/MM).
+    /// Partition by minute (`.../hour=HH/minute=MM`).
     Minute,
-    /// Partition by second (YYYY-MM-DD/HH/MM/SS).
+    /// Partition by second (`.../minute=MM/second=SS`).
     Second,
 }
 
@@ -142,7 +151,7 @@ impl Partition {
                 let dt = time::OffsetDateTime::from_unix_timestamp(timestamp)
                     .unwrap_or(time::OffsetDateTime::UNIX_EPOCH);
                 Some(format!(
-                    "year={:04}/month={:02}/date={:02}",
+                    "year={:04}/month={:02}/day={:02}",
                     dt.year(),
                     dt.month() as u8,
                     dt.day()
@@ -152,7 +161,7 @@ impl Partition {
                 let dt = time::OffsetDateTime::from_unix_timestamp(timestamp)
                     .unwrap_or(time::OffsetDateTime::UNIX_EPOCH);
                 Some(format!(
-                    "year={:04}/month={:02}/date={:02}/hour={:02}",
+                    "year={:04}/month={:02}/day={:02}/hour={:02}",
                     dt.year(),
                     dt.month() as u8,
                     dt.day(),
@@ -163,7 +172,7 @@ impl Partition {
                 let dt = time::OffsetDateTime::from_unix_timestamp(timestamp)
                     .unwrap_or(time::OffsetDateTime::UNIX_EPOCH);
                 Some(format!(
-                    "year={:04}/month={:02}/date={:02}/hour={:02}/minute={:02}",
+                    "year={:04}/month={:02}/day={:02}/hour={:02}/minute={:02}",
                     dt.year(),
                     dt.month() as u8,
                     dt.day(),
@@ -175,7 +184,7 @@ impl Partition {
                 let dt = time::OffsetDateTime::from_unix_timestamp(timestamp)
                     .unwrap_or(time::OffsetDateTime::UNIX_EPOCH);
                 Some(format!(
-                    "year={:04}/month={:02}/date={:02}/hour={:02}/minute={:02}/second={:02}",
+                    "year={:04}/month={:02}/day={:02}/hour={:02}/minute={:02}/second={:02}",
                     dt.year(),
                     dt.month() as u8,
                     dt.day(),
@@ -618,12 +627,12 @@ mod tests {
         // 2024-01-15 12:00:00 UTC = 1705320000
         assert_eq!(
             Partition::Date.partition_key(100, 1705320000),
-            Some("year=2024/month=01/date=15".to_string())
+            Some("year=2024/month=01/day=15".to_string())
         );
         // 2024-01-16 00:00:00 UTC = 1705363200
         assert_eq!(
             Partition::Date.partition_key(200, 1705363200),
-            Some("year=2024/month=01/date=16".to_string())
+            Some("year=2024/month=01/day=16".to_string())
         );
     }
 
@@ -632,7 +641,7 @@ mod tests {
         // 2024-01-15 14:30:00 UTC = 1705329000
         assert_eq!(
             Partition::Hour.partition_key(100, 1705329000),
-            Some("year=2024/month=01/date=15/hour=14".to_string())
+            Some("year=2024/month=01/day=15/hour=14".to_string())
         );
     }
 

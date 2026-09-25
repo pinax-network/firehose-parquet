@@ -666,13 +666,13 @@ Displays comprehensive metadata for a single Parquet file: file-level key-value 
 
 ```bash
 # Inspect a local file
-fireparq inspect ./output/blocks/year=2026/month=01/date=15/part-000001.parquet
+fireparq inspect ./output/blocks/year=2026/month=01/day=15/part-000001.parquet
 
 # Resolve a shorthand key against S3_BUCKET when no local path matches
 S3_BUCKET=my-bucket fireparq inspect evm/partitions.parquet
 
 # Inspect an S3 file
-fireparq inspect s3://my-bucket/evm/blocks/year=2026/month=01/date=15/part-000001.parquet
+fireparq inspect s3://my-bucket/evm/blocks/year=2026/month=01/day=15/part-000001.parquet
 
 # Show only schema fields, including explicit nullability
 fireparq inspect s3://my-bucket/evm/partitions.parquet --schema-only
@@ -846,20 +846,20 @@ fireparq truncate ./output/mainnet/ --dry-run
 # Delete a single parquet file directly
 fireparq truncate ./output/mainnet/partitions.parquet
 
-# Delete a specific partition
-fireparq truncate ./output/blocks/ -p "year=2026/month=01/date=01"
+# Delete day-of-month 01 partitions (`day=01`, and legacy `date=01` directories)
+fireparq truncate ./output/blocks/ -p "day=01"
 
 # Delete all partitions under a key
-fireparq truncate ./output/blocks/ -p date
+fireparq truncate ./output/blocks/ -p minute
 
 # Glob pattern matching
-fireparq truncate s3://bucket/prefix -p "year=2026/month=01/date=*"
+fireparq truncate s3://bucket/prefix -p "day=0*"
 
 # Resolve a shorthand S3 path when no local match exists
 S3_BUCKET=my-bucket fireparq truncate evm/blocks/ -p "month=01"
 
 # Multiple partitions
-fireparq truncate ./output/ -p "year=2026/month=01/date=01" -p "year=2026/month=01/date=02"
+fireparq truncate ./output/ -p "day=01" -p "day=02"
 
 # Dry run — show what would be deleted
 fireparq truncate ./output/blocks/ --dry-run
@@ -971,7 +971,7 @@ Endpoint `block_id_encoding` remains a fallback only when the chain does not res
 ```python
 import pyarrow.parquet as pq
 
-meta = pq.read_metadata("output/blocks/year=2026/month=01/date=15/part-000001.parquet")
+meta = pq.read_metadata("output/blocks/year=2026/month=01/day=15/part-000001.parquet")
 for i in range(meta.metadata.count()):
     key = meta.metadata.keys()[i]
     if key.startswith("firehose-parquet."):
@@ -981,7 +981,7 @@ for i in range(meta.metadata.count()):
 ```sql
 -- DuckDB
 SELECT key, value
-FROM parquet_kv_metadata('output/blocks/year=2026/month=01/date=15/part-000001.parquet')
+FROM parquet_kv_metadata('output/blocks/year=2026/month=01/day=15/part-000001.parquet')
 WHERE key LIKE 'firehose-parquet.%';
 ```
 
@@ -991,15 +991,28 @@ WHERE key LIKE 'firehose-parquet.%';
 <chain_name>/
 ├── cursor.parquet
 ├── blocks/
-│   ├── year=2026/month=02/date=25/
+│   ├── year=2026/month=02/day=25/
 │   │   ├── part-000001.parquet
 │   │   └── part-000002.parquet
-│   └── year=2026/month=02/date=26/
+│   └── year=2026/month=02/day=26/
 │       └── part-000001.parquet
 ├── transactions/
 │   └── ...
 └── logs/
     └── ...
+```
+
+Time-based partitioning writes Hive-style directories: `--partition date` writes `year=YYYY/month=MM/day=DD/`, and `hour`, `minute` and `second` add `hour=HH/`, `minute=MM/` and `second=SS/` below it. `--partition block_range` writes `block_range=<start>-<stop>/`.
+
+The day-of-month key is `day=`. Earlier releases wrote `date=DD`, which collides with the canonical `date` column under Hive partitioning: DuckDB's default `hive_partitioning` replaced the `date` DATE values with the day number, and Polars' `hive_partitioning=True` failed to parse `26` as a date. `rollup` and `truncate` still accept legacy `date=` directories.
+
+Query a dataset with its partition columns, e.g. in DuckDB:
+
+```sql
+SELECT date, day, count(*)
+FROM read_parquet('output/mainnet/blocks/**/*.parquet')  -- hive_partitioning is on by default
+GROUP BY ALL;
+-- date: DATE (the canonical data column); year/month/day/hour: partition columns
 ```
 
 ## Canonical Identity Columns
@@ -1016,7 +1029,7 @@ Every table across all chains includes these 7 columns (from Firehose `BlockMeta
 | `timestamp` | Timestamp(Millisecond, UTC) | Block time. Parquet logical type `TIMESTAMP(MILLIS, isAdjustedToUTC=true)`; keeps sub-second precision where the chain has it (e.g. Antelope's 500 ms blocks) |
 | `date` | Date32 | UTC day of the block time |
 
-Time-based partition directories (`year=`/`month=`/`date=`/`hour=`/…) and `date` are derived from the whole-second block time, so a block at `12:00:00.500` lands in the same `second=00` partition as one at `12:00:00.000`. Solana tables keep `timestamp` and `date` null when `block_time` is missing.
+Time-based partition directories (`year=`/`month=`/`day=`/`hour=`/…) and `date` are derived from the whole-second block time, so a block at `12:00:00.500` lands in the same `second=00` partition as one at `12:00:00.000`. Solana tables keep `timestamp` and `date` null when `block_time` is missing.
 
 ## Output Encoding by Block Type
 
