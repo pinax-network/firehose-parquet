@@ -20,7 +20,8 @@ issue labels and green CI alone are not acceptance evidence. See the
    explains why deterministic range filenames alone cannot prevent duplicates
    when replay chooses different timer or size boundaries. The complete
    [runtime implementation](468-ingestion-runtime.md) is independently reviewed
-   and awaiting PR publication/final CI on main `f555898`: 995 workspace tests,
+   and published in [PR #600](https://github.com/pinax-network/firehose-parquet/pull/600),
+   awaiting final CI/merge on main `f555898`: 995 workspace tests,
    the CI capture example, actual failed-Writing recovery and 14-table/12,298-row
    live equivalence passed. Its migration and S3 quiescence limits are explicit.
    PR #591 remains the historical ownership/control foundation. Keep #468 open
