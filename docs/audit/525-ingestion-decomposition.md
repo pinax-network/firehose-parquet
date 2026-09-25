@@ -126,3 +126,12 @@ no-op subjects; all routing value assertions remain. Validation on base `9eddfd4
 176 binary tests plus nine transaction, one metrics, one non-final-stream and one
 shutdown integration test passed. A baseline binary from that unmodified base is
 retained for comparison; final qualification will use the final integration base.
+
+Stage 2 extracts `ResolvedEndpoint` and `IngestionSetup` into the binary-private
+`ingestion/setup.rs`. Ownership remains in outer orchestration; the endpoint
+phase resolves complete scopes and the second phase reads resumed authority only
+after acquisition. Metrics registration and final-config Blocks client creation
+retain their order. The callback and completion tail are unchanged apart from
+owned setup-string borrows. Independent review found no ordering change; all
+176 binary tests and the same 12 integration checks passed on merged main
+`955b8b2` (188 total). Runtime method/window extraction follows separately.
