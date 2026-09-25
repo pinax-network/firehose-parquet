@@ -93,6 +93,21 @@ Migration:
 
 How aliases are chosen, and how to refresh them, is described in `docs/network-registry-integration.md`.
 
+### `verify`: one registry per network, chain and table inferred from the data (#488)
+
+`verify` used to default to `--chain evm --table blocks` and to derive the registry path from them, with a hard-coded `mainnet`. On S3, every network mapped to `s3://<bucket>/evm/mainnet/merkle_roots.parquet`, so verifying a second network overwrote the first network's roots. Locally, the registry was written under a fake `<output>/<chain_name>/evm/mainnet/` directory. When the verify path contained it (or `cursor.parquet`), that file was hashed as an `unpartitioned` partition, and the next run failed against the registry it had just written.
+
+Now:
+
+- **The chain and table are inferred.** The chain comes from the `firehose-parquet.block_type` file metadata and the table from the directory layout (`<output>/<chain_name>/<table>/...`). `--chain` and `--table` are only needed for data without that information. An explicit value that contradicts the data is an error, and so is a verify path that spans several tables or networks.
+- **The registry lives in the network directory.** It is `<output>/<chain_name>/merkle_roots.parquet`, one per network and shared by its tables (rows are keyed by chain, table and partition). Published reports go to `<output>/<chain_name>/verify_runs/<run_id>/report.json`. The report gains `network` and `warnings`.
+- **Reserved artifacts are never scanned as data.** `cursor.parquet`, `partitions.parquet`, `merkle_roots.parquet` and `verify_runs/` are skipped. Paths are matched by component instead of by substring.
+
+Migration:
+
+- Scripts that passed `--chain evm --table blocks` for non-EVM or non-`blocks` data now fail with a conflict error. Drop the flags, or fix them.
+- `verify` warns while a registry exists at the old default location (`<output>/<chain_name>/evm/mainnet/merkle_roots.parquet` locally, `s3://<bucket>/evm/mainnet/merkle_roots.parquet` on S3). Keep a copy of it, run `fireparq verify <output>/<chain_name>/<table> --update-registry --no-fail-fast` for each table against trusted data, then delete the old file (locally the whole `<output>/<chain_name>/evm/` directory). The details are in `docs/verifiability-artifact-runbook.md` ("Moving a registry from the old default location"). An S3 registry at the old location may mix several networks' rows, so do not reuse it as a baseline.
+
 ## Fixes
 
 - **`build` no longer restarts from scratch when `cursor.parquet` cannot be read (#465).** Only a missing cursor, or one with no row or an empty cursor string, starts a fresh run. A cursor that exists but cannot be loaded (permission denied, S3 403/5xx/timeout, empty, truncated or corrupt file) now fails the run with an error that names the file. Previously the run logged "starting fresh", re-ingested from `--start-block` or genesis, and overwrote the good cursor on its first flush. To deliberately ignore an unreadable cursor and restart from the CLI bounds, pass `--cursor-override`. `partitions build` also fails instead of ignoring an unreadable sibling cursor when it uses it to infer `--start-block`.

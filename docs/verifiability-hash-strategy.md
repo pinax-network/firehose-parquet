@@ -13,7 +13,7 @@ This document defines the cross-chain hashing policy used by `fireparq verify`, 
 `verify` selects a hash strategy by:
 
 1. `--hash-strategy` (if set to `keccak256` or `sha256`)
-2. otherwise `auto` chain default:
+2. otherwise `auto` chain default, where the chain is the dataset's `firehose-parquet.block_type` file metadata (or `--chain` for files without it):
    - `evm` -> `keccak256`
    - `bitcoin` -> `sha256`
    - `solana` -> `sha256`

@@ -650,44 +650,50 @@ Lookup order:
     },
     /// Verify deterministic partition merkle roots for table parquet data.
     ///
-    /// Reads parquet data, computes partition-level `merkle_v2` roots, compares to
-    /// `merkle_roots.parquet`, and optionally writes missing/updated entries.
+    /// Reads one table directory of `build` output (`<output>/<chain_name>/<table>`),
+    /// computes partition-level `merkle_v2` roots, compares them to
+    /// `<output>/<chain_name>/merkle_roots.parquet`, and optionally writes
+    /// missing/updated entries. The chain and table are inferred from the file
+    /// metadata and the directory layout.
     #[command(after_long_help = "\
 Examples:
-  # Verify EVM blocks and auto-create missing root registry entries
-  fireparq verify ./output/evm/mainnet/blocks --chain evm --table blocks
+  # Verify ETH mainnet blocks (chain and table are inferred) and fill missing registry roots
+  fireparq verify ./output/mainnet/blocks
 
   # Quick profile (roots only)
-  fireparq verify ./output/evm/mainnet/blocks --profile quick
+  fireparq verify ./output/mainnet/blocks --profile quick
 
   # Explicitly select checks regardless of profile
-  fireparq verify ./output/evm/mainnet/blocks --checks roots,protocol
+  fireparq verify ./output/mainnet/blocks --checks roots,protocol
 
   # Continue scanning all partitions (no fail-fast) and emit JSON report
-  fireparq verify ./output/evm/mainnet/blocks --no-fail-fast --report-json verify-report.json
+  fireparq verify ./output/mainnet/blocks --no-fail-fast --report-json verify-report.json
 
-  # Publish the report to the suggested verify artifact path
-  fireparq verify ./output/evm/mainnet/blocks --publish-report
+  # Publish the report to <output>/<chain_name>/verify_runs/<run_id>/report.json
+  fireparq verify ./output/mainnet/blocks --publish-report
 
   # Publish the report to an explicit S3 location
-  fireparq verify s3://bucket/evm/mainnet/blocks \
-    --publish-report-path s3://bucket/evm/mainnet/verify_runs/custom-run/report.json
+  fireparq verify s3://bucket/mainnet/blocks \
+    --publish-report-path s3://bucket/mainnet/verify_runs/custom-run/report.json
 
   # Resolve a shorthand S3 data path when no local match exists
-  S3_BUCKET=my-bucket fireparq verify evm/mainnet/blocks --chain evm --table blocks
+  S3_BUCKET=my-bucket fireparq verify mainnet/blocks
 
-  # Verify S3 parquet data with explicit registry location
-  fireparq verify s3://bucket/evm/mainnet/blocks \\
-    --registry-path s3://bucket/evm/mainnet/merkle_roots.parquet
+  # Verify S3 parquet data with an explicit registry (use one registry per network)
+  fireparq verify s3://bucket/mainnet/blocks \
+    --registry-path s3://bucket/mainnet/merkle_roots.parquet
+
+  # Data without firehose-parquet.block_type metadata: name the chain explicitly
+  fireparq verify ./output/btc/blocks --chain bitcoin
 
   # Override hash strategy (default: auto from chain)
-  fireparq verify ./output/bitcoin/mainnet/blocks --chain bitcoin --hash-strategy sha256
+  fireparq verify ./output/btc/blocks --hash-strategy sha256
 
   # Update mismatched registry roots (default behavior only fills missing roots)
-  fireparq verify ./output/evm/mainnet/blocks --update-registry
+  fireparq verify ./output/mainnet/blocks --update-registry
 
   # Rebuild a registry written with an older Merkle version (e.g. legacy merkle_v1 roots)
-  fireparq verify ./output/evm/mainnet/blocks --update-registry --no-fail-fast
+  fireparq verify ./output/mainnet/blocks --update-registry --no-fail-fast
 
 Lookup order for the data path:
   1. Explicit s3://bucket/... URIs are used as-is.
@@ -698,12 +704,12 @@ Lookup order for the data path:
         /// Path to a directory of .parquet files, a single parquet file, a shorthand S3 key/prefix via S3_BUCKET, or an S3 URI
         #[arg(help_heading = "Selection")]
         path: String,
-        /// Chain identifier used in root registry keys
-        #[arg(long, default_value = "evm", help_heading = "Selection")]
-        chain: String,
-        /// Table name used in root registry keys
-        #[arg(long, default_value = "blocks", help_heading = "Selection")]
-        table: String,
+        /// Chain family (evm, bitcoin, solana, ...) [default: firehose-parquet.block_type file metadata; a different value is an error]
+        #[arg(long, help_heading = "Selection")]
+        chain: Option<String>,
+        /// Table name [default: the table directory in <chain_root>/<table>/...; a different value is an error]
+        #[arg(long, help_heading = "Selection")]
+        table: Option<String>,
         /// Hash strategy used for leaf+merkle hashing (auto, keccak256, sha256)
         #[arg(long, default_value = "auto", help_heading = "Verification")]
         hash_strategy: String,
@@ -738,7 +744,7 @@ Lookup order for the data path:
         /// Explicit path to publish the JSON report (local or s3://)
         #[arg(long, help_heading = "Reporting")]
         publish_report_path: Option<String>,
-        /// Explicit merkle roots registry path (local or s3://)
+        /// Explicit merkle roots registry path (local or s3://) [default: <chain_root>/merkle_roots.parquet]
         #[arg(long, help_heading = "Registry")]
         registry_path: Option<String>,
         /// Overwrite mismatched roots (including roots from an older Merkle version) in the registry with computed values
@@ -7563,8 +7569,8 @@ mod tests {
 
     fn test_verify_options() -> crate::verify::VerifyOptions {
         crate::verify::VerifyOptions {
-            chain: "evm".to_string(),
-            table: "blocks".to_string(),
+            chain: None,
+            table: None,
             hash_strategy: Some("auto".to_string()),
             checks: vec![],
             profile: crate::verify::VerifyProfile::Standard,

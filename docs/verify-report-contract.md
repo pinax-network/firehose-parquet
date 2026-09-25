@@ -22,7 +22,7 @@ This document defines the versioned JSON report contract emitted by `fireparq ve
 
 | Version | Change |
 |---------|--------|
-| `2.0.0` | Roots use the `merkle_v2` construction, so `computed_root` changes for identical data. Added `merkle_version`. |
+| `2.0.0` | Roots use the `merkle_v2` construction, so `computed_root` changes for identical data. Added `merkle_version`, `network` and `warnings`. `chain` and `table` are inferred from the dataset, and the registry and report paths moved under the network's chain root. |
 | `1.0.0` | Initial contract. Roots used the legacy `merkle_v1` construction. |
 
 ## Required Run Metadata
@@ -34,14 +34,16 @@ Each report includes stable run-level metadata:
 - `finished_at`
 - `duration_ms`
 - `tool_version`
-- `chain`
-- `table`
+- `chain`: chain family, from `firehose-parquet.block_type` file metadata or `--chain`
+- `table`: table directory name, or `--table`
+- `network`: `firehose-parquet.chain_name` file metadata, else the chain root directory name; `null` when neither exists
 - `profile`
 - `requested_checks`
 - `effective_checks`
 - `algorithm`
 - `merkle_version`
 - `registry_path`
+- `warnings`: operator-facing messages (for example an ignored registry at the old default location); empty when there are none
 
 ## Root Comparability
 
@@ -65,13 +67,15 @@ Suggested report artifact path is deterministic and included as:
 
 - `suggested_run_report_path`
 
-Pattern:
+Pattern, where `<chain_root>` is the network directory that holds the table directories (`<output>/<chain_name>` for `fireparq build` output):
 
-- `/<chain>/mainnet/verify_runs/<run_id>/report.json`
+- `<chain_root>/verify_runs/<run_id>/report.json`
 
 For S3:
 
-- `s3://<bucket>/<chain>/mainnet/verify_runs/<run_id>/report.json`
+- `s3://<bucket>/<chain_name>/verify_runs/<run_id>/report.json` (with any prefix before `<chain_name>` kept)
+
+The default registry is `<chain_root>/merkle_roots.parquet` (`registry_path`). See the dataset resolution rules in `docs/verifiability-artifact-runbook.md`.
 
 `merkle_roots.parquet` remains the canonical registry for computed roots and must not be treated as run-report storage.
 
