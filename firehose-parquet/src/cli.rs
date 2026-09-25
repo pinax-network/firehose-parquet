@@ -4084,12 +4084,35 @@ pub fn resolve_partition_window_bounds_from_index(
 }
 
 impl AwsConfig {
-    /// Build an `AmazonS3` client for the given bucket.
+    /// Build an `AmazonS3` client for read-only access to the given bucket.
     ///
     /// When no access key is provided, enables anonymous (unsigned) requests
     /// via `with_skip_signature(true)` so that public buckets can be accessed
     /// without credentials.
     pub fn build_s3_client(&self, bucket: &str) -> anyhow::Result<object_store::aws::AmazonS3> {
+        self.s3_client_builder(bucket, false)?
+            .build()
+            .map_err(|e| anyhow::anyhow!("building S3 client for bucket {bucket}: {e}"))
+    }
+
+    /// Build a mutation client with transport retries disabled. An error after
+    /// sending PUT/DELETE may leave a remote request in flight; a later success
+    /// would not prove that earlier request has stopped. The owning operation
+    /// must retain ownership on an unresolved mutation error.
+    pub fn build_s3_client_for_mutation(
+        &self,
+        bucket: &str,
+    ) -> anyhow::Result<object_store::aws::AmazonS3> {
+        self.s3_client_builder(bucket, true)?
+            .build()
+            .map_err(|e| anyhow::anyhow!("building S3 mutation client for bucket {bucket}: {e}"))
+    }
+
+    pub(crate) fn s3_client_builder(
+        &self,
+        bucket: &str,
+        mutation: bool,
+    ) -> anyhow::Result<object_store::aws::AmazonS3Builder> {
         use object_store::aws::AmazonS3Builder;
 
         let mut builder = AmazonS3Builder::new().with_bucket_name(bucket);
@@ -4113,9 +4136,10 @@ impl AwsConfig {
         if self.aws_access_key_id.is_none() {
             builder = builder.with_skip_signature(true);
         }
-        builder
-            .build()
-            .map_err(|e| anyhow::anyhow!("building S3 client for bucket {bucket}: {e}"))
+        if mutation {
+            builder = crate::s3::without_mutation_retries(builder);
+        }
+        Ok(builder)
     }
 }
 

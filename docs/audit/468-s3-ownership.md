@@ -165,3 +165,6 @@ Local logs: `/tmp/fireparq-s3-owner-workspace.log` and
 `/tmp/fireparq-s3-owner-final-focused.log`. This is offline protocol validation;
 no claim of production provider qualification or available provider-quiescence
 evidence is made.
+
+The subsequent single-attempt data/cursor client prerequisite and its API
+compatibility boundary are documented in `468-s3-mutation-attempts.md`.
