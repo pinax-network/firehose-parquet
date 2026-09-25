@@ -1,3 +1,4 @@
+use super::decimal;
 use super::proto::eth;
 use super::schema;
 use arrow::array::*;
@@ -16,19 +17,20 @@ use std::sync::Arc;
 // Helpers
 // ---------------------------------------------------------------------------
 
-fn bigint_to_string(bi: &Option<eth::BigInt>) -> String {
-    match bi {
-        Some(b) if !b.bytes.is_empty() => {
-            let n = num_bigint::BigUint::from_bytes_be(&b.bytes);
-            n.to_string()
-        }
-        _ => "0".to_string(),
-    }
+/// Bytes of a Firehose `BigInt`; empty (zero) when absent.
+fn bigint_bytes(bi: &Option<eth::BigInt>) -> &[u8] {
+    bi.as_ref().map_or(&[][..], |b| &b.bytes)
 }
 
-/// Decimal string of a big-endian unsigned integer; `"0"` when empty.
-fn bytes_to_decimal(bytes: &[u8]) -> String {
-    num_bigint::BigUint::from_bytes_be(bytes).to_string()
+/// Decimal string of `bi`; `"0"` when absent or empty.
+#[cfg(test)]
+fn bigint_to_string(bi: &Option<eth::BigInt>) -> String {
+    decimal::to_decimal(bigint_bytes(bi))
+}
+
+/// Append the decimal string of `bi` (`"0"` when absent or empty).
+fn append_bigint(builder: &mut StringBuilder, bi: &Option<eth::BigInt>) {
+    decimal::append_decimal(builder, bigint_bytes(bi));
 }
 
 /// Append `bytes`, or null when empty. For header fields that are absent
@@ -44,7 +46,7 @@ fn append_non_empty_bytes(builder: &mut BytesColumn, bytes: &[u8]) {
 /// Append a decimal string for `value`, or null when absent.
 fn append_optional_bigint(builder: &mut StringBuilder, value: &Option<eth::BigInt>) {
     if value.is_some() {
-        builder.append_value(bigint_to_string(value));
+        append_bigint(builder, value);
     } else {
         builder.append_null();
     }
@@ -437,14 +439,10 @@ impl EvmBlockMapper {
         self.blocks
             .gas_limit
             .append_value(header.map_or(0, |h| h.gas_limit));
-        let base_fee = header.and_then(|h| h.base_fee_per_gas.as_ref());
-        if base_fee.is_some() {
-            self.blocks.base_fee_per_gas.append_value(bigint_to_string(
-                &header.and_then(|h| h.base_fee_per_gas.clone()),
-            ));
-        } else {
-            self.blocks.base_fee_per_gas.append_null();
-        }
+        append_optional_bigint(
+            &mut self.blocks.base_fee_per_gas,
+            header.map_or(&None, |h| &h.base_fee_per_gas),
+        );
         self.blocks
             .coinbase
             .append_value(header.map_or(&[][..], |h| &h.coinbase));
@@ -461,14 +459,10 @@ impl EvmBlockMapper {
         self.blocks
             .receipt_root
             .append_value(header.map_or(&[][..], |h| &h.receipt_root));
-        let difficulty = header.and_then(|h| h.difficulty.as_ref());
-        if difficulty.is_some() {
-            self.blocks
-                .difficulty
-                .append_value(bigint_to_string(&header.and_then(|h| h.difficulty.clone())));
-        } else {
-            self.blocks.difficulty.append_null();
-        }
+        append_optional_bigint(
+            &mut self.blocks.difficulty,
+            header.map_or(&None, |h| &h.difficulty),
+        );
         self.blocks
             .mix_hash
             .append_value(header.map_or(&[][..], |h| &h.mix_hash));
@@ -559,19 +553,10 @@ impl EvmBlockMapper {
         self.transactions.hash.append_value(tx_hash);
         self.transactions.from.append_value(&tx.from);
         self.transactions.to.append_value(&tx.to);
-        self.transactions
-            .value
-            .append_value(bigint_to_string(&tx.value));
+        append_bigint(&mut self.transactions.value, &tx.value);
         self.transactions.gas_limit.append_value(tx.gas_limit);
         self.transactions.gas_used.append_value(tx.gas_used);
-        let gas_price = &tx.gas_price;
-        if gas_price.is_some() {
-            self.transactions
-                .gas_price
-                .append_value(bigint_to_string(gas_price));
-        } else {
-            self.transactions.gas_price.append_null();
-        }
+        append_optional_bigint(&mut self.transactions.gas_price, &tx.gas_price);
         self.transactions
             .r#type
             .append_value(transaction_type_text(tx.r#type));
@@ -580,20 +565,11 @@ impl EvmBlockMapper {
             .append_value(transaction_status_text(tx.status));
         self.transactions.nonce.append_value(tx.nonce);
         self.transactions.input.append_value(&tx.input);
-        if tx.max_fee_per_gas.is_some() {
-            self.transactions
-                .max_fee_per_gas
-                .append_value(bigint_to_string(&tx.max_fee_per_gas));
-        } else {
-            self.transactions.max_fee_per_gas.append_null();
-        }
-        if tx.max_priority_fee_per_gas.is_some() {
-            self.transactions
-                .max_priority_fee_per_gas
-                .append_value(bigint_to_string(&tx.max_priority_fee_per_gas));
-        } else {
-            self.transactions.max_priority_fee_per_gas.append_null();
-        }
+        append_optional_bigint(&mut self.transactions.max_fee_per_gas, &tx.max_fee_per_gas);
+        append_optional_bigint(
+            &mut self.transactions.max_priority_fee_per_gas,
+            &tx.max_priority_fee_per_gas,
+        );
         if let Some(ref receipt) = tx.receipt {
             self.transactions
                 .cumulative_gas_used
@@ -1913,7 +1889,7 @@ impl EvmSetCodeAuthorizationsBuilder {
         self.tx_hash.append_value(&tx.hash);
         self.tx_index.append_value(tx.index);
         self.authorization_index.append_value(authorization_index);
-        self.chain_id.append_value(bytes_to_decimal(&auth.chain_id));
+        decimal::append_decimal(&mut self.chain_id, &auth.chain_id);
         append_non_empty_bytes(&mut self.address, &auth.address);
         self.nonce.append_value(auth.nonce);
         self.v.append_value(auth.v);
@@ -2043,7 +2019,7 @@ impl EvmCallsBuilder {
         self.call_type.append_value(call_type_text(call.call_type));
         self.caller.append_value(&call.caller);
         self.address.append_value(&call.address);
-        self.value.append_value(bigint_to_string(&call.value));
+        append_bigint(&mut self.value, &call.value);
         self.gas_limit.append_value(call.gas_limit);
         self.gas_consumed.append_value(call.gas_consumed);
         self.input.append_value(&call.input);
@@ -2149,8 +2125,8 @@ impl EvmBalanceChangesBuilder {
         self.call_index.append_value(ctx.call_index);
         self.ordinal.append_value(bc.ordinal);
         self.address.append_value(&bc.address);
-        self.old_value.append_value(bigint_to_string(&bc.old_value));
-        self.new_value.append_value(bigint_to_string(&bc.new_value));
+        append_bigint(&mut self.old_value, &bc.old_value);
+        append_bigint(&mut self.new_value, &bc.new_value);
         self.reason
             .append_value(balance_change_reason_text(bc.reason));
         self.state_reverted.append_value(ctx.state_reverted);
@@ -2622,7 +2598,7 @@ impl SystemCallsBuilder {
         self.call_type.append_value(call_type_text(call.call_type));
         self.caller.append_value(&call.caller);
         self.address.append_value(&call.address);
-        self.value.append_value(bigint_to_string(&call.value));
+        append_bigint(&mut self.value, &call.value);
         self.gas_limit.append_value(call.gas_limit);
         self.gas_consumed.append_value(call.gas_consumed);
         self.input.append_value(&call.input);
@@ -2716,8 +2692,8 @@ impl SystemBalanceChangesBuilder {
         self.call_index.append_option(call_index);
         self.ordinal.append_value(bc.ordinal);
         self.address.append_value(&bc.address);
-        self.old_value.append_value(bigint_to_string(&bc.old_value));
-        self.new_value.append_value(bigint_to_string(&bc.new_value));
+        append_bigint(&mut self.old_value, &bc.old_value);
+        append_bigint(&mut self.new_value, &bc.new_value);
         self.reason
             .append_value(balance_change_reason_text(bc.reason));
         append_fork_step(&mut self.fork_step, fork_step);
@@ -3030,53 +3006,6 @@ impl SystemAccountCreationsBuilder {
         ]);
         finish_fork_step(&mut self.fork_step, &mut columns);
         Ok(RecordBatch::try_new(Arc::new(schema.clone()), columns)?)
-    }
-}
-
-mod num_bigint {
-    pub struct BigUint {
-        bytes: Vec<u8>,
-    }
-
-    impl BigUint {
-        pub fn from_bytes_be(bytes: &[u8]) -> Self {
-            Self {
-                bytes: bytes.to_vec(),
-            }
-        }
-
-        pub fn to_string(&self) -> String {
-            if self.bytes.is_empty() {
-                return "0".to_string();
-            }
-            let mut result = vec![0u8];
-            for &byte in &self.bytes {
-                let mut carry = 0u16;
-                for digit in result.iter_mut().rev() {
-                    let val = (*digit as u16) * 256 + carry;
-                    *digit = (val % 10) as u8;
-                    carry = val / 10;
-                }
-                while carry > 0 {
-                    result.insert(0, (carry % 10) as u8);
-                    carry /= 10;
-                }
-                let mut carry = byte as u16;
-                for digit in result.iter_mut().rev() {
-                    let val = (*digit as u16) + carry;
-                    *digit = (val % 10) as u8;
-                    carry = val / 10;
-                }
-                while carry > 0 {
-                    result.insert(0, (carry % 10) as u8);
-                    carry /= 10;
-                }
-            }
-            while result.len() > 1 && result[0] == 0 {
-                result.remove(0);
-            }
-            result.into_iter().map(|d| (b'0' + d) as char).collect()
-        }
     }
 }
 
