@@ -5,6 +5,7 @@ pub mod cursor;
 pub mod encode;
 pub mod grpc;
 pub mod merge;
+pub(crate) mod merge_journal;
 pub mod metrics;
 pub mod networks;
 pub mod networks_generated;
