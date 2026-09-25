@@ -4,6 +4,17 @@ Changes merged since the last release. Fold this file into `docs/releases/vX.Y.Z
 
 ## Breaking changes
 
+### Antelope database-operation transaction keys (#508)
+
+`db_ops` adds non-null `tx_hash: Utf8`, `tx_index: UInt64` (original source trace
+index), and `db_op_index: UInt32` (position within that transaction). Join through
+canonical block identity; indices are not renumbered after filtering. Old files
+need rebuilding or explicit schema reconciliation to use these fields. The action
+aliases `transaction_id`, `trace_block_num`, `producer_block_id`, and `block_time`
+are deprecated for ordinary joins/routing but remain verbatim source metadata
+with no planned removal. Existing text values and row order are unchanged.
+See [the validation and migration record](../audit/508-antelope-db-joins.md).
+
 ### Metrics names, labels and readiness reflect actual state (#475)
 
 Counter names now emit one `_total` suffix; dashboards using accidental

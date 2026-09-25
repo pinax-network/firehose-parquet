@@ -95,6 +95,9 @@ pub fn db_ops_schema(include_fork_step: bool, encoding: &EncodeBytes) -> Schema 
         Field::new("new_data", bd, true),
         Field::new("old_data_json", DataType::Utf8, true),
         Field::new("new_data_json", DataType::Utf8, true),
+        Field::new("tx_hash", DataType::Utf8, false),
+        Field::new("tx_index", DataType::UInt64, false),
+        Field::new("db_op_index", DataType::UInt32, false),
     ]);
     maybe_fork_step(&mut fields, include_fork_step);
     Schema::new(fields)

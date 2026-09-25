@@ -1,5 +1,6 @@
 use super::proto::antelope;
 use super::schema;
+use super::text::{append_auth_sequence, append_authorization, append_exception};
 use arrow::array::*;
 use arrow::datatypes::Schema;
 use arrow::record_batch::RecordBatch;
@@ -9,7 +10,6 @@ use firehose_parquet::traits::{
     timestamp_millis, BlockIdentity, BlockMapper, CanonicalBuilder, PreparedIdentity,
 };
 use prost::Message;
-use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -25,28 +25,20 @@ fn finish_fork_step(builder: &mut Option<StringBuilder>, columns: &mut Vec<Arc<d
     }
 }
 
-fn format_authorization(auth: &[antelope::PermissionLevel]) -> String {
-    let parts: Vec<String> = auth
-        .iter()
-        .map(|a| format!("{}@{}", a.actor, a.permission))
-        .collect();
-    parts.join(",")
+fn enum_text(name: &'static str, prefix: &str) -> &'static str {
+    name.strip_prefix(prefix).unwrap_or(name)
 }
 
-fn enum_text(name: &str, prefix: &str) -> String {
-    name.strip_prefix(prefix).unwrap_or(name).to_string()
-}
-
-fn transaction_status_text(value: i32) -> String {
+fn transaction_status_text(value: i32) -> &'static str {
     antelope::TransactionStatus::try_from(value)
         .map(|status| enum_text(status.as_str_name(), "TRANSACTIONSTATUS_"))
-        .unwrap_or_else(|_| "UNKNOWN".to_string())
+        .unwrap_or("UNKNOWN")
 }
 
-fn db_op_operation_text(value: i32) -> String {
+fn db_op_operation_text(value: i32) -> &'static str {
     antelope::db_op::Operation::try_from(value)
         .map(|operation| enum_text(operation.as_str_name(), "OPERATION_"))
-        .unwrap_or_else(|_| "UNKNOWN".to_string())
+        .unwrap_or("UNKNOWN")
 }
 
 fn optional_string_value(value: &str) -> Option<&str> {
@@ -59,83 +51,6 @@ fn append_optional_string(builder: &mut StringBuilder, value: Option<&str>) {
     } else {
         builder.append_null();
     }
-}
-
-fn serialize_timestamp(timestamp: &prost_types::Timestamp) -> Value {
-    json!({
-        "seconds": timestamp.seconds,
-        "nanos": timestamp.nanos,
-    })
-}
-
-fn serialize_log_context(context: &antelope::exception::LogContext) -> Value {
-    let mut result = json!({
-        "level": context.level,
-        "file": context.file,
-        "line": context.line,
-        "method": context.method,
-        "hostname": context.hostname,
-        "thread_name": context.thread_name,
-    });
-
-    if let Some(map) = result.as_object_mut() {
-        if let Some(timestamp) = context.timestamp.as_ref() {
-            map.insert("timestamp".to_string(), serialize_timestamp(timestamp));
-        }
-        if let Some(parent) = context.context.as_ref() {
-            map.insert("context".to_string(), serialize_log_context(parent));
-        }
-    }
-
-    result
-}
-
-fn serialize_exception(exception: &antelope::Exception) -> String {
-    let stack = exception
-        .stack
-        .iter()
-        .map(|message| {
-            let mut result = json!({
-                "format": message.format,
-                "data": String::from_utf8_lossy(&message.data).into_owned(),
-            });
-            if let Some(map) = result.as_object_mut() {
-                if let Some(context) = message.context.as_ref() {
-                    map.insert("context".to_string(), serialize_log_context(context));
-                }
-            }
-            result
-        })
-        .collect::<Vec<_>>();
-
-    serde_json::to_string(&json!({
-        "code": exception.code,
-        "name": exception.name,
-        "message": exception.message,
-        "stack": stack,
-    }))
-    .expect("exception JSON serialization should be infallible")
-}
-
-fn serialize_auth_sequence(auth_sequence: &[antelope::AuthSequence]) -> Option<String> {
-    if auth_sequence.is_empty() {
-        return None;
-    }
-
-    Some(
-        serde_json::to_string(
-            &auth_sequence
-                .iter()
-                .map(|entry| {
-                    json!({
-                        "account_name": entry.account_name,
-                        "sequence": entry.sequence,
-                    })
-                })
-                .collect::<Vec<_>>(),
-        )
-        .expect("auth sequence JSON serialization should be infallible"),
-    )
 }
 
 pub struct AntelopeBlockMapper {
@@ -178,7 +93,8 @@ impl AntelopeBlockMapper {
     ) -> anyhow::Result<()> {
         let header = block.header.as_ref();
 
-        // Convert every materialized action time before mutating any table.
+        // Validate every materialized action time and operation position before
+        // mutating any table.
         let traces = if block.filtering_applied {
             &block.filtered_transaction_traces
         } else {
@@ -191,6 +107,10 @@ impl AntelopeBlockMapper {
                     || trace.receipt.as_ref().map(|r| r.status).unwrap_or(0) == 1
             })
             .map(|trace| {
+                if let Some(last) = trace.db_ops.len().checked_sub(1) {
+                    u32::try_from(last)
+                        .map_err(|_| anyhow::anyhow!("Antelope db_op_index exceeds UInt32"))?;
+                }
                 let times = trace
                     .action_traces
                     .iter()
@@ -258,9 +178,19 @@ impl AntelopeBlockMapper {
         }
 
         // db_ops table (always included for Antelope output)
-        for db_op in &trace.db_ops {
+        for (index, db_op) in trace.db_ops.iter().enumerate() {
             if let Some(ref mut db_ops) = self.db_ops {
-                Self::map_db_op(db_ops, db_op, identity, fork_step);
+                // The complete block was checked before any builder mutation.
+                let index = u32::try_from(index).expect("preflighted db_op_index");
+                Self::map_db_op(
+                    db_ops,
+                    db_op,
+                    &trace.id,
+                    trace.index,
+                    index,
+                    identity,
+                    fork_step,
+                );
             }
         }
     }
@@ -296,12 +226,9 @@ impl AntelopeBlockMapper {
         self.actions
             .name
             .append_value(action.map(|a| a.name.as_str()).unwrap_or(""));
-        let auth_str = action
-            .map(|a| format_authorization(&a.authorization))
-            .unwrap_or_default();
-        append_optional_string(
+        append_authorization(
             &mut self.actions.authorization,
-            (!auth_str.is_empty()).then_some(auth_str.as_str()),
+            action.map_or(&[], |a| &a.authorization),
         );
         append_optional_string(
             &mut self.actions.json_data,
@@ -344,13 +271,7 @@ impl AntelopeBlockMapper {
             &mut self.actions.json_return_value,
             optional_string_value(&action_trace.json_return_value),
         );
-        if let Some(exception) = action_trace.exception.as_ref() {
-            self.actions
-                .exception
-                .append_value(serialize_exception(exception));
-        } else {
-            self.actions.exception.append_null();
-        }
+        append_exception(&mut self.actions.exception, action_trace.exception.as_ref());
         self.actions
             .error_code
             .append_value(action_trace.error_code);
@@ -364,14 +285,10 @@ impl AntelopeBlockMapper {
         self.actions
             .receipt_global_sequence
             .append_value(receipt.map(|r| r.global_sequence).unwrap_or(0));
-        if let Some(auth_sequence) = receipt.and_then(|r| serialize_auth_sequence(&r.auth_sequence))
-        {
-            self.actions
-                .receipt_auth_sequence
-                .append_value(auth_sequence);
-        } else {
-            self.actions.receipt_auth_sequence.append_null();
-        }
+        append_auth_sequence(
+            &mut self.actions.receipt_auth_sequence,
+            receipt.map_or(&[], |r| &r.auth_sequence),
+        );
         self.actions
             .receipt_recv_sequence
             .append_value(receipt.map(|r| r.recv_sequence).unwrap_or(0));
@@ -387,10 +304,16 @@ impl AntelopeBlockMapper {
     fn map_db_op(
         db_ops: &mut DbOpsBuilder,
         db_op: &antelope::DbOp,
+        tx_hash: &str,
+        tx_index: u64,
+        db_op_index: u32,
         identity: &PreparedIdentity,
         fork_step: Option<&str>,
     ) {
         db_ops.canonical.append(identity);
+        db_ops.tx_hash.append_value(tx_hash);
+        db_ops.tx_index.append_value(tx_index);
+        db_ops.db_op_index.append_value(db_op_index);
         db_ops.action_index.append_value(db_op.action_index);
         db_ops
             .operation
@@ -557,6 +480,9 @@ impl BlockMapper for AntelopeBlockMapper {
                     + db_ops.new_data.estimated_bytes()
                     + est_str(&db_ops.old_data_json)
                     + est_str(&db_ops.new_data_json)
+                    + est_str(&db_ops.tx_hash)
+                    + est_u64(&db_ops.tx_index)
+                    + est_u32(&db_ops.db_op_index)
                     + est_opt_str(&db_ops.fork_step),
             ));
         }
@@ -787,6 +713,9 @@ struct DbOpsBuilder {
     new_data: BytesColumn,
     old_data_json: StringBuilder,
     new_data_json: StringBuilder,
+    tx_hash: StringBuilder,
+    tx_index: UInt64Builder,
+    db_op_index: UInt32Builder,
     fork_step: Option<StringBuilder>,
 }
 
@@ -806,6 +735,9 @@ impl DbOpsBuilder {
             new_data: BytesColumn::new(encoding),
             old_data_json: StringBuilder::new(),
             new_data_json: StringBuilder::new(),
+            tx_hash: StringBuilder::new(),
+            tx_index: UInt64Builder::new(),
+            db_op_index: UInt32Builder::new(),
             fork_step: if include_fork_step {
                 Some(StringBuilder::new())
             } else {
@@ -829,6 +761,9 @@ impl DbOpsBuilder {
             self.new_data.finish(),
             Arc::new(self.old_data_json.finish()) as Arc<dyn Array>,
             Arc::new(self.new_data_json.finish()) as Arc<dyn Array>,
+            Arc::new(self.tx_hash.finish()) as Arc<dyn Array>,
+            Arc::new(self.tx_index.finish()) as Arc<dyn Array>,
+            Arc::new(self.db_op_index.finish()) as Arc<dyn Array>,
         ]);
         finish_fork_step(&mut self.fork_step, &mut columns);
         Ok(RecordBatch::try_new(Arc::new(schema.clone()), columns)?)
@@ -1047,6 +982,121 @@ pub(crate) mod tests {
             filtering_exclude_filter_expr: String::new(),
             filtering_system_actions_include_filter_expr: String::new(),
         }
+    }
+
+    #[test]
+    fn database_operations_keep_original_transaction_and_operation_positions() {
+        let mut block = make_test_block(100);
+        let mut first = block.unfiltered_transaction_traces[0].clone();
+        first.index = 4;
+        first.db_ops.push(first.db_ops[0].clone());
+        first.db_ops[1].operation = 99;
+        let mut failed = first.clone();
+        failed.id = "failed".into();
+        failed.index = 8;
+        failed.receipt.as_mut().unwrap().status = 2;
+        let mut last = first.clone();
+        last.id = "last".into();
+        last.index = u64::MAX;
+        last.db_ops.truncate(1);
+        // Raw action aliases may differ from canonical identity; retain them.
+        last.action_traces[0].transaction_id = "source-only".into();
+        last.action_traces[0].block_num = 99;
+        last.action_traces[0].producer_block_id.clear();
+        last.action_traces[0].block_time = None;
+        block.filtered_transaction_traces = vec![first, failed, last];
+        block.filtering_applied = true;
+        for encoding in [EncodeBytes::Binary, EncodeBytes::HexNoPrefix] {
+            for fork in [false, true] {
+                for include_failed in [false, true] {
+                    let mut mapper =
+                        AntelopeBlockMapper::new(fork, encoding.clone(), include_failed);
+                    for _ in 0..2 {
+                        mapper
+                            .map_block(
+                                &block.encode_to_vec(),
+                                &BlockIdentity::default(),
+                                Some("FINAL"),
+                            )
+                            .unwrap();
+                        let batches = mapper.flush().unwrap();
+                        let ops = &batches["db_ops"];
+                        let hashes = ops
+                            .column_by_name("tx_hash")
+                            .unwrap()
+                            .as_any()
+                            .downcast_ref::<StringArray>()
+                            .unwrap();
+                        let tx_positions = ops
+                            .column_by_name("tx_index")
+                            .unwrap()
+                            .as_any()
+                            .downcast_ref::<UInt64Array>()
+                            .unwrap();
+                        let op_positions = ops
+                            .column_by_name("db_op_index")
+                            .unwrap()
+                            .as_any()
+                            .downcast_ref::<UInt32Array>()
+                            .unwrap();
+                        let action_positions = ops
+                            .column_by_name("action_index")
+                            .unwrap()
+                            .as_any()
+                            .downcast_ref::<UInt32Array>()
+                            .unwrap();
+                        let labels = ops
+                            .column_by_name("operation")
+                            .unwrap()
+                            .as_any()
+                            .downcast_ref::<StringArray>()
+                            .unwrap();
+                        let selected: Vec<_> = block
+                            .filtered_transaction_traces
+                            .iter()
+                            .filter(|t| include_failed || t.receipt.as_ref().unwrap().status == 1)
+                            .collect();
+                        let mut row = 0;
+                        for trace in selected {
+                            for (position, _) in trace.db_ops.iter().enumerate() {
+                                assert_eq!(hashes.value(row), trace.id);
+                                assert_eq!(tx_positions.value(row), trace.index);
+                                assert_eq!(op_positions.value(row), position as u32);
+                                assert_eq!(action_positions.value(row), 0);
+                                row += 1;
+                            }
+                        }
+                        assert_eq!(ops.num_rows(), row);
+                        assert_eq!(labels.value(1), "UNKNOWN");
+                        assert_eq!(
+                            ops.schema().fields().last().unwrap().name(),
+                            if fork { "fork_step" } else { "db_op_index" }
+                        );
+                        let actions = &batches["actions"];
+                        let row = actions.num_rows() - 2;
+                        let alias = actions
+                            .column_by_name("transaction_id")
+                            .unwrap()
+                            .as_any()
+                            .downcast_ref::<StringArray>()
+                            .unwrap();
+                        let alias_block = actions
+                            .column_by_name("trace_block_num")
+                            .unwrap()
+                            .as_any()
+                            .downcast_ref::<UInt64Array>()
+                            .unwrap();
+                        assert_eq!(alias.value(row), "source-only");
+                        assert_eq!(alias_block.value(row), 99);
+                        assert!(actions.column_by_name("block_time").unwrap().is_null(row));
+                        assert_eq!(mapper.total_rows(), 0);
+                        assert_eq!(mapper.flush().unwrap()["db_ops"].num_rows(), 0);
+                    }
+                }
+            }
+        }
+        assert_eq!(transaction_status_text(i32::MAX), "UNKNOWN");
+        assert_eq!(db_op_operation_text(i32::MIN), "UNKNOWN");
     }
 
     #[test]
@@ -1374,6 +1424,9 @@ pub(crate) mod tests {
                 "new_data",
                 "old_data_json",
                 "new_data_json",
+                "tx_hash",
+                "tx_index",
+                "db_op_index",
             ]
         );
         assert_eq!(
