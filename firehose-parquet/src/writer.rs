@@ -787,16 +787,24 @@ impl OutputWriter {
 
     /// Concatenate and write all buffered batches for a single table.
     /// Returns `true` if data was written.
+    ///
+    /// The buffer is only removed once the write succeeds. On error the rows
+    /// stay buffered, so a failed write never silently drops data.
     fn flush_table(&mut self, table: &str) -> Result<bool> {
-        let buf = match self.buffers.remove(table) {
+        let buf = match self.buffers.get(table) {
             Some(buf) if !buf.batches.is_empty() => buf,
-            _ => return Ok(false),
+            Some(_) => {
+                self.buffers.remove(table);
+                return Ok(false);
+            }
+            None => return Ok(false),
         };
         let schema = buf.batches[0].schema();
         let merged = arrow::compute::concat_batches(&schema, &buf.batches)?;
         let num_rows = merged.num_rows();
         let partition_key = buf.partition_key.clone();
         let (_path, compressed_bytes) = self.inner.write_batch(table, &merged, &buf.metadata)?;
+        self.buffers.remove(table);
 
         // Update Prometheus metrics if available.
         if let Some(ref m) = self.metrics {
@@ -825,7 +833,9 @@ impl OutputWriter {
     /// Flush all remaining buffered data to disk, then re-buffer any
     /// pending batches from partition changes.
     ///
-    /// Returns `true` if any data was written.
+    /// Returns `true` if any data was written. If a table fails to write, the
+    /// error is returned and that table (plus any not yet attempted) stays
+    /// buffered, along with pending partition-change batches.
     pub fn flush_remaining(&mut self) -> Result<bool> {
         let tables: Vec<String> = self.buffers.keys().cloned().collect();
         let mut wrote = false;
@@ -1208,6 +1218,98 @@ mod tests {
         let read_batches = read_parquet(&file_path).unwrap();
         let total_rows: usize = read_batches.iter().map(|b| b.num_rows()).sum();
         assert_eq!(total_rows, 2, "concatenated batch should have 2 rows");
+    }
+
+    fn parquet_rows_in(dir: &Path) -> usize {
+        std::fs::read_dir(dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.path().extension().is_some_and(|ext| ext == "parquet"))
+            .flat_map(|e| read_parquet(&e.path()).unwrap())
+            .map(|b| b.num_rows())
+            .sum()
+    }
+
+    #[test]
+    fn test_flush_remaining_retains_buffer_when_table_write_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut batches = HashMap::new();
+        batches.insert("blocks".to_string(), make_test_batch());
+        batches.insert("logs".to_string(), make_test_batch());
+
+        let mut out = OutputWriter::new(dir.path(), Partition::None, Compression::None, 0);
+        out.write_all(&batches, &default_metadata()).unwrap();
+
+        // A regular file where the `logs` table directory belongs makes that
+        // table's write fail (like ENOSPC or a failed S3 PUT would).
+        let blocker = dir.path().join("logs");
+        std::fs::write(&blocker, b"").unwrap();
+
+        assert!(
+            out.flush_remaining().is_err(),
+            "a failed table write must surface as an error"
+        );
+        let logs = out
+            .buffers
+            .get("logs")
+            .expect("the failed table must stay buffered");
+        let buffered_logs_rows: usize = logs.batches.iter().map(|b| b.num_rows()).sum();
+        assert_eq!(buffered_logs_rows, 1, "no buffered logs rows may be lost");
+
+        // Once the write can succeed again, the retained rows are written and
+        // tables that already succeeded are not written twice.
+        std::fs::remove_file(&blocker).unwrap();
+        assert!(out.flush_remaining().unwrap());
+        assert_eq!(out.buffered_stats(), WriterBufferStats::default());
+        assert_eq!(parquet_rows_in(&dir.path().join("logs")), 1);
+        assert_eq!(parquet_rows_in(&dir.path().join("blocks")), 1);
+    }
+
+    #[test]
+    fn test_write_all_keeps_pending_partition_batches_when_flush_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut batches = HashMap::new();
+        batches.insert("blocks".to_string(), make_test_batch());
+
+        let mut out = OutputWriter::new(dir.path(), Partition::Date, Compression::None, 0);
+        let jan15 = BlockMetadata {
+            min_block_number: 100,
+            max_block_number: 200,
+            min_timestamp: Some(1705320000), // 2024-01-15 12:00:00 UTC
+            max_timestamp: Some(1705320000),
+        };
+        out.write_all(&batches, &jan15).unwrap();
+
+        let blocker = dir.path().join("blocks");
+        std::fs::write(&blocker, b"").unwrap();
+
+        // The partition change forces a global flush of 2024-01-15, which fails.
+        let jan16 = BlockMetadata {
+            min_block_number: 300,
+            max_block_number: 400,
+            min_timestamp: Some(1705406400), // 2024-01-16 12:00:00 UTC
+            max_timestamp: Some(1705406400),
+        };
+        assert!(out.write_all(&batches, &jan16).is_err());
+        assert_eq!(out.buffered_stats().rows, 1, "old partition stays buffered");
+        assert_eq!(
+            out.pending_after_flush.len(),
+            1,
+            "new partition stays pending"
+        );
+
+        std::fs::remove_file(&blocker).unwrap();
+        out.flush_remaining().unwrap();
+        out.flush_remaining().unwrap();
+        assert_eq!(out.buffered_stats(), WriterBufferStats::default());
+        assert_eq!(
+            parquet_rows_in(&dir.path().join("blocks/year=2024/month=01/date=15")),
+            1
+        );
+        assert_eq!(
+            parquet_rows_in(&dir.path().join("blocks/year=2024/month=01/date=16")),
+            1
+        );
     }
 
     #[test]

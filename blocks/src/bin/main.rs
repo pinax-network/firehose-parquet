@@ -252,6 +252,79 @@ fn log_writer_flush_outcome(
     }
 }
 
+/// How the Firehose stream ended, which decides whether buffered output may be
+/// materialized and the cursor committed on exit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StreamExit {
+    /// The stream ended cleanly (stop block reached or server closed it).
+    Completed,
+    /// SIGINT/SIGTERM was received.
+    Shutdown,
+    /// A mapper, writer or stream error ended the run.
+    Failed,
+}
+
+impl StreamExit {
+    fn from_result(result: &Result<()>) -> Self {
+        match result {
+            Ok(()) => Self::Completed,
+            Err(e) if format!("{e}").contains("__shutdown__") => Self::Shutdown,
+            Err(_) => Self::Failed,
+        }
+    }
+
+    /// Only a completed stream flushes partial buffers and commits the cursor.
+    /// After a shutdown or a failure the buffers are discarded and the cursor
+    /// stays at the last committed flush, so the next run replays that window.
+    /// Flushing after a failure could save the cursor past rows whose write
+    /// had failed.
+    fn materializes_buffers(self) -> bool {
+        matches!(self, Self::Completed)
+    }
+}
+
+/// Final writer flush when the stream ends. Remaining buffers are written, and
+/// `commit_cursor` runs, only when the stream completed and data was written
+/// (see [`StreamExit::materializes_buffers`]). Returns whether the cursor
+/// commit ran.
+fn flush_writer_on_exit(
+    exit: StreamExit,
+    writer: &mut OutputWriter,
+    pipeline_metrics: &metrics::PipelineMetrics,
+    commit_cursor: impl FnOnce(),
+) -> Result<bool> {
+    if !exit.materializes_buffers() {
+        return Ok(false);
+    }
+
+    let wrote = writer.flush_remaining()?;
+    if !wrote {
+        info!(
+            trigger = "shutdown",
+            "no writer-buffered parquet data remained to materialize before exit"
+        );
+        return Ok(false);
+    }
+
+    let writer_buffered = writer.buffered_stats();
+    info!(
+        trigger = "shutdown",
+        buffered_tables = writer_buffered.tables,
+        buffered_rows = writer_buffered.rows,
+        buffered_estimated_bytes =
+            firehose_parquet::cli::format_bytes(writer_buffered.estimated_compressed_bytes),
+        "writer materialized remaining parquet output before exit"
+    );
+    pipeline_metrics
+        .flushes_total
+        .get_or_create(&metrics::FlushLabels {
+            trigger: "shutdown".to_string(),
+        })
+        .inc();
+    commit_cursor();
+    Ok(true)
+}
+
 fn output_block_id_encoding_label(encoding: &EncodeBytes) -> Option<&'static str> {
     match encoding {
         EncodeBytes::Binary => None,
@@ -4974,6 +5047,9 @@ async fn run_ingestion(args: &BuildArgs, global: &GlobalArgs) -> Result<()> {
                 }
                 current_partition_key = new_partition_key;
 
+                transactions_processed += m.map_block(block_bytes, identity, fork_step)?;
+
+                // Only count the block in the file metadata once it is mapped.
                 min_block = Some(min_block.map_or(block_number, |s: u64| s.min(block_number)));
                 max_block = Some(max_block.map_or(block_number, |s: u64| s.max(block_number)));
                 global_min_block = Some(global_min_block.map_or(block_number, |s: u64| s.min(block_number)));
@@ -4983,7 +5059,6 @@ async fn run_ingestion(args: &BuildArgs, global: &GlobalArgs) -> Result<()> {
                     max_timestamp = Some(max_timestamp.map_or(ts, |s: i64| s.max(ts)));
                 }
 
-                transactions_processed += m.map_block(block_bytes, identity, fork_step)?;
                 blocks_processed += 1;
                 blocks_since_flush += 1;
                 bytes_read += block_bytes.len() as u64;
@@ -5166,24 +5241,28 @@ async fn run_ingestion(args: &BuildArgs, global: &GlobalArgs) -> Result<()> {
         .await;
 
     // Distinguish graceful shutdown from real errors.
-    let is_shutdown = match &stream_result {
-        Err(e) if format!("{e}").contains("__shutdown__") => {
-            info!("graceful shutdown initiated");
-            true
+    let exit = StreamExit::from_result(&stream_result);
+    match &stream_result {
+        Err(e) if exit == StreamExit::Failed => {
+            warn!(error = %e, "stream ended with error, discarding buffered data without advancing the cursor");
         }
-        Err(e) => {
-            warn!(error = %e, "stream ended with error, flushing buffered data before exit");
-            false
-        }
-        Ok(()) => false,
-    };
+        Err(_) => info!("graceful shutdown initiated"),
+        Ok(()) => {}
+    }
 
-    // On graceful shutdown, do not write partial buffers — this avoids
-    // non-deterministic extra part files.  Only complete partitions that
-    // were already flushed during normal processing are preserved.  On
-    // restart the stream will resume from the last saved cursor, which
-    // corresponds to the last fully-written partition.
-    if is_shutdown {
+    // Only a completed stream writes partial buffers. On graceful shutdown
+    // they are discarded to avoid non-deterministic extra part files. On an
+    // error they are discarded so the cursor is never saved past rows whose
+    // write (or mapping) failed. Either way only complete partitions that were
+    // already flushed during normal processing are preserved, and on restart
+    // the stream resumes from the last saved cursor, which corresponds to the
+    // last fully-written flush.
+    if !exit.materializes_buffers() {
+        let skipped_message = if exit == StreamExit::Failed {
+            "stream error skipped partial flushes; buffered data was not materialized to storage and the cursor was not advanced"
+        } else {
+            "graceful shutdown skipped partial flushes; buffered data was not materialized to storage"
+        };
         let mapper_buffered_rows = mapper.as_ref().map(|m| m.total_rows()).unwrap_or(0);
         let writer_buffered = writer.buffered_stats();
         info!(
@@ -5195,7 +5274,7 @@ async fn run_ingestion(args: &BuildArgs, global: &GlobalArgs) -> Result<()> {
             timestamp_backfill_buffered_blocks = timestamp_backfill.buffered_blocks_len(),
             timestamp_backfill_buffered_bytes =
                 firehose_parquet::cli::format_bytes(timestamp_backfill.buffered_bytes()),
-            "graceful shutdown skipped partial flushes; buffered data was not materialized to storage"
+            "{skipped_message}"
         );
     } else {
         let trailing_timestamp_backfill_blocks = timestamp_backfill.drain_open_span()?;
@@ -5204,6 +5283,12 @@ async fn run_ingestion(args: &BuildArgs, global: &GlobalArgs) -> Result<()> {
             for buffered_block in trailing_timestamp_backfill_blocks {
                 let block_number = buffered_block.identity.block_num;
                 let ts = buffered_block.identity.timestamp;
+                transactions_processed += m.map_block(
+                    &buffered_block.block_bytes,
+                    &buffered_block.identity,
+                    buffered_block.fork_step.as_deref(),
+                )?;
+
                 min_block = Some(min_block.map_or(block_number, |s: u64| s.min(block_number)));
                 max_block = Some(max_block.map_or(block_number, |s: u64| s.max(block_number)));
                 global_min_block =
@@ -5213,11 +5298,6 @@ async fn run_ingestion(args: &BuildArgs, global: &GlobalArgs) -> Result<()> {
                 min_timestamp = Some(min_timestamp.map_or(ts, |s: i64| s.min(ts)));
                 max_timestamp = Some(max_timestamp.map_or(ts, |s: i64| s.max(ts)));
 
-                transactions_processed += m.map_block(
-                    &buffered_block.block_bytes,
-                    &buffered_block.identity,
-                    buffered_block.fork_step.as_deref(),
-                )?;
                 blocks_processed += 1;
                 bytes_read += buffered_block.block_bytes.len() as u64;
                 last_cursor = Some(buffered_block.cursor);
@@ -5244,65 +5324,40 @@ async fn run_ingestion(args: &BuildArgs, global: &GlobalArgs) -> Result<()> {
                 }
             }
         }
-
-        // Flush any remaining buffered data in the writer.
-        if !dry_run {
-            let wrote = writer.flush_remaining()?;
-            let writer_buffered = writer.buffered_stats();
-            if wrote {
-                info!(
-                    trigger = "shutdown",
-                    buffered_tables = writer_buffered.tables,
-                    buffered_rows = writer_buffered.rows,
-                    buffered_estimated_bytes = firehose_parquet::cli::format_bytes(
-                        writer_buffered.estimated_compressed_bytes
-                    ),
-                    "writer materialized remaining parquet output before exit"
-                );
-            } else {
-                info!(
-                    trigger = "shutdown",
-                    "no writer-buffered parquet data remained to materialize before exit"
-                );
-            }
-
-            // Save cursor after final flush.
-            if wrote {
-                pipeline_metrics
-                    .flushes_total
-                    .get_or_create(&metrics::FlushLabels {
-                        trigger: "shutdown".to_string(),
-                    })
-                    .inc();
-                if let (Some(ref loc), Some(ref cursor)) = (&cursor_location, &last_cursor) {
-                    let mut state = cursor_state_template.clone();
-                    state.cursor = cursor.clone();
-                    state.last_block_num = last_block_num;
-                    state.last_block_id = decode_id_bytes(&last_block_id);
-                    state.last_timestamp = timestamp_backfill.current_anchor_timestamp();
-                    state.updated_at = time::OffsetDateTime::now_utc()
-                        .format(&time::format_description::well_known::Rfc3339)
-                        .unwrap_or_default();
-                    if let Err(e) = loc.save(&state) {
-                        warn!(error = %e, "failed to save cursor.parquet");
-                        pipeline_metrics
-                            .errors_total
-                            .get_or_create(&metrics::ErrorLabels {
-                                kind: "cursor_save".to_string(),
-                            })
-                            .inc();
-                    } else {
-                        pipeline_metrics.cursor_saves_total.inc();
-                        pipeline_metrics
-                            .cursor_last_block_num
-                            .set(last_block_num as i64);
-                    }
-                }
-            }
-        }
     }
 
-    if !is_shutdown && genesis_timestamp_bootstrap.enabled {
+    // Flush any remaining buffered data in the writer, then save the cursor
+    // after the final flush. Both are skipped unless the stream completed.
+    if !dry_run {
+        flush_writer_on_exit(exit, &mut writer, &pipeline_metrics, || {
+            if let (Some(ref loc), Some(ref cursor)) = (&cursor_location, &last_cursor) {
+                let mut state = cursor_state_template.clone();
+                state.cursor = cursor.clone();
+                state.last_block_num = last_block_num;
+                state.last_block_id = decode_id_bytes(&last_block_id);
+                state.last_timestamp = timestamp_backfill.current_anchor_timestamp();
+                state.updated_at = time::OffsetDateTime::now_utc()
+                    .format(&time::format_description::well_known::Rfc3339)
+                    .unwrap_or_default();
+                if let Err(e) = loc.save(&state) {
+                    warn!(error = %e, "failed to save cursor.parquet");
+                    pipeline_metrics
+                        .errors_total
+                        .get_or_create(&metrics::ErrorLabels {
+                            kind: "cursor_save".to_string(),
+                        })
+                        .inc();
+                } else {
+                    pipeline_metrics.cursor_saves_total.inc();
+                    pipeline_metrics
+                        .cursor_last_block_num
+                        .set(last_block_num as i64);
+                }
+            }
+        })?;
+    }
+
+    if exit == StreamExit::Completed && genesis_timestamp_bootstrap.enabled {
         if let Some(first_buffered_block) = genesis_timestamp_bootstrap.first_buffered_block {
             return Err(missing_genesis_timestamp_bootstrap_error(
                 first_buffered_block,
@@ -5355,11 +5410,9 @@ async fn run_ingestion(args: &BuildArgs, global: &GlobalArgs) -> Result<()> {
         "pipeline finished",
     );
 
-    // Propagate real (non-shutdown) errors after flushing.
-    if let Err(e) = stream_result {
-        if !is_shutdown {
-            return Err(e);
-        }
+    // Propagate real (non-shutdown) errors so the process exits non-zero.
+    if exit == StreamExit::Failed {
+        return stream_result;
     }
 
     Ok(())
@@ -5459,6 +5512,83 @@ mod tests {
             dir.join("blocks/year=2024/month=01/date=15").exists(),
             "forced partition-boundary materialization should write the old partition immediately"
         );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn test_stream_exit_only_materializes_buffers_after_completed_stream() {
+        assert_eq!(StreamExit::from_result(&Ok(())), StreamExit::Completed);
+        assert_eq!(
+            StreamExit::from_result(&Err(anyhow!("__shutdown__"))),
+            StreamExit::Shutdown
+        );
+        assert_eq!(
+            StreamExit::from_result(&Err(anyhow!("uploading to S3: logs/part.parquet"))),
+            StreamExit::Failed
+        );
+
+        assert!(StreamExit::Completed.materializes_buffers());
+        assert!(!StreamExit::Shutdown.materializes_buffers());
+        assert!(!StreamExit::Failed.materializes_buffers());
+    }
+
+    #[test]
+    fn test_failed_table_write_does_not_save_cursor_on_exit() {
+        let dir = make_temp_output_dir();
+        let output = dir.join("output");
+        let cursor_path = dir.join("cursor.parquet");
+        let cursor_location = CursorLocation::Local(cursor_path.clone());
+        let (_registry, pipeline_metrics) = metrics::init();
+        let metadata = BlockMetadata {
+            min_block_number: 100,
+            max_block_number: 200,
+            min_timestamp: Some(1705320000),
+            max_timestamp: Some(1705320000),
+        };
+        let mut batches = make_test_batches();
+        batches.insert("logs".to_string(), make_test_batch());
+        let mut writer = OutputWriter::new(&output, Partition::None, Compression::None, 0);
+
+        // A mapper flush whose `logs` write fails ends the stream with an error.
+        std::fs::create_dir_all(&output).unwrap();
+        std::fs::write(output.join("logs"), b"").unwrap();
+        let stream_result = write_mapper_flush(&mut writer, &batches, &metadata, true).map(|_| ());
+        let exit = StreamExit::from_result(&stream_result);
+        assert_eq!(exit, StreamExit::Failed);
+
+        let save_cursor = || {
+            cursor_location
+                .save(&CursorState {
+                    cursor: "cursor-at-block-200".to_string(),
+                    last_block_num: 200,
+                    ..CursorState::default()
+                })
+                .unwrap();
+        };
+        let committed =
+            flush_writer_on_exit(exit, &mut writer, &pipeline_metrics, save_cursor).unwrap();
+        assert!(!committed);
+        assert!(
+            !cursor_path.exists(),
+            "the error exit path must not save the cursor past the failed rows"
+        );
+        assert!(
+            writer.buffered_stats().rows >= 1,
+            "the failed table's rows stay buffered instead of being dropped"
+        );
+
+        // The same final flush on a completed stream writes and commits.
+        std::fs::remove_file(output.join("logs")).unwrap();
+        let committed = flush_writer_on_exit(
+            StreamExit::Completed,
+            &mut writer,
+            &pipeline_metrics,
+            save_cursor,
+        )
+        .unwrap();
+        assert!(committed);
+        assert!(cursor_path.exists());
+        assert!(output.join("logs").is_dir());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
