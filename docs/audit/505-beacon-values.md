@@ -90,5 +90,55 @@ missing nested messages versus present empty/zero values, including nullable
 list parents. Populated cases use the production Parquet writer and reader to
 verify round-trip schemas and values.
 
-Final full-suite and bounded live qualification results are recorded below once
-completed. No production S3 writes or wide range scans are part of this change.
+At source `8e7ea05` on main `d5e1419`, the workspace suite passed **860 tests**,
+with **5 existing ignored**, plus build and formatting checks. The inherited
+`transactions_processed` unused-assignment warning in the CLI is unchanged.
+All Cargo operations used the shared whole-command lock and target directory.
+
+### Bounded live qualification
+
+On 2026-09-25 at approximately 18:39 UTC, the copied debug binary at `8e7ea05`
+(SHA-256 `75d4360076b3c23b8fd02b02ebac65521ebe45c03f838de90dfba26612fe43cb`)
+completed exactly one finalized Beacon slot, `[10597349, 10597350)`, from
+`https://eth-cl.firehose.pinax.network:443` into a fresh local temporary root.
+The subprocess received only PATH and the intended Pinax API key, with a
+45-second process bound. The selected Deneb slot and sanitized source JSON were
+retained from the separately documented [#504 qualification](504-beacon-qualification.md).
+No new raw-source request, production S3 write, or wide range scan was needed.
+
+[505-compare-beacon.py](505-compare-beacon.py) performs only offline reads:
+
+```sh
+python3 docs/audit/505-compare-beacon.py RAW_JSON OLD_CHAIN_ROOT NEW_CHAIN_ROOT
+```
+
+It independently interprets the raw producer fee bytes in Python and decodes
+all six source blobs; then it compares every populated output table against the
+pre-change Parquet, normalizing only the declared fee/blob representation changes.
+It checks the physical blob type with DuckDB and reads only the public saved
+checkpoint height, never its opaque cursor.
+
+| Result | Verified value |
+|---|---|
+| Beacon slot / execution block | 10597349 / 21385241 |
+| Source fee bytes (Deneb big-endian) | `03 27 35 70 ed` |
+| Decimal fee, wei per gas | `13542715629` |
+| Blobs | 6 × 131,072 exact source bytes; each SHA-256 and index checked |
+| Populated tables | blocks, attestations, execution_payload, blob_sidecars, withdrawals, bls_to_execution_changes |
+| Compared rows / scalar cells | 153 / 2,747 |
+| Unchanged cells excluding six blob representations and one fee representation | 2,740 |
+| Saved public checkpoint height | 10597349 |
+
+Local evidence is under
+`/var/folders/mm/46m31dr97v1_k02y_ftl10lh0000gn/T/fireparq-505-live-okum7zcm/`;
+`comparison.json` contains counts and blob hashes. Source is
+`/tmp/fireparq-beacon-qualification-data/raw-10597349.json`, and the baseline is
+that directory's `out-10597349/mainnet-cl/`. The first offline comparison exposed
+DuckDB's UInt64-as-JSON-string rendering for blob indices; numeric normalization
+fixed the comparator, which then passed on the same files without another live call.
+
+This live check qualifies Deneb at this specific slot. Bellatrix/Capella and
+later-fork byte order are established by pinned producer/dependency source and
+all-five-body unit/Parquet tests, with the separately retained Fusaka fee vector.
+It does not claim a new live check for every fork, cryptographic blob validation,
+or exhaustive history coverage.

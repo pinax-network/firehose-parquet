@@ -57,7 +57,7 @@ def main(raw_path, old_root, new_root):
     for row, blob in zip(blobs, body["embeddedBlobs"]):
         value = base64.b64decode(blob["blob"])
         assert row["blob"] == "0x" + value.hex()
-        assert row["blob_index"] == int(blob.get("index", 0))
+        assert int(row["blob_index"]) == int(blob.get("index", 0))
         assert len(value) == 131_072
         for column, field in [("kzg_commitment", "kzgCommitment"), ("kzg_proof", "kzgProof")]:
             assert row[column] == "0x" + base64.b64decode(blob[field]).hex()
