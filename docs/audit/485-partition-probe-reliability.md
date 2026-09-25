@@ -117,3 +117,10 @@ This live check qualifies two historical block-range boundaries only. It does
 not qualify long missing-slot behavior against a production endpoint, live head
 or incomplete partitions, nonmonotonic timestamps, or the separate #486
 boundary-search issue. No live NEAR retry or broad production scan was made.
+
+After timestamp validation (#476, PR #584) merged as `34cb6e2`, integration
+commit `4104a1b` retained the cached Fetch channel, typed probe failures, checked
+metadata conversion, negative timestamp support, and both sets of regressions.
+The full workspace suite passed again: **779 passed, 0 failed, 4 ignored**;
+formatting and all doc tests passed. This is the combined main state qualified
+for this PR's merge; the previous bounded live evidence remains scoped as above.
