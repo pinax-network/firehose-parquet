@@ -192,3 +192,14 @@ The two ignored qualification helpers were run explicitly for the benchmark and
 retained EVM evidence above; remaining ignored tests retain their existing scopes.
 No production S3 requests were performed. This record is implementation/test
 evidence; GitHub PR merge and issue state must be verified separately.
+
+After the previously reviewed head passed CI, main advanced to `c6db643` with the
+qualified NEAR mapper/table changes. Normal integration at `07379ce` was clean;
+both sets of release/audit documentation were retained. **40 targeted checks
+passed**: 17 NEAR mapper tests, six cross-chain schema/encoding contracts, the
+native CLI ownership preflight, and 16 core native storage/controller cases
+(one offline qualification helper ignored). Formatting and a fresh binary build
+also passed. The resulting CLI SHA-256 is
+`cb61e1b7d4d143d8e319e4fd9d72f3bfcb889913b31eda5eea4f418904ead44c`.
+The earlier full workspace count remains its recorded source-specific result;
+fresh PR CI validates this integrated tree.
