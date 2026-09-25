@@ -490,11 +490,9 @@ pub struct BuildArgs {
     )]
     pub exclude_failed_transactions: bool,
 
-    /// Override cursor parameter validation and restart from the current CLI
-    /// range. When a cursor file exists and its stored parameters differ from
-    /// the current CLI arguments, the pipeline normally exits with an error.
-    /// This flag suppresses that check and ignores the stored resume position
-    /// for start/stop/mode resolution.
+    /// Ignore legacy cursor defaults during a read-only dry run. Protected
+    /// ingestion refuses cursor overrides; use a new empty output root and an
+    /// absent mirror to change the original range or mapper semantics.
     #[arg(
         long,
         env = "CURSOR_OVERRIDE",
@@ -2858,6 +2856,34 @@ fn read_partition_index_snapshot(
     aws: Option<&AwsConfig>,
 ) -> anyhow::Result<PartitionIndexSnapshot> {
     let path = resolve_parquet_input_path_string(path);
+    if path.starts_with("s3://") {
+        use object_store::ObjectStore;
+        let aws = aws.ok_or_else(|| anyhow::anyhow!("AWS config required for S3 paths"))?;
+        let (bucket, key) = crate::writer::parse_s3_url(&path)?;
+        let client = aws.build_s3_client(&bucket)?;
+        let object_path = object_store::path::Path::from(key.as_str());
+        let data = block_on_async(async { client.get(&object_path).await?.bytes().await })
+            .map_err(|error| anyhow::Error::from(error).context(format!("reading {path}")))?;
+        partition_index_snapshot_from_reader(data, false)
+    } else {
+        let file = std::fs::File::open(&path)
+            .map_err(|error| anyhow::Error::from(error).context(format!("opening {path}")))?;
+        partition_index_snapshot_from_reader(file, false)
+    }
+}
+
+/// Strict snapshot decoder shared with native async protected ingestion reads.
+/// The caller bounds the compressed byte stream before collecting it.
+pub(crate) fn read_verified_partitions_index_bytes(
+    data: bytes::Bytes,
+) -> anyhow::Result<VerifiedPartitionIndex> {
+    verified_index_from_snapshot(partition_index_snapshot_from_reader(data, true)?)
+}
+
+fn partition_index_snapshot_from_reader<T: parquet::file::reader::ChunkReader + 'static>(
+    input: T,
+    bounded: bool,
+) -> anyhow::Result<PartitionIndexSnapshot> {
     use arrow::array::{
         Array, Int32Array, Int64Array, LargeStringArray, StringArray, TimestampSecondArray,
         UInt32Array, UInt64Array,
@@ -3093,53 +3119,51 @@ fn read_partition_index_snapshot(
         })
     }
 
-    if path.starts_with("s3://") {
-        use crate::writer::parse_s3_url;
-        use object_store::ObjectStore;
-
-        let aws = aws.ok_or_else(|| anyhow::anyhow!("AWS config required for S3 paths"))?;
-        let (bucket, key) = parse_s3_url(&path)?;
-        let client = aws.build_s3_client(&bucket)?;
-        let object_path = object_store::path::Path::from(key.as_str());
-        let data = block_on_async(async { client.get(&object_path).await?.bytes().await })
-            .map_err(|error| anyhow::Error::from(error).context(format!("reading {path}")))?;
-        let builder = ParquetRecordBatchReaderBuilder::try_new(data)?;
-        let schema = builder.schema();
-        validate_partitions_schema(&schema)?;
-        validate_partitions_metadata(builder.metadata().file_metadata())?;
-        let file_ctx = extract_file_context(builder.metadata().file_metadata())?;
-        coverage = file_ctx.coverage.clone();
-        let reader = builder.build()?;
-        for batch in reader {
-            collect_rows(
-                &batch?,
-                &mut rows,
-                &mut proofs,
-                &read_utf8_value,
-                &read_u64_value,
-                &file_ctx,
-            )?;
+    let builder = ParquetRecordBatchReaderBuilder::try_new(input)?;
+    if bounded {
+        let metadata = builder.metadata();
+        anyhow::ensure!(
+            metadata.file_metadata().num_rows() >= 0
+                && metadata.file_metadata().num_rows() <= 1_000_000,
+            "standalone index exceeds protected initialization row limit"
+        );
+        let uncompressed = metadata
+            .row_groups()
+            .iter()
+            .try_fold(0_u64, |total, group| {
+                anyhow::ensure!(
+                    group.total_byte_size() >= 0,
+                    "invalid standalone index row-group size"
+                );
+                total
+                    .checked_add(group.total_byte_size() as u64)
+                    .ok_or_else(|| anyhow::anyhow!("standalone index size overflow"))
+            })?;
+        anyhow::ensure!(
+            uncompressed <= 512 * 1024 * 1024,
+            "standalone index exceeds protected initialization decoded-size limit"
+        );
+    }
+    validate_partitions_schema(builder.schema())?;
+    validate_partitions_metadata(builder.metadata().file_metadata())?;
+    let file_ctx = extract_file_context(builder.metadata().file_metadata())?;
+    coverage = file_ctx.coverage.clone();
+    for batch in builder.build()? {
+        let batch = batch?;
+        if bounded {
+            anyhow::ensure!(
+                batch.num_rows() <= 1_000_000_usize.saturating_sub(rows.len()),
+                "standalone index exceeds protected initialization observed-row limit"
+            );
         }
-    } else {
-        let file = std::fs::File::open(&path)
-            .map_err(|error| anyhow::Error::from(error).context(format!("opening {path}")))?;
-        let builder = ParquetRecordBatchReaderBuilder::try_new(file)?;
-        let schema = builder.schema();
-        validate_partitions_schema(&schema)?;
-        validate_partitions_metadata(builder.metadata().file_metadata())?;
-        let file_ctx = extract_file_context(builder.metadata().file_metadata())?;
-        coverage = file_ctx.coverage.clone();
-        let reader = builder.build()?;
-        for batch in reader {
-            collect_rows(
-                &batch?,
-                &mut rows,
-                &mut proofs,
-                &read_utf8_value,
-                &read_u64_value,
-                &file_ctx,
-            )?;
-        }
+        collect_rows(
+            &batch,
+            &mut rows,
+            &mut proofs,
+            &read_utf8_value,
+            &read_u64_value,
+            &file_ctx,
+        )?;
     }
 
     Ok(PartitionIndexSnapshot {

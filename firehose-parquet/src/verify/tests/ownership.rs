@@ -1,5 +1,6 @@
 use super::*;
 use crate::dataset_lock::LocalOwnership;
+use crate::ingest::maintenance::{self, MaintenancePolicy};
 use std::time::Duration;
 
 fn fixture(root: &Path) -> std::path::PathBuf {
@@ -76,7 +77,8 @@ fn all_scopes_stay_owned_until_registry_and_reports_finish() {
         super::super::VerifyMutationPlan::discover(data.to_str().unwrap(), None, &opts, &run_id)
             .unwrap();
     let ownership =
-        crate::dataset_lock::DatasetOwnership::acquire_blocking("verify", plan.scopes, None)
+        maintenance::acquire_blocking("verify", plan.scopes, MaintenancePolicy::Artifacts, None)
+            .map(|prepared| prepared.ownership)
             .unwrap();
     let source = data.clone();
     let (send, receive) = std::sync::mpsc::channel();
@@ -188,7 +190,8 @@ fn replaced_artifact_directory_is_revalidated_before_first_publication() {
         super::super::VerifyMutationPlan::discover(data.to_str().unwrap(), None, &opts, &run_id)
             .unwrap();
     let ownership =
-        crate::dataset_lock::DatasetOwnership::acquire_blocking("verify", plan.scopes, None)
+        maintenance::acquire_blocking("verify", plan.scopes, MaintenancePolicy::Artifacts, None)
+            .map(|prepared| prepared.ownership)
             .unwrap();
     // Deliberately bypass cooperating commands to replace a held path's inode.
     std::fs::rename(&reports, dir.path().join("old-reports")).unwrap();

@@ -8,9 +8,10 @@ coverage is described in the later sections.
 
 The accepted full architecture is in
 [468-ingestion-transaction-plan.md](468-ingestion-transaction-plan.md).
-Stage 1 does not establish ingestion crash/replay safety. Protected ingestion
-remains inaccessible until the transaction, frontier, startup recovery and
-protected-maintenance stages are complete.
+Stage 1 alone did not establish ingestion crash/replay safety. The subsequent
+[runtime integration](468-ingestion-runtime.md) connects the transaction,
+frontier, startup recovery and protected-maintenance layers. Historical stage-1
+results below should not be read as qualification of the complete runtime.
 
 ## Local foundation
 

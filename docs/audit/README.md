@@ -43,6 +43,8 @@ lifecycle state; a local implementation or passing test alone is not closure.
 - [#468: conditional S3 ownership qualification](468-s3-ownership.md)
 - [#468: single-attempt remote mutations](468-s3-mutation-attempts.md)
 - [#468: verification artifact ownership](468-verify-ownership.md)
+- [#468: complete runtime, migration and live recovery qualification](468-ingestion-runtime.md)
+- [#468: live table equality and recovered-state evidence](468-live-comparison.json)
 
 ## Verified lifecycle outcomes
 
@@ -75,7 +77,9 @@ lifecycle state; a local implementation or passing test alone is not closure.
 | [#505](https://github.com/pinax-network/firehose-parquet/issues/505) | [#594](https://github.com/pinax-network/firehose-parquet/pull/594) | Merged as `b8d6834` on 2026-09-25; issue closed; 862 tests, one-slot decimal fee and six-blob live equality check, independent review and CI passed. |
 | [#474](https://github.com/pinax-network/firehose-parquet/issues/474) | [#597](https://github.com/pinax-network/firehose-parquet/pull/597) | Merged as `1f2d252` on 2026-09-25; issue closed; 873 tests, real CLI fork-stream checks, executed query examples, review and CI passed. |
 | [#565](https://github.com/pinax-network/firehose-parquet/issues/565) | [#598](https://github.com/pinax-network/firehose-parquet/pull/598) | Merged as `cd6e011` on 2026-09-25; issue closed; 877 tests, independent equivalence review, 13.4–14.4x conversion/append benchmarks and CI passed. |
-| #468 prerequisite | [#591](https://github.com/pinax-network/firehose-parquet/pull/591) | Ownership/control foundation merged as `78ceb98`; 848 tests and CI passed. Full ingestion crash/replay protection remains incomplete; issue #468 stays open. |
+| [#524](https://github.com/pinax-network/firehose-parquet/issues/524) | [#599](https://github.com/pinax-network/firehose-parquet/pull/599) | Merged as `f555898` on 2026-09-25; issue closure verified; 882 tests, projected-read/partition-check regressions, 1.8–2.7x measured local validation improvements and CI passed. |
+| #468 prerequisite | [#591](https://github.com/pinax-network/firehose-parquet/pull/591) | Historical ownership/control foundation merged as `78ceb98`; 848 tests and CI passed. This stage alone did not provide all-table crash/replay protection. |
+| [#468](https://github.com/pinax-network/firehose-parquet/issues/468) | [#600](https://github.com/pinax-network/firehose-parquet/pull/600) | Runtime PR open; complete implementation independently reviewed on main `f555898`; 995 workspace tests plus the CI capture example passed. Actual interrupted Writing rollback, 14-table/12,298-row live equality, completed-bound no-op and deleted-mirror repair passed. Issue remains open until final PR CI and merge. |
 
 The #468 design PR accidentally triggered GitHub auto-closure through a negative
 sentence containing a recognized closing phrase. On 2026-09-25 the PR text was
