@@ -122,17 +122,11 @@ impl ResolvedEndpoint {
         let ownership = if config.dry_run {
             None
         } else {
-            let aws = AwsConfig {
-                aws_access_key_id: config.aws_access_key_id.clone(),
-                aws_secret_access_key: config.aws_secret_access_key.clone(),
-                aws_session_token: config.aws_session_token.clone(),
-                aws_region: config.aws_region.clone(),
-                aws_endpoint_url: config.aws_endpoint_url.clone(),
-            };
+            let aws = AwsConfig::from(config);
             Some(
                 DatasetOwnership::acquire(
                     "build",
-                    ingestion_mutation_scopes(&config, cursor_location.as_ref())?,
+                    ingestion_mutation_scopes(config, cursor_location.as_ref())?,
                     Some(&aws),
                 )
                 .await?,

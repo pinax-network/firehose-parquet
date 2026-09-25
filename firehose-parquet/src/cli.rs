@@ -88,6 +88,67 @@ impl GrpcArgs {
     }
 }
 
+/// AWS options shared by every command; credentials are never displayed in help.
+#[derive(Args, Debug, Clone, Default)]
+pub struct AwsArgs {
+    /// AWS access key ID (for S3 access)
+    #[arg(
+        long,
+        env = "AWS_ACCESS_KEY_ID",
+        hide_env_values = true,
+        help_heading = "AWS / S3"
+    )]
+    pub aws_access_key_id: Option<String>,
+
+    /// AWS secret access key (for S3 access)
+    #[arg(
+        long,
+        env = "AWS_SECRET_ACCESS_KEY",
+        hide_env_values = true,
+        help_heading = "AWS / S3"
+    )]
+    pub aws_secret_access_key: Option<String>,
+
+    /// AWS session token (for S3 access)
+    #[arg(
+        long,
+        env = "AWS_SESSION_TOKEN",
+        hide_env_values = true,
+        help_heading = "AWS / S3"
+    )]
+    pub aws_session_token: Option<String>,
+
+    /// AWS region (for S3 access)
+    #[arg(
+        long,
+        env = "AWS_REGION",
+        hide_env_values = true,
+        help_heading = "AWS / S3"
+    )]
+    pub aws_region: Option<String>,
+
+    /// AWS endpoint URL (for S3-compatible services)
+    #[arg(
+        long,
+        env = "AWS_ENDPOINT_URL_S3",
+        hide_env_values = true,
+        help_heading = "AWS / S3"
+    )]
+    pub aws_endpoint_url: Option<String>,
+}
+
+impl From<&AwsArgs> for AwsConfig {
+    fn from(args: &AwsArgs) -> Self {
+        Self {
+            aws_access_key_id: args.aws_access_key_id.clone(),
+            aws_secret_access_key: args.aws_secret_access_key.clone(),
+            aws_session_token: args.aws_session_token.clone(),
+            aws_region: args.aws_region.clone(),
+            aws_endpoint_url: args.aws_endpoint_url.clone(),
+        }
+    }
+}
+
 // Shared CLI arguments for all fireparq binaries.
 //
 // Embed in a per-chain `#[derive(Parser)]` struct with `#[command(flatten)]`.
@@ -322,50 +383,8 @@ pub struct CommonArgs {
     )]
     pub reconnect_stall_timeout_secs: Option<u64>,
 
-    /// AWS access key ID (for S3 output)
-    #[arg(
-        long,
-        env = "AWS_ACCESS_KEY_ID",
-        hide_env_values = true,
-        help_heading = "AWS / S3"
-    )]
-    pub aws_access_key_id: Option<String>,
-
-    /// AWS secret access key (for S3 output)
-    #[arg(
-        long,
-        env = "AWS_SECRET_ACCESS_KEY",
-        hide_env_values = true,
-        help_heading = "AWS / S3"
-    )]
-    pub aws_secret_access_key: Option<String>,
-
-    /// AWS session token (for S3 output)
-    #[arg(
-        long,
-        env = "AWS_SESSION_TOKEN",
-        hide_env_values = true,
-        help_heading = "AWS / S3"
-    )]
-    pub aws_session_token: Option<String>,
-
-    /// AWS region (for S3 output)
-    #[arg(
-        long,
-        env = "AWS_REGION",
-        hide_env_values = true,
-        help_heading = "AWS / S3"
-    )]
-    pub aws_region: Option<String>,
-
-    /// AWS endpoint URL (for S3-compatible services)
-    #[arg(
-        long,
-        env = "AWS_ENDPOINT_URL_S3",
-        hide_env_values = true,
-        help_heading = "AWS / S3"
-    )]
-    pub aws_endpoint_url: Option<String>,
+    #[command(flatten)]
+    pub aws: AwsArgs,
 
     /// S3 bucket for relative output paths; must match an explicit s3:// output URI
     #[arg(
@@ -620,46 +639,8 @@ Lookup order:
             help_heading = "Display"
         )]
         json: bool,
-        /// AWS access key ID (for S3 paths)
-        #[arg(
-            long,
-            env = "AWS_ACCESS_KEY_ID",
-            hide_env_values = true,
-            help_heading = "AWS / S3"
-        )]
-        aws_access_key_id: Option<String>,
-        /// AWS secret access key (for S3 paths)
-        #[arg(
-            long,
-            env = "AWS_SECRET_ACCESS_KEY",
-            hide_env_values = true,
-            help_heading = "AWS / S3"
-        )]
-        aws_secret_access_key: Option<String>,
-        /// AWS session token (for S3 paths)
-        #[arg(
-            long,
-            env = "AWS_SESSION_TOKEN",
-            hide_env_values = true,
-            help_heading = "AWS / S3"
-        )]
-        aws_session_token: Option<String>,
-        /// AWS region (for S3 paths)
-        #[arg(
-            long,
-            env = "AWS_REGION",
-            hide_env_values = true,
-            help_heading = "AWS / S3"
-        )]
-        aws_region: Option<String>,
-        /// AWS endpoint URL (for S3-compatible services)
-        #[arg(
-            long,
-            env = "AWS_ENDPOINT_URL_S3",
-            hide_env_values = true,
-            help_heading = "AWS / S3"
-        )]
-        aws_endpoint_url: Option<String>,
+        #[command(flatten)]
+        aws: AwsArgs,
     },
     /// Validate block sequence integrity of Parquet files.
     ///
@@ -694,46 +675,8 @@ Lookup order:
         /// Allow gaps in block numbers (e.g. Solana skipped slots)
         #[arg(long, default_value = "false", help_heading = "Validation")]
         allow_gaps: bool,
-        /// AWS access key ID (for S3 paths)
-        #[arg(
-            long,
-            env = "AWS_ACCESS_KEY_ID",
-            hide_env_values = true,
-            help_heading = "AWS / S3"
-        )]
-        aws_access_key_id: Option<String>,
-        /// AWS secret access key (for S3 paths)
-        #[arg(
-            long,
-            env = "AWS_SECRET_ACCESS_KEY",
-            hide_env_values = true,
-            help_heading = "AWS / S3"
-        )]
-        aws_secret_access_key: Option<String>,
-        /// AWS session token (for S3 paths)
-        #[arg(
-            long,
-            env = "AWS_SESSION_TOKEN",
-            hide_env_values = true,
-            help_heading = "AWS / S3"
-        )]
-        aws_session_token: Option<String>,
-        /// AWS region (for S3 paths)
-        #[arg(
-            long,
-            env = "AWS_REGION",
-            hide_env_values = true,
-            help_heading = "AWS / S3"
-        )]
-        aws_region: Option<String>,
-        /// AWS endpoint URL (for S3-compatible services)
-        #[arg(
-            long,
-            env = "AWS_ENDPOINT_URL_S3",
-            hide_env_values = true,
-            help_heading = "AWS / S3"
-        )]
-        aws_endpoint_url: Option<String>,
+        #[command(flatten)]
+        aws: AwsArgs,
     },
     /// Verify deterministic partition merkle roots for table parquet data.
     ///
@@ -838,46 +781,8 @@ Lookup order for the data path:
         /// Accept the current data: replace differing roots (including roots from an older Merkle version) with computed values; replaced rows are reported as `updated` and the run passes once the registry is written
         #[arg(long, default_value = "false", help_heading = "Registry")]
         update_registry: bool,
-        /// AWS access key ID (for S3 paths)
-        #[arg(
-            long,
-            env = "AWS_ACCESS_KEY_ID",
-            hide_env_values = true,
-            help_heading = "AWS / S3"
-        )]
-        aws_access_key_id: Option<String>,
-        /// AWS secret access key (for S3 paths)
-        #[arg(
-            long,
-            env = "AWS_SECRET_ACCESS_KEY",
-            hide_env_values = true,
-            help_heading = "AWS / S3"
-        )]
-        aws_secret_access_key: Option<String>,
-        /// AWS session token (for S3 paths)
-        #[arg(
-            long,
-            env = "AWS_SESSION_TOKEN",
-            hide_env_values = true,
-            help_heading = "AWS / S3"
-        )]
-        aws_session_token: Option<String>,
-        /// AWS region (for S3 paths)
-        #[arg(
-            long,
-            env = "AWS_REGION",
-            hide_env_values = true,
-            help_heading = "AWS / S3"
-        )]
-        aws_region: Option<String>,
-        /// AWS endpoint URL (for S3-compatible services)
-        #[arg(
-            long,
-            env = "AWS_ENDPOINT_URL_S3",
-            hide_env_values = true,
-            help_heading = "AWS / S3"
-        )]
-        aws_endpoint_url: Option<String>,
+        #[command(flatten)]
+        aws: AwsArgs,
     },
     /// Roll up fine-grained partitioned Parquet files into coarser intervals.
     ///
@@ -934,46 +839,8 @@ local path.
         /// Delete each source file once its target partition is written (required for in-place rollup)
         #[arg(long, default_value = "false", help_heading = "Execution")]
         delete_source: bool,
-        /// AWS access key ID (for S3 paths)
-        #[arg(
-            long,
-            env = "AWS_ACCESS_KEY_ID",
-            hide_env_values = true,
-            help_heading = "AWS / S3"
-        )]
-        aws_access_key_id: Option<String>,
-        /// AWS secret access key (for S3 paths)
-        #[arg(
-            long,
-            env = "AWS_SECRET_ACCESS_KEY",
-            hide_env_values = true,
-            help_heading = "AWS / S3"
-        )]
-        aws_secret_access_key: Option<String>,
-        /// AWS session token (for S3 paths)
-        #[arg(
-            long,
-            env = "AWS_SESSION_TOKEN",
-            hide_env_values = true,
-            help_heading = "AWS / S3"
-        )]
-        aws_session_token: Option<String>,
-        /// AWS region (for S3 paths)
-        #[arg(
-            long,
-            env = "AWS_REGION",
-            hide_env_values = true,
-            help_heading = "AWS / S3"
-        )]
-        aws_region: Option<String>,
-        /// AWS endpoint URL (for S3-compatible services)
-        #[arg(
-            long,
-            env = "AWS_ENDPOINT_URL_S3",
-            hide_env_values = true,
-            help_heading = "AWS / S3"
-        )]
-        aws_endpoint_url: Option<String>,
+        #[command(flatten)]
+        aws: AwsArgs,
         /// Cache-Control header for S3 uploads (empty string = no header)
         #[arg(
             long,
@@ -1043,46 +910,8 @@ inspect, merge never falls back to s3://$S3_BUCKET/<path> for a missing local pa
         /// Show what would be merged without writing
         #[arg(long, default_value = "false", help_heading = "Execution")]
         dry_run: bool,
-        /// AWS access key ID (for S3 paths)
-        #[arg(
-            long,
-            env = "AWS_ACCESS_KEY_ID",
-            hide_env_values = true,
-            help_heading = "AWS / S3"
-        )]
-        aws_access_key_id: Option<String>,
-        /// AWS secret access key (for S3 paths)
-        #[arg(
-            long,
-            env = "AWS_SECRET_ACCESS_KEY",
-            hide_env_values = true,
-            help_heading = "AWS / S3"
-        )]
-        aws_secret_access_key: Option<String>,
-        /// AWS session token (for S3 paths)
-        #[arg(
-            long,
-            env = "AWS_SESSION_TOKEN",
-            hide_env_values = true,
-            help_heading = "AWS / S3"
-        )]
-        aws_session_token: Option<String>,
-        /// AWS region (for S3 paths)
-        #[arg(
-            long,
-            env = "AWS_REGION",
-            hide_env_values = true,
-            help_heading = "AWS / S3"
-        )]
-        aws_region: Option<String>,
-        /// AWS endpoint URL (for S3-compatible services)
-        #[arg(
-            long,
-            env = "AWS_ENDPOINT_URL_S3",
-            hide_env_values = true,
-            help_heading = "AWS / S3"
-        )]
-        aws_endpoint_url: Option<String>,
+        #[command(flatten)]
+        aws: AwsArgs,
         /// Cache-Control header for S3 uploads
         #[arg(
             long,
@@ -1127,46 +956,8 @@ Lookup order:
         /// Emit machine-readable JSON output
         #[arg(long, default_value = "false", help_heading = "Display")]
         json: bool,
-        /// AWS access key ID (for S3 paths)
-        #[arg(
-            long,
-            env = "AWS_ACCESS_KEY_ID",
-            hide_env_values = true,
-            help_heading = "AWS / S3"
-        )]
-        aws_access_key_id: Option<String>,
-        /// AWS secret access key (for S3 paths)
-        #[arg(
-            long,
-            env = "AWS_SECRET_ACCESS_KEY",
-            hide_env_values = true,
-            help_heading = "AWS / S3"
-        )]
-        aws_secret_access_key: Option<String>,
-        /// AWS session token (for S3 paths)
-        #[arg(
-            long,
-            env = "AWS_SESSION_TOKEN",
-            hide_env_values = true,
-            help_heading = "AWS / S3"
-        )]
-        aws_session_token: Option<String>,
-        /// AWS region (for S3 paths)
-        #[arg(
-            long,
-            env = "AWS_REGION",
-            hide_env_values = true,
-            help_heading = "AWS / S3"
-        )]
-        aws_region: Option<String>,
-        /// AWS endpoint URL (for S3-compatible services)
-        #[arg(
-            long,
-            env = "AWS_ENDPOINT_URL_S3",
-            hide_env_values = true,
-            help_heading = "AWS / S3"
-        )]
-        aws_endpoint_url: Option<String>,
+        #[command(flatten)]
+        aws: AwsArgs,
     },
     /// Delete parquet files from local filesystem or S3, with optional partition filtering.
     ///
@@ -1231,46 +1022,8 @@ inspect, truncate never falls back to s3://$S3_BUCKET/<path> for a missing local
         /// Delete the matched files. Without --yes, truncate prints a summary and exits non-zero
         #[arg(long, short = 'y', default_value = "false", help_heading = "Execution")]
         yes: bool,
-        /// AWS access key ID (for S3 paths)
-        #[arg(
-            long,
-            env = "AWS_ACCESS_KEY_ID",
-            hide_env_values = true,
-            help_heading = "AWS / S3"
-        )]
-        aws_access_key_id: Option<String>,
-        /// AWS secret access key (for S3 paths)
-        #[arg(
-            long,
-            env = "AWS_SECRET_ACCESS_KEY",
-            hide_env_values = true,
-            help_heading = "AWS / S3"
-        )]
-        aws_secret_access_key: Option<String>,
-        /// AWS session token (for S3 paths)
-        #[arg(
-            long,
-            env = "AWS_SESSION_TOKEN",
-            hide_env_values = true,
-            help_heading = "AWS / S3"
-        )]
-        aws_session_token: Option<String>,
-        /// AWS region (for S3 paths)
-        #[arg(
-            long,
-            env = "AWS_REGION",
-            hide_env_values = true,
-            help_heading = "AWS / S3"
-        )]
-        aws_region: Option<String>,
-        /// AWS endpoint URL (for S3-compatible services)
-        #[arg(
-            long,
-            env = "AWS_ENDPOINT_URL_S3",
-            hide_env_values = true,
-            help_heading = "AWS / S3"
-        )]
-        aws_endpoint_url: Option<String>,
+        #[command(flatten)]
+        aws: AwsArgs,
     },
 }
 
@@ -1451,46 +1204,8 @@ Examples:
         /// Emit machine-readable JSON output
         #[arg(long, default_value = "false", help_heading = "Runtime / Logging")]
         json: bool,
-        /// AWS access key ID (for S3 paths)
-        #[arg(
-            long,
-            env = "AWS_ACCESS_KEY_ID",
-            hide_env_values = true,
-            help_heading = "AWS / S3"
-        )]
-        aws_access_key_id: Option<String>,
-        /// AWS secret access key (for S3 paths)
-        #[arg(
-            long,
-            env = "AWS_SECRET_ACCESS_KEY",
-            hide_env_values = true,
-            help_heading = "AWS / S3"
-        )]
-        aws_secret_access_key: Option<String>,
-        /// AWS session token (for S3 paths)
-        #[arg(
-            long,
-            env = "AWS_SESSION_TOKEN",
-            hide_env_values = true,
-            help_heading = "AWS / S3"
-        )]
-        aws_session_token: Option<String>,
-        /// AWS region (for S3 paths)
-        #[arg(
-            long,
-            env = "AWS_REGION",
-            hide_env_values = true,
-            help_heading = "AWS / S3"
-        )]
-        aws_region: Option<String>,
-        /// AWS endpoint URL (for S3-compatible services)
-        #[arg(
-            long,
-            env = "AWS_ENDPOINT_URL_S3",
-            hide_env_values = true,
-            help_heading = "AWS / S3"
-        )]
-        aws_endpoint_url: Option<String>,
+        #[command(flatten)]
+        aws: AwsArgs,
     },
     /// Validate continuity and invariants in `partitions.parquet`.
     #[command(after_long_help = "\
@@ -1523,21 +1238,8 @@ Examples:
         /// Emit machine-readable JSON output
         #[arg(long, default_value = "false")]
         json: bool,
-        /// AWS access key ID (for S3 paths)
-        #[arg(long, env = "AWS_ACCESS_KEY_ID", hide_env_values = true)]
-        aws_access_key_id: Option<String>,
-        /// AWS secret access key (for S3 paths)
-        #[arg(long, env = "AWS_SECRET_ACCESS_KEY", hide_env_values = true)]
-        aws_secret_access_key: Option<String>,
-        /// AWS session token (for S3 paths)
-        #[arg(long, env = "AWS_SESSION_TOKEN", hide_env_values = true)]
-        aws_session_token: Option<String>,
-        /// AWS region (for S3 paths)
-        #[arg(long, env = "AWS_REGION", hide_env_values = true)]
-        aws_region: Option<String>,
-        /// AWS endpoint URL (for S3-compatible services)
-        #[arg(long, env = "AWS_ENDPOINT_URL_S3", hide_env_values = true)]
-        aws_endpoint_url: Option<String>,
+        #[command(flatten)]
+        aws: AwsArgs,
     },
     /// Deterministically assign partitions to one shard.
     #[command(after_long_help = "\
@@ -1589,21 +1291,8 @@ Examples:
         /// Emit machine-readable JSON output
         #[arg(long, default_value = "false")]
         json: bool,
-        /// AWS access key ID (for S3 paths)
-        #[arg(long, env = "AWS_ACCESS_KEY_ID", hide_env_values = true)]
-        aws_access_key_id: Option<String>,
-        /// AWS secret access key (for S3 paths)
-        #[arg(long, env = "AWS_SECRET_ACCESS_KEY", hide_env_values = true)]
-        aws_secret_access_key: Option<String>,
-        /// AWS session token (for S3 paths)
-        #[arg(long, env = "AWS_SESSION_TOKEN", hide_env_values = true)]
-        aws_session_token: Option<String>,
-        /// AWS region (for S3 paths)
-        #[arg(long, env = "AWS_REGION", hide_env_values = true)]
-        aws_region: Option<String>,
-        /// AWS endpoint URL (for S3-compatible services)
-        #[arg(long, env = "AWS_ENDPOINT_URL_S3", hide_env_values = true)]
-        aws_endpoint_url: Option<String>,
+        #[command(flatten)]
+        aws: AwsArgs,
     },
     /// List/query partition rows from `partitions.parquet`.
     #[command(after_long_help = "\
@@ -1645,21 +1334,8 @@ Examples:
         /// Emit machine-readable JSON output
         #[arg(long, default_value = "false")]
         json: bool,
-        /// AWS access key ID (for S3 paths)
-        #[arg(long, env = "AWS_ACCESS_KEY_ID", hide_env_values = true)]
-        aws_access_key_id: Option<String>,
-        /// AWS secret access key (for S3 paths)
-        #[arg(long, env = "AWS_SECRET_ACCESS_KEY", hide_env_values = true)]
-        aws_secret_access_key: Option<String>,
-        /// AWS session token (for S3 paths)
-        #[arg(long, env = "AWS_SESSION_TOKEN", hide_env_values = true)]
-        aws_session_token: Option<String>,
-        /// AWS region (for S3 paths)
-        #[arg(long, env = "AWS_REGION", hide_env_values = true)]
-        aws_region: Option<String>,
-        /// AWS endpoint URL (for S3-compatible services)
-        #[arg(long, env = "AWS_ENDPOINT_URL_S3", hide_env_values = true)]
-        aws_endpoint_url: Option<String>,
+        #[command(flatten)]
+        aws: AwsArgs,
     },
     /// Resolve one complete span within declared finalized coverage.
     #[command(after_long_help = "\
@@ -1701,21 +1377,8 @@ Examples:
         /// Emit machine-readable JSON output
         #[arg(long, default_value = "false")]
         json: bool,
-        /// AWS access key ID (for S3 paths)
-        #[arg(long, env = "AWS_ACCESS_KEY_ID", hide_env_values = true)]
-        aws_access_key_id: Option<String>,
-        /// AWS secret access key (for S3 paths)
-        #[arg(long, env = "AWS_SECRET_ACCESS_KEY", hide_env_values = true)]
-        aws_secret_access_key: Option<String>,
-        /// AWS session token (for S3 paths)
-        #[arg(long, env = "AWS_SESSION_TOKEN", hide_env_values = true)]
-        aws_session_token: Option<String>,
-        /// AWS region (for S3 paths)
-        #[arg(long, env = "AWS_REGION", hide_env_values = true)]
-        aws_region: Option<String>,
-        /// AWS endpoint URL (for S3-compatible services)
-        #[arg(long, env = "AWS_ENDPOINT_URL_S3", hide_env_values = true)]
-        aws_endpoint_url: Option<String>,
+        #[command(flatten)]
+        aws: AwsArgs,
     },
 }
 
@@ -4107,8 +3770,8 @@ pub fn build_config(args: &CommonArgs) -> anyhow::Result<Config> {
 
     validate_s3_output_credentials(
         output.to_string_lossy().as_ref(),
-        args.aws_access_key_id.as_deref(),
-        args.aws_secret_access_key.as_deref(),
+        args.aws.aws_access_key_id.as_deref(),
+        args.aws.aws_secret_access_key.as_deref(),
     )?;
 
     // Validate that the cursor path has a .parquet extension.
@@ -4117,8 +3780,8 @@ pub fn build_config(args: &CommonArgs) -> anyhow::Result<Config> {
         crate::writer::parse_s3_url(&cursor_str)?;
         validate_s3_output_credentials(
             &cursor_str,
-            args.aws_access_key_id.as_deref(),
-            args.aws_secret_access_key.as_deref(),
+            args.aws.aws_access_key_id.as_deref(),
+            args.aws.aws_secret_access_key.as_deref(),
         )?;
     }
     if !cursor_str.ends_with(".parquet") {
@@ -4153,11 +3816,11 @@ pub fn build_config(args: &CommonArgs) -> anyhow::Result<Config> {
         compression: parse_compression(&args.compression)?,
         final_blocks_only: args.final_blocks_only,
         dry_run: args.dry_run,
-        aws_access_key_id: args.aws_access_key_id.clone(),
-        aws_secret_access_key: args.aws_secret_access_key.clone(),
-        aws_session_token: args.aws_session_token.clone(),
-        aws_region: args.aws_region.clone(),
-        aws_endpoint_url: args.aws_endpoint_url.clone(),
+        aws_access_key_id: args.aws.aws_access_key_id.clone(),
+        aws_secret_access_key: args.aws.aws_secret_access_key.clone(),
+        aws_session_token: args.aws.aws_session_token.clone(),
+        aws_region: args.aws.aws_region.clone(),
+        aws_endpoint_url: args.aws.aws_endpoint_url.clone(),
         s3_bucket: args.s3_bucket.clone(),
         cache_control: if args.cache_control.is_empty() {
             None
@@ -4204,15 +3867,7 @@ pub fn generate_completions<C: clap::CommandFactory>(shell: Shell) {
     generate(shell, &mut cmd, name, &mut io::stdout());
 }
 
-/// AWS credentials for building an S3 client.
-#[derive(Debug, Clone)]
-pub struct AwsConfig {
-    pub aws_access_key_id: Option<String>,
-    pub aws_secret_access_key: Option<String>,
-    pub aws_session_token: Option<String>,
-    pub aws_region: Option<String>,
-    pub aws_endpoint_url: Option<String>,
-}
+pub use crate::s3::AwsConfig;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PartitionBoundsRequest {
@@ -4407,66 +4062,6 @@ pub fn resolve_partition_window_bounds_from_index(
         partition_to: request.partition_to,
         coverage: index.coverage,
     })
-}
-
-impl AwsConfig {
-    /// Build an `AmazonS3` client for read-only access to the given bucket.
-    ///
-    /// When no access key is provided, enables anonymous (unsigned) requests
-    /// via `with_skip_signature(true)` so that public buckets can be accessed
-    /// without credentials.
-    pub fn build_s3_client(&self, bucket: &str) -> anyhow::Result<object_store::aws::AmazonS3> {
-        self.s3_client_builder(bucket, false)?
-            .build()
-            .map_err(|e| anyhow::anyhow!("building S3 client for bucket {bucket}: {e}"))
-    }
-
-    /// Build a mutation client with transport retries disabled. An error after
-    /// sending PUT/DELETE may leave a remote request in flight; a later success
-    /// would not prove that earlier request has stopped. The owning operation
-    /// must retain ownership on an unresolved mutation error.
-    pub fn build_s3_client_for_mutation(
-        &self,
-        bucket: &str,
-    ) -> anyhow::Result<object_store::aws::AmazonS3> {
-        self.s3_client_builder(bucket, true)?
-            .build()
-            .map_err(|e| anyhow::anyhow!("building S3 mutation client for bucket {bucket}: {e}"))
-    }
-
-    pub(crate) fn s3_client_builder(
-        &self,
-        bucket: &str,
-        mutation: bool,
-    ) -> anyhow::Result<object_store::aws::AmazonS3Builder> {
-        use object_store::aws::AmazonS3Builder;
-
-        let mut builder = AmazonS3Builder::new().with_bucket_name(bucket);
-        if let Some(ref key) = self.aws_access_key_id {
-            builder = builder.with_access_key_id(key);
-        }
-        if let Some(ref secret) = self.aws_secret_access_key {
-            builder = builder.with_secret_access_key(secret);
-        }
-        if let Some(ref token) = self.aws_session_token {
-            builder = builder.with_token(token);
-        }
-        if let Some(ref region) = self.aws_region {
-            builder = builder.with_region(region);
-        }
-        if let Some(ref endpoint_url) = self.aws_endpoint_url {
-            builder = crate::s3::configure_endpoint(builder, endpoint_url, bucket)?;
-        }
-        // When no credentials are provided, use anonymous (unsigned) requests
-        // so public buckets are accessible without IMDS/IAM lookup.
-        if self.aws_access_key_id.is_none() {
-            builder = builder.with_skip_signature(true);
-        }
-        if mutation {
-            builder = crate::s3::without_mutation_retries(builder);
-        }
-        Ok(builder)
-    }
 }
 
 /// Scan and display parquet files at the given path.
@@ -5419,33 +5014,18 @@ fn inspect_parquet_s3(
     aws: &AwsConfig,
 ) -> anyhow::Result<()> {
     use crate::writer::parse_s3_url;
-    use object_store::aws::AmazonS3Builder;
     use object_store::ObjectStore;
     use parquet::file::reader::FileReader;
     use parquet::file::serialized_reader::SerializedFileReader;
 
     let (bucket, key) = parse_s3_url(path)?;
 
-    let mut builder = AmazonS3Builder::new().with_bucket_name(&bucket);
-    if let Some(ref v) = aws.aws_access_key_id {
-        builder = builder.with_access_key_id(v);
-    }
-    if let Some(ref v) = aws.aws_secret_access_key {
-        builder = builder.with_secret_access_key(v);
-    }
-    if let Some(ref v) = aws.aws_session_token {
-        builder = builder.with_token(v);
-    }
-    if let Some(ref v) = aws.aws_region {
-        builder = builder.with_region(v);
-    }
-    if let Some(ref v) = aws.aws_endpoint_url {
-        builder = builder.with_endpoint(v);
-    }
-
-    let client = builder
-        .build()
-        .map_err(|e| anyhow::anyhow!("building S3 client for bucket {bucket}: {e}"))?;
+    let client = crate::s3::build_s3_store(
+        aws,
+        &bucket,
+        crate::s3::S3Operation::ReadOnly,
+        crate::s3::CredentialPolicy::ProviderChain,
+    )?;
 
     let obj_path = object_store::path::Path::from(key.as_str());
     let data = block_on_async(async { client.get(&obj_path).await?.bytes().await })
@@ -7083,6 +6663,88 @@ mod tests {
 
     #[test]
     #[serial]
+    fn shared_aws_args_preserve_env_precedence_and_recovery_endpoint_name() {
+        use crate::recovery::RecoveryCommands;
+        let _key = EnvVarGuard::set("AWS_ACCESS_KEY_ID", "synthetic-env-key");
+        let _secret = EnvVarGuard::set("AWS_SECRET_ACCESS_KEY", "synthetic-env-secret");
+        let _token = EnvVarGuard::set("AWS_SESSION_TOKEN", "synthetic-env-token");
+        let _region = EnvVarGuard::set("AWS_REGION", "synthetic-env-region");
+        let _endpoint = EnvVarGuard::set("AWS_ENDPOINT_URL_S3", "https://ordinary.example");
+        let _recovery = EnvVarGuard::set("AWS_ENDPOINT_URL", "https://recovery.example");
+        for (base, endpoint) in [
+            (vec!["test-cli"], "https://ordinary.example"),
+            (
+                vec!["test-cli", "inspect", "fixture.parquet"],
+                "https://ordinary.example",
+            ),
+            (
+                vec!["test-cli", "recovery", "status", "fixture"],
+                "https://recovery.example",
+            ),
+        ] {
+            for explicit in [false, true] {
+                let mut args = base.clone();
+                if explicit {
+                    args.extend([
+                        "--aws-access-key-id",
+                        "synthetic-cli-key",
+                        "--aws-secret-access-key",
+                        "synthetic-cli-secret",
+                        "--aws-session-token",
+                        "synthetic-cli-token",
+                        "--aws-region",
+                        "synthetic-cli-region",
+                        "--aws-endpoint-url",
+                        "https://explicit.example",
+                    ]);
+                }
+                let cli = try_parse(&args).unwrap();
+                let aws = match cli.command {
+                    None => cli.common.aws,
+                    Some(Commands::Inspect { aws, .. }) => aws,
+                    Some(Commands::Recovery(RecoveryCommands::Status(storage))) => storage.aws,
+                    _ => panic!("unexpected fixture command"),
+                };
+                let config = AwsConfig::from(&aws);
+                let source = if explicit { "cli" } else { "env" };
+                assert_eq!(
+                    config.aws_access_key_id,
+                    Some(format!("synthetic-{source}-key"))
+                );
+                assert_eq!(
+                    config.aws_secret_access_key,
+                    Some(format!("synthetic-{source}-secret"))
+                );
+                assert_eq!(
+                    config.aws_session_token,
+                    Some(format!("synthetic-{source}-token"))
+                );
+                assert_eq!(
+                    config.aws_region,
+                    Some(format!("synthetic-{source}-region"))
+                );
+                assert_eq!(
+                    config.aws_endpoint_url.as_deref(),
+                    Some(if explicit {
+                        "https://explicit.example"
+                    } else {
+                        endpoint
+                    })
+                );
+            }
+        }
+        let help = TestCli::command().render_long_help().to_string();
+        for secret in [
+            "synthetic-env-key",
+            "synthetic-env-secret",
+            "synthetic-env-token",
+        ] {
+            assert!(!help.contains(secret));
+        }
+    }
+
+    #[test]
+    #[serial]
     fn test_required_endpoint() {
         // endpoint is optional at the clap level (for subcommands like completions)
         // but build_config will fail without it
@@ -7127,11 +6789,11 @@ mod tests {
         assert_eq!(cli.common.cursor, PathBuf::from("cursor.parquet"));
         assert!(cli.common.cursor_template.is_none());
         assert!(cli.common.flush_interval_secs.is_none());
-        assert!(cli.common.aws_access_key_id.is_none());
-        assert!(cli.common.aws_secret_access_key.is_none());
-        assert!(cli.common.aws_session_token.is_none());
-        assert!(cli.common.aws_region.is_none());
-        assert!(cli.common.aws_endpoint_url.is_none());
+        assert!(cli.common.aws.aws_access_key_id.is_none());
+        assert!(cli.common.aws.aws_secret_access_key.is_none());
+        assert!(cli.common.aws.aws_session_token.is_none());
+        assert!(cli.common.aws.aws_region.is_none());
+        assert!(cli.common.aws.aws_endpoint_url.is_none());
         assert!(cli.common.s3_bucket.is_none());
         assert_eq!(cli.common.stream_idle_timeout_secs, Some(120));
         assert_eq!(cli.common.reconnect_stall_timeout_secs, Some(900));
@@ -9005,15 +8667,18 @@ mod tests {
             "--aws-endpoint-url",
             "https://s3.custom.endpoint",
         ]);
-        assert_eq!(cli.common.aws_access_key_id.as_deref(), Some("AKID123"));
+        assert_eq!(cli.common.aws.aws_access_key_id.as_deref(), Some("AKID123"));
         assert_eq!(
-            cli.common.aws_secret_access_key.as_deref(),
+            cli.common.aws.aws_secret_access_key.as_deref(),
             Some("secret456")
         );
-        assert_eq!(cli.common.aws_session_token.as_deref(), Some("token789"));
-        assert_eq!(cli.common.aws_region.as_deref(), Some("us-east-1"));
         assert_eq!(
-            cli.common.aws_endpoint_url.as_deref(),
+            cli.common.aws.aws_session_token.as_deref(),
+            Some("token789")
+        );
+        assert_eq!(cli.common.aws.aws_region.as_deref(), Some("us-east-1"));
+        assert_eq!(
+            cli.common.aws.aws_endpoint_url.as_deref(),
             Some("https://s3.custom.endpoint")
         );
 
@@ -9043,11 +8708,11 @@ mod tests {
             std::env::remove_var("S3_BUCKET");
         }
         let cli = parse(&["test-cli", "--endpoint", "http://localhost:9000"]);
-        assert!(cli.common.aws_access_key_id.is_none());
-        assert!(cli.common.aws_secret_access_key.is_none());
-        assert!(cli.common.aws_session_token.is_none());
-        assert!(cli.common.aws_region.is_none());
-        assert!(cli.common.aws_endpoint_url.is_none());
+        assert!(cli.common.aws.aws_access_key_id.is_none());
+        assert!(cli.common.aws.aws_secret_access_key.is_none());
+        assert!(cli.common.aws.aws_session_token.is_none());
+        assert!(cli.common.aws.aws_region.is_none());
+        assert!(cli.common.aws.aws_endpoint_url.is_none());
         assert!(cli.common.s3_bucket.is_none());
     }
 

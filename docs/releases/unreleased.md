@@ -44,6 +44,15 @@ Changes merged since the last release. Fold this file into `docs/releases/vX.Y.Z
 
 ## Breaking changes
 
+### Shared AWS CLI structures (#527)
+
+Rust CLI argument structures now contain `aws: AwsArgs`; downstream struct
+literals/matches must adapt. Existing flags, environment precedence and resolved
+`Config`/`AwsConfig` fields are unchanged, including recovery's historical
+`AWS_ENDPOINT_URL` binding. Inspection now shares bucket-bound endpoint handling
+with ingestion and maintenance. Credential-provider and mutation/read retry
+policies are preserved. See [validation](../audit/527-shared-aws-configuration.md).
+
 ### Parquet lookup properties and explicit Zstandard levels (#519)
 
 Part encoders and maintenance share selective, bounded Bloom filters and a

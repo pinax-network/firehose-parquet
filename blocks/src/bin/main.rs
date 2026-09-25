@@ -2570,21 +2570,11 @@ async fn main() -> Result<()> {
                     resume,
                     overwrite,
                     json,
-                    aws_access_key_id,
-                    aws_secret_access_key,
-                    aws_session_token,
-                    aws_region,
-                    aws_endpoint_url,
+                    aws,
                 } => {
                     init_tracing(&cli.global.log_level, cli.global.verbose);
                     let compression = firehose_parquet::cli::parse_compression(compression)?;
-                    let aws = AwsConfig {
-                        aws_access_key_id: aws_access_key_id.clone(),
-                        aws_secret_access_key: aws_secret_access_key.clone(),
-                        aws_session_token: aws_session_token.clone(),
-                        aws_region: aws_region.clone(),
-                        aws_endpoint_url: aws_endpoint_url.clone(),
-                    };
+                    let aws = AwsConfig::from(aws);
                     let resolved_endpoint = if let Some(endpoint) = endpoint.as_deref() {
                         endpoint.to_string()
                     } else if let Some(network) = network.as_deref() {
@@ -2639,11 +2629,7 @@ async fn main() -> Result<()> {
                     partition_chain,
                     allow_gaps,
                     json,
-                    aws_access_key_id,
-                    aws_secret_access_key,
-                    aws_session_token,
-                    aws_region,
-                    aws_endpoint_url,
+                    aws,
                 } => {
                     let request = PartitionValidateRequest {
                         list: PartitionListRequest {
@@ -2656,13 +2642,7 @@ async fn main() -> Result<()> {
                         },
                         allow_gaps: *allow_gaps,
                     };
-                    let aws = AwsConfig {
-                        aws_access_key_id: aws_access_key_id.clone(),
-                        aws_secret_access_key: aws_secret_access_key.clone(),
-                        aws_session_token: aws_session_token.clone(),
-                        aws_region: aws_region.clone(),
-                        aws_endpoint_url: aws_endpoint_url.clone(),
-                    };
+                    let aws = AwsConfig::from(aws);
                     let result = validate_partitions_index(&request, Some(&aws))?;
 
                     if *json {
@@ -2703,11 +2683,7 @@ async fn main() -> Result<()> {
                     shard_index,
                     strategy,
                     json,
-                    aws_access_key_id,
-                    aws_secret_access_key,
-                    aws_session_token,
-                    aws_region,
-                    aws_endpoint_url,
+                    aws,
                 } => {
                     let list = PartitionListRequest {
                         index_path: partitions_index.clone(),
@@ -2723,13 +2699,7 @@ async fn main() -> Result<()> {
                         shard_index: *shard_index,
                         strategy: parse_partition_shard_strategy(strategy)?,
                     };
-                    let aws = AwsConfig {
-                        aws_access_key_id: aws_access_key_id.clone(),
-                        aws_secret_access_key: aws_secret_access_key.clone(),
-                        aws_session_token: aws_session_token.clone(),
-                        aws_region: aws_region.clone(),
-                        aws_endpoint_url: aws_endpoint_url.clone(),
-                    };
+                    let aws = AwsConfig::from(aws);
                     let result = shard_partitions_from_index(&request, Some(&aws))?;
 
                     if *json {
@@ -2785,11 +2755,7 @@ async fn main() -> Result<()> {
                     to,
                     limit,
                     json,
-                    aws_access_key_id,
-                    aws_secret_access_key,
-                    aws_session_token,
-                    aws_region,
-                    aws_endpoint_url,
+                    aws,
                 } => {
                     let request = PartitionListRequest {
                         index_path: partitions_index.clone(),
@@ -2799,13 +2765,7 @@ async fn main() -> Result<()> {
                         to: to.clone(),
                         limit: *limit,
                     };
-                    let aws = AwsConfig {
-                        aws_access_key_id: aws_access_key_id.clone(),
-                        aws_secret_access_key: aws_secret_access_key.clone(),
-                        aws_session_token: aws_session_token.clone(),
-                        aws_region: aws_region.clone(),
-                        aws_endpoint_url: aws_endpoint_url.clone(),
-                    };
+                    let aws = AwsConfig::from(aws);
                     let result = list_partitions_from_index(&request, Some(&aws))?;
 
                     if *json {
@@ -2859,11 +2819,7 @@ async fn main() -> Result<()> {
                     strict_single_chain,
                     all_spans,
                     json,
-                    aws_access_key_id,
-                    aws_secret_access_key,
-                    aws_session_token,
-                    aws_region,
-                    aws_endpoint_url,
+                    aws,
                 } => {
                     let request = PartitionBoundsRequest {
                         index_path: partitions_index.clone(),
@@ -2871,13 +2827,7 @@ async fn main() -> Result<()> {
                         partition_value: partition_value.clone(),
                         chain: partition_chain.clone(),
                     };
-                    let aws = AwsConfig {
-                        aws_access_key_id: aws_access_key_id.clone(),
-                        aws_secret_access_key: aws_secret_access_key.clone(),
-                        aws_session_token: aws_session_token.clone(),
-                        aws_region: aws_region.clone(),
-                        aws_endpoint_url: aws_endpoint_url.clone(),
-                    };
+                    let aws = AwsConfig::from(aws);
                     let result = resolve_partition_command(
                         request,
                         Some(&aws),
@@ -2918,19 +2868,9 @@ async fn main() -> Result<()> {
                 schema_only,
                 vertical,
                 json,
-                aws_access_key_id,
-                aws_secret_access_key,
-                aws_session_token,
-                aws_region,
-                aws_endpoint_url,
+                aws,
             } => {
-                let aws = firehose_parquet::cli::AwsConfig {
-                    aws_access_key_id: aws_access_key_id.clone(),
-                    aws_secret_access_key: aws_secret_access_key.clone(),
-                    aws_session_token: aws_session_token.clone(),
-                    aws_region: aws_region.clone(),
-                    aws_endpoint_url: aws_endpoint_url.clone(),
-                };
+                let aws = AwsConfig::from(aws);
                 firehose_parquet::cli::scan_parquet(
                     path,
                     *limit,
@@ -2947,19 +2887,9 @@ async fn main() -> Result<()> {
                 path,
                 schema_only,
                 json,
-                aws_access_key_id,
-                aws_secret_access_key,
-                aws_session_token,
-                aws_region,
-                aws_endpoint_url,
+                aws,
             } => {
-                let aws = firehose_parquet::cli::AwsConfig {
-                    aws_access_key_id: aws_access_key_id.clone(),
-                    aws_secret_access_key: aws_secret_access_key.clone(),
-                    aws_session_token: aws_session_token.clone(),
-                    aws_region: aws_region.clone(),
-                    aws_endpoint_url: aws_endpoint_url.clone(),
-                };
+                let aws = AwsConfig::from(aws);
                 firehose_parquet::cli::inspect_parquet(path, *schema_only, *json, Some(&aws))?;
                 return Ok(());
             }
@@ -2967,19 +2897,9 @@ async fn main() -> Result<()> {
                 path,
                 cross_partition,
                 allow_gaps,
-                aws_access_key_id,
-                aws_secret_access_key,
-                aws_session_token,
-                aws_region,
-                aws_endpoint_url,
+                aws,
             } => {
-                let aws = firehose_parquet::cli::AwsConfig {
-                    aws_access_key_id: aws_access_key_id.clone(),
-                    aws_secret_access_key: aws_secret_access_key.clone(),
-                    aws_session_token: aws_session_token.clone(),
-                    aws_region: aws_region.clone(),
-                    aws_endpoint_url: aws_endpoint_url.clone(),
-                };
+                let aws = AwsConfig::from(aws);
                 let opts = firehose_parquet::cli::ValidateOptions {
                     cross_partition: *cross_partition,
                     allow_gaps: *allow_gaps,
@@ -2998,24 +2918,14 @@ async fn main() -> Result<()> {
                 compression,
                 flush_bytes,
                 delete_source,
-                aws_access_key_id,
-                aws_secret_access_key,
-                aws_session_token,
-                aws_region,
-                aws_endpoint_url,
+                aws,
                 cache_control,
             } => {
                 init_tracing(&cli.global.log_level, cli.global.verbose);
                 let target = firehose_parquet::rollup::parse_rollup_target(partition)?;
                 let compression = firehose_parquet::cli::parse_compression(compression)?;
                 let output_path = output.clone().unwrap_or_else(|| source.clone());
-                let aws = Some(firehose_parquet::cli::AwsConfig {
-                    aws_access_key_id: aws_access_key_id.clone(),
-                    aws_secret_access_key: aws_secret_access_key.clone(),
-                    aws_session_token: aws_session_token.clone(),
-                    aws_region: aws_region.clone(),
-                    aws_endpoint_url: aws_endpoint_url.clone(),
-                });
+                let aws = Some(AwsConfig::from(aws));
                 let rollup_config = firehose_parquet::rollup::RollupConfig {
                     source: source.clone(),
                     output: output_path,
@@ -3043,20 +2953,10 @@ async fn main() -> Result<()> {
                 publish_report_path,
                 registry_path,
                 update_registry,
-                aws_access_key_id,
-                aws_secret_access_key,
-                aws_session_token,
-                aws_region,
-                aws_endpoint_url,
+                aws,
             } => {
                 init_tracing(&cli.global.log_level, cli.global.verbose);
-                let aws = firehose_parquet::cli::AwsConfig {
-                    aws_access_key_id: aws_access_key_id.clone(),
-                    aws_secret_access_key: aws_secret_access_key.clone(),
-                    aws_session_token: aws_session_token.clone(),
-                    aws_region: aws_region.clone(),
-                    aws_endpoint_url: aws_endpoint_url.clone(),
-                };
+                let aws = AwsConfig::from(aws);
                 let opts = firehose_parquet::verify::VerifyOptions {
                     chain: chain.clone(),
                     table: table.clone(),
@@ -3084,22 +2984,12 @@ async fn main() -> Result<()> {
                 flush_rows,
                 flush_bytes,
                 dry_run,
-                aws_access_key_id,
-                aws_secret_access_key,
-                aws_session_token,
-                aws_region,
-                aws_endpoint_url,
+                aws,
                 cache_control,
             } => {
                 init_tracing(&cli.global.log_level, cli.global.verbose);
                 let compression = firehose_parquet::cli::parse_compression(compression)?;
-                let aws = Some(firehose_parquet::cli::AwsConfig {
-                    aws_access_key_id: aws_access_key_id.clone(),
-                    aws_secret_access_key: aws_secret_access_key.clone(),
-                    aws_session_token: aws_session_token.clone(),
-                    aws_region: aws_region.clone(),
-                    aws_endpoint_url: aws_endpoint_url.clone(),
-                });
+                let aws = Some(AwsConfig::from(aws));
                 let merge_config = firehose_parquet::merge::MergeConfig {
                     path: path.clone(),
                     compression,
@@ -3126,20 +3016,10 @@ async fn main() -> Result<()> {
                 partition,
                 dry_run,
                 yes,
-                aws_access_key_id,
-                aws_secret_access_key,
-                aws_session_token,
-                aws_region,
-                aws_endpoint_url,
+                aws,
             } => {
                 init_tracing(&cli.global.log_level, cli.global.verbose);
-                let aws = Some(firehose_parquet::cli::AwsConfig {
-                    aws_access_key_id: aws_access_key_id.clone(),
-                    aws_secret_access_key: aws_secret_access_key.clone(),
-                    aws_session_token: aws_session_token.clone(),
-                    aws_region: aws_region.clone(),
-                    aws_endpoint_url: aws_endpoint_url.clone(),
-                });
+                let aws = Some(AwsConfig::from(aws));
                 let truncate_config = firehose_parquet::truncate::TruncateConfig {
                     path: path.clone(),
                     partitions: partition.clone(),
