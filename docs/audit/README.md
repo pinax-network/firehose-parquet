@@ -103,7 +103,6 @@ lifecycle state; a local implementation or passing test alone is not closure.
 
 | [#527](https://github.com/pinax-network/firehose-parquet/issues/527) | [#610](https://github.com/pinax-network/firehose-parquet/pull/610) | Merged as `270af16` on 2026-09-25; issue closure verified. All 80 AWS option definitions unchanged, 1,039 workspace tests, 44 final S3 integration checks, independent review and CI passed. |
 | [#509](https://github.com/pinax-network/firehose-parquet/issues/509) | [#595](https://github.com/pinax-network/firehose-parquet/pull/595) | Merged as `5de4f16` on 2026-09-25; issue closure verified. 1,067 workspace tests, two bounded native RPC reads, 377,560 raw-source value checks, 136,720 legacy-value checks, physical schema checks, independent review and CI passed. RPC-backed mapper qualification only; Firehose transport and #550 remain separate. |
-
 | [#525](https://github.com/pinax-network/firehose-parquet/issues/525) | [#611](https://github.com/pinax-network/firehose-parquet/pull/611) | Merged as `ab0888e` on 2026-09-25; issue closure verified. 1,058 workspace tests, final main integration, exact 13-part/5,050-row CLI replay and durable-state parity, independent review and CI passed. |
 
 The #468 design PR accidentally triggered GitHub auto-closure through a negative

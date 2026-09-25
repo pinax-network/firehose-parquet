@@ -8,8 +8,8 @@ and validation. The current baseline is `270af1674597da4e5dde9433ee672c2c5ebfb1a
 including #527's shared AWS arguments and builder. This is a mechanical extraction,
 not a rewrite of command behavior or the maintenance/ingestion engines.
 
-The implementation is integrated with actual main `5de4f16`, including the merged
-Tron work. Source commit `88af38e` contains the extraction. The original stopped
+The initial implementation was integrated with main `5de4f16`, including the
+merged Tron work, and finally with actual main `ab0888e` and the ingestion modules. Source commit `88af38e` contains the extraction. The original stopped
 agent checkout and untracked `.claude/` worktrees remain preserved.
 
 ## Module map and compatibility
@@ -87,3 +87,13 @@ paths are byte-identical to the #527 snapshot. Independent review checked all
 paths and proof limitations; no blocker was found. Fresh PR CI remains required
 before merge. No additional live data or production storage writes are needed
 for this extraction; all mapper, authority and mutation code remains unchanged.
+
+After integrating #525's actual merge `ab0888e`, **341 focused tests** passed:
+156 CLI/library tests, 176 binary tests and nine real ingestion lifecycle tests.
+The retained-EVM baseline replay is an opt-in ignored case already explicitly
+qualified in #525; it was not re-run for this CLI extraction. Locked build,
+formatting and bash/zsh/fish completions passed again. The unchanged-item
+comparison was re-run successfully on the final source; recorded source hashes
+include the final formatting. Documentation conflicts retained both module maps,
+release notes and verified lifecycle evidence. No executable merge conflict
+occurred. PR review/CI/merge outcomes are recorded separately in the audit index.
