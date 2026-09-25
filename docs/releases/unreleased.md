@@ -80,6 +80,32 @@ Migration:
 - Add `--delete-source` to in-place `rollup` commands, or write to a separate `--output`.
 - Don't rely on rollup outputs being named `part-000001.parquet`.
 
+### Built-in `--network` aliases: 13 removed, 4 moved to StreamingFast (#535)
+
+17 of the 54 built-in aliases pointed at Pinax hosts that no longer resolve or fail TLS, so `fireparq build --network <alias>` failed at startup. The registry is regenerated from The Graph networks registry (v0.8.4, 2026-09-24).
+
+**Removed.** Neither Pinax nor any other provider in the registry serves these networks over Firehose any more:
+
+`bnb-op`, `bnb-svm`, `fantom`, `fuse`, `gnosis-chiado-cl`, `mode-mainnet`, `moonbeam`, `moonriver`, `ronin`, `scroll`, `scroll-sepolia`, `telos`, `telos-testnet`
+
+`--network` now rejects them during argument parsing. If you have a working endpoint for one of these chains, pass it with `--endpoint`.
+
+**Moved to StreamingFast.** Pinax no longer serves these networks, so they use the StreamingFast endpoint the registry lists:
+
+| Alias | Before | After |
+|---|---|---|
+| `near-mainnet` | `near.firehose.pinax.network` | `mainnet.near.streamingfast.io` |
+| `near-testnet` | `neartest.firehose.pinax.network` | `testnet.near.streamingfast.io` |
+| `tron` | `tron.firehose.pinax.network` | `mainnet.tron.streamingfast.io` |
+| `tron-evm` | `tronevm.firehose.pinax.network` | `mainnet-evm.tron.streamingfast.io` |
+
+- These endpoints need a credential that StreamingFast accepts, such as a The Graph Market API token in `SUBSTREAMS_API_TOKEN`. Credentials are provider-specific: a token that works against Pinax can be rejected here with `invalid JWT token`, and `build` then keeps reconnecting (#472). Use `FIREHOSE_ENDPOINT_<ALIAS>` or `--endpoint` if you have another endpoint for these chains.
+- `cursor.parquet` records the endpoint, so resuming output written through the old Pinax endpoint fails with an `endpoint` cursor mismatch. Rerun with `--cursor-override` and an explicit `--start-block` just after the cursor's last block.
+
+**Added.** New Pinax networks in the registry: `arc`, `megaeth`, `robinhood`, `tempo`, `xlayer-mainnet`.
+
+How aliases are chosen, and how to refresh them, is described in `docs/network-registry-integration.md`.
+
 ## Fixes
 
 - **`build` no longer restarts from scratch when `cursor.parquet` cannot be read (#465).** Only a missing cursor, or one with no row or an empty cursor string, starts a fresh run. A cursor that exists but cannot be loaded (permission denied, S3 403/5xx/timeout, empty, truncated or corrupt file) now fails the run with an error that names the file. Previously the run logged "starting fresh", re-ingested from `--start-block` or genesis, and overwrote the good cursor on its first flush. To deliberately ignore an unreadable cursor and restart from the CLI bounds, pass `--cursor-override`. `partitions build` also fails instead of ignoring an unreadable sibling cursor when it uses it to infer `--start-block`.
@@ -92,4 +118,5 @@ Migration:
 ## Tests
 
 - A new cross-chain schema contract test maps one fixture batch for every table of every chain, under every bytes encoding and both `fork_step` settings. It checks that column names are unique, that each batch round-trips through the Parquet writer and reader with the same schema and values, and that every table's canonical `block_id` / `parent_id` match the `blocks` table.
+- A weekly `Network endpoints` workflow runs `scripts/check_network_endpoints.sh`, which sends a Firehose `EndpointInfo` call to every built-in `--network` endpoint and fails when one no longer answers (#535). It also runs on pull requests that change the generated registry. Regular `cargo test` stays offline.
 - A Parquet round-trip test asserts that the canonical `timestamp` is written as `TIMESTAMP(MILLIS, isAdjustedToUTC=true)` and reads back as `Timestamp(Millisecond, UTC)` without the embedded Arrow schema. The contract test also checks the canonical `timestamp` type on every table.

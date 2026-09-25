@@ -7,6 +7,7 @@ Related design docs:
 - `docs/verifiability-hash-strategy.md`: cross-chain verify hash defaults, normalization rules, and onboarding path.
 - `docs/partition-vocabulary.md`: naming convention for partition-related CLI flags.
 - `docs/partitions-build-defaults.md`: inference and bounded-range rules for `fireparq partitions build`.
+- `docs/network-registry-integration.md`: how built-in `--network` aliases are generated, the provider policy, and the endpoint check.
 
 ## Workspace Layout
 
@@ -33,7 +34,8 @@ Related design docs:
   - `src/lib.rs`: exports chain modules.
 - `proto/`: source `.proto` files and Buf config.
   - Includes top-level chain proto files plus `proto/core/*` dependencies.
-- `.github/workflows/`: CI/CD entrypoints (`ci.yml`, `docker-publish.yml`, `release.yml`).
+- `scripts/`: `generate_networks.rs` (the `generate-networks` bin that writes `firehose-parquet/src/networks_generated.rs`) and `check_network_endpoints.sh` (live check of every built-in endpoint).
+- `.github/workflows/`: CI/CD entrypoints (`ci.yml`, `docker-publish.yml`, `release.yml`, `network-endpoints.yml`).
 
 ## Data-Flow Mental Model
 
@@ -67,7 +69,8 @@ Related design docs:
 - Change gRPC retry/auth/stream lifecycle:
   - `firehose-parquet/src/grpc.rs`
 - Change built-in `--network` aliases or endpoint override behavior:
-  - `firehose-parquet/src/networks.rs`
+  - `firehose-parquet/src/networks.rs` (resolution and `FIREHOSE_ENDPOINT_*` overrides)
+  - `scripts/generate_networks.rs` (provider policy); regenerate `firehose-parquet/src/networks_generated.rs` instead of editing it, following `docs/network-registry-integration.md`
 - Change metrics names/labels/endpoint behavior:
   - `firehose-parquet/src/metrics.rs`
 - Change rollup/merge/truncate behavior:
@@ -90,6 +93,7 @@ Related design docs:
 - CI entrypoint: `.github/workflows/ci.yml`
 - Docker publish workflow: `.github/workflows/docker-publish.yml`
 - Release assets workflow: `.github/workflows/release.yml`
+- Built-in network endpoint check (weekly, needs network access): `.github/workflows/network-endpoints.yml`, locally `scripts/check_network_endpoints.sh`
 
 ## Parquet Enum Convention
 

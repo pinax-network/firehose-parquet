@@ -8,12 +8,12 @@ A production-grade Rust toolkit that consumes [StreamingFast Firehose](https://f
 |---|---|---|
 | `evm` | `eth.firehose.pinax.network:443` | blocks, transactions, logs, calls, balance_changes, code_changes, storage_changes, nonce_changes, gas_changes, account_creations (`--without-extended` disables extra tables) |
 | `solana` | `solana.firehose.pinax.network:443` | blocks, transactions, messages, instructions, rewards, token_balances, account_lookups, vote_transactions (`--without-votes` disables `vote_transactions`) |
-| `bitcoin` | `btc.firehose.pinax.network:443` | blocks, transactions, inputs, outputs |
-| `beacon` | `beacon.firehose.pinax.network:443` | blocks, attestations, deposits, proposer_slashings, attester_slashings, voluntary_exits, execution_payload, blob_sidecars |
-| `tron` | `tron.firehose.pinax.network:443` | blocks, transactions, logs, internal_transactions |
-| `cosmos` | `cosmoshub.firehose.pinax.network:443` | blocks, transactions, events, messages |
+| `bitcoin` | `bitcoin.firehose.pinax.network:443` | blocks, transactions, inputs, outputs |
+| `beacon` | `eth-cl.firehose.pinax.network:443` | blocks, attestations, deposits, proposer_slashings, attester_slashings, voluntary_exits, execution_payload, blob_sidecars |
+| `tron` | `mainnet.tron.streamingfast.io:443` | blocks, transactions, logs, internal_transactions |
+| `cosmos` | `mainnet.injective.streamingfast.io:443` | blocks, transactions, events, messages |
 | `antelope` | `eos.firehose.pinax.network:443` | blocks, transactions, actions, db_ops |
-| `near` | `near.firehose.pinax.network:443` | blocks, chunks, transactions, receipts, state_changes |
+| `near` | `mainnet.near.streamingfast.io:443` | blocks, chunks, transactions, receipts, state_changes |
 
 > **Tip:** Use `--block-type auto` (the default) to auto-detect the chain from the Firehose stream's protobuf `type_url`.
 
@@ -157,10 +157,12 @@ Examples:
 
 - `mainnet` → `https://eth.firehose.pinax.network:443`
 - `solana-mainnet-beta` → `https://solana.firehose.pinax.network:443`
-- `tron` → `https://tron.firehose.pinax.network:443`
-- `tron-evm` → `https://tronevm.firehose.pinax.network:443`
+- `tron` → `https://mainnet.tron.streamingfast.io:443`
+- `tron-evm` → `https://mainnet-evm.tron.streamingfast.io:443`
 
-Provider hostnames do not always mirror the network name exactly. For example, `tron-evm` resolves to the provider hostname `tronevm.firehose.pinax.network`.
+Provider hostnames do not always mirror the network name exactly. For example, `matic` resolves to the provider hostname `polygon.firehose.pinax.network`. Run `fireparq build --help` to list every built-in name.
+
+Aliases use the Pinax endpoint that The Graph networks registry lists. `near-mainnet`, `near-testnet`, `tron`, and `tron-evm` use StreamingFast endpoints because Pinax no longer serves them; those need a credential StreamingFast accepts, such as a The Graph Market API token in `SUBSTREAMS_API_TOKEN`. See `docs/network-registry-integration.md` for the provider policy and the weekly endpoint check.
 
 Resolution precedence:
 
