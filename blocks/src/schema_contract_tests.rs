@@ -203,6 +203,8 @@ fn cases(encoding: &EncodeBytes, fork_step: bool) -> Vec<Case> {
             vec![
                 beacon_block_with_slashings().encode_to_vec(),
                 beacon::mapper::tests::make_deneb_block(BLOCK_NUM + 1).encode_to_vec(),
+                // Execution requests and committee bits only exist from Electra.
+                beacon::mapper::tests::make_electra_block(BLOCK_NUM + 2).encode_to_vec(),
             ],
         ),
         Case::new(
