@@ -132,3 +132,68 @@ remains. No warning was introduced in the local publication code.
 Independent review of the publication protocol and symlink follow-up found no
 remaining implementation blockers before publication. The tests were repeated
 after that correction.
+
+## Final Beacon integration and bounded Ethereum runtime check
+
+Integrated main `c88abcca1199cb8a919d504b751dd7727c0bf047` (merged Beacon #560)
+into this branch as `17b93f37f62a9a70e606f2bf37c1097611791e13`. The audit index
+conflict was resolved by retaining both sets of records; production code merged
+without conflicts. The following checks ran against that integrated source:
+
+- `cargo test --workspace --locked -j4`: **740 passed, 0 failed, 4 ignored**
+  (117 + 191 + 1 + 425 + 3 + 3), including the full Beacon schema matrix,
+  Arrow/Parquet compatibility fixtures, publication faults and subprocess crashes.
+- `cargo build --workspace --locked -j4` and `cargo fmt --all --check`: passed.
+- The runtime binary was copied while holding the whole-process Cargo lock.
+
+A fresh local ingestion on 2026-09-25 requested only Ethereum blocks
+`[26049575,26049577)`, explicitly using `https://eth.firehose.pinax.network:443`
+and the intended Pinax key through `PINAX_API_KEY`. The subprocess environment
+contained only that key and `PATH`; the bearer-token selector named an absent
+variable. No StreamingFast credential or S3 destination was supplied.
+
+The run used `--partition none --compression zstd --flush-blocks 1
+--final-blocks-only`, preserving the reference sample's extended EVM output,
+hex encoding and failed-transaction inclusion. Both requested blocks were
+processed, the run exited successfully in 2.97 seconds, and it produced 26 data
+parts plus the cursor. No retry/probe events or `.fireparq-*.tmp` remnants were
+observed. This exercises the actual local publication path with the normal
+binary, without test-only fault wrappers.
+
+The output at `/tmp/fireparq-578-live-20260925/mainnet` was compared with the
+existing reference `/tmp/fireparq-469-live-20260925/mainnet`. For every table,
+DuckDB `DESCRIBE` and the complete `parquet_schema()` result (excluding filenames)
+match. `EXCEPT ALL` over all columns in **both directions** reports zero rows,
+checking values and duplicate multiplicities independently of part filenames
+or ordering. The exact observed rows were:
+
+| Table | Reference rows | Atomic-publication rows | Difference either direction |
+|---|---:|---:|---:|
+| access_lists | 72 | 72 | 0 |
+| balance_changes | 1,970 | 1,970 | 0 |
+| blocks | 2 | 2 | 0 |
+| calls | 4,261 | 4,261 | 0 |
+| code_changes | 3 | 3 | 0 |
+| logs | 1,438 | 1,438 | 0 |
+| nonce_changes | 465 | 465 | 0 |
+| set_code_authorizations | 2 | 2 | 0 |
+| storage_changes | 3,545 | 3,545 | 0 |
+| system_balance_changes | 32 | 32 | 0 |
+| system_calls | 8 | 8 | 0 |
+| system_storage_changes | 10 | 10 | 0 |
+| transactions | 458 | 458 | 0 |
+| withdrawals | 32 | 32 | 0 |
+| **Total: 14 tables** | **12,298** | **12,298** | **0** |
+
+Both `blocks` tables have exactly two rows, from 26049575 through 26049576.
+Cursor rows also match after excluding the private `cursor` and expected
+wall-clock `updated_at` fields: last block number/ID, timestamp, and requested
+start/stop range agree. No private cursor values were printed or committed.
+Local reproduction uses `/tmp/fireparq-578-compare.py`; the sanitized result is
+`/tmp/fireparq-578-live-comparison.json`. Generated data and runtime logs remain
+outside the repository.
+
+This live success confirms equivalent output through the new publication path;
+it does not extend the single-file guarantee to a multi-table/cursor transaction.
+Issue #468 remains open. PR #580's GitHub closing references were checked and
+contain only the narrow prerequisite issue #578.
