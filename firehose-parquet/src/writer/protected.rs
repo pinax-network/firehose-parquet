@@ -744,6 +744,7 @@ impl Drop for MutationAttempt<'_> {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Stage {
+    #[cfg(test)]
     Writing,
     FileSync,
     StagedDirectorySync,
