@@ -246,9 +246,23 @@ When output is written locally or to S3, the default cursor file is automaticall
 | Output | `--cursor` value | Cursor location |
 |---|---|---|
 | `./output` | *(default)* | `./output/<chain>/cursor.parquet` |
-| `s3://bucket/prefix` | *(default)* | `s3://bucket/prefix/cursor.parquet` |
-| `s3://bucket/prefix` | `my-cursor.parquet` | `s3://bucket/prefix/my-cursor.parquet` |
+| `s3://bucket/prefix` | *(default)* | `s3://bucket/prefix/<chain>/cursor.parquet` |
+| `s3://bucket/prefix` | `my-cursor.parquet` | `s3://bucket/prefix/<chain>/my-cursor.parquet` |
 | `s3://bucket/prefix` | `s3://other/path.parquet` | `s3://other/path.parquet` |
+| `./output` | `s3://other/path.parquet` | `s3://other/path.parquet` |
+
+An explicit S3 cursor URI uses its own bucket and key. It can be separate from
+the data bucket; both use the configured AWS credentials, region and endpoint.
+Relative cursor paths inherit the resolved output bucket and prefix. Explicit
+local output paths (`./output`, `../output`, or an absolute path) stay local even
+when `S3_BUCKET` is set, and absolute local cursor paths remain absolute for
+local output.
+
+When `--output` is an S3 URI, `--s3-bucket` or `S3_BUCKET`, if set, must name the
+same output bucket. A mismatch now fails before contacting Firehose or storage;
+unset the bucket option or make it match. This consistency check applies to
+`build` and `partitions build` and does not restrict an explicit cursor URI to
+the data bucket.
 
 ### Parameter Validation on Resume
 
@@ -424,7 +438,7 @@ custom deployment environments:
 
 | Flag group | Purpose |
 |---|---|
-| `--s3-bucket <S3_BUCKET>` | Prefix relative output paths with `s3://<bucket>/...` |
+| `--s3-bucket <S3_BUCKET>` | Prefix relative output paths with `s3://<bucket>/...`; must match an explicit S3 output URI |
 | `--aws-access-key-id`, `--aws-secret-access-key`, `--aws-session-token`, `--aws-region` | Override ambient AWS credential and region resolution |
 | `--aws-endpoint-url <AWS_ENDPOINT_URL_S3>` | Target S3-compatible object stores |
 | `--cache-control <CACHE_CONTROL>` | Set upload headers for CDN or static distribution workflows |

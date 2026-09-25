@@ -6,18 +6,27 @@ use object_store::ObjectStore;
 
 use crate::config::Config;
 
-/// Build an S3 `ObjectStore` client from pipeline config credentials.
-pub fn build_s3_client(config: &Config) -> Result<Arc<dyn ObjectStore>> {
-    let output = config.output.to_string_lossy();
-    let bucket = if let Some(ref b) = config.s3_bucket {
-        b.clone()
-    } else if output.starts_with("s3://") {
-        crate::writer::parse_s3_url(&output)?.0
-    } else {
-        anyhow::bail!("no S3 bucket configured");
-    };
+/// Reject ambiguous S3 output configuration before any network or storage work.
+/// Explicit local output paths keep their local meaning even when S3_BUCKET is set.
+pub fn validate_output_bucket(output: &str, configured_bucket: Option<&str>) -> Result<()> {
+    if output.starts_with("s3://") {
+        let (bucket, _) = crate::writer::parse_s3_url(output)?;
+        if let Some(configured) = configured_bucket.map(str::trim).filter(|b| !b.is_empty()) {
+            if configured != bucket {
+                anyhow::bail!(
+                    "S3 output bucket `{bucket}` disagrees with --s3-bucket / S3_BUCKET `{configured}`; \
+                     use the same bucket or unset the bucket option"
+                );
+            }
+        }
+    }
+    Ok(())
+}
 
-    let mut builder = AmazonS3Builder::new().with_bucket_name(&bucket);
+/// Build an S3 client for the bucket selected by a data or cursor URI.
+/// The configured default output bucket must not override an explicit cursor bucket.
+pub fn build_s3_client(config: &Config, bucket: &str) -> Result<Arc<dyn ObjectStore>> {
+    let mut builder = AmazonS3Builder::new().with_bucket_name(bucket);
 
     if let Some(ref key) = config.aws_access_key_id {
         builder = builder.with_access_key_id(key);

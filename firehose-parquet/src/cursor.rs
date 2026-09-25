@@ -682,17 +682,17 @@ impl CursorLocation {
     /// If output is an S3 path, the cursor is placed alongside data in S3.
     /// If output is local, relative cursor paths are placed under the local
     /// output root while absolute local paths remain absolute.
+    /// An explicit S3 cursor URI selects its own bucket, even with local output.
+    /// `build_s3_client` is called only for S3 cursors, with that resolved bucket.
     pub fn resolve(
         output: &str,
         cursor_filename: &str,
-        s3_client: Option<Arc<dyn ObjectStore>>,
+        build_s3_client: impl FnOnce(&str) -> anyhow::Result<Arc<dyn ObjectStore>>,
     ) -> anyhow::Result<Self> {
         if cursor_filename.starts_with("s3://") {
             // Explicit S3 cursor path
-            let (_bucket, key) = crate::writer::parse_s3_url(cursor_filename)?;
-            let client = s3_client.ok_or_else(|| {
-                anyhow::anyhow!("cursor is an S3 path but no S3 client available")
-            })?;
+            let (bucket, key) = crate::writer::parse_s3_url(cursor_filename)?;
+            let client = build_s3_client(&bucket)?;
             return Ok(CursorLocation::S3 { client, key });
         }
 
@@ -704,21 +704,17 @@ impl CursorLocation {
                      Use a relative path (e.g. cursor/worker/cursor.parquet) or an explicit s3:// URI."
                 );
             }
-            let (_bucket, prefix) = crate::writer::parse_s3_url(output)?;
+            let (bucket, prefix) = crate::writer::parse_s3_url(output)?;
             let relative_key = cursor_filename.replace('\\', "/");
             let key = if prefix.is_empty() {
                 relative_key
             } else {
                 format!("{prefix}/{relative_key}")
             };
-            let client = s3_client
-                .ok_or_else(|| anyhow::anyhow!("output is S3 but no S3 client available"))?;
+            let client = build_s3_client(&bucket)?;
             Ok(CursorLocation::S3 { client, key })
         } else {
             // Local output — local cursor
-            if cursor_filename.starts_with("s3://") {
-                anyhow::bail!("local output with S3 cursor path is not supported");
-            }
             let cursor_path = std::path::PathBuf::from(cursor_filename);
             let resolved_path = if cursor_path.is_absolute() {
                 cursor_path
@@ -1460,7 +1456,10 @@ mod tests {
         let location = CursorLocation::resolve(
             "s3://bucket/output",
             "cursor/hour/2015-07-30 15:00:00.parquet",
-            Some(Arc::new(object_store::memory::InMemory::new())),
+            |bucket| {
+                assert_eq!(bucket, "bucket");
+                Ok(Arc::new(object_store::memory::InMemory::new()))
+            },
         )
         .expect("s3 relative cursor path should resolve");
 
@@ -1472,10 +1471,55 @@ mod tests {
         }
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_cursor_location_explicit_buckets_keep_same_keys_isolated() {
+        let output_store: Arc<dyn ObjectStore> = Arc::new(object_store::memory::InMemory::new());
+        let x_store: Arc<dyn ObjectStore> = Arc::new(object_store::memory::InMemory::new());
+        let y_store: Arc<dyn ObjectStore> = Arc::new(object_store::memory::InMemory::new());
+        let store_for_bucket = |bucket: &str| {
+            Ok(match bucket {
+                "output" => Arc::clone(&output_store),
+                "x" => Arc::clone(&x_store),
+                "y" => Arc::clone(&y_store),
+                _ => panic!("unexpected bucket {bucket}"),
+            })
+        };
+        let output = "s3://output/mainnet";
+        let x = CursorLocation::resolve(output, "s3://x/c.parquet", store_for_bucket).unwrap();
+        let y = CursorLocation::resolve(output, "s3://y/c.parquet", store_for_bucket).unwrap();
+        let sibling = CursorLocation::resolve(output, "c.parquet", store_for_bucket).unwrap();
+
+        for (location, cursor) in [(&x, "worker-x"), (&y, "worker-y"), (&sibling, "output")] {
+            location
+                .save(&CursorState {
+                    cursor: cursor.into(),
+                    ..Default::default()
+                })
+                .unwrap();
+        }
+        assert_eq!(x.load().unwrap().unwrap().cursor, "worker-x");
+        assert_eq!(y.load().unwrap().unwrap().cursor, "worker-y");
+        assert_eq!(sibling.load().unwrap().unwrap().cursor, "output");
+        assert!(matches!(
+            output_store
+                .head(&object_store::path::Path::from("c.parquet"))
+                .await,
+            Err(object_store::Error::NotFound { .. })
+        ));
+
+        // A local-output worker can intentionally share the same S3 cursor.
+        let local_output =
+            CursorLocation::resolve("./output/mainnet", "s3://x/c.parquet", store_for_bucket)
+                .unwrap();
+        assert_eq!(local_output.load().unwrap().unwrap().cursor, "worker-x");
+    }
+
     #[test]
     fn test_cursor_location_resolve_local_places_relative_cursor_under_output_root() {
-        let location = CursorLocation::resolve("./output/mainnet", CURSOR_PARQUET_FILENAME, None)
-            .expect("local relative cursor path should resolve");
+        let location = CursorLocation::resolve("./output/mainnet", CURSOR_PARQUET_FILENAME, |_| {
+            panic!("local cursors must not construct an S3 store")
+        })
+        .expect("local relative cursor path should resolve");
 
         match location {
             CursorLocation::Local(path) => {
@@ -1494,7 +1538,7 @@ mod tests {
         let location = CursorLocation::resolve(
             "./output/mainnet",
             absolute_path.to_string_lossy().as_ref(),
-            None,
+            |_| panic!("local cursors must not construct an S3 store"),
         )
         .expect("absolute local cursor path should resolve");
 
@@ -1511,7 +1555,7 @@ mod tests {
         let location = CursorLocation::resolve(
             output_root.to_string_lossy().as_ref(),
             CURSOR_PARQUET_FILENAME,
-            None,
+            |_| panic!("local cursors must not construct an S3 store"),
         )
         .expect("local relative cursor path should resolve");
 

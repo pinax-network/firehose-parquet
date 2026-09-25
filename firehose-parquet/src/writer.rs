@@ -3,7 +3,6 @@ use crate::metrics::PipelineMetrics;
 use anyhow::{Context, Result};
 use arrow::array::Int64Array;
 use arrow::record_batch::RecordBatch;
-use object_store::aws::AmazonS3Builder;
 use object_store::ObjectStore;
 use parquet::arrow::ArrowWriter;
 use parquet::basic::Compression as PqCompression;
@@ -85,29 +84,9 @@ impl ParquetTableWriter {
         compression: Compression,
         config: &Config,
     ) -> Result<Self> {
+        crate::s3::validate_output_bucket(output_path, config.s3_bucket.as_deref())?;
         let (bucket, prefix) = parse_s3_url(output_path)?;
-
-        let mut builder = AmazonS3Builder::new().with_bucket_name(&bucket);
-
-        if let Some(ref key) = config.aws_access_key_id {
-            builder = builder.with_access_key_id(key);
-        }
-        if let Some(ref secret) = config.aws_secret_access_key {
-            builder = builder.with_secret_access_key(secret);
-        }
-        if let Some(ref token) = config.aws_session_token {
-            builder = builder.with_token(token);
-        }
-        if let Some(ref region) = config.aws_region {
-            builder = builder.with_region(region);
-        }
-        if let Some(ref endpoint_url) = config.aws_endpoint_url {
-            builder = builder.with_endpoint(endpoint_url);
-        }
-
-        let client = builder
-            .build()
-            .with_context(|| format!("building S3 client for bucket {bucket}"))?;
+        let client = crate::s3::build_s3_client(config, &bucket)?;
 
         Ok(Self {
             output_dir: PathBuf::from(output_path),
@@ -115,7 +94,7 @@ impl ParquetTableWriter {
             compression,
             part_counters: HashMap::new(),
             process_id: short_uuid(),
-            s3_client: Some(Arc::new(client)),
+            s3_client: Some(client),
             s3_prefix: Some(prefix),
             cache_control: config.cache_control.clone().unwrap_or_default(),
             file_metadata: ParquetFileMetadata::new(),
@@ -929,6 +908,40 @@ pub fn read_parquet(path: &Path) -> Result<Vec<RecordBatch>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_s3_writer_uses_output_bucket_and_rejects_mismatched_default() {
+        let mut config = Config {
+            output: "s3://data/mainnet".into(),
+            s3_bucket: Some("data".into()),
+            aws_access_key_id: Some("test-key".into()),
+            aws_secret_access_key: Some("test-secret".into()),
+            aws_region: Some("us-east-1".into()),
+            ..Config::default()
+        };
+        let writer = ParquetTableWriter::new_s3(
+            "s3://data/mainnet",
+            Partition::None,
+            Compression::Zstd,
+            &config,
+        )
+        .unwrap();
+        assert_eq!(writer.s3_client.unwrap().to_string(), "AmazonS3(data)");
+        assert_eq!(writer.s3_prefix.as_deref(), Some("mainnet"));
+
+        config.s3_bucket = Some("wrong-bucket".into());
+        let error = ParquetTableWriter::new_s3(
+            "s3://data/mainnet",
+            Partition::None,
+            Compression::Zstd,
+            &config,
+        )
+        .err()
+        .expect("bucket mismatch must fail");
+        assert!(error
+            .to_string()
+            .contains("S3 output bucket `data` disagrees"));
+    }
     use crate::config::{BlockMetadata, Compression, Partition};
     use anyhow::anyhow;
     use arrow::array::UInt64Builder;

@@ -295,7 +295,7 @@ pub struct CommonArgs {
     )]
     pub aws_endpoint_url: Option<String>,
 
-    /// S3 bucket name (when set, output is written to s3://<bucket>/<output>)
+    /// S3 bucket for relative output paths; must match an explicit s3:// output URI
     #[arg(
         long,
         env = "S3_BUCKET",
@@ -2342,6 +2342,9 @@ pub fn resolve_s3_output_root(
     output: Option<&str>,
     s3_bucket: Option<&str>,
 ) -> anyhow::Result<String> {
+    if let Some(output) = output {
+        crate::s3::validate_output_bucket(output.trim(), s3_bucket)?;
+    }
     match (
         output.map(str::trim).filter(|value| !value.is_empty()),
         s3_bucket.map(str::trim).filter(|value| !value.is_empty()),
@@ -3702,6 +3705,14 @@ pub fn build_config(args: &CommonArgs) -> anyhow::Result<Config> {
 
     // Validate that the cursor path has a .parquet extension.
     let cursor_str = args.cursor.to_string_lossy();
+    if cursor_str.starts_with("s3://") {
+        crate::writer::parse_s3_url(&cursor_str)?;
+        validate_s3_output_credentials(
+            &cursor_str,
+            args.aws_access_key_id.as_deref(),
+            args.aws_secret_access_key.as_deref(),
+        )?;
+    }
     if !cursor_str.ends_with(".parquet") {
         return Err(anyhow::anyhow!(
             "--cursor path must end in .parquet, got: {cursor_str}"
@@ -8560,7 +8571,7 @@ mod tests {
 
     #[test]
     #[serial]
-    fn test_s3_bucket_no_double_prefix() {
+    fn test_s3_bucket_rejects_conflicting_explicit_output() {
         unsafe {
             std::env::remove_var("AWS_ACCESS_KEY_ID");
             std::env::remove_var("AWS_SECRET_ACCESS_KEY");
@@ -8569,7 +8580,7 @@ mod tests {
             std::env::remove_var("AWS_ENDPOINT_URL_S3");
             std::env::remove_var("S3_BUCKET");
         }
-        // When output already starts with s3://, s3_bucket should not double-prefix
+        // Conflicting buckets must fail before data and cursors can diverge.
         let cli = parse(&[
             "test-cli",
             "--endpoint",
@@ -8583,8 +8594,10 @@ mod tests {
             "--output",
             "s3://other-bucket/prefix",
         ]);
-        let config = build_config(&cli.common).expect("build_config should succeed");
-        assert_eq!(config.output, PathBuf::from("s3://other-bucket/prefix"));
+        let error = build_config(&cli.common).expect_err("conflicting buckets must fail");
+        let message = error.to_string();
+        assert!(message.contains("S3 output bucket `other-bucket` disagrees"));
+        assert!(message.contains("--s3-bucket / S3_BUCKET `my-bucket`"));
     }
 
     #[test]
@@ -9372,14 +9385,71 @@ mod tests {
     }
 
     #[test]
+    #[serial]
+    fn test_build_config_allows_independent_cursor_bucket_with_local_output() {
+        let _bucket = EnvVarGuard::set("S3_BUCKET", "data");
+        let cli = parse(&[
+            "test-cli",
+            "--endpoint",
+            "http://localhost:9000",
+            "--output",
+            "./output",
+            "--cursor",
+            "s3://state/worker.parquet",
+            "--aws-access-key-id",
+            "test-key",
+            "--aws-secret-access-key",
+            "test-secret",
+        ]);
+        let config = build_config(&cli.common).unwrap();
+        assert_eq!(config.output, PathBuf::from("./output"));
+        assert_eq!(
+            config.cursor_path.as_deref(),
+            Some("s3://state/worker.parquet")
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn test_s3_bucket_env_rejects_conflicting_explicit_output() {
+        let _bucket = EnvVarGuard::set("S3_BUCKET", "env-bucket");
+        let cli = parse(&[
+            "test-cli",
+            "--endpoint",
+            "http://localhost:9000",
+            "--output",
+            "s3://data/mainnet",
+        ]);
+        let error = build_config(&cli.common).unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("--s3-bucket / S3_BUCKET `env-bucket`"));
+    }
+
+    #[test]
+    fn test_resolve_s3_output_root_rejects_mismatched_buckets() {
+        let error = resolve_s3_output_root(Some("s3://data/mainnet"), Some("other")).unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("S3 output bucket `data` disagrees"));
+        assert_eq!(
+            resolve_s3_output_root(Some("s3://data/mainnet"), Some("data")).unwrap(),
+            "s3://data/mainnet"
+        );
+        assert_eq!(
+            resolve_s3_output_root(Some("/tmp/local"), Some("other")).unwrap(),
+            "/tmp/local"
+        );
+    }
+
+    #[test]
     fn test_resolve_s3_output_root_prefers_explicit_output() {
         let resolved =
             resolve_s3_output_root(Some("./output"), Some("bucket-name")).expect("resolve");
         assert_eq!(resolved, "./output");
 
         let resolved =
-            resolve_s3_output_root(Some("s3://other-bucket/prefix"), Some("bucket-name"))
-                .expect("resolve s3");
+            resolve_s3_output_root(Some("s3://other-bucket/prefix"), None).expect("resolve s3");
         assert_eq!(resolved, "s3://other-bucket/prefix");
     }
 
