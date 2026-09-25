@@ -44,7 +44,7 @@ pub(super) fn is_vote_transaction(tx: &solana::Transaction) -> bool {
     let Some(program_id) = msg.account_keys.get(instruction.program_id_index as usize) else {
         return false;
     };
-    if program_id.as_slice() != VOTE_PROGRAM_ID
+    if program_id.as_ref() != VOTE_PROGRAM_ID
         || instruction.program_id_index == 0
         || instruction
             .accounts

@@ -463,14 +463,13 @@ impl NearBlockMapper {
     }
 }
 
-impl BlockMapper for NearBlockMapper {
-    fn map_block(
+impl NearBlockMapper {
+    fn map_decoded(
         &mut self,
-        block_bytes: &[u8],
+        block: near::Block,
         identity: &BlockIdentity,
         fork_step: Option<&str>,
     ) -> anyhow::Result<u64> {
-        let block = near::Block::decode(block_bytes)?;
         let tx_count = block
             .shards
             .iter()
@@ -487,6 +486,26 @@ impl BlockMapper for NearBlockMapper {
         };
         self.map_near_block(&block, &identity, fork_step);
         Ok(tx_count)
+    }
+}
+
+impl BlockMapper for NearBlockMapper {
+    fn map_block(
+        &mut self,
+        block_bytes: &[u8],
+        identity: &BlockIdentity,
+        fork_step: Option<&str>,
+    ) -> anyhow::Result<u64> {
+        self.map_decoded(near::Block::decode(block_bytes)?, identity, fork_step)
+    }
+
+    fn map_block_bytes(
+        &mut self,
+        block_bytes: prost::bytes::Bytes,
+        identity: &BlockIdentity,
+        fork_step: Option<&str>,
+    ) -> anyhow::Result<u64> {
+        self.map_decoded(near::Block::decode(block_bytes)?, identity, fork_step)
     }
 
     fn flush(&mut self) -> anyhow::Result<HashMap<String, RecordBatch>> {
@@ -844,27 +863,27 @@ pub(crate) mod tests {
                 height,
                 prev_height: height.saturating_sub(1),
                 epoch_id: Some(near::CryptoHash {
-                    bytes: vec![0xaa; 32],
+                    bytes: vec![0xaa; 32].into(),
                 }),
                 next_epoch_id: Some(near::CryptoHash {
-                    bytes: vec![0xbb; 32],
+                    bytes: vec![0xbb; 32].into(),
                 }),
                 hash: Some(near::CryptoHash {
-                    bytes: vec![0x01; 32],
+                    bytes: vec![0x01; 32].into(),
                 }),
                 prev_hash: Some(near::CryptoHash {
-                    bytes: vec![0x02; 32],
+                    bytes: vec![0x02; 32].into(),
                 }),
                 prev_state_root: Some(near::CryptoHash {
-                    bytes: vec![0x03; 32],
+                    bytes: vec![0x03; 32].into(),
                 }),
                 timestamp: 1_700_000_000,
                 timestamp_nanosec: 1_700_000_000_000_000_000,
                 gas_price: Some(near::BigInt {
-                    bytes: vec![0x05, 0xF5, 0xE1, 0x00],
+                    bytes: vec![0x05, 0xF5, 0xE1, 0x00].into(),
                 }), // 100_000_000
                 total_supply: Some(near::BigInt {
-                    bytes: vec![0x01, 0x00],
+                    bytes: vec![0x01, 0x00].into(),
                 }), // 256
                 chunks_included: 4,
                 latest_protocol_version: 60,
@@ -875,8 +894,8 @@ pub(crate) mod tests {
                 chunk: Some(near::IndexerChunk {
                     author: "chunk_producer.near".to_string(),
                     header: Some(near::ChunkHeader {
-                        chunk_hash: vec![0x10; 32],
-                        prev_state_root: vec![0x11; 32],
+                        chunk_hash: vec![0x10; 32].into(),
+                        prev_state_root: vec![0x11; 32].into(),
                         shard_id: 0,
                         gas_used: 12_000_000_000_000,
                         gas_limit: 1_000_000_000_000_000,
@@ -891,12 +910,14 @@ pub(crate) mod tests {
                             receiver_id: "bob.near".to_string(),
                             nonce: 42,
                             hash: Some(near::CryptoHash {
-                                bytes: vec![0x20; 32],
+                                bytes: vec![0x20; 32].into(),
                             }),
                             actions: vec![near::Action {
                                 action: Some(near::action::Action::Transfer(
                                     near::TransferAction {
-                                        deposit: Some(near::BigInt { bytes: vec![0x01] }),
+                                        deposit: Some(near::BigInt {
+                                            bytes: vec![0x01].into(),
+                                        }),
                                     },
                                 )),
                             }],
@@ -911,7 +932,7 @@ pub(crate) mod tests {
                                         near::execution_outcome::Status::SuccessReceiptId(
                                             near::SuccessReceiptIdExecutionStatus {
                                                 id: Some(near::CryptoHash {
-                                                    bytes: vec![0x30; 32],
+                                                    bytes: vec![0x30; 32].into(),
                                                 }),
                                             },
                                         ),
@@ -931,7 +952,9 @@ pub(crate) mod tests {
                             gas_burnt: 2_428_000_000_000,
                             executor_id: "bob.near".to_string(),
                             status: Some(near::execution_outcome::Status::SuccessValue(
-                                near::SuccessValueExecutionStatus { value: vec![] },
+                                near::SuccessValueExecutionStatus {
+                                    value: vec![].into(),
+                                },
                             )),
                             ..Default::default()
                         }),
@@ -941,7 +964,7 @@ pub(crate) mod tests {
                         predecessor_id: "alice.near".to_string(),
                         receiver_id: "bob.near".to_string(),
                         receipt_id: Some(near::CryptoHash {
-                            bytes: vec![0x30; 32],
+                            bytes: vec![0x30; 32].into(),
                         }),
                         receipt: None,
                     }),
@@ -953,10 +976,14 @@ pub(crate) mod tests {
                         near::state_change_value::AccountUpdate {
                             account_id: "bob.near".to_string(),
                             account: Some(near::Account {
-                                amount: Some(near::BigInt { bytes: vec![0x01] }),
-                                locked: Some(near::BigInt { bytes: vec![] }),
+                                amount: Some(near::BigInt {
+                                    bytes: vec![0x01].into(),
+                                }),
+                                locked: Some(near::BigInt {
+                                    bytes: vec![].into(),
+                                }),
                                 code_hash: Some(near::CryptoHash {
-                                    bytes: vec![0x00; 32],
+                                    bytes: vec![0x00; 32].into(),
                                 }),
                                 storage_usage: 100,
                             }),
@@ -967,7 +994,7 @@ pub(crate) mod tests {
                     cause: Some(near::state_change_cause::Cause::TransactionProcessing(
                         near::state_change_cause::TransactionProcessing {
                             tx_hash: Some(near::CryptoHash {
-                                bytes: vec![0x20; 32],
+                                bytes: vec![0x20; 32].into(),
                             }),
                         },
                     )),
@@ -1001,10 +1028,10 @@ pub(crate) mod tests {
             header: Some(near::BlockHeader {
                 height: 1,
                 hash: Some(near::CryptoHash {
-                    bytes: vec![0x01; 32],
+                    bytes: vec![0x01; 32].into(),
                 }),
                 prev_hash: Some(near::CryptoHash {
-                    bytes: vec![0x00; 32],
+                    bytes: vec![0x00; 32].into(),
                 }),
                 timestamp: 1_700_000_000,
                 ..Default::default()
@@ -1077,10 +1104,10 @@ pub(crate) mod tests {
             header: Some(near::BlockHeader {
                 height: 200,
                 hash: Some(near::CryptoHash {
-                    bytes: vec![0x01; 32],
+                    bytes: vec![0x01; 32].into(),
                 }),
                 prev_hash: Some(near::CryptoHash {
-                    bytes: vec![0x00; 32],
+                    bytes: vec![0x00; 32].into(),
                 }),
                 timestamp: 1_700_000_000,
                 ..Default::default()
@@ -1091,8 +1118,8 @@ pub(crate) mod tests {
                     value: Some(near::state_change_value::Value::DataUpdate(
                         near::state_change_value::DataUpdate {
                             account_id: "contract.near".to_string(),
-                            key: b"mykey".to_vec(),
-                            value: b"myvalue".to_vec(),
+                            key: b"mykey".to_vec().into(),
+                            value: b"myvalue".to_vec().into(),
                         },
                     )),
                 }),
@@ -1100,7 +1127,7 @@ pub(crate) mod tests {
                     cause: Some(near::state_change_cause::Cause::ReceiptProcessing(
                         near::state_change_cause::ReceiptProcessing {
                             tx_hash: Some(near::CryptoHash {
-                                bytes: vec![0x20; 32],
+                                bytes: vec![0x20; 32].into(),
                             }),
                         },
                     )),
@@ -1156,21 +1183,28 @@ pub(crate) mod tests {
     #[test]
     fn test_bigint_to_string() {
         assert_eq!(bigint_to_string(&None), "0");
-        assert_eq!(bigint_to_string(&Some(near::BigInt { bytes: vec![] })), "0");
         assert_eq!(
-            bigint_to_string(&Some(near::BigInt { bytes: vec![0x01] })),
+            bigint_to_string(&Some(near::BigInt {
+                bytes: vec![].into()
+            })),
+            "0"
+        );
+        assert_eq!(
+            bigint_to_string(&Some(near::BigInt {
+                bytes: vec![0x01].into()
+            })),
             "1"
         );
         assert_eq!(
             bigint_to_string(&Some(near::BigInt {
-                bytes: vec![0x01, 0x00]
+                bytes: vec![0x01, 0x00].into()
             })),
             "256"
         );
         // 100_000_000 = 0x05F5E100
         assert_eq!(
             bigint_to_string(&Some(near::BigInt {
-                bytes: vec![0x05, 0xF5, 0xE1, 0x00]
+                bytes: vec![0x05, 0xF5, 0xE1, 0x00].into()
             })),
             "100000000"
         );

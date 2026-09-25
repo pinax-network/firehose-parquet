@@ -656,3 +656,9 @@ now use nulls, with real zero indices and present empty scripts preserved.
 Output addresses support the legacy first-address fallback. Native protobuf text
 encoding is unchanged and now documented accurately. These are intentional schema
 changes; use a new/rebuilt dataset or explicit reader-side schema reconciliation.
+
+- Chain protobuf byte fields now share owned Firehose payload storage during
+  mapping (#518). Existing borrowed mapper calls remain available; generated
+  Rust protobuf byte fields are now `Bytes` (`Vec` callers can use `.into()`).
+  Protobuf wire and Parquet schemas are unchanged. See
+  [decoding validation and benchmark](../audit/518-owned-protobuf-bytes.md).

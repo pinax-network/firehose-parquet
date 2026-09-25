@@ -8,6 +8,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     tonic_prost_build::configure()
         .build_server(false)
+        // Owned Bytes input lets generated chain bytes fields share its allocation.
+        // Externally supplied prost_types messages keep their own field types.
+        .bytes(".")
         .protoc_arg("--experimental_allow_proto3_optional")
         .compile_protos(
             &[

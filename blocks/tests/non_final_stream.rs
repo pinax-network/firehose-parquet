@@ -69,7 +69,7 @@ impl tonic::server::ServerStreamingService<firehose::Request> for Stream {
                         type_url: "type.googleapis.com/sf.ethereum.type.v2.Block".into(),
                         value: eth::Block {
                             number,
-                            hash: vec![hash; 32],
+                            hash: vec![hash; 32].into(),
                             ..Default::default()
                         }
                         .encode_to_vec(),

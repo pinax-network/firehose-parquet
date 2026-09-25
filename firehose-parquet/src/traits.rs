@@ -409,6 +409,17 @@ pub trait BlockMapper {
         fork_step: Option<&str>,
     ) -> anyhow::Result<u64>;
 
+    /// Map an owned protobuf buffer. Chain implementations can retain shared byte
+    /// slices during decoding; the default preserves external mapper compatibility.
+    fn map_block_bytes(
+        &mut self,
+        block_bytes: bytes::Bytes,
+        identity: &BlockIdentity,
+        fork_step: Option<&str>,
+    ) -> anyhow::Result<u64> {
+        self.map_block(block_bytes.as_ref(), identity, fork_step)
+    }
+
     /// Flush all buffered data into RecordBatches.
     fn flush(&mut self) -> anyhow::Result<HashMap<String, RecordBatch>>;
 

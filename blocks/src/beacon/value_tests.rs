@@ -37,20 +37,20 @@ fn round_trip(table: &str, batch: &RecordBatch) {
 fn payload_block(fork: beacon::Spec, bytes: Vec<u8>) -> beacon::Block {
     use beacon::block::Body;
     let payload = beacon::DenebExecutionPayload {
-        base_fee_per_gas: bytes.clone(),
+        base_fee_per_gas: bytes.clone().into(),
         ..Default::default()
     };
     let body = match fork {
         beacon::Spec::Bellatrix => Body::Bellatrix(beacon::BellatrixBody {
             execution_payload: Some(beacon::BellatrixExecutionPayload {
-                base_fee_per_gas: bytes,
+                base_fee_per_gas: bytes.into(),
                 ..Default::default()
             }),
             ..Default::default()
         }),
         beacon::Spec::Capella => Body::Capella(beacon::CapellaBody {
             execution_payload: Some(beacon::CapellaExecutionPayload {
-                base_fee_per_gas: bytes,
+                base_fee_per_gas: bytes.into(),
                 ..Default::default()
             }),
             ..Default::default()
@@ -228,9 +228,9 @@ fn full_size_blobs_remain_binary_in_every_encoding_and_after_flush() {
         let block = beacon::Block {
             body: Some(beacon::block::Body::Deneb(beacon::DenebBody {
                 embedded_blobs: vec![beacon::Blob {
-                    blob: blob.clone(),
-                    kzg_commitment: vec![0xa5; 48],
-                    kzg_proof: vec![0xb6; 48],
+                    blob: blob.clone().into(),
+                    kzg_commitment: vec![0xa5; 48].into(),
+                    kzg_proof: vec![0xb6; 48].into(),
                     index: 7,
                     ..Default::default()
                 }],
