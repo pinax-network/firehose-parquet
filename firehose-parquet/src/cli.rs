@@ -1267,6 +1267,10 @@ Examples:
         /// When omitted in `--live` mode, existing `partitions.parquet` rows take
         /// precedence as the restart anchor.
         ///
+        /// With `--resume` (or `--live`) and an existing index, the build continues
+        /// from the index frontier; an explicit value past that frontier is rejected
+        /// because it would leave the blocks in between unindexed.
+        ///
         /// Use `--overwrite` to ignore any existing canonical index and rebuild it
         /// from the requested start point instead.
         ///
@@ -1311,7 +1315,9 @@ Examples:
             help_heading = "Output"
         )]
         s3_bucket: Option<String>,
-        /// Resume from an existing canonical index under the resolved output path
+        /// Resume from an existing canonical index under the resolved output path,
+        /// continuing from its stored frontier. Bounded builds require `--resume` or
+        /// `--overwrite` when an index already exists.
         #[arg(
             long,
             default_value = "false",

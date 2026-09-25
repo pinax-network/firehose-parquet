@@ -18,6 +18,24 @@ Bounded-mode resolution order:
 
 This lets operators resume partition index generation from an existing artifact directory without manually looking up the last written block.
 
+## Existing Index
+
+A bounded build never modifies an existing `partitions.parquet` implicitly. When the index already exists, one of these is required:
+
+- `--resume`: continue from the stored frontier (the `stop_block` of the terminal row)
+- `--overwrite`: ignore the stored rows and replace the index
+
+Without either flag the build fails before probing, for both time-based and `block_range` partitions. Previously a time-based build silently replaced the index with only the new range, and a `block_range` build appended rows that overlapped the stored ones.
+
+When resuming (bounded `--resume` or `--live`):
+
+- the stored frontier is the start block; the sibling `cursor.parquet` and endpoint metadata are not consulted
+- an explicit `--start-block` past the frontier is rejected, because the terminal row would otherwise be stretched across unprobed blocks (live mode requires an explicit value to equal the frontier)
+- an explicit `--start-block` before the frontier is accepted and the build still resumes from the frontier
+- time-based builds never backtrack past the frontier when locating the first partition, so a terminal row that ends mid-partition (after a live run) is extended instead of rebuilt
+- a `block_range` terminal row shorter than `--block-range-size` is rebuilt from its aligned start rather than duplicated
+- a bounded run whose `--stop-block` is already covered by the stored frontier is a no-op
+
 For bounded builds, the first emitted row may expand downward from the requested seed block so that the stored row begins at the exact first block in that partition.
 
 ## Live Mode

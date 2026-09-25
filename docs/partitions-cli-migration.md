@@ -47,6 +47,7 @@ Current behavior:
 - writes `/<chain>/partitions.parquet` under the supplied local or S3 output root
 - includes file metadata defined in `docs/partitions-parquet-contract.md`
 - supports `--resume` by reusing trailing partition rows from the existing canonical artifact and continuing from the stored frontier
+- refuses to modify an existing canonical artifact in bounded mode unless `--resume` or `--overwrite` is passed (see `docs/partitions-build-defaults.md`)
 - infers `--start-block` from a sibling `cursor.parquet` or endpoint metadata when omitted
 - infers the S3 output root from `--s3-bucket` / `S3_BUCKET` when `--output` is omitted
 - supports `--live` to keep extending `partitions.parquet` from its latest covered frontier
