@@ -4,6 +4,22 @@ Changes merged since the last release. Fold this file into `docs/releases/vX.Y.Z
 
 ## Breaking changes
 
+### Day-of-month partition directories are now `day=DD` instead of `date=DD` (#493)
+
+Time-based partitioning (`--partition date`, `hour`, `minute` and `second`) wrote the day of the month as `date=DD`, while every table also has a canonical `date` column (`Date32`). Hive-partition-aware readers treat the directory key as a column, so the two collided:
+
+- DuckDB (`hive_partitioning` is on by default for such paths) replaced the `date` DATE values with the partition value: `date` read as `BIGINT` day-of-month numbers (`26` instead of `2025-07-26`).
+- Polars (`scan_parquet(..., hive_partitioning=True)`) failed with `could not find a 'date/datetime' pattern for '26'`.
+- Spark's file-source partition discovery likewise merges a partition column over a data column of the same name. This was not run here.
+
+New output uses `year=YYYY/month=MM/day=DD/...`. With it, DuckDB reads `date` as `DATE` plus a separate `day` partition column, and Polars reads `date` as `Date` plus `day`. The `--partition date` mode keeps its name; only the directory key changes. `year=`, `month=`, `hour=`, `minute=`, `second=` and `block_range=` are unchanged.
+
+Migration:
+
+- Existing `date=DD` trees stay usable. `rollup` accepts `date=` directories and keeps their key, and `truncate -p day=DD` (or `-p date=DD`) matches both `day=DD` and legacy `date=DD` directories.
+- A pipeline that resumes into an existing `date=` tree writes new days under `day=`, so the table then holds both layouts. DuckDB's auto-detection turns hive partitioning off for such a mix: no partition columns, and `date` is the data column. Forcing `hive_partitioning = true` fails with `Hive partition mismatch ... key "date" not found`. To get partition columns back, rename the legacy directories: renaming `date=DD` to `day=DD` inside each `month=MM` directory is enough, and the files themselves don't change.
+- Queries that used the `date` partition column as a day-of-month number should use `day`. Queries that disabled `hive_partitioning` to keep the `date` column no longer need to.
+
 ### Canonical `timestamp` is now `Timestamp(Millisecond, UTC)` on every table (#491)
 
 The canonical `timestamp` column was Arrow `Timestamp(Second, UTC)`. Parquet has no logical type for seconds, so it was written as a plain `INT64`, and DuckDB, Spark, Trino and ClickHouse read it as `BIGINT` unix seconds. Only Arrow-based readers recovered the type from the embedded Arrow schema.
@@ -11,7 +27,7 @@ The canonical `timestamp` column was Arrow `Timestamp(Second, UTC)`. Parquet has
 It is now Arrow `Timestamp(Millisecond, UTC)`, written as Parquet `TIMESTAMP(MILLIS, isAdjustedToUTC=true)`. `DESCRIBE` in DuckDB shows `TIMESTAMP WITH TIME ZONE`. Antelope `actions.block_time` uses the same type.
 
 - **Sub-second precision.** The value now keeps the milliseconds of the Firehose block time. Antelope chains (500 ms blocks) show `12:00:00.500` where they used to show `12:00:00`, and so can other chains whose Firehose metadata carries sub-second times. Whole-second chains such as EVM keep the same instant.
-- **Unchanged:** `date`, time-based partition directories (`year=`/`month=`/`date=`/`hour=`/`minute=`/`second=`) and the cursor's `last_timestamp` are still derived from the whole-second block time. Output lands in the same partitions as before.
+- **Unchanged:** `date`, time-based partition directories (`year=`/`month=`/`day=`/`hour=`/`minute=`/`second=`; see the `day=` rename above) and the cursor's `last_timestamp` are still derived from the whole-second block time. Blocks land in the same partitions as before.
 - **Unchanged:** Solana `timestamp`/`date` stay null when `block_time` is missing.
 
 Migration:

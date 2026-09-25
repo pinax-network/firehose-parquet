@@ -34,7 +34,7 @@ Schema (one row per `chain`/`table`/`partition`, all columns non-null `Utf8`):
 |--------|---------|
 | `chain` | Registry key: `--chain` value |
 | `table` | Registry key: `--table` value |
-| `partition` | Registry key: Hive partition path such as `date=2024-01-01`, or `unpartitioned` |
+| `partition` | Registry key: Hive partition path such as `year=2024/month=01/day=01`, or `unpartitioned` |
 | `algorithm` | Hash strategy used for the root (`keccak256` or `sha256`) |
 | `merkle_version` | Merkle construction used for the root (currently `merkle_v2`); see `docs/verifiability-hash-strategy.md` |
 | `merkle_root` | Lowercase hex partition root |

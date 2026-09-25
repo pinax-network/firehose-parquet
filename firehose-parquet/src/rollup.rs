@@ -12,7 +12,7 @@
 
 use crate::artifacts::is_reserved_artifact_path;
 use crate::cli::{block_on_async, format_bytes, resolve_parquet_input_path_string, AwsConfig};
-use crate::config::Compression;
+use crate::config::{Compression, DAY_PARTITION_PREFIX, LEGACY_DAY_PARTITION_PREFIX};
 use crate::merge::SchemaCheck;
 use crate::writer::parse_s3_url;
 use anyhow::{Context, Result};
@@ -40,18 +40,19 @@ const COPY_OUTPUT_PREFIX: &str = "part-rollup-";
 /// Target partition granularity for rollup.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RollupTarget {
-    /// Merge into hourly partitions: `table/year=YYYY/month=MM/date=DD/hour=HH/`
+    /// Merge into hourly partitions: `table/year=YYYY/month=MM/day=DD/hour=HH/`
     Hour,
-    /// Merge into daily partitions: `table/year=YYYY/month=MM/date=DD/`
+    /// Merge into daily partitions: `table/year=YYYY/month=MM/day=DD/`
     Date,
 }
 
 impl RollupTarget {
-    /// Hive directory prefix of a partition at this granularity.
-    fn level_prefix(self) -> &'static str {
+    /// Hive directory prefixes of a partition at this granularity. Days accept the
+    /// legacy `date=DD` key as well as `day=DD`; outputs keep the source's key.
+    fn level_prefixes(self) -> &'static [&'static str] {
         match self {
-            RollupTarget::Hour => "hour=",
-            RollupTarget::Date => "date=",
+            RollupTarget::Hour => &["hour="],
+            RollupTarget::Date => &[DAY_PARTITION_PREFIX, LEGACY_DAY_PARTITION_PREFIX],
         }
     }
 
@@ -145,7 +146,7 @@ fn is_same_location(source: &str, output: &str) -> bool {
 
 /// Returns true when `rel_path` (relative to the source root) is a table part file that rolls
 /// up into `target`: a `part-*.parquet` file inside a target-level partition and below a finer
-/// one, e.g. `blocks/year=2024/month=01/date=15/hour=14/part-*.parquet` for `date`.
+/// one, e.g. `blocks/year=2024/month=01/day=15/hour=14/part-*.parquet` for `date`.
 ///
 /// Everything else is skipped: reserved artifacts such as `cursor.parquet`, files already at
 /// the target granularity (including earlier rollup outputs), and files outside time
@@ -163,7 +164,10 @@ fn is_rollup_source(rel_path: &str, target: RollupTarget) -> bool {
     let mut has_level = false;
     let mut has_finer = false;
     for dir in dirs.split('/') {
-        has_level |= dir.starts_with(target.level_prefix());
+        has_level |= target
+            .level_prefixes()
+            .iter()
+            .any(|prefix| dir.starts_with(prefix));
         has_finer |= target
             .finer_prefixes()
             .iter()
@@ -493,7 +497,7 @@ fn remove_previous_copies_local(out_dir: &Path, written: &HashSet<PathBuf>) -> R
 
 /// Group source files by their target (coarser) partition key.
 ///
-/// Returns a map from output relative path (e.g. `blocks/year=2024/month=01/date=15`)
+/// Returns a map from output relative path (e.g. `blocks/year=2024/month=01/day=15`)
 /// to the list of source files that belong to that group.
 fn group_files_by_target(
     source_root: &Path,
@@ -519,12 +523,14 @@ fn group_files_by_target(
 /// Compute the group key for a relative file path given the target partition.
 ///
 /// Examples (target=Date):
-///   `blocks/year=2024/month=01/date=15/hour=14/minute=30/part-000001.parquet`
-///   → `blocks/year=2024/month=01/date=15`
+///   `blocks/year=2024/month=01/day=15/hour=14/minute=30/part-000001.parquet`
+///   → `blocks/year=2024/month=01/day=15`
 ///
 /// Examples (target=Hour):
-///   `blocks/year=2024/month=01/date=15/hour=14/minute=30/part-000001.parquet`
-///   → `blocks/year=2024/month=01/date=15/hour=14`
+///   `blocks/year=2024/month=01/day=15/hour=14/minute=30/part-000001.parquet`
+///   → `blocks/year=2024/month=01/day=15/hour=14`
+///
+/// Legacy `date=DD` trees keep their `date=DD` key, so they roll up in place.
 ///
 /// Files without recognized partition components keep everything except the filename.
 fn compute_group_key(rel_path: &str, target: RollupTarget) -> String {
@@ -969,6 +975,24 @@ mod tests {
     }
 
     #[test]
+    fn test_compute_group_key_day() {
+        assert_eq!(
+            compute_group_key(
+                "blocks/year=2024/month=01/day=15/hour=14/minute=30/part-000001.parquet",
+                RollupTarget::Date
+            ),
+            "blocks/year=2024/month=01/day=15"
+        );
+        assert_eq!(
+            compute_group_key(
+                "blocks/year=2024/month=01/day=15/hour=14/minute=30/part-000001.parquet",
+                RollupTarget::Hour
+            ),
+            "blocks/year=2024/month=01/day=15/hour=14"
+        );
+    }
+
+    #[test]
     fn test_compute_group_key_hour() {
         assert_eq!(
             compute_group_key(
@@ -1310,7 +1334,7 @@ mod tests {
         }
     }
 
-    const DAY: &str = "blocks/year=2024/month=01/date=15";
+    const DAY: &str = "blocks/year=2024/month=01/day=15";
 
     /// A batch whose `block_number` column holds `start..start + rows`, so tests can tell
     /// lost rows from duplicated ones.
@@ -1393,6 +1417,16 @@ mod tests {
         assert!(is_rollup_source(&minute_file, hour));
         assert!(is_rollup_source(
             "date=2024-01-15/hour=14/part-000001.parquet",
+            date
+        ));
+        // Legacy `date=DD` day directories written by earlier releases.
+        let legacy_day = "blocks/year=2024/month=01/date=15";
+        assert!(is_rollup_source(
+            &format!("{legacy_day}/hour=14/part-abc12345-000001.parquet"),
+            date
+        ));
+        assert!(!is_rollup_source(
+            &format!("{legacy_day}/part-abc12345-000001.parquet"),
             date
         ));
 
@@ -1871,7 +1905,7 @@ mod tests {
     fn test_rollup_skips_group_with_reordered_columns() {
         let root = tempfile::tempdir().unwrap();
         let mixed = root.path().join(DAY);
-        let healthy = root.path().join("blocks/year=2024/month=01/date=16");
+        let healthy = root.path().join("blocks/year=2024/month=01/day=16");
         write_columns_file(
             &mixed.join("hour=14/minute=30/part-aaaaaaaa-000001.parquet"),
             &[("a", 1), ("b", 10)],
@@ -1897,10 +1931,10 @@ mod tests {
         assert!(err.contains("1 target partition(s)"), "{err}");
         assert!(err.contains(DAY), "{err}");
         assert!(
-            err.contains(
+            err.contains(&format!(
                 "hour=14/minute=31/part-bbbbbbbb-000001.parquet does not match \
-                 blocks/year=2024/month=01/date=15/hour=14/minute=30/part-aaaaaaaa-000001.parquet"
-            ),
+                 {DAY}/hour=14/minute=30/part-aaaaaaaa-000001.parquet"
+            )),
             "{err}"
         );
         assert!(err.contains("different order"), "{err}");

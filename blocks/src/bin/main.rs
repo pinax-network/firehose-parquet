@@ -5633,7 +5633,7 @@ mod tests {
             "buffered stats should report in-memory data"
         );
         assert!(
-            !dir.join("blocks/year=2024/month=01/date=15").exists(),
+            !dir.join("blocks/year=2024/month=01/day=15").exists(),
             "without forced materialization the partition should stay buffered"
         );
         std::fs::remove_dir_all(&dir).unwrap();
@@ -5656,7 +5656,7 @@ mod tests {
         assert!(outcome.materialized);
         assert_eq!(outcome.buffered, WriterBufferStats::default());
         assert!(
-            dir.join("blocks/year=2024/month=01/date=15").exists(),
+            dir.join("blocks/year=2024/month=01/day=15").exists(),
             "forced partition-boundary materialization should write the old partition immediately"
         );
         std::fs::remove_dir_all(&dir).unwrap();

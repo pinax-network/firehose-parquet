@@ -30,6 +30,20 @@ Use `--partition` for partition granularity or output layout, and keep `--partit
 - `--partition-chain`
   - Means an optional chain filter when a partition index contains multiple chains.
 
+## Output directory keys
+
+`--partition` modes write Hive-style directory keys:
+
+| `--partition` | Directory keys |
+|---|---|
+| `block_range` | `block_range=<start>-<stop>/` |
+| `date` | `year=YYYY/month=MM/day=DD/` |
+| `hour` | `year=YYYY/month=MM/day=DD/hour=HH/` |
+| `minute` | `.../hour=HH/minute=MM/` |
+| `second` | `.../minute=MM/second=SS/` |
+
+The mode is still called `date`, but its directory key is `day=`, never `date=`: every table has a canonical `date` data column, and Hive-partition-aware readers turn directory keys into columns. A `date=` key shadows the data column (DuckDB's default `hive_partitioning` reads it as the day-of-month number) or fails to load (Polars). Earlier releases wrote `date=DD`; `rollup` and `truncate` accept that legacy key as an alias of `day=`.
+
 ## Resulting rename decisions
 
 This convention leads to the following CLI adjustments:
