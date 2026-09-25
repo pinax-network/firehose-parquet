@@ -291,6 +291,26 @@ already written in the failed flush may be written again on that replay.
 Only a stream that ends cleanly (for example, by reaching `--stop-block`)
 flushes the remaining buffers and saves the final cursor.
 
+### Start and Stop Blocks
+
+- **Start above the last irreversible block.** With `--final-blocks-only`
+  (the default), Firehose serves a request whose start block is above the
+  current last irreversible block (LIB) from LIB+1. Without a resume cursor,
+  blocks below `--start-block` are skipped before mapping: the first one is
+  logged, and all of them are counted in
+  `firehose_parquet_blocks_skipped_below_start_total` and in the
+  `blocks_skipped_below_start` field of the final summary.
+- **Bounded runs** (`--stop-block` set; it is exclusive) exit 0 only once block
+  `stop_block - 1` was received. If the server ends the stream earlier, the run
+  resumes from the last cursor. If the resumed stream delivers nothing, the
+  server has no more blocks in the range: on chains with skipped slots or
+  heights (Solana, NEAR, Beacon) the run completes with a warning. On other
+  chains it writes the blocks it received, saves the cursor at the last one,
+  and exits non-zero, so a rerun resumes after them.
+- **Live runs** (no `--stop-block`) never end on their own: if the server or a
+  proxy closes the stream cleanly, the run reconnects from the last cursor with
+  the usual back-off.
+
 ## CLI Reference
 
 The primary ingestion workflow is `fireparq build`. Utility workflows stay
@@ -927,6 +947,7 @@ Enable the metrics server with `--metrics-port <PORT>` (env: `METRICS_PORT`). A 
 | `firehose_parquet_cursor_last_block_num` | Gauge | — | Block number from last saved cursor |
 | `firehose_parquet_errors_total` | Counter | `kind` | Errors by category |
 | `firehose_parquet_grpc_reconnects_total` | Counter | — | gRPC stream reconnections |
+| `firehose_parquet_blocks_skipped_below_start_total` | Counter | — | Blocks received below the effective start block and skipped |
 | `firehose_parquet` | Info | *(pipeline config)* | Pipeline metadata (chain, endpoint, version) |
 
 ```bash

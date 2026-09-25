@@ -235,10 +235,14 @@ impl FirehoseClient {
     /// `self.config.start_block`.
     ///
     /// On stream errors the client will retry with exponential back-off
-    /// and resume from the last cursor.
+    /// and resume from the last cursor. A clean end of stream is handled by
+    /// [`clean_end_action`]: live streams reconnect, and a bounded stream that
+    /// ends before its last requested block is resumed to confirm the range
+    /// has no more blocks.
     ///
-    /// Returns when the stream is cleanly exhausted (stop block reached) or an
-    /// unrecoverable error occurs.
+    /// Returns when a bounded stream is exhausted or an unrecoverable error
+    /// occurs. Callers should still check which blocks were received, since
+    /// an exhausted range can end below `stop_block - 1` (e.g. skipped slots).
     pub async fn stream_blocks<F>(
         &self,
         initial_cursor: Option<String>,
@@ -264,9 +268,14 @@ impl FirehoseClient {
 
         let mut attempt = 0u64;
         let mut reconnect_stall_started_at: Option<Instant> = None;
+        // Highest block number received so far, across reconnects.
+        let mut last_block_num: Option<u64> = None;
+        // Set once a bounded stream ended before its last requested block.
+        let mut resumed_after_early_end = false;
 
         loop {
             attempt += 1;
+            let mut blocks_this_connection = 0u64;
             let channel = match self.connect().await {
                 Ok(ch) => {
                     attempt = 0;
@@ -440,6 +449,11 @@ impl FirehoseClient {
                             .unwrap_or_default();
 
                         if let Some(any) = resp.block {
+                            blocks_this_connection += 1;
+                            last_block_num =
+                                Some(last_block_num.map_or(identity.block_num, |last| {
+                                    last.max(identity.block_num)
+                                }));
                             handler(
                                 any.value,
                                 any.type_url,
@@ -452,8 +466,59 @@ impl FirehoseClient {
                         cursor = Some(new_cursor.clone());
                     }
                     Ok(None) => {
-                        info!("stream ended (stop block reached or server closed)");
-                        return Ok(());
+                        let stop_block = self.config.stop_block;
+                        match clean_end_action(
+                            stop_block,
+                            last_block_num,
+                            blocks_this_connection,
+                            resumed_after_early_end,
+                        ) {
+                            CleanEndAction::Complete => {
+                                info!("stream ended (stop block reached)");
+                                return Ok(());
+                            }
+                            CleanEndAction::Exhausted => {
+                                // The caller checks whether the range is complete.
+                                info!(
+                                    last_block_num = ?last_block_num,
+                                    stop_block = ?stop_block,
+                                    "resumed stream ended without new blocks; the server has no more blocks before the stop block"
+                                );
+                                return Ok(());
+                            }
+                            CleanEndAction::Reconnect => {
+                                if stop_block.is_some() {
+                                    resumed_after_early_end = true;
+                                    if last_block_num.is_some() {
+                                        warn!(
+                                            last_block_num = ?last_block_num,
+                                            stop_block = ?stop_block,
+                                            "stream ended before the last requested block, resuming from the last cursor"
+                                        );
+                                    } else {
+                                        // Typical when rerunning a finished range.
+                                        info!(
+                                            stop_block = ?stop_block,
+                                            "stream ended without blocks, resuming once to confirm the range is exhausted"
+                                        );
+                                    }
+                                } else {
+                                    warn!(
+                                        last_block_num = ?last_block_num,
+                                        "live stream closed by the server, will reconnect"
+                                    );
+                                }
+                                if let Some(ref m) = self.metrics {
+                                    m.grpc_reconnects_total.inc();
+                                    m.errors_total
+                                        .get_or_create(&crate::metrics::ErrorLabels {
+                                            kind: "grpc_reconnect".to_string(),
+                                        })
+                                        .inc();
+                                }
+                                break;
+                            }
+                        }
                     }
                     Err(e) => {
                         warn!(error = %e, "stream error, will reconnect");
@@ -475,6 +540,44 @@ impl FirehoseClient {
                 .unwrap_or(Duration::from_secs(60));
             tokio::time::sleep(wait).await;
         }
+    }
+}
+
+/// What the stream loop does when the server ends a stream cleanly (`Ok(None)`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CleanEndAction {
+    /// The last requested block (`stop_block - 1`) was received.
+    Complete,
+    /// A resumed bounded stream ended without delivering any block, so the
+    /// server has no more blocks in the range (e.g. skipped slots at the end).
+    Exhausted,
+    /// Resume from the last cursor after the usual back-off.
+    Reconnect,
+}
+
+/// Decide what a clean end of stream means.
+///
+/// - Live runs (no stop block) never end on their own, so a clean close came
+///   from the server or a proxy: reconnect.
+/// - Bounded runs complete once `stop_block - 1` was received.
+/// - A bounded stream that ends earlier is resumed from the cursor. If that
+///   resumed stream ends without delivering a block, the range is exhausted.
+fn clean_end_action(
+    stop_block: Option<u64>,
+    last_block_num: Option<u64>,
+    blocks_this_connection: u64,
+    resumed_after_early_end: bool,
+) -> CleanEndAction {
+    let Some(stop_block) = stop_block else {
+        return CleanEndAction::Reconnect;
+    };
+    let last_requested_block = stop_block.saturating_sub(1);
+    if last_block_num.is_some_and(|block| block >= last_requested_block) {
+        CleanEndAction::Complete
+    } else if resumed_after_early_end && blocks_this_connection == 0 {
+        CleanEndAction::Exhausted
+    } else {
+        CleanEndAction::Reconnect
     }
 }
 
@@ -535,6 +638,59 @@ mod tests {
                 keep_alive_timeout: Duration::from_secs(10),
                 keep_alive_while_idle: true,
             }
+        );
+    }
+
+    #[test]
+    fn test_clean_end_of_live_stream_reconnects() {
+        assert_eq!(
+            clean_end_action(None, Some(100), 5, false),
+            CleanEndAction::Reconnect
+        );
+        assert_eq!(
+            clean_end_action(None, None, 0, true),
+            CleanEndAction::Reconnect
+        );
+    }
+
+    #[test]
+    fn test_clean_end_of_bounded_stream_completes_at_last_requested_block() {
+        // --stop-block is exclusive: 200 means the last requested block is 199.
+        assert_eq!(
+            clean_end_action(Some(200), Some(199), 10, false),
+            CleanEndAction::Complete
+        );
+        assert_eq!(
+            clean_end_action(Some(200), Some(199), 0, true),
+            CleanEndAction::Complete
+        );
+    }
+
+    #[test]
+    fn test_early_clean_end_of_bounded_stream_resumes_then_finishes_when_exhausted() {
+        // The stream ends at 150: resume from the cursor instead of finishing.
+        assert_eq!(
+            clean_end_action(Some(200), Some(150), 10, false),
+            CleanEndAction::Reconnect
+        );
+        // The resumed stream made progress but ended early again: resume again.
+        assert_eq!(
+            clean_end_action(Some(200), Some(180), 30, true),
+            CleanEndAction::Reconnect
+        );
+        // The resumed stream delivered nothing: no more blocks in the range.
+        assert_eq!(
+            clean_end_action(Some(200), Some(180), 0, true),
+            CleanEndAction::Exhausted
+        );
+        // A range with no blocks at all gets one resume before finishing.
+        assert_eq!(
+            clean_end_action(Some(200), None, 0, false),
+            CleanEndAction::Reconnect
+        );
+        assert_eq!(
+            clean_end_action(Some(200), None, 0, true),
+            CleanEndAction::Exhausted
         );
     }
 

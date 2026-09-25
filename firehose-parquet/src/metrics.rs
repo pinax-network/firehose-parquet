@@ -39,6 +39,8 @@ pub struct ErrorLabels {
 pub struct PipelineMetrics {
     /// Total blocks processed since start.
     pub blocks_processed_total: Counter,
+    /// Blocks received below the effective start block and skipped.
+    pub blocks_skipped_below_start_total: Counter,
     /// Total protobuf bytes consumed from Firehose stream.
     pub bytes_read_total: Counter,
     /// Rows written per table name.
@@ -87,6 +89,7 @@ impl PipelineMetrics {
     pub fn new(registry: &mut Registry) -> Self {
         let metrics = Self {
             blocks_processed_total: Counter::default(),
+            blocks_skipped_below_start_total: Counter::default(),
             bytes_read_total: Counter::default(),
             rows_written_total: Family::default(),
             current_block_number: Gauge::default(),
@@ -115,6 +118,11 @@ impl PipelineMetrics {
             "firehose_parquet_blocks_processed_total",
             "Total blocks processed since start",
             metrics.blocks_processed_total.clone(),
+        );
+        registry.register(
+            "firehose_parquet_blocks_skipped_below_start_total",
+            "Blocks received below the effective start block and skipped",
+            metrics.blocks_skipped_below_start_total.clone(),
         );
         registry.register(
             "firehose_parquet_bytes_read_total",
