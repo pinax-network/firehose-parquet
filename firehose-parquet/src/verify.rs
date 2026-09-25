@@ -9,11 +9,13 @@ use arrow::record_batch::RecordBatch;
 use object_store::ObjectStore;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use parquet::arrow::ArrowWriter;
+use parquet::arrow::ProjectionMask;
 use serde::Serialize;
 use sha2::{Digest as ShaDigest, Sha256};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs::File;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
 use tiny_keccak::{Hasher, Keccak};
@@ -433,6 +435,8 @@ impl VerifyReport {
 struct ScanOutput {
     target: Target,
     partition_roots: BTreeMap<String, String>,
+    /// Partitions read in full (also counted when roots are not computed).
+    partitions_scanned: usize,
     protocol_findings: Vec<ProtocolCheckFinding>,
     /// Highest `block_num` per partition, to find partitions still being written.
     partition_max_block: HashMap<String, u64>,
@@ -788,7 +792,7 @@ pub fn verify_parquet(
         merkle_version: MERKLE_VERSION.to_string(),
         warnings,
         summary: VerifySummary {
-            partitions_scanned: partition_roots.len(),
+            partitions_scanned: scan_output.partitions_scanned,
             matches,
             missing_expected,
             mismatches,
@@ -1162,12 +1166,20 @@ fn collect_partition_roots_s3(
         .iter()
         .map(|obj| detect_partition(obj.location.as_ref(), &prefix))
         .collect();
+    let mut prefetcher = Prefetcher::spawn(
+        Arc::new(client),
+        objects.clone(),
+        PREFETCH_MAX_IN_FLIGHT,
+        PREFETCH_BUDGET_BYTES,
+    );
     let mut scan = ScanAccumulator::new(opts);
     for (index, obj) in objects.iter().enumerate() {
         let location = &obj.location;
-        let data = block_on_async(async { client.get(location).await?.bytes().await })
-            .map_err(|e| anyhow!("reading s3://{bucket}/{}: {e}", location))?;
-        let builder = ParquetRecordBatchReaderBuilder::try_new(data)?;
+        let object = prefetcher
+            .next_object()
+            .ok_or_else(|| anyhow!("S3 prefetch ended before s3://{bucket}/{location}"))?
+            .with_context(|| format!("reading s3://{bucket}/{location}"))?;
+        let builder = ParquetRecordBatchReaderBuilder::try_new(object.data.clone())?;
         let file_path = format!("s3://{bucket}/{location}");
         let next_partition = partitions.get(index + 1).map(String::as_str);
         if !scan.add_file(builder, &file_path, &partitions[index], next_partition)? {
@@ -1177,12 +1189,12 @@ fn collect_partition_roots_s3(
     scan.finish()
 }
 
-/// Per-partition leaves, protocol state and block ranges across the files of
-/// one scan, in file order.
+/// Per-partition Merkle trees, protocol state and block ranges across the
+/// files of one scan, in file order.
 struct ScanAccumulator<'a> {
     opts: &'a VerifyOptions,
     resolver: TargetResolver<'a>,
-    partition_leaves: HashMap<String, Vec<[u8; 32]>>,
+    partition_trees: HashMap<String, MerkleAccumulator>,
     protocol_state: HashMap<String, ProtocolPartitionState>,
     partition_max_block: HashMap<String, u64>,
     truncated_partition: Option<String>,
@@ -1193,7 +1205,7 @@ impl<'a> ScanAccumulator<'a> {
         Self {
             opts,
             resolver: TargetResolver::new(opts),
-            partition_leaves: HashMap::new(),
+            partition_trees: HashMap::new(),
             protocol_state: HashMap::new(),
             partition_max_block: HashMap::new(),
             truncated_partition: None,
@@ -1210,22 +1222,28 @@ impl<'a> ScanAccumulator<'a> {
         partition: &str,
         next_partition: Option<&str>,
     ) -> Result<bool> {
+        let footer = FooterIdentity::from_metadata(builder.metadata());
+        let target = self.resolver.observe(file_path, &footer)?;
         let state = self
             .protocol_state
             .entry(partition.to_string())
             .or_default();
-        let (leaves, max_block) =
-            scan_parquet_file(builder, file_path, self.opts, &mut self.resolver, state)?;
-        self.partition_leaves
-            .entry(partition.to_string())
-            .or_default()
-            .extend(leaves);
-        if let Some(max_block) = max_block {
-            let max = self
-                .partition_max_block
+
+        if self.opts.runs_roots() {
+            let tree = self
+                .partition_trees
                 .entry(partition.to_string())
-                .or_insert(max_block);
-            *max = (*max).max(max_block);
+                .or_insert_with(|| MerkleAccumulator::new(target.hash_strategy));
+            let max_block = hash_parquet_file(builder, file_path, self.opts, target, state, tree)?;
+            if let Some(max_block) = max_block {
+                let max = self
+                    .partition_max_block
+                    .entry(partition.to_string())
+                    .or_insert(max_block);
+                *max = (*max).max(max_block);
+            }
+        } else if self.opts.runs_protocol() {
+            check_parquet_file(builder, target, state)?;
         }
 
         if self.opts.runs_protocol() && !self.opts.no_fail_fast && has_protocol_failure(state) {
@@ -1243,16 +1261,15 @@ impl<'a> ScanAccumulator<'a> {
             .finish()
             .ok_or_else(|| anyhow!("no parquet files were scanned"))?;
         let mut roots = BTreeMap::new();
-        for (partition, leaves) in self.partition_leaves {
+        for (partition, tree) in self.partition_trees {
             // A partial partition's root is meaningless; never compare or record it.
             if self.truncated_partition.as_ref() == Some(&partition) {
                 continue;
             }
-            roots.insert(
-                partition,
-                hex::encode(merkle_root(&leaves, target.hash_strategy)),
-            );
+            roots.insert(partition, hex::encode(tree.root()));
         }
+        let partitions_scanned =
+            self.protocol_state.len() - usize::from(self.truncated_partition.is_some());
         let protocol_findings = if self.opts.runs_protocol() {
             finalize_protocol_findings(&target, &self.protocol_state)
         } else {
@@ -1261,6 +1278,7 @@ impl<'a> ScanAccumulator<'a> {
         Ok(ScanOutput {
             target,
             partition_roots: roots,
+            partitions_scanned,
             protocol_findings,
             partition_max_block: self.partition_max_block,
             truncated_partition: self.truncated_partition,
@@ -1268,21 +1286,17 @@ impl<'a> ScanAccumulator<'a> {
     }
 }
 
-/// Resolves or checks the target against one file, then runs protocol checks
-/// and hashes its rows into leaves. Also returns the file's highest
-/// `block_num`, when the column exists.
-fn scan_parquet_file<R: parquet::file::reader::ChunkReader + 'static>(
+/// Runs protocol checks on one file and streams its rows into the partition
+/// tree. Returns the file's highest `block_num`, when the column exists.
+fn hash_parquet_file<R: parquet::file::reader::ChunkReader + 'static>(
     builder: ParquetRecordBatchReaderBuilder<R>,
     file_path: &str,
     opts: &VerifyOptions,
-    resolver: &mut TargetResolver,
+    target: &Target,
     protocol_state: &mut ProtocolPartitionState,
-) -> Result<(Vec<[u8; 32]>, Option<u64>)> {
-    let footer = FooterIdentity::from_metadata(builder.metadata());
-    let target = resolver.observe(file_path, &footer)?;
+    tree: &mut MerkleAccumulator,
+) -> Result<Option<u64>> {
     let reader = builder.build()?;
-
-    let mut leaves = Vec::new();
     let mut max_block: Option<u64> = None;
     for maybe_batch in reader {
         let batch = maybe_batch?;
@@ -1294,29 +1308,166 @@ fn scan_parquet_file<R: parquet::file::reader::ChunkReader + 'static>(
             .and_then(|column| column.as_any().downcast_ref::<UInt64Array>())
             .and_then(arrow::compute::max);
         max_block = max_block.max(batch_max);
-        append_batch_leaves(&batch, target.hash_strategy, &mut leaves)
+        append_batch_leaves(&batch, target.hash_strategy, tree)
             .with_context(|| format!("hashing rows of {file_path}"))?;
     }
-
-    Ok((leaves, max_block))
+    Ok(max_block)
 }
 
-/// Appends one `merkle_v2` leaf per row: `H(0x00 || encoded_row)`, with the
-/// row encoded by [`row_encoding::RowEncoder`].
+/// Protocol checks for a run without roots: reads only the columns the checks
+/// use (see [`protocol_columns`]), and no rows when no check applies.
+fn check_parquet_file<R: parquet::file::reader::ChunkReader + 'static>(
+    builder: ParquetRecordBatchReaderBuilder<R>,
+    target: &Target,
+    protocol_state: &mut ProtocolPartitionState,
+) -> Result<()> {
+    let columns = protocol_columns(target);
+    if columns.is_empty() {
+        return Ok(());
+    }
+    let projection = ProjectionMask::columns(builder.parquet_schema(), columns.iter().copied());
+    for maybe_batch in builder.with_projection(projection).build()? {
+        run_protocol_checks_for_batch(target, &maybe_batch?, protocol_state);
+    }
+    Ok(())
+}
+
+/// Columns [`run_protocol_checks_for_batch`] reads for a target. Keep the two
+/// in sync: a protocol-only run reads nothing else.
+fn protocol_columns(target: &Target) -> &'static [&'static str] {
+    if !target.chain.eq_ignore_ascii_case("evm") {
+        return &[];
+    }
+    match target.table.to_ascii_lowercase().as_str() {
+        "blocks" => &[
+            "block_num",
+            "number",
+            "block_id",
+            "hash",
+            "parent_id",
+            "parent_hash",
+        ],
+        "transactions" | "logs" | "calls" => &["block_num", "block_number"],
+        _ => &[],
+    }
+}
+
+/// Adds one `merkle_v2` leaf per row, `H(0x00 || encoded_row)` with the row
+/// encoded by [`row_encoding::RowEncoder`], to `out`.
 fn append_batch_leaves(
     batch: &RecordBatch,
     hash_strategy: HashStrategy,
-    out: &mut Vec<[u8; 32]>,
+    out: &mut impl Extend<[u8; 32]>,
 ) -> Result<()> {
     let encoder = row_encoding::RowEncoder::new(batch)?;
     let mut encoded = Vec::new();
-    for row in 0..batch.num_rows() {
+    out.extend((0..batch.num_rows()).map(|row| {
         encoded.clear();
         encoded.push(MERKLE_LEAF_PREFIX);
         encoder.encode_row(row, &mut encoded);
-        out.push(hash_strategy.hash(&encoded));
-    }
+        hash_strategy.hash(&encoded)
+    }));
     Ok(())
+}
+
+/// Most S3 objects fetched ahead of the scan at once.
+const PREFETCH_MAX_IN_FLIGHT: usize = 4;
+/// Most object bytes held ahead of the scan: fetched or in flight, and not
+/// yet scanned. An object larger than the budget takes all of it.
+const PREFETCH_BUDGET_BYTES: u64 = 256 * 1024 * 1024;
+
+/// S3 objects fetched concurrently on a worker thread and handed to the scan
+/// in listing order. Each object holds its share of the byte budget until it
+/// is dropped, so memory stays bounded however far the fetches run ahead.
+struct Prefetcher {
+    receiver: Option<tokio::sync::mpsc::Receiver<Result<PrefetchedObject>>>,
+    budget: Arc<tokio::sync::Semaphore>,
+    worker: Option<std::thread::JoinHandle<()>>,
+}
+
+struct PrefetchedObject {
+    data: bytes::Bytes,
+    _budget: tokio::sync::OwnedSemaphorePermit,
+}
+
+impl Prefetcher {
+    fn spawn(
+        store: Arc<dyn ObjectStore>,
+        objects: Vec<object_store::ObjectMeta>,
+        max_in_flight: usize,
+        budget_bytes: u64,
+    ) -> Self {
+        // Budget accounting in KiB keeps permit counts well within u32.
+        let budget_units = budget_bytes.div_ceil(1024).max(1);
+        let budget = Arc::new(tokio::sync::Semaphore::new(budget_units as usize));
+        let max_in_flight = max_in_flight.max(1);
+        let (sender, receiver) = tokio::sync::mpsc::channel(max_in_flight);
+        let worker_budget = budget.clone();
+        let worker = std::thread::spawn(move || {
+            let runtime = match tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
+                Ok(runtime) => runtime,
+                Err(err) => {
+                    let _ = sender
+                        .blocking_send(Err(anyhow!("starting the S3 prefetch runtime: {err}")));
+                    return;
+                }
+            };
+            runtime.block_on(async move {
+                use futures::StreamExt;
+                let fetches = futures::stream::iter(objects)
+                    .map(|object| {
+                        let (store, budget) = (store.clone(), worker_budget.clone());
+                        async move {
+                            let units = object.size.div_ceil(1024).clamp(1, budget_units) as u32;
+                            let permit = budget
+                                .acquire_many_owned(units)
+                                .await
+                                .map_err(|_| anyhow!("S3 prefetch stopped"))?;
+                            let data =
+                                async { store.get(&object.location).await?.bytes().await }.await?;
+                            Ok(PrefetchedObject {
+                                data,
+                                _budget: permit,
+                            })
+                        }
+                    })
+                    .buffered(max_in_flight);
+                futures::pin_mut!(fetches);
+                while let Some(object) = fetches.next().await {
+                    // A closed channel means the scan stopped early.
+                    if sender.send(object).await.is_err() {
+                        break;
+                    }
+                }
+            });
+        });
+        Self {
+            receiver: Some(receiver),
+            budget,
+            worker: Some(worker),
+        }
+    }
+
+    /// The next object in listing order, or `None` once all were delivered.
+    fn next_object(&mut self) -> Option<Result<PrefetchedObject>> {
+        let receiver = self.receiver.as_mut()?;
+        block_on_async(receiver.recv())
+    }
+}
+
+impl Drop for Prefetcher {
+    fn drop(&mut self) {
+        // Closing the budget and the channel unblocks the worker wherever it
+        // waits, so joining it cannot hang after an early stop.
+        self.budget.close();
+        drop(self.receiver.take());
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+    }
 }
 
 fn has_protocol_failure(state: &ProtocolPartitionState) -> bool {
@@ -1742,43 +1893,89 @@ fn comparable_bytes(array: &dyn Array, row: usize) -> Option<Vec<u8>> {
     Some(bytes.to_vec())
 }
 
-/// Computes a `merkle_v2` partition root over row leaves.
+/// Streaming `merkle_v2` partition root.
 ///
 /// Interior nodes are `H(0x01 || left || right)` and an odd trailing node is
 /// promoted to the next level unchanged instead of being paired with itself.
 /// The tree root (`H("")` for an empty partition) is then bound to the row
 /// count as `H(0x02 || row_count_u64_le || tree_root)`, so `[a, b, c]` and
 /// `[a, b, c, c]` never share a root.
-fn merkle_root(leaves: &[[u8; 32]], hash_strategy: HashStrategy) -> [u8; 32] {
-    let tree_root = if leaves.is_empty() {
-        hash_strategy.hash(&[])
-    } else {
-        let mut level = leaves.to_vec();
-        while level.len() > 1 {
-            let mut next = Vec::with_capacity(level.len().div_ceil(2));
-            for pair in level.chunks(2) {
-                match pair {
-                    [left, right] => {
-                        let mut combined = [0u8; 65];
-                        combined[0] = MERKLE_NODE_PREFIX;
-                        combined[1..33].copy_from_slice(left);
-                        combined[33..].copy_from_slice(right);
-                        next.push(hash_strategy.hash(&combined));
-                    }
-                    [odd] => next.push(*odd),
-                    _ => unreachable!("chunks(2) yields one or two nodes"),
-                }
-            }
-            level = next;
-        }
-        level[0]
-    };
+///
+/// Leaves are folded in as they arrive: the accumulator keeps only the roots
+/// of completed perfect subtrees, at most one per height, so memory is
+/// O(log n) instead of one 32-byte leaf per row. Pairing a level left to
+/// right and promoting its odd last node yields exactly those perfect subtrees
+/// joined from the smallest to the largest, which is what [`Self::root`] does.
+#[derive(Debug, Clone)]
+struct MerkleAccumulator {
+    hash_strategy: HashStrategy,
+    /// Completed perfect subtrees as `(height, root)`, tallest (leftmost) first.
+    subtrees: Vec<(u32, [u8; 32])>,
+    leaves: u64,
+}
 
-    let mut committed = [0u8; 41];
-    committed[0] = MERKLE_ROOT_PREFIX;
-    committed[1..9].copy_from_slice(&(leaves.len() as u64).to_le_bytes());
-    committed[9..].copy_from_slice(&tree_root);
-    hash_strategy.hash(&committed)
+impl MerkleAccumulator {
+    fn new(hash_strategy: HashStrategy) -> Self {
+        Self {
+            hash_strategy,
+            subtrees: Vec::new(),
+            leaves: 0,
+        }
+    }
+
+    fn push(&mut self, leaf: [u8; 32]) {
+        self.leaves += 1;
+        let (mut height, mut node) = (0, leaf);
+        while let Some(&(top_height, top)) = self.subtrees.last() {
+            if top_height != height {
+                break;
+            }
+            self.subtrees.pop();
+            node = merkle_node(self.hash_strategy, &top, &node);
+            height += 1;
+        }
+        self.subtrees.push((height, node));
+    }
+
+    fn root(&self) -> [u8; 32] {
+        let tree_root = match self.subtrees.split_last() {
+            None => self.hash_strategy.hash(&[]),
+            Some((&(_, last), rest)) => rest.iter().rev().fold(last, |right, (_, left)| {
+                merkle_node(self.hash_strategy, left, &right)
+            }),
+        };
+
+        let mut committed = [0u8; 41];
+        committed[0] = MERKLE_ROOT_PREFIX;
+        committed[1..9].copy_from_slice(&self.leaves.to_le_bytes());
+        committed[9..].copy_from_slice(&tree_root);
+        self.hash_strategy.hash(&committed)
+    }
+}
+
+impl Extend<[u8; 32]> for MerkleAccumulator {
+    fn extend<I: IntoIterator<Item = [u8; 32]>>(&mut self, leaves: I) {
+        for leaf in leaves {
+            self.push(leaf);
+        }
+    }
+}
+
+/// Interior node `H(0x01 || left || right)`.
+fn merkle_node(hash_strategy: HashStrategy, left: &[u8; 32], right: &[u8; 32]) -> [u8; 32] {
+    let mut combined = [0u8; 65];
+    combined[0] = MERKLE_NODE_PREFIX;
+    combined[1..33].copy_from_slice(left);
+    combined[33..].copy_from_slice(right);
+    hash_strategy.hash(&combined)
+}
+
+/// `merkle_v2` root of a complete leaf list.
+#[cfg(test)]
+fn merkle_root(leaves: &[[u8; 32]], hash_strategy: HashStrategy) -> [u8; 32] {
+    let mut tree = MerkleAccumulator::new(hash_strategy);
+    tree.extend(leaves.iter().copied());
+    tree.root()
 }
 
 fn collect_parquet_files(dir: &PathBuf, out: &mut Vec<PathBuf>) -> Result<()> {
@@ -2063,7 +2260,7 @@ fn encode_registry(rows: &HashMap<String, RegistryRow>) -> Result<Vec<u8>> {
     });
 
     let column = |value: fn(&RegistryRow) -> &str| {
-        std::sync::Arc::new(StringArray::from(
+        Arc::new(StringArray::from(
             ordered.iter().map(|row| value(row)).collect::<Vec<&str>>(),
         )) as arrow::array::ArrayRef
     };
@@ -2358,8 +2555,8 @@ mod tests {
         append_batch_leaves, commit_registry_local, commit_registry_to_store, file_layout,
         join_artifact_path, legacy_default_registry_path, load_registry, load_registry_from_store,
         merkle_root, registry_key, verify_parquet, FileLayout, FindingStatus, HashStrategy,
-        RegistryChange, RegistryRow, VerifyCheck, VerifyOptions, VerifyProfile, VerifyReport,
-        VerifyScope, MERKLE_ROOTS_FILENAME,
+        MerkleAccumulator, Prefetcher, RegistryChange, RegistryRow, VerifyCheck, VerifyOptions,
+        VerifyProfile, VerifyReport, VerifyScope, MERKLE_ROOTS_FILENAME,
     };
     use crate::cursor::{save_cursor_parquet, CursorState};
     use anyhow::Result;
@@ -3450,5 +3647,226 @@ mod tests {
             .to_string();
         assert!(err.contains("changed while verify was running"), "{err}");
         assert!(warnings.is_empty(), "{warnings:?}");
+    }
+
+    /// The level-by-level `merkle_v2` construction the streaming accumulator
+    /// replaced, kept as the reference it must match.
+    fn reference_merkle_root(leaves: &[[u8; 32]], hash_strategy: HashStrategy) -> [u8; 32] {
+        let tree_root = if leaves.is_empty() {
+            hash_strategy.hash(&[])
+        } else {
+            let mut level = leaves.to_vec();
+            while level.len() > 1 {
+                let mut next = Vec::with_capacity(level.len().div_ceil(2));
+                for pair in level.chunks(2) {
+                    match pair {
+                        [left, right] => {
+                            let mut combined = [0u8; 65];
+                            combined[0] = 0x01;
+                            combined[1..33].copy_from_slice(left);
+                            combined[33..].copy_from_slice(right);
+                            next.push(hash_strategy.hash(&combined));
+                        }
+                        [odd] => next.push(*odd),
+                        _ => unreachable!(),
+                    }
+                }
+                level = next;
+            }
+            level[0]
+        };
+        let mut committed = [0u8; 41];
+        committed[0] = 0x02;
+        committed[1..9].copy_from_slice(&(leaves.len() as u64).to_le_bytes());
+        committed[9..].copy_from_slice(&tree_root);
+        hash_strategy.hash(&committed)
+    }
+
+    #[test]
+    fn streaming_accumulator_matches_the_level_by_level_tree() {
+        let leaf = |i: u64| HashStrategy::Sha256.hash(&i.to_le_bytes());
+        let sizes = (0..=300u64).chain([511, 512, 513, 1000, 1023, 1024, 1025, 4097]);
+        for n in sizes {
+            let leaves: Vec<[u8; 32]> = (0..n).map(leaf).collect();
+            for strategy in [HashStrategy::Keccak256, HashStrategy::Sha256] {
+                let mut tree = MerkleAccumulator::new(strategy);
+                for leaf in &leaves {
+                    tree.push(*leaf);
+                    // One pending subtree per set bit of the leaf count.
+                    assert_eq!(tree.subtrees.len() as u32, tree.leaves.count_ones());
+                }
+                assert_eq!(
+                    tree.root(),
+                    reference_merkle_root(&leaves, strategy),
+                    "n={n} {strategy:?}"
+                );
+            }
+        }
+    }
+
+    fn write_blocks_file(path: &Path, rows: &[(u64, u64, &str, &str)]) {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let kvs = vec![
+            KeyValue::new("firehose-parquet.block_type".to_string(), "evm".to_string()),
+            KeyValue::new(
+                "firehose-parquet.chain_name".to_string(),
+                "mainnet".to_string(),
+            ),
+        ];
+        let props = WriterProperties::builder()
+            .set_key_value_metadata(Some(kvs))
+            .build();
+        let u64s = |f: fn(&(u64, u64, &str, &str)) -> u64| {
+            Arc::new(UInt64Array::from(rows.iter().map(f).collect::<Vec<_>>())) as ArrayRef
+        };
+        let strs = |f: fn(&(u64, u64, &str, &str)) -> String| {
+            Arc::new(StringArray::from(rows.iter().map(f).collect::<Vec<_>>())) as ArrayRef
+        };
+        let batch = RecordBatch::try_from_iter(vec![
+            ("block_num", u64s(|r| r.0)),
+            ("block_id", strs(|r| r.2.to_string())),
+            ("parent_id", strs(|r| r.3.to_string())),
+            ("number", u64s(|r| r.1)),
+            ("hash", strs(|r| r.2.to_string())),
+            ("parent_hash", strs(|r| r.3.to_string())),
+            ("gas_used", u64s(|r| r.0 * 7)),
+        ])
+        .unwrap();
+        let mut writer = ArrowWriter::try_new(
+            std::fs::File::create(path).unwrap(),
+            batch.schema(),
+            Some(props),
+        )
+        .unwrap();
+        writer.write(&batch).unwrap();
+        writer.close().unwrap();
+    }
+
+    #[test]
+    fn protocol_only_runs_skip_hashing_and_match_full_runs() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = dir.path();
+        // blocks: block 3 has number=4 (a failure); transactions: block 5 fails.
+        write_blocks_file(
+            &root.join("mainnet/blocks/date=2024-01-01/part-0.parquet"),
+            &[(1, 1, "a", "z"), (2, 2, "b", "a")],
+        );
+        write_blocks_file(
+            &root.join("mainnet/blocks/date=2024-01-02/part-0.parquet"),
+            &[(3, 4, "c", "b")],
+        );
+        write_tx_file(
+            &root.join("mainnet/transactions/date=2024-01-01/part-0.parquet"),
+            &[(1, 1), (5, 6)],
+        );
+
+        for table in ["blocks", "transactions"] {
+            let data = root.join("mainnet").join(table);
+            let mut full = base_opts();
+            full.chain = None;
+            full.no_fail_fast = true;
+            full.checks = vec![VerifyCheck::Roots, VerifyCheck::Protocol];
+            full.registry_path = Some(
+                root.join(format!("{table}-registry.parquet"))
+                    .display()
+                    .to_string(),
+            );
+            let mut protocol_only = full.clone();
+            protocol_only.checks = vec![VerifyCheck::Protocol];
+
+            let full = verify_dir(&data, &full).unwrap();
+            let protocol_only = verify_dir(&data, &protocol_only).unwrap();
+            assert!(protocol_only.summary.protocol_failed > 0, "{table}");
+            assert_eq!(
+                serde_json::to_value(&protocol_only.protocol_findings).unwrap(),
+                serde_json::to_value(&full.protocol_findings).unwrap(),
+                "{table}"
+            );
+            assert_eq!(
+                protocol_only.summary.partitions_scanned,
+                full.summary.partitions_scanned
+            );
+            assert!(protocol_only.findings.is_empty());
+            assert!(!protocol_only.summary.wrote_registry);
+        }
+    }
+
+    #[test]
+    fn prefetcher_delivers_objects_in_order_within_its_budget() {
+        use object_store::ObjectStore as _;
+        let store = Arc::new(object_store::memory::InMemory::new());
+        let mut objects = Vec::new();
+        for i in 0..12u8 {
+            let location = object_store::path::Path::from(format!("t/part-{i:02}.parquet"));
+            let data = vec![i; (usize::from(i) + 1) * 1000];
+            super::block_on_async(store.put(&location, data.into())).unwrap();
+            objects.push(super::block_on_async(store.head(&location)).unwrap());
+        }
+
+        // A 4 KiB budget: the larger objects each take the whole budget in turn.
+        let mut prefetcher = Prefetcher::spawn(store.clone(), objects.clone(), 3, 4096);
+        for i in 0..12u8 {
+            let object = prefetcher.next_object().unwrap().unwrap();
+            assert_eq!(object.data.len(), (usize::from(i) + 1) * 1000);
+            assert!(object.data.iter().all(|b| *b == i));
+        }
+        assert!(prefetcher.next_object().is_none());
+
+        // Stopping early (fail-fast) while holding an object does not hang.
+        let mut early = Prefetcher::spawn(store, objects, 3, 4096);
+        let _held = early.next_object().unwrap().unwrap();
+        drop(early);
+    }
+
+    #[test]
+    fn protocol_only_runs_never_encode_rows() {
+        // A column without a merkle_v2 encoding fails hashing, so a protocol-only
+        // run succeeds only if it neither reads nor hashes that column.
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir
+            .path()
+            .join("mainnet/transactions/date=2024-01-01/part-0.parquet");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let kvs = vec![KeyValue::new(
+            "firehose-parquet.block_type".to_string(),
+            "evm".to_string(),
+        )];
+        let props = WriterProperties::builder()
+            .set_key_value_metadata(Some(kvs))
+            .build();
+        let decimals = arrow::array::Decimal128Array::from(vec![7i128])
+            .with_precision_and_scale(10, 2)
+            .unwrap();
+        let batch = RecordBatch::try_from_iter(vec![
+            (
+                "block_num",
+                Arc::new(UInt64Array::from(vec![1u64])) as ArrayRef,
+            ),
+            (
+                "block_number",
+                Arc::new(UInt64Array::from(vec![1u64])) as ArrayRef,
+            ),
+            ("fee", Arc::new(decimals) as ArrayRef),
+        ])
+        .unwrap();
+        let mut writer = ArrowWriter::try_new(
+            std::fs::File::create(&path).unwrap(),
+            batch.schema(),
+            Some(props),
+        )
+        .unwrap();
+        writer.write(&batch).unwrap();
+        writer.close().unwrap();
+        let data = dir.path().join("mainnet/transactions");
+
+        let mut opts = base_opts();
+        opts.chain = None;
+        opts.checks = vec![VerifyCheck::Protocol];
+        let report = verify_dir(&data, &opts).unwrap();
+        assert_eq!(report.summary.protocol_passed, 1);
+
+        opts.checks = vec![VerifyCheck::Roots];
+        let err = format!("{:#}", verify_dir(&data, &opts).unwrap_err());
+        assert!(err.contains("has no merkle_v2 encoding"), "{err}");
     }
 }
