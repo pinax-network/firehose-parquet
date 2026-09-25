@@ -42,7 +42,7 @@ Two artifact families serve different purposes and should be operated separately
 Path:
 
 - `<chain_root>/merkle_roots.parquet`, one registry per network, shared by that network's tables (for example `output/mainnet/merkle_roots.parquet`).
-- `--registry-path` overrides it. Use one registry per network: rows are keyed by `chain`, `table` and `partition`, and `chain` is the family (`evm`), which is the same for every EVM network.
+- `--registry-path` overrides it. A custom registry can be shared by several networks: rows are keyed by `network`, `chain`, `table` and `partition`, so networks of the same chain family (every EVM network is `chain = evm`) never collide.
 
 Purpose:
 
@@ -55,10 +55,11 @@ Operational properties:
 - Updated only by explicit verify runs.
 - Should be retained longer than per-run reports.
 
-Schema (one row per `chain`/`table`/`partition`, all columns non-null `Utf8`):
+Schema (one row per `network`/`chain`/`table`/`partition`, all columns non-null `Utf8`):
 
 | Column | Meaning |
 |--------|---------|
+| `network` | Registry key: the report's `network` (`firehose-parquet.chain_name`, else the chain root directory name); empty when unknown |
 | `chain` | Registry key: chain family (`firehose-parquet.block_type`, or `--chain`) |
 | `table` | Registry key: table directory name (or `--table`) |
 | `partition` | Registry key: Hive partition path such as `year=2024/month=01/day=01`, or `unpartitioned` |
@@ -68,6 +69,10 @@ Schema (one row per `chain`/`table`/`partition`, all columns non-null `Utf8`):
 | `updated_at` | RFC 3339 timestamp of the last write of this row |
 
 Registries written before `merkle_version` existed lack that column. `verify` reads them as `merkle_v1` and adds the column on the next registry write.
+
+Registries written before the `network` column existed are read with an empty `network`. A row with an empty `network` applies to whichever network looks it up, so older registries keep matching. When `verify` replaces such a row (`--update-registry`), the new row carries the network, and the old row is removed.
+
+Each write also leaves a `merkle_roots.parquet.lock` file next to a local registry (see [Concurrency and Atomic Writes](#concurrency-and-atomic-writes)). It is not table data, and no command scans it.
 
 ### 2. Per-Run Reports
 
@@ -108,11 +113,44 @@ For S3-backed operations:
 
 ## Root Registry Update Semantics
 
-`merkle_roots.parquet` should follow these semantics:
+A failing run never changes the registry. `verify` writes `merkle_roots.parquet` only when all of these hold:
 
-- **Missing root**: safe to append/create as part of a verify run.
-- **Mismatched root**: only overwrite when the operator explicitly intends to advance the canonical registry.
-- **Algorithm or Merkle version change**: treat as a deliberate migration event, not a silent rewrite. Rows whose `algorithm` or `merkle_version` differs from the runtime are reported as mismatches and are only replaced with `--update-registry`.
+- no protocol check failed, and the scan was not cut short by fail-fast;
+- no partition root differs from the registry, or `--update-registry` was given;
+- there is something to write (a missing root, or a root that `--update-registry` replaces).
+
+When a write is held back, the report's `warnings` say why (`the registry was not updated: ...`).
+
+Per partition:
+
+| Situation | Finding `status` | Registry | Run result |
+|-----------|------------------|----------|------------|
+| Root equals the registry | `match` | unchanged | pass |
+| No registry row | `missing_expected` | row added, when the run writes | pass |
+| Root differs (including an `algorithm` or `merkle_version` change) | `mismatch` | unchanged | **fail** (exit 1) |
+| Root differs, with `--update-registry`, and the write succeeds | `updated`: `expected_root` holds the replaced root, `error` the reason for an algorithm or version change | row replaced | pass |
+| Partition may still receive rows from `build` (see [Open Partitions](#open-partitions)) | `open` | never written | pass (not verified) |
+| Partition only partly read when fail-fast stopped at a protocol failure | none (named in `warnings`) | never written | fail (protocol) |
+
+`--update-registry` is the explicit decision to accept the current data as canonical. The run exits 0 once the registry is written, and the report's `updated` findings are the record of what changed. A rebuild no longer needs `--no-fail-fast`: with `--update-registry`, a differing root does not stop the run. `--no-fail-fast` still controls whether a protocol failure stops the scan.
+
+### Open Partitions
+
+`fireparq build` may still be writing, or may resume into, the newest partition of a table. Recording its root would make the next verify fail as soon as more rows land. `verify` reads `<chain_root>/cursor.parquet`. If the cursor's stream has not reached its stop block (a live build, or a bounded build that stopped early), these partitions are `open`:
+
+- the newest partition, meaning the one with the highest `block_num`;
+- every partition holding rows beyond the cursor block (written after the last cursor save).
+
+Open partitions are neither compared nor recorded, and `warnings` lists them. When the cursor reached its stop block (`last_block_num + 1 >= stop_block`), nothing is open. The same applies when there is no `cursor.parquet` in the chain root, so a cursor kept elsewhere with `build --cursor` is not detected. An unpartitioned table is a single partition that keeps growing, so it is `open` for as long as a live cursor exists.
+
+### Concurrency and Atomic Writes
+
+Registry writes cannot lose another run's update:
+
+- **Local.** `verify` takes an exclusive lock on `merkle_roots.parquet.lock`, re-reads the registry, applies its changes, and replaces the file atomically. It writes a unique temporary file in the same directory, fsyncs it, renames it over the registry, and fsyncs the directory. A crash leaves the old or the new registry, never a partial one.
+- **S3.** `verify` writes with a conditional put: `If-Match` on the ETag it read before comparing, or `If-None-Match: *` when it created the registry. If another run wrote in between, it re-reads the registry, re-applies its changes, and retries (up to 5 retries, with backoff). If the store does not support conditional writes, `verify` writes unconditionally and adds a warning.
+
+A change is re-applied only if the row it was compared against is unchanged, or already holds the same root. If another run changed that row to a different root in the meantime, `verify` fails with `the registry row for ... changed while verify was running ...`. Re-run it to compare against the new registry.
 
 Recommended operator posture:
 
@@ -122,13 +160,13 @@ Recommended operator posture:
 
 ### Migrating a Legacy (`merkle_v1`) Registry
 
-`merkle_v1` roots were computed by fireparq v0.7.1 and earlier. They cannot be compared with `merkle_v2` roots, and `verify` does not recompute `merkle_v1` roots because that construction cannot detect a duplicated trailing row. Against a legacy registry, `verify` exits non-zero and reports scanned partitions as `mismatch` with the error `merkle version mismatch: registry=merkle_v1 runtime=merkle_v2; ...` (only the first one unless `--no-fail-fast` is set).
+`merkle_v1` roots were computed by fireparq v0.7.1 and earlier. They cannot be compared with `merkle_v2` roots, and `verify` does not recompute `merkle_v1` roots because that construction cannot detect a duplicated trailing row. Against a legacy registry, `verify` exits 1 and reports scanned partitions as `mismatch` with the error `merkle version mismatch: registry=merkle_v1 runtime=merkle_v2; ...` (only the first one unless `--no-fail-fast` is set).
 
 To rebuild the registry:
 
 1. Preserve the current registry object (bucket versioning or a copy). It is the only record of the `merkle_v1` baseline.
 2. Confirm the dataset is trusted. The rebuild records the current data as canonical, and nothing compares it with the old baseline.
-3. Run `fireparq verify <data-path> --update-registry --no-fail-fast --publish-report`. Without `--no-fail-fast`, the run stops (and rewrites) at the first mismatched partition. This run still exits non-zero, because it reports every replaced legacy row as a mismatch. Keep its report as the migration record.
+3. Run `fireparq verify <data-path> --update-registry --publish-report`. Every scanned partition is reported as `updated`, with the legacy root in `expected_root`, and the run exits 0 once the registry is written. Keep its report as the migration record.
 4. Run `fireparq verify <data-path>` again. It should report only matches and exit zero.
 
 Rows for partitions outside `<data-path>` keep their `merkle_version = merkle_v1` label until a run that scans those partitions rebuilds them. Deleting the registry and letting the next run recreate it from missing-root fills is an equivalent reset.
@@ -149,7 +187,7 @@ On S3, every network shared one registry object with colliding keys, so each net
 `verify` no longer reads the old location. When a file exists there (and no `--registry-path` is given), every run adds a warning to the terminal summary and to the report's `warnings`, naming both paths. To migrate:
 
 1. Keep a copy of the old registry. On S3 it may hold rows from several networks mixed together, so treat it as a record, not as a baseline.
-2. Run `fireparq verify <chain_root>/<table> --update-registry --no-fail-fast` for each table of each network, against trusted data. This creates `<chain_root>/merkle_roots.parquet`. Old registries from v0.7.1 and earlier hold `merkle_v1` roots, which have to be rebuilt anyway (see above).
+2. Run `fireparq verify <chain_root>/<table> --update-registry` for each table of each network, against trusted data. This creates `<chain_root>/merkle_roots.parquet`. Old registries from v0.7.1 and earlier hold `merkle_v1` roots, which have to be rebuilt anyway (see above).
 3. Delete the old file. Locally, remove the whole `<chain_root>/evm/` directory. Other commands such as `rollup` would otherwise see `evm/` as a table directory.
 4. Run `verify` again. It should report only matches and no warnings.
 

@@ -1,5 +1,6 @@
 use crate::artifacts::{is_reserved_artifact_path, MERKLE_ROOTS_FILENAME, VERIFY_RUNS_DIR};
 use crate::cli::{block_on_async, resolve_parquet_input_path_string, AwsConfig};
+use crate::cursor::{parse_cursor, CURSOR_PARQUET_FILENAME};
 use crate::writer::parse_s3_url;
 use anyhow::{anyhow, Context, Result};
 use arrow::array::{Array, AsArray, Int64Array, LargeStringArray, StringArray, UInt64Array};
@@ -212,6 +213,10 @@ pub enum FindingStatus {
     Match,
     MissingExpected,
     Mismatch,
+    /// The registry root differed and `--update-registry` replaced it.
+    Updated,
+    /// The partition may still receive rows from `build`; not compared or recorded.
+    Open,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -231,6 +236,8 @@ pub struct VerifySummary {
     pub matches: usize,
     pub missing_expected: usize,
     pub mismatches: usize,
+    pub updated: usize,
+    pub open_partitions: usize,
     pub protocol_passed: usize,
     pub protocol_failed: usize,
     pub protocol_not_verifiable: usize,
@@ -342,6 +349,8 @@ impl VerifyReport {
         println!("  matches:       {}", self.summary.matches);
         println!("  missing roots: {}", self.summary.missing_expected);
         println!("  mismatches:    {}", self.summary.mismatches);
+        println!("  updated:       {}", self.summary.updated);
+        println!("  open parts:    {}", self.summary.open_partitions);
         println!("  protocol pass: {}", self.summary.protocol_passed);
         println!("  protocol fail: {}", self.summary.protocol_failed);
         println!("  protocol n/v:  {}", self.summary.protocol_not_verifiable);
@@ -375,6 +384,8 @@ impl VerifyReport {
                 FindingStatus::Match => "match",
                 FindingStatus::MissingExpected => "missing_expected",
                 FindingStatus::Mismatch => "mismatch",
+                FindingStatus::Updated => "updated",
+                FindingStatus::Open => "open",
             };
             println!("  - partition={} status={}", f.partition, status);
             if let Some(ref expected) = f.expected_root {
@@ -423,6 +434,22 @@ struct ScanOutput {
     target: Target,
     partition_roots: BTreeMap<String, String>,
     protocol_findings: Vec<ProtocolCheckFinding>,
+    /// Highest `block_num` per partition, to find partitions still being written.
+    partition_max_block: HashMap<String, u64>,
+    /// Partition whose files were only partly read when fail-fast stopped the scan.
+    truncated_partition: Option<String>,
+}
+
+/// How a scanned partition's root relates to the registry.
+enum RootOutcome {
+    Open(String),
+    Missing,
+    Match(String),
+    Differs {
+        reason: Option<String>,
+        key: String,
+        row: Box<RegistryRow>,
+    },
 }
 
 #[derive(Debug, Clone, Default)]
@@ -459,6 +486,7 @@ impl CheckAccumulator {
 
 #[derive(Debug, Clone)]
 struct RegistryRow {
+    network: String,
     chain: String,
     table: String,
     partition: String,
@@ -520,130 +548,6 @@ pub fn verify_parquet(
         }
     }
 
-    let mut findings = Vec::new();
-    let mut matches = 0usize;
-    let mut missing_expected = 0usize;
-    let mut mismatches = 0usize;
-    let wrote_registry = if runs_roots {
-        let (registry_exists, mut registry) = load_registry(&registry_path, aws)?;
-        let mut needs_registry_write = !registry_exists;
-
-        for (partition, computed_root) in &partition_roots {
-            let key = registry_key(&target.chain, &target.table, partition);
-            match registry.get(&key) {
-                Some(row)
-                    if row.algorithm.as_str() != algorithm.as_str()
-                        || row.merkle_version != MERKLE_VERSION =>
-                {
-                    mismatches += 1;
-                    findings.push(VerifyFinding {
-                        chain: target.chain.clone(),
-                        table: target.table.clone(),
-                        partition: partition.clone(),
-                        status: FindingStatus::Mismatch,
-                        expected_root: Some(row.merkle_root.clone()),
-                        computed_root: computed_root.clone(),
-                        error: Some(incomparable_root_error(row, &algorithm)),
-                    });
-                    if opts.update_registry {
-                        needs_registry_write = true;
-                        registry.insert(
-                            key,
-                            RegistryRow {
-                                chain: target.chain.clone(),
-                                table: target.table.clone(),
-                                partition: partition.clone(),
-                                algorithm: algorithm.clone(),
-                                merkle_version: MERKLE_VERSION.to_string(),
-                                merkle_root: computed_root.clone(),
-                                updated_at: now_rfc3339(),
-                            },
-                        );
-                    }
-                    if !opts.no_fail_fast {
-                        break;
-                    }
-                }
-                Some(row) if row.merkle_root == *computed_root => {
-                    matches += 1;
-                    findings.push(VerifyFinding {
-                        chain: target.chain.clone(),
-                        table: target.table.clone(),
-                        partition: partition.clone(),
-                        status: FindingStatus::Match,
-                        expected_root: Some(row.merkle_root.clone()),
-                        computed_root: computed_root.clone(),
-                        error: None,
-                    });
-                }
-                Some(row) => {
-                    mismatches += 1;
-                    findings.push(VerifyFinding {
-                        chain: target.chain.clone(),
-                        table: target.table.clone(),
-                        partition: partition.clone(),
-                        status: FindingStatus::Mismatch,
-                        expected_root: Some(row.merkle_root.clone()),
-                        computed_root: computed_root.clone(),
-                        error: None,
-                    });
-                    if opts.update_registry {
-                        needs_registry_write = true;
-                        registry.insert(
-                            key,
-                            RegistryRow {
-                                chain: target.chain.clone(),
-                                table: target.table.clone(),
-                                partition: partition.clone(),
-                                algorithm: algorithm.clone(),
-                                merkle_version: MERKLE_VERSION.to_string(),
-                                merkle_root: computed_root.clone(),
-                                updated_at: now_rfc3339(),
-                            },
-                        );
-                    }
-                    if !opts.no_fail_fast {
-                        break;
-                    }
-                }
-                None => {
-                    missing_expected += 1;
-                    findings.push(VerifyFinding {
-                        chain: target.chain.clone(),
-                        table: target.table.clone(),
-                        partition: partition.clone(),
-                        status: FindingStatus::MissingExpected,
-                        expected_root: None,
-                        computed_root: computed_root.clone(),
-                        error: None,
-                    });
-                    needs_registry_write = true;
-                    registry.insert(
-                        key,
-                        RegistryRow {
-                            chain: target.chain.clone(),
-                            table: target.table.clone(),
-                            partition: partition.clone(),
-                            algorithm: algorithm.clone(),
-                            merkle_version: MERKLE_VERSION.to_string(),
-                            merkle_root: computed_root.clone(),
-                            updated_at: now_rfc3339(),
-                        },
-                    );
-                }
-            }
-        }
-
-        if needs_registry_write {
-            write_registry(&registry_path, aws, &registry)?;
-            true
-        } else {
-            false
-        }
-    } else {
-        false
-    };
-
     let mut protocol_passed = 0usize;
     let mut protocol_failed = 0usize;
     let mut protocol_not_verifiable = 0usize;
@@ -660,6 +564,170 @@ pub fn verify_parquet(
             ProtocolCheckStatus::NotVerifiable => protocol_not_verifiable += 1,
         }
     }
+
+    if let Some(partition) = &scan_output.truncated_partition {
+        warnings.push(format!(
+            "the scan stopped at the first protocol failure (fail-fast) inside partition {partition}; its root would be incomplete, so it was not compared. Re-run with --no-fail-fast to scan every file"
+        ));
+    }
+
+    let mut findings = Vec::new();
+    let mut matches = 0usize;
+    let mut missing_expected = 0usize;
+    let mut mismatches = 0usize;
+    let mut updated = 0usize;
+    let mut open_count = 0usize;
+    let wrote_registry = if runs_roots {
+        let open = open_partitions(
+            &target,
+            &scan_output.partition_max_block,
+            aws,
+            &mut warnings,
+        );
+        let snapshot = load_registry(&registry_path, aws)?;
+        let network = target.network.clone().unwrap_or_default();
+
+        let mut outcomes = Vec::new();
+        for (partition, computed_root) in &partition_roots {
+            if let Some(reason) = open.get(partition) {
+                outcomes.push((partition, computed_root, RootOutcome::Open(reason.clone())));
+                continue;
+            }
+            let outcome = match lookup_registry_row(
+                &snapshot.rows,
+                &network,
+                &target.chain,
+                &target.table,
+                partition,
+            ) {
+                None => RootOutcome::Missing,
+                Some((key, row))
+                    if row.algorithm != algorithm || row.merkle_version != MERKLE_VERSION =>
+                {
+                    RootOutcome::Differs {
+                        reason: Some(incomparable_root_error(row, &algorithm)),
+                        key,
+                        row: Box::new(row.clone()),
+                    }
+                }
+                Some((_, row)) if row.merkle_root == *computed_root => {
+                    RootOutcome::Match(row.merkle_root.clone())
+                }
+                Some((key, row)) => RootOutcome::Differs {
+                    reason: None,
+                    key,
+                    row: Box::new(row.clone()),
+                },
+            };
+            // A differing root fails the run unless --update-registry accepts it.
+            let stop = matches!(outcome, RootOutcome::Differs { .. })
+                && !opts.update_registry
+                && !opts.no_fail_fast;
+            outcomes.push((partition, computed_root, outcome));
+            if stop {
+                break;
+            }
+        }
+
+        let differing = outcomes
+            .iter()
+            .filter(|(_, _, outcome)| matches!(outcome, RootOutcome::Differs { .. }))
+            .count();
+        let blocked = if protocol_failed > 0 || scan_output.truncated_partition.is_some() {
+            Some("protocol checks failed".to_string())
+        } else if differing > 0 && !opts.update_registry {
+            Some(format!(
+                "{differing} partition root(s) differ from the registry; re-run with --update-registry to accept the current data"
+            ))
+        } else {
+            None
+        };
+
+        let new_row = |partition: &str, computed_root: &str| RegistryRow {
+            network: network.clone(),
+            chain: target.chain.clone(),
+            table: target.table.clone(),
+            partition: partition.to_string(),
+            algorithm: algorithm.clone(),
+            merkle_version: MERKLE_VERSION.to_string(),
+            merkle_root: computed_root.to_string(),
+            updated_at: now_rfc3339(),
+        };
+        let changes: Vec<RegistryChange> = outcomes
+            .iter()
+            .filter_map(|(partition, computed_root, outcome)| {
+                let key = registry_key(&network, &target.chain, &target.table, partition);
+                match outcome {
+                    RootOutcome::Missing => Some(RegistryChange {
+                        compared_key: key.clone(),
+                        expected: None,
+                        key,
+                        row: new_row(partition, computed_root),
+                    }),
+                    RootOutcome::Differs {
+                        key: compared_key,
+                        row,
+                        ..
+                    } if opts.update_registry => Some(RegistryChange {
+                        compared_key: compared_key.clone(),
+                        expected: Some(row.as_ref().clone()),
+                        key,
+                        row: new_row(partition, computed_root),
+                    }),
+                    _ => None,
+                }
+            })
+            .collect();
+
+        let wrote = match (&blocked, changes.is_empty()) {
+            (_, true) => false,
+            (Some(reason), false) => {
+                warnings.push(format!("the registry was not updated: {reason}"));
+                false
+            }
+            (None, false) => {
+                commit_registry(&registry_path, aws, &snapshot, &changes, &mut warnings)?;
+                true
+            }
+        };
+
+        for (partition, computed_root, outcome) in outcomes {
+            let (status, expected_root, error) = match outcome {
+                RootOutcome::Open(reason) => {
+                    open_count += 1;
+                    (FindingStatus::Open, None, Some(reason))
+                }
+                RootOutcome::Missing => {
+                    missing_expected += 1;
+                    (FindingStatus::MissingExpected, None, None)
+                }
+                RootOutcome::Match(root) => {
+                    matches += 1;
+                    (FindingStatus::Match, Some(root), None)
+                }
+                RootOutcome::Differs { reason, row, .. } if wrote && opts.update_registry => {
+                    updated += 1;
+                    (FindingStatus::Updated, Some(row.merkle_root), reason)
+                }
+                RootOutcome::Differs { reason, row, .. } => {
+                    mismatches += 1;
+                    (FindingStatus::Mismatch, Some(row.merkle_root), reason)
+                }
+            };
+            findings.push(VerifyFinding {
+                chain: target.chain.clone(),
+                table: target.table.clone(),
+                partition: partition.clone(),
+                status,
+                expected_root,
+                computed_root: computed_root.clone(),
+                error,
+            });
+        }
+        wrote
+    } else {
+        false
+    };
 
     let mut capability_findings = Vec::new();
     if effective_checks.contains(&VerifyCheck::Continuity) {
@@ -724,6 +792,8 @@ pub fn verify_parquet(
             matches,
             missing_expected,
             mismatches,
+            updated,
+            open_partitions: open_count,
             protocol_passed,
             protocol_failed,
             protocol_not_verifiable,
@@ -1043,27 +1113,20 @@ fn collect_partition_roots_local(path: &str, opts: &VerifyOptions) -> Result<Sca
         return Err(anyhow!("no parquet files found in {}", path));
     }
 
-    let mut resolver = TargetResolver::new(opts);
-    let mut partition_leaves: HashMap<String, Vec<[u8; 32]>> = HashMap::new();
-    let mut protocol_state: HashMap<String, ProtocolPartitionState> = HashMap::new();
-
-    for file_path in files {
-        let file = File::open(&file_path).with_context(|| format!("opening {file_path}"))?;
+    let partitions: Vec<String> = files
+        .iter()
+        .map(|file| detect_partition(file, &base))
+        .collect();
+    let mut scan = ScanAccumulator::new(opts);
+    for (index, file_path) in files.iter().enumerate() {
+        let file = File::open(file_path).with_context(|| format!("opening {file_path}"))?;
         let builder = ParquetRecordBatchReaderBuilder::try_new(file)?;
-        let partition = detect_partition(&file_path, &base);
-        let partition_state = protocol_state.entry(partition.clone()).or_default();
-        let leaves = scan_parquet_file(builder, &file_path, opts, &mut resolver, partition_state)?;
-        partition_leaves
-            .entry(partition)
-            .or_default()
-            .extend(leaves);
-
-        if opts.runs_protocol() && !opts.no_fail_fast && has_protocol_failure(partition_state) {
+        let next_partition = partitions.get(index + 1).map(String::as_str);
+        if !scan.add_file(builder, file_path, &partitions[index], next_partition)? {
             break;
         }
     }
-
-    finish_scan(opts, resolver, partition_leaves, &protocol_state)
+    scan.finish()
 }
 
 fn collect_partition_roots_s3(
@@ -1095,84 +1158,147 @@ fn collect_partition_roots_s3(
         return Err(anyhow!("no parquet files found in {}", path));
     }
 
-    let mut resolver = TargetResolver::new(opts);
-    let mut partition_leaves: HashMap<String, Vec<[u8; 32]>> = HashMap::new();
-    let mut protocol_state: HashMap<String, ProtocolPartitionState> = HashMap::new();
-
-    for obj in objects {
+    let partitions: Vec<String> = objects
+        .iter()
+        .map(|obj| detect_partition(obj.location.as_ref(), &prefix))
+        .collect();
+    let mut scan = ScanAccumulator::new(opts);
+    for (index, obj) in objects.iter().enumerate() {
         let location = &obj.location;
         let data = block_on_async(async { client.get(location).await?.bytes().await })
             .map_err(|e| anyhow!("reading s3://{bucket}/{}: {e}", location))?;
         let builder = ParquetRecordBatchReaderBuilder::try_new(data)?;
         let file_path = format!("s3://{bucket}/{location}");
-        let partition = detect_partition(location.as_ref(), &prefix);
-        let partition_state = protocol_state.entry(partition.clone()).or_default();
-        let leaves = scan_parquet_file(builder, &file_path, opts, &mut resolver, partition_state)?;
-        partition_leaves
-            .entry(partition)
-            .or_default()
-            .extend(leaves);
-
-        if opts.runs_protocol() && !opts.no_fail_fast && has_protocol_failure(partition_state) {
+        let next_partition = partitions.get(index + 1).map(String::as_str);
+        if !scan.add_file(builder, &file_path, &partitions[index], next_partition)? {
             break;
         }
     }
+    scan.finish()
+}
 
-    finish_scan(opts, resolver, partition_leaves, &protocol_state)
+/// Per-partition leaves, protocol state and block ranges across the files of
+/// one scan, in file order.
+struct ScanAccumulator<'a> {
+    opts: &'a VerifyOptions,
+    resolver: TargetResolver<'a>,
+    partition_leaves: HashMap<String, Vec<[u8; 32]>>,
+    protocol_state: HashMap<String, ProtocolPartitionState>,
+    partition_max_block: HashMap<String, u64>,
+    truncated_partition: Option<String>,
+}
+
+impl<'a> ScanAccumulator<'a> {
+    fn new(opts: &'a VerifyOptions) -> Self {
+        Self {
+            opts,
+            resolver: TargetResolver::new(opts),
+            partition_leaves: HashMap::new(),
+            protocol_state: HashMap::new(),
+            partition_max_block: HashMap::new(),
+            truncated_partition: None,
+        }
+    }
+
+    /// Scans one file. Returns `false` when fail-fast stops the scan at a
+    /// protocol failure; the partition is then marked truncated if more of its
+    /// files (`next_partition`) were left unread.
+    fn add_file<R: parquet::file::reader::ChunkReader + 'static>(
+        &mut self,
+        builder: ParquetRecordBatchReaderBuilder<R>,
+        file_path: &str,
+        partition: &str,
+        next_partition: Option<&str>,
+    ) -> Result<bool> {
+        let state = self
+            .protocol_state
+            .entry(partition.to_string())
+            .or_default();
+        let (leaves, max_block) =
+            scan_parquet_file(builder, file_path, self.opts, &mut self.resolver, state)?;
+        self.partition_leaves
+            .entry(partition.to_string())
+            .or_default()
+            .extend(leaves);
+        if let Some(max_block) = max_block {
+            let max = self
+                .partition_max_block
+                .entry(partition.to_string())
+                .or_insert(max_block);
+            *max = (*max).max(max_block);
+        }
+
+        if self.opts.runs_protocol() && !self.opts.no_fail_fast && has_protocol_failure(state) {
+            if next_partition == Some(partition) {
+                self.truncated_partition = Some(partition.to_string());
+            }
+            return Ok(false);
+        }
+        Ok(true)
+    }
+
+    fn finish(self) -> Result<ScanOutput> {
+        let target = self
+            .resolver
+            .finish()
+            .ok_or_else(|| anyhow!("no parquet files were scanned"))?;
+        let mut roots = BTreeMap::new();
+        for (partition, leaves) in self.partition_leaves {
+            // A partial partition's root is meaningless; never compare or record it.
+            if self.truncated_partition.as_ref() == Some(&partition) {
+                continue;
+            }
+            roots.insert(
+                partition,
+                hex::encode(merkle_root(&leaves, target.hash_strategy)),
+            );
+        }
+        let protocol_findings = if self.opts.runs_protocol() {
+            finalize_protocol_findings(&target, &self.protocol_state)
+        } else {
+            Vec::new()
+        };
+        Ok(ScanOutput {
+            target,
+            partition_roots: roots,
+            protocol_findings,
+            partition_max_block: self.partition_max_block,
+            truncated_partition: self.truncated_partition,
+        })
+    }
 }
 
 /// Resolves or checks the target against one file, then runs protocol checks
-/// and hashes its rows into leaves.
+/// and hashes its rows into leaves. Also returns the file's highest
+/// `block_num`, when the column exists.
 fn scan_parquet_file<R: parquet::file::reader::ChunkReader + 'static>(
     builder: ParquetRecordBatchReaderBuilder<R>,
     file_path: &str,
     opts: &VerifyOptions,
     resolver: &mut TargetResolver,
     protocol_state: &mut ProtocolPartitionState,
-) -> Result<Vec<[u8; 32]>> {
+) -> Result<(Vec<[u8; 32]>, Option<u64>)> {
     let footer = FooterIdentity::from_metadata(builder.metadata());
     let target = resolver.observe(file_path, &footer)?;
     let reader = builder.build()?;
 
     let mut leaves = Vec::new();
+    let mut max_block: Option<u64> = None;
     for maybe_batch in reader {
         let batch = maybe_batch?;
         if opts.runs_protocol() {
             run_protocol_checks_for_batch(target, &batch, protocol_state);
         }
+        let batch_max = batch
+            .column_by_name("block_num")
+            .and_then(|column| column.as_any().downcast_ref::<UInt64Array>())
+            .and_then(arrow::compute::max);
+        max_block = max_block.max(batch_max);
         append_batch_leaves(&batch, target.hash_strategy, &mut leaves)
             .with_context(|| format!("hashing rows of {file_path}"))?;
     }
 
-    Ok(leaves)
-}
-
-fn finish_scan(
-    opts: &VerifyOptions,
-    resolver: TargetResolver,
-    partition_leaves: HashMap<String, Vec<[u8; 32]>>,
-    protocol_state: &HashMap<String, ProtocolPartitionState>,
-) -> Result<ScanOutput> {
-    let target = resolver
-        .finish()
-        .ok_or_else(|| anyhow!("no parquet files were scanned"))?;
-    let mut roots = BTreeMap::new();
-    for (partition, leaves) in partition_leaves {
-        roots.insert(
-            partition,
-            hex::encode(merkle_root(&leaves, target.hash_strategy)),
-        );
-    }
-    let protocol_findings = if opts.runs_protocol() {
-        finalize_protocol_findings(&target, protocol_state)
-    } else {
-        Vec::new()
-    };
-    Ok(ScanOutput {
-        target,
-        partition_roots: roots,
-        protocol_findings,
-    })
+    Ok((leaves, max_block))
 }
 
 /// Appends one `merkle_v2` leaf per row: `H(0x00 || encoded_row)`, with the
@@ -1699,8 +1825,31 @@ fn format_rfc3339(timestamp: OffsetDateTime) -> String {
         .unwrap_or_else(|_| "".to_string())
 }
 
-fn registry_key(chain: &str, table: &str, partition: &str) -> String {
-    format!("{chain}|{table}|{partition}")
+/// Registry row key. `network` is empty for rows written before the registry
+/// had a `network` column; such rows apply to any network.
+fn registry_key(network: &str, chain: &str, table: &str, partition: &str) -> String {
+    format!("{network}|{chain}|{table}|{partition}")
+}
+
+/// Finds the registry row for a partition: the row for this network, else a
+/// row without a network (written before the `network` column existed).
+/// Returns the row's key with it.
+fn lookup_registry_row<'a>(
+    rows: &'a HashMap<String, RegistryRow>,
+    network: &str,
+    chain: &str,
+    table: &str,
+    partition: &str,
+) -> Option<(String, &'a RegistryRow)> {
+    let key = registry_key(network, chain, table, partition);
+    if let Some(row) = rows.get(&key) {
+        return Some((key, row));
+    }
+    if network.is_empty() {
+        return None;
+    }
+    let key = registry_key("", chain, table, partition);
+    rows.get(&key).map(|row| (key, row))
 }
 
 /// Explains why a registry root cannot be compared with the computed root
@@ -1715,23 +1864,119 @@ fn incomparable_root_error(row: &RegistryRow, algorithm: &str) -> String {
     }
     if row.merkle_version != MERKLE_VERSION {
         reasons.push(format!(
-            "merkle version mismatch: registry={} runtime={}; roots from different Merkle versions are not comparable, rebuild the registry from trusted data with --update-registry --no-fail-fast",
+            "merkle version mismatch: registry={} runtime={}; roots from different Merkle versions are not comparable, rebuild the registry from trusted data with --update-registry",
             row.merkle_version, MERKLE_VERSION
         ));
     }
     reasons.join("; ")
 }
 
-fn load_registry(
-    path: &str,
-    aws: Option<&AwsConfig>,
-) -> Result<(bool, HashMap<String, RegistryRow>)> {
-    let data = read_registry_bytes(path, aws)?;
-    let Some(data) = data else {
-        return Ok((false, HashMap::new()));
-    };
+/// Registry contents as read before comparing, with the object version used
+/// for a conditional S3 write.
+#[derive(Debug, Clone, Default)]
+struct RegistrySnapshot {
+    exists: bool,
+    rows: HashMap<String, RegistryRow>,
+    e_tag: Option<String>,
+    version: Option<String>,
+}
 
-    let builder = ParquetRecordBatchReaderBuilder::try_new(bytes::Bytes::from(data))?;
+/// One registry row this run writes. It is applied only if the row it was
+/// compared against (`expected` at `compared_key`) is still there, so a
+/// concurrent run's update is never silently overwritten.
+#[derive(Debug, Clone)]
+struct RegistryChange {
+    compared_key: String,
+    expected: Option<RegistryRow>,
+    key: String,
+    row: RegistryRow,
+}
+
+fn same_registry_root(a: &RegistryRow, b: &RegistryRow) -> bool {
+    a.network == b.network
+        && a.algorithm == b.algorithm
+        && a.merkle_version == b.merkle_version
+        && a.merkle_root == b.merkle_root
+}
+
+/// Applies this run's changes to freshly read registry rows. A change whose
+/// compared row changed in the meantime is skipped when the registry already
+/// holds the same root, and is a conflict otherwise.
+fn apply_registry_changes(
+    rows: &mut HashMap<String, RegistryRow>,
+    changes: &[RegistryChange],
+) -> Result<()> {
+    for change in changes {
+        let unchanged = match (rows.get(&change.compared_key), &change.expected) {
+            (None, None) => true,
+            (Some(current), Some(expected)) => same_registry_root(current, expected),
+            _ => false,
+        };
+        if unchanged {
+            if change.compared_key != change.key {
+                rows.remove(&change.compared_key);
+            }
+            rows.insert(change.key.clone(), change.row.clone());
+        } else if rows
+            .get(&change.key)
+            .is_some_and(|current| same_registry_root(current, &change.row))
+        {
+            continue;
+        } else {
+            return Err(anyhow!(
+                "the registry row for {}:{} partition {} changed while verify was running (another verify run updated it); re-run verify",
+                change.row.chain,
+                change.row.table,
+                change.row.partition
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn load_registry(path: &str, aws: Option<&AwsConfig>) -> Result<RegistrySnapshot> {
+    if path.starts_with("s3://") {
+        let aws = aws.ok_or_else(|| anyhow!("AWS config required for S3 registry path"))?;
+        let (bucket, key) = parse_s3_url(path)?;
+        let client = aws.build_s3_client(&bucket)?;
+        let location = object_store::path::Path::from(key.as_str());
+        return load_registry_from_store(&client, &location)
+            .with_context(|| format!("reading registry {path}"));
+    }
+    match std::fs::read(path) {
+        Ok(data) => Ok(RegistrySnapshot {
+            exists: true,
+            rows: parse_registry(bytes::Bytes::from(data))
+                .with_context(|| format!("reading registry {path}"))?,
+            ..Default::default()
+        }),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(RegistrySnapshot::default()),
+        Err(err) => Err(anyhow::Error::new(err).context(format!("reading registry {path}"))),
+    }
+}
+
+fn load_registry_from_store(
+    store: &dyn ObjectStore,
+    location: &object_store::path::Path,
+) -> Result<RegistrySnapshot> {
+    let result = match block_on_async(store.get(location)) {
+        Ok(result) => result,
+        Err(object_store::Error::NotFound { .. }) => return Ok(RegistrySnapshot::default()),
+        Err(err) => return Err(err.into()),
+    };
+    let e_tag = result.meta.e_tag.clone();
+    let version = result.meta.version.clone();
+    let data = block_on_async(result.bytes())?;
+    Ok(RegistrySnapshot {
+        exists: true,
+        rows: parse_registry(data)?,
+        e_tag,
+        version,
+    })
+}
+
+fn parse_registry(data: bytes::Bytes) -> Result<HashMap<String, RegistryRow>> {
+    let builder = ParquetRecordBatchReaderBuilder::try_new(data)?;
     let reader = builder.build()?;
 
     let mut rows = HashMap::new();
@@ -1739,6 +1984,8 @@ fn load_registry(
         let batch = maybe_batch?;
         let schema = batch.schema();
 
+        // Registries written before the network key have no `network` column.
+        let idx_network = schema.index_of("network").ok();
         let idx_chain = schema.index_of("chain")?;
         let idx_table = schema.index_of("table")?;
         let idx_partition = schema.index_of("partition")?;
@@ -1749,6 +1996,10 @@ fn load_registry(
         let idx_updated_at = schema.index_of("updated_at")?;
 
         for row in 0..batch.num_rows() {
+            let network = match idx_network {
+                Some(idx) => required_string(batch.column(idx).as_ref(), row, "network")?,
+                None => String::new(),
+            };
             let chain = required_string(batch.column(idx_chain).as_ref(), row, "chain")?;
             let table = required_string(batch.column(idx_table).as_ref(), row, "table")?;
             let partition =
@@ -1765,8 +2016,9 @@ fn load_registry(
                 required_string(batch.column(idx_updated_at).as_ref(), row, "updated_at")?;
 
             rows.insert(
-                registry_key(&chain, &table, &partition),
+                registry_key(&network, &chain, &table, &partition),
                 RegistryRow {
+                    network,
                     chain,
                     table,
                     partition,
@@ -1779,7 +2031,7 @@ fn load_registry(
         }
     }
 
-    Ok((true, rows))
+    Ok(rows)
 }
 
 fn required_string(array: &dyn Array, row: usize, field: &str) -> Result<String> {
@@ -1799,72 +2051,248 @@ fn required_string(array: &dyn Array, row: usize, field: &str) -> Result<String>
     Err(anyhow!("registry field '{}' must be Utf8", field))
 }
 
-fn write_registry(
-    path: &str,
-    aws: Option<&AwsConfig>,
-    rows: &HashMap<String, RegistryRow>,
-) -> Result<()> {
+fn encode_registry(rows: &HashMap<String, RegistryRow>) -> Result<Vec<u8>> {
     let mut ordered: Vec<&RegistryRow> = rows.values().collect();
     ordered.sort_by(|a, b| {
-        (&a.chain, &a.table, &a.partition).cmp(&(&b.chain, &b.table, &b.partition))
+        (&a.network, &a.chain, &a.table, &a.partition).cmp(&(
+            &b.network,
+            &b.chain,
+            &b.table,
+            &b.partition,
+        ))
     });
 
-    let chain_values: Vec<&str> = ordered.iter().map(|r| r.chain.as_str()).collect();
-    let table_values: Vec<&str> = ordered.iter().map(|r| r.table.as_str()).collect();
-    let partition_values: Vec<&str> = ordered.iter().map(|r| r.partition.as_str()).collect();
-    let algorithm_values: Vec<&str> = ordered.iter().map(|r| r.algorithm.as_str()).collect();
-    let merkle_version_values: Vec<&str> =
-        ordered.iter().map(|r| r.merkle_version.as_str()).collect();
-    let merkle_values: Vec<&str> = ordered.iter().map(|r| r.merkle_root.as_str()).collect();
-    let updated_values: Vec<&str> = ordered.iter().map(|r| r.updated_at.as_str()).collect();
-
-    let schema = arrow::datatypes::Schema::new(vec![
-        arrow::datatypes::Field::new("chain", arrow::datatypes::DataType::Utf8, false),
-        arrow::datatypes::Field::new("table", arrow::datatypes::DataType::Utf8, false),
-        arrow::datatypes::Field::new("partition", arrow::datatypes::DataType::Utf8, false),
-        arrow::datatypes::Field::new("algorithm", arrow::datatypes::DataType::Utf8, false),
-        arrow::datatypes::Field::new("merkle_version", arrow::datatypes::DataType::Utf8, false),
-        arrow::datatypes::Field::new("merkle_root", arrow::datatypes::DataType::Utf8, false),
-        arrow::datatypes::Field::new("updated_at", arrow::datatypes::DataType::Utf8, false),
-    ]);
-
-    let batch = arrow::record_batch::RecordBatch::try_new(
-        std::sync::Arc::new(schema),
-        vec![
-            std::sync::Arc::new(StringArray::from(chain_values)),
-            std::sync::Arc::new(StringArray::from(table_values)),
-            std::sync::Arc::new(StringArray::from(partition_values)),
-            std::sync::Arc::new(StringArray::from(algorithm_values)),
-            std::sync::Arc::new(StringArray::from(merkle_version_values)),
-            std::sync::Arc::new(StringArray::from(merkle_values)),
-            std::sync::Arc::new(StringArray::from(updated_values)),
-        ],
-    )?;
+    let column = |value: fn(&RegistryRow) -> &str| {
+        std::sync::Arc::new(StringArray::from(
+            ordered.iter().map(|row| value(row)).collect::<Vec<&str>>(),
+        )) as arrow::array::ArrayRef
+    };
+    let batch = RecordBatch::try_from_iter_with_nullable(vec![
+        ("network", column(|r| r.network.as_str()), false),
+        ("chain", column(|r| r.chain.as_str()), false),
+        ("table", column(|r| r.table.as_str()), false),
+        ("partition", column(|r| r.partition.as_str()), false),
+        ("algorithm", column(|r| r.algorithm.as_str()), false),
+        (
+            "merkle_version",
+            column(|r| r.merkle_version.as_str()),
+            false,
+        ),
+        ("merkle_root", column(|r| r.merkle_root.as_str()), false),
+        ("updated_at", column(|r| r.updated_at.as_str()), false),
+    ])?;
 
     let mut data = Vec::new();
     let mut writer = ArrowWriter::try_new(&mut data, batch.schema(), None)?;
     writer.write(&batch)?;
     writer.close()?;
+    Ok(data)
+}
 
+/// Retries of a conditional S3 registry write after a concurrent update.
+const REGISTRY_COMMIT_RETRIES: u32 = 5;
+
+/// Writes this run's changes to the registry without losing concurrent
+/// updates: locally under a lock file with an atomic replace, on S3 with a
+/// conditional put on the ETag read before comparing, retried on conflict.
+fn commit_registry(
+    path: &str,
+    aws: Option<&AwsConfig>,
+    snapshot: &RegistrySnapshot,
+    changes: &[RegistryChange],
+    warnings: &mut Vec<String>,
+) -> Result<()> {
     if path.starts_with("s3://") {
         let aws = aws.ok_or_else(|| anyhow!("AWS config required for S3 registry path"))?;
         let (bucket, key) = parse_s3_url(path)?;
         let client = aws.build_s3_client(&bucket)?;
         let location = object_store::path::Path::from(key.as_str());
-        let payload = object_store::PutPayload::from(bytes::Bytes::from(data));
-        block_on_async(async { client.put(&location, payload).await })
-            .map_err(|e| anyhow!("writing registry to s3://{bucket}/{}: {e}", location))?;
+        commit_registry_to_store(&client, &location, snapshot, changes, warnings)
+            .with_context(|| format!("writing registry {path}"))
     } else {
-        let file_path = PathBuf::from(path);
-        if let Some(parent) = file_path.parent() {
-            std::fs::create_dir_all(parent)
-                .with_context(|| format!("creating registry dir {}", parent.display()))?;
+        commit_registry_local(Path::new(path), changes)
+    }
+}
+
+fn commit_registry_local(path: &Path, changes: &[RegistryChange]) -> Result<()> {
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    std::fs::create_dir_all(parent)
+        .with_context(|| format!("creating registry dir {}", parent.display()))?;
+
+    // Serializes read-modify-write between verify runs; released on drop.
+    let lock_path = sibling_path(path, ".lock");
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(&lock_path)
+        .with_context(|| format!("opening registry lock {}", lock_path.display()))?;
+    lock.lock()
+        .with_context(|| format!("locking registry lock {}", lock_path.display()))?;
+
+    let mut rows = load_registry(&path.to_string_lossy(), None)?.rows;
+    apply_registry_changes(&mut rows, changes)?;
+    write_file_atomic(path, &encode_registry(&rows)?)
+}
+
+fn commit_registry_to_store(
+    store: &dyn ObjectStore,
+    location: &object_store::path::Path,
+    snapshot: &RegistrySnapshot,
+    changes: &[RegistryChange],
+    warnings: &mut Vec<String>,
+) -> Result<()> {
+    let mut current = snapshot.clone();
+    let mut attempt = 0;
+    loop {
+        let mut rows = current.rows.clone();
+        apply_registry_changes(&mut rows, changes)?;
+        let data = bytes::Bytes::from(encode_registry(&rows)?);
+        let mode = if !current.exists {
+            object_store::PutMode::Create
+        } else if current.e_tag.is_some() {
+            object_store::PutMode::Update(object_store::UpdateVersion {
+                e_tag: current.e_tag.clone(),
+                version: current.version.clone(),
+            })
+        } else {
+            warnings.push(format!(
+                "the S3 store returned no ETag for {location}; the registry was written without a precondition, so concurrent verify runs may lose updates"
+            ));
+            object_store::PutMode::Overwrite
+        };
+
+        let payload = object_store::PutPayload::from(data.clone());
+        match block_on_async(store.put_opts(location, payload, mode.into())) {
+            Ok(_) => return Ok(()),
+            Err(
+                err @ (object_store::Error::Precondition { .. }
+                | object_store::Error::AlreadyExists { .. }),
+            ) => {
+                if attempt >= REGISTRY_COMMIT_RETRIES {
+                    return Err(anyhow!(
+                        "the registry kept changing during {} write attempts: {err}",
+                        attempt + 1
+                    ));
+                }
+                attempt += 1;
+                std::thread::sleep(std::time::Duration::from_millis(100 << attempt));
+                current = load_registry_from_store(store, location)?;
+            }
+            Err(object_store::Error::NotImplemented | object_store::Error::NotSupported { .. }) => {
+                warnings.push(format!(
+                    "the S3 store does not support conditional writes; the registry {location} was written without a precondition, so concurrent verify runs may lose updates"
+                ));
+                block_on_async(store.put(location, object_store::PutPayload::from(data)))?;
+                return Ok(());
+            }
+            Err(err) => return Err(err.into()),
         }
-        std::fs::write(&file_path, data)
-            .with_context(|| format!("writing registry {}", file_path.display()))?;
+    }
+}
+
+/// `path` with `suffix` appended to its file name.
+fn sibling_path(path: &Path, suffix: &str) -> PathBuf {
+    let mut name = path.file_name().unwrap_or_default().to_os_string();
+    name.push(suffix);
+    path.with_file_name(name)
+}
+
+/// Replaces `path` atomically: writes a unique temporary sibling, fsyncs it,
+/// renames it over `path`, then fsyncs the directory. A crash leaves either
+/// the old or the new file, never a partial one.
+fn write_file_atomic(path: &Path, data: &[u8]) -> Result<()> {
+    use std::io::Write;
+
+    let tmp_path = sibling_path(path, &format!(".{}.tmp", uuid::Uuid::new_v4()));
+    let write_tmp = || -> Result<()> {
+        let mut file =
+            File::create(&tmp_path).with_context(|| format!("creating {}", tmp_path.display()))?;
+        file.write_all(data)
+            .with_context(|| format!("writing {}", tmp_path.display()))?;
+        file.sync_all()
+            .with_context(|| format!("syncing {}", tmp_path.display()))?;
+        std::fs::rename(&tmp_path, path)
+            .with_context(|| format!("renaming {} to {}", tmp_path.display(), path.display()))
+    };
+    if let Err(err) = write_tmp() {
+        let _ = std::fs::remove_file(&tmp_path);
+        return Err(err);
+    }
+    #[cfg(unix)]
+    if let Some(dir) = path.parent().filter(|dir| !dir.as_os_str().is_empty()) {
+        File::open(dir)
+            .and_then(|dir| dir.sync_all())
+            .with_context(|| format!("syncing directory {}", dir.display()))?;
+    }
+    Ok(())
+}
+
+/// Partitions that `fireparq build` may still be writing, with the reason.
+///
+/// When the chain root has a `cursor.parquet` whose stream has not reached its
+/// stop block (live mode or an interrupted build), the newest partition (the
+/// highest `block_num`) and every partition holding rows beyond the cursor
+/// block can still change, so their roots are provisional.
+fn open_partitions(
+    target: &Target,
+    max_block: &HashMap<String, u64>,
+    aws: Option<&AwsConfig>,
+    warnings: &mut Vec<String>,
+) -> HashMap<String, String> {
+    let cursor_path = join_artifact_path(&target.chain_root, CURSOR_PARQUET_FILENAME);
+    let state = match read_optional_bytes(&cursor_path, aws)
+        .and_then(|data| data.map(|data| parse_cursor(data.into())).transpose())
+    {
+        Ok(Some(Some(state))) => state,
+        Ok(_) => return HashMap::new(),
+        Err(err) => {
+            warnings.push(format!(
+                "could not read {cursor_path} ({err:#}); partitions were not checked for ongoing writes"
+            ));
+            return HashMap::new();
+        }
+    };
+    let cursor_block = state.last_block_num;
+    if state
+        .stop_block
+        .is_some_and(|stop| cursor_block.saturating_add(1) >= stop)
+    {
+        return HashMap::new();
+    }
+    if max_block.is_empty() {
+        warnings.push(format!(
+            "{cursor_path} is at block {cursor_block} and its stream is not finished, but the table has no block_num column to tell which partition is still being written"
+        ));
+        return HashMap::new();
     }
 
-    Ok(())
+    let reason = format!(
+        "open: at or after the build cursor (block {cursor_block}) of an unfinished stream; not compared or recorded"
+    );
+    let mut open = HashMap::new();
+    if let Some((newest, _)) = max_block
+        .iter()
+        .max_by(|a, b| a.1.cmp(b.1).then_with(|| a.0.cmp(b.0)))
+    {
+        open.insert(newest.clone(), reason.clone());
+    }
+    for (partition, block) in max_block {
+        if *block > cursor_block {
+            open.insert(partition.clone(), reason.clone());
+        }
+    }
+    let mut names: Vec<&str> = open.keys().map(String::as_str).collect();
+    names.sort_unstable();
+    warnings.push(format!(
+        "{} partition(s) may still receive rows from `fireparq build` ({cursor_path} is at block {cursor_block} and has not reached its stop block): {}; they were not compared or recorded",
+        open.len(),
+        names.join(", ")
+    ));
+    open
 }
 
 fn write_report_bytes(path: &str, aws: Option<&AwsConfig>, data: &[u8]) -> Result<()> {
@@ -1882,8 +2310,7 @@ fn write_report_bytes(path: &str, aws: Option<&AwsConfig>, data: &[u8]) -> Resul
             std::fs::create_dir_all(parent)
                 .with_context(|| format!("creating report dir {}", parent.display()))?;
         }
-        std::fs::write(&file_path, data)
-            .with_context(|| format!("writing report {}", file_path.display()))?;
+        write_file_atomic(&file_path, data)?;
     }
 
     Ok(())
@@ -1904,50 +2331,37 @@ fn artifact_exists(path: &str, aws: Option<&AwsConfig>) -> bool {
     block_on_async(async { client.head(&location).await }).is_ok()
 }
 
-fn read_registry_bytes(path: &str, aws: Option<&AwsConfig>) -> Result<Option<Vec<u8>>> {
+/// Reads a local file or S3 object, or `None` when it does not exist.
+fn read_optional_bytes(path: &str, aws: Option<&AwsConfig>) -> Result<Option<Vec<u8>>> {
     if path.starts_with("s3://") {
-        let aws = aws.ok_or_else(|| anyhow!("AWS config required for S3 registry path"))?;
+        let aws = aws.ok_or_else(|| anyhow!("AWS config required for S3 path {path}"))?;
         let (bucket, key) = parse_s3_url(path)?;
         let client = aws.build_s3_client(&bucket)?;
         let location = object_store::path::Path::from(key.as_str());
-        let result = block_on_async(async { client.get(&location).await });
-        match result {
-            Ok(obj) => {
-                let bytes = block_on_async(async { obj.bytes().await })
-                    .map_err(|e| anyhow!("reading registry s3://{bucket}/{}: {e}", location))?;
-                Ok(Some(bytes.to_vec()))
-            }
-            Err(err) => {
-                let msg = err.to_string().to_lowercase();
-                if msg.contains("not found") {
-                    Ok(None)
-                } else {
-                    Err(anyhow!(
-                        "reading registry s3://{bucket}/{}: {err}",
-                        location
-                    ))
-                }
-            }
+        match block_on_async(async { client.get(&location).await?.bytes().await }) {
+            Ok(data) => Ok(Some(data.to_vec())),
+            Err(object_store::Error::NotFound { .. }) => Ok(None),
+            Err(err) => Err(anyhow!("reading {path}: {err}")),
         }
     } else {
-        let pathbuf = PathBuf::from(path);
-        if !pathbuf.exists() {
-            return Ok(None);
+        match std::fs::read(path) {
+            Ok(data) => Ok(Some(data)),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(err) => Err(anyhow::Error::new(err).context(format!("reading {path}"))),
         }
-        let data = std::fs::read(&pathbuf)
-            .with_context(|| format!("reading registry {}", pathbuf.display()))?;
-        Ok(Some(data))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        append_batch_leaves, file_layout, join_artifact_path, legacy_default_registry_path,
-        load_registry, merkle_root, registry_key, verify_parquet, FileLayout, FindingStatus,
-        HashStrategy, VerifyCheck, VerifyOptions, VerifyProfile, VerifyReport, VerifyScope,
-        MERKLE_ROOTS_FILENAME,
+        append_batch_leaves, commit_registry_local, commit_registry_to_store, file_layout,
+        join_artifact_path, legacy_default_registry_path, load_registry, load_registry_from_store,
+        merkle_root, registry_key, verify_parquet, FileLayout, FindingStatus, HashStrategy,
+        RegistryChange, RegistryRow, VerifyCheck, VerifyOptions, VerifyProfile, VerifyReport,
+        VerifyScope, MERKLE_ROOTS_FILENAME,
     };
+    use crate::cursor::{save_cursor_parquet, CursorState};
     use anyhow::Result;
     use arrow::array::{
         ArrayRef, StringArray, TimestampMillisecondArray, TimestampSecondArray, UInt64Array,
@@ -1957,6 +2371,7 @@ mod tests {
     use parquet::arrow::ArrowWriter;
     use parquet::file::metadata::KeyValue;
     use parquet::file::properties::WriterProperties;
+    use std::collections::HashMap;
     use std::path::Path;
     use std::sync::Arc;
 
@@ -2179,8 +2594,9 @@ mod tests {
         let registry_str = registry.display().to_string();
         let mut opts = roots_opts(&registry);
 
-        let (_, rows) = load_registry(&registry_str, None).unwrap();
+        let rows = load_registry(&registry_str, None).unwrap().rows;
         assert!(rows.values().all(|r| r.merkle_version == "merkle_v1"));
+        assert!(rows.values().all(|r| r.network.is_empty()));
 
         let legacy = verify_parquet(data.to_str().unwrap(), None, &opts).unwrap();
         assert_eq!(legacy.merkle_version, "merkle_v2");
@@ -2194,16 +2610,28 @@ mod tests {
         );
         assert!(error.contains("--update-registry"));
 
+        // The rebuild accepts the current data: the row is `updated` and the run passes.
         opts.update_registry = true;
         let rebuild = verify_parquet(data.to_str().unwrap(), None, &opts).unwrap();
         assert!(rebuild.summary.wrote_registry);
+        assert_eq!(rebuild.summary.updated, 1);
+        assert_eq!(rebuild.summary.mismatches, 0);
+        assert!(matches!(rebuild.findings[0].status, FindingStatus::Updated));
+        assert_eq!(
+            rebuild.findings[0].expected_root.as_deref(),
+            Some(legacy_root.as_str())
+        );
+        assert!(rebuild.is_valid());
 
-        let (_, rows) = load_registry(&registry_str, None).unwrap();
-        let rebuilt = &rows[&registry_key("evm", "blocks", "date=2024-01-01")];
+        let network = rebuild.network.clone().unwrap_or_default();
+        let rows = load_registry(&registry_str, None).unwrap().rows;
+        let rebuilt = &rows[&registry_key(&network, "evm", "blocks", "date=2024-01-01")];
         assert_eq!(rebuilt.merkle_version, "merkle_v2");
         assert_eq!(rebuilt.merkle_root, rebuild.findings[0].computed_root);
+        // The legacy row it replaced is gone.
+        assert!(!rows.contains_key(&registry_key("", "evm", "blocks", "date=2024-01-01")));
         // Rows outside the scanned data keep an explicit legacy label.
-        let untouched = &rows[&registry_key("evm", "blocks", "date=2023-12-31")];
+        let untouched = &rows[&registry_key("", "evm", "blocks", "date=2023-12-31")];
         assert_eq!(untouched.merkle_version, "merkle_v1");
         assert_eq!(untouched.merkle_root, legacy_root);
 
@@ -2534,17 +2962,18 @@ mod tests {
         }
         assert_ne!(roots[0], roots[1]);
 
-        let (_, mainnet) = load_registry(
+        let mainnet = load_registry(
             &root
                 .join("mainnet/merkle_roots.parquet")
                 .display()
                 .to_string(),
             None,
         )
-        .unwrap();
+        .unwrap()
+        .rows;
         assert_eq!(mainnet.len(), 1);
         assert_eq!(
-            mainnet[&registry_key("evm", "blocks", "date=2024-01-01")].merkle_root,
+            mainnet[&registry_key("mainnet", "evm", "blocks", "date=2024-01-01")].merkle_root,
             roots[0]
         );
     }
@@ -2572,17 +3001,19 @@ mod tests {
                 assert!(report.is_valid());
             }
         }
-        let (_, rows) = load_registry(
+        let rows = load_registry(
             &root
                 .join("mainnet/merkle_roots.parquet")
                 .display()
                 .to_string(),
             None,
         )
-        .unwrap();
+        .unwrap()
+        .rows;
         assert_eq!(rows.len(), 2);
-        assert!(rows.contains_key(&registry_key("evm", "blocks", "date=2024-01-01")));
-        assert!(rows.contains_key(&registry_key("evm", "transactions", "date=2024-01-01")));
+        for table in ["blocks", "transactions"] {
+            assert!(rows.contains_key(&registry_key("mainnet", "evm", table, "date=2024-01-01")));
+        }
     }
 
     #[test]
@@ -2632,5 +3063,392 @@ mod tests {
             .unwrap()
             .warnings
             .is_empty());
+    }
+
+    /// Writes an EVM `transactions` file; a row whose `block_number` differs
+    /// from `block_num` fails the protocol check.
+    fn write_tx_file(path: &Path, rows: &[(u64, u64)]) {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let kvs = vec![
+            KeyValue::new("firehose-parquet.block_type".to_string(), "evm".to_string()),
+            KeyValue::new(
+                "firehose-parquet.chain_name".to_string(),
+                "mainnet".to_string(),
+            ),
+        ];
+        let props = WriterProperties::builder()
+            .set_key_value_metadata(Some(kvs))
+            .build();
+        let column = |values: Vec<u64>| Arc::new(UInt64Array::from(values)) as ArrayRef;
+        let batch = RecordBatch::try_from_iter(vec![
+            ("block_num", column(rows.iter().map(|r| r.0).collect())),
+            ("block_number", column(rows.iter().map(|r| r.1).collect())),
+        ])
+        .unwrap();
+        let mut writer = ArrowWriter::try_new(
+            std::fs::File::create(path).unwrap(),
+            batch.schema(),
+            Some(props),
+        )
+        .unwrap();
+        writer.write(&batch).unwrap();
+        writer.close().unwrap();
+    }
+
+    #[test]
+    fn fail_fast_partial_partition_is_never_recorded() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let data = dir.path().join("mainnet/transactions");
+        let day1 = data.join("date=2024-01-01");
+        write_tx_file(&day1.join("part-0.parquet"), &[(1, 2)]); // protocol failure
+        write_tx_file(&day1.join("part-1.parquet"), &[(3, 3)]);
+        write_tx_file(&data.join("date=2024-01-02/part-0.parquet"), &[(4, 4)]);
+        let registry = dir.path().join("mainnet/merkle_roots.parquet");
+        let mut opts = base_opts();
+        opts.chain = None;
+
+        // Fail-fast stops after part-0: day 1 is only partly read.
+        let report = verify_dir(&data, &opts).unwrap();
+        assert!(report.summary.protocol_failed > 0);
+        assert!(!report.is_valid());
+        assert!(report.findings.is_empty(), "{:?}", report.findings);
+        assert!(!report.summary.wrote_registry);
+        assert!(!registry.exists());
+        assert!(
+            report.warnings.iter().any(|w| {
+                w.contains("stopped at the first protocol failure") && w.contains("date=2024-01-01")
+            }),
+            "{:?}",
+            report.warnings
+        );
+
+        // With every file read, roots are complete, but a failing run still writes nothing.
+        opts.no_fail_fast = true;
+        let report = verify_dir(&data, &opts).unwrap();
+        assert_eq!(report.summary.missing_expected, 2);
+        assert!(!report.summary.wrote_registry);
+        assert!(!registry.exists());
+        assert!(report
+            .warnings
+            .iter()
+            .any(|w| w.contains("the registry was not updated: protocol checks failed")));
+    }
+
+    #[test]
+    fn differing_roots_block_registry_writes_unless_update_registry() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = dir.path();
+        let data = root.join("mainnet/blocks");
+        let registry = root
+            .join("mainnet/merkle_roots.parquet")
+            .display()
+            .to_string();
+        let day1 = table_file(root, "mainnet", "blocks");
+        write_table_file(&day1, &[1, 2], Some("evm"), Some("mainnet"));
+        assert!(
+            verify_dir(&data, &inferred_opts())
+                .unwrap()
+                .summary
+                .wrote_registry
+        );
+
+        // Day 1 changes and day 2 appears.
+        write_table_file(&day1, &[1, 2, 2], Some("evm"), Some("mainnet"));
+        write_table_file(
+            &data.join("date=2024-01-02/part-0.parquet"),
+            &[3],
+            Some("evm"),
+            Some("mainnet"),
+        );
+        let mut opts = inferred_opts();
+        opts.no_fail_fast = true;
+        let failing = verify_dir(&data, &opts).unwrap();
+        assert_eq!(failing.summary.mismatches, 1);
+        assert_eq!(failing.summary.missing_expected, 1);
+        assert!(!failing.summary.wrote_registry);
+        assert!(!failing.is_valid());
+        assert!(failing
+            .warnings
+            .iter()
+            .any(|w| w.contains("1 partition root(s) differ from the registry")));
+        assert_eq!(load_registry(&registry, None).unwrap().rows.len(), 1);
+
+        // --update-registry accepts the data (even with fail-fast): the run passes.
+        let mut opts = inferred_opts();
+        opts.update_registry = true;
+        let accepted = verify_dir(&data, &opts).unwrap();
+        assert_eq!(accepted.summary.updated, 1);
+        assert_eq!(accepted.summary.missing_expected, 1);
+        assert_eq!(accepted.summary.mismatches, 0);
+        assert!(accepted.summary.wrote_registry);
+        assert!(accepted.is_valid());
+
+        let after = verify_dir(&data, &inferred_opts()).unwrap();
+        assert_eq!(after.summary.matches, 2);
+        assert!(after.is_valid());
+    }
+
+    fn save_cursor(chain_root: &Path, last_block_num: u64, stop_block: Option<u64>) {
+        let state = CursorState {
+            cursor: "cursor".to_string(),
+            last_block_num,
+            stop_block,
+            ..Default::default()
+        };
+        save_cursor_parquet(&chain_root.join("cursor.parquet"), &state).unwrap();
+    }
+
+    fn open_partitions_of(report: &VerifyReport) -> Vec<&str> {
+        let mut open: Vec<&str> = report
+            .findings
+            .iter()
+            .filter(|f| matches!(f.status, FindingStatus::Open))
+            .map(|f| f.partition.as_str())
+            .collect();
+        open.sort_unstable();
+        open
+    }
+
+    #[test]
+    fn partitions_still_being_written_are_not_compared_or_recorded() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = dir.path();
+        let chain_root = root.join("mainnet");
+        let data = chain_root.join("blocks");
+        let registry = chain_root
+            .join("merkle_roots.parquet")
+            .display()
+            .to_string();
+        for (day, blocks) in [
+            ("2024-01-01", [1u64, 2]),
+            ("2024-01-02", [3, 4]),
+            ("2024-01-03", [5, 6]),
+        ] {
+            write_table_file(
+                &data.join(format!("date={day}")).join("part-0.parquet"),
+                &blocks,
+                Some("evm"),
+                Some("mainnet"),
+            );
+        }
+
+        // A live build at block 6 may still append to the newest partition.
+        save_cursor(&chain_root, 6, None);
+        let report = verify_dir(&data, &inferred_opts()).unwrap();
+        assert_eq!(open_partitions_of(&report), ["date=2024-01-03"]);
+        assert_eq!(report.summary.open_partitions, 1);
+        assert_eq!(report.summary.missing_expected, 2);
+        assert!(report.is_valid());
+        assert!(report
+            .warnings
+            .iter()
+            .any(|w| w.contains("may still receive rows")));
+        let rows = load_registry(&registry, None).unwrap().rows;
+        assert_eq!(rows.len(), 2);
+        assert!(!rows.values().any(|r| r.partition == "date=2024-01-03"));
+
+        // Rows written after the last cursor save (block 2) are open too.
+        save_cursor(&chain_root, 2, Some(100));
+        let report = verify_dir(&data, &inferred_opts()).unwrap();
+        assert_eq!(
+            open_partitions_of(&report),
+            ["date=2024-01-02", "date=2024-01-03"]
+        );
+        assert_eq!(report.summary.matches, 1);
+
+        // A bounded build that reached its stop block has nothing open.
+        save_cursor(&chain_root, 6, Some(7));
+        let report = verify_dir(&data, &inferred_opts()).unwrap();
+        assert!(open_partitions_of(&report).is_empty());
+        assert_eq!(report.summary.matches, 2);
+        assert_eq!(report.summary.missing_expected, 1);
+        assert!(report.summary.wrote_registry);
+    }
+
+    #[test]
+    fn a_shared_registry_keeps_networks_apart() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = dir.path();
+        let registry = root.join("shared/merkle_roots.parquet");
+        let mut opts = inferred_opts();
+        opts.registry_path = Some(registry.display().to_string());
+        for (network, blocks) in [("mainnet", [1u64, 2]), ("sepolia", [7, 8])] {
+            write_table_file(
+                &table_file(root, network, "blocks"),
+                &blocks,
+                Some("evm"),
+                Some(network),
+            );
+        }
+        // Same chain, table and partition names: only the network tells them apart.
+        for _ in 0..2 {
+            for network in ["mainnet", "sepolia"] {
+                let report = verify_dir(&root.join(network).join("blocks"), &opts).unwrap();
+                assert!(report.is_valid(), "{network}: {:?}", report.findings);
+            }
+        }
+        let rows = load_registry(&registry.display().to_string(), None)
+            .unwrap()
+            .rows;
+        assert_eq!(rows.len(), 2);
+        for network in ["mainnet", "sepolia"] {
+            assert!(rows.contains_key(&registry_key(network, "evm", "blocks", "date=2024-01-01")));
+        }
+    }
+
+    #[test]
+    fn rows_without_a_network_still_match() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = dir.path();
+        write_table_file(
+            &table_file(root, "mainnet", "blocks"),
+            &[1, 2],
+            Some("evm"),
+            Some("mainnet"),
+        );
+        let data = root.join("mainnet/blocks");
+        let registry = root.join("mainnet/merkle_roots.parquet");
+        let computed = verify_dir(&data, &inferred_opts()).unwrap().findings[0]
+            .computed_root
+            .clone();
+
+        // Rewrite the registry in the layout from before the `network` column.
+        let schema = Arc::new(Schema::new(
+            [
+                "chain",
+                "table",
+                "partition",
+                "algorithm",
+                "merkle_version",
+                "merkle_root",
+                "updated_at",
+            ]
+            .iter()
+            .map(|name| Field::new(*name, DataType::Utf8, false))
+            .collect::<Vec<_>>(),
+        ));
+        let values = [
+            "evm",
+            "blocks",
+            "date=2024-01-01",
+            "keccak256",
+            "merkle_v2",
+            computed.as_str(),
+            "2026-01-01T00:00:00Z",
+        ];
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            values
+                .iter()
+                .map(|v| Arc::new(StringArray::from(vec![*v])) as ArrayRef)
+                .collect(),
+        )
+        .unwrap();
+        let mut writer =
+            ArrowWriter::try_new(std::fs::File::create(&registry).unwrap(), schema, None).unwrap();
+        writer.write(&batch).unwrap();
+        writer.close().unwrap();
+
+        let report = verify_dir(&data, &inferred_opts()).unwrap();
+        assert_eq!(report.summary.matches, 1);
+        assert!(!report.summary.wrote_registry);
+    }
+
+    fn registry_row(network: &str, partition: &str, root: &str) -> RegistryRow {
+        RegistryRow {
+            network: network.to_string(),
+            chain: "evm".to_string(),
+            table: "blocks".to_string(),
+            partition: partition.to_string(),
+            algorithm: "keccak256".to_string(),
+            merkle_version: "merkle_v2".to_string(),
+            merkle_root: root.to_string(),
+            updated_at: "2026-01-01T00:00:00Z".to_string(),
+        }
+    }
+
+    /// A missing-root fill planned against a registry without that row.
+    fn fill(row: RegistryRow) -> RegistryChange {
+        let key = registry_key(&row.network, &row.chain, &row.table, &row.partition);
+        RegistryChange {
+            compared_key: key.clone(),
+            expected: None,
+            key,
+            row,
+        }
+    }
+
+    #[test]
+    fn local_commits_merge_concurrent_runs_and_reject_conflicts() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("merkle_roots.parquet");
+        let path_str = path.display().to_string();
+
+        // Eight runs planned against the same empty registry commit at once.
+        let handles: Vec<_> = (0..8)
+            .map(|i| {
+                let path = path.clone();
+                std::thread::spawn(move || {
+                    let change = fill(registry_row("mainnet", &format!("day={i}"), "aa"));
+                    commit_registry_local(&path, &[change]).unwrap();
+                })
+            })
+            .collect();
+        for handle in handles {
+            handle.join().unwrap();
+        }
+        assert_eq!(load_registry(&path_str, None).unwrap().rows.len(), 8);
+
+        // Replaying a change another run already applied is a no-op.
+        commit_registry_local(&path, &[fill(registry_row("mainnet", "day=0", "aa"))]).unwrap();
+        // A different root for a row that appeared meanwhile is a conflict.
+        let err = commit_registry_local(&path, &[fill(registry_row("mainnet", "day=0", "bb"))])
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("changed while verify was running"), "{err}");
+
+        // Writes are atomic: only the registry and its lock file remain.
+        let mut names: Vec<String> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        assert_eq!(names, ["merkle_roots.parquet", "merkle_roots.parquet.lock"]);
+    }
+
+    #[test]
+    fn store_commits_retry_after_a_concurrent_update() {
+        let store = object_store::memory::InMemory::new();
+        let location = object_store::path::Path::from("mainnet/merkle_roots.parquet");
+        let mut warnings = Vec::new();
+        let rows = |store: &object_store::memory::InMemory| -> HashMap<String, RegistryRow> {
+            load_registry_from_store(store, &location).unwrap().rows
+        };
+
+        // Both runs read before either writes: the second create fails, re-reads and merges.
+        let empty = load_registry_from_store(&store, &location).unwrap();
+        assert!(!empty.exists);
+        for (partition, root) in [("day=1", "aa"), ("day=2", "bb")] {
+            let change = fill(registry_row("mainnet", partition, root));
+            commit_registry_to_store(&store, &location, &empty, &[change], &mut warnings).unwrap();
+        }
+        assert_eq!(rows(&store).len(), 2);
+
+        // Same with an existing object: the second write's ETag is stale.
+        let stale = load_registry_from_store(&store, &location).unwrap();
+        assert!(stale.e_tag.is_some());
+        for (partition, root) in [("day=3", "cc"), ("day=4", "dd")] {
+            let change = fill(registry_row("mainnet", partition, root));
+            commit_registry_to_store(&store, &location, &stale, &[change], &mut warnings).unwrap();
+        }
+        assert_eq!(rows(&store).len(), 4);
+
+        // A conflicting root is reported instead of overwriting the other run.
+        let change = fill(registry_row("mainnet", "day=1", "ff"));
+        let err = commit_registry_to_store(&store, &location, &stale, &[change], &mut warnings)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("changed while verify was running"), "{err}");
+        assert!(warnings.is_empty(), "{warnings:?}");
     }
 }

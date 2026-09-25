@@ -768,7 +768,8 @@ Lookup order for the data path matches `scan` / `inspect`: explicit `s3://...` U
 |---|---|---|
 | `--chain` | *(from `firehose-parquet.block_type`)* | Chain family (`evm`, `bitcoin`, `solana`, ...). Needed only for files without that metadata; a different value is an error |
 | `--table` | *(from the table directory)* | Table name. Needed only when files are not inside a table directory; a different value is an error |
-| `--registry-path` | `<chain_root>/merkle_roots.parquet` | Explicit registry location (local or `s3://`); use one registry per network |
+| `--registry-path` | `<chain_root>/merkle_roots.parquet` | Explicit registry location (local or `s3://`); rows are keyed by network, so one registry can serve several networks |
+| `--update-registry` | `false` | Accept the current data: replace differing roots (reported as `updated`; the run passes once the registry is written) |
 | `--checks` | *(from profile)* | Comma-separated check families: `roots`, `protocol`, `continuity`, `completeness` |
 | `--profile` | `standard` | Preset families: `quick` (roots), `standard` (roots+protocol), `deep` (adds continuity+completeness) |
 | `--scope` | `table` | Metadata scope tag in reports: `chain`, `table`, `partition`, `run` |
@@ -778,7 +779,9 @@ Lookup order for the data path matches `scan` / `inspect`: explicit `s3://...` U
 
 Migration note: `--chain` and `--table` no longer default to `evm` and `blocks`, and the default registry moved from `<chain>/mainnet/merkle_roots.parquet` to the network directory. `verify` warns when it finds a registry at the old location; see [Moving a registry from the old default location](docs/verifiability-artifact-runbook.md#moving-a-registry-from-the-old-default-location).
 
-Roots use the versioned `merkle_v2` construction, recorded as `merkle_version` in `merkle_roots.parquet` and in the report. Registries written by v0.7.1 and earlier hold legacy `merkle_v1` roots: `verify` reports them as mismatches until they are rebuilt with `--update-registry --no-fail-fast`. See the [runbook](docs/verifiability-artifact-runbook.md#migrating-a-legacy-merkle_v1-registry) for the procedure.
+Roots use the versioned `merkle_v2` construction, recorded as `merkle_version` in `merkle_roots.parquet` and in the report. Registries written by v0.7.1 and earlier hold legacy `merkle_v1` roots: `verify` reports them as mismatches until they are rebuilt with `--update-registry`.
+
+A failing run never changes the registry: roots are recorded only when no protocol check failed and no root differs (or `--update-registry` was given). The newest partition of a dataset whose `cursor.parquet` has not reached its stop block is reported as `open` and is not recorded. Registry writes are atomic locally and use conditional puts on S3, so concurrent runs do not lose updates. See [Root registry update semantics](docs/verifiability-artifact-runbook.md#root-registry-update-semantics). See the [runbook](docs/verifiability-artifact-runbook.md#migrating-a-legacy-merkle_v1-registry) for the procedure.
 
 See [Cross-chain verifiability hash strategy](docs/verifiability-hash-strategy.md) for defaults and normalization rules.
 

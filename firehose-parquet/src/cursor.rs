@@ -487,7 +487,7 @@ fn encode_cursor(state: &CursorState) -> anyhow::Result<Vec<u8>> {
 /// cursor, i.e. there is nothing to resume from. A file that is not a
 /// readable cursor (empty, truncated, corrupt, or missing the `cursor`
 /// column) is an error.
-fn parse_cursor(bytes: Bytes) -> anyhow::Result<Option<CursorState>> {
+pub(crate) fn parse_cursor(bytes: Bytes) -> anyhow::Result<Option<CursorState>> {
     let reader_builder =
         ParquetRecordBatchReaderBuilder::try_new(bytes).context("reading parquet metadata")?;
 
