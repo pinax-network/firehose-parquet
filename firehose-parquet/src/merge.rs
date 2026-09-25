@@ -21,8 +21,6 @@ use arrow::record_batch::RecordBatch;
 use object_store::ObjectStore;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use parquet::arrow::ArrowWriter;
-use parquet::basic::Compression as PqCompression;
-use parquet::basic::ZstdLevel;
 use parquet::file::metadata::KeyValue;
 use parquet::file::properties::WriterProperties;
 use std::collections::HashSet;
@@ -736,7 +734,11 @@ fn process_local_partition(
             }
 
             if writer_state.is_none() {
-                let props = writer_properties(config.compression, file_kv_metadata.as_deref());
+                let props = writer_properties(
+                    config.compression,
+                    batch.schema().as_ref(),
+                    file_kv_metadata.as_deref(),
+                );
                 writer_state = Some(StreamingPartWriter::new(
                     batch.schema(),
                     props,
@@ -832,28 +834,16 @@ fn no_op_compaction_estimate(
 
 fn writer_properties(
     compression: Compression,
+    schema: &Schema,
     kv_metadata: Option<&[KeyValue]>,
 ) -> WriterProperties {
-    let pq_compression = match compression {
-        Compression::None => PqCompression::UNCOMPRESSED,
-        Compression::Snappy => PqCompression::SNAPPY,
-        Compression::Gzip => PqCompression::GZIP(Default::default()),
-        Compression::Zstd => PqCompression::ZSTD(ZstdLevel::try_new(3).unwrap()),
-    };
-    let mut builder = WriterProperties::builder().set_compression(pq_compression);
-    if let Some(kvs) = kv_metadata {
-        if !kvs.is_empty() {
-            builder = builder.set_key_value_metadata(Some(
-                kvs.iter()
-                    .filter(|kv| {
-                        !kv.key.starts_with("fireparq.ingest.") && kv.key != "ARROW:schema"
-                    })
-                    .cloned()
-                    .collect(),
-            ));
-        }
-    }
-    builder.build()
+    let metadata = kv_metadata.map(|kvs| {
+        kvs.iter()
+            .filter(|kv| !kv.key.starts_with("fireparq.ingest.") && kv.key != "ARROW:schema")
+            .cloned()
+            .collect()
+    });
+    crate::writer::properties::for_schema(compression, schema, metadata)
 }
 
 fn collect_parquet_files_recursive(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
@@ -1336,7 +1326,11 @@ fn process_s3_partition(
                 }
 
                 if writer_state.is_none() {
-                    let props = writer_properties(config.compression, file_kv_metadata.as_deref());
+                    let props = writer_properties(
+                        config.compression,
+                        batch.schema().as_ref(),
+                        file_kv_metadata.as_deref(),
+                    );
                     writer_state = Some(StreamingPartWriter::new(
                         batch.schema(),
                         props,

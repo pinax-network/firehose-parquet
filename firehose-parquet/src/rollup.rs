@@ -18,14 +18,13 @@ use crate::ingest::maintenance::{self, MaintenancePolicy, MaintenanceTarget};
 use crate::merge::{SchemaCheck, StreamingPartWriter};
 use crate::writer::parse_s3_url;
 use anyhow::{Context, Result};
+use arrow::datatypes::Schema;
 #[cfg(test)]
 use arrow::record_batch::RecordBatch;
 use object_store::ObjectStore;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 #[cfg(test)]
 use parquet::arrow::ArrowWriter;
-use parquet::basic::Compression as PqCompression;
-use parquet::basic::ZstdLevel;
 use parquet::file::metadata::KeyValue;
 use parquet::file::properties::WriterProperties;
 use std::collections::{BTreeMap, HashSet};
@@ -341,13 +340,13 @@ fn run_rollup_local(config: &RollupConfig, ownership: &DatasetOwnership) -> Resu
         let out_dir = output.join(group_key);
         std::fs::create_dir_all(&out_dir)
             .with_context(|| format!("creating output dir {}", out_dir.display()))?;
-        let mut writer = StreamingPartWriter::new(
-            schema.context("rollup group has no schema")?,
-            writer_properties(config.compression, file_kv_metadata.as_deref()),
-            config.flush_bytes,
-            None,
-            0,
+        let schema = schema.context("rollup group has no schema")?;
+        let props = writer_properties(
+            config.compression,
+            schema.as_ref(),
+            file_kv_metadata.as_deref(),
         );
+        let mut writer = StreamingPartWriter::new(schema, props, config.flush_bytes, None, 0);
         let mut group_written = Vec::new();
         let mut publish = |part: u32, bytes: Vec<u8>, part_rows: usize| -> Result<()> {
             ownership.revalidate_local_paths()?;
@@ -570,28 +569,16 @@ fn cleanup_empty_dirs(dir: &Path) -> Result<()> {
 
 fn writer_properties(
     compression: Compression,
+    schema: &Schema,
     kv_metadata: Option<&[KeyValue]>,
 ) -> WriterProperties {
-    let pq_compression = match compression {
-        Compression::None => PqCompression::UNCOMPRESSED,
-        Compression::Snappy => PqCompression::SNAPPY,
-        Compression::Gzip => PqCompression::GZIP(Default::default()),
-        Compression::Zstd => PqCompression::ZSTD(ZstdLevel::try_new(3).unwrap()),
-    };
-    let mut builder = WriterProperties::builder().set_compression(pq_compression);
-    if let Some(kvs) = kv_metadata {
-        if !kvs.is_empty() {
-            builder = builder.set_key_value_metadata(Some(
-                kvs.iter()
-                    .filter(|kv| {
-                        !kv.key.starts_with("fireparq.ingest.") && kv.key != "ARROW:schema"
-                    })
-                    .cloned()
-                    .collect(),
-            ));
-        }
-    }
-    builder.build()
+    let metadata = kv_metadata.map(|kvs| {
+        kvs.iter()
+            .filter(|kv| !kv.key.starts_with("fireparq.ingest.") && kv.key != "ARROW:schema")
+            .cloned()
+            .collect()
+    });
+    crate::writer::properties::for_schema(compression, schema, metadata)
 }
 
 // ---------------------------------------------------------------------------
@@ -750,13 +737,13 @@ fn rollup_s3(config: &RollupConfig, src: &S3Root, out: &S3Root) -> Result<()> {
             .checked_add(rows)
             .context("rollup row count overflow")?;
         total_input_files += group_keys.len();
-        let mut writer = StreamingPartWriter::new(
-            schema.context("rollup group has no schema")?,
-            writer_properties(config.compression, file_kv_metadata.as_deref()),
-            config.flush_bytes,
-            None,
-            0,
+        let schema = schema.context("rollup group has no schema")?;
+        let props = writer_properties(
+            config.compression,
+            schema.as_ref(),
+            file_kv_metadata.as_deref(),
         );
+        let mut writer = StreamingPartWriter::new(schema, props, config.flush_bytes, None, 0);
         let mut group_written = Vec::new();
         let mut publish = |part: u32, bytes: Vec<u8>, part_rows: usize| -> Result<()> {
             let path = object_store::path::Path::from(

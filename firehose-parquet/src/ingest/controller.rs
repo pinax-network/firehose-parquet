@@ -333,11 +333,14 @@ fn runtime_partition(partition: &PartitionPolicy) -> Partition {
     }
 }
 fn part_compression(compression: Compression) -> PartCompression {
-    match compression {
+    match compression.canonical() {
         Compression::None => PartCompression::None,
         Compression::Snappy => PartCompression::Snappy,
         Compression::Gzip => PartCompression::Gzip,
         Compression::Zstd => PartCompression::Zstd,
+        Compression::ZstdWithLevel(level) => {
+            PartCompression::ZstdWithLevel(level.compression_level())
+        }
     }
 }
 
