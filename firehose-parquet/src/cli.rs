@@ -86,7 +86,7 @@ pub struct CommonArgs {
     )]
     pub start_block: Option<u64>,
 
-    /// Stop block number (exclusive).
+    /// Stop block number (exclusive); must be greater than the start block.
     ///
     /// When omitted, the build runs in live mode and keeps following finalized
     /// blocks.
@@ -95,7 +95,8 @@ pub struct CommonArgs {
         long,
         env = "STOP_BLOCK",
         hide_env_values = true,
-        help_heading = "Block Range"
+        help_heading = "Block Range",
+        value_parser = clap::value_parser!(u64).range(1..)
     )]
     pub stop_block: Option<u64>,
 
@@ -151,13 +152,14 @@ pub struct CommonArgs {
     )]
     pub partition: String,
 
-    /// Block range size when partition=block_range
+    /// Block range size when partition=block_range (must be at least 1)
     #[arg(
         long,
         env = "BLOCK_RANGE_SIZE",
         default_value = "10000",
         hide_env_values = true,
-        help_heading = "Output"
+        help_heading = "Output",
+        value_parser = clap::value_parser!(u64).range(1..)
     )]
     pub block_range_size: u64,
 
@@ -190,7 +192,7 @@ pub struct CommonArgs {
     )]
     pub flush_blocks: Option<u64>,
 
-    /// Flush mapper state at this many in-memory bytes and target roughly this many compressed bytes per parquet file
+    /// Flush mapper state at this many in-memory bytes and target roughly this many compressed bytes per parquet file (0 disables byte-based flushing)
     #[arg(
         long,
         env = "FLUSH_BYTES",
@@ -230,7 +232,7 @@ pub struct CommonArgs {
     #[arg(long, env = "METRICS_PORT", hide_env_values = true)]
     pub metrics_port: Option<u16>,
 
-    /// Force a reconnect if no stream message is received for N seconds
+    /// Force a reconnect if no stream message is received for N seconds (0 disables)
     #[arg(
         long,
         env = "STREAM_IDLE_TIMEOUT_SECS",
@@ -240,7 +242,7 @@ pub struct CommonArgs {
     )]
     pub stream_idle_timeout_secs: Option<u64>,
 
-    /// Exit with an error if reconnecting continuously for N seconds
+    /// Exit with an error if reconnecting continuously for N seconds (0 disables)
     #[arg(
         long,
         env = "RECONNECT_STALL_TIMEOUT_SECS",
@@ -1325,7 +1327,11 @@ Examples:
         partition: String,
         /// Block range size (required when --partition block_range).
         /// Each partition covers exactly this many blocks (e.g. 1000000).
-        #[arg(long, help_heading = "Partitioning")]
+        #[arg(
+            long,
+            help_heading = "Partitioning",
+            value_parser = clap::value_parser!(u64).range(1..)
+        )]
         block_range_size: Option<u64>,
         /// Compression codec for the written `partitions.parquet`: zstd, snappy, gzip, none
         #[arg(long, default_value = "zstd", help_heading = "Output")]
@@ -3603,6 +3609,9 @@ pub fn parse_compression(s: &str) -> anyhow::Result<Compression> {
 pub fn parse_partition(s: &str, block_range_size: u64) -> anyhow::Result<Partition> {
     match s.to_lowercase().as_str() {
         "none" => Ok(Partition::None),
+        "block_range" if block_range_size == 0 => {
+            anyhow::bail!("--block-range-size must be at least 1 when --partition block_range")
+        }
         "block_range" => Ok(Partition::block_range(block_range_size)),
         "date" => Ok(Partition::Date),
         "hour" => Ok(Partition::Hour),
@@ -3610,6 +3619,34 @@ pub fn parse_partition(s: &str, block_range_size: u64) -> anyhow::Result<Partiti
         "second" => Ok(Partition::Second),
         other => anyhow::bail!("invalid --partition '{other}': expected one of: none, block_range, date, hour, minute, second"),
     }
+}
+
+/// Check that an exclusive stop block leaves a non-empty range after the
+/// start block. Either bound may be unknown (live mode, or a start block
+/// resolved later from a cursor or the endpoint).
+pub fn validate_stop_block_after_start(
+    start_block: Option<u64>,
+    stop_block: Option<u64>,
+) -> anyhow::Result<()> {
+    if let (Some(start_block), Some(stop_block)) = (start_block, stop_block) {
+        if stop_block <= start_block {
+            anyhow::bail!(
+                "--stop-block ({stop_block}) must be greater than the start block ({start_block}); --stop-block is exclusive"
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Read a credential from the environment variable `name`.
+///
+/// Surrounding whitespace is trimmed (a secret mounted from a file often ends
+/// with a newline) and blank values count as unset.
+pub fn read_credential_env(name: &str) -> Option<String> {
+    std::env::var(name)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
 }
 
 /// Build a [`Config`] from [`CommonArgs`].
@@ -3623,12 +3660,10 @@ pub fn build_config(args: &CommonArgs) -> anyhow::Result<Config> {
 
     // Resolve the actual API key / JWT token by reading the environment variable
     // whose *name* is given by `--api-key-envvar` / `--api-token-envvar`.
-    let api_key = std::env::var(&args.api_key_envvar)
-        .ok()
-        .filter(|v| !v.is_empty());
-    let jwt_token = std::env::var(&args.api_token_envvar)
-        .ok()
-        .filter(|v| !v.is_empty());
+    let api_key = read_credential_env(&args.api_key_envvar);
+    let jwt_token = read_credential_env(&args.api_token_envvar);
+
+    validate_stop_block_after_start(args.start_block, args.stop_block)?;
 
     // Only reinterpret output as S3 when it is not an explicit local path.
     let output = PathBuf::from(resolve_s3_output_root(
@@ -3686,8 +3721,9 @@ pub fn build_config(args: &CommonArgs) -> anyhow::Result<Config> {
             Some(args.cache_control.clone())
         },
         metrics_port: args.metrics_port,
-        stream_idle_timeout_secs: args.stream_idle_timeout_secs,
-        reconnect_stall_timeout_secs: args.reconnect_stall_timeout_secs,
+        // 0 disables either timeout.
+        stream_idle_timeout_secs: args.stream_idle_timeout_secs.filter(|secs| *secs > 0),
+        reconnect_stall_timeout_secs: args.reconnect_stall_timeout_secs.filter(|secs| *secs > 0),
     })
 }
 
@@ -6669,6 +6705,153 @@ mod tests {
         assert_eq!(config.reconnect_stall_timeout_secs, Some(900));
         // cursor defaults to cursor.parquet
         assert_eq!(config.cursor_path, Some("cursor.parquet".to_string()));
+    }
+
+    fn assert_rejected_value(args: &[&str], flag: &str) {
+        let error = try_parse(args).expect_err("zero should be rejected");
+        assert_eq!(error.kind(), clap::error::ErrorKind::ValueValidation);
+        assert!(error.to_string().contains(flag), "{error}");
+    }
+
+    #[test]
+    #[serial]
+    fn test_block_range_size_zero_is_rejected() {
+        assert_rejected_value(
+            &[
+                "test-cli",
+                "--partition",
+                "block_range",
+                "--block-range-size",
+                "0",
+            ],
+            "--block-range-size",
+        );
+        assert!(parse_partition("block_range", 0).is_err());
+    }
+
+    #[test]
+    fn test_partitions_build_block_range_size_zero_is_rejected() {
+        assert_rejected_value(
+            &[
+                "test-cli",
+                "partitions",
+                "build",
+                "--endpoint",
+                "https://eth.firehose.pinax.network:443",
+                "--stop-block",
+                "200",
+                "--partition",
+                "block_range",
+                "--block-range-size",
+                "0",
+                "--output",
+                "./output",
+            ],
+            "--block-range-size",
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn test_stop_block_zero_is_rejected() {
+        assert_rejected_value(&["test-cli", "--stop-block", "0"], "--stop-block");
+    }
+
+    #[test]
+    #[serial]
+    fn test_build_config_rejects_stop_block_not_after_start_block() {
+        for (start, stop) in [("100", "100"), ("100", "50"), ("0", "0")] {
+            let cli = TestCli::try_parse_from([
+                "test-cli",
+                "--endpoint",
+                "https://example.com:443",
+                "--start-block",
+                start,
+                "--stop-block",
+                stop,
+            ]);
+            // --stop-block 0 is already rejected by the parser.
+            let Ok(cli) = cli else { continue };
+            let error = build_config(&cli.common).expect_err("empty range");
+            assert!(
+                error.to_string().contains("must be greater than"),
+                "{error}"
+            );
+        }
+
+        let cli = parse(&[
+            "test-cli",
+            "--endpoint",
+            "https://example.com:443",
+            "--start-block",
+            "0",
+            "--stop-block",
+            "1",
+        ]);
+        let config = build_config(&cli.common).expect("block 0 only is a valid range");
+        assert_eq!(config.stop_block, Some(1));
+        assert!(validate_stop_block_after_start(None, Some(1)).is_ok());
+        assert!(validate_stop_block_after_start(Some(5), None).is_ok());
+    }
+
+    #[test]
+    #[serial]
+    fn test_zero_connection_timeouts_mean_disabled() {
+        let cli = parse(&[
+            "test-cli",
+            "--endpoint",
+            "https://example.com:443",
+            "--stream-idle-timeout-secs",
+            "0",
+            "--reconnect-stall-timeout-secs",
+            "0",
+        ]);
+        let config = build_config(&cli.common).expect("build_config should succeed");
+        assert_eq!(config.stream_idle_timeout_secs, None);
+        assert_eq!(config.reconnect_stall_timeout_secs, None);
+        let rendered = config.to_string();
+        assert!(
+            rendered.contains("stream_idle_timeout disabled"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("reconnect_stall_timeout disabled"),
+            "{rendered}"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn test_flush_bytes_zero_means_disabled() {
+        let cli = parse(&[
+            "test-cli",
+            "--endpoint",
+            "https://example.com:443",
+            "--flush-bytes",
+            "0",
+        ]);
+        let config = build_config(&cli.common).expect("build_config should succeed");
+        assert_eq!(config.flush_bytes, 0);
+        assert!(config.to_string().contains("flush_bytes        disabled"));
+    }
+
+    #[test]
+    #[serial]
+    fn test_credentials_are_trimmed_and_blank_values_ignored() {
+        let _key = EnvVarGuard::set("FIREPARQ_TEST_API_KEY_471", "key-from-secret-file\n");
+        let _token = EnvVarGuard::set("FIREPARQ_TEST_API_TOKEN_471", " \n");
+        let cli = parse(&[
+            "test-cli",
+            "--endpoint",
+            "https://example.com:443",
+            "--api-key-envvar",
+            "FIREPARQ_TEST_API_KEY_471",
+            "--api-token-envvar",
+            "FIREPARQ_TEST_API_TOKEN_471",
+        ]);
+        let config = build_config(&cli.common).expect("build_config should succeed");
+        assert_eq!(config.api_key.as_deref(), Some("key-from-secret-file"));
+        assert_eq!(config.jwt_token, None);
     }
 
     #[test]

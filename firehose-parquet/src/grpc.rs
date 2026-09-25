@@ -6,6 +6,7 @@ use backoff::backoff::Backoff;
 use backoff::ExponentialBackoffBuilder;
 use firehose_protos::firehose;
 use std::time::{Duration, Instant};
+use tonic::metadata::{Ascii, MetadataValue};
 use tonic::transport::{Channel, ClientTlsConfig, Endpoint};
 use tracing::{debug, info, warn};
 
@@ -36,15 +37,68 @@ pub struct EndpointInfo {
 /// connection, authentication, and streaming with automatic retry/resume.
 pub struct FirehoseClient {
     config: Config,
+    auth: AuthMetadata,
     metrics: Option<PipelineMetrics>,
 }
 
-impl FirehoseClient {
-    pub fn new(config: Config) -> Self {
-        Self {
-            config,
-            metrics: None,
+/// gRPC authentication metadata, parsed once from the configured API key and
+/// JWT token.
+#[derive(Clone, Default)]
+struct AuthMetadata {
+    api_key: Option<MetadataValue<Ascii>>,
+    bearer: Option<MetadataValue<Ascii>>,
+}
+
+impl AuthMetadata {
+    /// Trim the credentials (a secret file often ends with a newline) and
+    /// parse them into header values. Blank credentials are ignored.
+    fn from_config(config: &Config) -> Result<Self> {
+        let parse = |value: &Option<String>, format: fn(&str) -> String, what: &str| {
+            value
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(|value| {
+                    MetadataValue::try_from(format(value)).map_err(|_| {
+                        anyhow::anyhow!(
+                            "{what} contains characters that are not allowed in a gRPC header (control characters or line breaks inside the value)"
+                        )
+                    })
+                })
+                .transpose()
+        };
+        Ok(Self {
+            api_key: parse(&config.api_key, str::to_string, "the API key")?,
+            bearer: parse(
+                &config.jwt_token,
+                |token| format!("Bearer {token}"),
+                "the JWT token",
+            )?,
+        })
+    }
+
+    fn apply<T>(&self, request: &mut tonic::Request<T>) {
+        if let Some(ref key) = self.api_key {
+            request.metadata_mut().insert("x-api-key", key.clone());
         }
+        if let Some(ref bearer) = self.bearer {
+            request
+                .metadata_mut()
+                .insert("authorization", bearer.clone());
+        }
+    }
+}
+
+impl FirehoseClient {
+    /// Create a client. Fails if the API key or JWT token cannot be sent as a
+    /// gRPC header.
+    pub fn new(config: Config) -> Result<Self> {
+        let auth = AuthMetadata::from_config(&config)?;
+        Ok(Self {
+            config,
+            auth,
+            metrics: None,
+        })
     }
 
     /// Set the pipeline metrics for Prometheus instrumentation.
@@ -134,21 +188,7 @@ impl FirehoseClient {
             .max_decoding_message_size(128 * 1024 * 1024);
 
         let mut request = tonic::Request::new(firehose::InfoRequest {});
-        if let Some(ref key) = self.config.api_key {
-            request.metadata_mut().insert(
-                "x-api-key",
-                key.parse()
-                    .expect("API key must be valid ASCII metadata value"),
-            );
-        }
-        if let Some(ref token) = self.config.jwt_token {
-            request.metadata_mut().insert(
-                "authorization",
-                format!("Bearer {token}")
-                    .parse()
-                    .expect("JWT token must be valid ASCII metadata value"),
-            );
-        }
+        self.auth.apply(&mut request);
 
         match client.info(request).await {
             Ok(resp) => {
@@ -195,16 +235,7 @@ impl FirehoseClient {
             };
 
             let mut request = tonic::Request::new(req);
-            if let Some(ref key) = self.config.api_key {
-                request
-                    .metadata_mut()
-                    .insert("x-api-key", key.parse().unwrap());
-            }
-            if let Some(ref token) = self.config.jwt_token {
-                request
-                    .metadata_mut()
-                    .insert("authorization", format!("Bearer {token}").parse().unwrap());
-            }
+            self.auth.apply(&mut request);
 
             let response = client.block(request).await?.into_inner();
             Ok(response.metadata.as_ref().map(|m| BlockIdentity {
@@ -257,13 +288,16 @@ impl FirehoseClient {
             .with_max_interval(Duration::from_secs(60))
             .with_max_elapsed_time(None) // retry forever
             .build();
+        // A timeout of 0 means disabled.
         let stream_idle_timeout = self
             .config
             .stream_idle_timeout_secs
+            .filter(|secs| *secs > 0)
             .map(Duration::from_secs);
         let reconnect_stall_timeout = self
             .config
             .reconnect_stall_timeout_secs
+            .filter(|secs| *secs > 0)
             .map(Duration::from_secs);
 
         let mut attempt = 0u64;
@@ -331,24 +365,13 @@ impl FirehoseClient {
             let req = firehose::Request {
                 start_block_num,
                 cursor: cursor.clone().unwrap_or_default(),
-                // CLI stop_block is exclusive; Firehose protocol is inclusive.
-                // Subtract 1 to convert (0 means stream forever in both).
-                stop_block_num: self.config.stop_block.map_or(0, |b| b.saturating_sub(1)),
+                stop_block_num: firehose_stop_block_num(self.config.stop_block),
                 final_blocks_only: self.config.final_blocks_only,
                 transforms: vec![],
             };
 
             let mut request = tonic::Request::new(req);
-            if let Some(ref key) = self.config.api_key {
-                request
-                    .metadata_mut()
-                    .insert("x-api-key", key.parse().unwrap());
-            }
-            if let Some(ref token) = self.config.jwt_token {
-                request
-                    .metadata_mut()
-                    .insert("authorization", format!("Bearer {token}").parse().unwrap());
-            }
+            self.auth.apply(&mut request);
 
             let stream = match client.blocks(request).await {
                 Ok(resp) => {
@@ -454,13 +477,28 @@ impl FirehoseClient {
                                 Some(last_block_num.map_or(identity.block_num, |last| {
                                     last.max(identity.block_num)
                                 }));
-                            handler(
-                                any.value,
-                                any.type_url,
-                                new_cursor.clone(),
-                                identity,
-                                resp.step,
-                            )?;
+                            // `--stop-block` is exclusive. The request may ask
+                            // for one block more than wanted (see
+                            // `firehose_stop_block_num`), so never pass blocks
+                            // at or above the stop block to the handler.
+                            let past_stop_block = self
+                                .config
+                                .stop_block
+                                .is_some_and(|stop_block| identity.block_num >= stop_block);
+                            if past_stop_block {
+                                debug!(
+                                    block_num = identity.block_num,
+                                    "dropping block at or above the exclusive stop block"
+                                );
+                            } else {
+                                handler(
+                                    any.value,
+                                    any.type_url,
+                                    new_cursor.clone(),
+                                    identity,
+                                    resp.step,
+                                )?;
+                            }
                         }
 
                         cursor = Some(new_cursor.clone());
@@ -543,6 +581,18 @@ impl FirehoseClient {
     }
 }
 
+/// Convert the exclusive `--stop-block` into Firehose's inclusive
+/// `stop_block_num`, where 0 means "stream forever".
+///
+/// A bounded run never sends 0: `--stop-block 1` (only block 0) asks for
+/// blocks up to 1, and the stream loop drops block 1.
+fn firehose_stop_block_num(stop_block: Option<u64>) -> u64 {
+    match stop_block {
+        None => 0,
+        Some(stop_block) => stop_block.saturating_sub(1).max(1),
+    }
+}
+
 /// What the stream loop does when the server ends a stream cleanly (`Ok(None)`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CleanEndAction {
@@ -621,7 +671,7 @@ mod tests {
 
     #[test]
     fn test_endpoint_enables_keepalive_settings() {
-        let client = FirehoseClient::new(test_config("https://example.com"));
+        let client = FirehoseClient::new(test_config("https://example.com")).unwrap();
         let endpoint = client.endpoint().expect("endpoint should build");
         let keepalive = FirehoseClient::endpoint_keepalive_settings();
 
@@ -639,6 +689,63 @@ mod tests {
                 keep_alive_while_idle: true,
             }
         );
+    }
+
+    #[test]
+    fn test_auth_metadata_trims_credentials_from_secret_files() {
+        let mut config = test_config("https://example.com");
+        config.api_key = Some("key-from-k8s-secret\n".to_string());
+        config.jwt_token = Some("  token\r\n".to_string());
+
+        let auth = AuthMetadata::from_config(&config).unwrap();
+        let mut request = tonic::Request::new(());
+        auth.apply(&mut request);
+
+        assert_eq!(
+            request.metadata().get("x-api-key").unwrap(),
+            "key-from-k8s-secret"
+        );
+        assert_eq!(
+            request.metadata().get("authorization").unwrap(),
+            "Bearer token"
+        );
+    }
+
+    #[test]
+    fn test_auth_metadata_ignores_blank_credentials() {
+        let mut config = test_config("https://example.com");
+        config.api_key = Some(" \n".to_string());
+
+        let auth = AuthMetadata::from_config(&config).unwrap();
+        let mut request = tonic::Request::new(());
+        auth.apply(&mut request);
+
+        assert!(request.metadata().get("x-api-key").is_none());
+        assert!(request.metadata().get("authorization").is_none());
+    }
+
+    #[test]
+    fn test_invalid_auth_header_value_is_an_error_not_a_panic() {
+        let mut config = test_config("https://example.com");
+        config.api_key = Some("key\nwith-embedded-newline".to_string());
+        let error = FirehoseClient::new(config).err().expect("invalid API key");
+        assert!(error.to_string().contains("API key"), "{error}");
+
+        let mut config = test_config("https://example.com");
+        config.jwt_token = Some("tok\u{7}en".to_string());
+        let error = FirehoseClient::new(config)
+            .err()
+            .expect("invalid JWT token");
+        assert!(error.to_string().contains("JWT token"), "{error}");
+    }
+
+    #[test]
+    fn test_bounded_request_never_sends_unbounded_stop_block_num() {
+        assert_eq!(firehose_stop_block_num(None), 0);
+        // --stop-block 1 only wants block 0, which Firehose cannot express.
+        assert_eq!(firehose_stop_block_num(Some(1)), 1);
+        assert_eq!(firehose_stop_block_num(Some(2)), 1);
+        assert_eq!(firehose_stop_block_num(Some(200)), 199);
     }
 
     #[test]
@@ -701,7 +808,7 @@ mod tests {
         drop(listener);
 
         let endpoint = format!("http://127.0.0.1:{port}");
-        let client = FirehoseClient::new(test_config(&endpoint));
+        let client = FirehoseClient::new(test_config(&endpoint)).unwrap();
         let err = client
             .healthcheck()
             .await

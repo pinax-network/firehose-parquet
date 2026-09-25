@@ -125,6 +125,11 @@ export SUBSTREAMS_API_TOKEN=your-jwt-token
 You only need `--api-key-envvar` or `--api-token-envvar` when your deployment
 stores credentials under different environment variable names.
 
+Surrounding whitespace is trimmed, so a key mounted from a secret file with a
+trailing newline works. A credential that still contains characters a gRPC
+header cannot carry (control characters or line breaks inside the value)
+fails at startup with an error.
+
 ### Docker
 
 The image is published to GitHub Container Registry on each release:
@@ -360,8 +365,8 @@ rather than the default workflow:
 |---|---|
 | `--cursor-override` | Intentionally restart from new CLI bounds instead of reusing the stored Firehose cursor |
 | `--skip-missing-blocks` | Sparse chains legitimately skip block numbers and you want probes/streams to continue past gaps |
-| `--stream-idle-timeout-secs <N>` | Supervising long-lived pipelines that should self-reconnect after a silent stream stall |
-| `--reconnect-stall-timeout-secs <N>` | Fail fast when reconnect loops should hand control back to an external supervisor |
+| `--stream-idle-timeout-secs <N>` | Supervising long-lived pipelines that should self-reconnect after a silent stream stall (default 120; `0` disables) |
+| `--reconnect-stall-timeout-secs <N>` | Fail fast when reconnect loops should hand control back to an external supervisor (default 900; `0` disables) |
 
 ### Advanced S3 / deployment knobs
 
@@ -380,7 +385,11 @@ custom deployment environments:
 `--flush-rows` and `--flush-interval-secs` flush mapper state into the writer,
 not directly to disk/S3. `--flush-bytes` also sets the writer's target part
 size, but no `--flush-*` flag guarantees immediate file materialization on its
-own. Watch for the runtime logs that distinguish `mapper flush emitted record
+own. `--flush-bytes 0` disables byte-based flushing, as it does for `merge` and
+`rollup`: files are then only cut by the other `--flush-*` triggers, at
+partition boundaries, or at the end of the run (with `--partition none` and no
+other trigger, everything stays in memory until the run ends, and a warning is
+logged). Watch for the runtime logs that distinguish `mapper flush emitted record
 batches`, `writer buffered mapper flush`, and `writer materialized parquet
 output`. On graceful shutdown, the process now logs any buffered rows/bytes that
 were intentionally left unmaterialized to preserve deterministic partition
