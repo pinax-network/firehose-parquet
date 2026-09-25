@@ -25,8 +25,10 @@ issue labels and green CI alone are not acceptance evidence. See the
    (#476, PR #584) are merged. Probe (#485) work was recovered into PR #583,
    passed 779 combined tests with the timestamp fix and CI, and merged as
    `3cf984b`; its issue is closed. Correct partition-index completeness/non-monotonic timestamps (#486)
-   and health/metrics semantics (#475).
-5. Finish schema fixes with repeatable raw-to-output fixtures (#499). Prefer
+   remains in progress. Health/metrics semantics (#475, PR #587) are merged
+   after 787 tests, real CLI regression and CI.
+5. The initial EVM golden fixture (#499, PR #588) is merged and runs offline
+   in CI. Continue schema fixes and add field-specific fixtures as needed. Prefer
    correctness and measured performance improvements before broad refactors.
 
 ## Existing PRs and remaining qualification
@@ -69,7 +71,7 @@ and test against current main. Never reset or discard the previous worktree.
   classification (#501, PR #586) and explicit instruction positions (#502,
   PR #585) also passed raw-data comparisons and are merged with issues closed.
 - Operational contracts: #474 covers reversible stream options/output semantics;
-  #475 metrics/readiness remains actionable. The #477 writer simplification and
+  #475 metrics/readiness is merged. The #477 writer simplification and
   #476 malformed-metadata handling are merged; the #468 journal is in progress.
 - Performance: recover #513 and #522 before starting duplicate work. Measure
   #503/#565, #515, #520 and #524 on representative data. #516 depends on durable
