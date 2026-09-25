@@ -151,7 +151,7 @@ for table in sorted(path.name for path in with_votes.iterdir() if path.is_dir())
         columns = [field['column_name'] for field in old_fields]
         assert [field for field in new_fields if field['column_name'] in columns] == old_fields
         projection = ', '.join('"' + name + '"' for name in columns)
-        result = query(f'select (select count(*) from {current}) rows, '
+        result = query(f'select (select count(*) from {current}) as row_count, '
                        f'(select count(*) from (select {projection} from {current} except all select * from {previous})) new_only, '
                        f'(select count(*) from (select * from {previous} except all select {projection} from {current})) old_only')[0]
         assert result['new_only'] == result['old_only'] == 0, (table, label, result)
