@@ -133,6 +133,19 @@ fn evm_block_with_every_table() -> eth::Block {
     // A system call carrying one of each state change feeds every system_* table.
     let system_call = call.clone();
     block.system_calls.push(system_call);
+    block.withdrawals.push(eth::Withdrawal {
+        index: 1,
+        validator_index: 2,
+        address: vec![0xaa; 20],
+        amount: 3,
+    });
+    let tx = &mut block.transaction_traces[0];
+    tx.access_list.push(eth::AccessTuple {
+        address: vec![0xaa; 20],
+        storage_keys: vec![vec![0x05; 32]],
+    });
+    tx.set_code_authorizations
+        .push(evm::mapper::tests::make_test_set_code_authorization());
     block
 }
 

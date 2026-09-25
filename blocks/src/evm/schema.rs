@@ -107,6 +107,56 @@ pub fn logs_schema(include_fork_step: bool, encoding: &EncodeBytes) -> Schema {
     Schema::new(fields)
 }
 
+pub fn withdrawals_schema(include_fork_step: bool, encoding: &EncodeBytes) -> Schema {
+    let bd = bytes_data_type(encoding);
+    let mut fields = canonical_fields_with_encoding(encoding);
+    fields.extend(vec![
+        Field::new("block_number", DataType::UInt64, false),
+        Field::new("index", DataType::UInt64, false),
+        Field::new("validator_index", DataType::UInt64, false),
+        Field::new("address", bd, false),
+        Field::new("amount_gwei", DataType::UInt64, false),
+    ]);
+    maybe_fork_step(&mut fields, include_fork_step);
+    Schema::new(fields)
+}
+
+pub fn access_lists_schema(include_fork_step: bool, encoding: &EncodeBytes) -> Schema {
+    let bd = bytes_data_type(encoding);
+    let mut fields = canonical_fields_with_encoding(encoding);
+    fields.extend(vec![
+        Field::new("block_number", DataType::UInt64, false),
+        Field::new("tx_hash", bd.clone(), false),
+        Field::new("tx_index", DataType::UInt32, false),
+        Field::new("access_index", DataType::UInt32, false),
+        Field::new("address", bd, false),
+        Field::new("storage_keys", BytesListColumn::data_type(encoding), false),
+    ]);
+    maybe_fork_step(&mut fields, include_fork_step);
+    Schema::new(fields)
+}
+
+pub fn set_code_authorizations_schema(include_fork_step: bool, encoding: &EncodeBytes) -> Schema {
+    let bd = bytes_data_type(encoding);
+    let mut fields = canonical_fields_with_encoding(encoding);
+    fields.extend(vec![
+        Field::new("block_number", DataType::UInt64, false),
+        Field::new("tx_hash", bd.clone(), false),
+        Field::new("tx_index", DataType::UInt32, false),
+        Field::new("authorization_index", DataType::UInt32, false),
+        Field::new("chain_id", DataType::Utf8, false),
+        Field::new("address", bd.clone(), true),
+        Field::new("nonce", DataType::UInt64, false),
+        Field::new("v", DataType::UInt32, false),
+        Field::new("r", bd.clone(), false),
+        Field::new("s", bd.clone(), false),
+        Field::new("authority", bd, true),
+        Field::new("discarded", DataType::Boolean, false),
+    ]);
+    maybe_fork_step(&mut fields, include_fork_step);
+    Schema::new(fields)
+}
+
 // ==========================================================================
 // Extended tables (EXTENDED detail level only)
 // ==========================================================================
@@ -384,13 +434,23 @@ pub fn system_account_creations_schema(include_fork_step: bool, encoding: &Encod
 }
 
 /// Standard table names (available at BASE detail level).
-pub const BASE_TABLE_NAMES: [&str; 3] = ["blocks", "transactions", "logs"];
-
-/// Extended table names (available at EXTENDED detail level).
-pub const EXTENDED_TABLE_NAMES: [&str; 17] = [
+pub const BASE_TABLE_NAMES: [&str; 6] = [
     "blocks",
     "transactions",
     "logs",
+    "withdrawals",
+    "access_lists",
+    "set_code_authorizations",
+];
+
+/// Extended table names (available at EXTENDED detail level).
+pub const EXTENDED_TABLE_NAMES: [&str; 20] = [
+    "blocks",
+    "transactions",
+    "logs",
+    "withdrawals",
+    "access_lists",
+    "set_code_authorizations",
     "calls",
     "balance_changes",
     "code_changes",

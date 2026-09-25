@@ -26,6 +26,11 @@ fn bigint_to_string(bi: &Option<eth::BigInt>) -> String {
     }
 }
 
+/// Decimal string of a big-endian unsigned integer; `"0"` when empty.
+fn bytes_to_decimal(bytes: &[u8]) -> String {
+    num_bigint::BigUint::from_bytes_be(bytes).to_string()
+}
+
 /// Append `bytes`, or null when empty. For header fields that are absent
 /// before the fork that introduced them (e.g. `withdrawals_root`).
 fn append_non_empty_bytes(builder: &mut BytesColumn, bytes: &[u8]) {
@@ -256,6 +261,9 @@ pub struct EvmBlockMapper {
     blocks: EvmBlocksBuilder,
     transactions: EvmTransactionsBuilder,
     logs: EvmLogsBuilder,
+    withdrawals: EvmWithdrawalsBuilder,
+    access_lists: EvmAccessListsBuilder,
+    set_code_authorizations: EvmSetCodeAuthorizationsBuilder,
     // Extended builders (transaction-scoped)
     calls: Option<EvmCallsBuilder>,
     balance_changes: Option<EvmBalanceChangesBuilder>,
@@ -276,6 +284,9 @@ pub struct EvmBlockMapper {
     blocks_schema: Schema,
     transactions_schema: Schema,
     logs_schema: Schema,
+    withdrawals_schema: Schema,
+    access_lists_schema: Schema,
+    set_code_authorizations_schema: Schema,
     calls_schema: Schema,
     balance_changes_schema: Schema,
     code_changes_schema: Schema,
@@ -307,6 +318,9 @@ impl EvmBlockMapper {
             blocks: EvmBlocksBuilder::new(ifs, enc),
             transactions: EvmTransactionsBuilder::new(ifs, enc),
             logs: EvmLogsBuilder::new(ifs, enc),
+            withdrawals: EvmWithdrawalsBuilder::new(ifs, enc),
+            access_lists: EvmAccessListsBuilder::new(ifs, enc),
+            set_code_authorizations: EvmSetCodeAuthorizationsBuilder::new(ifs, enc),
             calls: if extended {
                 Some(EvmCallsBuilder::new(ifs, enc))
             } else {
@@ -380,6 +394,9 @@ impl EvmBlockMapper {
             blocks_schema: schema::blocks_schema(ifs, enc),
             transactions_schema: schema::transactions_schema(ifs, enc),
             logs_schema: schema::logs_schema(ifs, enc),
+            withdrawals_schema: schema::withdrawals_schema(ifs, enc),
+            access_lists_schema: schema::access_lists_schema(ifs, enc),
+            set_code_authorizations_schema: schema::set_code_authorizations_schema(ifs, enc),
             calls_schema: schema::calls_schema(ifs, enc),
             balance_changes_schema: schema::balance_changes_schema(ifs, enc),
             code_changes_schema: schema::code_changes_schema(ifs, enc),
@@ -489,6 +506,12 @@ impl EvmBlockMapper {
             header.map_or(&[][..], |h| &h.requests_hash),
         );
         append_fork_step(&mut self.blocks.fork_step, fork_step);
+
+        // -- withdrawals (Shanghai and later) --
+        for withdrawal in &block.withdrawals {
+            self.withdrawals
+                .append(number, withdrawal, identity, fork_step);
+        }
 
         // -- transaction traces --
         for tx in &block.transaction_traces {
@@ -611,6 +634,28 @@ impl EvmBlockMapper {
             .append_value(tx.begin_ordinal);
         self.transactions.end_ordinal.append_value(tx.end_ordinal);
         append_fork_step(&mut self.transactions.fork_step, fork_step);
+
+        // -- access list and EIP-7702 authorizations --
+        for (access_index, tuple) in tx.access_list.iter().enumerate() {
+            self.access_lists.append(
+                block_number,
+                tx,
+                access_index as u32,
+                tuple,
+                identity,
+                fork_step,
+            );
+        }
+        for (authorization_index, auth) in tx.set_code_authorizations.iter().enumerate() {
+            self.set_code_authorizations.append(
+                block_number,
+                tx,
+                authorization_index as u32,
+                auth,
+                identity,
+                fork_step,
+            );
+        }
 
         // -- logs from receipt --
         if let Some(ref receipt) = tx.receipt {
@@ -839,6 +884,19 @@ impl BlockMapper for EvmBlockMapper {
             self.transactions.finish(&self.transactions_schema)?,
         );
         result.insert("logs".to_string(), self.logs.finish(&self.logs_schema)?);
+        result.insert(
+            "withdrawals".to_string(),
+            self.withdrawals.finish(&self.withdrawals_schema)?,
+        );
+        result.insert(
+            "access_lists".to_string(),
+            self.access_lists.finish(&self.access_lists_schema)?,
+        );
+        result.insert(
+            "set_code_authorizations".to_string(),
+            self.set_code_authorizations
+                .finish(&self.set_code_authorizations_schema)?,
+        );
 
         if self.extended {
             if let Some(ref mut b) = self.calls {
@@ -933,7 +991,10 @@ impl BlockMapper for EvmBlockMapper {
             .canonical
             .len()
             .max(self.transactions.canonical.len())
-            .max(self.logs.canonical.len());
+            .max(self.logs.canonical.len())
+            .max(self.withdrawals.canonical.len())
+            .max(self.access_lists.canonical.len())
+            .max(self.set_code_authorizations.canonical.len());
         if let Some(ref b) = self.calls {
             max = max.max(b.canonical.len());
         }
@@ -982,7 +1043,10 @@ impl BlockMapper for EvmBlockMapper {
     fn total_rows(&self) -> usize {
         let mut total = self.blocks.canonical.len()
             + self.transactions.canonical.len()
-            + self.logs.canonical.len();
+            + self.logs.canonical.len()
+            + self.withdrawals.canonical.len()
+            + self.access_lists.canonical.len()
+            + self.set_code_authorizations.canonical.len();
         if let Some(ref b) = self.calls {
             total += b.canonical.len();
         }
@@ -1106,6 +1170,12 @@ impl BlockMapper for EvmBlockMapper {
             ("blocks", blocks),
             ("transactions", transactions),
             ("logs", logs),
+            ("withdrawals", self.withdrawals.estimated_bytes()),
+            ("access_lists", self.access_lists.estimated_bytes()),
+            (
+                "set_code_authorizations",
+                self.set_code_authorizations.estimated_bytes(),
+            ),
         ];
         // calls (tx-level)
         macro_rules! est_calls {
@@ -1649,6 +1719,246 @@ impl EvmLogsBuilder {
             self.topic3.finish(),
             self.data.finish(),
             Arc::new(self.ordinal.finish()),
+        ]);
+        finish_fork_step(&mut self.fork_step, &mut columns);
+        Ok(RecordBatch::try_new(Arc::new(schema.clone()), columns)?)
+    }
+}
+
+struct EvmWithdrawalsBuilder {
+    canonical: CanonicalBuilder,
+    block_number: UInt64Builder,
+    index: UInt64Builder,
+    validator_index: UInt64Builder,
+    address: BytesColumn,
+    amount_gwei: UInt64Builder,
+    fork_step: Option<StringBuilder>,
+}
+
+impl EvmWithdrawalsBuilder {
+    fn new(include_fork_step: bool, encoding: &EncodeBytes) -> Self {
+        Self {
+            canonical: CanonicalBuilder::with_encoding(encoding),
+            block_number: UInt64Builder::new(),
+            index: UInt64Builder::new(),
+            validator_index: UInt64Builder::new(),
+            address: BytesColumn::new(encoding),
+            amount_gwei: UInt64Builder::new(),
+            fork_step: mk_fork_step(include_fork_step),
+        }
+    }
+
+    fn append(
+        &mut self,
+        block_number: u64,
+        withdrawal: &eth::Withdrawal,
+        identity: &PreparedIdentity,
+        fork_step: Option<&str>,
+    ) {
+        self.canonical.append(identity);
+        self.block_number.append_value(block_number);
+        self.index.append_value(withdrawal.index);
+        self.validator_index
+            .append_value(withdrawal.validator_index);
+        self.address.append_value(&withdrawal.address);
+        self.amount_gwei.append_value(withdrawal.amount);
+        append_fork_step(&mut self.fork_step, fork_step);
+    }
+
+    fn estimated_bytes(&self) -> usize {
+        self.canonical.estimated_bytes()
+            + est_u64(&self.block_number)
+            + est_u64(&self.index)
+            + est_u64(&self.validator_index)
+            + self.address.estimated_bytes()
+            + est_u64(&self.amount_gwei)
+            + est_opt_str(&self.fork_step)
+    }
+
+    fn finish(&mut self, schema: &Schema) -> anyhow::Result<RecordBatch> {
+        let mut columns = self.canonical.finish();
+        columns.extend(vec![
+            Arc::new(self.block_number.finish()) as Arc<dyn arrow::array::Array>,
+            Arc::new(self.index.finish()),
+            Arc::new(self.validator_index.finish()),
+            self.address.finish(),
+            Arc::new(self.amount_gwei.finish()),
+        ]);
+        finish_fork_step(&mut self.fork_step, &mut columns);
+        Ok(RecordBatch::try_new(Arc::new(schema.clone()), columns)?)
+    }
+}
+
+struct EvmAccessListsBuilder {
+    canonical: CanonicalBuilder,
+    block_number: UInt64Builder,
+    tx_hash: BytesColumn,
+    tx_index: UInt32Builder,
+    access_index: UInt32Builder,
+    address: BytesColumn,
+    storage_keys: BytesListColumn,
+    fork_step: Option<StringBuilder>,
+}
+
+impl EvmAccessListsBuilder {
+    fn new(include_fork_step: bool, encoding: &EncodeBytes) -> Self {
+        Self {
+            canonical: CanonicalBuilder::with_encoding(encoding),
+            block_number: UInt64Builder::new(),
+            tx_hash: BytesColumn::new(encoding),
+            tx_index: UInt32Builder::new(),
+            access_index: UInt32Builder::new(),
+            address: BytesColumn::new(encoding),
+            storage_keys: BytesListColumn::new(encoding),
+            fork_step: mk_fork_step(include_fork_step),
+        }
+    }
+
+    fn append(
+        &mut self,
+        block_number: u64,
+        tx: &eth::TransactionTrace,
+        access_index: u32,
+        tuple: &eth::AccessTuple,
+        identity: &PreparedIdentity,
+        fork_step: Option<&str>,
+    ) {
+        self.canonical.append(identity);
+        self.block_number.append_value(block_number);
+        self.tx_hash.append_value(&tx.hash);
+        self.tx_index.append_value(tx.index);
+        self.access_index.append_value(access_index);
+        self.address.append_value(&tuple.address);
+        for key in &tuple.storage_keys {
+            self.storage_keys.append_value(key);
+        }
+        self.storage_keys.append(true);
+        append_fork_step(&mut self.fork_step, fork_step);
+    }
+
+    fn estimated_bytes(&mut self) -> usize {
+        self.canonical.estimated_bytes()
+            + est_u64(&self.block_number)
+            + self.tx_hash.estimated_bytes()
+            + est_u32(&self.tx_index)
+            + est_u32(&self.access_index)
+            + self.address.estimated_bytes()
+            + self.storage_keys.estimated_bytes()
+            + est_opt_str(&self.fork_step)
+    }
+
+    fn finish(&mut self, schema: &Schema) -> anyhow::Result<RecordBatch> {
+        let mut columns = self.canonical.finish();
+        columns.extend(vec![
+            Arc::new(self.block_number.finish()) as Arc<dyn arrow::array::Array>,
+            self.tx_hash.finish(),
+            Arc::new(self.tx_index.finish()),
+            Arc::new(self.access_index.finish()),
+            self.address.finish(),
+            self.storage_keys.finish(),
+        ]);
+        finish_fork_step(&mut self.fork_step, &mut columns);
+        Ok(RecordBatch::try_new(Arc::new(schema.clone()), columns)?)
+    }
+}
+
+struct EvmSetCodeAuthorizationsBuilder {
+    canonical: CanonicalBuilder,
+    block_number: UInt64Builder,
+    tx_hash: BytesColumn,
+    tx_index: UInt32Builder,
+    authorization_index: UInt32Builder,
+    chain_id: StringBuilder,
+    address: BytesColumn,
+    nonce: UInt64Builder,
+    v: UInt32Builder,
+    r: BytesColumn,
+    s: BytesColumn,
+    authority: BytesColumn,
+    discarded: BooleanBuilder,
+    fork_step: Option<StringBuilder>,
+}
+
+impl EvmSetCodeAuthorizationsBuilder {
+    fn new(include_fork_step: bool, encoding: &EncodeBytes) -> Self {
+        Self {
+            canonical: CanonicalBuilder::with_encoding(encoding),
+            block_number: UInt64Builder::new(),
+            tx_hash: BytesColumn::new(encoding),
+            tx_index: UInt32Builder::new(),
+            authorization_index: UInt32Builder::new(),
+            chain_id: StringBuilder::new(),
+            address: BytesColumn::new(encoding),
+            nonce: UInt64Builder::new(),
+            v: UInt32Builder::new(),
+            r: BytesColumn::new(encoding),
+            s: BytesColumn::new(encoding),
+            authority: BytesColumn::new(encoding),
+            discarded: BooleanBuilder::new(),
+            fork_step: mk_fork_step(include_fork_step),
+        }
+    }
+
+    fn append(
+        &mut self,
+        block_number: u64,
+        tx: &eth::TransactionTrace,
+        authorization_index: u32,
+        auth: &eth::SetCodeAuthorization,
+        identity: &PreparedIdentity,
+        fork_step: Option<&str>,
+    ) {
+        self.canonical.append(identity);
+        self.block_number.append_value(block_number);
+        self.tx_hash.append_value(&tx.hash);
+        self.tx_index.append_value(tx.index);
+        self.authorization_index.append_value(authorization_index);
+        self.chain_id.append_value(bytes_to_decimal(&auth.chain_id));
+        append_non_empty_bytes(&mut self.address, &auth.address);
+        self.nonce.append_value(auth.nonce);
+        self.v.append_value(auth.v);
+        self.r.append_value(&auth.r);
+        self.s.append_value(&auth.s);
+        append_non_empty_bytes(
+            &mut self.authority,
+            auth.authority.as_deref().unwrap_or_default(),
+        );
+        self.discarded.append_value(auth.discarded);
+        append_fork_step(&mut self.fork_step, fork_step);
+    }
+
+    fn estimated_bytes(&self) -> usize {
+        self.canonical.estimated_bytes()
+            + est_u64(&self.block_number)
+            + self.tx_hash.estimated_bytes()
+            + est_u32(&self.tx_index)
+            + est_u32(&self.authorization_index)
+            + est_str(&self.chain_id)
+            + self.address.estimated_bytes()
+            + est_u64(&self.nonce)
+            + est_u32(&self.v)
+            + self.r.estimated_bytes()
+            + self.s.estimated_bytes()
+            + self.authority.estimated_bytes()
+            + est_bool(&self.discarded)
+            + est_opt_str(&self.fork_step)
+    }
+
+    fn finish(&mut self, schema: &Schema) -> anyhow::Result<RecordBatch> {
+        let mut columns = self.canonical.finish();
+        columns.extend(vec![
+            Arc::new(self.block_number.finish()) as Arc<dyn arrow::array::Array>,
+            self.tx_hash.finish(),
+            Arc::new(self.tx_index.finish()),
+            Arc::new(self.authorization_index.finish()),
+            Arc::new(self.chain_id.finish()),
+            self.address.finish(),
+            Arc::new(self.nonce.finish()),
+            Arc::new(self.v.finish()),
+            self.r.finish(),
+            self.s.finish(),
+            self.authority.finish(),
+            Arc::new(self.discarded.finish()),
         ]);
         finish_fork_step(&mut self.fork_step, &mut columns);
         Ok(RecordBatch::try_new(Arc::new(schema.clone()), columns)?)
@@ -3177,9 +3487,9 @@ pub(crate) mod tests {
     #[test]
     fn test_table_names() {
         let mapper_base = EvmBlockMapper::new(false, false, EncodeBytes::Hex, false);
-        assert_eq!(mapper_base.table_names().len(), 3);
+        assert_eq!(mapper_base.table_names().len(), 6);
         let mapper_ext = EvmBlockMapper::new(true, false, EncodeBytes::Hex, false);
-        assert_eq!(mapper_ext.table_names().len(), 17);
+        assert_eq!(mapper_ext.table_names().len(), 20);
     }
 
     #[test]
@@ -4154,5 +4464,152 @@ pub(crate) mod tests {
         let hashes = list.as_any().downcast_ref::<BinaryArray>().unwrap();
         assert_eq!(hashes.value(0), [0x01; 32].as_slice());
         assert_eq!(hashes.value(1), [0x02; 32].as_slice());
+    }
+
+    // -- withdrawals, access_lists and set_code_authorizations (#497) --
+
+    pub(crate) fn make_test_set_code_authorization() -> eth::SetCodeAuthorization {
+        eth::SetCodeAuthorization {
+            discarded: false,
+            chain_id: vec![0x01],
+            address: vec![0xde; 20],
+            nonce: 7,
+            v: 1,
+            r: vec![0x0a; 32],
+            s: vec![0x0b; 32],
+            authority: Some(vec![0xa1; 20]),
+        }
+    }
+
+    fn make_block_with_new_tables() -> eth::Block {
+        let mut block = make_test_evm_block(600);
+        block.withdrawals = vec![
+            eth::Withdrawal {
+                index: 100,
+                validator_index: 200,
+                address: vec![0x11; 20],
+                amount: 18_000_000,
+            },
+            eth::Withdrawal {
+                index: 101,
+                validator_index: 201,
+                address: vec![0x12; 20],
+                amount: 0,
+            },
+        ];
+        let tx = &mut block.transaction_traces[0];
+        tx.index = 4;
+        tx.access_list = vec![
+            eth::AccessTuple {
+                address: vec![0x21; 20],
+                storage_keys: vec![vec![0x01; 32], vec![0x02; 32]],
+            },
+            eth::AccessTuple {
+                address: vec![0x22; 20],
+                storage_keys: vec![],
+            },
+        ];
+        let mut discarded = make_test_set_code_authorization();
+        discarded.discarded = true;
+        discarded.authority = None;
+        discarded.address = vec![];
+        discarded.chain_id = vec![];
+        tx.set_code_authorizations = vec![make_test_set_code_authorization(), discarded];
+        block
+    }
+
+    #[test]
+    fn test_new_tables_are_base_tables() {
+        let block_bytes = prost::Message::encode_to_vec(&make_block_with_new_tables());
+        for extended in [false, true] {
+            let mut mapper = EvmBlockMapper::new(extended, false, EncodeBytes::Hex, true);
+            mapper
+                .map_block(&block_bytes, &BlockIdentity::default(), None)
+                .unwrap();
+            let names: Vec<String> = mapper.table_names().iter().map(|n| n.to_string()).collect();
+            let batches = mapper.flush().unwrap();
+            for table in ["withdrawals", "access_lists", "set_code_authorizations"] {
+                assert!(
+                    names.iter().any(|n| n == table),
+                    "{table} extended={extended}"
+                );
+                assert!(batches[table].num_rows() > 0, "{table} extended={extended}");
+            }
+        }
+    }
+
+    #[test]
+    fn test_withdrawals_rows() {
+        let batches = map_extended(&make_block_with_new_tables());
+        let w = &batches["withdrawals"];
+        assert_eq!(u64_values(w, "block_number"), vec![Some(600), Some(600)]);
+        assert_eq!(u64_values(w, "index"), vec![Some(100), Some(101)]);
+        assert_eq!(u64_values(w, "validator_index"), vec![Some(200), Some(201)]);
+        assert_eq!(get_string_value(w, "address", 0), hex(&[0x11; 20]));
+        assert_eq!(
+            u64_values(w, "amount_gwei"),
+            vec![Some(18_000_000), Some(0)]
+        );
+    }
+
+    #[test]
+    fn test_access_lists_rows() {
+        let batches = map_extended(&make_block_with_new_tables());
+        let a = &batches["access_lists"];
+        assert_eq!(a.num_rows(), 2);
+        assert_eq!(get_string_value(a, "tx_hash", 0), hex(&[0xbb; 32]));
+        assert_eq!(u32_values(a, "tx_index"), vec![Some(4), Some(4)]);
+        assert_eq!(u32_values(a, "access_index"), vec![Some(0), Some(1)]);
+        assert_eq!(get_string_value(a, "address", 1), hex(&[0x22; 20]));
+        assert_eq!(
+            list_values(a, "storage_keys", 0),
+            vec![hex(&[0x01; 32]), hex(&[0x02; 32])]
+        );
+        assert!(list_values(a, "storage_keys", 1).is_empty());
+    }
+
+    #[test]
+    fn test_set_code_authorizations_rows() {
+        let batches = map_extended(&make_block_with_new_tables());
+        let s = &batches["set_code_authorizations"];
+        assert_eq!(s.num_rows(), 2);
+        assert_eq!(u32_values(s, "tx_index"), vec![Some(4), Some(4)]);
+        assert_eq!(u32_values(s, "authorization_index"), vec![Some(0), Some(1)]);
+        assert_eq!(
+            string_values(s, "chain_id"),
+            vec![Some("1".to_string()), Some("0".to_string())]
+        );
+        assert_eq!(
+            string_values(s, "address"),
+            vec![Some(hex(&[0xde; 20])), None]
+        );
+        assert_eq!(u64_values(s, "nonce"), vec![Some(7), Some(7)]);
+        assert_eq!(u32_values(s, "v"), vec![Some(1), Some(1)]);
+        assert_eq!(get_string_value(s, "r", 0), hex(&[0x0a; 32]));
+        assert_eq!(get_string_value(s, "s", 0), hex(&[0x0b; 32]));
+        assert_eq!(
+            string_values(s, "authority"),
+            vec![Some(hex(&[0xa1; 20])), None]
+        );
+        assert_eq!(bool_values(s, "discarded"), vec![false, true]);
+    }
+
+    #[test]
+    fn test_failed_tx_access_list_and_authorizations_written() {
+        let mut block = make_block_with_new_tables();
+        block.transaction_traces[0].status = eth::TransactionTraceStatus::Reverted as i32;
+        let batches = map_extended(&block);
+        assert_eq!(batches["access_lists"].num_rows(), 2);
+        assert_eq!(batches["set_code_authorizations"].num_rows(), 2);
+
+        let block_bytes = prost::Message::encode_to_vec(&block);
+        let mut mapper = EvmBlockMapper::new(true, false, EncodeBytes::Hex, false);
+        mapper
+            .map_block(&block_bytes, &BlockIdentity::default(), None)
+            .unwrap();
+        let batches = mapper.flush().unwrap();
+        assert_eq!(batches["access_lists"].num_rows(), 0);
+        assert_eq!(batches["set_code_authorizations"].num_rows(), 0);
+        assert_eq!(batches["withdrawals"].num_rows(), 2);
     }
 }

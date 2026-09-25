@@ -236,6 +236,20 @@ Details:
 
 Migration: files written before and after this change have different schemas for these 5 tables. Query them separately or with `union_by_name`, and do not `merge` or `rollup` old and new files together.
 
+## New features
+
+### EVM: new `withdrawals`, `access_lists` and `set_code_authorizations` tables (#497)
+
+Firehose provides beacon-chain withdrawals (16 per mainnet block), transaction access lists (EIP-2930) and EIP-7702 authorizations, but none of them were written. Withdrawals only showed up as `system_balance_changes` rows with reason `WITHDRAWAL`, in wei and without the validator or withdrawal index.
+
+Three new EVM tables, written at both detail levels (also with `--without-extended`):
+
+- `withdrawals`: one row per withdrawal, with `index`, `validator_index`, `address` and `amount_gwei` (in gwei, not wei).
+- `access_lists`: one row per access-list entry, with `tx_hash`, `tx_index`, `access_index`, `address` and `storage_keys` (a list).
+- `set_code_authorizations`: one row per EIP-7702 authorization, with `tx_hash`, `tx_index`, `authorization_index`, `chain_id` (decimal), `address` (delegation target), `nonce`, `v`, `r`, `s`, `authority` and `discarded`.
+
+Rows of `access_lists` and `set_code_authorizations` follow their transaction: they are written for failed transactions and dropped by `--exclude-failed-transactions`. EVM outputs now have 6 base tables and 20 with extended detail.
+
 ## Fixes
 
 - **CLI values that crashed or misbehaved are now rejected or consistent (#471).**
