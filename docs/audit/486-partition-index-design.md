@@ -1,6 +1,6 @@
 # Partition index correctness design (#486)
 
-Status: implementation, strict consumers, combined validation and bounded live qualification are complete; publication is awaiting the ownership foundation base.
+Status: implementation, strict consumers, combined validation and bounded live qualification are complete; GitHub review/CI and issue lifecycle are tracked by the pull request.
 
 Issue: <https://github.com/pinax-network/firehose-parquet/issues/486>
 Base: `0b38efcf1eb417503cc0be15b4901a359019e75f`.
@@ -373,3 +373,9 @@ existing ignored and no failures. Workspace build and formatting passed; log:
 `/tmp/fireparq-486-foundation-combined.log`. The existing unused-assignment
 warning in final mapper metrics remains unchanged. No additional live request
 was needed for this Antelope/ownership-doc integration.
+
+Foundation PR #591 then merged as `78ceb98001885df60172c55963e08da0f73f1283`.
+Merging that actual `origin/main` into this branch changed no tree content
+(tree `ce704d7000a9233baa0b7d1e457e451e6a9220b9` before and after), so the 855-test
+combined result remains applicable. The following documentation-only update
+records this publication base; no additional runtime retest was needed.
