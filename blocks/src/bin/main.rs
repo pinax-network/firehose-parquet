@@ -1163,6 +1163,83 @@ fn stream_resume_cursor(
     }
 }
 
+/// Drops blocks below the effective start block before they are mapped.
+///
+/// Without a resume cursor, a Firehose request whose start block is above the
+/// last irreversible block (LIB) is served from LIB+1, so the first blocks can
+/// be below `--start-block`. With a cursor the server resumes after the cursor,
+/// which is never below the run's start block, so the filter is only a guard.
+#[derive(Debug)]
+struct StartBlockFilter {
+    start_block: Option<u64>,
+    skipped: u64,
+}
+
+impl StartBlockFilter {
+    fn new(start_block: Option<u64>) -> Self {
+        Self {
+            start_block,
+            skipped: 0,
+        }
+    }
+
+    /// Returns `true` when the block should be mapped. Blocks below the start
+    /// block are counted and rejected; the first one is logged.
+    fn admit(&mut self, block_num: u64) -> bool {
+        match self.start_block {
+            Some(start_block) if block_num < start_block => {
+                if self.skipped == 0 {
+                    warn!(
+                        block_num,
+                        start_block,
+                        "Firehose streamed a block below --start-block (a start above the last irreversible block is served from LIB+1); skipping blocks below the start block"
+                    );
+                }
+                self.skipped += 1;
+                false
+            }
+            _ => true,
+        }
+    }
+}
+
+/// Chains whose block numbers can legitimately have gaps (skipped slots or
+/// heights), so a bounded range may end below `stop_block - 1`.
+fn block_type_allows_block_number_gaps(block_type: &str) -> bool {
+    matches!(block_type, "solana" | "near" | "beacon")
+}
+
+/// Check that a bounded stream which ended cleanly reached its last requested
+/// block (`stop_block - 1`). `last_block_num` is the highest block processed
+/// by this run or recorded in the cursor it resumed from.
+///
+/// On chains without block-number gaps an early end is an error, so a bounded
+/// run never exits 0 with part of its range missing. The output and cursor
+/// already cover the blocks received, so a rerun resumes after them.
+fn ensure_bounded_stream_reached_stop(
+    stop_block: u64,
+    last_block_num: Option<u64>,
+    block_number_gaps_allowed: bool,
+) -> Result<()> {
+    let last_requested_block = stop_block.saturating_sub(1);
+    if last_block_num.is_some_and(|block| block >= last_requested_block) {
+        return Ok(());
+    }
+    if block_number_gaps_allowed {
+        warn!(
+            last_block_num = ?last_block_num,
+            last_requested_block,
+            "stream ended below the last requested block; the server has no more blocks in the range (skipped slots)"
+        );
+        return Ok(());
+    }
+    let reached =
+        last_block_num.map_or_else(|| "no block".to_string(), |block| format!("block {block}"));
+    Err(anyhow!(
+        "Firehose stream ended at {reached}, before the last requested block {last_requested_block} (--stop-block {stop_block} is exclusive). The output and cursor cover the blocks received; rerun to resume"
+    ))
+}
+
 fn validate_block_range_alignment(
     explicit_start_block: Option<u64>,
     effective_start_block: Option<u64>,
@@ -1354,6 +1431,13 @@ async fn run_partitions_build(
 
     let existing_rows = load_existing_partitions_build_rows(&partitions_index, aws, overwrite)?;
     log_existing_partitions_index_state(&partitions_index, &existing_rows, overwrite);
+    ensure_existing_partitions_index_mode(
+        &partitions_index,
+        &existing_rows,
+        live,
+        resume,
+        overwrite,
+    )?;
 
     // Validate existing file metadata matches current parameters (prevent mixing)
     if !existing_rows.is_empty() {
@@ -1365,7 +1449,21 @@ async fn run_partitions_build(
         )?;
     }
 
-    let existing_resume_block = existing_rows.iter().map(|row| row.stop_block).max();
+    let should_resume_from_existing = (live || resume) && !overwrite;
+    let resumed = if should_resume_from_existing && !existing_rows.is_empty() {
+        let (mut builder, resume_start_block) = PartitionIndexBuilder::resume_from_existing(
+            chain.clone(),
+            partition_types.clone(),
+            existing_rows.clone(),
+        )?;
+        if let Some(brs) = block_range_size {
+            builder = builder.with_block_range_size(brs);
+        }
+        Some((builder, resume_start_block))
+    } else {
+        None
+    };
+    let resumed_from_block = resumed.as_ref().map(|(_, frontier)| *frontier);
 
     let cursor_location = if !live && chain_output_root.starts_with("s3://") {
         let (bucket, _) = firehose_parquet::writer::parse_s3_url(&chain_output_root)?;
@@ -1385,115 +1483,71 @@ async fn run_partitions_build(
         None
     };
 
-    let inferred_start_block = if live {
-        if let Some(resume_block) = existing_resume_block {
-            if let Some(explicit_start_block) = start_block {
-                if explicit_start_block != resume_block {
-                    return Err(anyhow!(
-                        "--live resumes from existing partitions.parquet frontier {}; explicit --start-block {} does not match",
-                        resume_block,
-                        explicit_start_block
-                    ));
-                }
-            }
-            resume_block
-        } else if let Some(start_block) = start_block {
-            start_block
-        } else if let Some(first_streamable) = endpoint_info
+    let effective_start_block = resolve_partitions_build_start_block(
+        resumed_from_block,
+        start_block,
+        live,
+        || {
+            Ok(cursor_location
+                .as_ref()
+                .map(CursorLocation::load)
+                .transpose()
+                .context(
+                    "reading sibling cursor.parquet to infer --start-block (pass --start-block to skip it)",
+                )?
+                .flatten()
+                .map(|cursor_state| cursor_state.last_block_num.saturating_add(1)))
+        },
+        endpoint_info
             .as_ref()
-            .map(|info| info.first_streamable_block_num)
-        {
-            first_streamable
-        } else {
-            return Err(anyhow!(
-                "--start-block is required when --live has no existing partitions.parquet frontier and the endpoint does not expose first_streamable_block_num"
-            ));
+            .map(|info| info.first_streamable_block_num),
+    )?;
+    if let (Some(frontier), Some(requested)) = (resumed_from_block, start_block) {
+        if requested < frontier {
+            info!(
+                requested_start_block = requested,
+                frontier,
+                "existing partitions index already covers --start-block; resuming from its frontier"
+            );
         }
-    } else if let Some(start_block) = start_block {
-        start_block
-    } else if let Some(cursor_state) = cursor_location
-        .as_ref()
-        .map(CursorLocation::load)
-        .transpose()
-        .context(
-            "reading sibling cursor.parquet to infer --start-block (pass --start-block to skip it)",
-        )?
-        .flatten()
-    {
-        cursor_state.last_block_num.saturating_add(1)
-    } else if let Some(first_streamable) = endpoint_info
-        .as_ref()
-        .map(|info| info.first_streamable_block_num)
-    {
-        first_streamable
-    } else {
-        return Err(anyhow!(
-            "--start-block is required when no sibling cursor.parquet exists and the endpoint does not expose first_streamable_block_num"
-        ));
-    };
+    }
 
-    let should_resume_from_existing = (live || resume) && !overwrite;
-    let (mut builder, effective_start_block, resumed_from_block) =
-        if should_resume_from_existing && !existing_rows.is_empty() {
-            let (mut builder, resume_start_block) = PartitionIndexBuilder::resume_from_existing(
-                chain.clone(),
-                partition_types.clone(),
-                existing_rows.clone(),
-            )?;
-            if let Some(brs) = block_range_size {
-                builder = builder.with_block_range_size(brs);
-            }
-            let effective_start_block = if live {
-                resume_start_block
-            } else {
-                inferred_start_block.max(resume_start_block)
-            };
-            (builder, effective_start_block, Some(resume_start_block))
-        } else {
+    let mut builder = match resumed {
+        Some((builder, _)) => builder,
+        None => {
             let mut builder = PartitionIndexBuilder::new(chain.clone(), partition_types.clone())?;
             if let Some(brs) = block_range_size {
                 builder = builder.with_block_range_size(brs);
             }
-            (builder, inferred_start_block, None)
-        };
+            builder
+        }
+    };
 
     if let Some(stop_block) = stop_block {
-        if stop_block <= inferred_start_block {
+        if resumed_from_block.is_none() && stop_block <= effective_start_block {
             return Err(anyhow!(
-                "--stop-block must be greater than the effective start block, got {stop_block} <= {inferred_start_block}"
+                "--stop-block must be greater than the effective start block, got {stop_block} <= {effective_start_block}"
             ));
         }
 
-        if effective_start_block > stop_block {
-            return Err(anyhow!(
-                "effective start block {} is past --stop-block {}",
-                effective_start_block,
-                stop_block
-            ));
-        }
-
-        if effective_start_block == stop_block {
-            let rows = if should_resume_from_existing {
-                existing_rows.clone()
-            } else {
-                Vec::new()
-            };
+        if resumed_from_block.is_some() && effective_start_block >= stop_block {
+            info!(
+                frontier = effective_start_block,
+                requested_stop_block = stop_block,
+                "existing partitions index already covers --stop-block; nothing to build"
+            );
             return Ok(PartitionBuildResult {
                 partitions_index,
                 chain,
                 partition: partition_label.clone(),
-                row_count: rows.len(),
-                start_block: rows
+                row_count: existing_rows.len(),
+                start_block: existing_rows
                     .iter()
                     .map(|row| row.start_block)
                     .min()
-                    .unwrap_or(inferred_start_block),
-                stop_block: rows
-                    .iter()
-                    .map(|row| row.stop_block)
-                    .max()
-                    .unwrap_or(stop_block),
-                resumed: should_resume_from_existing && resumed_from_block.is_some(),
+                    .unwrap_or(effective_start_block),
+                stop_block: effective_start_block,
+                resumed: true,
                 resumed_from_block,
             });
         }
@@ -1516,7 +1570,7 @@ async fn run_partitions_build(
         poll_interval_secs,
         resume_requested = resume,
         overwrite_requested = overwrite,
-        resumed = should_resume_from_existing && resumed_from_block.is_some(),
+        resumed = resumed_from_block.is_some(),
         resumed_from_block = resumed_from_block,
         existing_rows = existing_rows.len(),
         "resolved partitions build range"
@@ -1964,7 +2018,7 @@ async fn run_partitions_build(
             "starting block-range partitions build"
         );
 
-        let mut rows = existing_rows.clone();
+        let mut rows = block_range_rows_before(&existing_rows, aligned_start);
         let existing_row_count = rows.len();
         let mut boundary = aligned_start;
 
@@ -2062,10 +2116,13 @@ async fn run_partitions_build(
             &probe_counter,
         )
         .await?;
+        // When resuming, never backtrack past the stored frontier: the terminal row already
+        // covers the blocks before it, and it may end mid-partition after a live run.
         let lower_bound = endpoint_info
             .as_ref()
             .map(|info| info.first_streamable_block_num)
-            .unwrap_or(0);
+            .unwrap_or(0)
+            .max(resumed_from_block.unwrap_or(0));
         let mut current_block = locate_partition_start(
             &stream_client,
             partition_type,
@@ -2203,7 +2260,7 @@ async fn run_partitions_build(
         .iter()
         .map(|row| row.stop_block)
         .max()
-        .unwrap_or_else(|| stop_block.unwrap_or(inferred_start_block));
+        .unwrap_or_else(|| stop_block.unwrap_or(effective_start_block));
 
     Ok(PartitionBuildResult {
         partitions_index,
@@ -2214,11 +2271,106 @@ async fn run_partitions_build(
             .iter()
             .map(|row| row.start_block)
             .min()
-            .unwrap_or(inferred_start_block),
+            .unwrap_or(effective_start_block),
         stop_block: result_stop_block,
-        resumed: should_resume_from_existing && resumed_from_block.is_some(),
+        resumed: resumed_from_block.is_some(),
         resumed_from_block,
     })
+}
+
+/// Refuse to modify an existing canonical index unless the caller chose how to treat it.
+///
+/// Without `--resume`, a bounded build would replace `partitions.parquet` with only the new
+/// range (time-based) or append rows that overlap the stored ones (block_range). Live mode
+/// always continues from the stored frontier, and `--overwrite` replaces the index.
+fn ensure_existing_partitions_index_mode(
+    partitions_index: &str,
+    existing_rows: &[PartitionBuildRow],
+    live: bool,
+    resume: bool,
+    overwrite: bool,
+) -> Result<()> {
+    if live || resume || overwrite || existing_rows.is_empty() {
+        return Ok(());
+    }
+
+    let start_block = existing_rows
+        .iter()
+        .map(|row| row.start_block)
+        .min()
+        .unwrap_or_default();
+    let frontier = existing_rows
+        .iter()
+        .map(|row| row.stop_block)
+        .max()
+        .unwrap_or_default();
+    Err(anyhow!(
+        "{partitions_index} already exists with {} rows covering blocks [{start_block}, {frontier}); pass --resume to extend it from block {frontier}, or --overwrite to replace it",
+        existing_rows.len()
+    ))
+}
+
+/// Resolve the first block a partitions build probes.
+///
+/// When an existing index is resumed (`--live`, or bounded `--resume`), its stored frontier
+/// is the only valid start: the sibling cursor and endpoint metadata are not consulted, and
+/// an explicit `--start-block` past the frontier is rejected because the terminal row would
+/// otherwise be stretched across the unprobed blocks in between. A new index starts at the
+/// explicit `--start-block`, then the sibling cursor (bounded mode only), then the endpoint's
+/// first streamable block.
+fn resolve_partitions_build_start_block(
+    resume_frontier: Option<u64>,
+    explicit_start_block: Option<u64>,
+    live: bool,
+    cursor_start_block: impl FnOnce() -> Result<Option<u64>>,
+    first_streamable_block: Option<u64>,
+) -> Result<u64> {
+    if let Some(frontier) = resume_frontier {
+        return match explicit_start_block {
+            Some(start_block) if live && start_block != frontier => Err(anyhow!(
+                "--live resumes from existing partitions.parquet frontier {frontier}; explicit --start-block {start_block} does not match"
+            )),
+            Some(start_block) if start_block > frontier => Err(anyhow!(
+                "--start-block {start_block} is past the existing partitions.parquet frontier {frontier}; resuming would leave blocks [{frontier}, {start_block}) unindexed. Omit --start-block to resume from {frontier}, or pass --overwrite to rebuild the index from {start_block}"
+            )),
+            _ => Ok(frontier),
+        };
+    }
+
+    if let Some(start_block) = explicit_start_block {
+        return Ok(start_block);
+    }
+    if !live {
+        if let Some(start_block) = cursor_start_block()? {
+            return Ok(start_block);
+        }
+    }
+    first_streamable_block.ok_or_else(|| {
+        if live {
+            anyhow!(
+                "--start-block is required when --live has no existing partitions.parquet frontier and the endpoint does not expose first_streamable_block_num"
+            )
+        } else {
+            anyhow!(
+                "--start-block is required when no sibling cursor.parquet exists and the endpoint does not expose first_streamable_block_num"
+            )
+        }
+    })
+}
+
+/// Existing block_range rows that end at or before `aligned_start`.
+///
+/// A resumed index may end in a partial row; the build regenerates it from `aligned_start`
+/// instead of appending a second row for the same range.
+fn block_range_rows_before(
+    existing_rows: &[PartitionBuildRow],
+    aligned_start: u64,
+) -> Vec<PartitionBuildRow> {
+    existing_rows
+        .iter()
+        .filter(|row| row.stop_block <= aligned_start)
+        .cloned()
+        .collect()
 }
 
 fn validate_block_range_bounds(
@@ -4321,6 +4473,13 @@ async fn main() -> Result<()> {
                 };
                 let result = firehose_parquet::merge::run_merge(&merge_config)?;
                 result.print();
+                if !result.schema_mismatches.is_empty() {
+                    anyhow::bail!(
+                        "{} partition(s) were not merged because their parts have different \
+                         schemas; nothing was written or deleted in them",
+                        result.schema_mismatches.len()
+                    );
+                }
                 return Ok(());
             }
             Commands::Truncate {
@@ -4750,6 +4909,10 @@ async fn run_ingestion(args: &BuildArgs, global: &GlobalArgs) -> Result<()> {
     let mut buffered_bootstrap_blocks: Vec<BufferedBootstrapBlock> = Vec::new();
     let progress_start = Instant::now();
     let mut current_partition_key: Option<String> = None;
+    let mut start_block_filter = StartBlockFilter::new(config.start_block);
+    // Chain resolved for this run (set once the mapper exists in auto mode).
+    let mut resolved_block_type: Option<String> =
+        (block_type != "auto").then(|| block_type.clone());
 
     // Build file-level metadata for the cursor (same `firehose-parquet.*`
     // namespace as table files). Includes version, endpoint, chain info, and
@@ -4816,6 +4979,10 @@ async fn run_ingestion(args: &BuildArgs, global: &GlobalArgs) -> Result<()> {
             if final_blocks_only && step == 2 {
                 return Ok(());
             }
+            if !start_block_filter.admit(identity.block_num) {
+                pipeline_metrics.blocks_skipped_below_start_total.inc();
+                return Ok(());
+            }
 
             // Lazy mapper creation for "auto" mode.
             if mapper.is_none() {
@@ -4876,6 +5043,7 @@ async fn run_ingestion(args: &BuildArgs, global: &GlobalArgs) -> Result<()> {
                 cursor_state_template.file_metadata = cursor_meta;
                 cursor_state_template.extended = extended;
                 is_solana = detected == "solana";
+                resolved_block_type = Some(detected.clone());
                 use_synthetic_partition_routing = detected_uses_synthetic_partition_routing;
                 timestamp_backfill = TimestampBackfill::new(
                     use_synthetic_partition_routing,
@@ -5441,6 +5609,7 @@ async fn run_ingestion(args: &BuildArgs, global: &GlobalArgs) -> Result<()> {
 
     info!(
         blocks_processed,
+        blocks_skipped_below_start = start_block_filter.skipped,
         block_range = %block_range,
         elapsed = %elapsed_display,
         bytes_read = firehose_parquet::cli::format_bytes(bytes_read),
@@ -5451,6 +5620,21 @@ async fn run_ingestion(args: &BuildArgs, global: &GlobalArgs) -> Result<()> {
     // Propagate real (non-shutdown) errors so the process exits non-zero.
     if exit == StreamExit::Failed {
         return stream_result;
+    }
+
+    // A bounded stream that ended cleanly must have reached its last requested
+    // block. The final flush above only committed the blocks received.
+    if let (StreamExit::Completed, Some(stop_block)) = (exit, config.stop_block) {
+        let resumed_block_num =
+            stream_resume_cursor(existing_cursor_state.as_ref(), args.cursor_override)
+                .and(existing_cursor_state.as_ref())
+                .map(|state| state.last_block_num);
+        let last_block_num = global_max_block.max(resumed_block_num);
+        let block_number_gaps_allowed = resolved_block_type
+            .as_deref()
+            .or(initial_block_type)
+            .is_some_and(block_type_allows_block_number_gaps);
+        ensure_bounded_stream_reached_stop(stop_block, last_block_num, block_number_gaps_allowed)?;
     }
 
     Ok(())
@@ -5524,7 +5708,7 @@ mod tests {
             "buffered stats should report in-memory data"
         );
         assert!(
-            !dir.join("blocks/year=2024/month=01/date=15").exists(),
+            !dir.join("blocks/year=2024/month=01/day=15").exists(),
             "without forced materialization the partition should stay buffered"
         );
         std::fs::remove_dir_all(&dir).unwrap();
@@ -5547,7 +5731,7 @@ mod tests {
         assert!(outcome.materialized);
         assert_eq!(outcome.buffered, WriterBufferStats::default());
         assert!(
-            dir.join("blocks/year=2024/month=01/date=15").exists(),
+            dir.join("blocks/year=2024/month=01/day=15").exists(),
             "forced partition-boundary materialization should write the old partition immediately"
         );
         std::fs::remove_dir_all(&dir).unwrap();
@@ -6450,6 +6634,54 @@ mod tests {
             stream_resume_cursor(Some(&cursor_state), false),
             Some("cursor-123".to_string())
         );
+    }
+
+    #[test]
+    fn test_start_block_filter_skips_blocks_below_start_before_mapping() {
+        // Start 26049673 above LIB 26049592: the server streams from LIB+1.
+        let mut filter = StartBlockFilter::new(Some(26_049_673));
+        let mapped: Vec<u64> = (26_049_593..=26_049_675)
+            .filter(|&block_num| filter.admit(block_num))
+            .collect();
+
+        assert_eq!(mapped, vec![26_049_673, 26_049_674, 26_049_675]);
+        assert_eq!(filter.skipped, 80);
+    }
+
+    #[test]
+    fn test_start_block_filter_without_start_block_admits_everything() {
+        let mut filter = StartBlockFilter::new(None);
+        assert!(filter.admit(0));
+        assert!(filter.admit(42));
+        assert_eq!(filter.skipped, 0);
+    }
+
+    #[test]
+    fn test_bounded_stream_ending_early_is_an_error() {
+        let error = ensure_bounded_stream_reached_stop(200, Some(150), false).unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains("block 150"), "{message}");
+        assert!(message.contains("last requested block 199"), "{message}");
+
+        let error = ensure_bounded_stream_reached_stop(200, None, false).unwrap_err();
+        assert!(error.to_string().contains("no block"), "{error}");
+    }
+
+    #[test]
+    fn test_bounded_stream_reaching_last_requested_block_is_complete() {
+        assert!(ensure_bounded_stream_reached_stop(200, Some(199), false).is_ok());
+        assert!(ensure_bounded_stream_reached_stop(200, Some(250), false).is_ok());
+    }
+
+    #[test]
+    fn test_bounded_stream_on_sparse_chain_may_end_below_last_requested_block() {
+        assert!(block_type_allows_block_number_gaps("solana"));
+        assert!(block_type_allows_block_number_gaps("near"));
+        assert!(block_type_allows_block_number_gaps("beacon"));
+        assert!(!block_type_allows_block_number_gaps("evm"));
+        assert!(!block_type_allows_block_number_gaps("bitcoin"));
+
+        assert!(ensure_bounded_stream_reached_stop(200, Some(197), true).is_ok());
     }
 
     #[test]
@@ -8647,6 +8879,222 @@ mod tests {
                 .as_deref(),
             Some("2023-07-31 14:59:50")
         );
+    }
+
+    fn partitions_test_row(
+        partition_type: &str,
+        partition_value: &str,
+        start_block: u64,
+        stop_block: u64,
+    ) -> PartitionBuildRow {
+        PartitionBuildRow {
+            partition_type: partition_type.to_string(),
+            partition_interval_seconds: if partition_type == "block_range" {
+                (stop_block - start_block) as i64
+            } else {
+                PartitionBuildType::from_cli_value(partition_type)
+                    .expect("partition type")
+                    .interval_seconds()
+            },
+            partition_start_ts: partition_value.to_string(),
+            partition_value: partition_value.to_string(),
+            start_block,
+            stop_block,
+            start_time: None,
+            end_time: None,
+            chain: Some("mainnet".to_string()),
+        }
+    }
+
+    fn unused_cursor_start() -> Result<Option<u64>> {
+        panic!("the sibling cursor must not be consulted")
+    }
+
+    #[test]
+    fn test_ensure_existing_partitions_index_mode_requires_resume_or_overwrite_for_bounded_builds()
+    {
+        let dir = std::env::temp_dir().join(format!(
+            "fireparq-existing-index-mode-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("system time")
+                .as_nanos()
+        ));
+        let aws = AwsConfig {
+            aws_access_key_id: None,
+            aws_secret_access_key: None,
+            aws_session_token: None,
+            aws_region: None,
+            aws_endpoint_url: None,
+        };
+
+        // Both partition types are guarded the same way: time-based builds used to replace
+        // the index with only the new range, block_range builds used to append overlaps.
+        for rows in [
+            vec![
+                partitions_test_row("date", "2024-01-01 00:00:00", 100, 7_000),
+                partitions_test_row("date", "2024-01-02 00:00:00", 7_000, 14_000),
+            ],
+            vec![
+                partitions_test_row("block_range", "8000000", 8_000_000, 9_000_000),
+                partitions_test_row("block_range", "9000000", 9_000_000, 10_000_000),
+            ],
+        ] {
+            let path = dir.join(format!("{}.parquet", rows[0].partition_type));
+            let index = path.to_string_lossy().to_string();
+            firehose_parquet::cli::write_partitions_index(&index, &rows, None)
+                .expect("write index");
+            let (start, frontier) = (rows[0].start_block, rows[1].stop_block);
+
+            let existing = load_existing_partitions_build_rows(&index, &aws, false)
+                .expect("load existing rows");
+            let err = ensure_existing_partitions_index_mode(&index, &existing, false, false, false)
+                .expect_err("bounded build over an existing index needs --resume or --overwrite");
+            let message = err.to_string();
+            assert!(
+                message.contains(&format!("covering blocks [{start}, {frontier})")),
+                "{message}"
+            );
+            assert!(message.contains("--resume"), "{message}");
+            assert!(message.contains("--overwrite"), "{message}");
+
+            // --resume and --live continue the index; --overwrite ignores it.
+            ensure_existing_partitions_index_mode(&index, &existing, false, true, false)
+                .expect("--resume is allowed");
+            ensure_existing_partitions_index_mode(&index, &existing, true, false, false)
+                .expect("--live is allowed");
+            let overwritten = load_existing_partitions_build_rows(&index, &aws, true)
+                .expect("overwrite skips the existing rows");
+            assert!(overwritten.is_empty());
+            ensure_existing_partitions_index_mode(&index, &overwritten, false, false, true)
+                .expect("--overwrite is allowed");
+        }
+
+        ensure_existing_partitions_index_mode("missing.parquet", &[], false, false, false)
+            .expect("a new index needs no flag");
+        std::fs::remove_dir_all(&dir).expect("remove temp dir");
+    }
+
+    #[test]
+    fn test_resolve_partitions_build_start_block_resumes_from_frontier_not_cursor() {
+        // Audit C2 reproduction: a sibling cursor far past the stored frontier used to become
+        // the resumed start, stretching the terminal row across the unprobed gap.
+        let start = resolve_partitions_build_start_block(
+            Some(14_000),
+            None,
+            false,
+            unused_cursor_start,
+            Some(0),
+        )
+        .expect("resume start");
+        assert_eq!(start, 14_000);
+
+        for explicit in [100, 14_000] {
+            let start = resolve_partitions_build_start_block(
+                Some(14_000),
+                Some(explicit),
+                false,
+                unused_cursor_start,
+                Some(0),
+            )
+            .expect("explicit start at or before the frontier");
+            assert_eq!(start, 14_000, "explicit --start-block {explicit}");
+        }
+    }
+
+    #[test]
+    fn test_resolve_partitions_build_start_block_rejects_start_past_resume_frontier() {
+        let err = resolve_partitions_build_start_block(
+            Some(14_000),
+            Some(50_000),
+            false,
+            unused_cursor_start,
+            Some(0),
+        )
+        .expect_err("a start past the frontier would leave a gap");
+        let message = err.to_string();
+        assert!(
+            message.contains("past the existing partitions.parquet frontier 14000"),
+            "{message}"
+        );
+        assert!(message.contains("[14000, 50000)"), "{message}");
+
+        let err = resolve_partitions_build_start_block(
+            Some(14_000),
+            Some(100),
+            true,
+            unused_cursor_start,
+            Some(0),
+        )
+        .expect_err("live mode requires an explicit start to match the frontier");
+        assert!(err.to_string().contains("does not match"), "{err}");
+        let start = resolve_partitions_build_start_block(
+            Some(14_000),
+            Some(14_000),
+            true,
+            unused_cursor_start,
+            Some(0),
+        )
+        .expect("live start at the frontier");
+        assert_eq!(start, 14_000);
+    }
+
+    #[test]
+    fn test_resolve_partitions_build_start_block_for_new_index() {
+        let explicit =
+            resolve_partitions_build_start_block(None, Some(500), false, unused_cursor_start, None)
+                .expect("explicit start");
+        assert_eq!(explicit, 500);
+
+        let from_cursor =
+            resolve_partitions_build_start_block(None, None, false, || Ok(Some(900)), Some(0))
+                .expect("cursor start");
+        assert_eq!(from_cursor, 900);
+
+        let from_endpoint =
+            resolve_partitions_build_start_block(None, None, false, || Ok(None), Some(42))
+                .expect("first streamable start");
+        assert_eq!(from_endpoint, 42);
+
+        let live =
+            resolve_partitions_build_start_block(None, None, true, unused_cursor_start, Some(42))
+                .expect("live ignores the cursor");
+        assert_eq!(live, 42);
+
+        let err = resolve_partitions_build_start_block(
+            None,
+            None,
+            false,
+            || Err(anyhow!("cursor unreadable")),
+            Some(42),
+        )
+        .expect_err("an unreadable cursor is an error");
+        assert!(err.to_string().contains("cursor unreadable"), "{err}");
+
+        let err = resolve_partitions_build_start_block(None, None, false, || Ok(None), None)
+            .expect_err("no start source");
+        assert!(
+            err.to_string().contains("--start-block is required"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn test_block_range_rows_before_drops_partial_terminal_row() {
+        let rows = vec![
+            partitions_test_row("block_range", "0", 0, 100),
+            partitions_test_row("block_range", "100", 100, 200),
+            partitions_test_row("block_range", "200", 200, 250),
+        ];
+
+        let kept = block_range_rows_before(&rows, 200);
+        assert_eq!(
+            kept.iter()
+                .map(|row| (row.start_block, row.stop_block))
+                .collect::<Vec<_>>(),
+            [(0, 100), (100, 200)]
+        );
+        assert_eq!(block_range_rows_before(&rows, 250).len(), 3);
     }
 
     #[test]

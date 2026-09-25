@@ -818,6 +818,9 @@ partitions.parquet, merkle_roots.parquet, verify_runs/) are left untouched, so
 re-running a rollup is safe. Without --delete-source, each re-run replaces the
 part-rollup-*.parquet files it wrote earlier in the target partitions it rolls up.
 
+A target partition whose source files have different columns (names, types,
+nullability, or order) is left untouched, and rollup exits non-zero.
+
 Lookup order for the source path:
   1. Explicit s3://bucket/... URIs are used as-is.
   2. Non-URI paths use the local filesystem when the path exists.
@@ -927,6 +930,11 @@ Examples:
 
   # Use snappy compression
   fireparq merge ./output/blocks/ --compression snappy
+
+Root artifacts (cursor.parquet, partitions.parquet, merkle_roots.parquet,
+verify_runs/) are skipped. A partition whose parts have different columns
+(names, types, nullability, or order) is left untouched and listed in the
+summary, and merge exits non-zero.
 
 Lookup order:
   1. Explicit s3://bucket/... URIs are used as-is.
@@ -1091,8 +1099,8 @@ Examples:
   # Delete a single parquet file directly
   fireparq truncate ./output/mainnet/partitions.parquet
 
-  # Delete only a specific date partition
-  fireparq truncate ./output/blocks/ -p \"date=01\"
+  # Delete only day-of-month 01 partitions (also matches legacy date=01 directories)
+  fireparq truncate ./output/blocks/ -p \"day=01\"
 
   # Delete with glob pattern (all of January)
   fireparq truncate s3://bucket/blocks/ -p \"month=01\"
@@ -1119,8 +1127,9 @@ Lookup order:
         #[arg(help_heading = "Selection")]
         path: String,
         /// Partition filter(s) — only delete files matching these partition segments.
-        /// Use a key name to match all values (e.g. "date" matches all date=* partitions),
-        /// or a key=value with optional glob (e.g. "date=2026-01-*"). Repeatable.
+        /// Use a key name to match all values (e.g. "minute" matches all minute=* partitions),
+        /// or a key=value with optional glob (e.g. "day=0*"). `day` also matches the legacy
+        /// `date=DD` day directories written by earlier releases. Repeatable.
         #[arg(long, short = 'p', help_heading = "Selection")]
         partition: Vec<String>,
         /// Show what would be deleted without actually deleting
@@ -1273,6 +1282,10 @@ Examples:
         /// When omitted in `--live` mode, existing `partitions.parquet` rows take
         /// precedence as the restart anchor.
         ///
+        /// With `--resume` (or `--live`) and an existing index, the build continues
+        /// from the index frontier; an explicit value past that frontier is rejected
+        /// because it would leave the blocks in between unindexed.
+        ///
         /// Use `--overwrite` to ignore any existing canonical index and rebuild it
         /// from the requested start point instead.
         ///
@@ -1317,7 +1330,9 @@ Examples:
             help_heading = "Output"
         )]
         s3_bucket: Option<String>,
-        /// Resume from an existing canonical index under the resolved output path
+        /// Resume from an existing canonical index under the resolved output path,
+        /// continuing from its stored frontier. Bounded builds require `--resume` or
+        /// `--overwrite` when an index already exists.
         #[arg(
             long,
             default_value = "false",

@@ -2,6 +2,7 @@
 //! with optional partition filtering.
 
 use crate::cli::{block_on_async, format_bytes, resolve_parquet_input_path_string, AwsConfig};
+use crate::config::{DAY_PARTITION_PREFIX, LEGACY_DAY_PARTITION_PREFIX};
 use anyhow::{Context, Result};
 use object_store::ObjectStore;
 use std::path::{Path, PathBuf};
@@ -10,7 +11,7 @@ use std::sync::Arc;
 /// Configuration for a truncate operation.
 pub struct TruncateConfig {
     pub path: String,
-    /// Partition filters (e.g. "date=2026-01-01"). Empty = delete all.
+    /// Partition filters (e.g. "day=01" or "month=01"). Empty = delete all.
     pub partitions: Vec<String>,
     pub dry_run: bool,
     pub aws: Option<AwsConfig>,
@@ -61,35 +62,46 @@ fn matches_partition(path: &str, filters: &[String]) -> bool {
         return true;
     }
     for raw_filter in filters {
-        // If filter is just a key name (e.g. "date"), expand to "date=*"
+        // If filter is just a key name (e.g. "day"), expand to "day=*"
         let filter = if !raw_filter.contains('=') && !raw_filter.contains('*') {
             format!("{}=*", raw_filter)
         } else {
             raw_filter.clone()
         };
-        if filter.contains('*') {
-            // Glob matching: convert to a simple prefix/suffix match.
-            let parts: Vec<&str> = filter.split('*').collect();
-            if parts.len() == 2 {
-                let prefix = parts[0];
-                let suffix = parts[1];
-                // Check if any path segment matches.
-                for segment in path.split('/') {
-                    if segment.starts_with(prefix) && segment.ends_with(suffix) {
-                        return true;
-                    }
-                }
-            }
-        } else {
-            // Exact match on a path segment.
-            for segment in path.split('/') {
-                if segment == filter.as_str() {
-                    return true;
-                }
+        // `day=` and the legacy `date=` day key are aliases, so one filter matches
+        // both the current and the legacy layout.
+        let filter_forms = [filter.as_str(), &canonical_day_key(&filter)];
+        for segment in path.split('/') {
+            let segment_forms = [segment, &canonical_day_key(segment)];
+            if filter_forms.iter().any(|filter| {
+                segment_forms
+                    .iter()
+                    .any(|segment| segment_matches(filter, segment))
+            }) {
+                return true;
             }
         }
     }
     false
+}
+
+/// Match one path segment against a filter: exact, or a single `*` glob.
+fn segment_matches(filter: &str, segment: &str) -> bool {
+    if filter.contains('*') {
+        // Glob matching: convert to a simple prefix/suffix match.
+        let parts: Vec<&str> = filter.split('*').collect();
+        parts.len() == 2 && segment.starts_with(parts[0]) && segment.ends_with(parts[1])
+    } else {
+        segment == filter
+    }
+}
+
+/// Rewrite the legacy `date=` day key as `day=`; other text is returned unchanged.
+fn canonical_day_key(text: &str) -> String {
+    match text.strip_prefix(LEGACY_DAY_PARTITION_PREFIX) {
+        Some(value) => format!("{DAY_PARTITION_PREFIX}{value}"),
+        None => text.to_string(),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -419,5 +431,54 @@ mod tests {
         assert_eq!(result.dirs_removed, 0);
         assert!(!partitions.exists());
         assert!(cursor.exists());
+    }
+
+    #[test]
+    fn matches_partition_treats_day_and_legacy_date_keys_as_aliases() {
+        let current = "blocks/year=2024/month=01/day=15/part-0001.parquet";
+        let legacy = "blocks/year=2024/month=01/date=15/part-0001.parquet";
+        let other_day = "blocks/year=2024/month=01/day=16/part-0001.parquet";
+        let filters = |filters: &[&str]| -> Vec<String> {
+            filters.iter().map(|filter| filter.to_string()).collect()
+        };
+
+        for filter in ["day=15", "date=15", "day=1*", "date=1*", "day", "date"] {
+            let filter = filters(&[filter]);
+            assert!(matches_partition(current, &filter), "{filter:?} on day=");
+            assert!(matches_partition(legacy, &filter), "{filter:?} on date=");
+        }
+        assert!(!matches_partition(other_day, &filters(&["day=15"])));
+        assert!(!matches_partition(other_day, &filters(&["date=15"])));
+
+        // Globs spelled against the raw legacy key keep matching legacy trees.
+        assert!(matches_partition(legacy, &filters(&["date*"])));
+        // Other keys are unaffected.
+        assert!(matches_partition(current, &filters(&["month=01"])));
+        assert!(!matches_partition(current, &filters(&["hour"])));
+    }
+
+    #[test]
+    fn run_truncate_local_day_filter_deletes_current_and_legacy_day_partitions() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("mainnet");
+        let current = root.join("blocks/year=2024/month=01/day=15/part-0001.parquet");
+        let legacy = root.join("blocks/year=2024/month=01/date=15/part-0001.parquet");
+        let kept = root.join("blocks/year=2024/month=01/day=16/part-0001.parquet");
+        for path in [&current, &legacy, &kept] {
+            write_test_file(path, b"blocks");
+        }
+
+        let result = run_truncate_local(&TruncateConfig {
+            path: root.to_string_lossy().into_owned(),
+            partitions: vec!["day=15".to_string()],
+            dry_run: false,
+            aws: None,
+        })
+        .unwrap();
+
+        assert_eq!(result.files_deleted, 2);
+        assert!(!current.exists());
+        assert!(!legacy.exists());
+        assert!(kept.exists());
     }
 }

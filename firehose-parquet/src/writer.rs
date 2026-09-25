@@ -216,7 +216,7 @@ impl ParquetTableWriter {
         }
     }
 
-    /// Return the partition-relative path component (e.g. `blocks/year=2024/month=01/date=15`).
+    /// Return the partition-relative path component (e.g. `blocks/year=2024/month=01/day=15`).
     pub fn partition_suffix(&self, table: &str, metadata: &BlockMetadata) -> String {
         match &self.partition {
             Partition::None => table.to_string(),
@@ -237,7 +237,7 @@ impl ParquetTableWriter {
                     let dt = OffsetDateTime::from_unix_timestamp(ts)
                         .unwrap_or(OffsetDateTime::UNIX_EPOCH);
                     format!(
-                        "{table}/year={:04}/month={:02}/date={:02}",
+                        "{table}/year={:04}/month={:02}/day={:02}",
                         dt.year(),
                         dt.month() as u8,
                         dt.day()
@@ -251,7 +251,7 @@ impl ParquetTableWriter {
                     let dt = OffsetDateTime::from_unix_timestamp(ts)
                         .unwrap_or(OffsetDateTime::UNIX_EPOCH);
                     format!(
-                        "{table}/year={:04}/month={:02}/date={:02}/hour={:02}",
+                        "{table}/year={:04}/month={:02}/day={:02}/hour={:02}",
                         dt.year(),
                         dt.month() as u8,
                         dt.day(),
@@ -266,7 +266,7 @@ impl ParquetTableWriter {
                     let dt = OffsetDateTime::from_unix_timestamp(ts)
                         .unwrap_or(OffsetDateTime::UNIX_EPOCH);
                     format!(
-                        "{table}/year={:04}/month={:02}/date={:02}/hour={:02}/minute={:02}",
+                        "{table}/year={:04}/month={:02}/day={:02}/hour={:02}/minute={:02}",
                         dt.year(),
                         dt.month() as u8,
                         dt.day(),
@@ -282,7 +282,7 @@ impl ParquetTableWriter {
                     let dt = OffsetDateTime::from_unix_timestamp(ts)
                         .unwrap_or(OffsetDateTime::UNIX_EPOCH);
                     format!(
-                        "{table}/year={:04}/month={:02}/date={:02}/hour={:02}/minute={:02}/second={:02}",
+                        "{table}/year={:04}/month={:02}/day={:02}/hour={:02}/minute={:02}/second={:02}",
                         dt.year(),
                         dt.month() as u8,
                         dt.day(),
@@ -319,7 +319,7 @@ impl ParquetTableWriter {
                         .unwrap_or(OffsetDateTime::UNIX_EPOCH);
                     base.join(format!("year={:04}", dt.year()))
                         .join(format!("month={:02}", dt.month() as u8))
-                        .join(format!("date={:02}", dt.day()))
+                        .join(format!("day={:02}", dt.day()))
                 } else {
                     base
                 }
@@ -330,7 +330,7 @@ impl ParquetTableWriter {
                         .unwrap_or(OffsetDateTime::UNIX_EPOCH);
                     base.join(format!("year={:04}", dt.year()))
                         .join(format!("month={:02}", dt.month() as u8))
-                        .join(format!("date={:02}", dt.day()))
+                        .join(format!("day={:02}", dt.day()))
                         .join(format!("hour={:02}", dt.hour()))
                 } else {
                     base
@@ -342,7 +342,7 @@ impl ParquetTableWriter {
                         .unwrap_or(OffsetDateTime::UNIX_EPOCH);
                     base.join(format!("year={:04}", dt.year()))
                         .join(format!("month={:02}", dt.month() as u8))
-                        .join(format!("date={:02}", dt.day()))
+                        .join(format!("day={:02}", dt.day()))
                         .join(format!("hour={:02}", dt.hour()))
                         .join(format!("minute={:02}", dt.minute()))
                 } else {
@@ -355,7 +355,7 @@ impl ParquetTableWriter {
                         .unwrap_or(OffsetDateTime::UNIX_EPOCH);
                     base.join(format!("year={:04}", dt.year()))
                         .join(format!("month={:02}", dt.month() as u8))
-                        .join(format!("date={:02}", dt.day()))
+                        .join(format!("day={:02}", dt.day()))
                         .join(format!("hour={:02}", dt.hour()))
                         .join(format!("minute={:02}", dt.minute()))
                         .join(format!("second={:02}", dt.second()))
@@ -1019,8 +1019,7 @@ mod tests {
         };
         let (path, _) = writer.write_batch("blocks", &batch, &meta).unwrap();
         assert!(
-            path.to_string_lossy()
-                .contains("year=2024/month=01/date=15"),
+            path.to_string_lossy().contains("year=2024/month=01/day=15"),
             "path: {}",
             path.display()
         );
@@ -1041,7 +1040,7 @@ mod tests {
         let (path, _) = writer.write_batch("blocks", &batch, &meta).unwrap();
         let path_str = path.to_string_lossy();
         assert!(
-            path_str.contains("year=2024/month=01/date=15"),
+            path_str.contains("year=2024/month=01/day=15"),
             "path: {}",
             path_str
         );
@@ -1303,11 +1302,11 @@ mod tests {
         out.flush_remaining().unwrap();
         assert_eq!(out.buffered_stats(), WriterBufferStats::default());
         assert_eq!(
-            parquet_rows_in(&dir.path().join("blocks/year=2024/month=01/date=15")),
+            parquet_rows_in(&dir.path().join("blocks/year=2024/month=01/day=15")),
             1
         );
         assert_eq!(
-            parquet_rows_in(&dir.path().join("blocks/year=2024/month=01/date=16")),
+            parquet_rows_in(&dir.path().join("blocks/year=2024/month=01/day=16")),
             1
         );
     }
@@ -1321,7 +1320,7 @@ mod tests {
 
         let mut out = OutputWriter::new(dir.path(), Partition::Date, Compression::None, 1_000_000);
 
-        // First write: date=2024-01-15
+        // First write: day=2024-01-15
         let meta1 = BlockMetadata {
             min_block_number: 100,
             max_block_number: 200,
@@ -1340,14 +1339,14 @@ mod tests {
         out.write_all(&batches, &meta2).unwrap();
 
         // The 2024-01-15 partition should have been written (partition change).
-        let jan15 = dir.path().join("blocks/year=2024/month=01/date=15");
+        let jan15 = dir.path().join("blocks/year=2024/month=01/day=15");
         assert!(
             jan15.exists(),
             "old partition should be flushed on date change"
         );
 
         // The 2024-01-16 data is still buffered.
-        let jan16 = dir.path().join("blocks/year=2024/month=01/date=16");
+        let jan16 = dir.path().join("blocks/year=2024/month=01/day=16");
         assert!(!jan16.exists(), "new partition should still be buffered");
         let stats = out.buffered_stats();
         assert_eq!(stats.tables, 1);
@@ -1470,8 +1469,8 @@ mod tests {
         out.flush_remaining().unwrap();
 
         // Both date partitions should exist.
-        let jan15 = dir.path().join("blocks/year=2024/month=01/date=15");
-        let jan16 = dir.path().join("blocks/year=2024/month=01/date=16");
+        let jan15 = dir.path().join("blocks/year=2024/month=01/day=15");
+        let jan16 = dir.path().join("blocks/year=2024/month=01/day=16");
         assert!(jan15.exists(), "2024-01-15 partition should exist");
         assert!(jan16.exists(), "2024-01-16 partition should exist");
 
@@ -1522,8 +1521,8 @@ mod tests {
         out.write_all(&batches, &meta).unwrap();
         out.flush_remaining().unwrap();
 
-        let h13 = dir.path().join("events/year=2024/month=01/date=15/hour=13");
-        let h14 = dir.path().join("events/year=2024/month=01/date=15/hour=14");
+        let h13 = dir.path().join("events/year=2024/month=01/day=15/hour=13");
+        let h14 = dir.path().join("events/year=2024/month=01/day=15/hour=14");
         assert!(h13.exists(), "hour=13 should exist");
         assert!(h14.exists(), "hour=14 should exist");
     }
@@ -1549,7 +1548,7 @@ mod tests {
         out.write_all(&batches, &meta).unwrap();
         out.flush_remaining().unwrap();
 
-        let jan15 = dir.path().join("blocks/year=2024/month=01/date=15");
+        let jan15 = dir.path().join("blocks/year=2024/month=01/day=15");
         assert!(jan15.exists());
         // Only one partition should exist (one year directory)
         let dirs: Vec<_> = std::fs::read_dir(dir.path().join("blocks"))

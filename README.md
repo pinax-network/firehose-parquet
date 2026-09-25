@@ -291,6 +291,26 @@ already written in the failed flush may be written again on that replay.
 Only a stream that ends cleanly (for example, by reaching `--stop-block`)
 flushes the remaining buffers and saves the final cursor.
 
+### Start and Stop Blocks
+
+- **Start above the last irreversible block.** With `--final-blocks-only`
+  (the default), Firehose serves a request whose start block is above the
+  current last irreversible block (LIB) from LIB+1. Without a resume cursor,
+  blocks below `--start-block` are skipped before mapping: the first one is
+  logged, and all of them are counted in
+  `firehose_parquet_blocks_skipped_below_start_total` and in the
+  `blocks_skipped_below_start` field of the final summary.
+- **Bounded runs** (`--stop-block` set; it is exclusive) exit 0 only once block
+  `stop_block - 1` was received. If the server ends the stream earlier, the run
+  resumes from the last cursor. If the resumed stream delivers nothing, the
+  server has no more blocks in the range: on chains with skipped slots or
+  heights (Solana, NEAR, Beacon) the run completes with a warning. On other
+  chains it writes the blocks it received, saves the cursor at the last one,
+  and exits non-zero, so a rerun resumes after them.
+- **Live runs** (no `--stop-block`) never end on their own: if the server or a
+  proxy closes the stream cleanly, the run reconnects from the last cursor with
+  the usual back-off.
+
 ## CLI Reference
 
 The primary ingestion workflow is `fireparq build`. Utility workflows stay
@@ -447,7 +467,8 @@ Behavior:
 - writes contract metadata including schema version, chain scope, and covered block range
 - writes an initial checkpoint as soon as the first row exists
 - checkpoints long bounded and live runs continuously by elapsed time and partition rollovers
-- `--resume` reuses the trailing rows from the existing canonical index and continues from the stored frontier
+- `--resume` reuses the trailing rows from the existing canonical index and continues from the stored frontier; the sibling cursor is not consulted, an explicit `--start-block` past the frontier is rejected, and a run whose `--stop-block` is already covered is a no-op
+- bounded builds refuse to touch an existing `partitions.parquet` unless `--resume` (extend it) or `--overwrite` (replace it) is passed
 - bounded builds may expand the requested start/stop to the enclosing partition boundaries so each completed row remains exact
 - `--live` treats existing `partitions.parquet` rows as the restart anchor, polls for new finalized blocks, and keeps extending the canonical index
 - sparse probes skip forward across a small window of missing block numbers by default after probe retries are exhausted
@@ -463,6 +484,7 @@ Behavior:
 | `--output` | inferred from `--s3-bucket` | Output root directory or `s3://` URI prefix |
 | `--s3-bucket` | none | S3 bucket used when `--output` is omitted or should be prefixed |
 | `--resume` | `false` | Reuse the existing canonical index at the resolved output path and continue from its frontier |
+| `--overwrite` | `false` | Ignore and replace the existing canonical index (conflicts with `--resume`) |
 | `--json` | `false` | Emit machine-readable output |
 
 ### `partitions ls` — Query Partition Index Rows
@@ -668,13 +690,13 @@ Displays comprehensive metadata for a single Parquet file: file-level key-value 
 
 ```bash
 # Inspect a local file
-fireparq inspect ./output/blocks/year=2026/month=01/date=15/part-000001.parquet
+fireparq inspect ./output/blocks/year=2026/month=01/day=15/part-000001.parquet
 
 # Resolve a shorthand key against S3_BUCKET when no local path matches
 S3_BUCKET=my-bucket fireparq inspect evm/partitions.parquet
 
 # Inspect an S3 file
-fireparq inspect s3://my-bucket/evm/blocks/year=2026/month=01/date=15/part-000001.parquet
+fireparq inspect s3://my-bucket/evm/blocks/year=2026/month=01/day=15/part-000001.parquet
 
 # Show only schema fields, including explicit nullability
 fireparq inspect s3://my-bucket/evm/partitions.parquet --schema-only
@@ -789,6 +811,7 @@ Which files rollup reads, writes, and deletes:
 - With `--delete-source`, outputs are named like ingestion parts (`part-<run>-NNNNNN.parquet`), and each source file is deleted once its target partition is written. A re-run after new data arrives only rolls up the new files.
 - Without `--delete-source`, outputs are named `part-rollup-<run>-NNNNNN.parquet`. They are copies of source files that are kept, so a re-run replaces the `part-rollup-*` files it wrote earlier in each target partition it rolls up, and leaves other files there alone. Because the re-run rebuilds those partitions from the source files that exist at that point, don't delete source files by hand between runs; use `--delete-source` instead.
 - An in-place rollup (no `--output`) requires `--delete-source`. Keeping the sources next to their rolled-up copy would store every row twice under the same root.
+- Files are only combined when they have the same columns: the same names, types, nullability, and order. A target partition with mixed schemas, such as files from two tool versions or with `--without-extended` toggled, is left untouched: nothing is written or deleted for it. The other partitions are still rolled up, and `rollup` exits non-zero with a list of the skipped partitions.
 
 | Flag | Default | Description |
 |---|---|---|
@@ -802,7 +825,9 @@ Which files rollup reads, writes, and deletes:
 
 Consolidates multiple small part files within each partition directory into fewer, larger files. Unlike `rollup` (which changes partition granularity), `merge` keeps the same partition layout but reduces file count. Supports local paths, shorthand S3 keys/prefixes via `S3_BUCKET`, and explicit S3 URIs.
 
-`merge` processes one table at a time and, within each table, one partition at a time. All parts in each partition are read into memory, sorted by `block_num`, and written back as new files respecting `--flush-bytes` and `--flush-rows`. Original parts are deleted after successful merge.
+`merge` processes one table at a time and, within each table, one partition at a time. All parts in each partition are read into memory, sorted by `block_num`, and written back as new files respecting `--flush-bytes` and `--flush-rows`. Original parts are deleted after successful merge. Root artifacts (`cursor.parquet`, `partitions.parquet`, `merkle_roots.parquet`, and anything under `verify_runs/`) are skipped, so merging a network root is safe.
+
+Parts are only merged when every part in the partition has the same columns: the same names, types, nullability, and order. Merge checks each part's footer before writing anything. A partition with mixed schemas, such as files from two tool versions or with `--without-extended` toggled, is left untouched and listed in the summary, and `merge` exits non-zero after processing the other partitions. `--dry-run` reports these partitions too.
 
 ```bash
 # Merge small parts within each partition (default 32 MB target per file)
@@ -853,20 +878,20 @@ fireparq truncate ./output/mainnet/ --dry-run
 # Delete a single parquet file directly
 fireparq truncate ./output/mainnet/partitions.parquet
 
-# Delete a specific partition
-fireparq truncate ./output/blocks/ -p "year=2026/month=01/date=01"
+# Delete day-of-month 01 partitions (`day=01`, and legacy `date=01` directories)
+fireparq truncate ./output/blocks/ -p "day=01"
 
 # Delete all partitions under a key
-fireparq truncate ./output/blocks/ -p date
+fireparq truncate ./output/blocks/ -p minute
 
 # Glob pattern matching
-fireparq truncate s3://bucket/prefix -p "year=2026/month=01/date=*"
+fireparq truncate s3://bucket/prefix -p "day=0*"
 
 # Resolve a shorthand S3 path when no local match exists
 S3_BUCKET=my-bucket fireparq truncate evm/blocks/ -p "month=01"
 
 # Multiple partitions
-fireparq truncate ./output/ -p "year=2026/month=01/date=01" -p "year=2026/month=01/date=02"
+fireparq truncate ./output/ -p "day=01" -p "day=02"
 
 # Dry run — show what would be deleted
 fireparq truncate ./output/blocks/ --dry-run
@@ -929,6 +954,7 @@ Enable the metrics server with `--metrics-port <PORT>` (env: `METRICS_PORT`). A 
 | `firehose_parquet_cursor_last_block_num` | Gauge | — | Block number from last saved cursor |
 | `firehose_parquet_errors_total` | Counter | `kind` | Errors by category |
 | `firehose_parquet_grpc_reconnects_total` | Counter | — | gRPC stream reconnections |
+| `firehose_parquet_blocks_skipped_below_start_total` | Counter | — | Blocks received below the effective start block and skipped |
 | `firehose_parquet` | Info | *(pipeline config)* | Pipeline metadata (chain, endpoint, version) |
 
 ```bash
@@ -978,7 +1004,7 @@ Endpoint `block_id_encoding` remains a fallback only when the chain does not res
 ```python
 import pyarrow.parquet as pq
 
-meta = pq.read_metadata("output/blocks/year=2026/month=01/date=15/part-000001.parquet")
+meta = pq.read_metadata("output/blocks/year=2026/month=01/day=15/part-000001.parquet")
 for i in range(meta.metadata.count()):
     key = meta.metadata.keys()[i]
     if key.startswith("firehose-parquet."):
@@ -988,7 +1014,7 @@ for i in range(meta.metadata.count()):
 ```sql
 -- DuckDB
 SELECT key, value
-FROM parquet_kv_metadata('output/blocks/year=2026/month=01/date=15/part-000001.parquet')
+FROM parquet_kv_metadata('output/blocks/year=2026/month=01/day=15/part-000001.parquet')
 WHERE key LIKE 'firehose-parquet.%';
 ```
 
@@ -998,15 +1024,28 @@ WHERE key LIKE 'firehose-parquet.%';
 <chain_name>/
 ├── cursor.parquet
 ├── blocks/
-│   ├── year=2026/month=02/date=25/
+│   ├── year=2026/month=02/day=25/
 │   │   ├── part-000001.parquet
 │   │   └── part-000002.parquet
-│   └── year=2026/month=02/date=26/
+│   └── year=2026/month=02/day=26/
 │       └── part-000001.parquet
 ├── transactions/
 │   └── ...
 └── logs/
     └── ...
+```
+
+Time-based partitioning writes Hive-style directories: `--partition date` writes `year=YYYY/month=MM/day=DD/`, and `hour`, `minute` and `second` add `hour=HH/`, `minute=MM/` and `second=SS/` below it. `--partition block_range` writes `block_range=<start>-<stop>/`.
+
+The day-of-month key is `day=`. Earlier releases wrote `date=DD`, which collides with the canonical `date` column under Hive partitioning: DuckDB's default `hive_partitioning` replaced the `date` DATE values with the day number, and Polars' `hive_partitioning=True` failed to parse `26` as a date. `rollup` and `truncate` still accept legacy `date=` directories.
+
+Query a dataset with its partition columns, e.g. in DuckDB:
+
+```sql
+SELECT date, day, count(*)
+FROM read_parquet('output/mainnet/blocks/**/*.parquet')  -- hive_partitioning is on by default
+GROUP BY ALL;
+-- date: DATE (the canonical data column); year/month/day/hour: partition columns
 ```
 
 ## Canonical Identity Columns
@@ -1023,7 +1062,7 @@ Every table across all chains includes these 7 columns (from Firehose `BlockMeta
 | `timestamp` | Timestamp(Millisecond, UTC) | Block time. Parquet logical type `TIMESTAMP(MILLIS, isAdjustedToUTC=true)`; keeps sub-second precision where the chain has it (e.g. Antelope's 500 ms blocks) |
 | `date` | Date32 | UTC day of the block time |
 
-Time-based partition directories (`year=`/`month=`/`date=`/`hour=`/…) and `date` are derived from the whole-second block time, so a block at `12:00:00.500` lands in the same `second=00` partition as one at `12:00:00.000`. Solana tables keep `timestamp` and `date` null when `block_time` is missing.
+Time-based partition directories (`year=`/`month=`/`day=`/`hour=`/…) and `date` are derived from the whole-second block time, so a block at `12:00:00.500` lands in the same `second=00` partition as one at `12:00:00.000`. Solana tables keep `timestamp` and `date` null when `block_time` is missing.
 
 ## Output Encoding by Block Type
 

@@ -7,11 +7,13 @@
 //! up. Files already at the target granularity (such as earlier rollup outputs), files
 //! outside time partitions, and reserved dataset artifacts (`cursor.parquet`, see
 //! [`crate::artifacts`]) are never read, rewritten, or deleted. Every run writes new, uniquely
-//! named files, so a re-run cannot overwrite or delete its own output.
+//! named files, so a re-run cannot overwrite or delete its own output. A target partition whose
+//! source files have different schemas is left untouched and reported as an error.
 
 use crate::artifacts::is_reserved_artifact_path;
 use crate::cli::{block_on_async, format_bytes, resolve_parquet_input_path_string, AwsConfig};
-use crate::config::Compression;
+use crate::config::{Compression, DAY_PARTITION_PREFIX, LEGACY_DAY_PARTITION_PREFIX};
+use crate::merge::SchemaCheck;
 use crate::writer::parse_s3_url;
 use anyhow::{Context, Result};
 use arrow::compute::concat_batches;
@@ -27,7 +29,7 @@ use std::collections::{BTreeMap, HashSet};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 /// File-name prefix of outputs written without `--delete-source`.
 ///
@@ -38,18 +40,19 @@ const COPY_OUTPUT_PREFIX: &str = "part-rollup-";
 /// Target partition granularity for rollup.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RollupTarget {
-    /// Merge into hourly partitions: `table/year=YYYY/month=MM/date=DD/hour=HH/`
+    /// Merge into hourly partitions: `table/year=YYYY/month=MM/day=DD/hour=HH/`
     Hour,
-    /// Merge into daily partitions: `table/year=YYYY/month=MM/date=DD/`
+    /// Merge into daily partitions: `table/year=YYYY/month=MM/day=DD/`
     Date,
 }
 
 impl RollupTarget {
-    /// Hive directory prefix of a partition at this granularity.
-    fn level_prefix(self) -> &'static str {
+    /// Hive directory prefixes of a partition at this granularity. Days accept the
+    /// legacy `date=DD` key as well as `day=DD`; outputs keep the source's key.
+    fn level_prefixes(self) -> &'static [&'static str] {
         match self {
-            RollupTarget::Hour => "hour=",
-            RollupTarget::Date => "date=",
+            RollupTarget::Hour => &["hour="],
+            RollupTarget::Date => &[DAY_PARTITION_PREFIX, LEGACY_DAY_PARTITION_PREFIX],
         }
     }
 
@@ -143,7 +146,7 @@ fn is_same_location(source: &str, output: &str) -> bool {
 
 /// Returns true when `rel_path` (relative to the source root) is a table part file that rolls
 /// up into `target`: a `part-*.parquet` file inside a target-level partition and below a finer
-/// one, e.g. `blocks/year=2024/month=01/date=15/hour=14/part-*.parquet` for `date`.
+/// one, e.g. `blocks/year=2024/month=01/day=15/hour=14/part-*.parquet` for `date`.
 ///
 /// Everything else is skipped: reserved artifacts such as `cursor.parquet`, files already at
 /// the target granularity (including earlier rollup outputs), and files outside time
@@ -161,7 +164,10 @@ fn is_rollup_source(rel_path: &str, target: RollupTarget) -> bool {
     let mut has_level = false;
     let mut has_finer = false;
     for dir in dirs.split('/') {
-        has_level |= dir.starts_with(target.level_prefix());
+        has_level |= target
+            .level_prefixes()
+            .iter()
+            .any(|prefix| dir.starts_with(prefix));
         has_finer |= target
             .finer_prefixes()
             .iter()
@@ -256,8 +262,9 @@ fn run_rollup_local(config: &RollupConfig) -> Result<()> {
     let mut total_rows = 0usize;
     let mut deleted_sources = 0usize;
     let mut written: HashSet<PathBuf> = HashSet::new();
+    let mut schema_mismatches: Vec<String> = Vec::new();
 
-    for (group_key, group_files) in &groups {
+    'groups: for (group_key, group_files) in &groups {
         info!(
             group = %group_key,
             files = group_files.len(),
@@ -267,11 +274,17 @@ fn run_rollup_local(config: &RollupConfig) -> Result<()> {
         // Read all batches from all files in this group.
         let mut all_batches: Vec<RecordBatch> = Vec::new();
         let mut file_kv_metadata: Option<Vec<KeyValue>> = None;
+        let mut schema_check = SchemaCheck::default();
         for file_path in group_files {
             debug!(group = %group_key, path = %file_path.display(), "reading source Parquet file");
             let file = std::fs::File::open(file_path)
                 .with_context(|| format!("opening {}", file_path.display()))?;
             let builder = ParquetRecordBatchReaderBuilder::try_new(file)?;
+            let rel = file_path.strip_prefix(&source).unwrap_or(file_path);
+            if let Some(reason) = schema_check.check(&rel.to_string_lossy(), builder.schema()) {
+                record_schema_mismatch(group_key, reason, &mut schema_mismatches);
+                continue 'groups;
+            }
             if file_kv_metadata.is_none() {
                 file_kv_metadata = builder
                     .metadata()
@@ -344,7 +357,33 @@ fn run_rollup_local(config: &RollupConfig) -> Result<()> {
         "rollup complete"
     );
 
-    Ok(())
+    schema_mismatch_result(&schema_mismatches)
+}
+
+/// Reports a target partition left untouched because its source files have different schemas.
+///
+/// Arrow's `concat_batches` pairs columns by position, so rolling such files up would silently
+/// drop or swap columns before the sources are deleted.
+fn record_schema_mismatch(group_key: &str, reason: String, mismatches: &mut Vec<String>) {
+    warn!(
+        group = %group_key,
+        reason = %reason,
+        "not rolling up group: source files have different schemas"
+    );
+    mismatches.push(format!("{group_key}: {reason}"));
+}
+
+/// Fails the run when any target partition was skipped for mixed schemas.
+fn schema_mismatch_result(mismatches: &[String]) -> Result<()> {
+    if mismatches.is_empty() {
+        return Ok(());
+    }
+    anyhow::bail!(
+        "{} target partition(s) were not rolled up because their source files have different \
+         schemas; nothing was written or deleted for them:\n  {}",
+        mismatches.len(),
+        mismatches.join("\n  ")
+    )
 }
 
 /// Create a new output file, failing instead of overwriting an existing one.
@@ -458,7 +497,7 @@ fn remove_previous_copies_local(out_dir: &Path, written: &HashSet<PathBuf>) -> R
 
 /// Group source files by their target (coarser) partition key.
 ///
-/// Returns a map from output relative path (e.g. `blocks/year=2024/month=01/date=15`)
+/// Returns a map from output relative path (e.g. `blocks/year=2024/month=01/day=15`)
 /// to the list of source files that belong to that group.
 fn group_files_by_target(
     source_root: &Path,
@@ -484,12 +523,14 @@ fn group_files_by_target(
 /// Compute the group key for a relative file path given the target partition.
 ///
 /// Examples (target=Date):
-///   `blocks/year=2024/month=01/date=15/hour=14/minute=30/part-000001.parquet`
-///   → `blocks/year=2024/month=01/date=15`
+///   `blocks/year=2024/month=01/day=15/hour=14/minute=30/part-000001.parquet`
+///   → `blocks/year=2024/month=01/day=15`
 ///
 /// Examples (target=Hour):
-///   `blocks/year=2024/month=01/date=15/hour=14/minute=30/part-000001.parquet`
-///   → `blocks/year=2024/month=01/date=15/hour=14`
+///   `blocks/year=2024/month=01/day=15/hour=14/minute=30/part-000001.parquet`
+///   → `blocks/year=2024/month=01/day=15/hour=14`
+///
+/// Legacy `date=DD` trees keep their `date=DD` key, so they roll up in place.
 ///
 /// Files without recognized partition components keep everything except the filename.
 fn compute_group_key(rel_path: &str, target: RollupTarget) -> String {
@@ -687,13 +728,15 @@ fn rollup_s3(config: &RollupConfig, src: &S3Root, out: &S3Root) -> Result<()> {
     let mut total_rows = 0usize;
     let mut deleted_sources = 0usize;
     let mut written: HashSet<String> = HashSet::new();
+    let mut schema_mismatches: Vec<String> = Vec::new();
 
-    for (group_key, group_keys) in &groups {
+    'groups: for (group_key, group_keys) in &groups {
         info!(group = %group_key, files = group_keys.len(), "processing group");
 
         // Read all batches and extract file-level metadata from the first file.
         let mut all_batches: Vec<RecordBatch> = Vec::new();
         let mut file_kv_metadata: Option<Vec<KeyValue>> = None;
+        let mut schema_check = SchemaCheck::default();
         for s3_key in group_keys {
             debug!(group = %group_key, path = %s3_key, "reading source Parquet file from S3");
             let data = block_on_async(async {
@@ -703,6 +746,10 @@ fn rollup_s3(config: &RollupConfig, src: &S3Root, out: &S3Root) -> Result<()> {
             .map_err(|e| anyhow::anyhow!("reading s3://{}/{s3_key}: {e}", src.bucket))?;
 
             let builder = ParquetRecordBatchReaderBuilder::try_new(data)?;
+            if let Some(reason) = schema_check.check(src.relative(s3_key), builder.schema()) {
+                record_schema_mismatch(group_key, reason, &mut schema_mismatches);
+                continue 'groups;
+            }
             if file_kv_metadata.is_none() {
                 file_kv_metadata = builder
                     .metadata()
@@ -773,7 +820,7 @@ fn rollup_s3(config: &RollupConfig, src: &S3Root, out: &S3Root) -> Result<()> {
         "rollup complete"
     );
 
-    Ok(())
+    schema_mismatch_result(&schema_mismatches)
 }
 
 /// Upload a merged RecordBatch as one or more new objects under `group_key`, splitting when
@@ -924,6 +971,24 @@ mod tests {
                 RollupTarget::Date
             ),
             "blocks/year=2024/month=01/date=15"
+        );
+    }
+
+    #[test]
+    fn test_compute_group_key_day() {
+        assert_eq!(
+            compute_group_key(
+                "blocks/year=2024/month=01/day=15/hour=14/minute=30/part-000001.parquet",
+                RollupTarget::Date
+            ),
+            "blocks/year=2024/month=01/day=15"
+        );
+        assert_eq!(
+            compute_group_key(
+                "blocks/year=2024/month=01/day=15/hour=14/minute=30/part-000001.parquet",
+                RollupTarget::Hour
+            ),
+            "blocks/year=2024/month=01/day=15/hour=14"
         );
     }
 
@@ -1269,7 +1334,7 @@ mod tests {
         }
     }
 
-    const DAY: &str = "blocks/year=2024/month=01/date=15";
+    const DAY: &str = "blocks/year=2024/month=01/day=15";
 
     /// A batch whose `block_number` column holds `start..start + rows`, so tests can tell
     /// lost rows from duplicated ones.
@@ -1352,6 +1417,16 @@ mod tests {
         assert!(is_rollup_source(&minute_file, hour));
         assert!(is_rollup_source(
             "date=2024-01-15/hour=14/part-000001.parquet",
+            date
+        ));
+        // Legacy `date=DD` day directories written by earlier releases.
+        let legacy_day = "blocks/year=2024/month=01/date=15";
+        assert!(is_rollup_source(
+            &format!("{legacy_day}/hour=14/part-abc12345-000001.parquet"),
+            date
+        ));
+        assert!(!is_rollup_source(
+            &format!("{legacy_day}/part-abc12345-000001.parquet"),
             date
         ));
 
@@ -1788,5 +1863,144 @@ mod tests {
         assert_eq!(out_keys.len(), 2);
         assert!(out_keys.contains(&format!("out/{DAY}/part-cccccccc-000001.parquet")));
         assert_eq!(s3_block_numbers(&store, "src"), (0..12).collect::<Vec<_>>());
+    }
+
+    // -- Schema drift --
+
+    /// A one-row batch of non-nullable UInt64 columns, in the given order.
+    fn make_columns_batch(columns: &[(&str, u64)]) -> RecordBatch {
+        let fields: Vec<Field> = columns
+            .iter()
+            .map(|(name, _)| Field::new(*name, DataType::UInt64, false))
+            .collect();
+        let arrays: Vec<arrow::array::ArrayRef> = columns
+            .iter()
+            .map(|(_, value)| Arc::new(UInt64Array::from(vec![*value])) as arrow::array::ArrayRef)
+            .collect();
+        RecordBatch::try_new(Arc::new(Schema::new(fields)), arrays).unwrap()
+    }
+
+    fn write_columns_file(path: &Path, columns: &[(&str, u64)]) {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        write_test_parquet(path, &make_columns_batch(columns));
+    }
+
+    /// `(path, bytes)` of every `.parquet` file under `dir`, sorted.
+    fn snapshot_parquet_files(dir: &Path) -> Vec<(PathBuf, Vec<u8>)> {
+        let mut files = Vec::new();
+        collect_parquet_files_recursive(dir, &mut files).unwrap();
+        files.sort();
+        files
+            .into_iter()
+            .map(|f| {
+                let bytes = std::fs::read(&f).unwrap();
+                (f, bytes)
+            })
+            .collect()
+    }
+
+    /// Source files that list the same columns in a different order used to be concatenated
+    /// by position (swapping values) and then deleted.
+    #[test]
+    fn test_rollup_skips_group_with_reordered_columns() {
+        let root = tempfile::tempdir().unwrap();
+        let mixed = root.path().join(DAY);
+        let healthy = root.path().join("blocks/year=2024/month=01/day=16");
+        write_columns_file(
+            &mixed.join("hour=14/minute=30/part-aaaaaaaa-000001.parquet"),
+            &[("a", 1), ("b", 10)],
+        );
+        write_columns_file(
+            &mixed.join("hour=14/minute=31/part-bbbbbbbb-000001.parquet"),
+            &[("b", 20), ("a", 2)],
+        );
+        write_columns_file(
+            &healthy.join("hour=00/minute=00/part-aaaaaaaa-000001.parquet"),
+            &[("a", 3), ("b", 30)],
+        );
+        write_columns_file(
+            &healthy.join("hour=00/minute=01/part-aaaaaaaa-000001.parquet"),
+            &[("a", 4), ("b", 40)],
+        );
+        let before = snapshot_parquet_files(&mixed);
+
+        let err = run_rollup(&local_config(root.path(), root.path(), true))
+            .unwrap_err()
+            .to_string();
+
+        assert!(err.contains("1 target partition(s)"), "{err}");
+        assert!(err.contains(DAY), "{err}");
+        assert!(
+            err.contains(&format!(
+                "hour=14/minute=31/part-bbbbbbbb-000001.parquet does not match \
+                 {DAY}/hour=14/minute=30/part-aaaaaaaa-000001.parquet"
+            )),
+            "{err}"
+        );
+        assert!(err.contains("different order"), "{err}");
+        // Nothing was written or deleted for the mixed day...
+        assert_eq!(snapshot_parquet_files(&mixed), before);
+        assert!(file_names_in(&mixed).is_empty());
+        // ...while the healthy day was rolled up and its sources removed.
+        assert_eq!(file_names_in(&healthy).len(), 1);
+        assert!(!healthy.join("hour=00").exists());
+    }
+
+    /// An extra column used to be dropped or fail halfway; now the group is left untouched.
+    #[test]
+    fn test_rollup_skips_group_with_extra_column() {
+        let source = tempfile::tempdir().unwrap();
+        let output = tempfile::tempdir().unwrap();
+        let day = source.path().join(DAY);
+        write_columns_file(
+            &day.join("hour=14/minute=30/part-aaaaaaaa-000001.parquet"),
+            &[("a", 1), ("b", 10)],
+        );
+        write_columns_file(
+            &day.join("hour=14/minute=31/part-bbbbbbbb-000001.parquet"),
+            &[("a", 2), ("b", 20), ("c", 200)],
+        );
+        let before = snapshot_parquet_files(source.path());
+
+        let err = run_rollup(&local_config(source.path(), output.path(), false))
+            .unwrap_err()
+            .to_string();
+
+        assert!(err.contains("extra column `c`"), "{err}");
+        assert_eq!(snapshot_parquet_files(source.path()), before);
+        assert!(snapshot_parquet_files(output.path()).is_empty());
+    }
+
+    #[test]
+    fn test_rollup_s3_skips_group_with_mixed_schemas() {
+        let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let root = memory_root(&store, "mainnet");
+        let put = |key: String, columns: &[(&str, u64)]| {
+            let batch = make_columns_batch(columns);
+            let mut buf = Vec::new();
+            let mut writer = ArrowWriter::try_new(&mut buf, batch.schema(), None).unwrap();
+            writer.write(&batch).unwrap();
+            writer.close().unwrap();
+            put_object(&store, &key, buf);
+        };
+        put(
+            format!("mainnet/{DAY}/hour=14/minute=30/part-aaaaaaaa-000001.parquet"),
+            &[("a", 1), ("b", 10)],
+        );
+        put(
+            format!("mainnet/{DAY}/hour=14/minute=31/part-bbbbbbbb-000001.parquet"),
+            &[("b", 20), ("a", 2)],
+        );
+        let keys = s3_keys(&store, "mainnet");
+        let before: Vec<bytes::Bytes> = keys.iter().map(|key| get_object(&store, key)).collect();
+
+        let config = s3_config("mainnet", "mainnet", true);
+        let err = rollup_s3(&config, &root, &root).unwrap_err().to_string();
+
+        assert!(err.contains("different order"), "{err}");
+        assert_eq!(s3_keys(&store, "mainnet"), keys);
+        for (key, bytes) in keys.iter().zip(&before) {
+            assert_eq!(&get_object(&store, key), bytes, "{key}");
+        }
     }
 }

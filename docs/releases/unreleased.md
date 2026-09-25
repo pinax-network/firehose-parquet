@@ -4,6 +4,22 @@ Changes merged since the last release. Fold this file into `docs/releases/vX.Y.Z
 
 ## Breaking changes
 
+### Day-of-month partition directories are now `day=DD` instead of `date=DD` (#493)
+
+Time-based partitioning (`--partition date`, `hour`, `minute` and `second`) wrote the day of the month as `date=DD`, while every table also has a canonical `date` column (`Date32`). Hive-partition-aware readers treat the directory key as a column, so the two collided:
+
+- DuckDB (`hive_partitioning` is on by default for such paths) replaced the `date` DATE values with the partition value: `date` read as `BIGINT` day-of-month numbers (`26` instead of `2025-07-26`).
+- Polars (`scan_parquet(..., hive_partitioning=True)`) failed with `could not find a 'date/datetime' pattern for '26'`.
+- Spark's file-source partition discovery likewise merges a partition column over a data column of the same name. This was not run here.
+
+New output uses `year=YYYY/month=MM/day=DD/...`. With it, DuckDB reads `date` as `DATE` plus a separate `day` partition column, and Polars reads `date` as `Date` plus `day`. The `--partition date` mode keeps its name; only the directory key changes. `year=`, `month=`, `hour=`, `minute=`, `second=` and `block_range=` are unchanged.
+
+Migration:
+
+- Existing `date=DD` trees stay usable. `rollup` accepts `date=` directories and keeps their key, and `truncate -p day=DD` (or `-p date=DD`) matches both `day=DD` and legacy `date=DD` directories.
+- A pipeline that resumes into an existing `date=` tree writes new days under `day=`, so the table then holds both layouts. DuckDB's auto-detection turns hive partitioning off for such a mix: no partition columns, and `date` is the data column. Forcing `hive_partitioning = true` fails with `Hive partition mismatch ... key "date" not found`. To get partition columns back, rename the legacy directories: renaming `date=DD` to `day=DD` inside each `month=MM` directory is enough, and the files themselves don't change.
+- Queries that used the `date` partition column as a day-of-month number should use `day`. Queries that disabled `hive_partitioning` to keep the `date` column no longer need to.
+
 ### Canonical `timestamp` is now `Timestamp(Millisecond, UTC)` on every table (#491)
 
 The canonical `timestamp` column was Arrow `Timestamp(Second, UTC)`. Parquet has no logical type for seconds, so it was written as a plain `INT64`, and DuckDB, Spark, Trino and ClickHouse read it as `BIGINT` unix seconds. Only Arrow-based readers recovered the type from the embedded Arrow schema.
@@ -11,7 +27,7 @@ The canonical `timestamp` column was Arrow `Timestamp(Second, UTC)`. Parquet has
 It is now Arrow `Timestamp(Millisecond, UTC)`, written as Parquet `TIMESTAMP(MILLIS, isAdjustedToUTC=true)`. `DESCRIBE` in DuckDB shows `TIMESTAMP WITH TIME ZONE`. Antelope `actions.block_time` uses the same type.
 
 - **Sub-second precision.** The value now keeps the milliseconds of the Firehose block time. Antelope chains (500 ms blocks) show `12:00:00.500` where they used to show `12:00:00`, and so can other chains whose Firehose metadata carries sub-second times. Whole-second chains such as EVM keep the same instant.
-- **Unchanged:** `date`, time-based partition directories (`year=`/`month=`/`date=`/`hour=`/`minute=`/`second=`) and the cursor's `last_timestamp` are still derived from the whole-second block time. Output lands in the same partitions as before.
+- **Unchanged:** `date`, time-based partition directories (`year=`/`month=`/`day=`/`hour=`/`minute=`/`second=`; see the `day=` rename above) and the cursor's `last_timestamp` are still derived from the whole-second block time. Blocks land in the same partitions as before.
 - **Unchanged:** Solana `timestamp`/`date` stay null when `block_time` is missing.
 
 Migration:
@@ -26,7 +42,7 @@ Migration:
   SELECT * FROM read_parquet('new/blocks/**/*.parquet');
   ```
 
-- Do not `merge` or `rollup` old and new files together (see #479: merge and rollup match columns by position). Rebuild the old range, or keep it under a separate prefix.
+- Do not `merge` or `rollup` old and new files together. Both commands now refuse (#479): they leave a partition with mixed schemas untouched and exit non-zero. Rebuild the old range, or keep it under a separate prefix.
 - `fireparq verify` roots over new files can differ from roots over old files wherever block times have milliseconds, because the stored value changed. Recompute registries for rebuilt ranges.
 
 ### Tron `transactions`: transaction time columns renamed (#492)
@@ -66,6 +82,19 @@ Migration:
 - Existing registries have no `merkle_version` column and are read as `merkle_v1`. `verify` reports their partitions as `mismatch` with `merkle version mismatch: registry=merkle_v1 runtime=merkle_v2; ...` and exits 1.
 - To rebuild, keep a copy of the old registry, then run `fireparq verify <path> --update-registry --no-fail-fast` against trusted data, and run `verify` again to confirm it passes. The full procedure is in `docs/verifiability-artifact-runbook.md` ("Migrating a legacy `merkle_v1` registry").
 - Report consumers that compare roots should compare `algorithm` and `merkle_version` too (`docs/verify-report-contract.md`).
+
+### `rollup`: in-place runs need `--delete-source`, outputs have new names, and only time partitions are rolled up (#478)
+
+`rollup` used to write fixed file names (`part-000001.parquet`), so a re-run could overwrite its earlier output and then delete it (see Fixes). The fix changes three behaviors:
+
+- **In-place rollups need `--delete-source`.** `fireparq rollup <dir>` without `--output` now fails unless `--delete-source` is passed. Without that flag, the rolled-up copy was written next to its sources, so every row was stored twice under the same root.
+- **New output names.** With `--delete-source`, outputs are named like ingestion parts: `part-<run>-NNNNNN.parquet`, where `<run>` is a random id per run. Without it, outputs are named `part-rollup-<run>-NNNNNN.parquet`, and a re-run replaces the earlier `part-rollup-*` files in each target partition it rewrites. Existing files are never overwritten.
+- **Only time partitions are rolled up.** Rollup now reads only `part-*.parquet` files below a partition finer than `--partition` (`hour=`, `minute=`, or `second=`). Files in `block_range=` or unpartitioned directories are no longer concatenated; use `merge` to compact those.
+
+Migration:
+
+- Add `--delete-source` to in-place `rollup` commands, or write to a separate `--output`.
+- Don't rely on rollup outputs being named `part-000001.parquet`.
 
 ### Built-in `--network` aliases: 13 removed, 4 moved to StreamingFast (#535)
 
@@ -110,9 +139,16 @@ Migration:
 
 ## Fixes
 
+- **`build --start-block` above the last irreversible block no longer writes earlier blocks (#466).** Firehose serves such a request from LIB+1, and those blocks used to be written. Blocks below the effective start block are now skipped before mapping, logged once, and counted in the new `firehose_parquet_blocks_skipped_below_start_total` metric and the `blocks_skipped_below_start` summary field.
+- **Bounded `build` runs verify the stop block (#466).** A run with `--stop-block` exits 0 only once block `stop_block - 1` was received. A stream that ends earlier is resumed from the cursor. If the server then has no more blocks, the run completes with a warning on chains with skipped slots or heights (Solana, NEAR, Beacon), and otherwise writes what it received, saves the cursor there, and exits non-zero.
+- **Live `build` runs reconnect when the stream closes cleanly (#466).** Previously a clean close by the server or a proxy ended the process with exit code 0, so `Restart=on-failure` supervisors never restarted it.
+
 - **`build` no longer restarts from scratch when `cursor.parquet` cannot be read (#465).** Only a missing cursor, or one with no row or an empty cursor string, starts a fresh run. A cursor that exists but cannot be loaded (permission denied, S3 403/5xx/timeout, empty, truncated or corrupt file) now fails the run with an error that names the file. Previously the run logged "starting fresh", re-ingested from `--start-block` or genesis, and overwrote the good cursor on its first flush. To deliberately ignore an unreadable cursor and restart from the CLI bounds, pass `--cursor-override`. `partitions build` also fails instead of ignoring an unreadable sibling cursor when it uses it to infer `--start-block`.
 - **Local cursor saves are atomic (#465).** `cursor.parquet` is written to `cursor.parquet.tmp` in the same directory, fsynced, renamed over the target, and the directory is fsynced. A crash mid-save leaves the previous cursor intact instead of a truncated file. S3 cursor saves were already atomic (single PUT).
 - **A failed table write no longer loses rows (#464).** The writer keeps a table's buffered rows until its write succeeds. When a write, mapping or stream error ends `build`, partial buffers are discarded, `cursor.parquet` is not advanced, and the process exits non-zero, so the next run replays the uncommitted window. Previously the error path flushed the other tables and saved the cursor past the lost rows.
+- **`rollup` re-runs no longer lose or duplicate rows (#478).** An in-place re-run with `--delete-source` overwrote its earlier output and then deleted it as a source; on mainnet test data, the second run deleted the whole dataset. A re-run without `--delete-source` read the earlier output again and stacked duplicate rows. Re-runs now only roll up files that are still below the target granularity, and never overwrite or delete their own output. With `--delete-source`, each target partition's sources are deleted as soon as its output is written, so a failure partway through no longer leaves finished partitions to be rolled up a second time.
+- **`rollup` and `merge` leave root artifacts alone (#478).** `cursor.parquet`, `partitions.parquet`, `merkle_roots.parquet`, and anything under `verify_runs/` are skipped. Rolling up or merging a network root used to fold them into a `part-000001.parquet` and delete them, or fail on their mismatched schemas.
+- **`merge` and `rollup` no longer combine files with different schemas (#479).** Both commands paired columns by position. When a partition mixed files from two tool versions or two schemas, an extra column was silently dropped, and two columns of the same type in a different order swapped values. The sources were then deleted. Both commands now compare every file's columns (names, types, nullability, and order) before writing. A partition with mixed schemas is left untouched, with nothing written or deleted in it. The other partitions are still processed, and the command then exits non-zero, listing the skipped partitions and how their files differ. `merge` reads each part's footer before merging a partition, which adds one small range request per S3 object, and `merge --dry-run` reports these partitions too.
 
 ## Tests
 
