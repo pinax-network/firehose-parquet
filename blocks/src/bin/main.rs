@@ -15,7 +15,10 @@ use firehose_parquet::cli::{
 use firehose_parquet::config::{BlockMetadata, Compression, Config, Partition};
 use firehose_parquet::cursor::{CursorLocation, CursorState};
 use firehose_parquet::encode::EncodeBytes;
-use firehose_parquet::grpc::{EndpointInfo, FirehoseClient};
+use firehose_parquet::grpc::{
+    is_shutdown_error, unless_shutdown, CancellationToken, EndpointInfo, FirehoseClient,
+    ShutdownRequested,
+};
 use firehose_parquet::metrics;
 use firehose_parquet::networks::{resolve_network_endpoint, EndpointSource};
 use firehose_parquet::traits::{decode_id_bytes, fork_step_name, BlockIdentity, BlockMapper};
@@ -258,11 +261,61 @@ enum StreamExit {
     Failed,
 }
 
+/// SIGINT (Ctrl-C) and, on Unix, SIGTERM.
+struct ShutdownSignals {
+    #[cfg(unix)]
+    sigterm: tokio::signal::unix::Signal,
+    #[cfg(unix)]
+    sigint: tokio::signal::unix::Signal,
+}
+
+impl ShutdownSignals {
+    fn install() -> Self {
+        Self {
+            #[cfg(unix)]
+            sigterm: tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                .expect("failed to install SIGTERM handler"),
+            #[cfg(unix)]
+            sigint: tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())
+                .expect("failed to install SIGINT handler"),
+        }
+    }
+
+    /// Wait for the next shutdown signal.
+    async fn next(&mut self) {
+        #[cfg(unix)]
+        tokio::select! {
+            _ = self.sigint.recv() => {}
+            _ = self.sigterm.recv() => {}
+        }
+        #[cfg(not(unix))]
+        {
+            tokio::signal::ctrl_c().await.ok();
+        }
+    }
+}
+
+fn spawn_ingestion_shutdown_handler(shutdown: CancellationToken, cursor_shutdown: Arc<AtomicBool>) {
+    // Install both Unix signals before yielding to another task. Otherwise an
+    // early SIGINT could arrive before a lazily polled ctrl_c future registers.
+    let mut signals = ShutdownSignals::install();
+    tokio::spawn(async move {
+        signals.next().await;
+        info!("shutdown signal received, stopping after the current block (send it again to exit immediately)");
+        cursor_shutdown.store(true, Ordering::SeqCst);
+        shutdown.cancel();
+
+        signals.next().await;
+        warn!("second shutdown signal received, exiting immediately; in-flight writes may be interrupted");
+        std::process::exit(130);
+    });
+}
+
 impl StreamExit {
     fn from_result(result: &Result<()>) -> Self {
         match result {
             Ok(()) => Self::Completed,
-            Err(e) if format!("{e}").contains("__shutdown__") => Self::Shutdown,
+            Err(e) if is_shutdown_error(e) => Self::Shutdown,
             Err(_) => Self::Failed,
         }
     }
@@ -4583,36 +4636,14 @@ async fn run_ingestion(args: &BuildArgs, global: &GlobalArgs) -> Result<()> {
     info!(version = env!("CARGO_PKG_VERSION"), "fireparq starting");
 
     // Install graceful shutdown handler for SIGINT (Ctrl-C) and SIGTERM.
-    // When a signal is received, the flag is set and the streaming loop
-    // will break after the current block.  Partial (incomplete partition)
-    // buffers are discarded so that only fully-written partitions survive
-    // on disk, keeping file creation deterministic.
-    let shutdown = Arc::new(AtomicBool::new(false));
-    {
-        let shutdown = Arc::clone(&shutdown);
-        tokio::spawn(async move {
-            let ctrl_c = tokio::signal::ctrl_c();
-
-            #[cfg(unix)]
-            {
-                use tokio::signal::unix::{signal, SignalKind};
-                let mut sigterm =
-                    signal(SignalKind::terminate()).expect("failed to install SIGTERM handler");
-                tokio::select! {
-                    _ = ctrl_c => {}
-                    _ = sigterm.recv() => {}
-                }
-            }
-
-            #[cfg(not(unix))]
-            {
-                ctrl_c.await.ok();
-            }
-
-            info!("shutdown signal received, finishing current block...");
-            shutdown.store(true, Ordering::SeqCst);
-        });
-    }
+    // The first signal cancels endpoint waits and lets current block work
+    // finish. Unflushed buffers are discarded and previously completed flushes
+    // are preserved. A second signal forces exit and may interrupt writes.
+    let shutdown = CancellationToken::new();
+    // Cursor retries retain their durable-write contract: finish in-flight I/O,
+    // then interrupt retry backoff on the same shutdown signal.
+    let cursor_shutdown = Arc::new(AtomicBool::new(false));
+    spawn_ingestion_shutdown_handler(shutdown.clone(), Arc::clone(&cursor_shutdown));
 
     let block_type = args.block_type.to_lowercase();
     if block_type != "auto" && !BLOCK_TYPES.contains(&block_type.as_str()) {
@@ -4679,8 +4710,22 @@ async fn run_ingestion(args: &BuildArgs, global: &GlobalArgs) -> Result<()> {
     // Fetch endpoint info for auto-detection of encoding, chain_name-based
     // output directory, and feature capability logging.
     let mut client = FirehoseClient::new(config.clone())?;
-    ensure_endpoint_available(&client, &config.endpoint, resolved_network_name.as_deref()).await?;
-    let endpoint_info = Some(client.info().await?);
+    // A signal during endpoint startup stops before anything is written.
+    // Preserve the required Info result; cancellation does not restore fallback
+    // output identity when Info is unavailable.
+    let startup = async {
+        ensure_endpoint_available(&client, &config.endpoint, resolved_network_name.as_deref())
+            .await?;
+        client.info().await
+    };
+    let endpoint_info = match unless_shutdown(&shutdown, startup).await {
+        Ok(endpoint_info) => Some(endpoint_info?),
+        Err(error) if is_shutdown_error(&error) => {
+            info!("shutdown requested during startup, exiting");
+            return Ok(());
+        }
+        Err(error) => return Err(error),
+    };
     debug!(endpoint_info = ?endpoint_info, "fetched endpoint metadata");
 
     // Use chain_name as a subdirectory under the output path.
@@ -5060,7 +5105,7 @@ async fn run_ingestion(args: &BuildArgs, global: &GlobalArgs) -> Result<()> {
     }
 
     let stream_result = client
-        .stream_blocks(stream_resume_cursor(existing_cursor_state.as_ref(), args.cursor_override), |block_bytes, type_url, cursor_str, identity: BlockIdentity, step: i32| {
+        .stream_blocks(stream_resume_cursor(existing_cursor_state.as_ref(), args.cursor_override), &shutdown, |block_bytes, type_url, cursor_str, identity: BlockIdentity, step: i32| {
             let fork_step_str = fork_step_name(step);
             if final_blocks_only && step == 2 {
                 return Ok(());
@@ -5326,7 +5371,7 @@ async fn run_ingestion(args: &BuildArgs, global: &GlobalArgs) -> Result<()> {
                                     state.updated_at = time::OffsetDateTime::now_utc()
                                         .format(&time::format_description::well_known::Rfc3339)
                                         .unwrap_or_default();
-                                    loc.save_with_retry_blocking(&state, &pipeline_metrics, &shutdown)?;
+                                    loc.save_with_retry_blocking(&state, &pipeline_metrics, &cursor_shutdown)?;
                                 }
                             }
                         } else {
@@ -5378,9 +5423,9 @@ async fn run_ingestion(args: &BuildArgs, global: &GlobalArgs) -> Result<()> {
                 }
 
                 // Check for graceful shutdown after processing the current block.
-                if shutdown.load(Ordering::SeqCst) {
+                if shutdown.is_cancelled() {
                     info!(blocks_processed, block_number, "shutdown requested, breaking out of stream");
-                    return Err(anyhow!("__shutdown__"));
+                    return Err(ShutdownRequested.into());
                 }
 
                 if should_emit_progress_log(blocks_processed) {
@@ -5487,7 +5532,7 @@ async fn run_ingestion(args: &BuildArgs, global: &GlobalArgs) -> Result<()> {
                                 state.updated_at = time::OffsetDateTime::now_utc()
                                     .format(&time::format_description::well_known::Rfc3339)
                                     .unwrap_or_default();
-                                loc.save_with_retry_blocking(&state, &pipeline_metrics, &shutdown)?;
+                                loc.save_with_retry_blocking(&state, &pipeline_metrics, &cursor_shutdown)?;
                             }
                         }
                     } else {
@@ -5639,7 +5684,7 @@ async fn run_ingestion(args: &BuildArgs, global: &GlobalArgs) -> Result<()> {
                     state.updated_at = time::OffsetDateTime::now_utc()
                         .format(&time::format_description::well_known::Rfc3339)
                         .unwrap_or_default();
-                    loc.save_with_retry_blocking(&state, &pipeline_metrics, &shutdown)?;
+                    loc.save_with_retry_blocking(&state, &pipeline_metrics, &cursor_shutdown)?;
                 }
                 Ok(())
             },
@@ -5830,12 +5875,84 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn shutdown_signal_child_fixture() {
+        if std::env::var("FIREPARQ_SHUTDOWN_TEST_CHILD").as_deref() != Ok("1") {
+            return;
+        }
+        let shutdown = CancellationToken::new();
+        let cursor_shutdown = Arc::new(AtomicBool::new(false));
+        spawn_ingestion_shutdown_handler(shutdown.clone(), Arc::clone(&cursor_shutdown));
+        println!("signal-handlers-ready");
+        shutdown.cancelled().await;
+        assert!(cursor_shutdown.load(Ordering::SeqCst));
+        println!("first-signal-cancelled-both-waits");
+        // Model a current operation still finishing after the first signal.
+        std::future::pending::<()>().await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_second_shutdown_signal_force_exits_after_first_cancellation() {
+        use tokio::io::AsyncBufReadExt;
+        let mut child = tokio::process::Command::new(std::env::current_exe().unwrap())
+            .kill_on_drop(true)
+            .env_clear()
+            .env("FIREPARQ_SHUTDOWN_TEST_CHILD", "1")
+            .args([
+                "--exact",
+                "tests::shutdown_signal_child_fixture",
+                "--nocapture",
+            ])
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::inherit())
+            .spawn()
+            .unwrap();
+        let pid = child.id().unwrap().to_string();
+        let mut lines = tokio::io::BufReader::new(child.stdout.take().unwrap()).lines();
+        for (marker, signal) in [
+            ("signal-handlers-ready", "-TERM"),
+            ("first-signal-cancelled-both-waits", "-INT"),
+        ] {
+            tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    let line = lines
+                        .next_line()
+                        .await
+                        .unwrap()
+                        .expect("child stopped before signal marker");
+                    if line.contains(marker) {
+                        break;
+                    }
+                }
+            })
+            .await
+            .expect("signal handler child must reach the marker");
+            assert!(tokio::process::Command::new("/bin/kill")
+                .args([signal, &pid])
+                .status()
+                .await
+                .unwrap()
+                .success());
+        }
+        let status = tokio::time::timeout(Duration::from_secs(2), child.wait())
+            .await
+            .expect("second signal must force exit promptly")
+            .unwrap();
+        assert_eq!(status.code(), Some(130));
+    }
+
     #[test]
     fn test_stream_exit_only_materializes_buffers_after_completed_stream() {
         assert_eq!(StreamExit::from_result(&Ok(())), StreamExit::Completed);
         assert_eq!(
-            StreamExit::from_result(&Err(anyhow!("__shutdown__"))),
+            StreamExit::from_result(&Err(ShutdownRequested.into())),
             StreamExit::Shutdown
+        );
+        assert_eq!(
+            StreamExit::from_result(&Err(anyhow!("storage path contains __shutdown__"))),
+            StreamExit::Failed,
         );
         assert_eq!(
             StreamExit::from_result(&Err(anyhow!("uploading to S3: logs/part.parquet"))),
