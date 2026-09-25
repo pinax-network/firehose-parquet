@@ -1,6 +1,4 @@
-//! Read-only ownership status and explicit provider-quiescent S3 owner release.
-//!
-//! These commands do not roll back data or implement ingestion transactions.
+//! Ownership inspection, provider-quiescent release and guarded transaction recovery.
 
 use anyhow::{bail, Context, Result};
 use clap::{Args, Subcommand};
@@ -21,6 +19,9 @@ use crate::durable_state::{
 pub enum RecoveryCommands {
     /// Read ownership and control-record summaries without changing S3 objects.
     Status(RecoveryStorageArgs),
+    /// Recover protected ingestion/mirror and recognized merge journals under one owner.
+    /// An S3 owner must first be released with provider-quiescence evidence.
+    Recover(RecoveryStorageArgs),
     /// Release one exact S3 owner after provider-confirmed request quiescence.
     ///
     /// This changes only ownership. It does not repair data or journals. Process
@@ -130,6 +131,26 @@ impl SlotSummary {
 pub async fn run_recovery(command: &RecoveryCommands) -> Result<()> {
     let result = match command {
         RecoveryCommands::Status(storage) => status(storage).await?,
+        RecoveryCommands::Recover(storage) => {
+            let aws = storage.aws();
+            let prepared = crate::ingest::maintenance::acquire(
+                "recovery",
+                vec![crate::ingest::maintenance::MaintenanceTarget::input(
+                    storage.path.clone(),
+                )?],
+                crate::ingest::maintenance::MaintenancePolicy::Recover,
+                Some(&aws),
+            )
+            .await?;
+            let roots = prepared.roots.len();
+            let merges = prepared.recovered_merges;
+            prepared.ownership.release().await?;
+            println!(
+                "{}",
+                serde_json::json!({"recovered_protected_roots":roots,"recovered_merge_journals":merges})
+            );
+            return Ok(());
+        }
         RecoveryCommands::Release(args) => {
             if !args.storage.path.starts_with("s3://") {
                 bail!("local ownership is an OS lock and cannot be forcibly released; stop the owning process before recovery");

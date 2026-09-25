@@ -4,6 +4,7 @@ pub(crate) mod binding;
 pub(crate) mod controller;
 pub(crate) mod eligibility;
 pub(crate) mod frontier;
+pub(crate) mod maintenance;
 pub(crate) mod mirror;
 pub(crate) mod parts;
 pub(crate) mod session;
