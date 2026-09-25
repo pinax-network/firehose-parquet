@@ -1,8 +1,9 @@
 # Issue #515: adaptive compressed file sizing
 
-Status: implemented and under independent review. Current-main full validation
-is in progress; no PR has been published. This builds on protected ingestion
-transactions (#600), with main #601/#510 (`9379883`) integrated.
+Status: implementation and independent review are complete. This builds on
+protected ingestion transactions (#600), with main through #603/#530 (`39d49f6`)
+integrated. Local qualification is recorded below; the linked PR tracks the
+remaining CI and merge gates.
 
 ## Diagnosis and implementation
 
@@ -159,5 +160,18 @@ all-chain schema/identity tests. New CLI cases prove committed compressed receip
 expand the next flush window, and a summed estimate triggers memory flushing
 while every individual table remains below its threshold. Existing restart,
 zero-row, genesis/lookahead, stop-extension, sparse EOF and legacy-refusal cases
-remain intact. Full workspace, examples, telemetry resets and final validation
-will be recorded here before publication.
+remain intact. The full workspace at `96ad7af` (main `b364681`, including
+#601/#510 and #602/#517) passed **1,015 tests** with nine intentional ignores.
+The sizing example and CI capture-auth example each passed their test; the latter
+also has one intentionally ignored child-process helper. Workspace build,
+formatting and Bash/Zsh/Fish completions passed. The new gauge test and real CLI
+metrics test prove both maximum and summed mapper estimates reset to zero after
+flush.
+
+After the subsequent disjoint client refactor #603/#530 was integrated as
+`430f74d`, **74 focused checks passed**: 50 gRPC, four sizing-policy, ten
+mapper/trigger, nine actual ingestion CLI and one metrics check. The gRPC suite
+also has one intentionally ignored measurement test. Workspace build/formatting
+passed again. The full-suite ancestry above is
+explicit; the PR CI validates the combined final tree. No new live Firehose
+requests or production S3 writes were made for this issue.
