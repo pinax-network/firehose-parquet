@@ -1,6 +1,7 @@
 use arrow::array::{
     ArrayBuilder, BinaryBuilder, BooleanBuilder, Date32Builder, Float64Builder, Int32Builder,
-    Int64Builder, ListBuilder, StringBuilder, TimestampSecondBuilder, UInt32Builder, UInt64Builder,
+    Int64Builder, ListBuilder, StringBuilder, TimestampMillisecondBuilder, UInt32Builder,
+    UInt64Builder,
 };
 use arrow::datatypes::{DataType, Field, TimeUnit};
 use arrow::record_batch::RecordBatch;
@@ -28,8 +29,8 @@ pub fn est_i64(b: &Int64Builder) -> usize {
     b.len() * 8
 }
 
-/// Estimate memory usage of a `TimestampSecondBuilder`.
-pub fn est_ts_sec(b: &TimestampSecondBuilder) -> usize {
+/// Estimate memory usage of a `TimestampMillisecondBuilder`.
+pub fn est_ts_ms(b: &TimestampMillisecondBuilder) -> usize {
     b.len() * 8
 }
 
@@ -92,9 +93,37 @@ pub struct BlockIdentity {
     pub parent_num: u64,
     pub parent_id: String,
     pub lib_num: u64,
-    pub timestamp: i64, // unix seconds
+    /// Block time in whole unix seconds. Drives partition routing, the `date`
+    /// column and the cursor's `last_timestamp`.
+    pub timestamp: i64,
+    /// Sub-second part of the block time in nanoseconds, as carried by the
+    /// Firehose metadata `time` (0 when absent). Only the canonical
+    /// `timestamp` column uses it, via [`BlockIdentity::timestamp_millis`].
+    pub timestamp_nanos: i32,
     /// Fork step: None when final_blocks_only=true, Some("NEW"/"UNDO"/"FINAL") otherwise.
     pub fork_step: Option<String>,
+}
+
+impl BlockIdentity {
+    /// Block time in unix milliseconds, for the canonical `timestamp` column.
+    pub fn timestamp_millis(&self) -> i64 {
+        timestamp_millis(self.timestamp, self.timestamp_nanos)
+    }
+}
+
+/// Combine unix seconds and a protobuf-style sub-second nanos part into unix
+/// milliseconds. Nanos outside `0..1_000_000_000` are clamped.
+pub fn timestamp_millis(seconds: i64, nanos: i32) -> i64 {
+    let millis = i64::from(nanos.clamp(0, 999_999_999) / 1_000_000);
+    seconds.saturating_mul(1_000).saturating_add(millis)
+}
+
+/// Arrow type of the canonical `timestamp` column and other block-time columns:
+/// `Timestamp(Millisecond, UTC)`, written to Parquet as
+/// `TIMESTAMP(MILLIS, isAdjustedToUTC=true)`. (Arrow `Timestamp(Second)` has no
+/// Parquet logical type and reads back as a plain INT64 outside Arrow.)
+pub fn timestamp_millis_utc_type() -> DataType {
+    DataType::Timestamp(TimeUnit::Millisecond, Some(Arc::from("UTC")))
 }
 
 /// Convert a block timestamp expressed as UTC unix seconds into Arrow `Date32`
@@ -137,7 +166,7 @@ fn canonical_fields_with_encoding_nullable(
         Field::new("lib_num", DataType::UInt64, false),
         Field::new(
             "timestamp",
-            DataType::Timestamp(TimeUnit::Second, Some(Arc::from("UTC"))),
+            timestamp_millis_utc_type(),
             nullable_timestamps,
         ),
         Field::new("date", DataType::Date32, nullable_timestamps),
@@ -163,7 +192,7 @@ pub struct CanonicalBuilder {
     pub parent_num: UInt64Builder,
     parent_id: BytesColumn,
     pub lib_num: UInt64Builder,
-    pub timestamp: TimestampSecondBuilder,
+    pub timestamp: TimestampMillisecondBuilder,
     pub date: Date32Builder,
 }
 
@@ -180,7 +209,7 @@ impl CanonicalBuilder {
             parent_num: UInt64Builder::new(),
             parent_id: BytesColumn::new(encoding),
             lib_num: UInt64Builder::new(),
-            timestamp: TimestampSecondBuilder::new().with_timezone("UTC"),
+            timestamp: TimestampMillisecondBuilder::new().with_timezone("UTC"),
             date: Date32Builder::new(),
         }
     }
@@ -189,22 +218,23 @@ impl CanonicalBuilder {
         self.block_num.append_value(id.block_num);
         self.parent_num.append_value(id.parent_num);
         self.lib_num.append_value(id.lib_num);
-        self.timestamp.append_value(id.timestamp);
+        self.timestamp.append_value(id.timestamp_millis());
         self.date
             .append_value(date32_from_timestamp_seconds(id.timestamp));
         self.append_ids(id);
     }
 
-    /// Append a row with an optional timestamp/date.  When `timestamp` is
-    /// `None` (e.g. Solana blocks without `block_time`), null values are
-    /// written for both the `timestamp` and `date` columns.
+    /// Append a row with an optional timestamp/date, given in whole unix
+    /// seconds. When `timestamp` is `None` (e.g. Solana blocks without
+    /// `block_time`), null values are written for both the `timestamp` and
+    /// `date` columns.
     pub fn append_with_optional_timestamp(&mut self, id: &BlockIdentity, timestamp: Option<i64>) {
         self.block_num.append_value(id.block_num);
         self.parent_num.append_value(id.parent_num);
         self.lib_num.append_value(id.lib_num);
         match timestamp {
             Some(ts) => {
-                self.timestamp.append_value(ts);
+                self.timestamp.append_value(timestamp_millis(ts, 0));
                 self.date.append_value(date32_from_timestamp_seconds(ts));
             }
             None => {
@@ -246,7 +276,7 @@ impl CanonicalBuilder {
             + est_u64(&self.parent_num)
             + self.parent_id.estimated_bytes()
             + est_u64(&self.lib_num)
-            + est_ts_sec(&self.timestamp)
+            + est_ts_ms(&self.timestamp)
             + est_date32(&self.date)
     }
 }
@@ -331,10 +361,61 @@ pub trait BlockMapper {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use arrow::array::{BinaryArray, Date32Array, TimestampSecondArray, UInt64Array};
+    use arrow::array::{BinaryArray, Date32Array, TimestampMillisecondArray, UInt64Array};
     use arrow::record_batch::RecordBatch;
     use bytes::Bytes;
-    use parquet::arrow::{arrow_reader::ParquetRecordBatchReaderBuilder, ArrowWriter};
+    use parquet::arrow::arrow_reader::{ArrowReaderOptions, ParquetRecordBatchReaderBuilder};
+    use parquet::arrow::ArrowWriter;
+    use parquet::basic::{LogicalType, TimeUnit as ParquetTimeUnit};
+
+    /// Write one canonical-identity batch to an in-memory Parquet file.
+    fn canonical_parquet_bytes(timestamp_millis: i64) -> Bytes {
+        let schema = Arc::new(arrow::datatypes::Schema::new(
+            canonical_fields_with_nullable_timestamps(&EncodeBytes::Binary),
+        ));
+        let batch = RecordBatch::try_new(
+            Arc::clone(&schema),
+            vec![
+                Arc::new(UInt64Array::from(vec![42_u64])),
+                Arc::new(BinaryArray::from(vec![b"block-id".as_slice()])),
+                Arc::new(UInt64Array::from(vec![41_u64])),
+                Arc::new(BinaryArray::from(vec![b"parent-id".as_slice()])),
+                Arc::new(UInt64Array::from(vec![40_u64])),
+                Arc::new(
+                    TimestampMillisecondArray::from(vec![timestamp_millis]).with_timezone("UTC"),
+                ),
+                Arc::new(Date32Array::from(vec![date32_from_timestamp_seconds(
+                    timestamp_millis.div_euclid(1_000),
+                )])),
+            ],
+        )
+        .expect("record batch should build");
+
+        let mut parquet_bytes = Vec::new();
+        let mut writer =
+            ArrowWriter::try_new(&mut parquet_bytes, Arc::clone(&schema), None).expect("writer");
+        writer.write(&batch).expect("write batch");
+        writer.close().expect("close writer");
+        Bytes::from(parquet_bytes)
+    }
+
+    #[test]
+    fn test_timestamp_millis_combines_seconds_and_nanos() {
+        assert_eq!(timestamp_millis(1_700_000_000, 0), 1_700_000_000_000);
+        assert_eq!(
+            timestamp_millis(1_700_000_000, 500_000_000),
+            1_700_000_000_500
+        );
+        assert_eq!(
+            timestamp_millis(1_700_000_000, 999_999_999),
+            1_700_000_000_999
+        );
+        assert_eq!(timestamp_millis(1_700_000_000, -1), 1_700_000_000_000);
+        assert_eq!(
+            timestamp_millis(1_700_000_000, 2_000_000_000),
+            1_700_000_000_999
+        );
+    }
 
     #[test]
     fn test_date32_from_timestamp_seconds_uses_utc_days() {
@@ -366,6 +447,7 @@ mod tests {
             parent_id: "bb".to_string(),
             lib_num: 40,
             timestamp: 1_700_000_000,
+            timestamp_nanos: 0,
             fork_step: None,
         });
 
@@ -402,6 +484,7 @@ mod tests {
                 parent_id: "dd".to_string(),
                 lib_num: 98,
                 timestamp: 0,
+                timestamp_nanos: 0,
                 fork_step: None,
             },
             None,
@@ -410,8 +493,8 @@ mod tests {
         let columns = builder.finish();
         let ts_array = columns[5]
             .as_any()
-            .downcast_ref::<TimestampSecondArray>()
-            .expect("timestamp column should be TimestampSecondArray");
+            .downcast_ref::<TimestampMillisecondArray>()
+            .expect("timestamp column should be TimestampMillisecondArray");
         let date_array = columns[6]
             .as_any()
             .downcast_ref::<Date32Array>()
@@ -422,35 +505,31 @@ mod tests {
     }
 
     #[test]
+    fn test_canonical_builder_append_with_optional_timestamp_some_writes_millis() {
+        let mut builder = CanonicalBuilder::new();
+        builder.append_with_optional_timestamp(&BlockIdentity::default(), Some(1_700_000_000));
+
+        let columns = builder.finish();
+        let ts_array = columns[5]
+            .as_any()
+            .downcast_ref::<TimestampMillisecondArray>()
+            .expect("timestamp column should be TimestampMillisecondArray");
+        let date_array = columns[6]
+            .as_any()
+            .downcast_ref::<Date32Array>()
+            .expect("date column should be Date32");
+        assert_eq!(ts_array.value(0), 1_700_000_000_000);
+        assert_eq!(
+            date_array.value(0),
+            date32_from_timestamp_seconds(1_700_000_000)
+        );
+    }
+
+    #[test]
     fn test_nullable_canonical_timestamp_and_date_stay_optional_in_parquet() {
-        let timestamp = 1_700_000_000;
-        let schema = Arc::new(arrow::datatypes::Schema::new(
-            canonical_fields_with_nullable_timestamps(&EncodeBytes::Binary),
-        ));
-        let batch = RecordBatch::try_new(
-            Arc::clone(&schema),
-            vec![
-                Arc::new(UInt64Array::from(vec![42_u64])),
-                Arc::new(BinaryArray::from(vec![b"block-id".as_slice()])),
-                Arc::new(UInt64Array::from(vec![41_u64])),
-                Arc::new(BinaryArray::from(vec![b"parent-id".as_slice()])),
-                Arc::new(UInt64Array::from(vec![40_u64])),
-                Arc::new(TimestampSecondArray::from(vec![timestamp]).with_timezone("UTC")),
-                Arc::new(Date32Array::from(vec![date32_from_timestamp_seconds(
-                    timestamp,
-                )])),
-            ],
-        )
-        .expect("record batch should build");
+        let parquet_bytes = canonical_parquet_bytes(1_700_000_000_000);
 
-        let mut parquet_bytes = Vec::new();
-        let mut writer =
-            ArrowWriter::try_new(&mut parquet_bytes, Arc::clone(&schema), None).expect("writer");
-        writer.write(&batch).expect("write batch");
-        writer.close().expect("close writer");
-
-        let builder =
-            ParquetRecordBatchReaderBuilder::try_new(Bytes::from(parquet_bytes)).expect("reader");
+        let builder = ParquetRecordBatchReaderBuilder::try_new(parquet_bytes).expect("reader");
         let roundtrip_schema = builder.schema();
         let parquet_schema = builder.parquet_schema().root_schema();
 
@@ -481,5 +560,71 @@ mod tests {
             parquet_date.is_optional(),
             "parquet date field should stay optional even without null values"
         );
+    }
+
+    #[test]
+    fn test_canonical_builder_keeps_sub_second_precision_and_second_based_date() {
+        // 2023-11-14T23:59:59.500Z: the timestamp keeps the 500 ms, the date
+        // stays on the UTC day of the whole second.
+        let mut builder = CanonicalBuilder::new();
+        builder.append(&BlockIdentity {
+            timestamp: 1_700_006_399,
+            timestamp_nanos: 500_000_000,
+            ..BlockIdentity::default()
+        });
+
+        let columns = builder.finish();
+        let timestamps = columns[5]
+            .as_any()
+            .downcast_ref::<TimestampMillisecondArray>()
+            .expect("timestamp column should be TimestampMillisecondArray");
+        let dates = columns[6]
+            .as_any()
+            .downcast_ref::<Date32Array>()
+            .expect("date column should be Date32");
+        assert_eq!(timestamps.value(0), 1_700_006_399_500);
+        assert_eq!(dates.value(0), date32_from_timestamp_seconds(1_700_006_399));
+    }
+
+    #[test]
+    fn test_canonical_timestamp_has_parquet_timestamp_millis_utc_logical_type() {
+        let parquet_bytes = canonical_parquet_bytes(1_700_000_000_500);
+
+        // What non-Arrow readers (DuckDB, Spark, Trino, ClickHouse) see.
+        let builder =
+            ParquetRecordBatchReaderBuilder::try_new(parquet_bytes.clone()).expect("reader");
+        let descr = builder.parquet_schema();
+        let column = (0..descr.num_columns())
+            .map(|i| descr.column(i))
+            .find(|column| column.name() == "timestamp")
+            .expect("timestamp column in parquet schema");
+        assert_eq!(
+            column.logical_type_ref(),
+            Some(&LogicalType::Timestamp {
+                is_adjusted_to_u_t_c: true,
+                unit: ParquetTimeUnit::MILLIS,
+            })
+        );
+
+        // The Arrow type is recoverable from the Parquet type alone, without the
+        // embedded Arrow schema.
+        let options = ArrowReaderOptions::new().with_skip_arrow_metadata(true);
+        let builder = ParquetRecordBatchReaderBuilder::try_new_with_options(parquet_bytes, options)
+            .expect("reader without arrow metadata");
+        let field = builder
+            .schema()
+            .field_with_name("timestamp")
+            .expect("timestamp field")
+            .clone();
+        assert_eq!(field.data_type(), &timestamp_millis_utc_type());
+
+        let batch = builder.build().unwrap().next().unwrap().unwrap();
+        let values = batch
+            .column_by_name("timestamp")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<TimestampMillisecondArray>()
+            .expect("timestamp column should be TimestampMillisecondArray");
+        assert_eq!(values.value(0), 1_700_000_000_500);
     }
 }

@@ -828,6 +828,7 @@ pub(crate) mod tests {
             parent_id: "0x000102".to_string(),
             lib_num: 100,
             timestamp: 1_700_000_000,
+            timestamp_nanos: 0,
             fork_step: None,
         };
         let mut mapper = TronBlockMapper::new(false, EncodeBytes::TronBase58, false);

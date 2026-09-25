@@ -4,6 +4,31 @@ Changes merged since the last release. Fold this file into `docs/releases/vX.Y.Z
 
 ## Breaking changes
 
+### Canonical `timestamp` is now `Timestamp(Millisecond, UTC)` on every table (#491)
+
+The canonical `timestamp` column was Arrow `Timestamp(Second, UTC)`. Parquet has no logical type for seconds, so it was written as a plain `INT64`, and DuckDB, Spark, Trino and ClickHouse read it as `BIGINT` unix seconds. Only Arrow-based readers recovered the type from the embedded Arrow schema.
+
+It is now Arrow `Timestamp(Millisecond, UTC)`, written as Parquet `TIMESTAMP(MILLIS, isAdjustedToUTC=true)`. `DESCRIBE` in DuckDB shows `TIMESTAMP WITH TIME ZONE`. Antelope `actions.block_time` uses the same type.
+
+- **Sub-second precision.** The value now keeps the milliseconds of the Firehose block time. Antelope chains (500 ms blocks) show `12:00:00.500` where they used to show `12:00:00`, and so can other chains whose Firehose metadata carries sub-second times. Whole-second chains such as EVM keep the same instant.
+- **Unchanged:** `date`, time-based partition directories (`year=`/`month=`/`date=`/`hour=`/`minute=`/`second=`) and the cursor's `last_timestamp` are still derived from the whole-second block time. Output lands in the same partitions as before.
+- **Unchanged:** Solana `timestamp`/`date` stay null when `block_time` is missing.
+
+Migration:
+
+- Queries that converted the column with `to_timestamp("timestamp")` should use `"timestamp"` directly. Queries that need numbers can use `epoch_ms("timestamp")` (milliseconds) or `epoch("timestamp")` (seconds, fractional) in DuckDB.
+- Old and new files have different `timestamp` types. A single DuckDB scan over both fails with a cast error (`BIGINT -> TIMESTAMP WITH TIME ZONE`), with or without `union_by_name`. Query them separately and normalize the old files:
+
+  ```sql
+  SELECT * REPLACE (to_timestamp("timestamp") AS "timestamp")
+  FROM read_parquet('old/blocks/**/*.parquet')
+  UNION ALL BY NAME
+  SELECT * FROM read_parquet('new/blocks/**/*.parquet');
+  ```
+
+- Do not `merge` or `rollup` old and new files together (see #479: merge and rollup match columns by position). Rebuild the old range, or keep it under a separate prefix.
+- `fireparq verify` roots over new files can differ from roots over old files wherever block times have milliseconds, because the stored value changed. Recompute registries for rebuilt ranges.
+
 ### Tron `transactions`: transaction time columns renamed (#492)
 
 The Tron `transactions` table had two columns named `timestamp`: the canonical block time and the transaction's own creation time. Spark and Polars reject files with duplicate column names, DuckDB exposes the second one as `timestamp_1`, and name-based lookups only find the first one.
@@ -35,3 +60,4 @@ Migration:
 ## Tests
 
 - A new cross-chain schema contract test maps one fixture batch for every table of every chain, under every bytes encoding and both `fork_step` settings. It checks that column names are unique, that each batch round-trips through the Parquet writer and reader with the same schema and values, and that every table's canonical `block_id` / `parent_id` match the `blocks` table.
+- A Parquet round-trip test asserts that the canonical `timestamp` is written as `TIMESTAMP(MILLIS, isAdjustedToUTC=true)` and reads back as `Timestamp(Millisecond, UTC)` without the embedded Arrow schema. The contract test also checks the canonical `timestamp` type on every table.

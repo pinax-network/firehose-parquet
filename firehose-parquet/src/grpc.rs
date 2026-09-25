@@ -214,6 +214,7 @@ impl FirehoseClient {
                 parent_id: m.parent_id.clone(),
                 lib_num: m.lib_num,
                 timestamp: m.time.as_ref().map_or(0, |t| t.seconds),
+                timestamp_nanos: m.time.as_ref().map_or(0, |t| t.nanos),
                 fork_step: None,
             }))
         };
@@ -433,6 +434,7 @@ impl FirehoseClient {
                                 parent_id: m.parent_id.clone(),
                                 lib_num: m.lib_num,
                                 timestamp: m.time.as_ref().map_or(0, |t| t.seconds),
+                                timestamp_nanos: m.time.as_ref().map_or(0, |t| t.nanos),
                                 fork_step: fork_step.clone(),
                             })
                             .unwrap_or_default();

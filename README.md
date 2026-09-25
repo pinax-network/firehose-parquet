@@ -21,7 +21,7 @@ A production-grade Rust toolkit that consumes [StreamingFast Firehose](https://f
 
 - **Single binary** — one `fireparq` binary handles all chains via `--block-type` with auto-detection
 - **Multi-chain** — pluggable `BlockMapper` trait with per-chain mapper modules
-- **Canonical identity columns** — `block_num`, `block_id`, `parent_num`, `parent_id`, `lib_num`, `timestamp`, `date` on every table; `date` is an Arrow `Date32` derived from the UTC block timestamp. For Solana, canonical `timestamp` / `date` stay nullable when `block_time` is missing, and synthetic timing is used only for time-based partition routing. Chain-specific columns never reuse these names: Tron `transactions` stores the transaction's own creation and expiration times as `tx_timestamp_ms` / `expiration_ms` (Int64 unix milliseconds; `tx_timestamp_ms` is set by the sender, so it can be 0 or use another unit)
+- **Canonical identity columns** — `block_num`, `block_id`, `parent_num`, `parent_id`, `lib_num`, `timestamp`, `date` on every table; `timestamp` is `Timestamp(Millisecond, UTC)` (Parquet `TIMESTAMP(MILLIS, isAdjustedToUTC=true)`, so DuckDB, Spark, Trino and ClickHouse read it as a timestamp) and keeps sub-second block times where Firehose provides them; `date` is an Arrow `Date32` derived from the UTC block timestamp. For Solana, canonical `timestamp` / `date` stay nullable when `block_time` is missing, and synthetic timing is used only for time-based partition routing. Chain-specific columns never reuse these names: Tron `transactions` stores the transaction's own creation and expiration times as `tx_timestamp_ms` / `expiration_ms` (Int64 unix milliseconds; `tx_timestamp_ms` is set by the sender, so it can be 0 or use another unit)
 - **gRPC streaming** — connects to any Firehose v2 endpoint via tonic, with TLS and API key / JWT auth
 - **Network aliases** — `--network` resolves built-in Firehose names and supports `FIREHOSE_ENDPOINT_*` per-network overrides
 - **Automatic retry / resume** — exponential back-off on connection errors; resumes from the last cursor
@@ -1002,7 +1002,7 @@ WHERE key LIKE 'firehose-parquet.%';
 
 ## Canonical Identity Columns
 
-Every table across all chains includes these 6 columns (from Firehose `BlockMetadata`):
+Every table across all chains includes these 7 columns (from Firehose `BlockMetadata`):
 
 | Column | Type | Description |
 |---|---|---|
@@ -1011,7 +1011,10 @@ Every table across all chains includes these 6 columns (from Firehose `BlockMeta
 | `parent_num` | UInt64 | Parent block number |
 | `parent_id` | Utf8 | Parent block ID |
 | `lib_num` | UInt64 | Last irreversible block number |
-| `timestamp` | Int64 | Block time (unix seconds) |
+| `timestamp` | Timestamp(Millisecond, UTC) | Block time. Parquet logical type `TIMESTAMP(MILLIS, isAdjustedToUTC=true)`; keeps sub-second precision where the chain has it (e.g. Antelope's 500 ms blocks) |
+| `date` | Date32 | UTC day of the block time |
+
+Time-based partition directories (`year=`/`month=`/`date=`/`hour=`/…) and `date` are derived from the whole-second block time, so a block at `12:00:00.500` lands in the same `second=00` partition as one at `12:00:00.000`. Solana tables keep `timestamp` and `date` null when `block_time` is missing.
 
 ## Output Encoding by Block Type
 

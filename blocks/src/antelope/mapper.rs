@@ -5,8 +5,8 @@ use arrow::datatypes::Schema;
 use arrow::record_batch::RecordBatch;
 use firehose_parquet::encode::{BytesColumn, EncodeBytes};
 use firehose_parquet::traits::{
-    est_bool, est_i64, est_opt_str, est_str, est_ts_sec, est_u32, est_u64, BlockIdentity,
-    BlockMapper, CanonicalBuilder,
+    est_bool, est_i64, est_opt_str, est_str, est_ts_ms, est_u32, est_u64, timestamp_millis,
+    BlockIdentity, BlockMapper, CanonicalBuilder,
 };
 use prost::Message;
 use serde_json::{json, Value};
@@ -62,11 +62,11 @@ fn append_optional_string(builder: &mut StringBuilder, value: Option<&str>) {
 }
 
 fn append_optional_timestamp(
-    builder: &mut TimestampSecondBuilder,
+    builder: &mut TimestampMillisecondBuilder,
     timestamp: Option<&prost_types::Timestamp>,
 ) {
     if let Some(timestamp) = timestamp {
-        builder.append_value(timestamp.seconds);
+        builder.append_value(timestamp_millis(timestamp.seconds, timestamp.nanos));
     } else {
         builder.append_null();
     }
@@ -527,7 +527,7 @@ impl BlockMapper for AntelopeBlockMapper {
             + est_str(&self.actions.transaction_id)
             + est_u64(&self.actions.trace_block_num)
             + est_str(&self.actions.producer_block_id)
-            + est_ts_sec(&self.actions.block_time)
+            + est_ts_ms(&self.actions.block_time)
             + self.actions.raw_return_value.estimated_bytes()
             + est_str(&self.actions.json_return_value)
             + est_str(&self.actions.exception)
@@ -683,7 +683,7 @@ struct ActionsBuilder {
     transaction_id: StringBuilder,
     trace_block_num: UInt64Builder,
     producer_block_id: StringBuilder,
-    block_time: TimestampSecondBuilder,
+    block_time: TimestampMillisecondBuilder,
     raw_return_value: BytesColumn,
     json_return_value: StringBuilder,
     exception: StringBuilder,
@@ -719,7 +719,7 @@ impl ActionsBuilder {
             transaction_id: StringBuilder::new(),
             trace_block_num: UInt64Builder::new(),
             producer_block_id: StringBuilder::new(),
-            block_time: TimestampSecondBuilder::new().with_timezone("UTC"),
+            block_time: TimestampMillisecondBuilder::new().with_timezone("UTC"),
             raw_return_value: BytesColumn::new(encoding),
             json_return_value: StringBuilder::new(),
             exception: StringBuilder::new(),
@@ -941,7 +941,7 @@ pub(crate) mod tests {
                         producer_block_id: make_test_hex_id(number),
                         block_time: Some(prost_types::Timestamp {
                             seconds: 1_700_000_000 + number as i64,
-                            nanos: 0,
+                            nanos: 500_000_000,
                         }),
                         account_ram_deltas: vec![],
                         raw_return_value: vec![9, 8, 7],
@@ -1083,6 +1083,7 @@ pub(crate) mod tests {
             parent_id: "firehose-envelope-parent-id".to_string(),
             lib_num: 99,
             timestamp: 0,
+            timestamp_nanos: 0,
             fork_step: None,
         };
 
@@ -1126,6 +1127,7 @@ pub(crate) mod tests {
             parent_id: "firehose-envelope-parent-id".to_string(),
             lib_num: 99,
             timestamp: 0,
+            timestamp_nanos: 0,
             fork_step: None,
         };
 
@@ -1405,9 +1407,9 @@ pub(crate) mod tests {
             .column_by_name("block_time")
             .unwrap()
             .as_any()
-            .downcast_ref::<TimestampSecondArray>()
+            .downcast_ref::<TimestampMillisecondArray>()
             .unwrap();
-        assert_eq!(block_time.value(0), 1_700_000_100);
+        assert_eq!(block_time.value(0), 1_700_000_100_500);
         assert!(block_time.is_null(1));
 
         let raw_return_value = actions

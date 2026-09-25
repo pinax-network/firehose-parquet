@@ -1218,6 +1218,7 @@ pub(crate) mod tests {
             parent_id: format!("0x{}", hex(&ENVELOPE_PARENT_ID_BYTES)),
             lib_num: 98,
             timestamp: 1_700_000_000,
+            timestamp_nanos: 0,
             fork_step: None,
         };
         let mut mapper = NearBlockMapper::new(false, EncodeBytes::Base58, false);
