@@ -3122,32 +3122,14 @@ fn write_partitions_index_impl(
     if path.starts_with("s3://") {
         use crate::writer::parse_s3_url;
         use bytes::Bytes;
-        use object_store::aws::AmazonS3Builder;
         use object_store::ObjectStore;
 
         let aws = aws
             .ok_or_else(|| anyhow::anyhow!("AWS config required for S3 partitions index output"))?;
         let (bucket, key) = parse_s3_url(path)?;
-        let mut builder = AmazonS3Builder::new().with_bucket_name(&bucket);
-        if let Some(ref value) = aws.aws_access_key_id {
-            builder = builder.with_access_key_id(value);
-        }
-        if let Some(ref value) = aws.aws_secret_access_key {
-            builder = builder.with_secret_access_key(value);
-        }
-        if let Some(ref value) = aws.aws_session_token {
-            builder = builder.with_token(value);
-        }
-        if let Some(ref value) = aws.aws_region {
-            builder = builder.with_region(value);
-        }
-        if let Some(ref value) = aws.aws_endpoint_url {
-            builder = builder.with_endpoint(value);
-        }
-
-        let client = builder
-            .build()
-            .map_err(|e| anyhow::anyhow!("building S3 client for bucket {bucket}: {e}"))?;
+        // Shared routing validation and zero transport retries are required for
+        // this guarded non-CAS checkpoint write, just as for data and cursors.
+        let client = aws.build_s3_client_for_mutation(&bucket)?;
         let mut buf = Vec::new();
         {
             let mut writer = ArrowWriter::try_new(&mut buf, schema, Some(props))?;
