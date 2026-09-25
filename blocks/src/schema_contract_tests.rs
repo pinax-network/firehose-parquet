@@ -530,3 +530,18 @@ fn invalid_identity_timestamps_leave_every_chain_mapper_unchanged() {
         );
     }
 }
+
+#[test]
+fn protected_dictionary_digest_preserves_existing_v1_evm_schema_identity() {
+    // A real interrupted Writing transaction already recorded this identity.
+    // Normalizing Parquet's assigned IPC IDs must not change the original
+    // zero-ID mapper schema hash or make that transaction unrecoverable.
+    assert_eq!(
+        firehose_parquet::writer::protected::schema_sha256(&evm::schema::transactions_schema(
+            false,
+            &EncodeBytes::Hex
+        ))
+        .unwrap(),
+        "44b18c11097fad9f240941e6c670cb01f04386d7a990a91ca644b935b01c2563"
+    );
+}

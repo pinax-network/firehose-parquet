@@ -1,10 +1,9 @@
-//! Preparation and single-part publication for the future ingestion transaction.
+//! Preparation and single-part publication for owned ingestion transactions.
 //!
-//! No command enables this path yet. The controller must persist Writing before
-//! staging, persist each receipt before final publication, and retain every batch
+//! The controller persists Writing before
+//! staging, persists each receipt before final publication, and retains every batch
 //! until its all-table commit is acknowledged. These primitives do not advance a
 //! cursor, recover a transaction, retire batches, or make independent writes atomic.
-#![allow(dead_code)] // Staged integration: controller wiring follows separately.
 
 use super::{local, ParquetFileMetadata, ParquetTableWriter};
 use crate::config::{BlockMetadata, Compression, Partition};
