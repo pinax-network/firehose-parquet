@@ -50,7 +50,8 @@ Related design docs:
 ## Data-Flow Mental Model
 
 1. CLI options/env load in `blocks/src/bin/main.rs` using shared structures from `firehose-parquet/src/cli.rs`.
-   The primary ingestion path dispatches to `fireparq build` (`Commands::Build(BuildArgs)`) which calls `run_ingestion`.
+   The primary ingestion path dispatches to `fireparq build` (`Commands::Build(BuildArgs)`) which calls `ingestion::run_ingestion` in `blocks/src/bin/ingestion/mod.rs`.
+   Its `setup.rs` resolves the endpoint and owned resume configuration; `runtime.rs` owns receive/filter/routing state and flush windows while borrowing the durable session.
 2. Endpoint metadata and stream messages come from `firehose-parquet/src/grpc.rs`.
 3. Selected chain mapper (`blocks/src/<chain>/mapper.rs`) decodes protobuf blocks and builds Arrow columns using schemas from `schema.rs`.
 4. `firehose-parquet/src/writer/protected.rs` validates the full table inventory and publishes transaction-owned partitioned Parquet parts (local or S3).
@@ -61,7 +62,7 @@ Related design docs:
 
 - Add/change CLI flag or subcommand:
   - `firehose-parquet/src/cli.rs` (shared flags/subcommands including `BuildArgs` for `fireparq build`, and argument validation)
-  - `blocks/src/bin/main.rs` (binary-specific wiring: `run_ingestion` and subcommand dispatch)
+  - `blocks/src/bin/main.rs` (binary command dispatch) and `blocks/src/bin/ingestion/setup.rs` (ingestion configuration)
 - Add a new chain or adjust chain-specific table mapping:
   - `blocks/src/<chain>/proto.rs` for protobuf type aliases
   - `blocks/src/<chain>/schema.rs` for Arrow schema
@@ -79,7 +80,7 @@ Related design docs:
 - Change resume/cursor behavior:
   - `firehose-parquet/src/ingest/{state,frontier,controller,session,mirror}.rs`
   - `firehose-parquet/src/cursor.rs` (Parquet row format and legacy inspection)
-  - `blocks/src/bin/main.rs` (receipt/mapping queues and request defaults)
+  - `blocks/src/bin/ingestion/{setup,runtime}.rs` (request defaults and ordered receipt/mapping queues)
 - Change encoding of hashes/addresses/bytes:
   - `firehose-parquet/src/encode.rs`
   - chain mapper usage in `blocks/src/*/mapper.rs`

@@ -1,8 +1,8 @@
 # Issue #525: behavior-preserving ingestion decomposition
 
-Status: accepted implementation plan; work began from merged main `9eddfd4`
-after #515 and #518 were merged. Review and qualification are pending. This
-refactor preserves the protected ingestion and owned-payload contracts.
+Status: implemented and independently reviewed; publication/current-main
+integration are pending. Work began from merged main `9eddfd4` after #515 and
+#518 were merged. This refactor preserves protected ingestion and owned payloads.
 
 ## What changed since the issue was filed
 
@@ -145,3 +145,76 @@ success-only physical receipt feedback. Only `IngestionSession` advances durable
 state. Outer orchestration keeps and releases ownership after runtime/session
 borrows end. The same 188 focused checks passed; current-main integration and
 cross-binary raw-fixture qualification follow before publication.
+
+## Offline exact-output qualification
+
+The opt-in integration test
+`retained_evm_replay_matches_baseline_bytes_authority_and_mirror` runs actual CLI
+processes against a local cursor-aware Firehose server. It uses the checked-in
+`blocks/tests/fixtures/evm-mainnet/block.pb` (height 26,049,575, SHA256
+`dad74257d32c66a056404add2a5f3360c288faedf0a026e5698394cd9d231b2a`)
+and one explicitly synthetic predecessor to establish an initial durable prefix.
+The fixture is not repeated to make a throughput claim.
+
+The baseline is pristine main `11ac02c55f8d2af7dce90f57cf957042d2f24343`, after
+#519's shared Parquet properties and explicit compression semantics. Its local
+macOS debug binary SHA256 is
+`90cb57ce578844f8be172ee239439fad84a771a73d81c26b02ca4622e7c13822`.
+The comparison tree also includes main `e4f990f` (#523 maintenance changes), which
+does not change this local ingestion mapper/codec/property path.
+
+After each child exits, the test restores the initialized prefix at the **same
+canonical output path**. It preserves source cursor, descriptor, checkpoint and
+transaction identity; it does not pretend two different roots should have
+identical identity-bearing footers. The test checks:
+
+- All 13 part paths, SHA256 values and complete physical bytes are identical.
+- Every complete Arrow schema and typed row is identical: 5,050 rows, comprising
+  the retained 5,049-row block and one seed row.
+- The complete authority payload and full state record bytes agree, including
+  the revision/checksum; an extra authority write cannot hide behind an equal
+  checkpoint payload. Neither run leaves a pending transaction record.
+- The cursor's field definitions and every row column except operational
+  `updated_at` agree. Its versioned footer envelope binds that time and is not
+  treated as a byte-equality target.
+- Both extensions request the same authoritative cursor. Repeating the completed
+  request preserves authority and makes no additional Blocks call.
+
+Independent review of the harness confirmed the same-path restore, exited-child
+ownership boundary, cleared environment, cursor-aware request plans and
+nonempty row assertion. This is one real EVM payload and a fixed block-flush
+boundary. Other chain, routing, failure, bootstrap, memory/size trigger and
+shutdown behavior is covered by the preserved unit/integration suite. No new
+live-provider or production S3 requests were made.
+
+To reproduce, build a pristine baseline from the stated commit and retain its
+binary outside the shared target directory; then run from this branch:
+
+```sh
+FIREPARQ_BASELINE_BIN=/absolute/path/to/baseline-fireparq \
+  cargo test -p blocks --test ingestion_transactions \
+  retained_evm_replay_matches_baseline_bytes_authority_and_mirror \
+  --locked -- --ignored --nocapture
+```
+
+The test is ignored in ordinary CI because it requires a separately built
+baseline; the existing nine transaction tests continue to run normally. Use the
+same Rust toolchain/dependency/schema/property base when renewing the comparison.
+
+## Combined validation
+
+On the tree containing current main `e4f990f` and the runtime extraction:
+
+- Workspace: **1,058 passed, zero failed, 12 intentionally ignored**. The new
+  cross-binary qualification is one of those opt-in ignores and was also run
+  explicitly: **one passed**, including full authority-record byte equality.
+- CI capture example: **one passed**, one subprocess fixture intentionally
+  ignored. Binary build, formatting, diff checks and bash/zsh/fish completions
+  passed.
+- Independent setup, runtime-ordering and parity-harness reviews found no
+  blocking issue. Existing real-CLI coverage includes restart/replay, filtered
+  UNDO, malformed/lookahead genesis, sparse EOF, compressed-size feedback,
+  summed-memory thresholds, metrics/reset, non-final recurrence and shutdown.
+
+The three removed tests asserted only the deleted identity/empty-return wrappers;
+no mapper, routing-value, durability or actual CLI regression was removed.

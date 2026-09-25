@@ -889,3 +889,216 @@ async fn summed_memory_flushes_cli_when_each_table_is_below_the_limit() {
     assert!(logs(&output).contains("memory"));
     server.assert_drained();
 }
+
+/// Opt-in cross-binary qualification: both runs start from the identical durable
+/// prefix at the same canonical output path. Source IDs, transaction IDs, footer
+/// metadata and file boundaries must therefore agree, including physical bytes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires FIREPARQ_BASELINE_BIN from the same dependency/schema base"]
+async fn retained_evm_replay_matches_baseline_bytes_authority_and_mirror() {
+    fn copy_tree(source: &Path, destination: &Path) {
+        std::fs::create_dir_all(destination).unwrap();
+        for entry in std::fs::read_dir(source).unwrap() {
+            let entry = entry.unwrap();
+            let file_type = entry.file_type().unwrap();
+            assert!(
+                !file_type.is_symlink(),
+                "qualification roots must not contain aliases"
+            );
+            let target = destination.join(entry.file_name());
+            if file_type.is_dir() {
+                copy_tree(&entry.path(), &target);
+            } else {
+                std::fs::copy(entry.path(), target).unwrap();
+            }
+        }
+    }
+    fn baseline_command(
+        binary: &Path,
+        server: &MockFirehose,
+        dir: &Path,
+        origin: u64,
+        stop: u64,
+    ) -> tokio::process::Command {
+        let candidate = command_with_flush(server, dir, origin, stop, 1);
+        let mut command = tokio::process::Command::new(binary);
+        command
+            .kill_on_drop(true)
+            .env_clear()
+            .current_dir(dir)
+            .args(candidate.as_std().get_args());
+        command
+    }
+
+    let baseline = PathBuf::from(
+        std::env::var_os("FIREPARQ_BASELINE_BIN")
+            .expect("set FIREPARQ_BASELINE_BIN to a built, matching-main fireparq"),
+    );
+    assert!(baseline.is_absolute() && baseline.is_file());
+    let fixture_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/evm-mainnet");
+    let metadata: Value =
+        serde_json::from_slice(&std::fs::read(fixture_dir.join("metadata.json")).unwrap()).unwrap();
+    let bytes = std::fs::read(fixture_dir.join("block.pb")).unwrap();
+    assert_eq!(
+        format!("{:x}", Sha256::digest(&bytes)),
+        metadata["sha256"].as_str().unwrap()
+    );
+    let identity = &metadata["identity"];
+    let number = identity["block_num"].as_u64().unwrap();
+    let origin = number - 1;
+    let mut seed = response(origin, 3);
+    let seed_metadata = seed.metadata.as_mut().unwrap();
+    seed_metadata.id = identity["parent_id"].as_str().unwrap().into();
+    seed_metadata.lib_num = identity["lib_num"].as_u64().unwrap();
+    seed_metadata.time.as_mut().unwrap().seconds = identity["timestamp"].as_i64().unwrap() - 12;
+    let retained = firehose::Response {
+        block: Some(prost_types::Any {
+            type_url: metadata["protobuf_type"].as_str().unwrap().into(),
+            value: bytes,
+        }),
+        step: 3,
+        cursor: format!("fixture-{number}"),
+        metadata: Some(firehose::BlockMetadata {
+            num: number,
+            id: identity["block_id"].as_str().unwrap().into(),
+            parent_num: identity["parent_num"].as_u64().unwrap(),
+            parent_id: identity["parent_id"].as_str().unwrap().into(),
+            lib_num: identity["lib_num"].as_u64().unwrap(),
+            time: Some(prost_types::Timestamp {
+                seconds: identity["timestamp"].as_i64().unwrap(),
+                nanos: identity["timestamp_nanos"].as_i64().unwrap() as i32,
+            }),
+            ..Default::default()
+        }),
+    };
+    // Fixed public fixture cursor; never capture or print a provider cursor.
+    assert_eq!(origin, 26_049_574);
+    let server = MockFirehose::start(
+        vec![seed, retained],
+        vec![
+            Plan::complete("", origin as i64, origin),
+            Plan::complete("fixture-26049574", origin as i64, number),
+            Plan::complete("fixture-26049574", origin as i64, number),
+        ],
+    )
+    .await;
+    let directory = tempfile::tempdir().unwrap();
+    let output = root(directory.path());
+    success(baseline_command(
+        &baseline,
+        &server,
+        directory.path(),
+        origin,
+        number,
+    ))
+    .await;
+    let saved_prefix = directory.path().join("saved-prefix");
+    copy_tree(&output, &saved_prefix);
+    let prefix = authority(&output);
+
+    success(baseline_command(
+        &baseline,
+        &server,
+        directory.path(),
+        origin,
+        number + 1,
+    ))
+    .await;
+    let expected_authority = authority(&output);
+    let state_path = output
+        .join(CONTROL_DIRECTORY)
+        .join(ControlKey::State.filename());
+    let expected_state_record = std::fs::read(&state_path).unwrap();
+    assert!(!output
+        .join(CONTROL_DIRECTORY)
+        .join(ControlKey::Pending.filename())
+        .exists());
+    let expected_paths = parts(&output);
+    let expected_bytes: BTreeMap<_, _> = expected_paths
+        .keys()
+        .map(|path| (path.clone(), std::fs::read(output.join(path)).unwrap()))
+        .collect();
+    let expected_batches: BTreeMap<_, _> = expected_paths
+        .keys()
+        .map(|path| (path.clone(), read_parquet(&output.join(path)).unwrap()))
+        .collect();
+    let expected_mirror = read_parquet(&output.join("cursor.parquet")).unwrap();
+
+    // Every child has exited via output(). No process can retain the old inode
+    // ownership when the disposable qualification root is restored in place.
+    std::fs::remove_dir_all(&output).unwrap();
+    copy_tree(&saved_prefix, &output);
+    assert_eq!(authority(&output), prefix);
+    success(command_with_flush(
+        &server,
+        directory.path(),
+        origin,
+        number + 1,
+        1,
+    ))
+    .await;
+    assert_eq!(
+        parts(&output),
+        expected_paths,
+        "part paths and physical hashes"
+    );
+    let mut rows = 0;
+    for (path, bytes) in expected_bytes {
+        assert_eq!(
+            std::fs::read(output.join(&path)).unwrap(),
+            bytes,
+            "part bytes: {path:?}"
+        );
+        let actual = read_parquet(&output.join(&path)).unwrap();
+        assert_eq!(
+            actual, expected_batches[&path],
+            "complete schema and typed rows: {path:?}"
+        );
+        rows += actual.iter().map(|batch| batch.num_rows()).sum::<usize>();
+    }
+    assert_eq!(
+        authority(&output),
+        expected_authority,
+        "all authoritative payload fields"
+    );
+    // The restored incarnation is the same, so record equality also checks the
+    // number of authority revisions instead of hiding redundant checkpoint writes.
+    assert_eq!(std::fs::read(&state_path).unwrap(), expected_state_record);
+    assert!(!output
+        .join(CONTROL_DIRECTORY)
+        .join(ControlKey::Pending.filename())
+        .exists());
+    assert_checkpoint(&output, 2, number, number + 1);
+    let actual_mirror = read_parquet(&output.join("cursor.parquet")).unwrap();
+    assert_eq!(actual_mirror.len(), expected_mirror.len());
+    for (actual, expected) in actual_mirror.iter().zip(&expected_mirror) {
+        assert_eq!(actual.schema().fields(), expected.schema().fields());
+        for (index, field) in actual.schema().fields().iter().enumerate() {
+            if field.name() != "updated_at" {
+                assert_eq!(
+                    actual.column(index),
+                    expected.column(index),
+                    "mirror column {}",
+                    field.name()
+                );
+            }
+        }
+    }
+    let repeated = success(command_with_flush(
+        &server,
+        directory.path(),
+        origin,
+        number + 1,
+        1,
+    ))
+    .await;
+    assert!(logs(&repeated).contains("without opening Blocks"));
+    assert_eq!(server.calls(), 3);
+    assert_eq!(authority(&output), expected_authority);
+    server.assert_drained();
+    assert_eq!(
+        rows, 5_050,
+        "one seed row plus the retained 5,049-row block"
+    );
+    eprintln!("exact baseline parity: {} parts, {rows} rows; complete authority and stable mirror columns", expected_paths.len());
+}

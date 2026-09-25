@@ -697,3 +697,12 @@ changes; use a new/rebuilt dataset or explicit reader-side schema reconciliation
   Rust protobuf byte fields are now `Bytes` (`Vec` callers can use `.into()`).
   Protobuf wire and Parquet schemas are unchanged. See
   [decoding validation and benchmark](../audit/518-owned-protobuf-bytes.md).
+
+## Internal organization
+
+- Ingestion startup, ordered runtime state and flush-window handling now live in
+  binary-private modules. The durable Session still owns authority and mirror
+  commits; CLI behavior, source filtering, partition boundaries and output
+  formats remain unchanged. The no-op timestamp-buffer interface was removed,
+  while real genesis/lookahead buffering and restored sparse-chain anchors
+  remain. See [#525 qualification](../audit/525-ingestion-decomposition.md).
