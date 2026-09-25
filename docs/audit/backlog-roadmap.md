@@ -108,8 +108,10 @@ and test against current main. Never reset or discard the previous worktree.
   tests, local delayed-transport benchmarks, independent review and CI; issue
   closure was verified. #518-#519 and #523 need the specific throughput, memory,
   file-size or lookup evidence requested by their issues.
-- Structure: #525-#529 follow correctness work, with scope refreshed against
-  current main. The remaining #530 auth/client duplication merged in PR #603
+- Structure: #525 now has a behavior-preserving setup/runtime/flush implementation
+  under review; [its record](525-ingestion-decomposition.md) tracks qualification
+  and publication separately. #526-#529 follow correctness work, with scope refreshed against
+  current main. [#516 concurrency](516-concurrency-design.md) remains a proposal only. The remaining #530 auth/client duplication merged in PR #603
   as `39d49f6` after 1,010 tests, protocol/retry regressions, independent review
   and CI; issue closure was verified.
 
