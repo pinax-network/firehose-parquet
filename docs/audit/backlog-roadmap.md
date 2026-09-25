@@ -18,10 +18,10 @@ issue labels and green CI alone are not acceptance evidence. See the
    passed; GitHub reports no open dependency alerts after rescan.
 3. Crash/replay publication (#468). The [design](468-crash-recovery-design.md)
    explains why deterministic range filenames alone cannot prevent duplicates
-   when replay chooses different timer or size boundaries. Remove the unreachable,
-   broken writer split path (#477) and establish an all-table durable frontier.
+   when replay chooses different timer or size boundaries. The writer split path has been removed (#477, PR #581); establish an
+   all-table durable frontier next.
    Complete this before ingestion concurrency (#516).
-4. Recover the existing shutdown (#473) and probe (#485) work, then correct
+4. Shutdown recovery (#473, PR #579) is merged. Recover probe (#485) work, then correct
    partition-index completeness/non-monotonic timestamps (#486), malformed
    identity/timestamp handling (#476), and health/metrics semantics (#475).
 5. Finish schema fixes with repeatable raw-to-output fixtures (#499). Prefer
@@ -32,11 +32,11 @@ issue labels and green CI alone are not acceptance evidence. See the
 | PR / issue | Review finding | Still needed before closure |
 |---|---|---|
 | #559 / #506, NEAR joins and events | No actionable code defect found at `8056a07`. Same-block `tx_hash` is intentional and documented. | Current-main validation and a raw/output live comparison for action/log counts, order, receipt lineage and exact event strings. One fresh request on 2026-09-25 was again rejected by StreamingFast egress quota. See the [qualification record](506-near-qualification.md); no further requests were made. |
-| #560 / #504, Beacon coverage | No actionable code defect found at `26d96f9`. Existing live comparisons cover withdrawals, committee bits, graffiti and all three request types. | The [targeted live BLS/slashing comparisons](504-beacon-qualification.md) now pass, including the integrated Arrow/Parquet 60 build and 730-test suite. Final PR CI/merge must still be verified. Capella BLS changes remain absent from the upstream protobuf. |
+| #560 / #504, Beacon coverage | No actionable code defect found at `26d96f9`. Existing live comparisons cover withdrawals, committee bits, graffiti and all three request types. | The [targeted live BLS/slashing comparisons](504-beacon-qualification.md) now pass, including the integrated Arrow/Parquet 60 build and 730-test suite. CI passed; merged as `c88abcc` and issue closure verified. Capella BLS changes remain absent from the upstream protobuf. |
 
-Both historical CI runs predate newer shared-encoding and durability changes.
-Do not close either issue merely because its PR is mergeable. Later validation
-must be recorded against the exact integrated head.
+The NEAR historical CI predates newer shared-encoding and durability changes.
+Its issue remains open until current integration and live qualification pass.
+Beacon acceptance was checked against its integrated head before merge.
 
 ## Previous agent work
 

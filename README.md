@@ -1211,6 +1211,24 @@ These columns hold Firehose fields as they are, with bytes in the output encodin
 
 The new columns come after the existing ones in each table. Ordinals are unique within a block, so `(block_number, ordinal)` orders every log, call and state change of a block. They are not reliable for anything inside a reverted call.
 
+## Solana Reward Indices
+
+`rewards.reward_index` is a zero-based index within one block envelope. Rewards
+from included transactions are numbered in transaction order and in each
+transaction's upstream reward order, followed by block rewards in their upstream
+order. The counter restarts for every block; flush size and restarts do not change
+it. `source` identifies `transaction` or `block`, and `transaction_index` is null
+for block rewards.
+
+For finalized output, use `(block_id, reward_index)` as the reward key. Include
+the chain/network when combining datasets. With reversible output, NEW and UNDO
+rows are separate events that can share this key; apply fork semantics before
+using it as a unique key. Changing transaction filters can change indices.
+
+Older output may contain colliding indices within a block and indices offset by
+earlier buffered blocks. Rebuild affected ranges into a separate output root
+before relying on the corrected key; appending new output does not repair old rows.
+
 ## Beacon Chain Tables
 
 Each Beacon table gets rows from the fork that introduced its data. Blocks from earlier forks add no rows to it, so a range from before that fork writes no file for the table.
