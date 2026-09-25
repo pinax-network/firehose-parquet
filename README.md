@@ -1966,7 +1966,9 @@ hash, signature and account/address columns. Readers that support these filters
 can skip row groups for equality lookups; positive matches still require row
 filtering. Filters do not answer `IS NULL` predicates. Row groups contain at most
 65,536 rows, with at most eight filters per group. This changes physical layout,
-not table schemas or row order.
+not table schemas or row order. Dictionary encoding retains its existing policy.
+The retained-data benchmark measured 0.74–1.92% larger files and faster missing-key
+lookups; readers without Bloom pruning may only see the storage overhead.
 
 Complete ingestion parts declare ascending `block_num` only when every observed
 height proves that order. Streaming maintenance omits that assertion. Neither
