@@ -685,10 +685,18 @@ fn status_code_from_name(name: &str) -> Option<tonic::Code> {
 /// when the status is worth retrying.
 fn fatal_status_error(status: &tonic::Status) -> Option<anyhow::Error> {
     let code = effective_status_code(status);
-    if !is_fatal_code(code) {
+    // `ResourceExhausted` is usually a rate limit worth backing off for, but
+    // an exhausted quota (e.g. "billable egress bytes quota exceeded") does
+    // not recover within the run.
+    let quota_exhausted = code == tonic::Code::ResourceExhausted
+        && status.message().to_ascii_lowercase().contains("quota");
+    if !is_fatal_code(code) && !quota_exhausted {
         return None;
     }
     let hint = match code {
+        tonic::Code::ResourceExhausted => {
+            "the credential's quota is used up; use another API key or token, or wait for the quota to reset"
+        }
         tonic::Code::Unauthenticated | tonic::Code::PermissionDenied => {
             "check that the API key or token (--api-key-envvar / --api-token-envvar) is valid for this endpoint"
         }
@@ -891,6 +899,25 @@ mod tests {
                 status.code()
             );
         }
+    }
+
+    #[test]
+    fn test_exhausted_quota_fails_fast_but_rate_limits_are_retried() {
+        // Seen live on Pinax for a JWT over its egress quota.
+        let quota = tonic::Status::resource_exhausted(
+            "resource exhausted: billable egress bytes quota exceeded (quota '5368709120', current '15762311347')",
+        );
+        let error = fatal_status_error(&quota).expect("fatal").to_string();
+        assert!(error.contains("ResourceExhausted"), "{error}");
+        assert!(error.contains("quota is used up"), "{error}");
+
+        let relayed = tonic::Status::unknown(
+            "rpc error: code = ResourceExhausted desc = monthly Quota exceeded",
+        );
+        assert!(fatal_status_error(&relayed).is_some());
+
+        let rate_limit = tonic::Status::resource_exhausted("rate limit: too many requests");
+        assert!(fatal_status_error(&rate_limit).is_none());
     }
 
     #[test]

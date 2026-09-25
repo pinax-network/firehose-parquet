@@ -377,10 +377,13 @@ rather than the default workflow:
   `Unknown` with the original code in the message
   (`rpc error: code = InvalidArgument desc = ...`), and credentials that are not
   valid for the endpoint (for example a Pinax token used against a
-  StreamingFast endpoint). They are counted in
+  StreamingFast endpoint). A `ResourceExhausted` error that reports an
+  exhausted quota (for example `billable egress bytes quota exceeded`) is
+  fatal too. They are counted in
   `firehose_parquet_errors_total{kind="grpc_fatal"}`.
-- **Other errors are retried** with exponential back-off from 1 s to 60 s. The
-  back-off resets only once a stream message arrives.
+- **Other errors are retried** with exponential back-off from 1 s to 60 s,
+  including other `ResourceExhausted` errors such as rate limits. The back-off
+  resets only once a stream message arrives.
 - **Limits.** A run gives up when `--reconnect-stall-timeout-secs` passes
   without a stream message, or after 30 consecutive failed attempts without a
   message (over 20 minutes at the maximum back-off), even when the stall
