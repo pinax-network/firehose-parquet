@@ -148,6 +148,21 @@ latency benchmark). `cargo fmt --all -- --check` and `git diff --check` passed.
 The native request tests and actual command/recovery regressions run in that
 suite. No production request was made.
 
+Combined deletion/read qualification at `c998650`, including merged main
+`955b8b2` (#515, #518 and #550), passed **1,054 workspace tests**, with 11
+explicit ignores including both separately executed benchmarks. The capture-auth
+example passed one test with its one subprocess helper ignored. Workspace build,
+CLI help, Zsh completions, formatting and whitespace checks also passed.
+
+After merging #608/main `11ac02c`, integration head `28b684b` preserves the shared
+schema-aware writer properties in both local and S3 merge paths. Fresh writer,
+merge and rollup tests passed, including lookup metadata, protected-part handling,
+read-window recovery and deletion barriers. Formatting and whitespace checks
+passed again. PR CI runs the full combined tree; the preceding full local suite
+is the 1,054-test run above, rather than a claimed rerun after this integration.
+
+
+
 ## Deletion measurements and limits
 
 The ignored test `s3::delete::tests::benchmark::delayed_store_deletion_benchmark`
