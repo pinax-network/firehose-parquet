@@ -27,7 +27,8 @@ issue labels and green CI alone are not acceptance evidence. See the
    `3cf984b`; its issue is closed. Correct partition-index completeness/non-monotonic timestamps (#486)
    remains in progress. Health/metrics semantics (#475, PR #587) are merged
    after 787 tests, real CLI regression and CI.
-5. Finish schema fixes with repeatable raw-to-output fixtures (#499). Prefer
+5. The initial EVM golden fixture (#499, PR #588) is merged and runs offline
+   in CI. Continue schema fixes and add field-specific fixtures as needed. Prefer
    correctness and measured performance improvements before broad refactors.
 
 ## Existing PRs and remaining qualification

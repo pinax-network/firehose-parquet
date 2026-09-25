@@ -1,3 +1,4 @@
+use super::amounts::transaction_satoshis;
 use super::proto::btc;
 use super::schema;
 use arrow::array::Array;
@@ -7,7 +8,7 @@ use arrow::record_batch::RecordBatch;
 use firehose_parquet::encode::EncodeBytes;
 use firehose_parquet::traits::{
     decode_id_bytes, est_f64, est_i32, est_i64, est_list_str, est_opt_str, est_str, est_u32,
-    BlockIdentity, BlockMapper, CanonicalBuilder, PreparedIdentity,
+    est_u64, BlockIdentity, BlockMapper, CanonicalBuilder, PreparedIdentity,
 };
 use prost::Message;
 use std::collections::HashMap;
@@ -31,6 +32,10 @@ fn mk_fork_step(include: bool) -> Option<StringBuilder> {
     } else {
         None
     }
+}
+
+fn nonempty(value: &str) -> Option<&str> {
+    (!value.is_empty()).then_some(value)
 }
 
 // ---------------------------------------------------------------------------
@@ -65,6 +70,7 @@ impl BitcoinBlockMapper {
     fn map_btc_block(
         &mut self,
         block: &btc::Block,
+        output_satoshis: &[Vec<u64>],
         identity: &PreparedIdentity,
         fork_step: Option<&str>,
     ) {
@@ -97,6 +103,7 @@ impl BitcoinBlockMapper {
                 block_time,
                 tx_index as u32,
                 tx,
+                &output_satoshis[tx_index],
                 identity,
                 fork_step,
             );
@@ -110,6 +117,7 @@ impl BitcoinBlockMapper {
         block_time: i64,
         tx_index: u32,
         tx: &btc::Transaction,
+        output_satoshis: &[u64],
         identity: &PreparedIdentity,
         fork_step: Option<&str>,
     ) {
@@ -130,21 +138,34 @@ impl BitcoinBlockMapper {
         append_fork_step(&mut self.transactions.fork_step, fork_step);
 
         for (i, vin) in tx.vin.iter().enumerate() {
-            let script_sig = vin.script_sig.as_ref();
+            let coinbase = nonempty(&vin.coinbase);
+            let previous = if coinbase.is_some() {
+                None
+            } else {
+                nonempty(&vin.txid)
+            };
+            let script_sig = if coinbase.is_some() {
+                None
+            } else {
+                vin.script_sig.as_ref()
+            };
             self.inputs.canonical.append(identity);
             self.inputs.tx_hash.append_value(tx_hash);
             self.inputs.block_height.append_value(block_height);
             self.inputs.input_index.append_value(i as u32);
-            self.inputs.prev_txid.append_value(&vin.txid);
-            self.inputs.prev_vout.append_value(vin.vout);
+            self.inputs.prev_txid.append_option(previous);
+            self.inputs
+                .prev_vout
+                .append_option(previous.map(|_| vin.vout));
+            self.inputs.tx_index.append_value(tx_index);
             self.inputs.sequence.append_value(vin.sequence);
             self.inputs
                 .script_sig_asm
-                .append_value(script_sig.map_or("", |s| &s.asm));
+                .append_option(script_sig.map(|s| s.asm.as_str()));
             self.inputs
                 .script_sig_hex
-                .append_value(script_sig.map_or("", |s| &s.hex));
-            self.inputs.coinbase.append_value(&vin.coinbase);
+                .append_option(script_sig.map(|s| s.hex.as_str()));
+            self.inputs.coinbase.append_option(coinbase);
 
             let witness_values = self.inputs.witness.values();
             for w in &vin.txinwitness {
@@ -154,25 +175,28 @@ impl BitcoinBlockMapper {
             append_fork_step(&mut self.inputs.fork_step, fork_step);
         }
 
-        for vout in &tx.vout {
+        for (vout, &satoshis) in tx.vout.iter().zip(output_satoshis) {
             let script = vout.script_pub_key.as_ref();
             self.outputs.canonical.append(identity);
             self.outputs.tx_hash.append_value(tx_hash);
             self.outputs.block_height.append_value(block_height);
             self.outputs.output_index.append_value(vout.n);
             self.outputs.value.append_value(vout.value);
+            self.outputs.value_sats.append_value(satoshis);
             self.outputs
                 .script_pubkey_asm
-                .append_value(script.map_or("", |s| &s.asm));
+                .append_option(script.map(|s| s.asm.as_str()));
             self.outputs
                 .script_pubkey_hex
-                .append_value(script.map_or("", |s| &s.hex));
+                .append_option(script.map(|s| s.hex.as_str()));
             self.outputs
                 .script_pubkey_type
-                .append_value(script.map_or("", |s| &s.r#type));
+                .append_option(script.map(|s| s.r#type.as_str()));
             self.outputs
                 .script_pubkey_address
-                .append_value(script.map_or("", |s| &s.address));
+                .append_option(script.and_then(|s| {
+                    nonempty(&s.address).or_else(|| s.addresses.first().and_then(|a| nonempty(a)))
+                }));
             append_fork_step(&mut self.outputs.fork_step, fork_step);
         }
     }
@@ -187,13 +211,28 @@ impl BlockMapper for BitcoinBlockMapper {
     ) -> anyhow::Result<u64> {
         let block = btc::Block::decode(block_bytes)?;
         let tx_count = block.tx.len() as u64;
+        // Preflight every output before appending any row, including the block
+        // row. An invalid later transaction must leave all existing buffers intact.
+        let output_satoshis = block
+            .tx
+            .iter()
+            .enumerate()
+            .map(|(tx_index, tx)| {
+                transaction_satoshis(tx).map_err(|error| {
+                    anyhow::anyhow!(
+                        "invalid Bitcoin output in block {}, transaction {tx_index}: {error:#}",
+                        block.height
+                    )
+                })
+            })
+            .collect::<anyhow::Result<Vec<_>>>()?;
         // Canonical ids come from the block's own hex hashes.
         let identity = self.blocks.canonical.prepare_with_ids(
             identity,
             &decode_id_bytes(&block.hash),
             &decode_id_bytes(&block.previous_hash),
         )?;
-        self.map_btc_block(&block, &identity, fork_step);
+        self.map_btc_block(&block, &output_satoshis, &identity, fork_step);
         Ok(tx_count)
     }
 
@@ -269,6 +308,7 @@ impl BlockMapper for BitcoinBlockMapper {
             + est_str(&self.inputs.tx_hash)
             + est_i64(&self.inputs.block_height)
             + est_u32(&self.inputs.input_index)
+            + est_u32(&self.inputs.tx_index)
             + est_str(&self.inputs.prev_txid)
             + est_u32(&self.inputs.prev_vout)
             + est_u32(&self.inputs.sequence)
@@ -282,6 +322,7 @@ impl BlockMapper for BitcoinBlockMapper {
             + est_i64(&self.outputs.block_height)
             + est_u32(&self.outputs.output_index)
             + est_f64(&self.outputs.value)
+            + est_u64(&self.outputs.value_sats)
             + est_str(&self.outputs.script_pubkey_asm)
             + est_str(&self.outputs.script_pubkey_hex)
             + est_str(&self.outputs.script_pubkey_type)
@@ -434,6 +475,7 @@ struct InputsBuilder {
     tx_hash: StringBuilder,
     block_height: Int64Builder,
     input_index: UInt32Builder,
+    tx_index: UInt32Builder,
     prev_txid: StringBuilder,
     prev_vout: UInt32Builder,
     sequence: UInt32Builder,
@@ -451,6 +493,7 @@ impl InputsBuilder {
             tx_hash: StringBuilder::new(),
             block_height: Int64Builder::new(),
             input_index: UInt32Builder::new(),
+            tx_index: UInt32Builder::new(),
             prev_txid: StringBuilder::new(),
             prev_vout: UInt32Builder::new(),
             sequence: UInt32Builder::new(),
@@ -475,6 +518,7 @@ impl InputsBuilder {
             Arc::new(self.script_sig_hex.finish()) as Arc<dyn Array>,
             Arc::new(self.coinbase.finish()) as Arc<dyn Array>,
             Arc::new(self.witness.finish()) as Arc<dyn Array>,
+            Arc::new(self.tx_index.finish()) as Arc<dyn Array>,
         ]);
         finish_fork_step(&mut self.fork_step, &mut columns);
         Ok(RecordBatch::try_new(Arc::new(schema.clone()), columns)?)
@@ -487,6 +531,7 @@ struct OutputsBuilder {
     block_height: Int64Builder,
     output_index: UInt32Builder,
     value: Float64Builder,
+    value_sats: UInt64Builder,
     script_pubkey_asm: StringBuilder,
     script_pubkey_hex: StringBuilder,
     script_pubkey_type: StringBuilder,
@@ -502,6 +547,7 @@ impl OutputsBuilder {
             block_height: Int64Builder::new(),
             output_index: UInt32Builder::new(),
             value: Float64Builder::new(),
+            value_sats: UInt64Builder::new(),
             script_pubkey_asm: StringBuilder::new(),
             script_pubkey_hex: StringBuilder::new(),
             script_pubkey_type: StringBuilder::new(),
@@ -521,6 +567,7 @@ impl OutputsBuilder {
             Arc::new(self.script_pubkey_hex.finish()) as Arc<dyn Array>,
             Arc::new(self.script_pubkey_type.finish()) as Arc<dyn Array>,
             Arc::new(self.script_pubkey_address.finish()) as Arc<dyn Array>,
+            Arc::new(self.value_sats.finish()) as Arc<dyn Array>,
         ]);
         finish_fork_step(&mut self.fork_step, &mut columns);
         Ok(RecordBatch::try_new(Arc::new(schema.clone()), columns)?)
@@ -534,6 +581,7 @@ impl OutputsBuilder {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+    use crate::bitcoin::amounts::value_satoshis;
 
     pub(crate) fn make_test_block(height: i64) -> btc::Block {
         btc::Block {
@@ -588,6 +636,219 @@ pub(crate) mod tests {
             chainwork: "0000000000000000000000000000000000000000000000000000000100010001".to_string(),
             n_tx: 1,
             previous_hash: "0000000000000000000000000000000000000000000000000000000000000000".to_string(),
+        }
+    }
+
+    #[test]
+    fn satoshi_conversion_preserves_valid_amounts_and_rejects_ambiguous_values() {
+        let amounts = [
+            0,
+            1,
+            3,
+            29,
+            100_000,
+            10_000_001,
+            123_456_789,
+            5_000_000_000,
+            1_000_000_000_000_001,
+            2_099_999_999_999_999,
+            2_100_000_000_000_000,
+        ];
+        for satoshis in amounts {
+            let btc = satoshis as f64 / 100_000_000.0;
+            assert_eq!(value_satoshis(btc).unwrap(), satoshis);
+        }
+        // Spread across the whole money range, including large f64 ULPs.
+        let mut sample = 17_u64;
+        for _ in 0..10_000 {
+            sample = sample.wrapping_mul(6364136223846793005).wrapping_add(1);
+            let satoshis = sample % 2_100_000_000_000_001;
+            assert_eq!(
+                value_satoshis(satoshis as f64 / 100_000_000.0).unwrap(),
+                satoshis
+            );
+        }
+        for invalid in [
+            f64::NAN,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            -1.0,
+            100_000_000.0,
+            0.000000005,
+            1.000000001,
+            f64::from_bits(0.01_f64.to_bits() + 1),
+        ] {
+            assert!(value_satoshis(invalid).is_err(), "accepted {invalid}");
+        }
+    }
+
+    #[test]
+    fn invalid_later_output_never_partially_appends_a_block() {
+        let valid = make_test_block(1);
+        for value in [f64::NAN, -0.1, 0.000000005, 100_000_000.0] {
+            let mut invalid = make_test_block(2);
+            let mut later = invalid.tx[0].clone();
+            later.vout[0].value = value;
+            invalid.tx.push(later);
+            let mut mapper = BitcoinBlockMapper::new(false, EncodeBytes::Hex);
+            mapper
+                .map_block(&valid.encode_to_vec(), &BlockIdentity::default(), None)
+                .unwrap();
+            let before = mapper.total_rows();
+            let error = mapper
+                .map_block(&invalid.encode_to_vec(), &BlockIdentity::default(), None)
+                .unwrap_err();
+            assert!(error.to_string().contains("transaction 1: output 0"));
+            assert_eq!(mapper.total_rows(), before);
+            let batches = mapper.flush().unwrap();
+            for batch in batches.values() {
+                assert_eq!(batch.num_rows(), 1);
+            }
+        }
+    }
+
+    #[test]
+    fn bitcoin_satoshis_input_joins_nulls_and_legacy_addresses() {
+        let mut block = make_test_block(1);
+        let mut tx = block.tx[0].clone();
+        tx.txid = "ab".repeat(32);
+        tx.vin = vec![
+            btc::Vin {
+                txid: "cd".repeat(32),
+                vout: 0,
+                script_sig: None,
+                sequence: 7,
+                ..Default::default()
+            },
+            btc::Vin {
+                txid: "ef".repeat(32),
+                vout: 2,
+                script_sig: Some(btc::ScriptSig::default()),
+                ..Default::default()
+            },
+            btc::Vin::default(),
+        ];
+        tx.vout = vec![
+            btc::Vout {
+                value: 1.1,
+                n: 0,
+                script_pub_key: Some(btc::ScriptPubKey {
+                    address: "modern".into(),
+                    addresses: vec!["legacy-ignored".into()],
+                    ..Default::default()
+                }),
+            },
+            btc::Vout {
+                value: 0.00000001,
+                n: 1,
+                script_pub_key: Some(btc::ScriptPubKey {
+                    addresses: vec!["legacy-first".into(), "legacy-second".into()],
+                    ..Default::default()
+                }),
+            },
+            btc::Vout {
+                value: 0.3,
+                n: 2,
+                script_pub_key: Some(btc::ScriptPubKey::default()),
+            },
+            btc::Vout {
+                value: 0.0,
+                n: 3,
+                script_pub_key: None,
+            },
+        ];
+        block.tx.push(tx);
+        for encoding in [EncodeBytes::Hex, EncodeBytes::Binary] {
+            for fork_step in [false, true] {
+                let mut mapper = BitcoinBlockMapper::new(fork_step, encoding.clone());
+                for _ in 0..2 {
+                    mapper
+                        .map_block(
+                            &block.encode_to_vec(),
+                            &BlockIdentity::default(),
+                            fork_step.then_some("FINAL"),
+                        )
+                        .unwrap();
+                    let batches = mapper.flush().unwrap();
+                    let input = &batches["inputs"];
+                    let column = |name| input.column_by_name(name).unwrap();
+                    assert_eq!(
+                        column("tx_index")
+                            .as_any()
+                            .downcast_ref::<UInt32Array>()
+                            .unwrap()
+                            .values(),
+                        &[0, 1, 1, 1]
+                    );
+                    for name in ["prev_txid", "prev_vout", "script_sig_asm", "script_sig_hex"] {
+                        assert!(column(name).is_null(0), "coinbase {name}");
+                        assert!(input.schema().field_with_name(name).unwrap().is_nullable());
+                    }
+                    let prev_vout = column("prev_vout")
+                        .as_any()
+                        .downcast_ref::<UInt32Array>()
+                        .unwrap();
+                    assert!(!prev_vout.is_null(1));
+                    assert_eq!(prev_vout.value(1), 0); // A real output zero stays zero.
+                    assert_eq!(prev_vout.value(2), 2);
+                    assert!(prev_vout.is_null(3)); // Missing previous tx identity stays unknown.
+                    assert!(column("script_sig_hex").is_null(1));
+                    assert!(!column("script_sig_hex").is_null(2)); // Present empty SegWit script.
+                    assert_eq!(
+                        column("script_sig_hex")
+                            .as_any()
+                            .downcast_ref::<StringArray>()
+                            .unwrap()
+                            .value(2),
+                        ""
+                    );
+                    assert!(!column("coinbase").is_null(0));
+                    for row in 1..4 {
+                        assert!(column("coinbase").is_null(row));
+                    }
+                    // Native protobuf strings retain Bitcoin Core display order.
+                    assert_eq!(
+                        column("prev_txid")
+                            .as_any()
+                            .downcast_ref::<StringArray>()
+                            .unwrap()
+                            .value(1),
+                        "cd".repeat(32)
+                    );
+                    let output = &batches["outputs"];
+                    let sats = output
+                        .column_by_name("value_sats")
+                        .unwrap()
+                        .as_any()
+                        .downcast_ref::<UInt64Array>()
+                        .unwrap();
+                    assert_eq!(
+                        sats.values(),
+                        &[5_000_000_000, 110_000_000, 1, 30_000_000, 0]
+                    );
+                    let addresses = output
+                        .column_by_name("script_pubkey_address")
+                        .unwrap()
+                        .as_any()
+                        .downcast_ref::<StringArray>()
+                        .unwrap();
+                    assert_eq!(addresses.value(1), "modern");
+                    assert_eq!(addresses.value(2), "legacy-first");
+                    assert!(addresses.is_null(3) && addresses.is_null(4));
+                    for name in [
+                        "script_pubkey_asm",
+                        "script_pubkey_hex",
+                        "script_pubkey_type",
+                    ] {
+                        let col = output.column_by_name(name).unwrap();
+                        assert!(!col.is_null(3));
+                        assert!(col.is_null(4));
+                    }
+                    assert_eq!(input.column_by_name("fork_step").is_some(), fork_step);
+                    assert_eq!(output.column_by_name("fork_step").is_some(), fork_step);
+                    assert_eq!(mapper.total_rows(), 0);
+                }
+            }
         }
     }
 
