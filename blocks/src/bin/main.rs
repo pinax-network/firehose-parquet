@@ -292,7 +292,7 @@ fn flush_writer_on_exit(
     exit: StreamExit,
     writer: &mut OutputWriter,
     pipeline_metrics: &metrics::PipelineMetrics,
-    commit_cursor: impl FnOnce(),
+    commit_cursor: impl FnOnce() -> Result<()>,
 ) -> Result<bool> {
     if !exit.materializes_buffers() {
         return Ok(false);
@@ -322,7 +322,7 @@ fn flush_writer_on_exit(
             trigger: "shutdown".to_string(),
         })
         .inc();
-    commit_cursor();
+    commit_cursor()?;
     Ok(true)
 }
 
@@ -5314,13 +5314,7 @@ async fn run_ingestion(args: &BuildArgs, global: &GlobalArgs) -> Result<()> {
                                     state.updated_at = time::OffsetDateTime::now_utc()
                                         .format(&time::format_description::well_known::Rfc3339)
                                         .unwrap_or_default();
-                                    if let Err(e) = loc.save(&state) {
-                                        warn!(error = %e, "failed to save cursor.parquet");
-                                        pipeline_metrics.errors_total.get_or_create(&metrics::ErrorLabels { kind: "cursor_save".to_string() }).inc();
-                                    } else {
-                                        pipeline_metrics.cursor_saves_total.inc();
-                                        pipeline_metrics.cursor_last_block_num.set(last_block_num as i64);
-                                    }
+                                    loc.save_with_retry_blocking(&state, &pipeline_metrics, &shutdown)?;
                                 }
                             }
                         } else {
@@ -5481,13 +5475,7 @@ async fn run_ingestion(args: &BuildArgs, global: &GlobalArgs) -> Result<()> {
                                 state.updated_at = time::OffsetDateTime::now_utc()
                                     .format(&time::format_description::well_known::Rfc3339)
                                     .unwrap_or_default();
-                                if let Err(e) = loc.save(&state) {
-                                    warn!(error = %e, "failed to save cursor.parquet");
-                                    pipeline_metrics.errors_total.get_or_create(&metrics::ErrorLabels { kind: "cursor_save".to_string() }).inc();
-                                } else {
-                                    pipeline_metrics.cursor_saves_total.inc();
-                                    pipeline_metrics.cursor_last_block_num.set(last_block_num as i64);
-                                }
+                                loc.save_with_retry_blocking(&state, &pipeline_metrics, &shutdown)?;
                             }
                         }
                     } else {
@@ -5633,21 +5621,9 @@ async fn run_ingestion(args: &BuildArgs, global: &GlobalArgs) -> Result<()> {
                 state.updated_at = time::OffsetDateTime::now_utc()
                     .format(&time::format_description::well_known::Rfc3339)
                     .unwrap_or_default();
-                if let Err(e) = loc.save(&state) {
-                    warn!(error = %e, "failed to save cursor.parquet");
-                    pipeline_metrics
-                        .errors_total
-                        .get_or_create(&metrics::ErrorLabels {
-                            kind: "cursor_save".to_string(),
-                        })
-                        .inc();
-                } else {
-                    pipeline_metrics.cursor_saves_total.inc();
-                    pipeline_metrics
-                        .cursor_last_block_num
-                        .set(last_block_num as i64);
-                }
+                loc.save_with_retry_blocking(&state, &pipeline_metrics, &shutdown)?;
             }
+            Ok(())
         })?;
     }
 
@@ -5872,13 +5848,11 @@ mod tests {
         assert_eq!(exit, StreamExit::Failed);
 
         let save_cursor = || {
-            cursor_location
-                .save(&CursorState {
-                    cursor: "cursor-at-block-200".to_string(),
-                    last_block_num: 200,
-                    ..CursorState::default()
-                })
-                .unwrap();
+            cursor_location.save(&CursorState {
+                cursor: "cursor-at-block-200".to_string(),
+                last_block_num: 200,
+                ..CursorState::default()
+            })
         };
         let committed =
             flush_writer_on_exit(exit, &mut writer, &pipeline_metrics, save_cursor).unwrap();
@@ -5904,6 +5878,42 @@ mod tests {
         assert!(committed);
         assert!(cursor_path.exists());
         assert!(output.join("logs").is_dir());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn test_final_cursor_failure_is_not_a_successful_completion() {
+        let dir = make_temp_output_dir();
+        let mut writer = OutputWriter::new(&dir, Partition::None, Compression::None, u64::MAX);
+        let metadata = BlockMetadata {
+            min_block_number: 100,
+            max_block_number: 200,
+            min_timestamp: Some(1705320000),
+            max_timestamp: Some(1705320000),
+        };
+        writer.write_all(&make_test_batches(), &metadata).unwrap();
+        let invalid_parent = dir.join("not-a-directory");
+        std::fs::write(&invalid_parent, b"file").unwrap();
+        let location = CursorLocation::Local(invalid_parent.join("cursor.parquet"));
+        let (_, metrics) = metrics::init();
+        let error = flush_writer_on_exit(StreamExit::Completed, &mut writer, &metrics, || {
+            location.save_with_retry_blocking(
+                &CursorState {
+                    last_block_num: 200,
+                    ..CursorState::default()
+                },
+                &metrics,
+                &AtomicBool::new(false),
+            )
+        })
+        .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("cursor persistence failed after 3 attempts"));
+        assert_eq!(StreamExit::from_result(&Err(error)), StreamExit::Failed);
+        assert_eq!(metrics.cursor_save_failures_total.get(), 3);
+        assert_eq!(metrics.cursor_saves_total.get(), 0);
+        assert_eq!(metrics.cursor_last_success_timestamp_seconds.get(), 0);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
