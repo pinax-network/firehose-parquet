@@ -5,8 +5,8 @@ use arrow::datatypes::Schema;
 use arrow::record_batch::RecordBatch;
 use firehose_parquet::encode::{BytesColumn, EncodeBytes};
 use firehose_parquet::traits::{
-    est_bool, est_i64, est_opt_str, est_str, est_ts_ms, est_u32, est_u64, timestamp_millis,
-    BlockIdentity, BlockMapper, CanonicalBuilder,
+    decode_id_bytes, est_bool, est_i64, est_opt_str, est_str, est_ts_ms, est_u32, est_u64,
+    timestamp_millis, BlockIdentity, BlockMapper, CanonicalBuilder, PreparedIdentity,
 };
 use prost::Message;
 use serde_json::{json, Value};
@@ -149,17 +149,6 @@ fn serialize_auth_sequence(auth_sequence: &[antelope::AuthSequence]) -> Option<S
     )
 }
 
-fn antelope_canonical_identity(block: &antelope::Block, identity: &BlockIdentity) -> BlockIdentity {
-    let mut canonical = identity.clone();
-    canonical.block_id = block.id.clone();
-    canonical.parent_id = block
-        .header
-        .as_ref()
-        .map(|h| h.previous.clone())
-        .unwrap_or_default();
-    canonical
-}
-
 pub struct AntelopeBlockMapper {
     include_failed_transactions: bool,
     blocks: BlocksBuilder,
@@ -195,14 +184,13 @@ impl AntelopeBlockMapper {
     fn map_antelope_block(
         &mut self,
         block: &antelope::Block,
-        identity: &BlockIdentity,
+        identity: &PreparedIdentity,
         fork_step: Option<&str>,
     ) {
         let header = block.header.as_ref();
-        let canonical_identity = antelope_canonical_identity(block, identity);
 
         // blocks table
-        self.blocks.canonical.append(&canonical_identity);
+        self.blocks.canonical.append(identity);
         self.blocks.number.append_value(block.number);
         self.blocks.hash.append_value(&block.id);
         self.blocks
@@ -232,14 +220,14 @@ impl AntelopeBlockMapper {
                     continue;
                 }
             }
-            self.map_transaction(trace, &canonical_identity, fork_step);
+            self.map_transaction(trace, identity, fork_step);
         }
     }
 
     fn map_transaction(
         &mut self,
         trace: &antelope::TransactionTrace,
-        identity: &BlockIdentity,
+        identity: &PreparedIdentity,
         fork_step: Option<&str>,
     ) {
         let receipt = trace.receipt.as_ref();
@@ -277,7 +265,7 @@ impl AntelopeBlockMapper {
         &mut self,
         action_trace: &antelope::ActionTrace,
         tx_hash: &str,
-        identity: &BlockIdentity,
+        identity: &PreparedIdentity,
         fork_step: Option<&str>,
     ) {
         let action = action_trace.action.as_ref();
@@ -397,7 +385,7 @@ impl AntelopeBlockMapper {
     fn map_db_op(
         db_ops: &mut DbOpsBuilder,
         db_op: &antelope::DbOp,
-        identity: &BlockIdentity,
+        identity: &PreparedIdentity,
         fork_step: Option<&str>,
     ) {
         db_ops.canonical.append(identity);
@@ -446,7 +434,13 @@ impl BlockMapper for AntelopeBlockMapper {
         } else {
             block.unfiltered_transaction_traces.len()
         } as u64;
-        self.map_antelope_block(&block, identity, fork_step);
+        // Canonical ids come from the block's own hex ids.
+        let identity = self.blocks.canonical.prepare_with_ids(
+            identity,
+            &decode_id_bytes(&block.id),
+            &decode_id_bytes(block.header.as_ref().map_or("", |h| h.previous.as_str())),
+        );
+        self.map_antelope_block(&block, &identity, fork_step);
         Ok(tx_count)
     }
 

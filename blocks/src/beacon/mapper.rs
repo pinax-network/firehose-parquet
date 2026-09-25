@@ -3,9 +3,10 @@ use super::schema;
 use arrow::array::*;
 use arrow::datatypes::Schema;
 use arrow::record_batch::RecordBatch;
-use firehose_parquet::encode::{encode_hex, BytesColumn, EncodeBytes};
+use firehose_parquet::encode::{BytesColumn, EncodeBytes};
 use firehose_parquet::traits::{
     est_i64, est_opt_str, est_str, est_u32, est_u64, BlockIdentity, BlockMapper, CanonicalBuilder,
+    PreparedIdentity,
 };
 use prost::Message;
 use std::collections::HashMap;
@@ -46,13 +47,6 @@ fn mk_fork_step(include: bool) -> Option<StringBuilder> {
     } else {
         None
     }
-}
-
-fn beacon_canonical_identity(block: &beacon::Block, identity: &BlockIdentity) -> BlockIdentity {
-    let mut canonical = identity.clone();
-    canonical.block_id = encode_hex(&block.root);
-    canonical.parent_id = encode_hex(&block.parent_root);
-    canonical
 }
 
 // ---------------------------------------------------------------------------
@@ -307,7 +301,7 @@ impl BeaconBlockMapper {
     fn map_beacon_block(
         &mut self,
         block: &beacon::Block,
-        identity: &BlockIdentity,
+        identity: &PreparedIdentity,
         fork_step: Option<&str>,
     ) {
         let slot = block.slot;
@@ -623,8 +617,11 @@ impl BlockMapper for BeaconBlockMapper {
         fork_step: Option<&str>,
     ) -> anyhow::Result<u64> {
         let block = beacon::Block::decode(block_bytes)?;
-        let canonical = beacon_canonical_identity(&block, identity);
-        self.map_beacon_block(&block, &canonical, fork_step);
+        let identity =
+            self.blocks
+                .canonical
+                .prepare_with_ids(identity, &block.root, &block.parent_root);
+        self.map_beacon_block(&block, &identity, fork_step);
         // Beacon chain uses attestations rather than traditional transactions.
         Ok(0)
     }

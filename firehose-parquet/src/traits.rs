@@ -8,7 +8,7 @@ use arrow::record_batch::RecordBatch;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::encode::{bytes_data_type, BytesColumn, EncodeBytes};
+use crate::encode::{bytes_data_type, BytesColumn, EncodeBytes, EncodedBytes};
 
 // ---------------------------------------------------------------------------
 // Arrow builder memory estimation helpers
@@ -185,6 +185,65 @@ pub fn decode_id_bytes(id: &str) -> Vec<u8> {
     hex::decode(hex_str).unwrap_or_else(|_| id.as_bytes().to_vec())
 }
 
+/// The canonical identity columns of one block, with `block_id`/`parent_id`
+/// already encoded and the `date` already derived.
+///
+/// Mappers prepare it once per block (see [`CanonicalBuilder::prepare`]) and
+/// append it to every row of every table, instead of decoding and re-encoding the
+/// ids on each row.
+#[derive(Debug, Clone)]
+pub struct PreparedIdentity {
+    block_num: u64,
+    parent_num: u64,
+    lib_num: u64,
+    /// Unix milliseconds; `None` writes a null `timestamp` and `date`.
+    timestamp_millis: Option<i64>,
+    date: Option<i32>,
+    block_id: EncodedBytes,
+    parent_id: EncodedBytes,
+}
+
+impl PreparedIdentity {
+    /// Prepare `identity` with its Firehose metadata ids (hex strings, decoded by
+    /// [`decode_id_bytes`]), encoded with `encoding`.
+    pub fn new(identity: &BlockIdentity, encoding: &EncodeBytes) -> Self {
+        Self::with_ids(
+            identity,
+            &decode_id_bytes(&identity.block_id),
+            &decode_id_bytes(&identity.parent_id),
+            encoding,
+        )
+    }
+
+    /// Prepare `identity` with raw block and parent ids taken from the block
+    /// itself, encoded with `encoding`.
+    pub fn with_ids(
+        identity: &BlockIdentity,
+        block_id: &[u8],
+        parent_id: &[u8],
+        encoding: &EncodeBytes,
+    ) -> Self {
+        Self {
+            block_num: identity.block_num,
+            parent_num: identity.parent_num,
+            lib_num: identity.lib_num,
+            timestamp_millis: Some(identity.timestamp_millis()),
+            date: Some(date32_from_timestamp_seconds(identity.timestamp)),
+            block_id: EncodedBytes::new(block_id, encoding),
+            parent_id: EncodedBytes::new(parent_id, encoding),
+        }
+    }
+
+    /// Replace the block time with an optional time in whole unix seconds. `None`
+    /// (e.g. a Solana block without `block_time`) writes null `timestamp` and
+    /// `date` values.
+    pub fn with_timestamp_seconds(mut self, timestamp_seconds: Option<i64>) -> Self {
+        self.timestamp_millis = timestamp_seconds.map(|seconds| timestamp_millis(seconds, 0));
+        self.date = timestamp_seconds.map(date32_from_timestamp_seconds);
+        self
+    }
+}
+
 /// Builder for canonical identity columns. Embed in each table builder.
 pub struct CanonicalBuilder {
     pub block_num: UInt64Builder,
@@ -214,43 +273,36 @@ impl CanonicalBuilder {
         }
     }
 
-    pub fn append(&mut self, id: &BlockIdentity) {
+    /// Prepare `identity`, with its Firehose metadata ids, in this builder's
+    /// encoding. Every table of a mapper shares the canonical encoding, so the
+    /// result can be appended to all of them.
+    pub fn prepare(&self, identity: &BlockIdentity) -> PreparedIdentity {
+        PreparedIdentity::new(identity, &self.block_id.encoding())
+    }
+
+    /// Prepare `identity` with raw block and parent ids taken from the block
+    /// itself, in this builder's encoding.
+    pub fn prepare_with_ids(
+        &self,
+        identity: &BlockIdentity,
+        block_id: &[u8],
+        parent_id: &[u8],
+    ) -> PreparedIdentity {
+        PreparedIdentity::with_ids(identity, block_id, parent_id, &self.block_id.encoding())
+    }
+
+    /// Append one row.
+    ///
+    /// # Panics
+    /// If `id` was prepared with a different encoding than this builder's.
+    pub fn append(&mut self, id: &PreparedIdentity) {
         self.block_num.append_value(id.block_num);
         self.parent_num.append_value(id.parent_num);
         self.lib_num.append_value(id.lib_num);
-        self.timestamp.append_value(id.timestamp_millis());
-        self.date
-            .append_value(date32_from_timestamp_seconds(id.timestamp));
-        self.append_ids(id);
-    }
-
-    /// Append a row with an optional timestamp/date, given in whole unix
-    /// seconds. When `timestamp` is `None` (e.g. Solana blocks without
-    /// `block_time`), null values are written for both the `timestamp` and
-    /// `date` columns.
-    pub fn append_with_optional_timestamp(&mut self, id: &BlockIdentity, timestamp: Option<i64>) {
-        self.block_num.append_value(id.block_num);
-        self.parent_num.append_value(id.parent_num);
-        self.lib_num.append_value(id.lib_num);
-        match timestamp {
-            Some(ts) => {
-                self.timestamp.append_value(timestamp_millis(ts, 0));
-                self.date.append_value(date32_from_timestamp_seconds(ts));
-            }
-            None => {
-                self.timestamp.append_null();
-                self.date.append_null();
-            }
-        }
-        self.append_ids(id);
-    }
-
-    /// Decode and append the block_id/parent_id columns.
-    fn append_ids(&mut self, id: &BlockIdentity) {
-        let block_id_bytes = decode_id_bytes(&id.block_id);
-        let parent_id_bytes = decode_id_bytes(&id.parent_id);
-        self.block_id.append_value(&block_id_bytes);
-        self.parent_id.append_value(&parent_id_bytes);
+        self.timestamp.append_option(id.timestamp_millis);
+        self.date.append_option(id.date);
+        self.block_id.append_encoded(&id.block_id);
+        self.parent_id.append_encoded(&id.parent_id);
     }
 
     pub fn finish(&mut self) -> Vec<Arc<dyn arrow::array::Array>> {
@@ -440,7 +492,7 @@ mod tests {
     #[test]
     fn test_canonical_builder_derives_date_column_from_timestamp() {
         let mut builder = CanonicalBuilder::new();
-        builder.append(&BlockIdentity {
+        let identity = builder.prepare(&BlockIdentity {
             block_num: 42,
             block_id: "aa".to_string(),
             parent_num: 41,
@@ -450,6 +502,7 @@ mod tests {
             timestamp_nanos: 0,
             fork_step: None,
         });
+        builder.append(&identity);
 
         let columns = builder.finish();
         let date_array = columns[6]
@@ -473,11 +526,11 @@ mod tests {
     }
 
     #[test]
-    fn test_canonical_builder_append_with_optional_timestamp_none() {
+    fn test_prepared_identity_without_timestamp_writes_null_timestamp_and_date() {
         use arrow::array::Array;
         let mut builder = CanonicalBuilder::new();
-        builder.append_with_optional_timestamp(
-            &BlockIdentity {
+        let identity = builder
+            .prepare(&BlockIdentity {
                 block_num: 100,
                 block_id: "cc".to_string(),
                 parent_num: 99,
@@ -486,9 +539,9 @@ mod tests {
                 timestamp: 0,
                 timestamp_nanos: 0,
                 fork_step: None,
-            },
-            None,
-        );
+            })
+            .with_timestamp_seconds(None);
+        builder.append(&identity);
 
         let columns = builder.finish();
         let ts_array = columns[5]
@@ -505,9 +558,16 @@ mod tests {
     }
 
     #[test]
-    fn test_canonical_builder_append_with_optional_timestamp_some_writes_millis() {
+    fn test_prepared_identity_with_timestamp_seconds_writes_millis() {
         let mut builder = CanonicalBuilder::new();
-        builder.append_with_optional_timestamp(&BlockIdentity::default(), Some(1_700_000_000));
+        let identity = builder
+            .prepare(&BlockIdentity {
+                timestamp: 1,
+                timestamp_nanos: 500_000_000,
+                ..BlockIdentity::default()
+            })
+            .with_timestamp_seconds(Some(1_700_000_000));
+        builder.append(&identity);
 
         let columns = builder.finish();
         let ts_array = columns[5]
@@ -567,11 +627,12 @@ mod tests {
         // 2023-11-14T23:59:59.500Z: the timestamp keeps the 500 ms, the date
         // stays on the UTC day of the whole second.
         let mut builder = CanonicalBuilder::new();
-        builder.append(&BlockIdentity {
+        let identity = builder.prepare(&BlockIdentity {
             timestamp: 1_700_006_399,
             timestamp_nanos: 500_000_000,
             ..BlockIdentity::default()
         });
+        builder.append(&identity);
 
         let columns = builder.finish();
         let timestamps = columns[5]
@@ -626,5 +687,180 @@ mod tests {
             .downcast_ref::<TimestampMillisecondArray>()
             .expect("timestamp column should be TimestampMillisecondArray");
         assert_eq!(values.value(0), 1_700_000_000_500);
+    }
+
+    /// The per-row path used before prepared identities: decode the metadata
+    /// ids on every row and let each `BytesColumn` encode them again.
+    fn legacy_append_ids(
+        block_ids: &mut BytesColumn,
+        parent_ids: &mut BytesColumn,
+        id: &BlockIdentity,
+    ) {
+        block_ids.append_value(&decode_id_bytes(&id.block_id));
+        parent_ids.append_value(&decode_id_bytes(&id.parent_id));
+    }
+
+    fn all_encodings() -> [EncodeBytes; 5] {
+        [
+            EncodeBytes::Binary,
+            EncodeBytes::Hex,
+            EncodeBytes::HexNoPrefix,
+            EncodeBytes::Base58,
+            EncodeBytes::TronBase58,
+        ]
+    }
+
+    #[test]
+    fn test_prepared_identity_ids_match_the_per_row_decode_and_encode_path() {
+        let identities = [
+            // 0x-prefixed hex (EVM-style metadata), plain hex (Antelope/Tron-style),
+            // a non-hex id (kept as its UTF-8 bytes), a 21-byte Tron address-sized
+            // id, and empty ids.
+            (
+                "0x".to_string() + &"ab".repeat(32),
+                "0x".to_string() + &"cd".repeat(32),
+            ),
+            ("12".repeat(32), "34".repeat(32)),
+            (
+                "firehose-envelope-id".to_string(),
+                "not hex either".to_string(),
+            ),
+            (
+                "41".to_string() + &"aa".repeat(20),
+                "41".to_string() + &"bb".repeat(20),
+            ),
+            (String::new(), String::new()),
+        ];
+
+        for encoding in all_encodings() {
+            let mut builder = CanonicalBuilder::with_encoding(&encoding);
+            let mut block_ids = BytesColumn::new(&encoding);
+            let mut parent_ids = BytesColumn::new(&encoding);
+            for (block_id, parent_id) in &identities {
+                let identity = BlockIdentity {
+                    block_id: block_id.clone(),
+                    parent_id: parent_id.clone(),
+                    ..BlockIdentity::default()
+                };
+                let prepared = builder.prepare(&identity);
+                for _ in 0..3 {
+                    builder.append(&prepared);
+                    legacy_append_ids(&mut block_ids, &mut parent_ids, &identity);
+                }
+            }
+
+            let columns = builder.finish();
+            assert_eq!(
+                columns[1].to_data(),
+                block_ids.finish().to_data(),
+                "block_id with {encoding:?}"
+            );
+            assert_eq!(
+                columns[3].to_data(),
+                parent_ids.finish().to_data(),
+                "parent_id with {encoding:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_prepare_with_ids_matches_hex_round_trip_of_raw_ids() {
+        // The per-chain helpers used to hex-encode raw ids into BlockIdentity and
+        // decode them again on every row.
+        let raw_ids: [&[u8]; 3] = [&[0xab; 32], &[0x01, 0x02, 0x03], &[]];
+        for encoding in all_encodings() {
+            let mut builder = CanonicalBuilder::with_encoding(&encoding);
+            let mut block_ids = BytesColumn::new(&encoding);
+            let mut parent_ids = BytesColumn::new(&encoding);
+            for raw in raw_ids {
+                let identity = BlockIdentity {
+                    block_id: crate::encode::encode_hex(raw),
+                    parent_id: crate::encode::encode_hex_no_prefix(raw),
+                    ..BlockIdentity::default()
+                };
+                let prepared = builder.prepare_with_ids(&BlockIdentity::default(), raw, raw);
+                builder.append(&prepared);
+                legacy_append_ids(&mut block_ids, &mut parent_ids, &identity);
+            }
+
+            let columns = builder.finish();
+            assert_eq!(
+                columns[1].to_data(),
+                block_ids.finish().to_data(),
+                "{encoding:?}"
+            );
+            assert_eq!(
+                columns[3].to_data(),
+                parent_ids.finish().to_data(),
+                "{encoding:?}"
+            );
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "does not match the column encoding")]
+    fn test_append_rejects_identity_prepared_with_another_encoding() {
+        let identity = PreparedIdentity::new(&BlockIdentity::default(), &EncodeBytes::Base58);
+        CanonicalBuilder::with_encoding(&EncodeBytes::Hex).append(&identity);
+    }
+
+    /// Per-row cost of the canonical identity columns, legacy path vs prepared.
+    /// `cargo test --release -p firehose-parquet --lib bench_canonical_identity -- --ignored --nocapture`
+    #[test]
+    #[ignore = "benchmark"]
+    fn bench_canonical_identity_per_row() {
+        use std::hint::black_box;
+        use std::time::Instant;
+
+        const ROWS: usize = 1_000_000;
+        let identity = BlockIdentity {
+            block_num: 300_000_000,
+            block_id: "0x".to_string() + &"ab".repeat(32),
+            parent_num: 299_999_999,
+            parent_id: "0x".to_string() + &"cd".repeat(32),
+            lib_num: 299_999_968,
+            timestamp: 1_700_000_000,
+            timestamp_nanos: 500_000_000,
+            fork_step: None,
+        };
+
+        for encoding in [EncodeBytes::Binary, EncodeBytes::Hex, EncodeBytes::Base58] {
+            // Legacy: what `CanonicalBuilder::append(&BlockIdentity)` did per row.
+            let mut block_num = UInt64Builder::with_capacity(ROWS);
+            let mut parent_num = UInt64Builder::with_capacity(ROWS);
+            let mut lib_num = UInt64Builder::with_capacity(ROWS);
+            let mut timestamp = TimestampMillisecondBuilder::with_capacity(ROWS);
+            let mut date = Date32Builder::with_capacity(ROWS);
+            let mut block_ids = BytesColumn::new(&encoding);
+            let mut parent_ids = BytesColumn::new(&encoding);
+            let start = Instant::now();
+            for _ in 0..ROWS {
+                let id = black_box(&identity);
+                block_num.append_value(id.block_num);
+                parent_num.append_value(id.parent_num);
+                lib_num.append_value(id.lib_num);
+                timestamp.append_value(id.timestamp_millis());
+                date.append_value(date32_from_timestamp_seconds(id.timestamp));
+                legacy_append_ids(&mut block_ids, &mut parent_ids, id);
+            }
+            let legacy = start.elapsed();
+            black_box((block_ids.finish(), parent_ids.finish()));
+
+            let mut builder = CanonicalBuilder::with_encoding(&encoding);
+            let start = Instant::now();
+            let prepared = builder.prepare(black_box(&identity));
+            for _ in 0..ROWS {
+                builder.append(black_box(&prepared));
+            }
+            let fast = start.elapsed();
+            black_box(builder.finish());
+
+            println!(
+                "{encoding:?}: legacy {:.0} ns/row, prepared {:.1} ns/row ({:.0}x)",
+                legacy.as_nanos() as f64 / ROWS as f64,
+                fast.as_nanos() as f64 / ROWS as f64,
+                legacy.as_secs_f64() / fast.as_secs_f64()
+            );
+        }
     }
 }

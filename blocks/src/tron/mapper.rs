@@ -6,7 +6,7 @@ use arrow::record_batch::RecordBatch;
 use firehose_parquet::encode::{BytesColumn, EncodeBytes};
 use firehose_parquet::traits::{
     est_bool, est_i64, est_opt_str, est_str, est_u32, est_u64, BlockIdentity, BlockMapper,
-    CanonicalBuilder,
+    CanonicalBuilder, PreparedIdentity,
 };
 use prost::Message;
 use std::collections::HashMap;
@@ -105,7 +105,7 @@ impl TronBlockMapper {
     fn map_tron_block(
         &mut self,
         block: &tron::Block,
-        identity: &BlockIdentity,
+        identity: &PreparedIdentity,
         fork_step: Option<&str>,
     ) {
         let header = block.header.as_ref();
@@ -148,7 +148,7 @@ impl TronBlockMapper {
         &mut self,
         block_number: u64,
         tx: &tron::Transaction,
-        identity: &BlockIdentity,
+        identity: &PreparedIdentity,
         fork_step: Option<&str>,
     ) {
         let info = tx.info.as_ref();
@@ -246,7 +246,8 @@ impl BlockMapper for TronBlockMapper {
     ) -> anyhow::Result<u64> {
         let block = tron::Block::decode(block_bytes)?;
         let tx_count = block.transactions.len() as u64;
-        self.map_tron_block(&block, identity, fork_step);
+        let identity = self.blocks.canonical.prepare(identity);
+        self.map_tron_block(&block, &identity, fork_step);
         Ok(tx_count)
     }
 

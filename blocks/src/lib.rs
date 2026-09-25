@@ -9,3 +9,6 @@ pub mod tron;
 
 #[cfg(test)]
 mod schema_contract_tests;
+
+#[cfg(test)]
+mod mapping_bench;
