@@ -8,6 +8,7 @@ lifecycle state; a local implementation or passing test alone is not closure.
 - [#467: stable startup destinations](467-endpoint-info.md)
 - [#567: compatible dependency security refresh](dependency-security-refresh.md)
 - [#469: durable cursor persistence](469-durable-cursor-saves.md)
+- [#578: atomic local Parquet publication](578-atomic-local-parquet.md)
 - [#506: NEAR qualification blocked by quota](506-near-qualification.md)
 
 - [Backlog priorities and preserved work](backlog-roadmap.md)

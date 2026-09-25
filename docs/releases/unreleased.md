@@ -4,6 +4,19 @@ Changes merged since the last release. Fold this file into `docs/releases/vX.Y.Z
 
 ## Breaking changes
 
+### Local Parquet publication requires durable filesystem operations (#578)
+
+Local table parts now become visible at their final `.parquet` name only after
+the footer is complete and the file is synced. Final-name publication is atomic
+and never overwrites an existing destination. Directory sync failures are fatal,
+including sync of output directory ancestors. Filesystems must support atomic
+hard links and file/directory sync; directory ancestors must be readable.
+
+Final filenames and S3 writes are unchanged. This is single-file publication,
+not a transaction across tables and the cursor: an error after publication can
+leave a complete part, and replay may duplicate it. Abrupt termination may leave
+hidden `.tmp` files. See [the guarantees and tests](../audit/578-atomic-local-parquet.md).
+
 ### Startup requires usable EndpointInfo (#467)
 
 Ingestion now stops before output/cursor resolution if endpoint metadata cannot
