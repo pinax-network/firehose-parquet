@@ -89,3 +89,7 @@ file was 137,885,482 bytes; the narrow layouts were approximately 7.8–8.0 MB.
 Filesystem discovery and per-file footer reads remain in these measurements.
 The boundary selection correctness change is separately covered by overlapping
 height regressions; the deliberately valid benchmark does not exercise that fix.
+
+Final integration with main `1f2d252` passed **878 workspace tests**, six
+intentional skips, the workspace build, formatting and shell-completion checks.
+The strengthened nested-root fixture was reviewed independently after its change.
