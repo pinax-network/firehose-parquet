@@ -37,11 +37,57 @@ mod supported {
     /// write may proceed after a conflict or partial acquisition failure.
     pub struct LocalOwnership {
         roots: Vec<PathBuf>,
+        scopes: Vec<PathBuf>,
         held: BTreeMap<Identity, (File, Mode)>,
         control_mutation: Mutex<()>,
     }
 
     impl LocalOwnership {
+        /// Guard an intended output without creating it before validation.
+        /// Missing roots conservatively own their nearest existing ancestor.
+        /// All upgrades are calculated before acquiring any inode lock.
+        pub fn acquire_without_creation(scopes: &[PathBuf]) -> Result<Self> {
+            let absolute = scopes
+                .iter()
+                .map(|scope| {
+                    if scope.is_absolute() {
+                        Ok(scope.clone())
+                    } else {
+                        Ok(std::env::current_dir()?.join(scope))
+                    }
+                })
+                .collect::<Result<Vec<_>>>()?;
+            let mut plan = snapshot(&absolute)?;
+            for root in &plan.roots {
+                if root.is_dir() {
+                    continue;
+                }
+                let ancestor = root
+                    .ancestors()
+                    .find(|path| path.is_dir())
+                    .context("missing output has no existing directory ancestor")?;
+                let identity = identity_of(&fs::metadata(ancestor)?);
+                plan.directories
+                    .get_mut(&identity)
+                    .context("existing output ancestor was not included in ownership plan")?
+                    .mode = Mode::Exclusive;
+            }
+            let mut guard = Self {
+                roots: plan.roots.clone(),
+                scopes: absolute.clone(),
+                held: BTreeMap::new(),
+                control_mutation: Mutex::new(()),
+            };
+            guard.acquire_missing(&plan)?;
+            validate_handles(&guard, &plan)?;
+            // Detect path/alias changes between planning and locking. Existing
+            // roots may have appeared, but no path may resolve to another graph.
+            if snapshot(&absolute)?.roots != plan.roots {
+                bail!("ownership scope changed during acquisition; retry after stabilizing paths");
+            }
+            Ok(guard)
+        }
+
         pub fn acquire(scopes: &[PathBuf]) -> Result<Self> {
             let absolute = scopes
                 .iter()
@@ -56,6 +102,7 @@ mod supported {
             let before = snapshot(&absolute)?;
             let mut guard = Self {
                 roots: before.roots.clone(),
+                scopes: absolute.clone(),
                 held: BTreeMap::new(),
                 control_mutation: Mutex::new(()),
             };
@@ -84,6 +131,36 @@ mod supported {
                     })?;
             }
             Ok(guard)
+        }
+
+        /// Recheck aliases and inode coverage before a command publishes data.
+        /// Newly created directories remain covered by a held exclusive ancestor.
+        pub fn revalidate(&self) -> Result<()> {
+            let current = snapshot(&self.scopes)?;
+            if current.roots != self.roots {
+                bail!("local mutation scope changed after ownership acquisition");
+            }
+            for (identity, requirement) in &current.directories {
+                if self.held.contains_key(identity) {
+                    continue;
+                }
+                let mut covered = false;
+                for ancestor in requirement.path.ancestors().skip(1) {
+                    let metadata = fs::metadata(ancestor)?;
+                    if self
+                        .held
+                        .get(&identity_of(&metadata))
+                        .is_some_and(|(_, mode)| *mode == Mode::Exclusive)
+                    {
+                        covered = true;
+                        break;
+                    }
+                }
+                if !covered {
+                    bail!("local mutation ancestry changed after ownership acquisition");
+                }
+            }
+            Ok(())
         }
 
         /// Canonical roots after aliases and nested scopes have been reduced.
@@ -250,10 +327,18 @@ pub struct LocalOwnership;
 
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
 impl LocalOwnership {
+    pub fn acquire_without_creation(scopes: &[std::path::PathBuf]) -> anyhow::Result<Self> {
+        Self::acquire(scopes)
+    }
+
     pub fn acquire(_scopes: &[std::path::PathBuf]) -> anyhow::Result<Self> {
         anyhow::bail!(
             "local dataset ownership requires supported macOS/Linux directory inode locks"
         )
+    }
+
+    pub fn revalidate(&self) -> anyhow::Result<()> {
+        anyhow::bail!("local dataset ownership is unsupported on this platform")
     }
 
     pub fn roots(&self) -> &[std::path::PathBuf] {

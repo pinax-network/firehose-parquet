@@ -99,3 +99,36 @@ ignores. This includes eleven durable state tests, remote tombstone/recreation,
 concurrent same-version exclusion and cancellation retaining the owner. Mutator
 wiring was being implemented during this check; complete command coverage and
 CLI qualification remain required before the stage-1 review boundary.
+
+### Deferred command scopes and aliases
+
+Ordinary command guards use `LocalOwnership::acquire_without_creation`. For a
+missing output, the nearest existing ancestor is held exclusively; all upgrades
+are calculated before any lock is acquired. This conservatively serializes
+siblings until that operation ends. It does not create an empty output during
+an invalid endpoint probe or failed validation. The normal writer creates its
+output only when it has valid data. The original durable-state acquisition API
+still durably creates its requested roots.
+
+The guard retains intended canonical and lexical roots and can revalidate their
+inode coverage before publication. Newly created directories remain covered by
+an exclusive ancestor. Retargeted aliases fail. Cooperating commands cannot
+replace held ancestry; older binaries or external tools that ignore ownership
+remain outside the guarantee.
+
+A command also walks directories beneath its reduced local roots after locking
+and rejects nested symlink entries before mutation. Explicit command-root aliases
+and cursor-parent aliases are canonicalized/locked normally, but aliases nested
+inside a traversed mutation tree are unsupported. This preflight reads directory
+entries, not file contents, and costs a recursive directory traversal. It prevents
+maintenance traversal or table routing from escaping the guarded root through a
+nested alias. Commands with very broad roots should choose narrower scopes.
+
+The integration run after these changes passed **822 tests**, with five intended
+ignores across workspace suites. Existing subprocess endpoint/probe tests prove
+that failed startup and invalid partition probes create no output and preserve
+an existing index. Local tests prove missing roots remain absent, newly created
+roots stay excluded, nested aliases fail, explicit root aliases work, and an
+externally retargeted alias is detected before publication. Remote test support
+includes a crate-private injected-owner constructor for hermetic command tests;
+production acquisition still validates configured routing and conditional support.

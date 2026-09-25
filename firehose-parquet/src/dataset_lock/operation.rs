@@ -99,15 +99,19 @@ impl DatasetOwnership {
             let aws = aws.context("AWS configuration is required for remote ownership")?;
             clients.push((
                 bucket.clone(),
-                Arc::new(aws.build_s3_client(&bucket)?) as Arc<dyn object_store::ObjectStore>,
+                Arc::new(aws.build_s3_client_for_mutation(&bucket)?)
+                    as Arc<dyn object_store::ObjectStore>,
                 scopes,
             ));
         }
         let local = if local.is_empty() {
             None
         } else {
-            Some(LocalOwnership::acquire(&local)?)
+            Some(LocalOwnership::acquire_without_creation(&local)?)
         };
+        if let Some(local) = &local {
+            validate_local_mutation_trees(local)?;
+        }
         let mut ownership = Self {
             local,
             remote: BTreeMap::new(),
@@ -144,6 +148,21 @@ impl DatasetOwnership {
             return futures::executor::block_on(Self::acquire(operation, scopes, aws));
         }
         block_storage(Self::acquire(operation, scopes, aws))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn from_remote_for_test(bucket: &str, owner: S3Ownership) -> Self {
+        Self {
+            local: None,
+            remote: BTreeMap::from([(bucket.to_owned(), owner)]),
+        }
+    }
+
+    pub fn revalidate_local_paths(&self) -> Result<()> {
+        if let Some(local) = &self.local {
+            local.revalidate()?;
+        }
+        Ok(())
     }
 
     pub fn local(&self) -> Option<&LocalOwnership> {
@@ -183,6 +202,33 @@ impl DatasetOwnership {
     }
 }
 
+/// Explicit scope aliases have already been canonicalized and locked. Nested
+/// aliases would escape that graph, so fail before any command data mutation.
+/// This directory-only walk does not read data file contents.
+fn validate_local_mutation_trees(ownership: &LocalOwnership) -> Result<()> {
+    let mut pending = ownership.roots().to_vec();
+    while let Some(directory) = pending.pop() {
+        if !directory.exists() {
+            continue;
+        }
+        for entry in
+            std::fs::read_dir(&directory).context("inspecting a guarded local mutation tree")?
+        {
+            let entry = entry.context("inspecting a guarded local mutation entry")?;
+            let kind = entry
+                .file_type()
+                .context("inspecting a guarded entry type")?;
+            if kind.is_symlink() {
+                bail!("nested symlinks are unsupported inside a guarded mutation tree; use an explicit command-root alias or relocate the nested target");
+            }
+            if kind.is_dir() {
+                pending.push(entry.path());
+            }
+        }
+    }
+    Ok(())
+}
+
 /// This sync bridge never panics in a current-thread runtime. Async callers can
 /// use `acquire`/`release` directly instead of blocking their executor.
 fn block_storage<T>(future: impl std::future::Future<Output = Result<T>>) -> Result<T> {
@@ -217,6 +263,13 @@ mod tests {
         )
         .unwrap();
         assert_eq!(ownership.local().unwrap().roots().len(), 1);
+        assert!(
+            !output.exists(),
+            "guard must not create output before validation"
+        );
+        assert!(LocalOwnership::acquire(&[output.clone()]).is_err());
+        std::fs::create_dir_all(output.join("state")).unwrap();
+        ownership.revalidate_local_paths().unwrap();
         assert!(LocalOwnership::acquire(&[output]).is_err());
         ownership.release_blocking().unwrap();
     }
@@ -235,6 +288,64 @@ mod tests {
             None
         )
         .is_err());
+    }
+
+    #[test]
+    fn nested_symlinks_fail_before_mutation_but_explicit_root_aliases_work() {
+        use std::os::unix::fs::symlink;
+        let dir = tempfile::tempdir().unwrap();
+        let output = dir.path().join("output");
+        let outside = dir.path().join("outside");
+        std::fs::create_dir_all(&output).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        let alias = dir.path().join("alias");
+        symlink(&output, &alias).unwrap();
+        let nested = output.join("table");
+        symlink(&outside, &nested).unwrap();
+        let error = DatasetOwnership::acquire_blocking(
+            "test",
+            vec![MutationScope::directory(alias.to_string_lossy())],
+            None,
+        )
+        .err()
+        .unwrap();
+        assert!(error.to_string().contains("nested symlinks"));
+        assert!(std::fs::read_dir(&outside).unwrap().next().is_none());
+        std::fs::remove_file(nested).unwrap();
+        let ownership = DatasetOwnership::acquire_blocking(
+            "test",
+            vec![MutationScope::directory(alias.to_string_lossy())],
+            None,
+        )
+        .unwrap();
+        ownership.release_blocking().unwrap();
+    }
+
+    #[test]
+    fn deferred_scope_detects_alias_retargeting_before_publication() {
+        use std::os::unix::fs::symlink;
+        let dir = tempfile::tempdir().unwrap();
+        let first = dir.path().join("first");
+        let second = dir.path().join("second");
+        std::fs::create_dir(&first).unwrap();
+        std::fs::create_dir(&second).unwrap();
+        let alias = dir.path().join("alias");
+        symlink(&first, &alias).unwrap();
+        let owner = DatasetOwnership::acquire_blocking(
+            "test",
+            vec![MutationScope::directory(
+                alias.join("new").to_string_lossy(),
+            )],
+            None,
+        )
+        .unwrap();
+        assert!(!first.join("new").exists());
+        // Simulate a non-cooperating external actor; cooperating commands are
+        // excluded by the alias-parent/target locks.
+        std::fs::remove_file(&alias).unwrap();
+        symlink(&second, &alias).unwrap();
+        assert!(owner.revalidate_local_paths().is_err());
+        assert!(!second.join("new").exists());
     }
 
     #[tokio::test]
