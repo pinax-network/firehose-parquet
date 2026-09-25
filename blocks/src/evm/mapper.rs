@@ -1087,7 +1087,7 @@ impl BlockMapper for EvmBlockMapper {
         total
     }
 
-    fn largest_table(&mut self) -> (&str, usize) {
+    fn table_estimates(&mut self) -> Vec<(&str, usize)> {
         // blocks
         let blocks = self.blocks.canonical.estimated_bytes()
             + est_u64(&self.blocks.number)
@@ -1443,10 +1443,7 @@ impl BlockMapper for EvmBlockMapper {
         if let Some(ref b) = self.system_account_creations {
             tables.push(("system_account_creations", est_sys_account_creations!(b)));
         }
-        tables
-            .into_iter()
-            .max_by_key(|&(_, s)| s)
-            .unwrap_or(("blocks", 0))
+        tables.into_iter().collect()
     }
 
     fn table_names(&self) -> Vec<&str> {

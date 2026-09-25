@@ -305,7 +305,7 @@ impl BlockMapper for TronBlockMapper {
             + self.internal_transactions.canonical.len()
     }
 
-    fn largest_table(&mut self) -> (&str, usize) {
+    fn table_estimates(&mut self) -> Vec<(&str, usize)> {
         let blocks = self.blocks.canonical.estimated_bytes()
             + est_u64(&self.blocks.number)
             + self.blocks.hash.estimated_bytes()
@@ -359,8 +359,7 @@ impl BlockMapper for TronBlockMapper {
             ("internal_transactions", internal_transactions),
         ]
         .into_iter()
-        .max_by_key(|&(_, s)| s)
-        .unwrap_or(("blocks", 0))
+        .collect()
     }
 
     fn table_names(&self) -> Vec<&str> {

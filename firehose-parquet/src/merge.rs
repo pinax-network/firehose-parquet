@@ -68,17 +68,24 @@ impl MergeS3Operation {
     }
 }
 
-struct StreamingPartWriter {
+// A separate finite active-row-group budget preserves useful dictionaries even
+// when the encoded output target is small. It never scales with the input group.
+const ROW_GROUP_MEMORY_BUDGET_BYTES: usize = 32 * 1024 * 1024;
+
+/// Buffers one encoded output part plus a separately bounded active row group.
+pub(crate) struct StreamingPartWriter {
     schema: Arc<arrow::datatypes::Schema>,
     props: WriterProperties,
     flush_bytes: u64,
+    row_group_memory_bytes: usize,
     flush_rows: Option<usize>,
     next_part_num: u32,
     current_writer: Option<ArrowWriter<Vec<u8>>>,
+    current_rows: usize,
 }
 
 impl StreamingPartWriter {
-    fn new(
+    pub(crate) fn new(
         schema: Arc<arrow::datatypes::Schema>,
         props: WriterProperties,
         flush_bytes: u64,
@@ -89,6 +96,7 @@ impl StreamingPartWriter {
             schema,
             props,
             flush_bytes,
+            row_group_memory_bytes: ROW_GROUP_MEMORY_BUDGET_BYTES,
             // Treat an explicit zero like the disabled default so merge only flushes on rows when
             // the operator provides a positive threshold.
             flush_rows: flush_rows
@@ -96,10 +104,11 @@ impl StreamingPartWriter {
                 .map(|rows| rows as usize),
             next_part_num: initial_part_num,
             current_writer: None,
+            current_rows: 0,
         }
     }
 
-    fn write_batch<F>(&mut self, batch: &RecordBatch, flush_part: &mut F) -> Result<()>
+    pub(crate) fn write_batch<F>(&mut self, batch: &RecordBatch, flush_part: &mut F) -> Result<()>
     where
         F: FnMut(u32, Vec<u8>, usize) -> Result<()>,
     {
@@ -117,12 +126,25 @@ impl StreamingPartWriter {
 
         let writer = self.current_writer.as_mut().expect("writer must exist");
         writer.write(batch)?;
+        self.current_rows = self
+            .current_rows
+            .checked_add(batch.num_rows())
+            .context("output row count overflow")?;
 
         let reached_flush_rows = self
             .flush_rows
-            .is_some_and(|flush_rows| writer.in_progress_rows() >= flush_rows);
-        let reached_flush_bytes =
-            self.flush_bytes > 0 && writer.in_progress_size() as u64 >= self.flush_bytes;
+            .is_some_and(|flush_rows| self.current_rows >= flush_rows);
+        // Bound the active Arrow/dictionary buffers independently of encoded
+        // output. Closing only the row group preserves the compressed part
+        // target rather than turning every memory-bound batch into a tiny file.
+        if writer.memory_size() >= self.row_group_memory_bytes {
+            writer.flush()?;
+        }
+        // Already encoded row groups remain in the output Vec and must count.
+        let encoded = writer
+            .bytes_written()
+            .saturating_add(writer.in_progress_size());
+        let reached_flush_bytes = self.flush_bytes > 0 && encoded as u64 >= self.flush_bytes;
 
         if reached_flush_rows || reached_flush_bytes {
             self.flush_current(flush_part)?;
@@ -131,7 +153,7 @@ impl StreamingPartWriter {
         Ok(())
     }
 
-    fn finish<F>(&mut self, flush_part: &mut F) -> Result<()>
+    pub(crate) fn finish<F>(&mut self, flush_part: &mut F) -> Result<()>
     where
         F: FnMut(u32, Vec<u8>, usize) -> Result<()>,
     {
@@ -149,7 +171,8 @@ impl StreamingPartWriter {
             .current_writer
             .take()
             .expect("writer must exist when flushing");
-        let rows = writer.in_progress_rows();
+        let rows = self.current_rows;
+        self.current_rows = 0;
         let buf = writer.into_inner()?;
         self.next_part_num = self
             .next_part_num
@@ -1644,6 +1667,105 @@ mod tests {
         RecordBatch::try_new(schema, vec![Arc::new(builder.finish())]).unwrap()
     }
 
+    #[test]
+    fn streaming_writer_counts_closed_row_groups_for_row_and_byte_limits() {
+        let batch = make_test_batch(10);
+        for (bytes, rows) in [(0, Some(5)), (128, None)] {
+            let props = WriterProperties::builder()
+                .set_max_row_group_row_count(Some(2))
+                .build();
+            let mut writer = StreamingPartWriter::new(batch.schema(), props, bytes, rows, 0);
+            let mut emitted = Vec::new();
+            let mut output = |part, data: Vec<u8>, rows| {
+                let reader = ParquetRecordBatchReaderBuilder::try_new(bytes::Bytes::from(data))?;
+                assert_eq!(reader.metadata().file_metadata().num_rows() as usize, rows);
+                emitted.push((part, rows));
+                Ok(())
+            };
+            writer.write_batch(&batch, &mut output).unwrap();
+            assert!(
+                writer.current_writer.is_none(),
+                "closed row groups must count toward the flush limit"
+            );
+            writer.finish(&mut output).unwrap();
+            assert_eq!(emitted, [(1, 10)]);
+        }
+    }
+
+    #[test]
+    fn streaming_writer_flushes_dictionary_memory_without_publishing_a_small_part() {
+        let batch = make_test_batch(1024);
+        let mut writer = StreamingPartWriter::new(
+            batch.schema(),
+            WriterProperties::builder().build(),
+            32 * 1024,
+            None,
+            0,
+        );
+        writer.row_group_memory_bytes = 32 * 1024;
+        let mut outputs = Vec::new();
+        let mut publish = |_, bytes: Vec<u8>, rows| {
+            outputs.push((bytes, rows));
+            Ok(())
+        };
+        writer.write_batch(&batch, &mut publish).unwrap();
+        let active = writer
+            .current_writer
+            .as_ref()
+            .expect("memory flush should retain the compressed part");
+        assert_eq!(
+            active.in_progress_rows(),
+            0,
+            "the dictionary row group must have been flushed"
+        );
+        assert!(active.bytes_written() < 32 * 1024);
+        assert_eq!(writer.current_rows, 1024);
+        assert_eq!(writer.next_part_num, 0);
+        writer.finish(&mut publish).unwrap();
+        assert_eq!(outputs.len(), 1);
+        assert_eq!(outputs[0].1, 1024);
+    }
+
+    #[test]
+    fn streaming_writer_keeps_only_current_part_across_a_large_group() {
+        let batch = make_test_batch(1024);
+        let props = WriterProperties::builder()
+            .set_max_row_group_row_count(Some(2048))
+            .build();
+        let mut writer = StreamingPartWriter::new(batch.schema(), props, 1024 * 1024, None, 0);
+        let mut total = 0;
+        let mut output = |_, _: Vec<u8>, rows| {
+            total += rows;
+            Ok(())
+        };
+        let mut peak = 0;
+        for _ in 0..512 {
+            writer.write_batch(&batch, &mut output).unwrap();
+            if let Some(active) = &writer.current_writer {
+                let retained = active
+                    .bytes_written()
+                    .saturating_add(active.memory_size().max(active.in_progress_size()));
+                peak = peak.max(retained);
+                assert!(
+                    active.memory_size() < ROW_GROUP_MEMORY_BUDGET_BYTES,
+                    "the active row group must flush at the memory target"
+                );
+                assert!(
+                    active
+                        .bytes_written()
+                        .saturating_add(active.in_progress_size())
+                        < 1024 * 1024,
+                    "the output part must flush at the encoded byte target"
+                );
+                assert!(retained < ROW_GROUP_MEMORY_BUDGET_BYTES + 1024 * 1024);
+            }
+        }
+        writer.finish(&mut output).unwrap();
+        assert_eq!(total, 512 * 1024);
+        assert!(peak > 0);
+        assert!(writer.next_part_num > 1);
+    }
+
     fn write_test_parquet_with_metadata(path: &Path, batch: &RecordBatch, kvs: Vec<KeyValue>) {
         let props = WriterProperties::builder()
             .set_key_value_metadata(Some(kvs))
@@ -2869,14 +2991,13 @@ fn protected_stream_for_path(
 }
 
 /// Compaction/export changes physical parts, so never inherit a source transaction receipt.
-pub(crate) fn strip_transaction_metadata(batch: RecordBatch) -> Result<RecordBatch> {
-    let original = batch.schema();
+pub(crate) fn strip_transaction_schema(original: Arc<Schema>) -> Arc<Schema> {
     if !original
         .metadata()
         .keys()
         .any(|key| key.starts_with("fireparq.ingest."))
     {
-        return Ok(batch);
+        return original;
     }
     let metadata: std::collections::HashMap<String, String> = original
         .metadata()
@@ -2884,11 +3005,16 @@ pub(crate) fn strip_transaction_metadata(batch: RecordBatch) -> Result<RecordBat
         .filter(|(key, _)| !key.starts_with("fireparq.ingest."))
         .map(|(key, value)| (key.clone(), value.clone()))
         .collect();
-    Ok(RecordBatch::try_new(
-        Arc::new(Schema::new_with_metadata(
-            original.fields().clone(),
-            metadata,
-        )),
-        batch.columns().to_vec(),
-    )?)
+    Arc::new(Schema::new_with_metadata(
+        original.fields().clone(),
+        metadata,
+    ))
+}
+
+pub(crate) fn strip_transaction_metadata(batch: RecordBatch) -> Result<RecordBatch> {
+    let schema = strip_transaction_schema(batch.schema());
+    if Arc::ptr_eq(&schema, &batch.schema()) {
+        return Ok(batch);
+    }
+    Ok(RecordBatch::try_new(schema, batch.columns().to_vec())?)
 }

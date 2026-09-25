@@ -1246,6 +1246,7 @@ mod tests {
             flush_rows: None,
             flush_blocks: None,
             flush_bytes: 0,
+            flush_memory_bytes: crate::config::DEFAULT_FLUSH_MEMORY_BYTES,
             flush_interval_secs: None,
             compression: Compression::Zstd,
             final_blocks_only: true,

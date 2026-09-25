@@ -292,7 +292,7 @@ impl BlockMapper for BitcoinBlockMapper {
             + self.outputs.canonical.len()
     }
 
-    fn largest_table(&mut self) -> (&str, usize) {
+    fn table_estimates(&mut self) -> Vec<(&str, usize)> {
         let blocks = self.blocks.canonical.estimated_bytes()
             + est_str(&self.blocks.hash)
             + est_i64(&self.blocks.height)
@@ -354,8 +354,7 @@ impl BlockMapper for BitcoinBlockMapper {
             ("outputs", outputs),
         ]
         .into_iter()
-        .max_by_key(|&(_, s)| s)
-        .unwrap_or(("blocks", 0))
+        .collect()
     }
 
     fn table_names(&self) -> Vec<&str> {
