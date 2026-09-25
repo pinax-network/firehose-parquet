@@ -33,6 +33,7 @@ lifecycle state; a local implementation or passing test alone is not closure.
 - [#475: bounded metrics and stream readiness](475-metrics-readiness.md)
 - [#524: projected validation and partition boundary performance](524-validation-performance.md)
 - [#517: measured gRPC receive transport](517-grpc-transport.md)
+- [#530: shared authenticated gRPC clients](530-grpc-client-deduplication.md)
 - [#565: safe fixed-width Base58 conversion](565-fixed-base58.md)
 
 - [#476: timestamp and streamed identity validation](476-timestamp-validation.md)
