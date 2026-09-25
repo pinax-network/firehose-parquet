@@ -3,7 +3,8 @@
     "before": "f555898100fbfb486e97f40162c71b223112a94f clean main",
     "after": "937988353161eb0d1fe3d4c878454e31e48a9491 plus reviewed issue522 source changes",
     "combined_validation_base": "b364681",
-    "note": "The benchmark binaries are immutable copies identified by SHA256. Final source was then integrated with the transport-only main update and tested separately."
+    "note": "The benchmark binaries are immutable copies identified by SHA256. Final source then integrated the transport update for a full combined suite and the disjoint authentication update for focused gRPC/rollup checks.",
+    "final_integration_base": "39d49f6"
   },
   "runs": {
     "encoded_target_4mib": {

@@ -14,10 +14,10 @@ not `rollup.rs`. The exact binary diff was saved separately with SHA256
 The useful idea was counting already encoded row groups in the shared streaming
 writer's byte target. The unfinished generic rollup journal and earlier S3 lock
 sketch were not transplanted. This implementation started on an isolated branch
-and was integrated with main `b364681`, including protected-ingestion maintenance
-policy, the Cosmos protobuf update, and the gRPC transport changes. The benchmark
-uses a frozen binary built on `9379883`; the later transport integration is
-covered by the final combined test suite.
+and was integrated with main `39d49f6`, including protected-ingestion maintenance
+policy, the Cosmos protobuf update, and the transport/authentication changes. The
+benchmark uses a frozen binary built on `9379883`; later main integration is
+covered by the combined and focused checks described below.
 
 ## Implementation and memory contract
 
@@ -86,6 +86,11 @@ whole-process Cargo lock. CLI help, generated Zsh completions, formatting, and
 diff checks also passed. No production S3 writes or live Firehose requests were
 part of this qualification.
 
+After integrating the disjoint authentication cleanup at main `39d49f6`, focused
+gRPC tests passed 50 cases (one subprocess-helper ignore), and all 28 rollup tests
+passed. The binary rebuild, formatting, help and Zsh completions passed again.
+Full PR CI covers the final combined tree.
+
 Regressions cover exact row preservation, metadata, mixed schemas, source
 deletion, idempotent copy replacement, and local/S3 late-page corruption that
 leaves source and pre-existing output bytes untouched. The instrumented S3 store
@@ -98,7 +103,7 @@ flush without premature file publication, and current-part-only retention over
 ## Reproducible measurements
 
 The local synthetic benchmark is `522-rollup-benchmark.py`, with raw results in
-`522-rollup-benchmark.json`. The baseline binary is clean main `f555898`; the final
+`522-rollup-benchmark.json`. The baseline binary is clean main `f555898`; the measured updated
 binary is this change integrated on main `9379883`. Both were built and copied
 under the whole-process Cargo lock, with debug profiles and debuginfo disabled.
 The later main changes include protected maintenance acquisition/recovery and
