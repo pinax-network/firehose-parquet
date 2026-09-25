@@ -88,20 +88,22 @@ fn map(
     failed: bool,
     votes: bool,
     each: bool,
+    owned: bool,
 ) -> HashMap<String, RecordBatch> {
     let mut mapper = SolanaBlockMapper::new(votes, fork, encoding, false, failed);
     let mut batches = HashMap::<String, Vec<RecordBatch>>::new();
     for (i, block) in blocks.iter().enumerate() {
-        mapper
-            .map_block(
-                &block.encode_to_vec(),
-                &BlockIdentity {
-                    block_num: block.slot,
-                    ..Default::default()
-                },
-                fork.then_some("FINAL"),
-            )
-            .unwrap();
+        let identity = BlockIdentity {
+            block_num: block.slot,
+            ..Default::default()
+        };
+        let bytes = block.encode_to_vec();
+        if owned {
+            mapper.map_block_bytes(bytes.into(), &identity, fork.then_some("FINAL"))
+        } else {
+            mapper.map_block(&bytes, &identity, fork.then_some("FINAL"))
+        }
+        .unwrap();
         if each || i + 1 == blocks.len() {
             for (table, batch) in mapper.flush().unwrap() {
                 batches.entry(table).or_default().push(batch);
@@ -145,11 +147,44 @@ fn context_preserves_filtering_votes_plans_snapshots_and_flushes_in_every_encodi
                         include_failed,
                         votes,
                         false,
+                        false,
                     );
-                    let split = map(&blocks, encoding.clone(), fork, include_failed, votes, true);
+                    let split = map(
+                        &blocks,
+                        encoding.clone(),
+                        fork,
+                        include_failed,
+                        votes,
+                        true,
+                        true,
+                    );
                     assert_eq!(
                         joined, split,
                         "encoding={encoding:?},fork={fork},failed={include_failed},votes={votes}"
+                    );
+                    assert_eq!(
+                        joined,
+                        map(
+                            &blocks,
+                            encoding.clone(),
+                            fork,
+                            include_failed,
+                            votes,
+                            false,
+                            true
+                        )
+                    );
+                    assert_eq!(
+                        joined,
+                        map(
+                            &blocks,
+                            encoding.clone(),
+                            fork,
+                            include_failed,
+                            votes,
+                            true,
+                            false
+                        )
                     );
                     let expected_indices = if include_failed {
                         vec![0, 1, 2, 8]

@@ -22,6 +22,9 @@ struct Args {
     raw: Vec<PathBuf>,
     #[arg(long)]
     output: PathBuf,
+    /// Exercise the owned protobuf container used by ingestion.
+    #[arg(long)]
+    owned: bool,
 }
 fn main() -> Result<()> {
     let args = Args::parse();
@@ -75,7 +78,15 @@ fn main() -> Result<()> {
                     let mut totals = BTreeMap::<String, usize>::new();
                     let mut schemas = BTreeMap::new();
                     for (index, (bytes, identity)) in inputs.iter().enumerate() {
-                        mapper.map_block(bytes, identity, Some("FINAL"))?;
+                        if args.owned {
+                            mapper.map_block_bytes(
+                                bytes.clone().into(),
+                                identity,
+                                Some("FINAL"),
+                            )?;
+                        } else {
+                            mapper.map_block(bytes, identity, Some("FINAL"))?;
+                        }
                         if flush_each || index + 1 == inputs.len() {
                             for (table, batch) in mapper.flush()? {
                                 *totals.entry(table.clone()).or_default() += batch.num_rows();
@@ -102,7 +113,7 @@ fn main() -> Result<()> {
             }
         }
     }
-    let output = serde_json::json!({"raw_sha256":hashes,"cases":manifest});
+    let output = serde_json::json!({"raw_sha256":hashes,"cases":manifest,"owned":args.owned});
     fs::write(
         args.output.join("manifest.json"),
         serde_json::to_vec_pretty(&output)?,

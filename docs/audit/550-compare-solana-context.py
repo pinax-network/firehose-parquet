@@ -132,6 +132,8 @@ def main():
     report = {
         "raw_sha256": hashes,
         "raw_counts": dict(raw_counts),
+        "baseline_input_api": "owned" if before.get("owned", False) else "borrowed",
+        "candidate_input_api": "owned" if after.get("owned", False) else "borrowed",
         "cases": cases,
         "case_count": len(cases),
         "table_comparisons": sum(len(tables) for tables in cases.values()),
