@@ -49,8 +49,12 @@ pub fn transactions_schema(include_fork_step: bool, encoding: &EncodeBytes) -> S
         Field::new("energy_penalty", DataType::Int64, false),
         Field::new("fee", DataType::Int64, false),
         Field::new("contract_type", enum_data_type(), false),
-        Field::new("expiration", DataType::Int64, false),
-        Field::new("timestamp", DataType::Int64, false),
+        // Transaction expiration and creation times in unix milliseconds, named
+        // apart from the canonical block `timestamp` column. The creation time is
+        // set by the sender and not validated on chain (0 and other units occur),
+        // so both stay raw Int64 rather than a Timestamp type.
+        Field::new("expiration_ms", DataType::Int64, false),
+        Field::new("tx_timestamp_ms", DataType::Int64, false),
     ]);
     maybe_fork_step(&mut fields, include_fork_step);
     Schema::new(fields)

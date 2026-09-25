@@ -499,7 +499,7 @@ impl MessagesBuilder {
 // ===========================================================================
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     fn make_raw_tx(type_url: &str, value: &[u8]) -> Vec<u8> {
@@ -516,7 +516,7 @@ mod tests {
         prost::Message::encode_to_vec(&tx)
     }
 
-    fn make_test_block(height: i64) -> cosmos::Block {
+    pub(crate) fn make_test_block(height: i64) -> cosmos::Block {
         let raw_tx = make_raw_tx("/cosmos.bank.v1beta1.MsgSend", b"\x01\x02\x03");
         cosmos::Block {
             hash: vec![0xab, 0xcd, 0xef],

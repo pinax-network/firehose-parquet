@@ -254,7 +254,7 @@ impl NearBlockMapper {
             chunks: ChunksBuilder::new(include_fork_step, enc),
             transactions: TransactionsBuilder::new(include_fork_step, enc),
             receipts: ReceiptsBuilder::new(include_fork_step, enc),
-            state_changes: StateChangesBuilder::new(include_fork_step),
+            state_changes: StateChangesBuilder::new(include_fork_step, enc),
             blocks_schema: schema::blocks_schema(include_fork_step, enc),
             chunks_schema: schema::chunks_schema(include_fork_step, enc),
             transactions_schema: schema::transactions_schema(include_fork_step, enc),
@@ -805,9 +805,9 @@ struct StateChangesBuilder {
 }
 
 impl StateChangesBuilder {
-    fn new(include_fork_step: bool) -> Self {
+    fn new(include_fork_step: bool, encoding: &EncodeBytes) -> Self {
         Self {
-            canonical: CanonicalBuilder::new(),
+            canonical: CanonicalBuilder::with_encoding(encoding),
             r#type: StringBuilder::new(),
             cause: StringBuilder::new(),
             account_id: StringBuilder::new(),
@@ -836,10 +836,10 @@ impl StateChangesBuilder {
 // ===========================================================================
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
-    fn make_test_block(height: u64) -> near::Block {
+    pub(crate) fn make_test_block(height: u64) -> near::Block {
         near::Block {
             author: "test.near".to_string(),
             header: Some(near::BlockHeader {

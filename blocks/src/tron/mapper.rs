@@ -170,8 +170,8 @@ impl TronBlockMapper {
         self.transactions
             .contract_type
             .append_value(contract_type_text(contract_type));
-        self.transactions.expiration.append_value(tx.expiration);
-        self.transactions.timestamp.append_value(tx.timestamp);
+        self.transactions.expiration_ms.append_value(tx.expiration);
+        self.transactions.tx_timestamp_ms.append_value(tx.timestamp);
         append_fork_step(&mut self.transactions.fork_step, fork_step);
 
         // Map logs from TransactionInfo
@@ -305,8 +305,8 @@ impl BlockMapper for TronBlockMapper {
             + est_i64(&self.transactions.energy_penalty)
             + est_i64(&self.transactions.fee)
             + estimated_dictionary_index_bytes(self.transactions.contract_type.len())
-            + est_i64(&self.transactions.expiration)
-            + est_i64(&self.transactions.timestamp)
+            + est_i64(&self.transactions.expiration_ms)
+            + est_i64(&self.transactions.tx_timestamp_ms)
             + est_opt_str(&self.transactions.fork_step);
         let logs = self.logs.canonical.estimated_bytes()
             + est_u64(&self.logs.block_number)
@@ -409,8 +409,8 @@ struct TransactionsBuilder {
     energy_penalty: Int64Builder,
     fee: Int64Builder,
     contract_type: StringDictionaryBuilder<Int32Type>,
-    expiration: Int64Builder,
-    timestamp: Int64Builder,
+    expiration_ms: Int64Builder,
+    tx_timestamp_ms: Int64Builder,
     fork_step: Option<StringBuilder>,
 }
 
@@ -427,8 +427,8 @@ impl TransactionsBuilder {
             energy_penalty: Int64Builder::new(),
             fee: Int64Builder::new(),
             contract_type: StringDictionaryBuilder::new(),
-            expiration: Int64Builder::new(),
-            timestamp: Int64Builder::new(),
+            expiration_ms: Int64Builder::new(),
+            tx_timestamp_ms: Int64Builder::new(),
             fork_step: mk_fork_step(include_fork_step),
         }
     }
@@ -444,8 +444,8 @@ impl TransactionsBuilder {
             Arc::new(self.energy_penalty.finish()) as Arc<dyn Array>,
             Arc::new(self.fee.finish()) as Arc<dyn Array>,
             Arc::new(self.contract_type.finish()) as Arc<dyn Array>,
-            Arc::new(self.expiration.finish()) as Arc<dyn Array>,
-            Arc::new(self.timestamp.finish()) as Arc<dyn Array>,
+            Arc::new(self.expiration_ms.finish()) as Arc<dyn Array>,
+            Arc::new(self.tx_timestamp_ms.finish()) as Arc<dyn Array>,
         ]);
         finish_fork_step(&mut self.fork_step, &mut columns);
         Ok(RecordBatch::try_new(Arc::new(schema.clone()), columns)?)
@@ -554,7 +554,7 @@ impl InternalTransactionsBuilder {
 // ===========================================================================
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::super::proto::{protocol, tron};
     use super::*;
     use firehose_parquet::encode::{encode_hex_no_prefix, encode_tron_base58};
@@ -595,7 +595,7 @@ mod tests {
         panic!("column {name} is not Utf8 or dictionary-encoded Utf8");
     }
 
-    fn make_test_block(number: u64) -> tron::Block {
+    pub(crate) fn make_test_block(number: u64) -> tron::Block {
         tron::Block {
             id: vec![0x01, 0x02, 0x03],
             header: Some(tron::BlockHeader {
@@ -711,6 +711,39 @@ mod tests {
             get_string_value(transactions, "contract_type", 0),
             "TriggerSmartContract"
         );
+    }
+
+    #[test]
+    fn test_transaction_times_do_not_shadow_canonical_timestamp() {
+        let block = make_test_block(100);
+        let block_bytes = prost::Message::encode_to_vec(&block);
+        let mut mapper = TronBlockMapper::new(false, EncodeBytes::Hex, false);
+        mapper
+            .map_block(&block_bytes, &BlockIdentity::default(), None)
+            .unwrap();
+
+        let batches = mapper.flush().unwrap();
+        let transactions = &batches["transactions"];
+        let schema = transactions.schema();
+        let timestamp_columns: Vec<_> = schema
+            .fields()
+            .iter()
+            .filter(|field| field.name().contains("timestamp"))
+            .map(|field| field.name().as_str())
+            .collect();
+        assert_eq!(timestamp_columns, ["timestamp", "tx_timestamp_ms"]);
+
+        let i64_col = |name: &str| {
+            transactions
+                .column_by_name(name)
+                .unwrap_or_else(|| panic!("missing column {name}"))
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .unwrap_or_else(|| panic!("column {name} is not Int64"))
+                .value(0)
+        };
+        assert_eq!(i64_col("tx_timestamp_ms"), 1_700_000_000_000);
+        assert_eq!(i64_col("expiration_ms"), 1_700_000_060_000);
     }
 
     #[test]

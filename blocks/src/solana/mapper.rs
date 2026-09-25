@@ -1220,7 +1220,7 @@ impl AccountLookupsBuilder {
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     fn get_string_value(batch: &RecordBatch, name: &str, row: usize) -> String {
@@ -1247,7 +1247,7 @@ mod tests {
         firehose_parquet::encode::encode_base58(&[fill_byte; 32])
     }
 
-    fn make_test_block(slot: u64) -> solana::Block {
+    pub(crate) fn make_test_block(slot: u64) -> solana::Block {
         solana::Block {
             slot,
             parent_slot: slot.saturating_sub(1),
