@@ -6,8 +6,8 @@ use arrow::datatypes::{Int32Type, Schema};
 use arrow::record_batch::RecordBatch;
 use firehose_parquet::encode::{decode_base58, BytesColumn, BytesListColumn, EncodeBytes};
 use firehose_parquet::traits::{
-    est_bool, est_f64, est_i64, est_list_str, est_list_u64, est_opt_str, est_str, est_u32, est_u64,
-    BlockIdentity, BlockMapper, CanonicalBuilder, PreparedIdentity,
+    est_bin, est_bool, est_f64, est_i64, est_list_str, est_list_u64, est_opt_str, est_str, est_u32,
+    est_u64, BlockIdentity, BlockMapper, CanonicalBuilder, PreparedIdentity,
 };
 use prost::Message;
 use std::collections::HashMap;
@@ -24,6 +24,19 @@ fn finish_fork_step(builder: &mut Option<StringBuilder>, columns: &mut Vec<Arc<d
     if let Some(ref mut b) = builder {
         columns.push(Arc::new(b.finish()) as Arc<dyn Array>);
     }
+}
+
+fn index_list_builder() -> ListBuilder<UInt8Builder> {
+    ListBuilder::new(UInt8Builder::new()).with_field(schema::index_element_field())
+}
+
+fn append_indices(builder: &mut ListBuilder<UInt8Builder>, indices: &[u8]) {
+    builder.values().append_slice(indices);
+    builder.append(true);
+}
+
+fn estimated_index_list_bytes(builder: &mut ListBuilder<UInt8Builder>) -> usize {
+    (builder.len() + 1) * std::mem::size_of::<i32>() + builder.values().len()
 }
 
 fn solana_hash_bytes(hash: &str) -> Vec<u8> {
@@ -394,7 +407,7 @@ impl SolanaBlockMapper {
             self.instructions
                 .program_id_index
                 .append_value(instr.program_id_index);
-            self.instructions.accounts.append_value(&instr.accounts);
+            append_indices(&mut self.instructions.accounts, &instr.accounts);
             self.instructions.data.append_value(&instr.data);
             self.instructions.is_inner.append_value(false);
             self.instructions.inner_index.append_null();
@@ -418,7 +431,7 @@ impl SolanaBlockMapper {
                 self.instructions
                     .program_id_index
                     .append_value(inner.program_id_index);
-                self.instructions.accounts.append_value(&inner.accounts);
+                append_indices(&mut self.instructions.accounts, &inner.accounts);
                 self.instructions.data.append_value(&inner.data);
                 self.instructions.is_inner.append_value(true);
                 self.instructions.inner_index.append_value(inner_set.index);
@@ -466,12 +479,14 @@ impl SolanaBlockMapper {
             self.account_lookups
                 .account_key
                 .append_value(&lookup.account_key);
-            self.account_lookups
-                .writable_indexes
-                .append_value(&lookup.writable_indexes);
-            self.account_lookups
-                .readonly_indexes
-                .append_value(&lookup.readonly_indexes);
+            append_indices(
+                &mut self.account_lookups.writable_indexes,
+                &lookup.writable_indexes,
+            );
+            append_indices(
+                &mut self.account_lookups.readonly_indexes,
+                &lookup.readonly_indexes,
+            );
             append_fork_step(&mut self.account_lookups.fork_step, fork_step);
         }
 
@@ -683,8 +698,8 @@ impl BlockMapper for SolanaBlockMapper {
             + est_u32(&self.instructions.transaction_index)
             + est_u32(&self.instructions.instruction_index)
             + est_u32(&self.instructions.program_id_index)
-            + self.instructions.accounts.estimated_bytes()
-            + self.instructions.data.estimated_bytes()
+            + estimated_index_list_bytes(&mut self.instructions.accounts)
+            + est_bin(&self.instructions.data)
             + est_bool(&self.instructions.is_inner)
             + est_u32(&self.instructions.inner_index)
             + est_u32(&self.instructions.stack_height)
@@ -721,8 +736,8 @@ impl BlockMapper for SolanaBlockMapper {
             + est_u32(&self.account_lookups.transaction_index)
             + est_u32(&self.account_lookups.lookup_index)
             + self.account_lookups.account_key.estimated_bytes()
-            + self.account_lookups.writable_indexes.estimated_bytes()
-            + self.account_lookups.readonly_indexes.estimated_bytes()
+            + estimated_index_list_bytes(&mut self.account_lookups.writable_indexes)
+            + estimated_index_list_bytes(&mut self.account_lookups.readonly_indexes)
             + est_opt_str(&self.account_lookups.fork_step);
         [
             ("blocks", blocks),
@@ -809,7 +824,7 @@ struct TransactionsBuilder {
     signature: BytesColumn,
     num_signatures: UInt32Builder,
     fee: UInt64Builder,
-    err: BytesColumn,
+    err: BinaryBuilder,
     success: BooleanBuilder,
     compute_units_consumed: UInt64Builder,
     cost_units: UInt64Builder,
@@ -817,7 +832,7 @@ struct TransactionsBuilder {
     pre_balances: ListBuilder<UInt64Builder>,
     post_balances: ListBuilder<UInt64Builder>,
     return_data_program_id: BytesColumn,
-    return_data: BytesColumn,
+    return_data: BinaryBuilder,
     fork_step: Option<StringBuilder>,
 }
 
@@ -830,7 +845,7 @@ impl TransactionsBuilder {
             signature: BytesColumn::new(encoding),
             num_signatures: UInt32Builder::new(),
             fee: UInt64Builder::new(),
-            err: BytesColumn::new(encoding),
+            err: BinaryBuilder::new(),
             success: BooleanBuilder::new(),
             compute_units_consumed: UInt64Builder::new(),
             cost_units: UInt64Builder::new(),
@@ -838,7 +853,7 @@ impl TransactionsBuilder {
             pre_balances: ListBuilder::new(UInt64Builder::new()),
             post_balances: ListBuilder::new(UInt64Builder::new()),
             return_data_program_id: BytesColumn::new(encoding),
-            return_data: BytesColumn::new(encoding),
+            return_data: BinaryBuilder::new(),
             fork_step: if include_fork_step {
                 Some(StringBuilder::new())
             } else {
@@ -855,7 +870,7 @@ impl TransactionsBuilder {
             self.signature.finish(),
             Arc::new(self.num_signatures.finish()) as Arc<dyn Array>,
             Arc::new(self.fee.finish()) as Arc<dyn Array>,
-            self.err.finish(),
+            Arc::new(self.err.finish()) as Arc<dyn Array>,
             Arc::new(self.success.finish()) as Arc<dyn Array>,
             Arc::new(self.compute_units_consumed.finish()) as Arc<dyn Array>,
             Arc::new(self.log_messages.finish()) as Arc<dyn Array>,
@@ -863,7 +878,7 @@ impl TransactionsBuilder {
             Arc::new(self.post_balances.finish()) as Arc<dyn Array>,
             Arc::new(self.cost_units.finish()) as Arc<dyn Array>,
             self.return_data_program_id.finish(),
-            self.return_data.finish(),
+            Arc::new(self.return_data.finish()) as Arc<dyn Array>,
         ]);
         finish_fork_step(&mut self.fork_step, &mut columns);
         Ok(RecordBatch::try_new(Arc::new(schema.clone()), columns)?)
@@ -876,7 +891,7 @@ impl TransactionsBuilder {
             + self.signature.estimated_bytes()
             + est_u32(&self.num_signatures)
             + est_u64(&self.fee)
-            + self.err.estimated_bytes()
+            + est_bin(&self.err)
             + est_bool(&self.success)
             + est_u64(&self.compute_units_consumed)
             + est_u64(&self.cost_units)
@@ -884,7 +899,7 @@ impl TransactionsBuilder {
             + est_list_u64(&mut self.pre_balances)
             + est_list_u64(&mut self.post_balances)
             + self.return_data_program_id.estimated_bytes()
-            + self.return_data.estimated_bytes()
+            + est_bin(&self.return_data)
             + est_opt_str(&self.fork_step)
     }
 }
@@ -954,8 +969,8 @@ struct InstructionsBuilder {
     transaction_index: UInt32Builder,
     instruction_index: UInt32Builder,
     program_id_index: UInt32Builder,
-    accounts: BytesColumn,
-    data: BytesColumn,
+    accounts: ListBuilder<UInt8Builder>,
+    data: BinaryBuilder,
     is_inner: BooleanBuilder,
     inner_index: UInt32Builder,
     stack_height: UInt32Builder,
@@ -972,8 +987,8 @@ impl InstructionsBuilder {
             transaction_index: UInt32Builder::new(),
             instruction_index: UInt32Builder::new(),
             program_id_index: UInt32Builder::new(),
-            accounts: BytesColumn::new(encoding),
-            data: BytesColumn::new(encoding),
+            accounts: index_list_builder(),
+            data: BinaryBuilder::new(),
             is_inner: BooleanBuilder::new(),
             inner_index: UInt32Builder::new(),
             stack_height: UInt32Builder::new(),
@@ -994,8 +1009,8 @@ impl InstructionsBuilder {
             Arc::new(self.transaction_index.finish()) as Arc<dyn Array>,
             Arc::new(self.instruction_index.finish()) as Arc<dyn Array>,
             Arc::new(self.program_id_index.finish()) as Arc<dyn Array>,
-            self.accounts.finish(),
-            self.data.finish(),
+            Arc::new(self.accounts.finish()) as Arc<dyn Array>,
+            Arc::new(self.data.finish()) as Arc<dyn Array>,
             Arc::new(self.is_inner.finish()) as Arc<dyn Array>,
             Arc::new(self.inner_index.finish()) as Arc<dyn Array>,
             Arc::new(self.stack_height.finish()) as Arc<dyn Array>,
@@ -1128,8 +1143,8 @@ struct AccountLookupsBuilder {
     transaction_index: UInt32Builder,
     lookup_index: UInt32Builder,
     account_key: BytesColumn,
-    writable_indexes: BytesColumn,
-    readonly_indexes: BytesColumn,
+    writable_indexes: ListBuilder<UInt8Builder>,
+    readonly_indexes: ListBuilder<UInt8Builder>,
     fork_step: Option<StringBuilder>,
 }
 
@@ -1141,8 +1156,8 @@ impl AccountLookupsBuilder {
             transaction_index: UInt32Builder::new(),
             lookup_index: UInt32Builder::new(),
             account_key: BytesColumn::new(encoding),
-            writable_indexes: BytesColumn::new(encoding),
-            readonly_indexes: BytesColumn::new(encoding),
+            writable_indexes: index_list_builder(),
+            readonly_indexes: index_list_builder(),
             fork_step: if include_fork_step {
                 Some(StringBuilder::new())
             } else {
@@ -1158,8 +1173,8 @@ impl AccountLookupsBuilder {
             Arc::new(self.transaction_index.finish()) as Arc<dyn Array>,
             Arc::new(self.lookup_index.finish()) as Arc<dyn Array>,
             self.account_key.finish(),
-            self.writable_indexes.finish(),
-            self.readonly_indexes.finish(),
+            Arc::new(self.writable_indexes.finish()) as Arc<dyn Array>,
+            Arc::new(self.readonly_indexes.finish()) as Arc<dyn Array>,
         ]);
         finish_fork_step(&mut self.fork_step, &mut columns);
         Ok(RecordBatch::try_new(Arc::new(schema.clone()), columns)?)
