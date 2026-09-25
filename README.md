@@ -1058,6 +1058,56 @@ JOIN read_parquet('output/mainnet/system_calls/**/*.parquet') s
 
 The `logs` table holds receipt logs only, so logs emitted by reverted calls are never in it.
 
+### EVM: receipt log indices and RPC joins
+
+The `logs` table maps `TransactionReceipt.logs`. It contains receipt logs, so
+logs from reverted calls are absent. The two index columns have different scopes:
+
+| Column | Source | Meaning |
+|---|---|---|
+| `log_index` | Firehose `Log.index` | Transaction-relative Firehose log index. Different transactions can have the same value. The protobuf only guarantees this field at `EXTENDED` detail. |
+| `block_index` | Firehose `Log.blockIndex` | Block-relative receipt log index, corresponding to JSON-RPC `logIndex` after converting the RPC hexadecimal quantity to an integer. |
+| `tx_index` | Firehose transaction index | Position of the transaction in its block; corresponds to RPC `transactionIndex`. |
+
+For RPC joins, use the same chain, `block_id`/RPC `blockHash`, and
+`block_index`/RPC `logIndex`, with matching hash encoding. Including `tx_hash`
+provides an additional transaction check. `log_index` alone is not an RPC join
+key. Block hashes distinguish forks at the same block number; reversible output
+also requires applying NEW/UNDO events to select the canonical logs.
+
+```sql
+-- Export RPC-compatible index names from finalized EVM output.
+SELECT block_id, tx_hash,
+       block_index AS rpc_log_index,
+       tx_index AS rpc_transaction_index,
+       log_index AS firehose_transaction_log_index
+FROM read_parquet('output/mainnet/logs/**/*.parquet');
+```
+
+`fireparq` preserves the indices supplied by Firehose and does not renumber logs
+after filtering. Do not infer a transaction-local position from a default zero
+when the upstream source omits `Log.index` at a lower detail level.
+
+### EVM: tables that can be absent
+
+`gas_changes` and `account_creations` are extended tables populated only from
+upstream call arrays. A sampled range can contain no rows even when transactions
+and calls are present. The September 2026 audit's Ethereum mainnet block-version-5
+samples contained no rows for either table; this is a bounded observation, not
+a guarantee about every network, provider or block version.
+
+- `account_creations` is deprecated upstream: the checked-in Ethereum protobuf
+  says account-creation records are unsupported from block version 4. Do not use
+  an absent table to conclude that no contracts or accounts were created.
+- `gas_changes` contains explicit upstream gas-change records. Missing rows do
+  not mean zero gas usage; transaction/receipt gas fields provide separate data.
+- `--without-extended` disables both tables regardless of source contents.
+
+The ingestion writer skips zero-row batches, so an empty table usually has no
+Parquet file or directory. A DuckDB glob for such a table reports no matching
+files; it does not automatically produce an empty relation. Enumerate available
+files before querying optional tables. No placeholder files are synthesized.
+
 ### EVM: withdrawals, access lists and EIP-7702 authorizations
 
 Three tables hold block and transaction data that is not a column of `blocks` or `transactions`. They are written at both detail levels, including with `--without-extended`. Their rows follow their transaction: they are written for failed transactions too, and dropped with `--exclude-failed-transactions`.
