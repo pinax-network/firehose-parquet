@@ -5750,14 +5750,19 @@ mod tests {
     }
 
     fn make_temp_output_dir() -> PathBuf {
+        // SystemTime has microsecond resolution on macOS, so tests starting in
+        // the same microsecond got the same path; the counter keeps them apart.
+        static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let unique = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
+        let sequence = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let path = std::env::temp_dir().join(format!(
-            "fireparq-partition-boundary-test-{}-{}",
+            "fireparq-partition-boundary-test-{}-{}-{}",
             std::process::id(),
-            unique
+            unique,
+            sequence
         ));
         std::fs::create_dir_all(&path).unwrap();
         path
