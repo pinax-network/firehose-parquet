@@ -103,4 +103,10 @@ passed (the existing final-backfill unused-assignment warning is unchanged).
 All 14 focused Cosmos tests, including the captured transaction, are included.
 The final replay passed the independent source comparison; regenerated replay
 bytes matched SHA-256 `0cc9f598f5b7d7d13999a7b86337879addd95d2d08d9106b9bde2ad91f5ecfb6`.
+After PR #600 merged, head `2321ec9` integrates main `e4bd9cf`. This combined
+runtime passed **1,003 workspace tests** with **eight intentional ignores**, plus
+the separate capture example (one pass, one child-helper ignore), formatting and
+workspace build without warnings. The all-family protected-schema digest matrix
+includes the new Cosmos nested metadata. The final replay and independent RPC
+comparison passed again. The first PR CI passed before this integration; fresh
 CI and verified merge/closure remain the final publication gates.
