@@ -11,6 +11,7 @@ lifecycle state; a local implementation or passing test alone is not closure.
 - [#578: atomic local Parquet publication](578-atomic-local-parquet.md)
 - [#470: exact S3 cursor buckets](470-s3-cursor-buckets.md)
 - [#498: EVM log indices and optional tables](498-evm-log-indices.md)
+- [#499: offline EVM golden-block regression](499-evm-golden-fixture.md)
 - [#568: Arrow/Parquet security and compatibility](568-arrow-parquet-security.md)
 - [#572: final completion checkpoints](572-final-completion-checkpoint.md)
 - [#506: NEAR qualification blocked by quota](506-near-qualification.md)
@@ -50,6 +51,8 @@ lifecycle state; a local implementation or passing test alone is not closure.
 
 | [#502](https://github.com/pinax-network/firehose-parquet/issues/502) | [#585](https://github.com/pinax-network/firehose-parquet/pull/585) | Merged as `0b38efc`; issue closed; 780 tests, all 6,179 instruction positions checked against raw Solana data, 15,832 prior-column rows unchanged and CI passed. |
 | [#501](https://github.com/pinax-network/firehose-parquet/issues/501) | [#586](https://github.com/pinax-network/firehose-parquet/pull/586) | Merged as `a6a1712`; issue closed; 783 tests, independent raw classification and both vote-detail output modes checked on two slots, prior rows unchanged and CI passed. |
+
+| [#475](https://github.com/pinax-network/firehose-parquet/issues/475) | [#587](https://github.com/pinax-network/firehose-parquet/pull/587) | Merged as `79793c3`; issue closed; 787 tests, real CLI readiness/buffer/cursor regression, independent review and CI passed. |
 
 The #468 design PR accidentally triggered GitHub auto-closure through a negative
 sentence containing a recognized closing phrase. On 2026-09-25 the PR text was
