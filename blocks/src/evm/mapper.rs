@@ -551,7 +551,7 @@ impl EvmBlockMapper {
         &mut self,
         block_number: u64,
         tx: &eth::TransactionTrace,
-        identity: &BlockIdentity,
+        identity: &PreparedIdentity,
         fork_step: Option<&str>,
     ) {
         let tx_hash = &tx.hash;
