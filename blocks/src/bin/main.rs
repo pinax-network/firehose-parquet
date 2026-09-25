@@ -1163,6 +1163,83 @@ fn stream_resume_cursor(
     }
 }
 
+/// Drops blocks below the effective start block before they are mapped.
+///
+/// Without a resume cursor, a Firehose request whose start block is above the
+/// last irreversible block (LIB) is served from LIB+1, so the first blocks can
+/// be below `--start-block`. With a cursor the server resumes after the cursor,
+/// which is never below the run's start block, so the filter is only a guard.
+#[derive(Debug)]
+struct StartBlockFilter {
+    start_block: Option<u64>,
+    skipped: u64,
+}
+
+impl StartBlockFilter {
+    fn new(start_block: Option<u64>) -> Self {
+        Self {
+            start_block,
+            skipped: 0,
+        }
+    }
+
+    /// Returns `true` when the block should be mapped. Blocks below the start
+    /// block are counted and rejected; the first one is logged.
+    fn admit(&mut self, block_num: u64) -> bool {
+        match self.start_block {
+            Some(start_block) if block_num < start_block => {
+                if self.skipped == 0 {
+                    warn!(
+                        block_num,
+                        start_block,
+                        "Firehose streamed a block below --start-block (a start above the last irreversible block is served from LIB+1); skipping blocks below the start block"
+                    );
+                }
+                self.skipped += 1;
+                false
+            }
+            _ => true,
+        }
+    }
+}
+
+/// Chains whose block numbers can legitimately have gaps (skipped slots or
+/// heights), so a bounded range may end below `stop_block - 1`.
+fn block_type_allows_block_number_gaps(block_type: &str) -> bool {
+    matches!(block_type, "solana" | "near" | "beacon")
+}
+
+/// Check that a bounded stream which ended cleanly reached its last requested
+/// block (`stop_block - 1`). `last_block_num` is the highest block processed
+/// by this run or recorded in the cursor it resumed from.
+///
+/// On chains without block-number gaps an early end is an error, so a bounded
+/// run never exits 0 with part of its range missing. The output and cursor
+/// already cover the blocks received, so a rerun resumes after them.
+fn ensure_bounded_stream_reached_stop(
+    stop_block: u64,
+    last_block_num: Option<u64>,
+    block_number_gaps_allowed: bool,
+) -> Result<()> {
+    let last_requested_block = stop_block.saturating_sub(1);
+    if last_block_num.is_some_and(|block| block >= last_requested_block) {
+        return Ok(());
+    }
+    if block_number_gaps_allowed {
+        warn!(
+            last_block_num = ?last_block_num,
+            last_requested_block,
+            "stream ended below the last requested block; the server has no more blocks in the range (skipped slots)"
+        );
+        return Ok(());
+    }
+    let reached =
+        last_block_num.map_or_else(|| "no block".to_string(), |block| format!("block {block}"));
+    Err(anyhow!(
+        "Firehose stream ended at {reached}, before the last requested block {last_requested_block} (--stop-block {stop_block} is exclusive). The output and cursor cover the blocks received; rerun to resume"
+    ))
+}
+
 fn validate_block_range_alignment(
     explicit_start_block: Option<u64>,
     effective_start_block: Option<u64>,
@@ -4750,6 +4827,10 @@ async fn run_ingestion(args: &BuildArgs, global: &GlobalArgs) -> Result<()> {
     let mut buffered_bootstrap_blocks: Vec<BufferedBootstrapBlock> = Vec::new();
     let progress_start = Instant::now();
     let mut current_partition_key: Option<String> = None;
+    let mut start_block_filter = StartBlockFilter::new(config.start_block);
+    // Chain resolved for this run (set once the mapper exists in auto mode).
+    let mut resolved_block_type: Option<String> =
+        (block_type != "auto").then(|| block_type.clone());
 
     // Build file-level metadata for the cursor (same `firehose-parquet.*`
     // namespace as table files). Includes version, endpoint, chain info, and
@@ -4816,6 +4897,10 @@ async fn run_ingestion(args: &BuildArgs, global: &GlobalArgs) -> Result<()> {
             if final_blocks_only && step == 2 {
                 return Ok(());
             }
+            if !start_block_filter.admit(identity.block_num) {
+                pipeline_metrics.blocks_skipped_below_start_total.inc();
+                return Ok(());
+            }
 
             // Lazy mapper creation for "auto" mode.
             if mapper.is_none() {
@@ -4876,6 +4961,7 @@ async fn run_ingestion(args: &BuildArgs, global: &GlobalArgs) -> Result<()> {
                 cursor_state_template.file_metadata = cursor_meta;
                 cursor_state_template.extended = extended;
                 is_solana = detected == "solana";
+                resolved_block_type = Some(detected.clone());
                 use_synthetic_partition_routing = detected_uses_synthetic_partition_routing;
                 timestamp_backfill = TimestampBackfill::new(
                     use_synthetic_partition_routing,
@@ -5441,6 +5527,7 @@ async fn run_ingestion(args: &BuildArgs, global: &GlobalArgs) -> Result<()> {
 
     info!(
         blocks_processed,
+        blocks_skipped_below_start = start_block_filter.skipped,
         block_range = %block_range,
         elapsed = %elapsed_display,
         bytes_read = firehose_parquet::cli::format_bytes(bytes_read),
@@ -5451,6 +5538,21 @@ async fn run_ingestion(args: &BuildArgs, global: &GlobalArgs) -> Result<()> {
     // Propagate real (non-shutdown) errors so the process exits non-zero.
     if exit == StreamExit::Failed {
         return stream_result;
+    }
+
+    // A bounded stream that ended cleanly must have reached its last requested
+    // block. The final flush above only committed the blocks received.
+    if let (StreamExit::Completed, Some(stop_block)) = (exit, config.stop_block) {
+        let resumed_block_num =
+            stream_resume_cursor(existing_cursor_state.as_ref(), args.cursor_override)
+                .and(existing_cursor_state.as_ref())
+                .map(|state| state.last_block_num);
+        let last_block_num = global_max_block.max(resumed_block_num);
+        let block_number_gaps_allowed = resolved_block_type
+            .as_deref()
+            .or(initial_block_type)
+            .is_some_and(block_type_allows_block_number_gaps);
+        ensure_bounded_stream_reached_stop(stop_block, last_block_num, block_number_gaps_allowed)?;
     }
 
     Ok(())
@@ -6450,6 +6552,54 @@ mod tests {
             stream_resume_cursor(Some(&cursor_state), false),
             Some("cursor-123".to_string())
         );
+    }
+
+    #[test]
+    fn test_start_block_filter_skips_blocks_below_start_before_mapping() {
+        // Start 26049673 above LIB 26049592: the server streams from LIB+1.
+        let mut filter = StartBlockFilter::new(Some(26_049_673));
+        let mapped: Vec<u64> = (26_049_593..=26_049_675)
+            .filter(|&block_num| filter.admit(block_num))
+            .collect();
+
+        assert_eq!(mapped, vec![26_049_673, 26_049_674, 26_049_675]);
+        assert_eq!(filter.skipped, 80);
+    }
+
+    #[test]
+    fn test_start_block_filter_without_start_block_admits_everything() {
+        let mut filter = StartBlockFilter::new(None);
+        assert!(filter.admit(0));
+        assert!(filter.admit(42));
+        assert_eq!(filter.skipped, 0);
+    }
+
+    #[test]
+    fn test_bounded_stream_ending_early_is_an_error() {
+        let error = ensure_bounded_stream_reached_stop(200, Some(150), false).unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains("block 150"), "{message}");
+        assert!(message.contains("last requested block 199"), "{message}");
+
+        let error = ensure_bounded_stream_reached_stop(200, None, false).unwrap_err();
+        assert!(error.to_string().contains("no block"), "{error}");
+    }
+
+    #[test]
+    fn test_bounded_stream_reaching_last_requested_block_is_complete() {
+        assert!(ensure_bounded_stream_reached_stop(200, Some(199), false).is_ok());
+        assert!(ensure_bounded_stream_reached_stop(200, Some(250), false).is_ok());
+    }
+
+    #[test]
+    fn test_bounded_stream_on_sparse_chain_may_end_below_last_requested_block() {
+        assert!(block_type_allows_block_number_gaps("solana"));
+        assert!(block_type_allows_block_number_gaps("near"));
+        assert!(block_type_allows_block_number_gaps("beacon"));
+        assert!(!block_type_allows_block_number_gaps("evm"));
+        assert!(!block_type_allows_block_number_gaps("bitcoin"));
+
+        assert!(ensure_bounded_stream_reached_stop(200, Some(197), true).is_ok());
     }
 
     #[test]
