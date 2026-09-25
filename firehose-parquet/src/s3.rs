@@ -25,12 +25,20 @@ pub fn validate_output_bucket(output: &str, configured_bucket: Option<&str>) -> 
 
 /// Build an S3 client for the bucket selected by a data or cursor URI.
 /// The configured default output bucket must not override an explicit cursor bucket.
+/// Transport retries are disabled: a lost PUT/DELETE response must stop the
+/// mutator rather than leave an earlier request racing a later checkpoint.
 pub fn build_s3_client(config: &Config, bucket: &str) -> Result<Arc<dyn ObjectStore>> {
     Ok(Arc::new(build_s3_store(config, bucket)?))
 }
 
 fn build_s3_store(config: &Config, bucket: &str) -> Result<AmazonS3> {
-    let mut builder = AmazonS3Builder::new().with_bucket_name(bucket);
+    mutation_builder(config, bucket)?
+        .build()
+        .with_context(|| format!("building S3 client for bucket {bucket}"))
+}
+
+fn mutation_builder(config: &Config, bucket: &str) -> Result<AmazonS3Builder> {
+    let mut builder = without_mutation_retries(AmazonS3Builder::new().with_bucket_name(bucket));
 
     if let Some(ref key) = config.aws_access_key_id {
         builder = builder.with_access_key_id(key);
@@ -48,11 +56,16 @@ fn build_s3_store(config: &Config, bucket: &str) -> Result<AmazonS3> {
         builder = configure_endpoint(builder, endpoint_url, bucket)?;
     }
 
-    let client = builder
-        .build()
-        .with_context(|| format!("building S3 client for bucket {bucket}"))?;
+    Ok(builder)
+}
 
-    Ok(client)
+/// One transport attempt for each mutation. This also disables read retries on
+/// the same client; use the separate read builder for read-only operations.
+pub(crate) fn without_mutation_retries(builder: AmazonS3Builder) -> AmazonS3Builder {
+    builder.with_retry(object_store::RetryConfig {
+        max_retries: 0,
+        ..Default::default()
+    })
 }
 
 /// Configure the addressing style from the endpoint's host, never its path/query.
@@ -198,6 +211,9 @@ mod tests {
             let stores = [
                 build_s3_store(&config, bucket).unwrap(),
                 maintenance_config(&config).build_s3_client(bucket).unwrap(),
+                maintenance_config(&config)
+                    .build_s3_client_for_mutation(bucket)
+                    .unwrap(),
             ];
             for store in stores {
                 let url = store
@@ -231,6 +247,9 @@ mod tests {
                 maintenance_config(&config)
                     .build_s3_client("state")
                     .unwrap_err(),
+                maintenance_config(&config)
+                    .build_s3_client_for_mutation("state")
+                    .unwrap_err(),
             ] {
                 assert!(
                     error.to_string().contains("requested bucket is `state`"),
@@ -254,3 +273,6 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+mod mutation_tests;

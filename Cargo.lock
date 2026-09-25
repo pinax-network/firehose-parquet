@@ -853,6 +853,7 @@ version = "0.7.1"
 dependencies = [
  "anyhow",
  "arrow",
+ "async-trait",
  "backoff",
  "bs58",
  "bytes",

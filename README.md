@@ -331,11 +331,27 @@ Local cursor saves are atomic: the new cursor is written to a `.tmp` sibling
 (for example `cursor.parquet.tmp`) in the same directory, fsynced, and renamed
 over the old one, so a crash mid-save keeps the previous cursor.
 
-Cursor save failures pause ingestion and retry the same checkpoint up to three
-times, with 1 second and 2 second backoff. Exhausted retries, including a failed
-final checkpoint, exit nonzero. A shutdown during retry backoff also reports the
-durability failure. Local directory fsync errors count as failed saves. See
-[cursor persistence guarantees and metrics](docs/audit/469-durable-cursor-saves.md).
+Local cursor save failures pause ingestion and retry the same checkpoint up to
+three times, with 1 second and 2 second backoff. S3 cursor saves make one attempt,
+with transport retries disabled: a timed-out request might still finish remotely.
+A failed final checkpoint also exits nonzero. A shutdown during local retry
+backoff reports the durability failure. Local directory fsync errors count as
+failed saves. See [cursor persistence](docs/audit/469-durable-cursor-saves.md) and
+[remote mutation limits](docs/audit/468-s3-mutation-attempts.md).
+
+Mutating commands hold common ownership over output, source and external cursor
+or artifact locations. Local ownership uses macOS/Linux directory locks; nested
+symlinks inside mutation trees are refused. S3 ownership covers the whole bucket
+and requires conditional-write support plus access to reserved control keys.
+Unresolved remote errors retain ownership without an expiry or automatic takeover.
+`fireparq recovery status <path>` reads a summary. Explicit remote release requires
+the exact owner/generation and evidence that both the writer and all prior remote
+requests are quiescent; stopping the process alone is insufficient. See the
+[ownership and recovery runbook](docs/audit/468-stage1-ownership.md).
+
+Ownership currently prevents concurrent cooperating mutations. Output parts and
+the cursor are still separate writes; full ingestion crash/replay recovery and
+its authoritative output checkpoint remain under implementation in #468.
 
 ### Advanced Cursor Override
 
@@ -982,12 +998,12 @@ The path must exist locally or be an explicit `s3://...` URI. Unlike `scan` and 
 
 > **Memory note:** Merge holds one source part at a time plus the output file being built (up to `--flush-bytes`). On S3, each source object is downloaded whole before it is read, so peak memory is roughly the largest part plus `--flush-bytes`.
 
-Interrupted merges are recovered, so a crash never leaves duplicate rows:
+Local interrupted merges recover under exclusive ownership:
 
-- Each partition merge is recorded in a journal, `_fireparq_merge.json`, in the partition directory. The journal is created before any output is written. It is committed once every output is written, and removed after the original parts are deleted. Local outputs are written to a temporary file, fsynced, and renamed into place, so a partial file is never visible.
-- A merge that was interrupted (crash, `kill`, failed upload) is finished or undone by the next run before it does anything else. If the journal was committed, the remaining original parts are deleted. Otherwise the partial outputs are deleted, and the partition is merged again from its untouched original parts. The summary reports `Interrupted merges recovered`.
-- One merge runs per path at a time. `merge` holds `.fireparq-merge.lock` at the path and fails right away if another merge holds it. Locally this is an OS file lock, released when the process exits however it exits. On S3 it is a conditionally created lock object, refreshed while the run is active. A lock that has not been refreshed for 30 minutes is taken over by the next run. If the store has no conditional writes, merge warns and the lock is best effort.
-- A partition that a merge on an enclosing or nested path is working on is skipped and listed as `In use by another merge`.
+- Each partition merge has a journal, `_fireparq_merge.json`, created before output. It is committed after all outputs complete and removed after source deletion. Local output is completed and synced before publication.
+- Under the common local directory guard, the next run finishes a committed journal or removes an uncommitted run's outputs before retrying. The legacy local `.fireparq-merge.lock` remains for recognizing old journals.
+- S3 uses the persistent bucket-wide owner. An interrupted remote run retains ownership until an operator establishes writer cessation and provider-confirmed request quiescence and explicitly releases that exact owner. The subsequent guarded merge can recover journals written under this ownership protocol. Legacy S3 journals using the old expiring lock require separately reviewed migration and are refused automatically.
+- There is no timestamp takeover or best-effort conditional-write fallback. Conflicting local parent/child operations and all mutations in one S3 bucket fail immediately. See [the recovery limits and procedure](docs/audit/468-stage1-ownership.md).
 
 > **Metadata preservation:** Both `merge` and `rollup` preserve Parquet file-level metadata (`firehose-parquet.*` keys) from the source files into the output files.
 
@@ -1338,8 +1354,16 @@ Enable the metrics server with `--metrics-port <PORT>` (env: `METRICS_PORT`). A 
 | Endpoint | Description |
 |---|---|
 | `/metrics` | Prometheus text exposition format |
-| `/health` | Returns `200 OK` (liveness check) |
-| `/ready` | Returns `200 OK` (readiness check) |
+| `/health` | `200 OK` while the pipeline is running, reconnecting or committing final output; `503` after it stops |
+| `/ready` | `200 OK` after a valid stream message while connected and within the freshness threshold; otherwise `503` |
+
+`--metrics-stale-after-secs` / `METRICS_STALE_AFTER_SECS` sets the readiness
+threshold (default 120 seconds; must be positive). It uses monotonic time since
+the last valid message, so historical backfills can be ready even when block
+timestamps are old. Disconnects and stream completion make readiness false.
+Liveness stays true through final file publication and cursor persistence.
+Readiness establishes recent stream activity; it does not prove forward block
+progress, chain-head agreement or crash/replay safety.
 
 ### Available Metrics
 
@@ -1351,22 +1375,41 @@ Enable the metrics server with `--metrics-port <PORT>` (env: `METRICS_PORT`). A 
 | `firehose_parquet_current_block_number` | Gauge | — | Most recently processed block number |
 | `firehose_parquet_min_block_number` | Gauge | — | Minimum block number seen |
 | `firehose_parquet_max_block_number` | Gauge | — | Maximum block number seen |
-| `firehose_parquet_blocks_per_second` | Gauge | — | Rolling throughput (blocks/s) |
-| `firehose_parquet_bytes_per_second` | Gauge | — | Rolling throughput (bytes/s) |
-| `firehose_parquet_elapsed_seconds` | Gauge | — | Seconds since pipeline start |
-| `firehose_parquet_files_written_total` | Counter | `table`, `partition` | Parquet files written |
-| `firehose_parquet_file_bytes_total` | Counter | `table`, `partition` | Total compressed bytes written |
+| `firehose_parquet_elapsed_seconds` | Gauge | — | Monotonic seconds since metrics initialization; refreshed on scrape |
+| `firehose_parquet_last_block_timestamp_seconds` | Gauge | — | Last valid stream message's block timestamp; `NaN` when absent |
+| `firehose_parquet_block_time_lag_seconds` | Gauge | — | Wall-clock age of that timestamp, clamped at zero; `NaN` when absent; refreshed on scrape |
+| `firehose_parquet_last_message_age_seconds` | Gauge | — | Monotonic seconds since the last valid message; `NaN` before one; refreshed on scrape |
+| `firehose_parquet_files_written_total` | Counter | `table` | Parquet files written |
+| `firehose_parquet_file_bytes_total` | Counter | `table` | Total compressed bytes written |
 | `firehose_parquet_flushes_total` | Counter | `trigger` | Flush count by trigger type |
-| `firehose_parquet_buffer_estimated_bytes` | Gauge | `table` | Current in-memory buffer size |
-| `firehose_parquet_buffer_rows` | Gauge | `table` | Current buffered row count |
+| `firehose_parquet_buffer_estimated_bytes` | Gauge | — | Writer-owned buffers, estimated compressed bytes |
+| `firehose_parquet_buffer_rows` | Gauge | `table` | Writer-owned rows, including failed/unattempted tables |
+| `firehose_parquet_mapper_buffer_rows` | Gauge | — | Mapper-owned rows summed across tables |
+| `firehose_parquet_mapper_largest_table_estimated_bytes` | Gauge | — | Largest mapper table's estimated Arrow bytes, used by the byte flush trigger |
+| `firehose_parquet_bootstrap_buffered_blocks` | Gauge | — | Raw blocks awaiting the initial timestamp anchor |
+| `firehose_parquet_bootstrap_buffered_bytes` | Gauge | — | Raw protobuf bytes awaiting that anchor |
 | `firehose_parquet_cursor_saves_total` | Counter | — | Cursor persistence count |
 | `firehose_parquet_cursor_save_failures_total` | Counter | — | Failed cursor save attempts, including retries |
 | `firehose_parquet_cursor_last_success_timestamp_seconds` | Gauge | — | Unix time of the last successful cursor save in this process; 0 before the first save |
-| `firehose_parquet_cursor_last_block_num` | Gauge | — | Block number from last saved cursor |
+| `firehose_parquet_cursor_last_block_num` | Gauge | — | Block number from the loaded cursor, then the last successful save; 0 when neither exists |
 | `firehose_parquet_errors_total` | Counter | `kind` | Errors by category |
-| `firehose_parquet_grpc_reconnects_total` | Counter | — | gRPC stream reconnections |
+| `firehose_parquet_grpc_reconnects_total` | Counter | — | gRPC retries scheduled, once per reconnect path |
 | `firehose_parquet_blocks_skipped_below_start_total` | Counter | — | Blocks received below the effective start block and skipped |
-| `firehose_parquet` | Info | *(pipeline config)* | Pipeline metadata (chain, endpoint, version) |
+| `firehose_parquet_info` | Info | *(pipeline config)* | Pipeline metadata (chain, endpoint, version) |
+
+Use `rate(firehose_parquet_blocks_processed_total[5m])` and
+`rate(firehose_parquet_bytes_read_total[5m])` for throughput. The old rate gauges
+were cumulative averages and have been removed, along with the always-zero
+Solana `backfill_*` gauges. Block-time lag measures age against the local clock;
+it is not a measured remote chain-head lag. Buffer estimates are not process RSS.
+
+Dashboard migration: counters previously registered with `_total` emitted
+`_total_total`, because the Prometheus library adds the suffix. These now emit
+exactly one `_total`; update queries that used the doubled names.
+`cursor_save_failures_total` already had the correct name and is unchanged.
+`files_written_total` now has only the `table` label; remove per-partition filters
+and groupings. Existing series remain in your monitoring system until its normal
+retention expires.
 
 ```bash
 # Enable metrics on port 9090

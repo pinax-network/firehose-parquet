@@ -7,9 +7,11 @@
 use crate::artifacts::is_reserved_artifact_path;
 use crate::cli::{block_on_async, format_bytes, resolve_destructive_input_path, AwsConfig};
 use crate::config::Compression;
+use crate::dataset_lock::{DatasetOwnership, MutationScope};
+use crate::dataset_lock_s3::{S3Ownership, OWNER_KEY};
 use crate::merge_journal::{
     crash_point, write_local_output, Journal, LocalPartition, LocalRunLock, PartitionFiles,
-    RunContext, S3Partition, S3RunLock, JOURNAL_FILE,
+    RunContext, S3Partition, JOURNAL_FILE,
 };
 use crate::writer::s3_put_options;
 use anyhow::{Context, Result};
@@ -33,9 +35,9 @@ use tracing::{debug, info, info_span, warn};
 
 const S3_READ_MAX_ATTEMPTS: usize = 5;
 const S3_READ_RETRY_BASE_DELAY_MS: u64 = 100;
-const S3_UPLOAD_MAX_ATTEMPTS: usize = 8;
+const S3_UPLOAD_MAX_ATTEMPTS: usize = 1;
 const S3_UPLOAD_RETRY_BASE_DELAY_MS: u64 = 250;
-const S3_DELETE_MAX_ATTEMPTS: usize = 5;
+const S3_DELETE_MAX_ATTEMPTS: usize = 1;
 const S3_DELETE_RETRY_BASE_DELAY_MS: u64 = 100;
 /// Bytes read from the end of an S3 object to get its Parquet footer in one request.
 const S3_FOOTER_PREFETCH_BYTES: u64 = 64 * 1024;
@@ -372,7 +374,17 @@ fn run_merge_local(config: &MergeConfig) -> Result<MergeResult> {
         );
     }
 
-    // A dry run changes nothing, so it takes no lock and only reports interrupted merges.
+    let ownership = if config.dry_run {
+        None
+    } else {
+        Some(DatasetOwnership::acquire_blocking(
+            "merge",
+            vec![MutationScope::input(config.path.clone())?],
+            None,
+        )?)
+    };
+    // Retain the old local file lock for recognition of pre-upgrade journals;
+    // the directory guard provides shared cross-command/ancestor ownership.
     let lock = if config.dry_run {
         None
     } else {
@@ -387,8 +399,8 @@ fn run_merge_local(config: &MergeConfig) -> Result<MergeResult> {
     };
 
     let mut result = MergeResult::default();
-    recover_local_merges(&root, lock.as_ref(), &mut result)?;
-    merge_local_partitions(&root, config, &run, &mut result)?;
+    recover_local_merges(&root, lock.as_ref(), ownership.as_ref(), &mut result)?;
+    merge_local_partitions(&root, config, &run, ownership.as_ref(), &mut result)?;
 
     if let Some(lock) = lock {
         lock.release()?;
@@ -421,6 +433,7 @@ fn local_partition_label(root: &Path, partition_dir: &Path) -> String {
 fn recover_local_merges(
     root: &Path,
     lock: Option<&LocalRunLock>,
+    ownership: Option<&DatasetOwnership>,
     result: &mut MergeResult,
 ) -> Result<()> {
     let mut journals = Vec::new();
@@ -443,6 +456,9 @@ fn recover_local_merges(
         if lock.owner_alive(&journal)? {
             continue;
         }
+        if let Some(ownership) = ownership {
+            ownership.revalidate_local_paths()?;
+        }
         let recovery = crate::merge_journal::recover(&partition, &journal)?;
         warn!(partition = label, run_id = journal.run_id, %recovery, "recovered an interrupted merge");
         println!("  {label}: {recovery}");
@@ -455,6 +471,7 @@ fn merge_local_partitions(
     root: &Path,
     config: &MergeConfig,
     run: &RunContext,
+    ownership: Option<&DatasetOwnership>,
     result: &mut MergeResult,
 ) -> Result<()> {
     // Group parquet files by their parent directory (partition). Reserved dataset artifacts
@@ -489,7 +506,15 @@ fn merge_local_partitions(
             Some(_) => {
                 let partition = current_partition.take().expect("partition must exist");
                 print_local_table_header(root, &partition, &mut current_table);
-                process_local_partition(root, &partition, &current_files, config, run, result)?;
+                process_local_partition(
+                    root,
+                    &partition,
+                    &current_files,
+                    config,
+                    run,
+                    ownership,
+                    result,
+                )?;
                 current_partition = Some(parent);
                 current_files = vec![file];
             }
@@ -502,7 +527,15 @@ fn merge_local_partitions(
 
     if let Some(partition) = current_partition {
         print_local_table_header(root, &partition, &mut current_table);
-        process_local_partition(root, &partition, &current_files, config, run, result)?;
+        process_local_partition(
+            root,
+            &partition,
+            &current_files,
+            config,
+            run,
+            ownership,
+            result,
+        )?;
     }
 
     Ok(())
@@ -525,6 +558,7 @@ fn process_local_partition(
     files: &[PathBuf],
     config: &MergeConfig,
     run: &RunContext,
+    ownership: Option<&DatasetOwnership>,
     result: &mut MergeResult,
 ) -> Result<()> {
     let partition_label = local_partition_label(root, partition_dir);
@@ -595,6 +629,9 @@ fn process_local_partition(
         files.iter().map(|f| file_name_string(f)).collect(),
         initial_part_num + 1,
     );
+    if let Some(ownership) = ownership {
+        ownership.revalidate_local_paths()?;
+    }
     if !partition.create_journal(&journal)? {
         record_partition_in_use(&partition_label, result);
         return Ok(());
@@ -676,6 +713,9 @@ fn process_local_partition(
     partition.sync()?;
     crash_point("after-outputs")?;
     let outputs = written_files.iter().map(|f| file_name_string(f)).collect();
+    if let Some(ownership) = ownership {
+        ownership.revalidate_local_paths()?;
+    }
     partition.replace_journal(&journal.committed(outputs))?;
     crash_point("after-commit")?;
 
@@ -764,6 +804,9 @@ fn collect_parquet_files_recursive(dir: &Path, out: &mut Vec<PathBuf>) -> Result
     for entry in std::fs::read_dir(dir)? {
         let entry = entry?;
         let path = entry.path();
+        if crate::artifacts::is_control_path(&path.to_string_lossy()) {
+            continue;
+        }
         if path.is_dir() {
             collect_parquet_files_recursive(&path, out)?;
         } else if path.extension().map_or(false, |ext| ext == "parquet") {
@@ -781,6 +824,9 @@ fn collect_named_files_recursive(dir: &Path, name: &str, out: &mut Vec<PathBuf>)
     for entry in std::fs::read_dir(dir)? {
         let entry = entry?;
         let path = entry.path();
+        if crate::artifacts::is_control_path(&path.to_string_lossy()) {
+            continue;
+        }
         if path.is_dir() {
             collect_named_files_recursive(&path, name, out)?;
         } else if path.file_name().is_some_and(|file_name| file_name == name) {
@@ -828,7 +874,7 @@ fn run_merge_s3(config: &MergeConfig) -> Result<MergeResult> {
         .as_ref()
         .ok_or_else(|| anyhow::anyhow!("AWS config required for S3 paths"))?;
 
-    let client: Arc<dyn ObjectStore> = Arc::new(aws.build_s3_client(&bucket)?);
+    let client: Arc<dyn ObjectStore> = Arc::new(aws.build_s3_client_for_mutation(&bucket)?);
     merge_s3(config, &client, &bucket, &prefix)
 }
 
@@ -839,7 +885,7 @@ struct S3Merge<'a> {
     prefix: &'a str,
     run: RunContext,
     /// `None` for a dry run.
-    lock: Option<S3RunLock>,
+    lock: Option<S3Ownership>,
 }
 
 fn merge_s3(
@@ -848,20 +894,33 @@ fn merge_s3(
     bucket: &str,
     prefix: &str,
 ) -> Result<MergeResult> {
-    let run_id = new_run_id();
+    if !config.dry_run && crate::artifacts::is_control_path(prefix) {
+        anyhow::bail!("recovery and ownership controls cannot be ordinary mutation targets");
+    }
     // A dry run changes nothing, so it takes no lock and only reports interrupted merges.
     let lock = if config.dry_run {
         None
     } else {
-        Some(S3RunLock::acquire(client, bucket, prefix, &run_id)?)
+        Some(block_on_async(S3Ownership::acquire(
+            Arc::clone(client),
+            "merge",
+            vec![prefix.to_owned()],
+        ))?)
     };
+    let run_id = lock
+        .as_ref()
+        .map(|owner| owner.record().owner_id().to_owned())
+        .unwrap_or_else(new_run_id);
     let mut s3 = S3Merge {
         client,
         bucket,
         prefix,
         run: RunContext {
             run_id,
-            lock: lock.as_ref().map(S3RunLock::location).unwrap_or_default(),
+            lock: lock
+                .as_ref()
+                .map(|_| OWNER_KEY.to_owned())
+                .unwrap_or_default(),
         },
         lock,
     };
@@ -869,14 +928,11 @@ fn merge_s3(
     let mut result = MergeResult::default();
     let outcome = recover_s3_merges(&mut s3, &mut result)
         .and_then(|()| merge_s3_partitions(&mut s3, config, &mut result));
-    // Release the lock even after an error, so the next run need not wait for it to go stale;
-    // that run recovers this run's journals because it then holds the same lock.
+    // Any error retains Owned. Process exit is insufficient to establish that
+    // previous remote requests cannot arrive after a recovery rollback.
+    outcome?;
     if let Some(lock) = s3.lock.take() {
-        let released = lock.release();
-        outcome?;
-        released?;
-    } else {
-        outcome?;
+        block_on_async(lock.release())?;
     }
     Ok(result)
 }
@@ -893,11 +949,25 @@ fn list_s3_objects(s3: &S3Merge<'_>) -> Result<Vec<object_store::ObjectMeta>> {
         .map_err(|e| anyhow::anyhow!("listing S3 objects: {e}"))
 }
 
+fn assert_s3_ownership(owner: &S3Ownership) -> Result<()> {
+    if owner.is_mutation_uncertain()
+        || block_on_async(S3Ownership::status(owner.object_store()))?.as_ref()
+            != Some(owner.record())
+    {
+        anyhow::bail!(
+            "S3 merge ownership is unresolved or changed; stopping before further mutation"
+        );
+    }
+    Ok(())
+}
+
 /// Finishes or undoes the partition merges that earlier runs left interrupted under the prefix.
 fn recover_s3_merges(s3: &mut S3Merge<'_>, result: &mut MergeResult) -> Result<()> {
     let objects = list_s3_objects(s3)?;
     for obj in &objects {
-        if obj.location.filename() != Some(JOURNAL_FILE) {
+        if obj.location.filename() != Some(JOURNAL_FILE)
+            || crate::artifacts::is_control_path(obj.location.as_ref())
+        {
             continue;
         }
         let key = obj.location.as_ref();
@@ -919,10 +989,10 @@ fn recover_s3_merges(s3: &mut S3Merge<'_>, result: &mut MergeResult) -> Result<(
             );
             continue;
         };
-        if lock.owner_alive(&journal)? {
-            continue;
+        if journal.lock != OWNER_KEY {
+            anyhow::bail!("legacy S3 merge journal cannot be recovered automatically: its old prefix lock does not prove writer and remote-request quiescence; preserve its files and obtain provider-confirmed recovery before migration");
         }
-        lock.refresh()?;
+        assert_s3_ownership(lock)?;
         let recovery = crate::merge_journal::recover(&partition, &journal)?;
         warn!(partition = label, run_id = journal.run_id, %recovery, "recovered an interrupted merge");
         println!("  {label}: {recovery}");
@@ -1093,7 +1163,7 @@ fn process_s3_partition(
     // Claim the partition with a journal before writing anything; see `merge_journal`.
     let initial_part_num = max_part_number_in_s3_objects(objects);
     if let Some(lock) = s3.lock.as_mut() {
-        lock.refresh()?;
+        assert_s3_ownership(lock)?;
     }
     let partition = S3Partition {
         client,
@@ -1121,7 +1191,7 @@ fn process_s3_partition(
         let name = format!("part-{part_num:06}.parquet");
         let s3_path = object_store::path::Path::from(format!("{partition_key}/{name}"));
         let size = buf.len();
-        put_s3_bytes_with_retry(
+        put_s3_bytes_once(
             client,
             bucket,
             &s3_path,
@@ -1199,9 +1269,9 @@ fn process_s3_partition(
     writer_state.finish(&mut write_part)?;
 
     crash_point("after-outputs")?;
-    // Fails if another run took over the lock, before anything is deleted.
+    // A changed ownership record is an error, never a time-based takeover.
     if let Some(lock) = s3.lock.as_mut() {
-        lock.refresh()?;
+        assert_s3_ownership(lock)?;
     }
     let files_written = output_names.len();
     let written: HashSet<String> = output_names
@@ -1221,7 +1291,7 @@ fn process_s3_partition(
 
     for obj in objects {
         if !written.contains(obj.location.as_ref()) {
-            delete_s3_object_with_retry(client, bucket, &obj.location, table, partition_label)?;
+            delete_s3_object_once(client, bucket, &obj.location, table, partition_label)?;
             crash_point("after-first-delete")?;
             if config.verbose {
                 info!(
@@ -1322,7 +1392,10 @@ fn read_s3_bytes_with_retry(
     )
 }
 
-fn put_s3_bytes_with_retry(
+// Data PUT/DELETE are single attempts on a zero-transport-retry client. An
+// error stops the entire run with its persistent owner retained; a later success
+// cannot prove an earlier abandoned request drained.
+fn put_s3_bytes_once(
     client: &Arc<dyn ObjectStore>,
     bucket: &str,
     location: &object_store::path::Path,
@@ -1351,7 +1424,7 @@ fn put_s3_bytes_with_retry(
     )
 }
 
-fn delete_s3_object_with_retry(
+fn delete_s3_object_once(
     client: &Arc<dyn ObjectStore>,
     bucket: &str,
     location: &object_store::path::Path,
@@ -1383,6 +1456,13 @@ fn retry_merge_s3_operation<T, F>(
 where
     F: FnMut() -> Result<T>,
 {
+    // Read retries are safe. Never let a caller accidentally enable retries
+    // for an unfenced data mutation, even if a future call passes a larger bound.
+    let max_attempts = if operation == MergeS3Operation::Read {
+        max_attempts.max(1)
+    } else {
+        1
+    };
     let s3_uri = format!("s3://{bucket}/{location}");
     let mut attempt = 0usize;
 
@@ -1662,7 +1742,7 @@ mod tests {
         let mut attempts = 0usize;
 
         let result = retry_merge_s3_operation(
-            MergeS3Operation::Upload,
+            MergeS3Operation::Read,
             "bucket",
             &location,
             "blocks",
@@ -1705,10 +1785,10 @@ mod tests {
 
         let message = err.to_string();
         assert!(message
-            .contains("failed deleting s3://bucket/blocks/part-000001.parquet after 2 attempts"));
+            .contains("failed deleting s3://bucket/blocks/part-000001.parquet after 1 attempts"));
         assert!(message.contains("table=blocks"));
         assert!(message.contains("partition=blocks/date=2026-03-18"));
-        assert_eq!(attempts, 2);
+        assert_eq!(attempts, 1);
     }
 
     const RESERVED: [&str; 5] = [
@@ -2359,9 +2439,37 @@ mod tests {
         store
     }
 
+    fn release_quiescent_fixture_owner(store: &Arc<dyn ObjectStore>) {
+        // InMemory has no detached HTTP requests: the injected synchronous
+        // failure returned after every prior store future completed. This proof
+        // is specific to the fixture and cannot be inferred for a real bucket.
+        let record = block_on_async(S3Ownership::status(store)).unwrap().unwrap();
+        let authorization =
+            crate::dataset_lock_s3::RecoveryAuthorization::assert_provider_quiescence(
+                &record,
+                "fixture writer returned from injected error",
+                "InMemory fixture has no pending detached requests",
+            )
+            .unwrap();
+        block_on_async(S3Ownership::operator_release(
+            Arc::clone(store),
+            &record,
+            authorization,
+        ))
+        .unwrap();
+    }
+
     #[test]
     fn test_merge_s3_recovers_a_crash_after_commit() {
         let store = crashed_s3_merge("after-commit");
+        assert!(merge_s3(
+            &test_merge_config("s3://bucket/evm"),
+            &store,
+            "bucket",
+            "evm"
+        )
+        .is_err());
+        release_quiescent_fixture_owner(&store);
         let partition = format!("evm/{CRASH_PARTITION}");
         assert_eq!(
             list_keys(&store, "evm"),
@@ -2388,6 +2496,7 @@ mod tests {
     #[test]
     fn test_merge_s3_rolls_back_a_crash_before_commit() {
         let store = crashed_s3_merge("after-outputs");
+        release_quiescent_fixture_owner(&store);
 
         let config = test_merge_config("s3://bucket/evm");
         let result = merge_s3(&config, &store, "bucket", "evm").unwrap();
@@ -2411,18 +2520,59 @@ mod tests {
                 parquet_bytes(&make_range_batch(part * 10, 10)),
             );
         }
-        let lock =
-            crate::merge_journal::S3RunLock::acquire(&store, "bucket", "evm", "other").unwrap();
+        let lock = block_on_async(S3Ownership::acquire(
+            Arc::clone(&store),
+            "merge",
+            vec!["other-prefix".into()],
+        ))
+        .unwrap();
         let config = test_merge_config("s3://bucket/evm");
 
         let err = merge_s3(&config, &store, "bucket", "evm")
             .unwrap_err()
             .to_string();
-        assert!(err.contains("another merge is running"), "{err}");
+        assert!(err.contains("ownership is held"), "{err}");
 
-        lock.release().unwrap();
+        block_on_async(lock.release()).unwrap();
         let result = merge_s3(&config, &store, "bucket", "evm").unwrap();
         assert_eq!(result.partitions_merged, 1);
         assert_eq!(list_keys(&store, "evm").len(), 1);
+    }
+
+    #[test]
+    fn test_merge_s3_refuses_legacy_journal_without_quiescence_proof() {
+        let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let key = format!("evm/{CRASH_PARTITION}");
+        let partition = S3Partition {
+            client: &store,
+            bucket: "bucket",
+            key: &key,
+        };
+        let journal = Journal::new(
+            &RunContext {
+                run_id: "legacy".into(),
+                lock: "evm/.fireparq-merge.lock".into(),
+            },
+            vec!["part-000001.parquet".into()],
+            2,
+        );
+        partition.create_journal(&journal).unwrap();
+        let before = list_keys(&store, "evm");
+        let error = merge_s3(
+            &test_merge_config("s3://bucket/evm"),
+            &store,
+            "bucket",
+            "evm",
+        )
+        .unwrap_err();
+        assert!(format!("{error:#}").contains("legacy S3 merge journal"));
+        assert_eq!(list_keys(&store, "evm"), before);
+        assert_eq!(
+            block_on_async(S3Ownership::status(&store))
+                .unwrap()
+                .unwrap()
+                .state(),
+            crate::dataset_lock_s3::OwnerState::Owned
+        );
     }
 }

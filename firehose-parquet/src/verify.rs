@@ -1,6 +1,7 @@
 use crate::artifacts::{is_reserved_artifact_path, MERKLE_ROOTS_FILENAME, VERIFY_RUNS_DIR};
 use crate::cli::{block_on_async, resolve_parquet_input_path_string, AwsConfig};
 use crate::cursor::{parse_cursor, CURSOR_PARQUET_FILENAME};
+use crate::dataset_lock::{DatasetOwnership, MutationScope};
 use crate::writer::parse_s3_url;
 use anyhow::{anyhow, Context, Result};
 use arrow::array::{Array, AsArray, Int64Array, LargeStringArray, StringArray, UInt64Array};
@@ -508,6 +509,147 @@ pub fn verify_parquet(
     let resolved_path = resolve_parquet_input_path_string(path);
     let run_started = OffsetDateTime::now_utc();
     let run_id = uuid::Uuid::new_v4().to_string();
+    // Validate options before discovery or persistent ownership acquisition.
+    if let Some(raw) = opts.hash_strategy.as_deref() {
+        parse_hash_strategy(raw)?;
+    }
+    let plan = if opts.runs_roots()
+        || opts.report_json.is_some()
+        || opts.publish_report
+        || opts.publish_report_path.is_some()
+    {
+        Some(VerifyMutationPlan::discover(
+            &resolved_path,
+            aws,
+            opts,
+            &run_id,
+        )?)
+    } else {
+        // Protocol-only verification without artifact output remains read-only,
+        // including access to public S3 buckets without write credentials.
+        None
+    };
+    verify_with_plan(resolved_path, aws, opts, run_started, run_id, plan)
+}
+
+struct VerifyMutationPlan {
+    chain_root: String,
+    scopes: Vec<MutationScope>,
+}
+
+impl VerifyMutationPlan {
+    fn discover(
+        path: &str,
+        aws: Option<&AwsConfig>,
+        opts: &VerifyOptions,
+        run_id: &str,
+    ) -> Result<Self> {
+        // Only discover paths here. Rows, footers, roots and registry contents
+        // are authoritatively re-read after every source/destination is owned.
+        let first = if path.starts_with("s3://") {
+            let aws = aws.context("AWS config required for S3 paths")?;
+            let (bucket, _, _, objects) = list_verify_objects(path, aws)?;
+            format!("s3://{bucket}/{}", objects[0].location)
+        } else {
+            list_verify_files(path)?.1[0].clone()
+        };
+        let chain_root = file_layout(&first).chain_root;
+        let mut scopes = vec![MutationScope::input(path)?];
+        if opts.runs_roots() {
+            // Missing roots are inserted even without --update-registry.
+            scopes.push(MutationScope::file(
+                opts.registry_path
+                    .clone()
+                    .unwrap_or_else(|| join_artifact_path(&chain_root, MERKLE_ROOTS_FILENAME)),
+            ));
+        }
+        if let Some(path) = &opts.report_json {
+            // This option is a local PathBuf, even if its literal spelling
+            // begins with "s3://". Resolve it locally before scope routing.
+            let local = if path.is_absolute() {
+                path.clone()
+            } else {
+                std::env::current_dir()?.join(path)
+            };
+            scopes.push(MutationScope::file(local.to_string_lossy()));
+        }
+        if opts.publish_report || opts.publish_report_path.is_some() {
+            scopes.push(MutationScope::file(
+                opts.publish_report_path.clone().unwrap_or_else(|| {
+                    join_artifact_path(
+                        &chain_root,
+                        &format!("{VERIFY_RUNS_DIR}/{run_id}/report.json"),
+                    )
+                }),
+            ));
+        }
+        Ok(Self { chain_root, scopes })
+    }
+}
+
+fn verify_with_plan(
+    resolved_path: String,
+    aws: Option<&AwsConfig>,
+    opts: &VerifyOptions,
+    run_started: OffsetDateTime,
+    run_id: String,
+    plan: Option<VerifyMutationPlan>,
+) -> Result<VerifyReport> {
+    let (ownership, expected_root) = match plan {
+        Some(plan) => (
+            Some(DatasetOwnership::acquire_blocking(
+                "verify",
+                plan.scopes,
+                aws,
+            )?),
+            Some(plan.chain_root),
+        ),
+        None => (None, None),
+    };
+    with_verify_ownership(ownership, |ownership| {
+        verify_owned(
+            resolved_path,
+            aws,
+            opts,
+            run_started,
+            run_id,
+            expected_root.as_deref(),
+            ownership,
+        )
+    })
+}
+
+fn with_verify_ownership<T>(
+    ownership: Option<DatasetOwnership>,
+    operation: impl FnOnce(Option<&DatasetOwnership>) -> Result<T>,
+) -> Result<T> {
+    match operation(ownership.as_ref()) {
+        Ok(report) => {
+            if let Some(ownership) = ownership {
+                ownership.release_blocking()?;
+            }
+            Ok(report)
+        }
+        Err(error) => {
+            // An error may follow an accepted remote write. Never release or
+            // replace an uncertain owner merely because a later read succeeds.
+            if let Some(ownership) = &ownership {
+                ownership.mark_remote_mutations_uncertain();
+            }
+            Err(error)
+        }
+    }
+}
+
+fn verify_owned(
+    resolved_path: String,
+    aws: Option<&AwsConfig>,
+    opts: &VerifyOptions,
+    run_started: OffsetDateTime,
+    run_id: String,
+    expected_root: Option<&str>,
+    ownership: Option<&DatasetOwnership>,
+) -> Result<VerifyReport> {
     let effective_checks = opts.effective_checks();
     let runs_roots = opts.runs_roots();
     let runs_protocol = opts.runs_protocol();
@@ -524,6 +666,10 @@ pub fn verify_parquet(
     };
 
     let target = scan_output.target;
+    anyhow::ensure!(
+        expected_root.is_none_or(|root| root == target.chain_root),
+        "verify dataset layout changed while ownership was acquired; no artifact was written"
+    );
     let partition_roots = scan_output.partition_roots;
     let algorithm = target.hash_strategy.as_str().to_string();
     let registry_path = opts
@@ -690,7 +836,10 @@ pub fn verify_parquet(
                 false
             }
             (None, false) => {
-                commit_registry(&registry_path, aws, &snapshot, &changes, &mut warnings)?;
+                ownership
+                    .context("registry publication requires dataset ownership")?
+                    .revalidate_local_paths()?;
+                commit_registry(&registry_path, aws, &snapshot, &changes)?;
                 true
             }
         };
@@ -812,11 +961,17 @@ pub fn verify_parquet(
     let bytes = serde_json::to_vec_pretty(&report)?;
 
     if let Some(ref report_path) = opts.report_json {
-        std::fs::write(report_path, &bytes)
+        ownership
+            .context("report publication requires dataset ownership")?
+            .revalidate_local_paths()?;
+        write_file_atomic(report_path, &bytes)
             .with_context(|| format!("writing JSON report to {}", report_path.display()))?;
     }
 
     if let Some(ref publish_path) = report.published_report_path {
+        ownership
+            .context("report publication requires dataset ownership")?
+            .revalidate_local_paths()?;
         write_report_bytes(publish_path, aws, &bytes)?;
     }
 
@@ -1089,6 +1244,24 @@ fn relative_path(file: &str, base: &str) -> String {
 }
 
 fn collect_partition_roots_local(path: &str, opts: &VerifyOptions) -> Result<ScanOutput> {
+    let (base, files) = list_verify_files(path)?;
+    let partitions: Vec<String> = files
+        .iter()
+        .map(|file| detect_partition(file, &base))
+        .collect();
+    let mut scan = ScanAccumulator::new(opts);
+    for (index, file_path) in files.iter().enumerate() {
+        let file = File::open(file_path).with_context(|| format!("opening {file_path}"))?;
+        let builder = ParquetRecordBatchReaderBuilder::try_new(file)?;
+        let next_partition = partitions.get(index + 1).map(String::as_str);
+        if !scan.add_file(builder, file_path, &partitions[index], next_partition)? {
+            break;
+        }
+    }
+    scan.finish()
+}
+
+fn list_verify_files(path: &str) -> Result<(String, Vec<String>)> {
     let pathbuf = absolute_local_path(path)?;
     let mut files = Vec::new();
 
@@ -1117,20 +1290,7 @@ fn collect_partition_roots_local(path: &str, opts: &VerifyOptions) -> Result<Sca
         return Err(anyhow!("no parquet files found in {}", path));
     }
 
-    let partitions: Vec<String> = files
-        .iter()
-        .map(|file| detect_partition(file, &base))
-        .collect();
-    let mut scan = ScanAccumulator::new(opts);
-    for (index, file_path) in files.iter().enumerate() {
-        let file = File::open(file_path).with_context(|| format!("opening {file_path}"))?;
-        let builder = ParquetRecordBatchReaderBuilder::try_new(file)?;
-        let next_partition = partitions.get(index + 1).map(String::as_str);
-        if !scan.add_file(builder, file_path, &partitions[index], next_partition)? {
-            break;
-        }
-    }
-    scan.finish()
+    Ok((base, files))
 }
 
 fn collect_partition_roots_s3(
@@ -1138,30 +1298,7 @@ fn collect_partition_roots_s3(
     aws: &AwsConfig,
     opts: &VerifyOptions,
 ) -> Result<ScanOutput> {
-    let (bucket, prefix) = parse_s3_url(path)?;
-    let client = aws.build_s3_client(&bucket)?;
-
-    let list_prefix = if prefix.is_empty() {
-        None
-    } else {
-        Some(object_store::path::Path::from(prefix.as_str()))
-    };
-
-    let mut objects: Vec<object_store::ObjectMeta> = block_on_async(async {
-        use futures::TryStreamExt;
-        client.list(list_prefix.as_ref()).try_collect().await
-    })
-    .map_err(|e| anyhow!("listing S3 objects: {e}"))?;
-
-    objects.retain(|obj| {
-        let key = obj.location.as_ref();
-        key.ends_with(".parquet") && !is_reserved_artifact_path(&relative_path(key, &prefix))
-    });
-    objects.sort_by(|a, b| a.location.cmp(&b.location));
-    if objects.is_empty() {
-        return Err(anyhow!("no parquet files found in {}", path));
-    }
-
+    let (bucket, prefix, client, objects) = list_verify_objects(path, aws)?;
     let partitions: Vec<String> = objects
         .iter()
         .map(|obj| detect_partition(obj.location.as_ref(), &prefix))
@@ -1187,6 +1324,42 @@ fn collect_partition_roots_s3(
         }
     }
     scan.finish()
+}
+
+fn list_verify_objects(
+    path: &str,
+    aws: &AwsConfig,
+) -> Result<(
+    String,
+    String,
+    object_store::aws::AmazonS3,
+    Vec<object_store::ObjectMeta>,
+)> {
+    let (bucket, prefix) = parse_s3_url(path)?;
+    let client = aws.build_s3_client(&bucket)?;
+
+    let list_prefix = if prefix.is_empty() {
+        None
+    } else {
+        Some(object_store::path::Path::from(prefix.as_str()))
+    };
+
+    let mut objects: Vec<object_store::ObjectMeta> = block_on_async(async {
+        use futures::TryStreamExt;
+        client.list(list_prefix.as_ref()).try_collect().await
+    })
+    .map_err(|e| anyhow!("listing S3 objects: {e}"))?;
+
+    objects.retain(|obj| {
+        let key = obj.location.as_ref();
+        key.ends_with(".parquet") && !is_reserved_artifact_path(&relative_path(key, &prefix))
+    });
+    objects.sort_by(|a, b| a.location.cmp(&b.location));
+    if objects.is_empty() {
+        return Err(anyhow!("no parquet files found in {}", path));
+    }
+
+    Ok((bucket, prefix, client, objects))
 }
 
 /// Per-partition Merkle trees, protocol state and block ranges across the
@@ -2286,25 +2459,22 @@ fn encode_registry(rows: &HashMap<String, RegistryRow>) -> Result<Vec<u8>> {
     Ok(data)
 }
 
-/// Retries of a conditional S3 registry write after a concurrent update.
-const REGISTRY_COMMIT_RETRIES: u32 = 5;
-
 /// Writes this run's changes to the registry without losing concurrent
 /// updates: locally under a lock file with an atomic replace, on S3 with a
-/// conditional put on the ETag read before comparing, retried on conflict.
+/// single conditional put on the version read before comparing. Any conflict
+/// or ambiguous response stops the owning operation without a fallback write.
 fn commit_registry(
     path: &str,
     aws: Option<&AwsConfig>,
     snapshot: &RegistrySnapshot,
     changes: &[RegistryChange],
-    warnings: &mut Vec<String>,
 ) -> Result<()> {
     if path.starts_with("s3://") {
         let aws = aws.ok_or_else(|| anyhow!("AWS config required for S3 registry path"))?;
         let (bucket, key) = parse_s3_url(path)?;
-        let client = aws.build_s3_client(&bucket)?;
+        let client = aws.build_s3_client_for_mutation(&bucket)?;
         let location = object_store::path::Path::from(key.as_str());
-        commit_registry_to_store(&client, &location, snapshot, changes, warnings)
+        commit_registry_to_store(&client, &location, snapshot, changes)
             .with_context(|| format!("writing registry {path}"))
     } else {
         commit_registry_local(Path::new(path), changes)
@@ -2340,55 +2510,27 @@ fn commit_registry_to_store(
     location: &object_store::path::Path,
     snapshot: &RegistrySnapshot,
     changes: &[RegistryChange],
-    warnings: &mut Vec<String>,
 ) -> Result<()> {
-    let mut current = snapshot.clone();
-    let mut attempt = 0;
-    loop {
-        let mut rows = current.rows.clone();
-        apply_registry_changes(&mut rows, changes)?;
-        let data = bytes::Bytes::from(encode_registry(&rows)?);
-        let mode = if !current.exists {
-            object_store::PutMode::Create
-        } else if current.e_tag.is_some() {
-            object_store::PutMode::Update(object_store::UpdateVersion {
-                e_tag: current.e_tag.clone(),
-                version: current.version.clone(),
-            })
-        } else {
-            warnings.push(format!(
-                "the S3 store returned no ETag for {location}; the registry was written without a precondition, so concurrent verify runs may lose updates"
-            ));
-            object_store::PutMode::Overwrite
+    let mut rows = snapshot.rows.clone();
+    apply_registry_changes(&mut rows, changes)?;
+    let mode = if !snapshot.exists {
+        object_store::PutMode::Create
+    } else {
+        let version = object_store::UpdateVersion {
+            e_tag: snapshot.e_tag.clone(),
+            version: snapshot.version.clone(),
         };
-
-        let payload = object_store::PutPayload::from(data.clone());
-        match block_on_async(store.put_opts(location, payload, mode.into())) {
-            Ok(_) => return Ok(()),
-            Err(
-                err @ (object_store::Error::Precondition { .. }
-                | object_store::Error::AlreadyExists { .. }),
-            ) => {
-                if attempt >= REGISTRY_COMMIT_RETRIES {
-                    return Err(anyhow!(
-                        "the registry kept changing during {} write attempts: {err}",
-                        attempt + 1
-                    ));
-                }
-                attempt += 1;
-                std::thread::sleep(std::time::Duration::from_millis(100 << attempt));
-                current = load_registry_from_store(store, location)?;
-            }
-            Err(object_store::Error::NotImplemented | object_store::Error::NotSupported { .. }) => {
-                warnings.push(format!(
-                    "the S3 store does not support conditional writes; the registry {location} was written without a precondition, so concurrent verify runs may lose updates"
-                ));
-                block_on_async(store.put(location, object_store::PutPayload::from(data)))?;
-                return Ok(());
-            }
-            Err(err) => return Err(err.into()),
-        }
-    }
+        anyhow::ensure!(
+            crate::dataset_lock_s3::usable_version(&version),
+            "S3 registry has no usable version; refusing an unconditional overwrite"
+        );
+        object_store::PutMode::Update(version)
+    };
+    let payload = object_store::PutPayload::from(encode_registry(&rows)?);
+    block_on_async(store.put_opts(location, payload, mode.into())).context(
+        "conditional registry publication failed; no retry or unconditional fallback was attempted",
+    )?;
+    Ok(())
 }
 
 /// `path` with `suffix` appended to its file name.
@@ -2496,10 +2638,9 @@ fn write_report_bytes(path: &str, aws: Option<&AwsConfig>, data: &[u8]) -> Resul
     if path.starts_with("s3://") {
         let aws = aws.ok_or_else(|| anyhow!("AWS config required for S3 report publish path"))?;
         let (bucket, key) = parse_s3_url(path)?;
-        let client = aws.build_s3_client(&bucket)?;
+        let client = aws.build_s3_client_for_mutation(&bucket)?;
         let location = object_store::path::Path::from(key.as_str());
-        let payload = object_store::PutPayload::from(bytes::Bytes::copy_from_slice(data));
-        block_on_async(async { client.put(&location, payload).await })
+        write_report_to_store(&client, &location, data)
             .map_err(|e| anyhow!("writing report to s3://{bucket}/{}: {e}", location))?;
     } else {
         let file_path = PathBuf::from(path);
@@ -2510,6 +2651,16 @@ fn write_report_bytes(path: &str, aws: Option<&AwsConfig>, data: &[u8]) -> Resul
         write_file_atomic(&file_path, data)?;
     }
 
+    Ok(())
+}
+
+fn write_report_to_store(
+    store: &dyn ObjectStore,
+    location: &object_store::path::Path,
+    data: &[u8],
+) -> Result<()> {
+    let payload = object_store::PutPayload::from(bytes::Bytes::copy_from_slice(data));
+    block_on_async(store.put(location, payload))?;
     Ok(())
 }
 
@@ -2551,6 +2702,7 @@ fn read_optional_bytes(path: &str, aws: Option<&AwsConfig>) -> Result<Option<Vec
 
 #[cfg(test)]
 mod tests {
+    mod ownership;
     use super::{
         append_batch_leaves, commit_registry_local, commit_registry_to_store, file_layout,
         join_artifact_path, legacy_default_registry_path, load_registry, load_registry_from_store,
@@ -3614,39 +3766,48 @@ mod tests {
     }
 
     #[test]
-    fn store_commits_retry_after_a_concurrent_update() {
+    fn store_commits_reject_stale_and_missing_versions_without_retry() {
         let store = object_store::memory::InMemory::new();
         let location = object_store::path::Path::from("mainnet/merkle_roots.parquet");
-        let mut warnings = Vec::new();
         let rows = |store: &object_store::memory::InMemory| -> HashMap<String, RegistryRow> {
             load_registry_from_store(store, &location).unwrap().rows
         };
 
-        // Both runs read before either writes: the second create fails, re-reads and merges.
+        // A stale absent snapshot cannot overwrite a newly created registry.
         let empty = load_registry_from_store(&store, &location).unwrap();
         assert!(!empty.exists);
-        for (partition, root) in [("day=1", "aa"), ("day=2", "bb")] {
-            let change = fill(registry_row("mainnet", partition, root));
-            commit_registry_to_store(&store, &location, &empty, &[change], &mut warnings).unwrap();
-        }
-        assert_eq!(rows(&store).len(), 2);
+        let first = fill(registry_row("mainnet", "day=1", "aa"));
+        commit_registry_to_store(&store, &location, &empty, &[first]).unwrap();
+        let second = fill(registry_row("mainnet", "day=2", "bb"));
+        assert!(commit_registry_to_store(&store, &location, &empty, &[second]).is_err());
+        assert_eq!(rows(&store).len(), 1);
 
         // Same with an existing object: the second write's ETag is stale.
         let stale = load_registry_from_store(&store, &location).unwrap();
         assert!(stale.e_tag.is_some());
-        for (partition, root) in [("day=3", "cc"), ("day=4", "dd")] {
-            let change = fill(registry_row("mainnet", partition, root));
-            commit_registry_to_store(&store, &location, &stale, &[change], &mut warnings).unwrap();
-        }
-        assert_eq!(rows(&store).len(), 4);
+        let third = fill(registry_row("mainnet", "day=3", "cc"));
+        commit_registry_to_store(&store, &location, &stale, &[third]).unwrap();
+        let fourth = fill(registry_row("mainnet", "day=4", "dd"));
+        assert!(commit_registry_to_store(&store, &location, &stale, &[fourth.clone()]).is_err());
+        assert_eq!(rows(&store).len(), 2);
+
+        let mut missing_version = load_registry_from_store(&store, &location).unwrap();
+        missing_version.e_tag = None;
+        missing_version.version = None;
+        assert!(
+            commit_registry_to_store(&store, &location, &missing_version, &[fourth])
+                .unwrap_err()
+                .to_string()
+                .contains("no usable version")
+        );
+        assert_eq!(rows(&store).len(), 2);
 
         // A conflicting root is reported instead of overwriting the other run.
         let change = fill(registry_row("mainnet", "day=1", "ff"));
-        let err = commit_registry_to_store(&store, &location, &stale, &[change], &mut warnings)
+        let err = commit_registry_to_store(&store, &location, &stale, &[change])
             .unwrap_err()
             .to_string();
         assert!(err.contains("changed while verify was running"), "{err}");
-        assert!(warnings.is_empty(), "{warnings:?}");
     }
 
     /// The level-by-level `merkle_v2` construction the streaming accumulator

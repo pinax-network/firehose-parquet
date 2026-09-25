@@ -17,14 +17,21 @@ lifecycle state; a local implementation or passing test alone is not closure.
 - [#504: Beacon live mapping qualification](504-beacon-qualification.md)
 - [#485: partition probe reliability](485-partition-probe-reliability.md)
 - [#500: stable Solana reward indices](500-solana-reward-index.md)
+- [#501: conservative Solana vote classification](501-solana-vote-classification.md)
 - [#502: explicit Solana instruction positions](502-solana-instruction-order.md)
 - [#473: responsive shutdown](473-responsive-shutdown.md)
 - [#477: single-partition writer contract](477-writer-partition-contract.md)
+- [#475: bounded metrics and stream readiness](475-metrics-readiness.md)
 
 - [#476: timestamp and streamed identity validation](476-timestamp-validation.md)
 
 - [Backlog priorities and preserved work](backlog-roadmap.md)
 - [#468: proposed crash/replay recovery design](468-crash-recovery-design.md)
+- [#468: accepted transaction implementation plan](468-ingestion-transaction-plan.md)
+- [#468: staged ownership and durable state implementation](468-stage1-ownership.md)
+- [#468: conditional S3 ownership qualification](468-s3-ownership.md)
+- [#468: single-attempt remote mutations](468-s3-mutation-attempts.md)
+- [#468: verification artifact ownership](468-verify-ownership.md)
 
 ## Verified lifecycle outcomes
 
@@ -46,6 +53,9 @@ lifecycle state; a local implementation or passing test alone is not closure.
 | [#476](https://github.com/pinax-network/firehose-parquet/issues/476) | [#584](https://github.com/pinax-network/firehose-parquet/pull/584) | Merged as `34cb6e2`; issue closed; 763 tests, malformed metadata and calendar-boundary regressions, 14-table live comparison and CI passed. |
 | [#485](https://github.com/pinax-network/firehose-parquet/issues/485) | [#583](https://github.com/pinax-network/firehose-parquet/pull/583) | Merged as `3cf984b`; issue closed; 779 combined tests, local gRPC/CLI failure scenarios, two-probe live check and CI passed. |
 
+| [#502](https://github.com/pinax-network/firehose-parquet/issues/502) | [#585](https://github.com/pinax-network/firehose-parquet/pull/585) | Merged as `0b38efc`; issue closed; 780 tests, all 6,179 instruction positions checked against raw Solana data, 15,832 prior-column rows unchanged and CI passed. |
+| [#501](https://github.com/pinax-network/firehose-parquet/issues/501) | [#586](https://github.com/pinax-network/firehose-parquet/pull/586) | Merged as `a6a1712`; issue closed; 783 tests, independent raw classification and both vote-detail output modes checked on two slots, prior rows unchanged and CI passed. |
+
 The #468 design PR accidentally triggered GitHub auto-closure through a negative
 sentence containing a recognized closing phrase. On 2026-09-25 the PR text was
 corrected and #468 was reopened; its open state was verified. The proposal and
@@ -56,5 +66,3 @@ Record the real test and live-data evidence, including unavailable qualification
 without credentials, private cursor values or generated datasets. Merge only
 after review and current integration checks pass, then verify issue closure and
 any external recovery condition, such as a dependency security rescan.
-
-- [Solana vote classification (#501)](501-solana-vote-classification.md)

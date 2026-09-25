@@ -4,6 +4,58 @@ Changes merged since the last release. Fold this file into `docs/releases/vX.Y.Z
 
 ## Breaking changes
 
+### Mutations require common ownership (#468 prerequisite)
+
+Build, partition-index construction, maintenance, and verification that writes
+artifacts now coordinate ownership over their source/output/cursor locations.
+Local mutation requires supported macOS/Linux directory inode locking and readable
+ancestry. Nested symlinks inside guarded trees are refused; explicit root aliases
+remain supported. Missing output roots are protected through their existing
+ancestors without being created before input validation. Directory preflight adds
+a recursive traversal.
+
+S3 mutation holds a persistent bucket-wide owner, including copy/verification
+sources that must remain stable while artifacts are written. It requires proven
+conditional Create/Update support, usable object versions, and read/write access
+to `.fireparq-owner-v1.json` plus read/write/delete access below
+`.fireparq-owner-probes-v1/`. Distinct prefixes in one bucket serialize. Unsupported
+conditional stores have no best-effort fallback. Remote data writes/deletes and
+cursor saves make one attempt with zero transport retries; errors retain ownership
+for explicit provider-quiescent recovery. Read retries and bounded local cursor
+retries remain.
+
+`recovery status` reads ownership/control summaries. Remote `recovery release`
+requires the exact UUID/generation, stopped-writer evidence, and provider-confirmed
+quiescence of every prior request. Process exit or elapsed time alone is
+insufficient. Providers without that assurance cannot safely recover a plain-glob
+dataset through this command. Legacy S3 merge journals using the old expiring lock
+are refused automatically and need separately reviewed migration. Local legacy
+merge recovery remains under the common OS guard.
+
+This stage prevents conflicting cooperating commands; ingestion output parts and
+its cursor still lack an all-table crash/replay transaction. No protected ingestion
+mode is exposed yet, and #468 remains open. See the
+[scope, permissions, recovery procedure and qualification limits](../audit/468-stage1-ownership.md).
+
+### Metrics names, labels and readiness reflect actual state (#475)
+
+Counter names now emit one `_total` suffix; dashboards using accidental
+`_total_total` names must migrate. `files_written_total` drops its unbounded
+`partition` label. The cumulative-average rate gauges and always-zero Solana
+`backfill_*` gauges are removed; use counter `rate()` expressions instead.
+Separate mapper, writer and initial timestamp-bootstrap buffers are exposed.
+The cursor gauge starts from the loaded checkpoint without incrementing save
+counters. See [the metrics table](../../README.md#available-metrics).
+
+`/ready` returns 503 before the first valid stream message, during reconnects,
+after the stream ends and after `--metrics-stale-after-secs` (default 120) without
+a valid message. `/health` remains live through reconnects and final file/cursor
+commit, then reports stopped when the pipeline returns. New time metrics describe
+message freshness and block timestamp age; they do not claim remote head lag.
+The Rust `metrics::serve` API now requires the matching `PipelineMetrics` handle
+between its registry and port arguments. Custom stream/pipeline integrations
+must retain the respective activity guards through their actual lifetimes.
+
 ### Solana vote filtering preserves administrative activity (#501)
 
 The vote-only table and `--without-votes` now apply only to conservative legacy,

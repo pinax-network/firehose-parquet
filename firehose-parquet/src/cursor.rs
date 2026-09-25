@@ -620,9 +620,11 @@ pub enum CursorLocation {
 }
 
 impl CursorLocation {
-    /// Persist the same checkpoint up to three times, waiting 1 s and 2 s
-    /// between attempts. A failed checkpoint must stop ingestion, not advance
-    /// to a newer checkpoint. Local I/O runs on a blocking worker.
+    /// Persist a local checkpoint up to three times, waiting 1 s and 2 s
+    /// between attempts. S3 checkpoints get exactly one application attempt:
+    /// the client must also disable transport retries (use the mutation builder).
+    /// A lost S3 response is ambiguous even if a later PUT would succeed, so a
+    /// failed checkpoint stops ingestion. Local I/O runs on a blocking worker.
     ///
     /// Shutdown interrupts backoff after a failure, but never abandons an
     /// in-flight save whose result would then be unknown. That interruption
@@ -652,6 +654,11 @@ impl CursorLocation {
             metrics,
             shutdown,
             Duration::from_secs(1),
+            if matches!(self, Self::S3 { .. }) {
+                1
+            } else {
+                CURSOR_SAVE_ATTEMPTS
+            },
         )
         .await
     }
@@ -762,13 +769,14 @@ async fn retry_cursor_save<Save, SaveFuture>(
     metrics: &crate::metrics::PipelineMetrics,
     shutdown: &AtomicBool,
     initial_backoff: Duration,
+    max_attempts: u32,
 ) -> anyhow::Result<()>
 where
     Save: FnMut() -> SaveFuture,
     SaveFuture: std::future::Future<Output = anyhow::Result<()>>,
 {
     let mut backoff = initial_backoff;
-    for attempt in 1..=CURSOR_SAVE_ATTEMPTS {
+    for attempt in 1..=max_attempts {
         let error = match save().await {
             Ok(()) => {
                 metrics.cursor_saves_total.inc();
@@ -787,12 +795,13 @@ where
                 kind: "cursor_save".to_string(),
             })
             .inc();
-        if attempt == CURSOR_SAVE_ATTEMPTS {
+        if attempt == max_attempts {
+            let noun = if attempt == 1 { "attempt" } else { "attempts" };
             return Err(error.context(format!(
-                "cursor persistence failed after {attempt} attempts at block {block_num}; stopping ingestion"
+                "cursor persistence failed after {attempt} {noun} at block {block_num}; stopping ingestion"
             )));
         }
-        warn!(attempt, max_attempts = CURSOR_SAVE_ATTEMPTS, block_num,
+        warn!(attempt, max_attempts, block_num,
             retry_in = ?backoff, error = %error, "cursor save failed; retrying the same checkpoint");
         let deadline = tokio::time::Instant::now() + backoff;
         loop {
@@ -818,7 +827,8 @@ async fn save_cursor_parquet_s3(
     key: &str,
     state: &CursorState,
 ) -> anyhow::Result<()> {
-    // A single PUT replaces the object atomically.
+    // A single PUT replaces the object atomically, but a failed response does
+    // not establish whether it completed. Never retry this at either layer.
     let buf = encode_cursor(state)?;
 
     let path = object_store::path::Path::from(key);
@@ -1240,6 +1250,7 @@ mod tests {
             &metrics,
             &AtomicBool::new(false),
             Duration::from_millis(1),
+            CURSOR_SAVE_ATTEMPTS,
         )
         .await
         .unwrap();
@@ -1289,6 +1300,7 @@ mod tests {
             &metrics,
             &shutdown,
             Duration::ZERO,
+            CURSOR_SAVE_ATTEMPTS,
         )
         .await
         .unwrap_err();
@@ -1342,7 +1354,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn retry_saves_s3_cursor_without_blocking_the_current_thread_runtime() {
+    async fn single_attempt_saves_s3_cursor_without_blocking_the_current_thread_runtime() {
         let store = Arc::new(object_store::memory::InMemory::new());
         let location = CursorLocation::S3 {
             client: store.clone(),

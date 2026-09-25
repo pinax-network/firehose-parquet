@@ -402,6 +402,7 @@ impl FirehoseClient {
     where
         F: FnMut(Vec<u8>, String, String, BlockIdentity, i32) -> Result<()>,
     {
+        let _activity = self.metrics.as_ref().map(PipelineMetrics::begin_stream);
         let mut cursor = initial_cursor;
         // A timeout of 0 means disabled.
         let stream_idle_timeout = self
@@ -522,6 +523,11 @@ impl FirehoseClient {
                         let metadata = resp.metadata.as_ref().ok_or_else(|| anyhow::anyhow!(
                             "Firehose response is missing block metadata; cannot safely identify or checkpoint this block"))?;
                         let identity = checked_block_identity(metadata, fork_step)?;
+                        if let Some(metrics) = &self.metrics {
+                            metrics.record_stream_message(metadata.time.as_ref().map(|time| {
+                                time.seconds as f64 + f64::from(time.nanos) / 1_000_000_000.0
+                            }));
+                        }
 
                         if let Some(any) = resp.block {
                             blocks_this_connection += 1;
@@ -631,6 +637,7 @@ impl FirehoseClient {
 
     fn record_reconnect_metric(&self) {
         if let Some(ref m) = self.metrics {
+            m.stream_disconnected();
             m.grpc_reconnects_total.inc();
             m.errors_total
                 .get_or_create(&crate::metrics::ErrorLabels {
