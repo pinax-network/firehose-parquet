@@ -37,6 +37,17 @@ its cursor still lack an all-table crash/replay transaction. No protected ingest
 mode is exposed yet, and #468 remains open. See the
 [scope, permissions, recovery procedure and qualification limits](../audit/468-stage1-ownership.md).
 
+### Antelope database-operation transaction keys (#508)
+
+`db_ops` adds non-null `tx_hash: Utf8`, `tx_index: UInt64` (original source trace
+index), and `db_op_index: UInt32` (position within that transaction). Join through
+canonical block identity; indices are not renumbered after filtering. Old files
+need rebuilding or explicit schema reconciliation to use these fields. The action
+aliases `transaction_id`, `trace_block_num`, `producer_block_id`, and `block_time`
+are deprecated for ordinary joins/routing but remain verbatim source metadata
+with no planned removal. Existing text values and row order are unchanged.
+See [the validation and migration record](../audit/508-antelope-db-joins.md).
+
 ### Metrics names, labels and readiness reflect actual state (#475)
 
 Counter names now emit one `_total` suffix; dashboards using accidental
@@ -469,3 +480,17 @@ Rows of `access_lists` and `set_code_authorizations` follow their transaction: t
 - A new cross-chain schema contract test maps one fixture batch for every table of every chain, under every bytes encoding and both `fork_step` settings. It checks that column names are unique, that each batch round-trips through the Parquet writer and reader with the same schema and values, and that every table's canonical `block_id` / `parent_id` match the `blocks` table.
 - A weekly `Network endpoints` workflow runs `scripts/check_network_endpoints.sh`, which sends a Firehose `EndpointInfo` call to every built-in `--network` endpoint and fails when one no longer answers (#535). It also runs on pull requests that change the generated registry. Regular `cargo test` stays offline.
 - A Parquet round-trip test asserts that the canonical `timestamp` is written as `TIMESTAMP(MILLIS, isAdjustedToUTC=true)` and reads back as `Timestamp(Millisecond, UTC)` without the embedded Arrow schema. The contract test also checks the canonical `timestamp` type on every table.
+
+## Bitcoin amounts and input metadata (#511)
+
+Bitcoin-family outputs add `value_sats: UInt64`; the original floating coin
+amount remains unchanged. Exact serialized output units are preferred; absent
+raw transaction bytes use a unique, checked conversion. Inconsistent or
+unrecoverable amounts stop mapping before that block appends any rows. The shared
+Litecoin mapper is not constrained by Bitcoin's monetary bound.
+
+Inputs add `tx_index`. Coinbase/ordinary input fields and absent script messages
+now use nulls, with real zero indices and present empty scripts preserved.
+Output addresses support the legacy first-address fallback. Native protobuf text
+encoding is unchanged and now documented accurately. These are intentional schema
+changes; use a new/rebuilt dataset or explicit reader-side schema reconciliation.
