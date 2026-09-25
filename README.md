@@ -1228,6 +1228,74 @@ These columns hold Firehose fields as they are, with bytes in the output encodin
 
 The new columns come after the existing ones in each table. Ordinals are unique within a block, so `(block_number, ordinal)` orders every log, call and state change of a block. They are not reliable for anything inside a reverted call.
 
+## Solana Vote Filtering
+
+The optional `vote_transactions` table contains conservatively recognized simple
+votes. `--without-votes` omits those transactions. A candidate must be a legacy
+transaction with one or two signatures, a consistent message header, and exactly
+one instruction whose program index resolves to the Vote program. Its complete,
+canonical payload must decode as `Vote`, `VoteSwitch`, `UpdateVoteState`,
+`UpdateVoteStateSwitch`, `CompactUpdateVoteState`,
+`CompactUpdateVoteStateSwitch`, `TowerSync`, or `TowerSyncSwitch`, with a nonempty
+vote history. Payloads larger than the current 1,232-byte packet ceiling stay in
+ordinary output.
+
+Administrative calls such as Withdraw, Authorize and InitializeAccount,
+transactions with multiple instructions, versioned transactions, unused Vote
+account keys, and unknown or malformed payloads keep their ordinary transaction,
+message, instruction, balance, lookup and reward rows, subject to the usual
+failed-transaction filter. This classification checks structure and recognized
+payloads; it does not verify signatures cryptographically or prove execution
+validity. Recognized votes retain the existing compact output policy: their
+transaction row goes to `vote_transactions` and their detail rows are omitted.
+
+Earlier versions classified any transaction mentioning the Vote account as a
+vote. Their output can therefore omit administrative activity. This fix changes
+row counts without changing schemas. Rebuild affected ranges into a separate
+output root to recover missing rows; appending a corrected replay to old results
+does not remove existing rows or guarantee deduplication.
+
+## Solana Instruction Order
+
+The `instructions` table preserves the upstream order inside each top-level
+instruction's inner set with two nullable `UInt32` columns:
+
+| Column | Top-level instruction | Inner instruction |
+|---|---|---|
+| `parent_instruction_index` | `NULL` | Zero-based index of the top-level instruction that owns the inner set |
+| `inner_instruction_index` | `NULL` | Zero-based position within that parent's inner set |
+
+The existing `instruction_index` still numbers all top-level instructions first,
+then all inner instructions in upstream group order. It is a row index, not call
+order. The existing `inner_index` still contains the top-level parent's index;
+it has the same value as `parent_instruction_index`.
+
+For one transaction in one block event, order its instructions as follows:
+
+```sql
+SELECT *
+FROM read_parquet('instructions/*.parquet')
+WHERE block_id = '<block id>' AND transaction_index = 0
+ORDER BY coalesce(parent_instruction_index, instruction_index),
+         is_inner,
+         inner_instruction_index;
+```
+
+This puts each top-level instruction before its recorded inner calls and keeps
+the upstream order of those calls, including nested calls. `stack_height`, when
+present, provides depth; `parent_instruction_index` identifies the top-level
+owner, not the immediate caller of a nested instruction. For failed transactions
+included with `--include-failed-transactions`, listed top-level instructions may
+include instructions that did not execute. Apply fork semantics first when
+querying reversible output; the ordering fields do not identify event delivery
+order or remove replay duplicates.
+
+Older files lack both new columns. Readers that union schemas by name can read
+them as null, but nulls alone cannot distinguish old inner rows from top-level
+rows. Check `is_inner` and rebuild old ranges into a separate output root before
+depending on these fields. The existing strict-schema maintenance commands
+refuse to merge or roll up mixed old/new instruction schemas.
+
 ## Solana Reward Indices
 
 `rewards.reward_index` is a zero-based index within one block envelope. Rewards
@@ -1286,8 +1354,16 @@ Enable the metrics server with `--metrics-port <PORT>` (env: `METRICS_PORT`). A 
 | Endpoint | Description |
 |---|---|
 | `/metrics` | Prometheus text exposition format |
-| `/health` | Returns `200 OK` (liveness check) |
-| `/ready` | Returns `200 OK` (readiness check) |
+| `/health` | `200 OK` while the pipeline is running, reconnecting or committing final output; `503` after it stops |
+| `/ready` | `200 OK` after a valid stream message while connected and within the freshness threshold; otherwise `503` |
+
+`--metrics-stale-after-secs` / `METRICS_STALE_AFTER_SECS` sets the readiness
+threshold (default 120 seconds; must be positive). It uses monotonic time since
+the last valid message, so historical backfills can be ready even when block
+timestamps are old. Disconnects and stream completion make readiness false.
+Liveness stays true through final file publication and cursor persistence.
+Readiness establishes recent stream activity; it does not prove forward block
+progress, chain-head agreement or crash/replay safety.
 
 ### Available Metrics
 
@@ -1299,22 +1375,41 @@ Enable the metrics server with `--metrics-port <PORT>` (env: `METRICS_PORT`). A 
 | `firehose_parquet_current_block_number` | Gauge | — | Most recently processed block number |
 | `firehose_parquet_min_block_number` | Gauge | — | Minimum block number seen |
 | `firehose_parquet_max_block_number` | Gauge | — | Maximum block number seen |
-| `firehose_parquet_blocks_per_second` | Gauge | — | Rolling throughput (blocks/s) |
-| `firehose_parquet_bytes_per_second` | Gauge | — | Rolling throughput (bytes/s) |
-| `firehose_parquet_elapsed_seconds` | Gauge | — | Seconds since pipeline start |
-| `firehose_parquet_files_written_total` | Counter | `table`, `partition` | Parquet files written |
-| `firehose_parquet_file_bytes_total` | Counter | `table`, `partition` | Total compressed bytes written |
+| `firehose_parquet_elapsed_seconds` | Gauge | — | Monotonic seconds since metrics initialization; refreshed on scrape |
+| `firehose_parquet_last_block_timestamp_seconds` | Gauge | — | Last valid stream message's block timestamp; `NaN` when absent |
+| `firehose_parquet_block_time_lag_seconds` | Gauge | — | Wall-clock age of that timestamp, clamped at zero; `NaN` when absent; refreshed on scrape |
+| `firehose_parquet_last_message_age_seconds` | Gauge | — | Monotonic seconds since the last valid message; `NaN` before one; refreshed on scrape |
+| `firehose_parquet_files_written_total` | Counter | `table` | Parquet files written |
+| `firehose_parquet_file_bytes_total` | Counter | `table` | Total compressed bytes written |
 | `firehose_parquet_flushes_total` | Counter | `trigger` | Flush count by trigger type |
-| `firehose_parquet_buffer_estimated_bytes` | Gauge | `table` | Current in-memory buffer size |
-| `firehose_parquet_buffer_rows` | Gauge | `table` | Current buffered row count |
+| `firehose_parquet_buffer_estimated_bytes` | Gauge | — | Writer-owned buffers, estimated compressed bytes |
+| `firehose_parquet_buffer_rows` | Gauge | `table` | Writer-owned rows, including failed/unattempted tables |
+| `firehose_parquet_mapper_buffer_rows` | Gauge | — | Mapper-owned rows summed across tables |
+| `firehose_parquet_mapper_largest_table_estimated_bytes` | Gauge | — | Largest mapper table's estimated Arrow bytes, used by the byte flush trigger |
+| `firehose_parquet_bootstrap_buffered_blocks` | Gauge | — | Raw blocks awaiting the initial timestamp anchor |
+| `firehose_parquet_bootstrap_buffered_bytes` | Gauge | — | Raw protobuf bytes awaiting that anchor |
 | `firehose_parquet_cursor_saves_total` | Counter | — | Cursor persistence count |
 | `firehose_parquet_cursor_save_failures_total` | Counter | — | Failed cursor save attempts, including retries |
 | `firehose_parquet_cursor_last_success_timestamp_seconds` | Gauge | — | Unix time of the last successful cursor save in this process; 0 before the first save |
-| `firehose_parquet_cursor_last_block_num` | Gauge | — | Block number from last saved cursor |
+| `firehose_parquet_cursor_last_block_num` | Gauge | — | Block number from the loaded cursor, then the last successful save; 0 when neither exists |
 | `firehose_parquet_errors_total` | Counter | `kind` | Errors by category |
-| `firehose_parquet_grpc_reconnects_total` | Counter | — | gRPC stream reconnections |
+| `firehose_parquet_grpc_reconnects_total` | Counter | — | gRPC retries scheduled, once per reconnect path |
 | `firehose_parquet_blocks_skipped_below_start_total` | Counter | — | Blocks received below the effective start block and skipped |
-| `firehose_parquet` | Info | *(pipeline config)* | Pipeline metadata (chain, endpoint, version) |
+| `firehose_parquet_info` | Info | *(pipeline config)* | Pipeline metadata (chain, endpoint, version) |
+
+Use `rate(firehose_parquet_blocks_processed_total[5m])` and
+`rate(firehose_parquet_bytes_read_total[5m])` for throughput. The old rate gauges
+were cumulative averages and have been removed, along with the always-zero
+Solana `backfill_*` gauges. Block-time lag measures age against the local clock;
+it is not a measured remote chain-head lag. Buffer estimates are not process RSS.
+
+Dashboard migration: counters previously registered with `_total` emitted
+`_total_total`, because the Prometheus library adds the suffix. These now emit
+exactly one `_total`; update queries that used the doubled names.
+`cursor_save_failures_total` already had the correct name and is unchanged.
+`files_written_total` now has only the `table` label; remove per-partition filters
+and groupings. Existing series remain in your monitoring system until its normal
+retention expires.
 
 ```bash
 # Enable metrics on port 9090

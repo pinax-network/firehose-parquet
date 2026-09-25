@@ -4,6 +4,56 @@ Changes merged since the last release. Fold this file into `docs/releases/vX.Y.Z
 
 ## Breaking changes
 
+### Metrics names, labels and readiness reflect actual state (#475)
+
+Counter names now emit one `_total` suffix; dashboards using accidental
+`_total_total` names must migrate. `files_written_total` drops its unbounded
+`partition` label. The cumulative-average rate gauges and always-zero Solana
+`backfill_*` gauges are removed; use counter `rate()` expressions instead.
+Separate mapper, writer and initial timestamp-bootstrap buffers are exposed.
+The cursor gauge starts from the loaded checkpoint without incrementing save
+counters. See [the metrics table](../../README.md#available-metrics).
+
+`/ready` returns 503 before the first valid stream message, during reconnects,
+after the stream ends and after `--metrics-stale-after-secs` (default 120) without
+a valid message. `/health` remains live through reconnects and final file/cursor
+commit, then reports stopped when the pipeline returns. New time metrics describe
+message freshness and block timestamp age; they do not claim remote head lag.
+The Rust `metrics::serve` API now requires the matching `PipelineMetrics` handle
+between its registry and port arguments. Custom stream/pipeline integrations
+must retain the respective activity guards through their actual lifetimes.
+
+### Solana vote filtering preserves administrative activity (#501)
+
+The vote-only table and `--without-votes` now apply only to conservative legacy,
+single-instruction votes with fully decoded recognized payloads. Withdraw,
+Authorize, vote-account creation, mixed instructions, unused Vote program keys,
+versioned transactions and unknown/malformed payloads keep their ordinary detail
+rows. The failed-transaction option still applies independently. Classification
+is structural, not a claim of transaction execution validity.
+
+Schemas are unchanged, but affected rows and verification roots change. Rebuild
+old ranges separately to recover activity that the previous account-key check
+omitted. See [the decision and validation record](../audit/501-solana-vote-classification.md).
+
+### Solana instruction positions are explicit (#502)
+
+`instructions` adds nullable `UInt32` columns `parent_instruction_index` and
+`inner_instruction_index`. Both are null for top-level instructions. Inner rows
+store their top-level parent's index and their zero-based position in that
+parent's upstream inner set. The old `instruction_index`, `inner_index`, and row
+order are unchanged. Sort one transaction's rows by
+`coalesce(parent_instruction_index, instruction_index), is_inner,
+inner_instruction_index` to place each top-level instruction before its recorded
+inner calls. A nested call's parent column still names the top-level owner;
+`stack_height` remains the optional depth signal.
+
+Older files do not gain positions when read with schema union. Rebuild old ranges
+into a separate output root if positions are required, and do not mix old and
+new schemas in strict-schema merge/rollup operations. These fields do not resolve
+forks, replay duplicates, or whether every listed instruction executed in a
+failed transaction. See [the implementation record](../audit/502-solana-instruction-order.md).
+
 ### Invalid timestamps and missing streamed identities now fail (#476)
 
 Malformed timestamp seconds or nanos now return errors before canonical rows or
