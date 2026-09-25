@@ -15,6 +15,7 @@ use firehose_parquet::config::{BlockMetadata, Compression, Config, Partition};
 use firehose_parquet::cursor::{CursorLocation, CursorState};
 use firehose_parquet::dataset_lock::{DatasetOwnership, MutationScope};
 use firehose_parquet::encode::EncodeBytes;
+use firehose_parquet::flush::{FlushSizing, MapperBufferEstimate, SizeFlushTrigger};
 use firehose_parquet::grpc::{
     classify_fetch_error, is_shutdown_error, unless_shutdown, CancellationToken, EndpointInfo,
     FetchErrorKind, FirehoseClient, ShutdownRequested,
@@ -183,6 +184,7 @@ struct WriterFlushOutcome {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum MapperFlushTrigger {
+    Memory,
     Bytes,
     Blocks,
     Rows,
@@ -192,6 +194,7 @@ enum MapperFlushTrigger {
 impl MapperFlushTrigger {
     fn as_str(self) -> &'static str {
         match self {
+            Self::Memory => "memory",
             Self::Bytes => "bytes",
             Self::Blocks => "blocks",
             Self::Rows => "rows",
@@ -207,8 +210,8 @@ fn next_mapper_flush_trigger(
     blocks_since_flush: u64,
     flush_interval_secs: Option<u64>,
     last_flush_time: Instant,
-    flush_bytes: u64,
-    estimated_bytes: u64,
+    sizing: &FlushSizing,
+    estimate: MapperBufferEstimate,
 ) -> Option<MapperFlushTrigger> {
     let time_to_flush = flush_interval_secs
         .map(|secs| last_flush_time.elapsed().as_secs() >= secs)
@@ -222,11 +225,11 @@ fn next_mapper_flush_trigger(
         .map(|limit| blocks_since_flush >= limit)
         .unwrap_or(false);
 
-    // `--flush-bytes 0` disables this mapper-level byte trigger.
-    let bytes_to_flush = flush_bytes > 0 && estimated_bytes >= flush_bytes;
-
-    if bytes_to_flush {
-        Some(MapperFlushTrigger::Bytes)
+    if let Some(trigger) = sizing.trigger(estimate) {
+        Some(match trigger {
+            SizeFlushTrigger::Memory => MapperFlushTrigger::Memory,
+            SizeFlushTrigger::Bytes => MapperFlushTrigger::Bytes,
+        })
     } else if blocks_to_flush {
         Some(MapperFlushTrigger::Blocks)
     } else if rows_to_flush {
@@ -976,9 +979,22 @@ fn update_bootstrap_buffer_metrics(
         .set(i64::try_from(buffered.len()).unwrap_or(i64::MAX));
 }
 
-fn update_mapper_buffer_metrics(metrics: &metrics::PipelineMetrics, mapper: &mut dyn BlockMapper) {
+fn update_mapper_buffer_metrics(
+    metrics: &metrics::PipelineMetrics,
+    mapper: &mut dyn BlockMapper,
+) -> MapperBufferEstimate {
     let rows = mapper.total_rows();
-    metrics.record_mapper_buffer(rows, mapper.estimated_bytes());
+    let estimates = MapperBufferEstimate::from_table_sizes(
+        mapper.table_estimates().into_iter().map(|(_, bytes)| bytes),
+    );
+    metrics.record_mapper_buffer(
+        rows,
+        usize::try_from(estimates.largest_table_bytes).unwrap_or(usize::MAX),
+    );
+    metrics
+        .mapper_buffer_estimated_bytes
+        .set(i64::try_from(estimates.total_bytes).unwrap_or(i64::MAX));
+    estimates
 }
 
 fn should_emit_progress_log(counter: u64) -> bool {
@@ -1529,6 +1545,7 @@ async fn run_partitions_build(
         flush_rows: None,
         flush_blocks: None,
         flush_bytes: 0,
+        flush_memory_bytes: firehose_parquet::config::DEFAULT_FLUSH_MEMORY_BYTES,
         flush_interval_secs: None,
         compression,
         final_blocks_only: true,
@@ -3189,10 +3206,13 @@ fn commit_ingestion_flush(
     compression: Compression,
     file_metadata: ParquetFileMetadata,
     metrics: &metrics::PipelineMetrics,
+    sizing: &mut FlushSizing,
+    estimate: MapperBufferEstimate,
     trigger: &str,
 ) -> Result<WriterFlushOutcome> {
     let committed = session.flush_blocking(batches, metadata, compression, file_metadata)?;
-    if committed.is_some() {
+    if let Some(flush) = &committed {
+        record_committed_flush_sizing(sizing, estimate, flush, trigger);
         metrics
             .flushes_total
             .get_or_create(&metrics::FlushLabels {
@@ -3204,6 +3224,29 @@ fn commit_ingestion_flush(
         materialized: committed.is_some_and(|flush| flush.files > 0),
         buffered: WriterBufferStats::default(),
     })
+}
+
+fn record_committed_flush_sizing(
+    sizing: &mut FlushSizing,
+    estimate: MapperBufferEstimate,
+    committed: &firehose_parquet::ingest::CommittedFlush,
+    trigger: &str,
+) {
+    let largest_file_bytes = committed
+        .tables
+        .iter()
+        .map(|table| table.bytes)
+        .max()
+        .unwrap_or(0);
+    sizing.observe_committed(estimate.largest_table_bytes, largest_file_bytes);
+    info!(
+        trigger,
+        largest_file_bytes,
+        largest_mapper_estimated_bytes = estimate.largest_table_bytes,
+        total_mapper_estimated_bytes = estimate.total_bytes,
+        compressed_to_mapper_ratio = sizing.ratio(),
+        "committed flush size observation"
+    );
 }
 
 async fn run_ingestion(args: &BuildArgs, global: &GlobalArgs) -> Result<()> {
@@ -3561,21 +3604,11 @@ async fn run_ingestion(args: &BuildArgs, global: &GlobalArgs) -> Result<()> {
     let include_fork_step = !final_blocks_only;
     let flush_rows = config.flush_rows.map(|r| r as usize);
     let flush_blocks = config.flush_blocks;
-    let flush_bytes = config.flush_bytes;
+    let mut flush_sizing = FlushSizing::new(config.flush_bytes, config.flush_memory_bytes)?;
     let flush_interval_secs = config.flush_interval_secs;
     let dry_run = config.dry_run;
     let mut is_solana = block_type == "solana";
     let partition_config = config.partition.clone();
-    if flush_bytes == 0
-        && flush_rows.is_none()
-        && flush_blocks.is_none()
-        && flush_interval_secs.is_none()
-        && partition_config == Partition::None
-    {
-        warn!(
-            "--flush-bytes 0 disables byte-based flushing and no other flush trigger is set (--flush-rows, --flush-blocks, --flush-interval-secs or --partition); all output stays in memory until the run ends"
-        );
-    }
     let mut use_synthetic_partition_routing =
         use_last_known_timestamp_partition_routing(&block_type, &partition_config);
     let mut genesis_timestamp_bootstrap = GenesisTimestampBootstrap::new(config.start_block);
@@ -4008,6 +4041,7 @@ async fn run_ingestion(args: &BuildArgs, global: &GlobalArgs) -> Result<()> {
                             block_number,
                             "partition boundary detected, flushing mapper"
                         );
+                        let preflush_estimate = update_mapper_buffer_metrics(&pipeline_metrics, m.as_mut());
                         let batches = m.flush()?;
                         update_mapper_buffer_metrics(&pipeline_metrics, m.as_mut());
                         let flushed_tables = batches.len();
@@ -4025,7 +4059,7 @@ async fn run_ingestion(args: &BuildArgs, global: &GlobalArgs) -> Result<()> {
                             let metadata = BlockMetadata {
                                 min_block_number: min_block.unwrap_or(0), max_block_number: max_block.unwrap_or(0), min_timestamp, max_timestamp,
                             };
-                            let outcome = commit_ingestion_flush(session.as_mut().context("protected session is required")?, batches, metadata, config.compression, current_file_metadata.clone(), &pipeline_metrics, "partition_boundary")?;
+                            let outcome = commit_ingestion_flush(session.as_mut().context("protected session is required")?, batches, metadata, config.compression, current_file_metadata.clone(), &pipeline_metrics, &mut flush_sizing, preflush_estimate, "partition_boundary")?;
                             log_writer_flush_outcome("partition_boundary", flushed_tables, flushed_rows, outcome);
                         } else {
                             info!(
@@ -4046,7 +4080,7 @@ async fn run_ingestion(args: &BuildArgs, global: &GlobalArgs) -> Result<()> {
                 current_partition_key = new_partition_key;
 
                 let mapped = m.map_block(block_bytes, identity, fork_step);
-                update_mapper_buffer_metrics(&pipeline_metrics, m.as_mut());
+                let mapper_estimate = update_mapper_buffer_metrics(&pipeline_metrics, m.as_mut());
                 transactions_processed += mapped?;
                 if let Some(session) = session.as_mut() {
                     session.accept_mapped(received_ordinal, (ts != 0).then_some(ts), lookahead_ordinal)?;
@@ -4143,8 +4177,8 @@ async fn run_ingestion(args: &BuildArgs, global: &GlobalArgs) -> Result<()> {
                     blocks_since_flush,
                     flush_interval_secs,
                     last_flush_time,
-                    flush_bytes,
-                    m.estimated_bytes() as u64,
+                    &flush_sizing,
+                    mapper_estimate,
                 ) {
                     let flush_trigger = flush_trigger.as_str();
                     let batches = m.flush()?;
@@ -4161,7 +4195,7 @@ async fn run_ingestion(args: &BuildArgs, global: &GlobalArgs) -> Result<()> {
                         let metadata = BlockMetadata {
                             min_block_number: min_block.unwrap_or(0), max_block_number: max_block.unwrap_or(0), min_timestamp, max_timestamp,
                         };
-                        let outcome = commit_ingestion_flush(session.as_mut().context("protected session is required")?, batches, metadata, config.compression, current_file_metadata.clone(), &pipeline_metrics, flush_trigger)?;
+                        let outcome = commit_ingestion_flush(session.as_mut().context("protected session is required")?, batches, metadata, config.compression, current_file_metadata.clone(), &pipeline_metrics, &mut flush_sizing, mapper_estimate, flush_trigger)?;
                         log_writer_flush_outcome(flush_trigger, flushed_tables, flushed_rows, outcome);
                     } else {
                         info!(
@@ -4250,6 +4284,8 @@ async fn run_ingestion(args: &BuildArgs, global: &GlobalArgs) -> Result<()> {
                 .transpose()?
                 .unwrap_or(false)
         {
+            let preflush_estimate =
+                update_mapper_buffer_metrics(&pipeline_metrics, mapper.as_mut());
             let batches = mapper.flush()?;
             update_mapper_buffer_metrics(&pipeline_metrics, mapper.as_mut());
             if let Some(session) = session.as_mut() {
@@ -4259,7 +4295,7 @@ async fn run_ingestion(args: &BuildArgs, global: &GlobalArgs) -> Result<()> {
                     min_timestamp,
                     max_timestamp,
                 };
-                if session
+                if let Some(committed) = session
                     .flush(
                         batches,
                         metadata,
@@ -4267,8 +4303,13 @@ async fn run_ingestion(args: &BuildArgs, global: &GlobalArgs) -> Result<()> {
                         current_file_metadata.clone(),
                     )
                     .await?
-                    .is_some()
                 {
+                    record_committed_flush_sizing(
+                        &mut flush_sizing,
+                        preflush_estimate,
+                        &committed,
+                        "stream_end",
+                    );
                     pipeline_metrics
                         .flushes_total
                         .get_or_create(&metrics::FlushLabels {
@@ -4762,8 +4803,11 @@ mod tests {
             1,
             None,
             Instant::now(),
-            flush_bytes,
-            mapper_estimate,
+            &FlushSizing::new(flush_bytes, u64::MAX).unwrap(),
+            MapperBufferEstimate {
+                largest_table_bytes: mapper_estimate,
+                total_bytes: mapper_estimate
+            },
         )
         .is_none());
 
@@ -5000,8 +5044,11 @@ mod tests {
             3,
             Some(60),
             Instant::now(),
-            1_000_000,
-            128,
+            &FlushSizing::new(1_000_000, u64::MAX).unwrap(),
+            MapperBufferEstimate {
+                largest_table_bytes: 128,
+                total_bytes: 128,
+            },
         );
 
         assert_eq!(trigger, Some(MapperFlushTrigger::Blocks));
@@ -5009,8 +5056,19 @@ mod tests {
 
     #[test]
     fn test_next_mapper_flush_trigger_ignores_blocks_when_flag_is_omitted() {
-        let trigger =
-            next_mapper_flush_trigger(None, 0, None, 3, None, Instant::now(), 1_000_000, 128);
+        let trigger = next_mapper_flush_trigger(
+            None,
+            0,
+            None,
+            3,
+            None,
+            Instant::now(),
+            &FlushSizing::new(1_000_000, u64::MAX).unwrap(),
+            MapperBufferEstimate {
+                largest_table_bytes: 128,
+                total_bytes: 128,
+            },
+        );
 
         assert_eq!(trigger, None);
     }
@@ -5018,7 +5076,7 @@ mod tests {
     #[test]
     fn test_next_mapper_flush_trigger_flush_bytes_zero_is_disabled() {
         // `--flush-bytes 0` used to flush after every block (`estimated >= 0`).
-        for estimated_bytes in [0, 128, u64::MAX] {
+        for estimated_bytes in [0, 128, u64::MAX - 1] {
             let trigger = next_mapper_flush_trigger(
                 None,
                 0,
@@ -5026,14 +5084,29 @@ mod tests {
                 1,
                 None,
                 Instant::now(),
-                0,
-                estimated_bytes,
+                &FlushSizing::new(0, u64::MAX).unwrap(),
+                MapperBufferEstimate {
+                    largest_table_bytes: estimated_bytes,
+                    total_bytes: estimated_bytes,
+                },
             );
             assert_eq!(trigger, None);
         }
 
         // Other triggers still apply.
-        let trigger = next_mapper_flush_trigger(None, 0, Some(1), 1, None, Instant::now(), 0, 128);
+        let trigger = next_mapper_flush_trigger(
+            None,
+            0,
+            Some(1),
+            1,
+            None,
+            Instant::now(),
+            &FlushSizing::new(0, u64::MAX).unwrap(),
+            MapperBufferEstimate {
+                largest_table_bytes: 128,
+                total_bytes: 128,
+            },
+        );
         assert_eq!(trigger, Some(MapperFlushTrigger::Blocks));
     }
 

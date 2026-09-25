@@ -891,7 +891,7 @@ impl BlockMapper for BeaconBlockMapper {
             + self.consolidation_requests.canonical.len()
     }
 
-    fn largest_table(&mut self) -> (&str, usize) {
+    fn table_estimates(&mut self) -> Vec<(&str, usize)> {
         let blocks = self.blocks.canonical.estimated_bytes()
             + est_u64(&self.blocks.slot)
             + est_u64(&self.blocks.parent_slot)
@@ -1045,8 +1045,7 @@ impl BlockMapper for BeaconBlockMapper {
             ),
         ]
         .into_iter()
-        .max_by_key(|&(_, s)| s)
-        .unwrap_or(("blocks", 0))
+        .collect()
     }
 
     fn table_names(&self) -> Vec<&str> {

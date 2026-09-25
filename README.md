@@ -572,15 +572,31 @@ custom deployment environments:
 | `--cache-control <CACHE_CONTROL>` | Set upload headers for CDN or static distribution workflows |
 | `--metrics-port <METRICS_PORT>` | Expose Prometheus and health endpoints for monitored deployments |
 
-Each `build` mapper flush writes its nonempty tables to local files or S3
-before advancing the cursor. `--flush-rows`, `--flush-blocks`, and
-`--flush-interval-secs` control mapper flush boundaries. `--flush-bytes` uses
-the mapper's estimated memory size; it does not impose a compressed part-size
-limit. `--flush-bytes 0` disables byte-based flushing: files are then only cut
-by the other `--flush-*` triggers, at
-partition boundaries, or at the end of the run (with `--partition none` and no
-other trigger, everything stays in memory until the run ends, and a warning is
-logged). `merge` and `rollup` retain their separate output-size controls.
+Each `build` mapper flush commits its nonempty tables together before advancing
+output authority and the cursor mirror. `--flush-bytes` is a **target compressed
+size for the largest table's file**, defaulting to 32 MiB in Config and the
+`build`, `merge`, and `rollup` commands. Build starts with a conservative
+calibration flush, then learns the compressed-to-mapper-size ratio from actual
+committed file sizes. This prediction resets on restart; dry runs keep the
+conservative estimate because they produce no file receipts. Files can overshoot by
+one mapped block, and smaller tables naturally produce smaller files.
+
+Build separately flushes when the **sum of all mapper table estimates** reaches
+`--flush-memory-bytes` (default 256 MiB, positive). This remains active with
+`--flush-bytes 0`, which disables only the compressed-size target. The estimate
+counts populated mapper values, **not process RSS**: decoder and bootstrap
+payloads, reserved allocator capacity, materialized Arrow batches, and the active
+Parquet encoder/output need additional memory. A single block can exceed the
+threshold before the next check. Compared with the former 32 MiB largest-table
+trigger, adaptive windows may use substantially more memory; lower this separate
+threshold to constrain estimated accumulation.
+
+`--flush-rows`, `--flush-blocks`, `--flush-interval-secs`, partition changes, the
+memory threshold and clean end of input can all force files below the size
+target. Highly compressible data may never reach 32 MiB before the memory
+threshold; increasing the file target does not bypass that threshold. `merge`
+and `rollup` use their own streaming writer and memory policies.
+
 Runtime logs distinguish mapper batches from successfully materialized Parquet
 output. On graceful shutdown or failure, remaining mapper data is not written
 and authority is not advanced. An interrupted transaction is reconciled before
@@ -1021,7 +1037,7 @@ Which files rollup reads, writes, and deletes:
 | `-o, --output` | same as source | Output path (local or S3 URI). In-place rollups require `--delete-source` |
 | `-p, --partition` | `date` | Target partition interval: `hour` or `date` |
 | `--compression` | `zstd` | Compression codec: zstd, snappy, gzip, none |
-| `--flush-bytes` | 128 MB | Max compressed bytes per output file |
+| `--flush-bytes` | 32 MiB | Target compressed bytes per output file |
 | `--delete-source` | `false` | Delete each source file once its target partition is written (required in place) |
 
 ### `merge` — Consolidate Part Files
@@ -1054,7 +1070,7 @@ The path must exist locally or be an explicit `s3://...` URI. Unlike `scan` and 
 | Flag | Default | Description |
 |---|---|---|
 | `--compression` | `zstd` | Compression codec: zstd, snappy, gzip, none |
-| `--flush-bytes` | 32 MB | Target compressed bytes per output file |
+| `--flush-bytes` | 32 MiB | Target compressed bytes per output file |
 | `--flush-rows` | disabled | Flush merged output after this many rows |
 | `--dry-run` | `false` | Show what would be merged without writing |
 
@@ -1494,7 +1510,8 @@ progress, chain-head agreement or crash/replay safety.
 | `firehose_parquet_buffer_estimated_bytes` | Gauge | — | Writer-owned buffers, estimated compressed bytes |
 | `firehose_parquet_buffer_rows` | Gauge | `table` | Writer-owned rows, including failed/unattempted tables |
 | `firehose_parquet_mapper_buffer_rows` | Gauge | — | Mapper-owned rows summed across tables |
-| `firehose_parquet_mapper_largest_table_estimated_bytes` | Gauge | — | Largest mapper table's estimated Arrow bytes, used by the byte flush trigger |
+| `firehose_parquet_mapper_largest_table_estimated_bytes` | Gauge | — | Largest mapper table estimate, used to predict compressed file size |
+| `firehose_parquet_mapper_buffer_estimated_bytes` | Gauge | — | Summed logical mapper estimates used by the memory trigger; not RSS |
 | `firehose_parquet_bootstrap_buffered_blocks` | Gauge | — | Raw blocks awaiting the initial timestamp anchor |
 | `firehose_parquet_bootstrap_buffered_bytes` | Gauge | — | Raw protobuf bytes awaiting that anchor |
 | `firehose_parquet_cursor_saves_total` | Counter | — | Cursor persistence count |

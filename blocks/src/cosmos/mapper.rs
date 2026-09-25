@@ -258,7 +258,7 @@ impl BlockMapper for CosmosBlockMapper {
             + self.messages.canonical.len()
     }
 
-    fn largest_table(&mut self) -> (&str, usize) {
+    fn table_estimates(&mut self) -> Vec<(&str, usize)> {
         let blocks = self.blocks.canonical.estimated_bytes()
             + est_i64(&self.blocks.height)
             + self.blocks.hash.estimated_bytes()
@@ -303,8 +303,7 @@ impl BlockMapper for CosmosBlockMapper {
             ("messages", messages),
         ]
         .into_iter()
-        .max_by_key(|&(_, s)| s)
-        .unwrap_or(("blocks", 0))
+        .collect()
     }
 
     fn table_names(&self) -> Vec<&str> {
