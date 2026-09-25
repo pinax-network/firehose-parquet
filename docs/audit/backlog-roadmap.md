@@ -1,0 +1,78 @@
+# Audit priorities and preserved work
+
+Snapshot reviewed on 2026-09-25. All 45 initially open issue bodies and both
+pending PRs were read. Priority reflects risks in the current implementation;
+issue labels and green CI alone are not acceptance evidence. See the
+[audit record index](README.md) for completed changes and their verified outcomes.
+
+## Delivery order
+
+1. Credential destination isolation (#562), compatible security updates (#567),
+   stable startup identity (#467), exact S3 cursor destinations (#470), and
+   fatal persistence failures (#469). These affect where credentials and durable
+   state go and whether ingestion can safely continue. PRs #566, #569 and #570
+   are merged; remaining records must be checked for their current lifecycle.
+2. Complete the Arrow/Parquet security migration (#568) and the separately
+   reproduced missing final checkpoint (#572). Dependency upgrades need old-file
+   compatibility and malformed-footer tests, not only a lockfile diff.
+3. Crash/replay publication (#468). The [design](468-crash-recovery-design.md)
+   explains why deterministic range filenames alone cannot prevent duplicates
+   when replay chooses different timer or size boundaries. Remove the unreachable,
+   broken writer split path (#477) and establish an all-table durable frontier.
+   Complete this before ingestion concurrency (#516).
+4. Recover the existing shutdown (#473) and probe (#485) work, then correct
+   partition-index completeness/non-monotonic timestamps (#486), malformed
+   identity/timestamp handling (#476), and health/metrics semantics (#475).
+5. Finish schema fixes with repeatable raw-to-output fixtures (#499). Prefer
+   correctness and measured performance improvements before broad refactors.
+
+## Existing PRs and remaining qualification
+
+| PR / issue | Review finding | Still needed before closure |
+|---|---|---|
+| #559 / #506, NEAR joins and events | No actionable code defect found at `8056a07`. Same-block `tx_hash` is intentional and documented. | Current-main validation and a raw/output live comparison for action/log counts, order, receipt lineage and exact event strings. The prior run was blocked by StreamingFast quota; that historical quota state is not proof of current availability. |
+| #560 / #504, Beacon coverage | No actionable code defect found at `26d96f9`. Existing live comparisons cover withdrawals, committee bits, graffiti and all three request types. | Current-main validation and targeted live BLS/slashing samples. Capella BLS changes are absent from the upstream protobuf; that limitation remains documented. |
+
+Both historical CI runs predate newer shared-encoding and durability changes.
+Do not close either issue merely because its PR is mergeable. Later validation
+must be recorded against the exact integrated head.
+
+## Previous agent work
+
+The original checkout contains no tracked edits; its untracked `.claude/`
+directory contains the prior worktrees. They were inspected and preserved.
+The previous agent process was still present during inspection; a stopped or
+idle UI does not prove a worktree can be safely reused.
+
+| Issue | Existing branch | Preserved state at inspection |
+|---|---|---|
+| #473 | `audit/473-shutdown-responsive` | Six modified files; no branch-only commit. |
+| #485 | `audit/485-partitions-probing` | One unpublished WIP commit plus two modified files. |
+| #513 | `audit/513-bigint-decimal-fast-path` | Modified Rust files and untracked decimal module; worktree locked to the prior agent. |
+| #522 | `audit/522-rollup-streaming` | Modified merge/journal code; the branch name does not establish a finished rollup implementation. |
+| #500, #508 | `audit/500-solana-reward-index`, `audit/508-antelope-db-ops` | Clean placeholders with no implementation changes found. |
+
+Copy or patch preserved work into a new isolated checkout before resuming it.
+Recheck its source state first, retain attribution, review the complete diff,
+and test against current main. Never reset or discard the previous worktree.
+
+## Remaining backlog groups
+
+- Schema/data correctness: #500-#503 (Solana), #505 (Beacon numeric/blob/null
+  semantics), #507-#511 (NEAR, Antelope, Tron, Cosmos and Bitcoin). #550 needs
+  explicit failed-effect semantics per chain and live fixtures. #498 documents
+  EVM indices and upstream-empty tables.
+- Operational contracts: #474 covers reversible stream options/output semantics;
+  #475 metrics/readiness and #476 malformed metadata remain independently
+  actionable. #477 should simplify writer behavior before the #468 journal.
+- Performance: recover #513 and #522 before starting duplicate work. Measure
+  #503/#565, #515, #520 and #524 on representative data. #516 depends on durable
+  commit ordering; #517-#519 and #523 need the specific throughput, memory,
+  file-size or lookup evidence requested by their issues.
+- Structure: #525-#530 follow correctness work. Scope must be refreshed against
+  main; for example, #530's original auth-duplication description is partly
+  obsolete after the shared provider-scoped auth helper.
+
+For each issue, document diagnosis, selected behavior, reproduction/regression,
+integration results, qualification limits and verified closure. Never equate a
+proposal, local WIP, benchmark assertion or unmerged PR with completion.
