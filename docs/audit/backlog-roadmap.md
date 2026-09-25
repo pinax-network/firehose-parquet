@@ -115,10 +115,12 @@ and test against current main. Never reset or discard the previous worktree.
   benchmarks and final integration checks. Each linked issue is closed; their
   audit records distinguish local measurements from live-provider claims.
 - Structure: #527 merged in PR #610; all AWS flags and retry/credential policies
-  were checked, and issue closure was verified. #525 is reviewed in PR #611 with
-  actual retained-block CLI parity; final CI/merge remains pending. #528 extracts
+  were checked, and issue closure was verified. #525 merged in PR #611 as
+  `ab0888e` after actual retained-block CLI/state parity and final CI; its issue
+  closure was verified. See [qualification](525-ingestion-decomposition.md). #528 extracts
   CLI operation modules with an unchanged-item proof. #526 shared chain helpers
-  and #529 maintenance consolidation remain open, scoped against current code. The remaining #530 auth/client duplication merged in PR #603
+  and #529 maintenance consolidation remain open, scoped against current code.
+  [#516 concurrency](516-concurrency-design.md) remains a proposal only. The remaining #530 auth/client duplication merged in PR #603
   as `39d49f6` after 1,010 tests, protocol/retry regressions, independent review
   and CI; issue closure was verified.
 

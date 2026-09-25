@@ -722,3 +722,11 @@ changes; use a new/rebuilt dataset or explicit reader-side schema reconciliation
 - CLI operations now live in focused configuration, path, inspection, validation
   and partition modules. Existing `firehose_parquet::cli::*` paths, flags and
   behavior are preserved. See [#528 validation](../audit/528-cli-modules.md).
+
+- Ingestion startup, ordered runtime state and flush-window handling now live in
+  binary-private modules. The durable Session still owns authority and mirror
+  commits; CLI behavior, source filtering, partition boundaries and output
+  formats remain unchanged. The no-op timestamp-buffer interface was removed,
+  while real genesis/lookahead buffering and restored sparse-chain anchors
+  remain. See [#525 qualification](../audit/525-ingestion-decomposition.md).
+
