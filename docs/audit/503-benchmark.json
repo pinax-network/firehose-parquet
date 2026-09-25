@@ -1,0 +1,180 @@
+{
+  "date": "2026-09-25",
+  "machine": "Apple M1 Max, macOS arm64",
+  "rustc": "1.93.1 (01f6ddf75 2026-02-11)",
+  "profile": "release, default workspace settings",
+  "baseline_commit": "4b0f72f439e3e72fb31775ab0749b378007ecc5c",
+  "warmup_iterations": 3,
+  "timed_scope": "protobuf decoding, mapping, Arrow flush, row/memory measurement, batch drop; excludes file reading, mapper construction, Parquet and network",
+  "notes": "Both modes include failed transactions and the vote table. Cargo compilation excluded using the shared process lock. First slot measured before then after; second slot after then before. No RSS/end-to-end throughput claim.",
+  "measurements": [
+    {
+      "arrow_allocated_bytes_last_flush": 5199580,
+      "encoding": "Base58",
+      "iterations_per_sample": 20,
+      "median_ms_per_block": 114.22346665,
+      "raw_bytes": 2946958,
+      "raw_sha256": "c68946ce74e66969b023d6397cff61f6cb8bd6508ff89148fb29130ea6a30dae",
+      "rows": 9765,
+      "samples_ms_per_block": [
+        114.60264585,
+        114.01422705,
+        114.47013335,
+        113.7804625,
+        114.2592,
+        114.22346665,
+        113.86566454999999
+      ],
+      "slot": 300000000,
+      "source_transactions": 2541,
+      "phase": "before"
+    },
+    {
+      "arrow_allocated_bytes_last_flush": 4706984,
+      "encoding": "Binary",
+      "iterations_per_sample": 20,
+      "median_ms_per_block": 7.654891649999999,
+      "raw_bytes": 2946958,
+      "raw_sha256": "c68946ce74e66969b023d6397cff61f6cb8bd6508ff89148fb29130ea6a30dae",
+      "rows": 9765,
+      "samples_ms_per_block": [
+        7.6189104,
+        7.8582437500000015,
+        7.9953333,
+        7.654891649999999,
+        7.6167625,
+        7.630987500000001,
+        7.840085400000001
+      ],
+      "slot": 300000000,
+      "source_transactions": 2541,
+      "phase": "before"
+    },
+    {
+      "arrow_allocated_bytes_last_flush": 5248392,
+      "encoding": "Base58",
+      "iterations_per_sample": 20,
+      "median_ms_per_block": 31.841593750000005,
+      "raw_bytes": 2946958,
+      "raw_sha256": "c68946ce74e66969b023d6397cff61f6cb8bd6508ff89148fb29130ea6a30dae",
+      "rows": 9765,
+      "samples_ms_per_block": [
+        31.681381250000005,
+        33.1543771,
+        32.73764165,
+        31.841593750000005,
+        31.7310875,
+        31.8129958,
+        31.8529604
+      ],
+      "slot": 300000000,
+      "source_transactions": 2541,
+      "phase": "after"
+    },
+    {
+      "arrow_allocated_bytes_last_flush": 4820240,
+      "encoding": "Binary",
+      "iterations_per_sample": 20,
+      "median_ms_per_block": 7.5250771,
+      "raw_bytes": 2946958,
+      "raw_sha256": "c68946ce74e66969b023d6397cff61f6cb8bd6508ff89148fb29130ea6a30dae",
+      "rows": 9765,
+      "samples_ms_per_block": [
+        7.5250771,
+        7.5208812499999995,
+        7.520295849999999,
+        7.5835125,
+        7.51850205,
+        7.7141333,
+        8.0692396
+      ],
+      "slot": 300000000,
+      "source_transactions": 2541,
+      "phase": "after"
+    },
+    {
+      "arrow_allocated_bytes_last_flush": 5967861,
+      "encoding": "Base58",
+      "iterations_per_sample": 20,
+      "median_ms_per_block": 149.0120875,
+      "raw_bytes": 2935030,
+      "raw_sha256": "552dbd676ea0d3a36be535d6318dc3c920de90ce7f875d48d037f538ba026154",
+      "rows": 9949,
+      "samples_ms_per_block": [
+        148.80158335000002,
+        148.263125,
+        149.4349771,
+        148.2091854,
+        149.0120875,
+        150.40181875000002,
+        149.25605625
+      ],
+      "slot": 300000001,
+      "source_transactions": 1907,
+      "phase": "before"
+    },
+    {
+      "arrow_allocated_bytes_last_flush": 5467816,
+      "encoding": "Binary",
+      "iterations_per_sample": 20,
+      "median_ms_per_block": 7.149529150000001,
+      "raw_bytes": 2935030,
+      "raw_sha256": "552dbd676ea0d3a36be535d6318dc3c920de90ce7f875d48d037f538ba026154",
+      "rows": 9949,
+      "samples_ms_per_block": [
+        7.072716649999999,
+        7.578224999999999,
+        7.149529150000001,
+        7.06796875,
+        7.15366875,
+        7.08564375,
+        7.172256250000001
+      ],
+      "slot": 300000001,
+      "source_transactions": 1907,
+      "phase": "before"
+    },
+    {
+      "arrow_allocated_bytes_last_flush": 6083828,
+      "encoding": "Base58",
+      "iterations_per_sample": 20,
+      "median_ms_per_block": 29.3115521,
+      "raw_bytes": 2935030,
+      "raw_sha256": "552dbd676ea0d3a36be535d6318dc3c920de90ce7f875d48d037f538ba026154",
+      "rows": 9949,
+      "samples_ms_per_block": [
+        29.20570835,
+        29.3115521,
+        29.307516649999997,
+        29.6134521,
+        29.5302292,
+        29.165668750000002,
+        29.747789600000004
+      ],
+      "slot": 300000001,
+      "source_transactions": 1907,
+      "phase": "after"
+    },
+    {
+      "arrow_allocated_bytes_last_flush": 5667565,
+      "encoding": "Binary",
+      "iterations_per_sample": 20,
+      "median_ms_per_block": 7.122152099999999,
+      "raw_bytes": 2935030,
+      "raw_sha256": "552dbd676ea0d3a36be535d6318dc3c920de90ce7f875d48d037f538ba026154",
+      "rows": 9949,
+      "samples_ms_per_block": [
+        7.151214550000001,
+        7.031860400000001,
+        7.1004666499999995,
+        7.1407583500000005,
+        7.15173125,
+        7.122152099999999,
+        7.05129585
+      ],
+      "slot": 300000001,
+      "source_transactions": 1907,
+      "phase": "after"
+    }
+  ]
+}
