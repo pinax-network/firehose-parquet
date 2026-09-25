@@ -25,23 +25,61 @@ pub fn validate_output_bucket(output: &str, configured_bucket: Option<&str>) -> 
     Ok(())
 }
 
-/// Build an S3 client for the bucket selected by a data or cursor URI.
-/// The configured default output bucket must not override an explicit cursor bucket.
-/// Transport retries are disabled: a lost PUT/DELETE response must stop the
-/// mutator rather than leave an earlier request racing a later checkpoint.
-pub fn build_s3_client(config: &Config, bucket: &str) -> Result<Arc<dyn ObjectStore>> {
-    Ok(Arc::new(build_s3_store(config, bucket)?))
+/// Resolved AWS settings shared by CLI commands and ingestion.
+/// This retains the historical `cli::AwsConfig` re-export.
+#[derive(Debug, Clone)]
+pub struct AwsConfig {
+    pub aws_access_key_id: Option<String>,
+    pub aws_secret_access_key: Option<String>,
+    pub aws_session_token: Option<String>,
+    pub aws_region: Option<String>,
+    pub aws_endpoint_url: Option<String>,
 }
 
-fn build_s3_store(config: &Config, bucket: &str) -> Result<AmazonS3> {
-    mutation_builder(config, bucket)?
+impl From<&Config> for AwsConfig {
+    fn from(config: &Config) -> Self {
+        Self {
+            aws_access_key_id: config.aws_access_key_id.clone(),
+            aws_secret_access_key: config.aws_secret_access_key.clone(),
+            aws_session_token: config.aws_session_token.clone(),
+            aws_region: config.aws_region.clone(),
+            aws_endpoint_url: config.aws_endpoint_url.clone(),
+        }
+    }
+}
+
+/// Retry behavior is selected by operation, independently of credentials.
+#[derive(Clone, Copy)]
+pub(crate) enum S3Operation {
+    ReadOnly,
+    Mutation,
+}
+
+/// Preserve the existing command-specific treatment of absent credentials.
+#[derive(Clone, Copy)]
+pub(crate) enum CredentialPolicy {
+    ProviderChain,
+    AnonymousWithoutAccessKey,
+}
+
+pub(crate) fn build_s3_store(
+    config: &AwsConfig,
+    bucket: &str,
+    operation: S3Operation,
+    credentials: CredentialPolicy,
+) -> Result<AmazonS3> {
+    store_builder(config, bucket, operation, credentials)?
         .build()
         .with_context(|| format!("building S3 client for bucket {bucket}"))
 }
 
-fn mutation_builder(config: &Config, bucket: &str) -> Result<AmazonS3Builder> {
-    let mut builder = without_mutation_retries(AmazonS3Builder::new().with_bucket_name(bucket));
-
+fn store_builder(
+    config: &AwsConfig,
+    bucket: &str,
+    operation: S3Operation,
+    credentials: CredentialPolicy,
+) -> Result<AmazonS3Builder> {
+    let mut builder = AmazonS3Builder::new().with_bucket_name(bucket);
     if let Some(ref key) = config.aws_access_key_id {
         builder = builder.with_access_key_id(key);
     }
@@ -57,8 +95,78 @@ fn mutation_builder(config: &Config, bucket: &str) -> Result<AmazonS3Builder> {
     if let Some(ref endpoint_url) = config.aws_endpoint_url {
         builder = configure_endpoint(builder, endpoint_url, bucket)?;
     }
-
+    if matches!(credentials, CredentialPolicy::AnonymousWithoutAccessKey)
+        && config.aws_access_key_id.is_none()
+    {
+        builder = builder.with_skip_signature(true);
+    }
+    if matches!(operation, S3Operation::Mutation) {
+        builder = without_mutation_retries(builder);
+    }
     Ok(builder)
+}
+
+/// Build a zero-retry client for the exact data or cursor bucket. The configured
+/// default output bucket never overrides the bucket selected by an explicit URI.
+pub fn build_s3_client(config: &Config, bucket: &str) -> Result<Arc<dyn ObjectStore>> {
+    Ok(Arc::new(build_s3_store(
+        &AwsConfig::from(config),
+        bucket,
+        S3Operation::Mutation,
+        CredentialPolicy::ProviderChain,
+    )?))
+}
+
+#[cfg(test)]
+fn mutation_builder(config: &Config, bucket: &str) -> Result<AmazonS3Builder> {
+    store_builder(
+        &AwsConfig::from(config),
+        bucket,
+        S3Operation::Mutation,
+        CredentialPolicy::ProviderChain,
+    )
+}
+
+impl AwsConfig {
+    /// Read-only access keeps default transport retries. Missing access keys
+    /// select anonymous requests, without metadata-provider credential lookup.
+    pub fn build_s3_client(&self, bucket: &str) -> Result<AmazonS3> {
+        build_s3_store(
+            self,
+            bucket,
+            S3Operation::ReadOnly,
+            CredentialPolicy::AnonymousWithoutAccessKey,
+        )
+    }
+
+    /// PUT/DELETE clients make one transport attempt. Callers retain ownership
+    /// when an error leaves a provider mutation uncertain.
+    pub fn build_s3_client_for_mutation(&self, bucket: &str) -> Result<AmazonS3> {
+        build_s3_store(
+            self,
+            bucket,
+            S3Operation::Mutation,
+            CredentialPolicy::AnonymousWithoutAccessKey,
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn s3_client_builder(
+        &self,
+        bucket: &str,
+        mutation: bool,
+    ) -> Result<AmazonS3Builder> {
+        store_builder(
+            self,
+            bucket,
+            if mutation {
+                S3Operation::Mutation
+            } else {
+                S3Operation::ReadOnly
+            },
+            CredentialPolicy::AnonymousWithoutAccessKey,
+        )
+    }
 }
 
 /// One transport attempt for each mutation. This also disables read retries on
@@ -122,7 +230,6 @@ pub fn endpoint_is_bucket_bound(endpoint: &str, bucket: &str) -> Result<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cli::AwsConfig;
     use object_store::signer::Signer;
 
     fn credentials(endpoint: &str) -> Config {
@@ -146,7 +253,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn both_s3_builders_sign_the_correct_bucket_and_key() {
+    async fn all_s3_access_modes_sign_the_correct_bucket_and_key() {
         for (endpoint, bucket, expected_host, expected_path) in [
             (
                 "https://data.s3.amazonaws.com",
@@ -211,7 +318,14 @@ mod tests {
         ] {
             let config = credentials(endpoint);
             let stores = [
-                build_s3_store(&config, bucket).unwrap(),
+                mutation_builder(&config, bucket).unwrap().build().unwrap(),
+                build_s3_store(
+                    &AwsConfig::from(&config),
+                    bucket,
+                    S3Operation::ReadOnly,
+                    CredentialPolicy::ProviderChain,
+                )
+                .unwrap(),
                 maintenance_config(&config).build_s3_client(bucket).unwrap(),
                 maintenance_config(&config)
                     .build_s3_client_for_mutation(bucket)
@@ -233,7 +347,7 @@ mod tests {
     }
 
     #[test]
-    fn both_s3_builders_reject_a_different_bucket_on_bound_endpoints() {
+    fn all_s3_access_modes_reject_a_different_bucket_on_bound_endpoints() {
         for endpoint in [
             "https://data.s3.amazonaws.com",
             "https://data.s3.us-east-1.amazonaws.com",
@@ -246,6 +360,13 @@ mod tests {
             let config = credentials(endpoint);
             for error in [
                 build_s3_client(&config, "state").unwrap_err(),
+                build_s3_store(
+                    &AwsConfig::from(&config),
+                    "state",
+                    S3Operation::ReadOnly,
+                    CredentialPolicy::ProviderChain,
+                )
+                .unwrap_err(),
                 maintenance_config(&config)
                     .build_s3_client("state")
                     .unwrap_err(),
