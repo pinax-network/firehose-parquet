@@ -673,7 +673,9 @@ Lookup order matches `scan`: explicit `s3://...` URIs win, existing local paths 
 
 ### `validate` — Check Partition Integrity
 
-Validates partitioned Parquet data for gaps, ordering errors, duplicates, parent hash mismatches, and timestamp reversals. Only partitions with issues are printed; valid ones are silently counted. Supports local paths, shorthand S3 keys/prefixes via `S3_BUCKET`, and explicit S3 URIs.
+Validates partitioned Parquet data for gaps, ordering errors, duplicates, parent hash mismatches, and timestamp reversals. Only partitions with issues or warnings are printed; clean ones are silently counted. Supports local paths, shorthand S3 keys/prefixes via `S3_BUCKET`, and explicit S3 URIs.
+
+Timestamp reversals (a block whose `timestamp` is earlier than the previous block that has one) are reported as warnings and do not change the exit code, because some chains (for example Bitcoin) allow non-monotonic block times. The `timestamp` column may use any Arrow timestamp unit or legacy `Int64` epoch seconds, and null timestamps are skipped.
 
 ```bash
 fireparq validate ./output/blocks/
