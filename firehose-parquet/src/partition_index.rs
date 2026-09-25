@@ -2,6 +2,13 @@
 //!
 //! Completeness belongs to an observed contiguous span. A calendar key may recur
 //! elsewhere or in future blocks; no index claims a globally complete date.
+mod builder;
+mod scan;
+pub use builder::{
+    append_verified_extension, ExactTimeIndexBuilder, RoutingWitness, SOLANA_GENESIS_TIMESTAMP,
+};
+pub use scan::{resolve_routing_parent, scan_time_index};
+
 use crate::cli::{PartitionBuildRow, PartitionBuildType};
 use crate::grpc::FinalizedAnchor;
 use anyhow::{ensure, Context, Result};

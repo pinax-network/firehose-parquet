@@ -241,3 +241,22 @@ keys in source order, incomplete edges, malformed flags/identity columns,
 conflicting metadata, and preservation of an existing target after rejection.
 Log: `/tmp/fireparq-486-model.log`. Runtime builders and strict command consumers
 are not yet wired to this model; this stage alone does not fix #486.
+
+## Stage 3 validation
+
+An exact time-span builder now validates every finalized canonical parent link,
+keeps backward/repeated timestamp runs, leaves clipped and current-head edges
+incomplete, and appends resumed coverage by source order. A separate bounded
+metadata stream reads the declared range and at most one right-edge witness;
+the latter request is capped at 65,536 slot numbers and a five-second caller
+budget. Parent context follows at most 64 verified parent identities within the
+same deadline. Solana missing times use the proven prior anchor; non-Solana
+missing-time bootstrap is explicitly refused for time indexes.
+
+Seven local gRPC tests and all thirteen model/builder tests passed on
+2026-09-25 (`/tmp/fireparq-486-scan.log`). Tests exercise exact request bounds,
+backward timestamps, actual parent RPCs and ancestry mismatch, a 64-parent budget,
+missing metadata, wrong finality/identity, omitted blocks, skipped slots,
+genesis zero, future-stop rejection before any RPC, and header/message/witness
+cancellation and deadlines. No live endpoint was contacted. These are validated
+building blocks; runtime command wiring and strict consumers remain in progress.

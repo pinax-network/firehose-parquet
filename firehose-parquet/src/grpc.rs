@@ -13,7 +13,9 @@ use tracing::{debug, info, warn};
 pub use tokio_util::sync::CancellationToken;
 
 mod finality;
+mod finalized_range;
 pub use finality::{FinalityTimeoutError, FinalizedAnchor};
+pub use finalized_range::FinalizedMetadataStream;
 
 /// Error returned when work stops because shutdown was requested
 /// (SIGINT/SIGTERM). Callers detect it with [`is_shutdown_error`].
