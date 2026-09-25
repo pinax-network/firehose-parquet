@@ -38,8 +38,40 @@ another has missing depth. It verifies every legacy/new position, resulting call
 order, nullable types, and complete batch equality after a flush reset, across
 binary, hex and base58 encodings with and without `fork_step`.
 
-The focused regression passed on 2026-09-25. Workspace integration, independent
-review and bounded existing-output comparison are recorded below when complete.
+On 2026-09-25, the focused regression passed. The combined implementation at
+`a636908` includes timestamp validation (#476, main `34cb6e2`) and probe
+reliability (#485, integration `4104a1b`). The workspace suite passed **780 tests,
+0 failed, 4 ignored**, plus all doc tests; the binary build, formatting and
+`git diff --check` passed. One ignored helper is invoked by the active atomic
+publication subprocess test. Independent review found no blocking issues.
+
+A fresh local-output run fetched exactly Solana slots `[300000000, 300000002)`
+with one block per flush, explicit Pinax provider credentials, and no ambient
+dotenv file. DuckDB comparison against the previously qualified #500 output
+found identical existing schemas and all **15,832 rows across eight tables**
+after projecting away the two new columns. Bidirectional `EXCEPT ALL` returned
+zero differences in every table. The 6,179 instruction rows comprise 3,462
+top-level and 2,717 inner instructions. All parent/null contracts and dense inner
+positions passed. The cursor ended at 300000001 with no remaining temporary
+parts. This comparison used the existing vote classification; #501 is separate.
+
+The #501 investigation independently fetched the same two raw protobuf blocks
+with two unary RPCs. Reusing those files, a separate Python protobuf decoder
+generated the expected top-level parents, inner positions and optional stack
+heights for the 916 transactions retained by the mapper. All 6,179 rows matched
+exactly. No additional raw fetch was needed for this check.
+
+| Slot | Raw protobuf bytes | SHA-256 |
+|---|---:|---|
+| 300000000 | 2,946,958 | `c68946ce74e66969b023d6397cff61f6cb8bd6508ff89148fb29130ea6a30dae` |
+| 300000001 | 2,935,030 | `552dbd676ea0d3a36be535d6318dc3c920de90ce7f875d48d037f538ba026154` |
+
+Local audit-host evidence is in `/tmp/fireparq-502-combined-tests.log`,
+`/tmp/fireparq-502-live-comparison.json` and
+`/tmp/fireparq-502-raw-comparison.json`. Raw bodies contain no Firehose cursors or
+credentials and are kept outside the repository. These two historical blocks
+qualify the tested mappings; malformed/reversed groups and encoding/fork-column
+variants are covered by the deterministic regression fixture.
 
 ## Compatibility limits
 
