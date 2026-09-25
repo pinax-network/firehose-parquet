@@ -7,5 +7,6 @@ pub(crate) mod eligibility;
 pub(crate) mod frontier;
 pub(crate) mod mirror;
 pub(crate) mod parts;
+pub(crate) mod session;
 pub(crate) mod state;
 pub(crate) mod store;

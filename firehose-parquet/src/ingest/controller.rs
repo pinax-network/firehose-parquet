@@ -50,6 +50,12 @@ pub struct CommittedFlush {
     pub rows: u64,
     pub bytes: u64,
     pub files: usize,
+    pub tables: Vec<CommittedTable>,
+}
+pub struct CommittedTable {
+    pub table: String,
+    pub rows: u64,
+    pub bytes: u64,
 }
 
 impl<'a, M: MirrorAction> TransactionController<'a, M> {
@@ -62,8 +68,18 @@ impl<'a, M: MirrorAction> TransactionController<'a, M> {
         mirror: M,
         expected: &StreamDescriptor,
     ) -> Result<Self> {
-        expected.validate()?;
         let session = parts.acquire_session()?;
+        Self::open_reserved(states, parts, mirror, expected, session).await
+    }
+
+    pub(super) async fn open_reserved(
+        states: TransactionStateStore<'a>,
+        parts: TransactionParts<'a>,
+        mirror: M,
+        expected: &StreamDescriptor,
+        session: crate::dataset_lock::session::SessionPermit<'a>,
+    ) -> Result<Self> {
+        expected.validate()?;
         let snapshot = states.load().await?;
         let mut authority = snapshot.authority.context(
             "protected ingestion authority is absent; eligible-root initialization is required",
@@ -174,7 +190,14 @@ impl<'a, M: MirrorAction> TransactionController<'a, M> {
             .tables
             .iter()
             .map(|(table, schema)| {
-                let directory = routing.partition_suffix(table, &metadata)?;
+                let rows = batches
+                    .get(table)
+                    .map_or(0, |batch| batch.num_rows() as u64);
+                let directory = if rows == 0 {
+                    table.clone()
+                } else {
+                    routing.partition_suffix(table, &metadata)?
+                };
                 let partition = if directory == *table {
                     String::new()
                 } else {
@@ -185,9 +208,7 @@ impl<'a, M: MirrorAction> TransactionController<'a, M> {
                 };
                 Ok(TablePlan {
                     table: table.clone(),
-                    rows: batches
-                        .get(table)
-                        .map_or(0, |batch| batch.num_rows() as u64),
+                    rows,
                     schema_sha256: schema.clone(),
                     partition,
                 })
@@ -276,6 +297,22 @@ impl<'a, M: MirrorAction> TransactionController<'a, M> {
                 .context("committed byte count overflow")
             })?,
             files: pending.payload.parts.len(),
+            tables: pending
+                .payload
+                .parts
+                .iter()
+                .map(|part| {
+                    Ok(CommittedTable {
+                        table: part.table.clone(),
+                        rows: part.row_count,
+                        bytes: part
+                            .receipt
+                            .as_ref()
+                            .context("committed receipt missing")?
+                            .byte_size,
+                    })
+                })
+                .collect::<Result<_>>()?,
         };
         self.failed = false;
         Ok(result)

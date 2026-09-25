@@ -12,7 +12,7 @@ use uuid::Uuid;
 /// Sync all directory links, including ancestors that another attempt may have
 /// created before failing to sync them. Merely finding an existing directory on
 /// retry does not establish that its link in its parent is durable.
-pub(super) fn create_dir_all_durable(dir: &Path) -> Result<()> {
+pub(crate) fn create_dir_all_durable(dir: &Path) -> Result<()> {
     let absolute = if dir.is_absolute() {
         dir.to_owned()
     } else {

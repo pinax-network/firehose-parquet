@@ -13,7 +13,13 @@ const MAX_BUFFERED_EVENTS: usize = 65_536;
 
 struct ReceivedEvent {
     identity: EventIdentity,
-    accepted_routing: Option<RoutingCheckpoint>,
+    accepted_routing: Option<AcceptedRouting>,
+}
+enum AcceptedRouting {
+    Explicit(RoutingCheckpoint),
+    /// Filtered envelopes inherit the preceding accepted routing when the gap
+    /// actually drains, not when an out-of-order filter decision was made.
+    Inherit,
 }
 
 pub struct AcceptedFrontier {
@@ -26,6 +32,20 @@ pub struct AcceptedFrontier {
     digest: Sha256,
 }
 impl AcceptedFrontier {
+    pub fn received(&self, ordinal: u64) -> Result<&EventIdentity> {
+        self.received
+            .get(&ordinal)
+            .map(|event| &event.identity)
+            .context("event was not received or was already accepted")
+    }
+    pub fn routing(&self) -> &RoutingCheckpoint {
+        &self.routing
+    }
+    pub fn next_accepted_ordinal(&self) -> Result<u64> {
+        self.accepted_ordinal
+            .checked_add(1)
+            .context("accepted event ordinal exhausted")
+    }
     pub fn resume(checkpoint: &Checkpoint) -> Self {
         Self {
             base_ordinal: checkpoint.ordinal,
@@ -73,11 +93,10 @@ impl AcceptedFrontier {
         if routing.policy != self.routing.policy {
             bail!("routing policy changed within an accepted stream");
         }
-        if routing
-            .anchor
-            .as_ref()
-            .is_some_and(|anchor| anchor.source_ordinal > self.assigned_ordinal)
-        {
+        if routing.anchor.as_ref().is_some_and(|anchor| {
+            anchor.source_ordinal > self.assigned_ordinal
+                && self.routing.anchor.as_ref() != Some(anchor)
+        }) {
             bail!("routing anchor refers to an event that was never received");
         }
         if let Some(anchor) = &routing.anchor {
@@ -115,7 +134,23 @@ impl AcceptedFrontier {
         if event.accepted_routing.is_some() {
             bail!("event acceptance cannot be repeated or replaced");
         }
-        event.accepted_routing = Some(routing);
+        event.accepted_routing = Some(AcceptedRouting::Explicit(routing));
+        self.drain()
+    }
+
+    pub fn accept_filtered(&mut self, ordinal: u64) -> Result<()> {
+        let event = self
+            .received
+            .get_mut(&ordinal)
+            .context("filtered event was not received or was already accepted")?;
+        if event.accepted_routing.is_some() {
+            bail!("event acceptance cannot be repeated or replaced");
+        }
+        event.accepted_routing = Some(AcceptedRouting::Inherit);
+        self.drain()
+    }
+
+    fn drain(&mut self) -> Result<()> {
         while let Some(next) = self.accepted_ordinal.checked_add(1) {
             if !self
                 .received
@@ -125,7 +160,10 @@ impl AcceptedFrontier {
                 break;
             }
             let event = self.received.remove(&next).expect("accepted event present");
-            let routing = event.accepted_routing.expect("accepted routing present");
+            let routing = match event.accepted_routing.expect("accepted routing present") {
+                AcceptedRouting::Explicit(routing) => routing,
+                AcceptedRouting::Inherit => self.routing.clone(),
+            };
             let bytes = canonical_json(&serde_json::to_value((next, &event.identity, &routing))?)?;
             self.digest.update((bytes.len() as u64).to_be_bytes());
             self.digest.update(bytes);

@@ -425,6 +425,25 @@ fn needs_repair(authority: &AuthorityState, current: Option<&Envelope>) -> Resul
     Ok(true)
 }
 
+pub(super) fn resume_parameters(authority: &AuthorityState) -> Result<CursorState> {
+    authority.validate()?;
+    if authority.checkpoint.event.is_some() {
+        return expected_state(&Envelope::new(authority)?, &authority.descriptor);
+    }
+    let mut metadata = ParquetFileMetadata::new();
+    for (key, value) in expected_config(&authority.descriptor) {
+        metadata.add(key, value);
+    }
+    Ok(CursorState {
+        start_block: Some(authority.descriptor.origin_start),
+        extended: authority.descriptor.extended,
+        final_blocks_only: authority.descriptor.final_blocks_only,
+        include_failed_transactions: authority.descriptor.include_failed_transactions,
+        file_metadata: metadata,
+        ..Default::default()
+    })
+}
+
 fn expected_state(envelope: &Envelope, descriptor: &StreamDescriptor) -> Result<CursorState> {
     let event = envelope
         .checkpoint

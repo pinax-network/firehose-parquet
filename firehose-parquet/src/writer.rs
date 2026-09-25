@@ -17,6 +17,7 @@ use tracing::info;
 use uuid::Uuid;
 
 mod local;
+pub(crate) use local::create_dir_all_durable;
 pub mod protected;
 
 /// Key-value metadata to embed in every Parquet file's footer.
@@ -381,7 +382,7 @@ fn with_root_cause_context(context: impl Display, error: anyhow::Error) -> anyho
 
 /// Fixed compression ratio (compressed/uncompressed) used for diagnostic
 /// estimates of validated data retained after a failed table write.
-fn compression_ratio(compression: &Compression) -> f64 {
+pub(crate) fn compression_ratio(compression: &Compression) -> f64 {
     match compression {
         Compression::None => 0.50,   // Parquet encoding alone: ~2×
         Compression::Snappy => 0.25, // Parquet + Snappy: ~4×
