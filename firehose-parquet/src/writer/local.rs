@@ -36,10 +36,21 @@ pub(super) fn create_dir_all_durable(dir: &Path) -> Result<()> {
     Ok(())
 }
 
-fn sync_directory(path: &Path) -> Result<()> {
+pub(super) fn sync_directory(path: &Path) -> Result<()> {
     File::open(path)
         .and_then(|directory| directory.sync_all())
         .with_context(|| format!("syncing output directory {}", path.display()))
+}
+
+/// Publish an already complete inode without replacing an existing final name.
+/// The caller retains responsibility for temporary cleanup and directory sync.
+pub(super) fn publish_file_no_replace(temporary: &Path, final_path: &Path) -> Result<()> {
+    fs::hard_link(temporary, final_path).with_context(|| {
+        format!(
+            "publishing Parquet file without replacement {}",
+            final_path.display()
+        )
+    })
 }
 
 /// Success means both the complete file and its final directory entry are
@@ -93,12 +104,7 @@ pub(super) fn write_parquet(
         // Linking in the same directory atomically creates a name for this
         // complete inode and fails if *anything* already occupies the final
         // name. A check followed by rename would race and could overwrite it.
-        fs::hard_link(temp.path.as_ref().unwrap(), path).with_context(|| {
-            format!(
-                "publishing Parquet file without replacement {}",
-                path.display()
-            )
-        })?;
+        publish_file_no_replace(temp.path.as_ref().unwrap(), path)?;
 
         #[cfg(test)]
         tests::checkpoint(tests::Stage::TempRemoval, path)?;
