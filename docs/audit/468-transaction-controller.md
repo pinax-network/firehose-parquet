@@ -131,3 +131,12 @@ resolution is idempotent before and after missing directories are created.
 The combined private ingestion suite passed 60 tests with one intentionally
 ignored subprocess child fixture (invoked by its parent crash test). Runtime
 selection remains unavailable until caller and maintenance integration finish.
+
+Remote standalone-index eligibility now uses the already-owned object store with
+native async GET/stream reads under one 60-second deadline, including on a
+current-thread Tokio runtime. The strict v2 decoder is shared with the existing
+CLI reader. Initialization accepts at most 64 MiB compressed, 512 MiB of declared
+row-group bytes, and 1,000,000 declared/observed rows; larger indexes require a
+new empty destination instead of implicit adoption. A current-thread in-memory
+S3 regression verifies valid eligibility, malformed rejection and bounded slow
+GET behavior. No production S3 backend qualification is inferred from this test.

@@ -46,20 +46,18 @@ pub(crate) async fn require_initializable(
         }
     };
     if index {
-        let index_path = match &descriptor.output {
-            StorageIdentity::Local { canonical_root } => Path::new(canonical_root)
-                .join(PARTITIONS_INDEX_FILENAME)
-                .to_str()
-                .context("index path must be UTF-8")?
-                .to_owned(),
-            StorageIdentity::S3 { .. } => {
-                format!("{}/{PARTITIONS_INDEX_FILENAME}", path.trim_end_matches('/'))
+        // Decode coverage, rows and proofs from one snapshot. An incomplete
+        // final live span is valid here because no bounds are consumed.
+        let index = match &descriptor.output {
+            StorageIdentity::Local { canonical_root } => {
+                let index_path = Path::new(canonical_root).join(PARTITIONS_INDEX_FILENAME);
+                crate::cli::read_verified_partitions_index(index_path.to_str().context("index path must be UTF-8")?,Some(aws))
             }
-        };
-        // This reads coverage, rows and proofs from one snapshot. Incomplete
-        // final live spans are valid artifacts; no bounds are consumed here.
-        let index = crate::cli::read_verified_partitions_index(&index_path, Some(aws))
-            .context("existing standalone index is not eligible for protected initialization; rebuild or use an empty output root")?;
+            StorageIdentity::S3 { bucket, prefix, .. } => {
+                let store=ownership.remote(bucket).context("index bucket is not owned")?.object_store();
+                read_remote_index(store.as_ref(),prefix,std::time::Duration::from_secs(60)).await
+            }
+        }.context("existing standalone index is not eligible for protected initialization; rebuild or use an empty output root")?;
         ensure!(
             index
                 .spans
@@ -73,6 +71,44 @@ pub(crate) async fn require_initializable(
     mirror.require_absent_for_initialization().await?;
     ownership.revalidate_local_paths()?;
     Ok(())
+}
+
+async fn read_remote_index(
+    store: &dyn object_store::ObjectStore,
+    prefix: &str,
+    deadline: std::time::Duration,
+) -> Result<crate::partition_index::VerifiedPartitionIndex> {
+    const MAX_BYTES: usize = 64 * 1024 * 1024;
+    let key = if prefix.is_empty() {
+        PARTITIONS_INDEX_FILENAME.into()
+    } else {
+        format!("{prefix}/{PARTITIONS_INDEX_FILENAME}")
+    };
+    let read = async {
+        let response = store
+            .get(&object_store::path::Path::from(key))
+            .await
+            .map_err(|_| anyhow::anyhow!("reading standalone index failed"))?;
+        ensure!(
+            response.meta.size <= MAX_BYTES as u64,
+            "standalone index exceeds protected initialization compressed-size limit"
+        );
+        let mut stream = response.into_stream();
+        let mut data = Vec::new();
+        while let Some(chunk) = stream.next().await {
+            let chunk =
+                chunk.map_err(|_| anyhow::anyhow!("reading standalone index bytes failed"))?;
+            ensure!(
+                chunk.len() <= MAX_BYTES.saturating_sub(data.len()),
+                "standalone index exceeds protected initialization compressed-size limit"
+            );
+            data.extend_from_slice(&chunk);
+        }
+        crate::cli::read_verified_partitions_index_bytes(bytes::Bytes::from(data))
+    };
+    tokio::time::timeout(deadline, read)
+        .await
+        .map_err(|_| anyhow::anyhow!("standalone index read timed out"))?
 }
 
 fn reject_existing() -> anyhow::Error {
@@ -351,5 +387,65 @@ mod tests {
             .await
             .unwrap();
         assert!(remote_contents(&store, "").await.is_err());
+    }
+    #[tokio::test(flavor = "current_thread")]
+    async fn remote_index_eligibility_uses_native_owned_store_and_bounded_get() {
+        use object_store::ObjectStore;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(PARTITIONS_INDEX_FILENAME);
+        crate::cli::write_verified_partitions_index(
+            path.to_str().unwrap(),
+            &index("mainnet"),
+            Compression::Zstd,
+            None,
+            None,
+        )
+        .unwrap();
+        let store = std::sync::Arc::new(object_store::memory::InMemory::new());
+        store
+            .put(
+                &"chain/partitions.parquet".into(),
+                bytes::Bytes::from(std::fs::read(&path).unwrap()).into(),
+            )
+            .await
+            .unwrap();
+        let remote = crate::dataset_lock_s3::S3Ownership::acquire(
+            store.clone(),
+            "test",
+            vec!["chain".into()],
+        )
+        .await
+        .unwrap();
+        let owner = DatasetOwnership::from_remote_for_test("data", remote);
+        let mut descriptor = descriptor(RoutingPolicy::DirectV1);
+        descriptor.output = resolve_output_identity("s3://data/chain", &aws()).unwrap();
+        let mirror = ProtectedMirror::new(&owner, &MirrorBinding::Disabled, None).unwrap();
+        require_initializable(&descriptor, &owner, &aws(), &mirror)
+            .await
+            .unwrap();
+        let slow = object_store::throttle::ThrottledStore::new(
+            store.clone() as std::sync::Arc<dyn object_store::ObjectStore>,
+            object_store::throttle::ThrottleConfig {
+                wait_get_per_call: std::time::Duration::from_millis(50),
+                ..Default::default()
+            },
+        );
+        assert!(
+            read_remote_index(&slow, "chain", std::time::Duration::from_millis(1))
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("timed out")
+        );
+        store
+            .put(
+                &"chain/partitions.parquet".into(),
+                bytes::Bytes::from_static(b"invalid").into(),
+            )
+            .await
+            .unwrap();
+        assert!(require_initializable(&descriptor, &owner, &aws(), &mirror)
+            .await
+            .is_err());
     }
 }
