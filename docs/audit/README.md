@@ -91,3 +91,6 @@ Record the real test and live-data evidence, including unavailable qualification
 without credentials, private cursor values or generated datasets. Merge only
 after review and current integration checks pass, then verify issue closure and
 any external recovery condition, such as a dependency security rescan.
+
+- [#518 owned protobuf byte buffers](518-owned-protobuf-bytes.md): shared chain
+  decoding, compatibility boundary, all-chain equivalence and offline benchmarks.
