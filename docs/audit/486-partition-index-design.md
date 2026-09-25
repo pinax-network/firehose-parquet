@@ -225,3 +225,19 @@ response-budget and signed-range overflow; header/message deadlines and shutdown
 in either RPC; and unavailable/empty final streams. They assert the exact negative
 head request and exact final-only candidate request, including authentication.
 No live endpoint was contacted. Log: `/tmp/fireparq-486-finality.log`.
+
+## Stage 2 validation
+
+The v2 model and Parquet serialization preserve the five existing index columns
+and add explicit boundary flags, first-span identity, and the routing seed. The
+footer declares finalized coverage. Metadata, rows and proofs are read from one
+file/object snapshot. The verified reader refuses legacy files; the inspection
+reader remains available without inventing coverage. Writes validate coverage,
+identities, partition keys and footer consistency before touching the target.
+
+Eight model/round-trip/error tests, seven existing index-write tests and two
+existing index-read tests passed on 2026-09-25. These include repeated calendar
+keys in source order, incomplete edges, malformed flags/identity columns,
+conflicting metadata, and preservation of an existing target after rejection.
+Log: `/tmp/fireparq-486-model.log`. Runtime builders and strict command consumers
+are not yet wired to this model; this stage alone does not fix #486.

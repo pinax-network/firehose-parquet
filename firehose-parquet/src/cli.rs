@@ -1,5 +1,9 @@
 use crate::config::{Compression, Config, Partition};
 use crate::networks::KNOWN_NETWORK_NAMES;
+use crate::partition_index::{
+    PartitionCoverage, PartitionSpanProof, VerifiedPartitionIndex, VerifiedPartitionSpan,
+    INDEX_COVERAGE_METADATA,
+};
 use clap::builder::PossibleValuesParser;
 use clap::Args;
 use clap_complete::{generate, Shell};
@@ -2719,6 +2723,45 @@ fn read_keyed_partitions_build_rows(
     path: &str,
     aws: Option<&AwsConfig>,
 ) -> anyhow::Result<Vec<(u64, PartitionBuildRow)>> {
+    let mut rows = read_partition_index_snapshot(path, aws)?.rows;
+    sort_keyed_partition_rows(&mut rows);
+    Ok(rows)
+}
+
+struct PartitionIndexSnapshot {
+    rows: Vec<(u64, PartitionBuildRow)>,
+    coverage: Option<PartitionCoverage>,
+    proofs: Vec<PartitionSpanProof>,
+}
+
+/// Decode rows, coverage and boundary flags from the same file/object snapshot.
+pub fn read_verified_partitions_index(
+    path: &str,
+    aws: Option<&AwsConfig>,
+) -> anyhow::Result<VerifiedPartitionIndex> {
+    let snapshot = read_partition_index_snapshot(path, aws)?;
+    let coverage = snapshot.coverage.ok_or_else(|| anyhow::anyhow!(
+        "partition index {path} has no verified coverage/completeness metadata; rebuild legacy indexes before resolution or resume"))?;
+    anyhow::ensure!(
+        snapshot.rows.len() == snapshot.proofs.len(),
+        "partition index has missing span proofs"
+    );
+    let mut spans = snapshot
+        .rows
+        .into_iter()
+        .zip(snapshot.proofs)
+        .map(|((_, row), proof)| VerifiedPartitionSpan { row, proof })
+        .collect::<Vec<_>>();
+    spans.sort_by_key(|span| span.row.start_block);
+    let index = VerifiedPartitionIndex { coverage, spans };
+    index.validate()?;
+    Ok(index)
+}
+
+fn read_partition_index_snapshot(
+    path: &str,
+    aws: Option<&AwsConfig>,
+) -> anyhow::Result<PartitionIndexSnapshot> {
     let path = resolve_parquet_input_path_string(path);
     use arrow::array::{
         Array, Int32Array, Int64Array, LargeStringArray, StringArray, TimestampSecondArray,
@@ -2792,11 +2835,13 @@ fn read_keyed_partitions_build_rows(
         chain: Option<String>,
         partition_type: Option<String>,
         interval: Option<i64>,
+        coverage: Option<PartitionCoverage>,
     }
 
     fn collect_rows(
         batch: &arrow::record_batch::RecordBatch,
         rows: &mut Vec<(u64, PartitionBuildRow)>,
+        proofs: &mut Vec<PartitionSpanProof>,
         read_utf8_value: &impl Fn(&dyn Array, usize) -> anyhow::Result<Option<String>>,
         read_u64_value: &impl Fn(&dyn Array, usize) -> anyhow::Result<Option<u64>>,
         file_ctx: &PartitionsFileContext,
@@ -2860,6 +2905,9 @@ fn read_keyed_partitions_build_rows(
                     .flatten()
             });
 
+            if file_ctx.coverage.is_some() {
+                proofs.push(crate::partition_index::read_proof(batch, row_index)?);
+            }
             rows.push((
                 partition_raw,
                 PartitionBuildRow {
@@ -2880,6 +2928,8 @@ fn read_keyed_partitions_build_rows(
     }
 
     let mut rows = Vec::new();
+    let mut proofs = Vec::new();
+    let coverage;
     /// Extract canonical chain/type/interval from Parquet file-level metadata.
     fn extract_file_context(
         file_metadata: &parquet::file::metadata::FileMetaData,
@@ -2909,6 +2959,9 @@ fn read_keyed_partitions_build_rows(
             chain,
             partition_type,
             interval,
+            coverage: find(INDEX_COVERAGE_METADATA)
+                .map(|value| serde_json::from_str(&value))
+                .transpose()?,
         })
     }
 
@@ -2927,11 +2980,13 @@ fn read_keyed_partitions_build_rows(
         validate_partitions_schema(&schema)?;
         validate_partitions_metadata(builder.metadata().file_metadata())?;
         let file_ctx = extract_file_context(builder.metadata().file_metadata())?;
+        coverage = file_ctx.coverage.clone();
         let reader = builder.build()?;
         for batch in reader {
             collect_rows(
                 &batch?,
                 &mut rows,
+                &mut proofs,
                 &read_utf8_value,
                 &read_u64_value,
                 &file_ctx,
@@ -2945,11 +3000,13 @@ fn read_keyed_partitions_build_rows(
         validate_partitions_schema(&schema)?;
         validate_partitions_metadata(builder.metadata().file_metadata())?;
         let file_ctx = extract_file_context(builder.metadata().file_metadata())?;
+        coverage = file_ctx.coverage.clone();
         let reader = builder.build()?;
         for batch in reader {
             collect_rows(
                 &batch?,
                 &mut rows,
+                &mut proofs,
                 &read_utf8_value,
                 &read_u64_value,
                 &file_ctx,
@@ -2957,8 +3014,11 @@ fn read_keyed_partitions_build_rows(
         }
     }
 
-    sort_keyed_partition_rows(&mut rows);
-    Ok(rows)
+    Ok(PartitionIndexSnapshot {
+        rows,
+        coverage,
+        proofs,
+    })
 }
 
 pub fn write_partitions_index(
@@ -2976,7 +3036,7 @@ pub fn write_partitions_index_with_metadata(
     aws: Option<&AwsConfig>,
     file_metadata: Option<&crate::writer::ParquetFileMetadata>,
 ) -> anyhow::Result<()> {
-    write_partitions_index_impl(path, rows, compression, aws, file_metadata)
+    write_partitions_index_impl(path, rows, compression, aws, file_metadata, None)
 }
 
 /// Write partitions index.
@@ -2987,7 +3047,69 @@ pub fn write_partitions_index_strict(
     aws: Option<&AwsConfig>,
     file_metadata: Option<&crate::writer::ParquetFileMetadata>,
 ) -> anyhow::Result<()> {
-    write_partitions_index_impl(path, rows, compression, aws, file_metadata)
+    write_partitions_index_impl(path, rows, compression, aws, file_metadata, None)
+}
+
+/// Write a v2 snapshot only after coverage and every span have been validated.
+pub fn write_verified_partitions_index(
+    path: &str,
+    index: &VerifiedPartitionIndex,
+    compression: Compression,
+    aws: Option<&AwsConfig>,
+    file_metadata: Option<&crate::writer::ParquetFileMetadata>,
+) -> anyhow::Result<()> {
+    index.validate()?;
+    let mut metadata = file_metadata.cloned().unwrap_or_default();
+    let first = &index.spans[0].row;
+    for (key, value) in [
+        ("firehose-parquet.chain_name", first.chain.clone().unwrap()),
+        ("firehose-parquet.partition", first.partition_type.clone()),
+        (
+            "firehose-parquet.block_range_size",
+            if first.partition_type == "block_range" {
+                first.partition_interval_seconds.to_string()
+            } else {
+                "0".into()
+            },
+        ),
+    ] {
+        anyhow::ensure!(
+            metadata
+                .entries
+                .iter()
+                .filter(|(existing, _)| existing == key)
+                .all(|(_, existing)| existing == &value),
+            "partition metadata disagrees with verified rows for {key}"
+        );
+        if !metadata.entries.iter().any(|(existing, _)| existing == key) {
+            metadata.add(key, value);
+        }
+    }
+    metadata
+        .entries
+        .retain(|(key, _)| key != INDEX_COVERAGE_METADATA);
+    metadata.add(
+        INDEX_COVERAGE_METADATA,
+        serde_json::to_string(&index.coverage)?,
+    );
+    let rows = index
+        .spans
+        .iter()
+        .map(|span| span.row.clone())
+        .collect::<Vec<_>>();
+    let proofs = index
+        .spans
+        .iter()
+        .map(|span| span.proof.clone())
+        .collect::<Vec<_>>();
+    write_partitions_index_impl(
+        path,
+        &rows,
+        compression,
+        aws,
+        Some(&metadata),
+        Some(&proofs),
+    )
 }
 
 fn write_partitions_index_impl(
@@ -2996,6 +3118,7 @@ fn write_partitions_index_impl(
     compression: Compression,
     aws: Option<&AwsConfig>,
     file_metadata: Option<&crate::writer::ParquetFileMetadata>,
+    proofs: Option<&[PartitionSpanProof]>,
 ) -> anyhow::Result<()> {
     use arrow::array::{TimestampSecondArray, UInt64Array};
     use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
@@ -3009,6 +3132,13 @@ fn write_partitions_index_impl(
 
     if rows.is_empty() {
         anyhow::bail!("cannot write an empty partitions index");
+    }
+
+    if let Some(proofs) = proofs {
+        anyhow::ensure!(
+            proofs.len() == rows.len(),
+            "partition rows and proofs have different lengths"
+        );
     }
 
     // Build minimal metadata from rows when no external metadata is provided.
@@ -3036,7 +3166,7 @@ fn write_partitions_index_impl(
     let effective_metadata = file_metadata.or(auto_metadata.as_ref());
 
     // Lean schema: chain, type, interval live in file-level metadata only
-    let schema = Arc::new(Schema::new(vec![
+    let mut fields = vec![
         Field::new("partition", DataType::UInt64, false),
         Field::new("start_block", DataType::UInt64, false),
         Field::new("stop_block", DataType::UInt64, false),
@@ -3050,7 +3180,11 @@ fn write_partitions_index_impl(
             DataType::Timestamp(TimeUnit::Second, Some(Arc::from("UTC"))),
             true,
         ),
-    ]));
+    ];
+    if proofs.is_some() {
+        fields.extend(crate::partition_index::proof_fields());
+    }
+    let schema = Arc::new(Schema::new(fields));
 
     // Build partition column: UInt64 — epoch seconds for time-based, start block for block_range
     let partition_values = rows
@@ -3084,20 +3218,21 @@ fn write_partitions_index_impl(
         })
         .collect::<anyhow::Result<Vec<_>>>()?;
 
-    let batch = RecordBatch::try_new(
-        schema.clone(),
-        vec![
-            Arc::new(UInt64Array::from(partition_values)),
-            Arc::new(UInt64Array::from(
-                rows.iter().map(|row| row.start_block).collect::<Vec<_>>(),
-            )),
-            Arc::new(UInt64Array::from(
-                rows.iter().map(|row| row.stop_block).collect::<Vec<_>>(),
-            )),
-            Arc::new(TimestampSecondArray::from(start_time_values).with_timezone("UTC")),
-            Arc::new(TimestampSecondArray::from(end_time_values).with_timezone("UTC")),
-        ],
-    )?;
+    let mut columns: Vec<arrow::array::ArrayRef> = vec![
+        Arc::new(UInt64Array::from(partition_values)),
+        Arc::new(UInt64Array::from(
+            rows.iter().map(|row| row.start_block).collect::<Vec<_>>(),
+        )),
+        Arc::new(UInt64Array::from(
+            rows.iter().map(|row| row.stop_block).collect::<Vec<_>>(),
+        )),
+        Arc::new(TimestampSecondArray::from(start_time_values).with_timezone("UTC")),
+        Arc::new(TimestampSecondArray::from(end_time_values).with_timezone("UTC")),
+    ];
+    if let Some(proofs) = proofs {
+        columns.extend(crate::partition_index::proof_columns(proofs));
+    }
+    let batch = RecordBatch::try_new(schema.clone(), columns)?;
 
     let pq_compression = match compression {
         Compression::None => PqCompression::UNCOMPRESSED,
