@@ -71,10 +71,12 @@ is presented as reliable.
   the supported result unchanged, and the unordered-state counterexample is
   checked explicitly. Run `python3 docs/audit/474-check-query.py`.
 
-The focused parser/helper, real CLI and SQL checks passed. At integration
-`d4d9d2c` on main `b8d6834`, the locked workspace suite passed **866 tests** with
-**5 existing ignored**. Locked binary build, formatting, diff-whitespace and
-Zsh completion generation also passed. The inherited `transactions_processed`
+The focused parser/helper, real CLI and SQL checks passed. The initial integration
+`d4d9d2c` on main `b8d6834` passed 866 tests with 5 existing ignored. After
+merging the EVM decimal optimization from main `2a3724e`, integration `668c3d7`
+passed **873 tests** with **6 existing ignored**. Locked workspace build,
+formatting and diff-whitespace checks also passed; Zsh completion generation
+passed on the unchanged CLI before this integration. The inherited `transactions_processed`
 unused-assignment warning is unchanged. All Cargo operations used the shared
 whole-command lock/target. Final documentation-only changes do not alter runtime
 code or the tested query. No new public Firehose calls or
