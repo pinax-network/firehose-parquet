@@ -46,7 +46,8 @@ implementation `f0bb91c`, including writer simplification, responsive shutdown
 and atomic publication, passed **752 workspace tests**, zero failed and four
 ignored (three benchmark helpers and one child-process helper invoked by its
 parent tests). Build, formatting and whitespace checks passed. Subsequent
-integration changed only documentation and commit ancestry.
+integration through merged main `73257c2` changed only documentation and commit
+ancestry. Bash/Zsh/Fish completion generation also passed.
 
 A bounded live run used the explicit Pinax Solana endpoint with provider-scoped
 credentials and fresh local output for slots `[300000000, 300000002)`. Two runs
