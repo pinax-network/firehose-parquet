@@ -9,6 +9,7 @@ name = "generate-networks"
 path = "../scripts/generate_networks.rs"
 
 [dependencies]
+async-trait = "0.1"
 firehose-protos = { path = "../firehose-protos" }
 arrow.workspace = true
 arrow-schema = { version = "60", features = ["serde"] }
@@ -42,6 +43,5 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
 [dev-dependencies]
-async-trait = "0.1"
 serial_test = "3"
 tonic-prost = "0.14"

@@ -20,14 +20,18 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap};
 use std::fs::{self, File, OpenOptions};
-use std::io::{Read, Write};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
+mod verification;
+
 const SCHEMA_DOMAIN: &[u8] = b"fireparq-arrow-schema-json-v1\0";
 const FOOTER_PREFIX: &str = "fireparq.ingest.";
 const DATA_TIMEOUT: Duration = Duration::from_secs(60);
+const MAX_FOOTER_BYTES: u64 = 32 * 1024 * 1024;
+const ROW_GROUP_MEMORY_BYTES: usize = 32 * 1024 * 1024;
 
 /// Versioned schema digest, preserving ordered fields and recursively sorting
 /// metadata/object keys. A future Arrow serialization change requires a new
@@ -145,6 +149,8 @@ pub(crate) struct EncodedPart {
     plan: PlannedPart,
     receipt: PartReceipt,
     bytes: Bytes,
+    // Native S3 owns a private disk spool instead of compressed heap bytes.
+    spool: Option<File>,
 }
 
 impl EncodedPart {
@@ -256,6 +262,51 @@ impl PreparedFlush {
         &self.parts
     }
 
+    pub(crate) fn encode_spooled(&self, entry_index: u32) -> Result<EncodedPart> {
+        let plan = self
+            .parts
+            .iter()
+            .find(|part| part.entry_index == entry_index)
+            .context("unknown protected part index")?;
+        let batch = self
+            .batches
+            .get(&plan.table)
+            .context("prepared batch is missing")?;
+        let mut metadata = self.file_metadata.clone();
+        metadata.entries.extend(footer_identity(plan));
+        let mut properties =
+            ParquetTableWriter::new(PathBuf::new(), Partition::None, self.compression);
+        properties.set_file_metadata(metadata);
+        let mut spool = SpoolWriter::new(crate::s3::upload::MAX_PART_BYTES)?;
+        let mut parquet = ArrowWriter::try_new(
+            &mut spool,
+            batch.schema(),
+            Some(properties.writer_properties(batch)?),
+        )?;
+        // A slice shares the already-owned mapper allocation. The separate row
+        // group trigger bounds encoder accumulation without creating extra parts.
+        for offset in (0..batch.num_rows()).step_by(4096) {
+            parquet.write(&batch.slice(offset, (batch.num_rows() - offset).min(4096)))?;
+            if parquet.memory_size() >= ROW_GROUP_MEMORY_BYTES {
+                parquet.flush()?;
+            }
+        }
+        parquet.close()?;
+        let receipt = PartReceipt {
+            byte_size: spool.size,
+            sha256: hex::encode(spool.hash.finalize()),
+            row_count: plan.row_count,
+            schema_sha256: plan.schema_sha256.clone(),
+        };
+        verify_file(plan, &receipt, &spool.file)?;
+        Ok(EncodedPart {
+            plan: plan.clone(),
+            receipt,
+            bytes: Bytes::new(),
+            spool: Some(spool.file),
+        })
+    }
+
     pub(crate) fn encode(&self, entry_index: u32) -> Result<EncodedPart> {
         let plan = self
             .parts
@@ -288,6 +339,7 @@ impl PreparedFlush {
             plan: plan.clone(),
             receipt,
             bytes: Bytes::from(bytes),
+            spool: None,
         })
     }
 }
@@ -399,8 +451,14 @@ fn verify_bytes(plan: &PlannedPart, receipt: &PartReceipt, bytes: Bytes) -> Resu
     );
     let reader = ParquetRecordBatchReaderBuilder::try_new(bytes)
         .context("validating protected Parquet footer")?;
-    let footer = reader
-        .metadata()
+    verify_footer(plan, reader.metadata())
+}
+
+fn verify_footer(
+    plan: &PlannedPart,
+    metadata: &parquet::file::metadata::ParquetMetaData,
+) -> Result<()> {
+    let footer = metadata
         .file_metadata()
         .key_value_metadata()
         .context("protected Parquet identity is absent")?;
@@ -417,11 +475,11 @@ fn verify_bytes(plan: &PlannedPart, receipt: &PartReceipt, bytes: Bytes) -> Resu
         "protected Parquet Arrow schema hint is missing or duplicated"
     );
     let schema = parquet::arrow::parquet_to_arrow_schema(
-        reader.metadata().file_metadata().schema_descr(),
+        metadata.file_metadata().schema_descr(),
         Some(&arrow_hint),
     )?;
     ensure!(
-        u64::try_from(reader.metadata().file_metadata().num_rows())? == plan.row_count
+        u64::try_from(metadata.file_metadata().num_rows())? == plan.row_count
             && schema_sha256(&schema)? == plan.schema_sha256,
         "protected Parquet schema or row count differs from plan"
     );
@@ -433,6 +491,112 @@ fn verify_bytes(plan: &PlannedPart, receipt: &PartReceipt, bytes: Bytes) -> Resu
         );
     }
     Ok(())
+}
+
+/// The new footer bound applies to native S3 recovery as well as new encoding.
+/// Hashing and parsing use disk-backed reads, never a complete object Vec.
+fn verify_file(plan: &PlannedPart, receipt: &PartReceipt, source: &File) -> Result<()> {
+    verify_file_checked(
+        plan,
+        receipt,
+        source,
+        &std::sync::atomic::AtomicBool::new(false),
+    )
+}
+fn verify_file_checked(
+    plan: &PlannedPart,
+    receipt: &PartReceipt,
+    source: &File,
+    cancelled: &std::sync::atomic::AtomicBool,
+) -> Result<()> {
+    validate_receipt(plan, receipt)?;
+    let mut file = source.try_clone().context("borrowing protected spool")?;
+    ensure!(
+        file.metadata()?.is_file() && file.metadata()?.len() == receipt.byte_size,
+        "protected spool size differs from receipt"
+    );
+    ensure!(
+        receipt.byte_size >= 12,
+        "protected Parquet is shorter than its footer"
+    );
+    file.seek(SeekFrom::End(-8))?;
+    let mut tail = [0u8; 8];
+    file.read_exact(&mut tail)?;
+    ensure!(
+        &tail[4..] == b"PAR1",
+        "protected Parquet footer marker is invalid"
+    );
+    let footer_size = u64::from(u32::from_le_bytes(tail[..4].try_into().unwrap()));
+    ensure!(
+        footer_size <= MAX_FOOTER_BYTES && footer_size <= receipt.byte_size - 12,
+        "protected Parquet footer exceeds the 32 MiB limit or file size"
+    );
+    file.seek(SeekFrom::Start(0))?;
+    let mut hash = Sha256::new();
+    let mut read = 0u64;
+    let mut buffer = [0u8; crate::s3::upload::IO_BUFFER_BYTES];
+    loop {
+        ensure!(
+            !cancelled.load(std::sync::atomic::Ordering::SeqCst),
+            "protected file verification cancelled"
+        );
+        let count = file.read(&mut buffer)?;
+        if count == 0 {
+            break;
+        }
+        read = read
+            .checked_add(count as u64)
+            .context("protected read size overflow")?;
+        ensure!(
+            read <= receipt.byte_size,
+            "protected spool exceeds receipt size"
+        );
+        hash.update(&buffer[..count]);
+    }
+    ensure!(
+        read == receipt.byte_size && hex::encode(hash.finalize()) == receipt.sha256,
+        "protected part bytes differ from journal receipt"
+    );
+    ensure!(
+        !cancelled.load(std::sync::atomic::Ordering::SeqCst),
+        "protected file verification cancelled"
+    );
+    let reader = ParquetRecordBatchReaderBuilder::try_new(file)
+        .context("validating protected Parquet footer")?;
+    verify_footer(plan, reader.metadata())
+}
+
+struct SpoolWriter {
+    file: File,
+    size: u64,
+    limit: u64,
+    hash: Sha256,
+}
+impl SpoolWriter {
+    fn new(limit: u64) -> Result<Self> {
+        Ok(Self {
+            file: tempfile::tempfile().context("creating private S3 spool")?,
+            size: 0,
+            limit,
+            hash: Sha256::new(),
+        })
+    }
+}
+impl Write for SpoolWriter {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        if (bytes.len() as u64) > self.limit.saturating_sub(self.size) {
+            return Err(std::io::Error::other(
+                "native S3 part exceeds the single-PUT size limit",
+            ));
+        }
+        let written = self.file.write(bytes)?;
+        self.size += written as u64;
+        self.hash.update(&bytes[..written]);
+        Ok(written)
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.file.flush()
+    }
 }
 
 fn validate_receipt(plan: &PlannedPart, receipt: &PartReceipt) -> Result<()> {
@@ -631,6 +795,13 @@ impl<'a> S3PartStore<'a> {
     /// version and footer before the attempt is resolved. Any error/cancellation
     /// permanently retains Owned; only provider-quiescent recovery can retry.
     pub(crate) async fn publish(&self, encoded: &EncodedPart) -> Result<()> {
+        if let Some(native) = self.ownership.native_upload() {
+            return self.publish_native(native, encoded).await;
+        }
+        ensure!(
+            encoded.spool.is_none(),
+            "spooled part requires its native upload capability"
+        );
         let _mutation = self.ownership.lock_control_mutation().await;
         ensure!(
             !self.ownership.is_mutation_uncertain(),
@@ -686,12 +857,162 @@ impl<'a> S3PartStore<'a> {
     ) -> Result<PartPresence> {
         let _mutation = self.ownership.lock_control_mutation().await;
         validate_receipt(plan, receipt)?;
+        if self.ownership.native_upload().is_some() {
+            return self.verify_native(plan, receipt, None).await;
+        }
         let Some((bytes, _)) = self.read(&self.key(plan)?, receipt).await? else {
             return Ok(PartPresence::Missing);
         };
         verify_bytes(plan, receipt, bytes)?;
         Ok(PartPresence::Present)
     }
+    async fn publish_native(
+        &self,
+        native: &crate::s3::upload::NativeS3Upload,
+        encoded: &EncodedPart,
+    ) -> Result<()> {
+        let _mutation = self.ownership.lock_control_mutation().await;
+        ensure!(
+            !self.ownership.is_mutation_uncertain(),
+            "unresolved remote mutation requires quiescent recovery"
+        );
+        let spool = encoded
+            .spool
+            .as_ref()
+            .context("native S3 publication requires a disk spool")?;
+        tokio::time::timeout(
+            crate::s3::upload::DATA_TIMEOUT,
+            verification::verify(
+                encoded.plan.clone(),
+                encoded.receipt.clone(),
+                spool.try_clone()?,
+            ),
+        )
+        .await
+        .map_err(|_| anyhow::anyhow!("verifying native upload spool timed out"))??;
+        let key = self.key(&encoded.plan)?;
+        ensure!(
+            S3Ownership::status(self.ownership.object_store())
+                .await?
+                .as_ref()
+                == Some(self.ownership.record()),
+            "remote ownership changed before part publication"
+        );
+        let upload = native
+            .prepare(
+                &key,
+                spool.try_clone()?,
+                encoded.receipt.byte_size,
+                &self.cache_control,
+            )
+            .await?;
+        let mut attempt = MutationAttempt {
+            ownership: self.ownership,
+            resolved: false,
+        };
+        let version = tokio::time::timeout(crate::s3::upload::DATA_TIMEOUT, upload.send())
+            .await
+            .map_err(|_| anyhow::anyhow!("native part upload timed out; retain ownership"))??;
+        ensure!(
+            self.verify_native(&encoded.plan, &encoded.receipt, Some(version))
+                .await?
+                == PartPresence::Present,
+            "acknowledged protected part is absent"
+        );
+        attempt.resolved = true;
+        Ok(())
+    }
+
+    async fn verify_native(
+        &self,
+        plan: &PlannedPart,
+        receipt: &PartReceipt,
+        version: Option<UpdateVersion>,
+    ) -> Result<PartPresence> {
+        let key = self.key(plan)?;
+        let plan = plan.clone();
+        let receipt = receipt.clone();
+        tokio::time::timeout(crate::s3::upload::DATA_TIMEOUT, async {
+            let Some(file) = self.read_spooled(&key, &receipt, version).await? else {
+                return Ok(PartPresence::Missing);
+            };
+            verification::verify(plan, receipt, file).await?;
+            Ok(PartPresence::Present)
+        })
+        .await
+        .map_err(|_| anyhow::anyhow!("native protected part verification timed out"))?
+    }
+
+    async fn read_spooled(
+        &self,
+        key: &ObjectPath,
+        receipt: &PartReceipt,
+        expected: Option<UpdateVersion>,
+    ) -> Result<Option<File>> {
+        use tokio::io::AsyncWriteExt;
+        ensure!(
+            receipt.byte_size <= crate::s3::upload::MAX_PART_BYTES,
+            "native protected part exceeds the single-PUT size limit"
+        );
+        let options = object_store::GetOptions {
+            if_match: expected.as_ref().and_then(|version| version.e_tag.clone()),
+            version: expected
+                .as_ref()
+                .and_then(|version| version.version.clone()),
+            ..Default::default()
+        };
+        let response = match self.ownership.object_store().get_opts(key, options).await {
+            Ok(response) => response,
+            Err(object_store::Error::NotFound { .. }) => return Ok(None),
+            Err(_) => return Err(anyhow::anyhow!("reading native protected part failed")),
+        };
+        ensure!(
+            response.meta.location == *key
+                && response.meta.size == receipt.byte_size
+                && response.range == (0..receipt.byte_size),
+            "native protected part metadata differs from receipt"
+        );
+        let observed = UpdateVersion {
+            e_tag: response.meta.e_tag.clone(),
+            version: response.meta.version.clone(),
+        };
+        ensure!(
+            usable_version(&observed),
+            "native protected part has no usable version"
+        );
+        ensure!(
+            expected
+                .as_ref()
+                .is_none_or(|expected| *expected == observed),
+            "native protected part version changed during publication"
+        );
+        let mut file = tokio::fs::File::from_std(
+            tempfile::tempfile().context("creating private verification spool")?,
+        );
+        let mut stream = response.into_stream();
+        let mut size = 0u64;
+        while let Some(chunk) = stream.next().await {
+            let chunk =
+                chunk.map_err(|_| anyhow::anyhow!("reading native protected part body failed"))?;
+            ensure!(
+                chunk.len() as u64 <= receipt.byte_size.saturating_sub(size),
+                "native protected part exceeds receipt size"
+            );
+            file.write_all(&chunk)
+                .await
+                .context("writing private verification spool")?;
+            size += chunk.len() as u64;
+        }
+        ensure!(
+            size == receipt.byte_size,
+            "native protected part is shorter than receipt"
+        );
+        file.flush()
+            .await
+            .context("finishing private verification spool")?;
+        Ok(Some(file.into_std().await))
+    }
+
     async fn read(
         &self,
         key: &ObjectPath,

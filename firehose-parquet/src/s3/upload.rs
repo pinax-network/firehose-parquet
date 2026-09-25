@@ -41,24 +41,25 @@ impl NativeS3Upload {
                     .is_some_and(|s| !s.is_empty()),
             "native streamed ingestion requires explicit S3 credentials"
         );
-        let store = store_builder(
-            config,
-            bucket,
-            S3Operation::Mutation,
-            CredentialPolicy::ProviderChain,
-        )?
-        // Applies to streamed readback as well as the shared control store.
-        // Control operations keep their shorter outer deadlines.
-        .with_client_options(
-            object_store::ClientOptions::new()
-                .with_connect_timeout(CONNECT_TIMEOUT)
-                .with_timeout(DATA_TIMEOUT),
-        )
-        .build()
-        .map_err(|_| anyhow::anyhow!("building native ingestion S3 client failed"))?;
-        Self::from_store(store, DATA_TIMEOUT, false)
+        // Reject unsupported native transport before any persistent owner or
+        // canary is created. Ordinary maintenance clients retain their policy.
+        if let Some(endpoint) = &config.aws_endpoint_url {
+            let url = reqwest::Url::parse(endpoint)
+                .map_err(|_| anyhow::anyhow!("invalid native ingestion S3 endpoint"))?;
+            ensure!(
+                url.scheme() == "https" && url.host_str().is_some(),
+                "native streamed ingestion requires an HTTPS S3 endpoint"
+            );
+        }
+        Self::configured(config, bucket, DATA_TIMEOUT, false)
     }
-    fn from_store(store: AmazonS3, timeout: Duration, allow_http: bool) -> Result<Self> {
+
+    fn configured(
+        config: &AwsConfig,
+        bucket: &str,
+        timeout: Duration,
+        allow_http: bool,
+    ) -> Result<Self> {
         let http = Client::builder()
             .https_only(!allow_http)
             .redirect(reqwest::redirect::Policy::none())
@@ -66,16 +67,39 @@ impl NativeS3Upload {
             .retry(reqwest::retry::never())
             .connect_timeout(CONNECT_TIMEOUT)
             .timeout(timeout)
+            .http2_max_header_list_size(MAX_RESPONSE_HEADERS as u32)
             .no_gzip()
             .no_brotli()
             .no_deflate()
             .no_zstd()
             .build()
             .map_err(|_| anyhow::anyhow!("building native upload transport failed"))?;
+        let store = store_builder(
+            config,
+            bucket,
+            S3Operation::Mutation,
+            CredentialPolicy::ProviderChain,
+        )?
+        .with_client_options(
+            object_store::ClientOptions::new()
+                .with_allow_http(allow_http)
+                .with_connect_timeout(CONNECT_TIMEOUT)
+                .with_timeout(timeout),
+        )
+        // Validate singleton version headers before the SDK collapses them.
+        // The same no-retry HTTP transport serves data and control requests.
+        .with_http_connector(StrictConnector(http.clone()))
+        .build()
+        .map_err(|_| anyhow::anyhow!("building native ingestion S3 client failed"))?;
         Ok(Self {
             store: Arc::new(store),
             http,
         })
+    }
+    pub(crate) fn validate_cache_control(&self, cache_control: &str) -> Result<()> {
+        header::HeaderValue::from_str(cache_control)
+            .map_err(|_| anyhow::anyhow!("invalid S3 cache-control header"))?;
+        Ok(())
     }
     pub(crate) fn object_store(&self) -> Arc<dyn ObjectStore> {
         self.store.clone()
@@ -157,27 +181,8 @@ impl PreparedUpload {
             "native conditional upload returned HTTP {}; retain ownership",
             response.status().as_u16()
         );
-        let header_bytes = response
-            .headers()
-            .iter()
-            .try_fold(0usize, |total, (key, value)| {
-                total
-                    .checked_add(key.as_str().len())?
-                    .checked_add(value.len())
-            })
-            .context("native upload response headers overflow")?;
-        ensure!(
-            header_bytes <= MAX_RESPONSE_HEADERS,
-            "native upload response headers exceed limit"
-        );
-        let version = UpdateVersion {
-            e_tag: single_header(response.headers(), header::ETAG.as_str())?,
-            version: single_header(response.headers(), "x-amz-version-id")?,
-        };
-        ensure!(
-            usable_version(&version),
-            "native upload returned no usable version"
-        );
+        check_header_bound(response.headers())?;
+        let version = response_version(response.headers())?;
         let mut stream = response.bytes_stream();
         let mut count = 0usize;
         while let Some(chunk) = stream.next().await {
@@ -194,6 +199,88 @@ impl PreparedUpload {
         Ok(version)
     }
 }
+fn check_header_bound(headers: &header::HeaderMap) -> Result<()> {
+    let size = headers
+        .iter()
+        .try_fold(0usize, |total, (key, value)| {
+            total
+                .checked_add(key.as_str().len())?
+                .checked_add(value.len())
+        })
+        .context("native response headers overflow")?;
+    ensure!(
+        size <= MAX_RESPONSE_HEADERS,
+        "native response headers exceed limit"
+    );
+    Ok(())
+}
+fn response_version(headers: &header::HeaderMap) -> Result<UpdateVersion> {
+    let version = UpdateVersion {
+        e_tag: single_header(headers, header::ETAG.as_str())?,
+        version: single_header(headers, "x-amz-version-id")?,
+    };
+    ensure!(
+        usable_version(&version),
+        "native response has no usable version"
+    );
+    Ok(version)
+}
+
+#[derive(Clone)]
+struct StrictConnector(Client);
+impl std::fmt::Debug for StrictConnector {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("NativeS3Transport")
+    }
+}
+impl object_store::client::HttpConnector for StrictConnector {
+    fn connect(
+        &self,
+        _: &object_store::ClientOptions,
+    ) -> object_store::Result<object_store::client::HttpClient> {
+        Ok(object_store::client::HttpClient::new(self.clone()))
+    }
+}
+#[async_trait::async_trait]
+impl object_store::client::HttpService for StrictConnector {
+    async fn call(
+        &self,
+        request: object_store::client::HttpRequest,
+    ) -> std::result::Result<object_store::client::HttpResponse, object_store::client::HttpError>
+    {
+        use object_store::client::{HttpError, HttpErrorKind, HttpService};
+        // ListObjectsV2 is a bucket operation and has no object version. All
+        // object GET/HEAD/PUT responses still pass the exact singleton parser.
+        let listing = request.method() == Method::GET
+            && request
+                .uri()
+                .query()
+                .is_some_and(|query| query.split('&').any(|pair| pair == "list-type=2"));
+        let needs_identity =
+            !listing && matches!(*request.method(), Method::GET | Method::HEAD | Method::PUT);
+        let response = HttpService::call(&self.0, request).await.map_err(|_| {
+            HttpError::new(
+                HttpErrorKind::Unknown,
+                std::io::Error::other("native S3 transport failed"),
+            )
+        })?;
+        let validated = check_header_bound(response.headers()).and_then(|_| {
+            if response.status().is_success() && needs_identity {
+                response_version(response.headers()).map(|_| ())
+            } else {
+                Ok(())
+            }
+        });
+        validated.map_err(|_| {
+            HttpError::new(
+                HttpErrorKind::Decode,
+                std::io::Error::other("native S3 response headers are invalid"),
+            )
+        })?;
+        Ok(response)
+    }
+}
+
 fn single_header(headers: &header::HeaderMap, name: &str) -> Result<Option<String>> {
     let mut values = headers.get_all(name).iter();
     let result = values
@@ -210,3 +297,6 @@ fn single_header(headers: &header::HeaderMap, name: &str) -> Result<Option<Strin
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+pub(crate) mod fixture;

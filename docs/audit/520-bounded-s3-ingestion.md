@@ -61,3 +61,55 @@ may end earlier when credentials expire; this remains a safe operation failure.
 
 Spool/controller qualification and measured memory/scratch evidence follow in
 separate implementation commits before this work is ready for publication.
+
+## Stage 2: private spool and transaction publication
+
+`TransactionParts::encode` selects a file-backed `EncodedPart` only for the native
+capability. The controller retains its existing full preflight and Writing ->
+receipt -> publish -> verify -> Committed -> authority -> mirror ordering. Generic
+and local parts still use the previous encoding path. Native encoding writes one
+private, automatically removed spool with an incremental hash and checked size;
+4096-row slices share mapper arrays. The encoder flushes row groups at its separate
+32 MiB estimated-memory trigger. This is not a hard RSS limit: the current slice,
+large values, codec/dictionaries, footer and allocator overhead remain additional.
+
+Readback uses the same native client, explicit long data timeout, exact acknowledged
+ETag/version conditions and complete byte/size/hash/schema/row/footer verification.
+Its response streams to a second private file. Peak scratch may therefore include
+two complete encoded parts. No full encoded object is collected into a Vec in this
+native path. Footer parsing first checks the 32 MiB serialized-footer limit.
+
+Large file verification runs on one owned thread. Timeout/cancellation signals it
+between 64 KiB hash reads and joins before returning, including a bounded footer
+parse already in progress. A deadline starts cancellation; a blocked disk call or
+in-progress parser still must drain. There are no detached verification workers.
+
+The native transport now rejects non-HTTPS configured endpoints at construction,
+before persistent ownership. This is a deliberate compatibility restriction for
+native ingestion; the ordinary maintenance builders keep their existing policy.
+The shared transport validates singleton version headers before object_store can
+collapse them. GET/HEAD/PUT object responses require a usable identity; bucket
+ListObjectsV2 responses correctly do not. A valid ETag with version `null` is
+supported, but `null` without a usable ETag is not. Duplicate headers, list/wildcard
+ETags, control characters and unusable versions fail closed.
+
+HTTP/2 response headers have a 32 KiB transport limit. Reqwest 0.12 does not expose
+a separate HTTP/1 parser-cap override: the pinned hyper implementation has a finite
+417,792-byte parser buffer limit, followed by our 32 KiB semantic header check.
+Thus the semantic limit is not falsely presented as an HTTP/1 preallocation limit.
+Upload response bodies are separately capped at 8 KiB.
+
+Checkpoint validation: `cargo test -p firehose-parquet --locked -j4` passed **715
+tests, 9 ignored** (709 library + 3 generator + 3 compatibility). The real native
+adapter talks only to a stateful loopback provider. Tests establish persisted exact
+receipts before each data PUT, query signing, conditional no-overwrite with a known
+object and concurrent winner, pinned complete readback, normal authority/cursor
+advance, and read-only bucket listing. Eleven publication/readback faults preserve
+Writing, the unchanged authority/cursor, and Owned after exactly one data PUT:
+lost acknowledgement, duplicate ETag/version, wildcard/list ETag, null-only or
+control-character version, changed version, corrupt/truncated body and oversized
+headers. Worker cancellation is independently checked to finish the worker before
+its task returns. Native cache-control is validated before any Writing record.
+
+This checkpoint still does not enable the CLI switch or claim large-file RSS,
+scratch or slow-transfer qualification. Those are the next qualification stage.

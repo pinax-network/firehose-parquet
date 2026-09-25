@@ -118,17 +118,7 @@ impl Server {
             aws_region: Some("us-east-1".into()),
             aws_endpoint_url: Some(self.endpoint.clone()),
         };
-        let store = store_builder(
-            &config,
-            "bucket",
-            S3Operation::Mutation,
-            CredentialPolicy::ProviderChain,
-        )
-        .unwrap()
-        .with_allow_http(true)
-        .build()
-        .unwrap();
-        NativeS3Upload::from_store(store, timeout, true).unwrap()
+        NativeS3Upload::configured(&config, "bucket", timeout, true).unwrap()
     }
 }
 impl Drop for Server {
@@ -274,4 +264,93 @@ fn native_capability_refuses_missing_credentials_before_any_lookup() {
         aws_endpoint_url: None,
     };
     assert!(NativeS3Upload::new(&config, "fixture").is_err());
+}
+
+#[test]
+fn native_capability_refuses_http_before_any_owner_request() {
+    let config = AwsConfig {
+        aws_access_key_id: Some("fixture-key".into()),
+        aws_secret_access_key: Some("fixture-secret".into()),
+        aws_session_token: None,
+        aws_region: None,
+        aws_endpoint_url: Some("http://127.0.0.1:1".into()),
+    };
+    let error = NativeS3Upload::new(&config, "fixture").err().unwrap();
+    assert!(error.to_string().contains("requires an HTTPS"));
+}
+
+#[test]
+fn version_parser_retains_valid_etag_with_null_version_but_refuses_ambiguity() {
+    for (values, accepted) in [
+        (
+            vec![("etag", "\"fixture\""), ("x-amz-version-id", "null")],
+            true,
+        ),
+        (vec![("x-amz-version-id", "null")], false),
+        (vec![("etag", "*")], false),
+        (vec![("etag", "\"a\",\"b\"")], false),
+        (vec![("etag", "\"a\""), ("etag", "\"a\"")], false),
+        (
+            vec![
+                ("etag", "\"a\""),
+                ("x-amz-version-id", "v1"),
+                ("x-amz-version-id", "v1"),
+            ],
+            false,
+        ),
+        (
+            vec![("etag", "\"a\""), ("x-amz-version-id", "bad\tvalue")],
+            false,
+        ),
+    ] {
+        let mut headers = header::HeaderMap::new();
+        for (name, value) in values {
+            headers.append(name, header::HeaderValue::from_str(value).unwrap());
+        }
+        assert_eq!(response_version(&headers).is_ok(), accepted);
+    }
+}
+
+#[tokio::test]
+async fn conditional_native_put_keeps_existing_bytes_and_has_one_concurrent_winner() {
+    let server = fixture::Server::start().await;
+    let key = Path::from("known.parquet");
+    let (first, bytes) = spool();
+    let (second, _) = spool();
+    let one = server
+        .client
+        .prepare(&key, first, bytes.len() as u64, "")
+        .await
+        .unwrap();
+    let two = server
+        .client
+        .prepare(&key, second, bytes.len() as u64, "")
+        .await
+        .unwrap();
+    let (one, two) = tokio::join!(one.send(), two.send());
+    assert_ne!(one.is_ok(), two.is_ok());
+    let original = server.state.lock().unwrap().objects["/bucket/known.parquet"].clone();
+    let mut different = tempfile::tempfile().unwrap();
+    different.write_all(b"replacement").unwrap();
+    assert!(server
+        .client
+        .prepare(&key, different, 11, "")
+        .await
+        .unwrap()
+        .send()
+        .await
+        .is_err());
+    let state = server.state.lock().unwrap();
+    let after = &state.objects["/bucket/known.parquet"];
+    assert_eq!(after.bytes, bytes);
+    assert_eq!(after.etag, original.etag);
+    assert_eq!(after.version, original.version);
+    assert_eq!(
+        state.requests.iter().filter(|r| r.method == "PUT").count(),
+        3
+    );
+    assert!(state
+        .requests
+        .iter()
+        .all(|r| r.conditional && r.query_signed));
 }
