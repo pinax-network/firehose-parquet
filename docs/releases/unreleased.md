@@ -4,6 +4,19 @@ Changes merged since the last release. Fold this file into `docs/releases/vX.Y.Z
 
 ## Breaking changes
 
+### Solana vote filtering preserves administrative activity (#501)
+
+The vote-only table and `--without-votes` now apply only to conservative legacy,
+single-instruction votes with fully decoded recognized payloads. Withdraw,
+Authorize, vote-account creation, mixed instructions, unused Vote program keys,
+versioned transactions and unknown/malformed payloads keep their ordinary detail
+rows. The failed-transaction option still applies independently. Classification
+is structural, not a claim of transaction execution validity.
+
+Schemas are unchanged, but affected rows and verification roots change. Rebuild
+old ranges separately to recover activity that the previous account-key check
+omitted. See [the decision and validation record](../audit/501-solana-vote-classification.md).
+
 ### Solana instruction positions are explicit (#502)
 
 `instructions` adds nullable `UInt32` columns `parent_instruction_index` and

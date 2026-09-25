@@ -1,5 +1,6 @@
 use super::proto::solana;
 use super::schema;
+use super::vote::is_vote_transaction;
 use arrow::array::*;
 use arrow::datatypes::{Int32Type, Schema};
 use arrow::record_batch::RecordBatch;
@@ -50,19 +51,6 @@ fn estimated_dictionary_index_bytes(len: usize) -> usize {
     // dictionary columns, the shared string dictionary cardinality is fixed and
     // small, so counting the per-row indices is sufficient for that comparison.
     len * std::mem::size_of::<i32>()
-}
-
-/// Solana Vote program ID (`Vote111111111111111111111111111111111111111`).
-const VOTE_PROGRAM_ID: [u8; 32] = [
-    7, 97, 72, 29, 53, 116, 116, 187, 124, 77, 118, 36, 235, 211, 189, 179, 216, 53, 94, 115, 209,
-    16, 67, 252, 13, 163, 83, 128, 0, 0, 0, 0,
-];
-
-/// Returns `true` if the Vote program ID appears in the message's account keys.
-fn is_vote_transaction(msg: &solana::Message) -> bool {
-    msg.account_keys
-        .iter()
-        .any(|key| key.as_slice() == VOTE_PROGRAM_ID)
 }
 
 /// Append a single transaction to the given [`TransactionsBuilder`].
@@ -329,7 +317,7 @@ impl SolanaBlockMapper {
         };
 
         // Vote transactions go to a separate table (no messages/instructions)
-        if is_vote_transaction(msg) {
+        if is_vote_transaction(tx) {
             if let Some(ref mut vote_txs) = self.vote_transactions {
                 append_transaction(vote_txs, slot, tx_idx, tx, meta, identity, fork_step);
             }
@@ -1184,7 +1172,34 @@ impl AccountLookupsBuilder {
 
 #[cfg(test)]
 pub(crate) mod tests {
+    use super::super::vote::VOTE_PROGRAM_ID;
     use super::*;
+    use solana_vote_interface::{
+        instruction::VoteInstruction,
+        state::{TowerSync, Vote, VoteAuthorize, VoteStateUpdate},
+    };
+
+    fn vote_payloads() -> Vec<Vec<u8>> {
+        let vote = Vote {
+            slots: vec![98, 99],
+            ..Default::default()
+        };
+        let update = VoteStateUpdate::from(vec![(98, 2), (99, 1)]);
+        let tower = TowerSync::from(vec![(98, 2), (99, 1)]);
+        [
+            VoteInstruction::Vote(vote.clone()),
+            VoteInstruction::VoteSwitch(vote, Default::default()),
+            VoteInstruction::UpdateVoteState(update.clone()),
+            VoteInstruction::UpdateVoteStateSwitch(update.clone(), Default::default()),
+            VoteInstruction::CompactUpdateVoteState(update.clone()),
+            VoteInstruction::CompactUpdateVoteStateSwitch(update, Default::default()),
+            VoteInstruction::TowerSync(tower.clone()),
+            VoteInstruction::TowerSyncSwitch(tower, Default::default()),
+        ]
+        .into_iter()
+        .map(|vote| bincode::serialize(&vote).unwrap())
+        .collect()
+    }
 
     fn get_string_value(batch: &RecordBatch, name: &str, row: usize) -> String {
         let column = batch
@@ -1566,6 +1581,278 @@ pub(crate) mod tests {
         assert_eq!(parent_id.value(0), previous_blockhash.value(0));
     }
 
+    fn block_with_vote_payload(data: Vec<u8>) -> solana::Block {
+        let mut block = make_test_block(100);
+        let message = block.transactions[0]
+            .transaction
+            .as_mut()
+            .unwrap()
+            .message
+            .as_mut()
+            .unwrap();
+        message.versioned = false;
+        message.address_table_lookups.clear();
+        message.account_keys[1] = VOTE_PROGRAM_ID.to_vec();
+        message.instructions[0].data = data;
+        block
+    }
+
+    fn assert_vote_activity_retained(label: &str, block: &solana::Block) {
+        let confirmed = &block.transactions[0];
+        let message = confirmed
+            .transaction
+            .as_ref()
+            .unwrap()
+            .message
+            .as_ref()
+            .unwrap();
+        let meta = confirmed.meta.as_ref().unwrap();
+        for with_votes in [false, true] {
+            let mut mapper =
+                SolanaBlockMapper::new(with_votes, false, EncodeBytes::Binary, false, false);
+            mapper
+                .map_block(&block.encode_to_vec(), &BlockIdentity::default(), None)
+                .unwrap();
+            let batches = mapper.flush().unwrap();
+            for (table, count) in [
+                ("transactions", 1),
+                ("messages", 1),
+                ("instructions", message.instructions.len() + 1),
+                ("token_balances", 2),
+                ("rewards", 2),
+                ("account_lookups", message.address_table_lookups.len()),
+            ] {
+                assert_eq!(
+                    batches[table].num_rows(),
+                    count,
+                    "{label}: {table}, with_votes={with_votes}"
+                );
+            }
+            if with_votes {
+                assert_eq!(batches["vote_transactions"].num_rows(), 0, "{label}");
+            }
+            let instructions = &batches["instructions"];
+            let payloads = instructions
+                .column_by_name("data")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<BinaryArray>()
+                .unwrap();
+            for (index, instruction) in message.instructions.iter().enumerate() {
+                assert_eq!(payloads.value(index), instruction.data, "{label}");
+            }
+            let transactions = &batches["transactions"];
+            for (name, expected) in [
+                ("pre_balances", &meta.pre_balances),
+                ("post_balances", &meta.post_balances),
+            ] {
+                let balances = transactions
+                    .column_by_name(name)
+                    .unwrap()
+                    .as_any()
+                    .downcast_ref::<ListArray>()
+                    .unwrap()
+                    .value(0);
+                assert_eq!(
+                    balances
+                        .as_any()
+                        .downcast_ref::<UInt64Array>()
+                        .unwrap()
+                        .values(),
+                    expected,
+                    "{label}"
+                );
+            }
+            let rewards = &batches["rewards"];
+            let indices = rewards
+                .column_by_name("reward_index")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<UInt32Array>()
+                .unwrap();
+            assert_eq!(indices.values(), &[0, 1], "{label}");
+            assert_eq!(get_string_value(rewards, "source", 0), "transaction");
+            assert_eq!(get_string_value(rewards, "pubkey", 0), "TxRewardPubkey");
+            assert_eq!(
+                get_string_value(&batches["token_balances"], "amount", 0),
+                "1500000000"
+            );
+            assert_eq!(
+                get_string_value(&batches["token_balances"], "amount", 1),
+                "500000000"
+            );
+        }
+    }
+
+    #[test]
+    fn test_vote_program_administration_and_mentions_retain_all_activity() {
+        // Single-instruction administrative calls defeat a program-only simple-vote check.
+        for instruction in [
+            VoteInstruction::Withdraw(42),
+            VoteInstruction::Authorize(Default::default(), VoteAuthorize::Voter),
+            VoteInstruction::AuthorizeChecked(VoteAuthorize::Withdrawer),
+            VoteInstruction::UpdateValidatorIdentity,
+            VoteInstruction::UpdateCommission(5),
+            VoteInstruction::InitializeAccount(Default::default()),
+        ] {
+            let block = block_with_vote_payload(bincode::serialize(&instruction).unwrap());
+            assert_vote_activity_retained(&format!("{instruction:?}"), &block);
+        }
+        let mut mixed = block_with_vote_payload(vote_payloads().remove(0));
+        let message = mixed.transactions[0]
+            .transaction
+            .as_mut()
+            .unwrap()
+            .message
+            .as_mut()
+            .unwrap();
+        message.account_keys.push(vec![3; 32]);
+        message.instructions.push(solana::CompiledInstruction {
+            program_id_index: 2,
+            accounts: vec![0],
+            data: vec![42],
+        });
+        assert_vote_activity_retained("vote plus another instruction", &mixed);
+
+        let mut create = block_with_vote_payload(
+            bincode::serialize(&VoteInstruction::InitializeAccount(Default::default())).unwrap(),
+        );
+        let message = create.transactions[0]
+            .transaction
+            .as_mut()
+            .unwrap()
+            .message
+            .as_mut()
+            .unwrap();
+        message.account_keys.push(vec![0; 32]); // System-program create + Vote-program initialize.
+        message.instructions.insert(
+            0,
+            solana::CompiledInstruction {
+                program_id_index: 2,
+                accounts: vec![0],
+                data: vec![0; 4],
+            },
+        );
+        assert_vote_activity_retained("create vote account", &create);
+
+        let mut mention = make_test_block(100);
+        let message = mention.transactions[0]
+            .transaction
+            .as_mut()
+            .unwrap()
+            .message
+            .as_mut()
+            .unwrap();
+        message.account_keys.push(VOTE_PROGRAM_ID.to_vec());
+        assert_vote_activity_retained("unused Vote key with address lookup", &mention);
+        let mut versioned = make_test_block(100);
+        let message = versioned.transactions[0]
+            .transaction
+            .as_mut()
+            .unwrap()
+            .message
+            .as_mut()
+            .unwrap();
+        message.account_keys[1] = VOTE_PROGRAM_ID.to_vec();
+        message.instructions[0].data = vote_payloads().remove(0);
+        assert_vote_activity_retained("versioned transaction with address lookup", &versioned);
+    }
+
+    #[test]
+    fn test_vote_filter_retains_unknown_malformed_and_ambiguous_transactions() {
+        let valid = vote_payloads().remove(0);
+        let mut trailing = valid.clone();
+        trailing.push(0);
+        let mut huge_length = 2_u32.to_le_bytes().to_vec();
+        huge_length.extend(u64::MAX.to_le_bytes());
+        for (label, data) in [
+            ("empty", vec![]),
+            ("truncated", valid[..valid.len() - 1].to_vec()),
+            ("unknown variant", u32::MAX.to_le_bytes().to_vec()),
+            ("trailing byte", trailing),
+            ("oversized", vec![0; 1233]),
+            ("unbounded slot count", huge_length),
+            (
+                "empty vote",
+                bincode::serialize(&VoteInstruction::Vote(Vote::default())).unwrap(),
+            ),
+        ] {
+            assert_vote_activity_retained(label, &block_with_vote_payload(data));
+        }
+        for case in 0..9 {
+            let mut block = block_with_vote_payload(valid.clone());
+            let tx = block.transactions[0].transaction.as_mut().unwrap();
+            match case {
+                0 => tx.message.as_mut().unwrap().instructions[0].program_id_index = u32::MAX,
+                1 => tx.message.as_mut().unwrap().instructions[0].accounts = vec![255],
+                2 => tx.signatures.clear(),
+                3 => tx.signatures = vec![vec![1; 64]; 3],
+                4 => tx.signatures[0].pop().map(|_| ()).unwrap(),
+                5 => tx.message.as_mut().unwrap().header = None,
+                6 => {
+                    tx.message
+                        .as_mut()
+                        .unwrap()
+                        .header
+                        .as_mut()
+                        .unwrap()
+                        .num_required_signatures = 2
+                }
+                7 => tx.message.as_mut().unwrap().recent_blockhash.clear(),
+                8 => tx.message.as_mut().unwrap().account_keys[0].clear(),
+                _ => unreachable!(),
+            }
+            assert_vote_activity_retained(&format!("invalid envelope {case}"), &block);
+        }
+    }
+
+    #[test]
+    fn test_all_recognized_vote_variants_use_optional_vote_table() {
+        for (variant, payload) in vote_payloads().into_iter().enumerate() {
+            for signature_count in [1, 2] {
+                let mut block = block_with_vote_payload(payload.clone());
+                if signature_count == 2 {
+                    let tx = block.transactions[0].transaction.as_mut().unwrap();
+                    tx.signatures.push(vec![2; 64]);
+                    let message = tx.message.as_mut().unwrap();
+                    message.account_keys.insert(1, vec![3; 32]);
+                    message.instructions[0].program_id_index = 2;
+                    message.header.as_mut().unwrap().num_required_signatures = 2;
+                }
+                for with_votes in [false, true] {
+                    let mut mapper = SolanaBlockMapper::new(
+                        with_votes,
+                        false,
+                        EncodeBytes::Binary,
+                        false,
+                        false,
+                    );
+                    mapper
+                        .map_block(&block.encode_to_vec(), &BlockIdentity::default(), None)
+                        .unwrap();
+                    let batches = mapper.flush().unwrap();
+                    for table in [
+                        "transactions",
+                        "messages",
+                        "instructions",
+                        "token_balances",
+                        "account_lookups",
+                    ] {
+                        assert_eq!(
+                            batches[table].num_rows(),
+                            0,
+                            "variant={variant}, signatures={signature_count}, {table}"
+                        );
+                    }
+                    assert_eq!(batches["rewards"].num_rows(), 1); // Existing vote-detail policy keeps block rewards.
+                    if with_votes {
+                        assert_eq!(batches["vote_transactions"].num_rows(), 1);
+                    }
+                }
+            }
+        }
+    }
+
     #[test]
     fn test_vote_transactions_separated() {
         let mut block = make_test_block(100);
@@ -1584,7 +1871,7 @@ pub(crate) mod tests {
                     instructions: vec![solana::CompiledInstruction {
                         program_id_index: 1,
                         accounts: vec![0],
-                        data: vec![1, 2, 3],
+                        data: vote_payloads().remove(0),
                     }],
                     versioned: false,
                     address_table_lookups: vec![],
@@ -2221,7 +2508,7 @@ pub(crate) mod tests {
                     instructions: vec![solana::CompiledInstruction {
                         program_id_index: 1,
                         accounts: vec![0],
-                        data: vec![1, 2, 3],
+                        data: vote_payloads().remove(0),
                     }],
                     versioned: false,
                     address_table_lookups: vec![],
