@@ -1524,7 +1524,7 @@ Time-based partition directories (`year=`/`month=`/`day=`/`hour=`/…) and `date
 | Block type / profile | Block encoding | Transaction / hash encoding | Address / other binary field encoding | Notes |
 |---|---|---|---|---|
 | `evm` | `hex_0x` | `hex` | `hex` | `block_id` is `0x`-prefixed hex. Transaction hashes, log topics, and addresses are `0x`-prefixed hex. |
-| `bitcoin` | `hex_0x` | `hex` | `hex` | Block IDs are `0x`-prefixed hex. Transaction IDs and other binary fields are `0x`-prefixed hex. |
+| `bitcoin` | `hex_0x` | Upstream text | Upstream text | Canonical IDs use `0x`-prefixed hex. Native hashes/txids/scripts/witnesses remain the original protobuf strings, normally Bitcoin Core hex without `0x`; addresses keep their native text format. |
 | `solana` | `base58` | `base58` | `base58` | Block IDs and other binary identifiers stay base58, matching common Solana operator tooling. |
 | `near` | `base58` | `base58` | `base58` | Block IDs, transaction hashes, receipt IDs, and key-like binary fields stay base58. |
 | `antelope` | `hex_no_prefix` | `hex_no_prefix` | `hex_no_prefix` | Uses lowercase hex without `0x` for both block IDs and other binary fields. |
@@ -1532,6 +1532,44 @@ Time-based partition directories (`year=`/`month=`/`day=`/`hour=`/…) and `date
 | `tron` | `hex_no_prefix` | `hex_no_prefix` | `tron_base58` for addresses; `hex_no_prefix` for other binary fields | Address-like fields use Tron Base58Check. Canonical hashes, topics, and other non-address bytes remain lowercase hex without `0x`. |
 | `beacon` | `hex_0x` | `hex` | `hex` | Block roots and other binary identifiers are `0x`-prefixed hex. |
 | `tron-evm` (`evm` Tron-style profile) | `hex_no_prefix` | `hex_no_prefix` | `tron_base58` for addresses; `hex_no_prefix` for other binary fields | Same operator-facing contract as `tron`: address-like fields use Tron Base58Check, while canonical hashes/topics stay lowercase hex without `0x`. |
+
+### Bitcoin amounts, input joins and missing fields
+
+Use `outputs.value_sats` (`UInt64`) for exact sums. The original `value` column
+remains a `Float64` coin amount for compatibility. When the protobuf includes
+`Transaction.hex`, `value_sats` comes directly from its serialized integer
+outputs; output counts, indices and the decoded coin amounts must agree. Older
+payloads without raw transaction bytes use a strict conversion only when one
+integer base-unit value recreates the supplied double. Ambiguous/fractional,
+negative, non-finite or inconsistent amounts fail before any row of that block
+is appended. The mapper is shared with Litecoin, so it does not impose Bitcoin's
+21-million monetary bound; its unit scale is 100,000,000 per coin.
+
+```sql
+SELECT SUM(value_sats) AS total_sats
+FROM read_parquet('output/btc/outputs/**/*.parquet');
+```
+
+`inputs.tx_index` joins to `transactions.tx_index` within the same canonical
+`block_id`; add `input_index` for an input's position. Coinbase inputs have null
+`prev_txid`, `prev_vout` and script-signature columns. Ordinary inputs have null
+`coinbase`; a missing previous txid also keeps `prev_vout` null rather than
+inventing output zero. A real previous output zero remains zero. A missing
+script-signature message is null, while a present empty script remains `''`.
+Witnesses retain the protobuf list, including an empty list when none is supplied.
+
+`script_pubkey_address` prefers a nonempty modern `address`, then the first
+legacy `addresses` entry, and is null if neither is available. The legacy first
+entry is not a claim of exclusive ownership of a multi-address script. Missing
+script-public-key messages yield null script columns; present empty fields stay
+empty. Native protobuf strings are copied verbatim without adding prefixes or
+reversing display-order hashes. Encoding settings apply to canonical ID columns.
+
+These additions and nullable-field changes affect the Bitcoin table schemas.
+Use a new output dataset or rebuild the affected tables when upgrading; merging
+old and new files requires explicit schema reconciliation. Readers such as
+DuckDB may use `union_by_name=true` when intentionally comparing versions, with
+new columns null for older files.
 
 ## Environment Variables
 
