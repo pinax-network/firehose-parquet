@@ -135,3 +135,13 @@ retain their order. The callback and completion tail are unchanged apart from
 owned setup-string borrows. Independent review found no ordering change; all
 176 binary tests and the same 12 integration checks passed on merged main
 `955b8b2` (188 total). Runtime method/window extraction follows separately.
+
+Stage 3 introduces explicit `MapperState`, `FlushWindow`, `RunStats` and
+`IngestionRuntime` in `ingestion/runtime.rs`. The stream callback delegates to
+`observe`; lazy dry-run setup, routed-block mapping, progress and completion are
+separate methods. Shared flush preparation keeps preflush estimates and gauge
+reset timing; blocking regular/partition commits and async EOF commits share
+success-only physical receipt feedback. Only `IngestionSession` advances durable
+state. Outer orchestration keeps and releases ownership after runtime/session
+borrows end. The same 188 focused checks passed; current-main integration and
+cross-binary raw-fixture qualification follow before publication.
