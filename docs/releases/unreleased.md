@@ -80,7 +80,7 @@ What `merkle_v2` fixes:
 Migration:
 
 - Existing registries have no `merkle_version` column and are read as `merkle_v1`. `verify` reports their partitions as `mismatch` with `merkle version mismatch: registry=merkle_v1 runtime=merkle_v2; ...` and exits 1.
-- To rebuild, keep a copy of the old registry, then run `fireparq verify <path> --update-registry --no-fail-fast` against trusted data, and run `verify` again to confirm it passes. The full procedure is in `docs/verifiability-artifact-runbook.md` ("Migrating a legacy `merkle_v1` registry").
+- To rebuild, keep a copy of the old registry, then run `fireparq verify <path> --update-registry` against trusted data, and run `verify` again to confirm it passes. The full procedure is in `docs/verifiability-artifact-runbook.md` ("Migrating a legacy `merkle_v1` registry").
 - Report consumers that compare roots should compare `algorithm` and `merkle_version` too (`docs/verify-report-contract.md`).
 
 ### `rollup`: in-place runs need `--delete-source`, outputs have new names, and only time partitions are rolled up (#478)
@@ -129,13 +129,37 @@ How aliases are chosen, and how to refresh them, is described in `docs/network-r
 Now:
 
 - **The chain and table are inferred.** The chain comes from the `firehose-parquet.block_type` file metadata and the table from the directory layout (`<output>/<chain_name>/<table>/...`). `--chain` and `--table` are only needed for data without that information. An explicit value that contradicts the data is an error, and so is a verify path that spans several tables or networks.
-- **The registry lives in the network directory.** It is `<output>/<chain_name>/merkle_roots.parquet`, one per network and shared by its tables (rows are keyed by chain, table and partition). Published reports go to `<output>/<chain_name>/verify_runs/<run_id>/report.json`. The report gains `network` and `warnings`.
+- **The registry lives in the network directory.** It is `<output>/<chain_name>/merkle_roots.parquet`, one per network and shared by its tables (rows are keyed by network, chain, table and partition, #489). Published reports go to `<output>/<chain_name>/verify_runs/<run_id>/report.json`. The report gains `network` and `warnings`.
 - **Reserved artifacts are never scanned as data.** `cursor.parquet`, `partitions.parquet`, `merkle_roots.parquet` and `verify_runs/` are skipped. Paths are matched by component instead of by substring.
 
 Migration:
 
 - Scripts that passed `--chain evm --table blocks` for non-EVM or non-`blocks` data now fail with a conflict error. Drop the flags, or fix them.
-- `verify` warns while a registry exists at the old default location (`<output>/<chain_name>/evm/mainnet/merkle_roots.parquet` locally, `s3://<bucket>/evm/mainnet/merkle_roots.parquet` on S3). Keep a copy of it, run `fireparq verify <output>/<chain_name>/<table> --update-registry --no-fail-fast` for each table against trusted data, then delete the old file (locally the whole `<output>/<chain_name>/evm/` directory). The details are in `docs/verifiability-artifact-runbook.md` ("Moving a registry from the old default location"). An S3 registry at the old location may mix several networks' rows, so do not reuse it as a baseline.
+- `verify` warns while a registry exists at the old default location (`<output>/<chain_name>/evm/mainnet/merkle_roots.parquet` locally, `s3://<bucket>/evm/mainnet/merkle_roots.parquet` on S3). Keep a copy of it, run `fireparq verify <output>/<chain_name>/<table> --update-registry` for each table against trusted data, then delete the old file (locally the whole `<output>/<chain_name>/evm/` directory). The details are in `docs/verifiability-artifact-runbook.md` ("Moving a registry from the old default location"). An S3 registry at the old location may mix several networks' rows, so do not reuse it as a baseline.
+
+### `verify`: a failing run never changes the registry; `--update-registry` passes once it has written (#489)
+
+An interrupted or failing `verify` could record wrong canonical roots:
+
+- a fail-fast stop inside a partition recorded that partition's truncated root;
+- roots were recorded even when protocol checks failed;
+- the partition `build` was still writing got a root that the next run could no longer match;
+- two runs writing at once lost one run's rows;
+- local registry writes were not atomic;
+- two networks sharing one `--registry-path` overwrote each other's rows.
+
+Now:
+
+- **A failing run never writes.** The registry is written only when no protocol check failed, the scan was not cut short, and no root differs (or `--update-registry` was given). A partly read partition is never compared or recorded. The report's `warnings` say why a write was held back.
+- **`--update-registry` passes once it has written.** Replaced roots are reported with the new finding status `updated` (previous root in `expected_root`) and no longer count as mismatches. A rebuild runs to the end without `--no-fail-fast` and exits 0 once the registry is written. Previously it exited 1.
+- **Partitions still being written are `open`.** When `<chain_root>/cursor.parquet` has not reached its stop block (a live or interrupted build), the newest partition and any partition with rows beyond the cursor are reported as `open`, and are neither compared nor recorded. The report gains `summary.updated` and `summary.open_partitions`.
+- **Registry rows are keyed by network.** A new `network` column lets one custom registry serve several networks. Rows without a network (older registries) still apply to any network.
+- **Writes are safe under concurrency.** Local writes take a lock file (`merkle_roots.parquet.lock`) and replace the registry atomically (temporary file, fsync, rename). S3 writes use a conditional put on the ETag and retry after a concurrent update. A run fails instead of overwriting a row that another run changed to a different root.
+
+Migration:
+
+- Scripts that expected `--update-registry` to exit 1 should check the report's `updated` findings instead.
+- Runs that fail (a mismatch or a protocol failure) no longer fill missing roots. Fix the failure, or pass `--update-registry`, first.
 
 ### EVM: failed transactions are included by default, with their persistent state changes (#494)
 

@@ -695,7 +695,7 @@ Examples:
   # Resolve a shorthand S3 data path when no local match exists
   S3_BUCKET=my-bucket fireparq verify mainnet/blocks
 
-  # Verify S3 parquet data with an explicit registry (use one registry per network)
+  # Verify S3 parquet data with an explicit registry (rows are keyed by network)
   fireparq verify s3://bucket/mainnet/blocks \
     --registry-path s3://bucket/mainnet/merkle_roots.parquet
 
@@ -708,8 +708,9 @@ Examples:
   # Update mismatched registry roots (default behavior only fills missing roots)
   fireparq verify ./output/mainnet/blocks --update-registry
 
-  # Rebuild a registry written with an older Merkle version (e.g. legacy merkle_v1 roots)
-  fireparq verify ./output/mainnet/blocks --update-registry --no-fail-fast
+  # Rebuild a registry written with an older Merkle version (e.g. legacy merkle_v1 roots);
+  # replaced rows are reported as `updated` and the run exits 0 once the registry is written
+  fireparq verify ./output/mainnet/blocks --update-registry
 
 Lookup order for the data path:
   1. Explicit s3://bucket/... URIs are used as-is.
@@ -763,7 +764,7 @@ Lookup order for the data path:
         /// Explicit merkle roots registry path (local or s3://) [default: <chain_root>/merkle_roots.parquet]
         #[arg(long, help_heading = "Registry")]
         registry_path: Option<String>,
-        /// Overwrite mismatched roots (including roots from an older Merkle version) in the registry with computed values
+        /// Accept the current data: replace differing roots (including roots from an older Merkle version) with computed values; replaced rows are reported as `updated` and the run passes once the registry is written
         #[arg(long, default_value = "false", help_heading = "Registry")]
         update_registry: bool,
         /// AWS access key ID (for S3 paths)

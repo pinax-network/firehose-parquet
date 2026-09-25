@@ -22,7 +22,7 @@ This document defines the versioned JSON report contract emitted by `fireparq ve
 
 | Version | Change |
 |---------|--------|
-| `2.0.0` | Roots use the `merkle_v2` construction, so `computed_root` changes for identical data. Added `merkle_version`, `network` and `warnings`. `chain` and `table` are inferred from the dataset, and the registry and report paths moved under the network's chain root. |
+| `2.0.0` | Roots use the `merkle_v2` construction, so `computed_root` changes for identical data. Added `merkle_version`, `network`, `warnings`, the `updated` and `open` finding statuses, and the `summary.updated` / `summary.open_partitions` counters. `chain` and `table` are inferred from the dataset, and the registry and report paths moved under the network's chain root. |
 | `1.0.0` | Initial contract. Roots used the legacy `merkle_v1` construction. |
 
 ## Required Run Metadata
@@ -54,12 +54,26 @@ A root is defined by the data plus two fields:
 
 Roots are comparable only when both fields are equal. Future changes to row encoding or tree construction bump `merkle_version`, so consumers that compare roots must check it, not only `report_schema_version`.
 
-When a registry row was written with a different `algorithm` or `merkle_version`, the finding has `status: "mismatch"`, `expected_root` set to the registry value, and an `error` that starts with one or both of these reasons, joined by `; `:
+When a registry row was written with a different `algorithm` or `merkle_version`, the finding has `status: "mismatch"` (or `"updated"` when `--update-registry` replaced it), `expected_root` set to the registry value, and an `error` that starts with one or both of these reasons, joined by `; `:
 
 - `algorithm mismatch: registry=<registry algorithm> runtime=<algorithm>`
 - `merkle version mismatch: registry=<registry merkle_version> runtime=<merkle_version>; ...`
 
 Registries without a `merkle_version` column predate it and are read as `merkle_v1`.
+
+## Findings and Exit Code
+
+`findings[].status` is one of:
+
+| Status | Meaning | Counter |
+|--------|---------|---------|
+| `match` | Computed root equals the registry root | `summary.matches` |
+| `missing_expected` | No registry row; added when the run writes the registry (`summary.wrote_registry`) | `summary.missing_expected` |
+| `mismatch` | Registry root differs and was not replaced | `summary.mismatches` |
+| `updated` | Registry root differed and `--update-registry` replaced it; `expected_root` is the replaced root | `summary.updated` |
+| `open` | Partition may still receive rows from `fireparq build`; not compared or recorded, reason in `error` | `summary.open_partitions` |
+
+The run passes (`fireparq verify` exits 0) when `summary.mismatches` and `summary.protocol_failed` are both 0. `updated` and `open` findings do not fail a run. The registry is written only by a passing run; `warnings` explain a held-back write. See "Root Registry Update Semantics" in `docs/verifiability-artifact-runbook.md`.
 
 ## Artifact Location Contract
 

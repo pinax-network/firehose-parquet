@@ -142,9 +142,8 @@ Registries written before `merkle_version` existed have no `merkle_version` colu
 
 `verify` only computes `merkle_v2` roots. It does not recompute `merkle_v1` roots, because that construction cannot detect a duplicated trailing row. When a scanned partition's registry row has a different `merkle_version`:
 
-- the partition is reported as a `mismatch` with the error `merkle version mismatch: registry=merkle_v1 runtime=merkle_v2; ...`, and the run exits non-zero
-- without `--update-registry`, the registry is left unchanged
-- with `--update-registry`, the row is replaced by the computed `merkle_v2` root
+- without `--update-registry`, the partition is reported as a `mismatch` with the error `merkle version mismatch: registry=merkle_v1 runtime=merkle_v2; ...`, the run exits 1, and the registry is left unchanged
+- with `--update-registry`, the row is replaced by the computed `merkle_v2` root and the partition is reported as `updated` (same error text, previous root in `expected_root`)
 
 Rows for partitions the run did not scan are kept as they are, and are written back with an explicit `merkle_version = merkle_v1` label. The rebuild procedure is in the [artifact runbook](verifiability-artifact-runbook.md#migrating-a-legacy-merkle_v1-registry).
 
