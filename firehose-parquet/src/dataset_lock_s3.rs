@@ -280,7 +280,6 @@ impl S3Ownership {
     /// Shared by every state store borrowing this guard. Fixed control slots
     /// still require conditional tombstones and unique record incarnations;
     /// a local mutex cannot stop a delayed remote DELETE retry.
-    #[allow(dead_code)] // Consumed by the separately integrated transaction store.
     pub(crate) async fn lock_control_mutation(&self) -> tokio::sync::MutexGuard<'_, ()> {
         self.control_mutation.lock().await
     }
@@ -351,6 +350,7 @@ fn normalize_request(operation: &str, mut scopes: Vec<String>) -> Result<Vec<Str
     for scope in &mut scopes {
         if scope.len() > MAX_SCOPE_BYTES
             || scope.starts_with('/')
+            || scope.ends_with("//")
             || !scope
                 .bytes()
                 .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.' | b'/' | b'='))
@@ -365,6 +365,9 @@ fn normalize_request(operation: &str, mut scopes: Vec<String>) -> Result<Vec<Str
         {
             return Err(OwnershipError::InvalidRequest);
         }
+    }
+    if scopes.iter().map(String::len).sum::<usize>() > MAX_RECORD_BYTES / 2 {
+        return Err(OwnershipError::InvalidRequest);
     }
     scopes.sort();
     scopes.dedup();

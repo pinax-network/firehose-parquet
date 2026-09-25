@@ -230,10 +230,14 @@ async fn concurrent_create_and_released_cas_have_only_one_winner() {
     for round in 0..2 {
         fake.faults.lock().unwrap().owner_put_barrier =
             Some(Arc::new(tokio::sync::Barrier::new(2)));
-        let (first, second) = tokio::join!(
-            S3Ownership::acquire(store.clone(), "ingest", vec!["a".into()]),
-            S3Ownership::acquire(store.clone(), "merge", vec!["b".into()]),
-        );
+        let (first, second) = tokio::time::timeout(Duration::from_secs(5), async {
+            tokio::join!(
+                S3Ownership::acquire(store.clone(), "ingest", vec!["a".into()]),
+                S3Ownership::acquire(store.clone(), "merge", vec!["b".into()]),
+            )
+        })
+        .await
+        .expect("ownership race must finish promptly");
         assert_eq!(usize::from(first.is_ok()) + usize::from(second.is_ok()), 1);
         fake.faults.lock().unwrap().owner_put_barrier = None;
         let winner = first.or(second).unwrap();
@@ -321,9 +325,15 @@ async fn missing_version_on_release_retains_the_owned_record() {
     let guard = acquire(&store).await;
     let expected = guard.record().clone();
     fake.faults.lock().unwrap().hide_versions = true;
-    assert_eq!(guard.release().await.unwrap_err(), OwnershipError::MissingVersion);
+    assert_eq!(
+        guard.release().await.unwrap_err(),
+        OwnershipError::MissingVersion
+    );
     fake.faults.lock().unwrap().hide_versions = false;
-    assert_eq!(S3Ownership::status(&store).await.unwrap().unwrap(), expected);
+    assert_eq!(
+        S3Ownership::status(&store).await.unwrap().unwrap(),
+        expected
+    );
 }
 
 #[tokio::test]
@@ -598,6 +608,7 @@ fn bounded_canonical_requests_and_safe_versions() {
         "s3://bucket/key",
         "a?secret=x",
         "a//b",
+        "a///",
         "a/./b",
         "a\\b",
     ] {
@@ -609,6 +620,13 @@ fn bounded_canonical_requests_and_safe_versions() {
     assert!(normalize_request("secret=https://x", vec!["a".into()]).is_err());
     assert!(normalize_request("ingest", vec!["a".repeat(MAX_SCOPE_BYTES + 1)]).is_err());
     assert!(normalize_request("ingest", vec!["a".into(); MAX_SCOPES + 1]).is_err());
+    assert!(normalize_request(
+        "ingest",
+        (0..17)
+            .map(|index| format!("p{index}/{}", "x".repeat(1000)))
+            .collect()
+    )
+    .is_err());
     assert_eq!(
         normalize_request("ingest", vec!["".into()]).unwrap(),
         vec![""]
