@@ -8,12 +8,12 @@ A production-grade Rust toolkit that consumes [StreamingFast Firehose](https://f
 |---|---|---|
 | `evm` | `eth.firehose.pinax.network:443` | blocks, transactions, logs, calls, balance_changes, code_changes, storage_changes, nonce_changes, gas_changes, account_creations (`--without-extended` disables extra tables) |
 | `solana` | `solana.firehose.pinax.network:443` | blocks, transactions, messages, instructions, rewards, token_balances, account_lookups, vote_transactions (`--without-votes` disables `vote_transactions`) |
-| `bitcoin` | `btc.firehose.pinax.network:443` | blocks, transactions, inputs, outputs |
-| `beacon` | `beacon.firehose.pinax.network:443` | blocks, attestations, deposits, proposer_slashings, attester_slashings, voluntary_exits, execution_payload, blob_sidecars |
-| `tron` | `tron.firehose.pinax.network:443` | blocks, transactions, logs, internal_transactions |
-| `cosmos` | `cosmoshub.firehose.pinax.network:443` | blocks, transactions, events, messages |
+| `bitcoin` | `bitcoin.firehose.pinax.network:443` | blocks, transactions, inputs, outputs |
+| `beacon` | `eth-cl.firehose.pinax.network:443` | blocks, attestations, deposits, proposer_slashings, attester_slashings, voluntary_exits, execution_payload, blob_sidecars |
+| `tron` | `mainnet.tron.streamingfast.io:443` | blocks, transactions, logs, internal_transactions |
+| `cosmos` | `mainnet.injective.streamingfast.io:443` | blocks, transactions, events, messages |
 | `antelope` | `eos.firehose.pinax.network:443` | blocks, transactions, actions, db_ops |
-| `near` | `near.firehose.pinax.network:443` | blocks, chunks, transactions, receipts, state_changes |
+| `near` | `mainnet.near.streamingfast.io:443` | blocks, chunks, transactions, receipts, state_changes |
 
 > **Tip:** Use `--block-type auto` (the default) to auto-detect the chain from the Firehose stream's protobuf `type_url`.
 
@@ -157,10 +157,12 @@ Examples:
 
 - `mainnet` → `https://eth.firehose.pinax.network:443`
 - `solana-mainnet-beta` → `https://solana.firehose.pinax.network:443`
-- `tron` → `https://tron.firehose.pinax.network:443`
-- `tron-evm` → `https://tronevm.firehose.pinax.network:443`
+- `tron` → `https://mainnet.tron.streamingfast.io:443`
+- `tron-evm` → `https://mainnet-evm.tron.streamingfast.io:443`
 
-Provider hostnames do not always mirror the network name exactly. For example, `tron-evm` resolves to the provider hostname `tronevm.firehose.pinax.network`.
+Provider hostnames do not always mirror the network name exactly. For example, `matic` resolves to the provider hostname `polygon.firehose.pinax.network`. Run `fireparq build --help` to list every built-in name.
+
+Aliases use the Pinax endpoint that The Graph networks registry lists. `near-mainnet`, `near-testnet`, `tron`, and `tron-evm` use StreamingFast endpoints because Pinax no longer serves them; those need a credential StreamingFast accepts, such as a The Graph Market API token in `SUBSTREAMS_API_TOKEN`. See `docs/network-registry-integration.md` for the provider policy and the weekly endpoint check.
 
 Resolution precedence:
 
@@ -288,6 +290,26 @@ already written in the failed flush may be written again on that replay.
 
 Only a stream that ends cleanly (for example, by reaching `--stop-block`)
 flushes the remaining buffers and saves the final cursor.
+
+### Start and Stop Blocks
+
+- **Start above the last irreversible block.** With `--final-blocks-only`
+  (the default), Firehose serves a request whose start block is above the
+  current last irreversible block (LIB) from LIB+1. Without a resume cursor,
+  blocks below `--start-block` are skipped before mapping: the first one is
+  logged, and all of them are counted in
+  `firehose_parquet_blocks_skipped_below_start_total` and in the
+  `blocks_skipped_below_start` field of the final summary.
+- **Bounded runs** (`--stop-block` set; it is exclusive) exit 0 only once block
+  `stop_block - 1` was received. If the server ends the stream earlier, the run
+  resumes from the last cursor. If the resumed stream delivers nothing, the
+  server has no more blocks in the range: on chains with skipped slots or
+  heights (Solana, NEAR, Beacon) the run completes with a warning. On other
+  chains it writes the blocks it received, saves the cursor at the last one,
+  and exits non-zero, so a rerun resumes after them.
+- **Live runs** (no `--stop-block`) never end on their own: if the server or a
+  proxy closes the stream cleanly, the run reconnects from the last cursor with
+  the usual back-off.
 
 ## CLI Reference
 
@@ -782,6 +804,7 @@ Which files rollup reads, writes, and deletes:
 - With `--delete-source`, outputs are named like ingestion parts (`part-<run>-NNNNNN.parquet`), and each source file is deleted once its target partition is written. A re-run after new data arrives only rolls up the new files.
 - Without `--delete-source`, outputs are named `part-rollup-<run>-NNNNNN.parquet`. They are copies of source files that are kept, so a re-run replaces the `part-rollup-*` files it wrote earlier in each target partition it rolls up, and leaves other files there alone. Because the re-run rebuilds those partitions from the source files that exist at that point, don't delete source files by hand between runs; use `--delete-source` instead.
 - An in-place rollup (no `--output`) requires `--delete-source`. Keeping the sources next to their rolled-up copy would store every row twice under the same root.
+- Files are only combined when they have the same columns: the same names, types, nullability, and order. A target partition with mixed schemas, such as files from two tool versions or with `--without-extended` toggled, is left untouched: nothing is written or deleted for it. The other partitions are still rolled up, and `rollup` exits non-zero with a list of the skipped partitions.
 
 | Flag | Default | Description |
 |---|---|---|
@@ -795,7 +818,9 @@ Which files rollup reads, writes, and deletes:
 
 Consolidates multiple small part files within each partition directory into fewer, larger files. Unlike `rollup` (which changes partition granularity), `merge` keeps the same partition layout but reduces file count. Supports local paths, shorthand S3 keys/prefixes via `S3_BUCKET`, and explicit S3 URIs.
 
-`merge` processes one table at a time and, within each table, one partition at a time. All parts in each partition are read into memory, sorted by `block_num`, and written back as new files respecting `--flush-bytes` and `--flush-rows`. Original parts are deleted after successful merge.
+`merge` processes one table at a time and, within each table, one partition at a time. All parts in each partition are read into memory, sorted by `block_num`, and written back as new files respecting `--flush-bytes` and `--flush-rows`. Original parts are deleted after successful merge. Root artifacts (`cursor.parquet`, `partitions.parquet`, `merkle_roots.parquet`, and anything under `verify_runs/`) are skipped, so merging a network root is safe.
+
+Parts are only merged when every part in the partition has the same columns: the same names, types, nullability, and order. Merge checks each part's footer before writing anything. A partition with mixed schemas, such as files from two tool versions or with `--without-extended` toggled, is left untouched and listed in the summary, and `merge` exits non-zero after processing the other partitions. `--dry-run` reports these partitions too.
 
 ```bash
 # Merge small parts within each partition (default 32 MB target per file)
@@ -922,6 +947,7 @@ Enable the metrics server with `--metrics-port <PORT>` (env: `METRICS_PORT`). A 
 | `firehose_parquet_cursor_last_block_num` | Gauge | — | Block number from last saved cursor |
 | `firehose_parquet_errors_total` | Counter | `kind` | Errors by category |
 | `firehose_parquet_grpc_reconnects_total` | Counter | — | gRPC stream reconnections |
+| `firehose_parquet_blocks_skipped_below_start_total` | Counter | — | Blocks received below the effective start block and skipped |
 | `firehose_parquet` | Info | *(pipeline config)* | Pipeline metadata (chain, endpoint, version) |
 
 ```bash
