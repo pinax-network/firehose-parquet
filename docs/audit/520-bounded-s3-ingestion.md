@@ -179,5 +179,16 @@ complete object on its own disk. Private client scratch is gone at child exit.
 The test cap is 512 MiB of synthetic payload; the 5 GB limit is exercised through
 checked-size and over-limit validation, not by transferring a 5 GB fixture.
 
-Final current-main workspace/build/help validation will be recorded below before
-publication.
+## Final integrated validation
+
+At source head `4d214b40014baf166b53bf7fead74beb07d23555`, based on actual main
+`81f5b79` (including #525 and #528), the full workspace passed **1,082 tests,
+14 ignored**. The separate capture-example auth regression passed (one test,
+one subprocess helper ignored). Formatting, the `fireparq` build, top-level/build
+help, and Bash/Zsh/Fish completion generation all passed under the shared lock.
+The preserved final CLI SHA-256 is
+`a41f8e72e37fb2989898b373aa114c97132f04e9bd41e8ab909dfbeb0731e703`.
+The two ignored qualification helpers were run explicitly for the benchmark and
+retained EVM evidence above; remaining ignored tests retain their existing scopes.
+No production S3 requests were performed. This record is implementation/test
+evidence; GitHub PR merge and issue state must be verified separately.
