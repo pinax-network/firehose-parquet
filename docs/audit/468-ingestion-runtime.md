@@ -171,5 +171,7 @@ not a blanket production-provider safety claim.
   controller-produced parts were merged without changing rows/frontier; protected
   destructive operations were refused, copy rollup remained allowed, and lost or
   cancelled remote cleanup kept owner and journal after one attempt.
+- Combined core runtime and maintenance passed **636 tests** (630 core library,
+  three generator, three compatibility), with five intentional library ignores.
 - Combined workspace, real CLI restart/no-op/extension/mirror/failure tests and
   final current-main integration are still in progress. They remain merge gates.

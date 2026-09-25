@@ -209,7 +209,7 @@ Per-network env overrides normalize network names by uppercasing and converting 
 
 Removed networks are rejected during argument parsing, and startup fails early if the resolved endpoint is unavailable or unhealthy.
 
-Both `build` and `partitions build` require EndpointInfo with a nonempty chain name before resolving output or cursor paths. Transient Info failures get three attempts with bounded backoff; exhausted retries, authentication errors, or unsupported Info stop startup. `--network`, `--block-type`, and `--cursor-override` do not bypass this requirement. This prevents a temporary metadata failure from changing the output root or hiding the existing cursor. Older servers must expose the Info RPC. See [the implementation record](docs/audit/467-endpoint-info.md) for retry limits and validation.
+Both `build` and `partitions build` require EndpointInfo with a nonempty chain name before resolving output or cursor paths. Transient Info failures get three attempts with bounded backoff; exhausted retries, authentication errors, or unsupported Info stop startup. `--network`, `--block-type`, and `--cursor-override` do not bypass this requirement. This prevents a temporary metadata failure from changing the output root or hiding the existing cursor. Older servers must expose the Info RPC. Protected ingestion resolves its mapper before recovery; unknown custom chain metadata requires an explicit `--block-type`. See [the implementation record](docs/audit/467-endpoint-info.md) for retry limits and validation.
 
 ```bash
 # Built-in alias
@@ -1164,7 +1164,7 @@ For a failed or reverted transaction, `fireparq` writes:
 
 This follows the rule documented on `TransactionTrace.status` in `proto/ethereum.proto`. Rolled-back transfers and storage writes of failed transactions are not written. Successful transactions keep every state change, including those of calls that were reverted inside them. The `persisted` column tells them apart (see below).
 
-Resuming an EVM output whose `cursor.parquet` was written with failed transactions excluded (the default before this change) keeps excluding them, so one output does not mix both modes. `fireparq` logs a warning. Pass `--exclude-failed-transactions` to keep that and silence the warning. To switch semantics, rebuild into a fresh output root with an absent mirror; `--cursor-override` cannot change protected output.
+Resuming protected EVM authority that records failed transactions as excluded keeps excluding them, so one output does not mix both modes. Legacy cursor-only datasets need a new empty output root. `fireparq` logs a warning. Pass `--exclude-failed-transactions` to keep that and silence the warning. To switch semantics, rebuild into a fresh output root with an absent mirror; `--cursor-override` cannot change protected output.
 
 ### EVM: which call recorded a change, and whether it persisted
 

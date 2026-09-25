@@ -1,9 +1,9 @@
 # #468: protected writer preparation and individual publication
 
-This is an inactive transaction-controller prerequisite. No CLI, ingestion mode,
-resume decision, cursor behavior, transaction commit or recovery policy is enabled
-by this change. #468 remains outstanding for its complete accepted-prefix,
-all-table journal, recovery, compatibility and interruption qualification.
+This record qualified an initially inactive transaction-controller prerequisite.
+The later [runtime integration](468-ingestion-runtime.md) now supplies accepted
+frontiers, all-table journals, recovery and compatibility enforcement. Results
+below describe the prepared-writer boundary, not standalone end-to-end guarantees.
 
 ## Boundary and implementation
 
