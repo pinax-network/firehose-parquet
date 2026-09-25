@@ -3,6 +3,7 @@
 
 pub(crate) mod controller;
 pub(crate) mod frontier;
+pub(crate) mod mirror;
 pub(crate) mod parts;
 pub(crate) mod state;
 pub(crate) mod store;
