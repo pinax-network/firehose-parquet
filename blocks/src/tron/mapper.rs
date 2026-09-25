@@ -5,8 +5,8 @@ use arrow::datatypes::{Int32Type, Schema};
 use arrow::record_batch::RecordBatch;
 use firehose_parquet::encode::{BytesColumn, EncodeBytes};
 use firehose_parquet::traits::{
-    est_bool, est_i64, est_opt_str, est_str, est_u32, est_u64, BlockIdentity, BlockMapper,
-    CanonicalBuilder, PreparedIdentity,
+    est_bin, est_bool, est_i32, est_i64, est_opt_str, est_str, est_u32, est_u64, BlockIdentity,
+    BlockMapper, CanonicalBuilder, PreparedIdentity,
 };
 use prost::Message;
 use std::collections::HashMap;
@@ -73,6 +73,10 @@ pub struct TronBlockMapper {
     transactions: TransactionsBuilder,
     logs: LogsBuilder,
     internal_transactions: InternalTransactionsBuilder,
+    contracts: ContractsBuilder,
+    internal_call_values: InternalCallValuesBuilder,
+    contracts_schema: Schema,
+    internal_call_values_schema: Schema,
     blocks_schema: Schema,
     transactions_schema: Schema,
     logs_schema: Schema,
@@ -92,6 +96,13 @@ impl TronBlockMapper {
             transactions: TransactionsBuilder::new(include_fork_step, enc),
             logs: LogsBuilder::new(include_fork_step, enc),
             internal_transactions: InternalTransactionsBuilder::new(include_fork_step, enc),
+            contracts: ContractsBuilder::new(include_fork_step, enc),
+            internal_call_values: InternalCallValuesBuilder::new(include_fork_step, enc),
+            contracts_schema: schema::contracts_schema(include_fork_step, enc),
+            internal_call_values_schema: schema::internal_call_values_schema(
+                include_fork_step,
+                enc,
+            ),
             blocks_schema: schema::blocks_schema(include_fork_step, enc),
             transactions_schema: schema::transactions_schema(include_fork_step, enc),
             logs_schema: schema::logs_schema(include_fork_step, enc),
@@ -107,6 +118,7 @@ impl TronBlockMapper {
         block: &tron::Block,
         identity: &PreparedIdentity,
         fork_step: Option<&str>,
+        decoded: &[Vec<super::contracts::DecodedContract>],
     ) {
         let header = block.header.as_ref();
         let block_number = header.map_or(0, |h| h.number);
@@ -135,25 +147,39 @@ impl TronBlockMapper {
             .append_value(block.transactions.len() as u32);
         append_fork_step(&mut self.blocks.fork_step, fork_step);
 
-        for tx in &block.transactions {
-            // Skip failed transactions (result != true) unless flag is set
+        let mut block_log_index = 0_u64;
+        for (transaction_index, tx) in block.transactions.iter().enumerate() {
+            let first_log_index = block_log_index;
+            block_log_index += tx.info.as_ref().map_or(0, |info| info.log.len() as u64);
+            // Preserve original indices, including gaps from excluded transactions.
             if !self.include_failed_transactions && !tx.result {
                 continue;
             }
-            self.map_transaction(block_number, tx, identity, fork_step);
+            self.map_transaction(
+                block_number,
+                transaction_index as u32,
+                first_log_index,
+                tx,
+                &decoded[transaction_index],
+                identity,
+                fork_step,
+            );
         }
     }
 
     fn map_transaction(
         &mut self,
         block_number: u64,
+        transaction_index: u32,
+        first_log_index: u64,
         tx: &tron::Transaction,
+        decoded: &[super::contracts::DecodedContract],
         identity: &PreparedIdentity,
         fork_step: Option<&str>,
     ) {
         let info = tx.info.as_ref();
         let fee = info.map_or(0, |i| i.fee);
-        let contract_type = tx.contracts.first().map_or(0, |c| c.r#type);
+        let receipt = info.and_then(|info| info.receipt.as_ref());
 
         self.transactions.canonical.append(identity);
         self.transactions.block_number.append_value(block_number);
@@ -167,12 +193,109 @@ impl TronBlockMapper {
             .energy_penalty
             .append_value(tx.energy_penalty);
         self.transactions.fee.append_value(fee);
-        self.transactions
-            .contract_type
-            .append_value(contract_type_text(contract_type));
+        if let Some(contract) = tx.contracts.first() {
+            self.transactions
+                .contract_type
+                .append_value(contract_type_text(contract.r#type));
+        } else {
+            self.transactions.contract_type.append_null();
+        }
         self.transactions.expiration_ms.append_value(tx.expiration);
         self.transactions.tx_timestamp_ms.append_value(tx.timestamp);
+        self.transactions
+            .transaction_index
+            .append_value(transaction_index);
+        self.transactions
+            .receipt_energy_usage
+            .append_option(receipt.map(|r| r.energy_usage));
+        self.transactions
+            .receipt_energy_fee
+            .append_option(receipt.map(|r| r.energy_fee));
+        self.transactions
+            .receipt_origin_energy_usage
+            .append_option(receipt.map(|r| r.origin_energy_usage));
+        self.transactions
+            .receipt_energy_usage_total
+            .append_option(receipt.map(|r| r.energy_usage_total));
+        self.transactions
+            .receipt_net_usage
+            .append_option(receipt.map(|r| r.net_usage));
+        self.transactions
+            .receipt_net_fee
+            .append_option(receipt.map(|r| r.net_fee));
+        self.transactions
+            .receipt_energy_penalty_total
+            .append_option(receipt.map(|r| r.energy_penalty_total));
+        if let Some(receipt) = receipt {
+            self.transactions.receipt_result.append_value(
+                protocol::transaction::result::ContractResult::try_from(receipt.result)
+                    .map(|r| r.as_str_name())
+                    .unwrap_or("UNKNOWN"),
+            );
+        } else {
+            self.transactions.receipt_result.append_null();
+        }
+        if let Some(info) = info {
+            self.transactions
+                .contract_address
+                .append_value(&info.contract_address);
+            self.transactions
+                .res_message
+                .append_value(&info.res_message);
+        } else {
+            self.transactions.contract_address.append_null();
+            self.transactions.res_message.append_null();
+        }
         append_fork_step(&mut self.transactions.fork_step, fork_step);
+
+        for (contract_index, (contract, decoded)) in tx.contracts.iter().zip(decoded).enumerate() {
+            let row = &mut self.contracts;
+            row.canonical.append(identity);
+            row.transaction_index.append_value(transaction_index);
+            row.tx_hash.append_value(&tx.txid);
+            row.contract_index.append_value(contract_index as u32);
+            row.contract_type
+                .append_value(contract_type_text(contract.r#type));
+            row.contract_type_id.append_value(contract.r#type);
+            row.permission_id.append_value(contract.permission_id);
+            if let Some(parameter) = &contract.parameter {
+                row.parameter_type_url.append_value(&parameter.type_url);
+                row.parameter.append_value(&parameter.value);
+            } else {
+                row.parameter_type_url.append_null();
+                row.parameter.append_null();
+            }
+            if let Some(value) = &decoded.owner_address {
+                row.owner_address.append_value(value);
+            } else {
+                row.owner_address.append_null();
+            }
+            if let Some(value) = &decoded.to_address {
+                row.to_address.append_value(value);
+            } else {
+                row.to_address.append_null();
+            }
+            if let Some(value) = &decoded.asset_name {
+                row.asset_name.append_value(value);
+            } else {
+                row.asset_name.append_null();
+            }
+            if let Some(value) = &decoded.contract_address {
+                row.contract_address.append_value(value);
+            } else {
+                row.contract_address.append_null();
+            }
+            if let Some(value) = &decoded.data {
+                row.data.append_value(value);
+            } else {
+                row.data.append_null();
+            }
+            row.amount.append_option(decoded.amount);
+            row.call_value.append_option(decoded.call_value);
+            row.call_token_value.append_option(decoded.call_token_value);
+            row.token_id.append_option(decoded.token_id);
+            append_fork_step(&mut row.fork_step, fork_step);
+        }
 
         // Map logs from TransactionInfo
         if let Some(info) = info {
@@ -181,6 +304,10 @@ impl TronBlockMapper {
                 self.logs.block_number.append_value(block_number);
                 self.logs.tx_hash.append_value(&tx.txid);
                 self.logs.log_index.append_value(log_index as u32);
+                self.logs.transaction_index.append_value(transaction_index);
+                self.logs
+                    .block_log_index
+                    .append_value(first_log_index + log_index as u64);
                 self.logs.address.append_value(&log.address);
 
                 let topics = &log.topics;
@@ -216,6 +343,9 @@ impl TronBlockMapper {
                     .append_value(block_number);
                 self.internal_transactions.tx_hash.append_value(&tx.txid);
                 self.internal_transactions
+                    .transaction_index
+                    .append_value(transaction_index);
+                self.internal_transactions
                     .internal_index
                     .append_value(internal_index as u32);
                 self.internal_transactions.hash.append_value(&itx.hash);
@@ -232,9 +362,59 @@ impl TronBlockMapper {
                     .rejected
                     .append_value(itx.rejected);
                 append_fork_step(&mut self.internal_transactions.fork_step, fork_step);
+                for (call_value_index, value) in itx.call_value_info.iter().enumerate() {
+                    let row = &mut self.internal_call_values;
+                    row.canonical.append(identity);
+                    row.transaction_index.append_value(transaction_index);
+                    row.tx_hash.append_value(&tx.txid);
+                    row.internal_index.append_value(internal_index as u32);
+                    row.call_value_index.append_value(call_value_index as u32);
+                    row.call_value.append_value(value.call_value);
+                    row.token_id.append_value(&value.token_id);
+                    append_fork_step(&mut row.fork_step, fork_step);
+                }
             }
         }
     }
+}
+
+fn preflight(
+    block: &tron::Block,
+    include_failed: bool,
+) -> anyhow::Result<Vec<Vec<super::contracts::DecodedContract>>> {
+    u32::try_from(block.transactions.len())
+        .map_err(|_| anyhow::anyhow!("too many Tron transactions"))?;
+    let mut logs = 0_u64;
+    let mut decoded = Vec::with_capacity(block.transactions.len());
+    for tx in &block.transactions {
+        if let Some(info) = &tx.info {
+            u32::try_from(info.log.len()).map_err(|_| anyhow::anyhow!("too many Tron logs"))?;
+            logs = logs
+                .checked_add(info.log.len() as u64)
+                .ok_or_else(|| anyhow::anyhow!("Tron block log index overflow"))?;
+        }
+        if !include_failed && !tx.result {
+            decoded.push(Vec::new());
+            continue;
+        }
+        u32::try_from(tx.contracts.len())
+            .map_err(|_| anyhow::anyhow!("too many Tron contracts"))?;
+        if let Some(info) = &tx.info {
+            u32::try_from(info.internal_transactions.len())
+                .map_err(|_| anyhow::anyhow!("too many Tron internal transactions"))?;
+            for itx in &info.internal_transactions {
+                u32::try_from(itx.call_value_info.len())
+                    .map_err(|_| anyhow::anyhow!("too many Tron internal call values"))?;
+            }
+        }
+        decoded.push(
+            tx.contracts
+                .iter()
+                .map(super::contracts::decode)
+                .collect::<anyhow::Result<_>>()?,
+        );
+    }
+    Ok(decoded)
 }
 
 impl BlockMapper for TronBlockMapper {
@@ -247,7 +427,8 @@ impl BlockMapper for TronBlockMapper {
         let block = tron::Block::decode(block_bytes)?;
         let tx_count = block.transactions.len() as u64;
         let identity = self.blocks.canonical.prepare(identity)?;
-        self.map_tron_block(&block, &identity, fork_step);
+        let decoded = preflight(&block, self.include_failed_transactions)?;
+        self.map_tron_block(&block, &identity, fork_step, &decoded);
         Ok(tx_count)
     }
 
@@ -267,6 +448,15 @@ impl BlockMapper for TronBlockMapper {
             self.internal_transactions
                 .finish(&self.internal_transactions_schema)?,
         );
+        result.insert(
+            "contracts".into(),
+            self.contracts.finish(&self.contracts_schema)?,
+        );
+        result.insert(
+            "internal_call_values".into(),
+            self.internal_call_values
+                .finish(&self.internal_call_values_schema)?,
+        );
         Ok(result)
     }
 
@@ -277,6 +467,8 @@ impl BlockMapper for TronBlockMapper {
             .max(self.transactions.canonical.len())
             .max(self.logs.canonical.len())
             .max(self.internal_transactions.canonical.len())
+            .max(self.contracts.canonical.len())
+            .max(self.internal_call_values.canonical.len())
     }
 
     fn total_rows(&self) -> usize {
@@ -284,6 +476,8 @@ impl BlockMapper for TronBlockMapper {
             + self.transactions.canonical.len()
             + self.logs.canonical.len()
             + self.internal_transactions.canonical.len()
+            + self.contracts.canonical.len()
+            + self.internal_call_values.canonical.len()
     }
 
     fn largest_table(&mut self) -> (&str, usize) {
@@ -308,6 +502,17 @@ impl BlockMapper for TronBlockMapper {
             + estimated_dictionary_index_bytes(self.transactions.contract_type.len())
             + est_i64(&self.transactions.expiration_ms)
             + est_i64(&self.transactions.tx_timestamp_ms)
+            + est_u32(&self.transactions.transaction_index)
+            + est_i64(&self.transactions.receipt_energy_usage)
+            + est_i64(&self.transactions.receipt_energy_fee)
+            + est_i64(&self.transactions.receipt_origin_energy_usage)
+            + est_i64(&self.transactions.receipt_energy_usage_total)
+            + est_i64(&self.transactions.receipt_net_usage)
+            + est_i64(&self.transactions.receipt_net_fee)
+            + estimated_dictionary_index_bytes(self.transactions.receipt_result.len())
+            + est_i64(&self.transactions.receipt_energy_penalty_total)
+            + self.transactions.contract_address.estimated_bytes()
+            + est_bin(&self.transactions.res_message)
             + est_opt_str(&self.transactions.fork_step);
         let logs = self.logs.canonical.estimated_bytes()
             + est_u64(&self.logs.block_number)
@@ -319,6 +524,8 @@ impl BlockMapper for TronBlockMapper {
             + self.logs.topic2.estimated_bytes()
             + self.logs.topic3.estimated_bytes()
             + self.logs.data.estimated_bytes()
+            + est_u32(&self.logs.transaction_index)
+            + est_u64(&self.logs.block_log_index)
             + est_opt_str(&self.logs.fork_step);
         let internal_transactions = self.internal_transactions.canonical.estimated_bytes()
             + est_u64(&self.internal_transactions.block_number)
@@ -332,12 +539,18 @@ impl BlockMapper for TronBlockMapper {
                 .estimated_bytes()
             + est_str(&self.internal_transactions.note)
             + est_bool(&self.internal_transactions.rejected)
+            + est_u32(&self.internal_transactions.transaction_index)
             + est_opt_str(&self.internal_transactions.fork_step);
         [
             ("blocks", blocks),
             ("transactions", transactions),
             ("logs", logs),
             ("internal_transactions", internal_transactions),
+            ("contracts", self.contracts.estimated_bytes()),
+            (
+                "internal_call_values",
+                self.internal_call_values.estimated_bytes(),
+            ),
         ]
         .into_iter()
         .max_by_key(|&(_, s)| s)
@@ -412,6 +625,17 @@ struct TransactionsBuilder {
     contract_type: StringDictionaryBuilder<Int32Type>,
     expiration_ms: Int64Builder,
     tx_timestamp_ms: Int64Builder,
+    transaction_index: UInt32Builder,
+    receipt_energy_usage: Int64Builder,
+    receipt_energy_fee: Int64Builder,
+    receipt_origin_energy_usage: Int64Builder,
+    receipt_energy_usage_total: Int64Builder,
+    receipt_net_usage: Int64Builder,
+    receipt_net_fee: Int64Builder,
+    receipt_result: StringDictionaryBuilder<Int32Type>,
+    receipt_energy_penalty_total: Int64Builder,
+    contract_address: BytesColumn,
+    res_message: BinaryBuilder,
     fork_step: Option<StringBuilder>,
 }
 
@@ -430,6 +654,17 @@ impl TransactionsBuilder {
             contract_type: StringDictionaryBuilder::new(),
             expiration_ms: Int64Builder::new(),
             tx_timestamp_ms: Int64Builder::new(),
+            transaction_index: UInt32Builder::new(),
+            receipt_energy_usage: Int64Builder::new(),
+            receipt_energy_fee: Int64Builder::new(),
+            receipt_origin_energy_usage: Int64Builder::new(),
+            receipt_energy_usage_total: Int64Builder::new(),
+            receipt_net_usage: Int64Builder::new(),
+            receipt_net_fee: Int64Builder::new(),
+            receipt_result: StringDictionaryBuilder::new(),
+            receipt_energy_penalty_total: Int64Builder::new(),
+            contract_address: BytesColumn::new(encoding),
+            res_message: BinaryBuilder::new(),
             fork_step: mk_fork_step(include_fork_step),
         }
     }
@@ -447,6 +682,17 @@ impl TransactionsBuilder {
             Arc::new(self.contract_type.finish()) as Arc<dyn Array>,
             Arc::new(self.expiration_ms.finish()) as Arc<dyn Array>,
             Arc::new(self.tx_timestamp_ms.finish()) as Arc<dyn Array>,
+            Arc::new(self.transaction_index.finish()) as Arc<dyn Array>,
+            Arc::new(self.receipt_energy_usage.finish()) as Arc<dyn Array>,
+            Arc::new(self.receipt_energy_fee.finish()) as Arc<dyn Array>,
+            Arc::new(self.receipt_origin_energy_usage.finish()) as Arc<dyn Array>,
+            Arc::new(self.receipt_energy_usage_total.finish()) as Arc<dyn Array>,
+            Arc::new(self.receipt_net_usage.finish()) as Arc<dyn Array>,
+            Arc::new(self.receipt_net_fee.finish()) as Arc<dyn Array>,
+            Arc::new(self.receipt_result.finish()) as Arc<dyn Array>,
+            Arc::new(self.receipt_energy_penalty_total.finish()) as Arc<dyn Array>,
+            self.contract_address.finish(),
+            Arc::new(self.res_message.finish()) as Arc<dyn Array>,
         ]);
         finish_fork_step(&mut self.fork_step, &mut columns);
         Ok(RecordBatch::try_new(Arc::new(schema.clone()), columns)?)
@@ -464,6 +710,8 @@ struct LogsBuilder {
     topic2: BytesColumn,
     topic3: BytesColumn,
     data: BytesColumn,
+    transaction_index: UInt32Builder,
+    block_log_index: UInt64Builder,
     fork_step: Option<StringBuilder>,
 }
 
@@ -481,6 +729,8 @@ impl LogsBuilder {
             topic2: BytesColumn::new(&reserved_encoding),
             topic3: BytesColumn::new(&reserved_encoding),
             data: BytesColumn::new(encoding),
+            transaction_index: UInt32Builder::new(),
+            block_log_index: UInt64Builder::new(),
             fork_step: mk_fork_step(include_fork_step),
         }
     }
@@ -497,6 +747,8 @@ impl LogsBuilder {
             self.topic2.finish(),
             self.topic3.finish(),
             self.data.finish(),
+            Arc::new(self.transaction_index.finish()) as Arc<dyn Array>,
+            Arc::new(self.block_log_index.finish()) as Arc<dyn Array>,
         ]);
         finish_fork_step(&mut self.fork_step, &mut columns);
         Ok(RecordBatch::try_new(Arc::new(schema.clone()), columns)?)
@@ -513,6 +765,7 @@ struct InternalTransactionsBuilder {
     transfer_to_address: BytesColumn,
     note: StringBuilder,
     rejected: BooleanBuilder,
+    transaction_index: UInt32Builder,
     fork_step: Option<StringBuilder>,
 }
 
@@ -529,6 +782,7 @@ impl InternalTransactionsBuilder {
             transfer_to_address: BytesColumn::new(encoding),
             note: StringBuilder::new(),
             rejected: BooleanBuilder::new(),
+            transaction_index: UInt32Builder::new(),
             fork_step: mk_fork_step(include_fork_step),
         }
     }
@@ -544,6 +798,7 @@ impl InternalTransactionsBuilder {
             self.transfer_to_address.finish(),
             Arc::new(self.note.finish()) as Arc<dyn Array>,
             Arc::new(self.rejected.finish()) as Arc<dyn Array>,
+            Arc::new(self.transaction_index.finish()) as Arc<dyn Array>,
         ]);
         finish_fork_step(&mut self.fork_step, &mut columns);
         Ok(RecordBatch::try_new(Arc::new(schema.clone()), columns)?)
@@ -790,7 +1045,7 @@ pub(crate) mod tests {
     #[test]
     fn test_table_names() {
         let mapper = TronBlockMapper::new(false, EncodeBytes::Hex, false);
-        assert_eq!(mapper.table_names().len(), 4);
+        assert_eq!(mapper.table_names().len(), 6);
         assert!(mapper.table_names().contains(&"blocks"));
         assert!(mapper.table_names().contains(&"transactions"));
         assert!(mapper.table_names().contains(&"logs"));
@@ -878,5 +1133,145 @@ pub(crate) mod tests {
             string_col(internal_transactions, "transfer_to_address").value(0),
             encode_tron_base58(&tron_address(0xbb))
         );
+    }
+}
+
+struct ContractsBuilder {
+    canonical: CanonicalBuilder,
+    transaction_index: UInt32Builder,
+    tx_hash: BytesColumn,
+    contract_index: UInt32Builder,
+    contract_type: StringDictionaryBuilder<Int32Type>,
+    contract_type_id: Int32Builder,
+    parameter_type_url: StringBuilder,
+    parameter: BinaryBuilder,
+    permission_id: Int32Builder,
+    owner_address: BytesColumn,
+    to_address: BytesColumn,
+    amount: Int64Builder,
+    asset_name: BinaryBuilder,
+    contract_address: BytesColumn,
+    data: BinaryBuilder,
+    call_value: Int64Builder,
+    call_token_value: Int64Builder,
+    token_id: Int64Builder,
+    fork_step: Option<StringBuilder>,
+}
+impl ContractsBuilder {
+    fn new(include_fork_step: bool, encoding: &EncodeBytes) -> Self {
+        Self {
+            canonical: CanonicalBuilder::with_encoding(encoding),
+            transaction_index: UInt32Builder::new(),
+            tx_hash: BytesColumn::new(&tron_reserved_encoding(encoding)),
+            contract_index: UInt32Builder::new(),
+            contract_type: StringDictionaryBuilder::new(),
+            contract_type_id: Int32Builder::new(),
+            parameter_type_url: StringBuilder::new(),
+            parameter: BinaryBuilder::new(),
+            permission_id: Int32Builder::new(),
+            owner_address: BytesColumn::new(encoding),
+            to_address: BytesColumn::new(encoding),
+            amount: Int64Builder::new(),
+            asset_name: BinaryBuilder::new(),
+            contract_address: BytesColumn::new(encoding),
+            data: BinaryBuilder::new(),
+            call_value: Int64Builder::new(),
+            call_token_value: Int64Builder::new(),
+            token_id: Int64Builder::new(),
+            fork_step: mk_fork_step(include_fork_step),
+        }
+    }
+    fn finish(&mut self, schema: &Schema) -> anyhow::Result<RecordBatch> {
+        let mut columns = self.canonical.finish();
+        columns.extend(vec![
+            Arc::new(self.transaction_index.finish()) as Arc<dyn Array>,
+            self.tx_hash.finish(),
+            Arc::new(self.contract_index.finish()) as Arc<dyn Array>,
+            Arc::new(self.contract_type.finish()) as Arc<dyn Array>,
+            Arc::new(self.contract_type_id.finish()) as Arc<dyn Array>,
+            Arc::new(self.parameter_type_url.finish()) as Arc<dyn Array>,
+            Arc::new(self.parameter.finish()) as Arc<dyn Array>,
+            Arc::new(self.permission_id.finish()) as Arc<dyn Array>,
+            self.owner_address.finish(),
+            self.to_address.finish(),
+            Arc::new(self.amount.finish()) as Arc<dyn Array>,
+            Arc::new(self.asset_name.finish()) as Arc<dyn Array>,
+            self.contract_address.finish(),
+            Arc::new(self.data.finish()) as Arc<dyn Array>,
+            Arc::new(self.call_value.finish()) as Arc<dyn Array>,
+            Arc::new(self.call_token_value.finish()) as Arc<dyn Array>,
+            Arc::new(self.token_id.finish()) as Arc<dyn Array>,
+        ]);
+        finish_fork_step(&mut self.fork_step, &mut columns);
+        Ok(RecordBatch::try_new(Arc::new(schema.clone()), columns)?)
+    }
+    fn estimated_bytes(&self) -> usize {
+        self.canonical.estimated_bytes()
+            + est_u32(&self.transaction_index)
+            + self.tx_hash.estimated_bytes()
+            + est_u32(&self.contract_index)
+            + estimated_dictionary_index_bytes(self.contract_type.len())
+            + est_i32(&self.contract_type_id)
+            + est_str(&self.parameter_type_url)
+            + est_bin(&self.parameter)
+            + est_i32(&self.permission_id)
+            + self.owner_address.estimated_bytes()
+            + self.to_address.estimated_bytes()
+            + est_i64(&self.amount)
+            + est_bin(&self.asset_name)
+            + self.contract_address.estimated_bytes()
+            + est_bin(&self.data)
+            + est_i64(&self.call_value)
+            + est_i64(&self.call_token_value)
+            + est_i64(&self.token_id)
+            + est_opt_str(&self.fork_step)
+    }
+}
+
+struct InternalCallValuesBuilder {
+    canonical: CanonicalBuilder,
+    transaction_index: UInt32Builder,
+    tx_hash: BytesColumn,
+    internal_index: UInt32Builder,
+    call_value_index: UInt32Builder,
+    call_value: Int64Builder,
+    token_id: StringBuilder,
+    fork_step: Option<StringBuilder>,
+}
+impl InternalCallValuesBuilder {
+    fn new(include_fork_step: bool, encoding: &EncodeBytes) -> Self {
+        Self {
+            canonical: CanonicalBuilder::with_encoding(encoding),
+            transaction_index: UInt32Builder::new(),
+            tx_hash: BytesColumn::new(&tron_reserved_encoding(encoding)),
+            internal_index: UInt32Builder::new(),
+            call_value_index: UInt32Builder::new(),
+            call_value: Int64Builder::new(),
+            token_id: StringBuilder::new(),
+            fork_step: mk_fork_step(include_fork_step),
+        }
+    }
+    fn finish(&mut self, schema: &Schema) -> anyhow::Result<RecordBatch> {
+        let mut columns = self.canonical.finish();
+        columns.extend(vec![
+            Arc::new(self.transaction_index.finish()) as Arc<dyn Array>,
+            self.tx_hash.finish(),
+            Arc::new(self.internal_index.finish()) as Arc<dyn Array>,
+            Arc::new(self.call_value_index.finish()) as Arc<dyn Array>,
+            Arc::new(self.call_value.finish()) as Arc<dyn Array>,
+            Arc::new(self.token_id.finish()) as Arc<dyn Array>,
+        ]);
+        finish_fork_step(&mut self.fork_step, &mut columns);
+        Ok(RecordBatch::try_new(Arc::new(schema.clone()), columns)?)
+    }
+    fn estimated_bytes(&self) -> usize {
+        self.canonical.estimated_bytes()
+            + est_u32(&self.transaction_index)
+            + self.tx_hash.estimated_bytes()
+            + est_u32(&self.internal_index)
+            + est_u32(&self.call_value_index)
+            + est_i64(&self.call_value)
+            + est_str(&self.token_id)
+            + est_opt_str(&self.fork_step)
     }
 }
