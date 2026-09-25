@@ -13,6 +13,7 @@ lifecycle state; a local implementation or passing test alone is not closure.
 - [#498: EVM log indices and optional tables](498-evm-log-indices.md)
 - [#499: offline EVM golden-block regression](499-evm-golden-fixture.md)
 - [#511: Bitcoin amounts and input metadata](511-bitcoin-values.md)
+- [#513: recovered EVM decimal fast path](513-evm-decimal-fast-path.md)
 - [#508: Antelope database-operation joins](508-antelope-db-joins.md)
 - [#568: Arrow/Parquet security and compatibility](568-arrow-parquet-security.md)
 - [#572: final completion checkpoints](572-final-completion-checkpoint.md)
@@ -69,6 +70,8 @@ lifecycle state; a local implementation or passing test alone is not closure.
 | [#503](https://github.com/pinax-network/firehose-parquet/issues/503) | [#593](https://github.com/pinax-network/firehose-parquet/pull/593) | Merged as `d417e0c` on 2026-09-25; issue closed; 857 tests, all 19,714 retained raw-sample rows compared, bounded offline release benchmarks, independent review and CI passed. |
 | [#505](https://github.com/pinax-network/firehose-parquet/issues/505) | [#594](https://github.com/pinax-network/firehose-parquet/pull/594) | Merged as `b8d6834` on 2026-09-25; issue closed; 862 tests, one-slot decimal fee and six-blob live equality check, independent review and CI passed. |
 | #468 prerequisite | [#591](https://github.com/pinax-network/firehose-parquet/pull/591) | Ownership/control foundation merged as `78ceb98`; 848 tests and CI passed. Full ingestion crash/replay protection remains incomplete; issue #468 stays open. |
+
+| [#505](https://github.com/pinax-network/firehose-parquet/issues/505) | [#594](https://github.com/pinax-network/firehose-parquet/pull/594) | Merged as `b8d6834`; issue closed; 862 tests, independent review, exact live fee/blob comparison and CI passed. |
 
 The #468 design PR accidentally triggered GitHub auto-closure through a negative
 sentence containing a recognized closing phrase. On 2026-09-25 the PR text was
