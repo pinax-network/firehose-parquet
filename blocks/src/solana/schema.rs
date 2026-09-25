@@ -13,6 +13,14 @@ fn solana_canonical_fields(encoding: &EncodeBytes) -> Vec<Field> {
     canonical_fields_with_nullable_timestamps(encoding)
 }
 
+pub(super) fn index_element_field() -> Field {
+    Field::new("item", DataType::UInt8, false)
+}
+
+fn index_list_type() -> DataType {
+    DataType::List(Arc::new(index_element_field()))
+}
+
 fn enum_data_type() -> DataType {
     DataType::Dictionary(Box::new(DataType::Int32), Box::new(DataType::Utf8))
 }
@@ -49,7 +57,7 @@ pub fn transactions_schema(
         Field::new("signature", bytes_data_type(encoding), false),
         Field::new("num_signatures", DataType::UInt32, false),
         Field::new("fee", DataType::UInt64, false),
-        Field::new("err", bytes_data_type(encoding), true),
+        Field::new("err", DataType::Binary, true),
         Field::new("success", DataType::Boolean, false),
         Field::new("compute_units_consumed", DataType::UInt64, true),
         Field::new(
@@ -69,7 +77,7 @@ pub fn transactions_schema(
         ),
         Field::new("cost_units", DataType::UInt64, true),
         Field::new("return_data_program_id", bytes_data_type(encoding), true),
-        Field::new("return_data", bytes_data_type(encoding), true),
+        Field::new("return_data", DataType::Binary, true),
     ]);
     maybe_fork_step(&mut fields, include_fork_step);
     Schema::new(fields)
@@ -117,8 +125,8 @@ pub fn instructions_schema(
         Field::new("transaction_index", DataType::UInt32, false),
         Field::new("instruction_index", DataType::UInt32, false),
         Field::new("program_id_index", DataType::UInt32, false),
-        Field::new("accounts", bytes_data_type(encoding), false),
-        Field::new("data", bytes_data_type(encoding), false),
+        Field::new("accounts", index_list_type(), false),
+        Field::new("data", DataType::Binary, false),
         Field::new("is_inner", DataType::Boolean, false),
         Field::new("inner_index", DataType::UInt32, true),
         Field::new("stack_height", DataType::UInt32, true),
@@ -189,8 +197,8 @@ pub fn account_lookups_schema(
         Field::new("transaction_index", DataType::UInt32, false),
         Field::new("lookup_index", DataType::UInt32, false),
         Field::new("account_key", bytes_data_type(encoding), false),
-        Field::new("writable_indexes", bytes_data_type(encoding), false),
-        Field::new("readonly_indexes", bytes_data_type(encoding), false),
+        Field::new("writable_indexes", index_list_type(), false),
+        Field::new("readonly_indexes", index_list_type(), false),
     ]);
     maybe_fork_step(&mut fields, include_fork_step);
     Schema::new(fields)
