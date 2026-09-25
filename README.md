@@ -239,12 +239,27 @@ with a new explicit `--stop-block`, or omitted with `--live` to continue
 streaming indefinitely. In the normal workflow, rerunning the same command is
 enough and no extra resume flags are needed.
 
+### Unreadable Cursor
+
+A run starts fresh only when there is no cursor to resume from: the file or S3
+object does not exist, or it holds no row or an empty cursor. If a cursor
+exists but cannot be loaded (permission denied, S3 403/5xx/timeout, or an
+empty, truncated or corrupt file), `fireparq build` exits with an error that
+names the cursor instead of re-ingesting from `--start-block` and overwriting
+the resume point. Fix access to the cursor and rerun, or pass
+`--cursor-override` to ignore it and restart from the CLI bounds.
+
+Local cursor saves are atomic: the new cursor is written to a `.tmp` sibling
+(for example `cursor.parquet.tmp`) in the same directory, fsynced, and renamed
+over the old one, so a crash mid-save keeps the previous cursor.
+
 ### Advanced Cursor Override
 
 When `--cursor-override` is set, the CLI request takes precedence over the
 stored cursor range. The pipeline still loads the cursor file for
-validation/logging, but it restarts from the CLI-provided or endpoint-default
-start block and does not pass the stored stream cursor token to Firehose.
+validation/logging (an unreadable cursor is logged and ignored), but it
+restarts from the CLI-provided or endpoint-default start block and does not
+pass the stored stream cursor token to Firehose.
 
 ```bash
 # Restart from the requested range despite parameter changes in cursor.parquet

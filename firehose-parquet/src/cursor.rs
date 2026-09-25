@@ -1,4 +1,6 @@
+use anyhow::Context;
 use std::fs;
+use std::io::Write;
 use std::path::Path;
 use std::sync::Arc;
 use tracing::{info, warn};
@@ -353,6 +355,13 @@ impl CursorState {
         if batch.num_rows() == 0 {
             anyhow::bail!("cursor.parquet contains no rows");
         }
+        if batch
+            .column_by_name("cursor")
+            .and_then(|c| c.as_string_opt::<i32>())
+            .is_none()
+        {
+            anyhow::bail!("not a cursor file: missing Utf8 `cursor` column");
+        }
 
         let get_str = |name: &str| -> String {
             batch
@@ -461,43 +470,26 @@ impl CursorState {
     }
 }
 
-/// Save cursor state to a `cursor.parquet` file. Creates parent directories if needed.
-pub fn save_cursor_parquet(path: &Path, state: &CursorState) -> anyhow::Result<()> {
-    if let Some(parent) = path.parent() {
-        if !parent.as_os_str().is_empty() {
-            fs::create_dir_all(parent)?;
-        }
-    }
+/// Serialize cursor state to `cursor.parquet` bytes.
+fn encode_cursor(state: &CursorState) -> anyhow::Result<Vec<u8>> {
     let batch = state.to_record_batch()?;
     let props = state.writer_properties();
-    let file = fs::File::create(path)?;
-    let mut writer = ArrowWriter::try_new(file, batch.schema(), Some(props))?;
+    let mut buf = Vec::new();
+    let mut writer = ArrowWriter::try_new(&mut buf, batch.schema(), Some(props))?;
     writer.write(&batch)?;
     writer.close()?;
-    Ok(())
+    Ok(buf)
 }
 
-/// Load cursor state from a `cursor.parquet` file. Returns `None` if the file does
-/// not exist or cannot be read.
-pub fn load_cursor_parquet(path: &Path) -> Option<CursorState> {
-    let file = match fs::File::open(path) {
-        Ok(f) => f,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            info!(path = %path.display(), "cursor.parquet not found, starting fresh");
-            return None;
-        }
-        Err(e) => {
-            warn!(path = %path.display(), error = %e, "failed to open cursor.parquet, starting fresh");
-            return None;
-        }
-    };
-    let reader_builder = match ParquetRecordBatchReaderBuilder::try_new(file) {
-        Ok(b) => b,
-        Err(e) => {
-            warn!(path = %path.display(), error = %e, "failed to read cursor.parquet metadata");
-            return None;
-        }
-    };
+/// Parse `cursor.parquet` bytes.
+///
+/// Returns `Ok(None)` when the file is valid but holds no row or an empty
+/// cursor, i.e. there is nothing to resume from. A file that is not a
+/// readable cursor (empty, truncated, corrupt, or missing the `cursor`
+/// column) is an error.
+fn parse_cursor(bytes: Bytes) -> anyhow::Result<Option<CursorState>> {
+    let reader_builder =
+        ParquetRecordBatchReaderBuilder::try_new(bytes).context("reading parquet metadata")?;
 
     // Extract file-level KV metadata before consuming the builder.
     let kv_metadata = reader_builder
@@ -506,42 +498,106 @@ pub fn load_cursor_parquet(path: &Path) -> Option<CursorState> {
         .key_value_metadata()
         .cloned();
 
-    let reader = match reader_builder.build() {
-        Ok(r) => r,
+    let mut reader = reader_builder.build().context("building parquet reader")?;
+    let Some(batch) = reader.next().transpose().context("reading cursor row")? else {
+        return Ok(None);
+    };
+    let state = CursorState::from_record_batch(&batch, kv_metadata.as_deref())?;
+    if state.cursor.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(state))
+}
+
+/// Temporary sibling path used to write a cursor before renaming it into place.
+fn temp_cursor_path(path: &Path) -> std::path::PathBuf {
+    let mut name = path.file_name().unwrap_or_default().to_os_string();
+    name.push(".tmp");
+    path.with_file_name(name)
+}
+
+/// fsync a directory so a rename inside it survives a crash. Only supported
+/// on Unix; elsewhere this is a no-op.
+fn sync_dir(dir: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        fs::File::open(dir)?.sync_all()?;
+    }
+    #[cfg(not(unix))]
+    let _ = dir;
+    Ok(())
+}
+
+/// Save cursor state to a `cursor.parquet` file. Creates parent directories if needed.
+///
+/// The save is atomic: the cursor is written to `<name>.tmp` in the same
+/// directory, fsynced, and renamed over the target, then the directory is
+/// fsynced. A crash mid-save leaves the previous cursor intact.
+pub fn save_cursor_parquet(path: &Path, state: &CursorState) -> anyhow::Result<()> {
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty());
+    if let Some(parent) = parent {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("creating cursor directory {}", parent.display()))?;
+    }
+    let buf = encode_cursor(state)?;
+
+    let tmp_path = temp_cursor_path(path);
+    let write_tmp = || -> anyhow::Result<()> {
+        let mut file = fs::File::create(&tmp_path)
+            .with_context(|| format!("creating {}", tmp_path.display()))?;
+        file.write_all(&buf)
+            .with_context(|| format!("writing {}", tmp_path.display()))?;
+        file.sync_all()
+            .with_context(|| format!("syncing {}", tmp_path.display()))?;
+        fs::rename(&tmp_path, path)
+            .with_context(|| format!("renaming {} to {}", tmp_path.display(), path.display()))?;
+        Ok(())
+    };
+    if let Err(error) = write_tmp() {
+        let _ = fs::remove_file(&tmp_path);
+        return Err(error);
+    }
+
+    let dir = parent.unwrap_or_else(|| Path::new("."));
+    if let Err(error) = sync_dir(dir) {
+        warn!(dir = %dir.display(), error = %error, "failed to fsync cursor directory after rename");
+    }
+    Ok(())
+}
+
+/// Load cursor state from a `cursor.parquet` file.
+///
+/// Returns `Ok(None)` only when there is nothing to resume from: the file does
+/// not exist, or it holds no row or an empty cursor. Any other failure
+/// (permission denied, I/O error, empty, truncated or corrupt file) is an
+/// error, so a damaged cursor never silently restarts ingestion from scratch.
+pub fn load_cursor_parquet(path: &Path) -> anyhow::Result<Option<CursorState>> {
+    let bytes = match fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            info!(path = %path.display(), "cursor.parquet not found, starting fresh");
+            return Ok(None);
+        }
         Err(e) => {
-            warn!(path = %path.display(), error = %e, "failed to build parquet reader for cursor.parquet");
-            return None;
+            return Err(
+                anyhow::Error::new(e).context(format!("reading cursor file {}", path.display()))
+            );
         }
     };
-    for batch_result in reader {
-        match batch_result {
-            Ok(batch) => match CursorState::from_record_batch(&batch, kv_metadata.as_deref()) {
-                Ok(state) => {
-                    if state.cursor.is_empty() {
-                        info!(path = %path.display(), "cursor.parquet has empty cursor, starting fresh");
-                        return None;
-                    }
-                    info!(
-                        path = %path.display(),
-                        cursor = %state.cursor,
-                        last_block_num = state.last_block_num,
-                        "loaded cursor from cursor.parquet"
-                    );
-                    return Some(state);
-                }
-                Err(e) => {
-                    warn!(path = %path.display(), error = %e, "failed to parse cursor.parquet");
-                    return None;
-                }
-            },
-            Err(e) => {
-                warn!(path = %path.display(), error = %e, "failed to read batch from cursor.parquet");
-                return None;
-            }
-        }
+    let state = parse_cursor(Bytes::from(bytes))
+        .with_context(|| format!("parsing cursor file {}", path.display()))?;
+    match &state {
+        Some(state) => info!(
+            path = %path.display(),
+            cursor = %state.cursor,
+            last_block_num = state.last_block_num,
+            "loaded cursor from cursor.parquet"
+        ),
+        None => info!(path = %path.display(), "cursor.parquet has no cursor, starting fresh"),
     }
-    info!(path = %path.display(), "cursor.parquet has no data, starting fresh");
-    None
+    Ok(state)
 }
 
 /// Where the cursor file lives — local filesystem or S3.
@@ -622,8 +678,9 @@ impl CursorLocation {
     }
 
     /// Load cursor state (blocking — safe to call from sync code inside tokio).
-    /// Returns `None` if not found or unreadable.
-    pub fn load(&self) -> Option<CursorState> {
+    /// Returns `Ok(None)` if there is no cursor to resume from, and an error
+    /// if a cursor exists but cannot be read or parsed.
+    pub fn load(&self) -> anyhow::Result<Option<CursorState>> {
         match self {
             CursorLocation::Local(path) => load_cursor_parquet(path),
             CursorLocation::S3 { client, key } => tokio::task::block_in_place(|| {
@@ -640,16 +697,8 @@ async fn save_cursor_parquet_s3(
     key: &str,
     state: &CursorState,
 ) -> anyhow::Result<()> {
-    let batch = state.to_record_batch()?;
-    let props = state.writer_properties();
-
-    // Write parquet to in-memory buffer
-    let mut buf = Vec::new();
-    {
-        let mut writer = ArrowWriter::try_new(&mut buf, batch.schema(), Some(props))?;
-        writer.write(&batch)?;
-        writer.close()?;
-    }
+    // A single PUT replaces the object atomically.
+    let buf = encode_cursor(state)?;
 
     let path = object_store::path::Path::from(key);
     let payload = object_store::PutPayload::from(Bytes::from(buf));
@@ -659,81 +708,42 @@ async fn save_cursor_parquet_s3(
     Ok(())
 }
 
-/// Load cursor state from S3. Returns `None` if not found or unreadable.
-async fn load_cursor_parquet_s3(client: &dyn ObjectStore, key: &str) -> Option<CursorState> {
+/// Load cursor state from S3.
+///
+/// Same contract as [`load_cursor_parquet`]: only a missing object, or one
+/// with no row or an empty cursor, is `Ok(None)`. Access errors (403, 5xx,
+/// timeouts) and unreadable objects are errors.
+async fn load_cursor_parquet_s3(
+    client: &dyn ObjectStore,
+    key: &str,
+) -> anyhow::Result<Option<CursorState>> {
     let path = object_store::path::Path::from(key);
     let result = match client.get(&path).await {
         Ok(r) => r,
         Err(object_store::Error::NotFound { .. }) => {
             info!(key = %key, "cursor.parquet not found in S3, starting fresh");
-            return None;
+            return Ok(None);
         }
         Err(e) => {
-            warn!(key = %key, error = %e, "failed to read cursor.parquet from S3, starting fresh");
-            return None;
+            return Err(anyhow::Error::new(e).context(format!("reading S3 cursor object {key}")));
         }
     };
+    let bytes = result
+        .bytes()
+        .await
+        .with_context(|| format!("reading S3 cursor object {key}"))?;
 
-    let bytes = match result.bytes().await {
-        Ok(b) => b,
-        Err(e) => {
-            warn!(key = %key, error = %e, "failed to read cursor.parquet bytes from S3");
-            return None;
-        }
-    };
-
-    let reader_builder = match ParquetRecordBatchReaderBuilder::try_new(bytes) {
-        Ok(b) => b,
-        Err(e) => {
-            warn!(key = %key, error = %e, "failed to read cursor.parquet metadata from S3");
-            return None;
-        }
-    };
-
-    // Extract file-level KV metadata before consuming the builder.
-    let kv_metadata = reader_builder
-        .metadata()
-        .file_metadata()
-        .key_value_metadata()
-        .cloned();
-
-    let reader = match reader_builder.build() {
-        Ok(r) => r,
-        Err(e) => {
-            warn!(key = %key, error = %e, "failed to build parquet reader for S3 cursor.parquet");
-            return None;
-        }
-    };
-
-    for batch_result in reader {
-        match batch_result {
-            Ok(batch) => match CursorState::from_record_batch(&batch, kv_metadata.as_deref()) {
-                Ok(state) => {
-                    if state.cursor.is_empty() {
-                        info!(key = %key, "S3 cursor.parquet has empty cursor, starting fresh");
-                        return None;
-                    }
-                    info!(
-                        key = %key,
-                        cursor = %state.cursor,
-                        last_block_num = state.last_block_num,
-                        "loaded cursor from S3 cursor.parquet"
-                    );
-                    return Some(state);
-                }
-                Err(e) => {
-                    warn!(key = %key, error = %e, "failed to parse S3 cursor.parquet");
-                    return None;
-                }
-            },
-            Err(e) => {
-                warn!(key = %key, error = %e, "failed to read batch from S3 cursor.parquet");
-                return None;
-            }
-        }
+    let state = parse_cursor(bytes).with_context(|| format!("parsing S3 cursor object {key}"))?;
+    match &state {
+        Some(state) => info!(
+            key = %key,
+            cursor = %state.cursor,
+            last_block_num = state.last_block_num,
+            "loaded cursor from S3 cursor.parquet"
+        ),
+        None => info!(key = %key, "S3 cursor.parquet has no cursor, starting fresh"),
     }
-    info!(key = %key, "S3 cursor.parquet has no data, starting fresh");
-    None
+    Ok(state)
 }
 
 #[cfg(test)]
@@ -848,7 +858,9 @@ mod tests {
         };
 
         save_cursor_parquet(&path, &state).unwrap();
-        let loaded = load_cursor_parquet(&path).expect("should load cursor");
+        let loaded = load_cursor_parquet(&path)
+            .unwrap()
+            .expect("should load cursor");
 
         assert_eq!(loaded.cursor, "cursor123");
         assert_eq!(loaded.last_block_num, 42000);
@@ -918,16 +930,212 @@ mod tests {
         };
         save_cursor_parquet(&path, &state2).unwrap();
 
-        let loaded = load_cursor_parquet(&path).expect("should load cursor");
+        let loaded = load_cursor_parquet(&path)
+            .unwrap()
+            .expect("should load cursor");
         assert_eq!(loaded.cursor, "second");
         assert_eq!(loaded.last_block_num, 200);
     }
 
     #[test]
     fn test_load_cursor_parquet_missing_file() {
-        let result =
-            load_cursor_parquet(Path::new("/tmp/nonexistent_cursor_parquet_12345.parquet"));
-        assert!(result.is_none());
+        let dir = TempDir::new().unwrap();
+        let result = load_cursor_parquet(&dir.path().join("missing").join(CURSOR_PARQUET_FILENAME));
+        assert!(result.unwrap().is_none());
+    }
+
+    fn saved_cursor_bytes() -> Vec<u8> {
+        encode_cursor(&CursorState {
+            cursor: "cursor-to-damage".to_string(),
+            last_block_num: 42,
+            file_metadata: test_file_metadata(),
+            ..CursorState::default()
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn test_load_cursor_parquet_corrupt_file_is_error() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join(CURSOR_PARQUET_FILENAME);
+        fs::write(&path, b"definitely not parquet").unwrap();
+
+        let error = load_cursor_parquet(&path).unwrap_err();
+        assert!(
+            format!("{error:#}").contains(&path.display().to_string()),
+            "error should name the cursor file: {error:#}"
+        );
+    }
+
+    #[test]
+    fn test_load_cursor_parquet_truncated_file_is_error() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join(CURSOR_PARQUET_FILENAME);
+        let bytes = saved_cursor_bytes();
+        fs::write(&path, &bytes[..bytes.len() / 2]).unwrap();
+
+        assert!(load_cursor_parquet(&path).is_err());
+    }
+
+    #[test]
+    fn test_load_cursor_parquet_zero_byte_file_is_error() {
+        // A zero-byte file is what a crash mid-save used to leave behind, so
+        // it must not be mistaken for "no cursor".
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join(CURSOR_PARQUET_FILENAME);
+        fs::write(&path, b"").unwrap();
+
+        assert!(load_cursor_parquet(&path).is_err());
+    }
+
+    #[test]
+    fn test_load_cursor_parquet_without_cursor_column_is_error() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join(CURSOR_PARQUET_FILENAME);
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "block_num",
+            DataType::UInt64,
+            false,
+        )]));
+        let batch =
+            RecordBatch::try_new(schema, vec![Arc::new(UInt64Array::from(vec![1_u64]))]).unwrap();
+        let mut writer =
+            ArrowWriter::try_new(fs::File::create(&path).unwrap(), batch.schema(), None).unwrap();
+        writer.write(&batch).unwrap();
+        writer.close().unwrap();
+
+        assert!(load_cursor_parquet(&path).is_err());
+    }
+
+    #[test]
+    fn test_load_cursor_parquet_unreadable_path_is_error() {
+        // A directory where the cursor file belongs cannot be read as a file,
+        // even when running as root.
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join(CURSOR_PARQUET_FILENAME);
+        fs::create_dir(&path).unwrap();
+
+        assert!(load_cursor_parquet(&path).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_load_cursor_parquet_permission_denied_is_error() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join(CURSOR_PARQUET_FILENAME);
+        fs::write(&path, saved_cursor_bytes()).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o000)).unwrap();
+        if fs::read(&path).is_ok() {
+            // Running as root: permissions are not enforced.
+            return;
+        }
+
+        assert!(load_cursor_parquet(&path).is_err());
+    }
+
+    #[test]
+    fn test_save_cursor_parquet_is_atomic_and_leaves_no_temp_file() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join(CURSOR_PARQUET_FILENAME);
+
+        for (cursor, block) in [("first", 100_u64), ("second", 200_u64)] {
+            save_cursor_parquet(
+                &path,
+                &CursorState {
+                    cursor: cursor.to_string(),
+                    last_block_num: block,
+                    ..CursorState::default()
+                },
+            )
+            .unwrap();
+        }
+
+        let entries: Vec<_> = fs::read_dir(dir.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert_eq!(
+            entries,
+            vec![std::ffi::OsString::from(CURSOR_PARQUET_FILENAME)]
+        );
+        let loaded = load_cursor_parquet(&path).unwrap().unwrap();
+        assert_eq!(loaded.cursor, "second");
+        assert_eq!(loaded.last_block_num, 200);
+    }
+
+    #[test]
+    fn test_failed_cursor_save_keeps_previous_cursor() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join(CURSOR_PARQUET_FILENAME);
+        let previous = CursorState {
+            cursor: "previous".to_string(),
+            last_block_num: 100,
+            ..CursorState::default()
+        };
+        save_cursor_parquet(&path, &previous).unwrap();
+
+        // Block the temp file so the next save fails before the rename.
+        fs::create_dir(temp_cursor_path(&path)).unwrap();
+        let next = CursorState {
+            cursor: "next".to_string(),
+            last_block_num: 200,
+            ..CursorState::default()
+        };
+        assert!(save_cursor_parquet(&path, &next).is_err());
+
+        let loaded = load_cursor_parquet(&path).unwrap().unwrap();
+        assert_eq!(loaded.cursor, "previous");
+        assert_eq!(loaded.last_block_num, 100);
+    }
+
+    #[tokio::test]
+    async fn test_load_cursor_parquet_s3_round_trip_and_missing_object() {
+        let store = object_store::memory::InMemory::new();
+        let key = "output/mainnet/cursor.parquet";
+        assert!(load_cursor_parquet_s3(&store, key).await.unwrap().is_none());
+
+        let state = CursorState {
+            cursor: "s3-cursor".to_string(),
+            last_block_num: 77,
+            ..CursorState::default()
+        };
+        save_cursor_parquet_s3(&store, key, &state).await.unwrap();
+        let loaded = load_cursor_parquet_s3(&store, key).await.unwrap().unwrap();
+        assert_eq!(loaded.cursor, "s3-cursor");
+        assert_eq!(loaded.last_block_num, 77);
+    }
+
+    #[tokio::test]
+    async fn test_load_cursor_parquet_s3_corrupt_object_is_error() {
+        let store = object_store::memory::InMemory::new();
+        let key = "output/mainnet/cursor.parquet";
+        let bytes = saved_cursor_bytes();
+        store
+            .put(
+                &object_store::path::Path::from(key),
+                Bytes::from(bytes[..bytes.len() / 2].to_vec()).into(),
+            )
+            .await
+            .unwrap();
+
+        let error = load_cursor_parquet_s3(&store, key).await.unwrap_err();
+        assert!(format!("{error:#}").contains(key), "{error:#}");
+    }
+
+    #[tokio::test]
+    async fn test_load_cursor_parquet_s3_access_error_is_error() {
+        // Any error other than NotFound (403, 5xx, timeouts) must not look
+        // like a missing cursor. A key below a regular file makes the local
+        // object store fail with a non-NotFound error.
+        let dir = TempDir::new().unwrap();
+        fs::write(dir.path().join("blocker"), b"").unwrap();
+        let store = object_store::local::LocalFileSystem::new_with_prefix(dir.path()).unwrap();
+
+        assert!(load_cursor_parquet_s3(&store, "blocker/cursor.parquet")
+            .await
+            .is_err());
     }
 
     #[test]
@@ -940,7 +1148,7 @@ mod tests {
             ..CursorState::default()
         };
         save_cursor_parquet(&path, &state).unwrap();
-        assert!(load_cursor_parquet(&path).is_none());
+        assert!(load_cursor_parquet(&path).unwrap().is_none());
     }
 
     #[test]
@@ -957,7 +1165,9 @@ mod tests {
             ..CursorState::default()
         };
         save_cursor_parquet(&path, &state).unwrap();
-        let loaded = load_cursor_parquet(&path).expect("should load cursor");
+        let loaded = load_cursor_parquet(&path)
+            .unwrap()
+            .expect("should load cursor");
         assert_eq!(loaded.cursor, "abc");
     }
 
@@ -1034,7 +1244,10 @@ mod tests {
             CursorLocation::S3 { .. } => panic!("expected local cursor location"),
         }
 
-        let loaded = location.load().expect("cursor load should succeed");
+        let loaded = location
+            .load()
+            .unwrap()
+            .expect("cursor load should succeed");
         assert_eq!(loaded.cursor, state.cursor);
         assert_eq!(loaded.last_block_num, state.last_block_num);
     }
@@ -1051,7 +1264,9 @@ mod tests {
             ..CursorState::default()
         };
         save_cursor_parquet(&path, &state).unwrap();
-        let loaded = load_cursor_parquet(&path).expect("should load cursor");
+        let loaded = load_cursor_parquet(&path)
+            .unwrap()
+            .expect("should load cursor");
         assert_eq!(loaded.start_block, None);
         assert_eq!(loaded.stop_block, None);
         assert_eq!(loaded.last_timestamp, None);
@@ -1106,7 +1321,9 @@ mod tests {
         );
 
         save_legacy_cursor_parquet(&path, legacy_metadata).unwrap();
-        let loaded = load_cursor_parquet(&path).expect("should load legacy cursor");
+        let loaded = load_cursor_parquet(&path)
+            .unwrap()
+            .expect("should load legacy cursor");
 
         assert_eq!(loaded.cursor, "legacy-cursor");
         assert_eq!(loaded.last_block_num, 123);
@@ -1132,7 +1349,9 @@ mod tests {
             ..CursorState::default()
         };
         save_cursor_parquet(&path, &state).unwrap();
-        let loaded = load_cursor_parquet(&path).expect("should load cursor");
+        let loaded = load_cursor_parquet(&path)
+            .unwrap()
+            .expect("should load cursor");
         assert_eq!(loaded.last_block_id, block_id);
     }
 
