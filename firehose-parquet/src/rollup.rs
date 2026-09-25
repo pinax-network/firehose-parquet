@@ -1905,7 +1905,7 @@ mod tests {
     fn test_rollup_skips_group_with_reordered_columns() {
         let root = tempfile::tempdir().unwrap();
         let mixed = root.path().join(DAY);
-        let healthy = root.path().join("blocks/year=2024/month=01/date=16");
+        let healthy = root.path().join("blocks/year=2024/month=01/day=16");
         write_columns_file(
             &mixed.join("hour=14/minute=30/part-aaaaaaaa-000001.parquet"),
             &[("a", 1), ("b", 10)],
@@ -1931,10 +1931,10 @@ mod tests {
         assert!(err.contains("1 target partition(s)"), "{err}");
         assert!(err.contains(DAY), "{err}");
         assert!(
-            err.contains(
+            err.contains(&format!(
                 "hour=14/minute=31/part-bbbbbbbb-000001.parquet does not match \
-                 blocks/year=2024/month=01/date=15/hour=14/minute=30/part-aaaaaaaa-000001.parquet"
-            ),
+                 {DAY}/hour=14/minute=30/part-aaaaaaaa-000001.parquet"
+            )),
             "{err}"
         );
         assert!(err.contains("different order"), "{err}");
