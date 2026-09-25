@@ -78,7 +78,36 @@ and positive address cases are therefore qualified by offline fixtures, not
 claimed as observed live. No addresses are synthesized from scripts. Litecoin
 large-amount compatibility is covered offline; no live Litecoin claim is made.
 
-Full current-main workspace validation and independent review are recorded before
-merge. Raw transaction capture and temporary Parquet output remain outside the
+Current-main integration (including #499 at `806bf60`) passed **793 workspace
+tests**, with four intentionally ignored tests; the capture-auth example test
+also passed (one test plus its separately invoked child fixture). Formatting and
+the binary build passed. Independent review found no blocker in the amount
+reader/conversion, whole-block preflight, schema/nullable changes or documented
+compatibility limits. The only compiler warning is the existing unused final-tail
+transaction counter assignment.
+
+Raw transaction capture and temporary Parquet output remain outside the
 repository; no credentials, authorization headers or opaque cursor values are
 included in this record.
+
+## Repeating the offline comparison
+
+[511-compare-bitcoin.py](511-compare-bitcoin.py) makes no network requests. It
+requires a raw block-900000 capture directory containing unchanged `block.pb`
+and a public `metadata.json` with block identity/time and `sha256`, plus the
+corresponding local Parquet chain root and cursor. Build the protobuf descriptor
+from the checked-in source, then point it at those artifacts:
+
+```sh
+protoc -I proto --include_imports --descriptor_set_out=/tmp/bitcoin.desc proto/bitcoin.proto
+uv run --with protobuf python docs/audit/511-compare-bitcoin.py \
+  --raw-dir /tmp/bitcoin-raw --descriptor /tmp/bitcoin.desc \
+  --dataset /tmp/bitcoin-output/btc --cursor /tmp/bitcoin-output/cursor.parquet
+```
+
+Add the installation's standard protobuf include directory if `protoc` needs it.
+The script reads only public cursor progress, normalizes DuckDB's unsigned/list
+JSON representation, validates all output units from serialized transaction
+bytes independently, and prints a compact comparison summary. It does not update
+fixtures, expected values, cursors or datasets. Its assertions are scoped to this
+recorded block; it is an audit reproducer, not a generic consensus validator.
