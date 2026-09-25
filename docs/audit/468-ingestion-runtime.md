@@ -1,11 +1,11 @@
 # Transactional ingestion runtime and migration (#468)
 
-This records the integrated implementation under qualification. The reviewed
+This records the integrated implementation and its local qualification. The reviewed
 foundation and private controller records describe narrower historical stages;
 the runtime now connects those layers for every non-dry-run `build`. No optional
 partially protected ingestion mode or automatic legacy adoption is provided.
-Final end-to-end and backend qualification results are recorded below as they
-complete. The issue is not complete merely because these local commits exist.
+Final end-to-end results and exact backend qualification limits are recorded
+below. Publication still requires independent review and CI on the final head.
 
 ## Startup and immutable dataset identity
 
@@ -173,5 +173,92 @@ not a blanket production-provider safety claim.
   cancelled remote cleanup kept owner and journal after one attempt.
 - Combined core runtime and maintenance passed **636 tests** (630 core library,
   three generator, three compatibility), with five intentional library ignores.
-- Combined workspace, real CLI restart/no-op/extension/mirror/failure tests and
-  final current-main integration are still in progress. They remain merge gates.
+- Final runtime head `a9306b7d7e87d9996561fc1b920326acad7604f3` integrates main
+  `f555898100fbfb486e97f40162c71b223112a94f`. The full workspace passed **995 tests**
+  with **eight intentional ignores**; the separately required capture example
+  passed **one test**, with its subprocess helper intentionally ignored. Build,
+  formatting and Bash/Zsh/Fish completions passed without compiler warnings.
+  Evidence: `/tmp/fireparq-468-current-main-workspace.log`.
+- Real CLI tests create authority through actual ingestion, then prove completed
+  range no-op, exact cursor extension, deleted mirror repair, legacy/changed
+  semantics refusal before Blocks, filtered UNDO zero-row completion, sparse EOF
+  refusal with a durable prefix, and SIGKILL after accepted unflushed data followed
+  by exactly one copy of each replayed row. Genesis NEW/filtered UNDO/future anchor
+  tests verify persisted ordinals and provenance through the actual callback,
+  including a malformed future payload after the buffered prefix commits.
+- Nine Session-focused tests include actual `IngestionSession::open` ordering:
+  nested roots fail before new control creation, and coexisting valid Writing
+  and merge journals fail with byte-for-byte unchanged files. Removing only the
+  conflicting merge intent makes the same Writing fixture recover successfully.
+
+## Bounded real-data qualification and discovered regression
+
+The live destination was newly created for this task at
+`/tmp/fireparq-468-live-20260925/mainnet`. The requested source range was exactly
+`[26049575,26049577)` through `https://eth.firehose.pinax.network:443`, using the
+intended Pinax credential selected explicitly by name. Only local output was
+written. Credentials and raw cursor values were excluded from saved evidence.
+
+The first attempt on the pre-fix runtime stopped while preparing the transactions
+table of the first block. Ten complete parts had published with recorded receipts,
+authority remained at ordinal zero, and pending remained Writing. Verification
+had incorrectly included Arrow's deprecated IPC dictionary IDs in schema identity.
+Parquet assigns those IDs during serialization; Arrow's own Field equality ignores
+them. This affected multi-dictionary schemas such as EVM and Tron transactions,
+which earlier equality-only schema tests did not detect.
+
+The correction normalizes only typed Field dictionary IDs recursively. It keeps
+field order, names, types, nullability, dictionary orderedness, union type IDs and
+all field/schema metadata, including metadata keys named `dict_id`. The original
+zero-ID EVM mapper hash remains exactly
+`44b18c11097fad9f240941e6c670cb01f04386d7a990a91ca644b935b01c2563`, so the interrupted
+journal remains usable. The full nonempty mapper/encoding/profile schema matrix
+was proven failing before the fix and passing afterward; nested/multiple
+Dictionary tests and exact old-hash compatibility cover the correction.
+
+Before any additional source request, the fixed binary ran offline
+`recovery recover` against the actual interrupted output. It removed all ten
+owned published parts, left no temporary files or pending record, and retained
+the original authority byte-for-byte. The next bounded run into that recovered
+root completed successfully, producing 26 data parts plus the cursor mirror and
+no temporary remnants. This exercised real failed-Writing rollback before replay,
+in addition to the hermetic interruption matrix.
+
+DuckDB SQL schemas, physical Parquet schemas, row counts, and bidirectional
+`EXCEPT ALL` comparisons against `/tmp/fireparq-469-live-20260925/mainnet` matched
+for every table. No duplicate rows or absent reference rows were found:
+
+| Table | Rows in each output | Differences |
+|---|---:|---:|
+| access_lists | 72 | 0 |
+| balance_changes | 1,970 | 0 |
+| blocks | 2 | 0 |
+| calls | 4,261 | 0 |
+| code_changes | 3 | 0 |
+| logs | 1,438 | 0 |
+| nonce_changes | 465 | 0 |
+| set_code_authorizations | 2 | 0 |
+| storage_changes | 3,545 | 0 |
+| system_balance_changes | 32 | 0 |
+| system_calls | 8 | 0 |
+| system_storage_changes | 10 | 0 |
+| transactions | 458 | 0 |
+| withdrawals | 32 | 0 |
+| **Total** | **12,298** | **0** |
+
+The mirror's block identity, origin and completed stop match the reference.
+Its `last_timestamp` now preserves the actual committed EVM source time, whereas
+the legacy reference stored null; it was independently checked against the final
+block row. This deliberate mirror enrichment does not change any data table.
+
+Two further runs reused the completed bound. The first left the mirror unchanged.
+For the second, only this task's mirror was deleted first; it was repaired to the
+same block/origin/completed stop and source time. Both returned the no-Blocks
+completion result, and hashes of every data part and the authoritative state
+were unchanged. Hermetic CLI request counters separately prove this path makes
+no Blocks RPC. No stop extension or other live range was requested.
+
+Sanitized evidence is summarized in [the comparison record](468-live-comparison.json).
+The local runner/comparator and logs remain under `/tmp/fireparq-468-*`; the
+credential-selecting live runner is intentionally not committed. No production
+S3 writes or production-provider request-drain qualification was performed.

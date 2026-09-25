@@ -1,0 +1,163 @@
+{
+  "tables": [
+    {
+      "table": "access_lists",
+      "old_rows": 72,
+      "new_rows": 72,
+      "old_only": 0,
+      "new_only": 0,
+      "schema_equal": true,
+      "parquet_schema_equal": true
+    },
+    {
+      "table": "balance_changes",
+      "old_rows": 1970,
+      "new_rows": 1970,
+      "old_only": 0,
+      "new_only": 0,
+      "schema_equal": true,
+      "parquet_schema_equal": true
+    },
+    {
+      "table": "blocks",
+      "old_rows": 2,
+      "new_rows": 2,
+      "old_only": 0,
+      "new_only": 0,
+      "schema_equal": true,
+      "parquet_schema_equal": true
+    },
+    {
+      "table": "calls",
+      "old_rows": 4261,
+      "new_rows": 4261,
+      "old_only": 0,
+      "new_only": 0,
+      "schema_equal": true,
+      "parquet_schema_equal": true
+    },
+    {
+      "table": "code_changes",
+      "old_rows": 3,
+      "new_rows": 3,
+      "old_only": 0,
+      "new_only": 0,
+      "schema_equal": true,
+      "parquet_schema_equal": true
+    },
+    {
+      "table": "logs",
+      "old_rows": 1438,
+      "new_rows": 1438,
+      "old_only": 0,
+      "new_only": 0,
+      "schema_equal": true,
+      "parquet_schema_equal": true
+    },
+    {
+      "table": "nonce_changes",
+      "old_rows": 465,
+      "new_rows": 465,
+      "old_only": 0,
+      "new_only": 0,
+      "schema_equal": true,
+      "parquet_schema_equal": true
+    },
+    {
+      "table": "set_code_authorizations",
+      "old_rows": 2,
+      "new_rows": 2,
+      "old_only": 0,
+      "new_only": 0,
+      "schema_equal": true,
+      "parquet_schema_equal": true
+    },
+    {
+      "table": "storage_changes",
+      "old_rows": 3545,
+      "new_rows": 3545,
+      "old_only": 0,
+      "new_only": 0,
+      "schema_equal": true,
+      "parquet_schema_equal": true
+    },
+    {
+      "table": "system_balance_changes",
+      "old_rows": 32,
+      "new_rows": 32,
+      "old_only": 0,
+      "new_only": 0,
+      "schema_equal": true,
+      "parquet_schema_equal": true
+    },
+    {
+      "table": "system_calls",
+      "old_rows": 8,
+      "new_rows": 8,
+      "old_only": 0,
+      "new_only": 0,
+      "schema_equal": true,
+      "parquet_schema_equal": true
+    },
+    {
+      "table": "system_storage_changes",
+      "old_rows": 10,
+      "new_rows": 10,
+      "old_only": 0,
+      "new_only": 0,
+      "schema_equal": true,
+      "parquet_schema_equal": true
+    },
+    {
+      "table": "transactions",
+      "old_rows": 458,
+      "new_rows": 458,
+      "old_only": 0,
+      "new_only": 0,
+      "schema_equal": true,
+      "parquet_schema_equal": true
+    },
+    {
+      "table": "withdrawals",
+      "old_rows": 32,
+      "new_rows": 32,
+      "old_only": 0,
+      "new_only": 0,
+      "schema_equal": true,
+      "parquet_schema_equal": true
+    }
+  ],
+  "total_rows": 12298,
+  "cursor_identity_and_bounds_equal": true,
+  "legacy_cursor_timestamp_null": true,
+  "protected_cursor_timestamp_matches_source": true,
+  "runtime_head": "a9306b7d7e87d9996561fc1b920326acad7604f3",
+  "range": {
+    "start": 26049575,
+    "stop_exclusive": 26049577
+  },
+  "offline_recovery": {
+    "exit_code": 0,
+    "published_parts_after_recovery": 0,
+    "temporary_remnants_after_recovery": 0,
+    "pending_present": false,
+    "authority_unchanged": true
+  },
+  "same_bound_runs": [
+    {
+      "deleted_mirror_before_run": false,
+      "exit_code": 0,
+      "reported_no_blocks_request": true,
+      "parts_and_authority_unchanged": true,
+      "mirror_exists": true,
+      "mirror_unchanged": true
+    },
+    {
+      "deleted_mirror_before_run": true,
+      "exit_code": 0,
+      "reported_no_blocks_request": true,
+      "parts_and_authority_unchanged": true,
+      "mirror_exists": true
+    }
+  ]
+}
