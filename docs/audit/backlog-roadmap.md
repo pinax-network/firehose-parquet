@@ -99,19 +99,28 @@ and test against current main. Never reset or discard the previous worktree.
   measured conversion benchmarks and CI; issue closure was verified. The original
   locked work is preserved. #565's safe fixed-size Base58 implementation and
   equivalence checks are recorded in [its audit](565-fixed-base58.md); PR #598
-  merged as `cd6e011` after 877 tests, release benchmarks and CI; issue closed. Recover #522 before duplicating that work. Measure
-  #515 and #520 on representative data. #524 merged in PR #599 as `f555898`
+  merged as `cd6e011` after 877 tests, release benchmarks and CI; issue closed. #522 merged in PR #604 with 36 guarded
+  rollup measurements and exact row/schema comparisons. #515 merged in PR #605
+  with adaptive compressed-file sizing and an independent estimated-memory trigger.
+  #520 is implementing bounded authenticated native S3 spooling and streaming
+  with local protocol and memory qualification; it remains open. #524 merged in PR #599 as `f555898`
   after 882 tests, reproducible 1.8–2.7x local validation improvements and CI;
   issue closure is verified. #503's native-type work and
   bounded release benchmark are complete. #516 depends on durable
   commit ordering. Transport #517 merged in PR #602 as `b364681` after 1,007
   tests, local delayed-transport benchmarks, independent review and CI; issue
-  closure was verified. #518-#519 and #523 need the specific throughput, memory,
-  file-size or lookup evidence requested by their issues.
-- Structure: #525 now has a behavior-preserving setup/runtime/flush implementation
-  under review; [its record](525-ingestion-decomposition.md) tracks qualification
-  and publication separately. #526-#529 follow correctness work, with scope refreshed against
-  current main. [#516 concurrency](516-concurrency-design.md) remains a proposal only. The remaining #530 auth/client duplication merged in PR #603
+  closure was verified. #518 merged in PR #606 after 75 guarded samples and all-chain
+  equality. #519 merged in PR #608 after 120 encodes and 3,510 exact-result lookup
+  probes. #523 merged in PR #609 after 1,054 tests, exact-result read/delete
+  benchmarks and final integration checks. Each linked issue is closed; their
+  audit records distinguish local measurements from live-provider claims.
+- Structure: #527 merged in PR #610; all AWS flags and retry/credential policies
+  were checked, and issue closure was verified. #525 merged in PR #611 as
+  `ab0888e` after actual retained-block CLI/state parity and final CI; its issue
+  closure was verified. See [qualification](525-ingestion-decomposition.md). #528 extracts
+  CLI operation modules with an unchanged-item proof. #526 shared chain helpers
+  and #529 maintenance consolidation remain open, scoped against current code.
+  [#516 concurrency](516-concurrency-design.md) remains a proposal only. The remaining #530 auth/client duplication merged in PR #603
   as `39d49f6` after 1,010 tests, protocol/retry regressions, independent review
   and CI; issue closure was verified.
 

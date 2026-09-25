@@ -99,8 +99,11 @@ lifecycle state; a local implementation or passing test alone is not closure.
 | [#518](https://github.com/pinax-network/firehose-parquet/issues/518) | [#606](https://github.com/pinax-network/firehose-parquet/pull/606) | Merged as `9eddfd4` on 2026-09-25; issue closure verified. All-chain owned/borrowed equality, 75 guarded offline samples, 1,029 combined tests, independent review and CI passed. |
 | [#550](https://github.com/pinax-network/firehose-parquet/issues/550), Solana slice | [#607](https://github.com/pinax-network/firehose-parquet/pull/607) | Merged as `955b8b2` on 2026-09-25; issue remains open. Parent outcome context added; all legacy values preserved in 300 table comparisons, 1,030 tests and CI passed. Other chains remain outstanding. |
 | [#519](https://github.com/pinax-network/firehose-parquet/issues/519) | [#608](https://github.com/pinax-network/firehose-parquet/pull/608) | Merged as `11ac02c` on 2026-09-25; issue closure verified. Shared bounded lookup properties, 120 schema/row-preserving encodes and 3,510 exact-result lookup probes, independent review and CI passed. |
-
 | [#523](https://github.com/pinax-network/firehose-parquet/issues/523) | [#609](https://github.com/pinax-network/firehose-parquet/pull/609) | Merged as `e4f990f` on 2026-09-25; issue closure verified. 1,054 workspace tests, 128 current-main integration tests, exact-result synthetic delete/read benchmarks, independent review and CI passed. |
+
+| [#527](https://github.com/pinax-network/firehose-parquet/issues/527) | [#610](https://github.com/pinax-network/firehose-parquet/pull/610) | Merged as `270af16` on 2026-09-25; issue closure verified. All 80 AWS option definitions unchanged, 1,039 workspace tests, 44 final S3 integration checks, independent review and CI passed. |
+| [#509](https://github.com/pinax-network/firehose-parquet/issues/509) | [#595](https://github.com/pinax-network/firehose-parquet/pull/595) | Merged as `5de4f16` on 2026-09-25; issue closure verified. 1,067 workspace tests, two bounded native RPC reads, 377,560 raw-source value checks, 136,720 legacy-value checks, physical schema checks, independent review and CI passed. RPC-backed mapper qualification only; Firehose transport and #550 remain separate. |
+| [#525](https://github.com/pinax-network/firehose-parquet/issues/525) | [#611](https://github.com/pinax-network/firehose-parquet/pull/611) | Merged as `ab0888e` on 2026-09-25; issue closure verified. 1,058 workspace tests, final main integration, exact 13-part/5,050-row CLI replay and durable-state parity, independent review and CI passed. |
 
 The #468 design PR accidentally triggered GitHub auto-closure through a negative
 sentence containing a recognized closing phrase. On 2026-09-25 the PR text was
@@ -120,3 +123,5 @@ any external recovery condition, such as a dependency security rescan.
 - [#519 Parquet lookup properties and explicit compression](519-parquet-lookup-properties.md).
 
 - [#527 shared AWS options and S3 construction](527-shared-aws-configuration.md).
+
+- [#528 CLI module extraction and unchanged-item proof](528-cli-modules.md).
