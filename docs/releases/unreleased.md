@@ -556,6 +556,14 @@ Rows of `access_lists` and `set_code_authorizations` follow their transaction: t
 
 ## Performance
 
+### Projected dataset validation (#524)
+
+`validate` decodes only canonical ID/height/time columns, preserves full-schema
+checks, and compares cached partition endpoints instead of repeatedly scanning
+all blocks. This also fixes endpoint selection when partitions contain overlapping
+heights. Global validation still retains all canonical tuples, and S3 still
+downloads whole objects. See [the checks and benchmark](../audit/524-validation-performance.md).
+
 ### Fixed-size Base58 conversion uses safe integer limbs (#565)
 
 32-byte keys and 64-byte signatures use a safe stack-buffer encoder; all other

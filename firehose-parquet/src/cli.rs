@@ -6160,6 +6160,40 @@ fn find_canonical_indices(schema: &arrow::datatypes::Schema) -> anyhow::Result<C
     })
 }
 
+/// Decode only validation columns while retaining the full footer schema for
+/// schema consistency checks. Shared by file-backed and S3-buffer-backed readers.
+fn read_validation_columns<R: parquet::file::reader::ChunkReader + 'static>(
+    input: R,
+) -> anyhow::Result<(arrow::datatypes::Schema, Vec<BlockTuple>, u64)> {
+    use arrow::record_batch::RecordBatchReader;
+    use parquet::arrow::{arrow_reader::ParquetRecordBatchReaderBuilder, ProjectionMask};
+
+    let builder = ParquetRecordBatchReaderBuilder::try_new(input)?;
+    let schema = builder.schema().as_ref().clone();
+    let indices = find_canonical_indices(&schema)?;
+    let roots = [
+        Some(indices.block_num),
+        Some(indices.block_id),
+        Some(indices.parent_id),
+        indices.timestamp,
+    ]
+    .into_iter()
+    .flatten();
+    let projection = ProjectionMask::roots(builder.parquet_schema(), roots);
+    let row_count = builder.metadata().file_metadata().num_rows() as u64;
+    let reader = builder.with_projection(projection).build()?;
+    // Projection retains source field order, which need not match canonical order.
+    let projected = find_canonical_indices(&reader.schema())?;
+    let tuples = extract_block_tuples(
+        reader,
+        projected.block_num,
+        projected.block_id,
+        projected.parent_id,
+        projected.timestamp,
+    )?;
+    Ok((schema, tuples, row_count))
+}
+
 /// Compare two schemas and return a list of differences.
 fn compare_schemas(
     reference: &arrow::datatypes::Schema,
@@ -6382,23 +6416,25 @@ fn validate_from_files(files: Vec<FileInfo>, opts: &ValidateOptions) -> Validate
     let mut all_tuples: Vec<BlockTuple> = Vec::new();
     let mut total_files = 0usize;
 
-    for (partition_name, (tuples, file_count, row_count)) in &groups {
-        let mut tuples = tuples.clone();
+    // Keep only each partition's own boundary tuples for cross-partition checks.
+    // Global duplicate/continuity validation still needs the complete tuple set.
+    let mut boundaries = Vec::new();
+    for (partition_name, (mut tuples, file_count, row_count)) in groups {
         total_files += file_count;
 
-        if *file_count == 0 {
+        if file_count == 0 {
             empty_partitions.push(EmptyPartition {
-                partition: partition_name.clone(),
+                partition: partition_name,
                 files: 0,
                 reason: "no files",
             });
             continue;
         }
-        if *row_count == 0 {
+        if row_count == 0 {
             empty_partitions.push(EmptyPartition {
-                partition: partition_name.clone(),
-                files: *file_count,
-                reason: &"0 rows across all files",
+                partition: partition_name,
+                files: file_count,
+                reason: "0 rows across all files",
             });
             continue;
         }
@@ -6407,10 +6443,15 @@ fn validate_from_files(files: Vec<FileInfo>, opts: &ValidateOptions) -> Validate
         let cr = check_tuples(&tuples);
         let min_block = tuples.first().map(|t| t.0);
         let max_block = tuples.last().map(|t| t.0);
+        if opts.cross_partition {
+            if let (Some(first), Some(last)) = (tuples.first(), tuples.last()) {
+                boundaries.push((partition_name.clone(), first.clone(), last.clone()));
+            }
+        }
 
         partitions.push(PartitionResult {
-            partition: partition_name.clone(),
-            files_scanned: *file_count,
+            partition: partition_name,
+            files_scanned: file_count,
             total_blocks: tuples.len() as u64,
             min_block,
             max_block,
@@ -6421,63 +6462,36 @@ fn validate_from_files(files: Vec<FileInfo>, opts: &ValidateOptions) -> Validate
             timestamp_reversals: cr.timestamp_reversals,
         });
 
-        all_tuples.extend(tuples.iter().cloned());
+        all_tuples.extend(tuples);
     }
 
-    // Cross-partition continuity (#88).
+    // Cross-partition continuity (#88): sort P boundaries, then inspect P-1 pairs
+    // directly instead of searching all N block tuples for every pair (#524).
     let mut cross_partition_issues = Vec::new();
-    if opts.cross_partition && partitions.len() > 1 {
-        // Sort partitions by their min_block.
-        let mut sorted_parts: Vec<&PartitionResult> = partitions
-            .iter()
-            .filter(|p| p.min_block.is_some())
-            .collect();
-        sorted_parts.sort_by_key(|p| p.min_block);
-
-        for i in 1..sorted_parts.len() {
-            let prev = sorted_parts[i - 1];
-            let curr = sorted_parts[i];
-
-            if let (Some(prev_max), Some(curr_min)) = (prev.max_block, curr.min_block) {
-                // Find the actual last and first tuples.
-                // We need the block_id of prev's last block and parent_id of curr's first block.
-                // We already have all_tuples, but let's check from the group data.
-                let gap = if curr_min > prev_max + 1 {
-                    Some(BlockGap {
-                        from: prev_max + 1,
-                        to: curr_min,
-                    })
-                } else {
-                    None
-                };
-
-                // For parent mismatch, we need the actual block_id/parent_id.
-                // Find them from all_tuples (sorted later).
-                let parent_mismatch = if curr_min == prev_max + 1 {
-                    // Find prev's last block and curr's first block in all_tuples.
-                    let prev_last = all_tuples.iter().rfind(|t| t.0 == prev_max);
-                    let curr_first = all_tuples.iter().find(|t| t.0 == curr_min);
-                    match (prev_last, curr_first) {
-                        (Some(pl), Some(cf)) if cf.2 != pl.1 => Some(ParentMismatch {
-                            block_num: cf.0,
-                            expected_parent_id: pl.1.clone(),
-                            actual_parent_id: cf.2.clone(),
-                        }),
-                        _ => None,
-                    }
-                } else {
-                    None
-                };
-
-                if gap.is_some() || parent_mismatch.is_some() {
-                    cross_partition_issues.push(CrossPartitionIssue {
-                        from_partition: prev.partition.clone(),
-                        to_partition: curr.partition.clone(),
-                        gap,
-                        parent_mismatch,
-                    });
-                }
-            }
+    boundaries.sort_by_key(|(_, first, _)| first.0);
+    for pair in boundaries.windows(2) {
+        let (prev_name, _, prev_last) = &pair[0];
+        let (curr_name, curr_first, _) = &pair[1];
+        let Some(next_block) = prev_last.0.checked_add(1) else {
+            continue;
+        };
+        let gap = (curr_first.0 > next_block).then_some(BlockGap {
+            from: next_block,
+            to: curr_first.0,
+        });
+        let parent_mismatch =
+            (curr_first.0 == next_block && curr_first.2 != prev_last.1).then(|| ParentMismatch {
+                block_num: curr_first.0,
+                expected_parent_id: prev_last.1.clone(),
+                actual_parent_id: curr_first.2.clone(),
+            });
+        if gap.is_some() || parent_mismatch.is_some() {
+            cross_partition_issues.push(CrossPartitionIssue {
+                from_partition: prev_name.clone(),
+                to_partition: curr_name.clone(),
+                gap,
+                parent_mismatch,
+            });
         }
     }
 
@@ -6522,8 +6536,6 @@ fn validate_parquet_local(
     path: &PathBuf,
     opts: &ValidateOptions,
 ) -> anyhow::Result<ValidateResult> {
-    use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
-
     let mut paths: Vec<PathBuf> = Vec::new();
     if path.is_file() {
         paths.push(path.clone());
@@ -6558,24 +6570,7 @@ fn validate_parquet_local(
 
     for file_path in &paths {
         let file = std::fs::File::open(file_path)?;
-        let builder = ParquetRecordBatchReaderBuilder::try_new(file)?;
-        let schema = builder.schema();
-        let arrow_schema: arrow::datatypes::Schema = (**schema).clone();
-        let indices = find_canonical_indices(&arrow_schema)?;
-        let metadata = builder.metadata().clone();
-        let row_count: u64 = metadata
-            .row_groups()
-            .iter()
-            .map(|rg| rg.num_rows() as u64)
-            .sum();
-        let reader = builder.build()?;
-        let tuples = extract_block_tuples(
-            reader,
-            indices.block_num,
-            indices.block_id,
-            indices.parent_id,
-            indices.timestamp,
-        )?;
+        let (arrow_schema, tuples, row_count) = read_validation_columns(file)?;
 
         let partition_key = detect_partition(&file_path.to_string_lossy(), &base);
         let display = file_path
@@ -6603,7 +6598,6 @@ fn validate_parquet_s3(
 ) -> anyhow::Result<ValidateResult> {
     use crate::writer::parse_s3_url;
     use object_store::ObjectStore;
-    use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 
     let (bucket, prefix) = parse_s3_url(path)?;
     let client = aws.build_s3_client(&bucket)?;
@@ -6651,24 +6645,7 @@ fn validate_parquet_s3(
         let data = block_on_async(async { client.get(&obj.location).await?.bytes().await })
             .map_err(|e| anyhow::anyhow!("reading s3://{bucket}/{}: {e}", obj.location))?;
 
-        let builder = ParquetRecordBatchReaderBuilder::try_new(data)?;
-        let schema = builder.schema();
-        let arrow_schema: arrow::datatypes::Schema = (**schema).clone();
-        let indices = find_canonical_indices(&arrow_schema)?;
-        let metadata = builder.metadata().clone();
-        let row_count: u64 = metadata
-            .row_groups()
-            .iter()
-            .map(|rg| rg.num_rows() as u64)
-            .sum();
-        let reader = builder.build()?;
-        let tuples = extract_block_tuples(
-            reader,
-            indices.block_num,
-            indices.block_id,
-            indices.parent_id,
-            indices.timestamp,
-        )?;
+        let (arrow_schema, tuples, row_count) = read_validation_columns(data)?;
 
         let partition_key = detect_partition(obj.location.as_ref(), &prefix);
         let display = obj
@@ -11316,3 +11293,7 @@ mod tests {
         assert!(list_partitions_from_index(&verified_list_request(&path), None).is_err());
     }
 }
+
+#[cfg(test)]
+#[path = "cli/validate_tests.rs"]
+mod validate_tests;

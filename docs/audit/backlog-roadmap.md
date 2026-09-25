@@ -85,9 +85,10 @@ and test against current main. Never reset or discard the previous worktree.
   integrated tests, bounded exhaustive/sampled equivalence, independent review,
   measured conversion benchmarks and CI; issue closure was verified. The original
   locked work is preserved. #565's safe fixed-size Base58 implementation and
-  equivalence checks are recorded in [its audit](565-fixed-base58.md); publication
-  and CI remain separate gates. Recover #522 before duplicating that work. Measure
-  #515, #520 and #524 on representative data; #503's native-type work and
+  equivalence checks are recorded in [its audit](565-fixed-base58.md); PR #598
+  merged as `cd6e011` after 877 tests, release benchmarks and CI; issue closed. Recover #522 before duplicating that work. Measure
+  #515 and #520 on representative data. #524 is in PR #599 after 878 tests
+  and reproducible 1.8–2.7x local validation improvements; merge remains pending. #503's native-type work and
   bounded release benchmark are complete. #516 depends on durable
   commit ordering; #517-#519 and #523 need the specific throughput, memory,
   file-size or lookup evidence requested by their issues.
