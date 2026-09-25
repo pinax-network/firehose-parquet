@@ -9,7 +9,7 @@ const DEFAULT_PROVIDER: &str = "pinax.network";
 
 /// Networks the default provider no longer serves, kept on another Firehose
 /// provider that the registry lists for them. Each entry was checked live by
-/// streaming blocks with a `SUBSTREAMS_API_TOKEN` (#535). The default provider
+/// streaming blocks with a StreamingFast-compatible token (#535). The default provider
 /// still wins if the registry lists it again.
 const FALLBACK_PROVIDERS: &[(&str, &str)] = &[
     ("near-mainnet", "streamingfast.io"),

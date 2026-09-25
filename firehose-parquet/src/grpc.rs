@@ -825,6 +825,52 @@ mod tests {
     }
 
     #[test]
+    fn test_provider_scoping_applies_to_rpc_auth_metadata() {
+        for (endpoint, expected_key, expected_bearer) in [
+            (
+                "https://eth.firehose.pinax.network",
+                Some("pinax-key"),
+                None,
+            ),
+            (
+                "https://mainnet.tron.streamingfast.io",
+                None,
+                Some("Bearer sf-token"),
+            ),
+            ("https://custom.example", None, None),
+        ] {
+            let credentials = crate::auth::resolve_with(endpoint, None, None, |name| match name {
+                "PINAX_API_KEY" => Some("pinax-key".into()),
+                "SUBSTREAMS_API_KEY" => Some("legacy-pinax-key".into()),
+                "STREAMINGFAST_API_TOKEN" => Some("sf-token".into()),
+                _ => None,
+            })
+            .unwrap();
+            let mut config = test_config(endpoint);
+            config.api_key = credentials.api_key;
+            config.jwt_token = credentials.jwt_token;
+            let client = FirehoseClient::new(config).unwrap();
+            // Info, stream, and sparse probes all use this same metadata helper.
+            let mut request = tonic::Request::new(firehose::InfoRequest {});
+            client.auth.apply(&mut request);
+            assert_eq!(
+                request
+                    .metadata()
+                    .get("x-api-key")
+                    .map(|v| v.to_str().unwrap()),
+                expected_key
+            );
+            assert_eq!(
+                request
+                    .metadata()
+                    .get("authorization")
+                    .map(|v| v.to_str().unwrap()),
+                expected_bearer
+            );
+        }
+    }
+
+    #[test]
     fn test_auth_metadata_trims_credentials_from_secret_files() {
         let mut config = test_config("https://example.com");
         config.api_key = Some("key-from-k8s-secret\n".to_string());
