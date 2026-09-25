@@ -1413,7 +1413,7 @@ Examples:
             value_parser = clap::value_parser!(u64).range(1..)
         )]
         block_range_size: Option<u64>,
-        /// Compression codec for the written `partitions.parquet`: zstd, snappy, gzip, none
+        /// Compression codec for the written `partitions.parquet`: zstd (level 3), zstd:<level>, snappy, gzip, none
         #[arg(long, default_value = "zstd", help_heading = "Output")]
         compression: String,
         /// Output root path (local directory or s3:// URI prefix).

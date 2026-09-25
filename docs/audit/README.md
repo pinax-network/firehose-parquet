@@ -106,3 +106,5 @@ any external recovery condition, such as a dependency security rescan.
 
 - [#518 owned protobuf byte buffers](518-owned-protobuf-bytes.md): shared chain
   decoding, compatibility boundary, all-chain equivalence and offline benchmarks.
+
+- [#519 Parquet lookup properties and explicit compression](519-parquet-lookup-properties.md).
