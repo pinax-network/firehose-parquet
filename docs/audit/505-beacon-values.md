@@ -95,6 +95,12 @@ with **5 existing ignored**, plus build and formatting checks. The inherited
 `transactions_processed` unused-assignment warning in the CLI is unchanged.
 All Cargo operations used the shared whole-command lock and target directory.
 
+Final integration `b11c508` includes main `d417e0c` (merged #593 Solana payload
+changes). The combined locked workspace suite passed **862 tests**, with **5
+existing ignored**; locked build, formatting and diff-whitespace checks passed.
+The integration changes no Beacon source, so the bounded live evidence below
+remains applicable. The final audit-only commit does not change runtime code.
+
 ### Bounded live qualification
 
 On 2026-09-25 at approximately 18:39 UTC, the copied debug binary at `8e7ea05`
