@@ -18,10 +18,14 @@ issue labels and green CI alone are not acceptance evidence. See the
    passed; GitHub reports no open dependency alerts after rescan.
 3. Crash/replay publication (#468). The [design](468-crash-recovery-design.md)
    explains why deterministic range filenames alone cannot prevent duplicates
-   when replay chooses different timer or size boundaries. The writer split path has been removed (#477, PR #581); establish an
-   all-table durable frontier next. The common ownership/control foundation is
-   merged in PR #591; it does not yet provide protected ingestion.
-   Complete this before ingestion concurrency (#516).
+   when replay chooses different timer or size boundaries. The complete
+   [runtime implementation](468-ingestion-runtime.md) is independently reviewed
+   and awaiting PR publication/final CI on main `f555898`: 995 workspace tests,
+   the CI capture example, actual failed-Writing recovery and 14-table/12,298-row
+   live equivalence passed. Its migration and S3 quiescence limits are explicit.
+   PR #591 remains the historical ownership/control foundation. Keep #468 open
+   until the runtime PR merges; ingestion concurrency (#516) remains sequenced
+   after that durable commit-order contract.
 4. Shutdown recovery (#473, PR #579) and malformed identity/timestamp handling
    (#476, PR #584) are merged. Probe (#485) work was recovered into PR #583,
    passed 779 combined tests with the timestamp fix and CI, and merged as
@@ -80,15 +84,17 @@ and test against current main. Never reset or discard the previous worktree.
   in PR #597 as `1f2d252` after 873 tests, executable query and protocol checks,
   independent review and CI; issue closure was verified. #475 metrics/readiness
   is merged. The #477 writer simplification and
-  #476 malformed-metadata handling are merged; the #468 journal is in progress.
+  #476 malformed-metadata handling are merged; the complete #468 runtime is
+  reviewed and qualified locally, awaiting runtime PR CI and merge.
 - Performance: #513 was recovered and merged in PR #596 as `2a3724e` after 869
   integrated tests, bounded exhaustive/sampled equivalence, independent review,
   measured conversion benchmarks and CI; issue closure was verified. The original
   locked work is preserved. #565's safe fixed-size Base58 implementation and
   equivalence checks are recorded in [its audit](565-fixed-base58.md); PR #598
   merged as `cd6e011` after 877 tests, release benchmarks and CI; issue closed. Recover #522 before duplicating that work. Measure
-  #515 and #520 on representative data. #524 is in PR #599 after 878 tests
-  and reproducible 1.8–2.7x local validation improvements; merge remains pending. #503's native-type work and
+  #515 and #520 on representative data. #524 merged in PR #599 as `f555898`
+  after 882 tests, reproducible 1.8–2.7x local validation improvements and CI;
+  issue closure is verified. #503's native-type work and
   bounded release benchmark are complete. #516 depends on durable
   commit ordering; #517-#519 and #523 need the specific throughput, memory,
   file-size or lookup evidence requested by their issues.
