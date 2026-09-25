@@ -1013,7 +1013,7 @@ See [Verifiability artifact runbook](docs/verifiability-artifact-runbook.md) for
 
 ### `rollup` — Roll Up Partitions
 
-Rolls up fine-grained partitions (e.g. `minute` or `hour`) into coarser ones (e.g. `date`). Reads source files, concatenates them by target partition, and writes new files respecting `--flush-bytes`. The source path is a local path or an explicit S3 URI.
+Rolls up fine-grained partitions (e.g. `minute` or `hour`) into coarser ones (e.g. `date`). Validates each target partition before writing, then streams source batches into new files using the `--flush-bytes` target. The source path is a local path or an explicit S3 URI.
 
 ```bash
 # Roll up minute-partitioned data into daily partitions, replacing the minute files
@@ -1027,6 +1027,8 @@ fireparq rollup s3://my-bucket/evm/blocks/ -p date --delete-source
 ```
 
 The source path must exist locally or be an explicit `s3://...` URI. Unlike `scan` and `inspect`, `rollup` never falls back to `s3://<S3_BUCKET>/<path>` when a relative path is missing (`.env` is loaded automatically, so a typo could otherwise target a bucket).
+
+Rollup holds one output part and one input batch instead of the whole target partition. The byte target limits the encoded output part; active row groups have a separate 32 MiB estimated-memory budget. A memory-bound row group is flushed within the same part; a new file starts when its encoded bytes reach the target. Checks occur between batches, so a wide row, Parquet page/dictionary, and codec overhead can exceed the target. `--flush-bytes 0` leaves the output part unlimited, while the row-group budget remains finite. A bounded validation pass reads all input data before the encoding pass so a damaged later file is rejected before that group writes anything. S3 reads use pinned byte ranges rather than downloading complete source objects; the two passes trade extra reads for bounded memory and early failure.
 
 Which files rollup reads, writes, and deletes:
 
@@ -1043,7 +1045,7 @@ Which files rollup reads, writes, and deletes:
 | `-o, --output` | same as source | Output path (local or S3 URI). In-place rollups require `--delete-source` |
 | `-p, --partition` | `date` | Target partition interval: `hour` or `date` |
 | `--compression` | `zstd` | Compression codec: zstd, snappy, gzip, none |
-| `--flush-bytes` | 128 MB | Max compressed bytes per output file |
+| `--flush-bytes` | 128 MB | Target compressed bytes per output part; 0 disables the output-size bound |
 | `--delete-source` | `false` | Delete each source file once its target partition is written (required in place) |
 
 ### `merge` — Consolidate Part Files
@@ -1080,7 +1082,7 @@ The path must exist locally or be an explicit `s3://...` URI. Unlike `scan` and 
 | `--flush-rows` | disabled | Flush merged output after this many rows |
 | `--dry-run` | `false` | Show what would be merged without writing |
 
-> **Memory note:** Merge holds one source part at a time plus the output file being built (up to `--flush-bytes`). On S3, each source object is downloaded whole before it is read, so peak memory is roughly the largest part plus `--flush-bytes`.
+> **Memory note:** Merge holds the encoded output part plus an active row group with a separate 32 MiB estimated-memory budget. Input batches, Parquet pages/dictionaries and codec overhead add to this; `--flush-bytes` is an approximate output-size target, not an absolute memory limit. On S3, merge still downloads each whole source object before reading it, so the largest source part also contributes to peak memory. Rollup uses bounded source ranges instead.
 
 Local interrupted merges recover under exclusive ownership:
 
