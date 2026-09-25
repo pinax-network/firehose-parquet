@@ -1,3 +1,4 @@
+use crate::artifacts::{is_reserved_artifact_path, MERKLE_ROOTS_FILENAME, VERIFY_RUNS_DIR};
 use crate::cli::{block_on_async, resolve_parquet_input_path_string, AwsConfig};
 use crate::writer::parse_s3_url;
 use anyhow::{anyhow, Context, Result};
@@ -144,8 +145,11 @@ pub enum VerifyScope {
 
 #[derive(Debug, Clone)]
 pub struct VerifyOptions {
-    pub chain: String,
-    pub table: String,
+    /// Chain family (`evm`, `bitcoin`, ...). `None` infers it from the
+    /// `firehose-parquet.block_type` file metadata.
+    pub chain: Option<String>,
+    /// Table name. `None` infers it from the `<chain_root>/<table>/...` layout.
+    pub table: Option<String>,
     pub hash_strategy: Option<String>,
     pub checks: Vec<VerifyCheck>,
     pub profile: VerifyProfile,
@@ -278,6 +282,7 @@ pub struct VerifyReport {
     pub tool_version: String,
     pub chain: String,
     pub table: String,
+    pub network: Option<String>,
     pub scope: VerifyScope,
     pub requested_checks: Vec<VerifyCheck>,
     pub effective_checks: Vec<VerifyCheck>,
@@ -289,6 +294,7 @@ pub struct VerifyReport {
     pub published_report_path: Option<String>,
     pub algorithm: String,
     pub merkle_version: String,
+    pub warnings: Vec<String>,
     pub summary: VerifySummary,
     pub findings: Vec<VerifyFinding>,
     pub protocol_findings: Vec<ProtocolCheckFinding>,
@@ -302,6 +308,9 @@ impl VerifyReport {
 
     pub fn print(&self) {
         println!("Verifying {}:{}", self.chain, self.table);
+        if let Some(ref network) = self.network {
+            println!("  network:       {}", network);
+        }
         println!("  report schema: {}", self.report_schema_version);
         println!("  run id:        {}", self.run_id);
         println!("  started at:    {}", self.started_at);
@@ -348,6 +357,13 @@ impl VerifyReport {
                 " no"
             }
         );
+
+        if !self.warnings.is_empty() {
+            println!("\nWarnings:");
+            for warning in &self.warnings {
+                println!("  - {}", warning);
+            }
+        }
 
         if self.findings.is_empty() {
             return;
@@ -404,6 +420,7 @@ impl VerifyReport {
 
 #[derive(Debug, Clone)]
 struct ScanOutput {
+    target: Target,
     partition_roots: BTreeMap<String, String>,
     protocol_findings: Vec<ProtocolCheckFinding>,
 }
@@ -462,27 +479,45 @@ pub fn verify_parquet(
     let effective_checks = opts.effective_checks();
     let runs_roots = opts.runs_roots();
     let runs_protocol = opts.runs_protocol();
-    let hash_strategy = resolve_hash_strategy(&opts.chain, opts.hash_strategy.as_deref())?;
-    let algorithm = hash_strategy.as_str().to_string();
-
-    let registry_path = opts
-        .registry_path
-        .clone()
-        .unwrap_or_else(|| derive_registry_path(&resolved_path, &opts.chain, &opts.table));
-    let suggested_run_report_path =
-        derive_run_report_path(&resolved_path, &opts.chain, &opts.table, &run_id);
+    // Fail on a bad --hash-strategy before scanning.
+    if let Some(raw) = opts.hash_strategy.as_deref() {
+        parse_hash_strategy(raw)?;
+    }
 
     let scan_output = if resolved_path.starts_with("s3://") {
         let aws = aws.ok_or_else(|| anyhow!("AWS config required for S3 paths"))?;
-        collect_partition_roots_s3(&resolved_path, aws, opts, hash_strategy)?
+        collect_partition_roots_s3(&resolved_path, aws, opts)?
     } else {
-        collect_partition_roots_local(&resolved_path, opts, hash_strategy)?
+        collect_partition_roots_local(&resolved_path, opts)?
     };
 
+    let target = scan_output.target;
     let partition_roots = scan_output.partition_roots;
+    let algorithm = target.hash_strategy.as_str().to_string();
+    let registry_path = opts
+        .registry_path
+        .clone()
+        .unwrap_or_else(|| join_artifact_path(&target.chain_root, MERKLE_ROOTS_FILENAME));
+    let suggested_run_report_path = join_artifact_path(
+        &target.chain_root,
+        &format!("{VERIFY_RUNS_DIR}/{run_id}/report.json"),
+    );
 
-    if partition_roots.is_empty() {
-        return Err(anyhow!("no parquet files found in {}", resolved_path));
+    let mut warnings = Vec::new();
+    if runs_roots && opts.registry_path.is_none() {
+        let data_path = if resolved_path.starts_with("s3://") {
+            resolved_path.clone()
+        } else {
+            absolute_local_path(&resolved_path)?
+                .to_string_lossy()
+                .into_owned()
+        };
+        let legacy = legacy_default_registry_path(&data_path, &target.chain, &target.table);
+        if legacy != registry_path && artifact_exists(&legacy, aws) {
+            warnings.push(format!(
+                "a registry exists at the old default location {legacy} and is ignored; verify now keeps one registry per network at {registry_path}. Move or delete the old file (see \"Moving a registry from the old default location\" in docs/verifiability-artifact-runbook.md)"
+            ));
+        }
     }
 
     let mut findings = Vec::new();
@@ -494,7 +529,7 @@ pub fn verify_parquet(
         let mut needs_registry_write = !registry_exists;
 
         for (partition, computed_root) in &partition_roots {
-            let key = registry_key(&opts.chain, &opts.table, partition);
+            let key = registry_key(&target.chain, &target.table, partition);
             match registry.get(&key) {
                 Some(row)
                     if row.algorithm.as_str() != algorithm.as_str()
@@ -502,8 +537,8 @@ pub fn verify_parquet(
                 {
                     mismatches += 1;
                     findings.push(VerifyFinding {
-                        chain: opts.chain.clone(),
-                        table: opts.table.clone(),
+                        chain: target.chain.clone(),
+                        table: target.table.clone(),
                         partition: partition.clone(),
                         status: FindingStatus::Mismatch,
                         expected_root: Some(row.merkle_root.clone()),
@@ -515,8 +550,8 @@ pub fn verify_parquet(
                         registry.insert(
                             key,
                             RegistryRow {
-                                chain: opts.chain.clone(),
-                                table: opts.table.clone(),
+                                chain: target.chain.clone(),
+                                table: target.table.clone(),
                                 partition: partition.clone(),
                                 algorithm: algorithm.clone(),
                                 merkle_version: MERKLE_VERSION.to_string(),
@@ -532,8 +567,8 @@ pub fn verify_parquet(
                 Some(row) if row.merkle_root == *computed_root => {
                     matches += 1;
                     findings.push(VerifyFinding {
-                        chain: opts.chain.clone(),
-                        table: opts.table.clone(),
+                        chain: target.chain.clone(),
+                        table: target.table.clone(),
                         partition: partition.clone(),
                         status: FindingStatus::Match,
                         expected_root: Some(row.merkle_root.clone()),
@@ -544,8 +579,8 @@ pub fn verify_parquet(
                 Some(row) => {
                     mismatches += 1;
                     findings.push(VerifyFinding {
-                        chain: opts.chain.clone(),
-                        table: opts.table.clone(),
+                        chain: target.chain.clone(),
+                        table: target.table.clone(),
                         partition: partition.clone(),
                         status: FindingStatus::Mismatch,
                         expected_root: Some(row.merkle_root.clone()),
@@ -557,8 +592,8 @@ pub fn verify_parquet(
                         registry.insert(
                             key,
                             RegistryRow {
-                                chain: opts.chain.clone(),
-                                table: opts.table.clone(),
+                                chain: target.chain.clone(),
+                                table: target.table.clone(),
                                 partition: partition.clone(),
                                 algorithm: algorithm.clone(),
                                 merkle_version: MERKLE_VERSION.to_string(),
@@ -574,8 +609,8 @@ pub fn verify_parquet(
                 None => {
                     missing_expected += 1;
                     findings.push(VerifyFinding {
-                        chain: opts.chain.clone(),
-                        table: opts.table.clone(),
+                        chain: target.chain.clone(),
+                        table: target.table.clone(),
                         partition: partition.clone(),
                         status: FindingStatus::MissingExpected,
                         expected_root: None,
@@ -586,8 +621,8 @@ pub fn verify_parquet(
                     registry.insert(
                         key,
                         RegistryRow {
-                            chain: opts.chain.clone(),
-                            table: opts.table.clone(),
+                            chain: target.chain.clone(),
+                            table: target.table.clone(),
                             partition: partition.clone(),
                             algorithm: algorithm.clone(),
                             merkle_version: MERKLE_VERSION.to_string(),
@@ -629,8 +664,8 @@ pub fn verify_parquet(
     let mut capability_findings = Vec::new();
     if effective_checks.contains(&VerifyCheck::Continuity) {
         capability_findings.push(CapabilityFinding {
-            chain: opts.chain.clone(),
-            table: opts.table.clone(),
+            chain: target.chain.clone(),
+            table: target.table.clone(),
             check: VerifyCheck::Continuity,
             status: CapabilityStatus::NotVerifiable,
             details: "continuity checks are not yet implemented under verify; use `validate` for sequence integrity checks"
@@ -639,8 +674,8 @@ pub fn verify_parquet(
     }
     if effective_checks.contains(&VerifyCheck::Completeness) {
         capability_findings.push(CapabilityFinding {
-            chain: opts.chain.clone(),
-            table: opts.table.clone(),
+            chain: target.chain.clone(),
+            table: target.table.clone(),
             check: VerifyCheck::Completeness,
             status: CapabilityStatus::NotVerifiable,
             details: "completeness checks are not yet implemented under verify".to_string(),
@@ -666,8 +701,9 @@ pub fn verify_parquet(
         finished_at: format_rfc3339(run_finished),
         duration_ms,
         tool_version: env!("CARGO_PKG_VERSION").to_string(),
-        chain: opts.chain.clone(),
-        table: opts.table.clone(),
+        chain: target.chain.clone(),
+        table: target.table.clone(),
+        network: target.network.clone(),
         scope: opts.scope,
         requested_checks: opts.checks.clone(),
         effective_checks: effective_checks.iter().copied().collect(),
@@ -682,6 +718,7 @@ pub fn verify_parquet(
         published_report_path,
         algorithm,
         merkle_version: MERKLE_VERSION.to_string(),
+        warnings,
         summary: VerifySummary {
             partitions_scanned: partition_roots.len(),
             matches,
@@ -712,7 +749,9 @@ pub fn verify_parquet(
     Ok(report)
 }
 
-fn derive_registry_path(data_path: &str, chain: &str, table: &str) -> String {
+/// Registry location used before registries moved to `<chain_root>` (v0.7.1
+/// and earlier). Only used to warn about an old registry that is now ignored.
+fn legacy_default_registry_path(data_path: &str, chain: &str, table: &str) -> String {
     if data_path.starts_with("s3://") {
         if let Ok((bucket, prefix)) = parse_s3_url(data_path) {
             let mut segments: Vec<&str> = prefix.split('/').filter(|s| !s.is_empty()).collect();
@@ -758,86 +797,262 @@ fn derive_registry_path(data_path: &str, chain: &str, table: &str) -> String {
     }
 }
 
-fn derive_run_report_path(data_path: &str, chain: &str, table: &str, run_id: &str) -> String {
-    if data_path.starts_with("s3://") {
-        if let Ok((bucket, prefix)) = parse_s3_url(data_path) {
-            let mut segments: Vec<&str> = prefix.split('/').filter(|s| !s.is_empty()).collect();
-            if let Some(pos) = segments.iter().position(|s| *s == table) {
-                segments.truncate(pos);
-            }
-            if segments.len() < 2
-                || segments[segments.len() - 2] != chain
-                || segments[segments.len() - 1] != "mainnet"
-            {
-                segments = vec![chain, "mainnet"];
-            }
-            format!(
-                "s3://{}/{}/verify_runs/{}/report.json",
-                bucket,
-                segments.join("/"),
-                run_id
-            )
-        } else {
-            format!(
-                "s3://{}/{}/mainnet/verify_runs/{}/report.json",
-                "unknown", chain, run_id
-            )
-        }
-    } else {
-        let mut root = PathBuf::from(data_path);
-        if root.is_file() {
-            root = root.parent().unwrap_or(Path::new(".")).to_path_buf();
-        }
+/// What `verify` checks, resolved from the scanned files and the explicit flags.
+#[derive(Debug, Clone)]
+struct Target {
+    /// Chain family (`evm`, `bitcoin`, ...): registry key, default hash
+    /// strategy, and protocol checks.
+    chain: String,
+    table: String,
+    /// Network (`firehose-parquet.chain_name`, else the chain root directory name).
+    network: Option<String>,
+    /// `<output>/<chain_name>` directory (local path or `s3://bucket/prefix`)
+    /// holding the table directories, `merkle_roots.parquet` and `verify_runs/`.
+    chain_root: String,
+    hash_strategy: HashStrategy,
+}
 
-        let root_text = root.to_string_lossy().to_string();
-        if let Some(idx) = root_text.find(&format!("/{table}")) {
-            root = PathBuf::from(&root_text[..idx]);
-        }
+/// Dataset identity recorded in a file's `firehose-parquet.*` footer metadata.
+#[derive(Debug, Default)]
+struct FooterIdentity {
+    block_type: Option<String>,
+    chain_name: Option<String>,
+}
 
-        let root_text = root.to_string_lossy();
-        if !root_text.ends_with(&format!("/{chain}/mainnet")) {
-            root.push(chain);
-            root.push("mainnet");
+impl FooterIdentity {
+    fn from_metadata(metadata: &parquet::file::metadata::ParquetMetaData) -> Self {
+        let value = |key: &str| {
+            metadata
+                .file_metadata()
+                .key_value_metadata()?
+                .iter()
+                .find(|kv| kv.key == key)?
+                .value
+                .clone()
+                .filter(|v| !v.is_empty())
+        };
+        Self {
+            block_type: value("firehose-parquet.block_type"),
+            chain_name: value("firehose-parquet.chain_name"),
         }
-        root.push("verify_runs");
-        root.push(run_id);
-        root.push("report.json");
-        root.to_string_lossy().to_string()
     }
 }
 
-fn collect_partition_roots_local(
-    path: &str,
-    opts: &VerifyOptions,
-    hash_strategy: HashStrategy,
-) -> Result<ScanOutput> {
-    let pathbuf = PathBuf::from(path);
+/// Where a data file sits in the `build` layout
+/// `<chain_root>/<table>/[<k>=<v>/...]<file>.parquet`.
+#[derive(Debug, PartialEq, Eq)]
+struct FileLayout {
+    chain_root: String,
+    table: Option<String>,
+    /// Name of the chain root directory (the network under `build` output).
+    chain_root_name: Option<String>,
+}
+
+/// Splits a `/`-separated data file path (absolute local path or
+/// `s3://bucket/key`) into its layout by path components: the table is the
+/// nearest ancestor directory that is not a Hive partition (`k=v`), and the
+/// chain root is that directory's parent.
+fn file_layout(file_path: &str) -> FileLayout {
+    let (prefix, rest) = match file_path.strip_prefix("s3://") {
+        Some(url) => {
+            let (bucket, key) = url.split_once('/').unwrap_or((url, ""));
+            (format!("s3://{bucket}"), key)
+        }
+        None => (String::new(), file_path),
+    };
+    let mut dirs: Vec<&str> = rest.split('/').filter(|c| !c.is_empty()).collect();
+    dirs.pop(); // file name
+    while dirs.last().is_some_and(|dir| dir.contains('=')) {
+        dirs.pop();
+    }
+    let table = dirs.pop().map(str::to_string);
+    let chain_root_name = dirs.last().map(|dir| dir.to_string());
+    let chain_root = match (prefix.is_empty(), dirs.is_empty()) {
+        (true, true) => "/".to_string(),
+        (false, true) => prefix,
+        _ => format!("{prefix}/{}", dirs.join("/")),
+    };
+    FileLayout {
+        chain_root,
+        table,
+        chain_root_name,
+    }
+}
+
+/// Joins a `/`-separated artifact path onto a chain root.
+fn join_artifact_path(chain_root: &str, artifact: &str) -> String {
+    format!("{}/{artifact}", chain_root.trim_end_matches('/'))
+}
+
+/// Resolves the [`Target`] from the first scanned file and checks that every
+/// later file belongs to the same table of the same dataset.
+struct TargetResolver<'a> {
+    opts: &'a VerifyOptions,
+    target: Option<Target>,
+    /// First `firehose-parquet.chain_name` seen, to reject mixed networks.
+    seen_chain_name: Option<String>,
+}
+
+impl<'a> TargetResolver<'a> {
+    fn new(opts: &'a VerifyOptions) -> Self {
+        Self {
+            opts,
+            target: None,
+            seen_chain_name: None,
+        }
+    }
+
+    fn observe(&mut self, file_path: &str, footer: &FooterIdentity) -> Result<&Target> {
+        let layout = file_layout(file_path);
+        match &self.target {
+            None => self.target = Some(self.resolve(file_path, &layout, footer)?),
+            Some(target) => check_same_target(target, file_path, &layout, footer)?,
+        }
+        if let Some(chain_name) = &footer.chain_name {
+            match &self.seen_chain_name {
+                Some(seen) if seen != chain_name => {
+                    return Err(anyhow!(
+                        "{file_path} was written for network `{chain_name}`, but earlier files are from `{seen}`; verify one network at a time"
+                    ))
+                }
+                Some(_) => {}
+                None => self.seen_chain_name = Some(chain_name.clone()),
+            }
+        }
+        Ok(self.target.as_ref().expect("target resolved above"))
+    }
+
+    fn resolve(
+        &self,
+        file_path: &str,
+        layout: &FileLayout,
+        footer: &FooterIdentity,
+    ) -> Result<Target> {
+        let chain = match (self.opts.chain.as_deref(), footer.block_type.as_deref()) {
+            (Some(flag), Some(meta)) if !flag.eq_ignore_ascii_case(meta) => {
+                return Err(anyhow!(
+                    "--chain {flag} conflicts with {file_path}, which has firehose-parquet.block_type={meta}; drop --chain or point verify at {flag} data"
+                ))
+            }
+            (_, Some(meta)) => meta.to_string(),
+            (Some(flag), None) => flag.to_string(),
+            (None, None) => {
+                return Err(anyhow!(
+                    "cannot infer the chain: {file_path} has no firehose-parquet.block_type metadata; pass --chain"
+                ))
+            }
+        };
+        let table = match (self.opts.table.as_deref(), layout.table.as_deref()) {
+            (Some(flag), Some(dir)) if flag != dir => {
+                return Err(anyhow!(
+                    "--table {flag} conflicts with the directory layout: {file_path} is in table directory `{dir}`"
+                ))
+            }
+            (_, Some(dir)) => dir.to_string(),
+            (Some(flag), None) => flag.to_string(),
+            (None, None) => {
+                return Err(anyhow!(
+                    "cannot infer the table: {file_path} is not inside a table directory; pass --table"
+                ))
+            }
+        };
+        let hash_strategy = resolve_hash_strategy(&chain, self.opts.hash_strategy.as_deref())?;
+        Ok(Target {
+            chain,
+            table,
+            network: footer
+                .chain_name
+                .clone()
+                .or_else(|| layout.chain_root_name.clone()),
+            chain_root: layout.chain_root.clone(),
+            hash_strategy,
+        })
+    }
+
+    fn finish(self) -> Option<Target> {
+        self.target
+    }
+}
+
+fn check_same_target(
+    target: &Target,
+    file_path: &str,
+    layout: &FileLayout,
+    footer: &FooterIdentity,
+) -> Result<()> {
+    if layout.chain_root != target.chain_root || layout.table.as_deref() != Some(&target.table) {
+        return Err(anyhow!(
+            "the verify path holds more than one table: {file_path} is not in {}; verify one table directory at a time",
+            join_artifact_path(&target.chain_root, &target.table)
+        ));
+    }
+    if let Some(block_type) = footer.block_type.as_deref() {
+        if !block_type.eq_ignore_ascii_case(&target.chain) {
+            return Err(anyhow!(
+                "{file_path} has firehose-parquet.block_type={block_type}, but the chain is `{}`",
+                target.chain
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Absolute form of a local verify path (symlinks and `..` resolved when the
+/// path exists), so layout and registry paths do not depend on the working
+/// directory.
+fn absolute_local_path(path: &str) -> Result<PathBuf> {
+    std::fs::canonicalize(path)
+        .or_else(|_| std::path::absolute(path))
+        .with_context(|| format!("resolving {path}"))
+}
+
+/// Path of `file` relative to the scan base, `/`-separated.
+fn relative_path(file: &str, base: &str) -> String {
+    file.strip_prefix(base)
+        .unwrap_or(file)
+        .trim_start_matches('/')
+        .to_string()
+}
+
+fn collect_partition_roots_local(path: &str, opts: &VerifyOptions) -> Result<ScanOutput> {
+    let pathbuf = absolute_local_path(path)?;
     let mut files = Vec::new();
 
     if pathbuf.is_dir() {
         collect_parquet_files(&pathbuf, &mut files)?;
     } else if pathbuf
         .extension()
-        .map_or(false, |ext| ext.eq_ignore_ascii_case("parquet"))
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("parquet"))
     {
         files.push(pathbuf.clone());
     }
 
-    files.sort();
-
     let base = if pathbuf.is_dir() {
-        pathbuf
+        pathbuf.clone()
     } else {
-        pathbuf.parent().unwrap_or(Path::new(".")).to_path_buf()
+        pathbuf.parent().unwrap_or(Path::new("/")).to_path_buf()
     };
+    let base = base.to_string_lossy().to_string();
+    let mut files: Vec<String> = files
+        .iter()
+        .map(|file| file.to_string_lossy().to_string())
+        .filter(|file| !is_reserved_artifact_path(&relative_path(file, &base)))
+        .collect();
+    files.sort();
+    if files.is_empty() {
+        return Err(anyhow!("no parquet files found in {}", path));
+    }
 
+    let mut resolver = TargetResolver::new(opts);
     let mut partition_leaves: HashMap<String, Vec<[u8; 32]>> = HashMap::new();
     let mut protocol_state: HashMap<String, ProtocolPartitionState> = HashMap::new();
 
     for file_path in files {
-        let partition = detect_partition(&file_path.to_string_lossy(), &base.to_string_lossy());
+        let file = File::open(&file_path).with_context(|| format!("opening {file_path}"))?;
+        let builder = ParquetRecordBatchReaderBuilder::try_new(file)?;
+        let partition = detect_partition(&file_path, &base);
         let partition_state = protocol_state.entry(partition.clone()).or_default();
-        let leaves = read_parquet_leaves_local(&file_path, opts, partition_state, hash_strategy)?;
+        let leaves = scan_parquet_file(builder, &file_path, opts, &mut resolver, partition_state)?;
         partition_leaves
             .entry(partition)
             .or_default()
@@ -848,25 +1063,13 @@ fn collect_partition_roots_local(
         }
     }
 
-    let mut roots = BTreeMap::new();
-    for (partition, leaves) in partition_leaves {
-        roots.insert(partition, hex::encode(merkle_root(&leaves, hash_strategy)));
-    }
-    Ok(ScanOutput {
-        partition_roots: roots,
-        protocol_findings: if opts.runs_protocol() {
-            finalize_protocol_findings(opts, &protocol_state)
-        } else {
-            Vec::new()
-        },
-    })
+    finish_scan(opts, resolver, partition_leaves, &protocol_state)
 }
 
 fn collect_partition_roots_s3(
     path: &str,
     aws: &AwsConfig,
     opts: &VerifyOptions,
-    hash_strategy: HashStrategy,
 ) -> Result<ScanOutput> {
     let (bucket, prefix) = parse_s3_url(path)?;
     let client = aws.build_s3_client(&bucket)?;
@@ -883,23 +1086,28 @@ fn collect_partition_roots_s3(
     })
     .map_err(|e| anyhow!("listing S3 objects: {e}"))?;
 
-    objects.retain(|obj| obj.location.as_ref().ends_with(".parquet"));
+    objects.retain(|obj| {
+        let key = obj.location.as_ref();
+        key.ends_with(".parquet") && !is_reserved_artifact_path(&relative_path(key, &prefix))
+    });
     objects.sort_by(|a, b| a.location.cmp(&b.location));
+    if objects.is_empty() {
+        return Err(anyhow!("no parquet files found in {}", path));
+    }
 
+    let mut resolver = TargetResolver::new(opts);
     let mut partition_leaves: HashMap<String, Vec<[u8; 32]>> = HashMap::new();
     let mut protocol_state: HashMap<String, ProtocolPartitionState> = HashMap::new();
 
     for obj in objects {
-        let partition = detect_partition(obj.location.as_ref(), &prefix);
+        let location = &obj.location;
+        let data = block_on_async(async { client.get(location).await?.bytes().await })
+            .map_err(|e| anyhow!("reading s3://{bucket}/{}: {e}", location))?;
+        let builder = ParquetRecordBatchReaderBuilder::try_new(data)?;
+        let file_path = format!("s3://{bucket}/{location}");
+        let partition = detect_partition(location.as_ref(), &prefix);
         let partition_state = protocol_state.entry(partition.clone()).or_default();
-        let leaves = read_parquet_leaves_s3(
-            &client,
-            &bucket,
-            &obj.location,
-            opts,
-            partition_state,
-            hash_strategy,
-        )?;
+        let leaves = scan_parquet_file(builder, &file_path, opts, &mut resolver, partition_state)?;
         partition_leaves
             .entry(partition)
             .or_default()
@@ -910,68 +1118,61 @@ fn collect_partition_roots_s3(
         }
     }
 
+    finish_scan(opts, resolver, partition_leaves, &protocol_state)
+}
+
+/// Resolves or checks the target against one file, then runs protocol checks
+/// and hashes its rows into leaves.
+fn scan_parquet_file<R: parquet::file::reader::ChunkReader + 'static>(
+    builder: ParquetRecordBatchReaderBuilder<R>,
+    file_path: &str,
+    opts: &VerifyOptions,
+    resolver: &mut TargetResolver,
+    protocol_state: &mut ProtocolPartitionState,
+) -> Result<Vec<[u8; 32]>> {
+    let footer = FooterIdentity::from_metadata(builder.metadata());
+    let target = resolver.observe(file_path, &footer)?;
+    let reader = builder.build()?;
+
+    let mut leaves = Vec::new();
+    for maybe_batch in reader {
+        let batch = maybe_batch?;
+        if opts.runs_protocol() {
+            run_protocol_checks_for_batch(target, &batch, protocol_state);
+        }
+        append_batch_leaves(&batch, target.hash_strategy, &mut leaves)
+            .with_context(|| format!("hashing rows of {file_path}"))?;
+    }
+
+    Ok(leaves)
+}
+
+fn finish_scan(
+    opts: &VerifyOptions,
+    resolver: TargetResolver,
+    partition_leaves: HashMap<String, Vec<[u8; 32]>>,
+    protocol_state: &HashMap<String, ProtocolPartitionState>,
+) -> Result<ScanOutput> {
+    let target = resolver
+        .finish()
+        .ok_or_else(|| anyhow!("no parquet files were scanned"))?;
     let mut roots = BTreeMap::new();
     for (partition, leaves) in partition_leaves {
-        roots.insert(partition, hex::encode(merkle_root(&leaves, hash_strategy)));
+        roots.insert(
+            partition,
+            hex::encode(merkle_root(&leaves, target.hash_strategy)),
+        );
     }
+    let protocol_findings = if opts.runs_protocol() {
+        finalize_protocol_findings(&target, protocol_state)
+    } else {
+        Vec::new()
+    };
     Ok(ScanOutput {
+        target,
         partition_roots: roots,
-        protocol_findings: if opts.runs_protocol() {
-            finalize_protocol_findings(opts, &protocol_state)
-        } else {
-            Vec::new()
-        },
+        protocol_findings,
     })
-}
-
-fn read_parquet_leaves_local(
-    path: &Path,
-    opts: &VerifyOptions,
-    protocol_state: &mut ProtocolPartitionState,
-    hash_strategy: HashStrategy,
-) -> Result<Vec<[u8; 32]>> {
-    let file = File::open(path).with_context(|| format!("opening {}", path.display()))?;
-    let builder = ParquetRecordBatchReaderBuilder::try_new(file)?;
-    let reader = builder.build()?;
-
-    let mut leaves = Vec::new();
-    for maybe_batch in reader {
-        let batch = maybe_batch?;
-        if opts.runs_protocol() {
-            run_protocol_checks_for_batch(opts, &batch, protocol_state);
-        }
-        append_batch_leaves(&batch, hash_strategy, &mut leaves)
-            .with_context(|| format!("hashing rows of {}", path.display()))?;
-    }
-
-    Ok(leaves)
-}
-
-fn read_parquet_leaves_s3(
-    client: &object_store::aws::AmazonS3,
-    bucket: &str,
-    location: &object_store::path::Path,
-    opts: &VerifyOptions,
-    protocol_state: &mut ProtocolPartitionState,
-    hash_strategy: HashStrategy,
-) -> Result<Vec<[u8; 32]>> {
-    let data = block_on_async(async { client.get(location).await?.bytes().await })
-        .map_err(|e| anyhow!("reading s3://{bucket}/{}: {e}", location))?;
-
-    let builder = ParquetRecordBatchReaderBuilder::try_new(data)?;
-    let reader = builder.build()?;
-
-    let mut leaves = Vec::new();
-    for maybe_batch in reader {
-        let batch = maybe_batch?;
-        if opts.runs_protocol() {
-            run_protocol_checks_for_batch(opts, &batch, protocol_state);
-        }
-        append_batch_leaves(&batch, hash_strategy, &mut leaves)
-            .with_context(|| format!("hashing rows of s3://{bucket}/{location}"))?;
-    }
-
-    Ok(leaves)
 }
 
 /// Appends one `merkle_v2` leaf per row: `H(0x00 || encoded_row)`, with the
@@ -1011,7 +1212,7 @@ fn has_protocol_failure(state: &ProtocolPartitionState) -> bool {
 }
 
 fn finalize_protocol_findings(
-    opts: &VerifyOptions,
+    target: &Target,
     state_by_partition: &HashMap<String, ProtocolPartitionState>,
 ) -> Vec<ProtocolCheckFinding> {
     let mut partitions: Vec<String> = state_by_partition.keys().cloned().collect();
@@ -1024,31 +1225,31 @@ fn finalize_protocol_findings(
             None => continue,
         };
 
-        if opts.chain.eq_ignore_ascii_case("evm") && opts.table.eq_ignore_ascii_case("blocks") {
+        if target.chain.eq_ignore_ascii_case("evm") && target.table.eq_ignore_ascii_case("blocks") {
             add_check_finding(
                 &mut findings,
-                opts,
+                target,
                 &partition,
                 "evm_hash_matches_block_id",
                 &state.hash_matches_block_id,
             );
             add_check_finding(
                 &mut findings,
-                opts,
+                target,
                 &partition,
                 "evm_parent_hash_matches_parent_id",
                 &state.parent_hash_matches_parent_id,
             );
             add_check_finding(
                 &mut findings,
-                opts,
+                target,
                 &partition,
                 "evm_number_matches_block_num",
                 &state.number_matches_block_num,
             );
             findings.push(ProtocolCheckFinding {
-                chain: opts.chain.clone(),
-                table: opts.table.clone(),
+                chain: target.chain.clone(),
+                table: target.table.clone(),
                 partition: partition.clone(),
                 check: "evm_transactions_root_trie_recompute".to_string(),
                 status: ProtocolCheckStatus::NotVerifiable,
@@ -1057,8 +1258,8 @@ fn finalize_protocol_findings(
                     .to_string(),
             });
             findings.push(ProtocolCheckFinding {
-                chain: opts.chain.clone(),
-                table: opts.table.clone(),
+                chain: target.chain.clone(),
+                table: target.table.clone(),
                 partition: partition.clone(),
                 check: "evm_receipt_root_trie_recompute".to_string(),
                 status: ProtocolCheckStatus::NotVerifiable,
@@ -1067,8 +1268,8 @@ fn finalize_protocol_findings(
                     .to_string(),
             });
             findings.push(ProtocolCheckFinding {
-                chain: opts.chain.clone(),
-                table: opts.table.clone(),
+                chain: target.chain.clone(),
+                table: target.table.clone(),
                 partition,
                 check: "evm_state_root_recompute".to_string(),
                 status: ProtocolCheckStatus::NotVerifiable,
@@ -1076,55 +1277,57 @@ fn finalize_protocol_findings(
                 details: "requires full state transition execution and account/storage tries"
                     .to_string(),
             });
-        } else if opts.chain.eq_ignore_ascii_case("evm")
-            && opts.table.eq_ignore_ascii_case("transactions")
+        } else if target.chain.eq_ignore_ascii_case("evm")
+            && target.table.eq_ignore_ascii_case("transactions")
         {
             add_check_finding(
                 &mut findings,
-                opts,
+                target,
                 &partition,
                 "evm_transactions_block_number_matches_block_num",
                 &state.transactions_block_number_matches_block_num,
             );
             findings.push(ProtocolCheckFinding {
-                chain: opts.chain.clone(),
-                table: opts.table.clone(),
+                chain: target.chain.clone(),
+                table: target.table.clone(),
                 partition,
                 check: "evm_transactions_root_inclusion".to_string(),
                 status: ProtocolCheckStatus::NotVerifiable,
                 block_num: None,
                 details: "requires canonical transaction RLP encoding + trie indexing by transaction position".to_string(),
             });
-        } else if opts.chain.eq_ignore_ascii_case("evm") && opts.table.eq_ignore_ascii_case("logs")
+        } else if target.chain.eq_ignore_ascii_case("evm")
+            && target.table.eq_ignore_ascii_case("logs")
         {
             add_check_finding(
                 &mut findings,
-                opts,
+                target,
                 &partition,
                 "evm_logs_block_number_matches_block_num",
                 &state.logs_block_number_matches_block_num,
             );
             findings.push(ProtocolCheckFinding {
-                chain: opts.chain.clone(),
-                table: opts.table.clone(),
+                chain: target.chain.clone(),
+                table: target.table.clone(),
                 partition,
                 check: "evm_logs_receipt_inclusion".to_string(),
                 status: ProtocolCheckStatus::NotVerifiable,
                 block_num: None,
                 details: "requires receipt reconstruction and trie inclusion proofs".to_string(),
             });
-        } else if opts.chain.eq_ignore_ascii_case("evm") && opts.table.eq_ignore_ascii_case("calls")
+        } else if target.chain.eq_ignore_ascii_case("evm")
+            && target.table.eq_ignore_ascii_case("calls")
         {
             add_check_finding(
                 &mut findings,
-                opts,
+                target,
                 &partition,
                 "evm_calls_block_number_matches_block_num",
                 &state.calls_block_number_matches_block_num,
             );
             findings.push(ProtocolCheckFinding {
-                chain: opts.chain.clone(),
-                table: opts.table.clone(),
+                chain: target.chain.clone(),
+                table: target.table.clone(),
                 partition,
                 check: "evm_calls_receipt_correlation".to_string(),
                 status: ProtocolCheckStatus::NotVerifiable,
@@ -1134,8 +1337,8 @@ fn finalize_protocol_findings(
             });
         } else {
             findings.push(ProtocolCheckFinding {
-                chain: opts.chain.clone(),
-                table: opts.table.clone(),
+                chain: target.chain.clone(),
+                table: target.table.clone(),
                 partition,
                 check: "protocol_checks_coverage".to_string(),
                 status: ProtocolCheckStatus::NotVerifiable,
@@ -1150,7 +1353,7 @@ fn finalize_protocol_findings(
 
 fn add_check_finding(
     findings: &mut Vec<ProtocolCheckFinding>,
-    opts: &VerifyOptions,
+    target: &Target,
     partition: &str,
     check: &str,
     acc: &CheckAccumulator,
@@ -1174,8 +1377,8 @@ fn add_check_finding(
     };
 
     findings.push(ProtocolCheckFinding {
-        chain: opts.chain.clone(),
-        table: opts.table.clone(),
+        chain: target.chain.clone(),
+        table: target.table.clone(),
         partition: partition.to_string(),
         check: check.to_string(),
         status,
@@ -1185,15 +1388,15 @@ fn add_check_finding(
 }
 
 fn run_protocol_checks_for_batch(
-    opts: &VerifyOptions,
+    target: &Target,
     batch: &RecordBatch,
     state: &mut ProtocolPartitionState,
 ) {
-    if !opts.chain.eq_ignore_ascii_case("evm") {
+    if !target.chain.eq_ignore_ascii_case("evm") {
         return;
     }
 
-    if opts.table.eq_ignore_ascii_case("transactions") {
+    if target.table.eq_ignore_ascii_case("transactions") {
         check_block_number_alignment(
             batch,
             "block_number",
@@ -1202,7 +1405,7 @@ fn run_protocol_checks_for_batch(
         return;
     }
 
-    if opts.table.eq_ignore_ascii_case("logs") {
+    if target.table.eq_ignore_ascii_case("logs") {
         check_block_number_alignment(
             batch,
             "block_number",
@@ -1211,7 +1414,7 @@ fn run_protocol_checks_for_batch(
         return;
     }
 
-    if opts.table.eq_ignore_ascii_case("calls") {
+    if target.table.eq_ignore_ascii_case("calls") {
         check_block_number_alignment(
             batch,
             "block_number",
@@ -1220,7 +1423,7 @@ fn run_protocol_checks_for_batch(
         return;
     }
 
-    if !opts.table.eq_ignore_ascii_case("blocks") {
+    if !target.table.eq_ignore_ascii_case("blocks") {
         return;
     }
 
@@ -1686,6 +1889,21 @@ fn write_report_bytes(path: &str, aws: Option<&AwsConfig>, data: &[u8]) -> Resul
     Ok(())
 }
 
+/// Whether a local file or S3 object exists; lookup errors count as absent.
+fn artifact_exists(path: &str, aws: Option<&AwsConfig>) -> bool {
+    if !path.starts_with("s3://") {
+        return Path::new(path).is_file();
+    }
+    let (Some(aws), Ok((bucket, key))) = (aws, parse_s3_url(path)) else {
+        return false;
+    };
+    let Ok(client) = aws.build_s3_client(&bucket) else {
+        return false;
+    };
+    let location = object_store::path::Path::from(key.as_str());
+    block_on_async(async { client.head(&location).await }).is_ok()
+}
+
 fn read_registry_bytes(path: &str, aws: Option<&AwsConfig>) -> Result<Option<Vec<u8>>> {
     if path.starts_with("s3://") {
         let aws = aws.ok_or_else(|| anyhow!("AWS config required for S3 registry path"))?;
@@ -1725,16 +1943,20 @@ fn read_registry_bytes(path: &str, aws: Option<&AwsConfig>) -> Result<Option<Vec
 #[cfg(test)]
 mod tests {
     use super::{
-        append_batch_leaves, derive_run_report_path, load_registry, merkle_root, registry_key,
-        verify_parquet, FindingStatus, HashStrategy, VerifyCheck, VerifyOptions, VerifyProfile,
-        VerifyScope,
+        append_batch_leaves, file_layout, join_artifact_path, legacy_default_registry_path,
+        load_registry, merkle_root, registry_key, verify_parquet, FileLayout, FindingStatus,
+        HashStrategy, VerifyCheck, VerifyOptions, VerifyProfile, VerifyReport, VerifyScope,
+        MERKLE_ROOTS_FILENAME,
     };
+    use anyhow::Result;
     use arrow::array::{
         ArrayRef, StringArray, TimestampMillisecondArray, TimestampSecondArray, UInt64Array,
     };
     use arrow::datatypes::{DataType, Field, Schema};
     use arrow::record_batch::RecordBatch;
     use parquet::arrow::ArrowWriter;
+    use parquet::file::metadata::KeyValue;
+    use parquet::file::properties::WriterProperties;
     use std::path::Path;
     use std::sync::Arc;
 
@@ -1993,8 +2215,9 @@ mod tests {
 
     fn base_opts() -> VerifyOptions {
         VerifyOptions {
-            chain: "evm".to_string(),
-            table: "blocks".to_string(),
+            // Test fixtures have no firehose-parquet.block_type metadata.
+            chain: Some("evm".to_string()),
+            table: None,
             hash_strategy: None,
             checks: vec![],
             profile: VerifyProfile::Standard,
@@ -2030,19 +2253,384 @@ mod tests {
     }
 
     #[test]
-    fn suggested_run_report_path_local() {
-        let path =
-            derive_run_report_path("./output/evm/mainnet/blocks", "evm", "blocks", "run-123");
-        assert!(path.ends_with("evm/mainnet/verify_runs/run-123/report.json"));
+    fn file_layout_splits_chain_root_and_table_per_network() {
+        let layout =
+            file_layout("/out/mainnet/blocks/year=2025/month=12/date=13/part-a-000001.parquet");
+        assert_eq!(
+            layout,
+            FileLayout {
+                chain_root: "/out/mainnet".to_string(),
+                table: Some("blocks".to_string()),
+                chain_root_name: Some("mainnet".to_string()),
+            }
+        );
+        assert_eq!(
+            file_layout("/out/sepolia/blocks/year=2025/part-a-000001.parquet").chain_root,
+            "/out/sepolia"
+        );
+        // Unpartitioned table: files sit directly in the table directory.
+        assert_eq!(
+            file_layout("/out/mainnet/blocks/part-a-000001.parquet").table,
+            Some("blocks".to_string())
+        );
+
+        let s3 = file_layout("s3://bucket/data/mainnet/transactions/date=2024-01-01/x.parquet");
+        assert_eq!(s3.chain_root, "s3://bucket/data/mainnet");
+        assert_eq!(s3.table, Some("transactions".to_string()));
+        let bucket_root = file_layout("s3://bucket/blocks/x.parquet");
+        assert_eq!(bucket_root.chain_root, "s3://bucket");
+        assert_eq!(bucket_root.chain_root_name, None);
+        assert_eq!(file_layout("s3://bucket/x.parquet").table, None);
+
+        assert_eq!(
+            join_artifact_path("s3://bucket/data/mainnet", MERKLE_ROOTS_FILENAME),
+            "s3://bucket/data/mainnet/merkle_roots.parquet"
+        );
+        assert_eq!(
+            join_artifact_path("/", MERKLE_ROOTS_FILENAME),
+            "/merkle_roots.parquet"
+        );
     }
 
     #[test]
-    fn suggested_run_report_path_s3() {
-        let path =
-            derive_run_report_path("s3://bucket/evm/mainnet/blocks", "evm", "blocks", "run-123");
+    fn file_layout_matches_path_components_not_substrings() {
+        // The old substring match cut paths at the first "/blocks".
+        let layout = file_layout("/data/blocks-archive/mainnet/transactions/date=1/x.parquet");
+        assert_eq!(layout.chain_root, "/data/blocks-archive/mainnet");
+        assert_eq!(layout.table, Some("transactions".to_string()));
         assert_eq!(
-            path,
-            "s3://bucket/evm/mainnet/verify_runs/run-123/report.json"
+            file_layout("/out/mainnet/blocks_v2/x.parquet").table,
+            Some("blocks_v2".to_string())
         );
+    }
+
+    #[test]
+    fn legacy_default_registry_paths_are_the_old_shared_locations() {
+        assert_eq!(
+            legacy_default_registry_path("/out/mainnet/blocks", "evm", "blocks"),
+            "/out/mainnet/evm/mainnet/merkle_roots.parquet"
+        );
+        // Every S3 network mapped to the same object.
+        for network in ["mainnet", "sepolia"] {
+            assert_eq!(
+                legacy_default_registry_path(
+                    &format!("s3://bucket/{network}/blocks"),
+                    "evm",
+                    "blocks"
+                ),
+                "s3://bucket/evm/mainnet/merkle_roots.parquet"
+            );
+        }
+    }
+
+    /// Writes a `build`-style table file with `firehose-parquet.*` metadata.
+    fn write_table_file(
+        path: &Path,
+        values: &[u64],
+        block_type: Option<&str>,
+        chain_name: Option<&str>,
+    ) {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let mut kvs = Vec::new();
+        if let Some(block_type) = block_type {
+            kvs.push(KeyValue::new(
+                "firehose-parquet.block_type".to_string(),
+                block_type.to_string(),
+            ));
+        }
+        if let Some(chain_name) = chain_name {
+            kvs.push(KeyValue::new(
+                "firehose-parquet.chain_name".to_string(),
+                chain_name.to_string(),
+            ));
+        }
+        let props = WriterProperties::builder()
+            .set_key_value_metadata(Some(kvs))
+            .build();
+        let batch = RecordBatch::try_from_iter(vec![(
+            "block_num",
+            Arc::new(UInt64Array::from(values.to_vec())) as ArrayRef,
+        )])
+        .unwrap();
+        let mut writer = ArrowWriter::try_new(
+            std::fs::File::create(path).unwrap(),
+            batch.schema(),
+            Some(props),
+        )
+        .unwrap();
+        writer.write(&batch).unwrap();
+        writer.close().unwrap();
+    }
+
+    /// Roots-only options that infer everything from the dataset.
+    fn inferred_opts() -> VerifyOptions {
+        let mut opts = base_opts();
+        opts.chain = None;
+        opts.checks = vec![VerifyCheck::Roots];
+        opts
+    }
+
+    fn table_file(root: &Path, network: &str, table: &str) -> std::path::PathBuf {
+        root.join(network)
+            .join(table)
+            .join("date=2024-01-01")
+            .join("part-0.parquet")
+    }
+
+    fn verify_dir(dir: &Path, opts: &VerifyOptions) -> Result<VerifyReport> {
+        verify_parquet(dir.to_str().unwrap(), None, opts)
+    }
+
+    #[test]
+    fn target_is_inferred_from_metadata_and_layout() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        write_table_file(
+            &table_file(&root, "mainnet", "blocks"),
+            &[1, 2],
+            Some("evm"),
+            Some("mainnet"),
+        );
+
+        let report = verify_dir(&root.join("mainnet/blocks"), &inferred_opts()).unwrap();
+        assert_eq!(report.chain, "evm");
+        assert_eq!(report.table, "blocks");
+        assert_eq!(report.network.as_deref(), Some("mainnet"));
+        assert_eq!(report.algorithm, "keccak256");
+        let chain_root = root.join("mainnet").display().to_string();
+        assert_eq!(
+            report.registry_path,
+            format!("{chain_root}/merkle_roots.parquet")
+        );
+        assert_eq!(
+            report.suggested_run_report_path,
+            format!("{chain_root}/verify_runs/{}/report.json", report.run_id)
+        );
+
+        // Matching explicit flags are accepted.
+        let mut opts = inferred_opts();
+        opts.chain = Some("EVM".to_string());
+        opts.table = Some("blocks".to_string());
+        assert!(verify_dir(&root.join("mainnet/blocks"), &opts).is_ok());
+    }
+
+    #[test]
+    fn explicit_flags_that_conflict_with_the_dataset_are_errors() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = dir.path();
+        write_table_file(
+            &table_file(root, "mainnet", "blocks"),
+            &[1],
+            Some("evm"),
+            Some("mainnet"),
+        );
+        let data = root.join("mainnet/blocks");
+
+        let mut opts = inferred_opts();
+        opts.chain = Some("bitcoin".to_string());
+        let err = verify_dir(&data, &opts).unwrap_err().to_string();
+        assert!(err.contains("--chain bitcoin conflicts"), "{err}");
+
+        let mut opts = inferred_opts();
+        opts.table = Some("transactions".to_string());
+        let err = verify_dir(&data, &opts).unwrap_err().to_string();
+        assert!(err.contains("--table transactions conflicts"), "{err}");
+
+        // Without metadata, the chain must be named.
+        write_table_file(&table_file(root, "legacy", "blocks"), &[1], None, None);
+        let err = verify_dir(&root.join("legacy/blocks"), &inferred_opts())
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("pass --chain"), "{err}");
+    }
+
+    #[test]
+    fn verify_rejects_paths_that_mix_tables_or_networks() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = dir.path();
+        write_table_file(
+            &table_file(root, "mainnet", "blocks"),
+            &[1],
+            Some("evm"),
+            Some("mainnet"),
+        );
+        write_table_file(
+            &table_file(root, "mainnet", "transactions"),
+            &[1],
+            Some("evm"),
+            Some("mainnet"),
+        );
+        let err = verify_dir(&root.join("mainnet"), &inferred_opts())
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("more than one table"), "{err}");
+
+        let mixed = root.join("mixed/blocks/date=2024-01-01");
+        write_table_file(
+            &mixed.join("part-0.parquet"),
+            &[1],
+            Some("evm"),
+            Some("mainnet"),
+        );
+        write_table_file(
+            &mixed.join("part-1.parquet"),
+            &[2],
+            Some("evm"),
+            Some("sepolia"),
+        );
+        let err = verify_dir(&root.join("mixed/blocks"), &inferred_opts())
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("verify one network at a time"), "{err}");
+    }
+
+    #[test]
+    fn registries_are_per_network_and_never_scanned_as_data() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = dir.path();
+        for (network, values) in [("mainnet", [1u64, 2]), ("sepolia", [7, 8])] {
+            write_table_file(
+                &table_file(root, network, "blocks"),
+                &values,
+                Some("evm"),
+                Some(network),
+            );
+            // Reserved artifacts beside the table and inside the table directory.
+            write_block_nums(&root.join(network).join("cursor.parquet"), &[99]);
+            write_block_nums(&root.join(network).join("partitions.parquet"), &[99]);
+            write_block_nums(
+                &root
+                    .join(network)
+                    .join("blocks")
+                    .join("merkle_roots.parquet"),
+                &[99],
+            );
+            write_block_nums(
+                &root.join(network).join("verify_runs/run-0/roots.parquet"),
+                &[99],
+            );
+        }
+
+        let mut roots = Vec::new();
+        for network in ["mainnet", "sepolia"] {
+            // This chain root holds a single table, so it can be verified directly;
+            // three runs show the registry it writes is never hashed as data.
+            let data = root.join(network);
+            let runs: Vec<VerifyReport> = (0..3)
+                .map(|_| verify_dir(&data, &inferred_opts()).unwrap())
+                .collect();
+            assert_eq!(runs[0].summary.missing_expected, 1);
+            assert!(runs[0].summary.wrote_registry);
+            for run in &runs[1..] {
+                assert_eq!(run.summary.partitions_scanned, 1);
+                assert_eq!(run.summary.matches, 1);
+                assert!(!run.summary.wrote_registry);
+                assert!(run.is_valid());
+            }
+            assert!(runs[0]
+                .registry_path
+                .ends_with(&format!("/{network}/merkle_roots.parquet")));
+            roots.push(runs[0].findings[0].computed_root.clone());
+        }
+        assert_ne!(roots[0], roots[1]);
+
+        let (_, mainnet) = load_registry(
+            &root
+                .join("mainnet/merkle_roots.parquet")
+                .display()
+                .to_string(),
+            None,
+        )
+        .unwrap();
+        assert_eq!(mainnet.len(), 1);
+        assert_eq!(
+            mainnet[&registry_key("evm", "blocks", "date=2024-01-01")].merkle_root,
+            roots[0]
+        );
+    }
+
+    #[test]
+    fn tables_of_one_network_share_a_registry_without_colliding() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = dir.path();
+        write_table_file(
+            &table_file(root, "mainnet", "blocks"),
+            &[1],
+            Some("evm"),
+            Some("mainnet"),
+        );
+        write_table_file(
+            &table_file(root, "mainnet", "transactions"),
+            &[2],
+            Some("evm"),
+            Some("mainnet"),
+        );
+        for _ in 0..2 {
+            for table in ["blocks", "transactions"] {
+                let report =
+                    verify_dir(&root.join("mainnet").join(table), &inferred_opts()).unwrap();
+                assert!(report.is_valid());
+            }
+        }
+        let (_, rows) = load_registry(
+            &root
+                .join("mainnet/merkle_roots.parquet")
+                .display()
+                .to_string(),
+            None,
+        )
+        .unwrap();
+        assert_eq!(rows.len(), 2);
+        assert!(rows.contains_key(&registry_key("evm", "blocks", "date=2024-01-01")));
+        assert!(rows.contains_key(&registry_key("evm", "transactions", "date=2024-01-01")));
+    }
+
+    #[test]
+    fn registry_at_old_default_location_is_reported() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        write_table_file(
+            &table_file(&root, "mainnet", "blocks"),
+            &[1],
+            Some("evm"),
+            Some("mainnet"),
+        );
+        let legacy = root.join("mainnet/evm/mainnet/merkle_roots.parquet");
+        std::fs::create_dir_all(legacy.parent().unwrap()).unwrap();
+        write_legacy_registry(&legacy, &[("date=2024-01-01", &"11".repeat(32))]);
+
+        let report = verify_dir(&root.join("mainnet/blocks"), &inferred_opts()).unwrap();
+        assert_eq!(report.warnings.len(), 1, "{:?}", report.warnings);
+        assert!(report.warnings[0].contains(&legacy.display().to_string()));
+        assert!(report.warnings[0].contains("old default location"));
+        // The old registry is not used: the partition is a missing root in the new one.
+        assert_eq!(report.summary.missing_expected, 1);
+        assert!(report
+            .registry_path
+            .ends_with("/mainnet/merkle_roots.parquet"));
+
+        // Data laid out as `<root>/evm/mainnet/<table>` already used the new
+        // location, so there is nothing to warn about.
+        write_table_file(
+            &table_file(&root.join("evm"), "mainnet", "blocks"),
+            &[1],
+            Some("evm"),
+            Some("mainnet"),
+        );
+        for _ in 0..2 {
+            let report = verify_dir(&root.join("evm/mainnet/blocks"), &inferred_opts()).unwrap();
+            assert!(report.warnings.is_empty(), "{:?}", report.warnings);
+            assert!(report
+                .registry_path
+                .ends_with("/evm/mainnet/merkle_roots.parquet"));
+        }
+
+        // An explicit --registry-path is the operator's choice: no warning.
+        let mut opts = inferred_opts();
+        opts.registry_path = Some(legacy.display().to_string());
+        assert!(verify_dir(&root.join("mainnet/blocks"), &opts)
+            .unwrap()
+            .warnings
+            .is_empty());
     }
 }

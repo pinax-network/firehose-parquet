@@ -741,29 +741,34 @@ Lookup order matches `scan` / `inspect`: explicit `s3://...` URIs win, existing 
 
 ### `verify` — Deterministic Roots + Check Profiles
 
-Verifies deterministic partition Merkle roots and optional protocol checks under one command surface. Supports local paths, shorthand S3 keys/prefixes via `S3_BUCKET`, and explicit S3 URIs for the data path.
+Verifies deterministic partition Merkle roots and optional protocol checks under one command surface, one table of one network per run. Supports local paths, shorthand S3 keys/prefixes via `S3_BUCKET`, and explicit S3 URIs for the data path.
+
+The chain and table are inferred from the data: the chain from the `firehose-parquet.block_type` file metadata, the table from the directory layout (`<output>/<chain_name>/<table>/...`). The registry defaults to `<output>/<chain_name>/merkle_roots.parquet`, one per network, and published reports go to `<output>/<chain_name>/verify_runs/<run_id>/report.json`.
 
 ```bash
 # Standard profile (default): roots + protocol
-fireparq verify ./output/evm/mainnet/blocks --chain evm --table blocks
+fireparq verify ./output/mainnet/blocks
 
 # Quick profile (low-cost)
-fireparq verify ./output/evm/mainnet/blocks --profile quick
+fireparq verify ./output/mainnet/blocks --profile quick
 
 # Explicit checks override profile defaults
-fireparq verify ./output/evm/mainnet/blocks --checks roots,protocol
+fireparq verify ./output/mainnet/blocks --checks roots,protocol
 
 # Publish report to the suggested artifact path
-fireparq verify ./output/evm/mainnet/blocks --publish-report
+fireparq verify ./output/mainnet/blocks --publish-report
 
 # Resolve a shorthand S3 data path when no local match exists
-S3_BUCKET=my-bucket fireparq verify evm/mainnet/blocks --chain evm --table blocks
+S3_BUCKET=my-bucket fireparq verify mainnet/blocks
 ```
 
 Lookup order for the data path matches `scan` / `inspect`: explicit `s3://...` URIs win, existing local paths win over shorthand S3 resolution, and only missing relative paths fall back to `s3://<S3_BUCKET>/<path>`.
 
 | Flag | Default | Description |
 |---|---|---|
+| `--chain` | *(from `firehose-parquet.block_type`)* | Chain family (`evm`, `bitcoin`, `solana`, ...). Needed only for files without that metadata; a different value is an error |
+| `--table` | *(from the table directory)* | Table name. Needed only when files are not inside a table directory; a different value is an error |
+| `--registry-path` | `<chain_root>/merkle_roots.parquet` | Explicit registry location (local or `s3://`); use one registry per network |
 | `--checks` | *(from profile)* | Comma-separated check families: `roots`, `protocol`, `continuity`, `completeness` |
 | `--profile` | `standard` | Preset families: `quick` (roots), `standard` (roots+protocol), `deep` (adds continuity+completeness) |
 | `--scope` | `table` | Metadata scope tag in reports: `chain`, `table`, `partition`, `run` |
@@ -771,7 +776,7 @@ Lookup order for the data path matches `scan` / `inspect`: explicit `s3://...` U
 | `--publish-report` | `false` | Publish `report.json` to the suggested verify artifact path |
 | `--publish-report-path` | *(suggested path)* | Override where the published report is written (local or `s3://`) |
 
-Migration note: existing verify flags (`--no-fail-fast`, `--report-json`, `--registry-path`, `--update-registry`) remain unchanged.
+Migration note: `--chain` and `--table` no longer default to `evm` and `blocks`, and the default registry moved from `<chain>/mainnet/merkle_roots.parquet` to the network directory. `verify` warns when it finds a registry at the old location; see [Moving a registry from the old default location](docs/verifiability-artifact-runbook.md#moving-a-registry-from-the-old-default-location).
 
 Roots use the versioned `merkle_v2` construction, recorded as `merkle_version` in `merkle_roots.parquet` and in the report. Registries written by v0.7.1 and earlier hold legacy `merkle_v1` roots: `verify` reports them as mismatches until they are rebuilt with `--update-registry --no-fail-fast`. See the [runbook](docs/verifiability-artifact-runbook.md#migrating-a-legacy-merkle_v1-registry) for the procedure.
 
