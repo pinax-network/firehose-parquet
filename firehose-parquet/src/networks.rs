@@ -139,13 +139,39 @@ mod tests {
         assert_eq!(solana.endpoint, "https://solana.firehose.pinax.network:443");
         assert_eq!(solana.source, EndpointSource::Builtin);
 
+        let tron = resolve_network_endpoint("tron").expect("tron should resolve");
+        assert_eq!(tron.chain_name, "tron");
+        assert_eq!(tron.endpoint, "https://mainnet.tron.streamingfast.io:443");
+        assert_eq!(tron.source, EndpointSource::Builtin);
+
         let tronevm = resolve_network_endpoint("tron-evm").expect("tron-evm should resolve");
         assert_eq!(tronevm.chain_name, "tron-evm");
         assert_eq!(
             tronevm.endpoint,
-            "https://tronevm.firehose.pinax.network:443"
+            "https://mainnet-evm.tron.streamingfast.io:443"
         );
         assert_eq!(tronevm.source, EndpointSource::Builtin);
+    }
+
+    #[test]
+    fn test_builtin_networks_are_consistent() {
+        let names: Vec<&str> = BUILTIN_NETWORKS
+            .iter()
+            .map(|network| network.chain_name)
+            .collect();
+        assert_eq!(names, KNOWN_NETWORK_NAMES);
+        assert!(
+            names.windows(2).all(|pair| pair[0] < pair[1]),
+            "built-in network names must be sorted and unique"
+        );
+        for network in BUILTIN_NETWORKS {
+            assert!(
+                network.default_endpoint.starts_with("https://"),
+                "built-in endpoint must use TLS for {}: {}",
+                network.chain_name,
+                network.default_endpoint
+            );
+        }
     }
 
     #[test]
@@ -159,11 +185,15 @@ mod tests {
 
     #[test]
     fn test_resolve_network_endpoint_removed_builtin_network() {
-        let err = resolve_network_endpoint("arbitrum-nova")
-            .expect_err("removed built-in network should no longer resolve");
-        assert!(err
-            .to_string()
-            .contains("unsupported network `arbitrum-nova`"));
+        // `arbitrum-nova` was removed earlier; the rest were removed in #535
+        // because no registry provider serves them any more.
+        for name in ["arbitrum-nova", "fantom", "scroll", "telos"] {
+            let err = resolve_network_endpoint(name)
+                .expect_err("removed built-in network should no longer resolve");
+            assert!(err
+                .to_string()
+                .contains(&format!("unsupported network `{name}`")));
+        }
     }
 
     #[test]

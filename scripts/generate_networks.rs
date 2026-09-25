@@ -4,13 +4,39 @@ use std::path::PathBuf;
 use anyhow::{anyhow, Context, Result};
 use serde::Deserialize;
 
+/// Provider whose Firehose endpoint a built-in alias uses when the registry lists one.
+const DEFAULT_PROVIDER: &str = "pinax.network";
+
+/// Networks the default provider no longer serves, kept on another Firehose
+/// provider that the registry lists for them. Each entry was checked live by
+/// streaming blocks with a `SUBSTREAMS_API_TOKEN` (#535). The default provider
+/// still wins if the registry lists it again.
+const FALLBACK_PROVIDERS: &[(&str, &str)] = &[
+    ("near-mainnet", "streamingfast.io"),
+    ("near-testnet", "streamingfast.io"),
+    ("tron", "streamingfast.io"),
+    ("tron-evm", "streamingfast.io"),
+];
+
+/// Networks whose registry endpoint is known to be broken. They get no built-in
+/// alias until the endpoint works again.
+const EXCLUDED_NETWORKS: &[(&str, &str)] = &[(
+    "robinhood-sepolia",
+    "robsepolia.firehose.pinax.network has no DNS record (checked 2026-09-24)",
+)];
+
 #[derive(Debug, Deserialize)]
 struct Registry {
+    #[serde(default)]
+    version: Option<String>,
+    #[serde(default)]
+    #[serde(rename = "updatedAt")]
+    updated_at: Option<String>,
     #[serde(default)]
     networks: Vec<RegistryNetwork>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Default, Deserialize)]
 struct RegistryNetwork {
     #[serde(default)]
     id: Option<String>,
@@ -51,11 +77,40 @@ fn main() -> Result<()> {
     let registry: Registry = serde_json::from_str(&raw)
         .with_context(|| format!("failed to parse registry file {}", input.display()))?;
 
+    let built = build_networks(&registry.networks)?;
+    for (network, provider) in FALLBACK_PROVIDERS {
+        if !built.iter().any(|b| b.chain_name == *network) {
+            eprintln!("warning: fallback network `{network}` has no `{provider}` Firehose endpoint in the registry");
+        }
+    }
+
+    let rendered = render(&built, &snapshot_label(&registry));
+    fs::write(&output, rendered)
+        .with_context(|| format!("failed to write generated file {}", output.display()))?;
+
+    eprintln!("wrote {} networks to {}", built.len(), output.display());
+    Ok(())
+}
+
+fn build_networks(networks: &[RegistryNetwork]) -> Result<Vec<BuiltNetwork>> {
     let mut built = Vec::new();
-    for network in registry.networks {
-        if let Some(endpoint) = pinax_firehose_endpoint(&network) {
-            let chain_name = canonical_name(&network)
-                .ok_or_else(|| anyhow!("missing canonical network name for endpoint {endpoint}"))?;
+    for network in networks {
+        let Some(chain_name) = canonical_name(network) else {
+            if let Some(endpoint) = provider_endpoint(network, DEFAULT_PROVIDER) {
+                return Err(anyhow!(
+                    "missing canonical network name for endpoint {endpoint}"
+                ));
+            }
+            continue;
+        };
+        if let Some((_, reason)) = EXCLUDED_NETWORKS
+            .iter()
+            .find(|(name, _)| *name == chain_name)
+        {
+            eprintln!("skipping `{chain_name}`: {reason}");
+            continue;
+        }
+        if let Some(endpoint) = select_endpoint(&chain_name, network) {
             built.push(BuiltNetwork {
                 chain_name,
                 default_endpoint: endpoint,
@@ -64,22 +119,27 @@ fn main() -> Result<()> {
     }
 
     built.sort_by(|a, b| a.chain_name.cmp(&b.chain_name));
-    let rendered = render(&built);
-    fs::write(&output, rendered)
-        .with_context(|| format!("failed to write generated file {}", output.display()))?;
-
-    eprintln!("wrote {} networks to {}", built.len(), output.display());
-    Ok(())
+    Ok(built)
 }
 
-fn pinax_firehose_endpoint(network: &RegistryNetwork) -> Option<String> {
-    for endpoint in &network.services.firehose {
-        if endpoint.to_ascii_lowercase().contains("pinax.network") {
-            return Some(with_https(endpoint));
-        }
-    }
+/// Picks the default provider's endpoint, or the fallback provider's endpoint
+/// for networks listed in `FALLBACK_PROVIDERS`.
+fn select_endpoint(chain_name: &str, network: &RegistryNetwork) -> Option<String> {
+    provider_endpoint(network, DEFAULT_PROVIDER).or_else(|| {
+        FALLBACK_PROVIDERS
+            .iter()
+            .find(|(name, _)| *name == chain_name)
+            .and_then(|(_, provider)| provider_endpoint(network, provider))
+    })
+}
 
-    None
+fn provider_endpoint(network: &RegistryNetwork, provider: &str) -> Option<String> {
+    network
+        .services
+        .firehose
+        .iter()
+        .find(|endpoint| endpoint.to_ascii_lowercase().contains(provider))
+        .map(|endpoint| with_https(endpoint))
 }
 
 fn canonical_name(network: &RegistryNetwork) -> Option<String> {
@@ -122,8 +182,21 @@ fn normalize_alias(value: &str) -> String {
     normalized.trim_matches('-').to_string()
 }
 
-fn render(networks: &[BuiltNetwork]) -> String {
+fn snapshot_label(registry: &Registry) -> String {
+    let version = registry.version.as_deref().unwrap_or("unknown");
+    match registry.updated_at.as_deref() {
+        Some(updated_at) => format!("v{version}, updatedAt {updated_at}"),
+        None => format!("v{version}"),
+    }
+}
+
+fn render(networks: &[BuiltNetwork], snapshot: &str) -> String {
     let mut out = String::new();
+    out.push_str("// @generated by scripts/generate_networks.rs. Do not edit by hand.\n");
+    out.push_str(&format!(
+        "// Source: The Graph networks registry ({snapshot}).\n"
+    ));
+    out.push_str("// Refresh steps: docs/network-registry-integration.md\n\n");
     out.push_str("use crate::networks::BuiltinNetwork;\n\n");
     out.push_str("pub const GENERATED_NETWORKS: &[BuiltinNetwork] = &[\n");
     for network in networks {
@@ -142,4 +215,76 @@ fn render(networks: &[BuiltNetwork]) -> String {
     }
     out.push_str("];\n");
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn network(id: &str, firehose: &[&str]) -> RegistryNetwork {
+        RegistryNetwork {
+            id: Some(id.to_string()),
+            services: RegistryServices {
+                firehose: firehose.iter().map(|value| value.to_string()).collect(),
+            },
+            ..RegistryNetwork::default()
+        }
+    }
+
+    fn endpoints(built: &[BuiltNetwork]) -> Vec<(&str, &str)> {
+        built
+            .iter()
+            .map(|b| (b.chain_name.as_str(), b.default_endpoint.as_str()))
+            .collect()
+    }
+
+    #[test]
+    fn test_build_networks_prefers_default_provider() {
+        let built = build_networks(&[network(
+            "mainnet",
+            &[
+                "mainnet.eth.streamingfast.io:443",
+                "eth.firehose.pinax.network:443",
+            ],
+        )])
+        .unwrap();
+        assert_eq!(
+            endpoints(&built),
+            vec![("mainnet", "https://eth.firehose.pinax.network:443")]
+        );
+    }
+
+    #[test]
+    fn test_build_networks_uses_fallback_provider_only_for_listed_networks() {
+        let built = build_networks(&[
+            network("tron", &["mainnet.tron.streamingfast.io:443"]),
+            network("monad", &["mainnet.monad.streamingfast.io:443"]),
+        ])
+        .unwrap();
+        assert_eq!(
+            endpoints(&built),
+            vec![("tron", "https://mainnet.tron.streamingfast.io:443")]
+        );
+    }
+
+    #[test]
+    fn test_build_networks_skips_excluded_networks_and_sorts() {
+        let built = build_networks(&[
+            network("zora", &["zora.firehose.pinax.network:443"]),
+            network(
+                "robinhood-sepolia",
+                &["robsepolia.firehose.pinax.network:443"],
+            ),
+            network("arc", &["arc.firehose.pinax.network:443"]),
+            network("scroll", &[]),
+        ])
+        .unwrap();
+        assert_eq!(
+            endpoints(&built),
+            vec![
+                ("arc", "https://arc.firehose.pinax.network:443"),
+                ("zora", "https://zora.firehose.pinax.network:443"),
+            ]
+        );
+    }
 }
