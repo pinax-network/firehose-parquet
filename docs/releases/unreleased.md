@@ -262,6 +262,7 @@ Migration: files written before and after this change have different schemas for
 ## Performance
 
 - **Canonical identity columns are encoded once per block (#512).** `block_id` and `parent_id` used to be hex-decoded and re-encoded on every row of every table. Mappers now prepare them once per block and append the encoded values. The output is byte-identical. The canonical columns cost about 40 ns per row instead of 380 ns (binary), 830 ns (hex) or 3.1 µs (base58). Mapping a synthetic 1,000-transaction Solana block (base58) takes 19 ms instead of 43 ms, and a 200-transaction EVM block with 2,000 logs (hex) takes 3.7 ms instead of 6.0 ms.
+- **Hex and base58 columns no longer allocate a string per value (#514).** Byte columns encode into a reused buffer (`hex::encode_to_slice`, `bs58` into a `Vec`), and byte and canonical column builders keep their capacity across flushes. The output is byte-identical. A 32-byte hex value costs about 32 ns instead of 230 ns, and the 200-transaction EVM block (hex) now maps in 1.55 ms instead of 3.8 ms. Base58 is dominated by the encoding itself (about 1.3 µs per 32-byte value), so Solana mapping changes little.
 
 ## Tests
 
