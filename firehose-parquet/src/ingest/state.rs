@@ -162,7 +162,7 @@ pub enum StorageIdentity {
     },
 }
 impl StorageIdentity {
-    fn validate(&self) -> Result<()> {
+    pub(super) fn validate(&self) -> Result<()> {
         match self {
             Self::Local { canonical_root } => validate_absolute_path(canonical_root),
             Self::S3 { bucket, prefix, .. } => {
@@ -187,7 +187,7 @@ pub enum MirrorBinding {
     },
 }
 impl MirrorBinding {
-    fn validate(&self) -> Result<()> {
+    pub(super) fn validate(&self) -> Result<()> {
         match self {
             Self::Disabled => Ok(()),
             Self::Local { absolute_path } => validate_absolute_path(absolute_path),

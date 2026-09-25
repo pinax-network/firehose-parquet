@@ -94,3 +94,20 @@ The final current-branch library suite passed **539 tests, five intentionally
 ignored**; the new ignored child helper is invoked by the passing process-death
 test. `cargo fmt --all -- --check` and `git diff --check` passed. The library
 command was `cargo test -p firehose-parquet --lib --locked -j4`.
+
+## Runtime storage binding foundation
+
+The private binding resolver now derives service identity from the same effective
+region and HTTPS endpoint used by production S3 builders. Recognized AWS/Tigris
+bucket hosts normalize to their matching service host, including dotted bucket
+names; credentials are excluded. Global/regional endpoints, custom aliases,
+service paths and nondefault ports stay distinct unless their normalized address
+is identical. Endpoint credentials, queries, fragments and ambiguous/encoded
+paths are rejected without echoing them. Operators cannot silently migrate a
+protected stream by changing its storage endpoint.
+
+Local output identities canonicalize existing ancestors without creating missing
+roots. Cursor bindings preserve lexical aliases for the mirror's dual ancestry
+sync. Explicit remote cursors keep their independent bucket; disabled mirrors do
+not disable authoritative state. Five focused binding tests passed after merging
+strict v2 index main d5e1419 and the reviewed mirror adapter 7e03c09.

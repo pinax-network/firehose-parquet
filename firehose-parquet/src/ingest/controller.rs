@@ -22,6 +22,13 @@ pub trait MirrorAction {
     async fn reconcile(&self, authority: &AuthorityState) -> Result<()>;
 }
 
+impl MirrorAction for super::mirror::ProtectedMirror<'_> {
+    async fn reconcile(&self, authority: &AuthorityState) -> Result<()> {
+        super::mirror::ProtectedMirror::reconcile(self, authority).await?;
+        Ok(())
+    }
+}
+
 pub struct TransactionController<'a, M: MirrorAction> {
     states: TransactionStateStore<'a>,
     parts: TransactionParts<'a>,
