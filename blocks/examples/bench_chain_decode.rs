@@ -102,7 +102,8 @@ fn main() -> Result<()> {
     map(mapper.as_mut(), &raw, &identity, args.borrowed)?;
     let mut output = BTreeMap::new();
     for (table, batch) in mapper.flush()? {
-        let mut writer = arrow::ipc::writer::StreamWriter::try_new(Vec::new(), batch.schema().as_ref())?;
+        let mut writer =
+            arrow::ipc::writer::StreamWriter::try_new(Vec::new(), batch.schema().as_ref())?;
         writer.write(&batch)?;
         writer.finish()?;
         output.insert(table, serde_json::json!({"rows": batch.num_rows(), "schema": format!("{:?}", batch.schema()), "sha256": format!("{:x}", Sha256::digest(writer.into_inner()?))}));
