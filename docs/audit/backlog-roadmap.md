@@ -64,9 +64,10 @@ and test against current main. Never reset or discard the previous worktree.
 
 ## Remaining backlog groups
 
-- Schema/data correctness: #503 (Solana native payload types; implementation,
-  benchmark, raw-data comparison and 857-test integration complete; PR/CI pending), #505 (Beacon numeric/blob/null
-  semantics), #507, #509 and #510 (NEAR, Tron and Cosmos). Antelope #508 is merged in
+- Schema/data correctness: #505 (Beacon numeric/blob/null semantics), #507,
+  #509 and #510 (NEAR, Tron and Cosmos). Solana native payload types (#503) merged
+  as `d417e0c` in PR #593 after 857 tests, 19,714 raw-sample row comparisons, release
+  benchmarks and CI; issue closure is verified. Antelope #508 is merged in
   PR #590 after raw join checks, byte-for-byte legacy-column comparison and CI. Bitcoin #511 is merged
   in PR #589 after raw integer/input qualification and CI. #550 needs
   explicit failed-effect semantics per chain and live fixtures. #498 documents
@@ -77,8 +78,12 @@ and test against current main. Never reset or discard the previous worktree.
 - Operational contracts: #474 covers reversible stream options/output semantics;
   #475 metrics/readiness is merged. The #477 writer simplification and
   #476 malformed-metadata handling are merged; the #468 journal is in progress.
-- Performance: recover #513 and #522 before starting duplicate work. Measure
-  #503/#565, #515, #520 and #524 on representative data. #516 depends on durable
+- Performance: #513 was recovered into an isolated worktree, with bounded exhaustive
+  and sampled equivalence tests, a reproducible conversion benchmark and 869 passing
+  integrated tests; PR/CI pending.
+  The original locked work is preserved. Recover #522 before duplicating that work. Measure
+  #565, #515, #520 and #524 on representative data; #503's native-type work and
+  bounded release benchmark are complete. #516 depends on durable
   commit ordering; #517-#519 and #523 need the specific throughput, memory,
   file-size or lookup evidence requested by their issues.
 - Structure: #525-#530 follow correctness work. Scope must be refreshed against

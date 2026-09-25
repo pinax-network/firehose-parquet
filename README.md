@@ -1362,6 +1362,22 @@ Each Beacon table gets rows from the fork that introduced its data. Blocks from 
 | `withdrawal_requests` | Electra | `execution_requests.withdrawals` (EIP-7002) |
 | `consolidation_requests` | Electra | `execution_requests.consolidations` (EIP-7251) |
 
+`execution_payload.base_fee_per_gas` is an exact unsigned decimal string in wei
+per gas. It is independent of the selected byte encoding; use a checked numeric cast for
+arithmetic (the full uint256 range needs up to 78 decimal digits).
+`blob_sidecars.blob` is always Binary; hashes, roots, commitments, and proofs
+retain the selected byte encoding. `blocks.spec` uses generated enum names in
+an Arrow string dictionary, with `UNKNOWN` for unrecognized numeric values.
+Missing nested messages produce null descendants, while present zero values
+and empty byte/list values remain present. Absent bodies or execution payloads
+produce no child rows.
+
+These schema changes require a fresh output root or a verified conversion of
+existing files. Old fee bytes have different byte orders by payload type:
+Bellatrix/Capella are fixed little-endian, Deneb and later are big-endian.
+Historical fake zeros for missing messages cannot be repaired without source
+replay. See [the producer evidence and migration procedure](docs/audit/505-beacon-values.md).
+
 Amounts (`amount`) are in Gwei. `block_slot` joins `blocks.slot`. `withdrawals.withdrawal_index` is the chain-wide withdrawal index; `change_index` and `request_index` are positions within the block.
 
 - **Attestations after Electra.** EIP-7549 moved the committee out of the signed data: `committee_index` is always `0`, and `committee_bits` (8 bytes, a 64-bit bitvector) says which committees an aggregate covers. Bit `i` is bit `i % 8` of byte `i / 8`. `aggregation_bits` then spans those committees in index order. `committee_bits` is null before Electra.
