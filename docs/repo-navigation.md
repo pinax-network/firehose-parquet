@@ -19,7 +19,12 @@ Related design docs:
   - `firehose-protos/build.rs`: compiles `proto/*.proto` into Rust modules with `tonic-prost-build`.
   - `firehose-protos/src/lib.rs`: exposes compiled protobuf modules and aliases (`firehose`, `eth`, `solana`, etc.).
 - `firehose-parquet/`: core library crate used by the binary.
-  - `src/cli.rs`: shared CLI args (`AwsArgs`, `CommonArgs`, `BuildArgs`), subcommands, parsing, validation, and utility routines.
+  - `src/cli.rs`: shared Clap args (`AwsArgs`, `CommonArgs`, `BuildArgs`), subcommands and stable public re-exports.
+  - `src/cli/configuration.rs`: CLI-to-config conversion, argument value parsing, logging and completions.
+  - `src/cli/paths.rs`: local/S3 input and output policy, credential preflight and cursor templates.
+  - `src/cli/inspect.rs`, `src/cli/validate.rs`: read-only scan/inspection and canonical block validation.
+  - `src/cli/partitions/{mod,builder,io,queries}.rs`: partition models/vocabulary, incremental span construction, strict index IO and resolution/listing/sharding.
+  - `src/cli/{tests,validate_tests}.rs`: existing CLI and validation regressions.
   - `src/networks.rs`: built-in Firehose network alias registry and env override resolution.
   - `src/config.rs`: pipeline config model, partition key behavior, compression enum.
   - `src/auth.rs`: credential selection by resolved provider host and explicit env-var selectors.
@@ -50,7 +55,8 @@ Related design docs:
 ## Data-Flow Mental Model
 
 1. CLI options/env load in `blocks/src/bin/main.rs` using shared structures from `firehose-parquet/src/cli.rs`.
-   The primary ingestion path dispatches to `fireparq build` (`Commands::Build(BuildArgs)`) which calls `run_ingestion`.
+   The primary ingestion path dispatches to `fireparq build` (`Commands::Build(BuildArgs)`) which calls `ingestion::run_ingestion` in `blocks/src/bin/ingestion/mod.rs`.
+   Its `setup.rs` resolves the endpoint and owned resume configuration; `runtime.rs` owns receive/filter/routing state and flush windows while borrowing the durable session.
 2. Endpoint metadata and stream messages come from `firehose-parquet/src/grpc.rs`.
 3. Selected chain mapper (`blocks/src/<chain>/mapper.rs`) decodes protobuf blocks and builds Arrow columns using schemas from `schema.rs`.
 4. `firehose-parquet/src/writer/protected.rs` validates the full table inventory and publishes transaction-owned partitioned Parquet parts (local or S3).
@@ -60,8 +66,8 @@ Related design docs:
 ## Where To Edit For X
 
 - Add/change CLI flag or subcommand:
-  - `firehose-parquet/src/cli.rs` (shared flags/subcommands including `BuildArgs` for `fireparq build`, and argument validation)
-  - `blocks/src/bin/main.rs` (binary-specific wiring: `run_ingestion` and subcommand dispatch)
+  - `firehose-parquet/src/cli.rs` (shared flags/subcommands including `BuildArgs` for `fireparq build`); `firehose-parquet/src/cli/configuration.rs` for config conversion and value validation
+  - `blocks/src/bin/main.rs` (binary command dispatch) and `blocks/src/bin/ingestion/setup.rs` (ingestion configuration)
 - Add a new chain or adjust chain-specific table mapping:
   - `blocks/src/<chain>/proto.rs` for protobuf type aliases
   - `blocks/src/<chain>/schema.rs` for Arrow schema
@@ -73,13 +79,13 @@ Related design docs:
   - `firehose-parquet/src/writer.rs` (directory/file naming and flush behavior)
 - Change partition index building/consumption:
   - `firehose-parquet/src/partition_index{.rs,/}` (proof model, scanner and span builder)
-  - `firehose-parquet/src/cli.rs` (v2 IO and strict range/inspection helpers)
+  - `firehose-parquet/src/cli/partitions/{io,queries,builder}.rs` (v2 IO, strict range queries and incremental construction)
   - `blocks/src/bin/main.rs` (`run_partitions_build` lifecycle and publication)
   - `docs/partitions-parquet-contract.md`, `docs/partitions-build-defaults.md` (coverage and migration contract)
 - Change resume/cursor behavior:
   - `firehose-parquet/src/ingest/{state,frontier,controller,session,mirror}.rs`
   - `firehose-parquet/src/cursor.rs` (Parquet row format and legacy inspection)
-  - `blocks/src/bin/main.rs` (receipt/mapping queues and request defaults)
+  - `blocks/src/bin/ingestion/{setup,runtime}.rs` (request defaults and ordered receipt/mapping queues)
 - Change encoding of hashes/addresses/bytes:
   - `firehose-parquet/src/encode.rs`
   - chain mapper usage in `blocks/src/*/mapper.rs`
