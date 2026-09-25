@@ -232,7 +232,13 @@ fn cases(encoding: &EncodeBytes, fork_step: bool) -> Vec<Case> {
         Case::new(
             "near",
             NearBlockMapper::new(fork_step, enc(), true),
-            vec![near::mapper::tests::make_test_block(BLOCK_NUM).encode_to_vec()],
+            vec![
+                near::mapper::tests::make_test_block(BLOCK_NUM).encode_to_vec(),
+                // Every receipt action kind, a data receipt, a failed
+                // transaction and receipts without a same-block origin, so the
+                // nullable columns hold nulls.
+                near::mapper::tests::make_every_action_block(BLOCK_NUM + 1).encode_to_vec(),
+            ],
         ),
         Case::new(
             "tron",
