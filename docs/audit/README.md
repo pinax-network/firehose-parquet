@@ -88,6 +88,10 @@ lifecycle state; a local implementation or passing test alone is not closure.
 | [#517](https://github.com/pinax-network/firehose-parquet/issues/517) | [#602](https://github.com/pinax-network/firehose-parquet/pull/602) | Merged as `b364681` on 2026-09-25; issue closure verified; 1,007 tests, guarded local receive-window benchmarks, independent review and CI passed. |
 | [#530](https://github.com/pinax-network/firehose-parquet/issues/530) | [#603](https://github.com/pinax-network/firehose-parquet/pull/603) | Merged as `39d49f6` on 2026-09-25; issue closure verified; 1,010 tests, real local authenticated RPC/retry regressions, independent review and CI passed. |
 
+
+| [#522](https://github.com/pinax-network/firehose-parquet/issues/522) | [#604](https://github.com/pinax-network/firehose-parquet/pull/604) | Merged as `6cae796` on 2026-09-25; issue closure verified. Guarded 36-run rollup comparisons, complete row/schema equality, bounded range-read/error tests, independent review and CI passed. |
+| [#515](https://github.com/pinax-network/firehose-parquet/issues/515) | [#605](https://github.com/pinax-network/firehose-parquet/pull/605) | Merged as `137ab325` on 2026-09-25; issue closure verified. Retained and synthetic sizing evidence, successful-commit feedback and memory-trigger tests, 228 current-main integration checks, independent review and CI passed. |
+
 The #468 design PR accidentally triggered GitHub auto-closure through a negative
 sentence containing a recognized closing phrase. On 2026-09-25 the PR text was
 corrected and #468 was reopened; its open state was verified. The proposal and

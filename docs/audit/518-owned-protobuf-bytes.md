@@ -120,3 +120,12 @@ owned-buffer tests **3/0/0**, and actual protected ingestion CLI tests **7/0/0**
 the workspace build and formatting passed again. The PR's CI checks the complete
 integrated tree. Independent production review found no blocker and requested
 the nested Cosmos pointer assertion, which is included and passing.
+
+Final integration includes streaming rollup #604 and adaptive sizing #605 on
+main `137ab325`. The resolved production tree at `eeb0420` is byte-identical across
+all workspace source crates, manifests and protobufs to integration rehearsal
+`f22eff2`, which passed **1,029 workspace tests, 0 failed, 9 ignored**, the capture
+example (**1 passed, 1 ignored**), the sizing example (**1 passed**), formatting,
+binary build and Bash/Zsh/Fish completion generation. The only source conflict
+combined the owned mapper call with the new buffer-estimate return value; both
+behaviors are retained. Fresh PR CI validates this actual main ancestry.
