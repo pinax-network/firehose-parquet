@@ -11,6 +11,7 @@ path = "../scripts/generate_networks.rs"
 [dependencies]
 firehose-protos = { path = "../firehose-protos" }
 arrow.workspace = true
+arrow-schema = { version = "60", features = ["serde"] }
 parquet = { version = "60", features = ["arrow"] }
 tonic = { workspace = true, features = ["tls-ring", "tls-native-roots", "transport", "gzip"] }
 prost.workspace = true

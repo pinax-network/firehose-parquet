@@ -26,7 +26,7 @@ use object_store::ObjectStore;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::fs::{File, OpenOptions};
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -76,6 +76,7 @@ pub(crate) enum JournalState {
 
 /// The record of one partition merge.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct Journal {
     pub version: u32,
     pub run_id: String,
@@ -90,6 +91,9 @@ pub(crate) struct Journal {
     /// Output file names, recorded at commit.
     #[serde(default)]
     pub outputs: Vec<String>,
+    /// Explicit protected stream binding; absent on legacy/unprotected merges.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub protected_stream: Option<String>,
 }
 
 impl Journal {
@@ -103,6 +107,7 @@ impl Journal {
             sources,
             first_output_part,
             outputs: Vec::new(),
+            protected_stream: None,
         }
     }
 
@@ -114,11 +119,38 @@ impl Journal {
         }
     }
 
-    fn encode(&self) -> Result<Vec<u8>> {
-        Ok(serde_json::to_vec_pretty(self)?)
+    pub(crate) fn with_protected_stream(
+        mut self,
+        stream: Option<&crate::ingest::state::Digest>,
+    ) -> Self {
+        self.protected_stream = stream.map(|digest| digest.as_str().to_owned());
+        self
     }
 
-    fn decode(data: &[u8], location: &str) -> Result<Journal> {
+    pub(crate) fn validate_protection(
+        &self,
+        expected: Option<&crate::ingest::state::Digest>,
+    ) -> Result<()> {
+        if self.protected_stream.as_deref() != expected.map(|digest| digest.as_str()) {
+            anyhow::bail!("merge journal does not bind the selected protected stream; preserve it for explicit diagnosis");
+        }
+        Ok(())
+    }
+
+    fn encode(&self) -> Result<Vec<u8>> {
+        let bytes = serde_json::to_vec_pretty(self)?;
+        anyhow::ensure!(
+            bytes.len() <= crate::durable_state::MAX_CONTROL_BYTES,
+            "merge journal exceeds the control-record byte limit"
+        );
+        Ok(bytes)
+    }
+
+    pub(crate) fn decode(data: &[u8], location: &str) -> Result<Journal> {
+        anyhow::ensure!(
+            data.len() <= crate::durable_state::MAX_CONTROL_BYTES,
+            "merge journal exceeds the control-record byte limit"
+        );
         let journal: Journal = serde_json::from_slice(data)
             .with_context(|| format!("parsing merge journal {location}"))?;
         if journal.version != JOURNAL_VERSION {
@@ -126,6 +158,51 @@ impl Journal {
                 "merge journal {location} has version {}, but this build understands {JOURNAL_VERSION}",
                 journal.version
             );
+        }
+        anyhow::ensure!(
+            journal.lock.len() <= 4096
+                && !journal.lock.contains('\0')
+                && journal.started_at.len() <= 64
+                && journal.first_output_part > 0,
+            "merge journal identity fields are invalid"
+        );
+        anyhow::ensure!(
+            match journal.state {
+                JournalState::Writing => journal.outputs.is_empty(),
+                JournalState::Committed =>
+                    !journal.sources.is_empty() && !journal.outputs.is_empty(),
+            },
+            "merge journal phase disagrees with output inventory"
+        );
+        let valid_name = |name: &str| {
+            !name.is_empty()
+                && name.len() <= 255
+                && !name.contains(['/', '\\', '\0'])
+                && name.ends_with(".parquet")
+                && !crate::artifacts::is_reserved_artifact_path(name)
+        };
+        anyhow::ensure!(
+            journal.sources.iter().all(|name| valid_name(name))
+                && journal.outputs.iter().all(|name| valid_name(name))
+                && !journal.run_id.is_empty()
+                && journal.run_id.len() <= 64
+                && journal
+                    .run_id
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_')),
+            "merge journal contains invalid file or run identities"
+        );
+        let sources: HashSet<_> = journal.sources.iter().collect();
+        let outputs: HashSet<_> = journal.outputs.iter().collect();
+        anyhow::ensure!(
+            sources.len() == journal.sources.len()
+                && outputs.len() == journal.outputs.len()
+                && sources.is_disjoint(&outputs),
+            "merge journal has duplicate or overlapping source/output identities"
+        );
+        if let Some(stream) = &journal.protected_stream {
+            crate::ingest::state::Digest::parse(stream.clone())
+                .context("invalid protected merge stream identity")?;
         }
         Ok(journal)
     }
@@ -241,6 +318,40 @@ fn now_rfc3339() -> String {
         .unwrap_or_default()
 }
 
+/// Bounded, sanitized read shared by synchronous legacy callers and native
+/// async protected recovery. NotFound alone means no journal.
+pub(crate) async fn read_remote_journal(
+    client: &Arc<dyn ObjectStore>,
+    path: &object_store::path::Path,
+) -> Result<Option<Journal>> {
+    use futures::StreamExt;
+    tokio::time::timeout(std::time::Duration::from_secs(60), async {
+        let response = match client.get(path).await {
+            Ok(response) => response,
+            Err(object_store::Error::NotFound { .. }) => return Ok(None),
+            Err(_) => anyhow::bail!("reading remote merge journal failed"),
+        };
+        anyhow::ensure!(
+            response.meta.size <= crate::durable_state::MAX_CONTROL_BYTES as u64,
+            "merge journal exceeds the control-record byte limit"
+        );
+        let mut bytes = Vec::new();
+        let mut stream = response.into_stream();
+        while let Some(chunk) = stream.next().await {
+            let chunk =
+                chunk.map_err(|_| anyhow::anyhow!("reading remote merge journal body failed"))?;
+            anyhow::ensure!(
+                chunk.len() <= crate::durable_state::MAX_CONTROL_BYTES.saturating_sub(bytes.len()),
+                "merge journal exceeds the control-record byte limit"
+            );
+            bytes.extend_from_slice(&chunk);
+        }
+        Journal::decode(&bytes, "remote partition").map(Some)
+    })
+    .await
+    .map_err(|_| anyhow::anyhow!("remote merge journal read timed out"))?
+}
+
 // ---------------------------------------------------------------------------
 // Local filesystem
 // ---------------------------------------------------------------------------
@@ -296,11 +407,22 @@ impl PartitionFiles for LocalPartition {
 
     fn read_journal(&self) -> Result<Option<Journal>> {
         let path = self.journal_path();
-        match std::fs::read(&path) {
-            Ok(data) => Journal::decode(&data, &path.display().to_string()).map(Some),
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
-            Err(err) => Err(err).with_context(|| format!("reading {}", path.display())),
-        }
+        let metadata = match std::fs::symlink_metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error).context("reading merge journal metadata"),
+        };
+        anyhow::ensure!(
+            metadata.is_file()
+                && !metadata.file_type().is_symlink()
+                && metadata.len() <= crate::durable_state::MAX_CONTROL_BYTES as u64,
+            "merge journal is not a bounded regular file"
+        );
+        let mut data = Vec::new();
+        File::open(path)?
+            .take((crate::durable_state::MAX_CONTROL_BYTES + 1) as u64)
+            .read_to_end(&mut data)?;
+        Journal::decode(&data, "local partition").map(Some)
     }
 
     fn create_journal(&self, journal: &Journal) -> Result<bool> {
@@ -520,11 +642,7 @@ impl PartitionFiles for S3Partition<'_> {
 
     fn read_journal(&self) -> Result<Option<Journal>> {
         let path = self.path(JOURNAL_FILE);
-        match block_on_async(async { self.client.get(&path).await?.bytes().await }) {
-            Ok(data) => Journal::decode(&data, &format!("s3://{}/{path}", self.bucket)).map(Some),
-            Err(object_store::Error::NotFound { .. }) => Ok(None),
-            Err(err) => Err(err).with_context(|| format!("reading s3://{}/{path}", self.bucket)),
-        }
+        block_on_async(read_remote_journal(self.client, &path))
     }
 
     fn create_journal(&self, journal: &Journal) -> Result<bool> {

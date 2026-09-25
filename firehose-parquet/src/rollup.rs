@@ -13,7 +13,8 @@
 use crate::artifacts::is_reserved_artifact_path;
 use crate::cli::{block_on_async, format_bytes, resolve_destructive_input_path, AwsConfig};
 use crate::config::{Compression, DAY_PARTITION_PREFIX, LEGACY_DAY_PARTITION_PREFIX};
-use crate::dataset_lock::{DatasetOwnership, MutationScope};
+use crate::dataset_lock::DatasetOwnership;
+use crate::ingest::maintenance::{self, MaintenancePolicy, MaintenanceTarget};
 use crate::merge::SchemaCheck;
 use crate::writer::parse_s3_url;
 use anyhow::{Context, Result};
@@ -122,14 +123,20 @@ pub fn run_rollup(config: &RollupConfig) -> Result<()> {
             "rollup requires both source and output to use the same storage kind (local or S3)"
         );
     }
-    let ownership = DatasetOwnership::acquire_blocking(
+    let ownership = maintenance::acquire_blocking(
         "rollup",
         vec![
-            MutationScope::input(resolved.source.clone())?,
-            MutationScope::directory(resolved.output.clone()),
+            MaintenanceTarget::input(resolved.source.clone())?,
+            MaintenanceTarget::directory(resolved.output.clone()),
         ],
+        MaintenancePolicy::Rollup {
+            source: resolved.source.clone(),
+            output: resolved.output.clone(),
+            delete_source: resolved.delete_source,
+        },
         resolved.aws.as_ref(),
-    )?;
+    )?
+    .ownership;
     if resolved.source.starts_with("s3://") || resolved.output.starts_with("s3://") {
         run_rollup_s3(&resolved)
     } else {
@@ -309,7 +316,7 @@ fn run_rollup_local(config: &RollupConfig, ownership: &DatasetOwnership) -> Resu
             }
             let reader = builder.build()?;
             for batch_result in reader {
-                let batch = batch_result?;
+                let batch = crate::merge::strip_transaction_metadata(batch_result?)?;
                 if batch.num_rows() > 0 {
                     all_batches.push(batch);
                 }
@@ -623,7 +630,14 @@ fn writer_properties(
     let mut builder = WriterProperties::builder().set_compression(pq_compression);
     if let Some(kvs) = kv_metadata {
         if !kvs.is_empty() {
-            builder = builder.set_key_value_metadata(Some(kvs.to_vec()));
+            builder = builder.set_key_value_metadata(Some(
+                kvs.iter()
+                    .filter(|kv| {
+                        !kv.key.starts_with("fireparq.ingest.") && kv.key != "ARROW:schema"
+                    })
+                    .cloned()
+                    .collect(),
+            ));
         }
     }
     builder.build()
@@ -776,7 +790,7 @@ fn rollup_s3(config: &RollupConfig, src: &S3Root, out: &S3Root) -> Result<()> {
             }
             let reader = builder.build()?;
             for batch_result in reader {
-                let batch = batch_result?;
+                let batch = crate::merge::strip_transaction_metadata(batch_result?)?;
                 if batch.num_rows() > 0 {
                     all_batches.push(batch);
                 }

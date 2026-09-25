@@ -9,7 +9,8 @@
 use crate::artifacts::{is_control_path, is_reserved_artifact_path};
 use crate::cli::{block_on_async, format_bytes, resolve_destructive_input_path, AwsConfig};
 use crate::config::{DAY_PARTITION_PREFIX, LEGACY_DAY_PARTITION_PREFIX};
-use crate::dataset_lock::{DatasetOwnership, MutationScope};
+use crate::dataset_lock::DatasetOwnership;
+use crate::ingest::maintenance::{self, MaintenancePolicy, MaintenanceTarget};
 use anyhow::{Context, Result};
 use object_store::ObjectStore;
 use std::collections::BTreeMap;
@@ -65,11 +66,15 @@ pub fn run_truncate(config: &TruncateConfig) -> Result<TruncateResult> {
     let ownership = if config.dry_run || !config.yes {
         None
     } else {
-        Some(DatasetOwnership::acquire_blocking(
-            "truncate",
-            vec![MutationScope::input(path.clone())?],
-            config.aws.as_ref(),
-        )?)
+        Some(
+            maintenance::acquire_blocking(
+                "truncate",
+                vec![MaintenanceTarget::input(path.clone())?],
+                MaintenancePolicy::Truncate,
+                config.aws.as_ref(),
+            )?
+            .ownership,
+        )
     };
     let result = if path.starts_with("s3://") {
         run_truncate_s3(config, &path, &filters)

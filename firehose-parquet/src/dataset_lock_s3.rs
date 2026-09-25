@@ -201,6 +201,7 @@ pub struct S3Ownership {
     version: UpdateVersion,
     mutation_uncertain: AtomicBool,
     control_mutation: tokio::sync::Mutex<()>,
+    transaction_session: crate::dataset_lock::session::SessionSlot,
 }
 
 impl fmt::Debug for S3Ownership {
@@ -254,12 +255,19 @@ impl S3Ownership {
             version,
             mutation_uncertain: AtomicBool::new(false),
             control_mutation: tokio::sync::Mutex::new(()),
+            transaction_session: Default::default(),
         })
     }
 
     /// Read-only inspection. Never probes, renews, releases or creates an object.
     pub async fn status(store: &Arc<dyn ObjectStore>) -> Result<Option<OwnerRecord>> {
         Ok(read_record(store).await?.map(|(record, _)| record))
+    }
+
+    pub(crate) fn acquire_transaction_session(
+        &self,
+    ) -> anyhow::Result<crate::dataset_lock::session::SessionPermit<'_>> {
+        self.transaction_session.acquire()
     }
 
     pub fn record(&self) -> &OwnerRecord {

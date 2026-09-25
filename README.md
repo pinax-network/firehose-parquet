@@ -24,9 +24,9 @@ A production-grade Rust toolkit that consumes [StreamingFast Firehose](https://f
 - **Canonical identity columns** — `block_num`, `block_id`, `parent_num`, `parent_id`, `lib_num`, `timestamp`, `date` on every table; `timestamp` is `Timestamp(Millisecond, UTC)` (Parquet `TIMESTAMP(MILLIS, isAdjustedToUTC=true)`, so DuckDB, Spark, Trino and ClickHouse read it as a timestamp) and keeps sub-second block times where Firehose provides them; `date` is an Arrow `Date32` derived from the UTC block timestamp. For Solana, canonical `timestamp` / `date` stay nullable when `block_time` is missing, and synthetic timing is used only for time-based partition routing. Chain-specific columns never reuse these names: Tron `transactions` stores the transaction's own creation and expiration times as `tx_timestamp_ms` / `expiration_ms` (Int64 unix milliseconds; `tx_timestamp_ms` is set by the sender, so it can be 0 or use another unit)
 - **gRPC streaming** — connects to any Firehose v2 endpoint via tonic, with TLS and API key / JWT auth
 - **Network aliases** — `--network` resolves built-in Firehose names and supports `FIREHOSE_ENDPOINT_*` per-network overrides
-- **Automatic retry / resume** — exponential back-off on connection errors; resumes from the last cursor
+- **Automatic retry / resume** — exponential back-off on connection errors; restarts from the authoritative output checkpoint
 - **Recovery guardrails** — optional stream idle timeout and reconnect stall timeout to force self-recovery or fail-fast restarts
-- **Cursor persistence** — pipeline state saved as `cursor.parquet` with full parameter validation on resume
+- **Crash recovery** — all-table transactions and an authoritative output checkpoint; `cursor.parquet` remains an optional compatible mirror
 - **S3-aware cursor** — cursor automatically stored alongside output (local or S3)
 - **Partitioning** — `none`, `block_range`, `date`, `hour`, `minute`, or `second` layouts
 - **File rollover** — flush by row count, byte size, or time interval
@@ -171,7 +171,18 @@ docker run --rm \
 
 ## Cursor & Resume
 
-`fireparq` persists pipeline state in a `cursor.parquet` file so streams can resume from their last successful checkpoint, with parameter validation. Output files and the cursor are separate writes; interrupted flushes can still replay already-published rows.
+`fireparq build` stores an authoritative checkpoint and an all-table transaction
+journal under `<output>/<chain>/.fireparq-ingest/`. Every flush either recovers
+its complete committed output or removes its owned uncommitted parts before
+replay. The optional `cursor.parquet` file mirrors this authority; deleting the
+mirror cannot rewind ingestion. These controls contain opaque source cursors
+and should receive the same access restrictions as the cursor file.
+
+Existing datasets without this authority are not adopted automatically. Rebuild
+into a new empty output root, with an absent cursor mirror. A verified same-chain
+v2 `partitions.parquet` may already exist there. Keep legacy datasets available
+for read-only tools and guarded legacy maintenance. See the
+[transaction and migration contract](docs/audit/468-ingestion-runtime.md).
 
 ## Network Aliases
 
@@ -198,7 +209,7 @@ Per-network env overrides normalize network names by uppercasing and converting 
 
 Removed networks are rejected during argument parsing, and startup fails early if the resolved endpoint is unavailable or unhealthy.
 
-Both `build` and `partitions build` require EndpointInfo with a nonempty chain name before resolving output or cursor paths. Transient Info failures get three attempts with bounded backoff; exhausted retries, authentication errors, or unsupported Info stop startup. `--network`, `--block-type`, and `--cursor-override` do not bypass this requirement. This prevents a temporary metadata failure from changing the output root or hiding the existing cursor. Older servers must expose the Info RPC. See [the implementation record](docs/audit/467-endpoint-info.md) for retry limits and validation.
+Both `build` and `partitions build` require EndpointInfo with a nonempty chain name before resolving output or cursor paths. Transient Info failures get three attempts with bounded backoff; exhausted retries, authentication errors, or unsupported Info stop startup. `--network`, `--block-type`, and `--cursor-override` do not bypass this requirement. This prevents a temporary metadata failure from changing the output root or hiding the existing cursor. Older servers must expose the Info RPC. Protected ingestion resolves its mapper before recovery; unknown custom chain metadata requires an explicit `--block-type`. See [the implementation record](docs/audit/467-endpoint-info.md) for retry limits and validation.
 
 ```bash
 # Built-in alias
@@ -215,34 +226,39 @@ fireparq --network solana-mainnet-beta --start-block 250000000 --stop-block 2501
 
 ### How It Works
 
-1. **Synchronized flush** — when any table triggers a file rollover (partition change or size threshold), *all* tables are flushed together. This ensures every table is consistent at the cursor point.
-2. **Cursor saved after writes** — `cursor.parquet` is only updated *after* all table files have been successfully written to disk (or S3). If the process crashes mid-write, the cursor still points to the last complete flush.
-3. **Resume from cursor** — on startup, if `cursor.parquet` exists, the pipeline sends the stored Firehose cursor token to resume the gRPC stream exactly where it left off.
+1. **Receive and map** — assign source-event order before filtering or timestamp
+   buffering. Every table belongs to one contiguous accepted event window;
+   filtered events can advance a zero-row checkpoint.
+2. **Prepare and publish** — validate the whole table inventory, save the pending
+   transaction, and publish complete parts with deterministic owned names.
+   Record each file's size, checksum and schema before publication.
+3. **Commit and mirror** — after verifying every part, record the transaction's
+   commit, advance output authority, repair the cursor mirror, and clear pending.
+4. **Recover before streaming** — roll back a Writing transaction or finish a
+   Committed transaction before opening Firehose Blocks. Never infer progress
+   from the greatest block number, a filename, or an external cursor alone.
 
 ### Local part publication
 
-Local table parts are written under hidden `.fireparq-<uuid>.tmp` names in the
-destination directory. The writer completes the Parquet footer and syncs the
-file before atomically creating its final `.parquet` name without overwriting an
-existing destination. It removes the temporary name and syncs the directory
-before reporting success. Output directory ancestors are also synced, including
-newly created directories and those left by an earlier failed attempt. Symlinked
-output paths sync both the resolved target ancestry and the alias ancestry.
+Protected local parts use a hidden transaction-owned `.tmp` name in the same
+directory as their final `part-v1-*.parquet` name. The writer completes and syncs
+the Parquet file, creates the final name with a no-clobber hard link, and syncs
+directory links. Recovery verifies exact journal ownership before removing a
+partial transaction or accepting a committed file. Canonical and lexical output
+ancestry are both synced, preserving explicit output-root symlink aliases.
 
-This requires a filesystem that supports atomic same-directory hard links,
-file sync, and directory sync, with readable directory ancestors. Unsupported
-operations or sync failures stop the write; there is no weaker fallback. Final
-filenames retain the existing random process prefix and counter. S3 publication
-is unchanged.
+This requires atomic same-directory hard links, file and directory sync, readable
+directory ancestry, and macOS/Linux inode locking. Unsupported operations fail
+closed. Nested symlink entries inside guarded trees are refused. External writers
+that bypass ownership are unsupported. Legacy low-level writers and maintenance
+retain their independent naming and journal rules.
 
-Readers of final `.parquet` files see complete individual parts. This does not
-make a multi-table flush or its cursor update atomic. A failure after final-name
-publication can leave a complete part even though the write reports an error;
-ingestion stops, and replay can duplicate it. A process crash can leave hidden
-`.tmp` files, which are not Parquet inputs and are not automatically removed.
-Do not remove another active writer's temporary files. See the
-[implementation and failure tests](docs/audit/578-atomic-local-parquet.md) and
-the remaining [transaction/recovery design](docs/audit/468-crash-recovery-design.md).
+Final `.parquet` files are individually complete. Concurrent readers using plain
+globs can still see only some tables during publication; this protocol does not
+provide atomic multi-table query snapshots. Do not remove control records or
+another active writer's temporary files. See the
+[local publication tests](docs/audit/578-atomic-local-parquet.md) and
+[transaction recovery contract](docs/audit/468-ingestion-runtime.md).
 
 ### Cursor File Format
 
@@ -255,14 +271,14 @@ The cursor is stored as a single-row Parquet file with two layers of data:
 | `cursor` | Utf8 | Firehose opaque cursor token |
 | `last_block_num` | UInt64 | Last processed block number |
 | `last_block_id` | Binary | Last processed block ID (raw bytes) |
-| `last_timestamp` | Int64 (nullable) | Last known sparse-routing timestamp anchor used for timestamp-less resume routing |
+| `last_timestamp` | Int64 (nullable) | Committed routing anchor, or actual source timestamp when no anchor is needed |
 | `updated_at` | Utf8 | ISO 8601 timestamp of last save |
 | `start_block` | UInt64 (nullable) | Pipeline start block |
-| `stop_block` | UInt64 (nullable) | Pipeline stop block (exclusive) |
+| `stop_block` | UInt64 (nullable) | Last durably proven completed exclusive request bound |
 
 **File-level metadata** (Parquet key-value pairs in `firehose-parquet.*` namespace):
 
-Pipeline configuration and firehose endpoint metadata are embedded in the file footer — same convention as table files. This includes `endpoint`, `chain_name`, `partition`, `compression`, `bytes_encoding`, plus cursor compatibility fields such as `extended`, `final_blocks_only`, and `include_failed_transactions`.
+The protected mirror footer contains a versioned checkpoint envelope, its digest, and duplicated semantic configuration. Every row/configuration duplicate must agree with authority. Legacy cursor files remain readable by inspection tools; they cannot establish protected output authority.
 
 ### S3-Aware Cursor
 
@@ -302,42 +318,32 @@ is local. This is validated after `--cursor-template` expansion as well as for
 
 ### Parameter Validation on Resume
 
-When resuming from an existing `cursor.parquet`, the pipeline validates that the current CLI parameters match those stored in the cursor. Checked parameters include:
+Protected output binds the original start and block-range anchor, chain and mapper
+family, exact table schemas and mapper epoch, identifier encoding, partitioning,
+effective feature flags, output storage identity and mirror location. A mismatch
+stops before Blocks. Compression and flush thresholds may change without changing
+logical rows. Endpoint aliases do not relax storage-service binding.
 
-- `start_block` (from row data)
-- `extended`, `final_blocks_only`, `include_failed_transactions` (from cursor file metadata, with legacy row fallback in v0.7.x)
-- `with_votes` (Solana only) for vote table output
-- `endpoint`, `partition`, `block_range_size`, `compression`, `bytes_encoding` (from file metadata)
+Rerun with the same original start, or omit `--start-block` to use the stored
+origin. An already completed stop is a no-op after recovery and mirror repair;
+an increased stop resumes from the exact authoritative source cursor. Omit the
+stop for live continuation. Solana routing anchors and non-nullable-chain
+bootstrap lookahead are persisted with their source identity, so restart does
+not choose a new timestamp for already accepted rows.
 
-For timestamp-sparse chains such as Solana time partitions, `last_timestamp` preserves the last known routing anchor across shutdown/restart. Legacy `v0.7.x` cursors without `last_timestamp` still load, but resume anchoring falls back to the older best-effort behavior and emits a warning. This legacy cursor fallback is intended for `v0.7.x` compatibility and is expected to tighten in `v0.8.0`.
+### Missing or Unreadable Cursor
 
-On resume, the cursor's stored `start_block` is reused when present. The
-cursor's `stop_block` may be omitted from the CLI for bounded resume, replaced
-with a new explicit `--stop-block`, or omitted with `--live` to continue
-streaming indefinitely. In the normal workflow, rerunning the same command is
-enough and no extra resume flags are needed.
+A missing or genuinely older mirror is repaired from authority before streaming.
+An ahead, foreign, malformed or unreadable mirror fails closed; it never selects
+a new resume point. An existing legacy cursor also blocks initialization of a
+new dataset. `--cursor none` disables the mirror only; authority remains mandatory.
+Changing or disabling the mirror of an existing protected dataset is refused.
 
-### Unreadable Cursor
-
-A run starts fresh only when there is no cursor to resume from: the file or S3
-object does not exist, or it holds no row or an empty cursor. If a cursor
-exists but cannot be loaded (permission denied, S3 403/5xx/timeout, or an
-empty, truncated or corrupt file), `fireparq build` exits with an error that
-names the cursor instead of re-ingesting from `--start-block` and overwriting
-the resume point. Fix access to the cursor and rerun, or pass
-`--cursor-override` to ignore it and restart from the CLI bounds.
-
-Local cursor saves are atomic: the new cursor is written to a `.tmp` sibling
-(for example `cursor.parquet.tmp`) in the same directory, fsynced, and renamed
-over the old one, so a crash mid-save keeps the previous cursor.
-
-Local cursor save failures pause ingestion and retry the same checkpoint up to
-three times, with 1 second and 2 second backoff. S3 cursor saves make one attempt,
-with transport retries disabled: a timed-out request might still finish remotely.
-A failed final checkpoint also exits nonzero. A shutdown during local retry
-backoff reports the durability failure. Local directory fsync errors count as
-failed saves. See [cursor persistence](docs/audit/469-durable-cursor-saves.md) and
-[remote mutation limits](docs/audit/468-s3-mutation-attempts.md).
+Local mirror saves use private same-directory temporary files, atomic replacement,
+file and directory sync, and up to three attempts with 1 and 2 second backoff.
+S3 mirror updates use one conditional Create/Update with transport retries disabled,
+then exact readback. Failed or cancelled saves preserve pending recovery state;
+a shutdown during local retry backoff still reports the durability failure.
 
 Mutating commands hold common ownership over output, source and external cursor
 or artifact locations. Local ownership uses macOS/Linux directory locks; nested
@@ -349,27 +355,19 @@ the exact owner/generation and evidence that both the writer and all prior remot
 requests are quiescent; stopping the process alone is insufficient. See the
 [ownership and recovery runbook](docs/audit/468-stage1-ownership.md).
 
-Ownership currently prevents concurrent cooperating mutations. Output parts and
-the cursor are still separate writes; full ingestion crash/replay recovery and
-its authoritative output checkpoint remain under implementation in #468.
+Protected datasets allow guarded lossless merge and copy-only rollup into a
+separate unprotected output. Truncate, in-place rollup and source-deleting rollup
+are refused because they cannot reconcile the ingestion checkpoint. Maintenance
+selected at a table/partition or parent root discovers every affected protected
+dataset and its external mirror before recovery or data reads.
 
-### Advanced Cursor Override
+### Cursor Override and Migration
 
-When `--cursor-override` is set, the CLI request takes precedence over the
-stored cursor range. The pipeline still loads the cursor file for
-validation/logging (an unreadable cursor is logged and ignored), but it
-restarts from the CLI-provided or endpoint-default start block and does not
-pass the stored stream cursor token to Firehose.
-
-```bash
-# Restart from the requested range despite parameter changes in cursor.parquet
-fireparq \
-  --endpoint https://eth.firehose.pinax.network:443 \
-  --cursor cursor.parquet \
-  --cursor-override \
-  --start-block 1 \
-  --stop-block 20000000
-```
+`--cursor-override` cannot reset, rewind or change protected output semantics.
+Use a new empty output and absent mirror when changing the original range, schema
+or feature flags. Legacy random-name output has no proof relating all parts to
+its cursor, so this release provides no implicit adoption or override escape.
+Read-only dry-run behavior can still inspect legacy cursor defaults.
 
 ### Graceful Shutdown
 
@@ -390,14 +388,15 @@ still produces a non-zero exit.
 A second SIGINT or SIGTERM exits immediately with code 130, without waiting for
 the current block. In-flight writes may be interrupted: a hidden temporary part
 may remain incomplete, or a cursor update may not finish its durability checks.
-A published local table part already has a complete footer, but replay can still
-duplicate complete parts until recovery across tables and the cursor is implemented (#468).
+A published local table part already has a complete footer. The next owned
+recovery reconciles its pending transaction before any source replay.
 
 If a write (local disk or S3), a block mapping, or the stream fails, the
 pipeline also discards partial buffers and does not save the cursor, then exits
-non-zero. A table whose write failed is never skipped: the next run resumes from
-the last committed cursor and replays the uncommitted window. Tables that were
-already written in the failed flush may be written again on that replay.
+non-zero. Recovery removes verified parts from an uncommitted transaction before
+replaying its window, or finishes a committed transaction without remapping it.
+S3 recovery additionally requires explicit release after provider-confirmed
+request quiescence whenever the prior owner remains retained.
 
 Only a stream that ends cleanly (for example, by reaching `--stop-block`)
 flushes the remaining buffers and saves the final cursor.
@@ -411,13 +410,12 @@ flushes the remaining buffers and saves the final cursor.
   logged, and all of them are counted in
   `firehose_parquet_blocks_skipped_below_start_total` and in the
   `blocks_skipped_below_start` field of the final summary.
-- **Bounded runs** (`--stop-block` set; it is exclusive) exit 0 only once block
-  `stop_block - 1` was received. If the server ends the stream earlier, the run
-  resumes from the last cursor. If the resumed stream delivers nothing, the
-  server has no more blocks in the range: on chains with skipped slots or
-  heights (Solana, NEAR, Beacon) the run completes with a warning. On other
-  chains it writes the blocks it received, saves the cursor at the last one,
-  and exits non-zero, so a rerun resumes after them.
+- **Bounded runs** (`--stop-block` is exclusive) record completion only after
+  clean EOF, all received events are acknowledged, and the last accepted event
+  reaches `stop_block - 1`. A sparse or empty tail alone cannot prove coverage,
+  including on Solana, NEAR and Beacon: the accepted prefix is durable, but the
+  command exits nonzero with a diagnostic. Repeating an already proven bound
+  opens no Blocks request; extending it uses the authoritative cursor.
 - **Live runs** (no `--stop-block`) never end on their own: if the server or a
   proxy closes the stream cleanly, the run reconnects from the last cursor with
   the usual back-off.
@@ -439,7 +437,7 @@ recovery knobs to dedicated advanced sections.
 |---|---|
 | Connection | `--network <NETWORK>` or `--endpoint <ENDPOINT>` |
 | Range | `--start-block <START_BLOCK>`, `--stop-block <STOP_BLOCK>`, `--live` |
-| Resume | Rerun the same command and the default `cursor.parquet` is reused automatically; use `--cursor <CURSOR>` only when you want a non-default cursor file |
+| Resume | Rerun the same original range; output authority selects progress and repairs the bound optional cursor mirror |
 | Output | `--output <OUTPUT>`, `--partition <PARTITION>`, `--compression <COMPRESSION>` |
 | Chain | `--block-type <BLOCK_TYPE>` (default `auto`), plus chain-specific toggles like `--extended false` or `--with-votes false` only when needed |
 | Runtime | `--final-blocks-only[=true|false]` (default `true`), `--flush-bytes <FLUSH_BYTES>`, optional `--flush-rows` / `--flush-interval-secs` |
@@ -534,7 +532,7 @@ rather than the default workflow:
 
 | Flag | Use when |
 |---|---|
-| `--cursor-override` | Intentionally restart from new CLI bounds instead of reusing the stored Firehose cursor |
+| `--cursor-override` | Legacy dry-run override; protected output refuses rewinds and requires a new empty root for changed semantics |
 | `--skip-missing-blocks` | Sparse chains legitimately skip block numbers and you want probes/streams to continue past gaps |
 | `--stream-idle-timeout-secs <N>` | Supervising long-lived pipelines that should self-reconnect after a silent stream stall (default 120; `0` disables and relies on HTTP/2 keepalive). On slow chains such as Bitcoin (~600 s blocks), set it above the block time to avoid a reconnect every 120 s. An idle reconnect is not counted as a failure. |
 | `--reconnect-stall-timeout-secs <N>` | Fail fast when reconnect loops should hand control back to an external supervisor (default 900; `0` disables). The timer starts at the first failed attempt and is reset only when a stream message arrives, not when a connection or RPC succeeds. |
@@ -585,8 +583,8 @@ other trigger, everything stays in memory until the run ends, and a warning is
 logged). `merge` and `rollup` retain their separate output-size controls.
 Runtime logs distinguish mapper batches from successfully materialized Parquet
 output. On graceful shutdown or failure, remaining mapper data is not written
-and the cursor is not advanced. A failed table write retains visible rows for
-diagnosis; retry after an ambiguous publication error can duplicate output.
+and authority is not advanced. An interrupted transaction is reconciled before
+replay; a storage error stops ingestion and retains recovery evidence.
 
 When a partition boundary is detected during ingestion, the mapper flush for the
 old partition is written immediately, and the same
@@ -1202,7 +1200,7 @@ For a failed or reverted transaction, `fireparq` writes:
 
 This follows the rule documented on `TransactionTrace.status` in `proto/ethereum.proto`. Rolled-back transfers and storage writes of failed transactions are not written. Successful transactions keep every state change, including those of calls that were reverted inside them. The `persisted` column tells them apart (see below).
 
-Resuming an EVM output whose `cursor.parquet` was written with failed transactions excluded (the default before this change) keeps excluding them, so one output does not mix both modes. `fireparq` logs a warning. Pass `--exclude-failed-transactions` to keep that and silence the warning. To switch the output to the new default, use `--cursor-override` with an explicit `--start-block`.
+Resuming protected EVM authority that records failed transactions as excluded keeps excluding them, so one output does not mix both modes. Legacy cursor-only datasets need a new empty output root. `fireparq` logs a warning. Pass `--exclude-failed-transactions` to keep that and silence the warning. To switch semantics, rebuild into a fresh output root with an absent mirror; `--cursor-override` cannot change protected output.
 
 ### EVM: which call recorded a change, and whether it persisted
 

@@ -27,9 +27,11 @@ Related design docs:
   - `src/grpc/{finality,finalized_range}.rs`: bounded explicit finalized-anchor proof and exact metadata traversal.
   - `src/partition_index.rs`, `src/partition_index/{builder,scan}.rs`: v2 finalized coverage, contiguous raw-time spans, ancestry/routing context and resume.
   - `src/writer.rs`: Arrow builders to Parquet file writing, flush/rollover logic.
-  - `src/cursor.rs`: resume state persistence (`cursor.parquet`) and parameter checks.
+  - `src/ingest/`: versioned all-table transactions, authority, accepted frontier, cursor mirrors, recovery and maintenance policy.
+  - `src/cursor.rs`: compatible cursor Parquet encoding and legacy inspection.
+  - `src/writer/protected.rs`: prepared complete parts and exact receipt/schema verification.
   - `src/dataset_lock/`, `src/dataset_lock_s3.rs`: common local directory and persistent S3 bucket ownership for mutating commands.
-  - `src/durable_state.rs`, `src/durable_state_s3.rs`: strict versioned local/remote control records; ingestion transaction integration remains staged.
+  - `src/durable_state.rs`, `src/durable_state_s3.rs`: strict versioned local/remote control records and CAS tombstones.
   - `src/recovery.rs`: read-only ownership/control summaries and explicit provider-quiescent S3 owner release.
   - `src/encode.rs`: byte encoding modes (`hex`, `base58`, `tron_base58`, etc.).
   - `src/metrics.rs`: Prometheus metrics registry and `/metrics` server helpers.
@@ -51,8 +53,8 @@ Related design docs:
    The primary ingestion path dispatches to `fireparq build` (`Commands::Build(BuildArgs)`) which calls `run_ingestion`.
 2. Endpoint metadata and stream messages come from `firehose-parquet/src/grpc.rs`.
 3. Selected chain mapper (`blocks/src/<chain>/mapper.rs`) decodes protobuf blocks and builds Arrow columns using schemas from `schema.rs`.
-4. `firehose-parquet/src/writer.rs` flushes `RecordBatch`es to partitioned Parquet files (local or S3).
-5. `firehose-parquet/src/cursor.rs` snapshots resume state to `cursor.parquet` at synchronized flush boundaries.
+4. `firehose-parquet/src/writer/protected.rs` validates the full table inventory and publishes transaction-owned partitioned Parquet parts (local or S3).
+5. `firehose-parquet/src/ingest/session.rs` journals every all-table flush, advances output authority, and reconciles the optional cursor mirror. Recovery completes before Blocks requests.
 6. Optional observability is emitted by `firehose-parquet/src/metrics.rs`.
 
 ## Where To Edit For X
@@ -65,6 +67,7 @@ Related design docs:
   - `blocks/src/<chain>/schema.rs` for Arrow schema
   - `blocks/src/<chain>/mapper.rs` for row extraction/transform logic
   - `blocks/src/bin/main.rs` for mapper wiring and `--block-type` handling
+  - `firehose-parquet/src/ingest/state.rs` (`MAPPER_EPOCH`): advance the epoch when row/routing semantics change without a schema change; protected output must not silently mix those meanings.
 - Change partitioning or output file layout:
   - `firehose-parquet/src/config.rs` (`Partition::partition_key`)
   - `firehose-parquet/src/writer.rs` (directory/file naming and flush behavior)
@@ -74,8 +77,9 @@ Related design docs:
   - `blocks/src/bin/main.rs` (`run_partitions_build` lifecycle and publication)
   - `docs/partitions-parquet-contract.md`, `docs/partitions-build-defaults.md` (coverage and migration contract)
 - Change resume/cursor behavior:
-  - `firehose-parquet/src/cursor.rs`
-  - `blocks/src/bin/main.rs` (resume flow and validation overrides)
+  - `firehose-parquet/src/ingest/{state,frontier,controller,session,mirror}.rs`
+  - `firehose-parquet/src/cursor.rs` (Parquet row format and legacy inspection)
+  - `blocks/src/bin/main.rs` (receipt/mapping queues and request defaults)
 - Change encoding of hashes/addresses/bytes:
   - `firehose-parquet/src/encode.rs`
   - chain mapper usage in `blocks/src/*/mapper.rs`
