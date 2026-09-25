@@ -62,10 +62,38 @@ impl BlockMetadata {
     }
 }
 
+/// Shared target for the largest compressed output file (32 MiB).
+pub const DEFAULT_FLUSH_BYTES: u64 = 32 * 1024 * 1024;
+/// Independent summed logical mapper buffer threshold (256 MiB, not RSS).
+pub const DEFAULT_FLUSH_MEMORY_BYTES: u64 = 256 * 1024 * 1024;
+
+/// Receive-side gRPC controls, shared by ingestion and partition probes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GrpcConfig {
+    /// Let HTTP/2 tune receive windows using measured bandwidth and latency.
+    pub adaptive_window: bool,
+    /// Initial stream/connection receive window; None keeps HTTP/2 library defaults.
+    /// Adaptive flow control, when enabled, overrides this setting.
+    pub initial_window_bytes: Option<u32>,
+    /// Maximum encoded or decompressed protobuf response size, in bytes.
+    pub max_message_bytes: u32,
+}
+
+impl Default for GrpcConfig {
+    fn default() -> Self {
+        Self {
+            adaptive_window: false,
+            initial_window_bytes: Some(16 * 1024 * 1024),
+            max_message_bytes: 128 * 1024 * 1024,
+        }
+    }
+}
+
 /// Pipeline configuration.
 #[derive(Debug, Clone)]
 pub struct Config {
     pub endpoint: String,
+    pub grpc: GrpcConfig,
     pub api_key: Option<String>,
     pub jwt_token: Option<String>,
     pub start_block: Option<u64>,
@@ -79,6 +107,7 @@ pub struct Config {
     pub flush_rows: Option<u32>,
     pub flush_blocks: Option<u64>,
     pub flush_bytes: u64,
+    pub flush_memory_bytes: u64,
     pub flush_interval_secs: Option<u64>,
     pub compression: Compression,
     pub final_blocks_only: bool,
@@ -272,6 +301,11 @@ impl std::fmt::Display for Config {
             writeln!(f, "  flush_blocks       {blocks}")?;
         }
         writeln!(f, "  flush_bytes        {flush_bytes}")?;
+        writeln!(
+            f,
+            "  flush_memory_bytes {} B (summed mapper estimate)",
+            self.flush_memory_bytes
+        )?;
         if let Some(secs) = self.flush_interval_secs {
             writeln!(f, "  flush_interval     {secs}s")?;
         }
@@ -286,6 +320,17 @@ impl std::fmt::Display for Config {
             Some(secs) if secs > 0 => format!("{secs}s"),
             _ => "disabled".to_string(),
         };
+        writeln!(f, "  grpc_adaptive_window {}", self.grpc.adaptive_window)?;
+        writeln!(
+            f,
+            "  grpc_window_bytes {:?}",
+            self.grpc.initial_window_bytes
+        )?;
+        writeln!(
+            f,
+            "  grpc_max_message_bytes {}",
+            self.grpc.max_message_bytes
+        )?;
         writeln!(
             f,
             "  stream_idle_timeout {}",
@@ -331,6 +376,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             endpoint: "https://mainnet.sol.streamingfast.io:443".to_string(),
+            grpc: GrpcConfig::default(),
             api_key: None,
             jwt_token: None,
             start_block: None,
@@ -341,7 +387,8 @@ impl Default for Config {
             partition: Partition::None,
             flush_rows: None,
             flush_blocks: None,
-            flush_bytes: 128 * 1024 * 1024, // 128 MiB; set to 0 to disable size-based rollover
+            flush_bytes: DEFAULT_FLUSH_BYTES,
+            flush_memory_bytes: DEFAULT_FLUSH_MEMORY_BYTES,
             flush_interval_secs: None,
             compression: Compression::Zstd,
             final_blocks_only: true,
@@ -396,7 +443,8 @@ mod tests {
         assert!(display.contains("compression        zstd"));
         assert!(!display.contains("flush_rows"));
         assert!(!display.contains("flush_blocks"));
-        assert!(display.contains("128 MiB"));
+        assert!(display.contains("32 MiB"));
+        assert!(display.contains("flush_memory_bytes 268435456 B"));
         assert!(display.contains("final_blocks_only  true"));
         // dry_run defaults to false, so it should not appear
         assert!(!display.contains("dry_run"));

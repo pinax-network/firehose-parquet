@@ -257,6 +257,43 @@ impl<'a> LocalStateStore<'a> {
         self.sync_directory()
     }
 
+    /// Establish durability of a previously observed record or absence during
+    /// transaction recovery. A visible rename/unlink may be from an earlier
+    /// attempt that failed before syncing its directory. Read-only status does
+    /// not call this method and remains observational.
+    pub(crate) fn stabilize(
+        &self,
+        key: ControlKey,
+        expected: Option<&ControlVersion>,
+    ) -> Result<()> {
+        let _mutation = self.ownership.lock_control_mutation()?;
+        self.ownership.revalidate()?;
+        let observed = self.load::<serde_json::Value>(key)?;
+        if observed.as_ref().map(|document| &document.version) != expected {
+            bail!("control record changed while establishing recovery durability");
+        }
+        if observed.is_some() {
+            #[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+            tests::checkpoint(tests::Failure::FileSync)?;
+            File::open(self.directory.join(key.filename()))?
+                .sync_all()
+                .context("syncing observed control record for recovery")?;
+        }
+        let existing = self
+            .directory
+            .ancestors()
+            .find(|path| path.is_dir())
+            .context("control recovery has no existing ancestor")?;
+        for ancestor in existing.ancestors() {
+            #[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+            tests::checkpoint(tests::Failure::DirectorySync)?;
+            File::open(ancestor)?
+                .sync_all()
+                .context("syncing observed control ancestry for recovery")?;
+        }
+        Ok(())
+    }
+
     fn require_version(&self, key: ControlKey, expected: &ControlVersion) -> Result<()> {
         let current = self
             .load::<serde_json::Value>(key)?
@@ -386,6 +423,42 @@ mod tests {
             }
             Ok(())
         })
+    }
+
+    #[test]
+    fn recovery_stabilizes_visible_record_and_absence_after_failed_directory_sync() {
+        let root = tempfile::tempdir().unwrap();
+        let owner = LocalOwnership::acquire(&[root.path().into()]).unwrap();
+        let store = LocalStateStore::new(root.path(), &owner).unwrap();
+        let version = store
+            .create(ControlKey::Pending, &serde_json::json!({"event":1}))
+            .unwrap();
+        FAILURE.with(|failure| failure.set(Some(Failure::FileSync)));
+        assert!(store
+            .stabilize(ControlKey::Pending, Some(&version))
+            .is_err());
+        store
+            .stabilize(ControlKey::Pending, Some(&version))
+            .unwrap();
+        FAILURE.with(|failure| failure.set(Some(Failure::DirectorySync)));
+        assert!(store.remove(ControlKey::Pending, &version).is_err());
+        assert!(store
+            .load::<serde_json::Value>(ControlKey::Pending)
+            .unwrap()
+            .is_none());
+        FAILURE.with(|failure| failure.set(Some(Failure::DirectorySync)));
+        assert!(store.stabilize(ControlKey::Pending, None).is_err());
+        store.stabilize(ControlKey::Pending, None).unwrap();
+        let replacement = store
+            .create(ControlKey::Pending, &serde_json::json!({"event":2}))
+            .unwrap();
+        assert!(store.stabilize(ControlKey::Pending, None).is_err());
+        assert!(store
+            .stabilize(ControlKey::Pending, Some(&version))
+            .is_err());
+        store
+            .stabilize(ControlKey::Pending, Some(&replacement))
+            .unwrap();
     }
 
     #[test]

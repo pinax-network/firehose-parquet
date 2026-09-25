@@ -12,8 +12,21 @@ use std::path::{Component, Path, PathBuf};
 
 /// Default max unresolved timestamp-backfill buffer size in bytes.
 pub const DEFAULT_TIMESTAMP_BACKFILL_BUFFER_LIMIT_BYTES: u64 = 134_217_728;
-/// Shared 32 MiB default flush target for build/merge byte-based flushing.
-pub const DEFAULT_FLUSH_BYTES: u64 = 33_554_432;
+pub use crate::config::DEFAULT_FLUSH_BYTES;
+use crate::config::DEFAULT_FLUSH_MEMORY_BYTES;
+
+/// Completion of a bounded reversible stream does not establish tail finality.
+/// Pass the resolved stop bound (`None` for an unbounded live stream).
+pub fn non_final_bounded_warning(
+    final_blocks_only: bool,
+    stop_block: Option<u64>,
+) -> Option<&'static str> {
+    (!final_blocks_only && stop_block.is_some()).then_some(
+        "Completion of a bounded non-final stream does not prove its tail is final. \
+         Output retains append-only NEW/UNDO events; later UNDO events cannot be received after this stop. \
+         Use a separate final-only dataset to select finalized block identities.",
+    )
+}
 
 /// Load environment variables from `.env` file (if present).
 ///
@@ -41,11 +54,45 @@ pub fn block_on_async<F: std::future::Future>(f: F) -> F::Output {
     }
 }
 
+/// Transport options shared by ingestion and partition index construction.
+#[derive(Args, Debug, Clone)]
+pub struct GrpcArgs {
+    /// Adapt HTTP/2 receive windows to measured bandwidth/latency, overriding --grpc-window-bytes
+    #[arg(long = "grpc-adaptive-window", env = "GRPC_ADAPTIVE_WINDOW", default_value = "false",
+        action = clap::ArgAction::Set, num_args = 0..=1, default_missing_value = "true",
+        require_equals = true, hide_env_values = true, help_heading = "Connection")]
+    pub adaptive_window: bool,
+
+    /// Initial HTTP/2 stream and connection receive window bytes (0 uses library defaults; adaptive mode overrides)
+    #[arg(long = "grpc-window-bytes", env = "GRPC_WINDOW_BYTES", default_value = "16777216",
+        value_parser = clap::value_parser!(u32).range(0..=2147483647), hide_env_values = true,
+        help_heading = "Connection")]
+    pub window_bytes: u32,
+
+    /// Maximum encoded or decompressed gRPC response bytes (128 MiB by default)
+    #[arg(long = "grpc-max-message-bytes", env = "GRPC_MAX_MESSAGE_BYTES",
+        default_value = "134217728", value_parser = clap::value_parser!(u32).range(1..),
+        hide_env_values = true, help_heading = "Connection")]
+    pub max_message_bytes: u32,
+}
+
+impl GrpcArgs {
+    pub fn config(&self) -> crate::config::GrpcConfig {
+        crate::config::GrpcConfig {
+            adaptive_window: self.adaptive_window,
+            initial_window_bytes: (self.window_bytes != 0).then_some(self.window_bytes),
+            max_message_bytes: self.max_message_bytes,
+        }
+    }
+}
+
 // Shared CLI arguments for all fireparq binaries.
 //
 // Embed in a per-chain `#[derive(Parser)]` struct with `#[command(flatten)]`.
 #[derive(Args, Debug, Clone)]
 pub struct CommonArgs {
+    #[command(flatten)]
+    pub grpc: GrpcArgs,
     /// Firehose gRPC endpoint URL
     #[arg(
         short = 'e',
@@ -124,11 +171,15 @@ pub struct CommonArgs {
     )]
     pub cursor_template: Option<String>,
 
-    /// Only process finalized blocks (when false, adds fork_step column)
+    /// Only process finalized blocks; =false appends NEW/UNDO rows with fork_step
     #[arg(
         long,
         env = "FINAL_BLOCKS_ONLY",
         default_value = "true",
+        action = clap::ArgAction::Set,
+        num_args = 0..=1,
+        default_missing_value = "true",
+        require_equals = true,
         hide_env_values = true,
         help_heading = "Block Range"
     )]
@@ -194,7 +245,7 @@ pub struct CommonArgs {
     )]
     pub flush_blocks: Option<u64>,
 
-    /// Flush mapper state and write Parquet at this many estimated mapper bytes (0 disables byte-based flushing)
+    /// Target compressed bytes in the largest table file, learned from committed files (0 disables this target; other triggers can write smaller files)
     #[arg(
         long,
         env = "FLUSH_BYTES",
@@ -203,6 +254,17 @@ pub struct CommonArgs {
         help_heading = "Flush"
     )]
     pub flush_bytes: u64,
+
+    /// Flush at this summed mapper byte estimate, even below the file target (positive; not RSS, excludes decoder/encoder/allocator overhead; one block can overshoot)
+    #[arg(
+        long,
+        env = "FLUSH_MEMORY_BYTES",
+        default_value_t = DEFAULT_FLUSH_MEMORY_BYTES,
+        value_parser = clap::value_parser!(u64).range(1..),
+        hide_env_values = true,
+        help_heading = "Flush"
+    )]
+    pub flush_memory_bytes: u64,
 
     /// Flush mapper state and write Parquet every N seconds (disabled by default)
     #[arg(
@@ -439,11 +501,9 @@ pub struct BuildArgs {
     )]
     pub exclude_failed_transactions: bool,
 
-    /// Override cursor parameter validation and restart from the current CLI
-    /// range. When a cursor file exists and its stored parameters differ from
-    /// the current CLI arguments, the pipeline normally exits with an error.
-    /// This flag suppresses that check and ignores the stored resume position
-    /// for start/stop/mode resolution.
+    /// Ignore legacy cursor defaults during a read-only dry run. Protected
+    /// ingestion refuses cursor overrides; use a new empty output root and an
+    /// absent mirror to change the original range or mapper semantics.
     #[arg(
         long,
         env = "CURSOR_OVERRIDE",
@@ -820,7 +880,7 @@ Lookup order for the data path:
     /// Roll up fine-grained partitioned Parquet files into coarser intervals.
     ///
     /// Reads minute/hour-partitioned files and merges them into hourly or daily
-    /// partitions, respecting --flush-bytes for file size limits.
+    /// partitions, streaming one output part at a time with a --flush-bytes target.
     #[command(after_long_help = "\
 Examples:
   # Roll up minute partitions into daily, replacing the minute files (in-place)
@@ -866,8 +926,8 @@ local path.
         /// Compression codec: zstd, snappy, gzip, none
         #[arg(long, default_value = "zstd", help_heading = "Output")]
         compression: String,
-        /// Max compressed bytes per output file (0 = no limit)
-        #[arg(long, default_value = "134217728", help_heading = "Output")]
+        /// Target compressed bytes per part, with batch/codec overhead (0 = unlimited output size)
+        #[arg(long, default_value_t = DEFAULT_FLUSH_BYTES, help_heading = "Output")]
         flush_bytes: u64,
         /// Delete each source file once its target partition is written (required for in-place rollup)
         #[arg(long, default_value = "false", help_heading = "Execution")]
@@ -1274,6 +1334,8 @@ Examples:
     --output ./output
 ")]
     Build {
+        #[command(flatten)]
+        grpc: GrpcArgs,
         /// Firehose gRPC endpoint URL
         #[arg(
             long,
@@ -2805,6 +2867,34 @@ fn read_partition_index_snapshot(
     aws: Option<&AwsConfig>,
 ) -> anyhow::Result<PartitionIndexSnapshot> {
     let path = resolve_parquet_input_path_string(path);
+    if path.starts_with("s3://") {
+        use object_store::ObjectStore;
+        let aws = aws.ok_or_else(|| anyhow::anyhow!("AWS config required for S3 paths"))?;
+        let (bucket, key) = crate::writer::parse_s3_url(&path)?;
+        let client = aws.build_s3_client(&bucket)?;
+        let object_path = object_store::path::Path::from(key.as_str());
+        let data = block_on_async(async { client.get(&object_path).await?.bytes().await })
+            .map_err(|error| anyhow::Error::from(error).context(format!("reading {path}")))?;
+        partition_index_snapshot_from_reader(data, false)
+    } else {
+        let file = std::fs::File::open(&path)
+            .map_err(|error| anyhow::Error::from(error).context(format!("opening {path}")))?;
+        partition_index_snapshot_from_reader(file, false)
+    }
+}
+
+/// Strict snapshot decoder shared with native async protected ingestion reads.
+/// The caller bounds the compressed byte stream before collecting it.
+pub(crate) fn read_verified_partitions_index_bytes(
+    data: bytes::Bytes,
+) -> anyhow::Result<VerifiedPartitionIndex> {
+    verified_index_from_snapshot(partition_index_snapshot_from_reader(data, true)?)
+}
+
+fn partition_index_snapshot_from_reader<T: parquet::file::reader::ChunkReader + 'static>(
+    input: T,
+    bounded: bool,
+) -> anyhow::Result<PartitionIndexSnapshot> {
     use arrow::array::{
         Array, Int32Array, Int64Array, LargeStringArray, StringArray, TimestampSecondArray,
         UInt32Array, UInt64Array,
@@ -3040,53 +3130,51 @@ fn read_partition_index_snapshot(
         })
     }
 
-    if path.starts_with("s3://") {
-        use crate::writer::parse_s3_url;
-        use object_store::ObjectStore;
-
-        let aws = aws.ok_or_else(|| anyhow::anyhow!("AWS config required for S3 paths"))?;
-        let (bucket, key) = parse_s3_url(&path)?;
-        let client = aws.build_s3_client(&bucket)?;
-        let object_path = object_store::path::Path::from(key.as_str());
-        let data = block_on_async(async { client.get(&object_path).await?.bytes().await })
-            .map_err(|error| anyhow::Error::from(error).context(format!("reading {path}")))?;
-        let builder = ParquetRecordBatchReaderBuilder::try_new(data)?;
-        let schema = builder.schema();
-        validate_partitions_schema(&schema)?;
-        validate_partitions_metadata(builder.metadata().file_metadata())?;
-        let file_ctx = extract_file_context(builder.metadata().file_metadata())?;
-        coverage = file_ctx.coverage.clone();
-        let reader = builder.build()?;
-        for batch in reader {
-            collect_rows(
-                &batch?,
-                &mut rows,
-                &mut proofs,
-                &read_utf8_value,
-                &read_u64_value,
-                &file_ctx,
-            )?;
+    let builder = ParquetRecordBatchReaderBuilder::try_new(input)?;
+    if bounded {
+        let metadata = builder.metadata();
+        anyhow::ensure!(
+            metadata.file_metadata().num_rows() >= 0
+                && metadata.file_metadata().num_rows() <= 1_000_000,
+            "standalone index exceeds protected initialization row limit"
+        );
+        let uncompressed = metadata
+            .row_groups()
+            .iter()
+            .try_fold(0_u64, |total, group| {
+                anyhow::ensure!(
+                    group.total_byte_size() >= 0,
+                    "invalid standalone index row-group size"
+                );
+                total
+                    .checked_add(group.total_byte_size() as u64)
+                    .ok_or_else(|| anyhow::anyhow!("standalone index size overflow"))
+            })?;
+        anyhow::ensure!(
+            uncompressed <= 512 * 1024 * 1024,
+            "standalone index exceeds protected initialization decoded-size limit"
+        );
+    }
+    validate_partitions_schema(builder.schema())?;
+    validate_partitions_metadata(builder.metadata().file_metadata())?;
+    let file_ctx = extract_file_context(builder.metadata().file_metadata())?;
+    coverage = file_ctx.coverage.clone();
+    for batch in builder.build()? {
+        let batch = batch?;
+        if bounded {
+            anyhow::ensure!(
+                batch.num_rows() <= 1_000_000_usize.saturating_sub(rows.len()),
+                "standalone index exceeds protected initialization observed-row limit"
+            );
         }
-    } else {
-        let file = std::fs::File::open(&path)
-            .map_err(|error| anyhow::Error::from(error).context(format!("opening {path}")))?;
-        let builder = ParquetRecordBatchReaderBuilder::try_new(file)?;
-        let schema = builder.schema();
-        validate_partitions_schema(&schema)?;
-        validate_partitions_metadata(builder.metadata().file_metadata())?;
-        let file_ctx = extract_file_context(builder.metadata().file_metadata())?;
-        coverage = file_ctx.coverage.clone();
-        let reader = builder.build()?;
-        for batch in reader {
-            collect_rows(
-                &batch?,
-                &mut rows,
-                &mut proofs,
-                &read_utf8_value,
-                &read_u64_value,
-                &file_ctx,
-            )?;
-        }
+        collect_rows(
+            &batch,
+            &mut rows,
+            &mut proofs,
+            &read_utf8_value,
+            &read_u64_value,
+            &file_ctx,
+        )?;
     }
 
     Ok(PartitionIndexSnapshot {
@@ -4039,6 +4127,7 @@ pub fn build_config(args: &CommonArgs) -> anyhow::Result<Config> {
 
     Ok(Config {
         endpoint,
+        grpc: args.grpc.config(),
         api_key: credentials.api_key,
         jwt_token: credentials.jwt_token,
         start_block: args.start_block,
@@ -4050,6 +4139,7 @@ pub fn build_config(args: &CommonArgs) -> anyhow::Result<Config> {
         flush_rows: args.flush_rows,
         flush_blocks: args.flush_blocks,
         flush_bytes: args.flush_bytes,
+        flush_memory_bytes: args.flush_memory_bytes,
         flush_interval_secs: args.flush_interval_secs,
         compression: parse_compression(&args.compression)?,
         final_blocks_only: args.final_blocks_only,
@@ -6119,6 +6209,40 @@ fn find_canonical_indices(schema: &arrow::datatypes::Schema) -> anyhow::Result<C
     })
 }
 
+/// Decode only validation columns while retaining the full footer schema for
+/// schema consistency checks. Shared by file-backed and S3-buffer-backed readers.
+fn read_validation_columns<R: parquet::file::reader::ChunkReader + 'static>(
+    input: R,
+) -> anyhow::Result<(arrow::datatypes::Schema, Vec<BlockTuple>, u64)> {
+    use arrow::record_batch::RecordBatchReader;
+    use parquet::arrow::{arrow_reader::ParquetRecordBatchReaderBuilder, ProjectionMask};
+
+    let builder = ParquetRecordBatchReaderBuilder::try_new(input)?;
+    let schema = builder.schema().as_ref().clone();
+    let indices = find_canonical_indices(&schema)?;
+    let roots = [
+        Some(indices.block_num),
+        Some(indices.block_id),
+        Some(indices.parent_id),
+        indices.timestamp,
+    ]
+    .into_iter()
+    .flatten();
+    let projection = ProjectionMask::roots(builder.parquet_schema(), roots);
+    let row_count = builder.metadata().file_metadata().num_rows() as u64;
+    let reader = builder.with_projection(projection).build()?;
+    // Projection retains source field order, which need not match canonical order.
+    let projected = find_canonical_indices(&reader.schema())?;
+    let tuples = extract_block_tuples(
+        reader,
+        projected.block_num,
+        projected.block_id,
+        projected.parent_id,
+        projected.timestamp,
+    )?;
+    Ok((schema, tuples, row_count))
+}
+
 /// Compare two schemas and return a list of differences.
 fn compare_schemas(
     reference: &arrow::datatypes::Schema,
@@ -6341,23 +6465,25 @@ fn validate_from_files(files: Vec<FileInfo>, opts: &ValidateOptions) -> Validate
     let mut all_tuples: Vec<BlockTuple> = Vec::new();
     let mut total_files = 0usize;
 
-    for (partition_name, (tuples, file_count, row_count)) in &groups {
-        let mut tuples = tuples.clone();
+    // Keep only each partition's own boundary tuples for cross-partition checks.
+    // Global duplicate/continuity validation still needs the complete tuple set.
+    let mut boundaries = Vec::new();
+    for (partition_name, (mut tuples, file_count, row_count)) in groups {
         total_files += file_count;
 
-        if *file_count == 0 {
+        if file_count == 0 {
             empty_partitions.push(EmptyPartition {
-                partition: partition_name.clone(),
+                partition: partition_name,
                 files: 0,
                 reason: "no files",
             });
             continue;
         }
-        if *row_count == 0 {
+        if row_count == 0 {
             empty_partitions.push(EmptyPartition {
-                partition: partition_name.clone(),
-                files: *file_count,
-                reason: &"0 rows across all files",
+                partition: partition_name,
+                files: file_count,
+                reason: "0 rows across all files",
             });
             continue;
         }
@@ -6366,10 +6492,15 @@ fn validate_from_files(files: Vec<FileInfo>, opts: &ValidateOptions) -> Validate
         let cr = check_tuples(&tuples);
         let min_block = tuples.first().map(|t| t.0);
         let max_block = tuples.last().map(|t| t.0);
+        if opts.cross_partition {
+            if let (Some(first), Some(last)) = (tuples.first(), tuples.last()) {
+                boundaries.push((partition_name.clone(), first.clone(), last.clone()));
+            }
+        }
 
         partitions.push(PartitionResult {
-            partition: partition_name.clone(),
-            files_scanned: *file_count,
+            partition: partition_name,
+            files_scanned: file_count,
             total_blocks: tuples.len() as u64,
             min_block,
             max_block,
@@ -6380,63 +6511,36 @@ fn validate_from_files(files: Vec<FileInfo>, opts: &ValidateOptions) -> Validate
             timestamp_reversals: cr.timestamp_reversals,
         });
 
-        all_tuples.extend(tuples.iter().cloned());
+        all_tuples.extend(tuples);
     }
 
-    // Cross-partition continuity (#88).
+    // Cross-partition continuity (#88): sort P boundaries, then inspect P-1 pairs
+    // directly instead of searching all N block tuples for every pair (#524).
     let mut cross_partition_issues = Vec::new();
-    if opts.cross_partition && partitions.len() > 1 {
-        // Sort partitions by their min_block.
-        let mut sorted_parts: Vec<&PartitionResult> = partitions
-            .iter()
-            .filter(|p| p.min_block.is_some())
-            .collect();
-        sorted_parts.sort_by_key(|p| p.min_block);
-
-        for i in 1..sorted_parts.len() {
-            let prev = sorted_parts[i - 1];
-            let curr = sorted_parts[i];
-
-            if let (Some(prev_max), Some(curr_min)) = (prev.max_block, curr.min_block) {
-                // Find the actual last and first tuples.
-                // We need the block_id of prev's last block and parent_id of curr's first block.
-                // We already have all_tuples, but let's check from the group data.
-                let gap = if curr_min > prev_max + 1 {
-                    Some(BlockGap {
-                        from: prev_max + 1,
-                        to: curr_min,
-                    })
-                } else {
-                    None
-                };
-
-                // For parent mismatch, we need the actual block_id/parent_id.
-                // Find them from all_tuples (sorted later).
-                let parent_mismatch = if curr_min == prev_max + 1 {
-                    // Find prev's last block and curr's first block in all_tuples.
-                    let prev_last = all_tuples.iter().rfind(|t| t.0 == prev_max);
-                    let curr_first = all_tuples.iter().find(|t| t.0 == curr_min);
-                    match (prev_last, curr_first) {
-                        (Some(pl), Some(cf)) if cf.2 != pl.1 => Some(ParentMismatch {
-                            block_num: cf.0,
-                            expected_parent_id: pl.1.clone(),
-                            actual_parent_id: cf.2.clone(),
-                        }),
-                        _ => None,
-                    }
-                } else {
-                    None
-                };
-
-                if gap.is_some() || parent_mismatch.is_some() {
-                    cross_partition_issues.push(CrossPartitionIssue {
-                        from_partition: prev.partition.clone(),
-                        to_partition: curr.partition.clone(),
-                        gap,
-                        parent_mismatch,
-                    });
-                }
-            }
+    boundaries.sort_by_key(|(_, first, _)| first.0);
+    for pair in boundaries.windows(2) {
+        let (prev_name, _, prev_last) = &pair[0];
+        let (curr_name, curr_first, _) = &pair[1];
+        let Some(next_block) = prev_last.0.checked_add(1) else {
+            continue;
+        };
+        let gap = (curr_first.0 > next_block).then_some(BlockGap {
+            from: next_block,
+            to: curr_first.0,
+        });
+        let parent_mismatch =
+            (curr_first.0 == next_block && curr_first.2 != prev_last.1).then(|| ParentMismatch {
+                block_num: curr_first.0,
+                expected_parent_id: prev_last.1.clone(),
+                actual_parent_id: curr_first.2.clone(),
+            });
+        if gap.is_some() || parent_mismatch.is_some() {
+            cross_partition_issues.push(CrossPartitionIssue {
+                from_partition: prev_name.clone(),
+                to_partition: curr_name.clone(),
+                gap,
+                parent_mismatch,
+            });
         }
     }
 
@@ -6481,8 +6585,6 @@ fn validate_parquet_local(
     path: &PathBuf,
     opts: &ValidateOptions,
 ) -> anyhow::Result<ValidateResult> {
-    use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
-
     let mut paths: Vec<PathBuf> = Vec::new();
     if path.is_file() {
         paths.push(path.clone());
@@ -6517,24 +6619,7 @@ fn validate_parquet_local(
 
     for file_path in &paths {
         let file = std::fs::File::open(file_path)?;
-        let builder = ParquetRecordBatchReaderBuilder::try_new(file)?;
-        let schema = builder.schema();
-        let arrow_schema: arrow::datatypes::Schema = (**schema).clone();
-        let indices = find_canonical_indices(&arrow_schema)?;
-        let metadata = builder.metadata().clone();
-        let row_count: u64 = metadata
-            .row_groups()
-            .iter()
-            .map(|rg| rg.num_rows() as u64)
-            .sum();
-        let reader = builder.build()?;
-        let tuples = extract_block_tuples(
-            reader,
-            indices.block_num,
-            indices.block_id,
-            indices.parent_id,
-            indices.timestamp,
-        )?;
+        let (arrow_schema, tuples, row_count) = read_validation_columns(file)?;
 
         let partition_key = detect_partition(&file_path.to_string_lossy(), &base);
         let display = file_path
@@ -6562,7 +6647,6 @@ fn validate_parquet_s3(
 ) -> anyhow::Result<ValidateResult> {
     use crate::writer::parse_s3_url;
     use object_store::ObjectStore;
-    use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 
     let (bucket, prefix) = parse_s3_url(path)?;
     let client = aws.build_s3_client(&bucket)?;
@@ -6610,24 +6694,7 @@ fn validate_parquet_s3(
         let data = block_on_async(async { client.get(&obj.location).await?.bytes().await })
             .map_err(|e| anyhow::anyhow!("reading s3://{bucket}/{}: {e}", obj.location))?;
 
-        let builder = ParquetRecordBatchReaderBuilder::try_new(data)?;
-        let schema = builder.schema();
-        let arrow_schema: arrow::datatypes::Schema = (**schema).clone();
-        let indices = find_canonical_indices(&arrow_schema)?;
-        let metadata = builder.metadata().clone();
-        let row_count: u64 = metadata
-            .row_groups()
-            .iter()
-            .map(|rg| rg.num_rows() as u64)
-            .sum();
-        let reader = builder.build()?;
-        let tuples = extract_block_tuples(
-            reader,
-            indices.block_num,
-            indices.block_id,
-            indices.parent_id,
-            indices.timestamp,
-        )?;
+        let (arrow_schema, tuples, row_count) = read_validation_columns(data)?;
 
         let partition_key = detect_partition(obj.location.as_ref(), &prefix);
         let display = obj
@@ -6855,6 +6922,158 @@ mod tests {
 
     #[test]
     #[serial]
+    fn final_blocks_only_accepts_explicit_values_and_preserves_bare_flag() {
+        let _env = EnvVarGuard::remove("FINAL_BLOCKS_ONLY");
+        for (args, expected) in [
+            (vec!["test-cli"], true),
+            (vec!["test-cli", "--final-blocks-only"], true),
+            (vec!["test-cli", "--final-blocks-only=true"], true),
+            (vec!["test-cli", "--final-blocks-only=false"], false),
+        ] {
+            let mut args = args;
+            args.extend(["--endpoint", "http://localhost:9000", "--partition", "none"]);
+            let parsed = try_parse(&args).unwrap();
+            assert_eq!(parsed.common.final_blocks_only, expected);
+            assert_eq!(
+                build_config(&parsed.common).unwrap().final_blocks_only,
+                expected
+            );
+        }
+        assert!(try_parse(&["test-cli", "--final-blocks-only=maybe"]).is_err());
+        // An optional bool must not consume the next subcommand as its value.
+        assert!(try_parse(&["test-cli", "--final-blocks-only", "completions", "zsh"]).is_ok());
+    }
+
+    #[test]
+    #[serial]
+    fn final_blocks_only_environment_is_overridden_by_explicit_cli() {
+        let _env = EnvVarGuard::set("FINAL_BLOCKS_ONLY", "false");
+        assert!(!parse(&["test-cli"]).common.final_blocks_only);
+        assert!(
+            parse(&["test-cli", "--final-blocks-only"])
+                .common
+                .final_blocks_only
+        );
+        assert!(
+            parse(&["test-cli", "--final-blocks-only=true"])
+                .common
+                .final_blocks_only
+        );
+        let _env_true = EnvVarGuard::set("FINAL_BLOCKS_ONLY", "true");
+        assert!(
+            !parse(&["test-cli", "--final-blocks-only=false"])
+                .common
+                .final_blocks_only
+        );
+    }
+
+    #[test]
+    fn bounded_tail_warning_applies_only_to_non_final_bounded_runs() {
+        assert!(non_final_bounded_warning(true, Some(100)).is_none());
+        assert!(non_final_bounded_warning(true, None).is_none());
+        assert!(non_final_bounded_warning(false, None).is_none());
+        assert!(non_final_bounded_warning(false, Some(100))
+            .unwrap()
+            .contains("does not prove its tail is final"));
+    }
+
+    #[test]
+    #[serial]
+    fn grpc_transport_flags_validate_limits_and_apply_to_both_build_commands() {
+        let _adaptive = EnvVarGuard::set("GRPC_ADAPTIVE_WINDOW", "false");
+        let _window = EnvVarGuard::set("GRPC_WINDOW_BYTES", "16777216");
+        let _limit = EnvVarGuard::set("GRPC_MAX_MESSAGE_BYTES", "134217728");
+        let parsed = parse(&[
+            "test-cli",
+            "--endpoint",
+            "http://localhost",
+            "--partition",
+            "none",
+        ]);
+        let default = build_config(&parsed.common).unwrap();
+        assert_eq!(default.grpc, crate::config::GrpcConfig::default());
+        for args in [
+            vec![
+                "test-cli",
+                "--endpoint",
+                "http://localhost",
+                "--partition",
+                "none",
+                "--grpc-adaptive-window=false",
+                "--grpc-max-message-bytes",
+                "268435456",
+            ],
+            vec![
+                "test-cli",
+                "partitions",
+                "build",
+                "--endpoint",
+                "http://localhost",
+                "--partition",
+                "date",
+                "--stop-block",
+                "10",
+                "--grpc-adaptive-window=false",
+                "--grpc-max-message-bytes",
+                "268435456",
+            ],
+        ] {
+            let parsed = try_parse(&args).unwrap();
+            let grpc = match parsed.command {
+                Some(Commands::Partitions(PartitionsCommands::Build { grpc, .. })) => grpc.config(),
+                None => build_config(&parsed.common).unwrap().grpc,
+                _ => unreachable!(),
+            };
+            assert!(!grpc.adaptive_window);
+            assert_eq!(grpc.max_message_bytes, 268435456);
+        }
+        for value in ["0", "-1", "4294967296", "nope"] {
+            assert!(try_parse(&["test-cli", "--grpc-max-message-bytes", value]).is_err());
+        }
+        assert!(try_parse(&["test-cli", "--grpc-adaptive-window=maybe"]).is_err());
+        for value in ["-1", "2147483648", "nope"] {
+            assert!(try_parse(&["test-cli", "--grpc-window-bytes", value]).is_err());
+        }
+        assert_eq!(
+            parse(&["test-cli", "--grpc-window-bytes", "0"])
+                .common
+                .grpc
+                .config()
+                .initial_window_bytes,
+            None
+        );
+        assert_eq!(
+            parse(&["test-cli", "--grpc-window-bytes", "65535"])
+                .common
+                .grpc
+                .config()
+                .initial_window_bytes,
+            Some(65535)
+        );
+        let _enabled = EnvVarGuard::set("GRPC_ADAPTIVE_WINDOW", "true");
+        assert!(
+            !parse(&["test-cli", "--grpc-adaptive-window=false"])
+                .common
+                .grpc
+                .adaptive_window
+        );
+        let _adaptive = EnvVarGuard::set("GRPC_ADAPTIVE_WINDOW", "false");
+        let _limit = EnvVarGuard::set("GRPC_MAX_MESSAGE_BYTES", "4096");
+        let parsed = parse(&["test-cli"]);
+        assert!(!parsed.common.grpc.adaptive_window);
+        assert_eq!(parsed.common.grpc.max_message_bytes, 4096);
+        let parsed = parse(&[
+            "test-cli",
+            "--grpc-adaptive-window",
+            "--grpc-max-message-bytes",
+            "8192",
+        ]);
+        assert!(parsed.common.grpc.adaptive_window);
+        assert_eq!(parsed.common.grpc.max_message_bytes, 8192);
+    }
+
+    #[test]
+    #[serial]
     fn test_required_endpoint() {
         // endpoint is optional at the clap level (for subcommands like completions)
         // but build_config will fail without it
@@ -6886,6 +7105,7 @@ mod tests {
         assert!(cli.common.flush_rows.is_none());
         assert!(cli.common.flush_blocks.is_none());
         assert_eq!(cli.common.flush_bytes, DEFAULT_FLUSH_BYTES);
+        assert_eq!(cli.common.flush_memory_bytes, DEFAULT_FLUSH_MEMORY_BYTES);
         assert_eq!(cli.common.compression, "zstd");
         assert_eq!(cli.common.log_level, "info");
         assert!(!cli.common.verbose);
@@ -7692,8 +7912,9 @@ mod tests {
 
         assert!(help.contains("Flush mapper state and write Parquet after this many rows"));
         assert!(help.contains("Flush written files after this many processed blocks"));
-        assert!(help
-            .contains("Flush mapper state and write Parquet at this many estimated mapper bytes"));
+        assert!(help.contains("Target compressed bytes in the largest table file"));
+        assert!(help.contains("--flush-memory-bytes"));
+        assert!(help.contains("summed mapper byte estimate"));
         assert!(help.contains("Flush mapper state and write Parquet every N seconds"));
     }
 
@@ -7715,10 +7936,46 @@ mod tests {
 
         assert!(build_help.contains(&default_flush_bytes));
         assert!(merge_help.contains(&default_flush_bytes));
+        let rollup_help = cmd
+            .get_subcommands()
+            .find(|command| command.get_name() == "rollup")
+            .unwrap()
+            .clone()
+            .render_long_help()
+            .to_string();
+        assert!(rollup_help.contains(&default_flush_bytes));
+        assert_eq!(Config::default().flush_bytes, DEFAULT_FLUSH_BYTES);
+        assert_eq!(
+            Config::default().flush_memory_bytes,
+            DEFAULT_FLUSH_MEMORY_BYTES
+        );
         assert!(merge_help.contains("Flush:"));
         assert!(merge_help.contains("--flush-rows"));
         assert!(merge_help.contains("--flush-bytes"));
         assert!(!merge_help.contains("--flush-blocks"));
+    }
+
+    #[test]
+    fn test_flush_memory_threshold_is_positive_and_propagated() {
+        assert!(TestCli::try_parse_from([
+            "test-cli",
+            "--endpoint",
+            "http://localhost",
+            "--flush-memory-bytes",
+            "0"
+        ])
+        .is_err());
+        let cli = parse(&[
+            "test-cli",
+            "--endpoint",
+            "http://localhost",
+            "--flush-memory-bytes",
+            "123456",
+        ]);
+        assert_eq!(
+            build_config(&cli.common).unwrap().flush_memory_bytes,
+            123456
+        );
     }
 
     #[test]
@@ -11218,3 +11475,7 @@ mod tests {
         assert!(list_partitions_from_index(&verified_list_request(&path), None).is_err());
     }
 }
+
+#[cfg(test)]
+#[path = "cli/validate_tests.rs"]
+mod validate_tests;

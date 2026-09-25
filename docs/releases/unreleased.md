@@ -2,6 +2,34 @@
 
 Changes merged since the last release. Fold this file into `docs/releases/vX.Y.Z.md` when the next release is cut.
 
+## CLI and query semantics
+
+- Firehose receive windows default to 16 MiB per stream/connection. Both `build`
+  and `partitions build` expose `--grpc-window-bytes`, `--grpc-adaptive-window`,
+  and `--grpc-max-message-bytes` (the receive limit remains 128 MiB). Replies
+  may use zstd as well as gzip/plain; request compression is unchanged. Oversized
+  compressed responses stop without retrying the same payload. The default was
+  selected using a bounded local benchmark, not a live-provider speed claim.
+  See [#517 evidence](../audit/517-grpc-transport.md).
+
+- `rollup` now validates each target group, then streams one input batch and one
+  output part at a time. S3 source reads use pinned byte ranges. Positive
+  `--flush-bytes` values target encoded part sizes, with a separate 32 MiB estimated
+  row-group memory budget. Checks occur between batches; output file counts
+  can change, and a page/dictionary or wide batch can exceed these targets. Zero
+  disables the output-size threshold but retains the row-group memory budget. A
+  corrupt later input is rejected before that group publishes output or deletes
+  sources. See
+  [#522 validation](../audit/522-streaming-rollup.md).
+
+- `--final-blocks-only=false` now enables append-only reversible output directly;
+  the default and bare flag remain true. Optional values use `=`, and explicit
+  CLI values override `FINAL_BLOCKS_ONLY`. Successful bounded non-final runs warn
+  that completion does not establish tail finality. The README documents NEW/UNDO
+  recurrence, the absence of global event order, and a safe finalized-reference
+  intersection query with explicit limits; it does not promise a canonical tail
+  from unordered files. See [#474 validation](../audit/474-non-final-streams.md).
+
 ## Breaking changes
 
 ### Tron contract and receipt fields (#509)
@@ -13,6 +41,82 @@ raw Any payload is retained. Empty contract lists now yield null for the existin
 first-contract type projection. New schemas/inventories require a new output root
 or explicit migration; verification roots change. See [the exact field semantics
 and qualification status](../audit/509-tron-contract-fields.md).
+
+### Solana detail rows expose parent transaction outcome (#550, partial)
+
+`messages`, `instructions`, `token_balances`, and `account_lookups` append Boolean
+`transaction_success`; rewards append the same field with null for block-level
+rewards. Existing values, row filters and vote treatment are unchanged. This is
+parent outcome context, not proof of individual instruction execution or
+reversion. Balance snapshots and fees remain literal source observations.
+Rebuild into a fresh dataset; old missing context must not become false.
+See the [contract and retained-source comparison](../audit/550-solana-execution-context.md).
+The other chains and remaining qualification in #550 are still open.
+
+### Adaptive compressed file targets and independent mapper memory threshold (#515)
+
+`build --flush-bytes` now targets the largest compressed file using feedback from
+committed transactions. Config/build/merge/rollup share a 32 MiB default (Config
+and rollup previously used 128 MiB). Build independently flushes at a positive
+`--flush-memory-bytes` sum of mapper estimates, default 256 MiB; this remains
+active with `--flush-bytes 0`. It is not an RSS cap and one block can overshoot.
+Adaptive windows may use more memory than the old largest-table raw-byte trigger;
+memory, partition and other flushes can prevent reaching the file target.
+External Rust `BlockMapper` implementations must now implement `table_estimates`;
+`largest_table` derives its maximum. See [measurements and limits](../audit/515-adaptive-flush-sizing.md).
+
+### Cosmos preserves event order, unknown results and SDK metadata (#510)
+
+Empty events now produce one row; `attribute_index` preserves repeated-key order.
+Event transaction indices are UInt32, block event transaction hashes are null,
+and absent results produce nullable code/gas/text fields. Unknown results remain
+included; use `code = 0` for confirmed source success. Transactions add exact
+Binary raw bytes, subset decode status, memo, fee, signer and signature metadata;
+blocks count decode failures even for filtered rows. Start a fresh dataset or
+explicitly reconcile schemas. Lost source information requires replay. See the
+[field contract, migration and RPC-backed comparison](../audit/510-cosmos-values.md).
+
+### All-table ingestion transactions and output authority (#468)
+
+`build` now journals each complete mapper flush and recovers it before opening
+Blocks. Output authority under `.fireparq-ingest/` selects the exact accepted
+cursor, including filtered zero-row events and persisted timestamp-routing
+provenance. Deterministic owned parts are rolled back before replay or verified
+and rolled forward after commit. `cursor.parquet` is an optional derived mirror;
+its deletion cannot rewind output, and `--cursor none` keeps mandatory authority.
+
+This requires a new empty dataset root and absent mirror. Existing random-name
+output or legacy cursors are refused rather than adopted. Protected origin,
+mapper/schema/encoding, effective feature flags, partition policy, storage and
+mirror binding are immutable; `--cursor-override` cannot bypass them. Use a new
+root for changed semantics. Unknown custom chain metadata needs an explicit
+`--block-type` before recovery. Flush thresholds and compression remain tunable.
+
+Guarded merge, metadata artifacts, and copy-only rollup remain available; protected
+truncate, in-place rollup and source-deleting rollup are refused. Discovery covers
+ancestor and descendant dataset roots plus external mirrors. `recovery recover`
+performs offline owned recovery. S3 retains its explicit provider-quiescence
+release requirement; no time-based takeover or generic request-drain claim is added.
+
+A completed bounded request must have an acknowledged boundary event. A clean
+sparse/empty tail alone no longer implies completion on skipped-height chains;
+the prefix remains durable, but the command exits nonzero. Already proven bounds
+make no Blocks request, and extensions retain their original origin and exact
+cursor. Plain-glob readers still do not get atomic multi-table query snapshots.
+See [the runtime contract and qualification](../audit/468-ingestion-runtime.md).
+
+### Beacon numeric fees, binary blobs, and null presence (#505)
+
+Beacon `execution_payload.base_fee_per_gas` is now an exact unsigned decimal
+Utf8 string in wei per gas; conversion follows the producer's little-endian
+Bellatrix/Capella and big-endian Deneb+ representations. `blob_sidecars.blob`
+is always Binary, and `blocks.spec` is an Arrow string dictionary using generated
+names (`UNKNOWN` is distinct from `UNSPECIFIED`). Missing nested messages now
+produce null fields instead of fake zeros/empty bytes/lists; present zeros and
+empty values retain their meaning. Other byte fields preserve their requested
+encoding. Rebuild into a fresh root or explicitly convert and verify old files
+before mixing schemas. Old placeholder zeros require source replay to recover
+presence. See [the migration and validation record](../audit/505-beacon-values.md).
 
 ### Solana payloads use native bytes and account-index lists (#503)
 
@@ -77,9 +181,8 @@ dataset through this command. Legacy S3 merge journals using the old expiring lo
 are refused automatically and need separately reviewed migration. Local legacy
 merge recovery remains under the common OS guard.
 
-This stage prevents conflicting cooperating commands; ingestion output parts and
-its cursor still lack an all-table crash/replay transaction. No protected ingestion
-mode is exposed yet, and #468 remains open. See the
+This foundation also provides ownership for the all-table transaction protocol
+above. See the
 [scope, permissions, recovery procedure and qualification limits](../audit/468-stage1-ownership.md).
 
 ### Antelope database-operation transaction keys (#508)
@@ -515,10 +618,45 @@ Rows of `access_lists` and `set_code_authorizations` follow their transaction: t
 
 ## Performance
 
+### Projected dataset validation (#524)
+
+`validate` decodes only canonical ID/height/time columns, preserves full-schema
+checks, and compares cached partition endpoints instead of repeatedly scanning
+all blocks. This also fixes endpoint selection when partitions contain overlapping
+heights. Global validation still retains all canonical tuples, and S3 still
+downloads whole objects. See [the checks and benchmark](../audit/524-validation-performance.md).
+
+### Fixed-size Base58 conversion uses safe integer limbs (#565)
+
+32-byte keys and 64-byte signatures use a safe stack-buffer encoder; all other
+lengths, including Tron checksummed addresses, retain `bs58`. Output strings,
+leading zeros, decoders and schemas are unchanged. No dependency or data
+migration is added. Conversion plus Arrow append measured 13.4× faster for
+32-byte and 14.4× for 64-byte values on one Apple M1 Max, with the 25-byte
+fallback unchanged within measurement noise. These are conversion benchmarks,
+not end-to-end ingestion claims. See [equivalence coverage, dependency review and measured
+conversion performance](../audit/565-fixed-base58.md).
+
+### EVM decimal conversion writes directly into Arrow (#513)
+
+Recovered and validated the previous agent's u128/limb formatter. Up to 32
+significant bytes use a stack buffer and direct StringBuilder append; larger
+inputs retain an arbitrary-length fallback. Nulls, zero/leading-zero values,
+decimal strings and schemas are unchanged. Five conversion-and-append benchmark
+cases improved by 10.8–26.8× on one Apple M1 Max; this is not an end-to-end ingestion
+claim. See [equivalence coverage, recovered-work provenance and all measurements](../audit/513-evm-decimal-fast-path.md).
+
 - **Canonical identity columns are encoded once per block (#512).** `block_id` and `parent_id` used to be hex-decoded and re-encoded on every row of every table. Mappers now prepare them once per block and append the encoded values. The output is byte-identical. The canonical columns cost about 40 ns per row instead of 380 ns (binary), 830 ns (hex) or 3.1 µs (base58). Mapping a synthetic 1,000-transaction Solana block (base58) takes 19 ms instead of 43 ms, and a 200-transaction EVM block with 2,000 logs (hex) takes 3.7 ms instead of 6.0 ms.
 - **Hex and base58 columns no longer allocate a string per value (#514).** Byte columns encode into a reused buffer (`hex::encode_to_slice`, `bs58` into a `Vec`), and byte and canonical column builders keep their capacity across flushes. The output is byte-identical. A 32-byte hex value costs about 32 ns instead of 230 ns, and the 200-transaction EVM block (hex) now maps in 1.55 ms instead of 3.8 ms. Base58 is dominated by the encoding itself (about 1.3 µs per 32-byte value), so Solana mapping changes little.
 
 - **`verify` memory no longer grows with row count, and protocol-only runs skip hashing (#521).** Partition roots are built as rows stream in, with O(log n) memory per partition instead of 32 bytes per row. The roots are identical. `--checks protocol` reads only the columns the protocol checks use, and hashes nothing. S3 objects are prefetched, up to 4 at a time with a 256 MiB budget. On 300 EVM mainnet blocks, verifying `gas_changes` (9.0 million rows) peaks at 30 MiB instead of 940 MiB, in about the same time (14 s). A protocol-only run on `calls` (1.7 million rows) takes 0.2 s instead of 5.2 s.
+
+## Internal maintenance
+
+- All Firehose RPC clients now share automatic credential insertion and transport
+  construction. Provider selection, retries, cancellation and finality behavior
+  are unchanged; local protocol tests cover every path and reconnect. See
+  [#530 validation](../audit/530-grpc-client-deduplication.md).
 
 ## Tests
 
@@ -539,3 +677,9 @@ now use nulls, with real zero indices and present empty scripts preserved.
 Output addresses support the legacy first-address fallback. Native protobuf text
 encoding is unchanged and now documented accurately. These are intentional schema
 changes; use a new/rebuilt dataset or explicit reader-side schema reconciliation.
+
+- Chain protobuf byte fields now share owned Firehose payload storage during
+  mapping (#518). Existing borrowed mapper calls remain available; generated
+  Rust protobuf byte fields are now `Bytes` (`Vec` callers can use `.into()`).
+  Protobuf wire and Parquet schemas are unchanged. See
+  [decoding validation and benchmark](../audit/518-owned-protobuf-bytes.md).

@@ -1,5 +1,9 @@
 # Persistent S3 ownership primitive for #468
 
+Current integration is recorded in [the runtime contract](468-ingestion-runtime.md).
+The primitive qualification below remains narrower than production-provider or
+end-to-end recovery qualification.
+
 ## Status and integration boundary
 
 This is the bucket-ownership primitive for the staged ingestion-transaction

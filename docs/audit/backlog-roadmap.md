@@ -18,10 +18,14 @@ issue labels and green CI alone are not acceptance evidence. See the
    passed; GitHub reports no open dependency alerts after rescan.
 3. Crash/replay publication (#468). The [design](468-crash-recovery-design.md)
    explains why deterministic range filenames alone cannot prevent duplicates
-   when replay chooses different timer or size boundaries. The writer split path has been removed (#477, PR #581); establish an
-   all-table durable frontier next. The common ownership/control foundation is
-   merged in PR #591; it does not yet provide protected ingestion.
-   Complete this before ingestion concurrency (#516).
+   when replay chooses different timer or size boundaries. The complete
+   [runtime implementation](468-ingestion-runtime.md) is independently reviewed
+   and merged in [PR #600](https://github.com/pinax-network/firehose-parquet/pull/600): 995 workspace tests,
+   the CI capture example, actual failed-Writing recovery and 14-table/12,298-row
+   live equivalence passed. Its migration and S3 quiescence limits are explicit.
+   PR #600 merged as `e4bd9cf` after final CI; issue #468 closure was verified.
+   PR #591 remains the historical ownership/control foundation. Ingestion
+   concurrency (#516) can now build on that durable commit-order contract.
 4. Shutdown recovery (#473, PR #579) and malformed identity/timestamp handling
    (#476, PR #584) are merged. Probe (#485) work was recovered into PR #583,
    passed 779 combined tests with the timestamp fix and CI, and merged as
@@ -64,11 +68,16 @@ and test against current main. Never reset or discard the previous worktree.
 
 ## Remaining backlog groups
 
-- Schema/data correctness: #503 (Solana native payload types; implementation,
-  benchmark, raw-data comparison and 857-test integration complete; PR/CI pending), #505 (Beacon numeric/blob/null
-  semantics), #507, #509 and #510 (NEAR, Tron and Cosmos). Tron #509 now has a
-  reviewed implementation with 863 passing tests; its draft remains blocked by
-  the required live Firehose read returning the same StreamingFast quota error. Antelope #508 is merged in
+- Schema/data correctness: #507 and #509 (NEAR and Tron). Draft PR #595 preserves
+  the reviewed Tron field implementation; its Firehose qualification is blocked by
+  StreamingFast quota. A separately bounded public RPC qualification is underway. Cosmos #510 merged
+  in PR #601 as `9379883`, with 1,003 tests, independent raw RPC-backed mapping
+  qualification and CI; issue closure was verified. This is not a captured
+  Firehose/producer transport qualification.
+  Beacon numeric/blob/null semantics (#505) merged in PR #594 as `b8d6834` after
+  862 tests, bounded live fee/blob comparison and CI; its issue is closed. Solana native payload types (#503) merged
+  as `d417e0c` in PR #593 after 857 tests, 19,714 raw-sample row comparisons, release
+  benchmarks and CI; issue closure is verified. Antelope #508 is merged in
   PR #590 after raw join checks, byte-for-byte legacy-column comparison and CI. Bitcoin #511 is merged
   in PR #589 after raw integer/input qualification and CI. #550 needs
   explicit failed-effect semantics per chain and live fixtures. #498 documents
@@ -76,16 +85,30 @@ and test against current main. Never reset or discard the previous worktree.
   are now merged and closed after regression and live comparison. Vote
   classification (#501, PR #586) and explicit instruction positions (#502,
   PR #585) also passed raw-data comparisons and are merged with issues closed.
-- Operational contracts: #474 covers reversible stream options/output semantics;
-  #475 metrics/readiness is merged. The #477 writer simplification and
-  #476 malformed-metadata handling are merged; the #468 journal is in progress.
-- Performance: recover #513 and #522 before starting duplicate work. Measure
-  #503/#565, #515, #520 and #524 on representative data. #516 depends on durable
-  commit ordering; #517-#519 and #523 need the specific throughput, memory,
+- Operational contracts: #474 reversible stream options/output semantics merged
+  in PR #597 as `1f2d252` after 873 tests, executable query and protocol checks,
+  independent review and CI; issue closure was verified. #475 metrics/readiness
+  is merged. The #477 writer simplification and
+  #476 malformed-metadata handling are merged; the complete #468 runtime is
+  merged in PR #600; issue closure is verified.
+- Performance: #513 was recovered and merged in PR #596 as `2a3724e` after 869
+  integrated tests, bounded exhaustive/sampled equivalence, independent review,
+  measured conversion benchmarks and CI; issue closure was verified. The original
+  locked work is preserved. #565's safe fixed-size Base58 implementation and
+  equivalence checks are recorded in [its audit](565-fixed-base58.md); PR #598
+  merged as `cd6e011` after 877 tests, release benchmarks and CI; issue closed. Recover #522 before duplicating that work. Measure
+  #515 and #520 on representative data. #524 merged in PR #599 as `f555898`
+  after 882 tests, reproducible 1.8–2.7x local validation improvements and CI;
+  issue closure is verified. #503's native-type work and
+  bounded release benchmark are complete. #516 depends on durable
+  commit ordering. Transport #517 merged in PR #602 as `b364681` after 1,007
+  tests, local delayed-transport benchmarks, independent review and CI; issue
+  closure was verified. #518-#519 and #523 need the specific throughput, memory,
   file-size or lookup evidence requested by their issues.
-- Structure: #525-#530 follow correctness work. Scope must be refreshed against
-  main; for example, #530's original auth-duplication description is partly
-  obsolete after the shared provider-scoped auth helper.
+- Structure: #525-#529 follow correctness work, with scope refreshed against
+  current main. The remaining #530 auth/client duplication merged in PR #603
+  as `39d49f6` after 1,010 tests, protocol/retry regressions, independent review
+  and CI; issue closure was verified.
 
 For each issue, document diagnosis, selected behavior, reproduction/regression,
 integration results, qualification limits and verified closure. Never equate a

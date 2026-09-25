@@ -40,6 +40,7 @@ mod supported {
         scopes: Vec<PathBuf>,
         held: BTreeMap<Identity, (File, Mode)>,
         control_mutation: Mutex<()>,
+        transaction_session: super::super::session::SessionSlot,
     }
 
     impl LocalOwnership {
@@ -77,6 +78,7 @@ mod supported {
                 scopes: absolute.clone(),
                 held: BTreeMap::new(),
                 control_mutation: Mutex::new(()),
+                transaction_session: Default::default(),
             };
             guard.acquire_missing(&plan)?;
             validate_handles(&guard, &plan)?;
@@ -105,6 +107,7 @@ mod supported {
                 scopes: absolute.clone(),
                 held: BTreeMap::new(),
                 control_mutation: Mutex::new(()),
+                transaction_session: Default::default(),
             };
             guard.acquire_missing(&before)?;
             validate_handles(&guard, &before)?;
@@ -164,6 +167,12 @@ mod supported {
         }
 
         /// Canonical roots after aliases and nested scopes have been reduced.
+        pub(crate) fn acquire_transaction_session(
+            &self,
+        ) -> Result<super::super::session::SessionPermit<'_>> {
+            self.transaction_session.acquire()
+        }
+
         pub fn roots(&self) -> &[PathBuf] {
             &self.roots
         }
@@ -343,6 +352,12 @@ impl LocalOwnership {
 
     pub fn roots(&self) -> &[std::path::PathBuf] {
         &[]
+    }
+
+    pub(crate) fn acquire_transaction_session(
+        &self,
+    ) -> anyhow::Result<super::session::SessionPermit<'_>> {
+        anyhow::bail!("local dataset ownership is unsupported on this platform")
     }
 
     pub(crate) fn lock_control_mutation(&self) -> anyhow::Result<std::sync::MutexGuard<'_, ()>> {

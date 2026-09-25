@@ -5,12 +5,12 @@ use prost::Message;
 
 #[derive(Default)]
 pub(super) struct DecodedContract {
-    pub owner_address: Option<Vec<u8>>,
-    pub to_address: Option<Vec<u8>>,
+    pub owner_address: Option<prost::bytes::Bytes>,
+    pub to_address: Option<prost::bytes::Bytes>,
     pub amount: Option<i64>,
-    pub asset_name: Option<Vec<u8>>,
-    pub contract_address: Option<Vec<u8>>,
-    pub data: Option<Vec<u8>>,
+    pub asset_name: Option<prost::bytes::Bytes>,
+    pub contract_address: Option<prost::bytes::Bytes>,
+    pub data: Option<prost::bytes::Bytes>,
     pub call_value: Option<i64>,
     pub call_token_value: Option<i64>,
     pub token_id: Option<i64>,

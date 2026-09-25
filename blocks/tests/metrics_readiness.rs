@@ -1,7 +1,8 @@
 //! Exercise metrics through the real CLI, mapper, writer, cursor and gRPC stream.
-use firehose_parquet::cursor::{load_cursor_parquet, save_cursor_parquet, CursorState};
+use firehose_parquet::cursor::load_cursor_parquet;
 use firehose_protos::{firehose, sf::ethereum::r#type::v2 as eth};
 use prost::Message;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -16,7 +17,7 @@ impl tonic::server::UnaryService<firehose::InfoRequest> for Info {
         Box::pin(async {
             Ok(tonic::Response::new(firehose::InfoResponse {
                 chain_name: "metrics-test".into(),
-                first_streamable_block_num: 100,
+                first_streamable_block_num: 99,
                 ..Default::default()
             }))
         })
@@ -24,7 +25,10 @@ impl tonic::server::UnaryService<firehose::InfoRequest> for Info {
 }
 
 #[derive(Clone)]
-struct Stream(Arc<Mutex<Option<tokio::sync::mpsc::Receiver<firehose::Response>>>>);
+struct Stream {
+    receiver: Arc<Mutex<Option<tokio::sync::mpsc::Receiver<firehose::Response>>>>,
+    calls: Arc<AtomicUsize>,
+}
 impl tonic::server::ServerStreamingService<firehose::Request> for Stream {
     type Response = firehose::Response;
     type ResponseStream = std::pin::Pin<
@@ -32,8 +36,29 @@ impl tonic::server::ServerStreamingService<firehose::Request> for Stream {
     >;
     type Future = BoxFuture<tonic::Response<Self::ResponseStream>, tonic::Status>;
     fn call(&mut self, request: tonic::Request<firehose::Request>) -> Self::Future {
-        assert_eq!(request.into_inner().cursor, "resume-99");
-        let receiver = self.0.lock().unwrap().take().expect("unexpected reconnect");
+        let request = request.into_inner();
+        assert_eq!(request.start_block_num, 99);
+        let call = self.calls.fetch_add(1, Ordering::SeqCst);
+        if call == 0 {
+            // Seed an actual protected authority through a completed CLI run;
+            // a hand-written compatibility cursor is no longer a resume authority.
+            assert!(request.cursor.is_empty());
+            assert_eq!(request.stop_block_num, 99);
+            return Box::pin(async {
+                Ok(tonic::Response::new(
+                    Box::pin(futures::stream::iter([Ok(response(99))])) as Self::ResponseStream,
+                ))
+            });
+        }
+        assert_eq!(call, 1, "unexpected reconnect");
+        assert_eq!(request.stop_block_num, 101);
+        assert_eq!(request.cursor, "resume-99");
+        let receiver = self
+            .receiver
+            .lock()
+            .unwrap()
+            .take()
+            .expect("unexpected reconnect");
         Box::pin(async move {
             let stream = futures::stream::unfold(receiver, |mut receiver| async {
                 receiver
@@ -87,10 +112,14 @@ async fn get(port: u16, path: &str) -> std::io::Result<String> {
 }
 
 async fn wait_for_metric(port: u16, expected: &str) -> String {
+    wait_for_metrics(port, &[expected]).await
+}
+
+async fn wait_for_metrics(port: u16, expected: &[&str]) -> String {
     tokio::time::timeout(Duration::from_secs(10), async {
         loop {
             if let Ok(response) = get(port, "/metrics").await {
-                if response.contains(expected) {
+                if expected.iter().all(|metric| response.contains(metric)) {
                     return response;
                 }
             }
@@ -98,7 +127,7 @@ async fn wait_for_metric(port: u16, expected: &str) -> String {
         }
     })
     .await
-    .unwrap_or_else(|_| panic!("metric did not reach {expected}"))
+    .unwrap_or_else(|_| panic!("metrics did not reach {expected:?}"))
 }
 
 fn response(number: u64) -> firehose::Response {
@@ -135,30 +164,70 @@ async fn resumed_cli_reports_freshness_actual_buffers_and_saved_cursor() {
         Some((listener.accept().await.map(|(socket, _)| socket), listener))
     });
     let (send, receive) = tokio::sync::mpsc::channel(4);
+    let calls = Arc::new(AtomicUsize::new(0));
+    let service = Stream {
+        receiver: Arc::new(Mutex::new(Some(receive))),
+        calls: calls.clone(),
+    };
     let server = tokio::spawn(async move {
         tonic::transport::Server::builder()
             .add_service(Info)
-            .add_service(Stream(Arc::new(Mutex::new(Some(receive)))))
+            .add_service(service)
             .serve_with_incoming(incoming)
             .await
             .unwrap();
     });
     let dir = tempfile::tempdir().unwrap();
     let cursor = dir.path().join("cursor.parquet");
-    save_cursor_parquet(
-        &cursor,
-        &CursorState {
-            cursor: "resume-99".into(),
-            last_block_num: 99,
-            start_block: Some(100),
-            stop_block: Some(102),
-            extended: true,
-            final_blocks_only: true,
-            include_failed_transactions: true,
-            ..Default::default()
-        },
+    let seed = tokio::time::timeout(
+        Duration::from_secs(15),
+        tokio::process::Command::new(env!("CARGO_BIN_EXE_fireparq"))
+            .kill_on_drop(true)
+            .env_clear()
+            .current_dir(dir.path())
+            .args([
+                "build",
+                "--endpoint",
+                &endpoint,
+                "--block-type",
+                "evm",
+                "--start-block",
+                "99",
+                "--stop-block",
+                "100",
+                "--partition",
+                "none",
+                "--flush-blocks",
+                "2",
+                "--flush-bytes",
+                "1000000000",
+                "--flush-interval-secs",
+                "1000000000",
+                "--output",
+            ])
+            .arg(dir.path().join("output"))
+            .arg("--cursor")
+            .arg(&cursor)
+            .arg("--cursor-template")
+            .arg(&cursor)
+            .output(),
     )
+    .await
+    .unwrap()
     .unwrap();
+    assert!(
+        seed.status.success(),
+        "{}{}",
+        String::from_utf8_lossy(&seed.stdout),
+        String::from_utf8_lossy(&seed.stderr)
+    );
+    assert_eq!(
+        load_cursor_parquet(&cursor)
+            .unwrap()
+            .unwrap()
+            .last_block_num,
+        99
+    );
     let metrics_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = metrics_listener.local_addr().unwrap().port();
     drop(metrics_listener);
@@ -173,7 +242,7 @@ async fn resumed_cli_reports_freshness_actual_buffers_and_saved_cursor() {
             "--block-type",
             "evm",
             "--start-block",
-            "100",
+            "99",
             "--stop-block",
             "102",
             "--partition",
@@ -227,7 +296,20 @@ async fn resumed_cli_reports_freshness_actual_buffers_and_saved_cursor() {
         .unwrap()
         .starts_with("HTTP/1.1 200"));
     send.send(response(101)).await.unwrap();
-    let flushed = wait_for_metric(port, "firehose_parquet_cursor_last_block_num 101\n").await;
+    // Saving the mirror and releasing flush buffers update separate gauges.
+    // Require the stable post-flush state instead of assuming one atomic scrape.
+    let flushed = wait_for_metrics(
+        port,
+        &[
+            "firehose_parquet_cursor_last_block_num 101\n",
+            "firehose_parquet_mapper_buffer_rows 0\n",
+            "firehose_parquet_mapper_largest_table_estimated_bytes 0\n",
+            "firehose_parquet_mapper_buffer_estimated_bytes 0\n",
+            "firehose_parquet_buffer_estimated_bytes 0\n",
+            "firehose_parquet_files_written_total{table=\"blocks\"} 1\n",
+        ],
+    )
+    .await;
     assert!(flushed.contains("firehose_parquet_mapper_buffer_rows 0\n"));
     assert!(flushed.contains("firehose_parquet_buffer_estimated_bytes 0\n"));
     assert!(flushed.contains("firehose_parquet_files_written_total{table=\"blocks\"} 1\n"));
@@ -249,5 +331,6 @@ async fn resumed_cli_reports_freshness_actual_buffers_and_saved_cursor() {
         "{}",
         String::from_utf8_lossy(&result.stderr)
     );
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
     server.abort();
 }

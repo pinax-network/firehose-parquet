@@ -7,13 +7,18 @@ use backoff::ExponentialBackoffBuilder;
 use firehose_protos::firehose;
 use std::time::{Duration, Instant};
 use tonic::metadata::{Ascii, MetadataValue};
+use tonic::service::{interceptor::InterceptedService, Interceptor};
 use tonic::transport::{Channel, ClientTlsConfig, Endpoint};
 use tracing::{debug, info, warn};
 
 pub use tokio_util::sync::CancellationToken;
 
+#[cfg(test)]
+mod auth_tests;
 mod finality;
 mod finalized_range;
+#[cfg(test)]
+mod transport_tests;
 pub use finality::{FinalityTimeoutError, FinalizedAnchor};
 pub use finalized_range::FinalizedMetadataStream;
 
@@ -89,6 +94,9 @@ pub fn classify_fetch_error(error: &anyhow::Error) -> FetchErrorKind {
             return FetchErrorKind::Timeout;
         }
         if let Some(status) = cause.downcast_ref::<tonic::Status>() {
+            if decompression_limit(status).is_some() {
+                return FetchErrorKind::Fatal;
+            }
             match status.code() {
                 Code::NotFound => return FetchErrorKind::NotFound,
                 Code::DeadlineExceeded => return FetchErrorKind::Timeout,
@@ -193,8 +201,13 @@ impl AuthMetadata {
             )?,
         })
     }
+}
 
-    fn apply<T>(&self, request: &mut tonic::Request<T>) {
+impl Interceptor for AuthMetadata {
+    fn call(
+        &mut self,
+        mut request: tonic::Request<()>,
+    ) -> Result<tonic::Request<()>, tonic::Status> {
         if let Some(ref key) = self.api_key {
             request.metadata_mut().insert("x-api-key", key.clone());
         }
@@ -203,13 +216,37 @@ impl AuthMetadata {
                 .metadata_mut()
                 .insert("authorization", bearer.clone());
         }
+        Ok(request)
     }
+}
+
+// Generated tonic clients have separate concrete types with identical transport
+// setters. Keep their private constructors typed while defining auth, response
+// negotiation and the receive limit once for every RPC path.
+macro_rules! rpc_client {
+    ($constructor:ident, $module:ident, $client:ident) => {
+        fn $constructor(
+            &self,
+            channel: Channel,
+        ) -> firehose::$module::$client<InterceptedService<Channel, AuthMetadata>> {
+            firehose::$module::$client::with_interceptor(channel, self.auth.clone())
+                .accept_compressed(tonic::codec::CompressionEncoding::Zstd)
+                .accept_compressed(tonic::codec::CompressionEncoding::Gzip)
+                .max_decoding_message_size(self.config.grpc.max_message_bytes as usize)
+        }
+    };
 }
 
 impl FirehoseClient {
     /// Create a client. Fails if the API key or JWT token cannot be sent as a
     /// gRPC header.
     pub fn new(config: Config) -> Result<Self> {
+        anyhow::ensure!(
+            config.grpc.max_message_bytes > 0,
+            "grpc.max_message_bytes must be greater than zero"
+        );
+        anyhow::ensure!(config.grpc.initial_window_bytes.is_none_or(|bytes| bytes > 0 && bytes <= i32::MAX as u32),
+            "grpc.initial_window_bytes must be between 1 and 2147483647, or None for library defaults");
         let auth = AuthMetadata::from_config(&config)?;
         Ok(Self {
             config,
@@ -240,6 +277,9 @@ impl FirehoseClient {
             .with_context(|| format!("invalid endpoint URI: {uri}"))
             .map(|endpoint| {
                 endpoint
+                    .initial_stream_window_size(self.config.grpc.initial_window_bytes)
+                    .initial_connection_window_size(self.config.grpc.initial_window_bytes)
+                    .http2_adaptive_window(self.config.grpc.adaptive_window)
                     .timeout(Duration::from_secs(300))
                     .connect_timeout(Duration::from_secs(30))
                     .tcp_keepalive(Some(keepalive.tcp_keepalive))
@@ -278,6 +318,11 @@ impl FirehoseClient {
         self.connect_with_log(true).await
     }
 
+    // Requests remain uncompressed; servers choose response compression.
+    rpc_client!(stream_client, stream_client, StreamClient);
+    rpc_client!(fetch_client, fetch_client, FetchClient);
+    rpc_client!(info_client, endpoint_info_client, EndpointInfoClient);
+
     /// Verify that the configured Firehose endpoint is reachable before
     /// startup relies on endpoint metadata or begins streaming.
     pub async fn healthcheck(&self) -> Result<()> {
@@ -295,11 +340,8 @@ impl FirehoseClient {
         let response = retry_endpoint_info(
             || async {
                 let channel = self.connect().await?;
-                let mut client = firehose::endpoint_info_client::EndpointInfoClient::new(channel)
-                    .accept_compressed(tonic::codec::CompressionEncoding::Gzip)
-                    .max_decoding_message_size(128 * 1024 * 1024);
-                let mut request = tonic::Request::new(firehose::InfoRequest {});
-                self.auth.apply(&mut request);
+                let mut client = self.info_client(channel);
+                let request = tonic::Request::new(firehose::InfoRequest {});
                 Ok(client.info(request).await?.into_inner())
             },
             Duration::from_secs(10),
@@ -343,9 +385,7 @@ impl FirehoseClient {
     ) -> Result<Option<BlockIdentity>> {
         let fetch = async {
             let channel = self.fetch_channel().await?;
-            let mut client = firehose::fetch_client::FetchClient::new(channel)
-                .accept_compressed(tonic::codec::CompressionEncoding::Gzip)
-                .max_decoding_message_size(128 * 1024 * 1024);
+            let mut client = self.fetch_client(channel);
 
             let req = firehose::SingleBlockRequest {
                 transforms: vec![],
@@ -354,8 +394,7 @@ impl FirehoseClient {
                 )),
             };
 
-            let mut request = tonic::Request::new(req);
-            self.auth.apply(&mut request);
+            let request = tonic::Request::new(req);
 
             let response = client.block(request).await?.into_inner();
             response
@@ -444,9 +483,7 @@ impl FirehoseClient {
                 }
             };
 
-            let mut client = firehose::stream_client::StreamClient::new(channel)
-                .accept_compressed(tonic::codec::CompressionEncoding::Gzip)
-                .max_decoding_message_size(128 * 1024 * 1024);
+            let mut client = self.stream_client(channel);
 
             let start_block_num = match &cursor {
                 Some(_) => self.config.start_block.unwrap_or(0) as i64,
@@ -461,8 +498,7 @@ impl FirehoseClient {
                 transforms: vec![],
             };
 
-            let mut request = tonic::Request::new(req);
-            self.auth.apply(&mut request);
+            let request = tonic::Request::new(req);
 
             // Accepting the RPC is not progress: the back-off and the stall
             // timer are only reset once a message arrives.
@@ -854,6 +890,11 @@ fn status_code_from_name(name: &str) -> Option<tonic::Code> {
 /// Build the error for a fatal status, with a hint on what to fix, or `None`
 /// when the status is worth retrying.
 fn fatal_status_error(status: &tonic::Status) -> Option<anyhow::Error> {
+    if let Some(limit) = decompression_limit(status) {
+        return Some(anyhow::Error::new(status.clone()).context(format!(
+            "gRPC response exceeds --grpc-max-message-bytes={limit}; not retrying the same oversized message"
+        )));
+    }
     let code = effective_status_code(status);
     // `ResourceExhausted` is usually a rate limit worth backing off for, but
     // an exhausted quota (e.g. "billable egress bytes quota exceeded") does
@@ -874,7 +915,7 @@ fn fatal_status_error(status: &tonic::Status) -> Option<anyhow::Error> {
             "check --start-block, --stop-block and the stored cursor (--cursor-override restarts from the CLI bounds)"
         }
         tonic::Code::OutOfRange => {
-            "the request or a response is out of range, e.g. a block past the chain head or larger than the 128 MiB message limit"
+            "the request or a response is out of range, e.g. a block past the chain head or larger than --grpc-max-message-bytes"
         }
         _ => "the endpoint does not serve the Firehose v2 Stream API",
     };
@@ -882,6 +923,20 @@ fn fatal_status_error(status: &tonic::Status) -> Option<anyhow::Error> {
         "Firehose rejected the stream with {code:?}: {}; not retrying: {hint}",
         status.message()
     ))
+}
+
+/// tonic 0.14 uses ResourceExhausted specifically for a local decompression
+/// limit. Match its whole diagnostic, not arbitrary rate-limit/server text.
+fn decompression_limit(status: &tonic::Status) -> Option<u32> {
+    if status.code() != tonic::Code::ResourceExhausted {
+        return None;
+    }
+    let bytes = status
+        .message()
+        .strip_prefix("Error decompressing: size limit, of ")?
+        .strip_suffix(" bytes, exceeded while decompressing message")?;
+    let limit = bytes.parse::<u32>().ok()?;
+    (limit.to_string() == bytes).then_some(limit)
 }
 
 /// Convert the exclusive `--stop-block` into Firehose's inclusive
@@ -1179,6 +1234,7 @@ mod tests {
     pub(super) fn test_config(endpoint: &str) -> Config {
         Config {
             endpoint: endpoint.to_string(),
+            grpc: Default::default(),
             api_key: None,
             jwt_token: None,
             start_block: None,
@@ -1190,6 +1246,7 @@ mod tests {
             flush_rows: None,
             flush_blocks: None,
             flush_bytes: 0,
+            flush_memory_bytes: crate::config::DEFAULT_FLUSH_MEMORY_BYTES,
             flush_interval_secs: None,
             compression: Compression::Zstd,
             final_blocks_only: true,
@@ -1255,9 +1312,9 @@ mod tests {
             config.api_key = credentials.api_key;
             config.jwt_token = credentials.jwt_token;
             let client = FirehoseClient::new(config).unwrap();
-            // Info, stream, and sparse probes all use this same metadata helper.
-            let mut request = tonic::Request::new(firehose::InfoRequest {});
-            client.auth.apply(&mut request);
+            // Every typed RPC client uses this same interceptor.
+            let request = tonic::Request::new(());
+            let request = client.auth.clone().call(request).unwrap();
             assert_eq!(
                 request
                     .metadata()
@@ -1282,8 +1339,8 @@ mod tests {
         config.jwt_token = Some("  token\r\n".to_string());
 
         let auth = AuthMetadata::from_config(&config).unwrap();
-        let mut request = tonic::Request::new(());
-        auth.apply(&mut request);
+        let request = tonic::Request::new(());
+        let request = auth.clone().call(request).unwrap();
 
         assert_eq!(
             request.metadata().get("x-api-key").unwrap(),
@@ -1301,8 +1358,8 @@ mod tests {
         config.api_key = Some(" \n".to_string());
 
         let auth = AuthMetadata::from_config(&config).unwrap();
-        let mut request = tonic::Request::new(());
-        auth.apply(&mut request);
+        let request = tonic::Request::new(());
+        let request = auth.clone().call(request).unwrap();
 
         assert!(request.metadata().get("x-api-key").is_none());
         assert!(request.metadata().get("authorization").is_none());

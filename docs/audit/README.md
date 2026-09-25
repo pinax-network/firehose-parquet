@@ -14,20 +14,32 @@ lifecycle state; a local implementation or passing test alone is not closure.
 - [#499: offline EVM golden-block regression](499-evm-golden-fixture.md)
 - [#511: Bitcoin amounts and input metadata](511-bitcoin-values.md)
 - [#509: Tron contracts, receipts and internal values](509-tron-contract-fields.md)
+
+- [#513: recovered EVM decimal fast path](513-evm-decimal-fast-path.md)
+- [#510: Cosmos event order, unknown results and SDK metadata](510-cosmos-values.md)
 - [#508: Antelope database-operation joins](508-antelope-db-joins.md)
 - [#568: Arrow/Parquet security and compatibility](568-arrow-parquet-security.md)
 - [#572: final completion checkpoints](572-final-completion-checkpoint.md)
 - [#506: NEAR qualification blocked by quota](506-near-qualification.md)
 - [#504: Beacon live mapping qualification](504-beacon-qualification.md)
+- [#505: Beacon value semantics and migration](505-beacon-values.md)
 - [#485: partition probe reliability](485-partition-probe-reliability.md)
 - [#486: exact finalized partition coverage and strict consumers](486-partition-index-design.md)
 - [#500: stable Solana reward indices](500-solana-reward-index.md)
 - [#501: conservative Solana vote classification](501-solana-vote-classification.md)
 - [#502: explicit Solana instruction positions](502-solana-instruction-order.md)
 - [#503: Binary Solana payloads and account-index lists](503-solana-binary-payloads.md)
+- [#550: Solana parent transaction outcome context (partial; issue remains open)](550-solana-execution-context.md)
 - [#473: responsive shutdown](473-responsive-shutdown.md)
+- [#474: append-only non-final streams and query limits](474-non-final-streams.md)
 - [#477: single-partition writer contract](477-writer-partition-contract.md)
 - [#475: bounded metrics and stream readiness](475-metrics-readiness.md)
+- [#522: streaming rollup memory and remote range reads](522-streaming-rollup.md)
+- [#524: projected validation and partition boundary performance](524-validation-performance.md)
+- [#517: measured gRPC receive transport](517-grpc-transport.md)
+- [#515: adaptive compressed flush sizing and summed mapper limit](515-adaptive-flush-sizing.md)
+- [#530: shared authenticated gRPC clients](530-grpc-client-deduplication.md)
+- [#565: safe fixed-width Base58 conversion](565-fixed-base58.md)
 
 - [#476: timestamp and streamed identity validation](476-timestamp-validation.md)
 
@@ -38,6 +50,8 @@ lifecycle state; a local implementation or passing test alone is not closure.
 - [#468: conditional S3 ownership qualification](468-s3-ownership.md)
 - [#468: single-attempt remote mutations](468-s3-mutation-attempts.md)
 - [#468: verification artifact ownership](468-verify-ownership.md)
+- [#468: complete runtime, migration and live recovery qualification](468-ingestion-runtime.md)
+- [#468: live table equality and recovered-state evidence](468-live-comparison.json)
 
 ## Verified lifecycle outcomes
 
@@ -65,15 +79,33 @@ lifecycle state; a local implementation or passing test alone is not closure.
 | [#511](https://github.com/pinax-network/firehose-parquet/issues/511) | [#589](https://github.com/pinax-network/firehose-parquet/pull/589) | Merged as `4b0f72f`; issue closed; 793 workspace tests, independent raw comparison of 3,904 outputs and 4,387 inputs, review and CI passed. |
 | [#508](https://github.com/pinax-network/firehose-parquet/issues/508) | [#590](https://github.com/pinax-network/firehose-parquet/pull/590) | Merged as `21de6af`; issue closed; 796 tests, all old columns preserved across 24 live EOS rows, ten raw-verified database joins, independent review and CI passed. |
 | [#486](https://github.com/pinax-network/firehose-parquet/issues/486) | [#592](https://github.com/pinax-network/firehose-parquet/pull/592) | Merged as `d5e1419`; issue closed; 855 tests, independent review, bounded finalized Ethereum coverage/resume comparison and CI passed. |
-| #468 prerequisite | [#591](https://github.com/pinax-network/firehose-parquet/pull/591) | Ownership/control foundation merged as `78ceb98`; 848 tests and CI passed. Full ingestion crash/replay protection remains incomplete; issue #468 stays open. |
+| [#503](https://github.com/pinax-network/firehose-parquet/issues/503) | [#593](https://github.com/pinax-network/firehose-parquet/pull/593) | Merged as `d417e0c` on 2026-09-25; issue closed; 857 tests, all 19,714 retained raw-sample rows compared, bounded offline release benchmarks, independent review and CI passed. |
+| [#513](https://github.com/pinax-network/firehose-parquet/issues/513) | [#596](https://github.com/pinax-network/firehose-parquet/pull/596) | Merged as `2a3724e` on 2026-09-25; issue closed; 869 tests, independent arbitrary-size equivalence, bounded release benchmarks, review and CI passed. Original stopped-agent work remains preserved. |
+| [#505](https://github.com/pinax-network/firehose-parquet/issues/505) | [#594](https://github.com/pinax-network/firehose-parquet/pull/594) | Merged as `b8d6834` on 2026-09-25; issue closed; 862 tests, one-slot decimal fee and six-blob live equality check, independent review and CI passed. |
+| [#474](https://github.com/pinax-network/firehose-parquet/issues/474) | [#597](https://github.com/pinax-network/firehose-parquet/pull/597) | Merged as `1f2d252` on 2026-09-25; issue closed; 873 tests, real CLI fork-stream checks, executed query examples, review and CI passed. |
+| [#565](https://github.com/pinax-network/firehose-parquet/issues/565) | [#598](https://github.com/pinax-network/firehose-parquet/pull/598) | Merged as `cd6e011` on 2026-09-25; issue closed; 877 tests, independent equivalence review, 13.4–14.4x conversion/append benchmarks and CI passed. |
+| [#524](https://github.com/pinax-network/firehose-parquet/issues/524) | [#599](https://github.com/pinax-network/firehose-parquet/pull/599) | Merged as `f555898` on 2026-09-25; issue closure verified; 882 tests, projected-read/partition-check regressions, 1.8–2.7x measured local validation improvements and CI passed. |
+| #468 prerequisite | [#591](https://github.com/pinax-network/firehose-parquet/pull/591) | Historical ownership/control foundation merged as `78ceb98`; 848 tests and CI passed. This stage alone did not provide all-table crash/replay protection. |
+| [#468](https://github.com/pinax-network/firehose-parquet/issues/468) | [#600](https://github.com/pinax-network/firehose-parquet/pull/600) | Merged as `e4bd9cf` on 2026-09-25; issue closure verified. 995 workspace tests plus the CI capture example and final CI passed. Actual interrupted Writing rollback, 14-table/12,298-row live equality, completed-bound no-op and deleted-mirror repair passed. |
+| [#510](https://github.com/pinax-network/firehose-parquet/issues/510) | [#601](https://github.com/pinax-network/firehose-parquet/pull/601) | Merged as `9379883` on 2026-09-25; issue closure verified; 1,003 workspace tests, independent Cosmos RPC-backed source/value comparison and CI passed. Firehose producer transport remains unqualified. |
+| [#517](https://github.com/pinax-network/firehose-parquet/issues/517) | [#602](https://github.com/pinax-network/firehose-parquet/pull/602) | Merged as `b364681` on 2026-09-25; issue closure verified; 1,007 tests, guarded local receive-window benchmarks, independent review and CI passed. |
+| [#530](https://github.com/pinax-network/firehose-parquet/issues/530) | [#603](https://github.com/pinax-network/firehose-parquet/pull/603) | Merged as `39d49f6` on 2026-09-25; issue closure verified; 1,010 tests, real local authenticated RPC/retry regressions, independent review and CI passed. |
+
+
+| [#522](https://github.com/pinax-network/firehose-parquet/issues/522) | [#604](https://github.com/pinax-network/firehose-parquet/pull/604) | Merged as `6cae796` on 2026-09-25; issue closure verified. Guarded 36-run rollup comparisons, complete row/schema equality, bounded range-read/error tests, independent review and CI passed. |
+| [#515](https://github.com/pinax-network/firehose-parquet/issues/515) | [#605](https://github.com/pinax-network/firehose-parquet/pull/605) | Merged as `137ab325` on 2026-09-25; issue closure verified. Retained and synthetic sizing evidence, successful-commit feedback and memory-trigger tests, 228 current-main integration checks, independent review and CI passed. |
 
 The #468 design PR accidentally triggered GitHub auto-closure through a negative
 sentence containing a recognized closing phrase. On 2026-09-25 the PR text was
 corrected and #468 was reopened; its open state was verified. The proposal and
-single-file durability work do not satisfy full crash/replay recovery acceptance.
+single-file durability work did not satisfy full crash/replay recovery acceptance.
+The later complete runtime in PR #600 satisfied that acceptance and closed #468.
 
 For each next fix, add an issue-specific record here and reference it in the PR.
 Record the real test and live-data evidence, including unavailable qualification,
 without credentials, private cursor values or generated datasets. Merge only
 after review and current integration checks pass, then verify issue closure and
 any external recovery condition, such as a dependency security rescan.
+
+- [#518 owned protobuf byte buffers](518-owned-protobuf-bytes.md): shared chain
+  decoding, compatibility boundary, all-chain equivalence and offline benchmarks.

@@ -1,13 +1,14 @@
 use super::proto::beacon;
 use super::schema;
 use arrow::array::*;
-use arrow::datatypes::Schema;
+use arrow::datatypes::{Int32Type, Schema};
 use arrow::record_batch::RecordBatch;
 use firehose_parquet::encode::{BytesColumn, EncodeBytes};
 use firehose_parquet::traits::{
-    est_i64, est_list_u64, est_opt_str, est_str, est_u32, est_u64, BlockIdentity, BlockMapper,
-    CanonicalBuilder, PreparedIdentity,
+    est_bin, est_i64, est_list_u64, est_opt_str, est_str, est_u32, est_u64, BlockIdentity,
+    BlockMapper, CanonicalBuilder, PreparedIdentity,
 };
+use num_bigint::BigUint;
 use prost::Message;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -17,16 +18,38 @@ use std::sync::Arc;
 // ---------------------------------------------------------------------------
 
 fn spec_name(spec: i32) -> &'static str {
-    match spec {
-        1 => "PHASE0",
-        2 => "ALTAIR",
-        3 => "BELLATRIX",
-        4 => "CAPELLA",
-        5 => "DENEB",
-        6 => "ELECTRA",
-        7 => "FUSAKA",
-        _ => "UNSPECIFIED",
-    }
+    beacon::Spec::try_from(spec)
+        .map(|spec| spec.as_str_name())
+        .unwrap_or("UNKNOWN")
+}
+
+/// The producer copies fixed SSZ bytes for Bellatrix/Capella, but calls
+/// uint256.Int.Bytes() (minimal big-endian) for Deneb and later bodies.
+/// See docs/audit/505-beacon-values.md for pinned producer/dependency evidence.
+#[derive(Clone, Copy)]
+enum BaseFeeEncoding {
+    FixedLittleEndian,
+    BigEndian,
+}
+
+fn base_fee_decimal(bytes: &[u8], encoding: BaseFeeEncoding) -> anyhow::Result<String> {
+    let value = match encoding {
+        BaseFeeEncoding::FixedLittleEndian => {
+            anyhow::ensure!(bytes.len() == 32,
+                "Beacon Bellatrix/Capella base_fee_per_gas must contain 32 little-endian bytes (got {})", bytes.len());
+            BigUint::from_bytes_le(bytes)
+        }
+        BaseFeeEncoding::BigEndian => {
+            anyhow::ensure!(
+                bytes.len() <= 32,
+                "Beacon Deneb+ base_fee_per_gas exceeds uint256 (got {} bytes)",
+                bytes.len()
+            );
+            // The producer's Bytes() returns an empty slice for zero.
+            BigUint::from_bytes_be(bytes)
+        }
+    };
+    Ok(value.to_str_radix(10))
 }
 
 fn append_fork_step(builder: &mut Option<StringBuilder>, fork_step: Option<&str>) {
@@ -93,6 +116,7 @@ struct ExecutionPayloadFields<'a> {
     timestamp: Option<&'a prost_types::Timestamp>,
     block_hash: &'a [u8],
     base_fee_per_gas: &'a [u8],
+    base_fee_encoding: BaseFeeEncoding,
     blob_gas_used: Option<u64>,
     excess_blob_gas: Option<u64>,
 }
@@ -110,6 +134,7 @@ fn bellatrix_payload(ep: &beacon::BellatrixExecutionPayload) -> ExecutionPayload
         timestamp: ep.timestamp.as_ref(),
         block_hash: &ep.block_hash,
         base_fee_per_gas: &ep.base_fee_per_gas,
+        base_fee_encoding: BaseFeeEncoding::FixedLittleEndian,
         blob_gas_used: None,
         excess_blob_gas: None,
     }
@@ -128,6 +153,7 @@ fn capella_payload(ep: &beacon::CapellaExecutionPayload) -> ExecutionPayloadFiel
         timestamp: ep.timestamp.as_ref(),
         block_hash: &ep.block_hash,
         base_fee_per_gas: &ep.base_fee_per_gas,
+        base_fee_encoding: BaseFeeEncoding::FixedLittleEndian,
         blob_gas_used: None,
         excess_blob_gas: None,
     }
@@ -146,6 +172,7 @@ fn deneb_payload(ep: &beacon::DenebExecutionPayload) -> ExecutionPayloadFields<'
         timestamp: ep.timestamp.as_ref(),
         block_hash: &ep.block_hash,
         base_fee_per_gas: &ep.base_fee_per_gas,
+        base_fee_encoding: BaseFeeEncoding::BigEndian,
         blob_gas_used: Some(ep.blob_gas_used),
         excess_blob_gas: Some(ep.excess_blob_gas),
     }
@@ -333,7 +360,14 @@ impl BeaconBlockMapper {
         block: &beacon::Block,
         identity: &PreparedIdentity,
         fork_step: Option<&str>,
-    ) {
+    ) -> anyhow::Result<()> {
+        // Validate conversions before appending any row to any table.
+        let body = extract_body_fields(block);
+        let base_fee = body
+            .execution_payload
+            .as_ref()
+            .map(|ep| base_fee_decimal(ep.base_fee_per_gas, ep.base_fee_encoding))
+            .transpose()?;
         let slot = block.slot;
 
         // blocks table
@@ -348,9 +382,10 @@ impl BeaconBlockMapper {
         self.blocks.state_root.append_value(&block.state_root);
         self.blocks.body_root.append_value(&block.body_root);
         self.blocks.signature.append_value(&block.signature);
-        self.blocks.spec.append_value(spec_name(block.spec));
-
-        let body = extract_body_fields(block);
+        self.blocks
+            .spec
+            .append(spec_name(block.spec))
+            .expect("bounded Beacon spec dictionary");
 
         match body.graffiti {
             Some(graffiti) => self.blocks.graffiti.append_value(graffiti),
@@ -372,7 +407,7 @@ impl BeaconBlockMapper {
                     if let Some(data) = &a.data {
                         self.append_attestation_data(data);
                     } else {
-                        self.append_empty_attestation_data();
+                        self.append_null_attestation_data();
                     }
                     self.attestations.committee_bits.append_null();
                 }
@@ -384,7 +419,7 @@ impl BeaconBlockMapper {
                     if let Some(data) = &a.data {
                         self.append_attestation_data(data);
                     } else {
-                        self.append_empty_attestation_data();
+                        self.append_null_attestation_data();
                     }
                     self.attestations
                         .committee_bits
@@ -407,10 +442,10 @@ impl BeaconBlockMapper {
                 self.deposits.amount.append_value(data.gwei);
                 self.deposits.signature.append_value(&data.signature);
             } else {
-                self.deposits.pubkey.append_value(&[]);
-                self.deposits.withdrawal_credentials.append_value(&[]);
-                self.deposits.amount.append_value(0);
-                self.deposits.signature.append_value(&[]);
+                self.deposits.pubkey.append_null();
+                self.deposits.withdrawal_credentials.append_null();
+                self.deposits.amount.append_null();
+                self.deposits.signature.append_null();
             }
             append_fork_step(&mut self.deposits.fork_step, fork_step);
         }
@@ -436,20 +471,26 @@ impl BeaconBlockMapper {
                 .append_value(i as u32);
             self.append_indexed_attestation(slashing.attestation_1.as_ref(), true);
             self.append_indexed_attestation(slashing.attestation_2.as_ref(), false);
-            append_u64_list(
-                &mut self.attester_slashings.attestation_1_attesting_indices,
-                slashing
-                    .attestation_1
-                    .as_ref()
-                    .map_or(&[], |a| &a.attesting_indices),
-            );
-            append_u64_list(
-                &mut self.attester_slashings.attestation_2_attesting_indices,
-                slashing
-                    .attestation_2
-                    .as_ref()
-                    .map_or(&[], |a| &a.attesting_indices),
-            );
+            match &slashing.attestation_1 {
+                Some(att) => append_u64_list(
+                    &mut self.attester_slashings.attestation_1_attesting_indices,
+                    &att.attesting_indices,
+                ),
+                None => self
+                    .attester_slashings
+                    .attestation_1_attesting_indices
+                    .append(false),
+            }
+            match &slashing.attestation_2 {
+                Some(att) => append_u64_list(
+                    &mut self.attester_slashings.attestation_2_attesting_indices,
+                    &att.attesting_indices,
+                ),
+                None => self
+                    .attester_slashings
+                    .attestation_2_attesting_indices
+                    .append(false),
+            }
             append_fork_step(&mut self.attester_slashings.fork_step, fork_step);
         }
 
@@ -465,8 +506,8 @@ impl BeaconBlockMapper {
                     .validator_index
                     .append_value(msg.validator_index);
             } else {
-                self.voluntary_exits.epoch.append_value(0);
-                self.voluntary_exits.validator_index.append_value(0);
+                self.voluntary_exits.epoch.append_null();
+                self.voluntary_exits.validator_index.append_null();
             }
             append_fork_step(&mut self.voluntary_exits.fork_step, fork_step);
         }
@@ -507,7 +548,7 @@ impl BeaconBlockMapper {
                 .append_value(ep.block_hash);
             self.execution_payload
                 .base_fee_per_gas
-                .append_value(ep.base_fee_per_gas);
+                .append_value(base_fee.as_deref().expect("validated payload base fee"));
             match ep.blob_gas_used {
                 Some(v) => self.execution_payload.blob_gas_used.append_value(v),
                 None => self.execution_payload.blob_gas_used.append_null(),
@@ -558,9 +599,9 @@ impl BeaconBlockMapper {
                         .append_value(&msg.to_execution_address);
                 }
                 None => {
-                    b.validator_index.append_value(0);
-                    b.from_bls_pubkey.append_value(&[]);
-                    b.to_execution_address.append_value(&[]);
+                    b.validator_index.append_null();
+                    b.from_bls_pubkey.append_null();
+                    b.to_execution_address.append_null();
                 }
             }
             b.signature.append_value(&change.signature);
@@ -603,6 +644,7 @@ impl BeaconBlockMapper {
                 append_fork_step(&mut b.fork_step, fork_step);
             }
         }
+        Ok(())
     }
 
     fn append_attestation_data(&mut self, data: &beacon::AttestationData) {
@@ -617,26 +659,26 @@ impl BeaconBlockMapper {
             self.attestations.source_epoch.append_value(src.epoch);
             self.attestations.source_root.append_value(&src.root);
         } else {
-            self.attestations.source_epoch.append_value(0);
-            self.attestations.source_root.append_value(&[]);
+            self.attestations.source_epoch.append_null();
+            self.attestations.source_root.append_null();
         }
         if let Some(tgt) = &data.target {
             self.attestations.target_epoch.append_value(tgt.epoch);
             self.attestations.target_root.append_value(&tgt.root);
         } else {
-            self.attestations.target_epoch.append_value(0);
-            self.attestations.target_root.append_value(&[]);
+            self.attestations.target_epoch.append_null();
+            self.attestations.target_root.append_null();
         }
     }
 
-    fn append_empty_attestation_data(&mut self) {
-        self.attestations.slot.append_value(0);
-        self.attestations.committee_index.append_value(0);
-        self.attestations.beacon_block_root.append_value(&[]);
-        self.attestations.source_epoch.append_value(0);
-        self.attestations.source_root.append_value(&[]);
-        self.attestations.target_epoch.append_value(0);
-        self.attestations.target_root.append_value(&[]);
+    fn append_null_attestation_data(&mut self) {
+        self.attestations.slot.append_null();
+        self.attestations.committee_index.append_null();
+        self.attestations.beacon_block_root.append_null();
+        self.attestations.source_epoch.append_null();
+        self.attestations.source_root.append_null();
+        self.attestations.target_epoch.append_null();
+        self.attestations.target_root.append_null();
     }
 
     fn append_proposer_slashing_header(
@@ -669,11 +711,11 @@ impl BeaconBlockMapper {
             sr_b.append_value(&hdr.state_root);
             br_b.append_value(&hdr.body_root);
         } else {
-            slot_b.append_value(0);
-            pi_b.append_value(0);
-            pr_b.append_value(&[]);
-            sr_b.append_value(&[]);
-            br_b.append_value(&[]);
+            slot_b.append_null();
+            pi_b.append_null();
+            pr_b.append_null();
+            sr_b.append_null();
+            br_b.append_null();
         }
     }
 
@@ -712,25 +754,42 @@ impl BeaconBlockMapper {
                 se_b.append_value(src.epoch);
                 sr_b.append_value(&src.root);
             } else {
-                se_b.append_value(0);
-                sr_b.append_value(&[]);
+                se_b.append_null();
+                sr_b.append_null();
             }
             if let Some(tgt) = &data.target {
                 te_b.append_value(tgt.epoch);
                 tr_b.append_value(&tgt.root);
             } else {
-                te_b.append_value(0);
-                tr_b.append_value(&[]);
+                te_b.append_null();
+                tr_b.append_null();
             }
         } else {
-            slot_b.append_value(0);
-            ci_b.append_value(0);
-            bbr_b.append_value(&[]);
-            se_b.append_value(0);
-            sr_b.append_value(&[]);
-            te_b.append_value(0);
-            tr_b.append_value(&[]);
+            slot_b.append_null();
+            ci_b.append_null();
+            bbr_b.append_null();
+            se_b.append_null();
+            sr_b.append_null();
+            te_b.append_null();
+            tr_b.append_null();
         }
+    }
+}
+
+impl BeaconBlockMapper {
+    fn map_decoded(
+        &mut self,
+        block: beacon::Block,
+        identity: &BlockIdentity,
+        fork_step: Option<&str>,
+    ) -> anyhow::Result<u64> {
+        let identity =
+            self.blocks
+                .canonical
+                .prepare_with_ids(identity, &block.root, &block.parent_root)?;
+        self.map_beacon_block(&block, &identity, fork_step)?;
+        // Beacon chain uses attestations rather than traditional transactions.
+        Ok(0)
     }
 }
 
@@ -741,14 +800,16 @@ impl BlockMapper for BeaconBlockMapper {
         identity: &BlockIdentity,
         fork_step: Option<&str>,
     ) -> anyhow::Result<u64> {
-        let block = beacon::Block::decode(block_bytes)?;
-        let identity =
-            self.blocks
-                .canonical
-                .prepare_with_ids(identity, &block.root, &block.parent_root)?;
-        self.map_beacon_block(&block, &identity, fork_step);
-        // Beacon chain uses attestations rather than traditional transactions.
-        Ok(0)
+        self.map_decoded(beacon::Block::decode(block_bytes)?, identity, fork_step)
+    }
+
+    fn map_block_bytes(
+        &mut self,
+        block_bytes: prost::bytes::Bytes,
+        identity: &BlockIdentity,
+        fork_step: Option<&str>,
+    ) -> anyhow::Result<u64> {
+        self.map_decoded(beacon::Block::decode(block_bytes)?, identity, fork_step)
     }
 
     fn flush(&mut self) -> anyhow::Result<HashMap<String, RecordBatch>> {
@@ -849,7 +910,7 @@ impl BlockMapper for BeaconBlockMapper {
             + self.consolidation_requests.canonical.len()
     }
 
-    fn largest_table(&mut self) -> (&str, usize) {
+    fn table_estimates(&mut self) -> Vec<(&str, usize)> {
         let blocks = self.blocks.canonical.estimated_bytes()
             + est_u64(&self.blocks.slot)
             + est_u64(&self.blocks.parent_slot)
@@ -859,7 +920,7 @@ impl BlockMapper for BeaconBlockMapper {
             + self.blocks.state_root.estimated_bytes()
             + self.blocks.body_root.estimated_bytes()
             + self.blocks.signature.estimated_bytes()
-            + est_str(&self.blocks.spec)
+            + self.blocks.spec.len() * std::mem::size_of::<i32>()
             + self.blocks.graffiti.estimated_bytes()
             + est_opt_str(&self.blocks.fork_step);
         let attestations = self.attestations.canonical.estimated_bytes()
@@ -967,14 +1028,14 @@ impl BlockMapper for BeaconBlockMapper {
             + est_u64(&self.execution_payload.gas_used)
             + est_i64(&self.execution_payload.payload_timestamp)
             + self.execution_payload.block_hash.estimated_bytes()
-            + self.execution_payload.base_fee_per_gas.estimated_bytes()
+            + est_str(&self.execution_payload.base_fee_per_gas)
             + est_u64(&self.execution_payload.blob_gas_used)
             + est_u64(&self.execution_payload.excess_blob_gas)
             + est_opt_str(&self.execution_payload.fork_step);
         let blob_sidecars = self.blob_sidecars.canonical.estimated_bytes()
             + est_u64(&self.blob_sidecars.block_slot)
             + est_u64(&self.blob_sidecars.blob_index)
-            + self.blob_sidecars.blob.estimated_bytes()
+            + est_bin(&self.blob_sidecars.blob)
             + self.blob_sidecars.kzg_commitment.estimated_bytes()
             + self.blob_sidecars.kzg_proof.estimated_bytes()
             + est_opt_str(&self.blob_sidecars.fork_step);
@@ -1003,8 +1064,7 @@ impl BlockMapper for BeaconBlockMapper {
             ),
         ]
         .into_iter()
-        .max_by_key(|&(_, s)| s)
-        .unwrap_or(("blocks", 0))
+        .collect()
     }
 
     fn table_names(&self) -> Vec<&str> {
@@ -1026,7 +1086,7 @@ struct BlocksBuilder {
     state_root: BytesColumn,
     body_root: BytesColumn,
     signature: BytesColumn,
-    spec: StringBuilder,
+    spec: StringDictionaryBuilder<Int32Type>,
     graffiti: BytesColumn,
     fork_step: Option<StringBuilder>,
 }
@@ -1043,7 +1103,7 @@ impl BlocksBuilder {
             state_root: BytesColumn::new(encoding),
             body_root: BytesColumn::new(encoding),
             signature: BytesColumn::new(encoding),
-            spec: StringBuilder::new(),
+            spec: StringDictionaryBuilder::new(),
             graffiti: BytesColumn::new(encoding),
             fork_step: mk_fork_step(include_fork_step),
         }
@@ -1350,7 +1410,7 @@ struct ExecutionPayloadBuilder {
     gas_used: UInt64Builder,
     payload_timestamp: Int64Builder,
     block_hash: BytesColumn,
-    base_fee_per_gas: BytesColumn,
+    base_fee_per_gas: StringBuilder,
     blob_gas_used: UInt64Builder,
     excess_blob_gas: UInt64Builder,
     fork_step: Option<StringBuilder>,
@@ -1371,7 +1431,7 @@ impl ExecutionPayloadBuilder {
             gas_used: UInt64Builder::new(),
             payload_timestamp: Int64Builder::new(),
             block_hash: BytesColumn::new(encoding),
-            base_fee_per_gas: BytesColumn::new(encoding),
+            base_fee_per_gas: StringBuilder::new(),
             blob_gas_used: UInt64Builder::new(),
             excess_blob_gas: UInt64Builder::new(),
             fork_step: mk_fork_step(include_fork_step),
@@ -1392,7 +1452,7 @@ impl ExecutionPayloadBuilder {
             Arc::new(self.gas_used.finish()) as Arc<dyn Array>,
             Arc::new(self.payload_timestamp.finish()) as Arc<dyn Array>,
             self.block_hash.finish(),
-            self.base_fee_per_gas.finish(),
+            Arc::new(self.base_fee_per_gas.finish()) as Arc<dyn Array>,
             Arc::new(self.blob_gas_used.finish()) as Arc<dyn Array>,
             Arc::new(self.excess_blob_gas.finish()) as Arc<dyn Array>,
         ]);
@@ -1405,7 +1465,7 @@ struct BlobSidecarsBuilder {
     canonical: CanonicalBuilder,
     block_slot: UInt64Builder,
     blob_index: UInt64Builder,
-    blob: BytesColumn,
+    blob: BinaryBuilder,
     kzg_commitment: BytesColumn,
     kzg_proof: BytesColumn,
     fork_step: Option<StringBuilder>,
@@ -1417,7 +1477,7 @@ impl BlobSidecarsBuilder {
             canonical: CanonicalBuilder::with_encoding(encoding),
             block_slot: UInt64Builder::new(),
             blob_index: UInt64Builder::new(),
-            blob: BytesColumn::new(encoding),
+            blob: BinaryBuilder::new(),
             kzg_commitment: BytesColumn::new(encoding),
             kzg_proof: BytesColumn::new(encoding),
             fork_step: mk_fork_step(include_fork_step),
@@ -1429,7 +1489,7 @@ impl BlobSidecarsBuilder {
         columns.extend(vec![
             Arc::new(self.block_slot.finish()) as Arc<dyn Array>,
             Arc::new(self.blob_index.finish()) as Arc<dyn Array>,
-            self.blob.finish(),
+            Arc::new(self.blob.finish()) as Arc<dyn Array>,
             self.kzg_commitment.finish(),
             self.kzg_proof.finish(),
         ]);
@@ -1699,50 +1759,50 @@ pub(crate) mod tests {
             spec: beacon::Spec::Phase0 as i32,
             slot,
             parent_slot: slot.saturating_sub(1),
-            root: vec![0xab; 32],
-            parent_root: vec![0xcd; 32],
-            state_root: vec![0xef; 32],
+            root: vec![0xab; 32].into(),
+            parent_root: vec![0xcd; 32].into(),
+            state_root: vec![0xef; 32].into(),
             proposer_index: 42,
-            body_root: vec![0x12; 32],
-            signature: vec![0x34; 96],
+            body_root: vec![0x12; 32].into(),
+            signature: vec![0x34; 96].into(),
             timestamp: Some(prost_types::Timestamp {
                 seconds: 1700000000,
                 nanos: 0,
             }),
             body: Some(beacon::block::Body::Phase0(beacon::Phase0Body {
-                rando_reveal: vec![0x01; 96],
+                rando_reveal: vec![0x01; 96].into(),
                 eth1_data: Some(beacon::Eth1Data {
-                    deposit_root: vec![0x02; 32],
+                    deposit_root: vec![0x02; 32].into(),
                     deposit_count: 100,
-                    block_hash: vec![0x03; 32],
+                    block_hash: vec![0x03; 32].into(),
                 }),
-                graffiti: vec![0x00; 32],
+                graffiti: vec![0x00; 32].into(),
                 proposer_slashings: vec![],
                 attester_slashings: vec![],
                 attestations: vec![beacon::Attestation {
-                    aggregation_bits: vec![0xff],
+                    aggregation_bits: vec![0xff].into(),
                     data: Some(beacon::AttestationData {
                         slot: slot,
                         committee_index: 1,
-                        beacon_block_root: vec![0xaa; 32],
+                        beacon_block_root: vec![0xaa; 32].into(),
                         source: Some(beacon::Checkpoint {
                             epoch: 10,
-                            root: vec![0xbb; 32],
+                            root: vec![0xbb; 32].into(),
                         }),
                         target: Some(beacon::Checkpoint {
                             epoch: 11,
-                            root: vec![0xcc; 32],
+                            root: vec![0xcc; 32].into(),
                         }),
                     }),
-                    signature: vec![0xdd; 96],
+                    signature: vec![0xdd; 96].into(),
                 }],
                 deposits: vec![beacon::Deposit {
-                    proof: vec![vec![0x11; 32]],
+                    proof: vec![vec![0x11; 32].into()],
                     data: Some(beacon::DepositData {
-                        public_key: vec![0x22; 48],
-                        withdrawal_credentials: vec![0x33; 32],
+                        public_key: vec![0x22; 48].into(),
+                        withdrawal_credentials: vec![0x33; 32].into(),
                         gwei: 32000000000,
-                        signature: vec![0x44; 96],
+                        signature: vec![0x44; 96].into(),
                     }),
                 }],
                 voluntary_exits: vec![beacon::SignedVoluntaryExit {
@@ -1750,7 +1810,7 @@ pub(crate) mod tests {
                         epoch: 100,
                         validator_index: 5,
                     }),
-                    signature: vec![0x55; 96],
+                    signature: vec![0x55; 96].into(),
                 }],
             })),
         }
@@ -1762,24 +1822,24 @@ pub(crate) mod tests {
             spec: beacon::Spec::Deneb as i32,
             slot,
             parent_slot: slot.saturating_sub(1),
-            root: vec![0xab; 32],
-            parent_root: vec![0xcd; 32],
-            state_root: vec![0xef; 32],
+            root: vec![0xab; 32].into(),
+            parent_root: vec![0xcd; 32].into(),
+            state_root: vec![0xef; 32].into(),
             proposer_index: 42,
-            body_root: vec![0x12; 32],
-            signature: vec![0x34; 96],
+            body_root: vec![0x12; 32].into(),
+            signature: vec![0x34; 96].into(),
             timestamp: Some(prost_types::Timestamp {
                 seconds: 1700000000,
                 nanos: 0,
             }),
             body: Some(beacon::block::Body::Deneb(beacon::DenebBody {
-                rando_reveal: vec![0x01; 96],
+                rando_reveal: vec![0x01; 96].into(),
                 eth1_data: Some(beacon::Eth1Data {
-                    deposit_root: vec![0x02; 32],
+                    deposit_root: vec![0x02; 32].into(),
                     deposit_count: 200,
-                    block_hash: vec![0x03; 32],
+                    block_hash: vec![0x03; 32].into(),
                 }),
-                graffiti: vec![0x00; 32],
+                graffiti: vec![0x00; 32].into(),
                 proposer_slashings: vec![],
                 attester_slashings: vec![],
                 attestations: vec![],
@@ -1787,12 +1847,12 @@ pub(crate) mod tests {
                 voluntary_exits: vec![],
                 sync_aggregate: None,
                 execution_payload: Some(beacon::DenebExecutionPayload {
-                    parent_hash: vec![0xa1; 32],
-                    fee_recipient: vec![0xa2; 20],
-                    state_root: vec![0xa3; 32],
-                    receipts_root: vec![0xa4; 32],
-                    logs_bloom: vec![0x00; 256],
-                    prev_randao: vec![0xa5; 32],
+                    parent_hash: vec![0xa1; 32].into(),
+                    fee_recipient: vec![0xa2; 20].into(),
+                    state_root: vec![0xa3; 32].into(),
+                    receipts_root: vec![0xa4; 32].into(),
+                    logs_bloom: vec![0x00; 256].into(),
+                    prev_randao: vec![0xa5; 32].into(),
                     block_number: 12345,
                     gas_limit: 30000000,
                     gas_used: 15000000,
@@ -1800,9 +1860,9 @@ pub(crate) mod tests {
                         seconds: 1700000000,
                         nanos: 0,
                     }),
-                    extra_data: vec![],
-                    base_fee_per_gas: vec![0x01],
-                    block_hash: vec![0xa6; 32],
+                    extra_data: vec![].into(),
+                    base_fee_per_gas: vec![0x01].into(),
+                    block_hash: vec![0xa6; 32].into(),
                     transactions: vec![],
                     withdrawals: test_withdrawals(),
                     blob_gas_used: 131072,
@@ -1812,9 +1872,9 @@ pub(crate) mod tests {
                 blob_kzg_commitments: vec![],
                 embedded_blobs: vec![beacon::Blob {
                     index: 0,
-                    blob: vec![0xff; 32],
-                    kzg_commitment: vec![0xee; 48],
-                    kzg_proof: vec![0xdd; 48],
+                    blob: vec![0xff; 32].into(),
+                    kzg_commitment: vec![0xee; 48].into(),
+                    kzg_proof: vec![0xdd; 48].into(),
                     kzg_commitment_inclusion_proof: vec![],
                 }],
             })),
@@ -1826,13 +1886,13 @@ pub(crate) mod tests {
             beacon::Withdrawal {
                 withdrawal_index: 1_000,
                 validator_index: 7,
-                address: vec![0xb1; 20],
+                address: vec![0xb1; 20].into(),
                 gwei: 12_345,
             },
             beacon::Withdrawal {
                 withdrawal_index: 1_001,
                 validator_index: 8,
-                address: vec![0xb2; 20],
+                address: vec![0xb2; 20].into(),
                 gwei: 32_000_000_000,
             },
         ]
@@ -1842,10 +1902,10 @@ pub(crate) mod tests {
         beacon::SignedBlsToExecutionChange {
             message: Some(beacon::BlsToExecutionChange {
                 validator_index: 9,
-                from_bls_pub_key: vec![0xc1; 48],
-                to_execution_address: vec![0xc2; 20],
+                from_bls_pub_key: vec![0xc1; 48].into(),
+                to_execution_address: vec![0xc2; 20].into(),
             }),
-            signature: vec![0xc3; 96],
+            signature: vec![0xc3; 96].into(),
         }
     }
 
@@ -1860,27 +1920,27 @@ pub(crate) mod tests {
             body: Some(beacon::block::Body::Electra(beacon::ElectraBody {
                 rando_reveal: deneb.rando_reveal,
                 eth1_data: deneb.eth1_data,
-                graffiti: b"electra graffiti".to_vec(),
+                graffiti: b"electra graffiti".to_vec().into(),
                 proposer_slashings: vec![],
                 attester_slashings: vec![],
                 attestations: vec![beacon::ElectraAttestation {
-                    aggregation_bits: vec![0x0f],
+                    aggregation_bits: vec![0x0f].into(),
                     data: Some(beacon::AttestationData {
                         slot,
                         committee_index: 0,
-                        beacon_block_root: vec![0xaa; 32],
+                        beacon_block_root: vec![0xaa; 32].into(),
                         source: Some(beacon::Checkpoint {
                             epoch: 20,
-                            root: vec![0xbb; 32],
+                            root: vec![0xbb; 32].into(),
                         }),
                         target: Some(beacon::Checkpoint {
                             epoch: 21,
-                            root: vec![0xcc; 32],
+                            root: vec![0xcc; 32].into(),
                         }),
                     }),
-                    signature: vec![0xdd; 96],
+                    signature: vec![0xdd; 96].into(),
                     // Committees 0 and 9 of a 64-bit bitvector.
-                    committee_bits: vec![0x01, 0x02, 0, 0, 0, 0, 0, 0],
+                    committee_bits: vec![0x01, 0x02, 0, 0, 0, 0, 0, 0].into(),
                 }],
                 deposits: vec![],
                 voluntary_exits: vec![],
@@ -1890,21 +1950,21 @@ pub(crate) mod tests {
                 blob_kzg_commitments: vec![],
                 execution_requests: Some(beacon::ExecutionRequest {
                     deposits: vec![beacon::DepositRequest {
-                        pub_key: vec![0xd1; 48],
-                        withdrawal_credentials: vec![0xd2; 32],
+                        pub_key: vec![0xd1; 48].into(),
+                        withdrawal_credentials: vec![0xd2; 32].into(),
                         amount: 32_000_000_000,
-                        signature: vec![0xd3; 96],
+                        signature: vec![0xd3; 96].into(),
                         index: 2_000_000,
                     }],
                     withdrawals: vec![beacon::WithdrawalRequest {
-                        source_address: vec![0xe1; 20],
-                        validator_pub_key: vec![0xe2; 48],
+                        source_address: vec![0xe1; 20].into(),
+                        validator_pub_key: vec![0xe2; 48].into(),
                         amount: 0,
                     }],
                     consolidations: vec![beacon::ConsolidationRequest {
-                        source_address: vec![0xf1; 20],
-                        source_pub_key: vec![0xf2; 48],
-                        target_pub_key: vec![0xf3; 48],
+                        source_address: vec![0xf1; 20].into(),
+                        source_pub_key: vec![0xf2; 48].into(),
+                        target_pub_key: vec![0xf3; 48].into(),
                     }],
                 }),
                 embedded_blobs: vec![],
@@ -1922,9 +1982,9 @@ pub(crate) mod tests {
     }
 
     fn strings(batch: &RecordBatch, column: &str) -> Vec<Option<String>> {
-        let array = batch
-            .column_by_name(column)
-            .unwrap_or_else(|| panic!("missing column {column}"))
+        let original = batch.column_by_name(column).unwrap();
+        let cast = arrow::compute::cast(original, &arrow::datatypes::DataType::Utf8).unwrap();
+        let array = cast
             .as_any()
             .downcast_ref::<StringArray>()
             .unwrap_or_else(|| panic!("{column} is not Utf8"));
@@ -2003,12 +2063,12 @@ pub(crate) mod tests {
             spec: beacon::Spec::Phase0 as i32,
             slot: 0,
             parent_slot: 0,
-            root: vec![],
-            parent_root: vec![],
-            state_root: vec![],
+            root: vec![].into(),
+            parent_root: vec![].into(),
+            state_root: vec![].into(),
             proposer_index: 0,
-            body_root: vec![],
-            signature: vec![],
+            body_root: vec![].into(),
+            signature: vec![].into(),
             timestamp: None,
             body: None,
         };
@@ -2071,7 +2131,7 @@ pub(crate) mod tests {
             body: Some(beacon::block::Body::Capella(beacon::CapellaBody {
                 rando_reveal: deneb.rando_reveal,
                 eth1_data: deneb.eth1_data,
-                graffiti: b"capella".to_vec(),
+                graffiti: b"capella".to_vec().into(),
                 proposer_slashings: vec![],
                 attester_slashings: vec![],
                 attestations: vec![],
@@ -2090,7 +2150,11 @@ pub(crate) mod tests {
                     gas_used: payload.gas_used,
                     timestamp: payload.timestamp,
                     extra_data: payload.extra_data,
-                    base_fee_per_gas: payload.base_fee_per_gas,
+                    base_fee_per_gas: {
+                        let mut bytes = vec![0; 32];
+                        bytes[0] = 1;
+                        bytes.into()
+                    },
                     block_hash: payload.block_hash,
                     transactions: vec![],
                     withdrawals: test_withdrawals(),
@@ -2254,7 +2318,7 @@ pub(crate) mod tests {
         let indexed = |indices: Vec<u64>| beacon::IndexedAttestation {
             attesting_indices: indices,
             data: None,
-            signature: vec![],
+            signature: vec![].into(),
         };
         let mut block = make_test_block(100);
         let Some(beacon::block::Body::Phase0(body)) = block.body.as_mut() else {
@@ -2415,3 +2479,7 @@ pub(crate) mod tests {
         assert_ne!(parent_id.value(0), "0x8888");
     }
 }
+
+#[cfg(test)]
+#[path = "value_tests.rs"]
+mod value_tests;

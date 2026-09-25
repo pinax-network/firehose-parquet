@@ -47,16 +47,13 @@ impl FirehoseClient {
 
     async fn finalized_anchor_inner(&self) -> Result<FinalizedAnchor> {
         let channel = self.fetch_channel().await?;
-        let mut client = firehose::stream_client::StreamClient::new(channel)
-            .accept_compressed(tonic::codec::CompressionEncoding::Gzip)
-            .max_decoding_message_size(128 * 1024 * 1024);
-        let mut request = tonic::Request::new(firehose::Request {
+        let mut client = self.stream_client(channel);
+        let request = tonic::Request::new(firehose::Request {
             start_block_num: -1,
             stop_block_num: 0,
             final_blocks_only: false,
             ..Default::default()
         });
-        self.auth.apply(&mut request);
         let mut head = client
             .blocks(request)
             .await
@@ -101,13 +98,12 @@ impl FirehoseClient {
             candidate.context("near-head response budget exhausted without a canonical witness")?;
         let signed_candidate = i64::try_from(candidate)
             .context("finalized candidate exceeds signed stream start range")?;
-        let mut request = tonic::Request::new(firehose::Request {
+        let request = tonic::Request::new(firehose::Request {
             start_block_num: signed_candidate,
             stop_block_num: candidate,
             final_blocks_only: true,
             ..Default::default()
         });
-        self.auth.apply(&mut request);
         let mut proof = client
             .blocks(request)
             .await
