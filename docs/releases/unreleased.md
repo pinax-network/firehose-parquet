@@ -4,6 +4,25 @@ Changes merged since the last release. Fold this file into `docs/releases/vX.Y.Z
 
 ## Breaking changes
 
+### Metrics names, labels and readiness reflect actual state (#475)
+
+Counter names now emit one `_total` suffix; dashboards using accidental
+`_total_total` names must migrate. `files_written_total` drops its unbounded
+`partition` label. The cumulative-average rate gauges and always-zero Solana
+`backfill_*` gauges are removed; use counter `rate()` expressions instead.
+Separate mapper, writer and initial timestamp-bootstrap buffers are exposed.
+The cursor gauge starts from the loaded checkpoint without incrementing save
+counters. See [the metrics table](../../README.md#available-metrics).
+
+`/ready` returns 503 before the first valid stream message, during reconnects,
+after the stream ends and after `--metrics-stale-after-secs` (default 120) without
+a valid message. `/health` remains live through reconnects and final file/cursor
+commit, then reports stopped when the pipeline returns. New time metrics describe
+message freshness and block timestamp age; they do not claim remote head lag.
+The Rust `metrics::serve` API now requires the matching `PipelineMetrics` handle
+between its registry and port arguments. Custom stream/pipeline integrations
+must retain the respective activity guards through their actual lifetimes.
+
 ### Invalid timestamps and missing streamed identities now fail (#476)
 
 Malformed timestamp seconds or nanos now return errors before canonical rows or
