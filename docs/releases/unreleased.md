@@ -44,6 +44,16 @@ Changes merged since the last release. Fold this file into `docs/releases/vX.Y.Z
 
 ## Breaking changes
 
+### Tron contract and receipt fields (#509)
+
+Adds `contracts` and `internal_call_values` child tables, original transaction
+positions, block-wide log indices, all receipt fee/usage fields and raw receipt
+error bytes. Common transfer/smart-contract parameters are decoded while every
+raw Any payload is retained. Empty contract lists now yield null for the existing
+first-contract type projection. New schemas/inventories require a new output root
+or explicit migration; verification roots change. See [the exact field semantics
+and qualification status](../audit/509-tron-contract-fields.md).
+
 ### Shared AWS CLI structures (#527)
 
 Rust CLI argument structures now contain `aws: AwsArgs`; downstream struct
