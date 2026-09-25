@@ -14,6 +14,7 @@ pub(crate) mod merge_journal;
 pub mod metrics;
 pub mod networks;
 pub mod networks_generated;
+pub mod recovery;
 pub mod rollup;
 pub mod s3;
 pub mod traits;

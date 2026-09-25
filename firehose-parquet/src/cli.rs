@@ -449,6 +449,9 @@ pub struct BuildArgs {
 /// Subcommands shared by all binaries.
 #[derive(clap::Subcommand, Debug)]
 pub enum Commands {
+    /// Inspect recovery state or explicitly release a provider-quiescent S3 owner.
+    #[command(subcommand)]
+    Recovery(crate::recovery::RecoveryCommands),
     /// Generate shell completions for the given shell
     Completions {
         /// Shell to generate completions for
@@ -944,10 +947,12 @@ verify_runs/) are skipped. A partition whose parts have different columns
 (names, types, nullability, or order) is left untouched and listed in the
 summary, and merge exits non-zero.
 
-Each partition merge is journaled in _fireparq_merge.json, so a merge interrupted
-by a crash is finished or undone by the next run instead of leaving duplicate
-rows. One merge runs per path at a time: merge holds .fireparq-merge.lock there
-and fails right away if another merge holds it.
+Each partition merge is journaled in _fireparq_merge.json. Local interrupted
+merges recover under the common directory guard. S3 mutations hold a persistent
+bucket-wide owner with no expiry or automatic takeover. After a remote error,
+recovery requires provider-confirmed request quiescence and explicit release of
+the exact owner. Legacy S3 journals using the former expiring lock are refused.
+Use recovery status to inspect ownership; process exit alone is not remote drain.
 
 The path must exist locally or be an explicit s3://bucket/... URI. Unlike scan and
 inspect, merge never falls back to s3://$S3_BUCKET/<path> for a missing local path.

@@ -175,3 +175,66 @@ future all-table ingestion journal. In particular, a remote mutation can have
 completed after its acknowledgement was lost; neither an ordinary retry nor a
 process-stop assertion proves that a delayed request cannot reappear after
 recovery. No production S3 qualification or bucket writes were performed.
+
+## Status and explicit remote release
+
+`fireparq recovery status <existing-local-root-or-s3-uri>` reports ownership plus
+state/pending incarnation and revision summaries without exposing record payloads,
+opaque object versions, cursor strings or evidence references. Remote status is
+GET-only and never creates a canary or owner. Local status requires an existing
+root and an available OS guard; a busy/unsupported scope is an error and no
+control record is changed or created.
+
+An abandoned remote owner has no expiry. First inspect the exact owner UUID and
+generation with status. Establish that the prior writer cannot send more requests
+and obtain provider confirmation that all previously sent PUT/DELETE requests
+have completed or are permanently prevented from completing. A process exit,
+revoked *future* access alone, empty listing, elapsed time, or a request timeout
+is not proof that an earlier accepted request has drained. If that provider
+cannot supply conclusive quiescence, generic plain-glob recovery remains blocked;
+do not use an invented evidence reference as an override.
+
+Only with that evidence, an operator can run:
+
+```text
+fireparq recovery release s3://bucket/dataset \
+  --expected-owner <UUID-from-status> \
+  --expected-generation <generation-from-status> \
+  --stopped-writer-evidence <non-secret-process-evidence-reference> \
+  --provider-quiescence-evidence <non-secret-provider-confirmation-reference>
+```
+
+These are explicit operator assertions, not automatic verification of provider
+claims. Both references are bounded and hashed before persistence. The exact
+identity/generation is checked again and release is conditional; it cannot release
+a newer owner. This changes only the owner record to `Released`, retaining its
+key and generation. It neither rolls back data nor restores a cursor, and does
+not make existing random-name ingestion output safe to replay. Local owner
+release is refused: stop its process and let the OS release the handles.
+
+Remote status needs `GetObject` on the owner and selected state/pending keys.
+Mutating commands additionally need `GetObject`/`PutObject` on the fixed root
+`.fireparq-owner-v1.json`, and `GetObject`/`PutObject`/`DeleteObject` under the
+random `.fireparq-owner-probes-v1/` prefix, plus their ordinary data permissions.
+Object version/ETag evidence and correct conditional Create/Update semantics are
+mandatory. Listing operations need the corresponding listing permission. Keys
+are never silently adopted from an incompatible version. See
+[468-s3-ownership.md](468-s3-ownership.md) for the exact probe/record protocol and
+real local HTTP adapter tests; no production provider has been live-qualified.
+
+## Current boundary
+
+Build acquires resolved output and cursor scopes before loading the cursor;
+partitions-build acquires the chain output before reading its index or sibling
+cursor. Their write/checkpoint boundaries revalidate local paths, and a successful
+run explicitly releases remote ownership. Error/cancellation drops retain remote
+ownership. Index writes use the shared exact-bucket, zero-retry S3 constructor.
+Real subprocess tests prove build, partitions-build, merge, truncate and rollup
+conflict with a held descendant owner before reading private cursor bytes or
+publishing output; an external cursor conflict leaves fresh output absent.
+
+Protected ingestion is still inaccessible. State/control primitives and common
+ownership are prerequisites only. Deterministic owned filenames, complete
+all-table journals, accepted-event frontiers (including empty-output events and
+routing anchors), output checkpoint authority, startup rollback/roll-forward and
+legacy migration rules remain the next stages. Issue #468 remains open.
