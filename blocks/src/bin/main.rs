@@ -5685,7 +5685,7 @@ mod tests {
         let help = command_help(&["fireparq", "partitions", "build", "--help"]);
         assert!(!help.contains("--chain"));
         assert!(help.contains("chainName"));
-        assert!(help.contains("Missing blocks are skipped automatically"));
+        assert!(help.contains("Time spans traverse exact finalized ancestry"));
         assert!(!help.contains("--skip-missing-blocks"));
     }
 
