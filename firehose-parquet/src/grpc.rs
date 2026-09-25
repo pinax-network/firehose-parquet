@@ -22,6 +22,89 @@ struct EndpointKeepaliveSettings {
     keep_alive_while_idle: bool,
 }
 
+/// Returned by [`FirehoseClient::fetch_block_identity`] when a fetch does not finish within
+/// its wait timeout.
+///
+/// Probe callers must retry it as a transient failure, never treat it as a missing block: on
+/// a slow endpoint that would make sparse probing skip real blocks.
+#[derive(Debug, thiserror::Error)]
+#[error("fetching block {block_num} timed out after {timeout:?}")]
+pub struct FetchTimeoutError {
+    pub block_num: u64,
+    pub timeout: Duration,
+}
+
+/// How a caller should treat a failed single-block fetch (see [`classify_fetch_error`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FetchErrorKind {
+    /// The fetch did not finish in time; retry it.
+    Timeout,
+    /// The endpoint has no block at this number, e.g. a skipped Solana slot.
+    NotFound,
+    /// Retrying cannot help: authentication, permissions, or an invalid request.
+    Fatal,
+    /// An unavailable endpoint or dropped connection; live callers may retry later.
+    Transient,
+    /// An unrecognized failure; bounded retries must surface it rather than infer absence.
+    Unexpected,
+}
+
+/// Classify a [`FirehoseClient::fetch_block_identity`] error, looking through any context.
+pub fn classify_fetch_error(error: &anyhow::Error) -> FetchErrorKind {
+    use tonic::Code;
+
+    for cause in error.chain() {
+        if cause.is::<FetchTimeoutError>() {
+            return FetchErrorKind::Timeout;
+        }
+        if let Some(status) = cause.downcast_ref::<tonic::Status>() {
+            match status.code() {
+                Code::NotFound => return FetchErrorKind::NotFound,
+                Code::DeadlineExceeded => return FetchErrorKind::Timeout,
+                Code::Unauthenticated
+                | Code::PermissionDenied
+                | Code::InvalidArgument
+                | Code::FailedPrecondition
+                | Code::OutOfRange
+                | Code::Unimplemented => return FetchErrorKind::Fatal,
+                // Some proxies preserve this precise upstream missing-block
+                // status in an Unknown response. Do not infer absence from
+                // arbitrary error text: storage/auth failures can mention a
+                // missing block file without establishing a skipped slot.
+                Code::Unknown
+                    if status.message()
+                        == "rpc error: code = NotFound desc = block not found in files" =>
+                {
+                    return FetchErrorKind::NotFound;
+                }
+                Code::Unavailable | Code::Cancelled | Code::ResourceExhausted => {
+                    return FetchErrorKind::Transient;
+                }
+                _ => return FetchErrorKind::Unexpected,
+            }
+        }
+        if cause.is::<tonic::transport::Error>() {
+            return FetchErrorKind::Transient;
+        }
+        if let Some(error) = cause.downcast_ref::<std::io::Error>() {
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::ConnectionRefused
+                    | std::io::ErrorKind::ConnectionReset
+                    | std::io::ErrorKind::ConnectionAborted
+                    | std::io::ErrorKind::NotConnected
+                    | std::io::ErrorKind::BrokenPipe
+                    | std::io::ErrorKind::TimedOut
+                    | std::io::ErrorKind::Interrupted
+            ) {
+                return FetchErrorKind::Transient;
+            }
+        }
+    }
+
+    FetchErrorKind::Unexpected
+}
+
 /// Information about the Firehose endpoint, returned by the `EndpointInfo/Info` RPC.
 #[derive(Debug, Clone)]
 pub struct EndpointInfo {
@@ -39,6 +122,9 @@ pub struct FirehoseClient {
     config: Config,
     auth: AuthMetadata,
     metrics: Option<PipelineMetrics>,
+    /// Channel shared by single-block fetches. tonic multiplexes requests over it and
+    /// reconnects when the connection drops, so sparse probes skip a TCP/TLS handshake each.
+    fetch_channel: tokio::sync::OnceCell<Channel>,
 }
 
 /// gRPC authentication metadata, parsed once from the configured API key and
@@ -98,6 +184,7 @@ impl FirehoseClient {
             config,
             auth,
             metrics: None,
+            fetch_channel: tokio::sync::OnceCell::new(),
         })
     }
 
@@ -205,13 +292,26 @@ impl FirehoseClient {
         Ok(info)
     }
 
+    /// Channel for single-block fetches, connected on first use and reused afterwards.
+    async fn fetch_channel(&self) -> Result<Channel> {
+        self.fetch_channel
+            .get_or_try_init(|| self.connect_with_log(false))
+            .await
+            .cloned()
+    }
+
+    /// Fetch one block's identity with the `Fetch/Block` RPC.
+    ///
+    /// Returns [`FetchTimeoutError`] when `wait_timeout` elapses. Some endpoints answer a
+    /// request past the chain head with their head block, so callers should compare the
+    /// returned `block_num` with the requested one.
     pub async fn fetch_block_identity(
         &self,
         block_num: u64,
         wait_timeout: Option<Duration>,
     ) -> Result<Option<BlockIdentity>> {
         let fetch = async {
-            let channel = self.connect_with_log(false).await?;
+            let channel = self.fetch_channel().await?;
             let mut client = firehose::fetch_client::FetchClient::new(channel)
                 .accept_compressed(tonic::codec::CompressionEncoding::Gzip)
                 .max_decoding_message_size(128 * 1024 * 1024);
@@ -242,7 +342,7 @@ impl FirehoseClient {
         match wait_timeout {
             Some(timeout) => match tokio::time::timeout(timeout, fetch).await {
                 Ok(result) => result,
-                Err(_) => Ok(None),
+                Err(_) => Err(FetchTimeoutError { block_num, timeout }.into()),
             },
             None => fetch.await,
         }
@@ -1397,5 +1497,251 @@ mod tests {
         let error = err.to_string();
         assert!(error.contains("unavailable or unhealthy"));
         assert!(error.contains(&endpoint));
+    }
+
+    #[test]
+    fn test_classify_fetch_error() {
+        let timeout = || -> anyhow::Error {
+            FetchTimeoutError {
+                block_num: 7,
+                timeout: Duration::from_secs(5),
+            }
+            .into()
+        };
+        let cases: Vec<(anyhow::Error, FetchErrorKind)> = vec![
+            (timeout(), FetchErrorKind::Timeout),
+            (
+                timeout().context("probing partition boundary"),
+                FetchErrorKind::Timeout,
+            ),
+            (
+                tonic::Status::deadline_exceeded("deadline").into(),
+                FetchErrorKind::Timeout,
+            ),
+            (
+                tonic::Status::not_found("block 7 not found").into(),
+                FetchErrorKind::NotFound,
+            ),
+            // Proxy-wrapped upstream NotFound, as returned for skipped Solana slots.
+            (
+                tonic::Status::unknown(
+                    "rpc error: code = NotFound desc = block not found in files",
+                )
+                .into(),
+                FetchErrorKind::NotFound,
+            ),
+            (
+                tonic::Status::unauthenticated("bad token").into(),
+                FetchErrorKind::Fatal,
+            ),
+            (
+                tonic::Status::permission_denied("no access").into(),
+                FetchErrorKind::Fatal,
+            ),
+            (
+                tonic::Status::unavailable("service is currently unavailable").into(),
+                FetchErrorKind::Transient,
+            ),
+            (
+                std::io::Error::new(
+                    std::io::ErrorKind::ConnectionReset,
+                    "connection reset by peer",
+                )
+                .into(),
+                FetchErrorKind::Transient,
+            ),
+            (
+                tonic::Status::internal("block index not found; storage failure").into(),
+                FetchErrorKind::Unexpected,
+            ),
+            (
+                tonic::Status::unavailable(
+                    "rpc error: code = NotFound desc = block not found in files",
+                )
+                .into(),
+                FetchErrorKind::Transient,
+            ),
+            (
+                tonic::Status::unknown("upstream block database not found").into(),
+                FetchErrorKind::Unexpected,
+            ),
+            (
+                anyhow::anyhow!("rpc error: code = NotFound desc = block not found in files"),
+                FetchErrorKind::Unexpected,
+            ),
+            (
+                tonic::Status::unauthenticated("timeout looking up block; token not found").into(),
+                FetchErrorKind::Fatal,
+            ),
+        ];
+
+        for (error, expected) in cases {
+            assert_eq!(classify_fetch_error(&error), expected, "{error:#}");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_fetch_block_identity_times_out_with_typed_error_and_reuses_channel() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+
+        // A server that accepts TCP connections but never answers, like a stalled endpoint.
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let accepted = Arc::new(AtomicUsize::new(0));
+        let accept_task = tokio::spawn({
+            let accepted = Arc::clone(&accepted);
+            async move {
+                let mut held = Vec::new();
+                while let Ok((socket, _)) = listener.accept().await {
+                    accepted.fetch_add(1, Ordering::SeqCst);
+                    held.push(socket);
+                }
+            }
+        });
+
+        let client = FirehoseClient::new(test_config(&format!("http://127.0.0.1:{port}"))).unwrap();
+        for block_num in [7, 8] {
+            let err = client
+                .fetch_block_identity(block_num, Some(Duration::from_millis(300)))
+                .await
+                .expect_err("a stalled endpoint must not look like a missing block");
+            assert_eq!(
+                classify_fetch_error(&err),
+                FetchErrorKind::Timeout,
+                "{err:#}"
+            );
+            let timeout = err
+                .downcast_ref::<FetchTimeoutError>()
+                .expect("typed timeout error");
+            assert_eq!(timeout.block_num, block_num);
+        }
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(
+            accepted.load(Ordering::SeqCst),
+            1,
+            "both probes should share one connection"
+        );
+        accept_task.abort();
+    }
+
+    #[derive(Clone)]
+    struct SuccessfulFetchService;
+
+    impl tonic::server::UnaryService<firehose::SingleBlockRequest> for SuccessfulFetchService {
+        type Response = firehose::SingleBlockResponse;
+        type Future = tonic::codegen::BoxFuture<tonic::Response<Self::Response>, tonic::Status>;
+
+        fn call(&mut self, request: tonic::Request<firehose::SingleBlockRequest>) -> Self::Future {
+            assert_eq!(request.metadata().get("x-api-key").unwrap(), "test-key");
+            assert_eq!(
+                request.metadata().get("authorization").unwrap(),
+                "Bearer test-token"
+            );
+            Box::pin(async move {
+                let Some(firehose::single_block_request::Reference::BlockNumber(number)) =
+                    request.into_inner().reference
+                else {
+                    panic!("expected number reference")
+                };
+                if number.num == 9 {
+                    return std::future::pending().await;
+                }
+                Ok(tonic::Response::new(firehose::SingleBlockResponse {
+                    block: None,
+                    metadata: Some(firehose::BlockMetadata {
+                        num: number.num,
+                        id: format!("block-{}", number.num),
+                        time: Some(prost_types::Timestamp {
+                            seconds: 1_700_000_000,
+                            nanos: 0,
+                        }),
+                        ..Default::default()
+                    }),
+                }))
+            })
+        }
+    }
+
+    impl tonic::server::NamedService for SuccessfulFetchService {
+        const NAME: &'static str = "sf.firehose.v2.Fetch";
+    }
+
+    impl tonic::codegen::Service<tonic::codegen::http::Request<tonic::body::Body>>
+        for SuccessfulFetchService
+    {
+        type Response = tonic::codegen::http::Response<tonic::body::Body>;
+        type Error = std::convert::Infallible;
+        type Future = tonic::codegen::BoxFuture<Self::Response, Self::Error>;
+
+        fn poll_ready(
+            &mut self,
+            _: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Result<(), Self::Error>> {
+            std::task::Poll::Ready(Ok(()))
+        }
+
+        fn call(
+            &mut self,
+            request: tonic::codegen::http::Request<tonic::body::Body>,
+        ) -> Self::Future {
+            Box::pin(async {
+                let mut grpc = tonic::server::Grpc::new(tonic_prost::ProstCodec::default());
+                Ok(grpc.unary(SuccessfulFetchService, request).await)
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn test_successful_fetches_and_timeout_recovery_share_one_connection() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let accepted = Arc::new(AtomicUsize::new(0));
+        let incoming = futures::stream::unfold(
+            (listener, Arc::clone(&accepted)),
+            |(listener, accepted)| async {
+                let socket = listener.accept().await.map(|(socket, _)| {
+                    accepted.fetch_add(1, Ordering::SeqCst);
+                    socket
+                });
+                Some((socket, (listener, accepted)))
+            },
+        );
+        let server = tokio::spawn(async {
+            tonic::transport::Server::builder()
+                .add_service(SuccessfulFetchService)
+                .serve_with_incoming(incoming)
+                .await
+                .unwrap();
+        });
+        let mut config = test_config(&endpoint);
+        config.api_key = Some("test-key".into());
+        config.jwt_token = Some("test-token".into());
+        let client = FirehoseClient::new(config).unwrap();
+        for block_num in [7, 8, 9, 10] {
+            let response = client
+                .fetch_block_identity(block_num, Some(Duration::from_millis(300)))
+                .await;
+            if block_num == 9 {
+                assert_eq!(
+                    classify_fetch_error(&response.unwrap_err()),
+                    FetchErrorKind::Timeout
+                );
+            } else {
+                let block = response.unwrap().unwrap();
+                assert_eq!(block.block_num, block_num);
+                assert_eq!(block.block_id, format!("block-{block_num}"));
+            }
+        }
+        assert_eq!(
+            accepted.load(Ordering::SeqCst),
+            1,
+            "successful requests and a cancelled RPC must retain the cached channel"
+        );
+        server.abort();
     }
 }

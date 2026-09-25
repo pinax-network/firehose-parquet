@@ -15,7 +15,7 @@ use firehose_parquet::cli::{
 use firehose_parquet::config::{BlockMetadata, Compression, Config, Partition};
 use firehose_parquet::cursor::{CursorLocation, CursorState};
 use firehose_parquet::encode::EncodeBytes;
-use firehose_parquet::grpc::{EndpointInfo, FirehoseClient};
+use firehose_parquet::grpc::{classify_fetch_error, EndpointInfo, FetchErrorKind, FirehoseClient};
 use firehose_parquet::metrics;
 use firehose_parquet::networks::{resolve_network_endpoint, EndpointSource};
 use firehose_parquet::traits::{decode_id_bytes, fork_step_name, BlockIdentity, BlockMapper};
@@ -1702,7 +1702,7 @@ async fn run_partitions_build(
                 .unwrap_or(effective_start_block);
             let frontier_context =
                 live_block_range_frontier_log_context(&rows, frontier, block_range_size);
-            let Some(maybe_latest_available) = await_live_interruptible(
+            let maybe_latest_available = match await_live_probe_or_backoff(
                 &shutdown,
                 &shutdown_notify,
                 locate_live_block_range_latest_available_block(
@@ -1712,28 +1712,35 @@ async fn run_partitions_build(
                     skip_missing_blocks,
                     &probe_counter,
                 ),
+                frontier,
+                poll_interval,
+                "polling live block-range frontier",
             )
             .await?
-            else {
-                info!(
-                    frontier,
-                    next_partition_start = frontier_context.next_partition_start,
-                    next_partition = %frontier_context.next_partition,
-                    latest_completed_partition = frontier_context
-                        .latest_completed_partition
-                        .as_deref()
-                        .unwrap_or("none"),
-                    latest_completed_start_time = frontier_context
-                        .latest_completed_start_time
-                        .as_deref()
-                        .unwrap_or("unavailable"),
-                    latest_completed_end_time = frontier_context
-                        .latest_completed_end_time
-                        .as_deref()
-                        .unwrap_or("unavailable"),
-                    "live block-range build interrupted during frontier probe"
-                );
-                break;
+            {
+                LiveProbeOutcome::Ready(value) => value,
+                LiveProbeOutcome::RetryAfterBackoff => continue,
+                LiveProbeOutcome::Interrupted => {
+                    info!(
+                        frontier,
+                        next_partition_start = frontier_context.next_partition_start,
+                        next_partition = %frontier_context.next_partition,
+                        latest_completed_partition = frontier_context
+                            .latest_completed_partition
+                            .as_deref()
+                            .unwrap_or("none"),
+                        latest_completed_start_time = frontier_context
+                            .latest_completed_start_time
+                            .as_deref()
+                            .unwrap_or("unavailable"),
+                        latest_completed_end_time = frontier_context
+                            .latest_completed_end_time
+                            .as_deref()
+                            .unwrap_or("unavailable"),
+                        "live block-range build interrupted during frontier probe"
+                    );
+                    break;
+                }
             };
 
             let Some(latest_available) = maybe_latest_available else {
@@ -1756,6 +1763,9 @@ async fn run_partitions_build(
                         .unwrap_or("unavailable"),
                     "no new finalized blocks available yet for block-range build; polling again"
                 );
+                if !wait_for_next_live_poll(&shutdown, &shutdown_notify, poll_interval).await? {
+                    break;
+                }
                 continue;
             };
 
@@ -1786,6 +1796,9 @@ async fn run_partitions_build(
                     next_partition_end = frontier.saturating_add(block_range_size),
                     "latest finalized block has not completed the next block-range partition yet"
                 );
+                if !wait_for_next_live_poll(&shutdown, &shutdown_notify, poll_interval).await? {
+                    break;
+                }
                 continue;
             }
 
@@ -1941,6 +1954,9 @@ async fn run_partitions_build(
                         &probe_counter,
                         overwrite,
                     )?;
+                }
+                if !wait_for_next_live_poll(&shutdown, &shutdown_notify, poll_interval).await? {
+                    break;
                 }
                 continue;
             };
@@ -2633,6 +2649,76 @@ const PARTITIONS_PROBE_FETCH_MAX_ATTEMPTS: usize = 4;
 const PARTITIONS_PROBE_FETCH_INITIAL_BACKOFF: Duration = Duration::from_millis(250);
 const PARTITIONS_PROBE_SKIP_MISSING_BLOCK_SCAN_LIMIT: u64 = 16;
 const PARTITIONS_PROBE_TIMESTAMP_EXPONENTIAL_MAX_JUMP: u64 = 65_536;
+/// How far past a probed number a run of missing blocks (e.g. skipped Solana slots) is
+/// followed before returning an explicit search-budget error, never a head result.
+const PARTITIONS_PROBE_MISSING_RUN_SCAN_LIMIT: u64 = 65_536;
+
+/// How far past a probed number to look for an available block.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ProbeScan {
+    /// Numbers probed one by one after the requested one.
+    max_skip_blocks: u64,
+    /// How far a longer run of missing blocks is followed (0 disables it).
+    missing_run_limit: u64,
+}
+
+impl ProbeScan {
+    /// Regular probes: skip missing blocks (and follow long runs of them) only when allowed.
+    fn standard(skip_missing_blocks: bool) -> Self {
+        if skip_missing_blocks {
+            Self {
+                max_skip_blocks: PARTITIONS_PROBE_SKIP_MISSING_BLOCK_SCAN_LIMIT,
+                missing_run_limit: PARTITIONS_PROBE_MISSING_RUN_SCAN_LIMIT,
+            }
+        } else {
+            Self::bounded(0)
+        }
+    }
+
+    /// A linear scan of `max_skip_blocks` numbers that does not follow longer runs.
+    fn bounded(max_skip_blocks: u64) -> Self {
+        Self {
+            max_skip_blocks,
+            missing_run_limit: 0,
+        }
+    }
+}
+
+/// Retry settings for one probe fetch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ProbeRetryPolicy {
+    max_attempts: usize,
+    /// Attempts before a "not found" answer is accepted as a missing block.
+    missing_attempts: usize,
+    initial_backoff: Duration,
+}
+
+impl ProbeRetryPolicy {
+    /// Default policy. Without `confirm_missing`, a "not found" answer is accepted at once,
+    /// which is used once a run of missing blocks is already established.
+    fn new(confirm_missing: bool) -> Self {
+        Self {
+            max_attempts: PARTITIONS_PROBE_FETCH_MAX_ATTEMPTS,
+            missing_attempts: if confirm_missing {
+                PARTITIONS_PROBE_FETCH_MAX_ATTEMPTS
+            } else {
+                1
+            },
+            initial_backoff: PARTITIONS_PROBE_FETCH_INITIAL_BACKOFF,
+        }
+    }
+}
+
+/// Outcome of probing one block number.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ProbeFetch<T> {
+    /// The endpoint returned the requested block.
+    Found(T),
+    /// The endpoint has no block at this number, e.g. a skipped Solana slot.
+    Missing,
+    /// The number is past the chain head: the endpoint answered with an earlier block.
+    PastHead,
+}
 
 enum LiveProbeOutcome<T> {
     Ready(T),
@@ -2640,29 +2726,11 @@ enum LiveProbeOutcome<T> {
     RetryAfterBackoff,
 }
 
-fn is_missing_probe_block_error(error: &anyhow::Error) -> bool {
-    let message = error.to_string().to_ascii_lowercase();
-    message.contains("not found") && message.contains("block")
-}
-
 fn is_transient_live_probe_error(error: &anyhow::Error) -> bool {
-    let message = error.to_string().to_ascii_lowercase();
-    [
-        "service is currently unavailable",
-        "message: \"unavailable\"",
-        "code = unavailable",
-        "code: unavailable",
-        "deadline exceeded",
-        "timed out",
-        "timeout",
-        "temporarily unavailable",
-        "connection reset",
-        "connection refused",
-        "broken pipe",
-        "transport error",
-    ]
-    .iter()
-    .any(|pattern| message.contains(pattern))
+    matches!(
+        classify_fetch_error(error),
+        FetchErrorKind::Timeout | FetchErrorKind::Transient
+    )
 }
 
 async fn await_live_probe_or_backoff<T, F>(
@@ -2702,23 +2770,83 @@ where
     }
 }
 
-async fn scan_forward_for_available_block<T, Op, Fut>(
+/// Find the first available block at or after `start_block_num`.
+///
+/// Probes `start_block_num..=start_block_num + scan.max_skip_blocks` one by one. If they are
+/// all missing and `scan.missing_run_limit` allows it, the run of missing blocks may just be
+/// long (a Solana leader outage), so the search continues instead of reporting "nothing yet":
+/// exponential probes up to the limit locate the next available block or the chain head,
+/// then a linear pass over the unprobed gap returns the exact first available block.
+/// If every exponential sample is missing, the skipped gap must still be checked:
+/// available slots need not coincide with exponential samples. Exhausting the
+/// full search budget without an available block or head evidence is an error.
+///
+/// `fetch(candidate, confirm_missing)` probes one number; `confirm_missing` is false once a
+/// run of missing blocks is established, so each further missing block is fetched only once.
+async fn find_first_available_block<T, Fetch, Fut>(
     start_block_num: u64,
-    max_skip_blocks: u64,
-    mut op: Op,
+    scan: ProbeScan,
+    mut fetch: Fetch,
 ) -> Result<Option<(u64, T)>>
 where
-    Op: FnMut(u64) -> Fut,
-    Fut: std::future::Future<Output = Result<Option<T>>>,
+    Fetch: FnMut(u64, bool) -> Fut,
+    Fut: std::future::Future<Output = Result<ProbeFetch<T>>>,
 {
+    let ProbeScan {
+        max_skip_blocks,
+        missing_run_limit,
+    } = scan;
     for skipped_blocks in 0..=max_skip_blocks {
-        let candidate_block_num = start_block_num.saturating_add(skipped_blocks);
-        if let Some(value) = op(candidate_block_num).await? {
-            return Ok(Some((candidate_block_num, value)));
+        let candidate_block_num = start_block_num
+            .checked_add(skipped_blocks)
+            .filter(|candidate| *candidate != u64::MAX)
+            .ok_or_else(|| anyhow!("probe search reached the block-number limit"))?;
+        match fetch(candidate_block_num, true).await? {
+            ProbeFetch::Found(value) => return Ok(Some((candidate_block_num, value))),
+            ProbeFetch::PastHead => return Ok(None),
+            ProbeFetch::Missing => {}
         }
     }
+    if missing_run_limit <= max_skip_blocks {
+        return Ok(None);
+    }
 
-    Ok(None)
+    // Every block through `max_skip_blocks` is missing: look further ahead exponentially.
+    let mut offset = max_skip_blocks
+        .saturating_add(1)
+        .saturating_mul(2)
+        .min(missing_run_limit);
+    let (upper_offset, upper_value, found_head) = loop {
+        let candidate = start_block_num
+            .checked_add(offset)
+            .filter(|candidate| *candidate != u64::MAX)
+            .ok_or_else(|| anyhow!("probe search reached the block-number limit"))?;
+        match fetch(candidate, false).await? {
+            ProbeFetch::Found(value) => break (offset, Some(value), false),
+            ProbeFetch::PastHead => break (offset, None, true),
+            ProbeFetch::Missing if offset == missing_run_limit => break (offset, None, false),
+            ProbeFetch::Missing => offset = offset.saturating_mul(2).min(missing_run_limit),
+        }
+    };
+
+    // The exponential probe skipped numbers; scan that gap for the exact first block.
+    for gap_offset in max_skip_blocks.saturating_add(1)..upper_offset {
+        let candidate_block_num = start_block_num.saturating_add(gap_offset);
+        match fetch(candidate_block_num, false).await? {
+            ProbeFetch::Found(value) => return Ok(Some((candidate_block_num, value))),
+            ProbeFetch::PastHead => return Ok(None),
+            ProbeFetch::Missing => {}
+        }
+    }
+    if let Some(value) = upper_value {
+        return Ok(Some((start_block_num + upper_offset, value)));
+    }
+    if found_head {
+        return Ok(None);
+    }
+    Err(anyhow!(
+        "probe search exhausted its {missing_run_limit}-block missing-slot budget after block {start_block_num} without establishing the chain head"
+    ))
 }
 
 async fn find_timestamp_borrow_probe<T, Fetch, Fut, GetTimestamp>(
@@ -2775,69 +2903,69 @@ where
     Ok(None)
 }
 
+/// Probe one block number, retrying failures with exponential backoff.
+///
+/// Errors are classified with [`classify_fetch_error`]:
+/// - timeouts and transient errors are retried up to `policy.max_attempts`, then returned; they
+///   never count as a missing block, so a slow endpoint cannot make probing skip real blocks
+/// - "not found" is retried up to `policy.missing_attempts`, then reported as
+///   [`ProbeFetch::Missing`] when `skip_missing_blocks` is set (returned as an error otherwise)
+/// - fatal errors (authentication, permissions) are returned immediately
 async fn retry_probe_fetch_with_policy<T, Op, Fut>(
     block_num: u64,
     context: &str,
-    max_attempts: usize,
-    initial_backoff: Duration,
+    policy: ProbeRetryPolicy,
     skip_missing_blocks: bool,
     probe_counter: &AtomicU64,
     mut op: Op,
-) -> Result<Option<T>>
+) -> Result<ProbeFetch<T>>
 where
     Op: FnMut() -> Fut,
-    Fut: std::future::Future<Output = Result<Option<T>>>,
+    Fut: std::future::Future<Output = Result<ProbeFetch<T>>>,
 {
-    let attempts = max_attempts.max(1);
+    let attempts = policy.max_attempts.max(1);
+    let missing_attempts = policy.missing_attempts.clamp(1, attempts);
     let mut attempt = 1usize;
-    let mut backoff = initial_backoff;
+    let mut backoff = policy.initial_backoff;
 
     loop {
         probe_counter.fetch_add(1, Ordering::Relaxed);
-        match op().await {
-            Ok(Some(value)) => return Ok(Some(value)),
-            Ok(None) if attempt >= attempts => {
-                warn!(
+        let error = match op().await {
+            Ok(outcome) => return Ok(outcome),
+            Err(error) => error,
+        };
+
+        let kind = classify_fetch_error(&error);
+        match kind {
+            FetchErrorKind::NotFound if skip_missing_blocks && attempt >= missing_attempts => {
+                debug!(
                     block_num,
                     context,
                     attempts = attempt,
-                    "probe returned no block after retries"
+                    error = %format!("{error:#}"),
+                    "probe found no block at this number; treating it as skipped"
                 );
-                return Ok(None);
+                return Ok(ProbeFetch::Missing);
             }
-            Ok(None) => {
+            FetchErrorKind::Fatal => {
+                return Err(error.context(format!(
+                    "{context}: probe fetch for block {block_num} failed"
+                )));
+            }
+            _ if attempt >= attempts => {
+                return Err(error.context(format!(
+                    "{context}: probe fetch for block {block_num} failed after {attempt} attempts"
+                )));
+            }
+            _ => {
                 warn!(
                     block_num,
                     context,
                     attempt,
                     max_attempts = attempts,
+                    kind = ?kind,
                     retry_backoff_ms = backoff.as_millis() as u64,
-                    "probe returned no block; retrying"
-                );
-            }
-            Err(error) if attempt >= attempts => {
-                if skip_missing_blocks && is_missing_probe_block_error(&error) {
-                    warn!(
-                        block_num,
-                        context,
-                        attempts = attempt,
-                        error = %error,
-                        "probe fetch exhausted retries for a missing block; treating it as skipped"
-                    );
-                    return Ok(None);
-                }
-                return Err(anyhow!(
-                    "{context}: probe fetch for block {block_num} failed after {attempt} attempts: {error}"
-                ));
-            }
-            Err(error) => {
-                warn!(
-                    block_num,
-                    context,
-                    attempt,
-                    max_attempts = attempts,
-                    retry_backoff_ms = backoff.as_millis() as u64,
-                    error = %error,
+                    error = %format!("{error:#}"),
                     "probe fetch failed; retrying"
                 );
             }
@@ -2875,6 +3003,24 @@ async fn fetch_required_block_identity(
         })
 }
 
+/// Wait `poll_interval` before polling the live frontier again. Returns `false` when a
+/// shutdown is requested during the wait.
+///
+/// Endpoints answer a probe past the chain head immediately (with their head block), so
+/// without this wait a caught-up live build would poll in a tight loop.
+async fn wait_for_next_live_poll(
+    shutdown: &Arc<AtomicBool>,
+    shutdown_notify: &Arc<Notify>,
+    poll_interval: Duration,
+) -> Result<bool> {
+    Ok(await_live_interruptible(shutdown, shutdown_notify, async {
+        tokio::time::sleep(poll_interval).await;
+        Ok(())
+    })
+    .await?
+    .is_some())
+}
+
 async fn await_live_interruptible<T, F>(
     shutdown: &Arc<AtomicBool>,
     shutdown_notify: &Arc<Notify>,
@@ -2902,18 +3048,12 @@ async fn fetch_optional_probe_block_identity(
     skip_missing_blocks: bool,
     probe_counter: &AtomicU64,
 ) -> Result<Option<BlockIdentity>> {
-    let max_skip_blocks = if skip_missing_blocks {
-        PARTITIONS_PROBE_SKIP_MISSING_BLOCK_SCAN_LIMIT
-    } else {
-        0
-    };
-
     let Some((resolved_block_num, block)) = fetch_probe_block_identity_raw(
         client,
         block_num,
         wait_timeout,
         context,
-        max_skip_blocks,
+        ProbeScan::standard(skip_missing_blocks),
         skip_missing_blocks,
         probe_counter,
     )
@@ -2954,18 +3094,12 @@ async fn fetch_optional_raw_probe_block_identity(
     skip_missing_blocks: bool,
     probe_counter: &AtomicU64,
 ) -> Result<Option<BlockIdentity>> {
-    let max_skip_blocks = if skip_missing_blocks {
-        PARTITIONS_PROBE_SKIP_MISSING_BLOCK_SCAN_LIMIT
-    } else {
-        0
-    };
-
     let Some((resolved_block_num, block)) = fetch_probe_block_identity_raw(
         client,
         block_num,
         wait_timeout,
         context,
-        max_skip_blocks,
+        ProbeScan::standard(skip_missing_blocks),
         skip_missing_blocks,
         probe_counter,
     )
@@ -2987,24 +3121,42 @@ async fn fetch_optional_raw_probe_block_identity(
     Ok(Some(block))
 }
 
+/// Fetch one block number, mapping an answer for an earlier block to [`ProbeFetch::PastHead`].
+async fn probe_fetch_block(
+    client: &FirehoseClient,
+    block_num: u64,
+    wait_timeout: Option<Duration>,
+) -> Result<ProbeFetch<BlockIdentity>> {
+    match client.fetch_block_identity(block_num, wait_timeout).await? {
+        Some(block) if block.block_num < block_num => Ok(ProbeFetch::PastHead),
+        Some(block) if block.block_num == block_num => Ok(ProbeFetch::Found(block)),
+        Some(block) => Err(anyhow!(
+            "fetch for block {block_num} returned unexpected later block {}",
+            block.block_num
+        )),
+        None => Err(anyhow!(
+            "fetch for block {block_num} returned no block metadata"
+        )),
+    }
+}
+
 async fn fetch_probe_block_identity_raw(
     client: &FirehoseClient,
     block_num: u64,
     wait_timeout: Option<Duration>,
     context: &str,
-    max_skip_blocks: u64,
+    scan: ProbeScan,
     skip_missing_blocks: bool,
     probe_counter: &AtomicU64,
 ) -> Result<Option<(u64, BlockIdentity)>> {
-    scan_forward_for_available_block(block_num, max_skip_blocks, |candidate_block_num| {
+    find_first_available_block(block_num, scan, |candidate_block_num, confirm_missing| {
         retry_probe_fetch_with_policy(
             candidate_block_num,
             context,
-            PARTITIONS_PROBE_FETCH_MAX_ATTEMPTS,
-            PARTITIONS_PROBE_FETCH_INITIAL_BACKOFF,
+            ProbeRetryPolicy::new(confirm_missing),
             skip_missing_blocks,
             probe_counter,
-            move || client.fetch_block_identity(candidate_block_num, wait_timeout),
+            move || probe_fetch_block(client, candidate_block_num, wait_timeout),
         )
     })
     .await
@@ -3038,7 +3190,7 @@ async fn normalize_probe_block_identity(
                 candidate_block_num,
                 wait_timeout,
                 context,
-                allowed_skip,
+                ProbeScan::bounded(allowed_skip),
                 skip_missing_blocks,
                 probe_counter,
             )
@@ -3081,46 +3233,24 @@ async fn probe_block_range_boundary_timestamp(
     client: &FirehoseClient,
     block_num: u64,
     probe_timeout: Duration,
-    scan_forward_on_missing: bool,
     skip_missing_blocks: bool,
     probe_counter: &AtomicU64,
-) -> Option<i64> {
-    match client
-        .fetch_block_identity(block_num, Some(probe_timeout))
-        .await
-    {
-        Ok(Some(block)) if block.timestamp != 0 => {
-            probe_counter.fetch_add(1, Ordering::Relaxed);
-            Some(block.timestamp)
-        }
-        Ok(Some(_)) => {
-            probe_counter.fetch_add(1, Ordering::Relaxed);
-            None
-        }
-        _ if skip_missing_blocks || !scan_forward_on_missing => {
-            probe_counter.fetch_add(1, Ordering::Relaxed);
-            None
-        }
-        _ => {
-            probe_counter.fetch_add(1, Ordering::Relaxed);
-            let mut found = None;
-            for offset in 1..=16 {
-                if let Ok(Some(block)) = client
-                    .fetch_block_identity(block_num + offset, Some(probe_timeout))
-                    .await
-                {
-                    probe_counter.fetch_add(1, Ordering::Relaxed);
-                    if block.timestamp != 0 {
-                        found = Some(block.timestamp);
-                        break;
-                    }
-                } else {
-                    probe_counter.fetch_add(1, Ordering::Relaxed);
-                }
-            }
-            found
-        }
-    }
+) -> Result<Option<i64>> {
+    // A missing boundary may have a nullable timestamp. Endpoint failures are
+    // not missing metadata and must never produce an apparently valid row.
+    let outcome = retry_probe_fetch_with_policy(
+        block_num,
+        "probing block-range boundary timestamp",
+        ProbeRetryPolicy::new(true),
+        skip_missing_blocks,
+        probe_counter,
+        || probe_fetch_block(client, block_num, Some(probe_timeout)),
+    )
+    .await?;
+    Ok(match outcome {
+        ProbeFetch::Found(block) if block.timestamp != 0 => Some(block.timestamp),
+        ProbeFetch::Found(_) | ProbeFetch::Missing | ProbeFetch::PastHead => None,
+    })
 }
 
 async fn build_block_range_partition_row(
@@ -3137,21 +3267,19 @@ async fn build_block_range_partition_row(
         client,
         boundary,
         probe_timeout,
-        true,
         skip_missing_blocks,
         probe_counter,
     )
-    .await;
+    .await?;
     let end_time = if partition_end > boundary + 1 {
         probe_block_range_boundary_timestamp(
             client,
             partition_end.saturating_sub(1),
             probe_timeout,
-            false,
             skip_missing_blocks,
             probe_counter,
         )
-        .await
+        .await?
     } else {
         start_time
     };
@@ -8818,16 +8946,27 @@ mod tests {
         );
     }
 
+    fn probe_timeout_error(block_num: u64) -> anyhow::Error {
+        firehose_parquet::grpc::FetchTimeoutError {
+            block_num,
+            timeout: Duration::from_secs(5),
+        }
+        .into()
+    }
+
     #[tokio::test]
-    async fn test_retry_probe_fetch_with_policy_retries_none_until_success() {
+    async fn test_retry_probe_fetch_with_policy_retries_timeouts_until_success() {
         let attempts = Arc::new(AtomicUsize::new(0));
         let probe_counter = AtomicU64::new(0);
         let result = retry_probe_fetch_with_policy(
             42,
             "testing probe retry",
-            3,
-            Duration::from_millis(0),
-            false,
+            ProbeRetryPolicy {
+                max_attempts: 3,
+                missing_attempts: 3,
+                initial_backoff: Duration::from_millis(0),
+            },
+            true,
             &probe_counter,
             {
                 let attempts = Arc::clone(&attempts);
@@ -8836,9 +8975,9 @@ mod tests {
                     async move {
                         let current = attempts.fetch_add(1, AtomicOrdering::SeqCst);
                         if current < 2 {
-                            Ok(None)
+                            Err(probe_timeout_error(42))
                         } else {
-                            Ok(Some(99_u64))
+                            Ok(ProbeFetch::Found(99_u64))
                         }
                     }
                 }
@@ -8847,8 +8986,38 @@ mod tests {
         .await
         .expect("retry should succeed");
 
-        assert_eq!(result, Some(99));
+        assert_eq!(result, ProbeFetch::Found(99));
         assert_eq!(attempts.load(AtomicOrdering::SeqCst), 3);
+        assert_eq!(probe_counter.load(Ordering::Relaxed), 3);
+    }
+
+    #[tokio::test]
+    async fn test_retry_probe_fetch_with_policy_never_treats_timeouts_as_missing_blocks() {
+        let probe_counter = AtomicU64::new(0);
+        let err = retry_probe_fetch_with_policy(
+            42,
+            "testing probe retry",
+            ProbeRetryPolicy {
+                max_attempts: 3,
+                missing_attempts: 3,
+                initial_backoff: Duration::from_millis(0),
+            },
+            true,
+            &probe_counter,
+            || async { Err::<ProbeFetch<u64>, _>(probe_timeout_error(42)) },
+        )
+        .await
+        .expect_err("exhausted timeouts must surface as an error, not a skipped block");
+
+        assert!(
+            err.to_string().contains("failed after 3 attempts"),
+            "{err:#}"
+        );
+        assert_eq!(classify_fetch_error(&err), FetchErrorKind::Timeout);
+        assert!(
+            is_transient_live_probe_error(&err),
+            "live mode should back off and poll again"
+        );
         assert_eq!(probe_counter.load(Ordering::Relaxed), 3);
     }
 
@@ -8859,8 +9028,11 @@ mod tests {
         let result = retry_probe_fetch_with_policy(
             42,
             "testing probe retry",
-            3,
-            Duration::from_millis(0),
+            ProbeRetryPolicy {
+                max_attempts: 3,
+                missing_attempts: 3,
+                initial_backoff: Duration::from_millis(0),
+            },
             false,
             &probe_counter,
             {
@@ -8872,7 +9044,7 @@ mod tests {
                         if current < 2 {
                             Err(anyhow!("transient failure"))
                         } else {
-                            Ok(Some(77_u64))
+                            Ok(ProbeFetch::Found(77_u64))
                         }
                     }
                 }
@@ -8881,7 +9053,7 @@ mod tests {
         .await
         .expect("retry should succeed");
 
-        assert_eq!(result, Some(77));
+        assert_eq!(result, ProbeFetch::Found(77));
         assert_eq!(attempts.load(AtomicOrdering::SeqCst), 3);
         assert_eq!(probe_counter.load(Ordering::Relaxed), 3);
     }
@@ -8893,8 +9065,11 @@ mod tests {
         let err = retry_probe_fetch_with_policy(
             42,
             "testing probe retry",
-            3,
-            Duration::from_millis(0),
+            ProbeRetryPolicy {
+                max_attempts: 3,
+                missing_attempts: 3,
+                initial_backoff: Duration::from_millis(0),
+            },
             false,
             &probe_counter,
             {
@@ -8903,7 +9078,7 @@ mod tests {
                     let attempts = Arc::clone(&attempts);
                     async move {
                         attempts.fetch_add(1, AtomicOrdering::SeqCst);
-                        Err::<Option<u64>, _>(anyhow!("still failing"))
+                        Err::<ProbeFetch<u64>, _>(anyhow!("still failing"))
                     }
                 }
             },
@@ -8916,10 +9091,41 @@ mod tests {
         assert_eq!(probe_counter.load(Ordering::Relaxed), 3);
     }
 
+    #[tokio::test]
+    async fn test_retry_probe_fetch_with_policy_fails_fast_on_fatal_errors() {
+        let probe_counter = AtomicU64::new(0);
+        let err = retry_probe_fetch_with_policy(
+            42,
+            "testing probe retry",
+            ProbeRetryPolicy {
+                max_attempts: 3,
+                missing_attempts: 3,
+                initial_backoff: Duration::from_millis(0),
+            },
+            true,
+            &probe_counter,
+            || async {
+                Err::<ProbeFetch<u64>, _>(tonic::Status::unauthenticated("bad token").into())
+            },
+        )
+        .await
+        .expect_err("authentication errors cannot be retried away");
+
+        assert_eq!(classify_fetch_error(&err), FetchErrorKind::Fatal);
+        assert_eq!(probe_counter.load(Ordering::Relaxed), 1);
+    }
+
     #[test]
     fn test_is_transient_live_probe_error_matches_service_unavailable() {
-        let err = anyhow!("code: 'The service is currently unavailable', message: \"unavailable\"");
+        let err = tonic::Status::unavailable("service unavailable").into();
         assert!(is_transient_live_probe_error(&err));
+        for error in [
+            tonic::Status::unauthenticated("timeout retrieving token").into(),
+            tonic::Status::internal("block index not found during timeout recovery").into(),
+            anyhow!("block not found after timeout"),
+        ] {
+            assert!(!is_transient_live_probe_error(&error), "{error:#}");
+        }
     }
 
     #[tokio::test]
@@ -8930,11 +9136,7 @@ mod tests {
         let outcome = await_live_probe_or_backoff(
             &shutdown,
             &shutdown_notify,
-            async {
-                Err::<u64, _>(anyhow!(
-                    "code: 'The service is currently unavailable', message: \"unavailable\""
-                ))
-            },
+            async { Err::<u64, _>(tonic::Status::unavailable("service unavailable").into()) },
             274_902_564_975,
             Duration::from_millis(0),
             "probing live partition span",
@@ -8946,14 +9148,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_wait_for_next_live_poll_sleeps_and_honors_shutdown() {
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let shutdown_notify = Arc::new(Notify::new());
+
+        let started = Instant::now();
+        assert!(
+            wait_for_next_live_poll(&shutdown, &shutdown_notify, Duration::from_millis(50))
+                .await
+                .expect("wait")
+        );
+        assert!(started.elapsed() >= Duration::from_millis(50));
+
+        shutdown.store(true, Ordering::SeqCst);
+        let started = Instant::now();
+        assert!(
+            !wait_for_next_live_poll(&shutdown, &shutdown_notify, Duration::from_secs(30))
+                .await
+                .expect("wait")
+        );
+        assert!(started.elapsed() < Duration::from_secs(1));
+    }
+
+    #[tokio::test]
     async fn test_retry_probe_fetch_with_policy_skips_missing_block_errors() {
         let attempts = Arc::new(AtomicUsize::new(0));
         let probe_counter = AtomicU64::new(0);
         let result = retry_probe_fetch_with_policy(
             42,
             "testing probe retry",
-            3,
-            Duration::from_millis(0),
+            ProbeRetryPolicy {
+                max_attempts: 3,
+                missing_attempts: 3,
+                initial_backoff: Duration::from_millis(0),
+            },
             true,
             &probe_counter,
             {
@@ -8962,9 +9190,12 @@ mod tests {
                     let attempts = Arc::clone(&attempts);
                     async move {
                         attempts.fetch_add(1, AtomicOrdering::SeqCst);
-                        Err::<Option<u64>, _>(anyhow!(
-                            "rpc error: code = NotFound desc = block not found in files"
-                        ))
+                        Err::<ProbeFetch<u64>, _>(
+                            tonic::Status::unknown(
+                                "rpc error: code = NotFound desc = block not found in files",
+                            )
+                            .into(),
+                        )
                     }
                 }
             },
@@ -8972,33 +9203,228 @@ mod tests {
         .await
         .expect("missing block errors should be skippable");
 
-        assert_eq!(result, None);
+        assert_eq!(result, ProbeFetch::Missing);
         assert_eq!(attempts.load(AtomicOrdering::SeqCst), 3);
         assert_eq!(probe_counter.load(Ordering::Relaxed), 3);
+
+        // Once a run of missing blocks is established, each further block is fetched once.
+        let probe_counter = AtomicU64::new(0);
+        let result = retry_probe_fetch_with_policy(
+            43,
+            "testing probe retry",
+            ProbeRetryPolicy {
+                max_attempts: 3,
+                missing_attempts: 1,
+                initial_backoff: Duration::from_millis(0),
+            },
+            true,
+            &probe_counter,
+            || async {
+                Err::<ProbeFetch<u64>, _>(tonic::Status::not_found("block 43 not found").into())
+            },
+        )
+        .await
+        .expect("missing block errors should be skippable");
+        assert_eq!(result, ProbeFetch::Missing);
+        assert_eq!(probe_counter.load(Ordering::Relaxed), 1);
+    }
+
+    /// Scripted chain for `find_first_available_block`: `available` numbers exist, numbers
+    /// past `head` are answered with the head block, everything else is missing. Records each
+    /// probe as `(block_num, confirm_missing)`.
+    fn scripted_probe(
+        available: &'static [u64],
+        head: u64,
+        probes: Arc<std::sync::Mutex<Vec<(u64, bool)>>>,
+    ) -> impl FnMut(u64, bool) -> std::future::Ready<Result<ProbeFetch<u64>>> {
+        move |block_num, confirm_missing| {
+            probes.lock().unwrap().push((block_num, confirm_missing));
+            let outcome = if block_num > head {
+                ProbeFetch::PastHead
+            } else if available.contains(&block_num) {
+                ProbeFetch::Found(block_num)
+            } else {
+                ProbeFetch::Missing
+            };
+            std::future::ready(Ok(outcome))
+        }
     }
 
     #[tokio::test]
-    async fn test_scan_forward_for_available_block_returns_first_available_candidate() {
-        let attempts = Arc::new(AtomicUsize::new(0));
-        let result = scan_forward_for_available_block(10, 3, {
-            let attempts = Arc::clone(&attempts);
-            move |candidate| {
-                let attempts = Arc::clone(&attempts);
-                async move {
-                    attempts.fetch_add(1, AtomicOrdering::SeqCst);
-                    match candidate {
-                        10 | 11 => Ok(None),
-                        12 => Ok(Some(candidate * 2)),
-                        _ => Ok(None),
-                    }
-                }
-            }
-        })
+    async fn test_find_first_available_block_returns_first_available_candidate() {
+        let probes = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let result = find_first_available_block(
+            10,
+            ProbeScan {
+                max_skip_blocks: 3,
+                missing_run_limit: PARTITIONS_PROBE_MISSING_RUN_SCAN_LIMIT,
+            },
+            scripted_probe(&[12, 13], 1_000, Arc::clone(&probes)),
+        )
         .await
         .expect("scan should succeed");
 
-        assert_eq!(result, Some((12, 24)));
-        assert_eq!(attempts.load(AtomicOrdering::SeqCst), 3);
+        assert_eq!(result, Some((12, 12)));
+        assert_eq!(
+            *probes.lock().unwrap(),
+            [(10, true), (11, true), (12, true)]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_find_first_available_block_stops_at_chain_head() {
+        let probes = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let result = find_first_available_block(
+            101,
+            ProbeScan::standard(true),
+            scripted_probe(&[100], 100, Arc::clone(&probes)),
+        )
+        .await
+        .expect("scan should succeed");
+
+        assert_eq!(result, None);
+        assert_eq!(
+            probes.lock().unwrap().len(),
+            1,
+            "a probe past the head must end the scan"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_find_first_available_block_follows_long_missing_runs() {
+        // Audit C4: a live frontier inside 17+ missing slots used to poll forever. Blocks
+        // 100..=160 are missing and 161 is the first available block.
+        let probes = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let result = find_first_available_block(
+            100,
+            ProbeScan::standard(true),
+            scripted_probe(&[161, 162, 168, 500], 1_000, Arc::clone(&probes)),
+        )
+        .await
+        .expect("scan should succeed");
+
+        assert_eq!(result, Some((161, 161)));
+        let probes = probes.lock().unwrap();
+        assert!(probes[..17].iter().all(|(_, confirm)| *confirm));
+        assert!(probes[17..].iter().all(|(_, confirm)| !*confirm));
+        // Window 100..=116, exponential 134 (missing) and 168 (found), then the gap from 117.
+        assert_eq!(probes[17], (134, false));
+        assert_eq!(probes[18], (168, false));
+        assert_eq!(probes.last(), Some(&(161, false)));
+    }
+
+    #[tokio::test]
+    async fn test_find_first_available_block_checks_gaps_when_every_exponential_sample_is_missing()
+    {
+        let probes = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let result = find_first_available_block(
+            100,
+            ProbeScan {
+                max_skip_blocks: 16,
+                missing_run_limit: 64,
+            },
+            scripted_probe(&[147], 1_000, Arc::clone(&probes)),
+        )
+        .await
+        .unwrap();
+        assert_eq!(result, Some((147, 147)));
+        assert_eq!(probes.lock().unwrap()[17..19], [(134, false), (164, false)]);
+    }
+
+    #[tokio::test]
+    async fn test_find_first_available_block_backfills_gap_before_an_overshooting_head_sample() {
+        let probes = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let result = find_first_available_block(
+            100,
+            ProbeScan::standard(true),
+            scripted_probe(&[161, 162], 162, Arc::clone(&probes)),
+        )
+        .await
+        .unwrap();
+        assert_eq!(result, Some((161, 161)));
+        assert!(probes.lock().unwrap().contains(&(168, false)));
+    }
+
+    #[tokio::test]
+    async fn test_find_first_available_block_propagates_gap_failure_without_skipping_it() {
+        let probes = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen = Arc::clone(&probes);
+        let error = find_first_available_block(
+            100,
+            ProbeScan {
+                max_skip_blocks: 16,
+                missing_run_limit: 64,
+            },
+            move |candidate, _| {
+                seen.lock().unwrap().push(candidate);
+                std::future::ready(if candidate == 147 {
+                    Err(probe_timeout_error(candidate))
+                } else if candidate == 150 {
+                    Ok(ProbeFetch::Found(candidate))
+                } else {
+                    Ok(ProbeFetch::Missing)
+                })
+            },
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(classify_fetch_error(&error), FetchErrorKind::Timeout);
+        assert_eq!(probes.lock().unwrap().last(), Some(&147));
+        assert!(!probes.lock().unwrap().contains(&150));
+    }
+
+    #[tokio::test]
+    async fn test_find_first_available_block_missing_run_up_to_head_is_unavailable() {
+        let probes = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let result = find_first_available_block(
+            100,
+            ProbeScan::standard(true),
+            scripted_probe(&[99], 130, Arc::clone(&probes)),
+        )
+        .await
+        .expect("scan should succeed");
+
+        assert_eq!(result, None);
+        let probes = probes.lock().unwrap();
+        assert_eq!(probes[17], (134, false), "exponential probe finds the head");
+        assert_eq!(
+            probes.last(),
+            Some(&(131, false)),
+            "the gap scan stops at the first number past the head"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_find_first_available_block_respects_missing_run_limit() {
+        let probes = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let result = find_first_available_block(
+            100,
+            ProbeScan::bounded(16),
+            scripted_probe(&[200], 1_000, Arc::clone(&probes)),
+        )
+        .await
+        .expect("scan should succeed");
+        assert_eq!(result, None);
+        assert_eq!(probes.lock().unwrap().len(), 17, "only the linear window");
+
+        let probes = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let error = find_first_available_block(
+            100,
+            ProbeScan {
+                max_skip_blocks: 16,
+                missing_run_limit: 64,
+            },
+            scripted_probe(&[500], 1_000, Arc::clone(&probes)),
+        )
+        .await
+        .expect_err("budget exhaustion is not evidence of chain head");
+        assert!(error
+            .to_string()
+            .contains("without establishing the chain head"));
+        assert!(!is_transient_live_probe_error(&error));
+        let probes = probes.lock().unwrap();
+        assert_eq!(probes[17..19], [(134, false), (164, false)]);
+        assert!((100..=164).all(|num| probes.iter().any(|(seen, _)| *seen == num)));
     }
 
     #[tokio::test]

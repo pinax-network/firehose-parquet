@@ -7046,6 +7046,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_partitions_build_subcommand_parse() {
         let cli = parse(&[
             "test-cli",
