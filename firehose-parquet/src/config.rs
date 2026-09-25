@@ -62,10 +62,33 @@ impl BlockMetadata {
     }
 }
 
+/// Receive-side gRPC controls, shared by ingestion and partition probes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GrpcConfig {
+    /// Let HTTP/2 tune receive windows using measured bandwidth and latency.
+    pub adaptive_window: bool,
+    /// Initial stream/connection receive window; None keeps HTTP/2 library defaults.
+    /// Adaptive flow control, when enabled, overrides this setting.
+    pub initial_window_bytes: Option<u32>,
+    /// Maximum encoded or decompressed protobuf response size, in bytes.
+    pub max_message_bytes: u32,
+}
+
+impl Default for GrpcConfig {
+    fn default() -> Self {
+        Self {
+            adaptive_window: false,
+            initial_window_bytes: Some(16 * 1024 * 1024),
+            max_message_bytes: 128 * 1024 * 1024,
+        }
+    }
+}
+
 /// Pipeline configuration.
 #[derive(Debug, Clone)]
 pub struct Config {
     pub endpoint: String,
+    pub grpc: GrpcConfig,
     pub api_key: Option<String>,
     pub jwt_token: Option<String>,
     pub start_block: Option<u64>,
@@ -286,6 +309,17 @@ impl std::fmt::Display for Config {
             Some(secs) if secs > 0 => format!("{secs}s"),
             _ => "disabled".to_string(),
         };
+        writeln!(f, "  grpc_adaptive_window {}", self.grpc.adaptive_window)?;
+        writeln!(
+            f,
+            "  grpc_window_bytes {:?}",
+            self.grpc.initial_window_bytes
+        )?;
+        writeln!(
+            f,
+            "  grpc_max_message_bytes {}",
+            self.grpc.max_message_bytes
+        )?;
         writeln!(
             f,
             "  stream_idle_timeout {}",
@@ -331,6 +365,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             endpoint: "https://mainnet.sol.streamingfast.io:443".to_string(),
+            grpc: GrpcConfig::default(),
             api_key: None,
             jwt_token: None,
             start_block: None,

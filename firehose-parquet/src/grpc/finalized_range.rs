@@ -36,9 +36,7 @@ impl FirehoseClient {
             shutdown,
             tokio::time::timeout(timeout, async {
                 let channel = self.fetch_channel().await?;
-                let mut client = firehose::stream_client::StreamClient::new(channel)
-                    .accept_compressed(tonic::codec::CompressionEncoding::Gzip)
-                    .max_decoding_message_size(128 * 1024 * 1024);
+                let mut client = self.stream_client(channel);
                 let mut request = tonic::Request::new(firehose::Request {
                     start_block_num: signed_start,
                     stop_block_num: end_inclusive,

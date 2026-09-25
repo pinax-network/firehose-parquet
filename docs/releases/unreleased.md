@@ -4,6 +4,14 @@ Changes merged since the last release. Fold this file into `docs/releases/vX.Y.Z
 
 ## CLI and query semantics
 
+- Firehose receive windows default to 16 MiB per stream/connection. Both `build`
+  and `partitions build` expose `--grpc-window-bytes`, `--grpc-adaptive-window`,
+  and `--grpc-max-message-bytes` (the receive limit remains 128 MiB). Replies
+  may use zstd as well as gzip/plain; request compression is unchanged. Oversized
+  compressed responses stop without retrying the same payload. The default was
+  selected using a bounded local benchmark, not a live-provider speed claim.
+  See [#517 evidence](../audit/517-grpc-transport.md).
+
 - `--final-blocks-only=false` now enables append-only reversible output directly;
   the default and bare flag remain true. Optional values use `=`, and explicit
   CLI values override `FINAL_BLOCKS_ONLY`. Successful bounded non-final runs warn
