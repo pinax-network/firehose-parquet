@@ -1,4 +1,4 @@
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Context, Result};
 use arrow::record_batch::RecordBatch;
 use clap::{Args, Parser};
 use firehose_parquet::cli::{
@@ -1210,6 +1210,35 @@ fn resolve_cursor_location(
     }
 }
 
+/// Load the stored cursor for `fireparq build`.
+///
+/// A cursor that exists but cannot be read (permission denied, S3 5xx/403,
+/// truncated or corrupt file) is a hard error: silently starting fresh would
+/// re-ingest from `--start-block` and overwrite the resume point on the first
+/// flush. With `--cursor-override` the unreadable cursor is ignored, since the
+/// run restarts from the CLI bounds anyway.
+fn load_existing_cursor(
+    cursor_location: Option<&CursorLocation>,
+    cursor_override: bool,
+) -> Result<Option<CursorState>> {
+    let Some(cursor_location) = cursor_location else {
+        return Ok(None);
+    };
+    match cursor_location.load() {
+        Ok(state) => Ok(state),
+        Err(error) if cursor_override => {
+            warn!(
+                error = %format!("{error:#}"),
+                "ignoring unreadable cursor because --cursor-override is set; restarting from CLI-provided/default bounds"
+            );
+            Ok(None)
+        }
+        Err(error) => Err(error.context(
+            "stored cursor exists but could not be loaded; refusing to start fresh. Fix access to the cursor, or pass --cursor-override to ignore it and restart from --start-block (the cursor is overwritten on the next flush)",
+        )),
+    }
+}
+
 async fn run_partitions_build(
     endpoint: &str,
     network: Option<&str>,
@@ -1382,7 +1411,15 @@ async fn run_partitions_build(
         }
     } else if let Some(start_block) = start_block {
         start_block
-    } else if let Some(cursor_state) = cursor_location.as_ref().and_then(CursorLocation::load) {
+    } else if let Some(cursor_state) = cursor_location
+        .as_ref()
+        .map(CursorLocation::load)
+        .transpose()
+        .context(
+            "reading sibling cursor.parquet to infer --start-block (pass --start-block to skip it)",
+        )?
+        .flatten()
+    {
         cursor_state.last_block_num.saturating_add(1)
     } else if let Some(first_streamable) = endpoint_info
         .as_ref()
@@ -4431,7 +4468,8 @@ async fn run_ingestion(args: &BuildArgs, global: &GlobalArgs) -> Result<()> {
     config.output = resolve_output(&config.output, &endpoint_info);
 
     let cursor_location = resolve_cursor_location(&config)?;
-    let existing_cursor_state = cursor_location.as_ref().and_then(CursorLocation::load);
+    let existing_cursor_state =
+        load_existing_cursor(cursor_location.as_ref(), args.cursor_override)?;
     let solana_chain = chain_is_solana(&block_type, &endpoint_info, existing_cursor_state.as_ref());
     let antelope_chain =
         chain_is_antelope(&block_type, &endpoint_info, existing_cursor_state.as_ref());
@@ -5859,6 +5897,43 @@ mod tests {
             }
             other => panic!("expected local cursor location, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn test_load_existing_cursor_fails_on_corrupt_cursor_unless_overridden() {
+        let dir = make_temp_output_dir();
+        let cursor_path = dir.join("cursor.parquet");
+        let location = CursorLocation::Local(cursor_path.clone());
+
+        // No cursor yet: start fresh.
+        assert!(load_existing_cursor(Some(&location), false)
+            .unwrap()
+            .is_none());
+        assert!(load_existing_cursor(None, false).unwrap().is_none());
+
+        // A truncated cursor is a hard error that points at the remediation.
+        location
+            .save(&CursorState {
+                cursor: "cursor-at-block-200".to_string(),
+                last_block_num: 200,
+                ..CursorState::default()
+            })
+            .unwrap();
+        let bytes = std::fs::read(&cursor_path).unwrap();
+        std::fs::write(&cursor_path, &bytes[..bytes.len() / 2]).unwrap();
+        let error = load_existing_cursor(Some(&location), false).unwrap_err();
+        let rendered = format!("{error:#}");
+        assert!(rendered.contains("--cursor-override"), "{rendered}");
+        assert!(
+            rendered.contains(&cursor_path.display().to_string()),
+            "{rendered}"
+        );
+
+        // --cursor-override explicitly ignores the unreadable cursor.
+        assert!(load_existing_cursor(Some(&location), true)
+            .unwrap()
+            .is_none());
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
