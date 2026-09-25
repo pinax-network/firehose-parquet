@@ -70,3 +70,10 @@ bytes were retained, without response cursors, headers or credentials:
 
 Local artifacts: `/tmp/fireparq-501-solana-data/{slot}.pb` with JSON sidecars.
 The same immutable sample is shared with #502, avoiding another raw fetch.
+
+The first full workspace run caught the schema-contract fixture's old fake vote
+(a changed account key). It now supplies a canonical legacy Vote payload so the
+contract still requires nonempty output for every table. The rerun passed.
+Neither `cargo-audit` nor `cargo-deny` is installed on this host, so no dependency
+advisory audit was run. Lockfile inspection confirms 28 added package/version
+pairs and no removed or updated existing pairs.
