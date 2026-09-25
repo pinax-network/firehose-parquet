@@ -470,9 +470,9 @@ UNDO nor counting NEW minus UNDO reconstructs arbitrary canonical state:
 UNDO(A)` ends with A absent despite the same unordered rows. Consequently the
 current reversible dataset alone cannot supply a general canonical-tail query.
 
-For a safe **finalized block-identity subset**, build a separate finalized-only
-dataset covering the desired range on the same chain/network, with matching
-identifier encoding. Then intersect its authoritative identities with observed
+For a safe **finalized block-identity subset**, build a separate dataset with
+`--final-blocks-only=true` covering the desired range on the same chain/network,
+with matching identifier encoding. Then intersect its authoritative identities with observed
 positive events:
 
 ```sql

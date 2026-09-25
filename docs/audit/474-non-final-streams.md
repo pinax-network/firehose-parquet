@@ -71,7 +71,12 @@ is presented as reliable.
   the supported result unchanged, and the unordered-state counterexample is
   checked explicitly. Run `python3 docs/audit/474-check-query.py`.
 
-The focused parser/helper, real CLI and SQL checks passed. Full current-main
-validation is recorded below when completed. No new public Firehose calls or
+The focused parser/helper, real CLI and SQL checks passed. At integration
+`d4d9d2c` on main `b8d6834`, the locked workspace suite passed **866 tests** with
+**5 existing ignored**. Locked binary build, formatting, diff-whitespace and
+Zsh completion generation also passed. The inherited `transactions_processed`
+unused-assignment warning is unchanged. All Cargo operations used the shared
+whole-command lock/target. Final documentation-only changes do not alter runtime
+code or the tested query. No new public Firehose calls or
 production writes are needed for this CLI/documentation correction; the protocol
 fixture exercises the existing append behavior without changing mapped data.
