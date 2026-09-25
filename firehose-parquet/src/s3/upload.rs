@@ -54,6 +54,22 @@ impl NativeS3Upload {
         Self::configured(config, bucket, DATA_TIMEOUT, false)
     }
 
+    #[cfg(test)]
+    pub(crate) fn fixture_client(endpoint: String) -> Result<Self> {
+        Self::configured(
+            &AwsConfig {
+                aws_access_key_id: Some("fixture-key".into()),
+                aws_secret_access_key: Some("fixture-secret".into()),
+                aws_session_token: None,
+                aws_region: Some("us-east-1".into()),
+                aws_endpoint_url: Some(endpoint),
+            },
+            "bucket",
+            DATA_TIMEOUT,
+            true,
+        )
+    }
+
     fn configured(
         config: &AwsConfig,
         bucket: &str,

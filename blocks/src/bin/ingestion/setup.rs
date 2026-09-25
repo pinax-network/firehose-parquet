@@ -124,10 +124,13 @@ impl ResolvedEndpoint {
         } else {
             let aws = AwsConfig::from(config);
             Some(
-                DatasetOwnership::acquire(
-                    "build",
+                DatasetOwnership::acquire_for_ingestion(
                     ingestion_mutation_scopes(config, cursor_location.as_ref())?,
                     Some(&aws),
+                    config
+                        .output
+                        .to_str()
+                        .context("output path must be UTF-8")?,
                 )
                 .await?,
             )
@@ -406,5 +409,40 @@ impl IngestionSetup {
             }
             metrics::register_info_metric(metrics_registry, labels);
         }
+    }
+}
+
+#[cfg(test)]
+mod native_upload_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn native_http_endpoint_fails_before_any_ownership_request_and_dry_run_stays_read_only() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let mut endpoint = ResolvedEndpoint {
+            config: Config {
+                output: "s3://bucket/dataset".into(),
+                aws_access_key_id: Some("fixture-key".into()),
+                aws_secret_access_key: Some("fixture-secret".into()),
+                aws_endpoint_url: Some(format!("http://{}", listener.local_addr().unwrap())),
+                ..Config::default()
+            },
+            block_type: "evm".into(),
+            endpoint_info: None,
+            cursor_location: None,
+        };
+        let error = endpoint
+            .acquire_ownership()
+            .await
+            .err()
+            .expect("native endpoint preflight");
+        assert!(error.to_string().contains("requires an HTTPS"));
+        endpoint.config.dry_run = true;
+        assert!(endpoint.acquire_ownership().await.unwrap().is_none());
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(50), listener.accept())
+                .await
+                .is_err()
+        );
     }
 }

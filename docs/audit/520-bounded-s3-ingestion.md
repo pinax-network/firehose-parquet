@@ -113,3 +113,71 @@ its task returns. Native cache-control is validated before any Writing record.
 
 This checkpoint still does not enable the CLI switch or claim large-file RSS,
 scratch or slow-transfer qualification. Those are the next qualification stage.
+
+
+Publication readback sends the ETag/version acknowledged by PUT as its GET
+conditions. Recovery has a journal receipt but no persisted provider-version pair:
+its one GET requires a usable observed version and exact receipt size/hash/schema,
+row count and footer identity. It does not claim a pre-known recovery ETag predicate.
+Joining the local verification worker proves only local worker drainage; it never
+proves provider request quiescence. Transport and file-I/O cancellation continue to
+retain uncertain remote ownership under the existing recovery contract.
+
+## Stage 3: active CLI and bounded local qualification
+
+The extracted `ResolvedEndpoint::acquire_ownership` now selects native acquisition
+for `build` output. Dry-run skips ownership as before. A real setup test confirms
+an HTTP endpoint is rejected before the loopback listener receives any request,
+and the same dry-run remains read-only. Native cancellation after remote acceptance
+also retains Owned/Writing with one PUT and an unchanged authority/mirror.
+
+The retained Parquet 58 type fixture passes file-spool schema/value equality.
+Offline retained Ethereum qualification re-encoded **26 files, 14 tables and
+12,298 rows** from `/tmp/fireparq-469-live-20260925/mainnet`; all field schemas and
+all typed values were equal, including multiple dictionaries and nullable/nested
+values. No new provider calls were made. This is offline qualification of already
+captured data, not new live S3 provider qualification.
+
+The reproducible [measurement driver](520-s3-spool-benchmark.py) and
+[complete results](520-s3-spool-results.json) use synthetic random binary rows,
+a separately running disk-backed loopback provider, and a preserved core test
+executable (`de29f7804a74706239cb5bd6cef86773526c240a7810745e35be8b4041d4163c`).
+It was built from stage-2 production code plus the qualification tests and merged
+main `ab0888e`. The complete run held `/tmp/fireparq-cargo-session.lock`.
+Each client child has its own `/usr/bin/time -l` measurement; these are per-process
+macOS peak RSS bytes, not cumulative child resource usage. Provider memory and
+fixture preparation are excluded from transfer measurements.
+
+| Encoded file bytes | Transfer + full verification peak RSS | PUT / GET |
+| ---: | ---: | ---: |
+| 16,909,610 | 34,095,104 (32.52 MiB) | 1 / 1 |
+| 135,168,186 | 34,095,104 (32.52 MiB) | 1 / 1 |
+| 540,615,607 | 34,111,488 (32.53 MiB) | 1 / 1 |
+
+The provider independently verifies the real SDK's SigV4 HMAC and checks the
+conditional header; readback uses the exact acknowledged ETag/version. A separate
+16,909,610-byte case delays both PUT acknowledgement and GET headers by **31 seconds
+each**. It completed in 63.344 seconds with one PUT/GET and 32.31 MiB peak RSS,
+proving the native read client is no longer cut off by the old 30-second default.
+These loopback numbers establish bounded client behavior, not internet throughput.
+
+The encoding measurements include full mapper-batch construction and retention:
+16 MiB of payload used 97.61 MiB RSS in the buffered encoder versus 87.72 MiB in
+the spool encoder; 128 MiB used 533.69 MiB versus 445.94 MiB. There is no claim of
+constant total ingestion RSS. At 128 MiB, row-group boundaries changed the encoded
+size from 135,188,177 to 135,168,186 bytes. Spooling also adds disk/hash work (the
+single diagnostic encoding samples took 4.962 versus 9.501 seconds); these are
+not repeated throughput estimates. Input memory, variable-width values, encoder
+state, footer metadata and allocator retention remain separate costs.
+
+For the largest transfer, the upload file and verified readback file each contain
+540,615,607 bytes, so the native client requires up to **1,081,231,214 bytes of
+scratch** while both coexist. Those file lengths are validated by the production
+receipt verifier; the reported two-file peak is structural accounting, not a
+filesystem-free-space sampler. The independent provider additionally stores one
+complete object on its own disk. Private client scratch is gone at child exit.
+The test cap is 512 MiB of synthetic payload; the 5 GB limit is exercised through
+checked-size and over-limit validation, not by transferring a 5 GB fixture.
+
+Final current-main workspace/build/help validation will be recorded below before
+publication.

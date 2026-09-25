@@ -44,6 +44,20 @@ Changes merged since the last release. Fold this file into `docs/releases/vX.Y.Z
 
 ## Breaking changes
 
+### Bounded native S3 ingestion uploads (#520)
+
+Authenticated protected `build` now encodes one part to private disk, streams one
+conditional PUT, and verifies through a second disk spool before checkpointing.
+The transaction and no-retry ownership guarantees stay unchanged. Allocate up to
+two encoded part sizes of temporary disk; mapper buffers and Parquet row-group
+memory remain additional. Native ingestion requires HTTPS, caps each encoded part
+at 5,000,000,000 bytes, and rejects serialized footers above 32 MiB even during
+resume verification. These are explicit compatibility limits; an oversized part
+fails with its Writing journal retained instead of falling back to multipart.
+Upload and complete readback each use a 15-minute deadline (10-second connect),
+with cancellation retaining uncertain remote ownership. Anonymous maintenance and
+the generic writer API retain their existing policies and encoded-part buffering.
+
 ### Tron contract and receipt fields (#509)
 
 Adds `contracts` and `internal_call_values` child tables, original transaction

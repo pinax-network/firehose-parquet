@@ -953,3 +953,43 @@ fn native_spool_size_limit_does_not_accept_partial_overflow_write() {
         hex::encode(Sha256::digest(b"1234"))
     );
 }
+
+#[test]
+fn native_spool_roundtrips_retained_parquet58_types_without_value_or_schema_changes() {
+    use arrow::compute::concat_batches;
+    let bytes = Bytes::from_static(include_bytes!(
+        "../../../tests/fixtures/parquet58/types.parquet"
+    ));
+    let reader = ParquetRecordBatchReaderBuilder::try_new(bytes).unwrap();
+    let schema = reader.schema().clone();
+    let batches = reader
+        .build()
+        .unwrap()
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .unwrap();
+    let input = concat_batches(&schema, &batches).unwrap();
+    let prepared = prepare(
+        input.clone(),
+        Partition::None,
+        BlockMetadata {
+            min_block_number: 100,
+            max_block_number: 102,
+            min_timestamp: Some(1_700_000_000),
+            max_timestamp: Some(1_700_000_002),
+        },
+    );
+    let encoded = prepared.encode_spooled(0).unwrap();
+    let reader = ParquetRecordBatchReaderBuilder::try_new(encoded.spool.unwrap()).unwrap();
+    // Default readers merge operational footer keys into schema metadata;
+    // verify_file has already compared the complete embedded physical schema.
+    assert_eq!(reader.schema().fields(), schema.fields());
+    let actual = reader
+        .build()
+        .unwrap()
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .unwrap();
+    let actual = concat_batches(&schema, &actual).unwrap();
+    assert_eq!(input, actual);
+}
+
+mod qualification;

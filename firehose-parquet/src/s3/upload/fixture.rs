@@ -9,6 +9,7 @@ pub(crate) enum Fault {
     #[default]
     None,
     LostPartAck,
+    DelayedPartAck,
     DuplicateEtag,
     DuplicateVersion,
     WildcardEtag,
@@ -190,6 +191,9 @@ async fn handle(mut socket: tokio::net::TcpStream, state: Arc<Mutex<State>>) {
             _ => panic!("unexpected fixture request"),
         }
     };
+    if method == "PUT" && matches!(fault, Fault::DelayedPartAck) {
+        tokio::time::sleep(Duration::from_secs(2)).await;
+    }
     if method == "PUT" && matches!(fault, Fault::LostPartAck) {
         let _ = socket.shutdown().await;
         return;

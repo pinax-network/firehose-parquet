@@ -166,3 +166,75 @@ async fn native_controller_retains_writing_owner_and_cursor_on_uncertain_publica
         );
     }
 }
+
+#[tokio::test]
+async fn cancelling_native_put_after_acceptance_retains_owner_and_writing() {
+    let server = Server::start().await;
+    let owner = S3Ownership::acquire_native(server.client.clone(), "build", vec!["dataset".into()])
+        .await
+        .unwrap();
+    let expected_owner = owner.record().clone();
+    let store = owner.object_store().clone();
+    let temp = tempfile::tempdir().unwrap();
+    let mut descriptor = actual_descriptor(temp.path());
+    descriptor.output = StorageIdentity::S3 {
+        service: Digest::hash("service", &"fixture").unwrap(),
+        bucket: "bucket".into(),
+        prefix: "dataset".into(),
+    };
+    let states = TransactionStateStore::s3("dataset", &owner).unwrap();
+    states
+        .initialize(AuthorityState::initial(descriptor.clone()).unwrap())
+        .await
+        .unwrap();
+    let mirror = Mirror::default();
+    let mut controller = TransactionController::open(
+        states,
+        TransactionParts::s3("dataset", &owner, "").unwrap(),
+        &mirror,
+        &descriptor,
+    )
+    .await
+    .unwrap();
+    server.state.lock().unwrap().fault = Fault::DelayedPartAck;
+    let mut committing = Box::pin(commit(&mut controller));
+    tokio::select! {
+        result = &mut committing => panic!("upload must still await acknowledgement: {}",result.is_ok()),
+        _ = async {
+            loop {
+                if server.state.lock().unwrap().requests.iter().any(|r|r.method=="PUT" && r.path.ends_with(".parquet")) {break;}
+                tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+            }
+        } => {}
+    }
+    drop(committing);
+    assert!(owner.is_mutation_uncertain());
+    assert_eq!(controller.authority().checkpoint.ordinal, 0);
+    let snapshot = TransactionStateStore::s3("dataset", &owner)
+        .unwrap()
+        .load()
+        .await
+        .unwrap();
+    assert_eq!(
+        snapshot.pending.unwrap().payload.phase,
+        TransactionPhase::Writing
+    );
+    assert_eq!(mirror.head.borrow().as_ref().unwrap().ordinal, 0);
+    assert_eq!(
+        server
+            .state
+            .lock()
+            .unwrap()
+            .requests
+            .iter()
+            .filter(|r| r.method == "PUT" && r.path.ends_with(".parquet"))
+            .count(),
+        1
+    );
+    drop(controller);
+    assert!(owner.release().await.is_err());
+    assert_eq!(
+        S3Ownership::status(&store).await.unwrap().unwrap(),
+        expected_owner
+    );
+}
