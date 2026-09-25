@@ -1239,6 +1239,47 @@ row counts without changing schemas. Rebuild affected ranges into a separate
 output root to recover missing rows; appending a corrected replay to old results
 does not remove existing rows or guarantee deduplication.
 
+## Solana Instruction Order
+
+The `instructions` table preserves the upstream order inside each top-level
+instruction's inner set with two nullable `UInt32` columns:
+
+| Column | Top-level instruction | Inner instruction |
+|---|---|---|
+| `parent_instruction_index` | `NULL` | Zero-based index of the top-level instruction that owns the inner set |
+| `inner_instruction_index` | `NULL` | Zero-based position within that parent's inner set |
+
+The existing `instruction_index` still numbers all top-level instructions first,
+then all inner instructions in upstream group order. It is a row index, not call
+order. The existing `inner_index` still contains the top-level parent's index;
+it has the same value as `parent_instruction_index`.
+
+For one transaction in one block event, order its instructions as follows:
+
+```sql
+SELECT *
+FROM read_parquet('instructions/*.parquet')
+WHERE block_id = '<block id>' AND transaction_index = 0
+ORDER BY coalesce(parent_instruction_index, instruction_index),
+         is_inner,
+         inner_instruction_index;
+```
+
+This puts each top-level instruction before its recorded inner calls and keeps
+the upstream order of those calls, including nested calls. `stack_height`, when
+present, provides depth; `parent_instruction_index` identifies the top-level
+owner, not the immediate caller of a nested instruction. For failed transactions
+included with `--include-failed-transactions`, listed top-level instructions may
+include instructions that did not execute. Apply fork semantics first when
+querying reversible output; the ordering fields do not identify event delivery
+order or remove replay duplicates.
+
+Older files lack both new columns. Readers that union schemas by name can read
+them as null, but nulls alone cannot distinguish old inner rows from top-level
+rows. Check `is_inner` and rebuild old ranges into a separate output root before
+depending on these fields. The existing strict-schema maintenance commands
+refuse to merge or roll up mixed old/new instruction schemas.
+
 ## Solana Reward Indices
 
 `rewards.reward_index` is a zero-based index within one block envelope. Rewards
