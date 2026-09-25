@@ -1,6 +1,6 @@
 //! Strict transaction identity and durable protocol records.
 
-use anyhow::{bail, Context, Result};
+use anyhow::{bail, ensure, Context, Result};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
@@ -560,6 +560,7 @@ pub enum PartCompression {
     Snappy,
     Gzip,
     Zstd,
+    ZstdWithLevel(i32),
 }
 
 #[derive(Clone, Eq, PartialEq, Serialize, Deserialize)]
@@ -669,6 +670,10 @@ impl PendingTransaction {
     }
     pub fn validate(&self, descriptor: &StreamDescriptor) -> Result<()> {
         descriptor.validate()?;
+        if let PartCompression::ZstdWithLevel(level) = self.compression {
+            ensure!(level != 0 && level != 3, "noncanonical explicit zstd level");
+            parquet::basic::ZstdLevel::try_new(level).context("invalid pending zstd level")?;
+        }
         self.prefix.validate()?;
         self.target.validate(descriptor)?;
         if self.format_version != FORMAT_VERSION

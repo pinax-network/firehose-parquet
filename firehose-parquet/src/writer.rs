@@ -5,8 +5,6 @@ use arrow::array::Array;
 use arrow::record_batch::RecordBatch;
 use object_store::ObjectStore;
 use parquet::arrow::ArrowWriter;
-use parquet::basic::Compression as PqCompression;
-use parquet::basic::ZstdLevel;
 use parquet::file::properties::WriterProperties;
 use std::collections::HashMap;
 use std::fmt::Display;
@@ -18,6 +16,7 @@ use uuid::Uuid;
 
 mod local;
 pub(crate) use local::create_dir_all_durable;
+pub mod properties;
 pub mod protected;
 
 /// Key-value metadata to embed in every Parquet file's footer.
@@ -132,7 +131,7 @@ impl ParquetTableWriter {
 
         if let Some(ref s3) = self.s3_client {
             // Write to in-memory buffer, then upload to S3.
-            let props = self.writer_properties();
+            let props = self.writer_properties(batch)?;
             let mut buf = Vec::new();
             let mut writer = ArrowWriter::try_new(&mut buf, batch.schema(), Some(props))?;
             writer.write(batch)?;
@@ -165,7 +164,7 @@ impl ParquetTableWriter {
             );
         } else {
             // Only a closed, synced Parquet file may become visible at its final name.
-            compressed_bytes = local::write_parquet(&path, batch, self.writer_properties())?;
+            compressed_bytes = local::write_parquet(&path, batch, self.writer_properties(batch)?)?;
 
             info!(
                 table,
@@ -344,28 +343,17 @@ impl ParquetTableWriter {
         }
     }
 
-    fn writer_properties(&self) -> WriterProperties {
-        use parquet::file::metadata::KeyValue;
-
-        let compression = match self.compression {
-            Compression::None => PqCompression::UNCOMPRESSED,
-            Compression::Snappy => PqCompression::SNAPPY,
-            Compression::Gzip => PqCompression::GZIP(Default::default()),
-            Compression::Zstd => PqCompression::ZSTD(ZstdLevel::try_new(3).unwrap()),
-        };
-        let mut builder = WriterProperties::builder().set_compression(compression);
-
-        if !self.file_metadata.entries.is_empty() {
-            let kvs: Vec<KeyValue> = self
-                .file_metadata
+    fn writer_properties(&self, batch: &RecordBatch) -> Result<WriterProperties> {
+        let metadata = (!self.file_metadata.entries.is_empty()).then(|| {
+            self.file_metadata
                 .entries
                 .iter()
-                .map(|(k, v)| KeyValue::new(k.clone(), Some(v.clone())))
-                .collect();
-            builder = builder.set_key_value_metadata(Some(kvs));
-        }
-
-        builder.build()
+                .map(|(key, value)| {
+                    parquet::file::metadata::KeyValue::new(key.clone(), Some(value.clone()))
+                })
+                .collect()
+        });
+        properties::for_batch(self.compression, batch, metadata)
     }
 }
 
@@ -387,7 +375,7 @@ pub(crate) fn compression_ratio(compression: &Compression) -> f64 {
         Compression::None => 0.50,   // Parquet encoding alone: ~2×
         Compression::Snappy => 0.25, // Parquet + Snappy: ~4×
         Compression::Gzip => 0.12,   // Parquet + Gzip: ~8×
-        Compression::Zstd => 0.12,   // Parquet + Zstd: ~8×
+        Compression::Zstd | Compression::ZstdWithLevel(_) => 0.12, // Parquet + Zstd: ~8×
     }
 }
 
