@@ -235,7 +235,7 @@ impl AntelopeBlockMapper {
             action.and_then(|a| optional_string_value(&a.json_data)),
         );
         if let Some(raw_data) = action
-            .map(|a| a.raw_data.as_slice())
+            .map(|a| a.raw_data.as_ref())
             .filter(|raw_data| !raw_data.is_empty())
         {
             self.actions.raw_data.append_value(raw_data);
@@ -346,14 +346,13 @@ impl AntelopeBlockMapper {
     }
 }
 
-impl BlockMapper for AntelopeBlockMapper {
-    fn map_block(
+impl AntelopeBlockMapper {
+    fn map_decoded(
         &mut self,
-        block_bytes: &[u8],
+        block: antelope::Block,
         identity: &BlockIdentity,
         fork_step: Option<&str>,
     ) -> anyhow::Result<u64> {
-        let block = antelope::Block::decode(block_bytes)?;
         let tx_count = if block.filtering_applied {
             block.filtered_transaction_traces.len()
         } else {
@@ -367,6 +366,26 @@ impl BlockMapper for AntelopeBlockMapper {
         )?;
         self.map_antelope_block(&block, &identity, fork_step)?;
         Ok(tx_count)
+    }
+}
+
+impl BlockMapper for AntelopeBlockMapper {
+    fn map_block(
+        &mut self,
+        block_bytes: &[u8],
+        identity: &BlockIdentity,
+        fork_step: Option<&str>,
+    ) -> anyhow::Result<u64> {
+        self.map_decoded(antelope::Block::decode(block_bytes)?, identity, fork_step)
+    }
+
+    fn map_block_bytes(
+        &mut self,
+        block_bytes: prost::bytes::Bytes,
+        identity: &BlockIdentity,
+        fork_step: Option<&str>,
+    ) -> anyhow::Result<u64> {
+        self.map_decoded(antelope::Block::decode(block_bytes)?, identity, fork_step)
     }
 
     fn flush(&mut self) -> anyhow::Result<HashMap<String, RecordBatch>> {
@@ -795,8 +814,8 @@ pub(crate) mod tests {
                 producer: "eosproducer1".to_string(),
                 confirmed: 0,
                 previous: make_test_hex_id(number.saturating_sub(1)),
-                transaction_mroot: vec![],
-                action_mroot: vec![],
+                transaction_mroot: vec![].into(),
+                action_mroot: vec![].into(),
                 schedule_version: 42,
                 header_extensions: vec![],
                 new_producers_v1: None,
@@ -813,7 +832,7 @@ pub(crate) mod tests {
             pending_schedule: None,
             activated_protocol_features: None,
             validated: true,
-            action_mroot_savanna: vec![],
+            action_mroot_savanna: vec![].into(),
             finality_lib: 0,
             finality_data: None,
             proposer_policy: None,
@@ -862,7 +881,7 @@ pub(crate) mod tests {
                                 permission: "active".to_string(),
                             }],
                             json_data: r#"{"from":"alice","to":"bob","quantity":"1.0000 EOS","memo":"test"}"#.to_string(),
-                            raw_data: vec![1, 2, 3, 4],
+                            raw_data: vec![1, 2, 3, 4].into(),
                         }),
                         context_free: false,
                         elapsed: 100,
@@ -875,7 +894,7 @@ pub(crate) mod tests {
                             nanos: 500_000_000,
                         }),
                         account_ram_deltas: vec![],
-                        raw_return_value: vec![9, 8, 7],
+                        raw_return_value: vec![9, 8, 7].into(),
                         json_return_value: r#"{"ok":true}"#.to_string(),
                         exception: Some(antelope::Exception {
                             code: 13,
@@ -896,7 +915,7 @@ pub(crate) mod tests {
                                     context: None,
                                 }),
                                 format: "assertion failure with message: {msg}".to_string(),
-                                data: br#"{"msg":"boom"}"#.to_vec(),
+                                data: br#"{"msg":"boom"}"#.to_vec().into(),
                             }],
                         }),
                         error_code: 0,
@@ -918,7 +937,7 @@ pub(crate) mod tests {
                                 permission: "active".to_string(),
                             }],
                             json_data: String::new(),
-                            raw_data: vec![1, 2, 3, 4],
+                            raw_data: vec![1, 2, 3, 4].into(),
                         }),
                         context_free: false,
                         elapsed: 50,
@@ -928,7 +947,7 @@ pub(crate) mod tests {
                         producer_block_id: make_test_hex_id(number),
                         block_time: None,
                         account_ram_deltas: vec![],
-                        raw_return_value: vec![],
+                        raw_return_value: vec![].into(),
                         json_return_value: String::new(),
                         exception: None,
                         error_code: 0,
@@ -952,8 +971,8 @@ pub(crate) mod tests {
                     primary_key: "EOS".to_string(),
                     old_payer: "eosio".to_string(),
                     new_payer: "alice".to_string(),
-                    old_data: vec![1, 2, 3],
-                    new_data: vec![10, 20, 30],
+                    old_data: vec![1, 2, 3].into(),
+                    new_data: vec![10, 20, 30].into(),
                     old_data_json: r#"{"balance":"0.0000 EOS"}"#.to_string(),
                     new_data_json: r#"{"balance":"1.0000 EOS"}"#.to_string(),
                 }],

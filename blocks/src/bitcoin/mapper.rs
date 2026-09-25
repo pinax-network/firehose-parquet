@@ -202,14 +202,13 @@ impl BitcoinBlockMapper {
     }
 }
 
-impl BlockMapper for BitcoinBlockMapper {
-    fn map_block(
+impl BitcoinBlockMapper {
+    fn map_decoded(
         &mut self,
-        block_bytes: &[u8],
+        block: btc::Block,
         identity: &BlockIdentity,
         fork_step: Option<&str>,
     ) -> anyhow::Result<u64> {
-        let block = btc::Block::decode(block_bytes)?;
         let tx_count = block.tx.len() as u64;
         // Preflight every output before appending any row, including the block
         // row. An invalid later transaction must leave all existing buffers intact.
@@ -234,6 +233,26 @@ impl BlockMapper for BitcoinBlockMapper {
         )?;
         self.map_btc_block(&block, &output_satoshis, &identity, fork_step);
         Ok(tx_count)
+    }
+}
+
+impl BlockMapper for BitcoinBlockMapper {
+    fn map_block(
+        &mut self,
+        block_bytes: &[u8],
+        identity: &BlockIdentity,
+        fork_step: Option<&str>,
+    ) -> anyhow::Result<u64> {
+        self.map_decoded(btc::Block::decode(block_bytes)?, identity, fork_step)
+    }
+
+    fn map_block_bytes(
+        &mut self,
+        block_bytes: prost::bytes::Bytes,
+        identity: &BlockIdentity,
+        fork_step: Option<&str>,
+    ) -> anyhow::Result<u64> {
+        self.map_decoded(btc::Block::decode(block_bytes)?, identity, fork_step)
     }
 
     fn flush(&mut self) -> anyhow::Result<HashMap<String, RecordBatch>> {

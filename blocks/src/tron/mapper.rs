@@ -116,17 +116,17 @@ impl TronBlockMapper {
         self.blocks.hash.append_value(&block.id);
         self.blocks
             .parent_hash
-            .append_value(header.map(|h| h.parent_hash.as_slice()).unwrap_or(&[]));
+            .append_value(header.map(|h| h.parent_hash.as_ref()).unwrap_or(&[]));
 
         self.blocks
             .witness_address
-            .append_value(header.map(|h| h.witness_address.as_slice()).unwrap_or(&[]));
+            .append_value(header.map(|h| h.witness_address.as_ref()).unwrap_or(&[]));
         self.blocks
             .version
             .append_value(header.map_or(0, |h| h.version));
         self.blocks
             .tx_trie_root
-            .append_value(header.map(|h| h.tx_trie_root.as_slice()).unwrap_or(&[]));
+            .append_value(header.map(|h| h.tx_trie_root.as_ref()).unwrap_or(&[]));
         self.blocks
             .parent_number
             .append_value(header.map_or(0, |h| h.parent_number));
@@ -237,6 +237,20 @@ impl TronBlockMapper {
     }
 }
 
+impl TronBlockMapper {
+    fn map_decoded(
+        &mut self,
+        block: tron::Block,
+        identity: &BlockIdentity,
+        fork_step: Option<&str>,
+    ) -> anyhow::Result<u64> {
+        let tx_count = block.transactions.len() as u64;
+        let identity = self.blocks.canonical.prepare(identity)?;
+        self.map_tron_block(&block, &identity, fork_step);
+        Ok(tx_count)
+    }
+}
+
 impl BlockMapper for TronBlockMapper {
     fn map_block(
         &mut self,
@@ -244,11 +258,16 @@ impl BlockMapper for TronBlockMapper {
         identity: &BlockIdentity,
         fork_step: Option<&str>,
     ) -> anyhow::Result<u64> {
-        let block = tron::Block::decode(block_bytes)?;
-        let tx_count = block.transactions.len() as u64;
-        let identity = self.blocks.canonical.prepare(identity)?;
-        self.map_tron_block(&block, &identity, fork_step);
-        Ok(tx_count)
+        self.map_decoded(tron::Block::decode(block_bytes)?, identity, fork_step)
+    }
+
+    fn map_block_bytes(
+        &mut self,
+        block_bytes: prost::bytes::Bytes,
+        identity: &BlockIdentity,
+        fork_step: Option<&str>,
+    ) -> anyhow::Result<u64> {
+        self.map_decoded(tron::Block::decode(block_bytes)?, identity, fork_step)
     }
 
     fn flush(&mut self) -> anyhow::Result<HashMap<String, RecordBatch>> {
@@ -598,54 +617,54 @@ pub(crate) mod tests {
 
     pub(crate) fn make_test_block(number: u64) -> tron::Block {
         tron::Block {
-            id: vec![0x01, 0x02, 0x03],
+            id: vec![0x01, 0x02, 0x03].into(),
             header: Some(tron::BlockHeader {
                 number,
-                tx_trie_root: vec![0xaa, 0xbb],
-                witness_address: tron_address(0x11),
+                tx_trie_root: vec![0xaa, 0xbb].into(),
+                witness_address: tron_address(0x11).into(),
                 parent_number: number.saturating_sub(1),
-                parent_hash: vec![0x00, 0x01, 0x02],
+                parent_hash: vec![0x00, 0x01, 0x02].into(),
                 version: 28,
                 timestamp: 1700000000000,
-                witness_signature: vec![],
+                witness_signature: vec![].into(),
             }),
             transactions: vec![tron::Transaction {
-                txid: vec![0xde, 0xad, 0xbe, 0xef],
+                txid: vec![0xde, 0xad, 0xbe, 0xef].into(),
                 signature: vec![],
-                ref_block_bytes: vec![],
-                ref_block_hash: vec![],
+                ref_block_bytes: vec![].into(),
+                ref_block_hash: vec![].into(),
                 expiration: 1700000060000,
                 timestamp: 1700000000000,
                 contract_result: vec![],
                 result: true,
                 code: 0,
-                message: vec![],
+                message: vec![].into(),
                 energy_used: 50000,
                 energy_penalty: 0,
                 info: Some(protocol::TransactionInfo {
-                    id: vec![0xde, 0xad, 0xbe, 0xef],
+                    id: vec![0xde, 0xad, 0xbe, 0xef].into(),
                     fee: 1000,
                     block_number: number as i64,
                     block_time_stamp: 1700000000000,
                     contract_result: vec![],
-                    contract_address: vec![],
+                    contract_address: vec![].into(),
                     receipt: None,
                     log: vec![protocol::transaction_info::Log {
-                        address: tron_address(0x22),
-                        topics: vec![vec![0xab, 0xcd], vec![0xef, 0x01]],
-                        data: vec![0x01, 0x02, 0x03],
+                        address: tron_address(0x22).into(),
+                        topics: vec![vec![0xab, 0xcd].into(), vec![0xef, 0x01].into()],
+                        data: vec![0x01, 0x02, 0x03].into(),
                     }],
                     result: 0,
-                    res_message: vec![],
+                    res_message: vec![].into(),
                     asset_issue_id: String::new(),
                     withdraw_amount: 0,
                     unfreeze_amount: 0,
                     internal_transactions: vec![protocol::InternalTransaction {
-                        hash: vec![0x11, 0x22],
-                        caller_address: tron_address(0xaa),
-                        transfer_to_address: tron_address(0xbb),
+                        hash: vec![0x11, 0x22].into(),
+                        caller_address: tron_address(0xaa).into(),
+                        transfer_to_address: tron_address(0xbb).into(),
                         call_value_info: vec![],
-                        note: b"call".to_vec(),
+                        note: b"call".to_vec().into(),
                         rejected: false,
                         extra: String::new(),
                     }],
@@ -654,7 +673,7 @@ pub(crate) mod tests {
                     exchange_withdraw_another_amount: 0,
                     exchange_id: 0,
                     shielded_transaction_fee: 0,
-                    order_id: vec![],
+                    order_id: vec![].into(),
                     order_details: vec![],
                     packing_fee: 0,
                     withdraw_expire_amount: 0,
@@ -663,8 +682,8 @@ pub(crate) mod tests {
                 contracts: vec![protocol::transaction::Contract {
                     r#type: 31, // TriggerSmartContract
                     parameter: None,
-                    provider: vec![],
-                    contract_name: vec![],
+                    provider: vec![].into(),
+                    contract_name: vec![].into(),
                     permission_id: 0,
                 }],
             }],
@@ -750,16 +769,16 @@ pub(crate) mod tests {
     #[test]
     fn test_empty_block() {
         let block = tron::Block {
-            id: vec![0x01],
+            id: vec![0x01].into(),
             header: Some(tron::BlockHeader {
                 number: 200,
-                tx_trie_root: vec![],
-                witness_address: vec![],
+                tx_trie_root: vec![].into(),
+                witness_address: vec![].into(),
                 parent_number: 199,
-                parent_hash: vec![],
+                parent_hash: vec![].into(),
                 version: 28,
                 timestamp: 1700000000000,
-                witness_signature: vec![],
+                witness_signature: vec![].into(),
             }),
             transactions: vec![],
         };

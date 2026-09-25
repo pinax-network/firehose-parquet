@@ -273,12 +273,12 @@ mod tests {
                 antelope::exception::LogMessage {
                     context: Some(child),
                     format: odd.clone(),
-                    data: vec![0xff, 0xc3, 0x28, 0, 34, 92],
+                    data: vec![0xff, 0xc3, 0x28, 0, 34, 92].into(),
                 },
                 antelope::exception::LogMessage {
                     context: None,
                     format: String::new(),
-                    data: odd.as_bytes().to_vec(),
+                    data: odd.as_bytes().to_vec().into(),
                 },
             ],
         };
