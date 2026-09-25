@@ -1393,6 +1393,32 @@ row counts without changing schemas. Rebuild affected ranges into a separate
 output root to recover missing rows; appending a corrected replay to old results
 does not remove existing rows or guarantee deduplication.
 
+## Solana Transaction Outcome Context
+
+Solana `messages`, `instructions`, `token_balances`, and `account_lookups` append
+a non-null Boolean `transaction_success`. It describes the parent transaction:
+`false` means its source metadata contains nonempty error bytes; absent or empty
+error bytes mean `true`. Transactions without metadata remain omitted. The
+existing failed-transaction and vote filters still select exactly the same rows.
+
+`rewards.transaction_success` is nullable: transaction rewards carry their
+parent's outcome; block rewards have `NULL` because they have no parent
+transaction. This does not change reward indices or amounts.
+
+This is outcome context, not an instruction result or a `reverted` flag.
+Submitted top-level instructions can include instructions that never executed;
+recorded inner calls do not establish each call's success. Token balances remain
+literal pre/post snapshots, and transaction fees and lamport balances remain
+unchanged. A failed transaction can still pay fees or advance a durable nonce;
+do not discard its balance observations merely because `transaction_success`
+is false. This addition does not provide a canonical view of reversible events.
+
+Start a fresh output root and replay when adopting these schemas. Old files lack
+the context; a missing column is not `false`. Strict maintenance and protected
+output bindings refuse mixed old/new schemas. An explicit conversion must write
+a separate dataset and preserve unknown historical context. See the
+[source evidence, migration and offline comparison](docs/audit/550-solana-execution-context.md).
+
 ## Solana Payloads and Account Indices
 
 Opaque `instructions.data`, `transactions.err` / `return_data` and

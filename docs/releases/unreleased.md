@@ -44,6 +44,17 @@ are bound into pending transaction identities; finish recovery with this version
 before downgrading to one that cannot parse that variant. See the
 [contract and measurements](../audit/519-parquet-lookup-properties.md).
 
+### Solana detail rows expose parent transaction outcome (#550, partial)
+
+`messages`, `instructions`, `token_balances`, and `account_lookups` append Boolean
+`transaction_success`; rewards append the same field with null for block-level
+rewards. Existing values, row filters and vote treatment are unchanged. This is
+parent outcome context, not proof of individual instruction execution or
+reversion. Balance snapshots and fees remain literal source observations.
+Rebuild into a fresh dataset; old missing context must not become false.
+See the [contract and retained-source comparison](../audit/550-solana-execution-context.md).
+The other chains and remaining qualification in #550 are still open.
+
 ### Adaptive compressed file targets and independent mapper memory threshold (#515)
 
 `build --flush-bytes` now targets the largest compressed file using feedback from

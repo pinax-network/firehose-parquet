@@ -111,6 +111,7 @@ pub fn messages_schema(
         ),
     ]);
     maybe_fork_step(&mut fields, include_fork_step);
+    fields.push(Field::new("transaction_success", DataType::Boolean, false));
     Schema::new(fields)
 }
 
@@ -134,6 +135,7 @@ pub fn instructions_schema(
         Field::new("inner_instruction_index", DataType::UInt32, true),
     ]);
     maybe_fork_step(&mut fields, include_fork_step);
+    fields.push(Field::new("transaction_success", DataType::Boolean, false));
     Schema::new(fields)
 }
 
@@ -156,10 +158,11 @@ pub fn rewards_schema(
         Field::new("transaction_index", DataType::UInt32, true),
     ]);
     maybe_fork_step(&mut fields, include_fork_step);
+    fields.push(Field::new("transaction_success", DataType::Boolean, true));
     Schema::new(fields)
 }
 
-/// Token balance changes (pre/post) per transaction.
+/// Token balance snapshots (pre/post) per transaction.
 pub fn token_balances_schema(
     include_fork_step: bool,
     encoding: &EncodeBytes,
@@ -182,6 +185,7 @@ pub fn token_balances_schema(
         Field::new("ui_amount_string", DataType::Utf8, false),
     ]);
     maybe_fork_step(&mut fields, include_fork_step);
+    fields.push(Field::new("transaction_success", DataType::Boolean, false));
     Schema::new(fields)
 }
 
@@ -201,6 +205,7 @@ pub fn account_lookups_schema(
         Field::new("readonly_indexes", index_list_type(), false),
     ]);
     maybe_fork_step(&mut fields, include_fork_step);
+    fields.push(Field::new("transaction_success", DataType::Boolean, false));
     Schema::new(fields)
 }
 
