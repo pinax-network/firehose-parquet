@@ -64,8 +64,9 @@ and test against current main. Never reset or discard the previous worktree.
 
 ## Remaining backlog groups
 
-- Schema/data correctness: #505 (Beacon numeric/blob/null semantics), #507,
-  #509 and #510 (NEAR, Tron and Cosmos). Solana native payload types (#503) merged
+- Schema/data correctness: #507, #509 and #510 (NEAR, Tron and Cosmos).
+  Beacon #505 merged as `b8d6834` in PR #594 after 862 tests and a retained raw
+  Deneb comparison; issue closure is verified. Solana native payload types (#503) merged
   as `d417e0c` in PR #593 after 857 tests, 19,714 raw-sample row comparisons, release
   benchmarks and CI; issue closure is verified. Antelope #508 is merged in
   PR #590 after raw join checks, byte-for-byte legacy-column comparison and CI. Bitcoin #511 is merged
@@ -80,7 +81,7 @@ and test against current main. Never reset or discard the previous worktree.
   #476 malformed-metadata handling are merged; the #468 journal is in progress.
 - Performance: #513 was recovered into an isolated worktree, with bounded exhaustive
   and sampled equivalence tests, a reproducible conversion benchmark and 869 passing
-  integrated tests; PR/CI pending.
+  integrated tests; PR #596 passed CI and merged as `2a3724e`; issue closed.
   The original locked work is preserved. Recover #522 before duplicating that work. Measure
   #565, #515, #520 and #524 on representative data; #503's native-type work and
   bounded release benchmark are complete. #516 depends on durable

@@ -1,7 +1,5 @@
 use super::*;
-use arrow::array::{
-    ArrayRef, BinaryArray, Int64Array, ListBuilder, StringArray, UInt64Array, UInt64Builder,
-};
+use arrow::array::{ArrayRef, BinaryArray, Int64Array, StringArray, StructArray, UInt64Array};
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
 use bytes::Bytes;
@@ -13,12 +11,18 @@ use parquet::file::{
 use std::sync::Arc;
 
 fn fixture(binary_ids: bool, timestamp: bool, numeric_payload: bool) -> Bytes {
-    let mut nested = ListBuilder::new(UInt64Builder::new());
-    for _ in 0..3 {
-        nested.values().append_slice(&[1, 2, 3]);
-        nested.append(true);
-    }
-    let mut columns: Vec<ArrayRef> = vec![Arc::new(nested.finish())];
+    // Two physical leaves precede canonical roots, so root and leaf indices differ.
+    let nested = StructArray::from(vec![
+        (
+            Arc::new(Field::new("a", DataType::UInt64, false)),
+            Arc::new(UInt64Array::from(vec![1, 2, 3])) as ArrayRef,
+        ),
+        (
+            Arc::new(Field::new("b", DataType::Utf8, false)),
+            Arc::new(StringArray::from(vec!["x", "y", "z"])) as ArrayRef,
+        ),
+    ]);
+    let mut columns: Vec<ArrayRef> = vec![Arc::new(nested)];
     let ids = |values: &[&str]| -> ArrayRef {
         if binary_ids {
             Arc::new(BinaryArray::from(
@@ -113,7 +117,7 @@ fn projected_validation_skips_payload_pages_and_remaps_reordered_roots() {
                 .row_groups()
                 .iter()
                 .flat_map(|group| {
-                    [0, 2].into_iter().map(move |i| {
+                    [0, 1, 3].into_iter().map(move |i| {
                         let (a, n) = group.column(i).byte_range();
                         (a, a + n)
                     })
