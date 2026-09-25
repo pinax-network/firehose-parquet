@@ -105,4 +105,16 @@ the shared Cargo target, `--locked`, and four build jobs.
   (110 + 191 + 1 + 424 + 3), with all doc tests passing.
 - `git diff --check`: passed.
 
-Final current-main integration checks are recorded below before publication.
+Final integration: `8ff1939cd6646b24f85eacdc20f1e0898cd508cd`, including main
+`2793421272d8dff64c43d4b69bc4bf68a8a6cab9` (Arrow/Parquet 60).
+
+- `cargo test --workspace --locked -j4`: **732 passed, 0 failed, 4 ignored**
+  (110 + 191 + 1 + 424 + 3 + 3), including Parquet 58 compatibility fixtures and
+  all documentation tests. One of the ignored tests is the subprocess helper
+  that the active crash test invokes twice.
+- `cargo build --workspace --locked -j4`: passed.
+- `cargo fmt --all --check`: passed.
+- `git diff --check`: passed.
+
+The existing unused `transactions_processed` assignment warning in the binary
+remains. No warning was introduced in the local publication code.
