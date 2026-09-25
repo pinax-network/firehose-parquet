@@ -33,7 +33,7 @@ A production-grade Rust toolkit that consumes [StreamingFast Firehose](https://f
 - **Fork handling** — finalized output by default; `--final-blocks-only=false` preserves append-only `fork_step` events ([query semantics](#non-final-streams-and-reorgs))
 - **Failed transactions** — EVM includes failed/reverted txs by default with only their persistent state changes (`--exclude-failed-transactions` drops them); other chains exclude them unless `--include-failed-transactions` is set
 - **Block-type-based encoding** — identifiers follow the resolved chain/profile defaults, recorded in Parquet metadata; opaque Solana payloads use Binary and account indices use UInt8 lists
-- **Compression** — zstd (default), snappy, gzip, or none
+- **Compression** — zstd (default level 3), explicit `zstd:<level>`, snappy, gzip, or none
 - **Parquet file metadata** — every file embeds pipeline provenance (`firehose-parquet.*` key-value pairs) in the Parquet footer
 - **Prometheus metrics** — opt-in `/metrics` endpoint for monitoring throughput, buffer state, and errors
 - **Graceful shutdown** — SIGINT/SIGTERM and write/stream errors never save the cursor past unwritten data; the next run resumes from the last committed flush
@@ -1060,7 +1060,7 @@ Which files rollup reads, writes, and deletes:
 |---|---|---|
 | `-o, --output` | same as source | Output path (local or S3 URI). In-place rollups require `--delete-source` |
 | `-p, --partition` | `date` | Target partition interval: `hour` or `date` |
-| `--compression` | `zstd` | Compression codec: zstd, snappy, gzip, none |
+| `--compression` | `zstd` | Compression codec: zstd (level 3), zstd:<level>, snappy, gzip, none |
 | `--flush-bytes` | 32 MiB | Target compressed bytes per output part, with batch/codec overhead; 0 disables size-based closure |
 | `--delete-source` | `false` | Delete each source file once its target partition is written (required in place) |
 
@@ -1093,7 +1093,7 @@ The path must exist locally or be an explicit `s3://...` URI. Unlike `scan` and 
 
 | Flag | Default | Description |
 |---|---|---|
-| `--compression` | `zstd` | Compression codec: zstd, snappy, gzip, none |
+| `--compression` | `zstd` | Compression codec: zstd (level 3), zstd:<level>, snappy, gzip, none |
 | `--flush-bytes` | 32 MiB | Target compressed bytes per output file |
 | `--flush-rows` | disabled | Flush merged output after this many rows |
 | `--dry-run` | `false` | Show what would be merged without writing |
@@ -1991,3 +1991,24 @@ cargo install --path blocks
 ## License
 
 [MIT](LICENSE)
+
+## Parquet Lookup Metadata
+
+Ingestion, merge and rollup write bounded Bloom filters for selected scalar
+hash, signature and account/address columns. Readers that support these filters
+can skip row groups for equality lookups; positive matches still require row
+filtering. Filters do not answer `IS NULL` predicates. Row groups contain at most
+65,536 rows, with at most eight filters per group. This changes physical layout,
+not table schemas or row order. Dictionary encoding retains its existing policy.
+The retained-data benchmark measured 0.74–1.92% larger files and faster missing-key
+lookups; readers without Bloom pruning may only see the storage overhead.
+
+Complete ingestion parts declare ascending `block_num` only when every observed
+height proves that order. Streaming maintenance omits that assertion. Neither
+path sorts or reconstructs reversible-chain history.
+
+Use `--compression zstd:6` to select an explicit Zstandard level; `zstd` and
+`zstd:3` retain level 3. Zero is rejected as ambiguous. Explicit non-default
+levels participate in protected transaction identity; recover any pending work
+with a supporting version before downgrading. See the
+[lookup properties and measurements](docs/audit/519-parquet-lookup-properties.md).

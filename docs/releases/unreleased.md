@@ -42,6 +42,18 @@ first-contract type projection. New schemas/inventories require a new output roo
 or explicit migration; verification roots change. See [the exact field semantics
 and qualification status](../audit/509-tron-contract-fields.md).
 
+### Parquet lookup properties and explicit Zstandard levels (#519)
+
+Part encoders and maintenance share selective, bounded Bloom filters and a
+65,536-row group maximum. Ingestion declares block-number ordering only after
+checking the complete part; streaming maintenance omits that assertion. Physical
+file layout changes while Arrow schemas, values and order remain unchanged.
+`--compression zstd:<level>` selects an explicit level; plain `zstd` remains level
+3. The Rust Compression enum has a new explicit-level variant. Non-default levels
+are bound into pending transaction identities; finish recovery with this version
+before downgrading to one that cannot parse that variant. See the
+[contract and measurements](../audit/519-parquet-lookup-properties.md).
+
 ### Solana detail rows expose parent transaction outcome (#550, partial)
 
 `messages`, `instructions`, `token_balances`, and `account_lookups` append Boolean

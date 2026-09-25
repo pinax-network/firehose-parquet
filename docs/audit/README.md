@@ -90,10 +90,11 @@ lifecycle state; a local implementation or passing test alone is not closure.
 | [#510](https://github.com/pinax-network/firehose-parquet/issues/510) | [#601](https://github.com/pinax-network/firehose-parquet/pull/601) | Merged as `9379883` on 2026-09-25; issue closure verified; 1,003 workspace tests, independent Cosmos RPC-backed source/value comparison and CI passed. Firehose producer transport remains unqualified. |
 | [#517](https://github.com/pinax-network/firehose-parquet/issues/517) | [#602](https://github.com/pinax-network/firehose-parquet/pull/602) | Merged as `b364681` on 2026-09-25; issue closure verified; 1,007 tests, guarded local receive-window benchmarks, independent review and CI passed. |
 | [#530](https://github.com/pinax-network/firehose-parquet/issues/530) | [#603](https://github.com/pinax-network/firehose-parquet/pull/603) | Merged as `39d49f6` on 2026-09-25; issue closure verified; 1,010 tests, real local authenticated RPC/retry regressions, independent review and CI passed. |
-
-
 | [#522](https://github.com/pinax-network/firehose-parquet/issues/522) | [#604](https://github.com/pinax-network/firehose-parquet/pull/604) | Merged as `6cae796` on 2026-09-25; issue closure verified. Guarded 36-run rollup comparisons, complete row/schema equality, bounded range-read/error tests, independent review and CI passed. |
 | [#515](https://github.com/pinax-network/firehose-parquet/issues/515) | [#605](https://github.com/pinax-network/firehose-parquet/pull/605) | Merged as `137ab325` on 2026-09-25; issue closure verified. Retained and synthetic sizing evidence, successful-commit feedback and memory-trigger tests, 228 current-main integration checks, independent review and CI passed. |
+
+| [#518](https://github.com/pinax-network/firehose-parquet/issues/518) | [#606](https://github.com/pinax-network/firehose-parquet/pull/606) | Merged as `9eddfd4` on 2026-09-25; issue closure verified. All-chain owned/borrowed equality, 75 guarded offline samples, 1,029 combined tests, independent review and CI passed. |
+| [#550](https://github.com/pinax-network/firehose-parquet/issues/550), Solana slice | [#607](https://github.com/pinax-network/firehose-parquet/pull/607) | Merged as `955b8b2` on 2026-09-25; issue remains open. Parent outcome context added; all legacy values preserved in 300 table comparisons, 1,030 tests and CI passed. Other chains remain outstanding. |
 
 The #468 design PR accidentally triggered GitHub auto-closure through a negative
 sentence containing a recognized closing phrase. On 2026-09-25 the PR text was
@@ -109,3 +110,5 @@ any external recovery condition, such as a dependency security rescan.
 
 - [#518 owned protobuf byte buffers](518-owned-protobuf-bytes.md): shared chain
   decoding, compatibility boundary, all-chain equivalence and offline benchmarks.
+
+- [#519 Parquet lookup properties and explicit compression](519-parquet-lookup-properties.md).
