@@ -1268,11 +1268,13 @@ source order, duplicates and empty lists. These are indices, not resolved keys.
 
 ```sql
 -- Inspect payload bytes without requiring base58 conversion.
-SELECT signature, instruction_index, hex(data) AS data_hex, accounts
+SELECT block_num, block_id, transaction_index, instruction_index,
+       is_inner, inner_instruction_index, hex(data) AS data_hex, accounts
 FROM read_parquet('output/**/instructions/*.parquet');
 
 -- Expand instruction account indices while preserving their source positions.
-SELECT signature, instruction_index,
+SELECT block_num, block_id, transaction_index, instruction_index,
+       is_inner, inner_instruction_index,
        generate_subscripts(accounts, 1) - 1 AS account_position,
        unnest(accounts) AS account_index
 FROM read_parquet('output/**/instructions/*.parquet');

@@ -65,7 +65,7 @@ and test against current main. Never reset or discard the previous worktree.
 ## Remaining backlog groups
 
 - Schema/data correctness: #503 (Solana native payload types; implementation,
-  benchmark and raw-data comparison complete, integration/PR pending), #505 (Beacon numeric/blob/null
+  benchmark, raw-data comparison and 857-test integration complete; PR/CI pending), #505 (Beacon numeric/blob/null
   semantics), #507, #509 and #510 (NEAR, Tron and Cosmos). Antelope #508 is merged in
   PR #590 after raw join checks, byte-for-byte legacy-column comparison and CI. Bitcoin #511 is merged
   in PR #589 after raw integer/input qualification and CI. #550 needs

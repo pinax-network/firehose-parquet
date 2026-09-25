@@ -110,5 +110,9 @@ for conflicting types. Strict merge/rollup requires matching schemas; verificati
 roots also change because their schema/value representation changes. Do not compare
 roots across the old and new contracts as if they described identical schemas.
 
-The full workspace, final current-main integration, CI, PR merge and issue closure
-are checked separately and recorded in the audit index.
+Integrated current main `d5e1419` (ownership foundation and exact finalized
+partition indexes). The full workspace passed 857 tests with five intentional
+child/helper skips; the capture-auth example passed its additional regression.
+Formatting, workspace build and Bash/Zsh/Fish completions passed. Both README
+queries were executed against the updated live sample. CI, PR merge and issue
+closure are recorded separately after publication.
