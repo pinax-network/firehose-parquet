@@ -76,8 +76,10 @@ and test against current main. Never reset or discard the previous worktree.
   are now merged and closed after regression and live comparison. Vote
   classification (#501, PR #586) and explicit instruction positions (#502,
   PR #585) also passed raw-data comparisons and are merged with issues closed.
-- Operational contracts: #474 covers reversible stream options/output semantics;
-  #475 metrics/readiness is merged. The #477 writer simplification and
+- Operational contracts: #474 reversible stream options/output semantics merged
+  in PR #597 as `1f2d252` after 873 tests, executable query and protocol checks,
+  independent review and CI; issue closure was verified. #475 metrics/readiness
+  is merged. The #477 writer simplification and
   #476 malformed-metadata handling are merged; the #468 journal is in progress.
 - Performance: #513 was recovered and merged in PR #596 as `2a3724e` after 869
   integrated tests, bounded exhaustive/sampled equivalence, independent review,

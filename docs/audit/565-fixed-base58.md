@@ -68,9 +68,15 @@ The unchanged `bs58` implementation is the independent differential reference:
 These are bounded exhaustive subdomains and sampled large domains, not an
 exhaustive enumeration of 256/512-bit inputs. At code commit `0c0db81`, all
 26 focused encoding tests passed; the two manual benchmarks were ignored.
-Full workspace and release benchmark results are recorded below after the final
-integration run. No new public Firehose call or production write is needed for
-this byte-identical conversion change.
+Integration `9362c40` includes main `2a3724e` plus the exact reviewed #597 head
+`40bb7e8`. Its locked workspace suite passed **877 tests**, with **7 intentional
+skips** (six inherited and this manual benchmark); locked formatting, workspace
+build and diff-whitespace checks passed. Merged main `1f2d252` has an identical
+source tree to that included #597 head, so its final ancestry merge does not
+change tested runtime code. The only build warning is the inherited
+`transactions_processed` assignment. Independent review found no code blocker.
+No new public Firehose call or production write is needed for this byte-identical
+conversion change.
 
 ## Reproducible benchmark
 
