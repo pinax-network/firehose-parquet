@@ -620,6 +620,13 @@ claim. See [equivalence coverage, recovered-work provenance and all measurements
 
 - **`verify` memory no longer grows with row count, and protocol-only runs skip hashing (#521).** Partition roots are built as rows stream in, with O(log n) memory per partition instead of 32 bytes per row. The roots are identical. `--checks protocol` reads only the columns the protocol checks use, and hashes nothing. S3 objects are prefetched, up to 4 at a time with a 256 MiB budget. On 300 EVM mainnet blocks, verifying `gas_changes` (9.0 million rows) peaks at 30 MiB instead of 940 MiB, in about the same time (14 s). A protocol-only run on `calls` (1.7 million rows) takes 0.2 s instead of 5.2 s.
 
+## Internal maintenance
+
+- All Firehose RPC clients now share automatic credential insertion and transport
+  construction. Provider selection, retries, cancellation and finality behavior
+  are unchanged; local protocol tests cover every path and reconnect. See
+  [#530 validation](../audit/530-grpc-client-deduplication.md).
+
 ## Tests
 
 - A new cross-chain schema contract test maps one fixture batch for every table of every chain, under every bytes encoding and both `fork_step` settings. It checks that column names are unique, that each batch round-trips through the Parquet writer and reader with the same schema and values, and that every table's canonical `block_id` / `parent_id` match the `blocks` table.

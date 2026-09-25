@@ -37,13 +37,12 @@ impl FirehoseClient {
             tokio::time::timeout(timeout, async {
                 let channel = self.fetch_channel().await?;
                 let mut client = self.stream_client(channel);
-                let mut request = tonic::Request::new(firehose::Request {
+                let request = tonic::Request::new(firehose::Request {
                     start_block_num: signed_start,
                     stop_block_num: end_inclusive,
                     final_blocks_only: true,
                     ..Default::default()
                 });
-                self.auth.apply(&mut request);
                 Ok::<_, anyhow::Error>(client.blocks(request).await?.into_inner())
             }),
         )
