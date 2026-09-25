@@ -30,7 +30,7 @@ A production-grade Rust toolkit that consumes [StreamingFast Firehose](https://f
 - **S3-aware cursor** — cursor automatically stored alongside output (local or S3)
 - **Partitioning** — `none`, `block_range`, `date`, `hour`, `minute`, or `second` layouts
 - **File rollover** — flush by row count, byte size, or time interval
-- **Fork handling** — `--final-blocks-only` (default) or include `fork_step` column (`NEW`/`UNDO`/`FINAL`)
+- **Fork handling** — finalized output by default; `--final-blocks-only=false` preserves append-only `fork_step` events ([query semantics](#non-final-streams-and-reorgs))
 - **Failed transactions** — EVM includes failed/reverted txs by default with only their persistent state changes (`--exclude-failed-transactions` drops them); other chains exclude them unless `--include-failed-transactions` is set
 - **Block-type-based encoding** — identifiers follow the resolved chain/profile defaults, recorded in Parquet metadata; opaque Solana payloads use Binary and account indices use UInt8 lists
 - **Compression** — zstd (default), snappy, gzip, or none
@@ -442,7 +442,72 @@ recovery knobs to dedicated advanced sections.
 | Resume | Rerun the same command and the default `cursor.parquet` is reused automatically; use `--cursor <CURSOR>` only when you want a non-default cursor file |
 | Output | `--output <OUTPUT>`, `--partition <PARTITION>`, `--compression <COMPRESSION>` |
 | Chain | `--block-type <BLOCK_TYPE>` (default `auto`), plus chain-specific toggles like `--extended false` or `--with-votes false` only when needed |
-| Runtime | `--final-blocks-only` (default), `--flush-bytes <FLUSH_BYTES>`, optional `--flush-rows` / `--flush-interval-secs` |
+| Runtime | `--final-blocks-only[=true|false]` (default `true`), `--flush-bytes <FLUSH_BYTES>`, optional `--flush-rows` / `--flush-interval-secs` |
+
+### Non-final streams and reorgs
+
+Finalized-only output is the default. Use `--final-blocks-only=false` to receive
+reversible blocks, or set `FINAL_BLOCKS_ONLY=false`. An explicit CLI value takes
+precedence over the environment. The bare `--final-blocks-only` flag still means
+`true`; optional values use `=` so the flag cannot consume a following command.
+An unbounded `--live` run controls when streaming stops, independently of whether
+blocks must be final.
+
+Non-final output is an **append-only event history**. Every mapped envelope adds
+rows carrying `fork_step`: `NEW` adds a block, `UNDO` records its removal from the
+chain, and `FINAL` is an explicit final event if the endpoint sends it. The usual
+non-final protocol sends `NEW` and occasional `UNDO`, not a later `FINAL` for
+every block. UNDO does not delete earlier rows. A block identity can return as
+`NEW` after an `UNDO`; replay/reconnect can also repeat deliveries. Treat unknown
+steps as unresolved rather than inferring their effect.
+
+The current table schema has **no global event sequence**. Block height, block
+time, `lib_num`, filenames, file enumeration, and row order in a multi-file scan
+are not delivery-order keys. The opaque saved cursor is a resume checkpoint,
+not a sortable per-row sequence. Neither filtering out every identity with an
+UNDO nor counting NEW minus UNDO reconstructs arbitrary canonical state:
+`NEW(A), UNDO(A), NEW(A)` ends with A present, while a repeated `NEW(A), NEW(A),
+UNDO(A)` ends with A absent despite the same unordered rows. Consequently the
+current reversible dataset alone cannot supply a general canonical-tail query.
+
+For a safe **finalized block-identity subset**, build a separate dataset with
+`--final-blocks-only=true` covering the desired range on the same chain/network,
+with matching identifier encoding. Then intersect its authoritative identities with observed
+positive events:
+
+```sql
+-- DuckDB: finality comes from the separate finalized-only capture.
+-- Returns one identity per finalized block also observed as NEW/FINAL.
+WITH finalized AS (
+  SELECT DISTINCT block_num, block_id
+  FROM read_parquet('finalized/mainnet/blocks/**/*.parquet')
+), observed AS (
+  SELECT DISTINCT block_num, block_id
+  FROM read_parquet('reversible/mainnet/blocks/**/*.parquet')
+  WHERE fork_step IN ('NEW', 'FINAL')
+)
+SELECT f.block_num, f.block_id
+FROM finalized f
+JOIN observed o USING (block_num, block_id)
+ORDER BY f.block_num, f.block_id;
+```
+
+This query is limited to the finalized reference's coverage; it says nothing
+about the remaining reversible tail or the ordering of its events. It handles
+repeated NEW/UNDO/NEW identities without inventing ordering. For transaction,
+log, or other child-table aggregates, query the finalized-only dataset directly.
+Joining child rows to these identities does **not** remove repeated deliveries,
+and generic `DISTINCT *` can collapse legitimate duplicate rows. Reconstructing
+a full reversible state requires a separately preserved, complete ordered event
+log and event/row occurrence keys; the current public Parquet schema does not
+provide those guarantees.
+
+Use different output roots/cursors for final-only and non-final captures;
+resuming a cursor with a different mode is incompatible. A bounded non-final
+run warns on successful completion because reaching its stop does not prove
+that its tail is final, and later UNDO events will not be received after it
+stops. A saved cursor or successful exit is not a finality certificate. See the
+[implementation and offline query checks](docs/audit/474-non-final-streams.md).
 
 ### Advanced authentication
 
