@@ -1,0 +1,116 @@
+{
+  "platform": "macOS-26.5.1-arm64-arm-64bit-Mach-O",
+  "samples_per_version": 7,
+  "warmups_per_version": 1,
+  "measure": "wall-clock whole CLI validate, cached local files; process startup and result formatting included",
+  "datasets": [
+    {
+      "name": "wide.parquet",
+      "files": 1,
+      "parquet_bytes": 137885482,
+      "before_ms": [
+        94.771167,
+        92.3545,
+        92.402875,
+        92.745917,
+        93.588625,
+        97.377708,
+        94.535125
+      ],
+      "after_ms": [
+        37.544083,
+        34.239291,
+        34.585083,
+        34.581042,
+        34.348542,
+        36.120833,
+        34.338375
+      ],
+      "before_median_ms": 93.588625,
+      "after_median_ms": 34.581042,
+      "output_sha256": "f22ae62b1ff5304e0c1747257b76f99859cb5c184d1e712afc8b687c78f43515",
+      "output": "Validating blocks in /tmp/fireparq-524-data/wide.parquet ...\n\n  Files scanned:     1\n  Block range:       1 \u2014 250000\n  Total blocks:      250000\n  Ordering errors:   0\n  Gaps:              0\n  Parent mismatches: 0\n  Duplicates:        0\n  Timestamp reversals: 0\n\n  \u2713 All blocks valid\n"
+    },
+    {
+      "name": "partitions-25",
+      "files": 25,
+      "parquet_bytes": 7792457,
+      "before_ms": [
+        55.141542,
+        57.286208,
+        55.603708,
+        55.012417,
+        55.764833,
+        54.914458,
+        55.043333
+      ],
+      "after_ms": [
+        30.325875,
+        30.974875,
+        30.289208,
+        31.719833,
+        30.528916,
+        29.940083,
+        29.971542
+      ],
+      "before_median_ms": 55.141542,
+      "after_median_ms": 30.325875,
+      "output_sha256": "5d1a07090158330b72e66fac9718c2f431c1f8e703232883db206c39b8a70d3a",
+      "output": "Validating blocks in /tmp/fireparq-524-data/partitions-25 ...\n\n  Partitions:        25 total, 25 valid, 0 with issues\n\n  Files scanned:     25\n  Block range:       1 \u2014 200000\n  Total blocks:      200000\n  Ordering errors:   0\n  Gaps:              0\n  Parent mismatches: 0\n  Duplicates:        0\n  Timestamp reversals: 0\n\n  \u2713 All blocks valid\n"
+    },
+    {
+      "name": "partitions-100",
+      "files": 100,
+      "parquet_bytes": 7836533,
+      "before_ms": [
+        75.436459,
+        75.092542,
+        74.872834,
+        74.804292,
+        75.297417,
+        73.366083,
+        75.647625
+      ],
+      "after_ms": [
+        35.081292,
+        36.064834,
+        35.705333,
+        35.25475,
+        35.914583,
+        35.102167,
+        35.23925
+      ],
+      "before_median_ms": 75.092542,
+      "after_median_ms": 35.25475,
+      "output_sha256": "f65af285d88687be91588d260f5c312a194375da4e524aca6232b0095ebca1ed",
+      "output": "Validating blocks in /tmp/fireparq-524-data/partitions-100 ...\n\n  Partitions:        100 total, 100 valid, 0 with issues\n\n  Files scanned:     100\n  Block range:       1 \u2014 200000\n  Total blocks:      200000\n  Ordering errors:   0\n  Gaps:              0\n  Parent mismatches: 0\n  Duplicates:        0\n  Timestamp reversals: 0\n\n  \u2713 All blocks valid\n"
+    },
+    {
+      "name": "partitions-400",
+      "files": 400,
+      "parquet_bytes": 8006003,
+      "before_ms": [
+        160.430625,
+        174.385166,
+        169.3025,
+        165.573208,
+        163.42125,
+        161.556875,
+        158.368291
+      ],
+      "after_ms": [
+        61.905375,
+        59.35,
+        60.4875,
+        59.393625,
+        60.657458,
+        59.599375,
+        60.315666
+      ],
+      "before_median_ms": 163.42125,
+      "after_median_ms": 60.315666,
+      "output_sha256": "6db1bd9c0406712fd37e88fa3dd525e004fec082e9377593b276aa297a059846",
+      "output": "Validating blocks in /tmp/fireparq-524-data/partitions-400 ...\n\n  Partitions:        400 total, 400 valid, 0 with issues\n\n  Files scanned:     400\n  Block range:       1 \u2014 200000\n  Total blocks:      200000\n  Ordering errors:   0\n  Gaps:              0\n  Parent mismatches: 0\n  Duplicates:        0\n  Timestamp reversals: 0\n\n  \u2713 All blocks valid\n"
+    }
+  ]
+}
