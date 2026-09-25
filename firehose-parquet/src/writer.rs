@@ -10,12 +10,14 @@ use parquet::basic::ZstdLevel;
 use parquet::file::properties::WriterProperties;
 use std::collections::HashMap;
 use std::fmt::Display;
-use std::fs::{self, File};
+use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use time::OffsetDateTime;
 use tracing::info;
 use uuid::Uuid;
+
+mod local;
 
 /// Key-value metadata to embed in every Parquet file's footer.
 #[derive(Debug, Clone, Default)]
@@ -112,7 +114,7 @@ impl ParquetTableWriter {
         if batch.num_rows() == 0 {
             let dir = self.output_dir.join(table);
             if self.s3_client.is_none() {
-                fs::create_dir_all(&dir)?;
+                local::create_dir_all_durable(&dir)?;
             }
             return Ok((dir, 0));
         }
@@ -161,16 +163,8 @@ impl ParquetTableWriter {
                 "wrote parquet part to S3"
             );
         } else {
-            // Write to local filesystem.
-            fs::create_dir_all(&dir).with_context(|| format!("creating dir {}", dir.display()))?;
-
-            let file =
-                File::create(&path).with_context(|| format!("creating file {}", path.display()))?;
-            let props = self.writer_properties();
-            let mut writer = ArrowWriter::try_new(file, batch.schema(), Some(props))?;
-            writer.write(batch)?;
-            writer.close()?;
-            compressed_bytes = fs::metadata(&path)?.len() as usize;
+            // Only a closed, synced Parquet file may become visible at its final name.
+            compressed_bytes = local::write_parquet(&path, batch, self.writer_properties())?;
 
             info!(
                 table,

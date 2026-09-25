@@ -8,6 +8,7 @@ lifecycle state; a local implementation or passing test alone is not closure.
 - [#467: stable startup destinations](467-endpoint-info.md)
 - [#567: compatible dependency security refresh](dependency-security-refresh.md)
 - [#469: durable cursor persistence](469-durable-cursor-saves.md)
+- [#578: atomic local Parquet publication](578-atomic-local-parquet.md)
 - [#470: exact S3 cursor buckets](470-s3-cursor-buckets.md)
 - [#498: EVM log indices and optional tables](498-evm-log-indices.md)
 - [#568: Arrow/Parquet security and compatibility](568-arrow-parquet-security.md)
