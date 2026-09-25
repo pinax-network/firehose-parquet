@@ -239,12 +239,19 @@ fn fixed_binary_and_dictionary_identity_filters_index_values_not_dictionary_ids(
 
 #[test]
 fn direct_library_default_levels_write_identical_level_three_files() {
-    let batch = RecordBatch::try_new(Arc::new(Schema::new(vec![Field::new("hash", DataType::Utf8, false)])),
-        vec![Arc::new(StringArray::from(vec!["a repeated value"; 1000]))]).unwrap();
+    let batch = RecordBatch::try_new(
+        Arc::new(Schema::new(vec![Field::new("hash", DataType::Utf8, false)])),
+        vec![Arc::new(StringArray::from(vec!["a repeated value"; 1000]))],
+    )
+    .unwrap();
     let expected = encoded(&batch, for_batch(Compression::Zstd, &batch, None).unwrap());
     for level in [0, 3] {
-        let compression = Compression::ZstdWithLevel(parquet::basic::ZstdLevel::try_new(level).unwrap());
+        let compression =
+            Compression::ZstdWithLevel(parquet::basic::ZstdLevel::try_new(level).unwrap());
         assert_eq!(compression.to_string(), "zstd");
-        assert_eq!(encoded(&batch, for_batch(compression, &batch, None).unwrap()), expected);
+        assert_eq!(
+            encoded(&batch, for_batch(compression, &batch, None).unwrap()),
+            expected
+        );
     }
 }
