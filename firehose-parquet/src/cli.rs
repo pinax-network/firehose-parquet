@@ -4106,14 +4106,7 @@ impl AwsConfig {
             builder = builder.with_region(region);
         }
         if let Some(ref endpoint_url) = self.aws_endpoint_url {
-            builder = builder.with_endpoint(endpoint_url);
-            // Enable virtual-hosted-style requests when the endpoint contains
-            // the bucket name as a subdomain (e.g. bucket.fly.storage.tigris.dev).
-            // This is required by providers like Tigris that don't support
-            // path-style access.
-            if endpoint_url.contains(&format!("{}.", bucket)) {
-                builder = builder.with_virtual_hosted_style_request(true);
-            }
+            builder = crate::s3::configure_endpoint(builder, endpoint_url, bucket)?;
         }
         // When no credentials are provided, use anonymous (unsigned) requests
         // so public buckets are accessible without IMDS/IAM lookup.

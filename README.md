@@ -253,6 +253,13 @@ When output is written locally or to S3, the default cursor file is automaticall
 
 An explicit S3 cursor URI uses its own bucket and key. It can be separate from
 the data bucket; both use the configured AWS credentials, region and endpoint.
+For separate buckets, use a service endpoint or omit the endpoint for standard
+AWS S3. Bucket-specific AWS endpoints (including global, regional, dualstack and
+accelerate forms) and `bucket.fly.storage.tigris.dev` use virtual-hosted requests
+and reject a different cursor bucket. Other custom endpoints must support
+path-style requests at a service endpoint; arbitrary bucket-specific custom
+domains are not inferred. These addressing rules also apply to S3 maintenance
+and inspection commands.
 Relative cursor paths inherit the resolved output bucket and prefix. Explicit
 local output paths (`./output`, `../output`, or an absolute path) stay local even
 when `S3_BUCKET` is set, and absolute local cursor paths remain absolute for
@@ -263,6 +270,10 @@ same output bucket. A mismatch now fails before contacting Firehose or storage;
 unset the bucket option or make it match. This consistency check applies to
 `build` and `partitions build` and does not restrict an explicit cursor URI to
 the data bucket.
+
+An S3 cursor requires complete explicit AWS credentials even when data output
+is local. This is validated after `--cursor-template` expansion as well as for
+`--cursor`; neither form silently falls back to instance metadata credentials.
 
 ### Parameter Validation on Resume
 

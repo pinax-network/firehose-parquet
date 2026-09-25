@@ -30,6 +30,20 @@ an explicit S3 cursor from working with local data output.
    constructs an S3 client.
 5. Cursor and data buckets share the supplied AWS credentials, region and
    endpoint. Separate credentials/endpoints per bucket are outside this fix.
+6. A bucket-specific AWS or Tigris endpoint is bound to the bucket in its host.
+   A matching bucket uses virtual-hosted requests (the key is appended without
+   adding the bucket again); a different bucket is rejected. This recognizes
+   dotted bucket names, AWS global/regional/legacy-regional/dualstack/accelerate
+   and China hosts, plus the exact `.fly.storage.tigris.dev` suffix. Endpoint
+   paths, queries and lookalike domains never determine bucket binding.
+   Service endpoints use path-style requests and support separate buckets.
+   Unrecognized custom domains must be service endpoints; their bucket binding
+   cannot be inferred. The pipeline and `AwsConfig` maintenance/read builders
+   share this endpoint configuration rule.
+7. The final effective cursor path is validated after template expansion and
+   before Firehose startup. A remote cursor with local output requires both
+   explicit AWS credential fields, just like remote data output. Missing or
+   partial credentials cannot trigger instance-metadata fallback.
 
 `CursorLocation::resolve` now receives a bucket-aware client factory instead of
 an already-bound store. This makes the URI bucket part of the operation rather
@@ -51,6 +65,12 @@ an inconsistent output bucket in manually constructed `Config` values.
 - Direct writer construction verifies the output store's bucket and rejects
   conflicting defaults. Existing local cursor save/load and absolute-path tests
   remain in place.
+- Signed PUT URLs from both actual S3 builders assert the effective host and key
+  path, including independent buckets on a service endpoint and matching
+  bucket-specific endpoints. Both builders reject bucket mismatches on AWS and
+  Tigris endpoints. These tests require no network access.
+- Effective S3 cursor-template validation rejects absent, access-key-only and
+  secret-only credentials with local output, before constructing an S3 client.
 
 ## Validation
 
@@ -68,3 +88,30 @@ These checks ran on the branch based on main commit `7cd615c`, using the shared
 audit target directory and development/test debug information disabled.
 No live S3 or Firehose requests were performed; object isolation is verified by
 separate in-memory stores plus inspection of real AWS clients' selected buckets.
+
+### Endpoint and template review followup
+
+The original store-name assertions did not prove HTTP routing for bucket-bound
+endpoints: object_store's default path-style mode would append `/state/` to a
+`data.s3...` endpoint. The signed-URL regressions now verify that actual routing
+contract. Likewise, validating the raw `--cursor` alone omitted the effective
+`--cursor-template` destination; validation now runs after substitution.
+Followup validation:
+
+- `cargo test --workspace --locked -j4`: 704 passed, zero failed, three ignored
+  (110 + 185 + 406 + 3), including signed-request URL tests from both builders.
+- Binary build, formatting and whitespace checks: passed.
+- Binary smoke checks with a closed loopback Firehose endpoint: local output
+  plus an S3 cursor template rejects missing credentials and either partial
+  credential pair before any connection. A `data.s3.us-east-1.amazonaws.com`
+  endpoint with `s3://state/c.parquet` likewise fails before connecting.
+
+After rebasing onto main `f3e99f3` (including the dependency security refresh),
+the combined workspace test run again passed all 704 tests with zero failures
+and three ignored tests. The binary build, bash/zsh/fish completion checks,
+formatting and whitespace checks also passed.
+
+After integrating main `774cc65` (the EndpointInfo startup fix), combined tests
+passed again: 708 passed, zero failed, three ignored (110 + 185 + 1 + 409 + 3).
+Binary build, formatting, whitespace and bash/zsh/fish completion checks passed.
+The effective cursor check remains before the endpoint health/Info requests.
