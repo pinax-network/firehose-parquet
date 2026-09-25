@@ -1,6 +1,6 @@
 use crate::config::{BlockMetadata, Compression, Config, Partition};
 use crate::metrics::PipelineMetrics;
-use anyhow::Result;
+use anyhow::{Context, Result};
 use arrow::array::Array;
 use arrow::record_batch::RecordBatch;
 use object_store::ObjectStore;
