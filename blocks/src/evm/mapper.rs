@@ -2231,11 +2231,11 @@ mod num_bigint {
 // ===========================================================================
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     #[allow(deprecated)]
-    fn make_test_evm_block(number: u64) -> eth::Block {
+    pub(crate) fn make_test_evm_block(number: u64) -> eth::Block {
         eth::Block {
             ver: 4,
             hash: vec![0xab; 32],

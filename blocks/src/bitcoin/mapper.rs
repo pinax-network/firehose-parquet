@@ -534,10 +534,10 @@ impl OutputsBuilder {
 // ===========================================================================
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
-    fn make_test_block(height: i64) -> btc::Block {
+    pub(crate) fn make_test_block(height: i64) -> btc::Block {
         btc::Block {
             hash: "000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f".to_string(),
             size: 285,

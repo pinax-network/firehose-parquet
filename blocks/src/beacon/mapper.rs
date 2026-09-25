@@ -1257,10 +1257,10 @@ impl BlobSidecarsBuilder {
 // ===========================================================================
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
-    fn make_test_block(slot: u64) -> beacon::Block {
+    pub(crate) fn make_test_block(slot: u64) -> beacon::Block {
         beacon::Block {
             version: 1,
             spec: beacon::Spec::Phase0 as i32,
@@ -1323,7 +1323,7 @@ mod tests {
         }
     }
 
-    fn make_deneb_block(slot: u64) -> beacon::Block {
+    pub(crate) fn make_deneb_block(slot: u64) -> beacon::Block {
         beacon::Block {
             version: 1,
             spec: beacon::Spec::Deneb as i32,

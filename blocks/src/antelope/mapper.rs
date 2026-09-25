@@ -844,14 +844,14 @@ impl DbOpsBuilder {
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     fn make_test_hex_id(seed: u32) -> String {
         format!("{seed:064x}")
     }
 
-    fn make_test_block(number: u32) -> antelope::Block {
+    pub(crate) fn make_test_block(number: u32) -> antelope::Block {
         antelope::Block {
             id: make_test_hex_id(number),
             number,

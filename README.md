@@ -21,7 +21,7 @@ A production-grade Rust toolkit that consumes [StreamingFast Firehose](https://f
 
 - **Single binary** — one `fireparq` binary handles all chains via `--block-type` with auto-detection
 - **Multi-chain** — pluggable `BlockMapper` trait with per-chain mapper modules
-- **Canonical identity columns** — `block_num`, `block_id`, `parent_num`, `parent_id`, `lib_num`, `timestamp`, `date` on every table; `date` is an Arrow `Date32` derived from the UTC block timestamp. For Solana, canonical `timestamp` / `date` stay nullable when `block_time` is missing, and synthetic timing is used only for time-based partition routing
+- **Canonical identity columns** — `block_num`, `block_id`, `parent_num`, `parent_id`, `lib_num`, `timestamp`, `date` on every table; `date` is an Arrow `Date32` derived from the UTC block timestamp. For Solana, canonical `timestamp` / `date` stay nullable when `block_time` is missing, and synthetic timing is used only for time-based partition routing. Chain-specific columns never reuse these names: Tron `transactions` stores the transaction's own creation and expiration times as `tx_timestamp_ms` / `expiration_ms` (Int64 unix milliseconds; `tx_timestamp_ms` is set by the sender, so it can be 0 or use another unit)
 - **gRPC streaming** — connects to any Firehose v2 endpoint via tonic, with TLS and API key / JWT auth
 - **Network aliases** — `--network` resolves built-in Firehose names and supports `FIREHOSE_ENDPOINT_*` per-network overrides
 - **Automatic retry / resume** — exponential back-off on connection errors; resumes from the last cursor
