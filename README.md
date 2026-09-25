@@ -782,6 +782,7 @@ Which files rollup reads, writes, and deletes:
 - With `--delete-source`, outputs are named like ingestion parts (`part-<run>-NNNNNN.parquet`), and each source file is deleted once its target partition is written. A re-run after new data arrives only rolls up the new files.
 - Without `--delete-source`, outputs are named `part-rollup-<run>-NNNNNN.parquet`. They are copies of source files that are kept, so a re-run replaces the `part-rollup-*` files it wrote earlier in each target partition it rolls up, and leaves other files there alone. Because the re-run rebuilds those partitions from the source files that exist at that point, don't delete source files by hand between runs; use `--delete-source` instead.
 - An in-place rollup (no `--output`) requires `--delete-source`. Keeping the sources next to their rolled-up copy would store every row twice under the same root.
+- Files are only combined when they have the same columns: the same names, types, nullability, and order. A target partition with mixed schemas, such as files from two tool versions or with `--without-extended` toggled, is left untouched: nothing is written or deleted for it. The other partitions are still rolled up, and `rollup` exits non-zero with a list of the skipped partitions.
 
 | Flag | Default | Description |
 |---|---|---|
@@ -796,6 +797,8 @@ Which files rollup reads, writes, and deletes:
 Consolidates multiple small part files within each partition directory into fewer, larger files. Unlike `rollup` (which changes partition granularity), `merge` keeps the same partition layout but reduces file count. Supports local paths, shorthand S3 keys/prefixes via `S3_BUCKET`, and explicit S3 URIs.
 
 `merge` processes one table at a time and, within each table, one partition at a time. All parts in each partition are read into memory, sorted by `block_num`, and written back as new files respecting `--flush-bytes` and `--flush-rows`. Original parts are deleted after successful merge. Root artifacts (`cursor.parquet`, `partitions.parquet`, `merkle_roots.parquet`, and anything under `verify_runs/`) are skipped, so merging a network root is safe.
+
+Parts are only merged when every part in the partition has the same columns: the same names, types, nullability, and order. Merge checks each part's footer before writing anything. A partition with mixed schemas, such as files from two tool versions or with `--without-extended` toggled, is left untouched and listed in the summary, and `merge` exits non-zero after processing the other partitions. `--dry-run` reports these partitions too.
 
 ```bash
 # Merge small parts within each partition (default 32 MB target per file)
