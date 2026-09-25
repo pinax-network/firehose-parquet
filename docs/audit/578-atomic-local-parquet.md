@@ -197,3 +197,15 @@ This live success confirms equivalent output through the new publication path;
 it does not extend the single-file guarantee to a multi-table/cursor transaction.
 Issue #468 remains open. PR #580's GitHub closing references were checked and
 contain only the narrow prerequisite issue #578.
+
+## Current-main integration
+
+The final integration includes merged writer simplification (#477, PR #581) and
+responsive shutdown (#473, PR #579), based on main `fdb1f98`. The only source
+conflict retained the writer's `Context` and `Array` imports needed by its new
+partition validation. At integrated implementation `d440779`, **751 workspace
+tests passed**, zero failed, four ignored (three benchmark helpers and the
+child-process fault helper exercised by its parent tests). Build, formatting and
+whitespace checks passed. README now describes the second-signal boundary:
+hidden temporary fragments may remain; already published local table files
+have complete footers. Cross-table replay remains outstanding in #468.

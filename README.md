@@ -372,8 +372,10 @@ failed, the same signal interrupts its retry backoff and the durability error
 still produces a non-zero exit.
 
 A second SIGINT or SIGTERM exits immediately with code 130, without waiting for
-the current block. In-flight writes may be interrupted: a part file may remain
-incomplete, or a cursor update may not finish its durability checks.
+the current block. In-flight writes may be interrupted: a hidden temporary part
+may remain incomplete, or a cursor update may not finish its durability checks.
+A published local table part already has a complete footer, but replay can still
+duplicate complete parts until recovery across tables and the cursor is implemented (#468).
 
 If a write (local disk or S3), a block mapping, or the stream fails, the
 pipeline also discards partial buffers and does not save the cursor, then exits
