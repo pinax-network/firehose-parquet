@@ -28,6 +28,20 @@ Operational properties:
 - Updated only by explicit verify runs.
 - Should be retained longer than per-run reports.
 
+Schema (one row per `chain`/`table`/`partition`, all columns non-null `Utf8`):
+
+| Column | Meaning |
+|--------|---------|
+| `chain` | Registry key: `--chain` value |
+| `table` | Registry key: `--table` value |
+| `partition` | Registry key: Hive partition path such as `date=2024-01-01`, or `unpartitioned` |
+| `algorithm` | Hash strategy used for the root (`keccak256` or `sha256`) |
+| `merkle_version` | Merkle construction used for the root (currently `merkle_v2`); see `docs/verifiability-hash-strategy.md` |
+| `merkle_root` | Lowercase hex partition root |
+| `updated_at` | RFC 3339 timestamp of the last write of this row |
+
+Registries written before `merkle_version` existed lack that column. `verify` reads them as `merkle_v1` and adds the column on the next registry write.
+
 ### 2. Per-Run Reports
 
 Path:
@@ -71,13 +85,26 @@ For S3-backed operations:
 
 - **Missing root**: safe to append/create as part of a verify run.
 - **Mismatched root**: only overwrite when the operator explicitly intends to advance the canonical registry.
-- **Algorithm change**: treat as a deliberate migration event, not a silent rewrite.
+- **Algorithm or Merkle version change**: treat as a deliberate migration event, not a silent rewrite. Rows whose `algorithm` or `merkle_version` differs from the runtime are reported as mismatches and are only replaced with `--update-registry`.
 
 Recommended operator posture:
 
 - Use missing-root fills as the normal onboarding path.
 - Use root overwrites only with explicit operator intent and a preserved run report.
 - Preserve the prior registry object version when object-store versioning is available.
+
+### Migrating a Legacy (`merkle_v1`) Registry
+
+`merkle_v1` roots were computed by fireparq v0.7.1 and earlier. They cannot be compared with `merkle_v2` roots, and `verify` does not recompute `merkle_v1` roots because that construction cannot detect a duplicated trailing row. Against a legacy registry, `verify` exits non-zero and reports scanned partitions as `mismatch` with the error `merkle version mismatch: registry=merkle_v1 runtime=merkle_v2; ...` (only the first one unless `--no-fail-fast` is set).
+
+To rebuild the registry:
+
+1. Preserve the current registry object (bucket versioning or a copy). It is the only record of the `merkle_v1` baseline.
+2. Confirm the dataset is trusted. The rebuild records the current data as canonical, and nothing compares it with the old baseline.
+3. Run `fireparq verify <data-path> --update-registry --no-fail-fast --publish-report`. Without `--no-fail-fast`, the run stops (and rewrites) at the first mismatched partition. This run still exits non-zero, because it reports every replaced legacy row as a mismatch. Keep its report as the migration record.
+4. Run `fireparq verify <data-path>` again. It should report only matches and exit zero.
+
+Rows for partitions outside `<data-path>` keep their `merkle_version = merkle_v1` label until a run that scans those partitions rebuilds them. Deleting the registry and letting the next run recreate it from missing-root fills is an equivalent reset.
 
 ## Immutability and Versioning Guidance
 
@@ -142,6 +169,7 @@ Recommended S3 publication posture:
 Consumers should:
 
 - Read `report_schema_version` before parsing `report.json`.
+- Compare roots across reports or registries only when both `algorithm` and `merkle_version` are equal.
 - Treat `run_id` as the unique execution key.
 - Use `registry_path` to identify the canonical registry consulted by the run.
 - Use `suggested_run_report_path` as the publication target, not as proof that upload already happened.
