@@ -339,6 +339,21 @@ mod tests {
         assert_eq!(reset.value(0), "42");
     }
 
+    #[test]
+    fn independent_biguint_oracle_covers_stack_and_arbitrary_length_fallback() {
+        let mut rng = Rng(0xa0b1_c2d3_e4f5_6789);
+        for length in 0..=256 {
+            for _ in 0..8 {
+                let bytes = rng.bytes(length);
+                let expected = ::num_bigint::BigUint::from_bytes_be(&bytes).to_str_radix(10);
+                assert_eq!(to_decimal(&bytes), expected);
+                let mut builder = StringBuilder::new();
+                append_decimal(&mut builder, &bytes);
+                assert_eq!(builder.finish().value(0), expected);
+            }
+        }
+    }
+
     /// `bytes * factor`, big-endian.
     fn mul_small(bytes: &[u8], factor: u32) -> Vec<u8> {
         let mut out = Vec::with_capacity(bytes.len() + 1);

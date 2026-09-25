@@ -1,0 +1,139 @@
+{
+  "hardware": "Apple M1 Max, macOS arm64",
+  "rustc": "1.93.1",
+  "profile": "release",
+  "source": "6aeaafa EVM mapper/decimal source; benchmark was run on the identical pre-commit tree",
+  "timing": "Both paths convert and append into equivalently preallocated Arrow StringBuilders; builder construction and flush excluded; one warmup per path/case, seven alternating-order samples of 100,000 iterations; Cargo/build excluded by whole-process lock",
+  "cases": [
+    {
+      "case": "4-byte gas price",
+      "input_hex": "3b9aca00",
+      "iterations": 100000,
+      "legacy_median_ns": 182.51084,
+      "legacy_ns": [
+        209.97042,
+        183.585,
+        180.48625,
+        182.27083,
+        183.68209,
+        182.51084,
+        181.67458
+      ],
+      "optimized_median_ns": 16.94584,
+      "optimized_ns": [
+        18.30792,
+        18.08375,
+        16.78583,
+        16.76375,
+        16.94584,
+        16.96042,
+        16.7925
+      ],
+      "samples": 7
+    },
+    {
+      "case": "10-byte balance",
+      "input_hex": "0123456789abcdef0123",
+      "iterations": 100000,
+      "legacy_median_ns": 559.27958,
+      "legacy_ns": [
+        562.62208,
+        561.21166,
+        555.39375,
+        559.57959,
+        559.27958,
+        557.03417,
+        553.79167
+      ],
+      "optimized_median_ns": 28.17459,
+      "optimized_ns": [
+        28.16792,
+        28.13833,
+        28.23625,
+        28.1775,
+        28.22167,
+        28.1425,
+        28.17459
+      ],
+      "samples": 7
+    },
+    {
+      "case": "16-byte value",
+      "input_hex": "abababababababababababababababab",
+      "iterations": 100000,
+      "legacy_median_ns": 1340.2566699999998,
+      "legacy_ns": [
+        1340.2566699999998,
+        1339.39583,
+        1334.44542,
+        1337.41958,
+        1348.96708,
+        1346.07958,
+        1364.45125
+      ],
+      "optimized_median_ns": 55.20292,
+      "optimized_ns": [
+        55.19667,
+        55.09791,
+        55.20292,
+        55.89041,
+        55.20375,
+        55.02167,
+        55.88084
+      ],
+      "samples": 7
+    },
+    {
+      "case": "20-byte value",
+      "input_hex": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+      "iterations": 100000,
+      "legacy_median_ns": 1991.63291,
+      "legacy_ns": [
+        1993.53208,
+        1990.16209,
+        2018.27417,
+        2014.04084,
+        1991.63291,
+        1988.01291,
+        1986.78292
+      ],
+      "optimized_median_ns": 74.23167,
+      "optimized_ns": [
+        74.06625,
+        74.23167,
+        81.93083,
+        82.80291,
+        73.93042,
+        73.93958,
+        79.13916
+      ],
+      "samples": 7
+    },
+    {
+      "case": "32-byte max",
+      "input_hex": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "iterations": 100000,
+      "legacy_median_ns": 4706.09917,
+      "legacy_ns": [
+        4706.09917,
+        4660.60833,
+        4759.4675,
+        4688.315,
+        4732.64042,
+        4714.69834,
+        4674.2775
+      ],
+      "optimized_median_ns": 183.31333,
+      "optimized_ns": [
+        187.82625,
+        158.50834000000003,
+        183.31333,
+        163.23250000000002,
+        172.88416,
+        183.73708,
+        184.89334
+      ],
+      "samples": 7
+    }
+  ]
+}

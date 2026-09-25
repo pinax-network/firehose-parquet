@@ -78,7 +78,10 @@ and test against current main. Never reset or discard the previous worktree.
 - Operational contracts: #474 covers reversible stream options/output semantics;
   #475 metrics/readiness is merged. The #477 writer simplification and
   #476 malformed-metadata handling are merged; the #468 journal is in progress.
-- Performance: recover #513 and #522 before starting duplicate work. Measure
+- Performance: #513 was recovered into an isolated worktree, with bounded exhaustive
+  and sampled equivalence tests, a reproducible conversion benchmark and 869 passing
+  integrated tests; PR/CI pending.
+  The original locked work is preserved. Recover #522 before duplicating that work. Measure
   #565, #515, #520 and #524 on representative data; #503's native-type work and
   bounded release benchmark are complete. #516 depends on durable
   commit ordering; #517-#519 and #523 need the specific throughput, memory,
