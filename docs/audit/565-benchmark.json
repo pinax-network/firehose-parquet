@@ -1,0 +1,88 @@
+{
+  "hardware": "Apple M1 Max, macOS arm64",
+  "rustc": "1.93.1",
+  "profile": "release",
+  "source": "0c0db81565204a02ffb1302d199bfce937c60638",
+  "timing": "Actual production dispatcher versus former bs58 path; reusable scratch and identically preallocated Arrow StringBuilders; builder construction and final flush excluded; one 10,000-value warmup per case/path; seven alternating-order samples of 100,000 values; whole-command lock excludes other Cargo builds.",
+  "corpus": "4,096 deterministic varied byte strings per length; every fourth input has a varied leading-zero prefix. Identical corpus supplied to both paths; reference equivalence checked before timing.",
+  "cases": [
+    {
+      "baseline_ns": [
+        818.2475,
+        768.3575,
+        769.86,
+        769.1275,
+        770.62334,
+        770.22167,
+        768.3725
+      ],
+      "bytes": 25,
+      "corpus_values": 4096,
+      "iterations": 100000,
+      "optimized_ns": [
+        770.21833,
+        771.30583,
+        769.57458,
+        770.05584,
+        772.11,
+        771.11167,
+        770.82292
+      ],
+      "baseline_median_ns": 769.86,
+      "optimized_median_ns": 770.82292,
+      "speedup": 0.9987507896106671
+    },
+    {
+      "baseline_ns": [
+        1169.67917,
+        1164.9725,
+        1165.92709,
+        1165.85542,
+        1166.96375,
+        1164.6625,
+        1166.01125
+      ],
+      "bytes": 32,
+      "corpus_values": 4096,
+      "iterations": 100000,
+      "optimized_ns": [
+        87.13917,
+        86.79417,
+        86.91375,
+        86.90625,
+        86.74666,
+        86.82916,
+        86.96334
+      ],
+      "baseline_median_ns": 1165.92709,
+      "optimized_median_ns": 86.90625,
+      "speedup": 13.41591761236965
+    },
+    {
+      "baseline_ns": [
+        4427.90375,
+        4427.32917,
+        4420.40792,
+        4424.61334,
+        4414.80791,
+        4415.18,
+        4421.25917
+      ],
+      "bytes": 64,
+      "corpus_values": 4096,
+      "iterations": 100000,
+      "optimized_ns": [
+        307.59375,
+        305.93833,
+        306.48084,
+        307.62542,
+        310.41083,
+        306.32125,
+        306.66958
+      ],
+      "baseline_median_ns": 4421.25917,
+      "optimized_median_ns": 306.66958,
+      "speedup": 14.417012505772501
+    }
+  ]
+}

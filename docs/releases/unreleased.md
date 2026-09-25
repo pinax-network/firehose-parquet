@@ -518,6 +518,17 @@ Rows of `access_lists` and `set_code_authorizations` follow their transaction: t
 
 ## Performance
 
+### Fixed-size Base58 conversion uses safe integer limbs (#565)
+
+32-byte keys and 64-byte signatures use a safe stack-buffer encoder; all other
+lengths, including Tron checksummed addresses, retain `bs58`. Output strings,
+leading zeros, decoders and schemas are unchanged. No dependency or data
+migration is added. Conversion plus Arrow append measured 13.4× faster for
+32-byte and 14.4× for 64-byte values on one Apple M1 Max, with the 25-byte
+fallback unchanged within measurement noise. These are conversion benchmarks,
+not end-to-end ingestion claims. See [equivalence coverage, dependency review and measured
+conversion performance](../audit/565-fixed-base58.md).
+
 ### EVM decimal conversion writes directly into Arrow (#513)
 
 Recovered and validated the previous agent's u128/limb formatter. Up to 32
