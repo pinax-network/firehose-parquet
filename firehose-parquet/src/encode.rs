@@ -3,6 +3,8 @@ use arrow::datatypes::DataType;
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
 
+mod fixed_base58;
+
 // ---------------------------------------------------------------------------
 // EncodeBytes strategy
 // ---------------------------------------------------------------------------
@@ -124,9 +126,15 @@ fn push_hex(bytes: &[u8], out: &mut Vec<u8>) {
 
 /// Append the base58 encoding of `bytes` to `out`.
 fn push_base58(bytes: &[u8], out: &mut Vec<u8>) {
-    bs58::encode(bytes)
-        .onto(out)
-        .expect("a Vec target always has room");
+    match bytes.len() {
+        32 => fixed_base58::push_32(bytes.try_into().expect("32-byte input"), out),
+        64 => fixed_base58::push_64(bytes.try_into().expect("64-byte input"), out),
+        _ => {
+            bs58::encode(bytes)
+                .onto(out)
+                .expect("a Vec target always has room");
+        }
+    }
 }
 
 /// Append a Tron Base58Check address to `out` (see [`encode_tron_base58`]).
@@ -646,6 +654,204 @@ mod tests {
         EncodeBytes::Base58,
         EncodeBytes::TronBase58,
     ];
+
+    fn assert_base58_reference(bytes: &[u8]) {
+        let expected = bs58::encode(bytes).into_string();
+        let actual = encode_base58(bytes);
+        assert_eq!(actual, expected, "input {bytes:02x?}");
+        if bytes.len() == 32 || bytes.len() == 64 {
+            assert!(actual.len() >= bytes.len());
+            assert!(actual.len() <= if bytes.len() == 32 { 44 } else { 88 });
+        }
+    }
+
+    #[test]
+    fn fixed_width_base58_exhaustive_two_byte_values() {
+        // Exhaust the low 16 bits at both supported widths, including all-zero
+        // values and the one/two-byte transition after a long zero prefix.
+        for len in [32, 64] {
+            let mut bytes = vec![0; len];
+            for value in 0..=u16::MAX {
+                bytes[len - 2..].copy_from_slice(&value.to_be_bytes());
+                assert_base58_reference(&bytes);
+            }
+        }
+    }
+
+    #[test]
+    fn fixed_width_base58_exhaustive_single_byte_positions() {
+        for len in [32, 64] {
+            let mut bytes = vec![0; len];
+            for position in 0..len {
+                for value in 0..=u8::MAX {
+                    bytes[position] = value;
+                    assert_base58_reference(&bytes);
+                }
+                bytes[position] = 0;
+            }
+            // Every possible zero-prefix length followed by the largest suffix.
+            bytes.fill(0xff);
+            for zeros in 0..=len {
+                bytes[..zeros].fill(0);
+                assert_base58_reference(&bytes);
+            }
+        }
+    }
+
+    #[test]
+    fn fixed_width_base58_random_and_radix_boundaries() {
+        let mut state = 0x3968_7119_36c5_f28bu64;
+        for len in [32, 64] {
+            let mut bytes = vec![0; len];
+            for sample in 0..8192 {
+                for byte in &mut bytes {
+                    state ^= state << 13;
+                    state ^= state >> 7;
+                    state ^= state << 17;
+                    *byte = state as u8;
+                }
+                if sample % 4 == 0 {
+                    bytes[..sample % (len + 1)].fill(0);
+                }
+                let encoded = encode_base58(&bytes);
+                assert_base58_reference(&bytes);
+                assert_eq!(decode_base58(&encoded).unwrap(), bytes);
+            }
+
+            // Independently build 58^k in big-endian bytes and check k-digit
+            // transitions (including every five-digit long-division boundary).
+            bytes.fill(0);
+            bytes[len - 1] = 1;
+            loop {
+                assert_base58_reference(&bytes);
+                let mut below = bytes.clone();
+                for byte in below.iter_mut().rev() {
+                    let (value, borrow) = byte.overflowing_sub(1);
+                    *byte = value;
+                    if !borrow {
+                        break;
+                    }
+                }
+                assert_base58_reference(&below);
+                let mut above = bytes.clone();
+                for byte in above.iter_mut().rev() {
+                    let (value, carry) = byte.overflowing_add(1);
+                    *byte = value;
+                    if !carry {
+                        break;
+                    }
+                }
+                assert_base58_reference(&above);
+                let mut carry = 0u16;
+                for byte in bytes.iter_mut().rev() {
+                    let wide = u16::from(*byte) * 58 + carry;
+                    *byte = wide as u8;
+                    carry = wide >> 8;
+                }
+                if carry != 0 {
+                    break;
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn base58_dispatch_preserves_prefixes_and_arbitrary_lengths() {
+        let mut out = Vec::with_capacity(2048);
+        for len in (0..=80).chain([127, 128, 255, 256, 1024]) {
+            let bytes: Vec<u8> = (0..len).map(|i| (i * 73) as u8).collect();
+            out.clear();
+            out.extend_from_slice(b"prefix:");
+            push_base58(&bytes, &mut out);
+            assert_eq!(&out[..7], b"prefix:");
+            assert_eq!(&out[7..], bs58::encode(&bytes).into_vec());
+        }
+        // Tron Base58Check is always a 25-byte payload and stays on bs58.
+        for len in [20, 21] {
+            for value in [0, 1, 0x41, 0xff] {
+                let bytes = vec![value; len];
+                assert_eq!(
+                    encode_tron_base58(&bytes),
+                    reference_encode(&bytes, &EncodeBytes::TronBase58)
+                );
+            }
+        }
+    }
+
+    /// Actual production dispatcher versus the previous bs58 implementation;
+    /// both use reusable scratch and identically preallocated Arrow builders.
+    #[test]
+    #[ignore = "benchmark"]
+    fn bench_fixed_width_base58() {
+        use std::{hint::black_box, time::Instant};
+
+        fn measure(corpus: &[Vec<u8>], optimized: bool, iterations: usize) -> f64 {
+            let mut scratch = Vec::with_capacity(90);
+            let mut builder = StringBuilder::with_capacity(iterations, iterations * 90);
+            let start = Instant::now();
+            for row in 0..iterations {
+                scratch.clear();
+                let bytes = black_box(&corpus[row % corpus.len()]);
+                if optimized {
+                    push_base58(bytes, &mut scratch);
+                } else {
+                    bs58::encode(bytes).onto(&mut scratch).unwrap();
+                }
+                builder.append_value(std::str::from_utf8(&scratch).unwrap());
+            }
+            let elapsed = start.elapsed();
+            black_box(builder.finish());
+            elapsed.as_nanos() as f64 / iterations as f64
+        }
+
+        let mut state = 0xe5a1_1b2d_c930_46f7u64;
+        let mut cases = Vec::new();
+        for size in [25, 32, 64] {
+            let mut corpus = Vec::new();
+            for sample in 0..4096 {
+                let mut bytes = vec![0; size];
+                for byte in &mut bytes {
+                    state ^= state << 13;
+                    state ^= state >> 7;
+                    state ^= state << 17;
+                    *byte = state as u8;
+                }
+                if sample % 4 == 0 {
+                    bytes[..sample % (size + 1)].fill(0);
+                }
+                assert_base58_reference(&bytes);
+                corpus.push(bytes);
+            }
+            for optimized in [false, true] {
+                black_box(measure(&corpus, optimized, 10_000));
+            }
+            let mut baseline = Vec::new();
+            let mut optimized = Vec::new();
+            for sample in 0..7 {
+                let order = if sample % 2 == 0 {
+                    [false, true]
+                } else {
+                    [true, false]
+                };
+                for fast in order {
+                    let ns = measure(&corpus, fast, 100_000);
+                    if fast {
+                        optimized.push(ns)
+                    } else {
+                        baseline.push(ns)
+                    }
+                }
+            }
+            cases.push(serde_json::json!({
+                "bytes": size,
+                "corpus_values": corpus.len(),
+                "iterations": 100_000,
+                "baseline_ns": baseline,
+                "optimized_ns": optimized,
+            }));
+        }
+        println!("{}", serde_json::to_string_pretty(&cases).unwrap());
+    }
 
     #[test]
     fn test_encoders_match_the_previous_per_value_implementations() {
