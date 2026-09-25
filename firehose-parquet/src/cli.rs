@@ -171,7 +171,7 @@ pub struct CommonArgs {
     )]
     pub compression: String,
 
-    /// Flush mapper state after this many rows; does not guarantee parquet files are materialized (disabled by default)
+    /// Flush mapper state and write Parquet after this many rows (disabled by default)
     #[arg(
         long,
         env = "FLUSH_ROWS",
@@ -190,7 +190,7 @@ pub struct CommonArgs {
     )]
     pub flush_blocks: Option<u64>,
 
-    /// Flush mapper state at this many in-memory bytes and target roughly this many compressed bytes per parquet file (0 disables byte-based flushing)
+    /// Flush mapper state and write Parquet at this many estimated mapper bytes (0 disables byte-based flushing)
     #[arg(
         long,
         env = "FLUSH_BYTES",
@@ -200,7 +200,7 @@ pub struct CommonArgs {
     )]
     pub flush_bytes: u64,
 
-    /// Flush mapper state every N seconds; does not guarantee parquet files are materialized (disabled by default)
+    /// Flush mapper state and write Parquet every N seconds (disabled by default)
     #[arg(
         long,
         env = "FLUSH_INTERVAL_SECS",
@@ -7367,13 +7367,11 @@ mod tests {
 
         let help = build.clone().render_long_help().to_string();
 
-        assert!(help.contains("Flush mapper state after this many rows"));
+        assert!(help.contains("Flush mapper state and write Parquet after this many rows"));
         assert!(help.contains("Flush written files after this many processed blocks"));
-        assert!(help.contains("does not guarantee parquet files are materialized"));
-        assert!(help.contains(
-            "Flush mapper state at this many in-memory bytes and target roughly this many compressed bytes per parquet file"
-        ));
-        assert!(help.contains("Flush mapper state every N seconds"));
+        assert!(help
+            .contains("Flush mapper state and write Parquet at this many estimated mapper bytes"));
+        assert!(help.contains("Flush mapper state and write Parquet every N seconds"));
     }
 
     #[test]

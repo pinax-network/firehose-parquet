@@ -10,6 +10,32 @@ use tonic::metadata::{Ascii, MetadataValue};
 use tonic::transport::{Channel, ClientTlsConfig, Endpoint};
 use tracing::{debug, info, warn};
 
+pub use tokio_util::sync::CancellationToken;
+
+/// Error returned when work stops because shutdown was requested
+/// (SIGINT/SIGTERM). Callers detect it with [`is_shutdown_error`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("shutdown requested")]
+pub struct ShutdownRequested;
+
+/// Whether `error` (or any error in its chain) is [`ShutdownRequested`].
+pub fn is_shutdown_error(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| cause.is::<ShutdownRequested>())
+}
+
+/// Await `future`, or return [`ShutdownRequested`] as soon as `shutdown` is
+/// cancelled, whichever comes first.
+pub async fn unless_shutdown<T>(
+    shutdown: &CancellationToken,
+    future: impl std::future::Future<Output = T>,
+) -> Result<T> {
+    tokio::select! {
+        biased;
+        _ = shutdown.cancelled() => Err(ShutdownRequested.into()),
+        value = future => Ok(value),
+    }
+}
+
 const FIREHOSE_TCP_KEEPALIVE: Duration = Duration::from_secs(30);
 const FIREHOSE_HTTP2_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(30);
 const FIREHOSE_HTTP2_KEEPALIVE_TIMEOUT: Duration = Duration::from_secs(10);
@@ -363,9 +389,14 @@ impl FirehoseClient {
     /// Returns when a bounded stream is exhausted or an unrecoverable error
     /// occurs. Callers should still check which blocks were received, since
     /// an exhausted range can end below `stop_block - 1` (e.g. skipped slots).
+    ///
+    /// Every wait (connecting, the `Blocks` call, the next message, back-off)
+    /// also watches `shutdown`, and returns [`ShutdownRequested`] as soon as
+    /// it is cancelled. A block already passed to `handler` is never cut short.
     pub async fn stream_blocks<F>(
         &self,
         initial_cursor: Option<String>,
+        shutdown: &CancellationToken,
         mut handler: F,
     ) -> Result<()>
     where
@@ -391,9 +422,12 @@ impl FirehoseClient {
         let mut resumed_after_early_end = false;
 
         loop {
+            if shutdown.is_cancelled() {
+                return Err(ShutdownRequested.into());
+            }
             let mut blocks_this_connection = 0u64;
             let mut received_message = false;
-            let channel = match self.connect().await {
+            let channel = match unless_shutdown(shutdown, self.connect()).await? {
                 Ok(ch) => ch,
                 Err(e) => {
                     let wait = reconnect.record_failure(Instant::now(), &e)?;
@@ -404,7 +438,7 @@ impl FirehoseClient {
                         "connection failed, retrying"
                     );
                     self.record_reconnect_metric();
-                    tokio::time::sleep(wait).await;
+                    unless_shutdown(shutdown, tokio::time::sleep(wait)).await?;
                     continue;
                 }
             };
@@ -431,7 +465,7 @@ impl FirehoseClient {
 
             // Accepting the RPC is not progress: the back-off and the stall
             // timer are only reset once a message arrives.
-            let stream = match client.blocks(request).await {
+            let stream = match unless_shutdown(shutdown, client.blocks(request)).await? {
                 Ok(resp) => resp.into_inner(),
                 Err(status) => {
                     self.fail_on_fatal_status(&status)?;
@@ -443,7 +477,7 @@ impl FirehoseClient {
                         "Blocks RPC failed, will retry"
                     );
                     self.record_reconnect_metric();
-                    tokio::time::sleep(wait).await;
+                    unless_shutdown(shutdown, tokio::time::sleep(wait)).await?;
                     continue;
                 }
             };
@@ -452,7 +486,9 @@ impl FirehoseClient {
 
             let session_end = loop {
                 let next_message = if let Some(timeout) = stream_idle_timeout {
-                    match tokio::time::timeout(timeout, stream.message()).await {
+                    match unless_shutdown(shutdown, tokio::time::timeout(timeout, stream.message()))
+                        .await?
+                    {
                         Ok(msg) => msg,
                         Err(_) => {
                             warn!(idle_for = ?timeout, "stream idle timeout reached, will reconnect");
@@ -460,7 +496,7 @@ impl FirehoseClient {
                         }
                     }
                 } else {
-                    stream.message().await
+                    unless_shutdown(shutdown, stream.message()).await?
                 };
 
                 match next_message {
@@ -600,7 +636,7 @@ impl FirehoseClient {
                 )?,
                 SessionEnd::Failed(status) => reconnect.record_failure(Instant::now(), &status)?,
             };
-            tokio::time::sleep(wait).await;
+            unless_shutdown(shutdown, tokio::time::sleep(wait)).await?;
         }
     }
 
@@ -1003,18 +1039,22 @@ mod tests {
         client.set_metrics(metrics.clone());
         let mut processed = vec![];
         let result = client
-            .stream_blocks(None, |_, _, cursor, identity, _| {
-                processed.push(identity.block_num);
-                location.save_with_retry_blocking(
-                    &CursorState {
-                        cursor,
-                        last_block_num: identity.block_num,
-                        ..Default::default()
-                    },
-                    &metrics,
-                    &AtomicBool::new(false),
-                )
-            })
+            .stream_blocks(
+                None,
+                &CancellationToken::new(),
+                |_, _, cursor, identity, _| {
+                    processed.push(identity.block_num);
+                    location.save_with_retry_blocking(
+                        &CursorState {
+                            cursor,
+                            last_block_num: identity.block_num,
+                            ..Default::default()
+                        },
+                        &metrics,
+                        &AtomicBool::new(false),
+                    )
+                },
+            )
             .await;
         stop.send(()).unwrap();
         server.await.unwrap();
@@ -1743,5 +1783,297 @@ mod tests {
             "successful requests and a cancelled RPC must retain the cached channel"
         );
         server.abort();
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    enum CancellationScenario {
+        PendingRpc,
+        Idle,
+        RpcFailure,
+        StreamFailure,
+    }
+
+    #[derive(Clone)]
+    struct CancellationService {
+        scenario: CancellationScenario,
+        called: std::sync::Arc<tokio::sync::Notify>,
+    }
+
+    impl tonic::server::ServerStreamingService<firehose::Request> for CancellationService {
+        type Response = firehose::Response;
+        type ResponseStream =
+            futures::stream::BoxStream<'static, Result<firehose::Response, tonic::Status>>;
+        type Future =
+            tonic::codegen::BoxFuture<tonic::Response<Self::ResponseStream>, tonic::Status>;
+
+        fn call(&mut self, _: tonic::Request<firehose::Request>) -> Self::Future {
+            use futures::StreamExt;
+            let scenario = self.scenario;
+            self.called.notify_one();
+            Box::pin(async move {
+                match scenario {
+                    CancellationScenario::PendingRpc => std::future::pending().await,
+                    CancellationScenario::RpcFailure => {
+                        Err(tonic::Status::unavailable("retry fixture"))
+                    }
+                    CancellationScenario::Idle | CancellationScenario::StreamFailure => {
+                        let first = futures::stream::once(async {
+                            Ok(firehose::Response {
+                                block: Some(prost_types::Any {
+                                    type_url: "test.Block".into(),
+                                    value: vec![],
+                                }),
+                                step: 3,
+                                cursor: "cursor-100".into(),
+                                metadata: Some(firehose::BlockMetadata {
+                                    num: 100,
+                                    ..Default::default()
+                                }),
+                            })
+                        });
+                        let rest: Self::ResponseStream = match scenario {
+                            CancellationScenario::Idle => Box::pin(futures::stream::pending()),
+                            CancellationScenario::StreamFailure => {
+                                Box::pin(futures::stream::once(async {
+                                    Err(tonic::Status::unavailable("stream retry fixture"))
+                                }))
+                            }
+                            _ => unreachable!(),
+                        };
+                        Ok(tonic::Response::new(
+                            Box::pin(first.chain(rest)) as Self::ResponseStream
+                        ))
+                    }
+                }
+            })
+        }
+    }
+
+    impl tonic::server::NamedService for CancellationService {
+        const NAME: &'static str = "sf.firehose.v2.Stream";
+    }
+
+    impl tonic::codegen::Service<tonic::codegen::http::Request<tonic::body::Body>>
+        for CancellationService
+    {
+        type Response = tonic::codegen::http::Response<tonic::body::Body>;
+        type Error = std::convert::Infallible;
+        type Future = tonic::codegen::BoxFuture<Self::Response, Self::Error>;
+
+        fn poll_ready(
+            &mut self,
+            _: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Result<(), Self::Error>> {
+            std::task::Poll::Ready(Ok(()))
+        }
+
+        fn call(
+            &mut self,
+            request: tonic::codegen::http::Request<tonic::body::Body>,
+        ) -> Self::Future {
+            let service = self.clone();
+            Box::pin(async move {
+                let mut grpc = tonic::server::Grpc::new(tonic_prost::ProstCodec::default());
+                Ok(grpc.server_streaming(service, request).await)
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn test_shutdown_interrupts_established_stream_waits_and_backoffs() {
+        use std::sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc,
+        };
+        for (scenario, idle_timeout) in [
+            (CancellationScenario::PendingRpc, Some(120)),
+            (CancellationScenario::Idle, Some(120)),
+            (CancellationScenario::Idle, None),
+            (CancellationScenario::RpcFailure, Some(120)),
+            (CancellationScenario::StreamFailure, Some(120)),
+        ] {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let endpoint = format!("http://{}", listener.local_addr().unwrap());
+            let incoming = futures::stream::unfold(listener, |listener| async {
+                Some((listener.accept().await.map(|(socket, _)| socket), listener))
+            });
+            let called = Arc::new(tokio::sync::Notify::new());
+            let service = CancellationService {
+                scenario,
+                called: Arc::clone(&called),
+            };
+            let server = tokio::spawn(async move {
+                tonic::transport::Server::builder()
+                    .add_service(service)
+                    .serve_with_incoming(incoming)
+                    .await
+                    .unwrap();
+            });
+            let mut config = test_config(&endpoint);
+            config.stream_idle_timeout_secs = idle_timeout;
+            let (_, metrics) = crate::metrics::init();
+            let mut client = FirehoseClient::new(config).unwrap();
+            client.set_metrics(metrics.clone());
+            let processed = Arc::new(AtomicUsize::new(0));
+            let handler_processed = Arc::clone(&processed);
+            let shutdown = CancellationToken::new();
+            let stream_shutdown = shutdown.clone();
+            let stream_task = tokio::spawn(async move {
+                client
+                    .stream_blocks(None, &stream_shutdown, |_, _, _, _, _| {
+                        handler_processed.fetch_add(1, Ordering::SeqCst);
+                        Ok(())
+                    })
+                    .await
+            });
+            // Observe the actual production wait state, rather than assuming
+            // that a fixed delay was long enough to establish the stream.
+            tokio::time::timeout(Duration::from_secs(5), async {
+                called.notified().await;
+                match scenario {
+                    CancellationScenario::PendingRpc => {}
+                    CancellationScenario::Idle => {
+                        while processed.load(Ordering::SeqCst) == 0 {
+                            tokio::time::sleep(Duration::from_millis(5)).await;
+                        }
+                    }
+                    CancellationScenario::RpcFailure | CancellationScenario::StreamFailure => {
+                        while metrics.grpc_reconnects_total.get() == 0 {
+                            tokio::time::sleep(Duration::from_millis(5)).await;
+                        }
+                    }
+                }
+            })
+            .await
+            .expect("fixture must reach the selected wait");
+            let started = Instant::now();
+            shutdown.cancel();
+            let error = tokio::time::timeout(Duration::from_secs(2), stream_task)
+                .await
+                .expect("cancellation must interrupt the real RPC wait or backoff")
+                .unwrap()
+                .unwrap_err();
+            assert!(is_shutdown_error(&error), "{scenario:?}: {error:#}");
+            assert!(started.elapsed() < Duration::from_secs(2));
+            let expected_processed = usize::from(matches!(
+                scenario,
+                CancellationScenario::Idle | CancellationScenario::StreamFailure
+            ));
+            assert_eq!(processed.load(Ordering::SeqCst), expected_processed);
+            assert_eq!(
+                metrics.grpc_reconnects_total.get(),
+                u64::from(matches!(
+                    scenario,
+                    CancellationScenario::RpcFailure | CancellationScenario::StreamFailure
+                ))
+            );
+            server.abort();
+            let _ = server.await;
+        }
+    }
+
+    /// Run `stream_blocks` against `endpoint`, cancel `shutdown` after
+    /// `cancel_after`, and return the result plus how long the call took.
+    async fn stream_until_cancelled(
+        endpoint: &str,
+        cancel_after: Duration,
+    ) -> (Result<()>, Duration) {
+        let client = FirehoseClient::new(test_config(endpoint)).unwrap();
+        let shutdown = CancellationToken::new();
+        let canceller = shutdown.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(cancel_after).await;
+            canceller.cancel();
+        });
+        let started = Instant::now();
+        let result = tokio::time::timeout(
+            Duration::from_secs(10),
+            client.stream_blocks(None, &shutdown, |_, _, _, _, _| {
+                panic!("no block should be delivered")
+            }),
+        )
+        .await
+        .expect("stream_blocks must return promptly after shutdown");
+        (result, started.elapsed())
+    }
+
+    #[tokio::test]
+    async fn test_unless_shutdown_interrupts_a_long_wait() {
+        // Back-off sleeps (up to 60 s) and idle waits (120 s by default) are
+        // wrapped like this one-hour sleep.
+        let shutdown = CancellationToken::new();
+        let canceller = shutdown.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            canceller.cancel();
+        });
+        let result = tokio::time::timeout(
+            Duration::from_secs(5),
+            unless_shutdown(&shutdown, tokio::time::sleep(Duration::from_secs(3600))),
+        )
+        .await
+        .expect("the wait must end as soon as shutdown is requested");
+        assert!(is_shutdown_error(&result.unwrap_err()));
+    }
+
+    #[tokio::test]
+    async fn test_shutdown_while_reconnecting_to_a_closed_port_returns_shutdown() {
+        // A closed port fails to connect at once, so the loop alternates
+        // between failed connects and back-off sleeps.
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+
+        let (result, elapsed) = stream_until_cancelled(
+            &format!("http://127.0.0.1:{port}"),
+            Duration::from_millis(200),
+        )
+        .await;
+        let error = result.expect_err("shutdown must end the stream");
+        assert!(is_shutdown_error(&error), "{error:#}");
+        assert!(elapsed < Duration::from_secs(2), "took {elapsed:?}");
+    }
+
+    #[tokio::test]
+    async fn test_shutdown_while_waiting_on_a_silent_server_returns_promptly() {
+        // The server accepts TCP but never answers, so the client waits in
+        // the connect / Blocks call (30 s and 300 s timeouts) when shutdown is
+        // requested.
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok((socket, _)) = listener.accept().await {
+                held.push(socket);
+            }
+        });
+
+        let (result, elapsed) = stream_until_cancelled(
+            &format!("http://127.0.0.1:{port}"),
+            Duration::from_millis(200),
+        )
+        .await;
+        let error = result.expect_err("shutdown must end the stream");
+        assert!(is_shutdown_error(&error), "{error:#}");
+        assert!(elapsed < Duration::from_secs(2), "took {elapsed:?}");
+    }
+
+    #[tokio::test]
+    async fn test_already_cancelled_shutdown_returns_before_connecting() {
+        let client = FirehoseClient::new(test_config("http://127.0.0.1:1")).unwrap();
+        let shutdown = CancellationToken::new();
+        shutdown.cancel();
+        let error = client
+            .stream_blocks(None, &shutdown, |_, _, _, _, _| Ok(()))
+            .await
+            .expect_err("shutdown must end the stream");
+        assert!(is_shutdown_error(&error));
+    }
+
+    #[test]
+    fn test_shutdown_error_is_detected_through_context() {
+        let error = anyhow::Error::from(ShutdownRequested).context("while mapping block 42");
+        assert!(is_shutdown_error(&error));
+        assert!(!is_shutdown_error(&anyhow::anyhow!("shutdown requested")));
     }
 }

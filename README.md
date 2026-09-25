@@ -334,10 +334,21 @@ fireparq \
 
 On SIGINT (Ctrl-C) or SIGTERM, the pipeline:
 
-1. Stops consuming new blocks from the gRPC stream after the current block
+1. Stops consuming new blocks from the gRPC stream. A block being processed is
+   finished first; waits for the endpoint (connecting, reconnect back-off, an
+   idle stream, startup checks) are interrupted without waiting for their
+   network timeout, even on a quiet chain
 2. Discards partial in-memory buffers instead of writing extra part files
 3. Leaves the cursor at the last committed flush
 4. Exits cleanly (exit code 0)
+
+An in-flight block or storage write finishes before exit. If a cursor save has
+failed, the same signal interrupts its retry backoff and the durability error
+still produces a non-zero exit.
+
+A second SIGINT or SIGTERM exits immediately with code 130, without waiting for
+the current block. In-flight writes may be interrupted: a part file may remain
+incomplete, or a cursor update may not finish its durability checks.
 
 If a write (local disk or S3), a block mapping, or the stream fails, the
 pipeline also discards partial buffers and does not save the cursor, then exits
@@ -455,21 +466,22 @@ custom deployment environments:
 | `--cache-control <CACHE_CONTROL>` | Set upload headers for CDN or static distribution workflows |
 | `--metrics-port <METRICS_PORT>` | Expose Prometheus and health endpoints for monitored deployments |
 
-`--flush-rows` and `--flush-interval-secs` flush mapper state into the writer,
-not directly to disk/S3. `--flush-bytes` also sets the writer's target part
-size, but no `--flush-*` flag guarantees immediate file materialization on its
-own. `--flush-bytes 0` disables byte-based flushing, as it does for `merge` and
-`rollup`: files are then only cut by the other `--flush-*` triggers, at
+Each `build` mapper flush writes its nonempty tables to local files or S3
+before advancing the cursor. `--flush-rows`, `--flush-blocks`, and
+`--flush-interval-secs` control mapper flush boundaries. `--flush-bytes` uses
+the mapper's estimated memory size; it does not impose a compressed part-size
+limit. `--flush-bytes 0` disables byte-based flushing: files are then only cut
+by the other `--flush-*` triggers, at
 partition boundaries, or at the end of the run (with `--partition none` and no
 other trigger, everything stays in memory until the run ends, and a warning is
-logged). Watch for the runtime logs that distinguish `mapper flush emitted record
-batches`, `writer buffered mapper flush`, and `writer materialized parquet
-output`. On graceful shutdown, the process now logs any buffered rows/bytes that
-were intentionally left unmaterialized to preserve deterministic partition
-boundaries.
+logged). `merge` and `rollup` retain their separate output-size controls.
+Runtime logs distinguish mapper batches from successfully materialized Parquet
+output. On graceful shutdown or failure, remaining mapper data is not written
+and the cursor is not advanced. A failed table write retains visible rows for
+diagnosis; retry after an ambiguous publication error can duplicate output.
 
 When a partition boundary is detected during ingestion, the mapper flush for the
-old partition is forced through writer materialization immediately, and the same
+old partition is written immediately, and the same
 writer outcome logs are emitted for that boundary-triggered flush.
 
 When the first streamable block is missing timestamp metadata, fireparq now
