@@ -482,8 +482,8 @@ impl BlockMapper for NearBlockMapper {
                 identity,
                 crypto_hash_bytes(&header.hash),
                 crypto_hash_bytes(&header.prev_hash),
-            ),
-            None => self.blocks.canonical.prepare(identity),
+            )?,
+            None => self.blocks.canonical.prepare(identity)?,
         };
         self.map_near_block(&block, &identity, fork_step);
         Ok(tx_count)

@@ -19,6 +19,8 @@ lifecycle state; a local implementation or passing test alone is not closure.
 - [#473: responsive shutdown](473-responsive-shutdown.md)
 - [#477: single-partition writer contract](477-writer-partition-contract.md)
 
+- [#476: timestamp and streamed identity validation](476-timestamp-validation.md)
+
 - [Backlog priorities and preserved work](backlog-roadmap.md)
 - [#468: proposed crash/replay recovery design](468-crash-recovery-design.md)
 
