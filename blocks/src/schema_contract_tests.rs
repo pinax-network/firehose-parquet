@@ -440,6 +440,15 @@ fn every_table_schema_has_unique_field_names_and_round_trips_through_parquet() {
                 batch.schema().fields(),
                 "{context}: schema changed through parquet"
             );
+            // Authority stores this digest, so Arrow's schema equality alone
+            // is insufficient: IPC dictionary IDs can change without affecting
+            // Field equality or data, and must not change a protected identity.
+            assert_eq!(
+                firehose_parquet::writer::protected::schema_sha256(read.schema().as_ref()).unwrap(),
+                firehose_parquet::writer::protected::schema_sha256(batch.schema().as_ref())
+                    .unwrap(),
+                "{context}: protected schema identity changed through parquet"
+            );
             assert_eq!(&read, batch, "{context}: values changed through parquet");
             checked += 1;
         }
