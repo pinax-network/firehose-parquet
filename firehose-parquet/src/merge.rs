@@ -5,7 +5,7 @@
 //! many small parts into fewer larger files.
 
 use crate::artifacts::is_reserved_artifact_path;
-use crate::cli::{block_on_async, format_bytes, resolve_parquet_input_path_string, AwsConfig};
+use crate::cli::{block_on_async, format_bytes, resolve_destructive_input_path, AwsConfig};
 use crate::config::Compression;
 use crate::writer::s3_put_options;
 use anyhow::{Context, Result};
@@ -205,7 +205,7 @@ impl MergeResult {
 /// Run the merge operation.
 pub fn run_merge(config: &MergeConfig) -> Result<MergeResult> {
     let resolved = MergeConfig {
-        path: resolve_parquet_input_path_string(&config.path),
+        path: resolve_destructive_input_path(&config.path)?,
         compression: config.compression,
         flush_rows: config.flush_rows,
         flush_bytes: config.flush_bytes,

@@ -788,7 +788,7 @@ See [Verifiability artifact runbook](docs/verifiability-artifact-runbook.md) for
 
 ### `rollup` — Roll Up Partitions
 
-Rolls up fine-grained partitions (e.g. `minute` or `hour`) into coarser ones (e.g. `date`). Reads source files, concatenates them by target partition, and writes new files respecting `--flush-bytes`. The source path supports local paths, shorthand S3 keys/prefixes via `S3_BUCKET`, and explicit S3 URIs.
+Rolls up fine-grained partitions (e.g. `minute` or `hour`) into coarser ones (e.g. `date`). Reads source files, concatenates them by target partition, and writes new files respecting `--flush-bytes`. The source path is a local path or an explicit S3 URI.
 
 ```bash
 # Roll up minute-partitioned data into daily partitions, replacing the minute files
@@ -797,11 +797,11 @@ fireparq rollup ./output/blocks/ -p date --delete-source
 # Roll up into a different output directory, keeping the source files
 fireparq rollup ./output/blocks/ -o ./rolled-up/blocks/ -p date
 
-# Resolve a shorthand S3 source path when no local match exists
-S3_BUCKET=my-bucket fireparq rollup evm/blocks/ -p date --delete-source
+# Roll up S3 data in place
+fireparq rollup s3://my-bucket/evm/blocks/ -p date --delete-source
 ```
 
-Lookup order for the source path matches `scan` / `inspect`: explicit `s3://...` URIs win, existing local paths win over shorthand S3 resolution, and only missing relative paths fall back to `s3://<S3_BUCKET>/<path>`.
+The source path must exist locally or be an explicit `s3://...` URI. Unlike `scan` and `inspect`, `rollup` never falls back to `s3://<S3_BUCKET>/<path>` when a relative path is missing (`.env` is loaded automatically, so a typo could otherwise target a bucket).
 
 Which files rollup reads, writes, and deletes:
 
@@ -823,7 +823,7 @@ Which files rollup reads, writes, and deletes:
 
 ### `merge` — Consolidate Part Files
 
-Consolidates multiple small part files within each partition directory into fewer, larger files. Unlike `rollup` (which changes partition granularity), `merge` keeps the same partition layout but reduces file count. Supports local paths, shorthand S3 keys/prefixes via `S3_BUCKET`, and explicit S3 URIs.
+Consolidates multiple small part files within each partition directory into fewer, larger files. Unlike `rollup` (which changes partition granularity), `merge` keeps the same partition layout but reduces file count. Supports local paths and explicit S3 URIs.
 
 `merge` processes one table at a time and, within each table, one partition at a time. All parts in each partition are read into memory, sorted by `block_num`, and written back as new files respecting `--flush-bytes` and `--flush-rows`. Original parts are deleted after successful merge. Root artifacts (`cursor.parquet`, `partitions.parquet`, `merkle_roots.parquet`, and anything under `verify_runs/`) are skipped, so merging a network root is safe.
 
@@ -844,12 +844,9 @@ fireparq merge ./output/blocks/ --flush-rows 100000
 
 # Merge S3-hosted data
 fireparq merge s3://my-bucket/evm/blocks/
-
-# Resolve a shorthand S3 path when no local match exists
-S3_BUCKET=my-bucket fireparq merge evm/blocks/
 ```
 
-Lookup order matches `scan` / `inspect`: explicit `s3://...` URIs win, existing local paths win over shorthand S3 resolution, and only missing relative paths fall back to `s3://<S3_BUCKET>/<path>`.
+The path must exist locally or be an explicit `s3://...` URI. Unlike `scan` and `inspect`, `merge` never falls back to `s3://<S3_BUCKET>/<path>` when a relative path is missing (`.env` is loaded automatically, so a typo could otherwise target a bucket).
 
 | Flag | Default | Description |
 |---|---|---|
@@ -864,45 +861,55 @@ Lookup order matches `scan` / `inspect`: explicit `s3://...` URIs win, existing 
 
 ### `truncate` — Delete Parquet Files
 
-Deletes `.parquet` files from local filesystem or S3 with optional partition filtering. Supports glob patterns for flexible selection, local paths, shorthand S3 keys/prefixes via `S3_BUCKET`, and explicit S3 URIs.
+Deletes `.parquet` files from local filesystem or S3 with optional partition filtering. Never deletes buckets or non-parquet files.
 
-When truncating a network root, root-level `.parquet` artifacts such as `partitions.parquet` and `cursor.parquet` are included in the matched files. `--dry-run` prints every matched file explicitly so those artifacts are visible before deletion. You can also target a single `.parquet` file directly, such as `fireparq truncate unichain/partitions.parquet`.
+Nothing is deleted without `--yes`. Without it, `truncate` prints a summary of what matched (file count, total size, and the first 10 paths) and exits non-zero. `--dry-run` lists every matched file instead. When truncating a network root without filters, root-level artifacts such as `partitions.parquet` and `cursor.parquet` are included; the summary calls them out. You can also target a single `.parquet` file directly, such as `fireparq truncate ./unichain/partitions.parquet --yes`.
 
 ```bash
+# Preview what would be deleted
+fireparq truncate ./output/blocks/ --dry-run
+
 # Delete all parquet files in a directory
-fireparq truncate ./output/blocks/
+fireparq truncate ./output/blocks/ --yes
 
-# Delete all parquet files under a network root, including root-level artifacts
-fireparq truncate ./output/mainnet/ --dry-run
+# Delete one day (also matches legacy `date=15` directories)
+fireparq truncate ./output/blocks/ -p "year=2026/month=01/day=15" --yes
 
-# Delete a single parquet file directly
-fireparq truncate ./output/mainnet/partitions.parquet
+# Delete one day in every table of a network root
+fireparq truncate ./output/mainnet/ -p "year=2026/month=01/day=15" --yes
 
-# Delete day-of-month 01 partitions (`day=01`, and legacy `date=01` directories)
-fireparq truncate ./output/blocks/ -p "day=01"
+# Delete January 2026 on S3 (filters on different keys must all match)
+fireparq truncate s3://bucket/evm/blocks/ -p year=2026 -p month=01 --yes
 
-# Delete all partitions under a key
-fireparq truncate ./output/blocks/ -p minute
+# Delete two days (filters on the same key match either one)
+fireparq truncate ./output/blocks/ -p "year=2026/month=01/day=01" -p "year=2026/month=01/day=02" --yes
+
+# Delete all minute-level partitions (key-only filter)
+fireparq truncate ./output/blocks/ -p minute --yes
 
 # Glob pattern matching
-fireparq truncate s3://bucket/prefix -p "day=0*"
-
-# Resolve a shorthand S3 path when no local match exists
-S3_BUCKET=my-bucket fireparq truncate evm/blocks/ -p "month=01"
-
-# Multiple partitions
-fireparq truncate ./output/ -p "day=01" -p "day=02"
-
-# Dry run — show what would be deleted
-fireparq truncate ./output/blocks/ --dry-run
+fireparq truncate s3://bucket/evm/blocks/ -p "year=2026/month=01/day=0*" --dry-run
 ```
 
-Lookup order matches `scan` / `inspect`: explicit `s3://...` URIs win, existing local paths win over shorthand S3 resolution, and only missing relative paths fall back to `s3://<S3_BUCKET>/<path>`.
+Partition filters (`-p`, repeatable):
+
+| Filter | Matches |
+|---|---|
+| `month=01` | Files under a `month=01` directory. On its own that is January of every year; combine it with `-p year=2026` for one month. |
+| `minute` | Every value of the key (`minute=*`). |
+| `year=2026/month=01/day=15` | A partition path: files whose partition directories (the `key=value` directories below the given path) start with exactly these segments, in every table under the path. |
+
+- Filters on different keys must all match (`-p year=2026 -p month=01` is January 2026 only). Filters on the same key match either value (`-p day=01 -p day=02`). Path filters match if any of them does, and must also satisfy the single-key filters.
+- Each segment may contain one `*` glob, such as `day=0*`. `day` also matches the legacy `date=DD` directories written by earlier releases.
+- Filters only match partition directories, so they never select root artifacts.
+
+The path must exist locally or be an explicit `s3://...` URI. Unlike `scan` and `inspect`, `truncate` never falls back to `s3://<S3_BUCKET>/<path>` when a relative path is missing (`.env` is loaded automatically, so a typo could otherwise target a bucket).
 
 | Flag | Default | Description |
 |---|---|---|
-| `-p, --partition` | *(none)* | Partition filter (repeatable, supports globs) |
-| `--dry-run` | `false` | Show what would be deleted without removing files |
+| `-p, --partition` | *(none)* | Partition filter (repeatable, supports globs and partition paths) |
+| `--dry-run` | `false` | List every file that would be deleted without removing anything |
+| `-y, --yes` | `false` | Delete the matched files. Without it, truncate prints a summary and exits non-zero |
 
 ## Failed Transaction Filtering
 

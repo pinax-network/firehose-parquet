@@ -806,9 +806,6 @@ Examples:
   # Roll up S3 data, delete source files after
   fireparq rollup s3://bucket/blocks/ --delete-source
 
-  # Resolve a shorthand S3 source path in-place when no local match exists
-  S3_BUCKET=my-bucket fireparq rollup eth-mainnet/blocks/ --delete-source
-
   # Custom file size limit (256 MB)
   fireparq rollup ./output/blocks/ -o ./daily/blocks/ --flush-bytes 268435456
 
@@ -821,13 +818,12 @@ part-rollup-*.parquet files it wrote earlier in the target partitions it rolls u
 A target partition whose source files have different columns (names, types,
 nullability, or order) is left untouched, and rollup exits non-zero.
 
-Lookup order for the source path:
-  1. Explicit s3://bucket/... URIs are used as-is.
-  2. Non-URI paths use the local filesystem when the path exists.
-  3. Otherwise, if S3_BUCKET is set, relative paths fall back to s3://<bucket>/<path>.
+The source path must exist locally or be an explicit s3://bucket/... URI. Unlike
+scan and inspect, rollup never falls back to s3://$S3_BUCKET/<path> for a missing
+local path.
 ")]
     Rollup {
-        /// Source path containing partitioned Parquet files (local directory, shorthand S3 key/prefix via S3_BUCKET, or S3 URI)
+        /// Source path containing partitioned Parquet files (existing local directory or s3:// URI)
         #[arg(help_heading = "Selection")]
         source: String,
         /// Output path (local directory or S3 URI). Defaults to source (in-place rollup, which requires --delete-source).
@@ -913,9 +909,6 @@ Examples:
   # Merge S3 data
   fireparq merge s3://bucket/eth-mainnet/blocks/
 
-  # Resolve a shorthand S3 path when no local match exists
-  S3_BUCKET=my-bucket fireparq merge eth-mainnet/blocks/
-
   # Custom target file size (512 MB)
   fireparq merge ./output/blocks/ --flush-bytes 536870912
 
@@ -936,13 +929,11 @@ verify_runs/) are skipped. A partition whose parts have different columns
 (names, types, nullability, or order) is left untouched and listed in the
 summary, and merge exits non-zero.
 
-Lookup order:
-  1. Explicit s3://bucket/... URIs are used as-is.
-  2. Non-URI paths use the local filesystem when the path exists.
-  3. Otherwise, if S3_BUCKET is set, relative paths fall back to s3://<bucket>/<path>.
+The path must exist locally or be an explicit s3://bucket/... URI. Unlike scan and
+inspect, merge never falls back to s3://$S3_BUCKET/<path> for a missing local path.
 ")]
     Merge {
-        /// Path to a directory of partitioned .parquet files, a shorthand S3 key/prefix via S3_BUCKET, or an S3 URI
+        /// Path to a directory of partitioned .parquet files (existing local directory or s3:// URI)
         #[arg(help_heading = "Selection")]
         path: String,
         /// Compression codec: zstd, snappy, gzip, none
@@ -1087,54 +1078,64 @@ Lookup order:
     /// Deletes only .parquet files. Never deletes buckets or non-parquet files.
     /// Truncating a network root includes root-level parquet artifacts like
     /// partitions.parquet and cursor.parquet, and --dry-run lists each matched file.
-    /// Use --partition to target specific partitions (supports glob patterns).
+    /// Use --partition to target specific partitions. Nothing is deleted without --yes:
+    /// without it, truncate prints a summary of what matched and exits non-zero.
     #[command(after_long_help = "\
 Examples:
-  # Delete all parquet files under a path
-  fireparq truncate ./output/blocks/
-
-  # Delete all parquet files under a network root, including root-level artifacts
-  fireparq truncate ./output/mainnet/ --dry-run
-
-  # Delete a single parquet file directly
-  fireparq truncate ./output/mainnet/partitions.parquet
-
-  # Delete only day-of-month 01 partitions (also matches legacy date=01 directories)
-  fireparq truncate ./output/blocks/ -p \"day=01\"
-
-  # Delete with glob pattern (all of January)
-  fireparq truncate s3://bucket/blocks/ -p \"month=01\"
-
-  # Resolve a shorthand S3 path when no local match exists
-  S3_BUCKET=my-bucket fireparq truncate eth-mainnet/blocks/ -p \"month=01\"
-
-  # Delete a specific year
-  fireparq truncate ./output/ -p \"year=2026\"
-
-  # Delete all minute-level partitions (key-only filter)
-  fireparq truncate ./output/blocks/ -p minute
-
   # Preview what would be deleted
   fireparq truncate ./output/blocks/ --dry-run
 
-Lookup order:
-  1. Explicit s3://bucket/... URIs are used as-is.
-  2. Non-URI paths use the local filesystem when the path exists.
-  3. Otherwise, if S3_BUCKET is set, relative paths fall back to s3://<bucket>/<path>.
+  # Delete all parquet files under a path
+  fireparq truncate ./output/blocks/ --yes
+
+  # Delete a single parquet file directly
+  fireparq truncate ./output/mainnet/partitions.parquet --yes
+
+  # Delete one day (also matches legacy date=15 directories)
+  fireparq truncate ./output/blocks/ -p \"year=2026/month=01/day=15\" --yes
+
+  # Delete one day in every table of a network root
+  fireparq truncate ./output/mainnet/ -p \"year=2026/month=01/day=15\" --yes
+
+  # Delete January 2026 on S3 (filters on different keys must all match)
+  fireparq truncate s3://bucket/eth-mainnet/blocks/ -p year=2026 -p month=01 --yes
+
+  # Delete two days (filters on the same key match either value)
+  fireparq truncate ./output/blocks/ -p year=2026/month=01/day=01 -p year=2026/month=01/day=02 --yes
+
+  # Delete all minute-level partitions (key-only filter)
+  fireparq truncate ./output/blocks/ -p minute --yes
+
+Partition filters:
+  key=value       matches files under a directory with that segment, e.g. month=01
+                  (every January of every year, unless combined with -p year=...)
+  key             matches every value of the key, e.g. minute
+  a/b/c           a partition path, e.g. year=2026/month=01/day=15: matches files whose
+                  partition directories start with exactly these segments
+  Each segment may contain one * glob (day=0*). day= also matches legacy date= directories.
+  Filters on different keys must all match; filters on the same key (and path filters)
+  match if any of them does.
+
+The path must exist locally or be an explicit s3://bucket/... URI. Unlike scan and
+inspect, truncate never falls back to s3://$S3_BUCKET/<path> for a missing local path.
 ")]
     Truncate {
-        /// Path to a .parquet file, a directory containing .parquet files, a shorthand S3 key/prefix via S3_BUCKET, or an S3 URI
+        /// Path to a .parquet file or a directory containing .parquet files (existing local path or s3:// URI)
         #[arg(help_heading = "Selection")]
         path: String,
-        /// Partition filter(s) — only delete files matching these partition segments.
-        /// Use a key name to match all values (e.g. "minute" matches all minute=* partitions),
-        /// or a key=value with optional glob (e.g. "day=0*"). `day` also matches the legacy
-        /// `date=DD` day directories written by earlier releases. Repeatable.
+        /// Partition filter(s) — only delete files matching these partitions. A key=value
+        /// segment with an optional glob (e.g. "month=01", "day=0*"), a key name for all its
+        /// values (e.g. "minute"), or a partition path (e.g. "year=2026/month=01/day=15").
+        /// Filters on different keys must all match; filters on the same key match either.
+        /// `day` also matches the legacy `date=DD` day directories. Repeatable.
         #[arg(long, short = 'p', help_heading = "Selection")]
         partition: Vec<String>,
         /// Show what would be deleted without actually deleting
         #[arg(long, default_value = "false", help_heading = "Execution")]
         dry_run: bool,
+        /// Delete the matched files. Without --yes, truncate prints a summary and exits non-zero
+        #[arg(long, short = 'y', default_value = "false", help_heading = "Execution")]
+        yes: bool,
         /// AWS access key ID (for S3 paths)
         #[arg(
             long,
@@ -2408,6 +2409,25 @@ pub fn resolve_parquet_input_path_string(path: &str) -> String {
     match resolve_parquet_input_path(path) {
         ParquetInputPath::S3(path) => path,
         ParquetInputPath::Local(path) => path.to_string_lossy().into_owned(),
+    }
+}
+
+/// Resolves the path argument of a command that deletes or rewrites files (`truncate`,
+/// `merge`, `rollup`).
+///
+/// Unlike [`resolve_parquet_input_path_string`], a relative path that does not exist locally
+/// is never turned into `s3://$S3_BUCKET/<path>` (with `.env` auto-loaded, a typo would
+/// otherwise target a bucket). S3 must be requested with an explicit `s3://` URI.
+pub fn resolve_destructive_input_path(path: &str) -> anyhow::Result<String> {
+    if path.starts_with("s3://") || Path::new(path).exists() {
+        return Ok(path.to_string());
+    }
+    match resolve_parquet_input_path(path) {
+        ParquetInputPath::S3(url) => anyhow::bail!(
+            "path does not exist: {path}. Commands that delete or rewrite files do not fall \
+             back to S3_BUCKET; to use S3, pass the URI explicitly: {url}"
+        ),
+        ParquetInputPath::Local(_) => anyhow::bail!("path does not exist: {path}"),
     }
 }
 
@@ -7606,51 +7626,6 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let _cwd = CurrentDirGuard::set(dir.path());
 
-        let truncate_err = match crate::truncate::run_truncate(&crate::truncate::TruncateConfig {
-            path: "./mainnet/blocks/".to_string(),
-            partitions: vec![],
-            dry_run: true,
-            aws: None,
-        }) {
-            Ok(_) => panic!("truncate should resolve to S3 without a local path"),
-            Err(err) => err,
-        };
-        assert!(truncate_err
-            .to_string()
-            .contains("AWS config required for S3 paths"));
-
-        let merge_err = match crate::merge::run_merge(&crate::merge::MergeConfig {
-            path: "./mainnet/blocks/".to_string(),
-            compression: crate::config::Compression::Zstd,
-            flush_rows: None,
-            flush_bytes: 1024,
-            dry_run: true,
-            verbose: false,
-            aws: None,
-            cache_control: String::new(),
-        }) {
-            Ok(_) => panic!("merge should resolve to S3 without a local path"),
-            Err(err) => err,
-        };
-        assert!(merge_err
-            .to_string()
-            .contains("AWS config required for S3 paths"));
-
-        let rollup_err = crate::rollup::run_rollup(&crate::rollup::RollupConfig {
-            source: "./mainnet/blocks/".to_string(),
-            output: "./mainnet/blocks/".to_string(),
-            target: crate::rollup::RollupTarget::Date,
-            compression: crate::config::Compression::Zstd,
-            flush_bytes: 1024,
-            delete_source: true,
-            aws: None,
-            cache_control: String::new(),
-        })
-        .expect_err("rollup should resolve to S3 without a local path");
-        assert!(rollup_err
-            .to_string()
-            .contains("AWS config required for S3 rollup"));
-
         let validate_err = match validate_parquet(
             "./mainnet/blocks/",
             None,
@@ -7685,6 +7660,69 @@ mod tests {
             .contains("AWS config required for S3 paths"));
     }
 
+    /// Commands that delete or rewrite files must not turn a missing (for example mistyped)
+    /// local path into `s3://$S3_BUCKET/<path>`.
+    #[test]
+    #[serial]
+    fn test_destructive_commands_do_not_fall_back_to_configured_s3_bucket() {
+        let _bucket = EnvVarGuard::set("S3_BUCKET", "configured-bucket");
+        let dir = tempfile::tempdir().expect("tempdir");
+        let _cwd = CurrentDirGuard::set(dir.path());
+        let assert_refused = |command: &str, err: anyhow::Error| {
+            let message = err.to_string();
+            assert!(
+                message.contains("path does not exist: ./mainnet/blocks/"),
+                "{command}: {message}"
+            );
+            assert!(
+                message.contains("do not fall back to S3_BUCKET"),
+                "{command}: {message}"
+            );
+            assert!(
+                message.contains("s3://configured-bucket/mainnet/blocks"),
+                "{command}: {message}"
+            );
+        };
+
+        let truncate_err = crate::truncate::run_truncate(&crate::truncate::TruncateConfig {
+            path: "./mainnet/blocks/".to_string(),
+            partitions: vec![],
+            dry_run: false,
+            yes: true,
+            aws: None,
+        })
+        .map(|_| ())
+        .expect_err("truncate must not resolve to S3");
+        assert_refused("truncate", truncate_err);
+
+        let merge_err = crate::merge::run_merge(&crate::merge::MergeConfig {
+            path: "./mainnet/blocks/".to_string(),
+            compression: crate::config::Compression::Zstd,
+            flush_rows: None,
+            flush_bytes: 1024,
+            dry_run: false,
+            verbose: false,
+            aws: None,
+            cache_control: String::new(),
+        })
+        .map(|_| ())
+        .expect_err("merge must not resolve to S3");
+        assert_refused("merge", merge_err);
+
+        let rollup_err = crate::rollup::run_rollup(&crate::rollup::RollupConfig {
+            source: "./mainnet/blocks/".to_string(),
+            output: "./mainnet/blocks/".to_string(),
+            target: crate::rollup::RollupTarget::Date,
+            compression: crate::config::Compression::Zstd,
+            flush_bytes: 1024,
+            delete_source: true,
+            aws: None,
+            cache_control: String::new(),
+        })
+        .expect_err("rollup must not resolve to S3");
+        assert_refused("rollup", rollup_err);
+    }
+
     #[test]
     #[serial]
     fn test_updated_commands_prefer_existing_local_paths_over_configured_s3_bucket() {
@@ -7699,6 +7737,7 @@ mod tests {
             path: "./mainnet/blocks/".to_string(),
             partitions: vec![],
             dry_run: true,
+            yes: false,
             aws: None,
         })
         .expect("truncate should stay local when the directory exists");

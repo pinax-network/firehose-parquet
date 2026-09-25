@@ -4486,6 +4486,7 @@ async fn main() -> Result<()> {
                 path,
                 partition,
                 dry_run,
+                yes,
                 aws_access_key_id,
                 aws_secret_access_key,
                 aws_session_token,
@@ -4504,6 +4505,7 @@ async fn main() -> Result<()> {
                     path: path.clone(),
                     partitions: partition.clone(),
                     dry_run: *dry_run,
+                    yes: *yes,
                     aws,
                 };
                 let result = firehose_parquet::truncate::run_truncate(&truncate_config)?;
@@ -6364,6 +6366,7 @@ mod tests {
                     "<PATH>",
                     "--partition",
                     "--dry-run",
+                    "--yes",
                     "--aws-region",
                     "--log-level",
                 ],

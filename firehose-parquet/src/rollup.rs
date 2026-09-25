@@ -11,7 +11,7 @@
 //! source files have different schemas is left untouched and reported as an error.
 
 use crate::artifacts::is_reserved_artifact_path;
-use crate::cli::{block_on_async, format_bytes, resolve_parquet_input_path_string, AwsConfig};
+use crate::cli::{block_on_async, format_bytes, resolve_destructive_input_path, AwsConfig};
 use crate::config::{Compression, DAY_PARTITION_PREFIX, LEGACY_DAY_PARTITION_PREFIX};
 use crate::merge::SchemaCheck;
 use crate::writer::parse_s3_url;
@@ -88,7 +88,7 @@ pub struct RollupConfig {
 
 /// Run the rollup operation.
 pub fn run_rollup(config: &RollupConfig) -> Result<()> {
-    let resolved_source = resolve_parquet_input_path_string(&config.source);
+    let resolved_source = resolve_destructive_input_path(&config.source)?;
     let resolved_output = if config.output == config.source {
         resolved_source.clone()
     } else {

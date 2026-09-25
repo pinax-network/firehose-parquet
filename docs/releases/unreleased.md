@@ -137,6 +137,19 @@ Migration:
 - Scripts that passed `--chain evm --table blocks` for non-EVM or non-`blocks` data now fail with a conflict error. Drop the flags, or fix them.
 - `verify` warns while a registry exists at the old default location (`<output>/<chain_name>/evm/mainnet/merkle_roots.parquet` locally, `s3://<bucket>/evm/mainnet/merkle_roots.parquet` on S3). Keep a copy of it, run `fireparq verify <output>/<chain_name>/<table> --update-registry --no-fail-fast` for each table against trusted data, then delete the old file (locally the whole `<output>/<chain_name>/evm/` directory). The details are in `docs/verifiability-artifact-runbook.md` ("Moving a registry from the old default location"). An S3 registry at the old location may mix several networks' rows, so do not reuse it as a baseline.
 
+### `truncate`: filters on different keys must all match, deletes need `--yes`, and destructive commands no longer fall back to `S3_BUCKET` (#481)
+
+- **Filters on different keys must all match.** `-p year=2026 -p month=01` used to delete every file under `year=2026` *or* `month=01`, including January 2025 and all of 2026. It now selects January 2026 only. Filters on the same key still match either value (`-p day=01 -p day=02`).
+- **Partition-path filters work.** A filter with `/`, such as `year=2026/month=01/day=15`, matches files whose partition directories (below the given path, in every table) start with exactly those segments. It used to match nothing, because each filter was compared with a single directory name. Empty filters, path filters with a segment that is not `key=value`, and segments with more than one `*` are now rejected.
+- **`--yes` is required to delete.** Without `--yes` (and without `--dry-run`), `truncate` prints a summary and exits non-zero without deleting anything. The summary lists the file count, total size, the first 10 paths, and any root artifacts such as `cursor.parquet`.
+- **No `S3_BUCKET` fallback for `truncate`, `merge`, and `rollup`.** A relative path that did not exist locally used to become `s3://$S3_BUCKET/<path>`, and `.env` is loaded automatically, so a typo could target a bucket. These three commands now fail with `path does not exist`, naming the `s3://` URI to pass if S3 was intended. `scan`, `inspect`, `validate`, and `verify` keep the fallback.
+
+Migration:
+
+- Add `--yes` to scripts that run `truncate` for real.
+- Check scripts that pass several `-p` filters on different keys: they now select the intersection instead of the union.
+- Pass `s3://bucket/prefix` explicitly to `truncate`, `merge`, and `rollup` for S3 data.
+
 ## Fixes
 
 - **`build --start-block` above the last irreversible block no longer writes earlier blocks (#466).** Firehose serves such a request from LIB+1, and those blocks used to be written. Blocks below the effective start block are now skipped before mapping, logged once, and counted in the new `firehose_parquet_blocks_skipped_below_start_total` metric and the `blocks_skipped_below_start` summary field.
