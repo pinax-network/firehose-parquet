@@ -689,6 +689,7 @@ pub(crate) mod tests {
             parent_id: "0x8888".to_string(),
             lib_num: 98,
             timestamp: 1_700_000_000,
+            timestamp_nanos: 0,
             fork_step: None,
         };
 

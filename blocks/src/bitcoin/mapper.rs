@@ -621,6 +621,7 @@ pub(crate) mod tests {
             parent_id: "firehose-envelope-parent-id".to_string(),
             lib_num: 0,
             timestamp: block.time,
+            timestamp_nanos: 0,
             fork_step: None,
         };
 
@@ -669,6 +670,7 @@ pub(crate) mod tests {
             parent_id: "firehose-envelope-parent-id".to_string(),
             lib_num: 0,
             timestamp: block.time,
+            timestamp_nanos: 0,
             fork_step: None,
         };
 

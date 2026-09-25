@@ -1,7 +1,8 @@
-use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
+use arrow::datatypes::{DataType, Field, Schema};
 use firehose_parquet::encode::{bytes_data_type, EncodeBytes};
-use firehose_parquet::traits::{canonical_fields_with_encoding, fork_step_field};
-use std::sync::Arc;
+use firehose_parquet::traits::{
+    canonical_fields_with_encoding, fork_step_field, timestamp_millis_utc_type,
+};
 
 fn maybe_fork_step(fields: &mut Vec<Field>, include: bool) {
     if include {
@@ -61,11 +62,7 @@ pub fn actions_schema(include_fork_step: bool, encoding: &EncodeBytes) -> Schema
         Field::new("transaction_id", DataType::Utf8, false),
         Field::new("trace_block_num", DataType::UInt64, false),
         Field::new("producer_block_id", DataType::Utf8, false),
-        Field::new(
-            "block_time",
-            DataType::Timestamp(TimeUnit::Second, Some(Arc::from("UTC"))),
-            true,
-        ),
+        Field::new("block_time", timestamp_millis_utc_type(), true),
         Field::new("raw_return_value", bd, true),
         Field::new("json_return_value", DataType::Utf8, true),
         Field::new("exception", DataType::Utf8, true),

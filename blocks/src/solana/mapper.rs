@@ -1395,6 +1395,7 @@ pub(crate) mod tests {
             parent_id: "firehose-envelope-parent-id".to_string(),
             lib_num: 99,
             timestamp: 1_700_000_123,
+            timestamp_nanos: 0,
             fork_step: None,
         };
         let mut mapper = SolanaBlockMapper::new(false, false, EncodeBytes::Binary, true, false);
@@ -1408,7 +1409,7 @@ pub(crate) mod tests {
             .column_by_name("timestamp")
             .unwrap()
             .as_any()
-            .downcast_ref::<TimestampSecondArray>()
+            .downcast_ref::<TimestampMillisecondArray>()
             .unwrap();
         let block_date = blocks
             .column_by_name("date")
@@ -1426,7 +1427,7 @@ pub(crate) mod tests {
             .column_by_name("timestamp")
             .unwrap()
             .as_any()
-            .downcast_ref::<TimestampSecondArray>()
+            .downcast_ref::<TimestampMillisecondArray>()
             .unwrap();
 
         assert!(
@@ -1460,6 +1461,7 @@ pub(crate) mod tests {
             parent_id: "firehose-envelope-parent-id".to_string(),
             lib_num: 99,
             timestamp: 1_700_000_100,
+            timestamp_nanos: 0,
             fork_step: None,
         };
 
@@ -1509,6 +1511,7 @@ pub(crate) mod tests {
             parent_id: "firehose-envelope-parent-id".to_string(),
             lib_num: 99,
             timestamp: 1_700_000_100,
+            timestamp_nanos: 0,
             fork_step: None,
         };
 

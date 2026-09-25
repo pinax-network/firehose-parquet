@@ -16,7 +16,7 @@ use arrow::record_batch::RecordBatch;
 use arrow::util::display::array_value_to_string;
 use firehose_parquet::config::{BlockMetadata, Compression, Partition};
 use firehose_parquet::encode::{decode_base58, EncodeBytes};
-use firehose_parquet::traits::{BlockIdentity, BlockMapper};
+use firehose_parquet::traits::{timestamp_millis_utc_type, BlockIdentity, BlockMapper};
 use firehose_parquet::writer::{read_parquet, ParquetTableWriter};
 use prost::Message;
 
@@ -240,6 +240,7 @@ fn identity(block_num: u64, fork_step: Option<&str>) -> BlockIdentity {
         parent_id: format!("0x{:064x}", block_num - 1),
         lib_num: block_num - 1,
         timestamp: TIMESTAMP + (block_num - BLOCK_NUM) as i64,
+        timestamp_nanos: 250_000_000,
         fork_step: fork_step.map(str::to_string),
     }
 }
@@ -394,6 +395,15 @@ fn every_table_schema_has_unique_field_names_and_round_trips_through_parquet() {
                 batch.schema().column_with_name("fork_step").is_some(),
                 flushed.include_fork_step,
                 "{context}: fork_step column"
+            );
+            assert_eq!(
+                batch
+                    .schema()
+                    .field_with_name("timestamp")
+                    .unwrap()
+                    .data_type(),
+                &timestamp_millis_utc_type(),
+                "{context}: canonical timestamp type"
             );
             // ParquetTableWriter skips empty batches, so every table needs rows.
             assert!(batch.num_rows() > 0, "{context}: fixture produced no rows");
