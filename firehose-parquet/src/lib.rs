@@ -4,6 +4,7 @@ pub mod cli;
 pub mod config;
 pub mod cursor;
 pub mod dataset_lock;
+pub mod dataset_lock_s3;
 pub mod durable_state;
 pub mod encode;
 pub mod grpc;
