@@ -9,6 +9,8 @@ pub mod durable_state;
 pub mod durable_state_s3;
 pub mod encode;
 pub mod grpc;
+#[allow(dead_code)] // Staged protocol: runtime integration is intentionally not selectable yet.
+pub(crate) mod ingest;
 pub mod merge;
 pub(crate) mod merge_journal;
 pub mod metrics;
