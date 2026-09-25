@@ -4,7 +4,7 @@
 
 `execution_payload.base_fee_per_gas` now stores an exact unsigned decimal string
 in wei per gas, and `blob_sidecars.blob` stores the source bytes as Arrow Binary
-regardless of `--encode-bytes`. Hashes, roots, addresses, commitments, and proofs
+regardless of the mapper/library byte encoding. Hashes, roots, addresses, commitments, and proofs
 retain the selected encoding. `blocks.spec` uses the generated protobuf enum
 name with an Arrow `Dictionary<Int32, Utf8>` builder; unknown numeric values map
 to `UNKNOWN`, separately from the declared zero value `UNSPECIFIED`.
@@ -61,7 +61,9 @@ perform an explicit, separately verified conversion before combining old and
 new files. Changing the binary or resuming an old cursor does not repair existing
 files, and generic union-by-name cannot convert the old fee semantics.
 
-- Old fees follow `--encode-bytes` (Binary or encoded Utf8). Decode that encoding
+- Old fees follow the selected byte encoding (Binary or encoded Utf8). The CLI
+  resolves this from the chain/profile and records `firehose-parquet.bytes_encoding`
+  in file metadata; library callers select `EncodeBytes`. Decode that encoding
   first, join the block's fork/body provenance, then apply the fork-specific byte
   order above and output the exact decimal string. Do not cast encoded hex text
   directly to a decimal. Decimal strings require an explicit checked numeric

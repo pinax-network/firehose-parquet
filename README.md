@@ -1332,7 +1332,7 @@ Each Beacon table gets rows from the fork that introduced its data. Blocks from 
 | `consolidation_requests` | Electra | `execution_requests.consolidations` (EIP-7251) |
 
 `execution_payload.base_fee_per_gas` is an exact unsigned decimal string in wei
-per gas. It is independent of `--encode-bytes`; use a checked numeric cast for
+per gas. It is independent of the selected byte encoding; use a checked numeric cast for
 arithmetic (the full uint256 range needs up to 78 decimal digits).
 `blob_sidecars.blob` is always Binary; hashes, roots, commitments, and proofs
 retain the selected byte encoding. `blocks.spec` uses generated enum names in
