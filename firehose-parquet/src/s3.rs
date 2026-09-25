@@ -317,8 +317,13 @@ mod tests {
             let config = credentials(endpoint);
             let stores = [
                 mutation_builder(&config, bucket).unwrap().build().unwrap(),
-                build_s3_store(&AwsConfig::from(&config), bucket, S3Operation::ReadOnly,
-                    CredentialPolicy::ProviderChain).unwrap(),
+                build_s3_store(
+                    &AwsConfig::from(&config),
+                    bucket,
+                    S3Operation::ReadOnly,
+                    CredentialPolicy::ProviderChain,
+                )
+                .unwrap(),
                 maintenance_config(&config).build_s3_client(bucket).unwrap(),
                 maintenance_config(&config)
                     .build_s3_client_for_mutation(bucket)
@@ -353,8 +358,13 @@ mod tests {
             let config = credentials(endpoint);
             for error in [
                 build_s3_client(&config, "state").unwrap_err(),
-                build_s3_store(&AwsConfig::from(&config), "state", S3Operation::ReadOnly,
-                    CredentialPolicy::ProviderChain).unwrap_err(),
+                build_s3_store(
+                    &AwsConfig::from(&config),
+                    "state",
+                    S3Operation::ReadOnly,
+                    CredentialPolicy::ProviderChain,
+                )
+                .unwrap_err(),
                 maintenance_config(&config)
                     .build_s3_client("state")
                     .unwrap_err(),

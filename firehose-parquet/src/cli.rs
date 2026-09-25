@@ -6673,17 +6673,30 @@ mod tests {
         let _recovery = EnvVarGuard::set("AWS_ENDPOINT_URL", "https://recovery.example");
         for (base, endpoint) in [
             (vec!["test-cli"], "https://ordinary.example"),
-            (vec!["test-cli", "inspect", "fixture.parquet"], "https://ordinary.example"),
-            (vec!["test-cli", "recovery", "status", "fixture"], "https://recovery.example"),
+            (
+                vec!["test-cli", "inspect", "fixture.parquet"],
+                "https://ordinary.example",
+            ),
+            (
+                vec!["test-cli", "recovery", "status", "fixture"],
+                "https://recovery.example",
+            ),
         ] {
             for explicit in [false, true] {
                 let mut args = base.clone();
                 if explicit {
-                    args.extend(["--aws-access-key-id", "synthetic-cli-key",
-                        "--aws-secret-access-key", "synthetic-cli-secret",
-                        "--aws-session-token", "synthetic-cli-token",
-                        "--aws-region", "synthetic-cli-region",
-                        "--aws-endpoint-url", "https://explicit.example"]);
+                    args.extend([
+                        "--aws-access-key-id",
+                        "synthetic-cli-key",
+                        "--aws-secret-access-key",
+                        "synthetic-cli-secret",
+                        "--aws-session-token",
+                        "synthetic-cli-token",
+                        "--aws-region",
+                        "synthetic-cli-region",
+                        "--aws-endpoint-url",
+                        "https://explicit.example",
+                    ]);
                 }
                 let cli = try_parse(&args).unwrap();
                 let aws = match cli.command {
@@ -6694,17 +6707,38 @@ mod tests {
                 };
                 let config = AwsConfig::from(&aws);
                 let source = if explicit { "cli" } else { "env" };
-                assert_eq!(config.aws_access_key_id, Some(format!("synthetic-{source}-key")));
-                assert_eq!(config.aws_secret_access_key, Some(format!("synthetic-{source}-secret")));
-                assert_eq!(config.aws_session_token, Some(format!("synthetic-{source}-token")));
-                assert_eq!(config.aws_region, Some(format!("synthetic-{source}-region")));
-                assert_eq!(config.aws_endpoint_url.as_deref(), Some(if explicit {
-                    "https://explicit.example"
-                } else { endpoint }));
+                assert_eq!(
+                    config.aws_access_key_id,
+                    Some(format!("synthetic-{source}-key"))
+                );
+                assert_eq!(
+                    config.aws_secret_access_key,
+                    Some(format!("synthetic-{source}-secret"))
+                );
+                assert_eq!(
+                    config.aws_session_token,
+                    Some(format!("synthetic-{source}-token"))
+                );
+                assert_eq!(
+                    config.aws_region,
+                    Some(format!("synthetic-{source}-region"))
+                );
+                assert_eq!(
+                    config.aws_endpoint_url.as_deref(),
+                    Some(if explicit {
+                        "https://explicit.example"
+                    } else {
+                        endpoint
+                    })
+                );
             }
         }
         let help = TestCli::command().render_long_help().to_string();
-        for secret in ["synthetic-env-key", "synthetic-env-secret", "synthetic-env-token"] {
+        for secret in [
+            "synthetic-env-key",
+            "synthetic-env-secret",
+            "synthetic-env-token",
+        ] {
             assert!(!help.contains(secret));
         }
     }
