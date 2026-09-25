@@ -84,6 +84,7 @@ lifecycle state; a local implementation or passing test alone is not closure.
 | [#468](https://github.com/pinax-network/firehose-parquet/issues/468) | [#600](https://github.com/pinax-network/firehose-parquet/pull/600) | Merged as `e4bd9cf` on 2026-09-25; issue closure verified. 995 workspace tests plus the CI capture example and final CI passed. Actual interrupted Writing rollback, 14-table/12,298-row live equality, completed-bound no-op and deleted-mirror repair passed. |
 | [#510](https://github.com/pinax-network/firehose-parquet/issues/510) | [#601](https://github.com/pinax-network/firehose-parquet/pull/601) | Merged as `9379883` on 2026-09-25; issue closure verified; 1,003 workspace tests, independent Cosmos RPC-backed source/value comparison and CI passed. Firehose producer transport remains unqualified. |
 | [#517](https://github.com/pinax-network/firehose-parquet/issues/517) | [#602](https://github.com/pinax-network/firehose-parquet/pull/602) | Merged as `b364681` on 2026-09-25; issue closure verified; 1,007 tests, guarded local receive-window benchmarks, independent review and CI passed. |
+| [#530](https://github.com/pinax-network/firehose-parquet/issues/530) | [#603](https://github.com/pinax-network/firehose-parquet/pull/603) | Merged as `39d49f6` on 2026-09-25; issue closure verified; 1,010 tests, real local authenticated RPC/retry regressions, independent review and CI passed. |
 
 The #468 design PR accidentally triggered GitHub auto-closure through a negative
 sentence containing a recognized closing phrase. On 2026-09-25 the PR text was

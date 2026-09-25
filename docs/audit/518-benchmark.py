@@ -7,7 +7,7 @@ import argparse, contextlib, fcntl, hashlib, json, pathlib, platform, statistics
 p = argparse.ArgumentParser()
 p.add_argument('--before', required=True)
 p.add_argument('--after', required=True)
-p.add_argument('--evm', required=True)
+p.add_argument('--evm')
 p.add_argument('--solana', action='append', default=[])
 p.add_argument('--beacon')
 p.add_argument('--iterations', type=int, default=200)
@@ -16,9 +16,10 @@ p.add_argument('--output', required=True)
 p.add_argument('--lock-file')
 a = p.parse_args()
 assert a.iterations > 0 and a.samples > 0
-cases = [('evm', a.evm)] + [('solana', v) for v in a.solana]
+cases = ([('evm', a.evm)] if a.evm else []) + [('solana', v) for v in a.solana]
 if a.beacon:
     cases.append(('beacon', a.beacon))
+assert cases, 'provide at least one block input'
 modes = [('before', a.before, False), ('after_owned', a.after, False), ('after_borrowed', a.after, True)]
 result = {'platform': platform.platform(), 'iterations': a.iterations, 'samples': a.samples,
           'binary_sha256': {name: hashlib.sha256(pathlib.Path(path).read_bytes()).hexdigest() for name, path in [('before', a.before), ('after', a.after)]},
@@ -43,7 +44,7 @@ with contextlib.ExitStack() as stack:
                     reference = signature
                 assert signature == reference, f'Logical output mismatch: {chain}/{name}'
                 records[name].append({k: sample[k] for k in ('decode_seconds', 'map_flush_seconds')})
-        result['cases'].append({'chain': chain, 'source_name': pathlib.Path(source).name,
+        result['cases'].append({'chain': chain, 'source_name': pathlib.Path(source).name, 'iterations': a.iterations,
                                 **reference, 'samples': records,
                                 'medians': {name: {metric: statistics.median(r[metric] for r in samples) for metric in ('decode_seconds', 'map_flush_seconds')} for name, samples in records.items()}})
         pathlib.Path(a.output).write_text(json.dumps(result, indent=2) + '\n')

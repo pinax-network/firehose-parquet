@@ -103,9 +103,10 @@ and test against current main. Never reset or discard the previous worktree.
   tests, local delayed-transport benchmarks, independent review and CI; issue
   closure was verified. #518-#519 and #523 need the specific throughput, memory,
   file-size or lookup evidence requested by their issues.
-- Structure: #525-#530 follow correctness work. Scope must be refreshed against
-  main; for example, #530's original auth-duplication description is partly
-  obsolete after the shared provider-scoped auth helper.
+- Structure: #525-#529 follow correctness work, with scope refreshed against
+  current main. The remaining #530 auth/client duplication merged in PR #603
+  as `39d49f6` after 1,010 tests, protocol/retry regressions, independent review
+  and CI; issue closure was verified.
 
 For each issue, document diagnosis, selected behavior, reproduction/regression,
 integration results, qualification limits and verified closure. Never equate a

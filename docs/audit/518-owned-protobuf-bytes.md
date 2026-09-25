@@ -75,5 +75,48 @@ cargo build --release --locked -p blocks --example bench_chain_decode
   --block blocks/tests/fixtures/evm-mainnet/block.pb --iterations 500
 ```
 
-Measured samples and final integrated validation will be recorded before PR
-publication. No speedup is claimed until those checks finish.
+## Measured results and integration
+
+Apple M1 Max, macOS 26.5.1 arm64, Rust 1.93.1, release profile. Five
+rotated samples per mode and fixture ran under a shared process lock excluding
+other builds/benchmarks. Each sample used 200 iterations for EVM/Solana and
+5,000 for Beacon; the initial shorter Beacon samples are retained separately.
+The baseline was main `9379883`; the optimized benchmark source was `ac21c97`,
+including #602's transport configuration. The subsequent #603 auth refactor
+changes no mapper or benchmark code. Exact source/input/binary hashes, schemas,
+row counts, Arrow IPC digests and all samples are in [518-benchmark.json](518-benchmark.json).
+
+Medians per block (lower time is better):
+
+| Retained block | Decode/drop, before → owned | Decode/map/flush/drop, before → owned | Mapping speedup |
+|---|---:|---:|---:|
+| EVM 26049575 | 2.0022 → 1.3501 ms | 3.3824 → 1.9228 ms | 1.76× |
+| Solana 300000000 | 4.3864 → 3.5710 ms | 7.6632 → 5.8378 ms | 1.31× |
+| Solana 300000001 | 4.3321 → 3.5941 ms | 7.2022 → 5.4321 ms | 1.33× |
+| Beacon 10597349 | 0.0696 → 0.0308 ms | 0.2084 → 0.0971 ms | 2.15× |
+
+All output schemas and Arrow IPC streams matched across before, owned and
+borrowed modes: 5,049 EVM rows, 9,765/9,949 Solana rows, and 153 Beacon rows.
+Every one of the 60 initial runs and 15 longer Beacon runs passed these checks.
+The new borrowed control still copies at decode and is included in the raw
+results; it is not the production CLI path. These measurements establish gains
+on retained fixtures, not an end-to-end ingestion or universal chain speedup.
+
+Reproduce the comparison with preserved binaries (input flags can select a
+subset; use `--iterations 5000` for the Beacon-only run):
+
+```sh
+python3 docs/audit/518-benchmark.py --before /path/to/before \
+  --after /path/to/after --evm blocks/tests/fixtures/evm-mainnet/block.pb \
+  --solana /path/to/300000000.pb --solana /path/to/300000001.pb \
+  --output /path/to/results.json
+```
+
+Full workspace validation on main `b364681` plus this change: **1,010 passed,
+0 failed, 9 ignored**. CI's separately selected capture example passed one test
+with one subprocess-helper ignore. Workspace build and formatting passed.
+After integrating current main `39d49f6`, focused gRPC tests passed **50/0/1**,
+owned-buffer tests **3/0/0**, and actual protected ingestion CLI tests **7/0/0**;
+the workspace build and formatting passed again. The PR's CI checks the complete
+integrated tree. Independent production review found no blocker and requested
+the nested Cosmos pointer assertion, which is included and passing.
