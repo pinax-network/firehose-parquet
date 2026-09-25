@@ -362,3 +362,32 @@ fn even_rehashed_pending_cannot_skip_authoritative_ordinal() {
     pending.validate(&authority.descriptor).unwrap();
     assert!(authority.install(&pending).is_err());
 }
+
+#[test]
+fn explicit_zstd_levels_bind_identity_and_reject_noncanonical_journals() {
+    let (authority, old) = pending(2);
+    assert_eq!(serde_json::to_string(&old.compression).unwrap(), "\"zstd\"");
+    let explicit = PendingTransaction::prepare(
+        &authority,
+        prefix(&authority),
+        table_plan(&authority, 2),
+        PartCompression::ZstdWithLevel(6),
+    )
+    .unwrap();
+    assert_ne!(old.id, explicit.id);
+    let roundtrip: PendingTransaction =
+        serde_json::from_slice(&serde_json::to_vec(&explicit).unwrap()).unwrap();
+    roundtrip.validate(&authority.descriptor).unwrap();
+    let mut tampered = roundtrip.clone();
+    tampered.compression = PartCompression::ZstdWithLevel(7);
+    assert!(tampered.validate(&authority.descriptor).is_err());
+    for level in [0, 3, 23, -131073] {
+        assert!(PendingTransaction::prepare(
+            &authority,
+            prefix(&authority),
+            table_plan(&authority, 2),
+            PartCompression::ZstdWithLevel(level)
+        )
+        .is_err());
+    }
+}

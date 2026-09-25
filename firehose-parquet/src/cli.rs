@@ -7,6 +7,8 @@ use crate::partition_index::{
 use clap::builder::PossibleValuesParser;
 use clap::Args;
 use clap_complete::{generate, Shell};
+#[cfg(test)]
+use parquet::basic::Compression as PqCompression;
 use std::io;
 use std::path::{Component, Path, PathBuf};
 
@@ -216,7 +218,7 @@ pub struct CommonArgs {
     )]
     pub block_range_size: u64,
 
-    /// Compression codec: zstd, snappy, gzip, none
+    /// Compression codec: zstd (level 3), zstd:<level>, snappy, gzip, none
     #[arg(
         long,
         env = "COMPRESSION",
@@ -912,7 +914,7 @@ local path.
             help_heading = "Selection"
         )]
         partition: String,
-        /// Compression codec: zstd, snappy, gzip, none
+        /// Compression codec: zstd (level 3), zstd:<level>, snappy, gzip, none
         #[arg(long, default_value = "zstd", help_heading = "Output")]
         compression: String,
         /// Target compressed bytes per part, with batch/codec overhead (0 = unlimited output size)
@@ -1018,7 +1020,7 @@ inspect, merge never falls back to s3://$S3_BUCKET/<path> for a missing local pa
         /// Path to a directory of partitioned .parquet files (existing local directory or s3:// URI)
         #[arg(help_heading = "Selection")]
         path: String,
-        /// Compression codec: zstd, snappy, gzip, none
+        /// Compression codec: zstd (level 3), zstd:<level>, snappy, gzip, none
         #[arg(long, default_value = "zstd", help_heading = "Output")]
         compression: String,
         /// Flush merged output after this many rows (disabled by default)
@@ -3276,8 +3278,6 @@ fn write_partitions_index_impl(
     use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
     use arrow::record_batch::RecordBatch;
     use parquet::arrow::ArrowWriter;
-    use parquet::basic::Compression as PqCompression;
-    use parquet::basic::ZstdLevel;
     use parquet::file::metadata::KeyValue;
     use parquet::file::properties::WriterProperties;
     use std::sync::Arc;
@@ -3386,12 +3386,7 @@ fn write_partitions_index_impl(
     }
     let batch = RecordBatch::try_new(schema.clone(), columns)?;
 
-    let pq_compression = match compression {
-        Compression::None => PqCompression::UNCOMPRESSED,
-        Compression::Snappy => PqCompression::SNAPPY,
-        Compression::Gzip => PqCompression::GZIP(Default::default()),
-        Compression::Zstd => PqCompression::ZSTD(ZstdLevel::try_new(3).unwrap()),
-    };
+    let pq_compression = compression.parquet();
     let mut props_builder = WriterProperties::builder().set_compression(pq_compression);
     let mut kvs = Vec::new();
     if let Some(meta) = effective_metadata {
@@ -4007,13 +4002,27 @@ pub fn validate_partitions_index(
 
 /// Parse a compression string into a [`Compression`] variant.
 pub fn parse_compression(s: &str) -> anyhow::Result<Compression> {
-    match s.to_lowercase().as_str() {
+    use anyhow::Context;
+    let normalized = s.to_lowercase();
+    if let Some(level) = normalized.strip_prefix("zstd:") {
+        let level: i32 = level.parse().context("zstd level must be an integer")?;
+        // Keep zero unambiguous: zstd's library-dependent default is not a
+        // reproducible level. The CLI's documented default is always 3.
+        anyhow::ensure!(level != 0, "zstd level 0 is ambiguous; use zstd or zstd:3");
+        let value = parquet::basic::ZstdLevel::try_new(level)?;
+        return Ok(if level == 3 {
+            Compression::Zstd
+        } else {
+            Compression::ZstdWithLevel(value)
+        });
+    }
+    match normalized.as_str() {
         "zstd" => Ok(Compression::Zstd),
         "snappy" => Ok(Compression::Snappy),
         "gzip" => Ok(Compression::Gzip),
         "none" => Ok(Compression::None),
         other => anyhow::bail!(
-            "invalid --compression '{other}': expected one of: zstd, snappy, gzip, none"
+            "invalid --compression '{other}': expected one of: zstd, zstd:<level>, snappy, gzip, none"
         ),
     }
 }
@@ -7203,6 +7212,19 @@ mod tests {
         assert_eq!(parse_compression("none").unwrap(), Compression::None);
         assert_eq!(parse_compression("ZSTD").unwrap(), Compression::Zstd);
         assert!(parse_compression("unknown").is_err());
+        assert_eq!(parse_compression("zstd:3").unwrap(), Compression::Zstd);
+        assert_eq!(parse_compression("ZSTD:6").unwrap().to_string(), "zstd:6");
+        assert_eq!(parse_compression("zstd:-7").unwrap().to_string(), "zstd:-7");
+        for invalid in [
+            "zstd:0",
+            "zstd:23",
+            "zstd:-131073",
+            "zstd:",
+            "zstd:nan",
+            "snappy:3",
+        ] {
+            assert!(parse_compression(invalid).is_err(), "{invalid}");
+        }
     }
 
     #[test]
@@ -10718,7 +10740,6 @@ mod tests {
 
     #[test]
     fn test_write_partitions_index_defaults_to_zstd_compression() {
-        use parquet::basic::Compression as PqCompression;
         use parquet::file::reader::{FileReader, SerializedFileReader};
 
         let dir = tempfile::tempdir().expect("tempdir");
@@ -10747,7 +10768,6 @@ mod tests {
     #[test]
     fn test_write_partitions_index_with_metadata_honors_snappy_compression() {
         use crate::writer::ParquetFileMetadata;
-        use parquet::basic::Compression as PqCompression;
         use parquet::file::reader::{FileReader, SerializedFileReader};
 
         let dir = tempfile::tempdir().expect("tempdir");

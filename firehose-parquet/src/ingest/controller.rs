@@ -338,6 +338,12 @@ fn part_compression(compression: Compression) -> PartCompression {
         Compression::Snappy => PartCompression::Snappy,
         Compression::Gzip => PartCompression::Gzip,
         Compression::Zstd => PartCompression::Zstd,
+        Compression::ZstdWithLevel(level) if level.compression_level() == 3 => {
+            PartCompression::Zstd
+        }
+        Compression::ZstdWithLevel(level) => {
+            PartCompression::ZstdWithLevel(level.compression_level())
+        }
     }
 }
 
