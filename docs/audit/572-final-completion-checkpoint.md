@@ -70,11 +70,11 @@ new dependency or ingestion-loop refactor.
   was materialized.
 
 Validation used the shared audit target with dev/test debug information
-disabled, on top of the #469 implementation and its audit follow-up
-(`2d29f4e`). Cargo processes were serialized for the shared target directory.
+disabled, after integrating the merged cursor retries and S3 routing fixes
+through `fa791ac`. Cargo processes were serialized for the shared target directory.
 
-- `cargo test --workspace --locked -j4`: 708 passed, zero failed and three
-  ignored (110 mapper, 187 binary, one startup integration, 407 core, and three
+- `cargo test --workspace --locked -j4`: 720 passed, zero failed and three
+  ignored (110 mapper, 191 binary, one startup integration, 415 core, and three
   network-registry tests); all doc tests passed.
 - `cargo build --bin fireparq --locked -j4`: passed.
 - Bash, Zsh and Fish shell-completion generation from the built binary: passed.
@@ -84,7 +84,28 @@ disabled, on top of the #469 implementation and its audit follow-up
 The pre-existing unused `transactions_processed` assignment warning in the
 trailing timestamp-backfill path remains unchanged.
 
+## Bounded live qualification
+
+On 2026-09-25, the binary built from `11bcf21` (the same implementation rebased
+onto merged #571 at `62d7b10`) was copied to its own stable path while holding
+the shared build lock. It completed the single-block Solana range
+`[300000000, 300000001)` through
+`https://solana.firehose.pinax.network:443`, using the existing provider-scoped
+credentials. Output and the explicit cursor were confined to a fresh local
+temporary directory. No remote storage was written.
+
+The run used no partitioning, Zstd, `--flush-bytes 1073741824`, and large row,
+block and interval thresholds so the normal loop did not flush. It exited zero,
+wrote eight table files, emitted one final writer materialization message and
+no normal mapper-flush message. Reading the saved local cursor confirmed
+`last_block_num = 300000000`. The opaque cursor and credentials were not printed
+or added to this document.
+
+This live check qualifies the real provider-to-mapper-to-final-drain path. The
+smaller-threshold automatic mapper materialization condition is proven by the
+deterministic real-mapper regression described above; the live check does not
+claim to exercise that allocation-dependent condition.
+
 This closes a missing successful-completion checkpoint. It does not make the
 data files and cursor update a single storage transaction; crash/replay
-atomicity remains tracked separately in #468. All tests here use local files
-and deterministic fixtures; no live Firehose or S3 access is needed.
+atomicity remains tracked separately in #468.
