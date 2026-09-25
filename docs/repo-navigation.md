@@ -67,6 +67,7 @@ Related design docs:
   - `blocks/src/<chain>/schema.rs` for Arrow schema
   - `blocks/src/<chain>/mapper.rs` for row extraction/transform logic
   - `blocks/src/bin/main.rs` for mapper wiring and `--block-type` handling
+  - `firehose-parquet/src/ingest/state.rs` (`MAPPER_EPOCH`): advance the epoch when row/routing semantics change without a schema change; protected output must not silently mix those meanings.
 - Change partitioning or output file layout:
   - `firehose-parquet/src/config.rs` (`Partition::partition_key`)
   - `firehose-parquet/src/writer.rs` (directory/file naming and flush behavior)
