@@ -9,209 +9,247 @@
     "mode": "release",
     "payload": "64 protobuf responses containing 1 MiB identical bytes each; compression disabled",
     "timing": "cold TCP/HTTP2 connection plus receive/protobuf decode and callback; local relay, no file writes",
-    "relay": "fixed 0 ms or 25 ms propagation each direction; reader independent of delayed writer; bounded queue asserts no capacity stalls; zero packet loss; no bandwidth cap",
-    "order": "3 cyclically rotated runs of each mode per delay"
+    "relay": "fixed 0 ms or 25 ms propagation each direction; reader independent of delayed writer; bounded queue asserts no capacity stalls; zero packet loss; no bandwidth cap; relay failures retained and checked; exactly one Stream RPC required per sample",
+    "order": "3 cyclically rotated runs of each mode per delay",
+    "integrated_main": "e4bd9cf354ea7a4f75c56f82c58b64368b16e1ec",
+    "source": "5efd85b plus reviewed relay failure/reconnect guards"
   },
   "samples": [
     {
       "adaptive": false,
-      "elapsed_seconds": 0.151640333,
+      "elapsed_seconds": 0.132110792,
       "mode": "library-fixed",
       "one_way_delay_ms": 0,
       "payload_bytes": 67108864,
+      "relay_failures": 0,
       "repetition": 0,
-      "server_wire_bytes": 67151120
+      "server_wire_bytes": 67151129,
+      "stream_rpcs": 1
     },
     {
       "adaptive": true,
-      "elapsed_seconds": 0.165605958,
+      "elapsed_seconds": 0.155491917,
       "mode": "adaptive",
       "one_way_delay_ms": 0,
       "payload_bytes": 67108864,
+      "relay_failures": 0,
       "repetition": 0,
-      "server_wire_bytes": 67151337
+      "server_wire_bytes": 67151373,
+      "stream_rpcs": 1
     },
     {
       "adaptive": false,
-      "elapsed_seconds": 0.034776042,
+      "elapsed_seconds": 0.035302666,
       "mode": "fixed-16mib",
       "one_way_delay_ms": 0,
       "payload_bytes": 67108864,
+      "relay_failures": 0,
       "repetition": 0,
-      "server_wire_bytes": 67151120
+      "server_wire_bytes": 67151120,
+      "stream_rpcs": 1
     },
     {
       "adaptive": true,
-      "elapsed_seconds": 0.154443375,
+      "elapsed_seconds": 0.158516583,
       "mode": "adaptive",
       "one_way_delay_ms": 0,
       "payload_bytes": 67108864,
+      "relay_failures": 0,
       "repetition": 1,
-      "server_wire_bytes": 67151467
+      "server_wire_bytes": 67151406,
+      "stream_rpcs": 1
     },
     {
       "adaptive": false,
-      "elapsed_seconds": 0.035768292,
+      "elapsed_seconds": 0.030723292,
       "mode": "fixed-16mib",
       "one_way_delay_ms": 0,
       "payload_bytes": 67108864,
+      "relay_failures": 0,
       "repetition": 1,
-      "server_wire_bytes": 67151120
+      "server_wire_bytes": 67151120,
+      "stream_rpcs": 1
     },
     {
       "adaptive": false,
-      "elapsed_seconds": 0.128930208,
+      "elapsed_seconds": 0.1147085,
       "mode": "library-fixed",
       "one_way_delay_ms": 0,
       "payload_bytes": 67108864,
+      "relay_failures": 0,
       "repetition": 1,
-      "server_wire_bytes": 67151129
+      "server_wire_bytes": 67151120,
+      "stream_rpcs": 1
     },
     {
       "adaptive": false,
-      "elapsed_seconds": 0.0355605,
+      "elapsed_seconds": 0.032261875,
       "mode": "fixed-16mib",
       "one_way_delay_ms": 0,
       "payload_bytes": 67108864,
+      "relay_failures": 0,
       "repetition": 2,
-      "server_wire_bytes": 67151120
+      "server_wire_bytes": 67151120,
+      "stream_rpcs": 1
     },
     {
       "adaptive": false,
-      "elapsed_seconds": 0.126356708,
+      "elapsed_seconds": 0.11411025,
       "mode": "library-fixed",
       "one_way_delay_ms": 0,
       "payload_bytes": 67108864,
+      "relay_failures": 0,
       "repetition": 2,
-      "server_wire_bytes": 67151129
+      "server_wire_bytes": 67151129,
+      "stream_rpcs": 1
     },
     {
       "adaptive": true,
-      "elapsed_seconds": 0.167618125,
+      "elapsed_seconds": 0.154606625,
       "mode": "adaptive",
       "one_way_delay_ms": 0,
       "payload_bytes": 67108864,
+      "relay_failures": 0,
       "repetition": 2,
-      "server_wire_bytes": 67151442
+      "server_wire_bytes": 67151397,
+      "stream_rpcs": 1
     },
     {
       "adaptive": false,
-      "elapsed_seconds": 2.075797459,
+      "elapsed_seconds": 1.94714025,
       "mode": "library-fixed",
       "one_way_delay_ms": 25,
       "payload_bytes": 67108864,
+      "relay_failures": 0,
       "repetition": 0,
-      "server_wire_bytes": 67151120
+      "server_wire_bytes": 67151120,
+      "stream_rpcs": 1
     },
     {
       "adaptive": true,
-      "elapsed_seconds": 0.815889083,
+      "elapsed_seconds": 0.976327583,
       "mode": "adaptive",
       "one_way_delay_ms": 25,
       "payload_bytes": 67108864,
+      "relay_failures": 0,
       "repetition": 0,
-      "server_wire_bytes": 67151337
+      "server_wire_bytes": 67151353,
+      "stream_rpcs": 1
     },
     {
       "adaptive": false,
-      "elapsed_seconds": 0.355126625,
+      "elapsed_seconds": 0.354002167,
       "mode": "fixed-16mib",
       "one_way_delay_ms": 25,
       "payload_bytes": 67108864,
+      "relay_failures": 0,
       "repetition": 0,
-      "server_wire_bytes": 67151120
+      "server_wire_bytes": 67151120,
+      "stream_rpcs": 1
     },
     {
       "adaptive": true,
-      "elapsed_seconds": 0.910727375,
+      "elapsed_seconds": 1.048728209,
       "mode": "adaptive",
       "one_way_delay_ms": 25,
       "payload_bytes": 67108864,
+      "relay_failures": 0,
       "repetition": 1,
-      "server_wire_bytes": 67151336
+      "server_wire_bytes": 67151397,
+      "stream_rpcs": 1
     },
     {
       "adaptive": false,
-      "elapsed_seconds": 0.354219208,
+      "elapsed_seconds": 0.394932292,
       "mode": "fixed-16mib",
       "one_way_delay_ms": 25,
       "payload_bytes": 67108864,
+      "relay_failures": 0,
       "repetition": 1,
-      "server_wire_bytes": 67151120
+      "server_wire_bytes": 67151120,
+      "stream_rpcs": 1
     },
     {
       "adaptive": false,
-      "elapsed_seconds": 2.063803958,
+      "elapsed_seconds": 2.288526125,
       "mode": "library-fixed",
       "one_way_delay_ms": 25,
       "payload_bytes": 67108864,
+      "relay_failures": 0,
       "repetition": 1,
-      "server_wire_bytes": 67151120
+      "server_wire_bytes": 67151120,
+      "stream_rpcs": 1
     },
     {
       "adaptive": false,
-      "elapsed_seconds": 0.368288208,
+      "elapsed_seconds": 0.37385175,
       "mode": "fixed-16mib",
       "one_way_delay_ms": 25,
       "payload_bytes": 67108864,
+      "relay_failures": 0,
       "repetition": 2,
-      "server_wire_bytes": 67151120
+      "server_wire_bytes": 67151120,
+      "stream_rpcs": 1
     },
     {
       "adaptive": false,
-      "elapsed_seconds": 2.223987375,
+      "elapsed_seconds": 2.15686825,
       "mode": "library-fixed",
       "one_way_delay_ms": 25,
       "payload_bytes": 67108864,
+      "relay_failures": 0,
       "repetition": 2,
-      "server_wire_bytes": 67151120
+      "server_wire_bytes": 67151120,
+      "stream_rpcs": 1
     },
     {
       "adaptive": true,
-      "elapsed_seconds": 0.884562709,
+      "elapsed_seconds": 1.150222875,
       "mode": "adaptive",
       "one_way_delay_ms": 25,
       "payload_bytes": 67108864,
+      "relay_failures": 0,
       "repetition": 2,
-      "server_wire_bytes": 67151327
+      "server_wire_bytes": 67151388,
+      "stream_rpcs": 1
     }
   ],
   "summary": [
     {
       "one_way_delay_ms": 0,
       "mode": "library-fixed",
-      "median_seconds": 0.128930208,
-      "mib_per_second": 496.39259094346613
+      "median_seconds": 0.1147085,
+      "mib_per_second": 557.9359855634063
     },
     {
       "one_way_delay_ms": 0,
       "mode": "adaptive",
-      "median_seconds": 0.165605958,
-      "mib_per_second": 386.4595258100557
+      "median_seconds": 0.155491917,
+      "mib_per_second": 411.59695780199297
     },
     {
       "one_way_delay_ms": 0,
       "mode": "fixed-16mib",
-      "median_seconds": 0.0355605,
-      "mib_per_second": 1799.749722304242
+      "median_seconds": 0.032261875,
+      "mib_per_second": 1983.7656676805052
     },
     {
       "one_way_delay_ms": 25,
       "mode": "library-fixed",
-      "median_seconds": 2.075797459,
-      "mib_per_second": 30.83152439681255
+      "median_seconds": 2.15686825,
+      "mib_per_second": 29.672651540028
     },
     {
       "one_way_delay_ms": 25,
       "mode": "adaptive",
-      "median_seconds": 0.884562709,
-      "mib_per_second": 72.35213439231701
+      "median_seconds": 1.048728209,
+      "mib_per_second": 61.02629780601238
     },
     {
       "one_way_delay_ms": 25,
       "mode": "fixed-16mib",
-      "median_seconds": 0.355126625,
-      "mib_per_second": 180.21740836807155
+      "median_seconds": 0.37385175,
+      "mib_per_second": 171.1908530587325
     }
   ]
 }

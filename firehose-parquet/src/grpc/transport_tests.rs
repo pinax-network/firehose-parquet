@@ -1,6 +1,6 @@
 //! Local protocol checks and an opt-in, bounded receive-throughput benchmark.
 use super::*;
-use futures::StreamExt;
+use futures::{FutureExt, StreamExt};
 use std::sync::{
     atomic::{AtomicUsize, Ordering},
     Arc, Mutex,
@@ -426,6 +426,7 @@ async fn forward(
 struct Relay {
     endpoint: String,
     bytes: Arc<AtomicUsize>,
+    failures: Arc<Mutex<Vec<String>>>,
     task: tokio::task::JoinHandle<()>,
 }
 impl Drop for Relay {
@@ -440,6 +441,8 @@ impl Relay {
         let upstream = upstream.strip_prefix("http://").unwrap().to_string();
         let bytes = Arc::new(AtomicUsize::new(0));
         let count = bytes.clone();
+        let failures = Arc::new(Mutex::new(Vec::new()));
+        let task_failures = failures.clone();
         let task = tokio::spawn(async move {
             let mut connections = tokio::task::JoinSet::new();
             loop {
@@ -448,20 +451,40 @@ impl Relay {
                 incoming.set_nodelay(true).unwrap();
                 outgoing.set_nodelay(true).unwrap();
                 let count = count.clone();
+                let connection_failures = task_failures.clone();
                 connections.spawn(async move {
-                    let (ir, iw) = incoming.into_split();
-                    let (or, ow) = outgoing.into_split();
-                    let _ = tokio::try_join!(
-                        forward(ir, ow, delay, Arc::new(AtomicUsize::new(0))),
-                        forward(or, iw, delay, count)
-                    );
+                    let result = std::panic::AssertUnwindSafe(async move {
+                        let (ir, iw) = incoming.into_split();
+                        let (or, ow) = outgoing.into_split();
+                        tokio::try_join!(
+                            forward(ir, ow, delay, Arc::new(AtomicUsize::new(0))),
+                            forward(or, iw, delay, count)
+                        )
+                    })
+                    .catch_unwind()
+                    .await;
+                    match result {
+                        Ok(Ok(_)) => {}
+                        Ok(Err(error)) => {
+                            connection_failures.lock().unwrap().push(error.to_string())
+                        }
+                        Err(_) => connection_failures
+                            .lock()
+                            .unwrap()
+                            .push("relay connection panicked".into()),
+                    }
                 });
-                while connections.try_join_next().is_some() {}
+                while let Some(result) = connections.try_join_next() {
+                    if let Err(error) = result {
+                        task_failures.lock().unwrap().push(error.to_string());
+                    }
+                }
             }
         });
         Self {
             endpoint,
             bytes,
+            failures,
             task,
         }
     }
@@ -512,13 +535,24 @@ async fn benchmark_receive_windows() {
                 .await
                 .unwrap()
                 .unwrap();
+                let elapsed_seconds = start.elapsed().as_secs_f64();
                 assert_eq!(count, 64);
+                assert_eq!(
+                    server.calls.lock().unwrap().len(),
+                    1,
+                    "reconnect invalidates timing"
+                );
+                let failures = relay.failures.lock().unwrap().clone();
+                assert!(
+                    failures.is_empty(),
+                    "relay failure invalidates timing: {failures:?}"
+                );
                 println!(
                     "GRPC_BENCH {}",
                     serde_json::json!({
                         "one_way_delay_ms": one_way_ms, "mode": mode, "adaptive": adaptive, "repetition": repetition,
                         "payload_bytes": count * 1024 * 1024, "server_wire_bytes": relay.bytes.load(Ordering::Relaxed),
-                        "elapsed_seconds": start.elapsed().as_secs_f64(),
+                        "elapsed_seconds": elapsed_seconds, "stream_rpcs": 1, "relay_failures": 0,
                     })
                 );
             }

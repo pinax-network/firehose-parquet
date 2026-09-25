@@ -72,7 +72,9 @@ A local TCP relay schedules each read chunk for a fixed 0 or 25 ms later in each
 direction. Reading and delayed writing run independently: there is no sleep per
 completed chunk and no configured bandwidth cap or packet loss. Its bounded
 queue asserts available capacity before every send, so queue throttling invalidates
-the benchmark rather than masquerading as network flow control. The 25 ms case
+the benchmark rather than masquerading as network flow control. Relay connection
+errors/panics are retained and checked, and every sample requires exactly one
+Stream RPC: a reconnect cannot silently turn a failed sample into a timing result. The 25 ms case
 adds approximately 50 ms round-trip propagation. This simulation is not a real WAN.
 
 Apple M1 Max, macOS 26.5.1, Rust 1.93.1, release profile; three cold samples per
@@ -81,26 +83,27 @@ whole-command Cargo lock, avoiding concurrent builds. Medians:
 
 | Added RTT | Prior fixed defaults | Adaptive | Fixed 16 MiB (selected) |
 |---|---:|---:|---:|
-| 0 ms | 0.128930 s / 496.4 MiB/s | 0.165606 s / 386.5 MiB/s | 0.035561 s / 1799.7 MiB/s |
-| 50 ms | 2.075797 s / 30.8 MiB/s | 0.884563 s / 72.4 MiB/s | 0.355127 s / 180.2 MiB/s |
+| 0 ms | 0.114709 s / 557.9 MiB/s | 0.155492 s / 411.6 MiB/s | 0.032262 s / 1983.8 MiB/s |
+| 50 ms | 2.156868 s / 29.7 MiB/s | 1.048728 s / 61.0 MiB/s | 0.373852 s / 171.2 MiB/s |
 
-The selected fixed windows improve this fixture's median throughput by 3.63x and
-5.85x respectively. Adaptive improves the delayed case but regresses the
+The selected fixed windows improve this fixture's median throughput by 3.56x and
+5.77x respectively. Adaptive improves the delayed case but regresses the
 zero-delay cold case. These are local receive/decode measurements, not a claim
 about full ingestion speed, compression speed, production latency, or memory
 reduction. Larger windows permit more in-flight buffering; operators can reduce
 them when memory matters more than network utilization. Exact samples and
 configuration are in [517-benchmark.json](517-benchmark.json).
 
-Reproduce (whole-process wrapper also coordinates shared-target protobuf builds):
+Reproduce from the repository root, with no concurrent builds or benchmarks:
 
 ```sh
-CARGO_TARGET_DIR=/Users/denis/.codex/worktrees/fireparq-arrow-security-target \
-CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 \
-python3 /tmp/fireparq-cargo-locked.py cargo test --release \
-  -p firehose-parquet --lib grpc::transport_tests::benchmark_receive_windows \
+cargo test --release -p firehose-parquet --lib \
+  grpc::transport_tests::benchmark_receive_windows \
   --locked -j4 -- --ignored --exact --nocapture
 ```
+
+The recorded run used a local whole-command lock to serialize multiple worktrees;
+that wrapper is not needed for this standalone reproduction command.
 
 ## Regression coverage
 
@@ -122,6 +125,18 @@ codec rather than honoring its enabled-only set. This allows exercising a real
 gzip response and a real zstd response separately without altering production
 client code or claiming this upstream server behavior is fixed.
 
-Initial release protocol/benchmark run: 4 passed (3 regression tests plus the
-explicitly enabled benchmark). Final current-main workspace/build/format results
-will be recorded after integration.
+Validation integrated main `e4bd9cf354ea7a4f75c56f82c58b64368b16e1ec` (#600):
+
+- Workspace: **999 passed, 0 failed, 9 ignored**; this includes all eight protected
+  ingestion CLI/readiness tests, shutdown, finality, and the new parser/RPC tests.
+- CI's separately selected `refresh_evm_golden` example: **1 passed, 1 ignored**
+  subprocess entrypoint; it makes no public request in this test.
+- Workspace/binary builds, format check, and bash/zsh/fish completions passed.
+  Both actual build help pages expose all three flags and their defaults.
+- Final release benchmark after the independent review's relay-error/reconnect
+  guards: **1 passed**; all 18 samples had zero relay failures and one Stream RPC.
+  Exact samples above replace the preliminary pre-guard run.
+
+Independent review found no production blocker; its portability and benchmark
+failure-detection suggestions were applied. No live-provider qualification is
+claimed or required to reproduce this issue's bounded throughput acceptance.
