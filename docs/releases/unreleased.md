@@ -162,6 +162,26 @@ Migration:
 - Resuming an EVM output whose `cursor.parquet` recorded `include_failed_transactions=false` (the old default, also assumed when a cursor predates the key) keeps excluding failed transactions, so one output does not mix both modes. `build` logs a warning; pass `--exclude-failed-transactions` to keep that silently. To switch an existing output to the new default, rerun with `--cursor-override` and an explicit `--start-block` just after the cursor's last block.
 - EVM outputs built with `--include-failed-transactions` before this release wrote every state change of failed transactions, including rolled-back transfers and storage writes. Rebuild them if you need the change tables to reconcile.
 
+### EVM change tables: new `tx_index`, `call_index`, `state_reverted` and `persisted` columns (#495)
+
+Successful transactions include state changes made inside calls that were later reverted: on ETH mainnet blocks 26049575–26049579, 12 balance changes and 122 storage changes. The change tables only had `tx_hash`, so these could not be told apart from changes that persisted, and rebuilding balances or storage from them gave wrong values.
+
+New columns on `balance_changes`, `nonce_changes`, `code_changes`, `storage_changes`, `account_creations` and `gas_changes`:
+
+| Column | Type | Meaning |
+|---|---|---|
+| `tx_index` | `UInt32` | Index of the transaction in the block (joins `transactions.index`). |
+| `call_index` | `UInt32` | Firehose index of the call that recorded the change (joins `calls.call_index` with `tx_hash`). |
+| `state_reverted` | `Boolean` | That call's `state_reverted` flag, the same value as in `calls`. |
+| `persisted` | `Boolean` | Whether the change is part of chain state after the transaction. Not on `gas_changes`. |
+
+- `persisted` is `NOT state_reverted` for successful transactions. For failed transactions it is always `true`: only their persistent changes are written (#494), and they come from the root call, whose `state_reverted` is `true`. Filter on `persisted` to rebuild state. On the 5 blocks above, balances rebuilt this way chain without a gap (each change's `old_value` equals the previous change's `new_value`); without the filter, 10 links break.
+- The `system_*` change tables get a nullable `call_index`: the system call that recorded the change, or `NULL` for block-level changes such as withdrawals.
+- `tx_index` and `call_index` follow `tx_hash`, and `call_index` follows `block_number` in the `system_*` tables. `state_reverted` and `persisted` are the last columns before `fork_step`.
+- The `logs` table is unchanged. It holds receipt logs only, which never include logs of reverted calls (58 of them in the blocks above).
+
+Migration: files written before and after this change have different schemas for these 12 tables. Query them separately or with `union_by_name`, and do not `merge` or `rollup` old and new files together. Rebuild old ranges to get the new columns.
+
 ## Fixes
 
 - **CLI values that crashed or misbehaved are now rejected or consistent (#471).**
