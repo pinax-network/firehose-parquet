@@ -1,12 +1,9 @@
 use crate::cli::{block_on_async, resolve_parquet_input_path_string, AwsConfig};
 use crate::writer::parse_s3_url;
 use anyhow::{anyhow, Context, Result};
-use arrow::array::{
-    Array, BinaryArray, BooleanArray, Float32Array, Float64Array, Int32Array, Int64Array,
-    LargeBinaryArray, LargeStringArray, StringArray, UInt32Array, UInt64Array,
-};
+use arrow::array::{Array, AsArray, Int64Array, LargeStringArray, StringArray, UInt64Array};
+use arrow::datatypes::DataType;
 use arrow::record_batch::RecordBatch;
-use arrow::util::display::ArrayFormatter;
 use object_store::ObjectStore;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use parquet::arrow::ArrowWriter;
@@ -18,6 +15,8 @@ use std::path::{Path, PathBuf};
 use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
 use tiny_keccak::{Hasher, Keccak};
+
+mod row_encoding;
 
 const VERIFY_REPORT_SCHEMA_VERSION: &str = "2.0.0";
 
@@ -941,7 +940,8 @@ fn read_parquet_leaves_local(
         if opts.runs_protocol() {
             run_protocol_checks_for_batch(opts, &batch, protocol_state);
         }
-        append_batch_leaves(&batch, hash_strategy, &mut leaves);
+        append_batch_leaves(&batch, hash_strategy, &mut leaves)
+            .with_context(|| format!("hashing rows of {}", path.display()))?;
     }
 
     Ok(leaves)
@@ -967,30 +967,29 @@ fn read_parquet_leaves_s3(
         if opts.runs_protocol() {
             run_protocol_checks_for_batch(opts, &batch, protocol_state);
         }
-        append_batch_leaves(&batch, hash_strategy, &mut leaves);
+        append_batch_leaves(&batch, hash_strategy, &mut leaves)
+            .with_context(|| format!("hashing rows of s3://{bucket}/{location}"))?;
     }
 
     Ok(leaves)
 }
 
-/// Appends one `merkle_v2` leaf per row: `H(0x00 || encoded_row)`, where the
-/// row encodes every column as length-prefixed name and normalized value bytes.
-fn append_batch_leaves(batch: &RecordBatch, hash_strategy: HashStrategy, out: &mut Vec<[u8; 32]>) {
-    let schema = batch.schema();
+/// Appends one `merkle_v2` leaf per row: `H(0x00 || encoded_row)`, with the
+/// row encoded by [`row_encoding::RowEncoder`].
+fn append_batch_leaves(
+    batch: &RecordBatch,
+    hash_strategy: HashStrategy,
+    out: &mut Vec<[u8; 32]>,
+) -> Result<()> {
+    let encoder = row_encoding::RowEncoder::new(batch)?;
+    let mut encoded = Vec::new();
     for row in 0..batch.num_rows() {
-        let mut encoded = vec![MERKLE_LEAF_PREFIX];
-        for (idx, field) in schema.fields().iter().enumerate() {
-            append_len_prefixed(&mut encoded, field.name().as_bytes());
-            let value = array_value_bytes(batch.column(idx).as_ref(), row);
-            append_len_prefixed(&mut encoded, &value);
-        }
+        encoded.clear();
+        encoded.push(MERKLE_LEAF_PREFIX);
+        encoder.encode_row(row, &mut encoded);
         out.push(hash_strategy.hash(&encoded));
     }
-}
-
-fn append_len_prefixed(out: &mut Vec<u8>, data: &[u8]) {
-    out.extend_from_slice(&(data.len() as u32).to_le_bytes());
-    out.extend_from_slice(data);
+    Ok(())
 }
 
 fn has_protocol_failure(state: &ProtocolPartitionState) -> bool {
@@ -1395,68 +1394,23 @@ fn u64_cell(array: &dyn Array, row: usize) -> Option<u64> {
     None
 }
 
+/// Raw bytes of a string or binary cell for identity comparisons, falling back
+/// to the `merkle_v2` canonical bytes for other types.
 fn comparable_bytes(array: &dyn Array, row: usize) -> Option<Vec<u8>> {
     if array.is_null(row) {
         return None;
     }
-    if let Some(a) = array.as_any().downcast_ref::<BinaryArray>() {
-        return Some(a.value(row).to_vec());
-    }
-    if let Some(a) = array.as_any().downcast_ref::<LargeBinaryArray>() {
-        return Some(a.value(row).to_vec());
-    }
-    if let Some(a) = array.as_any().downcast_ref::<StringArray>() {
-        return Some(a.value(row).as_bytes().to_vec());
-    }
-    if let Some(a) = array.as_any().downcast_ref::<LargeStringArray>() {
-        return Some(a.value(row).as_bytes().to_vec());
-    }
-    Some(array_value_bytes(array, row))
-}
-
-fn array_value_bytes(array: &dyn Array, row: usize) -> Vec<u8> {
-    if array.is_null(row) {
-        return b"<null>".to_vec();
-    }
-
-    if let Some(a) = array.as_any().downcast_ref::<UInt64Array>() {
-        return a.value(row).to_string().into_bytes();
-    }
-    if let Some(a) = array.as_any().downcast_ref::<UInt32Array>() {
-        return a.value(row).to_string().into_bytes();
-    }
-    if let Some(a) = array.as_any().downcast_ref::<Int64Array>() {
-        return a.value(row).to_string().into_bytes();
-    }
-    if let Some(a) = array.as_any().downcast_ref::<Int32Array>() {
-        return a.value(row).to_string().into_bytes();
-    }
-    if let Some(a) = array.as_any().downcast_ref::<Float64Array>() {
-        return a.value(row).to_string().into_bytes();
-    }
-    if let Some(a) = array.as_any().downcast_ref::<Float32Array>() {
-        return a.value(row).to_string().into_bytes();
-    }
-    if let Some(a) = array.as_any().downcast_ref::<BooleanArray>() {
-        return a.value(row).to_string().into_bytes();
-    }
-    if let Some(a) = array.as_any().downcast_ref::<StringArray>() {
-        return a.value(row).as_bytes().to_vec();
-    }
-    if let Some(a) = array.as_any().downcast_ref::<LargeStringArray>() {
-        return a.value(row).as_bytes().to_vec();
-    }
-    if let Some(a) = array.as_any().downcast_ref::<BinaryArray>() {
-        return hex::encode(a.value(row)).into_bytes();
-    }
-    if let Some(a) = array.as_any().downcast_ref::<LargeBinaryArray>() {
-        return hex::encode(a.value(row)).into_bytes();
-    }
-
-    match ArrayFormatter::try_new(array, &Default::default()) {
-        Ok(formatter) => formatter.value(row).to_string().into_bytes(),
-        Err(_) => b"<unsupported>".to_vec(),
-    }
+    let bytes = match array.data_type() {
+        DataType::Binary => array.as_binary::<i32>().value(row),
+        DataType::LargeBinary => array.as_binary::<i64>().value(row),
+        DataType::BinaryView => array.as_binary_view().value(row),
+        DataType::FixedSizeBinary(_) => array.as_fixed_size_binary().value(row),
+        DataType::Utf8 => array.as_string::<i32>().value(row).as_bytes(),
+        DataType::LargeUtf8 => array.as_string::<i64>().value(row).as_bytes(),
+        DataType::Utf8View => array.as_string_view().value(row).as_bytes(),
+        _ => return row_encoding::canonical_value_bytes(array, row),
+    };
+    Some(bytes.to_vec())
 }
 
 /// Computes a `merkle_v2` partition root over row leaves.
@@ -1775,7 +1729,9 @@ mod tests {
         verify_parquet, FindingStatus, HashStrategy, VerifyCheck, VerifyOptions, VerifyProfile,
         VerifyScope,
     };
-    use arrow::array::{ArrayRef, StringArray, UInt64Array};
+    use arrow::array::{
+        ArrayRef, StringArray, TimestampMillisecondArray, TimestampSecondArray, UInt64Array,
+    };
     use arrow::datatypes::{DataType, Field, Schema};
     use arrow::record_batch::RecordBatch;
     use parquet::arrow::ArrowWriter;
@@ -1882,12 +1838,12 @@ mod tests {
         let batch =
             RecordBatch::try_new(schema, vec![Arc::new(UInt64Array::from(vec![1u64]))]).unwrap();
         let mut leaves = Vec::new();
-        append_batch_leaves(&batch, HashStrategy::Sha256, &mut leaves);
+        append_batch_leaves(&batch, HashStrategy::Sha256, &mut leaves).unwrap();
 
-        // sha256(0x00 || u32le(9) || "block_num" || u32le(1) || "1")
+        // sha256(0x00 || u32le(9) || "block_num" || 0x01 || u32le(1) || "1")
         assert_eq!(
             hex::encode(leaves[0]),
-            "80b2af297ca5db8ec6ff8a35f122e313548c6a9c8583e99bcac99b6822f1decb"
+            "39bb9c5c843e0b59d89e2f1df4f973d681e687aad5a87b4557e1ab30fa6037fd"
         );
     }
 
@@ -1924,6 +1880,61 @@ mod tests {
             ArrowWriter::try_new(std::fs::File::create(path).unwrap(), schema, None).unwrap();
         writer.write(&batch).unwrap();
         writer.close().unwrap();
+    }
+
+    /// Writes `columns` as one parquet file and returns its verified root.
+    fn root_of(columns: Vec<(&str, ArrayRef)>) -> String {
+        let dir = tempfile::TempDir::new().unwrap();
+        let file = dir.path().join("data").join("part-0.parquet");
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        let batch = RecordBatch::try_from_iter(columns).unwrap();
+        let mut writer =
+            ArrowWriter::try_new(std::fs::File::create(&file).unwrap(), batch.schema(), None)
+                .unwrap();
+        writer.write(&batch).unwrap();
+        writer.close().unwrap();
+
+        let opts = roots_opts(&dir.path().join("merkle_roots.parquet"));
+        let data = dir.path().join("data");
+        let report = verify_parquet(data.to_str().unwrap(), None, &opts).unwrap();
+        report.findings[0].computed_root.clone()
+    }
+
+    #[test]
+    fn verify_roots_distinguish_null_from_sentinel_string() {
+        let null = root_of(vec![(
+            "memo",
+            Arc::new(StringArray::from(vec![None::<&str>])) as ArrayRef,
+        )]);
+        let sentinel = root_of(vec![(
+            "memo",
+            Arc::new(StringArray::from(vec!["<null>"])) as ArrayRef,
+        )]);
+        assert_ne!(null, sentinel);
+    }
+
+    #[test]
+    fn verify_roots_are_stable_across_timestamp_units() {
+        // The canonical `timestamp` column moves from seconds to milliseconds
+        // (#491); identical instants must keep identical roots.
+        let seconds = root_of(vec![(
+            "timestamp",
+            Arc::new(TimestampSecondArray::from(vec![1_700_000_000]).with_timezone("UTC"))
+                as ArrayRef,
+        )]);
+        let millis = root_of(vec![(
+            "timestamp",
+            Arc::new(TimestampMillisecondArray::from(vec![1_700_000_000_000]).with_timezone("UTC"))
+                as ArrayRef,
+        )]);
+        assert_eq!(seconds, millis);
+
+        let later = root_of(vec![(
+            "timestamp",
+            Arc::new(TimestampMillisecondArray::from(vec![1_700_000_000_001]).with_timezone("UTC"))
+                as ArrayRef,
+        )]);
+        assert_ne!(millis, later);
     }
 
     #[test]
