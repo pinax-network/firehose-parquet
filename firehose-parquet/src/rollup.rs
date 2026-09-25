@@ -18,14 +18,13 @@ use crate::ingest::maintenance::{self, MaintenancePolicy, MaintenanceTarget};
 use crate::merge::{SchemaCheck, StreamingPartWriter};
 use crate::writer::parse_s3_url;
 use anyhow::{Context, Result};
+use arrow::datatypes::Schema;
 #[cfg(test)]
 use arrow::record_batch::RecordBatch;
 use object_store::ObjectStore;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 #[cfg(test)]
 use parquet::arrow::ArrowWriter;
-use parquet::basic::Compression as PqCompression;
-use parquet::basic::ZstdLevel;
 use parquet::file::metadata::KeyValue;
 use parquet::file::properties::WriterProperties;
 use std::collections::{BTreeMap, HashSet};
@@ -341,13 +340,13 @@ fn run_rollup_local(config: &RollupConfig, ownership: &DatasetOwnership) -> Resu
         let out_dir = output.join(group_key);
         std::fs::create_dir_all(&out_dir)
             .with_context(|| format!("creating output dir {}", out_dir.display()))?;
-        let mut writer = StreamingPartWriter::new(
-            schema.context("rollup group has no schema")?,
-            writer_properties(config.compression, file_kv_metadata.as_deref()),
-            config.flush_bytes,
-            None,
-            0,
+        let schema = schema.context("rollup group has no schema")?;
+        let props = writer_properties(
+            config.compression,
+            schema.as_ref(),
+            file_kv_metadata.as_deref(),
         );
+        let mut writer = StreamingPartWriter::new(schema, props, config.flush_bytes, None, 0);
         let mut group_written = Vec::new();
         let mut publish = |part: u32, bytes: Vec<u8>, part_rows: usize| -> Result<()> {
             ownership.revalidate_local_paths()?;
@@ -570,28 +569,16 @@ fn cleanup_empty_dirs(dir: &Path) -> Result<()> {
 
 fn writer_properties(
     compression: Compression,
+    schema: &Schema,
     kv_metadata: Option<&[KeyValue]>,
 ) -> WriterProperties {
-    let pq_compression = match compression {
-        Compression::None => PqCompression::UNCOMPRESSED,
-        Compression::Snappy => PqCompression::SNAPPY,
-        Compression::Gzip => PqCompression::GZIP(Default::default()),
-        Compression::Zstd => PqCompression::ZSTD(ZstdLevel::try_new(3).unwrap()),
-    };
-    let mut builder = WriterProperties::builder().set_compression(pq_compression);
-    if let Some(kvs) = kv_metadata {
-        if !kvs.is_empty() {
-            builder = builder.set_key_value_metadata(Some(
-                kvs.iter()
-                    .filter(|kv| {
-                        !kv.key.starts_with("fireparq.ingest.") && kv.key != "ARROW:schema"
-                    })
-                    .cloned()
-                    .collect(),
-            ));
-        }
-    }
-    builder.build()
+    let metadata = kv_metadata.map(|kvs| {
+        kvs.iter()
+            .filter(|kv| !kv.key.starts_with("fireparq.ingest.") && kv.key != "ARROW:schema")
+            .cloned()
+            .collect()
+    });
+    crate::writer::properties::for_schema(compression, schema, metadata)
 }
 
 // ---------------------------------------------------------------------------
@@ -750,13 +737,13 @@ fn rollup_s3(config: &RollupConfig, src: &S3Root, out: &S3Root) -> Result<()> {
             .checked_add(rows)
             .context("rollup row count overflow")?;
         total_input_files += group_keys.len();
-        let mut writer = StreamingPartWriter::new(
-            schema.context("rollup group has no schema")?,
-            writer_properties(config.compression, file_kv_metadata.as_deref()),
-            config.flush_bytes,
-            None,
-            0,
+        let schema = schema.context("rollup group has no schema")?;
+        let props = writer_properties(
+            config.compression,
+            schema.as_ref(),
+            file_kv_metadata.as_deref(),
         );
+        let mut writer = StreamingPartWriter::new(schema, props, config.flush_bytes, None, 0);
         let mut group_written = Vec::new();
         let mut publish = |part: u32, bytes: Vec<u8>, part_rows: usize| -> Result<()> {
             let path = object_store::path::Path::from(
@@ -803,19 +790,13 @@ fn rollup_s3(config: &RollupConfig, src: &S3Root, out: &S3Root) -> Result<()> {
         // Delete this group's sources as soon as its output is written, so a failure in a
         // later group cannot leave them behind to be rolled up a second time.
         if config.delete_source {
-            for object in group_keys {
-                let key = object.location.as_ref();
-                if same_bucket && written.contains(key) {
-                    continue;
-                }
-                debug!(path = %key, "deleting rolled-up source Parquet file from S3");
-                block_on_async(async {
-                    let path = object_store::path::Path::from(key);
-                    src.client.delete(&path).await
-                })
-                .map_err(|e| anyhow::anyhow!("deleting s3://{}/{key}: {e}", src.bucket))?;
-                deleted_sources += 1;
-            }
+            let keys = group_keys
+                .iter()
+                .filter(|object| !(same_bucket && written.contains(object.location.as_ref())))
+                .map(|object| object.location.clone())
+                .collect::<Vec<_>>();
+            block_on_async(crate::s3::delete::delete_objects_once(&src.client, &keys))?;
+            deleted_sources += keys.len();
         }
     }
 
@@ -845,15 +826,16 @@ fn remove_previous_copies_s3(
     let dir = object_store::path::Path::from(out.key(group_key).as_str());
     let listing = block_on_async(out.client.list_with_delimiter(Some(&dir)))
         .map_err(|e| anyhow::anyhow!("listing s3://{}/{dir}: {e}", out.bucket))?;
-    for obj in listing.objects {
-        let key = obj.location.as_ref();
-        let is_copy = obj.location.filename().is_some_and(is_copy_output);
-        if is_copy && !written.contains(key) {
-            debug!(path = %key, "deleting copy output of an earlier rollup from S3");
-            block_on_async(out.client.delete(&obj.location))
-                .map_err(|e| anyhow::anyhow!("deleting s3://{}/{key}: {e}", out.bucket))?;
-        }
-    }
+    let keys = listing
+        .objects
+        .into_iter()
+        .filter(|object| {
+            object.location.filename().is_some_and(is_copy_output)
+                && !written.contains(object.location.as_ref())
+        })
+        .map(|object| object.location)
+        .collect::<Vec<_>>();
+    block_on_async(crate::s3::delete::delete_objects_once(&out.client, &keys))?;
     Ok(())
 }
 
@@ -1779,6 +1761,47 @@ mod tests {
         }
         values.sort_unstable();
         values
+    }
+
+    #[test]
+    fn s3_copy_cleanup_error_keeps_sources_and_all_later_groups_untouched() {
+        use crate::s3::delete::test_store::DelayedStore;
+        use std::sync::atomic::Ordering;
+        let prior_copy = format!("out/{DAY}/{COPY_OUTPUT_PREFIX}old-000001.parquet");
+        let mut fake = DelayedStore::new(std::time::Duration::from_millis(20));
+        fake.fail = Some(object_store::path::Path::from(prior_copy.as_str()));
+        fake.lose_response = true;
+        let fake = Arc::new(fake);
+        let store: Arc<dyn ObjectStore> = fake.clone();
+        let source = format!("src/{DAY}/hour=14/minute=30/part-first.parquet");
+        let later_day = DAY.replace("day=15", "day=16");
+        assert_ne!(later_day, DAY);
+        let later_source = format!("src/{later_day}/hour=14/minute=30/part-later.parquet");
+        put_range_object(&store, &source, 0, 8);
+        put_range_object(&store, &later_source, 8, 4);
+        put_range_object(&store, &prior_copy, 100, 1);
+        let before = [
+            get_object(&store, &source),
+            get_object(&store, &later_source),
+        ];
+        assert!(rollup_s3(
+            &s3_config("src", "out", true),
+            &memory_root(&store, "src"),
+            &memory_root(&store, "out")
+        )
+        .is_err());
+        assert_eq!(get_object(&store, &source), before[0]);
+        assert_eq!(get_object(&store, &later_source), before[1]);
+        assert!(s3_keys(&store, &format!("out/{later_day}")).is_empty());
+        assert_eq!(
+            s3_block_numbers(&store, &format!("out/{DAY}")),
+            (0..8).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            fake.counters.started.lock().unwrap().as_slice(),
+            &[object_store::path::Path::from(prior_copy)]
+        );
+        assert_eq!(fake.counters.active.load(Ordering::SeqCst), 0);
     }
 
     /// Reproductions 1 and 3 on S3: an in-place re-run keeps the earlier output, and root

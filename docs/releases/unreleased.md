@@ -4,6 +4,18 @@ Changes merged since the last release. Fold this file into `docs/releases/vX.Y.Z
 
 ## CLI and query semantics
 
+- S3 maintenance cleanup now permits at most ten individual DELETE requests at
+  once. Any observed failure stops new dispatch and drains started client
+  requests before returning; it retains ownership and recovery records on an
+  uncertain result. Transport/application mutation retries remain disabled.
+  Output, source-cleanup and journal barriers are unchanged. The pinned bulk
+  adapter cannot validate complete acknowledgements, so this reduces sequential
+  waiting without reducing HTTP request count. S3 merge also reads ordered
+  windows of at most four objects and 64 MiB of listed compressed bytes; an
+  oversized object runs alone. Every read requires and verifies its original
+  ETag/version, including safe read retries, with no unpinned fallback. These
+  bounds do not cap total RSS, and rollup keeps its existing page-range reads. See [#523 evidence](../audit/523-s3-maintenance-concurrency.md).
+
 - Firehose receive windows default to 16 MiB per stream/connection. Both `build`
   and `partitions build` expose `--grpc-window-bytes`, `--grpc-adaptive-window`,
   and `--grpc-max-message-bytes` (the receive limit remains 128 MiB). Replies
@@ -31,6 +43,18 @@ Changes merged since the last release. Fold this file into `docs/releases/vX.Y.Z
   from unordered files. See [#474 validation](../audit/474-non-final-streams.md).
 
 ## Breaking changes
+
+### Parquet lookup properties and explicit Zstandard levels (#519)
+
+Part encoders and maintenance share selective, bounded Bloom filters and a
+65,536-row group maximum. Ingestion declares block-number ordering only after
+checking the complete part; streaming maintenance omits that assertion. Physical
+file layout changes while Arrow schemas, values and order remain unchanged.
+`--compression zstd:<level>` selects an explicit level; plain `zstd` remains level
+3. The Rust Compression enum has a new explicit-level variant. Non-default levels
+are bound into pending transaction identities; finish recovery with this version
+before downgrading to one that cannot parse that variant. See the
+[contract and measurements](../audit/519-parquet-lookup-properties.md).
 
 ### Solana detail rows expose parent transaction outcome (#550, partial)
 
