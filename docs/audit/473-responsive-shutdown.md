@@ -74,11 +74,13 @@ behavior (code 130), which can interrupt a write; the README states this limit.
   Stream-exit tests additionally reject a storage error containing the old
   `__shutdown__` text.
 
-Validation on main `2793421` (including Arrow/Parquet 60) passed all 732
-workspace tests, with zero failures and three ignored tests; all doc tests
+Validation on main `c88abcc` (including Arrow/Parquet 60 and the Beacon coverage
+changes) passed all 739 workspace tests, with zero failures and three ignored tests; all doc tests
 passed. The binary build, formatting check, and Bash, Zsh, and Fish completion
 generation passed. This includes the cursor durability, final completion
 checkpoint, startup Info failure, and startup cancellation regressions.
+The combined implementation was tested at `22212b6`; the earlier Arrow/Parquet
+60 integration at `2793421` also passed its then-current 732 tests.
 
 Validation used the shared audit target, disabled dev/test debug information,
 and a whole-process Cargo lock. Independent review found no implementation
