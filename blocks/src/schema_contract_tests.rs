@@ -156,7 +156,18 @@ fn solana_block_with_vote() -> Vec<u8> {
     let mut vote = block.transactions[0].clone();
     let tx = vote.transaction.as_mut().expect("fixture transaction");
     tx.signatures = vec![vec![9u8; 64]];
-    tx.message.as_mut().expect("fixture message").account_keys[1] = vote_program;
+    let message = tx.message.as_mut().expect("fixture message");
+    message.account_keys[1] = vote_program;
+    message.versioned = false;
+    message.address_table_lookups.clear();
+    message.instructions[0].data =
+        bincode::serialize(&solana_vote_interface::instruction::VoteInstruction::Vote(
+            solana_vote_interface::state::Vote {
+                slots: vec![BLOCK_NUM],
+                ..Default::default()
+            },
+        ))
+        .expect("serialize canonical vote fixture");
     block.transactions.push(vote);
     block.encode_to_vec()
 }

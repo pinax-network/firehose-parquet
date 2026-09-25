@@ -122,6 +122,8 @@ pub fn instructions_schema(
         Field::new("is_inner", DataType::Boolean, false),
         Field::new("inner_index", DataType::UInt32, true),
         Field::new("stack_height", DataType::UInt32, true),
+        Field::new("parent_instruction_index", DataType::UInt32, true),
+        Field::new("inner_instruction_index", DataType::UInt32, true),
     ]);
     maybe_fork_step(&mut fields, include_fork_step);
     Schema::new(fields)
