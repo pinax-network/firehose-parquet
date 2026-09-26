@@ -183,7 +183,8 @@ impl VerifyOptions {
     }
 
     /// Whether this run writes artifacts (registry roots, JSON or published
-    /// reports), which also takes dataset ownership next to the data.
+    /// reports). It never writes table data or takes dataset ownership, but
+    /// its data path may not reach S3 through the implicit `S3_BUCKET` fallback.
     pub fn writes(&self) -> bool {
         self.runs_roots()
             || self.report_json.is_some()
@@ -1168,15 +1169,14 @@ fn verify_source(
     let resolved_path = source.path().to_string();
     let excluded = ExcludedPaths::for_run(opts);
     let mut warnings = Vec::new();
-    let writes_reports =
-        opts.report_json.is_some() || opts.publish_report || opts.publish_report_path.is_some();
+    let writes = opts.writes();
 
     // A run that records roots or publishes a report locates the chain root
     // first, so its artifact destinations are checked before any row is read.
     // Roots also need where `build` stands, read before the listing that is
     // scanned: every row at or below its frontier was published before the
     // frontier was recorded, so it is in that listing.
-    let discovered_root = if runs_roots || writes_reports {
+    let discovered_root = if writes {
         Some(file_layout(&source.first_file(&excluded)?).chain_root)
     } else {
         None
@@ -1251,7 +1251,7 @@ fn verify_source(
     // Roots are compared or recorded only for partitions that still hold
     // exactly the files that were read. A published protocol report needs
     // every file it read to be unchanged.
-    if runs_roots || writes_reports {
+    if writes {
         let relisted = source.list(&excluded)?;
         refuse_unfinished_merges(&resolved_path, &relisted)?;
         ensure_unchanged(&scan_output, &source.identities(&relisted)?, |partition| {
