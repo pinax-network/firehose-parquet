@@ -246,6 +246,54 @@ struct Matched<L> {
     reserved: bool,
 }
 
+/// Selects the `files` matching the partition filters, prints the plan and applies the
+/// confirmation rules shared by local and S3 truncation.
+///
+/// `describe` gives a file's path relative to the truncate path (what filters match) and its
+/// displayed location; `size` is only read for matched files. Returns the summary and the
+/// files to delete, which is empty unless deleting was confirmed.
+fn plan<L>(
+    config: &TruncateConfig,
+    filters: &PartitionFilters,
+    root: &str,
+    files: Vec<L>,
+    describe: impl Fn(&L) -> (String, String),
+    size: impl Fn(&L) -> u64,
+) -> Result<(TruncateResult, Vec<Matched<L>>)> {
+    if files.is_empty() {
+        println!("No .parquet files found in {root}");
+        return Ok((TruncateResult::default(), Vec::new()));
+    }
+
+    // Filter by partition.
+    let matched: Vec<Matched<L>> = files
+        .into_iter()
+        .filter_map(|location| {
+            let (rel, display) = describe(&location);
+            filters.matches(&rel).then(|| Matched {
+                display,
+                size: size(&location),
+                reserved: is_reserved_artifact_path(&rel),
+                location,
+            })
+        })
+        .collect();
+
+    if matched.is_empty() {
+        println!("No files match the partition filter(s)");
+        return Ok((TruncateResult::default(), Vec::new()));
+    }
+
+    let delete = confirm_plan(config, root, &matched)?;
+
+    let result = TruncateResult {
+        files_deleted: matched.len(),
+        bytes_freed: matched.iter().map(|m| m.size).sum(),
+        dirs_removed: 0,
+    };
+    Ok((result, if delete { matched } else { Vec::new() }))
+}
+
 /// Prints what matched and decides whether to delete it.
 ///
 /// Returns `Ok(true)` to delete, `Ok(false)` for a dry run, and an error when deleting was not
@@ -315,40 +363,15 @@ fn run_truncate_local(
         anyhow::bail!("path does not exist: {}", root.display());
     }
 
-    let all_files = collect_local_parquet_targets(&root)?;
-
-    if all_files.is_empty() {
-        println!("No .parquet files found in {}", root.display());
-        return Ok(TruncateResult::default());
-    }
-
-    // Filter by partition.
-    let matched: Vec<Matched<PathBuf>> = all_files
-        .into_iter()
-        .filter_map(|file| {
-            let rel = local_match_path(&file, &root);
-            filters.matches(&rel).then(|| Matched {
-                display: file.display().to_string(),
-                size: std::fs::metadata(&file).map(|m| m.len()).unwrap_or(0),
-                reserved: is_reserved_artifact_path(&rel),
-                location: file,
-            })
-        })
-        .collect();
-
+    let (mut result, matched) = plan(
+        config,
+        filters,
+        &root.display().to_string(),
+        collect_local_parquet_targets(&root)?,
+        |file| (local_match_path(file, &root), file.display().to_string()),
+        |file| std::fs::metadata(file).map(|m| m.len()).unwrap_or(0),
+    )?;
     if matched.is_empty() {
-        println!("No files match the partition filter(s)");
-        return Ok(TruncateResult::default());
-    }
-
-    let delete = confirm_plan(config, &root.display().to_string(), &matched)?;
-
-    let mut result = TruncateResult {
-        files_deleted: matched.len(),
-        bytes_freed: matched.iter().map(|m| m.size).sum(),
-        dirs_removed: 0,
-    };
-    if !delete {
         return Ok(result);
     }
 
@@ -464,45 +487,27 @@ fn truncate_s3(
         .filter(|obj| !is_control_path(obj.location.as_ref()))
         .collect();
 
-    if parquet_objects.is_empty() {
-        println!("No .parquet files found in {root}");
-        return Ok(TruncateResult::default());
-    }
-
-    // Filter by partition.
-    let matched: Vec<Matched<object_store::path::Path>> = parquet_objects
-        .into_iter()
-        .filter_map(|obj| {
+    let (result, matched) = plan(
+        config,
+        filters,
+        &root,
+        parquet_objects,
+        |obj| {
             let key = obj.location.as_ref();
-            let rel = discovery::relative_key(prefix, key);
-            filters.matches(rel).then(|| Matched {
-                display: format!("s3://{bucket}/{key}"),
-                size: obj.size,
-                reserved: is_reserved_artifact_path(rel),
-                location: obj.location.clone(),
-            })
-        })
-        .collect();
-
+            (
+                discovery::relative_key(prefix, key).to_string(),
+                format!("s3://{bucket}/{key}"),
+            )
+        },
+        |obj| obj.size,
+    )?;
     if matched.is_empty() {
-        println!("No files match the partition filter(s)");
-        return Ok(TruncateResult::default());
-    }
-
-    let delete = confirm_plan(config, &root, &matched)?;
-
-    let result = TruncateResult {
-        files_deleted: matched.len(),
-        bytes_freed: matched.iter().map(|m| m.size).sum(),
-        dirs_removed: 0,
-    };
-    if !delete {
         return Ok(result);
     }
 
     let keys = matched
         .iter()
-        .map(|entry| entry.location.clone())
+        .map(|entry| entry.location.location.clone())
         .collect::<Vec<_>>();
     block_on_async(crate::s3::delete::delete_objects_once(client, &keys))?;
 
@@ -935,5 +940,56 @@ mod tests {
                 "evm/mainnet/cursor.parquet".to_string(),
             ]
         );
+    }
+
+    /// Local and S3 truncation share one selection/confirmation step, so the same tree
+    /// under the same filters selects the same files, sizes and dataset artifacts.
+    #[test]
+    fn local_and_s3_select_the_same_files_for_every_filter() {
+        let tree = [
+            ("cursor.parquet", 3usize),
+            ("partitions.parquet", 5),
+            (
+                "blocks/year=2026/month=01/date=15/minute=00/part-1.parquet",
+                7,
+            ),
+            (
+                "blocks/year=2026/month=01/day=16/minute=01/part-2.parquet",
+                11,
+            ),
+            ("blocks/year=2025/month=12/day=31/part-3.parquet", 13),
+            ("logs/year=2026/month=01/day=15/part-4.parquet", 17),
+            ("logs/year=2026/month=02/day=15/notes.txt", 19),
+            (".fireparq-ingest/state.parquet", 23),
+        ];
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("evm");
+        let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        for (rel, size) in tree {
+            write_test_file(&root.join(rel), &vec![b'x'; size]);
+            let key = object_store::path::Path::from(format!("evm/{rel}"));
+            block_on_async(store.put(&key, vec![b'x'; size].into())).unwrap();
+        }
+        for filters in [
+            vec![],
+            vec!["year=2026"],
+            vec!["day=15"],
+            vec!["date=16"],
+            vec!["minute"],
+            vec!["year=2026/month=01", "year=2025/month=12"],
+            vec!["month=0*", "day=1*"],
+            vec!["year=2027"],
+        ] {
+            let mut local = config(&root, &filters, true, false);
+            let local_result = run_truncate(&local).unwrap();
+            local.path = "s3://bucket/evm".into();
+            let parsed = PartitionFilters::parse(&local.partitions).unwrap();
+            let remote_result = truncate_s3(&local, &parsed, &store, "bucket", "evm").unwrap();
+            assert_eq!(
+                (local_result.files_deleted, local_result.bytes_freed),
+                (remote_result.files_deleted, remote_result.bytes_freed),
+                "{filters:?}"
+            );
+        }
     }
 }
