@@ -2,3 +2,6 @@ pub mod mapper;
 pub mod proto;
 pub mod schema;
 mod text;
+
+#[cfg(test)]
+mod outcome_tests;

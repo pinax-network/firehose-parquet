@@ -1,7 +1,8 @@
 # #550: Solana parent transaction outcome context
 
 This is a bounded Solana slice of [#550](https://github.com/pinax-network/firehose-parquet/issues/550).
-It does not close that issue. Antelope, Tron and NEAR execution-policy work and
+It did not close that issue; the Tron, Antelope and NEAR rules and their
+qualification are recorded in [550-non-evm-failed-transactions.md](550-non-evm-failed-transactions.md). Antelope, Tron and NEAR execution-policy work and
 their missing failure/transport qualification remain separate. No new public
 chain requests or production writes were made for this change.
 

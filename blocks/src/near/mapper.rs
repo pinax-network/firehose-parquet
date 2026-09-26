@@ -168,6 +168,8 @@ struct ReceiptRowContext<'a> {
     shard_id: u64,
     predecessor_id: &'a str,
     receiver_id: &'a str,
+    /// The receipt's own execution outcome, as in `receipts.status` (#550).
+    receipt_status: &'static str,
 }
 
 /// Get execution status string from an ExecutionOutcome.
@@ -517,6 +519,11 @@ impl NearBlockMapper {
             shard_id,
             predecessor_id: &receipt.predecessor_id,
             receiver_id: &receipt.receiver_id,
+            receipt_status: receipt_outcome
+                .execution_outcome
+                .as_ref()
+                .and_then(|eo| eo.outcome.as_ref())
+                .map_or("Unknown", execution_status_str),
         };
         let outcome = receipt_outcome
             .execution_outcome
@@ -538,9 +545,7 @@ impl NearBlockMapper {
             .signer_id
             .append_option(action_receipt.map(|action| action.signer_id.as_str()));
         receipts.shard_id.append_value(shard_id);
-        receipts
-            .status
-            .append_value(outcome.map_or("Unknown", execution_status_str));
+        receipts.status.append_value(context.receipt_status);
         receipts
             .gas_burnt
             .append_value(outcome.map_or(0, |o| o.gas_burnt));
@@ -585,6 +590,7 @@ impl NearBlockMapper {
                 logs.predecessor_id.append_value(context.predecessor_id);
                 logs.log.append_value(log);
                 append_fork_step(&mut logs.fork_step, fork_step);
+                logs.receipt_status.append_value(context.receipt_status);
             }
         }
     }
@@ -627,6 +633,7 @@ impl NearBlockMapper {
         actions.gas.append_option(gas);
         actions.deposit.append_option(deposit);
         append_fork_step(&mut actions.fork_step, fork_step);
+        actions.receipt_status.append_value(context.receipt_status);
     }
 
     fn map_state_change(
@@ -833,7 +840,8 @@ impl BlockMapper for NearBlockMapper {
             + est_bin(&self.receipt_actions.args)
             + est_u64(&self.receipt_actions.gas)
             + est_str(&self.receipt_actions.deposit)
-            + est_opt_str(&self.receipt_actions.fork_step);
+            + est_opt_str(&self.receipt_actions.fork_step)
+            + estimated_dictionary_index_bytes(self.receipt_actions.receipt_status.len());
         let execution_logs = self.execution_logs.canonical.estimated_bytes()
             + self.execution_logs.receipt_id.estimated_bytes()
             + est_u32(&self.execution_logs.receipt_index)
@@ -843,7 +851,8 @@ impl BlockMapper for NearBlockMapper {
             + est_str(&self.execution_logs.executor_id)
             + est_str(&self.execution_logs.predecessor_id)
             + est_str(&self.execution_logs.log)
-            + est_opt_str(&self.execution_logs.fork_step);
+            + est_opt_str(&self.execution_logs.fork_step)
+            + estimated_dictionary_index_bytes(self.execution_logs.receipt_status.len());
         let state_changes = self.state_changes.canonical.estimated_bytes()
             + est_str(&self.state_changes.r#type)
             + est_str(&self.state_changes.cause)
@@ -1106,6 +1115,8 @@ struct ReceiptActionsBuilder {
     gas: UInt64Builder,
     deposit: StringBuilder,
     fork_step: Option<StringBuilder>,
+    /// Parent receipt outcome (#550).
+    receipt_status: StringDictionaryBuilder<Int32Type>,
 }
 
 impl ReceiptActionsBuilder {
@@ -1126,6 +1137,7 @@ impl ReceiptActionsBuilder {
             gas: UInt64Builder::new(),
             deposit: StringBuilder::new(),
             fork_step: fork_step_builder(include_fork_step),
+            receipt_status: StringDictionaryBuilder::new(),
         }
     }
 
@@ -1147,6 +1159,7 @@ impl ReceiptActionsBuilder {
             Arc::new(self.deposit.finish()) as Arc<dyn Array>,
         ]);
         finish_fork_step(&mut self.fork_step, &mut columns);
+        columns.push(Arc::new(self.receipt_status.finish()) as Arc<dyn Array>);
         Ok(RecordBatch::try_new(Arc::new(schema.clone()), columns)?)
     }
 }
@@ -1162,6 +1175,8 @@ struct ExecutionLogsBuilder {
     predecessor_id: StringBuilder,
     log: StringBuilder,
     fork_step: Option<StringBuilder>,
+    /// Parent receipt outcome (#550).
+    receipt_status: StringDictionaryBuilder<Int32Type>,
 }
 
 impl ExecutionLogsBuilder {
@@ -1177,6 +1192,7 @@ impl ExecutionLogsBuilder {
             predecessor_id: StringBuilder::new(),
             log: StringBuilder::new(),
             fork_step: fork_step_builder(include_fork_step),
+            receipt_status: StringDictionaryBuilder::new(),
         }
     }
 
@@ -1193,6 +1209,7 @@ impl ExecutionLogsBuilder {
             Arc::new(self.log.finish()) as Arc<dyn Array>,
         ]);
         finish_fork_step(&mut self.fork_step, &mut columns);
+        columns.push(Arc::new(self.receipt_status.finish()) as Arc<dyn Array>);
         Ok(RecordBatch::try_new(Arc::new(schema.clone()), columns)?)
     }
 }

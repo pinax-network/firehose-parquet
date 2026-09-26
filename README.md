@@ -10,7 +10,7 @@ A production-grade Rust toolkit that consumes [StreamingFast Firehose](https://f
 | `solana` | `solana.firehose.pinax.network:443` | blocks, transactions, messages, instructions, rewards, token_balances, account_lookups, vote_transactions (`--without-votes` disables `vote_transactions`) |
 | `bitcoin` | `bitcoin.firehose.pinax.network:443` | blocks, transactions, inputs, outputs |
 | `beacon` | `eth-cl.firehose.pinax.network:443` | blocks, attestations, deposits, proposer_slashings, attester_slashings, voluntary_exits, execution_payload, blob_sidecars, withdrawals, bls_to_execution_changes, deposit_requests, withdrawal_requests, consolidation_requests ([details](#beacon-chain-tables)) |
-| `tron` | `mainnet.tron.streamingfast.io:443` | blocks, transactions, logs, internal_transactions |
+| `tron` | `mainnet.tron.streamingfast.io:443` | blocks, transactions, logs, internal_transactions, contracts, internal_call_values |
 | `cosmos` | `mainnet.injective.streamingfast.io:443` | blocks, transactions, events, messages |
 | `antelope` | `eos.firehose.pinax.network:443` | blocks, transactions, actions, db_ops |
 | `near` | `mainnet.near.streamingfast.io:443` | blocks, chunks, transactions, receipts, receipt_actions, execution_logs, state_changes |
@@ -31,7 +31,7 @@ A production-grade Rust toolkit that consumes [StreamingFast Firehose](https://f
 - **Partitioning** — `none`, `block_range`, `date`, `hour`, `minute`, or `second` layouts
 - **File rollover** — flush by row count, byte size, or time interval
 - **Fork handling** — finalized output by default; `--final-blocks-only=false` preserves append-only `fork_step` events ([query semantics](#non-final-streams-and-reorgs))
-- **Failed transactions** — EVM includes failed/reverted txs by default with only their persistent state changes (`--exclude-failed-transactions` drops them); other chains exclude them unless `--include-failed-transactions` is set
+- **Failed transactions** — EVM includes failed/reverted txs by default with only their persistent state changes (`--exclude-failed-transactions` drops them); Solana, Tron, Antelope, Cosmos and NEAR exclude them unless `--include-failed-transactions` is set, and label child rows with their parent outcome ([details](#failed-transaction-filtering))
 - **Block-type-based encoding** — identifiers follow the resolved chain/profile defaults, recorded in Parquet metadata; opaque Solana payloads use Binary and account indices use UInt8 lists
 - **Compression** — zstd (default level 3), explicit `zstd:<level>`, snappy, gzip, or none
 - **Parquet file metadata** — every file embeds pipeline provenance (`firehose-parquet.*` key-value pairs) in the Parquet footer
@@ -1219,25 +1219,52 @@ The path must exist locally or be an explicit `s3://...` URI. Unlike `scan` and 
 
 ## Failed Transaction Filtering
 
-EVM includes failed/reverted transactions by default. The other chains exclude them unless you pass `--include-failed-transactions`. `--exclude-failed-transactions` drops them on every chain and takes precedence.
+EVM includes failed/reverted transactions by default. Solana, Tron, Antelope, Cosmos and NEAR exclude them unless you pass `--include-failed-transactions`. Bitcoin and Beacon have no failed transactions. `--exclude-failed-transactions` drops them on every chain and takes precedence. The flags select whole transactions: every row that belongs to a dropped transaction is dropped with it. NEAR receipts are not transactions and are always written ([below](#near-failed-receipts)).
 
-| Flag | EVM | Other chains |
+| Flag | EVM | Solana, Tron, Antelope, Cosmos, NEAR |
 |---|---|---|
 | *(none)* | included, with their persistent state changes | excluded |
 | `--exclude-failed-transactions` | excluded | excluded |
 | `--include-failed-transactions` | deprecated, no effect (warns) | included |
 
-Per-chain failure condition:
+Per-chain failure condition, and the columns that label the rows of an included failed transaction:
 
-| Chain | Failed when |
-|---|---|
-| **Solana** | `meta.err` has non-empty bytes |
-| **EVM** | `status != SUCCEEDED` |
-| **NEAR** | `status == "Failure"` |
-| **Cosmos** | `code != 0` in `TxResult` |
-| **Tron** | `result != "SUCCESS"` |
-| **Antelope** | Filtered by action trace status |
-| **Bitcoin** | *(not applicable — Bitcoin has no failed txs)* |
+| Chain | Failed when | Outcome columns |
+|---|---|---|
+| **EVM** | `status != SUCCEEDED` | `transactions.status`; `state_reverted` and `persisted` on state changes ([below](#evm-persistent-state-changes-of-failed-transactions)) |
+| **Solana** | `meta.err` has non-empty bytes | `transactions.success`; `transaction_success` on child tables ([details](#solana-transaction-outcome-context)) |
+| **Tron** | `TransactionInfo.result` is `FAILED`, or the receipt result is neither `DEFAULT` nor `SUCCESS` (for example `REVERT` or `OUT_OF_ENERGY`). The Firehose wrapper `result`/`code` are always true/`SUCCESS` and do not report execution | `transaction_success` on `transactions`, `logs`, `internal_transactions`, `contracts`, `internal_call_values` ([below](#tron-failed-smart-contract-calls)) |
+| **Antelope** | the trace carries an exception, or its receipt status is not `EXECUTED`, `SOFTFAIL` or `DELAYED` (so `HARDFAIL`, `EXPIRED` and statuses without an execution fail) | `transactions.transaction_success`; `transaction_status` and `transaction_success` on `actions` and `db_ops` ([below](#antelope-deferred-transactions-and-onerror)) |
+| **NEAR** | the transaction's own outcome is `Failure` (an inclusion failure) | `receipt_status` on `receipt_actions` and `execution_logs` ([below](#near-failed-receipts)) |
+| **Cosmos** | `code != 0` in `TxResult` | `transactions.code` |
+| **Bitcoin** | *(not applicable — Bitcoin has no failed txs)* | — |
+| **Beacon** | *(not applicable — consensus blocks have no transaction outcomes)* | — |
+
+A failed transaction still pays fees on every chain. The outcome columns describe the parent transaction or receipt; they do not assert that an individual instruction, contract or action ran.
+
+### Tron: failed smart-contract calls
+
+java-tron sets the transaction wrapper `result`/`code` to true/`SUCCESS` for every transaction it includes in a block, so `transactions.result` and `code` never report a failed TVM call. The outcome comes from `TransactionInfo`: `result = FAILED` (set with a runtime error such as `REVERT opcode executed`) or a receipt result other than `DEFAULT` (non-VM contracts) or `SUCCESS`. Unknown enum values count as failures. Before #550 the filter used the wrapper, so reverted calls were written by default.
+
+A failed call still pays its fee, energy and bandwidth: `fee` and the `receipt_*` columns keep them. The VM discards the logs of a reverted call and marks its internal transactions `rejected = true`. `contracts` rows are the submitted contracts, not executed transfers. Every row of `transactions`, `logs`, `internal_transactions`, `contracts` and `internal_call_values` carries the parent's non-null Boolean `transaction_success`. `transactions.contract_address` is the smart contract created or called; it is NULL when `TransactionInfo` has none (plain transfers and other system contracts).
+
+### Antelope: deferred transactions and onerror
+
+Receipt statuses other than `EXECUTED` come from deferred (scheduled) transactions:
+
+| Status | Trace | Selected by default |
+|---|---|---|
+| `EXECUTED` | executed normally | yes |
+| `DELAYED` | scheduled for later execution; no actions ran yet | yes |
+| `SOFTFAIL` | for a failed deferred transaction the producer writes two traces: the **failed deferred trace**, which carries the exception and whose database operations the producer already reverted, then the **`onerror` handler trace**, which ran without an exception and whose actions and database operations persisted | the `onerror` trace only |
+| `HARDFAIL` | the deferred transaction failed and its `onerror` handler failed or none ran; nothing persisted | no |
+| `EXPIRED` | the deferred transaction expired unexecuted | no |
+
+`transactions.transaction_success` and the `transaction_success` of `actions` and `db_ops` say whether the trace's effects persisted. `actions` and `db_ops` also carry the parent receipt status as `transaction_status` (`Dictionary(Int32, Utf8)`, the labels of `transactions.status`). Before #550 only `EXECUTED` traces were selected by default, which dropped successful `onerror` handlers and scheduled transactions.
+
+### NEAR: failed receipts
+
+NEAR fails per receipt, not per transaction. A failed receipt's actions do not take effect, but its `gas_burnt` and `tokens_burnt` persist, and the logs it emitted before failing stay in its outcome. `receipts`, `receipt_actions` and `execution_logs` are written for every executed receipt whatever the failed-transaction flags say. `receipt_actions` and `execution_logs` carry the receipt's own outcome as `receipt_status` (`Dictionary(Int32, Utf8)`: `SuccessValue`, `SuccessReceiptId`, `Failure` or `Unknown`, the values of `receipts.status`); keep `receipt_status <> 'Failure'` for actions that took effect. The transaction filter only drops a transaction whose own outcome is `Failure`. A transaction's outcome is almost always `SuccessReceiptId` and says nothing about the receipts it later spawned (#507). `state_changes` attribution is tracked in #507.
 
 When failed transactions are included, chain-specific fields like Solana's `err` bytes and `success` flag reflect the actual transaction status.
 
@@ -1432,14 +1459,15 @@ their raw payload with null decoded fields. `transactions.contract_type` remains
 the first-contract projection and is null when the contract list is empty.
 
 `transactions` includes nullable `receipt_*` energy/net fees, usage and result,
-receipt `contract_address`, and Binary `res_message`. Missing receipts are null;
+receipt `contract_address` (NULL when absent), and Binary `res_message`. Missing receipts are null;
 present zero/empty values remain values. `internal_call_values` retains each
 ordered source `(call_value, token_id)` pair, including repeated or empty token
 IDs, joined by block identity, transaction index/hash and `internal_index`.
 
 `transaction_index` and `logs.block_log_index` count original source positions,
 including transactions omitted by failed filtering. Existing `logs.log_index`
-remains per transaction. Included failed effects remain source records.
+remains per transaction. Failed calls and their `transaction_success` column are
+described under [failed transaction filtering](#tron-failed-smart-contract-calls).
 
 ```sql
 SELECT t.block_num, t.txid, c.contract_index, c.contract_type,
@@ -1889,6 +1917,9 @@ JOIN read_parquet('output/eos/transactions/**/*.parquet') t
  AND d.tx_index = t."index";
 ```
 
+`actions` and `db_ops` end with the parent `transaction_status` and
+`transaction_success` (see [deferred transactions and onerror](#antelope-deferred-transactions-and-onerror)).
+
 The action fields `transaction_id`, `trace_block_num`, `producer_block_id`, and
 `block_time` are deprecated for ordinary joins and routing; prefer `tx_hash` and
 canonical block identity/time. They remain verbatim action metadata, which can
@@ -1929,21 +1960,20 @@ Two tables hold what each executed receipt did:
   The payload columns are null for the other kinds. A `Delegate` row (NEP-366 meta-transaction) only records the kind: the delegated actions run in a receipt of their own and appear as that receipt's rows.
 - **`execution_logs`**: one row per line of the outcome's `logs`, keyed by `(receipt_id, log_index)`, with `receipt_index`, `tx_hash`, `shard_id`, `executor_id` (the account whose code logged), `predecessor_id` and `log`. NEP-297 events such as NEP-141 (fungible tokens) and NEP-171 (NFTs) are the lines that start with `EVENT_JSON:`. Transaction outcomes have no logs: converting a transaction runs no contract code.
 
-Both tables cover every receipt in `receipts`, including failed ones. Join `receipts` on `receipt_id` to check `status`:
+Both tables cover every receipt in `receipts`, including failed ones, and end with the receipt's own `receipt_status` ([failed receipts](#near-failed-receipts)):
 
 ```sql
 -- NEP-141 events of receipts that did not fail
 WITH events AS (
-  SELECT receipt_id, block_num, executor_id AS token,
+  SELECT block_num, executor_id AS token,
          TRY_CAST(substr(log, 12) AS JSON) AS event  -- the text after 'EVENT_JSON:'
   FROM read_parquet('output/near-mainnet/execution_logs/**/*.parquet')
   WHERE log LIKE 'EVENT_JSON:%'
+    AND receipt_status <> 'Failure'
 )
-SELECT e.block_num, e.token, e.event->>'event' AS event, e.event->'data' AS data
-FROM events AS e
-JOIN read_parquet('output/near-mainnet/receipts/**/*.parquet') AS r USING (receipt_id)
-WHERE e.event->>'standard' = 'nep141'
-  AND r.status <> 'Failure';
+SELECT block_num, token, event->>'event' AS event, event->'data' AS data
+FROM events
+WHERE event->>'standard' = 'nep141';
 ```
 
 `receipts.tx_hash` is only filled from the same block, which in practice means the receipt NEAR runs right away when a transaction's `signer_id` is also its `receiver_id`. Most receipts run in a later block, so most have a null `tx_hash`. Filling it from earlier blocks would make the output depend on where a run started. To find the originating transaction of every receipt, follow `converted_into_receipt_id` and `receipt_ids` over the range:

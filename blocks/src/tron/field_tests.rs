@@ -294,17 +294,19 @@ fn missing_messages_are_null_but_present_defaults_are_values() {
         "receipt_energy_fee",
         "receipt_net_fee",
         "receipt_result",
-        "contract_address",
         "res_message",
     ] {
         assert!(tx.column_by_name(name).unwrap().is_null(0));
         assert!(!tx.column_by_name(name).unwrap().is_null(1));
     }
+    // An empty TransactionInfo contract address is not a created contract (#550).
+    for row in 0..3 {
+        assert!(tx.column_by_name("contract_address").unwrap().is_null(row));
+    }
     assert_eq!(column::<Int64Array>(tx, "receipt_energy_fee").value(1), 0);
     assert!(!tx.column_by_name("contract_type").unwrap().is_null(2));
     assert!(tx.column_by_name("receipt_energy_fee").unwrap().is_null(2));
     assert!(tx.column_by_name("receipt_result").unwrap().is_null(2));
-    assert!(!tx.column_by_name("contract_address").unwrap().is_null(2));
     for name in ["parameter", "owner_address", "amount"] {
         assert!(batches["contracts"]
             .column_by_name(name)
@@ -324,10 +326,23 @@ fn missing_messages_are_null_but_present_defaults_are_values() {
 #[test]
 fn source_positions_do_not_renumber_after_failed_filtering() {
     let mut block = sample();
+    // The retained transaction executed successfully.
+    block.transactions[0]
+        .info
+        .as_mut()
+        .unwrap()
+        .receipt
+        .as_mut()
+        .unwrap()
+        .result = 1;
+    // A VM failure keeps the true/SUCCESS API wrapper (#550).
     let mut failed = block.transactions[0].clone();
-    failed.result = false;
-    let extra = failed.info.as_ref().unwrap().log[0].clone();
-    failed.info.as_mut().unwrap().log.push(extra);
+    let info = failed.info.as_mut().unwrap();
+    info.result = 1;
+    info.receipt.as_mut().unwrap().result = 2;
+    let extra = info.log[0].clone();
+    info.log.push(extra);
+    assert!(failed.result);
     block.transactions.insert(0, failed);
     for include_failed in [false, true] {
         let mut mapper = TronBlockMapper::new(false, EncodeBytes::Binary, include_failed);

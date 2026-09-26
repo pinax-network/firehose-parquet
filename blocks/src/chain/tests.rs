@@ -490,6 +490,46 @@ fn inventory_lines(
     options: &MapperOptions,
     mapper: &mut dyn BlockMapper,
 ) -> Vec<String> {
+    inventory_lines_with(kind, options, mapper, |_, schema| schema.clone())
+}
+
+/// Parent-outcome columns #550 appended to Tron, Antelope and NEAR tables.
+/// Solana's `transaction_success` predates #550 (#607) and is not listed.
+fn outcome_columns_550(kind: ChainKind, table: &str) -> &'static [&'static str] {
+    match (kind, table) {
+        (ChainKind::Tron, "blocks") => &[],
+        (ChainKind::Tron, _) => &["transaction_success"],
+        (ChainKind::Antelope, "transactions") => &["transaction_success"],
+        (ChainKind::Antelope, "actions" | "db_ops") => {
+            &["transaction_status", "transaction_success"]
+        }
+        (ChainKind::Near, "receipt_actions" | "execution_logs") => &["receipt_status"],
+        _ => &[],
+    }
+}
+
+/// The schema without the #550 outcome columns, which must be its last fields.
+fn without_outcome_columns_550(kind: ChainKind, table: &str, schema: &Schema) -> Schema {
+    let added = outcome_columns_550(kind, table);
+    let fields = schema.fields();
+    let kept = fields.len() - added.len();
+    let trailing: Vec<&str> = fields[kept..]
+        .iter()
+        .map(|field| field.name().as_str())
+        .collect();
+    assert_eq!(
+        trailing, added,
+        "{kind} {table}: #550 columns are appended last"
+    );
+    Schema::new_with_metadata(fields[..kept].to_vec(), schema.metadata().clone())
+}
+
+fn inventory_lines_with(
+    kind: ChainKind,
+    options: &MapperOptions,
+    mapper: &mut dyn BlockMapper,
+    project: impl Fn(&str, &Schema) -> Schema,
+) -> Vec<String> {
     let context = format!(
         "{}|{:?}|ext={}|votes={}|fork={}|synth={}|failed={}",
         kind.label(),
@@ -505,10 +545,31 @@ fn inventory_lines(
     let mut tables: Vec<_> = batches.iter().collect();
     tables.sort_by(|left, right| left.0.cmp(right.0));
     for (table, batch) in tables {
-        let schema: &Schema = &batch.schema();
+        let schema = project(table, &batch.schema());
         lines.push(format!("{context}|{table}|{schema:?}"));
     }
     lines
+}
+
+fn schema_digest(project: impl Fn(ChainKind, &str, &Schema) -> Schema) -> String {
+    let mut hasher = Sha256::new();
+    for kind in ChainKind::ALL {
+        for options in option_matrix() {
+            let mut mapper = kind.create_mapper(options.clone());
+            let lines = inventory_lines_with(kind, &options, mapper.as_mut(), |table, schema| {
+                project(kind, table, schema)
+            });
+            for line in lines {
+                hasher.update(line.as_bytes());
+                hasher.update(b"\n");
+            }
+        }
+    }
+    hasher
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
 }
 
 #[test]
@@ -545,28 +606,29 @@ fn create_mapper_matches_the_legacy_constructor_dispatch_for_every_option() {
 }
 
 /// SHA-256 over every family's table inventory and complete Arrow schemas for
-/// all 160 option/encoding combinations. The pinned value was produced by the
-/// same loop over the pre-#526 `create_mapper` on origin/main `9372f99`, so it
-/// also covers the shared fork-step and enum helpers moved into `traits.rs`.
+/// all 160 option/encoding combinations. Update the pinned value only for an
+/// intentional schema change, and record that change.
 #[test]
-fn every_mapper_schema_matches_the_pre_526_digest() {
-    let mut hasher = Sha256::new();
-    for kind in ChainKind::ALL {
-        for options in option_matrix() {
-            let mut mapper = kind.create_mapper(options.clone());
-            for line in inventory_lines(kind, &options, mapper.as_mut()) {
-                hasher.update(line.as_bytes());
-                hasher.update(b"\n");
-            }
-        }
-    }
-    let digest: String = hasher
-        .finalize()
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect();
-    assert_eq!(digest, PRE_526_SCHEMA_DIGEST);
+fn every_mapper_schema_matches_the_pinned_digest() {
+    assert_eq!(
+        schema_digest(|_, _, schema| schema.clone()),
+        CURRENT_SCHEMA_DIGEST
+    );
 }
 
-const PRE_526_SCHEMA_DIGEST: &str =
+/// Without the columns #550 appended, every schema of every family and option
+/// is exactly the pre-#550 schema. That pinned value was produced by the
+/// pre-#526 `create_mapper` on origin/main `9372f99` and held through #526.
+#[test]
+fn removing_the_550_outcome_columns_restores_the_pre_550_schemas() {
+    assert_eq!(
+        schema_digest(without_outcome_columns_550),
+        PRE_550_SCHEMA_DIGEST
+    );
+}
+
+const CURRENT_SCHEMA_DIGEST: &str =
+    "14283beaab78c6ad4a3473f68f410b5dc45cfb411ca55c401cfee2b367fd871c";
+
+const PRE_550_SCHEMA_DIGEST: &str =
     "68e8859576f696910042452f8815a6e7f9002c9357e4dd2a26edf30c61249dde";

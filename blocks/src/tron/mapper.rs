@@ -31,6 +31,31 @@ fn response_code_text(value: i32) -> &'static str {
         .unwrap_or("UNKNOWN")
 }
 
+/// Execution outcome of a Tron transaction (#550).
+///
+/// The Firehose wrapper `result`/`code` are API response fields: java-tron's
+/// `transaction2Extention` sets them to true/SUCCESS for every included
+/// transaction, so they never report a VM failure. The outcome therefore comes
+/// from `TransactionInfo`: the transaction failed when `result` is not `SUCESS`
+/// (`FAILED`, the value java-tron sets with a runtime error) or its receipt
+/// contract result is anything but `DEFAULT` (non-VM contracts) or `SUCCESS`,
+/// such as `REVERT` or `OUT_OF_ENERGY`. Unknown enum values count as failures.
+/// A false wrapper `result` also counts as a failure, as before. A transaction
+/// without `TransactionInfo` or receipt has no recorded failure.
+pub(crate) fn transaction_success(tx: &tron::Transaction) -> bool {
+    use protocol::transaction::result::ContractResult;
+    tx.result
+        && tx.info.as_ref().is_none_or(|info| {
+            info.result == protocol::transaction_info::Code::Sucess as i32
+                && info.receipt.as_ref().is_none_or(|receipt| {
+                    matches!(
+                        ContractResult::try_from(receipt.result),
+                        Ok(ContractResult::Default | ContractResult::Success)
+                    )
+                })
+        })
+}
+
 fn contract_type_text(value: i32) -> &'static str {
     protocol::transaction::contract::ContractType::try_from(value)
         .map(|contract_type| contract_type.as_str_name())
@@ -126,7 +151,8 @@ impl TronBlockMapper {
             let first_log_index = block_log_index;
             block_log_index += tx.info.as_ref().map_or(0, |info| info.log.len() as u64);
             // Preserve original indices, including gaps from excluded transactions.
-            if !self.include_failed_transactions && !tx.result {
+            let success = transaction_success(tx);
+            if !self.include_failed_transactions && !success {
                 continue;
             }
             self.map_transaction(
@@ -134,6 +160,7 @@ impl TronBlockMapper {
                 transaction_index as u32,
                 first_log_index,
                 tx,
+                success,
                 &decoded[transaction_index],
                 identity,
                 fork_step,
@@ -147,6 +174,7 @@ impl TronBlockMapper {
         transaction_index: u32,
         first_log_index: u64,
         tx: &tron::Transaction,
+        transaction_success: bool,
         decoded: &[super::contracts::DecodedContract],
         identity: &PreparedIdentity,
         fork_step: Option<&str>,
@@ -210,9 +238,15 @@ impl TronBlockMapper {
             self.transactions.receipt_result.append_null();
         }
         if let Some(info) = info {
-            self.transactions
-                .contract_address
-                .append_value(&info.contract_address);
+            // Smart-contract creations and calls carry the contract address;
+            // other contract types leave it empty, which is written as NULL (#550).
+            if info.contract_address.is_empty() {
+                self.transactions.contract_address.append_null();
+            } else {
+                self.transactions
+                    .contract_address
+                    .append_value(&info.contract_address);
+            }
             self.transactions
                 .res_message
                 .append_value(&info.res_message);
@@ -221,6 +255,9 @@ impl TronBlockMapper {
             self.transactions.res_message.append_null();
         }
         append_fork_step(&mut self.transactions.fork_step, fork_step);
+        self.transactions
+            .transaction_success
+            .append_value(transaction_success);
 
         for (contract_index, (contract, decoded)) in tx.contracts.iter().zip(decoded).enumerate() {
             let row = &mut self.contracts;
@@ -269,6 +306,7 @@ impl TronBlockMapper {
             row.call_token_value.append_option(decoded.call_token_value);
             row.token_id.append_option(decoded.token_id);
             append_fork_step(&mut row.fork_step, fork_step);
+            row.transaction_success.append_value(transaction_success);
         }
 
         // Map logs from TransactionInfo
@@ -307,6 +345,9 @@ impl TronBlockMapper {
                 }
                 self.logs.data.append_value(&log.data);
                 append_fork_step(&mut self.logs.fork_step, fork_step);
+                self.logs
+                    .transaction_success
+                    .append_value(transaction_success);
             }
 
             // Map internal transactions from TransactionInfo
@@ -336,6 +377,9 @@ impl TronBlockMapper {
                     .rejected
                     .append_value(itx.rejected);
                 append_fork_step(&mut self.internal_transactions.fork_step, fork_step);
+                self.internal_transactions
+                    .transaction_success
+                    .append_value(transaction_success);
                 for (call_value_index, value) in itx.call_value_info.iter().enumerate() {
                     let row = &mut self.internal_call_values;
                     row.canonical.append(identity);
@@ -346,6 +390,7 @@ impl TronBlockMapper {
                     row.call_value.append_value(value.call_value);
                     row.token_id.append_value(&value.token_id);
                     append_fork_step(&mut row.fork_step, fork_step);
+                    row.transaction_success.append_value(transaction_success);
                 }
             }
         }
@@ -367,7 +412,7 @@ fn preflight(
                 .checked_add(info.log.len() as u64)
                 .ok_or_else(|| anyhow::anyhow!("Tron block log index overflow"))?;
         }
-        if !include_failed && !tx.result {
+        if !include_failed && !transaction_success(tx) {
             decoded.push(Vec::new());
             continue;
         }
@@ -506,7 +551,8 @@ impl BlockMapper for TronBlockMapper {
             + est_i64(&self.transactions.receipt_energy_penalty_total)
             + self.transactions.contract_address.estimated_bytes()
             + est_bin(&self.transactions.res_message)
-            + est_opt_str(&self.transactions.fork_step);
+            + est_opt_str(&self.transactions.fork_step)
+            + est_bool(&self.transactions.transaction_success);
         let logs = self.logs.canonical.estimated_bytes()
             + est_u64(&self.logs.block_number)
             + self.logs.tx_hash.estimated_bytes()
@@ -519,7 +565,8 @@ impl BlockMapper for TronBlockMapper {
             + self.logs.data.estimated_bytes()
             + est_u32(&self.logs.transaction_index)
             + est_u64(&self.logs.block_log_index)
-            + est_opt_str(&self.logs.fork_step);
+            + est_opt_str(&self.logs.fork_step)
+            + est_bool(&self.logs.transaction_success);
         let internal_transactions = self.internal_transactions.canonical.estimated_bytes()
             + est_u64(&self.internal_transactions.block_number)
             + self.internal_transactions.tx_hash.estimated_bytes()
@@ -533,7 +580,8 @@ impl BlockMapper for TronBlockMapper {
             + est_str(&self.internal_transactions.note)
             + est_bool(&self.internal_transactions.rejected)
             + est_u32(&self.internal_transactions.transaction_index)
-            + est_opt_str(&self.internal_transactions.fork_step);
+            + est_opt_str(&self.internal_transactions.fork_step)
+            + est_bool(&self.internal_transactions.transaction_success);
         [
             ("blocks", blocks),
             ("transactions", transactions),
@@ -629,6 +677,8 @@ struct TransactionsBuilder {
     contract_address: BytesColumn,
     res_message: BinaryBuilder,
     fork_step: Option<StringBuilder>,
+    /// Parent transaction outcome (#550).
+    transaction_success: BooleanBuilder,
 }
 
 impl TransactionsBuilder {
@@ -658,6 +708,7 @@ impl TransactionsBuilder {
             contract_address: BytesColumn::new(encoding),
             res_message: BinaryBuilder::new(),
             fork_step: fork_step_builder(include_fork_step),
+            transaction_success: BooleanBuilder::new(),
         }
     }
 
@@ -687,6 +738,7 @@ impl TransactionsBuilder {
             Arc::new(self.res_message.finish()) as Arc<dyn Array>,
         ]);
         finish_fork_step(&mut self.fork_step, &mut columns);
+        columns.push(Arc::new(self.transaction_success.finish()) as Arc<dyn Array>);
         Ok(RecordBatch::try_new(Arc::new(schema.clone()), columns)?)
     }
 }
@@ -705,6 +757,8 @@ struct LogsBuilder {
     transaction_index: UInt32Builder,
     block_log_index: UInt64Builder,
     fork_step: Option<StringBuilder>,
+    /// Parent transaction outcome (#550).
+    transaction_success: BooleanBuilder,
 }
 
 impl LogsBuilder {
@@ -724,6 +778,7 @@ impl LogsBuilder {
             transaction_index: UInt32Builder::new(),
             block_log_index: UInt64Builder::new(),
             fork_step: fork_step_builder(include_fork_step),
+            transaction_success: BooleanBuilder::new(),
         }
     }
 
@@ -743,6 +798,7 @@ impl LogsBuilder {
             Arc::new(self.block_log_index.finish()) as Arc<dyn Array>,
         ]);
         finish_fork_step(&mut self.fork_step, &mut columns);
+        columns.push(Arc::new(self.transaction_success.finish()) as Arc<dyn Array>);
         Ok(RecordBatch::try_new(Arc::new(schema.clone()), columns)?)
     }
 }
@@ -759,6 +815,8 @@ struct InternalTransactionsBuilder {
     rejected: BooleanBuilder,
     transaction_index: UInt32Builder,
     fork_step: Option<StringBuilder>,
+    /// Parent transaction outcome (#550).
+    transaction_success: BooleanBuilder,
 }
 
 impl InternalTransactionsBuilder {
@@ -776,6 +834,7 @@ impl InternalTransactionsBuilder {
             rejected: BooleanBuilder::new(),
             transaction_index: UInt32Builder::new(),
             fork_step: fork_step_builder(include_fork_step),
+            transaction_success: BooleanBuilder::new(),
         }
     }
 
@@ -793,6 +852,7 @@ impl InternalTransactionsBuilder {
             Arc::new(self.transaction_index.finish()) as Arc<dyn Array>,
         ]);
         finish_fork_step(&mut self.fork_step, &mut columns);
+        columns.push(Arc::new(self.transaction_success.finish()) as Arc<dyn Array>);
         Ok(RecordBatch::try_new(Arc::new(schema.clone()), columns)?)
     }
 }
@@ -1151,6 +1211,8 @@ struct ContractsBuilder {
     call_token_value: Int64Builder,
     token_id: Int64Builder,
     fork_step: Option<StringBuilder>,
+    /// Parent transaction outcome (#550).
+    transaction_success: BooleanBuilder,
 }
 impl ContractsBuilder {
     fn new(include_fork_step: bool, encoding: &EncodeBytes) -> Self {
@@ -1174,6 +1236,7 @@ impl ContractsBuilder {
             call_token_value: Int64Builder::new(),
             token_id: Int64Builder::new(),
             fork_step: fork_step_builder(include_fork_step),
+            transaction_success: BooleanBuilder::new(),
         }
     }
     fn finish(&mut self, schema: &Schema) -> anyhow::Result<RecordBatch> {
@@ -1198,6 +1261,7 @@ impl ContractsBuilder {
             Arc::new(self.token_id.finish()) as Arc<dyn Array>,
         ]);
         finish_fork_step(&mut self.fork_step, &mut columns);
+        columns.push(Arc::new(self.transaction_success.finish()) as Arc<dyn Array>);
         Ok(RecordBatch::try_new(Arc::new(schema.clone()), columns)?)
     }
     fn estimated_bytes(&self) -> usize {
@@ -1220,6 +1284,7 @@ impl ContractsBuilder {
             + est_i64(&self.call_token_value)
             + est_i64(&self.token_id)
             + est_opt_str(&self.fork_step)
+            + est_bool(&self.transaction_success)
     }
 }
 
@@ -1232,6 +1297,8 @@ struct InternalCallValuesBuilder {
     call_value: Int64Builder,
     token_id: StringBuilder,
     fork_step: Option<StringBuilder>,
+    /// Parent transaction outcome (#550).
+    transaction_success: BooleanBuilder,
 }
 impl InternalCallValuesBuilder {
     fn new(include_fork_step: bool, encoding: &EncodeBytes) -> Self {
@@ -1244,6 +1311,7 @@ impl InternalCallValuesBuilder {
             call_value: Int64Builder::new(),
             token_id: StringBuilder::new(),
             fork_step: fork_step_builder(include_fork_step),
+            transaction_success: BooleanBuilder::new(),
         }
     }
     fn finish(&mut self, schema: &Schema) -> anyhow::Result<RecordBatch> {
@@ -1257,6 +1325,7 @@ impl InternalCallValuesBuilder {
             Arc::new(self.token_id.finish()) as Arc<dyn Array>,
         ]);
         finish_fork_step(&mut self.fork_step, &mut columns);
+        columns.push(Arc::new(self.transaction_success.finish()) as Arc<dyn Array>);
         Ok(RecordBatch::try_new(Arc::new(schema.clone()), columns)?)
     }
     fn estimated_bytes(&self) -> usize {
@@ -1268,5 +1337,6 @@ impl InternalCallValuesBuilder {
             + est_i64(&self.call_value)
             + est_str(&self.token_id)
             + est_opt_str(&self.fork_step)
+            + est_bool(&self.transaction_success)
     }
 }

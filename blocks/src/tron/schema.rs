@@ -60,6 +60,8 @@ pub fn transactions_schema(include_fork_step: bool, encoding: &EncodeBytes) -> S
         Field::new("res_message", DataType::Binary, true),
     ]);
     push_fork_step_field(&mut fields, include_fork_step);
+    // Parent transaction outcome (#550), after every earlier column.
+    fields.push(Field::new("transaction_success", DataType::Boolean, false));
     Schema::new(fields)
 }
 
@@ -81,6 +83,8 @@ pub fn logs_schema(include_fork_step: bool, encoding: &EncodeBytes) -> Schema {
         Field::new("block_log_index", DataType::UInt64, false),
     ]);
     push_fork_step_field(&mut fields, include_fork_step);
+    // Parent transaction outcome (#550), after every earlier column.
+    fields.push(Field::new("transaction_success", DataType::Boolean, false));
     Schema::new(fields)
 }
 
@@ -100,6 +104,8 @@ pub fn internal_transactions_schema(include_fork_step: bool, encoding: &EncodeBy
         Field::new("transaction_index", DataType::UInt32, false),
     ]);
     push_fork_step_field(&mut fields, include_fork_step);
+    // Parent transaction outcome (#550), after every earlier column.
+    fields.push(Field::new("transaction_success", DataType::Boolean, false));
     Schema::new(fields)
 }
 
@@ -138,6 +144,8 @@ pub fn contracts_schema(include_fork_step: bool, encoding: &EncodeBytes) -> Sche
         Field::new("token_id", DataType::Int64, true),
     ]);
     push_fork_step_field(&mut fields, include_fork_step);
+    // Parent transaction outcome (#550), after every earlier column.
+    fields.push(Field::new("transaction_success", DataType::Boolean, false));
     Schema::new(fields)
 }
 
@@ -156,5 +164,7 @@ pub fn internal_call_values_schema(include_fork_step: bool, encoding: &EncodeByt
         Field::new("token_id", DataType::Utf8, false),
     ]);
     push_fork_step_field(&mut fields, include_fork_step);
+    // Parent transaction outcome (#550), after every earlier column.
+    fields.push(Field::new("transaction_success", DataType::Boolean, false));
     Schema::new(fields)
 }

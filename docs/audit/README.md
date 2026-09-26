@@ -34,7 +34,8 @@ lifecycle state; a local implementation or passing test alone is not closure.
 - [#501: conservative Solana vote classification](501-solana-vote-classification.md)
 - [#502: explicit Solana instruction positions](502-solana-instruction-order.md)
 - [#503: Binary Solana payloads and account-index lists](503-solana-binary-payloads.md)
-- [#550: Solana parent transaction outcome context (partial; issue remains open)](550-solana-execution-context.md)
+- [#550: Solana parent transaction outcome context](550-solana-execution-context.md)
+- [#550: Tron, Antelope and NEAR failed-transaction rules and qualification](550-non-evm-failed-transactions.md)
 - [#473: responsive shutdown](473-responsive-shutdown.md)
 - [#474: append-only non-final streams and query limits](474-non-final-streams.md)
 - [#477: single-partition writer contract](477-writer-partition-contract.md)
@@ -109,6 +110,7 @@ lifecycle state; a local implementation or passing test alone is not closure.
 | [#523](https://github.com/pinax-network/firehose-parquet/issues/523) | [#609](https://github.com/pinax-network/firehose-parquet/pull/609) | Merged as `e4f990f` on 2026-09-25; issue closure verified. 1,054 workspace tests, 128 current-main integration tests, exact-result synthetic delete/read benchmarks, independent review and CI passed. |
 
 | [#527](https://github.com/pinax-network/firehose-parquet/issues/527) | [#610](https://github.com/pinax-network/firehose-parquet/pull/610) | Merged as `270af16` on 2026-09-25; issue closure verified. All 80 AWS option definitions unchanged, 1,039 workspace tests, 44 final S3 integration checks, independent review and CI passed. |
+| [#506](https://github.com/pinax-network/firehose-parquet/issues/506) | [#559](https://github.com/pinax-network/firehose-parquet/pull/559) | Merged as `c6db643` on 2026-09-25; issue closure verified. 1,073 workspace tests on integrated main `81f5b79`, a three-request NearData/archival-RPC capture of block 150000000, a 20-case independent offline comparison and PR CI passed. State changes remain with #507. |
 | [#509](https://github.com/pinax-network/firehose-parquet/issues/509) | [#595](https://github.com/pinax-network/firehose-parquet/pull/595) | Merged as `5de4f16` on 2026-09-25; issue closure verified. 1,067 workspace tests, two bounded native RPC reads, 377,560 raw-source value checks, 136,720 legacy-value checks, physical schema checks, independent review and CI passed. RPC-backed mapper qualification only; Firehose transport and #550 remain separate. |
 | [#525](https://github.com/pinax-network/firehose-parquet/issues/525) | [#611](https://github.com/pinax-network/firehose-parquet/pull/611) | Merged as `ab0888e` on 2026-09-25; issue closure verified. 1,058 workspace tests, final main integration, exact 13-part/5,050-row CLI replay and durable-state parity, independent review and CI passed. |
 

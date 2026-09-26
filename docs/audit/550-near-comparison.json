@@ -1,0 +1,134 @@
+{
+  "cases": {
+    "base58-failedfalse-forkfalse": {
+      "status_values": 124,
+      "legacy_values": 4084,
+      "rows": 224,
+      "failure_rows": 1
+    },
+    "base58-failedfalse-forktrue": {
+      "status_values": 124,
+      "legacy_values": 4308,
+      "rows": 224,
+      "failure_rows": 1
+    },
+    "base58-failedtrue-forkfalse": {
+      "status_values": 124,
+      "legacy_values": 4084,
+      "rows": 224,
+      "failure_rows": 1
+    },
+    "base58-failedtrue-forktrue": {
+      "status_values": 124,
+      "legacy_values": 4308,
+      "rows": 224,
+      "failure_rows": 1
+    },
+    "binary-failedfalse-forkfalse": {
+      "status_values": 124,
+      "legacy_values": 4084,
+      "rows": 224,
+      "failure_rows": 1
+    },
+    "binary-failedfalse-forktrue": {
+      "status_values": 124,
+      "legacy_values": 4308,
+      "rows": 224,
+      "failure_rows": 1
+    },
+    "binary-failedtrue-forkfalse": {
+      "status_values": 124,
+      "legacy_values": 4084,
+      "rows": 224,
+      "failure_rows": 1
+    },
+    "binary-failedtrue-forktrue": {
+      "status_values": 124,
+      "legacy_values": 4308,
+      "rows": 224,
+      "failure_rows": 1
+    },
+    "hex-failedfalse-forkfalse": {
+      "status_values": 124,
+      "legacy_values": 4084,
+      "rows": 224,
+      "failure_rows": 1
+    },
+    "hex-failedfalse-forktrue": {
+      "status_values": 124,
+      "legacy_values": 4308,
+      "rows": 224,
+      "failure_rows": 1
+    },
+    "hex-failedtrue-forkfalse": {
+      "status_values": 124,
+      "legacy_values": 4084,
+      "rows": 224,
+      "failure_rows": 1
+    },
+    "hex-failedtrue-forktrue": {
+      "status_values": 124,
+      "legacy_values": 4308,
+      "rows": 224,
+      "failure_rows": 1
+    },
+    "hex_no_prefix-failedfalse-forkfalse": {
+      "status_values": 124,
+      "legacy_values": 4084,
+      "rows": 224,
+      "failure_rows": 1
+    },
+    "hex_no_prefix-failedfalse-forktrue": {
+      "status_values": 124,
+      "legacy_values": 4308,
+      "rows": 224,
+      "failure_rows": 1
+    },
+    "hex_no_prefix-failedtrue-forkfalse": {
+      "status_values": 124,
+      "legacy_values": 4084,
+      "rows": 224,
+      "failure_rows": 1
+    },
+    "hex_no_prefix-failedtrue-forktrue": {
+      "status_values": 124,
+      "legacy_values": 4308,
+      "rows": 224,
+      "failure_rows": 1
+    },
+    "tron_base58-failedfalse-forkfalse": {
+      "status_values": 124,
+      "legacy_values": 4084,
+      "rows": 224,
+      "failure_rows": 1
+    },
+    "tron_base58-failedfalse-forktrue": {
+      "status_values": 124,
+      "legacy_values": 4308,
+      "rows": 224,
+      "failure_rows": 1
+    },
+    "tron_base58-failedtrue-forkfalse": {
+      "status_values": 124,
+      "legacy_values": 4084,
+      "rows": 224,
+      "failure_rows": 1
+    },
+    "tron_base58-failedtrue-forktrue": {
+      "status_values": 124,
+      "legacy_values": 4308,
+      "rows": 224,
+      "failure_rows": 1
+    }
+  },
+  "source_statuses": {
+    "SuccessValue": 68,
+    "SuccessReceiptId": 1,
+    "Failure": 1
+  },
+  "totals": {
+    "status_values": 2480,
+    "legacy_values": 83920,
+    "rows": 4480
+  }
+}

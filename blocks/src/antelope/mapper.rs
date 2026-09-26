@@ -2,13 +2,14 @@ use super::proto::antelope;
 use super::schema;
 use super::text::{append_auth_sequence, append_authorization, append_exception};
 use arrow::array::*;
-use arrow::datatypes::Schema;
+use arrow::datatypes::{Int32Type, Schema};
 use arrow::record_batch::RecordBatch;
 use firehose_parquet::encode::{BytesColumn, EncodeBytes};
 use firehose_parquet::traits::{
     append_fork_step, decode_id_bytes, est_bool, est_i64, est_opt_str, est_str, est_ts_ms, est_u32,
-    est_u64, finish_fork_step, fork_step_builder, strip_enum_prefix, timestamp_millis,
-    BlockIdentity, BlockMapper, CanonicalBuilder, PreparedIdentity,
+    est_u64, estimated_dictionary_index_bytes, finish_fork_step, fork_step_builder,
+    strip_enum_prefix, timestamp_millis, BlockIdentity, BlockMapper, CanonicalBuilder,
+    PreparedIdentity,
 };
 use prost::Message;
 use std::collections::HashMap;
@@ -18,6 +19,25 @@ fn transaction_status_text(value: i32) -> &'static str {
     antelope::TransactionStatus::try_from(value)
         .map(|status| strip_enum_prefix(status.as_str_name(), "TRANSACTIONSTATUS_"))
         .unwrap_or("UNKNOWN")
+}
+
+/// Whether a transaction trace's effects persisted (#550).
+///
+/// `EXECUTED` and `DELAYED` (scheduled for later execution) traces succeed. For a
+/// failed deferred transaction the producer emits two traces with `SOFTFAIL`: the
+/// failed deferred trace, which carries the exception and whose operations the
+/// producer already reverted, and the `onerror` handler trace, which ran without
+/// an exception and persisted. `HARDFAIL` (no or a failed handler), `EXPIRED`
+/// and statuses without an execution fail.
+pub(crate) fn transaction_success(trace: &antelope::TransactionTrace) -> bool {
+    use antelope::TransactionStatus as Status;
+    trace.exception.is_none()
+        && matches!(
+            Status::try_from(trace.receipt.as_ref().map_or(0, |receipt| receipt.status)),
+            Ok(Status::TransactionstatusExecuted
+                | Status::TransactionstatusSoftfail
+                | Status::TransactionstatusDelayed)
+        )
 }
 
 fn db_op_operation_text(value: i32) -> &'static str {
@@ -36,6 +56,13 @@ fn append_optional_string(builder: &mut StringBuilder, value: Option<&str>) {
     } else {
         builder.append_null();
     }
+}
+
+/// Parent transaction outcome copied onto its action and database rows (#550).
+#[derive(Clone, Copy)]
+struct TransactionOutcome {
+    status: &'static str,
+    success: bool,
 }
 
 pub struct AntelopeBlockMapper {
@@ -87,10 +114,7 @@ impl AntelopeBlockMapper {
         };
         let traces = traces
             .iter()
-            .filter(|trace| {
-                self.include_failed_transactions
-                    || trace.receipt.as_ref().map(|r| r.status).unwrap_or(0) == 1
-            })
+            .filter(|trace| self.include_failed_transactions || transaction_success(trace))
             .map(|trace| {
                 if let Some(last) = trace.db_ops.len().checked_sub(1) {
                     u32::try_from(last)
@@ -140,26 +164,36 @@ impl AntelopeBlockMapper {
         fork_step: Option<&str>,
     ) {
         let receipt = trace.receipt.as_ref();
+        let outcome = TransactionOutcome {
+            status: transaction_status_text(receipt.map(|r| r.status).unwrap_or(0)),
+            success: transaction_success(trace),
+        };
 
         // transactions table
         self.transactions.canonical.append(identity);
         self.transactions.tx_hash.append_value(&trace.id);
         self.transactions.index.append_value(trace.index);
-        self.transactions
-            .status
-            .append_value(transaction_status_text(
-                receipt.map(|r| r.status).unwrap_or(0),
-            ));
+        self.transactions.status.append_value(outcome.status);
         self.transactions
             .cpu_usage_us
             .append_value(receipt.map(|r| r.cpu_usage_micro_seconds).unwrap_or(0));
         self.transactions.net_usage.append_value(trace.net_usage);
         self.transactions.elapsed.append_value(trace.elapsed);
         append_fork_step(&mut self.transactions.fork_step, fork_step);
+        self.transactions
+            .transaction_success
+            .append_value(outcome.success);
 
         // actions table
         for (action_trace, block_time) in trace.action_traces.iter().zip(action_times) {
-            self.map_action(action_trace, *block_time, &trace.id, identity, fork_step);
+            self.map_action(
+                action_trace,
+                *block_time,
+                &trace.id,
+                outcome,
+                identity,
+                fork_step,
+            );
         }
 
         // db_ops table (always included for Antelope output)
@@ -173,6 +207,7 @@ impl AntelopeBlockMapper {
                     &trace.id,
                     trace.index,
                     index,
+                    outcome,
                     identity,
                     fork_step,
                 );
@@ -185,6 +220,7 @@ impl AntelopeBlockMapper {
         action_trace: &antelope::ActionTrace,
         block_time: Option<i64>,
         tx_hash: &str,
+        outcome: TransactionOutcome,
         identity: &PreparedIdentity,
         fork_step: Option<&str>,
     ) {
@@ -284,6 +320,10 @@ impl AntelopeBlockMapper {
             .receipt_abi_sequence
             .append_value(receipt.map(|r| r.abi_sequence).unwrap_or(0));
         append_fork_step(&mut self.actions.fork_step, fork_step);
+        self.actions.transaction_status.append_value(outcome.status);
+        self.actions
+            .transaction_success
+            .append_value(outcome.success);
     }
 
     fn map_db_op(
@@ -292,6 +332,7 @@ impl AntelopeBlockMapper {
         tx_hash: &str,
         tx_index: u64,
         db_op_index: u32,
+        outcome: TransactionOutcome,
         identity: &PreparedIdentity,
         fork_step: Option<&str>,
     ) {
@@ -328,6 +369,8 @@ impl AntelopeBlockMapper {
             optional_string_value(&db_op.new_data_json),
         );
         append_fork_step(&mut db_ops.fork_step, fork_step);
+        db_ops.transaction_status.append_value(outcome.status);
+        db_ops.transaction_success.append_value(outcome.success);
     }
 }
 
@@ -431,7 +474,8 @@ impl BlockMapper for AntelopeBlockMapper {
             + est_u32(&self.transactions.cpu_usage_us)
             + est_u64(&self.transactions.net_usage)
             + est_i64(&self.transactions.elapsed)
-            + est_opt_str(&self.transactions.fork_step);
+            + est_opt_str(&self.transactions.fork_step)
+            + est_bool(&self.transactions.transaction_success);
         let actions = self.actions.canonical.estimated_bytes()
             + est_str(&self.actions.tx_hash)
             + est_u32(&self.actions.action_ordinal)
@@ -462,7 +506,9 @@ impl BlockMapper for AntelopeBlockMapper {
             + est_u64(&self.actions.receipt_recv_sequence)
             + est_u64(&self.actions.receipt_code_sequence)
             + est_u64(&self.actions.receipt_abi_sequence)
-            + est_opt_str(&self.actions.fork_step);
+            + est_opt_str(&self.actions.fork_step)
+            + estimated_dictionary_index_bytes(self.actions.transaction_status.len())
+            + est_bool(&self.actions.transaction_success);
         let mut tables: Vec<(&str, usize)> = vec![
             ("blocks", blocks),
             ("transactions", transactions),
@@ -487,7 +533,9 @@ impl BlockMapper for AntelopeBlockMapper {
                     + est_str(&db_ops.tx_hash)
                     + est_u64(&db_ops.tx_index)
                     + est_u32(&db_ops.db_op_index)
-                    + est_opt_str(&db_ops.fork_step),
+                    + est_opt_str(&db_ops.fork_step)
+                    + estimated_dictionary_index_bytes(db_ops.transaction_status.len())
+                    + est_bool(&db_ops.transaction_success),
             ));
         }
         tables.into_iter().collect()
@@ -548,6 +596,8 @@ struct TransactionsBuilder {
     net_usage: UInt64Builder,
     elapsed: Int64Builder,
     fork_step: Option<StringBuilder>,
+    /// Whether the parent transaction's effects persisted (#550).
+    transaction_success: BooleanBuilder,
 }
 
 impl TransactionsBuilder {
@@ -561,6 +611,7 @@ impl TransactionsBuilder {
             net_usage: UInt64Builder::new(),
             elapsed: Int64Builder::new(),
             fork_step: fork_step_builder(include_fork_step),
+            transaction_success: BooleanBuilder::new(),
         }
     }
 
@@ -575,6 +626,7 @@ impl TransactionsBuilder {
             Arc::new(self.elapsed.finish()) as Arc<dyn Array>,
         ]);
         finish_fork_step(&mut self.fork_step, &mut columns);
+        columns.push(Arc::new(self.transaction_success.finish()) as Arc<dyn Array>);
         Ok(RecordBatch::try_new(Arc::new(schema.clone()), columns)?)
     }
 }
@@ -611,6 +663,10 @@ struct ActionsBuilder {
     receipt_code_sequence: UInt64Builder,
     receipt_abi_sequence: UInt64Builder,
     fork_step: Option<StringBuilder>,
+    /// Parent transaction receipt status (#550).
+    transaction_status: StringDictionaryBuilder<Int32Type>,
+    /// Whether the parent transaction's effects persisted (#550).
+    transaction_success: BooleanBuilder,
 }
 
 impl ActionsBuilder {
@@ -647,6 +703,8 @@ impl ActionsBuilder {
             receipt_code_sequence: UInt64Builder::new(),
             receipt_abi_sequence: UInt64Builder::new(),
             fork_step: fork_step_builder(include_fork_step),
+            transaction_status: StringDictionaryBuilder::new(),
+            transaction_success: BooleanBuilder::new(),
         }
     }
 
@@ -684,6 +742,8 @@ impl ActionsBuilder {
             Arc::new(self.receipt_abi_sequence.finish()) as Arc<dyn Array>,
         ]);
         finish_fork_step(&mut self.fork_step, &mut columns);
+        columns.push(Arc::new(self.transaction_status.finish()) as Arc<dyn Array>);
+        columns.push(Arc::new(self.transaction_success.finish()) as Arc<dyn Array>);
         Ok(RecordBatch::try_new(Arc::new(schema.clone()), columns)?)
     }
 }
@@ -706,6 +766,10 @@ struct DbOpsBuilder {
     tx_index: UInt64Builder,
     db_op_index: UInt32Builder,
     fork_step: Option<StringBuilder>,
+    /// Parent transaction receipt status (#550).
+    transaction_status: StringDictionaryBuilder<Int32Type>,
+    /// Whether the parent transaction's effects persisted (#550).
+    transaction_success: BooleanBuilder,
 }
 
 impl DbOpsBuilder {
@@ -728,6 +792,8 @@ impl DbOpsBuilder {
             tx_index: UInt64Builder::new(),
             db_op_index: UInt32Builder::new(),
             fork_step: fork_step_builder(include_fork_step),
+            transaction_status: StringDictionaryBuilder::new(),
+            transaction_success: BooleanBuilder::new(),
         }
     }
 
@@ -751,6 +817,8 @@ impl DbOpsBuilder {
             Arc::new(self.db_op_index.finish()) as Arc<dyn Array>,
         ]);
         finish_fork_step(&mut self.fork_step, &mut columns);
+        columns.push(Arc::new(self.transaction_status.finish()) as Arc<dyn Array>);
+        columns.push(Arc::new(self.transaction_success.finish()) as Arc<dyn Array>);
         Ok(RecordBatch::try_new(Arc::new(schema.clone()), columns)?)
     }
 }
@@ -979,7 +1047,9 @@ pub(crate) mod tests {
         let mut failed = first.clone();
         failed.id = "failed".into();
         failed.index = 8;
-        failed.receipt.as_mut().unwrap().status = 2;
+        // A hard-failed deferred transaction (#550): not selected by default.
+        failed.receipt.as_mut().unwrap().status = 3;
+        failed.exception = Some(antelope::Exception::default());
         let mut last = first.clone();
         last.id = "last".into();
         last.index = u64::MAX;
@@ -1039,7 +1109,7 @@ pub(crate) mod tests {
                         let selected: Vec<_> = block
                             .filtered_transaction_traces
                             .iter()
-                            .filter(|t| include_failed || t.receipt.as_ref().unwrap().status == 1)
+                            .filter(|t| include_failed || transaction_success(t))
                             .collect();
                         let mut row = 0;
                         for trace in selected {
@@ -1053,9 +1123,16 @@ pub(crate) mod tests {
                         }
                         assert_eq!(ops.num_rows(), row);
                         assert_eq!(labels.value(1), "UNKNOWN");
+                        let schema = ops.schema();
+                        let names: Vec<_> =
+                            schema.fields().iter().map(|field| field.name()).collect();
                         assert_eq!(
-                            ops.schema().fields().last().unwrap().name(),
-                            if fork { "fork_step" } else { "db_op_index" }
+                            names[names.len() - 3..],
+                            [
+                                if fork { "fork_step" } else { "db_op_index" },
+                                "transaction_status",
+                                "transaction_success",
+                            ]
                         );
                         let actions = &batches["actions"];
                         let row = actions.num_rows() - 2;
@@ -1369,6 +1446,8 @@ pub(crate) mod tests {
                 "receipt_recv_sequence",
                 "receipt_code_sequence",
                 "receipt_abi_sequence",
+                "transaction_status",
+                "transaction_success",
             ]
         );
         assert_eq!(
@@ -1412,6 +1491,8 @@ pub(crate) mod tests {
                 "tx_hash",
                 "tx_index",
                 "db_op_index",
+                "transaction_status",
+                "transaction_success",
             ]
         );
         assert_eq!(

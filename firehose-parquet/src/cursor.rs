@@ -107,7 +107,9 @@ fn block_type_default_bytes_encoding(
 ) -> Option<EncodeBytes> {
     match block_type {
         "evm" if tron_style_evm_profile => Some(EncodeBytes::TronBase58),
-        "evm" | "bitcoin" | "antelope" | "cosmos" | "beacon" => Some(EncodeBytes::Hex),
+        "evm" | "bitcoin" | "cosmos" | "beacon" => Some(EncodeBytes::Hex),
+        // Antelope output has always used unprefixed hex (`ChainProfile`).
+        "antelope" => Some(EncodeBytes::HexNoPrefix),
         "solana" | "near" => Some(EncodeBytes::Base58),
         "tron" => Some(EncodeBytes::TronBase58),
         _ => None,
@@ -1523,6 +1525,37 @@ mod tests {
         };
 
         assert!(state.validate_params(&current).is_empty());
+    }
+
+    /// A legacy Antelope `auto` cursor resolves to the unprefixed hex that
+    /// Antelope output actually uses (#550).
+    #[test]
+    fn test_legacy_auto_bytes_encoding_resolves_antelope_to_hex_no_prefix() {
+        let state = |bytes_encoding: &str| CursorState {
+            file_metadata: metadata_with_entries(
+                &[
+                    ("firehose-parquet.block_type", "antelope"),
+                    ("firehose-parquet.chain_name", "eos"),
+                    ("firehose-parquet.chain_name_aliases", "eos"),
+                    ("firehose-parquet.block_id_encoding", "hex_no_prefix"),
+                    ("firehose-parquet.bytes_encoding", bytes_encoding),
+                ],
+                &[],
+            ),
+            ..CursorState::default()
+        };
+        assert_eq!(
+            effective_bytes_encoding_label(&state("auto"), "auto"),
+            "hex_no_prefix"
+        );
+        assert!(state("auto")
+            .validate_params(&state("hex_no_prefix"))
+            .is_empty());
+        let mismatches = state("auto").validate_params(&state("hex"));
+        assert!(
+            mismatches.iter().any(|m| m.contains("bytes_encoding")),
+            "{mismatches:?}"
+        );
     }
 
     #[test]
