@@ -77,7 +77,7 @@ The run passes (`fireparq verify` exits 0) when `summary.mismatches` and `summar
 
 `open` partitions are the ones `fireparq build` may still write, decided from the writer frontier (the protected dataset's authoritative ingestion state, else a legacy `cursor.parquet`); the `error` says which rule applied. The last partition of a completed protected request stays `open` unless it is a `block_range` that ends at or before the stop block, because a longer request would append to it. `verify` reads without dataset ownership, so it can run while `build` runs.
 
-Some runs end with an error instead of a report: when a table file of a partition that would be compared or recorded changed while `verify` read it, or a protocol run that writes a report finds a file it read removed or replaced (`the data changed while verify was reading it: ...`), and when the table has an unfinished merge (`cannot verify ...: it has an unfinished merge ...`). Nothing is compared or written in either case; `verify` never recovers data. See "Concurrency and Atomic Writes" in `docs/verifiability-artifact-runbook.md`.
+Some runs end with an error instead of a report: when a table file of a partition that would be compared or recorded changed while `verify` read it, or a protocol run that writes a report finds a file it read removed or replaced (`the data changed while verify was reading it: ...`), and when the table has an unfinished merge or rollup (`cannot verify ...: it has an unfinished merge ...` or `... unfinished rollup ...`). Nothing is compared or written in either case; `verify` never recovers data. See "Concurrency and Atomic Writes" in `docs/verifiability-artifact-runbook.md`.
 
 ## Artifact Location Contract
 

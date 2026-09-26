@@ -236,26 +236,44 @@ The regression runs `verify` three times with a registry, a report named
 `.parquet` inside a partition and a published report inside the table
 directory, and once more through a directory alias. Without the fix it fails.
 
-## 4. `verify` recovered interrupted merges
+## 4. `verify` recovered interrupted merges (and ignored rollups)
 
 Acquiring ownership ran maintenance recovery, which finished or rolled back
 interrupted merges (deleting files) and recovered pending ingestion
 transactions before hashing, with no trace in the report.
 
 **Decision: refuse, do not recover.** A read-only command must not delete data,
-and without ownership it cannot recover safely anyway. When the scanned tree has
-a merge journal (`_fireparq_merge.json`), or the partition of a verified file
-does, `verify` fails before reading any row, whatever the checks:
-`cannot verify <path>: it has an unfinished merge (<journal>). ... run
-`fireparq recovery recover <path>` ... then re-run verify`. The refusal is also
-logged as a warning. The check runs again on the second listing, so a merge
-that starts during the scan is refused too. A pending ingestion transaction is
-not an error: its parts are after the frontier and stay open.
+and without ownership it cannot recover safely anyway. When a merge journal
+(`_fireparq_merge.json`) claims the verified files, `verify` fails before
+reading any row, whatever the checks: `cannot verify <path>: it has an
+unfinished merge (<journal>). ... run `fireparq recovery recover <path>` ...
+then re-run verify`. The refusal is also logged as a warning. The check runs
+again on the second listing, so a merge that starts during the scan is refused
+too. A pending ingestion transaction is not an error: its parts are after the
+frontier and stay open.
 
-The regression crashes a real `merge` after it wrote its output (sources and
-output coexist), then shows that roots and protocol-only runs both refuse with
-the file tree byte-for-byte unchanged, a single-file verify inside the claimed
-partition refuses too, and after `recovery recover` the run records roots.
+#624 added rollup journals (`_fireparq_rollup.json`), one per target partition.
+An interrupted in-place rollup leaves outputs next to sources the same way, so
+`verify` refuses those too, with `... it has an unfinished rollup ...` and the
+rollup's recovery: re-run the same `fireparq rollup` command, which finishes or
+rolls back the interrupted run (`recovery recover` does not handle rollups). A
+rollup journal sits in the coarser target partition and claims the finer source
+partitions below it. So `verify` looks for journals below the verified path,
+and also in every Hive partition directory above it, plus the file's own
+directory for a single file. Locally, one discovery walk finds both journal
+kinds (`LocalPolicy::named_any`). On S3, the listing finds those below and a
+HEAD request checks each partition directory above.
+
+The regressions crash a real `merge` after it wrote its output (sources and
+output coexist). Roots and protocol-only runs both refuse with the file tree
+byte-for-byte unchanged, and so does a single-file verify inside the claimed
+partition. After `recovery recover`, the run records roots. A real in-place
+rollup crashed after its commit (every row twice) is refused for the table,
+for protocol-only, for a source partition below the journal and for one of its
+files, all with the tree unchanged; re-running the rollup lets verify record
+the day. On S3, a rollup journal above the verified prefix is found and
+refused. Removing rollup journals from the refusal, or skipping the ancestor
+check, fails these tests.
 
 ## 5. Stale documentation
 
@@ -275,9 +293,10 @@ partition refuses too, and after `recovery recover` the run records roots.
 This branch builds on it instead of keeping verify-local walkers:
 
 - Local data files come from `collect_local` with the existing
-  `VERIFY_PARQUET` policy. Merge journals come from the existing
-  `merge_journals(JOURNAL_FILE)` policy, the same walk merge uses; it prunes
-  recovery control trees.
+  `VERIFY_PARQUET` policy. Merge and rollup journals come from the journal
+  walk merge uses (it prunes recovery control trees), through a new
+  `LocalPolicy::named_any` that selects both names in one pass. Merge's own
+  calls keep `LocalPolicy::named`.
 - S3 keys come from `list_objects` and are filtered with `relative_key`. The
   scanned listing and the snapshot re-list both use it.
 - Locating the chain root needs only one data file. The new shared helper
@@ -291,16 +310,19 @@ This branch builds on it instead of keeping verify-local walkers:
 
 ## Validation
 
-On the branch rebased onto main `a7d9413` (#620, after #615, #616, #618, #619
-and #622), `cargo fmt --all -- --check` and `cargo test --workspace --locked`
-passed: **1,179 tests, 0 failures, 14 intentional ignores**, with no compiler
-warnings. CI's extra steps also passed locally: the `refresh_evm_golden`
-example test, the `fireparq` build and the bash, zsh and fish completions. The
-focused verify suite has 67 tests (15 row-encoding tests, 22 concurrency tests
-and 30 others). The two schema-contract tests and the live-build integration
-test run in the `blocks` crate, and `first_object` has its own discovery test.
-The schema-contract hashing test also covers the table changes #622 made to
-NEAR, Tron and Antelope. The merge, rollup, truncate and discovery suites pass
+On the branch rebased onto main `355292f` (#626, after #615, #616, #618, #619,
+#620, #622, #623, #624 and #627), `cargo fmt --all -- --check` and
+`cargo test --workspace --locked` passed: **1,211 tests, 0 failures, 14
+intentional ignores**, with no compiler warnings. One earlier run hit a race
+in a #623 CLI test that reads the process cwd while `#[serial]` tests change
+it. The last commit marks that test `#[serial]` as well. CI's extra steps also passed
+locally: the `refresh_evm_golden` example test, the `fireparq` build and the
+bash, zsh and fish completions. The focused verify suite has 70 tests (15
+row-encoding tests, 25 concurrency tests and 30 others). The two
+schema-contract tests and the live-build integration test run in the `blocks`
+crate. `first_object` and `named_any` have their own discovery tests. The
+schema-contract hashing test also covers the table changes #622 made to NEAR,
+Tron and Antelope. The merge, rollup, truncate and discovery suites pass
 unchanged.
 
 ## End-to-end checks
@@ -308,8 +330,8 @@ unchanged.
 All runs used local copies only, absolute paths, and a working directory
 outside the repository with every `S3_BUCKET`/`AWS_*` variable cleared. They
 were repeated with the final release binary after the review fixes, and again
-after the #620 rebase (whose merge engine also produced the crashed merge),
-with the same results. No
+after the #620 and #624 rebases (the crashed merge and rollup came from their
+engines), with the same results. No
 Firehose endpoint or bucket was contacted. The branch release binary was
 compared with the main binary at `9372f99`.
 
@@ -335,3 +357,10 @@ compared with the main binary at `9372f99`.
 - **Concurrent rewrite.** A `gas_changes` part in a closed partition was
   replaced while `verify` read the table. The run failed with `the data changed
   while verify was reading it` and no registry was written.
+- **Interrupted rollup.** An in-place `rollup --delete-source` was aborted with
+  `FIREPARQ_TEST_ROLLUP_CRASH_AT=after-commit`. Its first table,
+  `balance_changes`, then held its day output next to all its minute sources.
+  The main binary's verify recorded 7 partition roots, including rows present
+  twice. The branch refused both the table and a source minute partition below
+  the journal, with the files unchanged. After re-running the same rollup, it
+  recorded the single day partition.
