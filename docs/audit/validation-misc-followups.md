@@ -95,9 +95,10 @@ named for them:
 The policies differ on purpose (ingestion must not sign anonymously; maintenance
 reads keep retries), so they were renamed rather than merged. The old public
 names stay as `#[deprecated]`, `#[doc(hidden)]` aliases, so external callers and
-concurrent lanes keep compiling. `ingest/session.rs` now uses
-`AwsConfig::from(&Config)` instead of its duplicate `aws_config()`. The rollup
-change is limited to the rename.
+concurrent lanes keep compiling. `ingest/session.rs` `aws_config()` no longer
+copies the fields itself; it delegates to `AwsConfig::from(&Config)`. The
+one-line wrapper stays because concurrent ingestion work adds new calls to it.
+The rollup change is limited to the rename.
 
 ### 7. Explicit selectors and non-Pinax hosts (#562)
 

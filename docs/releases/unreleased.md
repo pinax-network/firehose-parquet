@@ -770,8 +770,8 @@ claim. See [equivalence coverage, recovered-work provenance and all measurements
   `s3::build_ingestion_mutation_client` (zero retries, AWS provider-chain
   credentials) and `AwsConfig::build_read_client` (retrying reads, anonymous
   without an access key); rollup's private helper is `build_mutation_store`. The
-  old public names remain as deprecated, hidden aliases. Ingestion reuses
-  `AwsConfig::from(&Config)`. The gRPC receive defaults are single constants
+  old public names remain as deprecated, hidden aliases. Ingestion's
+  `aws_config` delegates to `AwsConfig::from(&Config)` instead of copying fields. The gRPC receive defaults are single constants
   (`config::DEFAULT_GRPC_WINDOW_BYTES`, `config::DEFAULT_GRPC_MAX_MESSAGE_BYTES`).
   The unused public `cli::read_credential_env` and
   `cli::DEFAULT_TIMESTAMP_BACKFILL_BUFFER_LIMIT_BYTES` were removed, and protected

@@ -70,6 +70,11 @@ pub struct MapperSemantics {
     pub tables: BTreeMap<String, Digest>,
 }
 
+/// Session-local spelling of the shared `From<&Config>` conversion.
+pub(crate) fn aws_config(config: &Config) -> AwsConfig {
+    AwsConfig::from(config)
+}
+
 fn descriptor(config: &Config, mapper: MapperSemantics) -> Result<StreamDescriptor> {
     let origin = config
         .start_block
@@ -102,7 +107,7 @@ fn descriptor(config: &Config, mapper: MapperSemantics) -> Result<StreamDescript
         // bootstrap even for a block-number partition. Bind that policy too.
         _ => RoutingPolicy::GenesisLookaheadV1,
     };
-    let aws = AwsConfig::from(config);
+    let aws = aws_config(config);
     let output = config
         .output
         .to_str()
@@ -190,7 +195,7 @@ pub async fn load_authoritative_resume(
     ownership: &DatasetOwnership,
     cursor_override: bool,
 ) -> Result<Option<CursorState>> {
-    let aws = AwsConfig::from(config);
+    let aws = aws_config(config);
     let output = config
         .output
         .to_str()
@@ -232,7 +237,7 @@ impl<'a> IngestionSession<'a> {
             "dry-run cannot open a mutating ingestion session"
         );
         let expected = descriptor(config, mapper)?;
-        let aws = AwsConfig::from(config);
+        let aws = aws_config(config);
         let permit = reserve(&expected.output, ownership)?;
         super::maintenance::validate_ingestion_target(&expected.output, ownership).await?;
         let service = mirror_service(&expected.mirror, &aws)?;
