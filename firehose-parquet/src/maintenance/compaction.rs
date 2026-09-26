@@ -194,22 +194,94 @@ pub(crate) fn describe_schema_mismatch(reference: &Schema, other: &Schema) -> Op
     Some(problems.join("; "))
 }
 
-/// Remembers the schema of the first file in a partition and reports how later files differ.
+/// Footer metadata keys that define what a file's values mean: its chain, the byte and
+/// block-id encodings, vote and failed-transaction coverage, synthetic timestamps, and
+/// the stream mode. Files that disagree on any of them are never combined, even when
+/// their columns match, because the combined file could only carry one of the labels.
+/// A key present in one file and absent in another is a disagreement.
+pub(crate) const VALUE_METADATA_KEYS: &[&str] = &[
+    "firehose-parquet.block_type",
+    "firehose-parquet.chain_name",
+    "firehose-parquet.bytes_encoding",
+    "firehose-parquet.block_id_encoding",
+    "firehose-parquet.with_votes",
+    "firehose-parquet.synthetic_timestamps",
+    "firehose-parquet.synthetic_timestamp_policy",
+    "firehose-parquet.extended",
+    "firehose-parquet.final_blocks_only",
+    "firehose-parquet.include_failed_transactions",
+];
+
+/// Values of [`VALUE_METADATA_KEYS`], in order; `None` when a key is absent.
+fn value_metadata(metadata: Option<&[KeyValue]>) -> Vec<Option<String>> {
+    VALUE_METADATA_KEYS
+        .iter()
+        .map(|key| {
+            metadata
+                .and_then(|kvs| kvs.iter().find(|kv| kv.key == *key))
+                .map(|kv| kv.value.clone().unwrap_or_default())
+        })
+        .collect()
+}
+
+/// Describes each value-defining footer key on which `other` differs from `reference`.
+fn describe_metadata_mismatch(
+    reference: &[Option<String>],
+    other: &[Option<String>],
+) -> Vec<String> {
+    let show = |value: &Option<String>| {
+        value
+            .as_ref()
+            .map_or_else(|| "absent".to_string(), |value| format!("`{value}`"))
+    };
+    VALUE_METADATA_KEYS
+        .iter()
+        .zip(reference.iter().zip(other))
+        .filter(|(_, (expected, found))| expected != found)
+        .map(|(key, (expected, found))| {
+            format!(
+                "file metadata `{key}` is {} instead of {}",
+                show(found),
+                show(expected)
+            )
+        })
+        .collect()
+}
+
+/// Remembers the schema and value-defining footer metadata of the first file in a partition
+/// and reports how later files differ.
 #[derive(Default)]
 pub(crate) struct SchemaCheck {
-    reference: Option<(String, SchemaRef)>,
+    reference: Option<(String, SchemaRef, Vec<Option<String>>)>,
 }
 
 impl SchemaCheck {
-    /// Records the first file's schema. For later files, returns how `schema` differs from it.
-    pub(crate) fn check(&mut self, name: &str, schema: &SchemaRef) -> Option<String> {
+    /// Records the first file's schema and metadata. For later files, returns how their
+    /// columns or value-defining footer metadata differ from it.
+    pub(crate) fn check(
+        &mut self,
+        name: &str,
+        schema: &SchemaRef,
+        metadata: Option<&[KeyValue]>,
+    ) -> Option<String> {
+        let values = value_metadata(metadata);
         match &self.reference {
             None => {
-                self.reference = Some((name.to_string(), Arc::clone(schema)));
+                self.reference = Some((name.to_string(), Arc::clone(schema), values));
                 None
             }
-            Some((reference_name, reference)) => describe_schema_mismatch(reference, schema)
-                .map(|diff| format!("{name} does not match {reference_name}: {diff}")),
+            Some((reference_name, reference, reference_values)) => {
+                let mut problems: Vec<String> = describe_schema_mismatch(reference, schema)
+                    .into_iter()
+                    .collect();
+                problems.extend(describe_metadata_mismatch(reference_values, &values));
+                (!problems.is_empty()).then(|| {
+                    format!(
+                        "{name} does not match {reference_name}: {}",
+                        problems.join("; ")
+                    )
+                })
+            }
         }
     }
 }

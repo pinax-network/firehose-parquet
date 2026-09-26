@@ -77,7 +77,12 @@ fn run<B: Backend>(
         let mut rows = 0usize;
         for source in sources {
             let builder = backend.reader(source, Pass::Validate)?;
-            if let Some(reason) = schema_check.check(&backend.label(source), builder.schema()) {
+            let key_values = builder.metadata().file_metadata().key_value_metadata();
+            if let Some(reason) = schema_check.check(
+                &backend.label(source),
+                builder.schema(),
+                key_values.map(Vec::as_slice),
+            ) {
                 record_schema_mismatch(group_key, reason, &mut schema_mismatches);
                 continue 'groups;
             }

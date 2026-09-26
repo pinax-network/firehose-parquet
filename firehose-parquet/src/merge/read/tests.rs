@@ -206,7 +206,7 @@ fn invalid_later_window_identity_and_size_reservations_fail_before_any_get() {
     listed[1].e_tag = None;
     listed[1].version = None;
     assert!(objects(&client, &listed).is_err());
-    assert!(schemas(&client, &listed).is_err());
+    assert!(footers(&client, &listed).is_err());
     listed[1] = listed[0].clone();
     listed[0].size = WINDOW_BYTES;
     listed[1].size = 1;

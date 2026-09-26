@@ -9,7 +9,7 @@ use futures::{stream, StreamExt, TryStreamExt};
 use object_store::{GetOptions, GetRange, ObjectMeta, ObjectStore, UpdateVersion};
 use parquet::arrow::arrow_reader::{ArrowReaderMetadata, ArrowReaderOptions};
 use parquet::errors::ParquetError;
-use parquet::file::metadata::ParquetMetaDataReader;
+use parquet::file::metadata::{KeyValue, ParquetMetaDataReader};
 use std::ops::Range;
 use std::sync::Arc;
 use std::time::Duration;
@@ -90,14 +90,14 @@ fn validate_window(window: &[ObjectMeta]) -> Result<()> {
     Ok(())
 }
 
-pub(super) fn schemas(
-    client: &Arc<dyn ObjectStore>,
-    window: &[ObjectMeta],
-) -> Result<Vec<SchemaRef>> {
+/// Arrow schema and footer key-value metadata of one source.
+pub(super) type Footer = (SchemaRef, Option<Vec<KeyValue>>);
+
+pub(super) fn footers(client: &Arc<dyn ObjectStore>, window: &[ObjectMeta]) -> Result<Vec<Footer>> {
     validate_window(window)?;
     crate::cli::block_on_async(async {
         stream::iter(window)
-            .map(|object| arrow_schema(client, object, super::S3_FOOTER_PREFETCH_BYTES))
+            .map(|object| footer(client, object, super::S3_FOOTER_PREFETCH_BYTES))
             .buffered(MAX_ACTIVE)
             .try_collect()
             .await
@@ -114,11 +114,11 @@ pub(super) fn objects(client: &Arc<dyn ObjectStore>, window: &[ObjectMeta]) -> R
     })
 }
 
-pub(super) async fn arrow_schema(
+pub(super) async fn footer(
     client: &Arc<dyn ObjectStore>,
     object: &ObjectMeta,
     prefetch: u64,
-) -> Result<SchemaRef> {
+) -> Result<Footer> {
     ensure!(prefetch > 0, "S3 footer prefetch must be positive");
     let mut tail_len = object.size.min(prefetch);
     let mut reader = ParquetMetaDataReader::new();
@@ -140,7 +140,12 @@ pub(super) async fn arrow_schema(
     }
     let metadata =
         ArrowReaderMetadata::try_new(Arc::new(reader.finish()?), ArrowReaderOptions::default())?;
-    Ok(metadata.schema().clone())
+    let key_values = metadata
+        .metadata()
+        .file_metadata()
+        .key_value_metadata()
+        .cloned();
+    Ok((metadata.schema().clone(), key_values))
 }
 
 #[derive(Debug, thiserror::Error)]

@@ -792,7 +792,9 @@ re-running a rollup is safe. Without --delete-source, each re-run replaces the
 part-rollup-*.parquet files it wrote earlier in the target partitions it rolls up.
 
 A target partition whose source files have different columns (names, types,
-nullability, or order) is left untouched, and rollup exits non-zero.
+nullability, or order) or different value-defining file metadata (chain, block
+type, byte or block-id encoding, vote or failed-transaction coverage, synthetic
+timestamps, stream mode) is left untouched, and rollup exits non-zero.
 
 The source path must exist locally or be an explicit s3://bucket/... URI. Unlike
 scan and inspect, rollup never falls back to s3://$S3_BUCKET/<path> for a missing
@@ -864,7 +866,9 @@ Examples:
 
 Root artifacts (cursor.parquet, partitions.parquet, merkle_roots.parquet,
 verify_runs/) are skipped. A partition whose parts have different columns
-(names, types, nullability, or order) is left untouched and listed in the
+(names, types, nullability, or order) or different value-defining file metadata
+(chain, block type, byte or block-id encoding, vote or failed-transaction
+coverage, synthetic timestamps, stream mode) is left untouched and listed in the
 summary, and merge exits non-zero.
 
 Each partition merge is journaled in _fireparq_merge.json. Local interrupted

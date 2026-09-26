@@ -8,7 +8,9 @@
 //! outside time partitions, and reserved dataset artifacts (`cursor.parquet`, see
 //! [`crate::artifacts`]) are never read, rewritten, or deleted. Every run writes new, uniquely
 //! named files, so a re-run cannot overwrite or delete its own output. A target partition whose
-//! source files have different schemas is left untouched and reported as an error.
+//! source files have different schemas or value-defining file metadata (see
+//! [`crate::maintenance::compaction::VALUE_METADATA_KEYS`]) is left untouched and reported
+//! as an error.
 
 use crate::artifacts::is_reserved_artifact_path;
 use crate::cli::{block_on_async, format_bytes, resolve_destructive_input_path, AwsConfig};
@@ -1856,5 +1858,70 @@ mod tests {
         assert!(local_parts == remote_parts);
         // Copy mode keeps every source in both storages.
         assert_eq!(s3_keys(&store, "src").len(), sources.len());
+    }
+
+    #[test]
+    fn test_rollup_skips_group_with_different_value_metadata() {
+        let encoding = |value: &str| {
+            vec![KeyValue::new(
+                "firehose-parquet.bytes_encoding".to_string(),
+                value.to_string(),
+            )]
+        };
+        let source = tempfile::tempdir().unwrap();
+        let output = tempfile::tempdir().unwrap();
+        let day = source.path().join(DAY);
+        std::fs::create_dir_all(day.join("hour=14/minute=30")).unwrap();
+        std::fs::create_dir_all(day.join("hour=14/minute=31")).unwrap();
+        write_test_parquet_with_metadata(
+            &day.join("hour=14/minute=30/part-aaaaaaaa-000001.parquet"),
+            &make_range_batch(0, 5),
+            encoding("hex"),
+        );
+        write_test_parquet_with_metadata(
+            &day.join("hour=14/minute=31/part-bbbbbbbb-000001.parquet"),
+            &make_range_batch(5, 5),
+            encoding("base58"),
+        );
+        let before = snapshot_parquet_files(source.path());
+
+        let err = run_rollup(&local_config(source.path(), output.path(), true))
+            .unwrap_err()
+            .to_string();
+
+        assert!(
+            err.contains(
+                "file metadata `firehose-parquet.bytes_encoding` is `base58` instead of `hex`"
+            ),
+            "{err}"
+        );
+        assert_eq!(snapshot_parquet_files(source.path()), before);
+        assert!(snapshot_parquet_files(output.path()).is_empty());
+
+        // The same group on S3 is refused the same way.
+        let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        for minute in ["30", "31"] {
+            let path = day.join(format!("hour=14/minute={minute}"));
+            let file = std::fs::read_dir(&path)
+                .unwrap()
+                .next()
+                .unwrap()
+                .unwrap()
+                .path();
+            put_object(
+                &store,
+                &format!(
+                    "mainnet/{DAY}/hour=14/minute={minute}/{}",
+                    file.file_name().unwrap().to_string_lossy()
+                ),
+                std::fs::read(&file).unwrap(),
+            );
+        }
+        let root = memory_root(&store, "mainnet");
+        let err = rollup_s3(&s3_config("mainnet", "mainnet", true), &root, &root)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("bytes_encoding"), "{err}");
+        assert_eq!(s3_keys(&store, "mainnet").len(), 2);
     }
 }

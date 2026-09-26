@@ -16,7 +16,6 @@ use crate::merge_journal::{
 };
 use crate::writer::s3_put_options;
 use anyhow::{Context, Result};
-use arrow::datatypes::SchemaRef;
 #[cfg(test)]
 use arrow::record_batch::RecordBatch;
 use object_store::ObjectStore;
@@ -92,8 +91,8 @@ pub struct MergeResult {
     pub files_written: usize,
     pub bytes_before: u64,
     pub bytes_after: u64,
-    /// Partitions left untouched because their parts have different schemas, each as
-    /// `<partition>: <reason>`.
+    /// Partitions left untouched because their parts have different schemas or value-defining
+    /// file metadata, each as `<partition>: <reason>`.
     pub schema_mismatches: Vec<String>,
     /// Interrupted partition merges from earlier runs that were finished or undone first.
     pub merges_recovered: usize,
@@ -180,12 +179,17 @@ fn file_name_string(path: &Path) -> String {
         .unwrap_or_else(|| path.display().to_string())
 }
 
-/// Reads the Arrow schema of a local Parquet file from its footer.
-fn read_local_arrow_schema(path: &Path) -> Result<SchemaRef> {
+/// Reads the Arrow schema and key-value metadata of a local Parquet file from its footer.
+fn read_local_footer(path: &Path) -> Result<read::Footer> {
     let file = std::fs::File::open(path).with_context(|| format!("opening {}", path.display()))?;
     let builder = ParquetRecordBatchReaderBuilder::try_new(file)
         .with_context(|| format!("reading Parquet footer of {}", path.display()))?;
-    Ok(Arc::clone(builder.schema()))
+    let key_values = builder
+        .metadata()
+        .file_metadata()
+        .key_value_metadata()
+        .cloned();
+    Ok((Arc::clone(builder.schema()), key_values))
 }
 
 // ---------------------------------------------------------------------------
@@ -413,8 +417,9 @@ impl engine::PartitionMerge for LocalMerge<'_> {
     fn schema_mismatch(&self, files: &[PathBuf]) -> Result<Option<String>> {
         let mut schema_check = SchemaCheck::default();
         for file in files {
-            let schema = read_local_arrow_schema(file)?;
-            if let Some(reason) = schema_check.check(&file_name_string(file), &schema) {
+            let (schema, key_values) = read_local_footer(file)?;
+            let key_values = key_values.as_deref();
+            if let Some(reason) = schema_check.check(&file_name_string(file), &schema, key_values) {
                 return Ok(Some(reason));
             }
         }
@@ -827,10 +832,10 @@ impl<'a> engine::PartitionMerge for S3PartitionMerge<'a> {
         let mut schema_check = SchemaCheck::default();
         for window in read::windows(objects) {
             let window = window?;
-            let schemas = read::schemas(self.s3.client, window)?;
-            for (obj, schema) in window.iter().zip(schemas) {
+            let footers = read::footers(self.s3.client, window)?;
+            for (obj, (schema, key_values)) in window.iter().zip(footers) {
                 let name = obj.location.filename().unwrap_or(obj.location.as_ref());
-                if let Some(reason) = schema_check.check(name, &schema) {
+                if let Some(reason) = schema_check.check(name, &schema, key_values.as_deref()) {
                     return Ok(Some(reason));
                 }
             }
@@ -1696,7 +1701,7 @@ mod tests {
 
         // A 16-byte prefetch holds only the footer tail, so the metadata is fetched again.
         for prefetch in [16, S3_FOOTER_PREFETCH_BYTES] {
-            let schema = block_on_async(read::arrow_schema(&store, &meta, prefetch)).unwrap();
+            let (schema, _) = block_on_async(read::footer(&store, &meta, prefetch)).unwrap();
             assert_eq!(
                 schema.fields(),
                 batch.schema().fields(),
@@ -2377,6 +2382,110 @@ mod tests {
             .collect();
         assert_eq!(keys, ["part-000004.parquet"]);
         assert_eq!(s3_values(&store, ""), (0..30).collect::<Vec<_>>());
+    }
+
+    fn encoding_metadata(encoding: &str) -> Vec<KeyValue> {
+        vec![
+            KeyValue::new("firehose-parquet.block_type".to_string(), "evm".to_string()),
+            KeyValue::new(
+                "firehose-parquet.block_id_encoding".to_string(),
+                encoding.to_string(),
+            ),
+        ]
+    }
+
+    fn parquet_bytes_with_metadata(batch: &RecordBatch, kvs: Vec<KeyValue>) -> Vec<u8> {
+        let props = WriterProperties::builder()
+            .set_key_value_metadata(Some(kvs))
+            .build();
+        let mut buf = Vec::new();
+        let mut writer = ArrowWriter::try_new(&mut buf, batch.schema(), Some(props)).unwrap();
+        writer.write(batch).unwrap();
+        writer.close().unwrap();
+        buf
+    }
+
+    /// Parts with identical columns but hex and base58 block ids used to merge into one file
+    /// labelled with the first part's encoding.
+    #[test]
+    fn test_merge_skips_partition_with_different_value_metadata() {
+        let dir = tempfile::tempdir().unwrap();
+        let mixed = dir.path().join("blocks/year=2024/month=01/day=15");
+        let healthy = dir.path().join("blocks/year=2024/month=01/day=16");
+        std::fs::create_dir_all(&mixed).unwrap();
+        std::fs::create_dir_all(&healthy).unwrap();
+        write_test_parquet_with_metadata(
+            &mixed.join("part-000001.parquet"),
+            &make_range_batch(0, 10),
+            encoding_metadata("hex"),
+        );
+        write_test_parquet_with_metadata(
+            &mixed.join("part-000002.parquet"),
+            &make_range_batch(10, 10),
+            encoding_metadata("base58"),
+        );
+        for part in 1..=2u64 {
+            let mut kvs = encoding_metadata("hex");
+            // Descriptive keys may differ between the parts that merge.
+            kvs.push(KeyValue::new(
+                "firehose-parquet.version".to_string(),
+                format!("0.7.{part}"),
+            ));
+            write_test_parquet_with_metadata(
+                &healthy.join(format!("part-00000{part}.parquet")),
+                &make_range_batch(part * 100, 10),
+                kvs,
+            );
+        }
+        let before = snapshot_dir(&mixed);
+
+        let result = run_merge(&test_merge_config(&dir.path().to_string_lossy())).unwrap();
+
+        assert_eq!(result.partitions_merged, 1);
+        assert_eq!(result.schema_mismatches.len(), 1);
+        assert!(
+            result.schema_mismatches[0].contains(
+                "file metadata `firehose-parquet.block_id_encoding` is `base58` instead of `hex`"
+            ),
+            "{:?}",
+            result.schema_mismatches
+        );
+        assert_eq!(snapshot_dir(&mixed), before);
+        assert_eq!(entries(&healthy), ["part-000003.parquet"]);
+    }
+
+    #[test]
+    fn test_merge_s3_skips_partition_with_different_value_metadata() {
+        let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let mixed = "evm/blocks/year=2024/month=01/day=15";
+        for (part, encoding) in [(1u64, "hex"), (2, "base58")] {
+            put_object(
+                &store,
+                &format!("{mixed}/part-00000{part}.parquet"),
+                parquet_bytes_with_metadata(
+                    &make_range_batch(part * 10, 10),
+                    encoding_metadata(encoding),
+                ),
+            );
+        }
+        let keys = list_keys(&store, mixed);
+        let before: Vec<bytes::Bytes> = keys.iter().map(|key| get_object(&store, key)).collect();
+
+        let result = merge_s3(
+            &test_merge_config("s3://bucket/evm"),
+            &store,
+            "bucket",
+            "evm",
+        )
+        .unwrap();
+
+        assert_eq!(result.partitions_merged, 0);
+        assert_eq!(result.schema_mismatches.len(), 1);
+        assert!(result.schema_mismatches[0].contains("block_id_encoding"));
+        assert_eq!(list_keys(&store, mixed), keys);
+        for (key, bytes) in keys.iter().zip(&before) {
+            assert_eq!(&get_object(&store, key), bytes, "{key}");
+        }
     }
 
     #[tokio::test]
