@@ -75,6 +75,10 @@ Registries without a `merkle_version` column predate it and are read as `merkle_
 
 The run passes (`fireparq verify` exits 0) when `summary.mismatches` and `summary.protocol_failed` are both 0. `updated` and `open` findings do not fail a run. The registry is written only by a passing run; `warnings` explain a held-back write. See "Root Registry Update Semantics" in `docs/verifiability-artifact-runbook.md`.
 
+`open` partitions are the ones `fireparq build` may still write, decided from the writer frontier (the protected dataset's authoritative ingestion state, else a legacy `cursor.parquet`); the `error` says which rule applied. `verify` reads without dataset ownership, so it can run while `build` runs.
+
+Some runs end with an error instead of a report: when a table file of a partition that would be compared or recorded changed while `verify` read it (`the data changed while verify was reading it: ...`), and when the table has an unfinished merge (`cannot verify ...: it has an unfinished merge ...`). Nothing is compared or written in either case; `verify` never recovers data. See "Concurrency and Atomic Writes" in `docs/verifiability-artifact-runbook.md`.
+
 ## Artifact Location Contract
 
 Suggested report artifact path is deterministic and included as:

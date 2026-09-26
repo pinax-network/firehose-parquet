@@ -66,6 +66,7 @@ lifecycle state; a local implementation or passing test alone is not closure.
 - [#468: complete runtime, migration and live recovery qualification](468-ingestion-runtime.md)
 - [#468: live table equality and recovered-state evidence](468-live-comparison.json)
 - [Validation follow-ups for protected ingestion (#464, #465, #466, #468, #469, #470, #472, #572, #578)](validation-ingest-followups.md)
+- [Verify follow-ups: Struct roots, verify beside build, registry scan exclusion, merge refusal](validation-verify-followups.md)
 
 ## Verified lifecycle outcomes
 
