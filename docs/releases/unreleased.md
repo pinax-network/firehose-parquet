@@ -130,7 +130,10 @@ Blocks. Output authority under `.fireparq-ingest/` selects the exact accepted
 cursor, including filtered zero-row events and persisted timestamp-routing
 provenance. Deterministic owned parts are rolled back before replay or verified
 and rolled forward after commit. `cursor.parquet` is an optional derived mirror;
-its deletion cannot rewind output, and `--cursor none` keeps mandatory authority.
+its deletion cannot rewind output. `--cursor none` (case-insensitive) creates a
+dataset without a mirror while keeping mandatory authority; that choice is bound
+to the dataset, so later runs must repeat it, and it cannot be combined with
+`--cursor-template`.
 
 This requires a new empty dataset root and absent mirror. Existing random-name
 output or legacy cursors are refused rather than adopted. Protected origin,

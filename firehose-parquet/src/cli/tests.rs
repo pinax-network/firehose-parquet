@@ -836,6 +836,68 @@ fn test_cursor_custom_parquet_name() {
 
 #[test]
 #[serial]
+fn test_cursor_none_disables_the_mirror_case_insensitively() {
+    for value in ["none", "NONE", "None", " none "] {
+        let cli = parse(&[
+            "test-cli",
+            "--endpoint",
+            "https://example.com:443",
+            "--cursor",
+            value,
+        ]);
+        let config = build_config(&cli.common).expect("--cursor none should be accepted");
+        assert_eq!(config.cursor_path, None, "{value:?}");
+    }
+    // The environment form uses the same parser.
+    let _cursor = EnvVarGuard::set("CURSOR", "None");
+    let cli = parse(&["test-cli", "--endpoint", "https://example.com:443"]);
+    assert_eq!(build_config(&cli.common).unwrap().cursor_path, None);
+}
+
+#[test]
+#[serial]
+fn test_cursor_none_rejects_contradictory_template_and_near_misses() {
+    let cli = parse(&[
+        "test-cli",
+        "--endpoint",
+        "https://example.com:443",
+        "--cursor",
+        "none",
+        "--cursor-template",
+        "worker.parquet",
+    ]);
+    let error = build_config(&cli.common).unwrap_err().to_string();
+    assert!(
+        error.contains("cannot be combined with --cursor-template"),
+        "{error}"
+    );
+    for value in ["nothing", "none.txt", "no"] {
+        let cli = parse(&[
+            "test-cli",
+            "--endpoint",
+            "https://example.com:443",
+            "--cursor",
+            value,
+        ]);
+        let error = build_config(&cli.common).unwrap_err().to_string();
+        assert!(error.contains(".parquet"), "{value}: {error}");
+    }
+    // A mirror file literally named none.parquet remains an ordinary path.
+    let cli = parse(&[
+        "test-cli",
+        "--endpoint",
+        "https://example.com:443",
+        "--cursor",
+        "none.parquet",
+    ]);
+    assert_eq!(
+        build_config(&cli.common).unwrap().cursor_path.as_deref(),
+        Some("none.parquet")
+    );
+}
+
+#[test]
+#[serial]
 fn test_cursor_template_must_end_in_parquet() {
     let cli = parse(&[
         "test-cli",

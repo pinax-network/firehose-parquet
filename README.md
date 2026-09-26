@@ -347,8 +347,18 @@ not choose a new timestamp for already accepted rows.
 A missing or genuinely older mirror is repaired from authority before streaming.
 An ahead, foreign, malformed or unreadable mirror fails closed; it never selects
 a new resume point. An existing legacy cursor also blocks initialization of a
-new dataset. `--cursor none` disables the mirror only; authority remains mandatory.
-Changing or disabling the mirror of an existing protected dataset is refused.
+new dataset. Changing or disabling the mirror of an existing protected dataset is refused.
+
+`--cursor none` (any case, also `CURSOR=none`) creates a dataset without a
+mirror. Authority under `.fireparq-ingest/` remains mandatory and alone selects
+the resume cursor, completed bounds and routing anchors, so resume, extension,
+same-bound no-ops and recovery behave exactly as with a mirror. The choice is
+bound when the dataset is created: every later `build` must pass `--cursor none`
+again, and a dataset created with a mirror cannot drop it. `--cursor none`
+cannot be combined with `--cursor-template`. Without a mirror there is no
+`<chain>/cursor.parquet` hint for other tools: `verify` cannot mark partitions
+of an unfinished build as `open`, and `partitions build` cannot infer
+`--start-block` from it (pass it explicitly).
 
 Local mirror saves use private same-directory temporary files, atomic replacement,
 file and directory sync, and up to three attempts with 1 and 2 second backoff.
@@ -910,6 +920,9 @@ Rules:
 - template path must end in `.parquet`
 - `{{` and `}}` escape literal braces
 - with S3 output, relative cursor template paths are stored under the output prefix
+- a template cannot be combined with `--cursor none`
+- the resolved mirror location is bound when the dataset is created; later runs
+  must resolve to the same location
 
 ### `scan` — Inspect Parquet Files
 

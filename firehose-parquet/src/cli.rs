@@ -187,7 +187,12 @@ pub struct CommonArgs {
     )]
     pub stop_block: Option<u64>,
 
-    /// Path to cursor parquet file for resuming a previous session (must end in .parquet)
+    /// Optional cursor mirror (must end in .parquet), or `none` to disable it.
+    ///
+    /// `build` always resumes from the output's mandatory authority under
+    /// `.fireparq-ingest/`; this file is a derived compatibility copy. The
+    /// choice is bound when a dataset is created: later runs must pass the same
+    /// value, including `none`.
     #[arg(
         short = 'c',
         long,

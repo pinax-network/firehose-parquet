@@ -528,6 +528,87 @@ async fn legacy_data_and_cursors_cannot_initialize_authority_even_with_override(
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cursor_none_keeps_mandatory_authority_without_a_mirror_and_binds_that_choice() {
+    let server = MockFirehose::start(
+        (100..103).map(|n| response(n, 3)).collect(),
+        vec![
+            Plan::complete("", 100, 101),
+            Plan::complete("fixture-101", 100, 102),
+        ],
+    )
+    .await;
+    let dir = tempfile::tempdir().unwrap();
+    let root = root(dir.path());
+    let without_mirror = |origin, stop| {
+        let mut request = command(&server, dir.path(), origin, stop);
+        request.args(["--cursor", "NONE"]);
+        request
+    };
+    success(without_mirror(100, 102)).await;
+    assert_eq!(block_numbers(&root), [100, 101]);
+    let state = authority(&root);
+    assert_eq!(state["descriptor"]["mirror"]["kind"], "disabled");
+    assert_eq!(state["checkpoint"]["ordinal"], 2);
+    assert_eq!(state["checkpoint"]["event"]["cursor"], "fixture-101");
+    assert_eq!(state["checkpoint"]["completed_stop"], 102);
+    assert!(!root.join("cursor.parquet").exists());
+
+    // Same-bound completion is still an authority-backed no-op.
+    let repeated = success(without_mirror(100, 102)).await;
+    assert!(logs(&repeated).contains("without opening Blocks"));
+    assert_eq!(server.calls(), 1);
+
+    // The disabled mirror is part of the stream identity: omitting --cursor
+    // none would add a mirror, which is refused before Blocks and before any
+    // cursor file is created.
+    let before = (authority(&root), parts(&root));
+    let output = run(command(&server, dir.path(), 100, 103)).await;
+    assert!(!output.status.success(), "{}", logs(&output));
+    assert!(
+        logs(&output).contains("created without a cursor mirror; rerun with --cursor none"),
+        "{}",
+        logs(&output)
+    );
+    assert_eq!(server.calls(), 1);
+    assert_eq!((authority(&root), parts(&root)), before);
+    assert!(!root.join("cursor.parquet").exists());
+
+    // Extension resumes from the authoritative cursor alone.
+    success(without_mirror(100, 103)).await;
+    assert_eq!(server.calls(), 2);
+    assert_eq!(block_numbers(&root), [100, 101, 102]);
+    let state = authority(&root);
+    assert_eq!(state["checkpoint"]["ordinal"], 3);
+    assert_eq!(state["checkpoint"]["event"]["cursor"], "fixture-102");
+    assert_eq!(state["checkpoint"]["completed_stop"], 103);
+    assert!(!root.join("cursor.parquet").exists());
+    server.assert_drained();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cursor_none_cannot_drop_an_existing_bound_mirror() {
+    let server =
+        MockFirehose::start(vec![response(100, 3)], vec![Plan::complete("", 100, 100)]).await;
+    let dir = tempfile::tempdir().unwrap();
+    let root = root(dir.path());
+    success(command(&server, dir.path(), 100, 101)).await;
+    assert!(root.join("cursor.parquet").exists());
+    let before = (authority(&root), parts(&root));
+    let mut request = command(&server, dir.path(), 100, 102);
+    request.args(["--cursor", "none"]);
+    let output = run(request).await;
+    assert!(!output.status.success(), "{}", logs(&output));
+    assert!(
+        logs(&output).contains("--cursor none cannot disable it"),
+        "{}",
+        logs(&output)
+    );
+    assert_eq!(server.calls(), 1);
+    assert_eq!((authority(&root), parts(&root)), before);
+    server.assert_drained();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn filtered_undo_is_a_zero_row_accepted_completion_and_repeat_is_noop() {
     let server =
         MockFirehose::start(vec![response(100, 2)], vec![Plan::complete("", 100, 100)]).await;
