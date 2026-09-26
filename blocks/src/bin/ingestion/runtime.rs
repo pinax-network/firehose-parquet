@@ -802,10 +802,7 @@ impl<'run, 'owner> IngestionRuntime<'run, 'owner> {
                 trigger,
                 flush.tables,
                 flush.rows,
-                WriterFlushOutcome {
-                    materialized: committed.is_some_and(|flush| flush.files > 0),
-                    buffered: WriterBufferStats::default(),
-                },
+                committed.is_some_and(|flush| flush.files > 0),
             );
         } else {
             info!(

@@ -100,17 +100,6 @@ pub fn validate_stop_block_after_start(
     Ok(())
 }
 
-/// Read a credential from the environment variable `name`.
-///
-/// Surrounding whitespace is trimmed (a secret mounted from a file often ends
-/// with a newline) and blank values count as unset.
-pub fn read_credential_env(name: &str) -> Option<String> {
-    std::env::var(name)
-        .ok()
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-}
-
 /// Build a [`Config`] from [`CommonArgs`].
 ///
 /// Returns an error if `--endpoint` was not provided (required for pipeline execution).
@@ -174,11 +163,12 @@ pub fn build_config(args: &CommonArgs) -> anyhow::Result<Config> {
         cursor_path: Some(args.cursor.to_string_lossy().to_string()),
         output,
         partition: parse_partition(&args.partition, args.block_range_size)?,
-        flush_rows: args.flush_rows,
+        // 0 disables the row and interval triggers, matching --flush-bytes 0.
+        flush_rows: args.flush_rows.filter(|rows| *rows > 0),
         flush_blocks: args.flush_blocks,
         flush_bytes: args.flush_bytes,
         flush_memory_bytes: args.flush_memory_bytes,
-        flush_interval_secs: args.flush_interval_secs,
+        flush_interval_secs: args.flush_interval_secs.filter(|secs| *secs > 0),
         compression: parse_compression(&args.compression)?,
         final_blocks_only: args.final_blocks_only,
         dry_run: args.dry_run,

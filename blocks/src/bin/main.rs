@@ -34,7 +34,9 @@ use firehose_parquet::partition_index::{
 use firehose_parquet::traits::{fork_step_name, BlockIdentity, BlockMapper};
 #[cfg(test)]
 use firehose_parquet::writer::OutputWriter;
-use firehose_parquet::writer::{ParquetFileMetadata, WriterBufferStats};
+use firehose_parquet::writer::ParquetFileMetadata;
+#[cfg(test)]
+use firehose_parquet::writer::WriterBufferStats;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -173,6 +175,7 @@ fn encode_bytes_label(encoding: &EncodeBytes) -> &'static str {
     }
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, Copy)]
 struct WriterFlushOutcome {
     materialized: bool,
@@ -210,13 +213,15 @@ fn next_mapper_flush_trigger(
     sizing: &FlushSizing,
     estimate: MapperBufferEstimate,
 ) -> Option<MapperFlushTrigger> {
+    // Zero disables the row and interval triggers, like `--flush-bytes 0`;
+    // `rows >= 0` or `elapsed >= 0` would otherwise flush after every block.
     let time_to_flush = flush_interval_secs
-        .map(|secs| last_flush_time.elapsed().as_secs() >= secs)
-        .unwrap_or(false);
+        .filter(|secs| *secs > 0)
+        .is_some_and(|secs| last_flush_time.elapsed().as_secs() >= secs);
 
     let rows_to_flush = flush_rows
-        .map(|limit| max_table_rows >= limit)
-        .unwrap_or(false);
+        .filter(|limit| *limit > 0)
+        .is_some_and(|limit| max_table_rows >= limit);
 
     let blocks_to_flush = flush_blocks
         .map(|limit| blocks_since_flush >= limit)
@@ -252,33 +257,18 @@ fn write_mapper_flush(
     })
 }
 
-fn log_writer_flush_outcome(
-    trigger: &str,
-    tables: usize,
-    rows: usize,
-    outcome: WriterFlushOutcome,
-) {
-    if outcome.materialized {
+/// Protected transactions publish every table of a flush or none, so no writer
+/// buffer is retained between flushes and there are no buffered stats to log.
+fn log_writer_flush_outcome(trigger: &str, tables: usize, rows: usize, materialized: bool) {
+    if materialized {
         info!(
             trigger,
-            tables,
-            rows,
-            buffered_tables = outcome.buffered.tables,
-            buffered_rows = outcome.buffered.rows,
-            buffered_estimated_bytes =
-                firehose_parquet::cli::format_bytes(outcome.buffered.estimated_compressed_bytes),
-            "writer materialized parquet output for mapper flush"
+            tables, rows, "writer materialized parquet output for mapper flush"
         );
     } else {
         info!(
             trigger,
-            tables,
-            rows,
-            buffered_tables = outcome.buffered.tables,
-            buffered_rows = outcome.buffered.rows,
-            buffered_estimated_bytes =
-                firehose_parquet::cli::format_bytes(outcome.buffered.estimated_compressed_bytes),
-            "mapper flush contained no nonempty table output"
+            tables, rows, "mapper flush contained no nonempty table output"
         );
     }
 }
@@ -1319,7 +1309,7 @@ fn resolve_cursor_location(
     if let Some(ref cp) = config.cursor_path {
         let output_str = config.output.to_string_lossy().to_string();
         Ok(Some(CursorLocation::resolve(&output_str, cp, |bucket| {
-            firehose_parquet::s3::build_s3_client(config, bucket)
+            firehose_parquet::s3::build_ingestion_mutation_client(config, bucket)
         })?))
     } else {
         Ok(None)
@@ -1537,7 +1527,7 @@ async fn run_partitions_build(
             let cursor = CursorLocation::resolve(
                 &chain_output_root,
                 firehose_parquet::cursor::CURSOR_PARQUET_FILENAME,
-                |bucket| Ok(Arc::new(aws.build_s3_client(bucket)?)),
+                |bucket| Ok(Arc::new(aws.build_read_client(bucket)?)),
             )?;
             Ok(cursor
                 .load()
@@ -3682,6 +3672,56 @@ mod tests {
     }
 
     #[test]
+    fn test_next_mapper_flush_trigger_zero_rows_and_interval_are_disabled() {
+        // `rows >= 0` and `elapsed >= 0` used to flush after every block.
+        let long_ago = Instant::now() - Duration::from_secs(3_600);
+        for max_table_rows in [0, 1, usize::MAX] {
+            let trigger = next_mapper_flush_trigger(
+                Some(0),
+                max_table_rows,
+                None,
+                1,
+                Some(0),
+                long_ago,
+                &FlushSizing::new(0, u64::MAX).unwrap(),
+                MapperBufferEstimate {
+                    largest_table_bytes: 128,
+                    total_bytes: 128,
+                },
+            );
+            assert_eq!(trigger, None, "max_table_rows={max_table_rows}");
+        }
+
+        // Positive limits still fire.
+        let estimate = MapperBufferEstimate {
+            largest_table_bytes: 128,
+            total_bytes: 128,
+        };
+        let sizing = FlushSizing::new(0, u64::MAX).unwrap();
+        assert_eq!(
+            next_mapper_flush_trigger(Some(1), 1, None, 1, None, long_ago, &sizing, estimate),
+            Some(MapperFlushTrigger::Rows)
+        );
+        assert_eq!(
+            next_mapper_flush_trigger(None, 1, None, 1, Some(1), long_ago, &sizing, estimate),
+            Some(MapperFlushTrigger::Interval)
+        );
+        assert_eq!(
+            next_mapper_flush_trigger(
+                None,
+                1,
+                None,
+                1,
+                Some(60),
+                Instant::now(),
+                &sizing,
+                estimate
+            ),
+            None
+        );
+    }
+
+    #[test]
     fn test_build_subcommand_rejects_zero_block_range_size_and_stop_block() {
         for (flag, value) in [("--block-range-size", "0"), ("--stop-block", "0")] {
             let error =
@@ -3690,6 +3730,82 @@ mod tests {
             assert_eq!(error.kind(), clap::error::ErrorKind::ValueValidation);
             assert!(error.to_string().contains(flag), "{error}");
         }
+    }
+
+    #[test]
+    fn test_env_example_matches_cli_environment_variables() {
+        use std::collections::BTreeSet;
+        fn collect(command: &clap::Command, names: &mut BTreeSet<String>) {
+            for arg in command.get_arguments() {
+                if let Some(env) = arg.get_env() {
+                    names.insert(env.to_string_lossy().into_owned());
+                }
+            }
+            for subcommand in command.get_subcommands() {
+                collect(subcommand, names);
+            }
+        }
+        let mut cli_names = BTreeSet::new();
+        collect(&Cli::command(), &mut cli_names);
+        assert!(cli_names.contains("FLUSH_MEMORY_BYTES"));
+
+        let example = include_str!("../../../.env.example");
+        let listed: BTreeSet<String> = example
+            .lines()
+            .filter_map(|line| {
+                let (name, _) = line.trim_start_matches('#').trim().split_once('=')?;
+                (!name.is_empty()
+                    && name
+                        .chars()
+                        .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_'))
+                .then(|| name.to_string())
+            })
+            .collect();
+        let missing: Vec<_> = cli_names.difference(&listed).collect();
+        assert!(
+            missing.is_empty(),
+            ".env.example is missing CLI variables: {missing:?}"
+        );
+
+        let credentials: BTreeSet<&str> = firehose_parquet::auth::PINAX_API_KEY_ENV_VARS
+            .iter()
+            .chain(firehose_parquet::auth::PINAX_API_TOKEN_ENV_VARS)
+            .chain(firehose_parquet::auth::STREAMINGFAST_API_KEY_ENV_VARS)
+            .chain(firehose_parquet::auth::STREAMINGFAST_API_TOKEN_ENV_VARS)
+            .copied()
+            .collect();
+        for name in &credentials {
+            assert!(listed.contains(*name), ".env.example is missing {name}");
+        }
+        let unknown: Vec<_> = listed
+            .iter()
+            .filter(|name| {
+                !cli_names.contains(*name)
+                    && !credentials.contains(name.as_str())
+                    && !name.starts_with("FIREHOSE_ENDPOINT_")
+            })
+            .collect();
+        assert!(
+            unknown.is_empty(),
+            ".env.example lists variables the CLI does not read: {unknown:?}"
+        );
+        assert!(!example.contains("FLUSH_BYTES=134217728"));
+        assert!(example.contains(&format!(
+            "FLUSH_BYTES={}",
+            firehose_parquet::config::DEFAULT_FLUSH_BYTES
+        )));
+        assert!(example.contains(&format!(
+            "FLUSH_MEMORY_BYTES={}",
+            firehose_parquet::config::DEFAULT_FLUSH_MEMORY_BYTES
+        )));
+        assert!(example.contains(&format!(
+            "GRPC_WINDOW_BYTES={}",
+            firehose_parquet::config::DEFAULT_GRPC_WINDOW_BYTES
+        )));
+        assert!(example.contains(&format!(
+            "GRPC_MAX_MESSAGE_BYTES={}",
+            firehose_parquet::config::DEFAULT_GRPC_MAX_MESSAGE_BYTES
+        )));
     }
 
     #[test]
