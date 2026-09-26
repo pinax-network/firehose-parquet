@@ -30,8 +30,21 @@ Ethereum fork. Synthetic unit tests remain useful for those cases.
 
 `blocks/tests/evm_golden.rs` runs entirely offline in `cargo test --workspace`.
 It checks standard/extended output, Binary/Hex schemas, and optional fork-step
-columns, plus canonical identity on every row. It compares fixed expectations;
-it does not calculate its expected values using the mapper under test.
+columns, plus canonical identity on every row. Each configuration maps the
+payload through both the borrowed `map_block` and the owned `map_block_bytes`
+entry point used by production ingestion, and requires identical tables,
+schemas and rows. It compares fixed expectations; it does not calculate its
+expected values using the mapper under test.
+
+## Fixture set
+
+| Directory | Block | Adds |
+|---|---|---|
+| `evm-mainnet/` | 26,049,575 | Legacy, dynamic-fee and blob transactions, one reverted transaction, withdrawals and system calls. |
+| `evm-mainnet-26000004/` | 26,000,004 | EIP-7702 `SET_CODE` transactions, 16 authorizations, 10 code changes and a reverted `SET_CODE` transaction with two authorizations from one authority. Stored as `block.pb.zst`. |
+
+Neither payload records a gas change, so `gas_changes` has no real-data
+coverage yet.
 
 ## Refresh or add a fixture
 
@@ -69,9 +82,13 @@ it does not calculate its expected values using the mapper under test.
    the fixture; public trace representations can change even for a fixed block.
 4. Copy the reviewed raw payload and public metadata into a fixture directory,
    update `expected.json` by reference to the raw protobuf, and update this
-   provenance/coverage record. `lib_num` is captured response metadata and can
-   vary between captures; it is not derived from the block payload. Never retain
-   the opaque response cursor, authorization headers or credentials.
+   provenance/coverage record. Store payloads over about 2 MB as
+   `zstd -19 block.pb -o block.pb.zst`, keep the helper's `metadata.json`
+   unchanged (its checksum describes the decompressed payload) and decompress
+   in the test before the checksum check. `lib_num` is captured response
+   metadata and can vary between captures; it is not derived from the block
+   payload. Never retain the opaque response cursor, authorization headers or
+   credentials.
 5. Run `cargo test -p blocks --test evm_golden --locked`, then the workspace suite.
    Review the binary checksum, expectation changes and any new coverage limits
    in the PR. Add another small block when new fork-specific coverage is needed.

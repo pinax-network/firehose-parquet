@@ -10,6 +10,7 @@ use prost::{bytes::Bytes, Message};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap};
+use std::sync::OnceLock;
 
 const STANDARD_TABLES: [&str; 6] = [
     "blocks",
@@ -23,7 +24,7 @@ const STANDARD_TABLES: [&str; 6] = [
 /// One retained raw block and its independently reviewed oracle.
 struct Fixture {
     name: &'static str,
-    /// The unchanged `Any.value` payload.
+    /// The unchanged `Any.value` payload (decompressed when stored as zstd).
     block: &'static [u8],
     metadata: &'static str,
     expected: &'static str,
@@ -44,6 +45,25 @@ fn block_26049575() -> Fixture {
         transactions: 182,
         timestamp_millis: 1_790_280_203_000,
         date: 20720,
+    }
+}
+
+/// Mainnet 26,000,004: EIP-7702 authorizations, code changes and a reverted
+/// SET_CODE transaction. Stored zstd-compressed; the checksum in its metadata
+/// is for the decompressed original payload.
+fn block_26000004() -> Fixture {
+    static RAW: OnceLock<Vec<u8>> = OnceLock::new();
+    let raw = RAW.get_or_init(|| {
+        zstd::decode_all(&include_bytes!("fixtures/evm-mainnet-26000004/block.pb.zst")[..]).unwrap()
+    });
+    Fixture {
+        name: "evm-mainnet-26000004",
+        block: raw.as_slice(),
+        metadata: include_str!("fixtures/evm-mainnet-26000004/metadata.json"),
+        expected: include_str!("fixtures/evm-mainnet-26000004/expected.json"),
+        transactions: 397,
+        timestamp_millis: 1_789_681_811_000,
+        date: 20713,
     }
 }
 
@@ -273,4 +293,67 @@ fn check_fixture(fixture: &Fixture) {
 #[test]
 fn mainnet_golden_block_matches_reviewed_counts_values_and_canonical_identity() {
     check_fixture(&block_26049575());
+}
+
+#[test]
+fn mainnet_set_code_block_matches_reviewed_counts_values_and_canonical_identity() {
+    check_fixture(&block_26000004());
+}
+
+/// The reverted EIP-7702 transaction at index 130 has two accepted
+/// authorizations from one authority. Both authority nonce increments persist;
+/// its root call recorded no code change and nothing else it did persists.
+#[test]
+fn mainnet_reverted_set_code_transaction_keeps_only_persistent_changes() {
+    let fixture = block_26000004();
+    let identity = fixture_identity(&fixture);
+    // Raw source shape, read directly from the payload.
+    let raw = eth::Block::decode(fixture.block).unwrap();
+    let tx = &raw.transaction_traces[130];
+    assert_eq!(tx.index, 130);
+    assert_eq!(tx.status, eth::TransactionTraceStatus::Reverted as i32);
+    assert_eq!(
+        tx.r#type,
+        eth::transaction_trace::Type::TrxTypeSetCode as i32
+    );
+    assert_eq!(tx.set_code_authorizations.len(), 2);
+    let authority = tx.set_code_authorizations[0].authority.clone().unwrap();
+    assert_eq!(authority.len(), 20);
+    for auth in &tx.set_code_authorizations {
+        assert!(!auth.discarded);
+        assert_eq!(auth.authority.as_ref(), Some(&authority));
+    }
+    let root = &tx.calls[0];
+    assert!(root.state_reverted);
+    assert!(root.code_changes.is_empty());
+    assert_eq!(
+        root.nonce_changes
+            .iter()
+            .filter(|change| change.address == authority)
+            .count(),
+        2
+    );
+
+    let batches = map_both_ways(&fixture, &identity, true, &EncodeBytes::Binary, false);
+    let rows_for_tx = |table: &str| {
+        let batch = &batches[table];
+        let tx_index = batch
+            .column_by_name("tx_index")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<UInt32Array>()
+            .unwrap();
+        (0..batch.num_rows())
+            .filter(|&row| tx_index.value(row) == 130)
+            .count()
+    };
+    assert_eq!(rows_for_tx("set_code_authorizations"), 2);
+    // Sender nonce plus one increment per accepted authorization.
+    assert_eq!(rows_for_tx("nonce_changes"), 3);
+    // Gas buy, gas refund and fee payment.
+    assert_eq!(rows_for_tx("balance_changes"), 3);
+    assert_eq!(rows_for_tx("code_changes"), 0);
+    assert_eq!(rows_for_tx("storage_changes"), 0);
+    assert_eq!(rows_for_tx("gas_changes"), 0);
+    assert_eq!(rows_for_tx("calls"), 3);
 }

@@ -497,6 +497,7 @@ dependencies = [
  "tonic",
  "tonic-prost",
  "tracing",
+ "zstd 0.14.0",
 ]
 
 [[package]]
