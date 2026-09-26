@@ -3,8 +3,8 @@ use arrow::record_batch::RecordBatch;
 use clap::{Args, Parser};
 use firehose_parquet::cli::{
     build_config, build_partitions_index_path, build_partitions_output_root, init_tracing,
-    list_partitions_from_index, load_dotenv, parse_partition_build_types,
-    parse_partition_shard_strategy, read_verified_partitions_index, resolve_cursor_template,
+    list_partitions_from_index, load_env_file, parse_partition_build_types,
+    parse_partition_shard_strategy, read_verified_partitions_index_at, resolve_cursor_template,
     resolve_partition_command, resolve_s3_output_root, shard_partitions_from_index,
     validate_partitions_index, validate_s3_output_credentials, write_verified_partitions_index,
     AwsConfig, BuildArgs, Commands, CursorTemplateContext, PartitionBoundsRequest,
@@ -139,6 +139,17 @@ struct GlobalArgs {
         help_heading = "Runtime / Logging"
     )]
     verbose: bool,
+
+    /// Load settings from this env file instead of ./.env (parent directories are never searched)
+    #[arg(
+        long,
+        env = "FIREPARQ_ENV_FILE",
+        value_name = "PATH",
+        hide_env_values = true,
+        global = true,
+        help_heading = "Runtime / Logging"
+    )]
+    env_file: Option<PathBuf>,
 }
 
 /// Detect block type from a protobuf `Any.type_url`.
@@ -1393,6 +1404,10 @@ async fn run_partitions_build(
             initial_finalized.exclusive_stop()?
         );
     }
+    info!(
+        partitions_index = %firehose_parquet::cli::display_destination(&partitions_index),
+        "resolved partition index destination"
+    );
     let ownership =
         prepare_partitions_index_write(&chain_output_root, &partitions_index, aws).await?;
     let mut snapshot = load_existing_verified_partitions_index(&partitions_index, aws, overwrite)?;
@@ -1680,7 +1695,8 @@ fn load_existing_verified_partitions_index(
     if overwrite {
         return Ok(None);
     }
-    match read_verified_partitions_index(path, Some(aws)) {
+    // Exact destination only: never the read-only S3_BUCKET shorthand (#617).
+    match read_verified_partitions_index_at(path, Some(aws)) {
         Ok(index) => Ok(Some(index)),
         Err(error)
             if error.chain().any(|cause| {
@@ -2370,10 +2386,35 @@ fn resolve_extended_mode(
     extended_enabled
 }
 
+/// Whether to report the loaded env file on stderr. Commands that install the
+/// tracing subscriber log it there instead (`init_tracing`); completions stay
+/// silent because their output is a script.
+fn env_file_notice_on_stderr(command: Option<&Commands>) -> bool {
+    !matches!(
+        command,
+        Some(
+            Commands::Build(_)
+                | Commands::Partitions(PartitionsCommands::Build { .. })
+                | Commands::Rollup { .. }
+                | Commands::Verify { .. }
+                | Commands::Merge { .. }
+                | Commands::Truncate { .. }
+                | Commands::Completions { .. }
+        )
+    )
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
-    load_dotenv();
+    // Only ./.env or an explicit --env-file / FIREPARQ_ENV_FILE; never parents (#617).
+    let env_file = load_env_file(std::env::args_os())?;
     let cli = Cli::parse();
+    if env_file_notice_on_stderr(cli.command.as_ref()) {
+        // Commands without a log subscriber still say which file supplied settings.
+        if let Some(loaded) = env_file.as_ref() {
+            eprintln!("{}", loaded.summary());
+        }
+    }
 
     if let Some(ref cmd) = cli.command {
         match cmd {

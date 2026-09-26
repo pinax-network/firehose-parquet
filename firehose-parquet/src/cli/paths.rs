@@ -1,6 +1,14 @@
 //! Local/S3 path policy and cursor-template resolution.
 use super::*;
 
+/// Resolve the output root of a command that writes (`build`, `partitions build`).
+///
+/// S3 writes require an explicit `s3://bucket/prefix`. A relative path is never
+/// expanded into `--s3-bucket` / `S3_BUCKET`: an inherited bucket setting must
+/// not turn a local-looking path into a remote write. When a bucket is set, a
+/// relative output (including the default `.`) or a missing output is rejected
+/// as ambiguous; write `./path` or an absolute path for local output. The bucket
+/// option otherwise only checks that an explicit S3 output names the same bucket.
 pub fn resolve_s3_output_root(
     output: Option<&str>,
     s3_bucket: Option<&str>,
@@ -12,20 +20,82 @@ pub fn resolve_s3_output_root(
         output.map(str::trim).filter(|value| !value.is_empty()),
         s3_bucket.map(str::trim).filter(|value| !value.is_empty()),
     ) {
-        (Some(output), Some(bucket))
-            if !output.starts_with("s3://") && !is_explicit_local_output_path(output) =>
-        {
-            if output == "." {
-                return Ok(format!("s3://{bucket}"));
-            }
-            let normalized = output.trim_start_matches("./").trim_start_matches('/');
-            Ok(format!("s3://{bucket}/{normalized}"))
+        (Some(output), _) if output.starts_with("s3://") => Ok(output.to_string()),
+        (Some(output), _) if is_explicit_local_output_path(output) => Ok(output.to_string()),
+        (Some(output), None) => Ok(output.to_string()),
+        (Some(output), Some(bucket)) => {
+            let prefix = output.trim_start_matches("./").trim_start_matches('/');
+            let suggestion = if prefix.is_empty() || prefix == "." {
+                format!("s3://{bucket}/<prefix>")
+            } else {
+                format!("s3://{bucket}/{prefix}")
+            };
+            anyhow::bail!(
+                "output `{output}` is a relative path while --s3-bucket / S3_BUCKET is set to \
+                 `{bucket}`; writes no longer expand relative paths into S3_BUCKET. For S3 \
+                 output pass --output {suggestion} (OUTPUT=s3://...); for local output pass \
+                 ./{prefix_or_dot} or an absolute path, or unset S3_BUCKET",
+                prefix_or_dot = if prefix.is_empty() { "." } else { prefix }
+            )
         }
-        (Some(output), _) => Ok(output.to_string()),
-        (None, Some(bucket)) => Ok(format!("s3://{bucket}")),
-        (None, None) => {
-            anyhow::bail!("--output is required unless --s3-bucket or S3_BUCKET is set")
-        }
+        (None, Some(bucket)) => anyhow::bail!(
+            "--output is required: writes no longer default to --s3-bucket / S3_BUCKET; \
+             pass --output s3://{bucket}/<prefix> for S3 or a local path"
+        ),
+        (None, None) => anyhow::bail!("--output is required"),
+    }
+}
+
+/// Fail when a write destination came only from the read-only `S3_BUCKET`
+/// shorthand, i.e. `original` is not an explicit `s3://` URI but resolved to
+/// one. `writes` says whether this invocation writes at all.
+pub fn reject_implicit_s3_write(
+    command: &str,
+    original: &str,
+    resolved: &str,
+    writes: bool,
+) -> anyhow::Result<()> {
+    if writes && resolved.starts_with("s3://") && !original.trim().starts_with("s3://") {
+        anyhow::bail!(
+            "{command} writes artifacts or takes dataset ownership next to its data, but \
+             `{original}` was resolved to {resolved} only through the read-only S3_BUCKET \
+             shorthand. Pass the S3 URI explicitly ({resolved}) to write there"
+        );
+    }
+    Ok(())
+}
+
+/// Human-readable absolute destination for startup logs: S3 URIs as given,
+/// local paths made absolute against the current directory (not canonicalized,
+/// so a path that does not exist yet is still reported).
+pub fn display_destination(path: &str) -> String {
+    if path.starts_with("s3://") {
+        return path.to_string();
+    }
+    std::path::absolute(path)
+        .map(|path| path.to_string_lossy().into_owned())
+        .unwrap_or_else(|_| path.to_string())
+}
+
+/// Destination of the cursor mirror under `output`, with the same placement as
+/// [`crate::cursor::CursorLocation::resolve`], for startup logs.
+pub fn display_cursor_destination(output: &str, cursor: &str) -> String {
+    if cursor.starts_with("s3://") {
+        return cursor.to_string();
+    }
+    if output.starts_with("s3://") && !Path::new(cursor).is_absolute() {
+        let relative = cursor.replace('\\', "/");
+        return match crate::writer::parse_s3_url(output) {
+            Ok((bucket, prefix)) if prefix.is_empty() => format!("s3://{bucket}/{relative}"),
+            Ok((bucket, prefix)) => format!("s3://{bucket}/{prefix}/{relative}"),
+            Err(_) => format!("{}/{relative}", output.trim_end_matches('/')),
+        };
+    }
+    let path = Path::new(cursor);
+    if path.is_absolute() {
+        display_destination(cursor)
+    } else {
+        display_destination(&Path::new(output).join(path).to_string_lossy())
     }
 }
 

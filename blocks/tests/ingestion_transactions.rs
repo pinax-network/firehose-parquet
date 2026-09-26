@@ -422,6 +422,144 @@ fn assert_checkpoint(root: &Path, ordinal: u64, number: u64, stop: u64) {
     assert_eq!(mirror.cursor, format!("fixture-{number}"));
 }
 
+/// Build with a relative `--output` (or none) from `cwd`, clearing the process
+/// environment so only an env file can supply settings.
+fn relative_output_build(
+    server: &MockFirehose,
+    cwd: &Path,
+    output: Option<&str>,
+    extra: &[&str],
+) -> tokio::process::Command {
+    let mut child = tokio::process::Command::new(env!("CARGO_BIN_EXE_fireparq"));
+    child
+        .kill_on_drop(true)
+        .env_clear()
+        .current_dir(cwd)
+        .args(extra)
+        .args([
+            "build",
+            "--endpoint",
+            &server.endpoint,
+            "--block-type",
+            "evm",
+            "--start-block",
+            "100",
+            "--stop-block",
+            "102",
+            "--partition",
+            "none",
+            "--stream-idle-timeout-secs",
+            "0",
+        ]);
+    if let Some(output) = output {
+        child.args(["--output", output]);
+    }
+    child
+}
+
+/// #617: a `.env` in a parent directory is never loaded, an inherited
+/// `S3_BUCKET` never turns a relative output into an S3 write, and startup logs
+/// name the env file (never values) and the absolute write destination.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn parent_env_file_is_ignored_and_bucket_never_redirects_relative_output() {
+    let server = MockFirehose::start(
+        (100..102).map(|n| response(n, 3)).collect(),
+        vec![Plan::complete("", 100, 101), Plan::complete("", 100, 101)],
+    )
+    .await;
+    let dir = tempfile::tempdir().unwrap();
+    // A checkout holding production settings, with a worktree below it.
+    let production_env = "S3_BUCKET=production-bucket\n\
+        AWS_ACCESS_KEY_ID=parent-key-id\n\
+        AWS_SECRET_ACCESS_KEY=parent-secret-value\n\
+        AWS_ENDPOINT_URL_S3=http://127.0.0.1:9\n";
+    std::fs::write(dir.path().join(".env"), production_env).unwrap();
+    let worktree = dir.path().join("worktree");
+    std::fs::create_dir(&worktree).unwrap();
+    // The child's working directory is the canonical path (macOS /private/var).
+    let worktree_abs = worktree.canonicalize().unwrap();
+
+    // 1. The parent .env is ignored: the relative output stays local.
+    let output = success(relative_output_build(
+        &server,
+        &worktree,
+        Some("target/out"),
+        &[],
+    ))
+    .await;
+    let logs = plain_logs(&output);
+    assert!(logs.contains("no env file loaded"), "{logs}");
+    let local_root = worktree_abs.join("target/out").join(CHAIN);
+    assert!(
+        logs.contains(&format!("output={}", local_root.display())),
+        "{logs}"
+    );
+    assert!(
+        logs.contains(&format!(
+            "cursor={}",
+            local_root.join("cursor.parquet").display()
+        )),
+        "{logs}"
+    );
+    assert!(logs.contains("resolved write destinations"), "{logs}");
+    assert_eq!(block_numbers(&local_root), [100, 101]);
+    assert!(!logs.contains("production-bucket"), "{logs}");
+    assert!(!logs.contains("parent-secret-value"), "{logs}");
+
+    // 2. The same file in the current directory is loaded and named, with
+    // variable names only, and the relative output is refused before any write.
+    std::fs::write(worktree.join(".env"), production_env).unwrap();
+    let output = run(relative_output_build(
+        &server,
+        &worktree,
+        Some("target/refused"),
+        &[],
+    ))
+    .await;
+    assert!(!output.status.success());
+    let logs = plain_logs(&output);
+    assert!(logs.contains("loaded env file"), "{logs}");
+    assert!(
+        logs.contains(&worktree_abs.join(".env").display().to_string()),
+        "{logs}"
+    );
+    assert!(logs.contains("S3_BUCKET"), "{logs}");
+    assert!(logs.contains("AWS_SECRET_ACCESS_KEY"), "{logs}");
+    assert!(!logs.contains("parent-secret-value"), "{logs}");
+    assert!(!logs.contains("parent-key-id"), "{logs}");
+    assert!(logs.contains("relative path"), "{logs}");
+    assert!(
+        logs.contains("s3://production-bucket/target/refused"),
+        "{logs}"
+    );
+    assert!(!worktree.join("target/refused").exists());
+
+    // 3. --env-file selects the only file to load, so ./.env is ignored.
+    let explicit = dir.path().join("explicit.env");
+    std::fs::write(&explicit, "OUTPUT=./target/explicit\n").unwrap();
+    let output = success(relative_output_build(
+        &server,
+        &worktree,
+        None,
+        &["--env-file", explicit.to_str().unwrap()],
+    ))
+    .await;
+    let logs = plain_logs(&output);
+    assert!(logs.contains("loaded env file"), "{logs}");
+    assert!(
+        logs.contains(&explicit.canonicalize().unwrap().display().to_string())
+            || logs.contains(&explicit.display().to_string()),
+        "{logs}"
+    );
+    assert!(logs.contains("supplied=OUTPUT"), "{logs}");
+    assert!(!logs.contains("S3_BUCKET"), "{logs}");
+    assert_eq!(
+        block_numbers(&worktree_abs.join("target/explicit").join(CHAIN)),
+        [100, 101]
+    );
+    server.assert_drained();
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn repeated_completed_range_is_noop_and_deleted_mirror_is_repaired_before_extension() {
     let server = MockFirehose::start(

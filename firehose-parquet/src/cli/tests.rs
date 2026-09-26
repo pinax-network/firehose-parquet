@@ -1891,14 +1891,47 @@ fn test_updated_commands_fall_back_to_configured_s3_bucket_for_missing_relative_
         .to_string()
         .contains("AWS config required for S3 paths"));
 
-    let verify_err =
-        match crate::verify::verify_parquet("./mainnet/blocks/", None, &test_verify_options()) {
-            Ok(_) => panic!("verify should resolve to S3 without a local path"),
-            Err(err) => err,
-        };
+    // Read-only protocol verification keeps the shorthand.
+    let protocol_only = crate::verify::VerifyOptions {
+        checks: vec![crate::verify::VerifyCheck::Protocol],
+        ..test_verify_options()
+    };
+    let verify_err = match crate::verify::verify_parquet("./mainnet/blocks/", None, &protocol_only)
+    {
+        Ok(_) => panic!("verify should resolve to S3 without a local path"),
+        Err(err) => err,
+    };
     assert!(verify_err
         .to_string()
         .contains("AWS config required for S3 paths"));
+
+    // Runs that write roots or reports (and take dataset ownership) refuse a
+    // destination that only the S3_BUCKET shorthand selected (#617).
+    for opts in [
+        test_verify_options(),
+        crate::verify::VerifyOptions {
+            checks: vec![crate::verify::VerifyCheck::Protocol],
+            publish_report: true,
+            ..test_verify_options()
+        },
+        crate::verify::VerifyOptions {
+            checks: vec![crate::verify::VerifyCheck::Protocol],
+            report_json: Some(PathBuf::from("report.json")),
+            ..test_verify_options()
+        },
+    ] {
+        let message = crate::verify::verify_parquet("./mainnet/blocks/", None, &opts)
+            .expect_err("implicit S3 writes must be refused")
+            .to_string();
+        assert!(
+            message.contains("read-only S3_BUCKET shorthand"),
+            "{message}"
+        );
+        assert!(
+            message.contains("s3://configured-bucket/mainnet/blocks"),
+            "{message}"
+        );
+    }
 
     let partitions_err = read_partitions_build_rows("./mainnet/partitions.parquet", None)
         .expect_err("partitions index reader should resolve to S3 without a local path");
@@ -2510,7 +2543,7 @@ fn test_build_config_rejects_s3_bucket_without_explicit_aws_credentials() {
         "--s3-bucket",
         "my-bucket",
         "--output",
-        "my-prefix",
+        "s3://my-bucket/my-prefix",
     ]);
     let err =
         build_config(&cli.common).expect_err("build_config should fail without AWS_* credentials");
@@ -2548,7 +2581,7 @@ fn test_build_config_rejects_direct_s3_output_without_explicit_aws_credentials()
 
 #[test]
 #[serial]
-fn test_s3_bucket_constructs_output() {
+fn test_s3_bucket_never_expands_relative_output() {
     unsafe {
         std::env::remove_var("AWS_ACCESS_KEY_ID");
         std::env::remove_var("AWS_SECRET_ACCESS_KEY");
@@ -2557,23 +2590,76 @@ fn test_s3_bucket_constructs_output() {
         std::env::remove_var("AWS_ENDPOINT_URL_S3");
         std::env::remove_var("S3_BUCKET");
     }
-    // When --s3-bucket is set, output should become s3://bucket/output
+    // #617: a relative output with a bucket set used to become
+    // s3://bucket/output. Writes now require the explicit URI.
+    let args = |output: &'static str| {
+        parse(&[
+            "test-cli",
+            "--endpoint",
+            "https://example.com:443",
+            "--aws-access-key-id",
+            "AKID123",
+            "--aws-secret-access-key",
+            "secret456",
+            "--s3-bucket",
+            "my-bucket",
+            "--output",
+            output,
+        ])
+    };
+    for output in ["my-prefix", "target/test-output", "."] {
+        let message = build_config(&args(output).common)
+            .expect_err("relative output with a bucket must be rejected")
+            .to_string();
+        assert!(message.contains("relative path"), "{message}");
+        assert!(message.contains("S3_BUCKET"), "{message}");
+        assert!(message.contains("s3://my-bucket/"), "{message}");
+    }
+    let config = build_config(&args("s3://my-bucket/my-prefix").common)
+        .expect("explicit S3 output should succeed");
+    assert_eq!(config.output, PathBuf::from("s3://my-bucket/my-prefix"));
+    assert_eq!(config.s3_bucket.as_deref(), Some("my-bucket"));
+}
+
+#[test]
+#[serial]
+fn test_s3_bucket_env_does_not_redirect_relative_build_output() {
+    // The #617 incident: S3_BUCKET inherited from an env file plus a relative
+    // --output must never produce an S3 destination.
+    let _bucket = EnvVarGuard::set("S3_BUCKET", "production-bucket");
+    let _key = EnvVarGuard::set("AWS_ACCESS_KEY_ID", "AKID123");
+    let _secret = EnvVarGuard::set("AWS_SECRET_ACCESS_KEY", "secret456");
     let cli = parse(&[
         "test-cli",
         "--endpoint",
         "https://example.com:443",
-        "--aws-access-key-id",
-        "AKID123",
-        "--aws-secret-access-key",
-        "secret456",
-        "--s3-bucket",
-        "my-bucket",
         "--output",
-        "my-prefix",
+        "target/test-output",
     ]);
-    let config = build_config(&cli.common).expect("build_config should succeed");
-    assert_eq!(config.output, PathBuf::from("s3://my-bucket/my-prefix"));
-    assert_eq!(config.s3_bucket.as_deref(), Some("my-bucket"));
+    assert_eq!(cli.common.s3_bucket.as_deref(), Some("production-bucket"));
+    let message = build_config(&cli.common)
+        .expect_err("inherited S3_BUCKET must not turn relative output into S3")
+        .to_string();
+    assert!(
+        message.contains("s3://production-bucket/target/test-output"),
+        "{message}"
+    );
+    assert!(message.contains("./target/test-output"), "{message}");
+}
+
+#[test]
+#[serial]
+fn test_relative_build_output_without_bucket_stays_local() {
+    let _bucket = EnvVarGuard::remove("S3_BUCKET");
+    let cli = parse(&[
+        "test-cli",
+        "--endpoint",
+        "https://example.com:443",
+        "--output",
+        "target/test-output",
+    ]);
+    let config = build_config(&cli.common).expect("relative local output");
+    assert_eq!(config.output, PathBuf::from("target/test-output"));
 }
 
 #[test]
@@ -2648,7 +2734,8 @@ fn test_s3_bucket_default_output() {
         std::env::remove_var("S3_BUCKET");
         std::env::remove_var("OUTPUT");
     }
-    // When --s3-bucket is set but output uses default "output", use bucket root
+    // The default output `.` with a bucket used to mean the bucket root; it is
+    // now rejected rather than silently written locally or remotely (#617).
     let cli = parse(&[
         "test-cli",
         "--endpoint",
@@ -2660,8 +2747,14 @@ fn test_s3_bucket_default_output() {
         "--s3-bucket",
         "my-bucket",
     ]);
-    let config = build_config(&cli.common).expect("build_config should succeed");
-    assert_eq!(config.output, PathBuf::from("s3://my-bucket"));
+    let message = build_config(&cli.common)
+        .expect_err("default output with a bucket is ambiguous")
+        .to_string();
+    assert!(
+        message.contains("output `.` is a relative path"),
+        "{message}"
+    );
+    assert!(message.contains("s3://my-bucket/<prefix>"), "{message}");
 }
 
 #[test]
@@ -3551,23 +3644,69 @@ fn test_resolve_s3_output_root_prefers_explicit_output() {
 }
 
 #[test]
-fn test_resolve_s3_output_root_accepts_bucket_without_output() {
-    let resolved = resolve_s3_output_root(None, Some("bucket-name")).expect("resolve");
-    assert_eq!(resolved, "s3://bucket-name");
+fn test_resolve_s3_output_root_requires_explicit_output_with_bucket() {
+    let message = resolve_s3_output_root(None, Some("bucket-name"))
+        .expect_err("a bucket alone no longer selects the output")
+        .to_string();
+    assert!(message.contains("--output is required"), "{message}");
+    assert!(message.contains("s3://bucket-name/<prefix>"), "{message}");
 }
 
 #[test]
-fn test_resolve_s3_output_root_rewrites_implicit_relative_output() {
-    let resolved = resolve_s3_output_root(Some("output"), Some("bucket-name")).expect("resolve");
-    assert_eq!(resolved, "s3://bucket-name/output");
+fn test_resolve_s3_output_root_rejects_implicit_relative_output() {
+    for output in ["output", ".", "a/b"] {
+        let message = resolve_s3_output_root(Some(output), Some("bucket-name"))
+            .expect_err("relative output with a bucket is ambiguous")
+            .to_string();
+        assert!(message.contains("relative path"), "{output}: {message}");
+    }
+    // Without a bucket a relative output is local, and explicit forms are kept.
+    assert_eq!(
+        resolve_s3_output_root(Some("output"), None).unwrap(),
+        "output"
+    );
+    for output in ["./output", "../output", "/abs/output", "s3://bucket-name/p"] {
+        assert_eq!(
+            resolve_s3_output_root(Some(output), Some("bucket-name")).unwrap(),
+            output
+        );
+    }
 }
 
 #[test]
-fn test_resolve_s3_output_root_requires_output_or_bucket() {
+fn test_resolve_s3_output_root_requires_output() {
     let err = resolve_s3_output_root(None, None).expect_err("missing output should fail");
-    assert!(err
-        .to_string()
-        .contains("--output is required unless --s3-bucket or S3_BUCKET is set"));
+    assert!(err.to_string().contains("--output is required"));
+}
+
+#[test]
+fn test_write_destinations_are_absolute_for_logs() {
+    let cwd = std::env::current_dir().unwrap();
+    assert_eq!(display_destination("s3://b/p"), "s3://b/p");
+    assert_eq!(
+        display_destination("out/data"),
+        cwd.join("out/data").to_string_lossy()
+    );
+    assert_eq!(
+        display_cursor_destination("s3://b/p", "cursor.parquet"),
+        "s3://b/p/cursor.parquet"
+    );
+    assert_eq!(
+        display_cursor_destination("s3://b", "w/cursor.parquet"),
+        "s3://b/w/cursor.parquet"
+    );
+    assert_eq!(
+        display_cursor_destination("out", "cursor.parquet"),
+        cwd.join("out/cursor.parquet").to_string_lossy()
+    );
+    assert_eq!(
+        display_cursor_destination("out", "s3://c/cursor.parquet"),
+        "s3://c/cursor.parquet"
+    );
+    assert_eq!(
+        display_cursor_destination("s3://b/p", "/abs/cursor.parquet"),
+        "/abs/cursor.parquet"
+    );
 }
 
 fn block_range_row(start_block: u64, stop_block: u64, block_range_size: u64) -> PartitionBuildRow {
@@ -5072,4 +5211,109 @@ fn v2_validate_allows_open_outer_edges_but_not_open_internal_boundaries() {
     .unwrap();
     assert_eq!(filtered.total_rows, 0);
     assert!(filtered.valid);
+}
+
+fn env_file_load(
+    explicit: Option<&Path>,
+    cwd: &Path,
+    preset: &[&str],
+) -> anyhow::Result<(Option<EnvFileLoad>, Vec<(String, String)>)> {
+    let mut set = Vec::new();
+    let loaded = load_env_file_with(
+        explicit,
+        cwd,
+        |name| preset.contains(&name),
+        |name, value| set.push((name.to_string(), value.to_string())),
+    )?;
+    Ok((loaded, set))
+}
+
+#[test]
+fn env_file_in_a_parent_directory_is_never_loaded() {
+    // #617: a worktree below a checkout must not inherit the checkout's .env.
+    let checkout = tempfile::tempdir().unwrap();
+    std::fs::write(
+        checkout.path().join(".env"),
+        "S3_BUCKET=production-bucket\nAWS_SECRET_ACCESS_KEY=secret-value\n",
+    )
+    .unwrap();
+    let worktree = checkout.path().join("worktree/nested");
+    std::fs::create_dir_all(&worktree).unwrap();
+    let (loaded, set) = env_file_load(None, &worktree, &[]).unwrap();
+    assert!(loaded.is_none());
+    assert!(set.is_empty());
+
+    // The same file is loaded from the current directory.
+    let (loaded, set) = env_file_load(None, checkout.path(), &[]).unwrap();
+    let loaded = loaded.unwrap();
+    assert!(!loaded.explicit);
+    assert_eq!(loaded.path, checkout.path().join(".env"));
+    assert_eq!(loaded.supplied, ["S3_BUCKET", "AWS_SECRET_ACCESS_KEY"]);
+    assert_eq!(set.len(), 2);
+    let summary = loaded.summary();
+    assert!(
+        summary.contains("S3_BUCKET, AWS_SECRET_ACCESS_KEY"),
+        "{summary}"
+    );
+    assert!(!summary.contains("secret-value"), "{summary}");
+    assert!(!summary.contains("production-bucket"), "{summary}");
+}
+
+#[test]
+fn explicit_env_file_replaces_the_current_directory_file() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join(".env"), "S3_BUCKET=cwd-bucket\n").unwrap();
+    std::fs::write(
+        dir.path().join("custom.env"),
+        "OUTPUT=./data\nFIREPARQ_ENV_FILE=other.env\nLOG_LEVEL=debug\nOUTPUT=./second\n",
+    )
+    .unwrap();
+    let (loaded, set) =
+        env_file_load(Some(Path::new("custom.env")), dir.path(), &["LOG_LEVEL"]).unwrap();
+    let loaded = loaded.unwrap();
+    assert!(loaded.explicit);
+    assert_eq!(loaded.path, dir.path().join("custom.env"));
+    // First value wins, process variables win, and the selector key is ignored.
+    assert_eq!(set, [("OUTPUT".to_string(), "./data".to_string())]);
+    assert_eq!(loaded.supplied, ["OUTPUT"]);
+    assert_eq!(loaded.ignored, ["FIREPARQ_ENV_FILE", "LOG_LEVEL"]);
+
+    let missing = env_file_load(Some(Path::new("absent.env")), dir.path(), &[])
+        .expect_err("an explicit env file must exist");
+    assert!(missing.to_string().contains("absent.env"), "{missing}");
+}
+
+#[test]
+fn env_file_parse_errors_never_echo_the_line() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join(".env"),
+        "GOOD=1\nnot a valid line with secret-token\n",
+    )
+    .unwrap();
+    let error = env_file_load(None, dir.path(), &[])
+        .expect_err("a malformed env file must fail")
+        .to_string();
+    assert!(error.contains(".env"), "{error}");
+    assert!(!error.contains("secret-token"), "{error}");
+}
+
+#[test]
+fn explicit_env_file_argument_is_found_before_clap_parsing() {
+    let parse = |args: &[&str]| explicit_env_file_arg(args.iter().copied());
+    assert_eq!(parse(&["fireparq", "build"]).unwrap(), None);
+    assert_eq!(
+        parse(&["fireparq", "--env-file", "a.env", "build"]).unwrap(),
+        Some(PathBuf::from("a.env"))
+    );
+    assert_eq!(
+        parse(&["fireparq", "build", "--env-file=b.env"]).unwrap(),
+        Some(PathBuf::from("b.env"))
+    );
+    assert_eq!(
+        parse(&["fireparq", "scan", "--", "--env-file=c.env"]).unwrap(),
+        None
+    );
+    assert!(parse(&["fireparq", "--env-file"]).is_err());
+    assert!(parse(&["fireparq", "--env-file="]).is_err());
 }

@@ -14,12 +14,189 @@ pub fn non_final_bounded_warning(
     )
 }
 
-/// Load environment variables from `.env` file (if present).
+/// Environment variable naming an explicit env file (same as `--env-file`).
 ///
-/// Call this **before** [`clap::Parser::parse`] so that `env` attributes
-/// on CLI arguments pick up the values.
+/// It is read from the process environment only; a key with this name inside
+/// an env file is ignored.
+pub const ENV_FILE_ENV_VAR: &str = "FIREPARQ_ENV_FILE";
+/// Default env file name, looked up in the current working directory only.
+pub const DEFAULT_ENV_FILE: &str = ".env";
+
+/// Which env file was loaded at startup and which variable names it supplied.
+/// Values are never retained.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EnvFileLoad {
+    /// Absolute path of the loaded file.
+    pub path: PathBuf,
+    /// Selected with `--env-file` / `FIREPARQ_ENV_FILE` rather than `./.env`.
+    pub explicit: bool,
+    /// Variables set from the file, in file order.
+    pub supplied: Vec<String>,
+    /// Variables in the file that the process environment already defined
+    /// (the process value wins), plus an ignored `FIREPARQ_ENV_FILE` key.
+    pub ignored: Vec<String>,
+}
+
+impl EnvFileLoad {
+    /// One-line, value-free description for startup logs.
+    pub fn summary(&self) -> String {
+        let names = |names: &[String]| {
+            if names.is_empty() {
+                "none".to_string()
+            } else {
+                names.join(", ")
+            }
+        };
+        format!(
+            "loaded env file {} ({}); supplied: {}; already set in the environment: {}",
+            self.path.display(),
+            if self.explicit {
+                "--env-file / FIREPARQ_ENV_FILE"
+            } else {
+                "current directory"
+            },
+            names(&self.supplied),
+            names(&self.ignored)
+        )
+    }
+}
+
+static ENV_FILE_LOAD: std::sync::OnceLock<Option<EnvFileLoad>> = std::sync::OnceLock::new();
+
+/// The env file recorded by [`load_env_file`], if it has run and loaded one.
+pub fn loaded_env_file() -> Option<&'static EnvFileLoad> {
+    ENV_FILE_LOAD.get().and_then(Option::as_ref)
+}
+
+/// Find an explicit `--env-file PATH` / `--env-file=PATH` in raw arguments,
+/// before clap parses them (clap `env` defaults must see the file's values).
+/// Scanning stops at `--`.
+pub fn explicit_env_file_arg<I, T>(args: I) -> anyhow::Result<Option<PathBuf>>
+where
+    I: IntoIterator<Item = T>,
+    T: Into<std::ffi::OsString>,
+{
+    let mut args = args.into_iter().map(Into::into).skip(1);
+    let mut found = None;
+    while let Some(arg) = args.next() {
+        if arg == "--" {
+            break;
+        }
+        if arg == "--env-file" {
+            let value = args
+                .next()
+                .ok_or_else(|| anyhow::anyhow!("--env-file requires a path"))?;
+            found = Some(PathBuf::from(value));
+        } else if let Some(value) = arg.to_str().and_then(|arg| arg.strip_prefix("--env-file=")) {
+            found = Some(PathBuf::from(value));
+        }
+    }
+    if found
+        .as_ref()
+        .is_some_and(|path| path.as_os_str().is_empty())
+    {
+        anyhow::bail!("--env-file requires a non-empty path");
+    }
+    Ok(found)
+}
+
+/// Load one env file without walking parent directories and record it.
+///
+/// An explicit `--env-file` in `args`, else a non-empty `FIREPARQ_ENV_FILE`,
+/// selects the only file to load; it must exist. Otherwise `./.env` in the
+/// current working directory is loaded when present. Parent directories are
+/// never searched, so a run started below a checkout that holds a production
+/// `.env` does not inherit its settings. Existing process variables win.
+///
+/// Call this **before** [`clap::Parser::parse`] so that `env` attributes on CLI
+/// arguments pick up the values, then log [`EnvFileLoad::summary`].
+pub fn load_env_file<I, T>(args: I) -> anyhow::Result<Option<EnvFileLoad>>
+where
+    I: IntoIterator<Item = T>,
+    T: Into<std::ffi::OsString>,
+{
+    let explicit = match explicit_env_file_arg(args)? {
+        Some(path) => Some(path),
+        None => std::env::var_os(ENV_FILE_ENV_VAR)
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from),
+    };
+    let cwd = std::env::current_dir()
+        .map_err(|error| anyhow::anyhow!("reading the current directory: {error}"))?;
+    let loaded = load_env_file_with(
+        explicit.as_deref(),
+        &cwd,
+        |name| std::env::var_os(name).is_some(),
+        |name, value| std::env::set_var(name, value),
+    )?;
+    let _ = ENV_FILE_LOAD.set(loaded.clone());
+    Ok(loaded)
+}
+
+/// Testable core of [`load_env_file`]: resolve against `cwd`, parse the whole
+/// file before setting anything, and set only names `is_set` reports absent.
+pub(crate) fn load_env_file_with(
+    explicit: Option<&Path>,
+    cwd: &Path,
+    is_set: impl Fn(&str) -> bool,
+    mut set: impl FnMut(&str, &str),
+) -> anyhow::Result<Option<EnvFileLoad>> {
+    let (path, is_explicit) = match explicit {
+        Some(path) => (cwd.join(path), true),
+        None => {
+            let path = cwd.join(DEFAULT_ENV_FILE);
+            if !path.is_file() {
+                return Ok(None);
+            }
+            (path, false)
+        }
+    };
+    let path = std::path::absolute(&path).unwrap_or(path);
+    let entries = dotenvy::from_path_iter(&path)
+        .map_err(|error| env_file_error(&path, error))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| env_file_error(&path, error))?;
+    let mut supplied = Vec::new();
+    let mut ignored = Vec::new();
+    for (name, value) in entries {
+        if name == ENV_FILE_ENV_VAR || is_set(&name) || supplied.contains(&name) {
+            if !ignored.contains(&name) && !supplied.contains(&name) {
+                ignored.push(name);
+            }
+            continue;
+        }
+        set(&name, &value);
+        supplied.push(name);
+    }
+    Ok(Some(EnvFileLoad {
+        path,
+        explicit: is_explicit,
+        supplied,
+        ignored,
+    }))
+}
+
+/// Never echo a rejected line: env files hold secrets.
+fn env_file_error(path: &Path, error: dotenvy::Error) -> anyhow::Error {
+    match error {
+        dotenvy::Error::LineParse(_, index) => anyhow::anyhow!(
+            "invalid env file {}: cannot parse the line at byte offset {index}",
+            path.display()
+        ),
+        dotenvy::Error::Io(error) => {
+            anyhow::anyhow!("cannot read env file {}: {error}", path.display())
+        }
+        other => anyhow::anyhow!("cannot load env file {}: {other}", path.display()),
+    }
+}
+
+/// Load `./.env` from the current working directory only, ignoring errors.
+///
+/// Retained for library callers; the `fireparq` binary uses [`load_env_file`],
+/// which also honors `--env-file` / `FIREPARQ_ENV_FILE` and reports errors.
+/// Unlike `dotenvy::dotenv`, parent directories are never searched.
 pub fn load_dotenv() {
-    dotenvy::dotenv().ok();
+    let _ = load_env_file(std::iter::empty::<std::ffi::OsString>());
 }
 
 /// Run a future to completion, working both inside and outside of a tokio runtime.
@@ -235,6 +412,24 @@ pub fn init_tracing(log_level: &str, verbose: bool) {
         .with_env_filter(filter)
         .with_target(false)
         .init();
+    log_env_file_load();
+}
+
+/// Report the startup env file (names only) once tracing is available.
+pub fn log_env_file_load() {
+    match ENV_FILE_LOAD.get() {
+        Some(Some(loaded)) => tracing::info!(
+            env_file = %loaded.path.display(),
+            explicit = loaded.explicit,
+            supplied = %loaded.supplied.join(","),
+            already_set = %loaded.ignored.join(","),
+            "loaded env file"
+        ),
+        Some(None) => tracing::info!(
+            "no env file loaded (./.env absent; parent directories are never searched)"
+        ),
+        None => {}
+    }
 }
 
 /// Generate shell completions for the given command and write to stdout.

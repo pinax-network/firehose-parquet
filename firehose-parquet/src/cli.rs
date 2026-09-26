@@ -228,7 +228,7 @@ pub struct CommonArgs {
     )]
     pub final_blocks_only: bool,
 
-    /// Output directory
+    /// Output directory, or an explicit s3://bucket/prefix URI for S3 output
     #[arg(
         long,
         env = "OUTPUT",
@@ -366,7 +366,7 @@ pub struct CommonArgs {
     #[command(flatten)]
     pub aws: AwsArgs,
 
-    /// S3 bucket for relative output paths; must match an explicit s3:// output URI
+    /// Optional check that an explicit s3:// output uses this bucket; never expands a relative OUTPUT (then rejected)
     #[arg(
         long,
         env = "S3_BUCKET",
@@ -689,8 +689,9 @@ Examples:
   fireparq verify s3://bucket/mainnet/blocks \
     --publish-report-path s3://bucket/mainnet/verify_runs/custom-run/report.json
 
-  # Resolve a shorthand S3 data path when no local match exists
-  S3_BUCKET=my-bucket fireparq verify mainnet/blocks
+  # Read-only protocol checks may resolve a shorthand S3 data path; runs that
+  # write roots or reports need the explicit s3:// URI
+  S3_BUCKET=my-bucket fireparq verify mainnet/blocks --checks protocol
 
   # Verify S3 parquet data with an explicit registry (rows are keyed by network)
   fireparq verify s3://bucket/mainnet/blocks \
@@ -1024,12 +1025,12 @@ Examples:
     --partition date \\
     --output ./output
 
-  # Build to S3 with JSON output
+  # Build to S3 with JSON output (S3 writes need an explicit s3:// URI)
   fireparq partitions build \\
     --network mainnet \\
     --stop-block 10010000 \\
     --partition hour \\
-    --s3-bucket my-bucket \\
+    --output s3://my-bucket \\
     --json
 
   # Let start block fall back to a sibling cursor or endpoint metadata
@@ -1152,13 +1153,14 @@ Examples:
         /// Compression codec for the written `partitions.parquet`: zstd (level 3), zstd:<level>, snappy, gzip, none
         #[arg(long, default_value = "zstd", help_heading = "Output")]
         compression: String,
-        /// Output root path (local directory or s3:// URI prefix).
+        /// Output root path: a local directory or an explicit s3://bucket/prefix URI (required).
         ///
-        /// When omitted, `--s3-bucket` or `S3_BUCKET` is required and the
-        /// output root becomes `s3://<bucket>`.
+        /// S3 writes need an explicit `s3://` URI. When `--s3-bucket` /
+        /// `S3_BUCKET` is set, a relative output is rejected as ambiguous; use
+        /// `./path` or an absolute path for local output.
         #[arg(long, help_heading = "Output")]
         output: Option<String>,
-        /// S3 bucket name used when `--output` is omitted or should be prefixed.
+        /// Optional check that an explicit s3:// output uses this bucket; never expands relative paths
         #[arg(
             long,
             env = "S3_BUCKET",

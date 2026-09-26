@@ -36,6 +36,17 @@ pub fn read_verified_partitions_index(
     verified_index_from_snapshot(read_partition_index_snapshot(path, aws)?)
 }
 
+/// Like [`read_verified_partitions_index`], but reads exactly `path`: a missing
+/// relative local path never falls back to `s3://$S3_BUCKET/<path>`. Writers
+/// (`partitions build`) use this for their own destination, so an inherited
+/// bucket can neither supply resume state nor redirect the snapshot (#617).
+pub fn read_verified_partitions_index_at(
+    path: &str,
+    aws: Option<&AwsConfig>,
+) -> anyhow::Result<VerifiedPartitionIndex> {
+    verified_index_from_snapshot(read_partition_index_snapshot_at(path, aws)?)
+}
+
 pub(in crate::cli) fn verified_index_from_snapshot(
     snapshot: PartitionIndexSnapshot,
 ) -> anyhow::Result<VerifiedPartitionIndex> {
@@ -61,18 +72,25 @@ pub(in crate::cli) fn read_partition_index_snapshot(
     path: &str,
     aws: Option<&AwsConfig>,
 ) -> anyhow::Result<PartitionIndexSnapshot> {
-    let path = resolve_parquet_input_path_string(path);
+    read_partition_index_snapshot_at(&resolve_parquet_input_path_string(path), aws)
+}
+
+/// Read one exact local path or `s3://` URI, without the read-only shorthand.
+fn read_partition_index_snapshot_at(
+    path: &str,
+    aws: Option<&AwsConfig>,
+) -> anyhow::Result<PartitionIndexSnapshot> {
     if path.starts_with("s3://") {
         use object_store::ObjectStore;
         let aws = aws.ok_or_else(|| anyhow::anyhow!("AWS config required for S3 paths"))?;
-        let (bucket, key) = crate::writer::parse_s3_url(&path)?;
+        let (bucket, key) = crate::writer::parse_s3_url(path)?;
         let client = aws.build_read_client(&bucket)?;
         let object_path = object_store::path::Path::from(key.as_str());
         let data = block_on_async(async { client.get(&object_path).await?.bytes().await })
             .map_err(|error| anyhow::Error::from(error).context(format!("reading {path}")))?;
         partition_index_snapshot_from_reader(data, false)
     } else {
-        let file = std::fs::File::open(&path)
+        let file = std::fs::File::open(path)
             .map_err(|error| anyhow::Error::from(error).context(format!("opening {path}")))?;
         partition_index_snapshot_from_reader(file, false)
     }
