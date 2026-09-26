@@ -741,6 +741,13 @@ claim. See [equivalence coverage, recovered-work provenance and all measurements
 - A new cross-chain schema contract test maps one fixture batch for every table of every chain, under every bytes encoding and both `fork_step` settings. It checks that column names are unique, that each batch round-trips through the Parquet writer and reader with the same schema and values, and that every table's canonical `block_id` / `parent_id` match the `blocks` table.
 - A weekly `Network endpoints` workflow runs `scripts/check_network_endpoints.sh`, which sends a Firehose `EndpointInfo` call to every built-in `--network` endpoint and fails when one no longer answers (#535). It also runs on pull requests that change the generated registry. Regular `cargo test` stays offline.
 - A Parquet round-trip test asserts that the canonical `timestamp` is written as `TIMESTAMP(MILLIS, isAdjustedToUTC=true)` and reads back as `Timestamp(Millisecond, UTC)` without the embedded Arrow schema. The contract test also checks the canonical `timestamp` type on every table.
+- The offline EVM golden regression now maps each retained block through both
+  `map_block` and the production `map_block_bytes` path and requires identical
+  output. A second retained mainnet block (26,000,004, zstd-compressed) covers
+  EIP-7702 authorizations, code changes and a reverted `SET_CODE` transaction
+  whose two accepted authorizations persist. Real-data `gas_changes` coverage is
+  still missing because neither block records a gas change. See
+  [the record](../audit/validation-misc-followups-evm.md).
 
 ## Bitcoin amounts and input metadata (#511)
 
