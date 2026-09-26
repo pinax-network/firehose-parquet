@@ -3102,7 +3102,14 @@ fn validate_local(path: &std::path::Path) -> ValidateResult {
 fn reversal_summary(reversals: &[TimestampReversal]) -> Vec<(u64, i64, u64, i64)> {
     reversals
         .iter()
-        .map(|r| (r.block_num, r.timestamp, r.prev_block_num, r.prev_timestamp))
+        .map(|r| {
+            (
+                r.block_num,
+                r.timestamp_ms,
+                r.prev_block_num,
+                r.prev_timestamp_ms,
+            )
+        })
         .collect()
 }
 
@@ -3152,11 +3159,82 @@ fn test_validate_parquet_reports_timestamp_reversal_in_any_timestamp_unit() {
         let result = validate_local(dir.path());
         assert_eq!(
             reversal_summary(&result.timestamp_reversals),
-            [(3, 1_690_815_595, 2, 1_690_815_600)],
+            [(3, 1_690_815_595_000, 2, 1_690_815_600_000)],
             "{label}"
         );
         assert_eq!(result.total_blocks, 4, "{label}");
     }
+}
+
+#[test]
+fn test_validate_parquet_reports_sub_second_timestamp_reversal() {
+    use arrow::array::{
+        ArrayRef, TimestampMicrosecondArray, TimestampMillisecondArray, TimestampNanosecondArray,
+        TimestampSecondArray,
+    };
+    use std::sync::Arc;
+
+    // Canonical millisecond timestamps: .900 then .100 within the same second is a
+    // reversal that whole-second comparison would miss.
+    let millis = [
+        1_690_815_600_000_i64,
+        1_690_815_600_900,
+        1_690_815_600_100,
+        1_690_815_601_000,
+    ];
+    let scaled = |factor: i64| millis.iter().map(|ms| ms * factor).collect::<Vec<_>>();
+    let columns: Vec<(&str, ArrayRef)> = vec![
+        (
+            "timestamp_millisecond_utc",
+            Arc::new(TimestampMillisecondArray::from(scaled(1)).with_timezone("UTC")),
+        ),
+        (
+            "timestamp_microsecond_utc",
+            Arc::new(TimestampMicrosecondArray::from(scaled(1_000)).with_timezone("UTC")),
+        ),
+        (
+            "timestamp_nanosecond",
+            Arc::new(TimestampNanosecondArray::from(scaled(1_000_000))),
+        ),
+    ];
+    for (label, column) in columns {
+        let dir = tempfile::tempdir().expect("tempdir");
+        write_validate_blocks_file(&dir.path().join("blocks.parquet"), column);
+        let result = validate_local(dir.path());
+        assert_eq!(
+            reversal_summary(&result.timestamp_reversals),
+            [(3, 1_690_815_600_100, 2, 1_690_815_600_900)],
+            "{label}"
+        );
+    }
+
+    // Second-precision data with equal and increasing times stays clean, and its
+    // values are compared (and reported) in milliseconds.
+    let dir = tempfile::tempdir().expect("tempdir");
+    write_validate_blocks_file(
+        &dir.path().join("blocks.parquet"),
+        Arc::new(
+            TimestampSecondArray::from(vec![
+                1_690_815_600,
+                1_690_815_600,
+                1_690_815_601,
+                1_690_815_612,
+            ])
+            .with_timezone("UTC"),
+        ),
+    );
+    let result = validate_local(dir.path());
+    assert!(result.timestamp_reversals.is_empty());
+    assert!(result.is_valid());
+
+    assert_eq!(
+        super::validate::format_epoch_millis(1_690_815_600_100),
+        "2023-07-31 15:00:00.100"
+    );
+    assert_eq!(
+        super::validate::format_epoch_millis(-1),
+        "1969-12-31 23:59:59.999"
+    );
 }
 
 #[test]
@@ -3182,7 +3260,7 @@ fn test_validate_parquet_compares_null_timestamps_against_last_known_timestamp()
     let result = validate_local(dir.path());
     assert_eq!(
         reversal_summary(&result.timestamp_reversals),
-        [(4, 1_690_815_590, 2, 1_690_815_600)]
+        [(4, 1_690_815_590_000, 2, 1_690_815_600_000)]
     );
 }
 
@@ -3221,7 +3299,7 @@ fn test_validate_parquet_reports_timestamp_reversal_per_partition() {
         [
             (
                 "date=2023-07-31",
-                vec![(2, 1_690_815_580, 1, 1_690_815_590)]
+                vec![(2, 1_690_815_580_000, 1, 1_690_815_590_000)]
             ),
             ("date=2023-08-01", vec![]),
         ]
