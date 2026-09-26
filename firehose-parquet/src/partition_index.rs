@@ -294,9 +294,66 @@ impl VerifiedPartitionIndex {
     }
 }
 
+/// True for the Arrow types a partition-index timestamp column (`start_time`,
+/// `end_time`, `routing_start_timestamp`) may have. New indexes are written as
+/// `Timestamp(Millisecond, UTC)`, like data-table block times since #491, so
+/// Parquet readers see a real timestamp; indexes written earlier used
+/// `Timestamp(Second, UTC)` and remain readable.
+pub(crate) fn is_index_timestamp_type(data_type: &arrow::datatypes::DataType) -> bool {
+    use arrow::datatypes::{DataType, TimeUnit};
+    matches!(
+        data_type,
+        DataType::Timestamp(TimeUnit::Second | TimeUnit::Millisecond, Some(timezone))
+            if timezone.as_ref() == "UTC"
+    )
+}
+
+/// Read one partition-index timestamp as UTC epoch seconds, casting by the
+/// column's unit. Millisecond values are floored to their second.
+pub(crate) fn index_timestamp_seconds(
+    column: &dyn arrow::array::Array,
+    row: usize,
+) -> Result<Option<i64>> {
+    use arrow::array::{TimestampMillisecondArray, TimestampSecondArray};
+    ensure!(
+        is_index_timestamp_type(column.data_type()),
+        "expected a Timestamp(Millisecond, UTC) or Timestamp(Second, UTC) index column, found {}",
+        column.data_type()
+    );
+    if column.is_null(row) {
+        return Ok(None);
+    }
+    if let Some(values) = column.as_any().downcast_ref::<TimestampSecondArray>() {
+        return Ok(Some(values.value(row)));
+    }
+    let values = column
+        .as_any()
+        .downcast_ref::<TimestampMillisecondArray>()
+        .context("index timestamp column has an unexpected array type")?;
+    Ok(Some(values.value(row).div_euclid(1_000)))
+}
+
+/// Build a `Timestamp(Millisecond, UTC)` index column from UTC epoch seconds.
+pub(crate) fn index_timestamp_column(seconds: &[Option<i64>]) -> Result<arrow::array::ArrayRef> {
+    let millis = seconds
+        .iter()
+        .map(|value| {
+            value
+                .map(|seconds| {
+                    seconds
+                        .checked_mul(1_000)
+                        .context("partition index timestamp exceeds the millisecond range")
+                })
+                .transpose()
+        })
+        .collect::<Result<Vec<_>>>()?;
+    Ok(std::sync::Arc::new(
+        arrow::array::TimestampMillisecondArray::from(millis).with_timezone("UTC"),
+    ))
+}
+
 pub(crate) fn proof_fields() -> Vec<arrow::datatypes::Field> {
-    use arrow::datatypes::{DataType, Field, TimeUnit};
-    use std::sync::Arc;
+    use arrow::datatypes::{DataType, Field};
     vec![
         Field::new("complete", DataType::Boolean, false),
         Field::new("start_complete", DataType::Boolean, false),
@@ -305,16 +362,16 @@ pub(crate) fn proof_fields() -> Vec<arrow::datatypes::Field> {
         Field::new("first_observed_block_id", DataType::Utf8, true),
         Field::new(
             "routing_start_timestamp",
-            DataType::Timestamp(TimeUnit::Second, Some(Arc::from("UTC"))),
+            crate::traits::timestamp_millis_utc_type(),
             true,
         ),
     ]
 }
 
-pub(crate) fn proof_columns(proofs: &[PartitionSpanProof]) -> Vec<arrow::array::ArrayRef> {
-    use arrow::array::{BooleanArray, StringArray, TimestampSecondArray, UInt64Array};
+pub(crate) fn proof_columns(proofs: &[PartitionSpanProof]) -> Result<Vec<arrow::array::ArrayRef>> {
+    use arrow::array::{BooleanArray, StringArray, UInt64Array};
     use std::sync::Arc;
-    vec![
+    Ok(vec![
         Arc::new(BooleanArray::from(
             proofs
                 .iter()
@@ -350,30 +407,33 @@ pub(crate) fn proof_columns(proofs: &[PartitionSpanProof]) -> Vec<arrow::array::
                 })
                 .collect::<Vec<_>>(),
         )),
-        Arc::new(
-            TimestampSecondArray::from(
-                proofs
-                    .iter()
-                    .map(|proof| proof.routing_start_timestamp)
-                    .collect::<Vec<_>>(),
-            )
-            .with_timezone("UTC"),
-        ),
-    ]
+        index_timestamp_column(
+            &proofs
+                .iter()
+                .map(|proof| proof.routing_start_timestamp)
+                .collect::<Vec<_>>(),
+        )?,
+    ])
 }
 
 pub(crate) fn read_proof(
     batch: &arrow::record_batch::RecordBatch,
     row: usize,
 ) -> Result<PartitionSpanProof> {
-    use arrow::array::{Array, BooleanArray, StringArray, TimestampSecondArray, UInt64Array};
+    use arrow::array::{Array, BooleanArray, StringArray, UInt64Array};
     let schema = batch.schema();
     for expected in proof_fields() {
         let actual = schema
             .field_with_name(expected.name())
             .with_context(|| format!("verified partition index is missing {}", expected.name()))?;
+        let matches = if is_index_timestamp_type(expected.data_type()) {
+            is_index_timestamp_type(actual.data_type())
+                && actual.is_nullable() == expected.is_nullable()
+        } else {
+            actual == &expected
+        };
         ensure!(
-            actual == &expected,
+            matches,
             "verified partition column {} has an unexpected type/nullability",
             expected.name()
         );
@@ -407,12 +467,7 @@ pub(crate) fn read_proof(
         numbers.is_null(row) == ids.is_null(row),
         "partition span has only half a first-block identity"
     );
-    let times = batch
-        .column_by_name("routing_start_timestamp")
-        .unwrap()
-        .as_any()
-        .downcast_ref::<TimestampSecondArray>()
-        .unwrap();
+    let times = batch.column_by_name("routing_start_timestamp").unwrap();
     let proof = PartitionSpanProof {
         start_complete: boolean("start_complete")?,
         end_complete: boolean("end_complete")?,
@@ -420,7 +475,7 @@ pub(crate) fn read_proof(
             block_num: numbers.value(row),
             block_id: ids.value(row).into(),
         }),
-        routing_start_timestamp: (!times.is_null(row)).then(|| times.value(row)),
+        routing_start_timestamp: index_timestamp_seconds(times.as_ref(), row)?,
     };
     ensure!(
         proof.complete() == boolean("complete")?,
@@ -685,14 +740,14 @@ mod tests {
         let original = index();
         let proofs = vec![original.spans[0].proof.clone()];
         let schema = Arc::new(Schema::new(proof_fields()));
-        let mut columns = proof_columns(&proofs);
+        let mut columns = proof_columns(&proofs).unwrap();
         columns[0] = Arc::new(BooleanArray::from(vec![true]));
         let batch = RecordBatch::try_new(schema.clone(), columns).unwrap();
         assert!(read_proof(&batch, 0)
             .unwrap_err()
             .to_string()
             .contains("boundary flags"));
-        let mut columns = proof_columns(&proofs);
+        let mut columns = proof_columns(&proofs).unwrap();
         columns[4] = Arc::new(StringArray::from(vec![None::<&str>]));
         let batch = RecordBatch::try_new(schema.clone(), columns).unwrap();
         assert!(read_proof(&batch, 0)
@@ -701,6 +756,7 @@ mod tests {
             .contains("half a first-block"));
         let fields = proof_fields().into_iter().take(5).collect::<Vec<_>>();
         let columns = proof_columns(&proofs)
+            .unwrap()
             .into_iter()
             .take(5)
             .collect::<Vec<_>>();

@@ -4025,7 +4025,7 @@ fn test_write_partitions_index_uses_updated_schema() {
             .field_with_name("start_time")
             .expect("start_time")
             .data_type(),
-        &DataType::Timestamp(TimeUnit::Second, Some(Arc::from("UTC")))
+        &DataType::Timestamp(TimeUnit::Millisecond, Some(Arc::from("UTC")))
     );
     assert!(
         schema
@@ -4039,7 +4039,7 @@ fn test_write_partitions_index_uses_updated_schema() {
             .field_with_name("end_time")
             .expect("end_time")
             .data_type(),
-        &DataType::Timestamp(TimeUnit::Second, Some(Arc::from("UTC")))
+        &DataType::Timestamp(TimeUnit::Millisecond, Some(Arc::from("UTC")))
     );
     assert!(
         schema
@@ -4853,7 +4853,7 @@ fn numeric_ranges_refuse_unseen_routing_context_but_inspection_preserves_evidenc
 }
 #[test]
 fn verified_reader_rejects_invalid_canonical_times_instead_of_nulling_them() {
-    use arrow::{array::TimestampSecondArray, record_batch::RecordBatch};
+    use arrow::{array::TimestampMillisecondArray, record_batch::RecordBatch};
     use parquet::{
         arrow::{arrow_reader::ParquetRecordBatchReaderBuilder, ArrowWriter},
         file::properties::WriterProperties,
@@ -4873,7 +4873,8 @@ fn verified_reader_rejects_invalid_canonical_times_instead_of_nulling_them() {
     let batch = reader.build().unwrap().next().unwrap().unwrap();
     let mut columns = batch.columns().to_vec();
     columns[3] = Arc::new(
-        TimestampSecondArray::from(vec![Some(i64::MAX); batch.num_rows()]).with_timezone("UTC"),
+        TimestampMillisecondArray::from(vec![Some(i64::MAX); batch.num_rows()])
+            .with_timezone("UTC"),
     );
     let bad = RecordBatch::try_new(schema.clone(), columns).unwrap();
     let properties = WriterProperties::builder()
@@ -4889,4 +4890,168 @@ fn verified_reader_rejects_invalid_canonical_times_instead_of_nulling_them() {
     writer.close().unwrap();
     assert!(read_verified_partitions_index(path.to_str().unwrap(), None).is_err());
     assert!(list_partitions_from_index(&verified_list_request(&path), None).is_err());
+}
+
+/// Rewrite an index file with its timestamp columns cast to `Timestamp(Second, UTC)`,
+/// the layout written before partition-index times moved to milliseconds.
+fn rewrite_index_with_second_timestamps(path: &std::path::Path) {
+    use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
+    use arrow::record_batch::RecordBatch;
+    use parquet::{
+        arrow::{arrow_reader::ParquetRecordBatchReaderBuilder, ArrowWriter},
+        file::properties::WriterProperties,
+    };
+    use std::sync::Arc;
+    let reader =
+        ParquetRecordBatchReaderBuilder::try_new(std::fs::File::open(path).unwrap()).unwrap();
+    let metadata = reader
+        .metadata()
+        .file_metadata()
+        .key_value_metadata()
+        .cloned();
+    let batch = reader.build().unwrap().next().unwrap().unwrap();
+    let seconds = DataType::Timestamp(TimeUnit::Second, Some(Arc::from("UTC")));
+    let mut fields = Vec::new();
+    let mut columns = Vec::new();
+    for (field, column) in batch.schema().fields().iter().zip(batch.columns()) {
+        if matches!(field.data_type(), DataType::Timestamp(_, _)) {
+            fields.push(Field::new(
+                field.name(),
+                seconds.clone(),
+                field.is_nullable(),
+            ));
+            columns.push(arrow::compute::cast(column, &seconds).unwrap());
+        } else {
+            fields.push(field.as_ref().clone());
+            columns.push(column.clone());
+        }
+    }
+    let schema = Arc::new(Schema::new(fields));
+    let batch = RecordBatch::try_new(schema.clone(), columns).unwrap();
+    let properties = WriterProperties::builder()
+        .set_key_value_metadata(metadata)
+        .build();
+    let mut writer = ArrowWriter::try_new(
+        std::fs::File::create(path).unwrap(),
+        schema,
+        Some(properties),
+    )
+    .unwrap();
+    writer.write(&batch).unwrap();
+    writer.close().unwrap();
+}
+
+#[test]
+fn partitions_index_writes_millisecond_times_and_reads_second_indexes() {
+    use arrow::datatypes::{DataType, TimeUnit};
+    use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("partitions.parquet");
+    write_test_verified_partitions_index(&path, verified_test_rows()).unwrap();
+    let original = read_verified_partitions_index(path.to_str().unwrap(), None).unwrap();
+    assert!(original
+        .spans
+        .iter()
+        .all(|span| span.row.start_time.is_some() && span.proof.routing_start_timestamp.is_some()));
+
+    // New indexes store every time column as TIMESTAMP(MILLIS, UTC), so external
+    // readers such as DuckDB see timestamps rather than BIGINT.
+    let reader =
+        ParquetRecordBatchReaderBuilder::try_new(std::fs::File::open(&path).unwrap()).unwrap();
+    let millis = DataType::Timestamp(TimeUnit::Millisecond, Some("UTC".into()));
+    for name in ["start_time", "end_time", "routing_start_timestamp"] {
+        assert_eq!(
+            reader.schema().field_with_name(name).unwrap().data_type(),
+            &millis,
+            "{name}"
+        );
+    }
+    let descr = reader.parquet_schema();
+    for name in ["start_time", "end_time", "routing_start_timestamp"] {
+        let column = (0..descr.num_columns())
+            .map(|i| descr.column(i))
+            .find(|column| column.name() == name)
+            .unwrap();
+        assert_eq!(
+            column.logical_type_ref(),
+            Some(&parquet::basic::LogicalType::timestamp(
+                true,
+                parquet::basic::TimeUnit::MILLIS
+            )),
+            "{name}"
+        );
+    }
+    let first = reader.build().unwrap().next().unwrap().unwrap();
+    let stored = first
+        .column_by_name("start_time")
+        .unwrap()
+        .as_any()
+        .downcast_ref::<arrow::array::TimestampMillisecondArray>()
+        .unwrap()
+        .value(0);
+    assert_eq!(
+        stored,
+        parse_partition_timestamp(original.spans[0].row.start_time.as_deref().unwrap()).unwrap()
+            * 1_000
+    );
+
+    // Indexes written before the change used Timestamp(Second, UTC): they keep
+    // reading as the same verified model, and resume/rewrite upgrades them.
+    rewrite_index_with_second_timestamps(&path);
+    let reader =
+        ParquetRecordBatchReaderBuilder::try_new(std::fs::File::open(&path).unwrap()).unwrap();
+    assert_eq!(
+        reader
+            .schema()
+            .field_with_name("routing_start_timestamp")
+            .unwrap()
+            .data_type(),
+        &DataType::Timestamp(TimeUnit::Second, Some("UTC".into()))
+    );
+    let legacy = read_verified_partitions_index(path.to_str().unwrap(), None).unwrap();
+    assert_eq!(legacy, original);
+    let listed = list_partitions_from_index(&verified_list_request(&path), None).unwrap();
+    assert_eq!(listed.rows.len(), original.spans.len());
+    write_verified_partitions_index(
+        path.to_str().unwrap(),
+        &legacy,
+        Compression::Zstd,
+        None,
+        None,
+    )
+    .unwrap();
+    let reader =
+        ParquetRecordBatchReaderBuilder::try_new(std::fs::File::open(&path).unwrap()).unwrap();
+    assert_eq!(
+        reader
+            .schema()
+            .field_with_name("end_time")
+            .unwrap()
+            .data_type(),
+        &millis
+    );
+    assert_eq!(
+        read_verified_partitions_index(path.to_str().unwrap(), None).unwrap(),
+        original
+    );
+
+    // Legacy (pre-v2) row files with second-precision times remain inspectable.
+    let legacy_path = temp.path().join("legacy.parquet");
+    let mut legacy_rows = verified_test_rows();
+    for row in &mut legacy_rows {
+        row.start_time = Some(row.partition_value.clone());
+    }
+    write_test_partitions_index(&legacy_path, legacy_rows.clone()).unwrap();
+    rewrite_index_with_second_timestamps(&legacy_path);
+    let mut rows = read_partitions_build_rows(legacy_path.to_str().unwrap(), None).unwrap();
+    rows.sort_by_key(|row| row.start_block);
+    assert_eq!(
+        rows.iter()
+            .map(|row| row.start_time.clone())
+            .collect::<Vec<_>>(),
+        legacy_rows
+            .iter()
+            .map(|row| row.start_time.clone())
+            .collect::<Vec<_>>()
+    );
 }
