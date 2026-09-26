@@ -110,6 +110,16 @@ fn run<B: Backend>(
             .context("rollup row count overflow")?;
         total_input_files += sources.len();
         backend.begin_group(group_key)?;
+        // Copies keep their sources, so the next copy rollup must be able to find and
+        // replace them even after merge renamed them; outputs that replace their sources
+        // keep whatever marker those sources carried.
+        let file_kv_metadata = if config.delete_source {
+            file_kv_metadata
+        } else {
+            Some(crate::maintenance::compaction::with_rollup_copy_marker(
+                file_kv_metadata,
+            ))
+        };
         let mut encoder = Encoder::rollup(
             schema.context("rollup group has no schema")?,
             config.compression,

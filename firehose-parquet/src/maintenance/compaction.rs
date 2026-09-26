@@ -194,11 +194,18 @@ pub(crate) fn describe_schema_mismatch(reference: &Schema, other: &Schema) -> Op
     Some(problems.join("; "))
 }
 
+/// Footer key marking a rollup output written without `--delete-source`: a copy of rows
+/// whose sources were kept, which the next copy rollup of the same target replaces. It is
+/// a value key, so merge never combines copies with other files and keeps the marker on
+/// the files it writes from them.
+pub(crate) const ROLLUP_COPY_KEY: &str = "firehose-parquet.rollup_copy";
+
 /// Footer metadata keys that define what a file's values mean: its chain, the byte and
-/// block-id encodings, vote and failed-transaction coverage, synthetic timestamps, and
-/// the stream mode. Files that disagree on any of them are never combined, even when
-/// their columns match, because the combined file could only carry one of the labels.
-/// A key present in one file and absent in another is a disagreement.
+/// block-id encodings, vote and failed-transaction coverage, synthetic timestamps, the
+/// stream mode, and whether it is a rollup copy. Files that disagree on any of them are
+/// never combined, even when their columns match, because the combined file could only
+/// carry one of the labels. A key present in one file and absent in another is a
+/// disagreement.
 pub(crate) const VALUE_METADATA_KEYS: &[&str] = &[
     "firehose-parquet.block_type",
     "firehose-parquet.chain_name",
@@ -210,7 +217,30 @@ pub(crate) const VALUE_METADATA_KEYS: &[&str] = &[
     "firehose-parquet.extended",
     "firehose-parquet.final_blocks_only",
     "firehose-parquet.include_failed_transactions",
+    ROLLUP_COPY_KEY,
 ];
+
+/// Whether footer metadata carries the rollup copy marker.
+pub(crate) fn is_rollup_copy(metadata: Option<&[KeyValue]>) -> bool {
+    metadata.is_some_and(|kvs| {
+        kvs.iter()
+            .any(|kv| kv.key == ROLLUP_COPY_KEY && kv.value.as_deref() == Some("true"))
+    })
+}
+
+/// `metadata` with the rollup copy marker set.
+pub(crate) fn with_rollup_copy_marker(metadata: Option<Vec<KeyValue>>) -> Vec<KeyValue> {
+    let mut kvs: Vec<KeyValue> = metadata
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|kv| kv.key != ROLLUP_COPY_KEY)
+        .collect();
+    kvs.push(KeyValue::new(
+        ROLLUP_COPY_KEY.to_string(),
+        "true".to_string(),
+    ));
+    kvs
+}
 
 /// Values of [`VALUE_METADATA_KEYS`], in order; `None` when a key is absent.
 fn value_metadata(metadata: Option<&[KeyValue]>) -> Vec<Option<String>> {

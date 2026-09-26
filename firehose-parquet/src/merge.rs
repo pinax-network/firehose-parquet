@@ -603,7 +603,7 @@ struct S3Merge<'a> {
 }
 
 #[cfg(test)]
-fn merge_s3(
+pub(crate) fn merge_s3(
     config: &MergeConfig,
     client: &Arc<dyn ObjectStore>,
     bucket: &str,

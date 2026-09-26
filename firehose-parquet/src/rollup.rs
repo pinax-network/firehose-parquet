@@ -323,25 +323,47 @@ fn create_output_file(path: &Path) -> Result<std::fs::File> {
         .with_context(|| format!("creating output file {}", path.display()))
 }
 
-/// Delete copy outputs (`part-rollup-*.parquet`) of earlier runs directly inside `out_dir`.
+/// Delete copy outputs of earlier runs directly inside `out_dir`: files named
+/// `part-rollup-*.parquet`, or Parquet files whose footer carries the rollup copy marker
+/// (merge keeps it when it renames copies).
 ///
 /// They hold rows from sources that were kept, and those rows were just rolled up again into
 /// the files in `written`.
 fn remove_previous_copies_local(out_dir: &Path, written: &HashSet<PathBuf>) -> Result<()> {
     for entry in std::fs::read_dir(out_dir)? {
         let path = entry?.path();
-        let is_copy = path.is_file()
-            && path
-                .file_name()
-                .and_then(|name| name.to_str())
-                .is_some_and(is_copy_output);
-        if is_copy && !written.contains(&path) {
+        if !path.is_file() || written.contains(&path) {
+            continue;
+        }
+        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        let is_copy = is_copy_output(name)
+            || (name.ends_with(".parquet") && {
+                let file = std::fs::File::open(&path)
+                    .with_context(|| format!("opening {}", path.display()))?;
+                footer_is_copy(&file)
+                    .with_context(|| format!("reading Parquet footer of {}", path.display()))?
+            });
+        if is_copy {
             debug!(path = %path.display(), "deleting copy output of an earlier rollup");
             std::fs::remove_file(&path)
                 .with_context(|| format!("deleting earlier rollup output {}", path.display()))?;
         }
     }
     Ok(())
+}
+
+/// Whether a Parquet file's footer carries the rollup copy marker.
+fn footer_is_copy<R: parquet::file::reader::ChunkReader>(reader: &R) -> Result<bool> {
+    let metadata =
+        parquet::file::metadata::ParquetMetaDataReader::new().parse_and_finish(reader)?;
+    Ok(crate::maintenance::compaction::is_rollup_copy(
+        metadata
+            .file_metadata()
+            .key_value_metadata()
+            .map(Vec::as_slice),
+    ))
 }
 
 /// Group source files by their target (coarser) partition key.
@@ -525,7 +547,9 @@ fn rollup_s3(config: &RollupConfig, src: &S3Root, out: &S3Root) -> Result<()> {
     engine::remote(src, out, &groups, config)
 }
 
-/// Delete copy outputs (`part-rollup-*.parquet`) of earlier runs directly under `group_key`.
+/// Delete copy outputs of earlier runs directly under `group_key`: objects named
+/// `part-rollup-*.parquet`, or Parquet objects whose footer carries the rollup copy marker
+/// (merge keeps it when it renames copies).
 ///
 /// They hold rows from sources that were kept, and those rows were just rolled up again into
 /// the objects in `written`.
@@ -537,15 +561,27 @@ fn remove_previous_copies_s3(
     let dir = object_store::path::Path::from(out.key(group_key).as_str());
     let listing = block_on_async(out.client.list_with_delimiter(Some(&dir)))
         .map_err(|e| anyhow::anyhow!("listing s3://{}/{dir}: {e}", out.bucket))?;
-    let keys = listing
-        .objects
-        .into_iter()
-        .filter(|object| {
-            object.location.filename().is_some_and(is_copy_output)
-                && !written.contains(object.location.as_ref())
-        })
-        .map(|object| object.location)
-        .collect::<Vec<_>>();
+    let mut keys = Vec::new();
+    for object in listing.objects {
+        if written.contains(object.location.as_ref()) {
+            continue;
+        }
+        let Some(name) = object.location.filename() else {
+            continue;
+        };
+        let is_copy = is_copy_output(name)
+            || (name.ends_with(".parquet")
+                && footer_is_copy(&RangeReader::new(out.client.clone(), object.clone()))
+                    .with_context(|| {
+                        format!(
+                            "reading Parquet footer of s3://{}/{}",
+                            out.bucket, object.location
+                        )
+                    })?);
+        if is_copy {
+            keys.push(object.location);
+        }
+    }
     block_on_async(crate::s3::delete::delete_objects_once(&out.client, &keys))?;
     Ok(())
 }
@@ -1923,5 +1959,126 @@ mod tests {
             .to_string();
         assert!(err.contains("bytes_encoding"), "{err}");
         assert_eq!(s3_keys(&store, "mainnet").len(), 2);
+    }
+
+    fn merge_config(path: &str) -> crate::merge::MergeConfig {
+        crate::merge::MergeConfig {
+            path: path.to_string(),
+            compression: Compression::None,
+            flush_rows: None,
+            flush_bytes: 0,
+            dry_run: false,
+            verbose: false,
+            aws: None,
+            cache_control: String::new(),
+        }
+    }
+
+    fn footer_marker(data: bytes::Bytes) -> bool {
+        let reader = ParquetRecordBatchReaderBuilder::try_new(data).unwrap();
+        crate::maintenance::compaction::is_rollup_copy(
+            reader
+                .metadata()
+                .file_metadata()
+                .key_value_metadata()
+                .map(Vec::as_slice),
+        )
+    }
+
+    /// Merge renames `part-rollup-*` copies. A re-run used to miss them and add a second copy
+    /// of every row; the footer marker that merge keeps now identifies them.
+    #[test]
+    fn copy_rollup_replaces_its_earlier_copies_after_merge_renamed_them() {
+        let dir = tempfile::tempdir().unwrap();
+        let (src, out) = (dir.path().join("src"), dir.path().join("out"));
+        for (minute, start) in [("30", 0), ("31", 1000), ("32", 2000)] {
+            write_range_file(
+                &src.join(format!(
+                    "{DAY}/hour=14/minute={minute}/part-00000001.parquet"
+                )),
+                start,
+                400,
+            );
+        }
+        let mut config = local_config(&src, &out, false);
+        config.flush_bytes = 1024;
+        run_rollup(&config).unwrap();
+        let group = out.join(DAY);
+        let first = file_names_in(&group);
+        assert!(
+            first.len() > 1,
+            "flush target must split the copy: {first:?}"
+        );
+        assert!(first.iter().all(|name| is_copy_output(name)));
+        for name in &first {
+            assert!(footer_marker(
+                std::fs::read(group.join(name)).unwrap().into()
+            ));
+        }
+
+        let merged = crate::merge::run_merge(&merge_config(&out.to_string_lossy())).unwrap();
+        assert_eq!(merged.partitions_merged, 1);
+        let renamed = file_names_in(&group);
+        assert_eq!(renamed, ["part-000001.parquet"]);
+        assert!(footer_marker(
+            std::fs::read(group.join(&renamed[0])).unwrap().into()
+        ));
+
+        run_rollup(&config).unwrap();
+        assert_eq!(local_block_numbers(&out), local_block_numbers(&src));
+        assert!(file_names_in(&group)
+            .iter()
+            .all(|name| is_copy_output(name)));
+
+        // Outputs that replace unmarked sources are not copies.
+        let in_place = dir.path().join("in-place");
+        write_range_file(
+            &in_place.join(format!("{DAY}/hour=14/minute=30/part-00000001.parquet")),
+            0,
+            10,
+        );
+        run_rollup(&local_config(&in_place, &in_place, true)).unwrap();
+        let outputs = file_names_in(&in_place.join(DAY));
+        assert_eq!(outputs.len(), 1);
+        assert!(!footer_marker(
+            std::fs::read(in_place.join(DAY).join(&outputs[0]))
+                .unwrap()
+                .into()
+        ));
+    }
+
+    #[test]
+    fn s3_copy_rollup_replaces_its_earlier_copies_after_merge_renamed_them() {
+        let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        for (minute, start) in [("30", 0), ("31", 1000), ("32", 2000)] {
+            put_range_object(
+                &store,
+                &format!("src/{DAY}/hour=14/minute={minute}/part-00000001.parquet"),
+                start,
+                400,
+            );
+        }
+        let mut config = s3_config("src", "out", false);
+        config.flush_bytes = 1024;
+        let (src, out) = (memory_root(&store, "src"), memory_root(&store, "out"));
+        rollup_s3(&config, &src, &out).unwrap();
+        assert!(s3_keys(&store, "out").len() > 1);
+
+        let merged =
+            crate::merge::merge_s3(&merge_config("s3://bucket/out"), &store, "bucket", "out")
+                .unwrap();
+        assert_eq!(merged.partitions_merged, 1);
+        let renamed: Vec<String> = s3_keys(&store, "out")
+            .into_iter()
+            .filter(|key| key.ends_with(".parquet"))
+            .collect();
+        assert_eq!(renamed, [format!("out/{DAY}/part-000001.parquet")]);
+        assert!(footer_marker(get_object(&store, &renamed[0])));
+
+        rollup_s3(&config, &src, &out).unwrap();
+        assert_eq!(
+            s3_block_numbers(&store, "out"),
+            s3_block_numbers(&store, "src")
+        );
     }
 }
