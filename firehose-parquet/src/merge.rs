@@ -38,6 +38,7 @@ mod read;
 #[cfg(test)]
 use crate::maintenance::compaction::describe_schema_mismatch;
 use crate::maintenance::compaction::{Encoder, SchemaCheck};
+use crate::maintenance::discovery::{self, relative_key, LocalPolicy};
 
 const S3_UPLOAD_MAX_ATTEMPTS: usize = 1;
 const S3_UPLOAD_RETRY_BASE_DELAY_MS: u64 = 250;
@@ -280,7 +281,11 @@ fn recover_local_merges(
     result: &mut MergeResult,
 ) -> Result<()> {
     let mut journals = Vec::new();
-    collect_named_files_recursive(root, JOURNAL_FILE, &mut journals)?;
+    discovery::collect_local(
+        root,
+        LocalPolicy::merge_journals(JOURNAL_FILE),
+        &mut journals,
+    )?;
     journals.sort();
     for journal_path in journals {
         let dir = journal_path.parent().unwrap_or(root);
@@ -324,7 +329,7 @@ fn merge_local_partitions(
     // Group parquet files by their parent directory (partition). Reserved dataset artifacts
     // such as cursor.parquet are not table data and are never merged.
     let mut all_files: Vec<PathBuf> = Vec::new();
-    collect_parquet_files_recursive(root, &mut all_files)?;
+    discovery::collect_local(root, LocalPolicy::MUTATION_PARQUET, &mut all_files)?;
     all_files.retain(|file| {
         let rel = file.strip_prefix(root).unwrap_or(file).to_string_lossy();
         let reserved = is_reserved_artifact_path(&rel);
@@ -608,45 +613,6 @@ fn no_op_compaction_estimate(
     (estimated_output_files >= source_files).then_some(estimated_output_files)
 }
 
-fn collect_parquet_files_recursive(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
-    if !dir.is_dir() {
-        return Ok(());
-    }
-    for entry in std::fs::read_dir(dir)? {
-        let entry = entry?;
-        let path = entry.path();
-        if crate::artifacts::is_control_path(&path.to_string_lossy()) {
-            continue;
-        }
-        if path.is_dir() {
-            collect_parquet_files_recursive(&path, out)?;
-        } else if path.extension().map_or(false, |ext| ext == "parquet") {
-            out.push(path);
-        }
-    }
-    Ok(())
-}
-
-/// Recursively collect files named `name` under `dir`.
-fn collect_named_files_recursive(dir: &Path, name: &str, out: &mut Vec<PathBuf>) -> Result<()> {
-    if !dir.is_dir() {
-        return Ok(());
-    }
-    for entry in std::fs::read_dir(dir)? {
-        let entry = entry?;
-        let path = entry.path();
-        if crate::artifacts::is_control_path(&path.to_string_lossy()) {
-            continue;
-        }
-        if path.is_dir() {
-            collect_named_files_recursive(&path, name, out)?;
-        } else if path.file_name().is_some_and(|file_name| file_name == name) {
-            out.push(path);
-        }
-    }
-    Ok(())
-}
-
 pub(crate) fn parse_part_number(filename: &str) -> Option<u32> {
     filename
         .strip_prefix("part-")
@@ -774,14 +740,7 @@ fn merge_s3_owned(
 }
 
 fn list_s3_objects(s3: &S3Merge<'_>) -> Result<Vec<object_store::ObjectMeta>> {
-    use futures::TryStreamExt;
-
-    let list_prefix = if s3.prefix.is_empty() {
-        None
-    } else {
-        Some(object_store::path::Path::from(s3.prefix))
-    };
-    block_on_async(async { s3.client.list(list_prefix.as_ref()).try_collect().await })
+    block_on_async(discovery::list_objects(s3.client.as_ref(), s3.prefix))
         .map_err(|e| anyhow::anyhow!("listing S3 objects: {e}"))
 }
 
@@ -808,7 +767,7 @@ fn recover_s3_merges(s3: &mut S3Merge<'_>, result: &mut MergeResult) -> Result<(
         }
         let key = obj.location.as_ref();
         let partition_key = key.rsplit_once('/').map(|(dir, _)| dir).unwrap_or("");
-        let label = relative_s3_key(s3.prefix, partition_key);
+        let label = relative_key(s3.prefix, partition_key);
         let label = if label.is_empty() { "(root)" } else { label };
         let partition = S3Partition {
             client: s3.client,
@@ -855,7 +814,7 @@ fn merge_s3_partitions(
         .filter(|obj| obj.location.as_ref().ends_with(".parquet"))
         .filter(|obj| {
             let key = obj.location.as_ref();
-            let reserved = is_reserved_artifact_path(relative_s3_key(prefix, key));
+            let reserved = is_reserved_artifact_path(relative_key(prefix, key));
             if reserved {
                 debug!(path = %key, "skipping reserved dataset artifact");
             }
@@ -914,10 +873,7 @@ fn process_s3_partition(
     result: &mut MergeResult,
 ) -> Result<()> {
     let (client, bucket, prefix) = (s3.client, s3.bucket, s3.prefix);
-    let partition_label = partition_key
-        .strip_prefix(prefix)
-        .map(|s| s.trim_start_matches('/'))
-        .unwrap_or(partition_key);
+    let partition_label = relative_key(prefix, partition_key);
     let partition_label = if partition_label.is_empty() {
         "(root)"
     } else {
@@ -1247,19 +1203,8 @@ where
     }
 }
 
-/// `key` relative to the listed `prefix`.
-fn relative_s3_key<'a>(prefix: &str, key: &'a str) -> &'a str {
-    key.strip_prefix(prefix)
-        .map(|s| s.trim_start_matches('/'))
-        .unwrap_or(key)
-}
-
 fn print_s3_table_header(prefix: &str, partition_key: &str, current_table: &mut Option<String>) {
-    let partition_relative = partition_key
-        .strip_prefix(prefix)
-        .map(|s| s.trim_start_matches('/'))
-        .unwrap_or(partition_key);
-    let table = partition_relative
+    let table = relative_key(prefix, partition_key)
         .split('/')
         .next()
         .filter(|name| !name.is_empty())
@@ -1282,6 +1227,14 @@ mod tests {
     use arrow::array::UInt64Builder;
     use arrow::datatypes::{DataType, Field, Schema};
     use object_store::memory::InMemory;
+
+    fn collect_parquet_files_recursive(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
+        Ok(discovery::collect_local(
+            dir,
+            LocalPolicy::MUTATION_PARQUET,
+            out,
+        )?)
+    }
 
     fn make_test_batch(rows: usize) -> RecordBatch {
         let schema = Arc::new(Schema::new(vec![Field::new(
@@ -2599,7 +2552,7 @@ pub(crate) async fn recover_guarded_for_ingestion(
                 .context("merge recovery has no local owner")?;
 
             let mut paths = Vec::new();
-            collect_named_files_recursive(root, JOURNAL_FILE, &mut paths)?;
+            discovery::collect_local(root, LocalPolicy::merge_journals(JOURNAL_FILE), &mut paths)?;
             paths.sort();
             if paths.is_empty() {
                 return Ok(0);

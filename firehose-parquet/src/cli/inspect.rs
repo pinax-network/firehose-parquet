@@ -130,7 +130,11 @@ pub(in crate::cli) fn collect_scan_parquet_local(
         files.push(path.to_path_buf());
         true
     } else if path.is_dir() {
-        collect_parquet_files(&path.to_path_buf(), &mut files)?;
+        crate::maintenance::discovery::collect_local(
+            path,
+            crate::maintenance::discovery::LocalPolicy::PARQUET,
+            &mut files,
+        )?;
         files.sort();
         false
     } else {
@@ -232,7 +236,6 @@ pub(in crate::cli) fn collect_scan_parquet_s3(
     aws: &AwsConfig,
 ) -> anyhow::Result<Vec<ScanFileResult>> {
     use crate::writer::parse_s3_url;
-    use object_store::ObjectStore;
 
     let (bucket, prefix) = parse_s3_url(path)?;
     let client = aws.build_s3_client(&bucket)?;
@@ -244,8 +247,11 @@ pub(in crate::cli) fn collect_scan_parquet_s3(
     let mut remaining_rows = rows;
     let mut remaining_offset = offset;
     for obj in &parquet_objects {
-        let data = block_on_async(async { client.get(&obj.location).await?.bytes().await })
-            .map_err(|e| anyhow::anyhow!("reading s3://{bucket}/{}: {e}", obj.location))?;
+        let data = block_on_async(crate::maintenance::discovery::read_object_bytes(
+            &client,
+            &obj.location,
+        ))
+        .map_err(|e| anyhow::anyhow!("reading s3://{bucket}/{}: {e}", obj.location))?;
         let display_key = scan_s3_display_key(obj.location.as_ref(), &prefix, exact_object_path);
         let result = build_scan_file_result_from_bytes(
             data,
@@ -321,8 +327,6 @@ pub(in crate::cli) async fn collect_scan_s3_parquet_objects(
     store: &dyn object_store::ObjectStore,
     prefix: &str,
 ) -> anyhow::Result<(Vec<object_store::ObjectMeta>, bool)> {
-    use futures::TryStreamExt;
-
     if prefix.ends_with(".parquet") && !prefix.is_empty() {
         let object_path = object_store::path::Path::from(prefix);
         match store.head(&object_path).await {
@@ -336,13 +340,7 @@ pub(in crate::cli) async fn collect_scan_s3_parquet_objects(
         }
     }
 
-    let list_prefix = if prefix.is_empty() {
-        None
-    } else {
-        Some(object_store::path::Path::from(prefix))
-    };
-    let objects: Vec<object_store::ObjectMeta> =
-        store.list(list_prefix.as_ref()).try_collect().await?;
+    let objects = crate::maintenance::discovery::list_objects(store, prefix).await?;
     let mut parquet_objects: Vec<_> = objects
         .into_iter()
         .filter(|obj| obj.location.as_ref().ends_with(".parquet"))
@@ -359,10 +357,7 @@ pub(in crate::cli) fn scan_s3_display_key(
     if exact_object_path {
         return location.to_string();
     }
-    location
-        .strip_prefix(prefix)
-        .map(|s| s.trim_start_matches('/').to_string())
-        .unwrap_or_else(|| location.to_string())
+    crate::maintenance::discovery::relative_key(prefix, location).to_string()
 }
 
 pub(in crate::cli) fn build_scan_schema(
@@ -971,7 +966,6 @@ pub(in crate::cli) fn inspect_parquet_s3(
     aws: &AwsConfig,
 ) -> anyhow::Result<()> {
     use crate::writer::parse_s3_url;
-    use object_store::ObjectStore;
     use parquet::file::reader::FileReader;
     use parquet::file::serialized_reader::SerializedFileReader;
 
@@ -985,8 +979,10 @@ pub(in crate::cli) fn inspect_parquet_s3(
     )?;
 
     let obj_path = object_store::path::Path::from(key.as_str());
-    let data = block_on_async(async { client.get(&obj_path).await?.bytes().await })
-        .map_err(|e| anyhow::anyhow!("reading {path}: {e}"))?;
+    let data = block_on_async(crate::maintenance::discovery::read_object_bytes(
+        &client, &obj_path,
+    ))
+    .map_err(|e| anyhow::anyhow!("reading {path}: {e}"))?;
 
     let file_size = data.len() as u64;
     let reader = SerializedFileReader::new(bytes::Bytes::from(data))
@@ -1279,23 +1275,6 @@ pub(in crate::cli) fn print_schema_field(field: &parquet::schema::types::Type, i
             }
         }
     }
-}
-
-/// Recursively collect `.parquet` files from a directory.
-pub(in crate::cli) fn collect_parquet_files(
-    dir: &PathBuf,
-    out: &mut Vec<PathBuf>,
-) -> anyhow::Result<()> {
-    for entry in std::fs::read_dir(dir)? {
-        let entry = entry?;
-        let path = entry.path();
-        if path.is_dir() {
-            collect_parquet_files(&path, out)?;
-        } else if path.extension().map_or(false, |ext| ext == "parquet") {
-            out.push(path);
-        }
-    }
-    Ok(())
 }
 
 /// Human-readable byte size formatting.

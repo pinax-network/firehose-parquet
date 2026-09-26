@@ -1271,7 +1271,11 @@ fn list_verify_files(path: &str) -> Result<(String, Vec<String>)> {
     let mut files = Vec::new();
 
     if pathbuf.is_dir() {
-        collect_parquet_files(&pathbuf, &mut files)?;
+        crate::maintenance::discovery::collect_local(
+            &pathbuf,
+            crate::maintenance::discovery::LocalPolicy::VERIFY_PARQUET,
+            &mut files,
+        )?;
     } else if pathbuf
         .extension()
         .is_some_and(|ext| ext.eq_ignore_ascii_case("parquet"))
@@ -1343,16 +1347,9 @@ fn list_verify_objects(
     let (bucket, prefix) = parse_s3_url(path)?;
     let client = aws.build_s3_client(&bucket)?;
 
-    let list_prefix = if prefix.is_empty() {
-        None
-    } else {
-        Some(object_store::path::Path::from(prefix.as_str()))
-    };
-
-    let mut objects: Vec<object_store::ObjectMeta> = block_on_async(async {
-        use futures::TryStreamExt;
-        client.list(list_prefix.as_ref()).try_collect().await
-    })
+    let mut objects = block_on_async(crate::maintenance::discovery::list_objects(
+        &client, &prefix,
+    ))
     .map_err(|e| anyhow!("listing S3 objects: {e}"))?;
 
     objects.retain(|obj| {
@@ -2154,22 +2151,6 @@ fn merkle_root(leaves: &[[u8; 32]], hash_strategy: HashStrategy) -> [u8; 32] {
     let mut tree = MerkleAccumulator::new(hash_strategy);
     tree.extend(leaves.iter().copied());
     tree.root()
-}
-
-fn collect_parquet_files(dir: &PathBuf, out: &mut Vec<PathBuf>) -> Result<()> {
-    for entry in std::fs::read_dir(dir)? {
-        let entry = entry?;
-        let path = entry.path();
-        if path.is_dir() {
-            collect_parquet_files(&path, out)?;
-        } else if path
-            .extension()
-            .map_or(false, |ext| ext.eq_ignore_ascii_case("parquet"))
-        {
-            out.push(path);
-        }
-    }
-    Ok(())
 }
 
 fn detect_partition(file_path: &str, base_path: &str) -> String {

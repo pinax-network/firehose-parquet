@@ -834,7 +834,11 @@ pub(in crate::cli) fn validate_parquet_local(
     if path.is_file() {
         paths.push(path.clone());
     } else if path.is_dir() {
-        collect_parquet_files(path, &mut paths)?;
+        crate::maintenance::discovery::collect_local(
+            path,
+            crate::maintenance::discovery::LocalPolicy::PARQUET,
+            &mut paths,
+        )?;
         paths.sort();
     } else {
         anyhow::bail!("path does not exist: {}", path.display());
@@ -890,23 +894,14 @@ pub(in crate::cli) fn validate_parquet_s3(
     aws: &AwsConfig,
     opts: &ValidateOptions,
 ) -> anyhow::Result<ValidateResult> {
+    use crate::maintenance::discovery::{list_objects, read_object_bytes, relative_key};
     use crate::writer::parse_s3_url;
-    use object_store::ObjectStore;
 
     let (bucket, prefix) = parse_s3_url(path)?;
     let client = aws.build_s3_client(&bucket)?;
 
-    let list_prefix = if prefix.is_empty() {
-        None
-    } else {
-        Some(object_store::path::Path::from(prefix.as_str()))
-    };
-
-    let objects: Vec<object_store::ObjectMeta> = block_on_async(async {
-        use futures::TryStreamExt;
-        client.list(list_prefix.as_ref()).try_collect().await
-    })
-    .map_err(|e| anyhow::anyhow!("listing S3 objects: {e}"))?;
+    let objects = block_on_async(list_objects(&client, &prefix))
+        .map_err(|e| anyhow::anyhow!("listing S3 objects: {e}"))?;
 
     let mut parquet_objects: Vec<_> = objects
         .into_iter()
@@ -936,19 +931,13 @@ pub(in crate::cli) fn validate_parquet_s3(
     let mut file_infos = Vec::new();
 
     for obj in &parquet_objects {
-        let data = block_on_async(async { client.get(&obj.location).await?.bytes().await })
+        let data = block_on_async(read_object_bytes(&client, &obj.location))
             .map_err(|e| anyhow::anyhow!("reading s3://{bucket}/{}: {e}", obj.location))?;
 
         let (arrow_schema, tuples, row_count) = read_validation_columns(data)?;
 
         let partition_key = detect_partition(obj.location.as_ref(), &prefix);
-        let display = obj
-            .location
-            .as_ref()
-            .strip_prefix(&prefix)
-            .map(|s| s.trim_start_matches('/'))
-            .unwrap_or(obj.location.as_ref())
-            .to_string();
+        let display = relative_key(&prefix, obj.location.as_ref()).to_string();
 
         file_infos.push(FileInfo {
             path: display,

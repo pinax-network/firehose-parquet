@@ -16,6 +16,7 @@ use crate::config::{Compression, DAY_PARTITION_PREFIX, LEGACY_DAY_PARTITION_PREF
 use crate::dataset_lock::DatasetOwnership;
 use crate::ingest::maintenance::{self, MaintenancePolicy, MaintenanceTarget};
 use crate::maintenance::compaction::{Encoder, SchemaCheck};
+use crate::maintenance::discovery::{self, LocalPolicy};
 use crate::writer::parse_s3_url;
 use anyhow::{Context, Result};
 #[cfg(test)]
@@ -250,7 +251,7 @@ fn run_rollup_local(config: &RollupConfig, ownership: &DatasetOwnership) -> Resu
 
     // Discover all .parquet files under source and keep the ones to roll up.
     let mut files: Vec<PathBuf> = Vec::new();
-    collect_parquet_files_recursive(&source, &mut files)?;
+    discovery::collect_local(&source, LocalPolicy::PARQUET, &mut files)?;
     files.sort();
     let discovered = files.len();
     files.retain(|file| {
@@ -530,20 +531,6 @@ fn compute_group_key(rel_path: &str, target: RollupTarget) -> String {
     }
 }
 
-/// Recursively collect `.parquet` files from a directory.
-fn collect_parquet_files_recursive(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
-    for entry in std::fs::read_dir(dir)? {
-        let entry = entry?;
-        let path = entry.path();
-        if path.is_dir() {
-            collect_parquet_files_recursive(&path, out)?;
-        } else if path.extension().is_some_and(|ext| ext == "parquet") {
-            out.push(path);
-        }
-    }
-    Ok(())
-}
-
 /// Remove empty directories recursively (bottom-up).
 fn cleanup_empty_dirs(dir: &Path) -> Result<()> {
     if !dir.is_dir() {
@@ -584,9 +571,7 @@ impl S3Root {
 
     /// `key` relative to this root.
     fn relative<'a>(&self, key: &'a str) -> &'a str {
-        key.strip_prefix(&self.prefix)
-            .map(|s| s.trim_start_matches('/'))
-            .unwrap_or(key)
+        discovery::relative_key(&self.prefix, key)
     }
 }
 
@@ -623,16 +608,8 @@ fn run_rollup_s3(config: &RollupConfig) -> Result<()> {
 
 fn rollup_s3(config: &RollupConfig, src: &S3Root, out: &S3Root) -> Result<()> {
     // List all .parquet objects under source prefix.
-    let objects: Vec<object_store::ObjectMeta> = block_on_async(async {
-        use futures::TryStreamExt;
-        let prefix = if src.prefix.is_empty() {
-            None
-        } else {
-            Some(object_store::path::Path::from(src.prefix.as_str()))
-        };
-        src.client.list(prefix.as_ref()).try_collect().await
-    })
-    .map_err(|e| anyhow::anyhow!("listing S3 objects: {e}"))?;
+    let objects = block_on_async(discovery::list_objects(src.client.as_ref(), &src.prefix))
+        .map_err(|e| anyhow::anyhow!("listing S3 objects: {e}"))?;
 
     let mut discovered = 0usize;
     let mut groups: BTreeMap<String, Vec<object_store::ObjectMeta>> = BTreeMap::new();
@@ -824,6 +801,10 @@ fn build_s3_client(bucket: &str, aws: &AwsConfig) -> Result<Arc<dyn ObjectStore>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn collect_parquet_files_recursive(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
+        Ok(discovery::collect_local(dir, LocalPolicy::PARQUET, out)?)
+    }
     use arrow::array::{UInt64Array, UInt64Builder};
     use arrow::datatypes::{DataType, Field, Schema};
     use object_store::memory::InMemory;
