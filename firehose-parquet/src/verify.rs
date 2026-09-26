@@ -176,6 +176,15 @@ impl VerifyOptions {
         self.checks.iter().copied().collect()
     }
 
+    /// Whether this run writes artifacts (registry roots, JSON or published
+    /// reports), which also takes dataset ownership next to the data.
+    pub fn writes(&self) -> bool {
+        self.runs_roots()
+            || self.report_json.is_some()
+            || self.publish_report
+            || self.publish_report_path.is_some()
+    }
+
     fn runs_roots(&self) -> bool {
         self.effective_checks().contains(&VerifyCheck::Roots)
     }
@@ -508,6 +517,7 @@ pub fn verify_parquet(
     opts: &VerifyOptions,
 ) -> Result<VerifyReport> {
     let resolved_path = resolve_parquet_input_path_string(path);
+    crate::cli::reject_implicit_s3_write("verify", path, &resolved_path, opts.writes())?;
     let run_started = OffsetDateTime::now_utc();
     let run_id = uuid::Uuid::new_v4().to_string();
     // Validate options before discovery or persistent ownership acquisition.
@@ -2474,6 +2484,11 @@ fn commit_registry(
     snapshot: &RegistrySnapshot,
     changes: &[RegistryChange],
 ) -> Result<()> {
+    tracing::info!(
+        registry = %crate::cli::display_destination(path),
+        changes = changes.len(),
+        "writing merkle roots registry"
+    );
     if path.starts_with("s3://") {
         let aws = aws.ok_or_else(|| anyhow!("AWS config required for S3 registry path"))?;
         let (bucket, key) = parse_s3_url(path)?;

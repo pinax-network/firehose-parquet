@@ -105,6 +105,7 @@ impl ResolvedEndpoint {
             .context("cannot resolve the mapper from EndpointInfo before protected recovery; provide --block-type explicitly")?);
         }
         let cursor_location = resolve_cursor_location(&config)?;
+        log_write_destinations(&config);
         Ok(Some(Self {
             config,
             block_type,
@@ -434,4 +435,21 @@ mod native_upload_tests {
                 .is_err()
         );
     }
+}
+
+/// Name the resolved absolute output and cursor-mirror destinations before any
+/// ownership record, part or cursor is written (#617).
+fn log_write_destinations(config: &Config) {
+    let output = config.output.to_string_lossy();
+    let cursor = config
+        .cursor_path
+        .as_deref()
+        .map(|cursor| firehose_parquet::cli::display_cursor_destination(&output, cursor))
+        .unwrap_or_else(|| "disabled".to_string());
+    info!(
+        output = %firehose_parquet::cli::display_destination(&output),
+        cursor = %cursor,
+        dry_run = config.dry_run,
+        "resolved write destinations"
+    );
 }

@@ -1049,3 +1049,79 @@ async fn cli_live_retries_transient_scan_failures_and_keeps_the_snapshot() {
         .collect::<Vec<_>>();
     assert_eq!(ranges, [(8, 12), (12, 16), (16, 20), (20, 21)]);
 }
+
+/// #617: an inherited `S3_BUCKET` never turns the relative `--output` of a
+/// partition index write into an S3 destination; the run fails before any
+/// endpoint call or write, and the explicit form is suggested.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cli_partitions_build_refuses_relative_output_with_a_bucket() {
+    let root = tempfile::tempdir().unwrap();
+    let fixture = Fixture::regular();
+    let server = spawn_server(fixture.clone()).await;
+    let output = tokio::time::timeout(
+        Duration::from_secs(10),
+        command(
+            root.path(),
+            &server.url,
+            &[
+                "--partition",
+                "hour",
+                "--start-block",
+                "10",
+                "--stop-block",
+                "14",
+            ],
+        )
+        .env("S3_BUCKET", "production-bucket")
+        .env("AWS_ACCESS_KEY_ID", "fake-key-id")
+        .env("AWS_SECRET_ACCESS_KEY", "fake-secret")
+        .env("AWS_ENDPOINT_URL_S3", "http://127.0.0.1:9")
+        .output(),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("relative path"), "{stderr}");
+    assert!(stderr.contains("s3://production-bucket/output"), "{stderr}");
+    assert!(!root.path().join("output").exists());
+    assert!(fixture.requests.lock().unwrap().is_empty());
+
+    // The explicit local spelling is accepted alongside the bucket setting.
+    let output = tokio::time::timeout(
+        Duration::from_secs(10),
+        tokio::process::Command::new(env!("CARGO_BIN_EXE_fireparq"))
+            .kill_on_drop(true)
+            .env_clear()
+            .env("S3_BUCKET", "production-bucket")
+            // Any accidental S3 access would hit a closed local port.
+            .env("AWS_ENDPOINT_URL_S3", "http://127.0.0.1:9")
+            .current_dir(root.path())
+            .args([
+                "--log-level",
+                "error",
+                "partitions",
+                "build",
+                "--endpoint",
+                &server.url,
+                "--output",
+                "./output",
+                "--json",
+                "--partition",
+                "hour",
+                "--start-block",
+                "10",
+                "--stop-block",
+                "14",
+            ])
+            .output(),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    // Before #617 this run resumed from s3://production-bucket/output/...:
+    // its own destination is now read exactly, never through the shorthand.
+    assert_ok(&output);
+    assert!(index_path(root.path()).exists());
+}
