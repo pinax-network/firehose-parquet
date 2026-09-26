@@ -5,6 +5,7 @@ limits of each audit fix. The linked GitHub issues and PRs provide the current
 lifecycle state; a local implementation or passing test alone is not closure.
 
 - [#562: provider-scoped credentials](562-provider-credentials.md)
+- [Validation follow-ups 1-9: platform fixes, and index of all 17 findings](validation-misc-followups.md)
 - [#467: stable startup destinations](467-endpoint-info.md)
 - [#567: compatible dependency security refresh](dependency-security-refresh.md)
 - [#469: durable cursor persistence](469-durable-cursor-saves.md)
@@ -12,6 +13,7 @@ lifecycle state; a local implementation or passing test alone is not closure.
 - [#470: exact S3 cursor buckets](470-s3-cursor-buckets.md)
 - [#498: EVM log indices and optional tables](498-evm-log-indices.md)
 - [#499: offline EVM golden-block regression](499-evm-golden-fixture.md)
+- [Validation follow-ups 16-17: owned EVM mapping path and EIP-7702 golden block](validation-misc-followups-evm.md)
 - [#511: Bitcoin amounts and input metadata](511-bitcoin-values.md)
 - [#509: Tron contracts, receipts and internal values](509-tron-contract-fields.md)
 - [#509: bounded native RPC qualification and retained evidence](509-tron-rpc-qualification.md)
@@ -60,6 +62,7 @@ lifecycle state; a local implementation or passing test alone is not closure.
 - [#468: verification artifact ownership](468-verify-ownership.md)
 - [#468: complete runtime, migration and live recovery qualification](468-ingestion-runtime.md)
 - [#468: live table equality and recovered-state evidence](468-live-comparison.json)
+- [Validation follow-ups for protected ingestion (#464, #465, #466, #468, #469, #470, #472, #572, #578)](validation-ingest-followups.md)
 
 ## Verified lifecycle outcomes
 

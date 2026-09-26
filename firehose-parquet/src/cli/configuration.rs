@@ -100,15 +100,47 @@ pub fn validate_stop_block_after_start(
     Ok(())
 }
 
-/// Read a credential from the environment variable `name`.
+/// `--cursor` value that disables the optional cursor mirror (case-insensitive).
+const CURSOR_MIRROR_DISABLED: &str = "none";
+
+/// Resolve `--cursor` / `--cursor-template` into the configured mirror path.
 ///
-/// Surrounding whitespace is trimmed (a secret mounted from a file often ends
-/// with a newline) and blank values count as unset.
-pub fn read_credential_env(name: &str) -> Option<String> {
-    std::env::var(name)
-        .ok()
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
+/// `--cursor none` (any case) returns `None`: protected ingestion then keeps
+/// only its mandatory output authority and writes no `cursor.parquet` mirror.
+/// Every other value must be a `.parquet` path or `s3://` URI.
+fn resolve_cursor_mirror_path(args: &CommonArgs) -> anyhow::Result<Option<String>> {
+    let cursor_str = args.cursor.to_string_lossy();
+    let template = normalize_opt_string(&args.cursor_template);
+    if cursor_str
+        .trim()
+        .eq_ignore_ascii_case(CURSOR_MIRROR_DISABLED)
+    {
+        if let Some(template) = template {
+            anyhow::bail!(
+                "--cursor none disables the cursor mirror and cannot be combined with --cursor-template ({template})"
+            );
+        }
+        return Ok(None);
+    }
+    if cursor_str.starts_with("s3://") {
+        crate::writer::parse_s3_url(&cursor_str)?;
+        validate_s3_output_credentials(
+            &cursor_str,
+            args.aws.aws_access_key_id.as_deref(),
+            args.aws.aws_secret_access_key.as_deref(),
+        )?;
+    }
+    if !cursor_str.ends_with(".parquet") {
+        anyhow::bail!(
+            "--cursor path must end in .parquet (or be `none` to disable the mirror), got: {cursor_str}"
+        );
+    }
+    if let Some(template) = template {
+        if !template.ends_with(".parquet") {
+            anyhow::bail!("--cursor-template must end in .parquet, got: {template}");
+        }
+    }
+    Ok(Some(cursor_str.into_owned()))
 }
 
 /// Build a [`Config`] from [`CommonArgs`].
@@ -140,28 +172,7 @@ pub fn build_config(args: &CommonArgs) -> anyhow::Result<Config> {
         args.aws.aws_secret_access_key.as_deref(),
     )?;
 
-    // Validate that the cursor path has a .parquet extension.
-    let cursor_str = args.cursor.to_string_lossy();
-    if cursor_str.starts_with("s3://") {
-        crate::writer::parse_s3_url(&cursor_str)?;
-        validate_s3_output_credentials(
-            &cursor_str,
-            args.aws.aws_access_key_id.as_deref(),
-            args.aws.aws_secret_access_key.as_deref(),
-        )?;
-    }
-    if !cursor_str.ends_with(".parquet") {
-        return Err(anyhow::anyhow!(
-            "--cursor path must end in .parquet, got: {cursor_str}"
-        ));
-    }
-    if let Some(template) = normalize_opt_string(&args.cursor_template) {
-        if !template.ends_with(".parquet") {
-            return Err(anyhow::anyhow!(
-                "--cursor-template must end in .parquet, got: {template}"
-            ));
-        }
-    }
+    let cursor_path = resolve_cursor_mirror_path(args)?;
 
     Ok(Config {
         endpoint,
@@ -170,14 +181,15 @@ pub fn build_config(args: &CommonArgs) -> anyhow::Result<Config> {
         jwt_token: credentials.jwt_token,
         start_block: args.start_block,
         stop_block: args.stop_block,
-        cursor_path: Some(args.cursor.to_string_lossy().to_string()),
+        cursor_path,
         output,
         partition: parse_partition(&args.partition, args.block_range_size)?,
-        flush_rows: args.flush_rows,
+        // 0 disables the row and interval triggers, matching --flush-bytes 0.
+        flush_rows: args.flush_rows.filter(|rows| *rows > 0),
         flush_blocks: args.flush_blocks,
         flush_bytes: args.flush_bytes,
         flush_memory_bytes: args.flush_memory_bytes,
-        flush_interval_secs: args.flush_interval_secs,
+        flush_interval_secs: args.flush_interval_secs.filter(|secs| *secs > 0),
         compression: parse_compression(&args.compression)?,
         final_blocks_only: args.final_blocks_only,
         dry_run: args.dry_run,

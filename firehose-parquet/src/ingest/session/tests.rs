@@ -198,6 +198,132 @@ async fn legacy_root_and_changed_semantics_never_initialize_or_rewind() {
     assert!(resume.cursor.is_empty());
 }
 
+/// Ownership must guard exactly the mirror that authority binds, including an
+/// independent cursor bucket and a `--cursor-template` expansion, and must not
+/// add a mirror scope for `--cursor none`.
+#[test]
+fn mutation_scopes_follow_the_recorded_mirror_binding() {
+    let local = tempfile::tempdir().unwrap();
+    let local_output = local.path().join("chain");
+    let external = local.path().join("state").join("worker.parquet");
+    let template = crate::cli::resolve_cursor_template(
+        "mirrors/{{worker}}.parquet",
+        &crate::cli::CursorTemplateContext {
+            chain: None,
+            partition_type: None,
+            partition_value: None,
+            partition_from: None,
+            partition_to: None,
+        },
+    )
+    .unwrap();
+    assert_eq!(template, "mirrors/{worker}.parquet");
+    let local_output = local_output.to_str().unwrap().to_string();
+    let cases: Vec<(String, Option<String>, Option<MutationScope>)> = vec![
+        (local_output.clone(), None, None),
+        (
+            local_output.clone(),
+            Some("cursor.parquet".into()),
+            Some(MutationScope::file(format!(
+                "{local_output}/cursor.parquet"
+            ))),
+        ),
+        (
+            local_output.clone(),
+            Some(template.clone()),
+            Some(MutationScope::file(format!("{local_output}/{template}"))),
+        ),
+        (
+            local_output.clone(),
+            Some(external.to_str().unwrap().into()),
+            Some(MutationScope::file(external.to_str().unwrap())),
+        ),
+        (
+            local_output.clone(),
+            Some("s3://state/external/cursor.parquet".into()),
+            Some(MutationScope::file("s3://state/external/cursor.parquet")),
+        ),
+        ("s3://data/chain".into(), None, None),
+        (
+            "s3://data/chain".into(),
+            Some("cursor.parquet".into()),
+            Some(MutationScope::file("s3://data/chain/cursor.parquet")),
+        ),
+        (
+            "s3://data/chain".into(),
+            Some(template.clone()),
+            Some(MutationScope::file(format!("s3://data/chain/{template}"))),
+        ),
+        (
+            "s3://data".into(),
+            Some("cursor.parquet".into()),
+            Some(MutationScope::file("s3://data/cursor.parquet")),
+        ),
+        (
+            "s3://data/chain".into(),
+            Some("s3://state/external/cursor.parquet".into()),
+            Some(MutationScope::file("s3://state/external/cursor.parquet")),
+        ),
+    ];
+    for (output, cursor, expected_mirror) in cases {
+        let config = Config {
+            output: output.clone().into(),
+            cursor_path: cursor.clone(),
+            // A configured S3_BUCKET never redirects an explicit cursor URI.
+            s3_bucket: Some("data".into()),
+            ..Default::default()
+        };
+        let scopes = ingestion_mutation_scopes(&config).unwrap();
+        assert_eq!(scopes[0], MutationScope::directory(output.clone()));
+        assert_eq!(
+            scopes.get(1),
+            expected_mirror.as_ref(),
+            "{output} {cursor:?}"
+        );
+        assert_eq!(scopes.len(), 1 + usize::from(expected_mirror.is_some()));
+        // The same resolution is what authority records and ProtectedMirror uses.
+        let binding =
+            resolve_mirror_binding(&output, cursor.as_deref(), &aws_config(&config)).unwrap();
+        let from_binding = match binding {
+            MirrorBinding::Disabled => None,
+            MirrorBinding::Local { absolute_path } => Some(MutationScope::file(absolute_path)),
+            MirrorBinding::S3 { bucket, key, .. } => {
+                Some(MutationScope::file(format!("s3://{bucket}/{key}")))
+            }
+        };
+        assert_eq!(from_binding, expected_mirror, "{output} {cursor:?}");
+    }
+    // Paths the binding cannot record are refused before ownership is taken.
+    for (output, cursor) in [
+        ("s3://data/chain", "/absolute/cursor.parquet"),
+        ("s3://data/chain", "../cursor.parquet"),
+    ] {
+        let config = Config {
+            output: output.into(),
+            cursor_path: Some(cursor.into()),
+            ..Default::default()
+        };
+        assert!(ingestion_mutation_scopes(&config).is_err(), "{cursor}");
+    }
+}
+
+#[tokio::test]
+async fn cursor_override_is_refused_even_before_authority_exists() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = config(dir.path());
+    let owner = own(&config).await;
+    let error = load_authoritative_resume(&config, &owner, true)
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("only valid with --dry-run"), "{error}");
+    assert!(load_authoritative_resume(&config, &owner, false)
+        .await
+        .unwrap()
+        .is_none());
+    assert!(!config.output.join(".fireparq-ingest").exists());
+}
+
 #[tokio::test]
 async fn restored_lookahead_routes_remaining_missing_prefix_before_source_is_reread() {
     let dir = tempfile::tempdir().unwrap();

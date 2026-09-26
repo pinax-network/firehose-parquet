@@ -5,32 +5,6 @@ use super::*;
 mod runtime;
 mod setup;
 
-/// Collect output and the fully resolved cursor before taking any ownership.
-fn ingestion_mutation_scopes(
-    config: &Config,
-    cursor: Option<&CursorLocation>,
-) -> Result<Vec<MutationScope>> {
-    let output = config.output.to_string_lossy().into_owned();
-    let mut scopes = vec![MutationScope::directory(output.clone())];
-    match cursor {
-        Some(CursorLocation::Local(path)) => {
-            scopes.push(MutationScope::file(path.to_string_lossy()));
-        }
-        Some(CursorLocation::S3 { key, .. }) => {
-            let explicit = config.cursor_path.as_deref().unwrap_or_default();
-            let bucket_source = if explicit.starts_with("s3://") {
-                explicit
-            } else {
-                &output
-            };
-            let (bucket, _) = firehose_parquet::writer::parse_s3_url(bucket_source)?;
-            scopes.push(MutationScope::file(format!("s3://{bucket}/{key}")));
-        }
-        None => {}
-    }
-    Ok(scopes)
-}
-
 fn record_committed_flush_sizing(
     sizing: &mut FlushSizing,
     estimate: MapperBufferEstimate,

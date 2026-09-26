@@ -130,13 +130,18 @@ Blocks. Output authority under `.fireparq-ingest/` selects the exact accepted
 cursor, including filtered zero-row events and persisted timestamp-routing
 provenance. Deterministic owned parts are rolled back before replay or verified
 and rolled forward after commit. `cursor.parquet` is an optional derived mirror;
-its deletion cannot rewind output, and `--cursor none` keeps mandatory authority.
+its deletion cannot rewind output. `--cursor none` (case-insensitive) creates a
+dataset without a mirror while keeping mandatory authority; that choice is bound
+to the dataset, so later runs must repeat it, and it cannot be combined with
+`--cursor-template`.
 
 This requires a new empty dataset root and absent mirror. Existing random-name
 output or legacy cursors are refused rather than adopted. Protected origin,
 mapper/schema/encoding, effective feature flags, partition policy, storage and
-mirror binding are immutable; `--cursor-override` cannot bypass them. Use a new
-root for changed semantics. Unknown custom chain metadata needs an explicit
+mirror binding are immutable; `--cursor-override` cannot bypass them, and a real
+`build` now rejects that flag even at a new root instead of silently ignoring it
+(it remains available to read-only `--dry-run`). Use a new root for changed
+semantics. Unknown custom chain metadata needs an explicit
 `--block-type` before recovery. Flush thresholds and compression remain tunable.
 
 Guarded merge, metadata artifacts, and copy-only rollup remain available; protected
@@ -144,6 +149,10 @@ truncate, in-place rollup and source-deleting rollup are refused. Discovery cove
 ancestor and descendant dataset roots plus external mirrors. `recovery recover`
 performs offline owned recovery. S3 retains its explicit provider-quiescence
 release requirement; no time-based takeover or generic request-drain claim is added.
+An ordinary error removes the failed transaction's hidden local
+`.fireparq-txn-*.tmp` staging files before exit and keeps its journal for
+recovery; if that best-effort cleanup fails or the process is killed, the next
+`build` or `recovery recover` removes them.
 
 A completed bounded request must have an acknowledged boundary event. A clean
 sparse/empty tail alone no longer implies completion on skipped-height chains;
@@ -346,10 +355,15 @@ and never overwrites an existing destination. Directory sync failures are fatal,
 including sync of output directory ancestors. Filesystems must support atomic
 hard links and file/directory sync; directory ancestors must be readable.
 
-Final filenames and S3 writes are unchanged. This is single-file publication,
-not a transaction across tables and the cursor: an error after publication can
-leave a complete part, and replay may duplicate it. Abrupt termination may leave
-hidden `.tmp` files. See [the guarantees and tests](../audit/578-atomic-local-parquet.md).
+On its own, #578 was single-file publication, not a transaction across tables
+and the cursor. `build` now layers the #468 all-table transaction on top: parts
+use deterministic `part-v1-<stream>-<first>-<last>-<transaction>-<index>.parquet`
+names and a journal, so recovery removes or verifies them before any replay and
+a replayed window republishes the identical name instead of a duplicate part.
+Ordinary errors remove the failed transaction's hidden `.fireparq-txn-*.tmp`
+staging files; if that cleanup fails or the process is killed, the next `build`
+or `recovery recover` removes them. Legacy low-level writers keep their random
+`part-<run>-NNNNNN.parquet` names. See [the guarantees and tests](../audit/578-atomic-local-parquet.md).
 
 ### Startup requires usable EndpointInfo (#467)
 
@@ -463,7 +477,7 @@ Migration:
 `rollup` used to write fixed file names (`part-000001.parquet`), so a re-run could overwrite its earlier output and then delete it (see Fixes). The fix changes three behaviors:
 
 - **In-place rollups need `--delete-source`.** `fireparq rollup <dir>` without `--output` now fails unless `--delete-source` is passed. Without that flag, the rolled-up copy was written next to its sources, so every row was stored twice under the same root.
-- **New output names.** With `--delete-source`, outputs are named like ingestion parts: `part-<run>-NNNNNN.parquet`, where `<run>` is a random id per run. Without it, outputs are named `part-rollup-<run>-NNNNNN.parquet`, and a re-run replaces the earlier `part-rollup-*` files in each target partition it rewrites. Existing files are never overwritten.
+- **New output names.** With `--delete-source`, outputs are named `part-<run>-NNNNNN.parquet`, where `<run>` is a random id per run (the legacy writer's naming; protected `build` parts now use deterministic `part-v1-*` transaction names, #468). Without it, outputs are named `part-rollup-<run>-NNNNNN.parquet`, and a re-run replaces the earlier `part-rollup-*` files in each target partition it rewrites. Existing files are never overwritten. Protected datasets refuse in-place and source-deleting rollup; copy-only rollup into a separate output remains available (#468).
 - **Only time partitions are rolled up.** Rollup now reads only `part-*.parquet` files below a partition finer than `--partition` (`hour=`, `minute=`, or `second=`). Files in `block_range=` or unpartitioned directories are no longer concatenated; use `merge` to compact those.
 
 Migration:
@@ -491,7 +505,7 @@ Migration:
 | `tron-evm` | `tronevm.firehose.pinax.network` | `mainnet-evm.tron.streamingfast.io` |
 
 - These endpoints need a credential that StreamingFast accepts, such as a The Graph Market API token in `STREAMINGFAST_API_TOKEN` (provider scoping: #562). Credentials are provider-specific: a token that works against Pinax can be rejected here with `invalid JWT token`; fatal authentication failures now stop the run (#472). Use `FIREHOSE_ENDPOINT_<ALIAS>` or `--endpoint` if you have another endpoint for these chains.
-- `cursor.parquet` records the endpoint, so resuming output written through the old Pinax endpoint fails with an `endpoint` cursor mismatch. Rerun with `--cursor-override` and an explicit `--start-block` just after the cursor's last block.
+- Output written before this release has no protected authority, so `build` cannot resume it through either endpoint (#468); rebuild into a new empty output root. Protected output binds the chain name and mapper semantics, not the endpoint URL, but its authoritative cursor is an opaque provider token: if the new provider rejects it, build into a new empty output root. `--cursor-override` cannot rewind or reset protected output.
 
 **Added.** New Pinax networks in the registry: `arc`, `megaeth`, `robinhood`, `tempo`, `xlayer-mainnet`.
 
@@ -558,7 +572,7 @@ Flags:
 Migration:
 
 - Existing EVM outputs have no failed transactions. `transactions`, `calls`, `balance_changes`, `nonce_changes`, `code_changes` and `gas_changes` gain rows for them in new files. Queries that assumed every row belongs to a successful transaction should filter on `transactions.status = 'SUCCEEDED'`, or build with `--exclude-failed-transactions`.
-- Resuming an EVM output whose `cursor.parquet` recorded `include_failed_transactions=false` (the old default, also assumed when a cursor predates the key) keeps excluding failed transactions, so one output does not mix both modes. `build` logs a warning; pass `--exclude-failed-transactions` to keep that silently. To switch an existing output to the new default, rerun with `--cursor-override` and an explicit `--start-block` just after the cursor's last block.
+- Resuming a protected EVM output whose authority records `include_failed_transactions=false` (created with `--exclude-failed-transactions`) keeps excluding failed transactions, so one output does not mix both modes. `build` logs a warning; pass `--exclude-failed-transactions` to keep that silently. To switch to the new default, rebuild into a new empty output root with an absent cursor mirror; `--cursor-override` cannot change protected output (#468). Legacy cursor-only outputs, whose `cursor.parquet` may predate the key, cannot be resumed by `build` at all and need a new root too.
 - EVM outputs built with `--include-failed-transactions` before this release wrote every state change of failed transactions, including rolled-back transfers and storage writes. Rebuild them if you need the change tables to reconcile.
 
 ### EVM change tables: new `tx_index`, `call_index`, `state_reverted` and `persisted` columns (#495)
@@ -688,6 +702,34 @@ Both tables carry `receipt_index`, `tx_hash`, `shard_id` and `predecessor_id`, l
 
 ## Fixes
 
+- **`--flush-rows 0` and `--flush-interval-secs 0` disable those `build` triggers.**
+  They used to evaluate `rows >= 0` / `elapsed >= 0` and flush after every block,
+  writing one transaction and one file per table per block. Zero now means
+  disabled, like `--flush-bytes 0` in `build` and `--flush-rows 0` in `merge`.
+  `--flush-blocks` and `--flush-memory-bytes` still reject zero. See
+  [the platform follow-ups](../audit/validation-misc-followups.md).
+- **Explicit credential selectors warn when a credential leaves Pinax (#562
+  follow-up).** `--api-key-envvar` / `--api-token-envvar` (`API_KEY_ENVVAR` /
+  `API_TOKEN_ENVVAR`) still authorize the named variable for any destination,
+  but startup now logs a `WARN` naming the variable (never its value) and the host
+  whenever an explicitly selected credential is sent to a non-Pinax host. Pinax
+  and legacy `SUBSTREAMS_*` names get a stronger message, for example a global
+  `API_KEY_ENVVAR=SUBSTREAMS_API_KEY` reaching StreamingFast. A `STREAMINGFAST_*`
+  variable sent to a built-in StreamingFast host is not warned about. Selection
+  is unchanged; see README "Authentication".
+- **Examples match the CLI.** README Docker, network-alias and Prometheus
+  examples include the required `build` subcommand. `.env.example` is regenerated
+  from the clap definitions: `FLUSH_BYTES` shows the 32 MiB default, and
+  `FLUSH_MEMORY_BYTES`, `FLUSH_BLOCKS`, `GRPC_*`, `METRICS_STALE_AFTER_SECS`,
+  `CURSOR_OVERRIDE`, the chain toggles, the provider-scoped credential variables
+  and recovery's `AWS_ENDPOINT_URL` are listed. The obsolete `EXTENDED`,
+  `BYTES_ENCODING` and `CURSOR=cursor.txt` entries are gone, and a test keeps
+  the file in sync with the CLI. `merge --flush-bytes` help now describes the
+  encoded-size target it actually checks.
+- **Dependency security updates.** Compatible lockfile updates to anyhow 1.0.104
+  (RUSTSEC-2026-0190), h2 0.4.19 (RUSTSEC-2026-0258), rustls 0.23.45
+  (RUSTSEC-2026-0285) and rustls-webpki 0.103.15.
+
 - **SIGINT/SIGTERM interrupt endpoint waits promptly (#473).** The shutdown flag used to be checked only after a block was processed, so a stop request was ignored during idle waits (up to the 120 s idle timeout), reconnect back-off (up to 60 s), connection attempts (30 s) and startup checks, and Kubernetes escalated to SIGKILL on quiet chains. A cancellation token now interrupts every stream wait; a block being processed still finishes first. A second signal exits immediately with code 130. Shutdown is detected with a typed error instead of matching the string `"__shutdown__"`.
 
 - **`build` no longer retries fatal gRPC errors forever (#472).** `Unauthenticated`, `PermissionDenied`, `InvalidArgument`, `FailedPrecondition`, `OutOfRange` and `Unimplemented` now end the run with an error and a hint, including statuses Firehose relays as `Unknown` with the real code in the message. So does `ResourceExhausted` when it reports an exhausted quota (e.g. `billable egress bytes quota exceeded`); other `ResourceExhausted` errors such as rate limits are still retried with back-off. An invalid cursor, a message over 128 MiB, or credentials that are not valid for the endpoint (such as a Pinax token against a StreamingFast endpoint after #535) used to reconnect about once a second indefinitely. Fatal errors are counted in `firehose_parquet_errors_total{kind="grpc_fatal"}`.
@@ -701,12 +743,14 @@ Both tables carry `receipt_index`, `tx_hash`, `shard_id` and `predecessor_id`, l
   - API keys and JWT tokens are trimmed, so a secret file with a trailing newline works, and they are parsed once when the client is created. A credential that cannot be sent as a gRPC header is a startup error instead of a panic (exit code 101).
 
 - **`build --start-block` above the last irreversible block no longer writes earlier blocks (#466).** Firehose serves such a request from LIB+1, and those blocks used to be written. Blocks below the effective start block are now skipped before mapping, logged once, and counted in the new `firehose_parquet_blocks_skipped_below_start_total` metric and the `blocks_skipped_below_start` summary field.
-- **Bounded `build` runs verify the stop block (#466).** A run with `--stop-block` exits 0 only once block `stop_block - 1` was received. A stream that ends earlier is resumed from the cursor. If the server then has no more blocks, the run completes with a warning on chains with skipped slots or heights (Solana, NEAR, Beacon), and otherwise writes what it received, saves the cursor there, and exits non-zero.
+- **Bounded `build` runs verify the stop block (#466, #468).** A run with `--stop-block` exits 0 only once block `stop_block - 1` was received and committed. A stream that ends earlier is resumed from the authoritative cursor once. If the server then has no more blocks, the run keeps the committed prefix and exits non-zero on every chain, including those with skipped slots or heights (Solana, NEAR, Beacon): a sparse or empty tail cannot prove the bound, so choose a stop bound ending at an observed block. `--dry-run` applies the same rule, so it fails exactly where the real build would.
 - **Live `build` runs reconnect when the stream closes cleanly (#466).** Previously a clean close by the server or a proxy ended the process with exit code 0, so `Restart=on-failure` supervisors never restarted it.
 
-- **`build` no longer restarts from scratch when `cursor.parquet` cannot be read (#465).** Only a missing cursor, or one with no row or an empty cursor string, starts a fresh run. A cursor that exists but cannot be loaded (permission denied, S3 403/5xx/timeout, empty, truncated or corrupt file) now fails the run with an error that names the file. Previously the run logged "starting fresh", re-ingested from `--start-block` or genesis, and overwrote the good cursor on its first flush. To deliberately ignore an unreadable cursor and restart from the CLI bounds, pass `--cursor-override`. `partitions build` also fails instead of ignoring an unreadable sibling cursor when it uses it to infer `--start-block`.
-- **Local cursor saves are atomic (#465).** `cursor.parquet` is written to `cursor.parquet.tmp` in the same directory, fsynced, renamed over the target, and the directory is fsynced. A crash mid-save leaves the previous cursor intact instead of a truncated file. S3 cursor saves were already atomic (single PUT).
-- **A failed table write no longer loses rows (#464).** The writer keeps a table's buffered rows until its write succeeds. When a write, mapping or stream error ends `build`, partial buffers are discarded, `cursor.parquet` is not advanced, and the process exits non-zero, so the next run replays the uncommitted window. Previously the error path flushed the other tables and saved the cursor past the lost rows.
+- **`build` no longer restarts from scratch when `cursor.parquet` cannot be read (#465).** Only a missing cursor, or one with no row or an empty cursor string, starts a fresh run. A cursor that exists but cannot be loaded (permission denied, S3 403/5xx/timeout, empty, truncated or corrupt file) now fails the run with an error that names the file. Previously the run logged "starting fresh", re-ingested from `--start-block` or genesis, and overwrote the good cursor on its first flush. Since #468, `build` resumes only from protected output authority and never from this file: a missing mirror is repaired from authority, while an unreadable or corrupt mirror fails closed. Fix access, or remove a corrupt mirror so the next run rewrites it from authority. `--cursor-override` only makes a read-only `--dry-run` ignore an unreadable legacy cursor; a real build rejects it. `partitions build` also fails instead of ignoring an unreadable sibling cursor when it uses it to infer `--start-block`.
+- **Local cursor saves are atomic (#465, #468).** The protected cursor mirror is written to a private `.fireparq-mirror-<uuid>.tmp` sibling (mode 0600), fsynced, renamed over the target, and the canonical and lexical directory ancestry is fsynced. A crash mid-save leaves the previous mirror intact instead of a truncated file; the mirror never selects the resume point. S3 mirror updates use one conditional Create/Update and an exact readback. (The unprotected `save_cursor_parquet` library helper still uses `<name>.tmp`.)
+- **Durable cursor saves are fatal when they fail (#469, #468).** A cursor mirror that cannot be persisted used to be logged while ingestion continued, so the checkpoint could fall arbitrarily far behind the data. A local mirror save now gets three attempts with 1 s and 2 s backoff (a shutdown interrupts the backoff and still reports the failure); an S3 mirror update gets one conditional attempt with transport retries disabled, and an ambiguous result retains ownership for provider-quiescent recovery. Exhausted or ambiguous saves stop `build` with a non-zero exit. Since #468 the mirror is published after the all-table commit advances authority, so a failed save never loses rows: the next run repairs the mirror from authority. `firehose_parquet_cursor_save_failures_total` and `firehose_parquet_errors_total{kind="cursor_save"}` count every failed attempt, and `firehose_parquet_cursor_last_success_timestamp_seconds` records the last successful save. See [#469](../audit/469-durable-cursor-saves.md).
+- **S3 cursors use their exact bucket (#470).** An explicit `s3://bucket/key` cursor now selects its own bucket and key, independent of the data output; `s3://x/c.parquet` and `s3://y/c.parquet` no longer overwrite one object in the output bucket. Relative cursor paths (including `--cursor-template` expansions) inherit the resolved output bucket and prefix. An explicit S3 output URI must agree with `--s3-bucket`/`S3_BUCKET`, a bucket-bound endpoint rejects a different cursor bucket, and an S3 cursor requires complete explicit AWS credentials even with local output. Protected ingestion owns and records exactly this resolved location. See [#470](../audit/470-s3-cursor-buckets.md).
+- **A failed table write no longer loses rows (#464, #468).** When a write, mapping or stream error ends `build`, the uncommitted mapper window is discarded, authority and `cursor.parquet` are not advanced, and the process exits non-zero. Parts that the failed transaction already published are removed by recovery before the next run replays the window, so every row is written exactly once. Previously the error path flushed the other tables and saved the cursor past the lost rows.
 - **`rollup` re-runs no longer lose or duplicate rows (#478).** An in-place re-run with `--delete-source` overwrote its earlier output and then deleted it as a source; on mainnet test data, the second run deleted the whole dataset. A re-run without `--delete-source` read the earlier output again and stacked duplicate rows. Re-runs now only roll up files that are still below the target granularity, and never overwrite or delete their own output. With `--delete-source`, each target partition's sources are deleted as soon as its output is written, so a failure partway through no longer leaves finished partitions to be rolled up a second time.
 - **`rollup` and `merge` leave root artifacts alone (#478).** `cursor.parquet`, `partitions.parquet`, `merkle_roots.parquet`, and anything under `verify_runs/` are skipped. Rolling up or merging a network root used to fold them into a `part-000001.parquet` and delete them, or fail on their mismatched schemas.
 - **`merge` and `rollup` no longer combine files with different schemas (#479).** Both commands paired columns by position. When a partition mixed files from two tool versions or two schemas, an extra column was silently dropped, and two columns of the same type in a different order swapped values. The sources were then deleted. Both commands now compare every file's columns (names, types, nullability, and order) before writing. A partition with mixed schemas is left untouched, with nothing written or deleted in it. The other partitions are still processed, and the command then exits non-zero, listing the skipped partitions and how their files differ. `merge` reads each part's footer before merging a partition, which adds one small range request per S3 object, and `merge --dry-run` reports these partitions too.
@@ -769,6 +813,24 @@ claim. See [equivalence coverage, recovered-work provenance and all measurements
 
 ## Internal maintenance
 
+- CI adds an `advisories` job: a pinned, checksum-verified cargo-deny 0.20.2 runs
+  `cargo deny --locked check advisories` with `deny.toml`. Every RustSec
+  vulnerability fails the job; unsound and unmaintained advisories fail for direct
+  dependencies. Four advisories are ignored with recorded reasons: quick-xml
+  0.38 through object_store 0.12 (RUSTSEC-2026-0194/0195; the fix needs
+  object_store 0.14) and the unmaintained backoff and bincode crates. See
+  [the platform follow-ups](../audit/validation-misc-followups.md).
+- The three functions named `build_s3_client` are renamed by policy:
+  `s3::build_ingestion_mutation_client` (zero retries, AWS provider-chain
+  credentials) and `AwsConfig::build_read_client` (retrying reads, anonymous
+  without an access key); rollup's private helper is `build_mutation_store`. The
+  old public names remain as deprecated, hidden aliases. Ingestion's
+  `aws_config` delegates to `AwsConfig::from(&Config)` instead of copying fields. The gRPC receive defaults are single constants
+  (`config::DEFAULT_GRPC_WINDOW_BYTES`, `config::DEFAULT_GRPC_MAX_MESSAGE_BYTES`).
+  The unused public `cli::read_credential_env` and
+  `cli::DEFAULT_TIMESTAMP_BACKFILL_BUFFER_LIMIT_BYTES` were removed, and protected
+  flush logs no longer print always-zero `buffered_*` fields.
+
 - All Firehose RPC clients now share automatic credential insertion and transport
   construction. Provider selection, retries, cancellation and finality behavior
   are unchanged; local protocol tests cover every path and reconnect. See
@@ -776,9 +838,20 @@ claim. See [equivalence coverage, recovered-work provenance and all measurements
 
 ## Tests
 
+- Merge and rollup outputs are checked for the shared #519 writer properties:
+  the requested codec, row groups of at most 65,536 rows, Bloom filters on lookup
+  columns only (with no false negatives), no streaming sort assertion, and chain
+  metadata preserved without ingestion receipt keys.
 - A new cross-chain schema contract test maps one fixture batch for every table of every chain, under every bytes encoding and both `fork_step` settings. It checks that column names are unique, that each batch round-trips through the Parquet writer and reader with the same schema and values, and that every table's canonical `block_id` / `parent_id` match the `blocks` table.
 - A weekly `Network endpoints` workflow runs `scripts/check_network_endpoints.sh`, which sends a Firehose `EndpointInfo` call to every built-in `--network` endpoint and fails when one no longer answers (#535). It also runs on pull requests that change the generated registry. Regular `cargo test` stays offline.
 - A Parquet round-trip test asserts that the canonical `timestamp` is written as `TIMESTAMP(MILLIS, isAdjustedToUTC=true)` and reads back as `Timestamp(Millisecond, UTC)` without the embedded Arrow schema. The contract test also checks the canonical `timestamp` type on every table.
+- The offline EVM golden regression now maps each retained block through both
+  `map_block` and the production `map_block_bytes` path and requires identical
+  output. A second retained mainnet block (26,000,004, zstd-compressed) covers
+  EIP-7702 authorizations, code changes and a reverted `SET_CODE` transaction
+  whose two accepted authorizations persist. Real-data `gas_changes` coverage is
+  still missing because neither block records a gas change. See
+  [the record](../audit/validation-misc-followups-evm.md).
 
 ## Bitcoin amounts and input metadata (#511)
 
@@ -801,6 +874,16 @@ changes; use a new/rebuilt dataset or explicit reader-side schema reconciliation
   [decoding validation and benchmark](../audit/518-owned-protobuf-bytes.md).
 
 ## Internal structure
+
+- Library API: the unused legacy writers `CursorLocation::save`,
+  `CursorLocation::save_with_retry` and `CursorLocation::save_with_retry_blocking`
+  are removed; protected `build` publishes its cursor mirror through the
+  ingestion session. `CursorLocation::resolve` and `load` remain for read-only
+  callers, and `save_cursor_parquet` remains an unprotected fixture helper.
+  `OutputWriter::new` and `OutputWriter::new_s3` no longer take the ignored
+  `flush_bytes` argument. `firehose_parquet::ingest::ingestion_mutation_scopes`
+  derives build ownership from the same mirror binding authority records.
+  See [the validation follow-up record](../audit/validation-ingest-followups.md).
 
 - CLI operations now live in focused configuration, path, inspection, validation
   and partition modules. Existing `firehose_parquet::cli::*` paths, flags and

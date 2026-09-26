@@ -61,3 +61,32 @@ cursor. The documented refresh process requires independent raw-field review.
   by the parent harness and invoked separately). No live recapture was needed;
   the original bounded capture used the intended Pinax endpoint and an isolated
   environment. The final review has no remaining blockers.
+
+## Follow-up: owned mapping path and EIP-7702 fixture
+
+A later validation pass found two gaps. The test only called the borrowed
+`map_block`, while production has mapped owned buffers through
+`map_block_bytes` since #518/#606. The retained block also had no
+`set_code_authorizations`, `code_changes` or `gas_changes` rows and no failed
+`SET_CODE` transaction.
+
+- Every configuration now maps each fixture through both entry points
+  (`Bytes::from_static` for the owned path) and requires identical tables,
+  schemas and rows before the oracle checks.
+- `blocks/tests/fixtures/evm-mainnet-26000004/` retains mainnet block
+  26,000,004, captured once with the refresh helper and an explicitly selected
+  Pinax key. The 5,304,418-byte payload (SHA-256
+  `ded7e47245becdf20d4b213a43d29cf3828140313e54fd8c849286b039178893`) is stored
+  with `zstd -19` in 762,362 bytes. It has seven `SET_CODE` transactions with 16
+  authorizations, 10 code changes, and reverted transaction 130 with two accepted
+  authorizations from one authority.
+- Its oracle (20 table counts, 14,001 extended rows, 304 selected values on 27
+  rows) came from an independent Python protobuf decode and the documented
+  persistence rules, retained as [`499-evm-golden-oracle.py`](499-evm-golden-oracle.py),
+  which regenerates the committed file byte for byte. The mapper test passed
+  against it on the first run. A
+  targeted test checks transaction 130's raw shape and its persisted rows:
+  three balance changes, three nonce changes (sender plus one per accepted
+  authorization) and no code or storage changes.
+- Neither fixture records a gas change in any call, so `gas_changes` still has
+  no real-data coverage; synthetic tests remain the only check for that mapping.

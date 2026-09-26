@@ -775,6 +775,44 @@ fn test_flush_bytes_zero_means_disabled() {
 
 #[test]
 #[serial]
+fn test_flush_rows_and_interval_zero_mean_disabled() {
+    // `--flush-rows 0` / `--flush-interval-secs 0` used to flush after every
+    // block (`rows >= 0`, `elapsed >= 0`); zero now disables them like
+    // `--flush-bytes 0` and merge `--flush-rows 0`.
+    let cli = parse(&[
+        "test-cli",
+        "--endpoint",
+        "https://example.com:443",
+        "--flush-rows",
+        "0",
+        "--flush-interval-secs",
+        "0",
+    ]);
+    assert_eq!(cli.common.flush_rows, Some(0));
+    assert_eq!(cli.common.flush_interval_secs, Some(0));
+    let config = build_config(&cli.common).expect("build_config should succeed");
+    assert_eq!(config.flush_rows, None);
+    assert_eq!(config.flush_interval_secs, None);
+    let rendered = config.to_string();
+    assert!(!rendered.contains("flush_rows"), "{rendered}");
+    assert!(!rendered.contains("flush_interval"), "{rendered}");
+
+    let cli = parse(&[
+        "test-cli",
+        "--endpoint",
+        "https://example.com:443",
+        "--flush-rows",
+        "5",
+        "--flush-interval-secs",
+        "7",
+    ]);
+    let config = build_config(&cli.common).expect("build_config should succeed");
+    assert_eq!(config.flush_rows, Some(5));
+    assert_eq!(config.flush_interval_secs, Some(7));
+}
+
+#[test]
+#[serial]
 fn test_credentials_are_trimmed_and_blank_values_ignored() {
     let _key = EnvVarGuard::set("FIREPARQ_TEST_API_KEY_471", "key-from-secret-file\n");
     let _token = EnvVarGuard::set("FIREPARQ_TEST_API_TOKEN_471", " \n");
@@ -829,6 +867,68 @@ fn test_cursor_custom_parquet_name() {
     assert_eq!(
         config.cursor_path,
         Some("cursor-mainnet-date.parquet".to_string())
+    );
+}
+
+#[test]
+#[serial]
+fn test_cursor_none_disables_the_mirror_case_insensitively() {
+    for value in ["none", "NONE", "None", " none "] {
+        let cli = parse(&[
+            "test-cli",
+            "--endpoint",
+            "https://example.com:443",
+            "--cursor",
+            value,
+        ]);
+        let config = build_config(&cli.common).expect("--cursor none should be accepted");
+        assert_eq!(config.cursor_path, None, "{value:?}");
+    }
+    // The environment form uses the same parser.
+    let _cursor = EnvVarGuard::set("CURSOR", "None");
+    let cli = parse(&["test-cli", "--endpoint", "https://example.com:443"]);
+    assert_eq!(build_config(&cli.common).unwrap().cursor_path, None);
+}
+
+#[test]
+#[serial]
+fn test_cursor_none_rejects_contradictory_template_and_near_misses() {
+    let cli = parse(&[
+        "test-cli",
+        "--endpoint",
+        "https://example.com:443",
+        "--cursor",
+        "none",
+        "--cursor-template",
+        "worker.parquet",
+    ]);
+    let error = build_config(&cli.common).unwrap_err().to_string();
+    assert!(
+        error.contains("cannot be combined with --cursor-template"),
+        "{error}"
+    );
+    for value in ["nothing", "none.txt", "no"] {
+        let cli = parse(&[
+            "test-cli",
+            "--endpoint",
+            "https://example.com:443",
+            "--cursor",
+            value,
+        ]);
+        let error = build_config(&cli.common).unwrap_err().to_string();
+        assert!(error.contains(".parquet"), "{value}: {error}");
+    }
+    // A mirror file literally named none.parquet remains an ordinary path.
+    let cli = parse(&[
+        "test-cli",
+        "--endpoint",
+        "https://example.com:443",
+        "--cursor",
+        "none.parquet",
+    ]);
+    assert_eq!(
+        build_config(&cli.common).unwrap().cursor_path.as_deref(),
+        Some("none.parquet")
     );
 }
 

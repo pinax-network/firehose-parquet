@@ -92,6 +92,11 @@ pub const DEFAULT_FLUSH_BYTES: u64 = 32 * 1024 * 1024;
 /// Independent summed logical mapper buffer threshold (256 MiB, not RSS).
 pub const DEFAULT_FLUSH_MEMORY_BYTES: u64 = 256 * 1024 * 1024;
 
+/// Default initial HTTP/2 stream and connection receive window (16 MiB).
+pub const DEFAULT_GRPC_WINDOW_BYTES: u32 = 16 * 1024 * 1024;
+/// Default maximum encoded or decompressed gRPC response size (128 MiB).
+pub const DEFAULT_GRPC_MAX_MESSAGE_BYTES: u32 = 128 * 1024 * 1024;
+
 /// Receive-side gRPC controls, shared by ingestion and partition probes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct GrpcConfig {
@@ -108,8 +113,8 @@ impl Default for GrpcConfig {
     fn default() -> Self {
         Self {
             adaptive_window: false,
-            initial_window_bytes: Some(16 * 1024 * 1024),
-            max_message_bytes: 128 * 1024 * 1024,
+            initial_window_bytes: Some(DEFAULT_GRPC_WINDOW_BYTES),
+            max_message_bytes: DEFAULT_GRPC_MAX_MESSAGE_BYTES,
         }
     }
 }
@@ -313,8 +318,9 @@ impl std::fmt::Display for Config {
         writeln!(f, "  start_block        {start}")?;
         writeln!(f, "  stop_block         {stop} (exclusive)")?;
         writeln!(f, "  missing_blocks     skip after probe retries")?;
-        if let Some(ref path) = self.cursor_path {
-            writeln!(f, "  cursor             {}", path)?;
+        match self.cursor_path {
+            Some(ref path) => writeln!(f, "  cursor             {}", path)?,
+            None => writeln!(f, "  cursor             none (mirror disabled)")?,
         }
         writeln!(f, "  output             {}", self.output.display())?;
         writeln!(f, "  partition          {}", self.partition)?;

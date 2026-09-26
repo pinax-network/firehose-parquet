@@ -142,6 +142,19 @@ selected variable is unset or blank, that header is omitted; it does not fall
 back to another variable. The other header still follows its own selection
 rules. Only explicitly select a credential for a destination you intend it to reach.
 
+An explicit selector is **not provider-scoped**. If `API_KEY_ENVVAR` or
+`API_TOKEN_ENVVAR` is set globally, for example to the legacy
+`SUBSTREAMS_API_KEY` in a shared `.env` or container environment, that
+credential is sent to every endpoint the process connects to, including
+StreamingFast and custom hosts. Startup logs a `WARN` line naming the variable
+(never its value) and the host whenever an explicitly selected credential is
+sent to a non-Pinax host, with a stronger message for Pinax and legacy
+`SUBSTREAMS_*` names. A `STREAMINGFAST_*` variable sent to a built-in
+StreamingFast host is its normal destination and is not warned about. When
+migrating, unset global selectors and rely on the provider-scoped variables
+above, or pass `--api-key-envvar` / `--api-token-envvar` only on the command
+for the intended endpoint.
+
 Startup logs identify the destination host, provider, and names of credential
 variables selected for transmission (`none` when absent), never their values.
 Surrounding whitespace is trimmed, so a key mounted from a secret file with a
@@ -159,9 +172,10 @@ The image path stays `ghcr.io/pinax-network/firehose-parquet`, but the container
 docker pull ghcr.io/pinax-network/firehose-parquet:latest
 
 docker run --rm \
-  -e SUBSTREAMS_API_KEY=your-key \
+  -e PINAX_API_KEY=your-key \
   -v $(pwd)/output:/output \
   ghcr.io/pinax-network/firehose-parquet \
+  build \
   --endpoint https://eth.firehose.pinax.network:443 \
   --start-block 19000000 \
   --stop-block 19001000 \
@@ -213,15 +227,15 @@ Both `build` and `partitions build` require EndpointInfo with a nonempty chain n
 
 ```bash
 # Built-in alias
-fireparq --network mainnet --start-block 20000000 --stop-block 20001000
+fireparq build --network mainnet --start-block 20000000 --stop-block 20001000
 
 # Per-network override
 export FIREHOSE_ENDPOINT_MAINNET=https://eth.internal.example.com:443
-fireparq --network mainnet --start-block 20000000 --stop-block 20001000
+fireparq build --network mainnet --start-block 20000000 --stop-block 20001000
 
 # Canonical-name override
 export FIREHOSE_ENDPOINT_SOLANA_MAINNET_BETA=https://solana.internal.example.com:443
-fireparq --network solana-mainnet-beta --start-block 250000000 --stop-block 250100000
+fireparq build --network solana-mainnet-beta --start-block 250000000 --stop-block 250100000
 ```
 
 ### How It Works
@@ -246,6 +260,14 @@ the Parquet file, creates the final name with a no-clobber hard link, and syncs
 directory links. Recovery verifies exact journal ownership before removing a
 partial transaction or accepting a committed file. Canonical and lexical output
 ancestry are both synced, preserving explicit output-root symlink aliases.
+
+The staging names are `.fireparq-txn-<transaction>-<index>.tmp` next to each
+final part; plain `*.parquet` globs ignore them. After an ordinary error (a
+failed write, publish, journal update or mirror save) the build removes its own
+staging names before exiting, on a best-effort basis, and leaves the journal for
+recovery. If that cleanup itself fails, for example because the directory is no
+longer writable, or the process is killed, a staging name can remain until the
+next `build` or `fireparq recovery recover <root>` removes it from the journal plan.
 
 This requires atomic same-directory hard links, file and directory sync, readable
 directory ancestry, and macOS/Linux inode locking. Unsupported operations fail
@@ -347,8 +369,18 @@ not choose a new timestamp for already accepted rows.
 A missing or genuinely older mirror is repaired from authority before streaming.
 An ahead, foreign, malformed or unreadable mirror fails closed; it never selects
 a new resume point. An existing legacy cursor also blocks initialization of a
-new dataset. `--cursor none` disables the mirror only; authority remains mandatory.
-Changing or disabling the mirror of an existing protected dataset is refused.
+new dataset. Changing or disabling the mirror of an existing protected dataset is refused.
+
+`--cursor none` (any case, also `CURSOR=none`) creates a dataset without a
+mirror. Authority under `.fireparq-ingest/` remains mandatory and alone selects
+the resume cursor, completed bounds and routing anchors, so resume, extension,
+same-bound no-ops and recovery behave exactly as with a mirror. The choice is
+bound when the dataset is created: every later `build` must pass `--cursor none`
+again, and a dataset created with a mirror cannot drop it. `--cursor none`
+cannot be combined with `--cursor-template`. Without a mirror there is no
+`<chain>/cursor.parquet` hint for other tools: `verify` cannot mark partitions
+of an unfinished build as `open`, and `partitions build` cannot infer
+`--start-block` from it (pass it explicitly).
 
 Local mirror saves use private same-directory temporary files, atomic replacement,
 file and directory sync, and up to three attempts with 1 and 2 second backoff.
@@ -374,7 +406,8 @@ dataset and its external mirror before recovery or data reads.
 
 ### Cursor Override and Migration
 
-`--cursor-override` cannot reset, rewind or change protected output semantics.
+`--cursor-override` cannot reset, rewind or change protected output semantics,
+and a real `build` rejects it before contacting the endpoint, even at a new root.
 Use a new empty output and absent mirror when changing the original range, schema
 or feature flags. Legacy random-name output has no proof relating all parts to
 its cursor, so this release provides no implicit adoption or override escape.
@@ -425,8 +458,10 @@ flushes the remaining buffers and saves the final cursor.
   clean EOF, all received events are acknowledged, and the last accepted event
   reaches `stop_block - 1`. A sparse or empty tail alone cannot prove coverage,
   including on Solana, NEAR and Beacon: the accepted prefix is durable, but the
-  command exits nonzero with a diagnostic. Repeating an already proven bound
-  opens no Blocks request; extending it uses the authoritative cursor.
+  command exits nonzero with a diagnostic. `--dry-run` applies the same rule
+  on every chain, so it fails exactly where the real build would. Repeating an
+  already proven bound opens no Blocks request; extending it uses the
+  authoritative cursor.
 - **Live runs** (no `--stop-block`) never end on their own: if the server or a
   proxy closes the stream cleanly, the run reconnects from the last cursor with
   the usual back-off.
@@ -447,11 +482,11 @@ recovery knobs to dedicated advanced sections.
 | Area | Common flags |
 |---|---|
 | Connection | `--network <NETWORK>` or `--endpoint <ENDPOINT>` |
-| Range | `--start-block <START_BLOCK>`, `--stop-block <STOP_BLOCK>`, `--live` |
+| Range | `--start-block <START_BLOCK>`, `--stop-block <STOP_BLOCK>` (omit the stop block for live mode) |
 | Resume | Rerun the same original range; output authority selects progress and repairs the bound optional cursor mirror |
 | Output | `--output <OUTPUT>`, `--partition <PARTITION>`, `--compression <COMPRESSION>` |
-| Chain | `--block-type <BLOCK_TYPE>` (default `auto`), plus chain-specific toggles like `--extended false` or `--with-votes false` only when needed |
-| Runtime | `--final-blocks-only[=true|false]` (default `true`), `--flush-bytes <FLUSH_BYTES>`, optional `--flush-rows` / `--flush-interval-secs` |
+| Chain | `--block-type <BLOCK_TYPE>` (default `auto`), plus chain-specific toggles like `--without-extended` or `--without-votes` only when needed |
+| Runtime | `--final-blocks-only[=true|false]` (default `true`), `--flush-bytes <FLUSH_BYTES>` (compressed file target, `0` disables), `--flush-memory-bytes <FLUSH_MEMORY_BYTES>` (summed mapper estimate), optional `--flush-rows` / `--flush-blocks` / `--flush-interval-secs` (`0` disables rows and interval) |
 
 ### Non-final streams and reorgs
 
@@ -543,7 +578,7 @@ rather than the default workflow:
 
 | Flag | Use when |
 |---|---|
-| `--cursor-override` | Legacy dry-run override; protected output refuses rewinds and requires a new empty root for changed semantics |
+| `--cursor-override` | Read-only `--dry-run` only: ignore legacy cursor defaults or an unreadable cursor. A real `build` rejects it, even at a new root; protected output never rewinds, so use a new empty root for changed semantics |
 | `--stream-idle-timeout-secs <N>` | Supervising long-lived pipelines that should self-reconnect after a silent stream stall (default 120; `0` disables and relies on HTTP/2 keepalive). On slow chains such as Bitcoin (~600 s blocks), set it above the block time to avoid a reconnect every 120 s. An idle reconnect is not counted as a failure. |
 | `--reconnect-stall-timeout-secs <N>` | Fail fast when reconnect loops should hand control back to an external supervisor (default 900; `0` disables). The timer starts at the first failed attempt and is reset only when a stream message arrives, not when a connection or RPC succeeds. |
 
@@ -625,7 +660,8 @@ threshold to constrain estimated accumulation.
 
 `--flush-rows`, `--flush-blocks`, `--flush-interval-secs`, partition changes, the
 memory threshold and clean end of input can all force files below the size
-target. Highly compressible data may never reach 32 MiB before the memory
+target. `--flush-rows 0` and `--flush-interval-secs 0` disable those triggers,
+like `--flush-bytes 0`; `--flush-blocks` and `--flush-memory-bytes` must be positive. Highly compressible data may never reach 32 MiB before the memory
 threshold; increasing the file target does not bypass that threshold. `merge`
 and `rollup` use their own streaming writer and memory policies.
 
@@ -916,6 +952,9 @@ Rules:
 - template path must end in `.parquet`
 - `{{` and `}}` escape literal braces
 - with S3 output, relative cursor template paths are stored under the output prefix
+- a template cannot be combined with `--cursor none`
+- the resolved mirror location is bound when the dataset is created; later runs
+  must resolve to the same location
 
 ### `scan` — Inspect Parquet Files
 
@@ -1111,8 +1150,8 @@ The path must exist locally or be an explicit `s3://...` URI. Unlike `scan` and 
 | Flag | Default | Description |
 |---|---|---|
 | `--compression` | `zstd` | Compression codec: zstd (level 3), zstd:<level>, snappy, gzip, none |
-| `--flush-bytes` | 32 MiB | Target compressed bytes per output file |
-| `--flush-rows` | disabled | Flush merged output after this many rows |
+| `--flush-bytes` | 32 MiB | Target encoded (compressed) bytes per output file, checked between batches; 0 = unlimited |
+| `--flush-rows` | disabled | Flush merged output after this many rows; 0 disables |
 | `--dry-run` | `false` | Show what would be merged without writing |
 
 > **Memory note:** Merge holds the encoded output part plus an active row group with a separate 32 MiB estimated-memory budget. Input batches, Parquet pages/dictionaries and codec overhead add to this; `--flush-bytes` is an approximate output-size target, not an absolute memory limit. On S3, merge still downloads each whole source object before reading it, so the largest source part also contributes to peak memory. Rollup uses bounded source ranges instead.
@@ -1651,7 +1690,7 @@ progress, chain-head agreement or crash/replay safety.
 | `firehose_parquet_bootstrap_buffered_blocks` | Gauge | — | Raw blocks awaiting the initial timestamp anchor |
 | `firehose_parquet_bootstrap_buffered_bytes` | Gauge | — | Raw protobuf bytes awaiting that anchor |
 | `firehose_parquet_cursor_saves_total` | Counter | — | Cursor persistence count |
-| `firehose_parquet_cursor_save_failures_total` | Counter | — | Failed cursor save attempts, including retries |
+| `firehose_parquet_cursor_save_failures_total` | Counter | — | Failed cursor mirror saves, once per failed attempt (including local retries, S3 reads/validation/owner checks before the PUT, and ambiguous or refused S3 publication) |
 | `firehose_parquet_cursor_last_success_timestamp_seconds` | Gauge | — | Unix time of the last successful cursor save in this process; 0 before the first save |
 | `firehose_parquet_cursor_last_block_num` | Gauge | — | Block number from the loaded cursor, then the last successful save; 0 when neither exists |
 | `firehose_parquet_errors_total` | Counter | `kind` | Errors by category |
@@ -1675,7 +1714,7 @@ retention expires.
 
 ```bash
 # Enable metrics on port 9090
-fireparq \
+fireparq build \
   --endpoint https://eth.firehose.pinax.network:443 \
   --metrics-port 9090 \
   --start-block 19000000

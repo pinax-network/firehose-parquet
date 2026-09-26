@@ -442,6 +442,7 @@ async fn alias_ancestry_is_synced_and_retarget_or_leaf_symlink_is_rejected() {
 
 #[derive(Default)]
 struct RemoteFaults {
+    reads_fail: bool,
     lose: bool,
     cancel: bool,
     hide_version: bool,
@@ -511,7 +512,7 @@ impl ObjectStore for RemoteStore {
     ) -> object_store::Result<GetResult> {
         let fail = {
             let f = self.faults.lock().unwrap();
-            key.as_ref() == KEY && f.readback_fails && !f.writes.is_empty()
+            key.as_ref() == KEY && (f.reads_fail || (f.readback_fails && !f.writes.is_empty()))
         };
         if fail {
             return Err(remote_error());
@@ -649,10 +650,13 @@ async fn ambiguous_remote_writes_or_cancel_never_retry_or_release() {
             .remote("cursor-bucket")
             .unwrap()
             .is_mutation_uncertain());
+        // The ambiguous PUT counted exactly once, even when cancelled.
+        assert_eq!(metrics.cursor_save_failures_total.get(), 1);
         assert!(adapter.reconcile(&current).await.is_err());
         assert_eq!(store.faults.lock().unwrap().writes.len(), 1);
         assert_eq!(metrics.cursor_saves_total.get(), 0);
-        assert_eq!(metrics.cursor_save_failures_total.get(), 1);
+        // The refused retry is a second failed save, although it sends no PUT.
+        assert_eq!(metrics.cursor_save_failures_total.get(), 2);
         assert_eq!(metrics.cursor_last_success_timestamp_seconds.get(), 0);
         let retained = ownership.remote("cursor-bucket").unwrap().record().clone();
         assert!(ownership.release().await.is_err());
@@ -662,6 +666,103 @@ async fn ambiguous_remote_writes_or_cancel_never_retry_or_release() {
             Some(&retained)
         );
     }
+}
+
+/// Failures before the conditional PUT used to leave the save-failure metrics
+/// unchanged on S3. Each failed reconciliation now counts once, without
+/// marking an attempted remote mutation or sending a write.
+#[tokio::test]
+async fn remote_failures_before_publication_count_as_failed_saves() {
+    let failed_saves = |metrics: &PipelineMetrics| {
+        (
+            metrics.cursor_save_failures_total.get(),
+            metrics
+                .errors_total
+                .get_or_create(&ErrorLabels {
+                    kind: "cursor_save".into(),
+                })
+                .get(),
+        )
+    };
+    for case in ["read", "corrupt", "uncertain"] {
+        let (store, ownership, initial, service) = remote_fixture().await;
+        let current = advance(&initial, 100);
+        let metrics = metrics();
+        match case {
+            "read" => store.faults.lock().unwrap().reads_fail = true,
+            "corrupt" => {
+                store
+                    .inner
+                    .put(
+                        &ObjectPath::from(KEY),
+                        Bytes::from_static(b"corrupt").into(),
+                    )
+                    .await
+                    .unwrap();
+            }
+            _ => ownership
+                .remote("cursor-bucket")
+                .unwrap()
+                .mark_mutation_uncertain(),
+        }
+        let adapter = ProtectedMirror::new(&ownership, &current.descriptor.mirror, Some(&service))
+            .unwrap()
+            .with_metrics(&metrics);
+        let error = adapter.reconcile(&current).await.unwrap_err();
+        assert!(!format!("{error:#}").contains("private-secret"), "{case}");
+        assert_eq!(failed_saves(&metrics), (1, 1), "{case}");
+        assert_eq!(metrics.cursor_saves_total.get(), 0, "{case}");
+        assert!(store.faults.lock().unwrap().writes.is_empty(), "{case}");
+        assert_eq!(
+            ownership
+                .remote("cursor-bucket")
+                .unwrap()
+                .is_mutation_uncertain(),
+            case == "uncertain",
+            "a failure before PUT must not mark a remote mutation: {case}"
+        );
+        // A later success still counts as one save; failures stay unchanged.
+        if case == "read" {
+            store.faults.lock().unwrap().reads_fail = false;
+            assert_eq!(
+                adapter.reconcile(&current).await.unwrap(),
+                MirrorOutcome::Repaired
+            );
+            assert_eq!(failed_saves(&metrics), (1, 1));
+            assert_eq!(metrics.cursor_saves_total.get(), 1);
+        }
+    }
+}
+
+/// Local failures before any write (here, an unreadable existing mirror) are
+/// failed saves too, matching the S3 accounting.
+#[tokio::test]
+async fn local_failure_before_writing_counts_as_one_failed_save() {
+    let (_dir, ownership, initial, path) = local_fixture();
+    let current = advance(&initial, 100);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(&path, b"corrupt").unwrap();
+    let refused = metrics();
+    assert!(mirror(&ownership, &current)
+        .with_metrics(&refused)
+        .reconcile(&current)
+        .await
+        .is_err());
+    assert_eq!(refused.cursor_save_failures_total.get(), 1);
+    assert_eq!(refused.cursor_saves_total.get(), 0);
+    assert_eq!(std::fs::read(&path).unwrap(), b"corrupt");
+    // An unchanged mirror is not a failure and not a save.
+    let (_dir, ownership, initial, _path) = local_fixture();
+    let current = advance(&initial, 100);
+    let repaired = metrics();
+    let adapter = mirror(&ownership, &current).with_metrics(&repaired);
+    adapter.reconcile(&current).await.unwrap();
+    assert_eq!(
+        adapter.reconcile(&current).await.unwrap(),
+        MirrorOutcome::Unchanged
+    );
+    assert_eq!(repaired.cursor_save_failures_total.get(), 0);
+    assert_eq!(repaired.cursor_saves_total.get(), 1);
 }
 
 #[test]
