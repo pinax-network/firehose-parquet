@@ -19,7 +19,7 @@ use super::store::TransactionStateStore;
 use crate::cli::AwsConfig;
 use crate::config::{BlockMetadata, Compression, Config, Partition};
 use crate::cursor::CursorState;
-use crate::dataset_lock::{session::SessionPermit, DatasetOwnership};
+use crate::dataset_lock::{session::SessionPermit, DatasetOwnership, MutationScope};
 use crate::metrics::PipelineMetrics;
 use crate::traits::BlockIdentity;
 use crate::writer::ParquetFileMetadata;
@@ -192,14 +192,41 @@ async fn existing(
         .map(|record| record.payload))
 }
 
+/// Ownership scopes for one protected build: the output root plus the cursor
+/// mirror resolved by exactly the binding that authority records. Deriving the
+/// guarded bucket/key or file from that binding (after any `--cursor-template`
+/// expansion stored in `config.cursor_path`) means ownership can never cover a
+/// different location than the one the session later writes.
+pub fn ingestion_mutation_scopes(config: &Config) -> Result<Vec<MutationScope>> {
+    let output = config
+        .output
+        .to_str()
+        .context("output path must be UTF-8")?;
+    let mut scopes = vec![MutationScope::directory(output)];
+    match resolve_mirror_binding(output, config.cursor_path.as_deref(), &aws_config(config))? {
+        MirrorBinding::Disabled => {}
+        MirrorBinding::Local { absolute_path } => scopes.push(MutationScope::file(absolute_path)),
+        MirrorBinding::S3 { bucket, key, .. } => {
+            scopes.push(MutationScope::file(format!("s3://{bucket}/{key}")))
+        }
+    }
+    Ok(scopes)
+}
+
+/// Refusal for `--cursor-override` on any mutating build, including a new root
+/// where there is nothing to override: protected output never rewinds or resets.
+pub const CURSOR_OVERRIDE_REFUSED: &str = "--cursor-override is only valid with --dry-run: a real build cannot rewind protected output or change its semantics. Omit it to resume from output authority, or build into a new empty output root (with an absent cursor mirror) to change the range or mapper settings";
+
 /// Compatibility fields used only to resolve CLI defaults. This reads mandatory
 /// authority, never an optional cursor file. The final open revalidates the full
 /// mapper descriptor and performs pending recovery before Blocks may connect.
+/// `cursor_override` is refused whether or not authority exists yet.
 pub async fn load_authoritative_resume(
     config: &Config,
     ownership: &DatasetOwnership,
     cursor_override: bool,
 ) -> Result<Option<CursorState>> {
+    ensure!(!cursor_override, CURSOR_OVERRIDE_REFUSED);
     let aws = aws_config(config);
     let output = config
         .output
@@ -210,16 +237,34 @@ pub async fn load_authoritative_resume(
     let Some(authority) = existing(&identity, ownership).await? else {
         return Ok(None);
     };
-    ensure!(
-        !cursor_override,
-        "--cursor-override cannot rewind protected output; select a new empty root"
-    );
     validate_runtime_bindings(&authority.descriptor, output, &aws)?;
-    ensure!(authority.descriptor.mirror==resolve_mirror_binding(output,config.cursor_path.as_deref(),&aws)?,"configured cursor binding differs from authority; changing or disabling it requires an explicit migration");
+    let configured = resolve_mirror_binding(output, config.cursor_path.as_deref(), &aws)?;
+    if authority.descriptor.mirror != configured {
+        bail!(
+            "{}",
+            mirror_binding_mismatch(&authority.descriptor.mirror, &configured)
+        );
+    }
     if let Some(requested) = config.start_block {
         ensure!(requested==authority.descriptor.origin_start,"explicit start differs from the stream's original start; use a new output root instead of rewinding or skipping");
     }
     Ok(Some(super::mirror::resume_parameters(&authority)?))
+}
+
+/// The mirror binding is part of the immutable stream identity. Name the
+/// actionable difference without echoing private paths or cursor values.
+fn mirror_binding_mismatch(stored: &MirrorBinding, configured: &MirrorBinding) -> &'static str {
+    match (stored, configured) {
+        (MirrorBinding::Disabled, _) => {
+            "this protected dataset was created without a cursor mirror; rerun with --cursor none (a mirror cannot be added to an existing dataset)"
+        }
+        (_, MirrorBinding::Disabled) => {
+            "this protected dataset has a bound cursor mirror; --cursor none cannot disable it, so rerun with its original --cursor/--cursor-template"
+        }
+        _ => {
+            "configured cursor binding differs from authority; rerun with the original --cursor/--cursor-template (changing it requires an explicit migration)"
+        }
+    }
 }
 
 pub struct IngestionSession<'a> {

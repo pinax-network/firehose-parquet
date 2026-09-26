@@ -403,9 +403,10 @@ pub struct WriterBufferStats {
 /// the failed write did not publish: a post-publication error can leave a final
 /// file, so retrying that table can duplicate output. Ingestion stops on errors.
 ///
-/// The constructor's legacy `flush_bytes` argument is retained for source
-/// compatibility but is ignored. The ingestion loop owns flush boundaries.
-/// This writer no longer splits, accumulates or coalesces mapper batches.
+/// Callers own flush boundaries; this writer never splits, accumulates or
+/// coalesces mapper batches. It is an unprotected single-file writer: protected
+/// `fireparq build` publishes all tables through the ingestion transaction
+/// instead (`writer::protected`).
 pub struct OutputWriter {
     pub inner: ParquetTableWriter,
     buffers: HashMap<String, TableBuffer>,
@@ -418,7 +419,6 @@ impl OutputWriter {
         output_dir: impl Into<PathBuf>,
         partition: Partition,
         compression: Compression,
-        _flush_bytes: u64,
     ) -> Self {
         Self {
             inner: ParquetTableWriter::new(output_dir, partition, compression),
@@ -428,14 +428,12 @@ impl OutputWriter {
         }
     }
 
-    /// Create a writer that uploads Parquet files to S3. The legacy
-    /// `flush_bytes` argument is ignored, as for `new`.
+    /// Create a writer that uploads Parquet files to S3.
     pub fn new_s3(
         output_path: &str,
         partition: Partition,
         compression: Compression,
         config: &Config,
-        _flush_bytes: u64,
     ) -> Result<Self> {
         Ok(Self {
             inner: ParquetTableWriter::new_s3(output_path, partition, compression, config)?,
@@ -485,7 +483,7 @@ impl OutputWriter {
 
     /// Validate all nonempty tables, then publish each immediately in table-name
     /// order. Returns true if any data was written. A successful call leaves no
-    /// pending rows, regardless of the legacy constructor threshold.
+    /// pending rows.
     ///
     /// After a confirmed pre-publication I/O failure, retry retained data with
     /// `flush_remaining` before submitting a new mapper flush. Ambiguous
@@ -830,7 +828,7 @@ mod tests {
         batches.insert("blocks".to_string(), batch);
 
         // flush_bytes=0 disables size-based rollover; data is written on flush_remaining().
-        let mut out = OutputWriter::new(dir.path(), Partition::None, Compression::Zstd, 0);
+        let mut out = OutputWriter::new(dir.path(), Partition::None, Compression::Zstd);
         let meta = default_metadata();
         out.write_all(&batches, &meta).unwrap();
         out.flush_remaining().unwrap();
@@ -961,7 +959,7 @@ mod tests {
     ) {
         let dir = tempfile::tempdir().unwrap();
         let output = dir.path().join("output");
-        let mut writer = OutputWriter::new(&output, partition, Compression::None, 0);
+        let mut writer = OutputWriter::new(&output, partition, Compression::None);
         let (_, metrics) = crate::metrics::init();
         writer.set_metrics(metrics.clone());
         assert!(writer
@@ -974,32 +972,29 @@ mod tests {
     }
 
     #[test]
-    fn test_mapper_batches_materialize_independently_of_legacy_threshold() {
-        for threshold in [0, 1, u64::MAX] {
-            let dir = tempfile::tempdir().unwrap();
-            let mut writer =
-                OutputWriter::new(dir.path(), Partition::None, Compression::Zstd, threshold);
-            let batches = HashMap::from([("blocks".into(), make_test_batch())]);
-            for _ in 0..2 {
-                assert!(writer.write_all(&batches, &default_metadata()).unwrap());
-                assert_eq!(writer.buffered_stats(), WriterBufferStats::default());
-                assert!(!writer.flush_remaining().unwrap());
-            }
-            assert_eq!(
-                std::fs::read_dir(dir.path().join("blocks"))
-                    .unwrap()
-                    .count(),
-                2
-            );
-            assert_eq!(parquet_rows_in(&dir.path().join("blocks")), 2);
+    fn test_each_mapper_batch_materializes_immediately() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut writer = OutputWriter::new(dir.path(), Partition::None, Compression::Zstd);
+        let batches = HashMap::from([("blocks".into(), make_test_batch())]);
+        for _ in 0..2 {
+            assert!(writer.write_all(&batches, &default_metadata()).unwrap());
+            assert_eq!(writer.buffered_stats(), WriterBufferStats::default());
+            assert!(!writer.flush_remaining().unwrap());
         }
+        assert_eq!(
+            std::fs::read_dir(dir.path().join("blocks"))
+                .unwrap()
+                .count(),
+            2
+        );
+        assert_eq!(parquet_rows_in(&dir.path().join("blocks")), 2);
     }
 
     #[test]
     fn metrics_keep_one_file_series_across_partitions_and_reset_writer_buffers() {
         let dir = tempfile::tempdir().unwrap();
         let (registry, metrics) = crate::metrics::init();
-        let mut writer = OutputWriter::new(dir.path(), Partition::Minute, Compression::None, 0);
+        let mut writer = OutputWriter::new(dir.path(), Partition::Minute, Compression::None);
         writer.set_metrics(metrics.clone());
         for offset in 0..3 {
             let timestamp = 1_705_320_000 + offset * 60;
@@ -1048,7 +1043,7 @@ mod tests {
                 Some(timestamp * 1_000),
             ],
         );
-        let mut writer = OutputWriter::new(&output, Partition::Date, Compression::None, 0);
+        let mut writer = OutputWriter::new(&output, Partition::Date, Compression::None);
         let error = writer
             .write_all(
                 &HashMap::from([("a_valid".into(), valid), ("z_invalid".into(), invalid)]),
@@ -1106,7 +1101,7 @@ mod tests {
                 Some(timestamp * 1_000 + 999),
             ],
         );
-        let mut writer = OutputWriter::new(dir.path(), Partition::Date, Compression::None, 0);
+        let mut writer = OutputWriter::new(dir.path(), Partition::Date, Compression::None);
         assert!(writer
             .write_all(
                 &HashMap::from([("blocks".into(), batch.clone())]),
@@ -1162,7 +1157,7 @@ mod tests {
     fn test_negative_milliseconds_use_floor_seconds_for_partition_membership() {
         let dir = tempfile::tempdir().unwrap();
         let batch = partition_batch(vec![Some(501), Some(502)], vec![Some(-1), Some(-999)]);
-        let mut writer = OutputWriter::new(dir.path(), Partition::Second, Compression::None, 0);
+        let mut writer = OutputWriter::new(dir.path(), Partition::Second, Compression::None);
         assert!(writer
             .write_all(
                 &HashMap::from([("blocks".into(), batch)]),
@@ -1181,7 +1176,7 @@ mod tests {
             let dir = tempfile::tempdir().unwrap();
             let batch = partition_batch(vec![Some(501)], vec![None]);
             let metadata = routed_metadata(timestamp);
-            let mut writer = OutputWriter::new(dir.path(), Partition::Date, Compression::None, 0);
+            let mut writer = OutputWriter::new(dir.path(), Partition::Date, Compression::None);
             let suffix = writer.inner.partition_suffix("blocks", &metadata).unwrap();
             assert!(writer
                 .write_all(&HashMap::from([("blocks".into(), batch)]), &metadata)
@@ -1260,7 +1255,7 @@ mod tests {
         metadata.max_block_number = 600;
         assert_rejected_without_publication(partition.clone(), valid.clone(), metadata);
         let dir = tempfile::tempdir().unwrap();
-        let mut writer = OutputWriter::new(dir.path(), partition, Compression::None, 0);
+        let mut writer = OutputWriter::new(dir.path(), partition, Compression::None);
         assert!(writer
             .write_all(
                 &HashMap::from([("blocks".into(), valid)]),
@@ -1291,7 +1286,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let blocker = dir.path().join("logs");
         std::fs::write(&blocker, b"not a directory").unwrap();
-        let mut writer = OutputWriter::new(dir.path(), Partition::None, Compression::None, 0);
+        let mut writer = OutputWriter::new(dir.path(), Partition::None, Compression::None);
         let batches = HashMap::from([
             ("blocks".into(), make_test_batch()),
             ("logs".into(), make_test_batch()),
@@ -1327,7 +1322,7 @@ mod tests {
     fn test_empty_mapper_flush_does_not_publish_or_buffer() {
         let dir = tempfile::tempdir().unwrap();
         let output = dir.path().join("output");
-        let mut writer = OutputWriter::new(&output, Partition::Date, Compression::None, 0);
+        let mut writer = OutputWriter::new(&output, Partition::Date, Compression::None);
         assert!(!writer
             .write_all(&HashMap::new(), &default_metadata())
             .unwrap());

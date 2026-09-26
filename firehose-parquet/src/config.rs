@@ -314,8 +314,9 @@ impl std::fmt::Display for Config {
         writeln!(f, "  start_block        {start}")?;
         writeln!(f, "  stop_block         {stop} (exclusive)")?;
         writeln!(f, "  missing_blocks     skip after probe retries")?;
-        if let Some(ref path) = self.cursor_path {
-            writeln!(f, "  cursor             {}", path)?;
+        match self.cursor_path {
+            Some(ref path) => writeln!(f, "  cursor             {}", path)?,
+            None => writeln!(f, "  cursor             none (mirror disabled)")?,
         }
         writeln!(f, "  output             {}", self.output.display())?;
         writeln!(f, "  partition          {}", self.partition)?;
