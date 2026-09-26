@@ -499,6 +499,10 @@ fn outcome_columns_550(kind: ChainKind, table: &str) -> &'static [&'static str] 
     match (kind, table) {
         (ChainKind::Tron, "blocks") => &[],
         (ChainKind::Tron, _) => &["transaction_success"],
+        (ChainKind::Antelope, "transactions") => &["transaction_success"],
+        (ChainKind::Antelope, "actions" | "db_ops") => {
+            &["transaction_status", "transaction_success"]
+        }
         _ => &[],
     }
 }
@@ -623,7 +627,7 @@ fn removing_the_550_outcome_columns_restores_the_pre_550_schemas() {
 }
 
 const CURRENT_SCHEMA_DIGEST: &str =
-    "df0a0d082b08f4c97a672cda59a771b9490765a9cac65e821ddea2f6b24af8e3";
+    "dac51ea380ba2357c0f7d2914709bb7790be10405a9db93fb0ffeb59156720fd";
 
 const PRE_550_SCHEMA_DIGEST: &str =
     "68e8859576f696910042452f8815a6e7f9002c9357e4dd2a26edf30c61249dde";

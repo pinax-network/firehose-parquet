@@ -1,7 +1,7 @@
 use arrow::datatypes::{DataType, Field, Schema};
 use firehose_parquet::encode::{bytes_data_type, EncodeBytes};
 use firehose_parquet::traits::{
-    canonical_fields_with_encoding, push_fork_step_field, timestamp_millis_utc_type,
+    canonical_fields_with_encoding, enum_data_type, push_fork_step_field, timestamp_millis_utc_type,
 };
 
 pub fn blocks_schema(include_fork_step: bool, encoding: &EncodeBytes) -> Schema {
@@ -28,6 +28,8 @@ pub fn transactions_schema(include_fork_step: bool, encoding: &EncodeBytes) -> S
         Field::new("elapsed", DataType::Int64, false),
     ]);
     push_fork_step_field(&mut fields, include_fork_step);
+    // Whether the transaction's effects persisted (#550), after every earlier column.
+    fields.push(Field::new("transaction_success", DataType::Boolean, false));
     Schema::new(fields)
 }
 
@@ -70,6 +72,9 @@ pub fn actions_schema(include_fork_step: bool, encoding: &EncodeBytes) -> Schema
         Field::new("receipt_abi_sequence", DataType::UInt64, false),
     ]);
     push_fork_step_field(&mut fields, include_fork_step);
+    // Parent transaction outcome (#550), after every earlier column.
+    fields.push(Field::new("transaction_status", enum_data_type(), false));
+    fields.push(Field::new("transaction_success", DataType::Boolean, false));
     Schema::new(fields)
 }
 
@@ -94,6 +99,9 @@ pub fn db_ops_schema(include_fork_step: bool, encoding: &EncodeBytes) -> Schema 
         Field::new("db_op_index", DataType::UInt32, false),
     ]);
     push_fork_step_field(&mut fields, include_fork_step);
+    // Parent transaction outcome (#550), after every earlier column.
+    fields.push(Field::new("transaction_status", enum_data_type(), false));
+    fields.push(Field::new("transaction_success", DataType::Boolean, false));
     Schema::new(fields)
 }
 
