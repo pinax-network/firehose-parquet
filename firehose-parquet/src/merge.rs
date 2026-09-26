@@ -541,9 +541,10 @@ fn max_part_number_in_local_files(files: &[PathBuf]) -> u32 {
 }
 
 fn max_part_number_in_s3_objects(objects: &[object_store::ObjectMeta]) -> u32 {
+    // Objects directly at the bucket root have no '/' but still have a file name.
     objects
         .iter()
-        .filter_map(|obj| obj.location.as_ref().rsplit_once('/').map(|(_, name)| name))
+        .filter_map(|obj| obj.location.filename())
         .filter_map(parse_part_number)
         .max()
         .unwrap_or(0)
@@ -752,6 +753,16 @@ fn merge_s3_partitions(
     )
 }
 
+/// Key of `name` inside the partition `key`; a bucket-root partition has no `/` prefix,
+/// matching listed object locations.
+fn s3_child_key(key: &str, name: &str) -> String {
+    if key.is_empty() {
+        name.to_owned()
+    } else {
+        format!("{key}/{name}")
+    }
+}
+
 /// Partition key relative to the merged prefix, `(root)` for the prefix itself.
 fn s3_partition_label<'a>(prefix: &str, partition_key: &'a str) -> &'a str {
     let label = relative_key(prefix, partition_key);
@@ -885,7 +896,7 @@ impl<'a> engine::PartitionMerge for S3PartitionMerge<'a> {
 
     fn publish(&self, name: &str, data: Vec<u8>, _rows: usize) -> Result<()> {
         let (client, bucket) = (self.s3.client, self.s3.bucket);
-        let s3_path = object_store::path::Path::from(format!("{}/{name}", self.key));
+        let s3_path = object_store::path::Path::from(s3_child_key(self.key, name));
         let size = data.len();
         put_s3_bytes_once(
             client,
@@ -922,7 +933,7 @@ impl<'a> engine::PartitionMerge for S3PartitionMerge<'a> {
         let bucket = self.s3.bucket;
         let written: HashSet<String> = outputs
             .iter()
-            .map(|name| format!("{}/{name}", self.key))
+            .map(|name| s3_child_key(self.key, name))
             .collect();
         let source_keys = objects
             .iter()
@@ -2344,6 +2355,28 @@ mod tests {
             assert!(!local_files.is_empty());
             assert!(local_files == remote_files, "{partition}");
         }
+    }
+
+    /// Part files directly at an S3 bucket root used to be numbered from zero, so the first
+    /// output overwrote `part-000001.parquet` and the source deletes then removed it too.
+    #[test]
+    fn s3_bucket_root_merge_numbers_after_sources_and_keeps_every_row() {
+        let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        for part in 0..3u64 {
+            put_object(
+                &store,
+                &format!("part-{:06}.parquet", part + 1),
+                parquet_bytes(&make_range_batch(part * 10, 10)),
+            );
+        }
+        let result = merge_s3(&test_merge_config("s3://bucket"), &store, "bucket", "").unwrap();
+        assert_eq!((result.partitions_merged, result.files_written), (1, 1));
+        let keys: Vec<String> = list_keys(&store, "")
+            .into_iter()
+            .filter(|key| key.ends_with(".parquet"))
+            .collect();
+        assert_eq!(keys, ["part-000004.parquet"]);
+        assert_eq!(s3_values(&store, ""), (0..30).collect::<Vec<_>>());
     }
 
     #[tokio::test]
