@@ -14,7 +14,7 @@ use parquet::arrow::ArrowWriter;
 use parquet::arrow::ProjectionMask;
 use serde::Serialize;
 use sha2::{Digest as ShaDigest, Sha256};
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -547,12 +547,13 @@ impl VerifyMutationPlan {
     ) -> Result<Self> {
         // Only discover paths here. Rows, footers, roots and registry contents
         // are authoritatively re-read after every source/destination is owned.
+        let excluded = ExcludedPaths::for_run(opts);
         let first = if path.starts_with("s3://") {
             let aws = aws.context("AWS config required for S3 paths")?;
-            let (bucket, _, _, objects) = list_verify_objects(path, aws)?;
+            let (bucket, _, _, objects) = list_verify_objects(path, aws, &excluded)?;
             format!("s3://{bucket}/{}", objects[0].location)
         } else {
-            list_verify_files(path)?.1[0].clone()
+            list_verify_files(path, &excluded)?.1[0].clone()
         };
         let chain_root = file_layout(&first).chain_root;
         let mut scopes = vec![MaintenanceTarget::input(path)?];
@@ -663,11 +664,12 @@ fn verify_owned(
         parse_hash_strategy(raw)?;
     }
 
+    let excluded = ExcludedPaths::for_run(opts);
     let scan_output = if resolved_path.starts_with("s3://") {
         let aws = aws.ok_or_else(|| anyhow!("AWS config required for S3 paths"))?;
-        collect_partition_roots_s3(&resolved_path, aws, opts)?
+        collect_partition_roots_s3(&resolved_path, aws, opts, &excluded)?
     } else {
-        collect_partition_roots_local(&resolved_path, opts)?
+        collect_partition_roots_local(&resolved_path, opts, &excluded)?
     };
 
     let target = scan_output.target;
@@ -687,6 +689,9 @@ fn verify_owned(
     );
 
     let mut warnings = Vec::new();
+    if let Some(registry) = opts.registry_path.as_deref().filter(|_| runs_roots) {
+        warnings.extend(registry_inside_table_warning(registry, &target));
+    }
     if runs_roots && opts.registry_path.is_none() {
         let data_path = if resolved_path.starts_with("s3://") {
             resolved_path.clone()
@@ -1248,8 +1253,83 @@ fn relative_path(file: &str, base: &str) -> String {
         .to_string()
 }
 
-fn collect_partition_roots_local(path: &str, opts: &VerifyOptions) -> Result<ScanOutput> {
-    let (base, files) = list_verify_files(path)?;
+/// The artifacts this run writes: the registry and both reports. Scans skip
+/// them whatever their names, so a custom `--registry-path` inside the
+/// verified path is never hashed as table data.
+#[derive(Debug, Default)]
+struct ExcludedPaths {
+    /// Local files, with their parent directory canonicalized.
+    local: HashSet<PathBuf>,
+    /// `s3://bucket/key` objects.
+    remote: HashSet<String>,
+}
+
+impl ExcludedPaths {
+    fn for_run(opts: &VerifyOptions) -> Self {
+        let mut excluded = Self::default();
+        for path in opts.registry_path.iter().chain(&opts.publish_report_path) {
+            if path.starts_with("s3://") {
+                if let Ok((bucket, key)) = parse_s3_url(path) {
+                    excluded.remote.insert(format!("s3://{bucket}/{key}"));
+                }
+            } else {
+                excluded.local.extend(canonical_file_path(Path::new(path)));
+            }
+        }
+        // --report-json is always a local path, even when spelled like an S3 URL.
+        if let Some(path) = &opts.report_json {
+            excluded.local.extend(canonical_file_path(path));
+        }
+        excluded
+    }
+
+    fn contains_local(&self, file: &Path) -> bool {
+        !self.local.is_empty()
+            && canonical_file_path(file).is_some_and(|file| self.local.contains(&file))
+    }
+
+    fn contains_remote(&self, bucket: &str, key: &str) -> bool {
+        !self.remote.is_empty() && self.remote.contains(&format!("s3://{bucket}/{key}"))
+    }
+}
+
+/// Absolute path of a file whose parent directory is canonicalized; the file
+/// itself need not exist. `None` when the parent directory does not exist.
+fn canonical_file_path(path: &Path) -> Option<PathBuf> {
+    let absolute = std::path::absolute(path).ok()?;
+    let parent = std::fs::canonicalize(absolute.parent()?).ok()?;
+    Some(parent.join(absolute.file_name()?))
+}
+
+/// A warning when an explicit registry sits inside the verified table
+/// directory under a name other commands do not skip.
+fn registry_inside_table_warning(registry: &str, target: &Target) -> Option<String> {
+    let table_dir = join_artifact_path(&target.chain_root, &target.table);
+    let (registry_norm, inside) = if registry.starts_with("s3://") {
+        let (bucket, key) = parse_s3_url(registry).ok()?;
+        let registry = format!("s3://{bucket}/{key}");
+        let inside = registry.starts_with(&format!("{table_dir}/"));
+        (registry, inside)
+    } else {
+        let registry = canonical_file_path(Path::new(registry))?;
+        let inside = registry.starts_with(&table_dir);
+        (registry.to_string_lossy().into_owned(), inside)
+    };
+    let name = registry_norm.rsplit('/').next().unwrap_or_default();
+    (inside && !is_reserved_artifact_path(name)).then(|| {
+        format!(
+            "the registry {registry_norm} is inside the table directory {table_dir}; verify skips it, but other commands (merge, rollup, validate) read it as table data. Keep the registry at {} or outside the table directories",
+            join_artifact_path(&target.chain_root, MERKLE_ROOTS_FILENAME)
+        )
+    })
+}
+
+fn collect_partition_roots_local(
+    path: &str,
+    opts: &VerifyOptions,
+    excluded: &ExcludedPaths,
+) -> Result<ScanOutput> {
+    let (base, files) = list_verify_files(path, excluded)?;
     let partitions: Vec<String> = files
         .iter()
         .map(|file| detect_partition(file, &base))
@@ -1266,7 +1346,7 @@ fn collect_partition_roots_local(path: &str, opts: &VerifyOptions) -> Result<Sca
     scan.finish()
 }
 
-fn list_verify_files(path: &str) -> Result<(String, Vec<String>)> {
+fn list_verify_files(path: &str, excluded: &ExcludedPaths) -> Result<(String, Vec<String>)> {
     let pathbuf = absolute_local_path(path)?;
     let mut files = Vec::new();
 
@@ -1288,7 +1368,10 @@ fn list_verify_files(path: &str) -> Result<(String, Vec<String>)> {
     let mut files: Vec<String> = files
         .iter()
         .map(|file| file.to_string_lossy().to_string())
-        .filter(|file| !is_reserved_artifact_path(&relative_path(file, &base)))
+        .filter(|file| {
+            !is_reserved_artifact_path(&relative_path(file, &base))
+                && !excluded.contains_local(Path::new(file))
+        })
         .collect();
     files.sort();
     if files.is_empty() {
@@ -1302,8 +1385,9 @@ fn collect_partition_roots_s3(
     path: &str,
     aws: &AwsConfig,
     opts: &VerifyOptions,
+    excluded: &ExcludedPaths,
 ) -> Result<ScanOutput> {
-    let (bucket, prefix, client, objects) = list_verify_objects(path, aws)?;
+    let (bucket, prefix, client, objects) = list_verify_objects(path, aws, excluded)?;
     let partitions: Vec<String> = objects
         .iter()
         .map(|obj| detect_partition(obj.location.as_ref(), &prefix))
@@ -1334,6 +1418,7 @@ fn collect_partition_roots_s3(
 fn list_verify_objects(
     path: &str,
     aws: &AwsConfig,
+    excluded: &ExcludedPaths,
 ) -> Result<(
     String,
     String,
@@ -1357,7 +1442,9 @@ fn list_verify_objects(
 
     objects.retain(|obj| {
         let key = obj.location.as_ref();
-        key.ends_with(".parquet") && !is_reserved_artifact_path(&relative_path(key, &prefix))
+        key.ends_with(".parquet")
+            && !is_reserved_artifact_path(&relative_path(key, &prefix))
+            && !excluded.contains_remote(&bucket, key)
     });
     objects.sort_by(|a, b| a.location.cmp(&b.location));
     if objects.is_empty() {
@@ -3344,6 +3431,68 @@ mod tests {
             mainnet[&registry_key("mainnet", "evm", "blocks", "date=2024-01-01")].merkle_root,
             roots[0]
         );
+    }
+
+    #[test]
+    fn configured_artifacts_inside_the_verified_path_are_never_scanned() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        write_table_file(
+            &table_file(&root, "mainnet", "blocks"),
+            &[1, 2],
+            Some("evm"),
+            Some("mainnet"),
+        );
+        let data = root.join("mainnet/blocks");
+        // Artifact paths with names other commands do not reserve, inside the
+        // verified table directory and one of its partitions. A JSON report
+        // named `.parquet` would fail to parse if it were scanned.
+        let registry = data.join("roots.parquet");
+        let report = data.join("date=2024-01-01/report.parquet");
+        let published = data.join("published.parquet");
+        let mut opts = inferred_opts();
+        opts.registry_path = Some(registry.display().to_string());
+        opts.report_json = Some(report.clone());
+        opts.publish_report_path = Some(published.display().to_string());
+
+        let runs: Vec<VerifyReport> = (0..3).map(|_| verify_dir(&data, &opts).unwrap()).collect();
+        assert!(runs[0].summary.wrote_registry);
+        assert_eq!(runs[0].summary.missing_expected, 1);
+        for run in &runs {
+            assert_eq!(run.summary.partitions_scanned, 1, "{:?}", run.findings);
+            assert!(run.is_valid(), "{:?}", run.findings);
+            assert!(
+                run.warnings
+                    .iter()
+                    .any(|w| w.contains("inside the table directory")),
+                "{:?}",
+                run.warnings
+            );
+        }
+        for run in &runs[1..] {
+            assert_eq!(run.summary.matches, 1);
+            assert!(!run.summary.wrote_registry);
+        }
+        assert!(registry.exists() && report.exists() && published.exists());
+
+        // The same registry spelled through a directory alias is skipped too.
+        #[cfg(unix)]
+        {
+            let alias = root.join("alias");
+            std::os::unix::fs::symlink(root.join("mainnet"), &alias).unwrap();
+            let mut aliased = opts.clone();
+            aliased.registry_path = Some(alias.join("blocks/roots.parquet").display().to_string());
+            let run = verify_dir(&data, &aliased).unwrap();
+            assert_eq!(run.summary.matches, 1, "{:?}", run.findings);
+        }
+
+        let excluded = super::ExcludedPaths::for_run(&VerifyOptions {
+            registry_path: Some("s3://bucket/mainnet/blocks/roots.parquet".to_string()),
+            ..inferred_opts()
+        });
+        assert!(excluded.contains_remote("bucket", "mainnet/blocks/roots.parquet"));
+        assert!(!excluded.contains_remote("bucket", "mainnet/blocks/part-0.parquet"));
+        assert!(!excluded.contains_remote("other", "mainnet/blocks/roots.parquet"));
     }
 
     #[test]
