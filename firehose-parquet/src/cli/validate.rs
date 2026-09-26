@@ -826,6 +826,25 @@ pub(in crate::cli) fn validate_from_files(
     }
 }
 
+/// The result for a path without any Parquet file (local and S3 alike).
+fn no_files_result() -> ValidateResult {
+    ValidateResult {
+        files_scanned: 0,
+        total_blocks: 0,
+        min_block: None,
+        max_block: None,
+        gaps: vec![],
+        parent_mismatches: vec![],
+        duplicates: vec![],
+        ordering_errors: 0,
+        timestamp_reversals: vec![],
+        partitions: vec![],
+        empty_partitions: vec![],
+        schema_mismatches: vec![],
+        cross_partition_issues: vec![],
+    }
+}
+
 pub(in crate::cli) fn validate_parquet_local(
     path: &PathBuf,
     opts: &ValidateOptions,
@@ -846,21 +865,7 @@ pub(in crate::cli) fn validate_parquet_local(
 
     if paths.is_empty() {
         println!("No .parquet files found in {}", path.display());
-        return Ok(ValidateResult {
-            files_scanned: 0,
-            total_blocks: 0,
-            min_block: None,
-            max_block: None,
-            gaps: vec![],
-            parent_mismatches: vec![],
-            duplicates: vec![],
-            ordering_errors: 0,
-            timestamp_reversals: vec![],
-            partitions: vec![],
-            empty_partitions: vec![],
-            schema_mismatches: vec![],
-            cross_partition_issues: vec![],
-        });
+        return Ok(no_files_result());
     }
 
     let base = path.to_string_lossy().to_string();
@@ -911,21 +916,7 @@ pub(in crate::cli) fn validate_parquet_s3(
 
     if parquet_objects.is_empty() {
         println!("No .parquet files found in {path}");
-        return Ok(ValidateResult {
-            files_scanned: 0,
-            total_blocks: 0,
-            min_block: None,
-            max_block: None,
-            gaps: vec![],
-            parent_mismatches: vec![],
-            duplicates: vec![],
-            ordering_errors: 0,
-            timestamp_reversals: vec![],
-            partitions: vec![],
-            empty_partitions: vec![],
-            schema_mismatches: vec![],
-            cross_partition_issues: vec![],
-        });
+        return Ok(no_files_result());
     }
 
     let mut file_infos = Vec::new();
