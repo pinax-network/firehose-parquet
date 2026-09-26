@@ -1,0 +1,145 @@
+{
+  "blocks": [
+    {
+      "block_num": 50000009,
+      "sha256": "3eb09087a866320ace50d42aab7d2574518f8cedf99fb9d1f11079c3a18cef84"
+    },
+    {
+      "block_num": 50000014,
+      "sha256": "9a61db6d87e213b9cdc224f1c1058b531596c0c02742df5d5764d903fba283fc"
+    },
+    {
+      "block_num": 50002529,
+      "sha256": "60eca1ded081c44c4c4e09b5c2caf521a9bdbb7b82c198e02dc9dfab91fcb9a0"
+    },
+    {
+      "block_num": 50002747,
+      "sha256": "5560fe2765d19f0a0114a30cc13a4e1d2f31d6ae2b95dc1953bdbc20ecc5cb89"
+    },
+    {
+      "block_num": 50002749,
+      "sha256": "c6bc28fa3bbee1196b42bf91da9057a6defa15d7a9289b7cc27f5d9966b3a9e4"
+    }
+  ],
+  "cases": {
+    "base58-failedfalse-forkfalse": {
+      "values": 3299,
+      "legacy_values": 46571,
+      "rows": 1732
+    },
+    "base58-failedfalse-forktrue": {
+      "values": 3299,
+      "legacy_values": 48303,
+      "rows": 1732
+    },
+    "base58-failedtrue-forkfalse": {
+      "values": 3325,
+      "legacy_values": 47009,
+      "rows": 1748
+    },
+    "base58-failedtrue-forktrue": {
+      "values": 3325,
+      "legacy_values": 48757,
+      "rows": 1748
+    },
+    "binary-failedfalse-forkfalse": {
+      "values": 3299,
+      "legacy_values": 46571,
+      "rows": 1732
+    },
+    "binary-failedfalse-forktrue": {
+      "values": 3299,
+      "legacy_values": 48303,
+      "rows": 1732
+    },
+    "binary-failedtrue-forkfalse": {
+      "values": 3325,
+      "legacy_values": 47009,
+      "rows": 1748
+    },
+    "binary-failedtrue-forktrue": {
+      "values": 3325,
+      "legacy_values": 48757,
+      "rows": 1748
+    },
+    "hex-failedfalse-forkfalse": {
+      "values": 3299,
+      "legacy_values": 46571,
+      "rows": 1732
+    },
+    "hex-failedfalse-forktrue": {
+      "values": 3299,
+      "legacy_values": 48303,
+      "rows": 1732
+    },
+    "hex-failedtrue-forkfalse": {
+      "values": 3325,
+      "legacy_values": 47009,
+      "rows": 1748
+    },
+    "hex-failedtrue-forktrue": {
+      "values": 3325,
+      "legacy_values": 48757,
+      "rows": 1748
+    },
+    "hex_no_prefix-failedfalse-forkfalse": {
+      "values": 3299,
+      "legacy_values": 46571,
+      "rows": 1732
+    },
+    "hex_no_prefix-failedfalse-forktrue": {
+      "values": 3299,
+      "legacy_values": 48303,
+      "rows": 1732
+    },
+    "hex_no_prefix-failedtrue-forkfalse": {
+      "values": 3325,
+      "legacy_values": 47009,
+      "rows": 1748
+    },
+    "hex_no_prefix-failedtrue-forktrue": {
+      "values": 3325,
+      "legacy_values": 48757,
+      "rows": 1748
+    },
+    "tron_base58-failedfalse-forkfalse": {
+      "values": 3299,
+      "legacy_values": 46571,
+      "rows": 1732
+    },
+    "tron_base58-failedfalse-forktrue": {
+      "values": 3299,
+      "legacy_values": 48303,
+      "rows": 1732
+    },
+    "tron_base58-failedtrue-forkfalse": {
+      "values": 3325,
+      "legacy_values": 47009,
+      "rows": 1748
+    },
+    "tron_base58-failedtrue-forktrue": {
+      "values": 3325,
+      "legacy_values": 48757,
+      "rows": 1748
+    }
+  },
+  "totals": {
+    "values": 66240,
+    "legacy_values": 953200,
+    "rows": 34800
+  },
+  "trace_roles": {
+    "EXECUTED|success=True|onerror=False": 153,
+    "SOFTFAIL|success=False|onerror=False": 2,
+    "SOFTFAIL|success=True|onerror=True": 1,
+    "EXPIRED|success=False|onerror=False": 2,
+    "HARDFAIL|success=False|onerror=True": 1,
+    "DELAYED|success=True|onerror=False": 1,
+    "HARDFAIL|success=False|onerror=False": 1
+  },
+  "newly_selected": {
+    "transactions": 2,
+    "actions": 1,
+    "db_ops": 0
+  }
+}

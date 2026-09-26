@@ -89,7 +89,54 @@ are bound into pending transaction identities; finish recovery with this version
 before downgrading to one that cannot parse that variant. See the
 [contract and measurements](../audit/519-parquet-lookup-properties.md).
 
-### Solana detail rows expose parent transaction outcome (#550, partial)
+### Tron excludes failed smart-contract calls by default (#550)
+
+Tron's failed-transaction filter used the Firehose wrapper `result`, which
+java-tron sets to true/SUCCESS for every included transaction, so reverted and
+out-of-energy calls were written by default with their contracts and internal
+transactions. A transaction now fails when `TransactionInfo.result` is `FAILED`
+or its receipt result is neither `DEFAULT` nor `SUCCESS`; failed transactions are
+excluded unless `--include-failed-transactions` is set. `transactions`, `logs`,
+`internal_transactions`, `contracts` and `internal_call_values` append a
+non-null Boolean `transaction_success`. `transactions.contract_address` is now
+NULL instead of empty when `TransactionInfo` has no address. Rebuild into a
+fresh output root. See the [rules and RPC-backed comparison](../audit/550-non-evm-failed-transactions.md).
+
+### Antelope keeps successful onerror handlers and scheduled transactions (#550)
+
+The default selection kept only `EXECUTED` traces, which dropped `SOFTFAIL`
+`onerror` handler traces whose effects persisted, and `DELAYED` (scheduled)
+transactions. A trace now succeeds when it has no exception and its status is
+`EXECUTED`, `SOFTFAIL` or `DELAYED`. The failed deferred trace that the producer
+writes beside an `onerror` handler carries the exception and stays excluded, as
+do `HARDFAIL` and `EXPIRED`. `transactions` appends `transaction_success`;
+`actions` and `db_ops` append the parent `transaction_status`
+(`Dictionary(Int32, Utf8)`) and `transaction_success`. Default outputs gain rows,
+so rebuild into a fresh output root. See the [rules and Pinax EOS comparison](../audit/550-non-evm-failed-transactions.md).
+
+### NEAR receipt actions and logs carry their receipt outcome (#550)
+
+`receipt_actions` and `execution_logs` append `receipt_status`
+(`Dictionary(Int32, Utf8)`), the receipt's own outcome as in `receipts.status`.
+Rows of failed receipts are still always written, whatever the failed-transaction
+flags; filter `receipt_status <> 'Failure'` for actions that took effect. Values
+and row selection are otherwise unchanged. Rebuild into a fresh output root.
+
+### Bitcoin amounts and input metadata (#511)
+
+Bitcoin-family outputs add `value_sats: UInt64`; the original floating coin
+amount remains unchanged. Exact serialized output units are preferred; absent
+raw transaction bytes use a unique, checked conversion. Inconsistent or
+unrecoverable amounts stop mapping before that block appends any rows. The shared
+Litecoin mapper is not constrained by Bitcoin's monetary bound.
+
+Inputs add `tx_index`. Coinbase/ordinary input fields and absent script messages
+now use nulls, with real zero indices and present empty scripts preserved.
+Output addresses support the legacy first-address fallback. Native protobuf text
+encoding is unchanged and now documented accurately. These are intentional schema
+changes; use a new/rebuilt dataset or explicit reader-side schema reconciliation.
+
+### Solana detail rows expose parent transaction outcome (#550)
 
 `messages`, `instructions`, `token_balances`, and `account_lookups` append Boolean
 `transaction_success`; rewards append the same field with null for block-level
@@ -98,7 +145,7 @@ parent outcome context, not proof of individual instruction execution or
 reversion. Balance snapshots and fees remain literal source observations.
 Rebuild into a fresh dataset; old missing context must not become false.
 See the [contract and retained-source comparison](../audit/550-solana-execution-context.md).
-The other chains and remaining qualification in #550 are still open.
+Tron, Antelope and NEAR follow in the entries above.
 
 ### Adaptive compressed file targets and independent mapper memory threshold (#515)
 
@@ -696,12 +743,13 @@ Receipt actions (method, arguments, deposit, gas) and execution logs, the channe
 - `receipt_actions`: one row per action, keyed by `receipt_id` and `action_index`. `action_kind` is dictionary-encoded and uses the labels of `transactions.actions`. `method_name`, `args` and `gas` are set for `FunctionCall`, and `deposit` for `FunctionCall` and `Transfer`. They are null for other kinds. `args` is raw `Binary` under every encoding; it is usually JSON, readable with `decode(args)` in DuckDB.
 - `execution_logs`: one row per line of the outcome's `logs`, keyed by `receipt_id` and `log_index`, with the emitting `executor_id`. NEP-297 events are the lines starting with `EVENT_JSON:`.
 
-Both tables carry `receipt_index`, `tx_hash`, `shard_id` and `predecessor_id`, like `receipts` (see the breaking change above). They cover failed receipts too; join `receipts` on `receipt_id` to check `status`. The README has a NEP-141 event query.
+Both tables carry `receipt_index`, `tx_hash`, `shard_id` and `predecessor_id`, like `receipts` (see the breaking change above). They cover failed receipts too, labeled by `receipt_status` (#550). The README has a NEP-141 event query.
 
 `state_changes` is unchanged. The pinned StreamingFast NEAR producer emits an empty block-level state-change list and omits the indexer's per-shard state changes. This producer limitation does not establish behavior for every provider; #507 remains separately tracked.
 
 ## Fixes
 
+- **Legacy Antelope cursors with `bytes_encoding=auto` validate against `hex_no_prefix` (#550).** Cursor compatibility resolved Antelope's `auto` encoding to `hex`, although Antelope output has always used unprefixed hex, so a legacy cursor reported a false mismatch.
 - **`--flush-rows 0` and `--flush-interval-secs 0` disable those `build` triggers.**
   They used to evaluate `rows >= 0` / `elapsed >= 0` and flush after every block,
   writing one transaction and one file per table per block. Zero now means
@@ -853,27 +901,13 @@ claim. See [equivalence coverage, recovered-work provenance and all measurements
   still missing because neither block records a gas change. See
   [the record](../audit/validation-misc-followups-evm.md).
 
-## Bitcoin amounts and input metadata (#511)
-
-Bitcoin-family outputs add `value_sats: UInt64`; the original floating coin
-amount remains unchanged. Exact serialized output units are preferred; absent
-raw transaction bytes use a unique, checked conversion. Inconsistent or
-unrecoverable amounts stop mapping before that block appends any rows. The shared
-Litecoin mapper is not constrained by Bitcoin's monetary bound.
-
-Inputs add `tx_index`. Coinbase/ordinary input fields and absent script messages
-now use nulls, with real zero indices and present empty scripts preserved.
-Output addresses support the legacy first-address fallback. Native protobuf text
-encoding is unchanged and now documented accurately. These are intentional schema
-changes; use a new/rebuilt dataset or explicit reader-side schema reconciliation.
+## Internal structure
 
 - Chain protobuf byte fields now share owned Firehose payload storage during
   mapping (#518). Existing borrowed mapper calls remain available; generated
   Rust protobuf byte fields are now `Bytes` (`Vec` callers can use `.into()`).
   Protobuf wire and Parquet schemas are unchanged. See
   [decoding validation and benchmark](../audit/518-owned-protobuf-bytes.md).
-
-## Internal structure
 
 - Library API: the unused legacy writers `CursorLocation::save`,
   `CursorLocation::save_with_retry` and `CursorLocation::save_with_retry_blocking`

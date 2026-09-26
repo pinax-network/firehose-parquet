@@ -1,0 +1,590 @@
+{
+  "cases": {
+    "base58-failedfalse-forkfalse": {
+      "blocks": {
+        "baseline_rows": 1,
+        "rows": 1
+      },
+      "contracts": {
+        "baseline_rows": 447,
+        "rows": 444
+      },
+      "internal_call_values": {
+        "baseline_rows": 38,
+        "rows": 38
+      },
+      "internal_transactions": {
+        "baseline_rows": 38,
+        "rows": 38
+      },
+      "logs": {
+        "baseline_rows": 89,
+        "rows": 89
+      },
+      "transactions": {
+        "baseline_rows": 447,
+        "rows": 444
+      }
+    },
+    "base58-failedfalse-forktrue": {
+      "blocks": {
+        "baseline_rows": 1,
+        "rows": 1
+      },
+      "contracts": {
+        "baseline_rows": 447,
+        "rows": 444
+      },
+      "internal_call_values": {
+        "baseline_rows": 38,
+        "rows": 38
+      },
+      "internal_transactions": {
+        "baseline_rows": 38,
+        "rows": 38
+      },
+      "logs": {
+        "baseline_rows": 89,
+        "rows": 89
+      },
+      "transactions": {
+        "baseline_rows": 447,
+        "rows": 444
+      }
+    },
+    "base58-failedtrue-forkfalse": {
+      "blocks": {
+        "baseline_rows": 1,
+        "rows": 1
+      },
+      "contracts": {
+        "baseline_rows": 447,
+        "rows": 447
+      },
+      "internal_call_values": {
+        "baseline_rows": 38,
+        "rows": 38
+      },
+      "internal_transactions": {
+        "baseline_rows": 38,
+        "rows": 38
+      },
+      "logs": {
+        "baseline_rows": 89,
+        "rows": 89
+      },
+      "transactions": {
+        "baseline_rows": 447,
+        "rows": 447
+      }
+    },
+    "base58-failedtrue-forktrue": {
+      "blocks": {
+        "baseline_rows": 1,
+        "rows": 1
+      },
+      "contracts": {
+        "baseline_rows": 447,
+        "rows": 447
+      },
+      "internal_call_values": {
+        "baseline_rows": 38,
+        "rows": 38
+      },
+      "internal_transactions": {
+        "baseline_rows": 38,
+        "rows": 38
+      },
+      "logs": {
+        "baseline_rows": 89,
+        "rows": 89
+      },
+      "transactions": {
+        "baseline_rows": 447,
+        "rows": 447
+      }
+    },
+    "binary-failedfalse-forkfalse": {
+      "blocks": {
+        "baseline_rows": 1,
+        "rows": 1
+      },
+      "contracts": {
+        "baseline_rows": 447,
+        "rows": 444
+      },
+      "internal_call_values": {
+        "baseline_rows": 38,
+        "rows": 38
+      },
+      "internal_transactions": {
+        "baseline_rows": 38,
+        "rows": 38
+      },
+      "logs": {
+        "baseline_rows": 89,
+        "rows": 89
+      },
+      "transactions": {
+        "baseline_rows": 447,
+        "rows": 444
+      }
+    },
+    "binary-failedfalse-forktrue": {
+      "blocks": {
+        "baseline_rows": 1,
+        "rows": 1
+      },
+      "contracts": {
+        "baseline_rows": 447,
+        "rows": 444
+      },
+      "internal_call_values": {
+        "baseline_rows": 38,
+        "rows": 38
+      },
+      "internal_transactions": {
+        "baseline_rows": 38,
+        "rows": 38
+      },
+      "logs": {
+        "baseline_rows": 89,
+        "rows": 89
+      },
+      "transactions": {
+        "baseline_rows": 447,
+        "rows": 444
+      }
+    },
+    "binary-failedtrue-forkfalse": {
+      "blocks": {
+        "baseline_rows": 1,
+        "rows": 1
+      },
+      "contracts": {
+        "baseline_rows": 447,
+        "rows": 447
+      },
+      "internal_call_values": {
+        "baseline_rows": 38,
+        "rows": 38
+      },
+      "internal_transactions": {
+        "baseline_rows": 38,
+        "rows": 38
+      },
+      "logs": {
+        "baseline_rows": 89,
+        "rows": 89
+      },
+      "transactions": {
+        "baseline_rows": 447,
+        "rows": 447
+      }
+    },
+    "binary-failedtrue-forktrue": {
+      "blocks": {
+        "baseline_rows": 1,
+        "rows": 1
+      },
+      "contracts": {
+        "baseline_rows": 447,
+        "rows": 447
+      },
+      "internal_call_values": {
+        "baseline_rows": 38,
+        "rows": 38
+      },
+      "internal_transactions": {
+        "baseline_rows": 38,
+        "rows": 38
+      },
+      "logs": {
+        "baseline_rows": 89,
+        "rows": 89
+      },
+      "transactions": {
+        "baseline_rows": 447,
+        "rows": 447
+      }
+    },
+    "hex-failedfalse-forkfalse": {
+      "blocks": {
+        "baseline_rows": 1,
+        "rows": 1
+      },
+      "contracts": {
+        "baseline_rows": 447,
+        "rows": 444
+      },
+      "internal_call_values": {
+        "baseline_rows": 38,
+        "rows": 38
+      },
+      "internal_transactions": {
+        "baseline_rows": 38,
+        "rows": 38
+      },
+      "logs": {
+        "baseline_rows": 89,
+        "rows": 89
+      },
+      "transactions": {
+        "baseline_rows": 447,
+        "rows": 444
+      }
+    },
+    "hex-failedfalse-forktrue": {
+      "blocks": {
+        "baseline_rows": 1,
+        "rows": 1
+      },
+      "contracts": {
+        "baseline_rows": 447,
+        "rows": 444
+      },
+      "internal_call_values": {
+        "baseline_rows": 38,
+        "rows": 38
+      },
+      "internal_transactions": {
+        "baseline_rows": 38,
+        "rows": 38
+      },
+      "logs": {
+        "baseline_rows": 89,
+        "rows": 89
+      },
+      "transactions": {
+        "baseline_rows": 447,
+        "rows": 444
+      }
+    },
+    "hex-failedtrue-forkfalse": {
+      "blocks": {
+        "baseline_rows": 1,
+        "rows": 1
+      },
+      "contracts": {
+        "baseline_rows": 447,
+        "rows": 447
+      },
+      "internal_call_values": {
+        "baseline_rows": 38,
+        "rows": 38
+      },
+      "internal_transactions": {
+        "baseline_rows": 38,
+        "rows": 38
+      },
+      "logs": {
+        "baseline_rows": 89,
+        "rows": 89
+      },
+      "transactions": {
+        "baseline_rows": 447,
+        "rows": 447
+      }
+    },
+    "hex-failedtrue-forktrue": {
+      "blocks": {
+        "baseline_rows": 1,
+        "rows": 1
+      },
+      "contracts": {
+        "baseline_rows": 447,
+        "rows": 447
+      },
+      "internal_call_values": {
+        "baseline_rows": 38,
+        "rows": 38
+      },
+      "internal_transactions": {
+        "baseline_rows": 38,
+        "rows": 38
+      },
+      "logs": {
+        "baseline_rows": 89,
+        "rows": 89
+      },
+      "transactions": {
+        "baseline_rows": 447,
+        "rows": 447
+      }
+    },
+    "hex_no_prefix-failedfalse-forkfalse": {
+      "blocks": {
+        "baseline_rows": 1,
+        "rows": 1
+      },
+      "contracts": {
+        "baseline_rows": 447,
+        "rows": 444
+      },
+      "internal_call_values": {
+        "baseline_rows": 38,
+        "rows": 38
+      },
+      "internal_transactions": {
+        "baseline_rows": 38,
+        "rows": 38
+      },
+      "logs": {
+        "baseline_rows": 89,
+        "rows": 89
+      },
+      "transactions": {
+        "baseline_rows": 447,
+        "rows": 444
+      }
+    },
+    "hex_no_prefix-failedfalse-forktrue": {
+      "blocks": {
+        "baseline_rows": 1,
+        "rows": 1
+      },
+      "contracts": {
+        "baseline_rows": 447,
+        "rows": 444
+      },
+      "internal_call_values": {
+        "baseline_rows": 38,
+        "rows": 38
+      },
+      "internal_transactions": {
+        "baseline_rows": 38,
+        "rows": 38
+      },
+      "logs": {
+        "baseline_rows": 89,
+        "rows": 89
+      },
+      "transactions": {
+        "baseline_rows": 447,
+        "rows": 444
+      }
+    },
+    "hex_no_prefix-failedtrue-forkfalse": {
+      "blocks": {
+        "baseline_rows": 1,
+        "rows": 1
+      },
+      "contracts": {
+        "baseline_rows": 447,
+        "rows": 447
+      },
+      "internal_call_values": {
+        "baseline_rows": 38,
+        "rows": 38
+      },
+      "internal_transactions": {
+        "baseline_rows": 38,
+        "rows": 38
+      },
+      "logs": {
+        "baseline_rows": 89,
+        "rows": 89
+      },
+      "transactions": {
+        "baseline_rows": 447,
+        "rows": 447
+      }
+    },
+    "hex_no_prefix-failedtrue-forktrue": {
+      "blocks": {
+        "baseline_rows": 1,
+        "rows": 1
+      },
+      "contracts": {
+        "baseline_rows": 447,
+        "rows": 447
+      },
+      "internal_call_values": {
+        "baseline_rows": 38,
+        "rows": 38
+      },
+      "internal_transactions": {
+        "baseline_rows": 38,
+        "rows": 38
+      },
+      "logs": {
+        "baseline_rows": 89,
+        "rows": 89
+      },
+      "transactions": {
+        "baseline_rows": 447,
+        "rows": 447
+      }
+    },
+    "tron_base58-failedfalse-forkfalse": {
+      "blocks": {
+        "baseline_rows": 1,
+        "rows": 1
+      },
+      "contracts": {
+        "baseline_rows": 447,
+        "rows": 444
+      },
+      "internal_call_values": {
+        "baseline_rows": 38,
+        "rows": 38
+      },
+      "internal_transactions": {
+        "baseline_rows": 38,
+        "rows": 38
+      },
+      "logs": {
+        "baseline_rows": 89,
+        "rows": 89
+      },
+      "transactions": {
+        "baseline_rows": 447,
+        "rows": 444
+      }
+    },
+    "tron_base58-failedfalse-forktrue": {
+      "blocks": {
+        "baseline_rows": 1,
+        "rows": 1
+      },
+      "contracts": {
+        "baseline_rows": 447,
+        "rows": 444
+      },
+      "internal_call_values": {
+        "baseline_rows": 38,
+        "rows": 38
+      },
+      "internal_transactions": {
+        "baseline_rows": 38,
+        "rows": 38
+      },
+      "logs": {
+        "baseline_rows": 89,
+        "rows": 89
+      },
+      "transactions": {
+        "baseline_rows": 447,
+        "rows": 444
+      }
+    },
+    "tron_base58-failedtrue-forkfalse": {
+      "blocks": {
+        "baseline_rows": 1,
+        "rows": 1
+      },
+      "contracts": {
+        "baseline_rows": 447,
+        "rows": 447
+      },
+      "internal_call_values": {
+        "baseline_rows": 38,
+        "rows": 38
+      },
+      "internal_transactions": {
+        "baseline_rows": 38,
+        "rows": 38
+      },
+      "logs": {
+        "baseline_rows": 89,
+        "rows": 89
+      },
+      "transactions": {
+        "baseline_rows": 447,
+        "rows": 447
+      }
+    },
+    "tron_base58-failedtrue-forktrue": {
+      "blocks": {
+        "baseline_rows": 1,
+        "rows": 1
+      },
+      "contracts": {
+        "baseline_rows": 447,
+        "rows": 447
+      },
+      "internal_call_values": {
+        "baseline_rows": 38,
+        "rows": 38
+      },
+      "internal_transactions": {
+        "baseline_rows": 38,
+        "rows": 38
+      },
+      "logs": {
+        "baseline_rows": 89,
+        "rows": 89
+      },
+      "transactions": {
+        "baseline_rows": 447,
+        "rows": 447
+      }
+    }
+  },
+  "coverage": {
+    "call_values": 38,
+    "empty_contract_address": 365,
+    "failed_transactions": [
+      {
+        "fee": 500,
+        "info_result": "FAILED",
+        "internal_transactions": 0,
+        "logs": 0,
+        "receipt_result": "OUT_OF_ENERGY",
+        "transaction_index": 84,
+        "txid": "502e9951cd838f02daac3d18f68e5ea5c772a17cdb981b22fb4fc5c0a5a2a28c",
+        "wrapper": "True/SUCCESS"
+      },
+      {
+        "fee": 1207400,
+        "info_result": "FAILED",
+        "internal_transactions": 0,
+        "logs": 0,
+        "receipt_result": "REVERT",
+        "transaction_index": 295,
+        "txid": "9af7e009cb42293f0cfd0f3705a1645f652f719f6d01571d48c2cb5399e25288",
+        "wrapper": "True/SUCCESS"
+      },
+      {
+        "fee": 200,
+        "info_result": "FAILED",
+        "internal_transactions": 0,
+        "logs": 0,
+        "receipt_result": "OUT_OF_ENERGY",
+        "transaction_index": 313,
+        "txid": "92c93ea38624df001f10007615552fbfc17ebe90e8e61ed60f3ff96f27bf720b",
+        "wrapper": "True/SUCCESS"
+      }
+    ],
+    "internal_transactions": 38,
+    "logs": 89,
+    "receipt_result": {
+      "DEFAULT": 365,
+      "OUT_OF_ENERGY": 2,
+      "REVERT": 1,
+      "SUCCESS": 79
+    },
+    "transaction_info_result": {
+      "FAILED": 3,
+      "SUCESS": 444
+    },
+    "transactions": 447,
+    "wrapper_result_and_code": {
+      "True/SUCCESS": 447
+    }
+  },
+  "descriptor_sha256": "8e53fd91182e15c8be95832cfc77e59da5fa3ec5272737bb40d7e8fb93200c77",
+  "height": 85000000,
+  "legacy_values": 528270,
+  "null_contract_addresses": 7300,
+  "outcome_values": 21120,
+  "qualification": "native RPC backed; pinned #509 producer conversion; no Firehose transport or cursor proof",
+  "raw_sha256": {
+    "block-extension.pb": "4f5514fd9a8bde0fd1842d546f9776c20dc9c7ef5c3def5bff75606486d12315",
+    "block.pb": "af7dc781876e8c0a3fe1c9da44a83169299ef86691650ef30eb45e07aadc1444",
+    "transaction-info-list.pb": "06b1890cf297c31feaee0e53ef04f33afc7fa04bee0f05c917c3594036755d18"
+  },
+  "raw_values": 549390,
+  "rows": 21140,
+  "status": "passed"
+}

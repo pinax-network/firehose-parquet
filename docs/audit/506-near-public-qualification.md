@@ -1,9 +1,12 @@
 # NEAR public-source qualification of recovered PR #559 (#506)
 
-Status: the single approved public capture and independent offline comparison
-passed. Full repository validation passed; independent final review is pending. The earlier
-single Firehose request remains quota-blocked and was not retried. #506, #507 and
-#550 remain open until their respective acceptance/merge gates are satisfied.
+Status: merged in [PR #559](https://github.com/pinax-network/firehose-parquet/pull/559)
+as `c6db643` on 2026-09-25 after the single approved public capture, the
+independent offline comparison, full repository validation and PR CI passed;
+#506 is closed. The earlier single Firehose request remains quota-blocked and
+was not retried. #507 (status semantics and state-change attribution) remains
+open. #550's NEAR receipt-outcome labels reuse this capture offline; see
+[the #550 record](550-non-evm-failed-transactions.md).
 
 ## Recovery and current compatibility
 
@@ -253,4 +256,4 @@ The live-block mapper comparison passes under the explicitly reviewed
 NearData/indexer-JSON plus pinned-producer-conversion boundary. It does not prove
 Firehose transport/cursor behavior, globally complete lineage, #507 state-change
 rows or #550 execution/filter semantics. Those remain separately open.
-Validation on integrated main `81f5b79` plus the recovered changes passed: **1,073 workspace tests, 0 failures, 12 ignored**; the standard `refresh_evm_golden` CI example passed 1 test with 1 subprocess fixture ignored. Formatting, binary build and Bash/Zsh/Fish completions passed. All shared-target Cargo commands used the whole-command lock. Independent final review and current-head GitHub CI remain required before merging the recovered PR.
+Validation on integrated main `81f5b79` plus the recovered changes passed: **1,073 workspace tests, 0 failures, 12 ignored**; the standard `refresh_evm_golden` CI example passed 1 test with 1 subprocess fixture ignored. Formatting, binary build and Bash/Zsh/Fish completions passed. All shared-target Cargo commands used the whole-command lock. The recovered PR later merged as `c6db643` after PR CI passed (see the status above).
