@@ -142,6 +142,19 @@ selected variable is unset or blank, that header is omitted; it does not fall
 back to another variable. The other header still follows its own selection
 rules. Only explicitly select a credential for a destination you intend it to reach.
 
+An explicit selector is **not provider-scoped**. If `API_KEY_ENVVAR` or
+`API_TOKEN_ENVVAR` is set globally, for example to the legacy
+`SUBSTREAMS_API_KEY` in a shared `.env` or container environment, that
+credential is sent to every endpoint the process connects to, including
+StreamingFast and custom hosts. Startup logs a `WARN` line naming the variable
+(never its value) and the host whenever an explicitly selected credential is
+sent to a non-Pinax host, with a stronger message for Pinax and legacy
+`SUBSTREAMS_*` names. A `STREAMINGFAST_*` variable sent to a built-in
+StreamingFast host is its normal destination and is not warned about. When
+migrating, unset global selectors and rely on the provider-scoped variables
+above, or pass `--api-key-envvar` / `--api-token-envvar` only on the command
+for the intended endpoint.
+
 Startup logs identify the destination host, provider, and names of credential
 variables selected for transmission (`none` when absent), never their values.
 Surrounding whitespace is trimmed, so a key mounted from a secret file with a
@@ -159,9 +172,10 @@ The image path stays `ghcr.io/pinax-network/firehose-parquet`, but the container
 docker pull ghcr.io/pinax-network/firehose-parquet:latest
 
 docker run --rm \
-  -e SUBSTREAMS_API_KEY=your-key \
+  -e PINAX_API_KEY=your-key \
   -v $(pwd)/output:/output \
   ghcr.io/pinax-network/firehose-parquet \
+  build \
   --endpoint https://eth.firehose.pinax.network:443 \
   --start-block 19000000 \
   --stop-block 19001000 \
@@ -213,15 +227,15 @@ Both `build` and `partitions build` require EndpointInfo with a nonempty chain n
 
 ```bash
 # Built-in alias
-fireparq --network mainnet --start-block 20000000 --stop-block 20001000
+fireparq build --network mainnet --start-block 20000000 --stop-block 20001000
 
 # Per-network override
 export FIREHOSE_ENDPOINT_MAINNET=https://eth.internal.example.com:443
-fireparq --network mainnet --start-block 20000000 --stop-block 20001000
+fireparq build --network mainnet --start-block 20000000 --stop-block 20001000
 
 # Canonical-name override
 export FIREHOSE_ENDPOINT_SOLANA_MAINNET_BETA=https://solana.internal.example.com:443
-fireparq --network solana-mainnet-beta --start-block 250000000 --stop-block 250100000
+fireparq build --network solana-mainnet-beta --start-block 250000000 --stop-block 250100000
 ```
 
 ### How It Works
@@ -447,11 +461,11 @@ recovery knobs to dedicated advanced sections.
 | Area | Common flags |
 |---|---|
 | Connection | `--network <NETWORK>` or `--endpoint <ENDPOINT>` |
-| Range | `--start-block <START_BLOCK>`, `--stop-block <STOP_BLOCK>`, `--live` |
+| Range | `--start-block <START_BLOCK>`, `--stop-block <STOP_BLOCK>` (omit the stop block for live mode) |
 | Resume | Rerun the same original range; output authority selects progress and repairs the bound optional cursor mirror |
 | Output | `--output <OUTPUT>`, `--partition <PARTITION>`, `--compression <COMPRESSION>` |
-| Chain | `--block-type <BLOCK_TYPE>` (default `auto`), plus chain-specific toggles like `--extended false` or `--with-votes false` only when needed |
-| Runtime | `--final-blocks-only[=true|false]` (default `true`), `--flush-bytes <FLUSH_BYTES>`, optional `--flush-rows` / `--flush-interval-secs` |
+| Chain | `--block-type <BLOCK_TYPE>` (default `auto`), plus chain-specific toggles like `--without-extended` or `--without-votes` only when needed |
+| Runtime | `--final-blocks-only[=true|false]` (default `true`), `--flush-bytes <FLUSH_BYTES>` (compressed file target, `0` disables), `--flush-memory-bytes <FLUSH_MEMORY_BYTES>` (summed mapper estimate), optional `--flush-rows` / `--flush-blocks` / `--flush-interval-secs` (`0` disables rows and interval) |
 
 ### Non-final streams and reorgs
 
@@ -626,7 +640,8 @@ threshold to constrain estimated accumulation.
 
 `--flush-rows`, `--flush-blocks`, `--flush-interval-secs`, partition changes, the
 memory threshold and clean end of input can all force files below the size
-target. Highly compressible data may never reach 32 MiB before the memory
+target. `--flush-rows 0` and `--flush-interval-secs 0` disable those triggers,
+like `--flush-bytes 0`; `--flush-blocks` and `--flush-memory-bytes` must be positive. Highly compressible data may never reach 32 MiB before the memory
 threshold; increasing the file target does not bypass that threshold. `merge`
 and `rollup` use their own streaming writer and memory policies.
 
@@ -1105,8 +1120,8 @@ The path must exist locally or be an explicit `s3://...` URI. Unlike `scan` and 
 | Flag | Default | Description |
 |---|---|---|
 | `--compression` | `zstd` | Compression codec: zstd (level 3), zstd:<level>, snappy, gzip, none |
-| `--flush-bytes` | 32 MiB | Target compressed bytes per output file |
-| `--flush-rows` | disabled | Flush merged output after this many rows |
+| `--flush-bytes` | 32 MiB | Target encoded (compressed) bytes per output file, checked between batches; 0 = unlimited |
+| `--flush-rows` | disabled | Flush merged output after this many rows; 0 disables |
 | `--dry-run` | `false` | Show what would be merged without writing |
 
 > **Memory note:** Merge holds the encoded output part plus an active row group with a separate 32 MiB estimated-memory budget. Input batches, Parquet pages/dictionaries and codec overhead add to this; `--flush-bytes` is an approximate output-size target, not an absolute memory limit. On S3, merge still downloads each whole source object before reading it, so the largest source part also contributes to peak memory. Rollup uses bounded source ranges instead.
@@ -1669,7 +1684,7 @@ retention expires.
 
 ```bash
 # Enable metrics on port 9090
-fireparq \
+fireparq build \
   --endpoint https://eth.firehose.pinax.network:443 \
   --metrics-port 9090 \
   --start-block 19000000

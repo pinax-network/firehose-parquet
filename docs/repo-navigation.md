@@ -119,7 +119,8 @@ Related design docs:
 - Run ingestion (preferred form): `cargo run --bin fireparq -- build --network mainnet --start-block 100`
 - Install binary locally: `cargo install --path blocks`
 - Generate shell completions: `cargo run --bin fireparq -- completions zsh`
-- CI entrypoint: `.github/workflows/ci.yml`
+- CI entrypoint: `.github/workflows/ci.yml` (`build-and-test` plus the `advisories` job)
+- Dependency advisory gate: `cargo deny --locked check advisories`, configured by `deny.toml` (RustSec advisories only; ignored advisories need a recorded reason)
 - Docker publish workflow: `.github/workflows/docker-publish.yml`
 - Release assets workflow: `.github/workflows/release.yml`
 - Built-in network endpoint check (weekly, needs network access): `.github/workflows/network-endpoints.yml`, locally `scripts/check_network_endpoints.sh`

@@ -161,7 +161,7 @@ pub async fn run_recovery(command: &RecoveryCommands) -> Result<()> {
 async fn status(storage: &RecoveryStorageArgs) -> Result<RecoveryStatus> {
     if storage.path.starts_with("s3://") {
         let (bucket, prefix) = remote_path(&storage.path)?;
-        let store: Arc<dyn ObjectStore> = Arc::new(storage.aws().build_s3_client(&bucket)?);
+        let store: Arc<dyn ObjectStore> = Arc::new(storage.aws().build_read_client(&bucket)?);
         remote_status(store, &prefix).await
     } else {
         local_status(Path::new(&storage.path))

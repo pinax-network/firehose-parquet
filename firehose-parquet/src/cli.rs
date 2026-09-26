@@ -26,10 +26,10 @@ use parquet::basic::Compression as PqCompression;
 use std::io;
 use std::path::{Component, Path, PathBuf};
 
-/// Default max unresolved timestamp-backfill buffer size in bytes.
-pub const DEFAULT_TIMESTAMP_BACKFILL_BUFFER_LIMIT_BYTES: u64 = 134_217_728;
 pub use crate::config::DEFAULT_FLUSH_BYTES;
-use crate::config::DEFAULT_FLUSH_MEMORY_BYTES;
+use crate::config::{
+    DEFAULT_FLUSH_MEMORY_BYTES, DEFAULT_GRPC_MAX_MESSAGE_BYTES, DEFAULT_GRPC_WINDOW_BYTES,
+};
 
 /// Transport options shared by ingestion and partition index construction.
 #[derive(Args, Debug, Clone)]
@@ -41,14 +41,14 @@ pub struct GrpcArgs {
     pub adaptive_window: bool,
 
     /// Initial HTTP/2 stream and connection receive window bytes (0 uses library defaults; adaptive mode overrides)
-    #[arg(long = "grpc-window-bytes", env = "GRPC_WINDOW_BYTES", default_value = "16777216",
+    #[arg(long = "grpc-window-bytes", env = "GRPC_WINDOW_BYTES", default_value_t = DEFAULT_GRPC_WINDOW_BYTES,
         value_parser = clap::value_parser!(u32).range(0..=2147483647), hide_env_values = true,
         help_heading = "Connection")]
     pub window_bytes: u32,
 
     /// Maximum encoded or decompressed gRPC response bytes (128 MiB by default)
     #[arg(long = "grpc-max-message-bytes", env = "GRPC_MAX_MESSAGE_BYTES",
-        default_value = "134217728", value_parser = clap::value_parser!(u32).range(1..),
+        default_value_t = DEFAULT_GRPC_MAX_MESSAGE_BYTES, value_parser = clap::value_parser!(u32).range(1..),
         hide_env_values = true, help_heading = "Connection")]
     pub max_message_bytes: u32,
 }
@@ -264,7 +264,7 @@ pub struct CommonArgs {
     )]
     pub compression: String,
 
-    /// Flush mapper state and write Parquet after this many rows (disabled by default)
+    /// Flush mapper state and write Parquet after this many rows in the largest table (0 or unset disables)
     #[arg(
         long,
         env = "FLUSH_ROWS",
@@ -304,7 +304,7 @@ pub struct CommonArgs {
     )]
     pub flush_memory_bytes: u64,
 
-    /// Flush mapper state and write Parquet every N seconds (disabled by default)
+    /// Flush mapper state and write Parquet every N seconds (0 or unset disables)
     #[arg(
         long,
         env = "FLUSH_INTERVAL_SECS",
@@ -876,10 +876,10 @@ inspect, merge never falls back to s3://$S3_BUCKET/<path> for a missing local pa
         /// Compression codec: zstd (level 3), zstd:<level>, snappy, gzip, none
         #[arg(long, default_value = "zstd", help_heading = "Output")]
         compression: String,
-        /// Flush merged output after this many rows (disabled by default)
+        /// Flush merged output after this many rows (0 or unset disables)
         #[arg(long, help_heading = "Flush")]
         flush_rows: Option<u32>,
-        /// Flush merged output at this many in-memory bytes and target roughly this many compressed bytes per parquet file
+        /// Start a new merged file once its encoded (compressed) bytes reach this target, checked between batches (0 = unlimited)
         #[arg(long, default_value_t = DEFAULT_FLUSH_BYTES, help_heading = "Flush")]
         flush_bytes: u64,
         /// Show what would be merged without writing

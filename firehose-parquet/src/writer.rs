@@ -88,7 +88,7 @@ impl ParquetTableWriter {
     ) -> Result<Self> {
         crate::s3::validate_output_bucket(output_path, config.s3_bucket.as_deref())?;
         let (bucket, prefix) = parse_s3_url(output_path)?;
-        let client = crate::s3::build_s3_client(config, &bucket)?;
+        let client = crate::s3::build_ingestion_mutation_client(config, &bucket)?;
 
         Ok(Self {
             output_dir: PathBuf::from(output_path),
@@ -829,7 +829,8 @@ mod tests {
         let mut batches = HashMap::new();
         batches.insert("blocks".to_string(), batch);
 
-        // flush_bytes=0 disables size-based rollover; data is written on flush_remaining().
+        // The legacy flush_bytes argument is ignored: write_all publishes each table
+        // immediately, and flush_remaining() has nothing left to write.
         let mut out = OutputWriter::new(dir.path(), Partition::None, Compression::Zstd, 0);
         let meta = default_metadata();
         out.write_all(&batches, &meta).unwrap();

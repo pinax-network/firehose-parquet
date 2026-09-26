@@ -108,15 +108,30 @@ fn store_builder(
     Ok(builder)
 }
 
-/// Build a zero-retry client for the exact data or cursor bucket. The configured
-/// default output bucket never overrides the bucket selected by an explicit URI.
-pub fn build_s3_client(config: &Config, bucket: &str) -> Result<Arc<dyn ObjectStore>> {
+/// Build the ingestion writer/cursor client for the exact data or cursor bucket:
+/// one transport attempt per request, and the AWS provider chain (environment,
+/// profile or instance metadata) when no access key is configured. The
+/// configured default output bucket never overrides the bucket selected by an
+/// explicit URI. Maintenance commands use [`AwsConfig::build_read_client`] and
+/// [`AwsConfig::build_s3_client_for_mutation`], which sign anonymously without
+/// an access key instead.
+pub fn build_ingestion_mutation_client(
+    config: &Config,
+    bucket: &str,
+) -> Result<Arc<dyn ObjectStore>> {
     Ok(Arc::new(build_s3_store(
         &AwsConfig::from(config),
         bucket,
         S3Operation::Mutation,
         CredentialPolicy::ProviderChain,
     )?))
+}
+
+/// Former name of [`build_ingestion_mutation_client`].
+#[deprecated(note = "renamed to build_ingestion_mutation_client")]
+#[doc(hidden)]
+pub fn build_s3_client(config: &Config, bucket: &str) -> Result<Arc<dyn ObjectStore>> {
+    build_ingestion_mutation_client(config, bucket)
 }
 
 #[cfg(test)]
@@ -132,13 +147,20 @@ fn mutation_builder(config: &Config, bucket: &str) -> Result<AmazonS3Builder> {
 impl AwsConfig {
     /// Read-only access keeps default transport retries. Missing access keys
     /// select anonymous requests, without metadata-provider credential lookup.
-    pub fn build_s3_client(&self, bucket: &str) -> Result<AmazonS3> {
+    pub fn build_read_client(&self, bucket: &str) -> Result<AmazonS3> {
         build_s3_store(
             self,
             bucket,
             S3Operation::ReadOnly,
             CredentialPolicy::AnonymousWithoutAccessKey,
         )
+    }
+
+    /// Former name of [`AwsConfig::build_read_client`].
+    #[deprecated(note = "renamed to build_read_client")]
+    #[doc(hidden)]
+    pub fn build_s3_client(&self, bucket: &str) -> Result<AmazonS3> {
+        self.build_read_client(bucket)
     }
 
     /// PUT/DELETE clients make one transport attempt. Callers retain ownership
@@ -328,7 +350,9 @@ mod tests {
                     CredentialPolicy::ProviderChain,
                 )
                 .unwrap(),
-                maintenance_config(&config).build_s3_client(bucket).unwrap(),
+                maintenance_config(&config)
+                    .build_read_client(bucket)
+                    .unwrap(),
                 maintenance_config(&config)
                     .build_s3_client_for_mutation(bucket)
                     .unwrap(),
@@ -361,7 +385,7 @@ mod tests {
         ] {
             let config = credentials(endpoint);
             for error in [
-                build_s3_client(&config, "state").unwrap_err(),
+                build_ingestion_mutation_client(&config, "state").unwrap_err(),
                 build_s3_store(
                     &AwsConfig::from(&config),
                     "state",
@@ -370,7 +394,7 @@ mod tests {
                 )
                 .unwrap_err(),
                 maintenance_config(&config)
-                    .build_s3_client("state")
+                    .build_read_client("state")
                     .unwrap_err(),
                 maintenance_config(&config)
                     .build_s3_client_for_mutation("state")

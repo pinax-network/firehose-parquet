@@ -1341,7 +1341,7 @@ fn list_verify_objects(
     Vec<object_store::ObjectMeta>,
 )> {
     let (bucket, prefix) = parse_s3_url(path)?;
-    let client = aws.build_s3_client(&bucket)?;
+    let client = aws.build_read_client(&bucket)?;
 
     let list_prefix = if prefix.is_empty() {
         None
@@ -2313,7 +2313,7 @@ fn load_registry(path: &str, aws: Option<&AwsConfig>) -> Result<RegistrySnapshot
     if path.starts_with("s3://") {
         let aws = aws.ok_or_else(|| anyhow!("AWS config required for S3 registry path"))?;
         let (bucket, key) = parse_s3_url(path)?;
-        let client = aws.build_s3_client(&bucket)?;
+        let client = aws.build_read_client(&bucket)?;
         let location = object_store::path::Path::from(key.as_str());
         return load_registry_from_store(&client, &location)
             .with_context(|| format!("reading registry {path}"));
@@ -2677,7 +2677,7 @@ fn artifact_exists(path: &str, aws: Option<&AwsConfig>) -> bool {
     let (Some(aws), Ok((bucket, key))) = (aws, parse_s3_url(path)) else {
         return false;
     };
-    let Ok(client) = aws.build_s3_client(&bucket) else {
+    let Ok(client) = aws.build_read_client(&bucket) else {
         return false;
     };
     let location = object_store::path::Path::from(key.as_str());
@@ -2689,7 +2689,7 @@ fn read_optional_bytes(path: &str, aws: Option<&AwsConfig>) -> Result<Option<Vec
     if path.starts_with("s3://") {
         let aws = aws.ok_or_else(|| anyhow!("AWS config required for S3 path {path}"))?;
         let (bucket, key) = parse_s3_url(path)?;
-        let client = aws.build_s3_client(&bucket)?;
+        let client = aws.build_read_client(&bucket)?;
         let location = object_store::path::Path::from(key.as_str());
         match block_on_async(async { client.get(&location).await?.bytes().await }) {
             Ok(data) => Ok(Some(data.to_vec())),

@@ -668,6 +668,34 @@ Both tables carry `receipt_index`, `tx_hash`, `shard_id` and `predecessor_id`, l
 
 ## Fixes
 
+- **`--flush-rows 0` and `--flush-interval-secs 0` disable those `build` triggers.**
+  They used to evaluate `rows >= 0` / `elapsed >= 0` and flush after every block,
+  writing one transaction and one file per table per block. Zero now means
+  disabled, like `--flush-bytes 0` in `build` and `--flush-rows 0` in `merge`.
+  `--flush-blocks` and `--flush-memory-bytes` still reject zero. See
+  [the platform follow-ups](../audit/validation-misc-followups.md).
+- **Explicit credential selectors warn when a credential leaves Pinax (#562
+  follow-up).** `--api-key-envvar` / `--api-token-envvar` (`API_KEY_ENVVAR` /
+  `API_TOKEN_ENVVAR`) still authorize the named variable for any destination,
+  but startup now logs a `WARN` naming the variable (never its value) and the host
+  whenever an explicitly selected credential is sent to a non-Pinax host. Pinax
+  and legacy `SUBSTREAMS_*` names get a stronger message, for example a global
+  `API_KEY_ENVVAR=SUBSTREAMS_API_KEY` reaching StreamingFast. A `STREAMINGFAST_*`
+  variable sent to a built-in StreamingFast host is not warned about. Selection
+  is unchanged; see README "Authentication".
+- **Examples match the CLI.** README Docker, network-alias and Prometheus
+  examples include the required `build` subcommand. `.env.example` is regenerated
+  from the clap definitions: `FLUSH_BYTES` shows the 32 MiB default, and
+  `FLUSH_MEMORY_BYTES`, `FLUSH_BLOCKS`, `GRPC_*`, `METRICS_STALE_AFTER_SECS`,
+  `CURSOR_OVERRIDE`, the chain toggles, the provider-scoped credential variables
+  and recovery's `AWS_ENDPOINT_URL` are listed. The obsolete `EXTENDED`,
+  `BYTES_ENCODING` and `CURSOR=cursor.txt` entries are gone, and a test keeps
+  the file in sync with the CLI. `merge --flush-bytes` help now describes the
+  encoded-size target it actually checks.
+- **Dependency security updates.** Compatible lockfile updates to anyhow 1.0.104
+  (RUSTSEC-2026-0190), h2 0.4.19 (RUSTSEC-2026-0258), rustls 0.23.45
+  (RUSTSEC-2026-0285) and rustls-webpki 0.103.15.
+
 - **SIGINT/SIGTERM interrupt endpoint waits promptly (#473).** The shutdown flag used to be checked only after a block was processed, so a stop request was ignored during idle waits (up to the 120 s idle timeout), reconnect back-off (up to 60 s), connection attempts (30 s) and startup checks, and Kubernetes escalated to SIGKILL on quiet chains. A cancellation token now interrupts every stream wait; a block being processed still finishes first. A second signal exits immediately with code 130. Shutdown is detected with a typed error instead of matching the string `"__shutdown__"`.
 
 - **`build` no longer retries fatal gRPC errors forever (#472).** `Unauthenticated`, `PermissionDenied`, `InvalidArgument`, `FailedPrecondition`, `OutOfRange` and `Unimplemented` now end the run with an error and a hint, including statuses Firehose relays as `Unknown` with the real code in the message. So does `ResourceExhausted` when it reports an exhausted quota (e.g. `billable egress bytes quota exceeded`); other `ResourceExhausted` errors such as rate limits are still retried with back-off. An invalid cursor, a message over 128 MiB, or credentials that are not valid for the endpoint (such as a Pinax token against a StreamingFast endpoint after #535) used to reconnect about once a second indefinitely. Fatal errors are counted in `firehose_parquet_errors_total{kind="grpc_fatal"}`.
@@ -731,6 +759,24 @@ claim. See [equivalence coverage, recovered-work provenance and all measurements
 
 ## Internal maintenance
 
+- CI adds an `advisories` job: a pinned, checksum-verified cargo-deny 0.20.2 runs
+  `cargo deny --locked check advisories` with `deny.toml`. Every RustSec
+  vulnerability fails the job; unsound and unmaintained advisories fail for direct
+  dependencies. Four advisories are ignored with recorded reasons: quick-xml
+  0.38 through object_store 0.12 (RUSTSEC-2026-0194/0195; the fix needs
+  object_store 0.14) and the unmaintained backoff and bincode crates. See
+  [the platform follow-ups](../audit/validation-misc-followups.md).
+- The three functions named `build_s3_client` are renamed by policy:
+  `s3::build_ingestion_mutation_client` (zero retries, AWS provider-chain
+  credentials) and `AwsConfig::build_read_client` (retrying reads, anonymous
+  without an access key); rollup's private helper is `build_mutation_store`. The
+  old public names remain as deprecated, hidden aliases. Ingestion's
+  `aws_config` delegates to `AwsConfig::from(&Config)` instead of copying fields. The gRPC receive defaults are single constants
+  (`config::DEFAULT_GRPC_WINDOW_BYTES`, `config::DEFAULT_GRPC_MAX_MESSAGE_BYTES`).
+  The unused public `cli::read_credential_env` and
+  `cli::DEFAULT_TIMESTAMP_BACKFILL_BUFFER_LIMIT_BYTES` were removed, and protected
+  flush logs no longer print always-zero `buffered_*` fields.
+
 - All Firehose RPC clients now share automatic credential insertion and transport
   construction. Provider selection, retries, cancellation and finality behavior
   are unchanged; local protocol tests cover every path and reconnect. See
@@ -738,6 +784,10 @@ claim. See [equivalence coverage, recovered-work provenance and all measurements
 
 ## Tests
 
+- Merge and rollup outputs are checked for the shared #519 writer properties:
+  the requested codec, row groups of at most 65,536 rows, Bloom filters on lookup
+  columns only (with no false negatives), no streaming sort assertion, and chain
+  metadata preserved without ingestion receipt keys.
 - A new cross-chain schema contract test maps one fixture batch for every table of every chain, under every bytes encoding and both `fork_step` settings. It checks that column names are unique, that each batch round-trips through the Parquet writer and reader with the same schema and values, and that every table's canonical `block_id` / `parent_id` match the `blocks` table.
 - A weekly `Network endpoints` workflow runs `scripts/check_network_endpoints.sh`, which sends a Firehose `EndpointInfo` call to every built-in `--network` endpoint and fails when one no longer answers (#535). It also runs on pull requests that change the generated registry. Regular `cargo test` stays offline.
 - A Parquet round-trip test asserts that the canonical `timestamp` is written as `TIMESTAMP(MILLIS, isAdjustedToUTC=true)` and reads back as `Timestamp(Millisecond, UTC)` without the embedded Arrow schema. The contract test also checks the canonical `timestamp` type on every table.
