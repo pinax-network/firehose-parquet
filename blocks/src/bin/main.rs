@@ -22,7 +22,7 @@ use firehose_parquet::grpc::{
 };
 use firehose_parquet::ingest::{
     declare_inventory, load_authoritative_resume, prepare_partitions_index_write, IngestionSession,
-    MapperSemantics,
+    MapperSemantics, CURSOR_OVERRIDE_REFUSED,
 };
 use firehose_parquet::metrics;
 use firehose_parquet::networks::{resolve_network_endpoint, EndpointSource};
@@ -590,10 +590,11 @@ fn maybe_add_synthetic_timestamp_metadata(
 /// - `--exclude-failed-transactions` always drops them.
 /// - EVM (`ChainProfile::failed_transactions_by_default`) writes them by
 ///   default, with only their persistent state changes.
-///   `--include-failed-transactions` is a deprecated no-op there. A resumed EVM
-///   cursor that was written with failed transactions excluded (the default
-///   before #494) keeps excluding them, so one output does not mix both modes;
-///   `--cursor-override` opts out of that.
+///   `--include-failed-transactions` is a deprecated no-op there. Resumed EVM
+///   state (protected authority, or a legacy cursor in a dry run) that records
+///   failed transactions as excluded keeps excluding them, so one output does
+///   not mix both modes. Only a read-only dry run's `--cursor-override` ignores
+///   that state; a protected build must use a new empty output root instead.
 /// - Other chains exclude them unless `--include-failed-transactions` is set.
 ///
 /// Returns the effective value and the warnings to log.
@@ -626,7 +627,7 @@ fn resolve_include_failed_transactions(
     if let Some(cursor_state) = cursor_state.filter(|_| !cursor_override) {
         if !cursor_state.include_failed_transactions {
             warnings.push(
-                "cursor.parquet was written with failed transactions excluded (the EVM default before #494); still excluding them so this output stays consistent. Pass --exclude-failed-transactions to keep this and silence the warning, or --cursor-override with --start-block to switch this output to the new default"
+                "this output's resume state records failed transactions as excluded (the EVM default before #494); still excluding them so this output stays consistent. Pass --exclude-failed-transactions to keep this and silence the warning. To switch to the new default, rebuild into a new empty output root with an absent cursor mirror; --cursor-override cannot change protected output"
                     .to_string(),
             );
             return (false, warnings);
@@ -1326,13 +1327,13 @@ fn resolve_cursor_location(
     }
 }
 
-/// Load the stored cursor for `fireparq build`.
+/// Load a legacy cursor for a read-only `fireparq build --dry-run`.
 ///
+/// Protected builds never call this: they resume only from output authority.
 /// A cursor that exists but cannot be read (permission denied, S3 5xx/403,
-/// truncated or corrupt file) is a hard error: silently starting fresh would
-/// re-ingest from `--start-block` and overwrite the resume point on the first
-/// flush. With `--cursor-override` the unreadable cursor is ignored, since the
-/// run restarts from the CLI bounds anyway.
+/// truncated or corrupt file) is a hard error rather than a silent fresh
+/// start. With `--cursor-override` the dry run ignores the unreadable cursor
+/// and previews the CLI bounds instead.
 fn load_existing_cursor(
     cursor_location: Option<&CursorLocation>,
     cursor_override: bool,
@@ -1350,7 +1351,7 @@ fn load_existing_cursor(
             Ok(None)
         }
         Err(error) => Err(error.context(
-            "stored cursor exists but could not be loaded; refusing to start fresh. Fix access to the cursor, or pass --cursor-override to ignore it and restart from --start-block (the cursor is overwritten on the next flush)",
+            "stored cursor exists but could not be loaded; this read-only dry run refuses to guess a resume point. Fix access to the cursor, or pass --cursor-override to ignore it for this dry run only. A real build never resumes from this file: it reads output authority, repairs a missing mirror and refuses a corrupt one",
         )),
     }
 }
@@ -4059,6 +4060,7 @@ mod tests {
         let error = load_existing_cursor(Some(&location), false).unwrap_err();
         let rendered = format!("{error:#}");
         assert!(rendered.contains("--cursor-override"), "{rendered}");
+        assert!(rendered.contains("for this dry run only"), "{rendered}");
         assert!(
             rendered.contains(&cursor_path.display().to_string()),
             "{rendered}"
@@ -4233,7 +4235,7 @@ mod tests {
             ),
             (false, vec![])
         );
-        // --cursor-override switches the output to the new default.
+        // A read-only dry run's --cursor-override previews the new default.
         assert_eq!(
             resolve_include_failed_transactions(
                 Some(ChainKind::Evm),

@@ -199,6 +199,23 @@ async fn legacy_root_and_changed_semantics_never_initialize_or_rewind() {
 }
 
 #[tokio::test]
+async fn cursor_override_is_refused_even_before_authority_exists() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = config(dir.path());
+    let owner = own(&config).await;
+    let error = load_authoritative_resume(&config, &owner, true)
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("only valid with --dry-run"), "{error}");
+    assert!(load_authoritative_resume(&config, &owner, false)
+        .await
+        .unwrap()
+        .is_none());
+    assert!(!config.output.join(".fireparq-ingest").exists());
+}
+
+#[tokio::test]
 async fn restored_lookahead_routes_remaining_missing_prefix_before_source_is_reread() {
     let dir = tempfile::tempdir().unwrap();
     let config = config(dir.path());

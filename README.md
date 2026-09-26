@@ -384,7 +384,8 @@ dataset and its external mirror before recovery or data reads.
 
 ### Cursor Override and Migration
 
-`--cursor-override` cannot reset, rewind or change protected output semantics.
+`--cursor-override` cannot reset, rewind or change protected output semantics,
+and a real `build` rejects it before contacting the endpoint, even at a new root.
 Use a new empty output and absent mirror when changing the original range, schema
 or feature flags. Legacy random-name output has no proof relating all parts to
 its cursor, so this release provides no implicit adoption or override escape.
@@ -553,7 +554,7 @@ rather than the default workflow:
 
 | Flag | Use when |
 |---|---|
-| `--cursor-override` | Legacy dry-run override; protected output refuses rewinds and requires a new empty root for changed semantics |
+| `--cursor-override` | Read-only `--dry-run` only: ignore legacy cursor defaults or an unreadable cursor. A real `build` rejects it, even at a new root; protected output never rewinds, so use a new empty root for changed semantics |
 | `--skip-missing-blocks` | Sparse chains legitimately skip block numbers and you want probes/streams to continue past gaps |
 | `--stream-idle-timeout-secs <N>` | Supervising long-lived pipelines that should self-reconnect after a silent stream stall (default 120; `0` disables and relies on HTTP/2 keepalive). On slow chains such as Bitcoin (~600 s blocks), set it above the block time to avoid a reconnect every 120 s. An idle reconnect is not counted as a failure. |
 | `--reconnect-stall-timeout-secs <N>` | Fail fast when reconnect loops should hand control back to an external supervisor (default 900; `0` disables). The timer starts at the first failed attempt and is reset only when a stream message arrives, not when a connection or RPC succeeds. |

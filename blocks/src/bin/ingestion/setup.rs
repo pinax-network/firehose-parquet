@@ -16,6 +16,11 @@ impl ResolvedEndpoint {
         shutdown: &CancellationToken,
     ) -> Result<Option<Self>> {
         let mut block_type = parse_requested_block_type(&args.block_type)?;
+        // Refuse before any endpoint or storage access, so a new root behaves
+        // like every later run instead of silently ignoring the flag once.
+        if args.cursor_override && !args.common.dry_run {
+            return Err(anyhow!(CURSOR_OVERRIDE_REFUSED));
+        }
 
         let mut common = args.common.clone();
         let mut resolved_network_name: Option<String> = None;

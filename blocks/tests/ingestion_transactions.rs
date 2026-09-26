@@ -516,7 +516,13 @@ async fn legacy_data_and_cursors_cannot_initialize_authority_even_with_override(
             }
             let output = run(request).await;
             assert!(!output.status.success(), "{}", logs(&output));
-            assert!(logs(&output).contains("legacy"), "{}", logs(&output));
+            // The override is refused before eligibility is even inspected.
+            let expected = if override_cursor {
+                "--cursor-override is only valid with --dry-run"
+            } else {
+                "legacy"
+            };
+            assert!(logs(&output).contains(expected), "{}", logs(&output));
             assert_eq!(server.calls(), 0);
             assert_eq!(std::fs::read(existing).unwrap(), before);
             assert!(!root
@@ -525,6 +531,35 @@ async fn legacy_data_and_cursors_cannot_initialize_authority_even_with_override(
                 .exists());
         }
     }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cursor_override_is_refused_at_a_new_root_but_still_serves_dry_runs() {
+    let server =
+        MockFirehose::start(vec![response(100, 3)], vec![Plan::complete("", 100, 100)]).await;
+    let dir = tempfile::tempdir().unwrap();
+    let mut request = command(&server, dir.path(), 100, 101);
+    request.arg("--cursor-override");
+    let output = run(request).await;
+    assert!(!output.status.success(), "{}", logs(&output));
+    assert!(
+        logs(&output).contains("--cursor-override is only valid with --dry-run"),
+        "{}",
+        logs(&output)
+    );
+    // Refused before endpoint startup: no Blocks request and no output root.
+    assert_eq!(server.calls(), 0);
+    assert!(!dir.path().join("output").exists());
+
+    // The documented read-only use is unchanged.
+    let mut request = command(&server, dir.path(), 100, 101);
+    request.args(["--cursor-override", "--dry-run"]);
+    success(request).await;
+    assert_eq!(server.calls(), 1);
+    let output_dir = dir.path().join("output");
+    assert!(!output_dir.exists() || parts(&output_dir).is_empty());
+    assert!(!root(dir.path()).join(CONTROL_DIRECTORY).exists());
+    server.assert_drained();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

@@ -192,14 +192,20 @@ async fn existing(
         .map(|record| record.payload))
 }
 
+/// Refusal for `--cursor-override` on any mutating build, including a new root
+/// where there is nothing to override: protected output never rewinds or resets.
+pub const CURSOR_OVERRIDE_REFUSED: &str = "--cursor-override is only valid with --dry-run: a real build cannot rewind protected output or change its semantics. Omit it to resume from output authority, or build into a new empty output root (with an absent cursor mirror) to change the range or mapper settings";
+
 /// Compatibility fields used only to resolve CLI defaults. This reads mandatory
 /// authority, never an optional cursor file. The final open revalidates the full
 /// mapper descriptor and performs pending recovery before Blocks may connect.
+/// `cursor_override` is refused whether or not authority exists yet.
 pub async fn load_authoritative_resume(
     config: &Config,
     ownership: &DatasetOwnership,
     cursor_override: bool,
 ) -> Result<Option<CursorState>> {
+    ensure!(!cursor_override, CURSOR_OVERRIDE_REFUSED);
     let aws = aws_config(config);
     let output = config
         .output
@@ -210,10 +216,6 @@ pub async fn load_authoritative_resume(
     let Some(authority) = existing(&identity, ownership).await? else {
         return Ok(None);
     };
-    ensure!(
-        !cursor_override,
-        "--cursor-override cannot rewind protected output; select a new empty root"
-    );
     validate_runtime_bindings(&authority.descriptor, output, &aws)?;
     let configured = resolve_mirror_binding(output, config.cursor_path.as_deref(), &aws)?;
     if authority.descriptor.mirror != configured {

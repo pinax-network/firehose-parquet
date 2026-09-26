@@ -14,6 +14,7 @@ pub(crate) mod store;
 pub use controller::CommittedFlush;
 pub use session::{
     declare_inventory, load_authoritative_resume, IngestionSession, MapperSemantics,
+    CURSOR_OVERRIDE_REFUSED,
 };
 pub use state::{BlockFamily, Digest};
 

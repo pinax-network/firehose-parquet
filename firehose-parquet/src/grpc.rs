@@ -912,7 +912,7 @@ fn fatal_status_error(status: &tonic::Status) -> Option<anyhow::Error> {
             "check that the API key or token (--api-key-envvar / --api-token-envvar) is valid for this endpoint"
         }
         tonic::Code::InvalidArgument | tonic::Code::FailedPrecondition => {
-            "check --start-block, --stop-block and the stored cursor (--cursor-override restarts from the CLI bounds)"
+            "check --start-block, --stop-block and the resume cursor; protected output cannot be rewound, so to restart from other bounds build into a new empty output root (inspect the current one with `fireparq recovery status`)"
         }
         tonic::Code::OutOfRange => {
             "the request or a response is out of range, e.g. a block past the chain head or larger than --grpc-max-message-bytes"
@@ -1458,7 +1458,8 @@ mod tests {
         let error = fatal_status_error(&status).expect("fatal").to_string();
         assert!(error.contains("InvalidArgument"), "{error}");
         assert!(error.contains("start block 24000005"), "{error}");
-        assert!(error.contains("--cursor-override"), "{error}");
+        assert!(error.contains("new empty output root"), "{error}");
+        assert!(!error.contains("--cursor-override"), "{error}");
 
         let status = tonic::Status::unknown("rpc error: code = Unavailable desc = backend down");
         assert_eq!(effective_status_code(&status), tonic::Code::Unavailable);

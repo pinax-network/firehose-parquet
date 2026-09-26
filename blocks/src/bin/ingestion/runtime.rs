@@ -289,7 +289,7 @@ impl<'run, 'owner> IngestionRuntime<'run, 'owner> {
                 );
                 } else {
                     return Err(anyhow!(
-                    "cursor parameter mismatch detected:\n  {}\n\nUse --cursor-override to force resume with current parameters.",
+                    "cursor parameter mismatch detected:\n  {}\n\nThis read-only dry run can preview the current parameters with --cursor-override. A real build cannot change protected output parameters; build into a new empty output root instead.",
                     mismatches.join("\n  ")
                 ));
                 }

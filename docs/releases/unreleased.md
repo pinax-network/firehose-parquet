@@ -138,8 +138,10 @@ to the dataset, so later runs must repeat it, and it cannot be combined with
 This requires a new empty dataset root and absent mirror. Existing random-name
 output or legacy cursors are refused rather than adopted. Protected origin,
 mapper/schema/encoding, effective feature flags, partition policy, storage and
-mirror binding are immutable; `--cursor-override` cannot bypass them. Use a new
-root for changed semantics. Unknown custom chain metadata needs an explicit
+mirror binding are immutable; `--cursor-override` cannot bypass them, and a real
+`build` now rejects that flag even at a new root instead of silently ignoring it
+(it remains available to read-only `--dry-run`). Use a new root for changed
+semantics. Unknown custom chain metadata needs an explicit
 `--block-type` before recovery. Flush thresholds and compression remain tunable.
 
 Guarded merge, metadata artifacts, and copy-only rollup remain available; protected
@@ -474,7 +476,7 @@ Migration:
 | `tron-evm` | `tronevm.firehose.pinax.network` | `mainnet-evm.tron.streamingfast.io` |
 
 - These endpoints need a credential that StreamingFast accepts, such as a The Graph Market API token in `STREAMINGFAST_API_TOKEN` (provider scoping: #562). Credentials are provider-specific: a token that works against Pinax can be rejected here with `invalid JWT token`; fatal authentication failures now stop the run (#472). Use `FIREHOSE_ENDPOINT_<ALIAS>` or `--endpoint` if you have another endpoint for these chains.
-- `cursor.parquet` records the endpoint, so resuming output written through the old Pinax endpoint fails with an `endpoint` cursor mismatch. Rerun with `--cursor-override` and an explicit `--start-block` just after the cursor's last block.
+- Output written before this release has no protected authority, so `build` cannot resume it through either endpoint (#468); rebuild into a new empty output root. Protected output binds the chain name and mapper semantics, not the endpoint URL, but its authoritative cursor is an opaque provider token: if the new provider rejects it, build into a new empty output root. `--cursor-override` cannot rewind or reset protected output.
 
 **Added.** New Pinax networks in the registry: `arc`, `megaeth`, `robinhood`, `tempo`, `xlayer-mainnet`.
 
@@ -541,7 +543,7 @@ Flags:
 Migration:
 
 - Existing EVM outputs have no failed transactions. `transactions`, `calls`, `balance_changes`, `nonce_changes`, `code_changes` and `gas_changes` gain rows for them in new files. Queries that assumed every row belongs to a successful transaction should filter on `transactions.status = 'SUCCEEDED'`, or build with `--exclude-failed-transactions`.
-- Resuming an EVM output whose `cursor.parquet` recorded `include_failed_transactions=false` (the old default, also assumed when a cursor predates the key) keeps excluding failed transactions, so one output does not mix both modes. `build` logs a warning; pass `--exclude-failed-transactions` to keep that silently. To switch an existing output to the new default, rerun with `--cursor-override` and an explicit `--start-block` just after the cursor's last block.
+- Resuming a protected EVM output whose authority records `include_failed_transactions=false` (created with `--exclude-failed-transactions`) keeps excluding failed transactions, so one output does not mix both modes. `build` logs a warning; pass `--exclude-failed-transactions` to keep that silently. To switch to the new default, rebuild into a new empty output root with an absent cursor mirror; `--cursor-override` cannot change protected output (#468). Legacy cursor-only outputs, whose `cursor.parquet` may predate the key, cannot be resumed by `build` at all and need a new root too.
 - EVM outputs built with `--include-failed-transactions` before this release wrote every state change of failed transactions, including rolled-back transfers and storage writes. Rebuild them if you need the change tables to reconcile.
 
 ### EVM change tables: new `tx_index`, `call_index`, `state_reverted` and `persisted` columns (#495)
@@ -687,7 +689,7 @@ Both tables carry `receipt_index`, `tx_hash`, `shard_id` and `predecessor_id`, l
 - **Bounded `build` runs verify the stop block (#466).** A run with `--stop-block` exits 0 only once block `stop_block - 1` was received. A stream that ends earlier is resumed from the cursor. If the server then has no more blocks, the run completes with a warning on chains with skipped slots or heights (Solana, NEAR, Beacon), and otherwise writes what it received, saves the cursor there, and exits non-zero.
 - **Live `build` runs reconnect when the stream closes cleanly (#466).** Previously a clean close by the server or a proxy ended the process with exit code 0, so `Restart=on-failure` supervisors never restarted it.
 
-- **`build` no longer restarts from scratch when `cursor.parquet` cannot be read (#465).** Only a missing cursor, or one with no row or an empty cursor string, starts a fresh run. A cursor that exists but cannot be loaded (permission denied, S3 403/5xx/timeout, empty, truncated or corrupt file) now fails the run with an error that names the file. Previously the run logged "starting fresh", re-ingested from `--start-block` or genesis, and overwrote the good cursor on its first flush. To deliberately ignore an unreadable cursor and restart from the CLI bounds, pass `--cursor-override`. `partitions build` also fails instead of ignoring an unreadable sibling cursor when it uses it to infer `--start-block`.
+- **`build` no longer restarts from scratch when `cursor.parquet` cannot be read (#465).** Only a missing cursor, or one with no row or an empty cursor string, starts a fresh run. A cursor that exists but cannot be loaded (permission denied, S3 403/5xx/timeout, empty, truncated or corrupt file) now fails the run with an error that names the file. Previously the run logged "starting fresh", re-ingested from `--start-block` or genesis, and overwrote the good cursor on its first flush. Since #468, `build` resumes only from protected output authority and never from this file: a missing mirror is repaired from authority, while an unreadable or corrupt mirror fails closed. Fix access, or remove a corrupt mirror so the next run rewrites it from authority. `--cursor-override` only makes a read-only `--dry-run` ignore an unreadable legacy cursor; a real build rejects it. `partitions build` also fails instead of ignoring an unreadable sibling cursor when it uses it to infer `--start-block`.
 - **Local cursor saves are atomic (#465).** `cursor.parquet` is written to `cursor.parquet.tmp` in the same directory, fsynced, renamed over the target, and the directory is fsynced. A crash mid-save leaves the previous cursor intact instead of a truncated file. S3 cursor saves were already atomic (single PUT).
 - **A failed table write no longer loses rows (#464).** The writer keeps a table's buffered rows until its write succeeds. When a write, mapping or stream error ends `build`, partial buffers are discarded, `cursor.parquet` is not advanced, and the process exits non-zero, so the next run replays the uncommitted window. Previously the error path flushed the other tables and saved the cursor past the lost rows.
 - **`rollup` re-runs no longer lose or duplicate rows (#478).** An in-place re-run with `--delete-source` overwrote its earlier output and then deleted it as a source; on mainnet test data, the second run deleted the whole dataset. A re-run without `--delete-source` read the earlier output again and stacked duplicate rows. Re-runs now only roll up files that are still below the target granularity, and never overwrite or delete their own output. With `--delete-source`, each target partition's sources are deleted as soon as its output is written, so a failure partway through no longer leaves finished partitions to be rolled up a second time.
