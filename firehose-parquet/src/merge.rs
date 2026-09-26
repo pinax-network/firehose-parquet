@@ -921,7 +921,7 @@ fn run_merge_s3(config: &MergeConfig) -> Result<MergeResult> {
         .as_ref()
         .context("AWS config required for S3 paths")?;
     if config.dry_run {
-        let client: Arc<dyn ObjectStore> = Arc::new(aws.build_s3_client(&bucket)?);
+        let client: Arc<dyn ObjectStore> = Arc::new(aws.build_read_client(&bucket)?);
         return merge_s3_owned(config, &client, &bucket, &prefix, None, &[]);
     }
     let prepared = maintenance::acquire_blocking(

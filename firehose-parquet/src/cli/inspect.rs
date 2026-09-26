@@ -235,7 +235,7 @@ pub(in crate::cli) fn collect_scan_parquet_s3(
     use object_store::ObjectStore;
 
     let (bucket, prefix) = parse_s3_url(path)?;
-    let client = aws.build_s3_client(&bucket)?;
+    let client = aws.build_read_client(&bucket)?;
     let (parquet_objects, exact_object_path) =
         block_on_async(collect_scan_s3_parquet_objects(&client, &prefix))
             .map_err(|e| anyhow::anyhow!("listing S3 objects: {e}"))?;

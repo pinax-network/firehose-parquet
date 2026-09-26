@@ -618,14 +618,14 @@ fn run_rollup_s3(config: &RollupConfig) -> Result<()> {
 
     // Build S3 client for source.
     let (src_bucket, src_prefix) = parse_s3_url(&config.source)?;
-    let src_client = build_s3_client(&src_bucket, aws)?;
+    let src_client = build_mutation_store(&src_bucket, aws)?;
 
     // Build S3 client for output (may be same bucket).
     let (out_bucket, out_prefix) = parse_s3_url(&config.output)?;
     let out_client = if out_bucket == src_bucket {
         Arc::clone(&src_client)
     } else {
-        build_s3_client(&out_bucket, aws)?
+        build_mutation_store(&out_bucket, aws)?
     };
 
     let src = S3Root {
@@ -839,7 +839,8 @@ fn remove_previous_copies_s3(
     Ok(())
 }
 
-fn build_s3_client(bucket: &str, aws: &AwsConfig) -> Result<Arc<dyn ObjectStore>> {
+/// Zero-retry rollup client; anonymous without an access key (see `crate::s3`).
+fn build_mutation_store(bucket: &str, aws: &AwsConfig) -> Result<Arc<dyn ObjectStore>> {
     Ok(Arc::new(aws.build_s3_client_for_mutation(bucket)?))
 }
 

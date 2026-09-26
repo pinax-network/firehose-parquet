@@ -894,7 +894,7 @@ pub(in crate::cli) fn validate_parquet_s3(
     use object_store::ObjectStore;
 
     let (bucket, prefix) = parse_s3_url(path)?;
-    let client = aws.build_s3_client(&bucket)?;
+    let client = aws.build_read_client(&bucket)?;
 
     let list_prefix = if prefix.is_empty() {
         None

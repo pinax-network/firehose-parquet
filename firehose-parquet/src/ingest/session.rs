@@ -70,16 +70,6 @@ pub struct MapperSemantics {
     pub tables: BTreeMap<String, Digest>,
 }
 
-pub(crate) fn aws_config(config: &Config) -> AwsConfig {
-    AwsConfig {
-        aws_access_key_id: config.aws_access_key_id.clone(),
-        aws_secret_access_key: config.aws_secret_access_key.clone(),
-        aws_session_token: config.aws_session_token.clone(),
-        aws_region: config.aws_region.clone(),
-        aws_endpoint_url: config.aws_endpoint_url.clone(),
-    }
-}
-
 fn descriptor(config: &Config, mapper: MapperSemantics) -> Result<StreamDescriptor> {
     let origin = config
         .start_block
@@ -112,7 +102,7 @@ fn descriptor(config: &Config, mapper: MapperSemantics) -> Result<StreamDescript
         // bootstrap even for a block-number partition. Bind that policy too.
         _ => RoutingPolicy::GenesisLookaheadV1,
     };
-    let aws = aws_config(config);
+    let aws = AwsConfig::from(config);
     let output = config
         .output
         .to_str()
@@ -200,7 +190,7 @@ pub async fn load_authoritative_resume(
     ownership: &DatasetOwnership,
     cursor_override: bool,
 ) -> Result<Option<CursorState>> {
-    let aws = aws_config(config);
+    let aws = AwsConfig::from(config);
     let output = config
         .output
         .to_str()
@@ -242,7 +232,7 @@ impl<'a> IngestionSession<'a> {
             "dry-run cannot open a mutating ingestion session"
         );
         let expected = descriptor(config, mapper)?;
-        let aws = aws_config(config);
+        let aws = AwsConfig::from(config);
         let permit = reserve(&expected.output, ownership)?;
         super::maintenance::validate_ingestion_target(&expected.output, ownership).await?;
         let service = mirror_service(&expected.mirror, &aws)?;
