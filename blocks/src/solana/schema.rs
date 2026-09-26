@@ -1,13 +1,9 @@
 use arrow::datatypes::{DataType, Field, Schema};
 use firehose_parquet::encode::{bytes_data_type, BytesListColumn, EncodeBytes};
-use firehose_parquet::traits::{canonical_fields_with_nullable_timestamps, fork_step_field};
+use firehose_parquet::traits::{
+    canonical_fields_with_nullable_timestamps, enum_data_type, push_fork_step_field,
+};
 use std::sync::Arc;
-
-fn maybe_fork_step(fields: &mut Vec<Field>, include: bool) {
-    if include {
-        fields.push(fork_step_field());
-    }
-}
 
 fn solana_canonical_fields(encoding: &EncodeBytes) -> Vec<Field> {
     canonical_fields_with_nullable_timestamps(encoding)
@@ -19,10 +15,6 @@ pub(super) fn index_element_field() -> Field {
 
 fn index_list_type() -> DataType {
     DataType::List(Arc::new(index_element_field()))
-}
-
-fn enum_data_type() -> DataType {
-    DataType::Dictionary(Box::new(DataType::Int32), Box::new(DataType::Utf8))
 }
 
 pub fn blocks_schema(
@@ -41,7 +33,7 @@ pub fn blocks_schema(
         Field::new("num_transactions", DataType::UInt32, false),
         Field::new("num_rewards", DataType::UInt32, false),
     ]);
-    maybe_fork_step(&mut fields, include_fork_step);
+    push_fork_step_field(&mut fields, include_fork_step);
     Schema::new(fields)
 }
 
@@ -79,7 +71,7 @@ pub fn transactions_schema(
         Field::new("return_data_program_id", bytes_data_type(encoding), true),
         Field::new("return_data", DataType::Binary, true),
     ]);
-    maybe_fork_step(&mut fields, include_fork_step);
+    push_fork_step_field(&mut fields, include_fork_step);
     Schema::new(fields)
 }
 
@@ -110,7 +102,7 @@ pub fn messages_schema(
             true,
         ),
     ]);
-    maybe_fork_step(&mut fields, include_fork_step);
+    push_fork_step_field(&mut fields, include_fork_step);
     fields.push(Field::new("transaction_success", DataType::Boolean, false));
     Schema::new(fields)
 }
@@ -134,7 +126,7 @@ pub fn instructions_schema(
         Field::new("parent_instruction_index", DataType::UInt32, true),
         Field::new("inner_instruction_index", DataType::UInt32, true),
     ]);
-    maybe_fork_step(&mut fields, include_fork_step);
+    push_fork_step_field(&mut fields, include_fork_step);
     fields.push(Field::new("transaction_success", DataType::Boolean, false));
     Schema::new(fields)
 }
@@ -157,7 +149,7 @@ pub fn rewards_schema(
         Field::new("source", DataType::Utf8, false),
         Field::new("transaction_index", DataType::UInt32, true),
     ]);
-    maybe_fork_step(&mut fields, include_fork_step);
+    push_fork_step_field(&mut fields, include_fork_step);
     fields.push(Field::new("transaction_success", DataType::Boolean, true));
     Schema::new(fields)
 }
@@ -184,7 +176,7 @@ pub fn token_balances_schema(
         Field::new("decimals", DataType::UInt32, false),
         Field::new("ui_amount_string", DataType::Utf8, false),
     ]);
-    maybe_fork_step(&mut fields, include_fork_step);
+    push_fork_step_field(&mut fields, include_fork_step);
     fields.push(Field::new("transaction_success", DataType::Boolean, false));
     Schema::new(fields)
 }
@@ -204,7 +196,7 @@ pub fn account_lookups_schema(
         Field::new("writable_indexes", index_list_type(), false),
         Field::new("readonly_indexes", index_list_type(), false),
     ]);
-    maybe_fork_step(&mut fields, include_fork_step);
+    push_fork_step_field(&mut fields, include_fork_step);
     fields.push(Field::new("transaction_success", DataType::Boolean, false));
     Schema::new(fields)
 }

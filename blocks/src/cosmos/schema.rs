@@ -1,12 +1,6 @@
 use arrow::datatypes::{DataType, Field, Schema};
 use firehose_parquet::encode::{bytes_data_type, EncodeBytes};
-use firehose_parquet::traits::{canonical_fields_with_encoding, fork_step_field};
-
-fn maybe_fork_step(fields: &mut Vec<Field>, include: bool) {
-    if include {
-        fields.push(fork_step_field());
-    }
-}
+use firehose_parquet::traits::{canonical_fields_with_encoding, push_fork_step_field};
 
 pub fn blocks_schema(include_fork_step: bool, encoding: &EncodeBytes) -> Schema {
     let bd = bytes_data_type(encoding);
@@ -23,7 +17,7 @@ pub fn blocks_schema(include_fork_step: bool, encoding: &EncodeBytes) -> Schema 
         Field::new("num_txs", DataType::UInt32, false),
         Field::new("tx_decode_failures", DataType::UInt32, false),
     ]);
-    maybe_fork_step(&mut fields, include_fork_step);
+    push_fork_step_field(&mut fields, include_fork_step);
     Schema::new(fields)
 }
 
@@ -41,7 +35,7 @@ pub fn transactions_schema(include_fork_step: bool, encoding: &EncodeBytes) -> S
         Field::new("codespace", DataType::Utf8, true),
     ]);
     fields.extend(super::tx_metadata::fields());
-    maybe_fork_step(&mut fields, include_fork_step);
+    push_fork_step_field(&mut fields, include_fork_step);
     Schema::new(fields)
 }
 
@@ -58,7 +52,7 @@ pub fn events_schema(include_fork_step: bool, encoding: &EncodeBytes) -> Schema 
         Field::new("key", DataType::Utf8, true),
         Field::new("value", DataType::Utf8, true),
     ]);
-    maybe_fork_step(&mut fields, include_fork_step);
+    push_fork_step_field(&mut fields, include_fork_step);
     Schema::new(fields)
 }
 
@@ -72,7 +66,7 @@ pub fn messages_schema(include_fork_step: bool, encoding: &EncodeBytes) -> Schem
         Field::new("type_url", DataType::Utf8, false),
         Field::new("value", DataType::Binary, false),
     ]);
-    maybe_fork_step(&mut fields, include_fork_step);
+    push_fork_step_field(&mut fields, include_fork_step);
     Schema::new(fields)
 }
 

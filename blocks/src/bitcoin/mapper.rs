@@ -7,32 +7,13 @@ use arrow::datatypes::Schema;
 use arrow::record_batch::RecordBatch;
 use firehose_parquet::encode::EncodeBytes;
 use firehose_parquet::traits::{
-    decode_id_bytes, est_f64, est_i32, est_i64, est_list_str, est_opt_str, est_str, est_u32,
-    est_u64, BlockIdentity, BlockMapper, CanonicalBuilder, PreparedIdentity,
+    append_fork_step, decode_id_bytes, est_f64, est_i32, est_i64, est_list_str, est_opt_str,
+    est_str, est_u32, est_u64, finish_fork_step, fork_step_builder, BlockIdentity, BlockMapper,
+    CanonicalBuilder, PreparedIdentity,
 };
 use prost::Message;
 use std::collections::HashMap;
 use std::sync::Arc;
-
-fn append_fork_step(builder: &mut Option<StringBuilder>, fork_step: Option<&str>) {
-    if let Some(ref mut b) = builder {
-        b.append_value(fork_step.unwrap_or("UNKNOWN"));
-    }
-}
-
-fn finish_fork_step(builder: &mut Option<StringBuilder>, columns: &mut Vec<Arc<dyn Array>>) {
-    if let Some(ref mut b) = builder {
-        columns.push(Arc::new(b.finish()) as Arc<dyn Array>);
-    }
-}
-
-fn mk_fork_step(include: bool) -> Option<StringBuilder> {
-    if include {
-        Some(StringBuilder::new())
-    } else {
-        None
-    }
-}
 
 fn nonempty(value: &str) -> Option<&str> {
     (!value.is_empty()).then_some(value)
@@ -405,7 +386,7 @@ impl BlocksBuilder {
             n_tx: UInt32Builder::new(),
             mediantime: Int64Builder::new(),
             chainwork: StringBuilder::new(),
-            fork_step: mk_fork_step(include_fork_step),
+            fork_step: fork_step_builder(include_fork_step),
         }
     }
 
@@ -464,7 +445,7 @@ impl TransactionsBuilder {
             block_height: Int64Builder::new(),
             block_time: Int64Builder::new(),
             tx_index: UInt32Builder::new(),
-            fork_step: mk_fork_step(include_fork_step),
+            fork_step: fork_step_builder(include_fork_step),
         }
     }
 
@@ -519,7 +500,7 @@ impl InputsBuilder {
             script_sig_hex: StringBuilder::new(),
             coinbase: StringBuilder::new(),
             witness: ListBuilder::new(StringBuilder::new()),
-            fork_step: mk_fork_step(include_fork_step),
+            fork_step: fork_step_builder(include_fork_step),
         }
     }
 
@@ -570,7 +551,7 @@ impl OutputsBuilder {
             script_pubkey_hex: StringBuilder::new(),
             script_pubkey_type: StringBuilder::new(),
             script_pubkey_address: StringBuilder::new(),
-            fork_step: mk_fork_step(include_fork_step),
+            fork_step: fork_step_builder(include_fork_step),
         }
     }
 

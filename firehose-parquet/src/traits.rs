@@ -398,6 +398,57 @@ impl ForkStepBuilder {
     }
 }
 
+/// Append the `fork_step` field to a table schema when fork steps are
+/// included (non-final streams). It is always the last column.
+pub fn push_fork_step_field(fields: &mut Vec<Field>, include: bool) {
+    if include {
+        fields.push(fork_step_field());
+    }
+}
+
+/// Optional `fork_step` column builder: present only when fork steps are included.
+pub fn fork_step_builder(include: bool) -> Option<StringBuilder> {
+    include.then(StringBuilder::new)
+}
+
+/// Append one row to an optional `fork_step` column. A missing step is
+/// written as `UNKNOWN`.
+pub fn append_fork_step(builder: &mut Option<StringBuilder>, fork_step: Option<&str>) {
+    if let Some(builder) = builder {
+        builder.append_value(fork_step.unwrap_or("UNKNOWN"));
+    }
+}
+
+/// Finish an optional `fork_step` column after the table's other columns.
+pub fn finish_fork_step(
+    builder: &mut Option<StringBuilder>,
+    columns: &mut Vec<Arc<dyn arrow::array::Array>>,
+) {
+    if let Some(builder) = builder {
+        columns.push(Arc::new(builder.finish()));
+    }
+}
+
+/// Arrow type of enum-backed label columns: dictionary-encoded `Utf8`
+/// (`Dictionary(Int32, Utf8)`), per the Parquet enum convention in
+/// `docs/repo-navigation.md`.
+pub fn enum_data_type() -> DataType {
+    DataType::Dictionary(Box::new(DataType::Int32), Box::new(DataType::Utf8))
+}
+
+/// Buffer estimate for an enum dictionary column with `len` rows. Largest-table
+/// tracking only needs a cheap relative estimate: the dictionary of protobuf
+/// labels is small and fixed, so the per-row `Int32` keys dominate.
+pub fn estimated_dictionary_index_bytes(len: usize) -> usize {
+    len * std::mem::size_of::<i32>()
+}
+
+/// A protobuf enum label without its generated prefix (for example
+/// `TRX_TYPE_`), or the label unchanged when it has no such prefix.
+pub fn strip_enum_prefix(name: &'static str, prefix: &str) -> &'static str {
+    name.strip_prefix(prefix).unwrap_or(name)
+}
+
 /// Trait for mapping raw protobuf block bytes into Arrow RecordBatches.
 pub trait BlockMapper {
     /// Map raw protobuf bytes (from Any.value) into internal builders.
@@ -588,6 +639,50 @@ mod tests {
                 .value(0),
             -1
         );
+    }
+
+    #[test]
+    fn shared_fork_step_helpers_keep_the_per_mapper_contract() {
+        let mut fields = vec![Field::new("block_num", DataType::UInt64, false)];
+        push_fork_step_field(&mut fields, false);
+        assert_eq!(fields.len(), 1);
+        push_fork_step_field(&mut fields, true);
+        assert_eq!(fields.last(), Some(&fork_step_field()));
+
+        let mut absent = fork_step_builder(false);
+        assert!(absent.is_none());
+        append_fork_step(&mut absent, Some("NEW"));
+        let mut columns = Vec::new();
+        finish_fork_step(&mut absent, &mut columns);
+        assert!(columns.is_empty());
+
+        let mut present = fork_step_builder(true);
+        append_fork_step(&mut present, Some("UNDO"));
+        append_fork_step(&mut present, None);
+        finish_fork_step(&mut present, &mut columns);
+        let values = columns[0]
+            .as_any()
+            .downcast_ref::<arrow::array::StringArray>()
+            .expect("fork_step is Utf8");
+        assert_eq!(
+            values.iter().collect::<Vec<_>>(),
+            [Some("UNDO"), Some("UNKNOWN")]
+        );
+        // The builder is reusable after finish, like the per-mapper copies.
+        append_fork_step(&mut present, Some("FINAL"));
+        assert_eq!(present.as_ref().map(ArrayBuilder::len), Some(1));
+    }
+
+    #[test]
+    fn shared_enum_helpers_keep_the_per_mapper_contract() {
+        assert_eq!(
+            enum_data_type(),
+            DataType::Dictionary(Box::new(DataType::Int32), Box::new(DataType::Utf8))
+        );
+        assert_eq!(estimated_dictionary_index_bytes(0), 0);
+        assert_eq!(estimated_dictionary_index_bytes(3), 12);
+        assert_eq!(strip_enum_prefix("TRX_TYPE_LEGACY", "TRX_TYPE_"), "LEGACY");
+        assert_eq!(strip_enum_prefix("LEGACY", "TRX_TYPE_"), "LEGACY");
     }
 
     #[test]

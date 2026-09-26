@@ -6,25 +6,14 @@ use arrow::datatypes::{Int32Type, Schema};
 use arrow::record_batch::RecordBatch;
 use firehose_parquet::encode::{decode_base58, BytesColumn, BytesListColumn, EncodeBytes};
 use firehose_parquet::traits::{
-    est_bin, est_bool, est_f64, est_i64, est_list_str, est_list_u64, est_opt_str, est_str, est_u32,
-    est_u64, BlockIdentity, BlockMapper, CanonicalBuilder, PreparedIdentity,
+    append_fork_step, est_bin, est_bool, est_f64, est_i64, est_list_str, est_list_u64, est_opt_str,
+    est_str, est_u32, est_u64, estimated_dictionary_index_bytes, finish_fork_step,
+    fork_step_builder, BlockIdentity, BlockMapper, CanonicalBuilder, PreparedIdentity,
 };
 use prost::Message;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tracing::warn;
-
-fn append_fork_step(builder: &mut Option<StringBuilder>, fork_step: Option<&str>) {
-    if let Some(ref mut b) = builder {
-        b.append_value(fork_step.unwrap_or("UNKNOWN"));
-    }
-}
-
-fn finish_fork_step(builder: &mut Option<StringBuilder>, columns: &mut Vec<Arc<dyn Array>>) {
-    if let Some(ref mut b) = builder {
-        columns.push(Arc::new(b.finish()) as Arc<dyn Array>);
-    }
-}
 
 fn index_list_builder() -> ListBuilder<UInt8Builder> {
     ListBuilder::new(UInt8Builder::new()).with_field(schema::index_element_field())
@@ -57,13 +46,6 @@ fn reward_type_text(value: i32) -> &'static str {
     solana::RewardType::try_from(value)
         .map(|reward_type| reward_type.as_str_name())
         .unwrap_or("UNKNOWN")
-}
-
-fn estimated_dictionary_index_bytes(len: usize) -> usize {
-    // Largest-table tracking only needs a cheap relative estimate. For enum-backed
-    // dictionary columns, the shared string dictionary cardinality is fixed and
-    // small, so counting the per-row indices is sufficient for that comparison.
-    len * std::mem::size_of::<i32>()
 }
 
 /// Append a single transaction to the given [`TransactionsBuilder`].
@@ -839,11 +821,7 @@ impl BlocksBuilder {
             block_time: Int64Builder::new(),
             num_transactions: UInt32Builder::new(),
             num_rewards: UInt32Builder::new(),
-            fork_step: if include_fork_step {
-                Some(StringBuilder::new())
-            } else {
-                None
-            },
+            fork_step: fork_step_builder(include_fork_step),
         }
     }
 
@@ -901,11 +879,7 @@ impl TransactionsBuilder {
             post_balances: ListBuilder::new(UInt64Builder::new()),
             return_data_program_id: BytesColumn::new(encoding),
             return_data: BinaryBuilder::new(),
-            fork_step: if include_fork_step {
-                Some(StringBuilder::new())
-            } else {
-                None
-            },
+            fork_step: fork_step_builder(include_fork_step),
         }
     }
 
@@ -984,11 +958,7 @@ impl MessagesBuilder {
             account_keys: BytesListColumn::new(encoding),
             loaded_writable_addresses: BytesListColumn::new(encoding),
             loaded_readonly_addresses: BytesListColumn::new(encoding),
-            fork_step: if include_fork_step {
-                Some(StringBuilder::new())
-            } else {
-                None
-            },
+            fork_step: fork_step_builder(include_fork_step),
         }
     }
 
@@ -1046,11 +1016,7 @@ impl InstructionsBuilder {
             stack_height: UInt32Builder::new(),
             parent_instruction_index: UInt32Builder::new(),
             inner_instruction_index: UInt32Builder::new(),
-            fork_step: if include_fork_step {
-                Some(StringBuilder::new())
-            } else {
-                None
-            },
+            fork_step: fork_step_builder(include_fork_step),
         }
     }
 
@@ -1104,11 +1070,7 @@ impl RewardsBuilder {
             commission: StringBuilder::new(),
             source: StringBuilder::new(),
             transaction_index: UInt32Builder::new(),
-            fork_step: if include_fork_step {
-                Some(StringBuilder::new())
-            } else {
-                None
-            },
+            fork_step: fork_step_builder(include_fork_step),
         }
     }
 
@@ -1166,11 +1128,7 @@ impl TokenBalancesBuilder {
             ui_amount: Float64Builder::new(),
             decimals: UInt32Builder::new(),
             ui_amount_string: StringBuilder::new(),
-            fork_step: if include_fork_step {
-                Some(StringBuilder::new())
-            } else {
-                None
-            },
+            fork_step: fork_step_builder(include_fork_step),
         }
     }
 
@@ -1219,11 +1177,7 @@ impl AccountLookupsBuilder {
             account_key: BytesColumn::new(encoding),
             writable_indexes: index_list_builder(),
             readonly_indexes: index_list_builder(),
-            fork_step: if include_fork_step {
-                Some(StringBuilder::new())
-            } else {
-                None
-            },
+            fork_step: fork_step_builder(include_fork_step),
         }
     }
 

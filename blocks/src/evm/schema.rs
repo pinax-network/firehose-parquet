@@ -1,16 +1,8 @@
 use arrow::datatypes::{DataType, Field, Schema};
 use firehose_parquet::encode::{bytes_data_type, BytesListColumn, EncodeBytes};
-use firehose_parquet::traits::{canonical_fields_with_encoding, fork_step_field};
-
-fn maybe_fork_step(fields: &mut Vec<Field>, include: bool) {
-    if include {
-        fields.push(fork_step_field());
-    }
-}
-
-fn enum_data_type() -> DataType {
-    DataType::Dictionary(Box::new(DataType::Int32), Box::new(DataType::Utf8))
-}
+use firehose_parquet::traits::{
+    canonical_fields_with_encoding, enum_data_type, push_fork_step_field,
+};
 
 // ==========================================================================
 // Standard tables (BASE detail level)
@@ -45,7 +37,7 @@ pub fn blocks_schema(include_fork_step: bool, encoding: &EncodeBytes) -> Schema 
         Field::new("parent_beacon_root", bd.clone(), true),
         Field::new("requests_hash", bd, true),
     ]);
-    maybe_fork_step(&mut fields, include_fork_step);
+    push_fork_step_field(&mut fields, include_fork_step);
     Schema::new(fields)
 }
 
@@ -82,7 +74,7 @@ pub fn transactions_schema(include_fork_step: bool, encoding: &EncodeBytes) -> S
         Field::new("begin_ordinal", DataType::UInt64, false),
         Field::new("end_ordinal", DataType::UInt64, false),
     ]);
-    maybe_fork_step(&mut fields, include_fork_step);
+    push_fork_step_field(&mut fields, include_fork_step);
     Schema::new(fields)
 }
 
@@ -105,7 +97,7 @@ pub fn logs_schema(include_fork_step: bool, encoding: &EncodeBytes) -> Schema {
         Field::new("data", bd, true),
         Field::new("ordinal", DataType::UInt64, false),
     ]);
-    maybe_fork_step(&mut fields, include_fork_step);
+    push_fork_step_field(&mut fields, include_fork_step);
     Schema::new(fields)
 }
 
@@ -119,7 +111,7 @@ pub fn withdrawals_schema(include_fork_step: bool, encoding: &EncodeBytes) -> Sc
         Field::new("address", bd, false),
         Field::new("amount_gwei", DataType::UInt64, false),
     ]);
-    maybe_fork_step(&mut fields, include_fork_step);
+    push_fork_step_field(&mut fields, include_fork_step);
     Schema::new(fields)
 }
 
@@ -134,7 +126,7 @@ pub fn access_lists_schema(include_fork_step: bool, encoding: &EncodeBytes) -> S
         Field::new("address", bd, false),
         Field::new("storage_keys", BytesListColumn::data_type(encoding), false),
     ]);
-    maybe_fork_step(&mut fields, include_fork_step);
+    push_fork_step_field(&mut fields, include_fork_step);
     Schema::new(fields)
 }
 
@@ -155,7 +147,7 @@ pub fn set_code_authorizations_schema(include_fork_step: bool, encoding: &Encode
         Field::new("authority", bd, true),
         Field::new("discarded", DataType::Boolean, false),
     ]);
-    maybe_fork_step(&mut fields, include_fork_step);
+    push_fork_step_field(&mut fields, include_fork_step);
     Schema::new(fields)
 }
 
@@ -191,7 +183,7 @@ pub fn calls_schema(include_fork_step: bool, encoding: &EncodeBytes) -> Schema {
         Field::new("begin_ordinal", DataType::UInt64, false),
         Field::new("end_ordinal", DataType::UInt64, false),
     ]);
-    maybe_fork_step(&mut fields, include_fork_step);
+    push_fork_step_field(&mut fields, include_fork_step);
     Schema::new(fields)
 }
 
@@ -211,7 +203,7 @@ pub fn balance_changes_schema(include_fork_step: bool, encoding: &EncodeBytes) -
         Field::new("state_reverted", DataType::Boolean, false),
         Field::new("persisted", DataType::Boolean, false),
     ]);
-    maybe_fork_step(&mut fields, include_fork_step);
+    push_fork_step_field(&mut fields, include_fork_step);
     Schema::new(fields)
 }
 
@@ -232,7 +224,7 @@ pub fn code_changes_schema(include_fork_step: bool, encoding: &EncodeBytes) -> S
         Field::new("state_reverted", DataType::Boolean, false),
         Field::new("persisted", DataType::Boolean, false),
     ]);
-    maybe_fork_step(&mut fields, include_fork_step);
+    push_fork_step_field(&mut fields, include_fork_step);
     Schema::new(fields)
 }
 
@@ -252,7 +244,7 @@ pub fn storage_changes_schema(include_fork_step: bool, encoding: &EncodeBytes) -
         Field::new("state_reverted", DataType::Boolean, false),
         Field::new("persisted", DataType::Boolean, false),
     ]);
-    maybe_fork_step(&mut fields, include_fork_step);
+    push_fork_step_field(&mut fields, include_fork_step);
     Schema::new(fields)
 }
 
@@ -271,7 +263,7 @@ pub fn nonce_changes_schema(include_fork_step: bool, encoding: &EncodeBytes) -> 
         Field::new("state_reverted", DataType::Boolean, false),
         Field::new("persisted", DataType::Boolean, false),
     ]);
-    maybe_fork_step(&mut fields, include_fork_step);
+    push_fork_step_field(&mut fields, include_fork_step);
     Schema::new(fields)
 }
 
@@ -289,7 +281,7 @@ pub fn gas_changes_schema(include_fork_step: bool, encoding: &EncodeBytes) -> Sc
         Field::new("reason", enum_data_type(), false),
         Field::new("state_reverted", DataType::Boolean, false),
     ]);
-    maybe_fork_step(&mut fields, include_fork_step);
+    push_fork_step_field(&mut fields, include_fork_step);
     Schema::new(fields)
 }
 
@@ -306,7 +298,7 @@ pub fn account_creations_schema(include_fork_step: bool, encoding: &EncodeBytes)
         Field::new("state_reverted", DataType::Boolean, false),
         Field::new("persisted", DataType::Boolean, false),
     ]);
-    maybe_fork_step(&mut fields, include_fork_step);
+    push_fork_step_field(&mut fields, include_fork_step);
     Schema::new(fields)
 }
 
@@ -340,7 +332,7 @@ pub fn system_calls_schema(include_fork_step: bool, encoding: &EncodeBytes) -> S
         Field::new("begin_ordinal", DataType::UInt64, false),
         Field::new("end_ordinal", DataType::UInt64, false),
     ]);
-    maybe_fork_step(&mut fields, include_fork_step);
+    push_fork_step_field(&mut fields, include_fork_step);
     Schema::new(fields)
 }
 
@@ -356,7 +348,7 @@ pub fn system_balance_changes_schema(include_fork_step: bool, encoding: &EncodeB
         Field::new("new_value", DataType::Utf8, false),
         Field::new("reason", enum_data_type(), false),
     ]);
-    maybe_fork_step(&mut fields, include_fork_step);
+    push_fork_step_field(&mut fields, include_fork_step);
     Schema::new(fields)
 }
 
@@ -373,7 +365,7 @@ pub fn system_code_changes_schema(include_fork_step: bool, encoding: &EncodeByte
         Field::new("old_code", bd.clone(), false),
         Field::new("new_code", bd, false),
     ]);
-    maybe_fork_step(&mut fields, include_fork_step);
+    push_fork_step_field(&mut fields, include_fork_step);
     Schema::new(fields)
 }
 
@@ -389,7 +381,7 @@ pub fn system_storage_changes_schema(include_fork_step: bool, encoding: &EncodeB
         Field::new("old_value", bd.clone(), false),
         Field::new("new_value", bd, false),
     ]);
-    maybe_fork_step(&mut fields, include_fork_step);
+    push_fork_step_field(&mut fields, include_fork_step);
     Schema::new(fields)
 }
 
@@ -404,7 +396,7 @@ pub fn system_nonce_changes_schema(include_fork_step: bool, encoding: &EncodeByt
         Field::new("old_value", DataType::UInt64, false),
         Field::new("new_value", DataType::UInt64, false),
     ]);
-    maybe_fork_step(&mut fields, include_fork_step);
+    push_fork_step_field(&mut fields, include_fork_step);
     Schema::new(fields)
 }
 
@@ -418,7 +410,7 @@ pub fn system_gas_changes_schema(include_fork_step: bool, encoding: &EncodeBytes
         Field::new("new_value", DataType::UInt64, false),
         Field::new("reason", enum_data_type(), false),
     ]);
-    maybe_fork_step(&mut fields, include_fork_step);
+    push_fork_step_field(&mut fields, include_fork_step);
     Schema::new(fields)
 }
 
@@ -431,7 +423,7 @@ pub fn system_account_creations_schema(include_fork_step: bool, encoding: &Encod
         Field::new("ordinal", DataType::UInt64, false),
         Field::new("account", bd, false),
     ]);
-    maybe_fork_step(&mut fields, include_fork_step);
+    push_fork_step_field(&mut fields, include_fork_step);
     Schema::new(fields)
 }
 
