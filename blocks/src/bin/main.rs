@@ -564,7 +564,7 @@ fn resolve_include_failed_transactions(
     if let Some(cursor_state) = cursor_state.filter(|_| !cursor_override) {
         if !cursor_state.include_failed_transactions {
             warnings.push(
-                "this output's resume state records failed transactions as excluded (the EVM default before #494); still excluding them so this output stays consistent. Pass --exclude-failed-transactions to keep this and silence the warning. To switch to the new default, rebuild into a new empty output root with an absent cursor mirror; --cursor-override cannot change protected output"
+                "this output's resume state records failed transactions as excluded (--exclude-failed-transactions, or the EVM default before #494); still excluding them so this output stays consistent. Pass --exclude-failed-transactions to keep this and silence the warning. To switch to the new default, rebuild into a new empty output root with an absent cursor mirror; --cursor-override cannot change protected output"
                     .to_string(),
             );
             return (false, warnings);
