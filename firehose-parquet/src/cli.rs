@@ -659,7 +659,9 @@ Lookup order:
     /// computes partition-level `merkle_v2` roots, compares them to
     /// `<output>/<chain_name>/merkle_roots.parquet`, and optionally writes
     /// missing/updated entries. The chain and table are inferred from the file
-    /// metadata and the directory layout.
+    /// metadata and the directory layout. It only reads table data, so it can
+    /// run while `build` writes the network: partitions `build` may still write
+    /// are reported as `open` and are neither compared nor recorded.
     #[command(after_long_help = "\
 Examples:
   # Verify ETH mainnet blocks (chain and table are inferred) and fill missing registry roots

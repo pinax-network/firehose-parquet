@@ -585,7 +585,9 @@ fn normalize_file(path: &str, aws: &AwsConfig) -> Result<String> {
             .into_owned(),
     )
 }
-fn validate_artifact_destinations(
+/// Artifact outputs may not replace a protected cursor mirror, recovery
+/// metadata or an ordinary data part of any given protected root.
+pub(crate) fn validate_artifact_destinations(
     targets: &[MaintenanceTarget],
     roots: &[ProtectedRoot],
     aws: &AwsConfig,

@@ -1102,3 +1102,135 @@ async fn retained_evm_replay_matches_baseline_bytes_authority_and_mirror() {
     );
     eprintln!("exact baseline parity: {} parts, {rows} rows; complete authority and stable mirror columns", expected_paths.len());
 }
+
+/// `fireparq verify` runs beside a live `fireparq build` that owns the
+/// dataset. Partitions the build may still write stay open, the others are
+/// recorded, and the build keeps its ownership throughout.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn verify_runs_beside_a_live_build_and_leaves_its_partitions_open() {
+    let server = MockFirehose::start(
+        (100..106).map(|n| response(n, 3)).collect(),
+        vec![Plan {
+            cursor: "",
+            origin: 100,
+            stop: 999,
+            limit: None,
+            keep_open: true,
+        }],
+    )
+    .await;
+    let dir = tempfile::tempdir().unwrap();
+    let root = root(dir.path());
+    let mut build = tokio::process::Command::new(env!("CARGO_BIN_EXE_fireparq"));
+    build
+        .kill_on_drop(true)
+        .env_clear()
+        .current_dir(dir.path())
+        .args([
+            "build",
+            "--endpoint",
+            &server.endpoint,
+            "--block-type",
+            "evm",
+            "--start-block",
+            "100",
+            "--stop-block",
+            "1000",
+            "--partition",
+            "block_range",
+            "--block-range-size",
+            "2",
+            "--flush-blocks",
+            "2",
+            "--flush-interval-secs",
+            "1000000000",
+            "--stream-idle-timeout-secs",
+            "0",
+            "--output",
+        ])
+        .arg(dir.path().join("output"))
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    let mut build = build.spawn().unwrap();
+    // Wait until the build committed block 105 and keeps streaming.
+    tokio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            let committed = std::fs::read(
+                root.join(CONTROL_DIRECTORY)
+                    .join(ControlKey::State.filename()),
+            )
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+            .is_some_and(|record| record["payload"]["checkpoint"]["event"]["block_num"] == 105);
+            if committed {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("build did not commit block 105");
+    assert!(build.try_wait().unwrap().is_none(), "build is still live");
+    assert!(
+        firehose_parquet::dataset_lock::LocalOwnership::acquire(&[root.clone()]).is_err(),
+        "the live build owns the dataset"
+    );
+
+    let verify = |report: &Path| {
+        let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_fireparq"));
+        command
+            .kill_on_drop(true)
+            .env_clear()
+            .current_dir(dir.path())
+            .arg("verify")
+            .arg(root.join("blocks"))
+            .args(["--checks", "roots", "--report-json"])
+            .arg(report);
+        command
+    };
+    let report_of =
+        |path: &Path| -> Value { serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap() };
+    let statuses = |report: &Value| -> BTreeMap<String, String> {
+        report["findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|finding| {
+                (
+                    finding["partition"].as_str().unwrap().to_string(),
+                    finding["status"].as_str().unwrap().to_string(),
+                )
+            })
+            .collect()
+    };
+
+    let first = dir.path().join("first.json");
+    success(verify(&first)).await;
+    let first = report_of(&first);
+    let expected: BTreeMap<String, String> = [
+        ("block_range=100-102", "missing_expected"),
+        ("block_range=102-104", "missing_expected"),
+        ("block_range=104-106", "open"),
+    ]
+    .into_iter()
+    .map(|(partition, status)| (partition.to_string(), status.to_string()))
+    .collect();
+    assert_eq!(statuses(&first), expected, "{first:#}");
+    assert_eq!(first["summary"]["wrote_registry"], true);
+    assert!(first["warnings"][0]
+        .as_str()
+        .unwrap()
+        .contains("authoritative ingestion state"));
+
+    let second = dir.path().join("second.json");
+    success(verify(&second)).await;
+    let second = report_of(&second);
+    assert_eq!(second["summary"]["matches"], 2, "{second:#}");
+    assert_eq!(second["summary"]["open_partitions"], 1);
+    assert_eq!(second["summary"]["wrote_registry"], false);
+
+    assert!(build.try_wait().unwrap().is_none(), "build kept running");
+    build.start_kill().unwrap();
+    let _ = tokio::time::timeout(Duration::from_secs(10), build.wait()).await;
+    server.assert_drained();
+}

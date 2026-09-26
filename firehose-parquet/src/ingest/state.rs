@@ -830,4 +830,4 @@ pub fn validate_relative_path(value: &str, empty_allowed: bool) -> Result<()> {
 }
 
 #[cfg(test)]
-pub(super) mod tests;
+pub(crate) mod tests;
