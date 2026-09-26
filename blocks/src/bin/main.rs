@@ -13,7 +13,7 @@ use firehose_parquet::cli::{
 };
 use firehose_parquet::config::{BlockMetadata, Compression, Config, Partition};
 use firehose_parquet::cursor::{CursorLocation, CursorState};
-use firehose_parquet::dataset_lock::{DatasetOwnership, MutationScope};
+use firehose_parquet::dataset_lock::DatasetOwnership;
 use firehose_parquet::encode::EncodeBytes;
 use firehose_parquet::flush::{FlushSizing, MapperBufferEstimate, SizeFlushTrigger};
 use firehose_parquet::grpc::{
@@ -21,8 +21,8 @@ use firehose_parquet::grpc::{
     FetchErrorKind, FirehoseClient, ShutdownRequested,
 };
 use firehose_parquet::ingest::{
-    declare_inventory, load_authoritative_resume, prepare_partitions_index_write, IngestionSession,
-    MapperSemantics, CURSOR_OVERRIDE_REFUSED,
+    declare_inventory, ingestion_mutation_scopes, load_authoritative_resume,
+    prepare_partitions_index_write, IngestionSession, MapperSemantics, CURSOR_OVERRIDE_REFUSED,
 };
 use firehose_parquet::metrics;
 use firehose_parquet::networks::{resolve_network_endpoint, EndpointSource};

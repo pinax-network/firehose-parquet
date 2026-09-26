@@ -19,7 +19,7 @@ use super::store::TransactionStateStore;
 use crate::cli::AwsConfig;
 use crate::config::{BlockMetadata, Compression, Config, Partition};
 use crate::cursor::CursorState;
-use crate::dataset_lock::{session::SessionPermit, DatasetOwnership};
+use crate::dataset_lock::{session::SessionPermit, DatasetOwnership, MutationScope};
 use crate::metrics::PipelineMetrics;
 use crate::traits::BlockIdentity;
 use crate::writer::ParquetFileMetadata;
@@ -190,6 +190,27 @@ async fn existing(
         .await?
         .authority
         .map(|record| record.payload))
+}
+
+/// Ownership scopes for one protected build: the output root plus the cursor
+/// mirror resolved by exactly the binding that authority records. Deriving the
+/// guarded bucket/key or file from that binding (after any `--cursor-template`
+/// expansion stored in `config.cursor_path`) means ownership can never cover a
+/// different location than the one the session later writes.
+pub fn ingestion_mutation_scopes(config: &Config) -> Result<Vec<MutationScope>> {
+    let output = config
+        .output
+        .to_str()
+        .context("output path must be UTF-8")?;
+    let mut scopes = vec![MutationScope::directory(output)];
+    match resolve_mirror_binding(output, config.cursor_path.as_deref(), &aws_config(config))? {
+        MirrorBinding::Disabled => {}
+        MirrorBinding::Local { absolute_path } => scopes.push(MutationScope::file(absolute_path)),
+        MirrorBinding::S3 { bucket, key, .. } => {
+            scopes.push(MutationScope::file(format!("s3://{bucket}/{key}")))
+        }
+    }
+    Ok(scopes)
 }
 
 /// Refusal for `--cursor-override` on any mutating build, including a new root

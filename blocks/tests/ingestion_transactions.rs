@@ -620,6 +620,32 @@ async fn cursor_none_keeps_mandatory_authority_without_a_mirror_and_binds_that_c
     server.assert_drained();
 }
 
+/// Ownership and authority must resolve a `--cursor-template` mirror outside
+/// the output root to the same file; otherwise the mirror write is refused as
+/// outside held ownership.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn external_cursor_template_is_owned_and_bound_as_one_mirror() {
+    let server =
+        MockFirehose::start(vec![response(100, 3)], vec![Plan::complete("", 100, 100)]).await;
+    let dir = tempfile::tempdir().unwrap();
+    let state = dir.path().join("state");
+    let template = format!("{}/worker-{{{{a}}}}.parquet", state.display());
+    let mirror = state.join("worker-{a}.parquet");
+    let mut request = command(&server, dir.path(), 100, 101);
+    request.args(["--cursor-template", &template]);
+    let output = success(request).await;
+    assert!(logs(&output).contains("resolved cursor path"));
+    let root = root(dir.path());
+    let descriptor = &authority(&root)["descriptor"]["mirror"];
+    assert_eq!(descriptor["kind"], "local");
+    assert_eq!(descriptor["absolute_path"], mirror.to_str().unwrap());
+    let saved = load_cursor_parquet(&mirror).unwrap().unwrap();
+    assert_eq!(saved.last_block_num, 100);
+    assert_eq!(saved.cursor, "fixture-100");
+    assert!(!root.join("cursor.parquet").exists());
+    server.assert_drained();
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn cursor_none_cannot_drop_an_existing_bound_mirror() {
     let server =
