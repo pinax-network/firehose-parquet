@@ -44,6 +44,40 @@ Changes merged since the last release. Fold this file into `docs/releases/vX.Y.Z
 
 ## Breaking changes
 
+### S3 writes need an explicit URI; `.env` is read from the working directory only (#617)
+
+`fireparq` used to load `.env` from the current directory **or any parent
+directory**, and `build` / `partitions build` expanded a relative `--output`
+(including the default `.`) into `s3://$S3_BUCKET/<path>`. A run started in a
+subdirectory or checkout copy below a directory with a production `.env` could
+therefore write to the production bucket; this happened during the audit.
+
+- `.env` is loaded from the current working directory only, or exactly the file
+  given with the new `--env-file <PATH>` / `FIREPARQ_ENV_FILE` (which must
+  exist). Parent directories are never searched. Startup names the loaded file
+  and the variables it supplied, never their values. A malformed env file is now
+  an error instead of being silently ignored.
+- S3 writes require an explicit `s3://bucket/prefix`. With `--s3-bucket` /
+  `S3_BUCKET` set, `build` and `partitions build` reject a relative output
+  (including the default `.`) and `partitions build` rejects a missing output,
+  before contacting the endpoint. Without a bucket option, a relative output is a
+  local path. The bucket option now only checks an explicit S3 output's bucket.
+- `partitions build` reads its existing index from the exact destination, never
+  through the `S3_BUCKET` shorthand.
+- `verify` runs that write registry roots or reports refuse a data path that only
+  the `S3_BUCKET` shorthand resolved to S3; pass the explicit URI. Read-only
+  commands (`scan`, `inspect`, `validate`, `partitions ls/resolve/shard/validate`,
+  protocol-only `verify`) keep the shorthand.
+- `build` logs the absolute output and cursor-mirror destinations, and
+  `partitions build` the index destination, before the first write.
+
+**Deployment migration:** replace `S3_BUCKET` plus a relative `OUTPUT` with an
+explicit URI, for example Kubernetes dependent-variable interpolation
+`OUTPUT=s3://$(BUCKET_NAME)/v1` (see the README "Migrating Kubernetes
+deployments"). Deployments that are not migrated exit with an error before
+writing. Run `fireparq` from the directory holding its `.env`, or pass
+`--env-file`. See [the incident record](../audit/617-explicit-s3-writes.md).
+
 ### Bounded native S3 ingestion uploads (#520)
 
 Authenticated protected `build` now encodes one part to private disk, streams one

@@ -323,16 +323,20 @@ and reject a different cursor bucket. Other custom endpoints must support
 path-style requests at a service endpoint; arbitrary bucket-specific custom
 domains are not inferred. These addressing rules also apply to S3 maintenance
 and inspection commands.
-Relative cursor paths inherit the resolved output bucket and prefix. Explicit
-local output paths (`./output`, `../output`, or an absolute path) stay local even
-when `S3_BUCKET` is set, and absolute local cursor paths remain absolute for
-local output.
+Relative cursor paths inherit the resolved output bucket and prefix, and
+absolute local cursor paths remain absolute for local output.
 
-When `--output` is an S3 URI, `--s3-bucket` or `S3_BUCKET`, if set, must name the
-same output bucket. A mismatch now fails before contacting Firehose or storage;
-unset the bucket option or make it match. This consistency check applies to
-`build` and `partitions build` and does not restrict an explicit cursor URI to
-the data bucket.
+**S3 writes require an explicit `s3://bucket/prefix` output** (#617). `build`
+and `partitions build` never expand a relative `--output` / `OUTPUT` into
+`--s3-bucket` / `S3_BUCKET`. When a bucket option is set, a relative output
+(including the default `.`) or, for `partitions build`, a missing output is
+rejected before contacting Firehose or storage, with the explicit URI suggested.
+Without a bucket option a relative output is a local path. Explicit local paths
+(`./output`, `../output`, or an absolute path) are always local. When `--output`
+is an S3 URI, `--s3-bucket` / `S3_BUCKET`, if set, must name the same bucket; this
+check does not restrict an explicit cursor URI to the data bucket. Before the
+first write, `build` logs `resolved write destinations` with the absolute output
+and cursor-mirror locations, and `partitions build` logs the index destination.
 
 An S3 cursor requires complete explicit AWS credentials even when data output
 is local. This is validated after `--cursor-template` expansion as well as for
@@ -633,7 +637,7 @@ custom deployment environments:
 
 | Flag group | Purpose |
 |---|---|
-| `--s3-bucket <S3_BUCKET>` | Prefix relative output paths with `s3://<bucket>/...`; must match an explicit S3 output URI |
+| `--s3-bucket <S3_BUCKET>` | Optional check that an explicit `s3://` output uses this bucket; a relative output is then rejected, never expanded |
 | `--aws-access-key-id`, `--aws-secret-access-key`, `--aws-session-token`, `--aws-region` | Override ambient AWS credential and region resolution |
 | `--aws-endpoint-url <AWS_ENDPOINT_URL_S3>` | Target S3-compatible object stores |
 | `--cache-control <CACHE_CONTROL>` | Set upload headers for CDN or static distribution workflows |
@@ -706,12 +710,12 @@ fireparq partitions build \
   --compression snappy \
   --output ./output
 
-# Build an hour index to S3
+# Build an hour index to S3 (S3 writes need an explicit s3:// URI)
 fireparq partitions build \
   --endpoint https://eth.firehose.pinax.network:443 \
   --stop-block 10010000 \
   --partition hour \
-  --s3-bucket my-bucket \
+  --output s3://my-bucket \
   --json
 
 # Resume from an existing canonical index and append only missing coverage
@@ -762,8 +766,8 @@ parent context, skipped-slot handling and endpoint requirements.
 | `--stop-block` | none in live mode | Exclusive bounded stop, no later than the proven finalized block plus one; incompatible with `--live` |
 | `--live` | `false` | Poll finalized coverage and extend the stored source frontier |
 | `--poll-interval-secs` | `30` | Wait between live finalized-head checks |
-| `--output` | inferred from `--s3-bucket` | Output root directory or `s3://` URI prefix |
-| `--s3-bucket` | none | S3 bucket used when no explicit local output overrides the environment default |
+| `--output` | required | Local output root or explicit `s3://bucket/prefix`; with a bucket option set, a relative path is rejected |
+| `--s3-bucket` | none | Optional check that an explicit `s3://` output uses this bucket; never supplies the output |
 | `--resume` | `false` | Extend an existing verified v2 index |
 | `--overwrite` | `false` | Rebuild and replace the index after successful validation; conflicts with `--resume` |
 | `--json` | `false` | Emit result and declared coverage as JSON; use `--log-level error` for stdout without progress logs |
@@ -1052,11 +1056,14 @@ fireparq verify ./output/mainnet/blocks --checks roots,protocol
 # Publish report to the suggested artifact path
 fireparq verify ./output/mainnet/blocks --publish-report
 
-# Resolve a shorthand S3 data path when no local match exists
-S3_BUCKET=my-bucket fireparq verify mainnet/blocks
+# Read-only protocol checks may resolve a shorthand S3 data path
+S3_BUCKET=my-bucket fireparq verify mainnet/blocks --checks protocol
+
+# Runs that write roots or reports need the explicit URI
+fireparq verify s3://my-bucket/mainnet/blocks
 ```
 
-Lookup order for the data path matches `scan` / `inspect`: explicit `s3://...` URIs win, existing local paths win over shorthand S3 resolution, and only missing relative paths fall back to `s3://<S3_BUCKET>/<path>`.
+Lookup order for the data path matches `scan` / `inspect`: explicit `s3://...` URIs win, existing local paths win over shorthand S3 resolution, and only missing relative paths fall back to `s3://<S3_BUCKET>/<path>`. That shorthand is read-only: a run that writes registry roots (the `roots` check, which fills missing roots by default), `--report-json`, `--publish-report` or `--publish-report-path` also takes dataset ownership next to the data, so it refuses a data path that only the shorthand resolved to S3 and asks for the explicit `s3://` URI (#617). Registry writes log `writing merkle roots registry` with the absolute destination.
 
 | Flag | Default | Description |
 |---|---|---|
@@ -1098,7 +1105,7 @@ fireparq rollup ./output/blocks/ -o ./rolled-up/blocks/ -p date
 fireparq rollup s3://my-bucket/evm/blocks/ -p date --delete-source
 ```
 
-The source path must exist locally or be an explicit `s3://...` URI. Unlike `scan` and `inspect`, `rollup` never falls back to `s3://<S3_BUCKET>/<path>` when a relative path is missing (`.env` is loaded automatically, so a typo could otherwise target a bucket).
+The source path must exist locally or be an explicit `s3://...` URI. Unlike `scan` and `inspect`, `rollup` never falls back to `s3://<S3_BUCKET>/<path>` when a relative path is missing (`.env` from the current directory is loaded automatically, so a typo could otherwise target a bucket).
 
 Rollup holds one output part and one input batch instead of the whole target partition. The byte target limits the encoded output part; active row groups have a separate 32 MiB estimated-memory budget. A memory-bound row group is flushed within the same part; a new file starts when its encoded bytes reach the target. Checks occur between batches, so a wide row, Parquet page/dictionary, and codec overhead can exceed the target. `--flush-bytes 0` leaves the output part unlimited, while the row-group budget remains finite. A bounded validation pass reads all input data before the encoding pass so a damaged later file is rejected before that group writes anything. S3 reads use pinned byte ranges rather than downloading complete source objects; the two passes trade extra reads for bounded memory and early failure.
 
@@ -1145,7 +1152,7 @@ fireparq merge ./output/blocks/ --flush-rows 100000
 fireparq merge s3://my-bucket/evm/blocks/
 ```
 
-The path must exist locally or be an explicit `s3://...` URI. Unlike `scan` and `inspect`, `merge` never falls back to `s3://<S3_BUCKET>/<path>` when a relative path is missing (`.env` is loaded automatically, so a typo could otherwise target a bucket).
+The path must exist locally or be an explicit `s3://...` URI. Unlike `scan` and `inspect`, `merge` never falls back to `s3://<S3_BUCKET>/<path>` when a relative path is missing (`.env` from the current directory is loaded automatically, so a typo could otherwise target a bucket).
 
 | Flag | Default | Description |
 |---|---|---|
@@ -1209,7 +1216,7 @@ Partition filters (`-p`, repeatable):
 - Each segment may contain one `*` glob, such as `day=0*`. `day` also matches the legacy `date=DD` directories written by earlier releases.
 - Filters only match partition directories, so they never select root artifacts.
 
-The path must exist locally or be an explicit `s3://...` URI. Unlike `scan` and `inspect`, `truncate` never falls back to `s3://<S3_BUCKET>/<path>` when a relative path is missing (`.env` is loaded automatically, so a typo could otherwise target a bucket).
+The path must exist locally or be an explicit `s3://...` URI. Unlike `scan` and `inspect`, `truncate` never falls back to `s3://<S3_BUCKET>/<path>` when a relative path is missing (`.env` from the current directory is loaded automatically, so a typo could otherwise target a bucket).
 
 | Flag | Default | Description |
 |---|---|---|
@@ -2002,7 +2009,19 @@ These added columns and tables require a fresh dataset or an explicit rebuild; p
 
 ## Environment Variables
 
-CLI flags can also be set via environment variables. Copy `.env.example` to `.env`:
+CLI flags can also be set via environment variables. Copy `.env.example` to `.env`
+in the directory you run `fireparq` from. Since #617:
+
+- `fireparq` loads `.env` from the **current working directory only**. Parent
+  directories are never searched, so a run started in a subdirectory or a git
+  worktree below a checkout does not inherit that checkout's production settings.
+- `--env-file <PATH>` (or `FIREPARQ_ENV_FILE` in the process environment) loads
+  exactly that file instead; it must exist, and `./.env` is then ignored.
+- Process environment variables and CLI flags win over the file.
+- Startup names the loaded file and the variables it supplied, never their
+  values: an INFO `loaded env file` log line for `build`, `partitions build`,
+  `merge`, `rollup`, `truncate` and `verify`, and one stderr line for other
+  commands. A malformed file is an error that never echoes the offending line.
 
 ```bash
 # Authentication — use credentials scoped to the destination provider
@@ -2024,6 +2043,28 @@ PINAX_API_KEY=your-pinax-api-key-here
 ```
 
 See `.env.example` for the full list of supported environment variables.
+
+### Migrating Kubernetes deployments (#617)
+
+Deployments that set `S3_BUCKET` plus a relative `OUTPUT` (or no `OUTPUT`) must
+switch to an explicit S3 URI; otherwise `build` and `partitions build` now exit
+with an error before writing anything. Kubernetes expands `$(VAR)` references to
+variables defined earlier in the same container's `env` list:
+
+```yaml
+env:
+  - name: BUCKET_NAME
+    valueFrom:
+      configMapKeyRef: { name: fireparq, key: bucket }
+  # Before: S3_BUCKET=$(BUCKET_NAME) and OUTPUT=v1 (implicitly s3://<bucket>/v1)
+  - name: OUTPUT
+    value: s3://$(BUCKET_NAME)/v1
+```
+
+Keep `S3_BUCKET` only if you want its bucket consistency check (it must then match
+the `OUTPUT` bucket) or read-only shorthand keys; it no longer selects the output.
+Relative cursor paths still land under the explicit output prefix. Check the
+`resolved write destinations` log line after rollout.
 
 ## CLI Architecture
 

@@ -49,7 +49,7 @@ Current behavior:
 - supports `--resume` by reusing trailing partition rows from the existing canonical artifact and continuing from the stored frontier
 - refuses to modify an existing canonical artifact in bounded mode unless `--resume` or `--overwrite` is passed (see `docs/partitions-build-defaults.md`)
 - infers `--start-block` from a sibling `cursor.parquet` or endpoint metadata when omitted
-- infers the S3 output root from `--s3-bucket` / `S3_BUCKET` when `--output` is omitted
+- requires `--output`; S3 index writes need an explicit `s3://bucket/prefix` (since #617, `--s3-bucket` / `S3_BUCKET` never supplies or expands the output root)
 - supports `--live` to keep extending `partitions.parquet` from its latest covered frontier
 - uses sparse finalized block probes instead of streaming every block for partition discovery
 

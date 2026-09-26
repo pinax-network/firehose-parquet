@@ -124,9 +124,13 @@ crash/replay transaction.
 
 ## Output root
 
-`--output` accepts a local directory or explicit S3 URI. Without it,
-`--s3-bucket`/`S3_BUCKET` can supply the S3 root. An explicit local output overrides
-an environment bucket. An explicitly supplied bucket and conflicting S3 output
-are rejected. See the README's storage options for credentials and endpoint
+`--output` is required and accepts a local directory or an explicit
+`s3://bucket/prefix` URI. Since #617, `--s3-bucket`/`S3_BUCKET` never supplies or
+expands the output root: with a bucket option set, a missing or relative output is
+rejected before any endpoint call (use `./path` or an absolute path for local
+output), and a conflicting explicit S3 output is rejected. The existing index is
+read from the exact destination, never through the read-only `S3_BUCKET`
+shorthand, and the absolute index destination is logged before ownership is
+taken. See the README's storage options for credentials and endpoint
 addressing. The artifact path remains `partitions.parquet`; there is no lookup
 sidecar.
