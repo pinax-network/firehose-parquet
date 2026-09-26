@@ -70,14 +70,9 @@ pub struct MapperSemantics {
     pub tables: BTreeMap<String, Digest>,
 }
 
+/// Session-local spelling of the shared `From<&Config>` conversion.
 pub(crate) fn aws_config(config: &Config) -> AwsConfig {
-    AwsConfig {
-        aws_access_key_id: config.aws_access_key_id.clone(),
-        aws_secret_access_key: config.aws_secret_access_key.clone(),
-        aws_session_token: config.aws_session_token.clone(),
-        aws_region: config.aws_region.clone(),
-        aws_endpoint_url: config.aws_endpoint_url.clone(),
-    }
+    AwsConfig::from(config)
 }
 
 fn descriptor(config: &Config, mapper: MapperSemantics) -> Result<StreamDescriptor> {

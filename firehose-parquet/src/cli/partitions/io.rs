@@ -66,7 +66,7 @@ pub(in crate::cli) fn read_partition_index_snapshot(
         use object_store::ObjectStore;
         let aws = aws.ok_or_else(|| anyhow::anyhow!("AWS config required for S3 paths"))?;
         let (bucket, key) = crate::writer::parse_s3_url(&path)?;
-        let client = aws.build_s3_client(&bucket)?;
+        let client = aws.build_read_client(&bucket)?;
         let object_path = object_store::path::Path::from(key.as_str());
         let data = block_on_async(async { client.get(&object_path).await?.bytes().await })
             .map_err(|error| anyhow::Error::from(error).context(format!("reading {path}")))?;

@@ -1,7 +1,48 @@
 //! Select credentials using the actual destination, after network overrides.
 use anyhow::{Context, Result};
 use tonic::transport::Endpoint;
-use tracing::info;
+use tracing::{info, warn};
+
+/// Ambient API key variables for built-in Pinax hosts, in priority order.
+pub const PINAX_API_KEY_ENV_VARS: &[&str] = &["PINAX_API_KEY", "SUBSTREAMS_API_KEY"];
+/// Ambient bearer token variables for built-in Pinax hosts, in priority order.
+pub const PINAX_API_TOKEN_ENV_VARS: &[&str] = &["PINAX_API_TOKEN", "SUBSTREAMS_API_TOKEN"];
+/// Ambient API key variables for built-in StreamingFast hosts.
+pub const STREAMINGFAST_API_KEY_ENV_VARS: &[&str] = &["STREAMINGFAST_API_KEY"];
+/// Ambient bearer token variables for built-in StreamingFast hosts.
+pub const STREAMINGFAST_API_TOKEN_ENV_VARS: &[&str] = &["STREAMINGFAST_API_TOKEN"];
+
+/// Why an explicitly selected credential deserves a startup warning.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ExplicitScopeWarning {
+    /// A Pinax (or legacy `SUBSTREAMS_*`) credential leaves Pinax, for example
+    /// a global `API_KEY_ENVVAR=SUBSTREAMS_API_KEY` reaching StreamingFast.
+    PinaxCredentialToOtherHost,
+    /// Any other explicitly selected credential reaches a non-Pinax host.
+    CredentialToNonPinaxHost,
+}
+
+/// Explicit selectors bypass provider scoping (#562), so an explicitly selected
+/// credential sent to a non-Pinax host is logged. A provider-scoped
+/// StreamingFast name sent to a StreamingFast host is its normal destination.
+fn explicit_scope_warning(provider: &str, name: &str) -> Option<ExplicitScopeWarning> {
+    let streamingfast_name = STREAMINGFAST_API_KEY_ENV_VARS
+        .iter()
+        .chain(STREAMINGFAST_API_TOKEN_ENV_VARS)
+        .any(|candidate| *candidate == name);
+    if provider == "pinax" || (provider == "streamingfast" && streamingfast_name) {
+        return None;
+    }
+    let pinax_name = PINAX_API_KEY_ENV_VARS
+        .iter()
+        .chain(PINAX_API_TOKEN_ENV_VARS)
+        .any(|candidate| *candidate == name);
+    Some(if pinax_name {
+        ExplicitScopeWarning::PinaxCredentialToOtherHost
+    } else {
+        ExplicitScopeWarning::CredentialToNonPinaxHost
+    })
+}
 
 /// Resolved secrets for one endpoint. Deliberately does not implement Debug.
 pub struct EndpointCredentials {
@@ -52,11 +93,11 @@ pub(crate) fn resolve_with(
     };
 
     let (key_defaults, token_defaults): (&[&str], &[&str]) = match provider {
-        "pinax" => (
-            &["PINAX_API_KEY", "SUBSTREAMS_API_KEY"],
-            &["PINAX_API_TOKEN", "SUBSTREAMS_API_TOKEN"],
+        "pinax" => (PINAX_API_KEY_ENV_VARS, PINAX_API_TOKEN_ENV_VARS),
+        "streamingfast" => (
+            STREAMINGFAST_API_KEY_ENV_VARS,
+            STREAMINGFAST_API_TOKEN_ENV_VARS,
         ),
-        "streamingfast" => (&["STREAMINGFAST_API_KEY"], &["STREAMINGFAST_API_TOKEN"]),
         _ => (&[], &[]),
     };
     let select = |explicit: Option<&str>, defaults: &[&str]| {
@@ -77,6 +118,40 @@ pub(crate) fn resolve_with(
         api_token_envvar = token.as_ref().map(|(name, _)| name.as_str()).unwrap_or("none"),
         "selected Firehose authentication"
     );
+    for (selector, selected) in [
+        (
+            "--api-key-envvar / API_KEY_ENVVAR",
+            api_key_envvar.and(key.as_ref()),
+        ),
+        (
+            "--api-token-envvar / API_TOKEN_ENVVAR",
+            api_token_envvar.and(token.as_ref()),
+        ),
+    ] {
+        let Some((name, _)) = selected else {
+            continue;
+        };
+        match explicit_scope_warning(provider, name) {
+            Some(ExplicitScopeWarning::PinaxCredentialToOtherHost) => warn!(
+                host = %host,
+                provider,
+                envvar = name.as_str(),
+                selector,
+                "explicitly selected Pinax credential is sent to a non-Pinax host; \
+                 unset the selector to use provider-scoped credentials, or move the \
+                 secret to the destination provider's variable"
+            ),
+            Some(ExplicitScopeWarning::CredentialToNonPinaxHost) => warn!(
+                host = %host,
+                provider,
+                envvar = name.as_str(),
+                selector,
+                "explicitly selected credential is sent to a non-Pinax host; \
+                 confirm this destination should receive it"
+            ),
+            None => {}
+        }
+    }
     Ok(EndpointCredentials {
         api_key: key.map(|(_, value)| value),
         jwt_token: token.map(|(_, value)| value),
@@ -218,6 +293,124 @@ mod tests {
             "streamingfast-token",
         ] {
             assert!(!log.contains(secret));
+        }
+    }
+
+    #[test]
+    fn explicit_credentials_leaving_pinax_are_classified_for_warning() {
+        use ExplicitScopeWarning::*;
+        for name in [
+            "SUBSTREAMS_API_KEY",
+            "SUBSTREAMS_API_TOKEN",
+            "PINAX_API_KEY",
+            "PINAX_API_TOKEN",
+        ] {
+            assert_eq!(
+                explicit_scope_warning("streamingfast", name),
+                Some(PinaxCredentialToOtherHost),
+                "{name}"
+            );
+            assert_eq!(
+                explicit_scope_warning("custom", name),
+                Some(PinaxCredentialToOtherHost),
+                "{name}"
+            );
+            assert_eq!(explicit_scope_warning("pinax", name), None, "{name}");
+        }
+        assert_eq!(
+            explicit_scope_warning("custom", "INTERNAL_FIREHOSE_API_KEY"),
+            Some(CredentialToNonPinaxHost)
+        );
+        assert_eq!(
+            explicit_scope_warning("streamingfast", "INTERNAL_FIREHOSE_API_KEY"),
+            Some(CredentialToNonPinaxHost)
+        );
+        assert_eq!(
+            explicit_scope_warning("pinax", "INTERNAL_FIREHOSE_API_KEY"),
+            None
+        );
+        assert_eq!(
+            explicit_scope_warning("streamingfast", "STREAMINGFAST_API_TOKEN"),
+            None
+        );
+        assert_eq!(
+            explicit_scope_warning("custom", "STREAMINGFAST_API_TOKEN"),
+            Some(CredentialToNonPinaxHost)
+        );
+    }
+
+    #[test]
+    fn explicit_legacy_selector_warns_when_sent_to_streamingfast() {
+        // Same process isolation as the startup log test: tracing caches
+        // callsite interest process-wide.
+        const CHILD: &str = "FIREPARQ_AUTH_WARN_TEST_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let child = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "auth::tests::explicit_legacy_selector_warns_when_sent_to_streamingfast",
+                    "--nocapture",
+                ])
+                .env(CHILD, "1")
+                .output()
+                .unwrap();
+            assert!(
+                child.status.success()
+                    && String::from_utf8_lossy(&child.stdout).contains("1 passed; 0 failed"),
+                "isolated warning test failed: {}{}",
+                String::from_utf8_lossy(&child.stdout),
+                String::from_utf8_lossy(&child.stderr)
+            );
+            return;
+        }
+        let capture = |endpoint: &str, key: Option<&str>, token: Option<&str>| {
+            let output = tempfile::NamedTempFile::new().unwrap();
+            let subscriber = tracing_subscriber::fmt()
+                .without_time()
+                .with_ansi(false)
+                .with_writer(std::sync::Mutex::new(output.reopen().unwrap()))
+                .finish();
+            let credentials = tracing::subscriber::with_default(subscriber, || {
+                resolve_with(endpoint, key, token, read).unwrap()
+            });
+            (credentials, std::fs::read_to_string(output.path()).unwrap())
+        };
+
+        // The migration hazard: a global legacy selector still authorizes the
+        // Pinax key for StreamingFast, but now says so loudly.
+        let (credentials, log) = capture(STREAMINGFAST, Some("SUBSTREAMS_API_KEY"), None);
+        assert_eq!(credentials.api_key.as_deref(), Some("legacy-key"));
+        assert!(log.contains("WARN"), "{log}");
+        assert!(
+            log.contains("explicitly selected Pinax credential is sent to a non-Pinax host"),
+            "{log}"
+        );
+        assert!(log.contains("envvar=\"SUBSTREAMS_API_KEY\""), "{log}");
+        assert!(log.contains("mainnet.tron.streamingfast.io"), "{log}");
+        assert!(!log.contains("legacy-key"), "{log}");
+
+        let (_, log) = capture(
+            "https://custom.example",
+            None,
+            Some("INTERNAL_FIREHOSE_API_TOKEN"),
+        );
+        // Unset explicit variables transmit nothing, so there is nothing to warn about.
+        assert!(!log.contains("WARN"), "{log}");
+        let (_, log) = capture("https://custom.example", None, Some("PINAX_API_TOKEN"));
+        assert!(
+            log.contains("explicitly selected Pinax credential is sent to a non-Pinax host"),
+            "{log}"
+        );
+        assert!(!log.contains("pinax-token"), "{log}");
+
+        // Pinax destinations and ambient provider-scoped selection stay quiet.
+        for (endpoint, key) in [
+            (PINAX, Some("SUBSTREAMS_API_KEY")),
+            (PINAX, None),
+            (STREAMINGFAST, None),
+        ] {
+            let (_, log) = capture(endpoint, key, None);
+            assert!(!log.contains("WARN"), "{endpoint}: {log}");
         }
     }
 

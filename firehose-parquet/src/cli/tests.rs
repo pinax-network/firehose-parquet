@@ -777,6 +777,44 @@ fn test_flush_bytes_zero_means_disabled() {
 
 #[test]
 #[serial]
+fn test_flush_rows_and_interval_zero_mean_disabled() {
+    // `--flush-rows 0` / `--flush-interval-secs 0` used to flush after every
+    // block (`rows >= 0`, `elapsed >= 0`); zero now disables them like
+    // `--flush-bytes 0` and merge `--flush-rows 0`.
+    let cli = parse(&[
+        "test-cli",
+        "--endpoint",
+        "https://example.com:443",
+        "--flush-rows",
+        "0",
+        "--flush-interval-secs",
+        "0",
+    ]);
+    assert_eq!(cli.common.flush_rows, Some(0));
+    assert_eq!(cli.common.flush_interval_secs, Some(0));
+    let config = build_config(&cli.common).expect("build_config should succeed");
+    assert_eq!(config.flush_rows, None);
+    assert_eq!(config.flush_interval_secs, None);
+    let rendered = config.to_string();
+    assert!(!rendered.contains("flush_rows"), "{rendered}");
+    assert!(!rendered.contains("flush_interval"), "{rendered}");
+
+    let cli = parse(&[
+        "test-cli",
+        "--endpoint",
+        "https://example.com:443",
+        "--flush-rows",
+        "5",
+        "--flush-interval-secs",
+        "7",
+    ]);
+    let config = build_config(&cli.common).expect("build_config should succeed");
+    assert_eq!(config.flush_rows, Some(5));
+    assert_eq!(config.flush_interval_secs, Some(7));
+}
+
+#[test]
+#[serial]
 fn test_credentials_are_trimmed_and_blank_values_ignored() {
     let _key = EnvVarGuard::set("FIREPARQ_TEST_API_KEY_471", "key-from-secret-file\n");
     let _token = EnvVarGuard::set("FIREPARQ_TEST_API_TOKEN_471", " \n");

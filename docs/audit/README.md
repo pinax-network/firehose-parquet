@@ -5,6 +5,7 @@ limits of each audit fix. The linked GitHub issues and PRs provide the current
 lifecycle state; a local implementation or passing test alone is not closure.
 
 - [#562: provider-scoped credentials](562-provider-credentials.md)
+- [Validation follow-ups 1-9: platform fixes, and index of all 17 findings](validation-misc-followups.md)
 - [#467: stable startup destinations](467-endpoint-info.md)
 - [#567: compatible dependency security refresh](dependency-security-refresh.md)
 - [#469: durable cursor persistence](469-durable-cursor-saves.md)
