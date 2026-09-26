@@ -1530,6 +1530,20 @@ fn protocol_columns(target: &Target) -> &'static [&'static str] {
     }
 }
 
+/// The `merkle_v2` partition root, as lowercase hex, that `verify` records for
+/// a partition holding exactly the rows of `batches`, in order. Fails, naming
+/// the column, on an Arrow type that has no `merkle_v2` encoding.
+pub fn partition_root<'a>(
+    batches: impl IntoIterator<Item = &'a RecordBatch>,
+    hash_strategy: HashStrategy,
+) -> Result<String> {
+    let mut tree = MerkleAccumulator::new(hash_strategy);
+    for batch in batches {
+        append_batch_leaves(batch, hash_strategy, &mut tree)?;
+    }
+    Ok(hex::encode(tree.root()))
+}
+
 /// Adds one `merkle_v2` leaf per row, `H(0x00 || encoded_row)` with the row
 /// encoded by [`row_encoding::RowEncoder`], to `out`.
 fn append_batch_leaves(

@@ -12,11 +12,16 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use arrow::compute::concat_batches;
+use arrow::datatypes::DataType;
 use arrow::record_batch::RecordBatch;
 use arrow::util::display::array_value_to_string;
 use firehose_parquet::config::{BlockMetadata, Compression, Partition};
 use firehose_parquet::encode::{decode_base58, EncodeBytes};
 use firehose_parquet::traits::{timestamp_millis_utc_type, BlockIdentity, BlockMapper};
+use firehose_parquet::verify::{
+    partition_root, verify_parquet, HashStrategy, VerifyCheck, VerifyOptions, VerifyProfile,
+    VerifyScope,
+};
 use firehose_parquet::writer::{read_parquet, ParquetTableWriter};
 use prost::Message;
 
@@ -481,6 +486,118 @@ fn every_table_schema_has_unique_field_names_and_round_trips_through_parquet() {
     }
 
     assert_eq!(checked, expected_table_count());
+}
+
+/// Whether `data_type` is, or nests, a `Struct`.
+fn has_struct(data_type: &DataType) -> bool {
+    match data_type {
+        DataType::Struct(_) => true,
+        DataType::List(field)
+        | DataType::LargeList(field)
+        | DataType::FixedSizeList(field, _)
+        | DataType::ListView(field)
+        | DataType::LargeListView(field) => has_struct(field.data_type()),
+        DataType::Dictionary(_, values) => has_struct(values),
+        _ => false,
+    }
+}
+
+/// `verify` has a `merkle_v2` encoding for every column type of every table of
+/// every chain, under every encoding and fork_step setting. A chain that adds
+/// an Arrow type without an encoding fails here instead of in `verify`.
+#[test]
+fn verify_hashes_every_table_of_every_chain() {
+    let mut checked = 0;
+    let mut nested_structs = BTreeSet::new();
+    for flushed in flush_all_cases() {
+        for (table, batch) in sorted_tables(&flushed.batches) {
+            let context = format!("{} table={table}", flushed.context);
+            for strategy in [HashStrategy::Keccak256, HashStrategy::Sha256] {
+                partition_root([batch], strategy)
+                    .unwrap_or_else(|err| panic!("{context}: verify cannot hash it: {err:#}"));
+            }
+            for field in batch.schema().fields() {
+                if has_struct(field.data_type()) {
+                    nested_structs.insert(format!("{table}.{}", field.name()));
+                }
+            }
+            checked += 1;
+        }
+    }
+    assert_eq!(checked, expected_table_count());
+    // Cosmos transaction metadata (#510) is the nested case this guards.
+    for column in ["transactions.fee_amount", "transactions.signer_infos"] {
+        assert!(nested_structs.contains(column), "{nested_structs:?}");
+    }
+}
+
+/// End to end: `verify` records a root for every table of every chain written
+/// by the production Parquet writer, and a second run matches it.
+#[test]
+fn verify_records_and_rematches_every_table_of_every_chain() {
+    let scratch = ScratchDir::new();
+    let mut checked = 0;
+    for encoding in [EncodeBytes::Binary, EncodeBytes::Hex] {
+        for (case_index, mut case) in cases(&encoding, true).into_iter().enumerate() {
+            for (offset, block) in case.blocks.iter().enumerate() {
+                let identity = identity(BLOCK_NUM + offset as u64, Some("NEW"));
+                case.mapper
+                    .map_block(block, &identity, Some("NEW"))
+                    .unwrap();
+            }
+            let chain_root = scratch.0.join(format!("{encoding:?}-{case_index}/net"));
+            let mut writer =
+                ParquetTableWriter::new(&chain_root, Partition::None, Compression::Zstd);
+            let metadata = BlockMetadata {
+                min_block_number: BLOCK_NUM,
+                max_block_number: BLOCK_NUM + case.blocks.len() as u64 - 1,
+                min_timestamp: Some(TIMESTAMP),
+                max_timestamp: Some(TIMESTAMP),
+            };
+            let batches = case.mapper.flush().unwrap();
+            for (table, batch) in sorted_tables(&batches) {
+                writer.write_batch(table, batch, &metadata).unwrap();
+            }
+            // The chain family is the first word of the case label.
+            let family = case.label.split(' ').next().unwrap().to_string();
+            let opts = VerifyOptions {
+                chain: Some(family),
+                table: None,
+                hash_strategy: None,
+                checks: vec![VerifyCheck::Roots],
+                profile: VerifyProfile::Quick,
+                scope: VerifyScope::Table,
+                no_fail_fast: false,
+                report_json: None,
+                publish_report: false,
+                publish_report_path: None,
+                registry_path: None,
+                update_registry: false,
+            };
+            for (table, _) in sorted_tables(&batches) {
+                let context = format!("{} encoding={encoding:?} table={table}", case.label);
+                let path = chain_root.join(table);
+                let path = path.to_str().unwrap();
+                let first = verify_parquet(path, None, &opts)
+                    .unwrap_or_else(|err| panic!("{context}: {err:#}"));
+                assert_eq!(first.summary.missing_expected, 1, "{context}");
+                assert!(first.summary.wrote_registry, "{context}");
+                let second = verify_parquet(path, None, &opts)
+                    .unwrap_or_else(|err| panic!("{context}: {err:#}"));
+                assert_eq!(second.summary.matches, 1, "{context}");
+                assert!(second.is_valid(), "{context}");
+                assert_eq!(
+                    second.findings[0].computed_root, first.findings[0].computed_root,
+                    "{context}"
+                );
+                checked += 1;
+            }
+        }
+    }
+    assert_eq!(
+        checked,
+        2 * expected_table_count() / (all_encodings().len() * 2)
+    );
 }
 
 #[test]
