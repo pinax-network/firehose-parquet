@@ -18,17 +18,22 @@ pub(super) trait PartitionMerge {
     fn label(&self) -> &str;
     /// Journal and file operations on the partition directory.
     fn files(&self) -> &Self::Files;
+    /// Total size of the sources, for the output estimate and summary.
     fn source_bytes(&self, sources: &[Self::Source]) -> Result<u64>;
+    /// Logs a partition skipped because merging would not reduce its file count.
     fn log_no_op(&self, sources: usize, source_bytes: u64, flush_bytes: u64, estimated: usize);
     /// How the sources' schemas differ, from their footers, before anything is written.
     fn schema_mismatch(&self, sources: &[Self::Source]) -> Result<Option<String>>;
-    fn log_start(&self, sources: usize, source_bytes: u64, config: &MergeConfig);
+    /// Logs the start of a real or dry-run partition merge (silent by default).
+    fn log_start(&self, _sources: usize, _source_bytes: u64, _config: &MergeConfig) {}
     /// Highest `part-NNNNNN.parquet` number among the sources; outputs are numbered after it.
     fn max_part_number(&self, sources: &[Self::Source]) -> u32;
     /// The claiming journal, with this storage's ownership check in its original order.
     fn claim_journal(&self, sources: &[Self::Source], initial_part_num: u32) -> Result<Journal>;
     /// A source that changed between listing and the claim, when the storage can tell.
-    fn changed_source(&self, sources: &[Self::Source]) -> Option<String>;
+    fn changed_source(&self, _sources: &[Self::Source]) -> Option<String> {
+        None
+    }
     /// Streams every source, in order, through `encoder`.
     fn encode<F>(
         &self,
@@ -44,7 +49,8 @@ pub(super) trait PartitionMerge {
     fn check_owner(&self) -> Result<()>;
     /// Deletes the committed merge's sources, stopping at the first error.
     fn delete_sources(&self, sources: &[Self::Source], outputs: &[String]) -> Result<()>;
-    fn log_done(&self, sources: usize, outputs: usize, output_bytes: u64);
+    /// Logs a completed partition merge (silent by default).
+    fn log_done(&self, _sources: usize, _outputs: usize, _output_bytes: u64) {}
 }
 
 /// Table name of a partition label: its first path segment.
