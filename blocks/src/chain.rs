@@ -70,8 +70,9 @@ pub struct ChainProfile {
     /// Blocks may lack timestamps: canonical `timestamp`/`date` are nullable
     /// and time partitions route by the last known timestamp.
     pub nullable_timestamps: bool,
-    /// Block numbers can legitimately skip (slots or heights), so a bounded
-    /// range may end below `stop_block - 1`.
+    /// Block numbers can legitimately skip (slots or heights). This does not
+    /// relax bounded completion: protected builds and dry runs both require the
+    /// accepted boundary to reach `stop_block - 1` on every chain.
     pub block_number_gaps: bool,
     /// Extended output behavior.
     pub extended: ExtendedOutput,

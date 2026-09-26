@@ -300,6 +300,77 @@ async fn every_publication_boundary_recovers_to_one_complete_all_table_prefix() 
     }
 }
 
+fn staged_temporaries(root: &Path) -> Vec<PathBuf> {
+    let mut pending = vec![root.to_path_buf()];
+    let mut found = Vec::new();
+    while let Some(path) = pending.pop() {
+        for entry in fs::read_dir(path).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                pending.push(path);
+            } else if path
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with(".fireparq-txn-")
+            {
+                found.push(path);
+            }
+        }
+    }
+    found
+}
+
+#[tokio::test]
+async fn ordinary_errors_remove_owned_staging_names_and_keep_the_journal() {
+    for stage in [
+        Stage::Staged(0),
+        Stage::ReceiptPersisted(0),
+        Stage::Staged(1),
+        Stage::ReceiptPersisted(1),
+    ] {
+        let root = tempfile::tempdir().unwrap();
+        let descriptor = actual_descriptor(root.path());
+        let mirror = Mirror::default();
+        let owner = LocalOwnership::acquire(&[root.path().into()]).unwrap();
+        initialize(root.path(), &owner, &descriptor).await;
+        let mut controller = open(root.path(), &owner, &mirror, &descriptor)
+            .await
+            .unwrap();
+        let injected = fail(stage);
+        assert!(commit(&mut controller).await.is_err(), "{stage:?}");
+        drop(injected);
+        // The staged part was complete before the injected error, yet no
+        // private staging name survives the ordinary error return.
+        assert!(
+            staged_temporaries(root.path()).is_empty(),
+            "{stage:?}: {:?}",
+            staged_temporaries(root.path())
+        );
+        let pending = TransactionStateStore::local(root.path(), &owner)
+            .unwrap()
+            .load()
+            .await
+            .unwrap()
+            .pending
+            .expect("the journal remains for recovery");
+        assert_eq!(
+            pending.payload.phase,
+            TransactionPhase::Writing,
+            "{stage:?}"
+        );
+        drop(controller);
+        let mut controller = open(root.path(), &owner, &mirror, &descriptor)
+            .await
+            .unwrap();
+        assert_eq!(controller.authority().checkpoint.ordinal, 0, "{stage:?}");
+        assert!(data_files(root.path()).is_empty(), "{stage:?}");
+        commit(&mut controller).await.unwrap();
+        assert_rows(root.path());
+        assert!(staged_temporaries(root.path()).is_empty());
+    }
+}
+
 #[tokio::test]
 async fn mirror_failure_retains_committed_journal_and_repairs_from_authority() {
     let root = tempfile::tempdir().unwrap();
