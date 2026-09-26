@@ -1659,7 +1659,7 @@ progress, chain-head agreement or crash/replay safety.
 | `firehose_parquet_bootstrap_buffered_blocks` | Gauge | — | Raw blocks awaiting the initial timestamp anchor |
 | `firehose_parquet_bootstrap_buffered_bytes` | Gauge | — | Raw protobuf bytes awaiting that anchor |
 | `firehose_parquet_cursor_saves_total` | Counter | — | Cursor persistence count |
-| `firehose_parquet_cursor_save_failures_total` | Counter | — | Failed cursor save attempts, including retries |
+| `firehose_parquet_cursor_save_failures_total` | Counter | — | Failed cursor mirror saves, once per failed attempt (including local retries, S3 reads/validation/owner checks before the PUT, and ambiguous or refused S3 publication) |
 | `firehose_parquet_cursor_last_success_timestamp_seconds` | Gauge | — | Unix time of the last successful cursor save in this process; 0 before the first save |
 | `firehose_parquet_cursor_last_block_num` | Gauge | — | Block number from the loaded cursor, then the last successful save; 0 when neither exists |
 | `firehose_parquet_errors_total` | Counter | `kind` | Errors by category |

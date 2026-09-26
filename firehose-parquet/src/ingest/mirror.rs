@@ -197,7 +197,22 @@ impl<'a> ProtectedMirror<'a> {
         Ok(())
     }
 
+    /// Every failed reconciliation increments `cursor_save_failures_total` and
+    /// `errors_total{kind="cursor_save"}` once per failed attempt, whatever the
+    /// stage: local write attempts, pre-publication S3 reads/validation/owner
+    /// checks, and ambiguous or cancelled S3 publication alike.
     pub(crate) async fn reconcile(&self, authority: &AuthorityState) -> Result<MirrorOutcome> {
+        let failures = FailureCount::new(self.metrics);
+        let outcome = self.reconcile_counted(authority, &failures).await?;
+        failures.resolve();
+        Ok(outcome)
+    }
+
+    async fn reconcile_counted(
+        &self,
+        authority: &AuthorityState,
+        failures: &FailureCount<'_>,
+    ) -> Result<MirrorOutcome> {
         authority.validate()?;
         ensure!(
             authority.descriptor.mirror == self.binding,
@@ -220,10 +235,10 @@ impl<'a> ProtectedMirror<'a> {
                             return Ok(outcome);
                         }
                         Err(error) => {
+                            failures.record();
                             if !attempted_write {
                                 return Err(error);
                             }
-                            record_failure(self.metrics);
                             if attempt == 2 {
                                 return Err(error.context("protected mirror persistence failed after three local attempts"));
                             }
@@ -264,7 +279,7 @@ impl<'a> ProtectedMirror<'a> {
                 );
                 let mut attempt = RemoteAttempt {
                     owner,
-                    metrics: self.metrics,
+                    failures,
                     resolved: false,
                 };
                 let result = tokio::time::timeout(REQUEST_TIMEOUT, owner.object_store().put_opts(&ObjectPath::from(key.as_str()), bytes.clone().into(), options)).await
@@ -876,13 +891,45 @@ fn record_failure(metrics: Option<&PipelineMetrics>) {
 }
 struct RemoteAttempt<'a> {
     owner: &'a S3Ownership,
-    metrics: Option<&'a PipelineMetrics>,
+    failures: &'a FailureCount<'a>,
     resolved: bool,
 }
 impl Drop for RemoteAttempt<'_> {
     fn drop(&mut self) {
         if !self.resolved {
             self.owner.mark_mutation_uncertain();
+            self.failures.record();
+        }
+    }
+}
+
+/// Counts one failed reconciliation unless a specific attempt already recorded
+/// it. Drop also covers errors returned before any publication and a cancelled
+/// future, so no failure path leaves the counters unchanged.
+struct FailureCount<'a> {
+    metrics: Option<&'a PipelineMetrics>,
+    recorded: AtomicBool,
+    resolved: AtomicBool,
+}
+impl<'a> FailureCount<'a> {
+    fn new(metrics: Option<&'a PipelineMetrics>) -> Self {
+        Self {
+            metrics,
+            recorded: AtomicBool::new(false),
+            resolved: AtomicBool::new(false),
+        }
+    }
+    fn record(&self) {
+        record_failure(self.metrics);
+        self.recorded.store(true, Ordering::SeqCst);
+    }
+    fn resolve(&self) {
+        self.resolved.store(true, Ordering::SeqCst);
+    }
+}
+impl Drop for FailureCount<'_> {
+    fn drop(&mut self) {
+        if !self.resolved.load(Ordering::SeqCst) && !self.recorded.load(Ordering::SeqCst) {
             record_failure(self.metrics);
         }
     }
