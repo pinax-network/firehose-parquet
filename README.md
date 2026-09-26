@@ -1271,7 +1271,7 @@ Receipt statuses other than `EXECUTED` come from deferred (scheduled) transactio
 
 ### NEAR: failed receipts
 
-NEAR fails per receipt, not per transaction. A failed receipt's actions do not take effect, but its `gas_burnt` and `tokens_burnt` persist, and the logs it emitted before failing stay in its outcome. `receipts`, `receipt_actions` and `execution_logs` are written for every executed receipt whatever the failed-transaction flags say. `receipt_actions` and `execution_logs` carry the receipt's own outcome as `receipt_status` (`Dictionary(Int32, Utf8)`: `SuccessValue`, `SuccessReceiptId`, `Failure` or `Unknown`, the values of `receipts.status`); keep `receipt_status <> 'Failure'` for actions that took effect. The transaction filter only drops a transaction whose own outcome is `Failure`. A transaction's outcome is almost always `SuccessReceiptId` and says nothing about the receipts it later spawned (#507). `state_changes` attribution is tracked in #507.
+NEAR fails per receipt, not per transaction. A failed receipt's actions do not take effect, but its `gas_burnt` and `tokens_burnt` persist, and the logs it emitted before failing stay in its outcome. `receipts`, `receipt_actions` and `execution_logs` are written for every executed receipt whatever the failed-transaction flags say. `receipt_actions` and `execution_logs` carry the receipt's own outcome as `receipt_status` (`Dictionary(Int32, Utf8)`: `SuccessValue`, `SuccessReceiptId`, `Failure` or `Unknown`, the values of `receipts.status`); keep `receipt_status <> 'Failure'` for actions that took effect. The transaction filter only drops a transaction whose own outcome is `Failure`. A transaction's outcome is almost always `SuccessReceiptId` and says nothing about the receipts it later spawned; see [final transaction outcome](#near-final-transaction-outcome).
 
 When failed transactions are included, chain-specific fields like Solana's `err` bytes and `success` flag reflect the actual transaction status.
 
@@ -1946,6 +1946,8 @@ A NEAR transaction's own outcome records its inclusion and conversion into a rec
 | `transactions` | `transaction_index` | `UInt32` | Position in the block: chunks in shard order, then each chunk's transactions. Failed transactions left out by the filter keep their index. |
 | `transactions` | `receipt_ids` | list of bytes | The outcome's `receipt_ids`. |
 | `transactions` | `converted_into_receipt_id` | bytes, nullable | The receipt the transaction was converted into. Joins `receipts.receipt_id`. Null when the outcome has no receipt. |
+| `transactions` | `status` | `Utf8` | The transaction's **own** outcome: `SuccessReceiptId` once it was converted into a receipt, `Failure` if it failed inclusion. It is not the final result of the contract calls ([final outcome](#near-final-transaction-outcome)). |
+| `receipts` | `success_receipt_id` | bytes, nullable | For a `SuccessReceiptId` outcome, the receipt whose outcome becomes this receipt's result (the next link of NEAR's result chain). Null for other outcomes. |
 | `transactions`, `receipts` | `tokens_burnt` | `Utf8` | yoctoNEAR burnt for gas, as a decimal string. |
 | `receipts` | `receipt_index` | `UInt32` | Position of the execution outcome in the block: shards in order, then each shard's receipts. |
 | `receipts` | `tx_hash` | bytes, nullable | The originating transaction, when it is in the same block (see below). |
@@ -2005,7 +2007,83 @@ LEFT JOIN origin USING (receipt_id);
 
 Receipts whose transaction or any intermediate lineage link is outside the available range stay unresolved. These queries assume a finalized dataset; append-only non-final events need the finalized-reference handling described above.
 
-These added columns and tables require a fresh dataset or an explicit rebuild; protected ingestion refuses to resume an incompatible schema inventory. See the [bounded public-source comparison and its coverage limits](docs/audit/506-near-public-qualification.md).
+### NEAR final transaction outcome
+
+A transaction's result is decided by later receipts, usually in later blocks, so one block cannot hold it and `transactions.status` does not report it. NEAR's final outcome (the RPC's `FinalExecutionStatus`) starts at the transaction and follows `SuccessReceiptId` links until an outcome that is not `SuccessReceiptId`: `SuccessValue` or `Failure`. Receipts off that chain, such as a failed cross-contract call whose callback handled the error, do not change it. Over a range of blocks:
+
+```sql
+-- Final outcome of each NEAR transaction: follow SuccessReceiptId links
+WITH RECURSIVE chain(tx_hash, receipt_id, depth) AS (
+  SELECT hash, converted_into_receipt_id, 0
+  FROM read_parquet('output/near-mainnet/transactions/**/*.parquet')
+  WHERE status = 'SuccessReceiptId'
+  UNION ALL
+  SELECT chain.tx_hash, r.success_receipt_id, chain.depth + 1
+  FROM chain
+  JOIN read_parquet('output/near-mainnet/receipts/**/*.parquet') AS r
+    ON r.receipt_id = chain.receipt_id
+  WHERE r.status = 'SuccessReceiptId'
+),
+last AS (
+  SELECT tx_hash, arg_max(receipt_id, depth) AS receipt_id
+  FROM chain
+  GROUP BY tx_hash
+)
+SELECT t.hash,
+       CASE WHEN t.status <> 'SuccessReceiptId' THEN t.status
+            WHEN r.status IS NULL THEN 'Pending'  -- the chain continues past the range
+            ELSE r.status END AS final_status
+FROM read_parquet('output/near-mainnet/transactions/**/*.parquet') AS t
+LEFT JOIN last ON last.tx_hash = t.hash
+LEFT JOIN read_parquet('output/near-mainnet/receipts/**/*.parquet') AS r
+  ON r.receipt_id = last.receipt_id;
+```
+
+To find transactions with a failed receipt anywhere in their receipt tree, including side calls, reuse the lineage walk above:
+
+```sql
+-- Transactions with a failed receipt anywhere in their tree
+WITH RECURSIVE origin(receipt_id, tx_hash) AS (
+  SELECT converted_into_receipt_id, hash
+  FROM read_parquet('output/near-mainnet/transactions/**/*.parquet')
+  WHERE converted_into_receipt_id IS NOT NULL
+  UNION
+  SELECT child.receipt_id, origin.tx_hash
+  FROM origin
+  JOIN (
+    SELECT receipt_id AS parent_id, unnest(receipt_ids) AS receipt_id
+    FROM read_parquet('output/near-mainnet/receipts/**/*.parquet')
+  ) AS child ON child.parent_id = origin.receipt_id
+)
+SELECT origin.tx_hash, count(*) AS failed_receipts
+FROM origin
+JOIN read_parquet('output/near-mainnet/receipts/**/*.parquet') AS r USING (receipt_id)
+WHERE r.status = 'Failure'
+GROUP BY origin.tx_hash;
+```
+
+Both need the whole chain in the range; a chain that continues past its end is `Pending` or incomplete.
+
+### NEAR state changes
+
+`state_changes` has one row per entry of the Firehose block's `state_changes` list:
+
+| Column | Type | Meaning |
+|---|---|---|
+| `state_change_index` | `UInt32` | Position in the block's list (entries without a value or cause are skipped but keep their position) |
+| `type`, `cause` | `Dictionary(Int32, Utf8)` | Change kind (`AccountUpdate`, `DataUpdate`, `AccessKeyUpdate`, ...) and cause (`TransactionProcessing`, `ReceiptProcessing`, `ActionReceiptGasReward`, ...) |
+| `cause_tx_hash` | bytes, nullable | The transaction of a `TransactionProcessing` cause |
+| `cause_receipt_hash` | bytes, nullable | The receipt of an `ActionReceiptProcessingStarted`, `ActionReceiptGasReward`, `ReceiptProcessing` or `PostponedReceipt` cause; joins `receipts.receipt_id` |
+| `account_id` | `Utf8` | The changed account |
+| `data_key`, `data_value` | bytes, nullable | `DataUpdate` key and value; `DataDeletion` key |
+| `amount`, `locked` | `Utf8`, nullable | `AccountUpdate` balances in yoctoNEAR, as decimal strings |
+| `storage_usage`, `code_hash` | `UInt64` / bytes, nullable | `AccountUpdate` storage in bytes and contract code hash |
+
+Bytes columns follow the identifier encoding. Columns that do not apply to a row's change kind are NULL. Access-key permissions and contract code are not materialized.
+
+**The table is empty with the StreamingFast NEAR producer.** Every published version of `near-firehose-indexer` (checked from 2021-08 to 2026-07) writes an empty `Block.state_changes`, and the Firehose protobuf has no per-shard state-change field. The columns above are mapped and tested, including on a projection of real NEAR state changes, so they fill in if a producer supplies the list ([#625](https://github.com/pinax-network/firehose-parquet/issues/625)).
+
+These added columns and tables require a fresh dataset or an explicit rebuild; protected ingestion refuses to resume an incompatible schema inventory. See the [bounded public-source comparison and its coverage limits](docs/audit/506-near-public-qualification.md) and the [#507 status and state-change record](docs/audit/507-near-status-state-changes.md).
 
 ## Environment Variables
 

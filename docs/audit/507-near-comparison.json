@@ -1,0 +1,124 @@
+{
+  "cases": {
+    "base58-failedfalse-forkfalse": {
+      "legacy_values": 4208,
+      "success_receipt_id_values": 70,
+      "state_change_values": 2652
+    },
+    "base58-failedfalse-forktrue": {
+      "legacy_values": 4432,
+      "success_receipt_id_values": 70,
+      "state_change_values": 2652
+    },
+    "base58-failedtrue-forkfalse": {
+      "legacy_values": 4208,
+      "success_receipt_id_values": 70,
+      "state_change_values": 2652
+    },
+    "base58-failedtrue-forktrue": {
+      "legacy_values": 4432,
+      "success_receipt_id_values": 70,
+      "state_change_values": 2652
+    },
+    "binary-failedfalse-forkfalse": {
+      "legacy_values": 4208,
+      "success_receipt_id_values": 70,
+      "state_change_values": 2652
+    },
+    "binary-failedfalse-forktrue": {
+      "legacy_values": 4432,
+      "success_receipt_id_values": 70,
+      "state_change_values": 2652
+    },
+    "binary-failedtrue-forkfalse": {
+      "legacy_values": 4208,
+      "success_receipt_id_values": 70,
+      "state_change_values": 2652
+    },
+    "binary-failedtrue-forktrue": {
+      "legacy_values": 4432,
+      "success_receipt_id_values": 70,
+      "state_change_values": 2652
+    },
+    "hex-failedfalse-forkfalse": {
+      "legacy_values": 4208,
+      "success_receipt_id_values": 70,
+      "state_change_values": 2652
+    },
+    "hex-failedfalse-forktrue": {
+      "legacy_values": 4432,
+      "success_receipt_id_values": 70,
+      "state_change_values": 2652
+    },
+    "hex-failedtrue-forkfalse": {
+      "legacy_values": 4208,
+      "success_receipt_id_values": 70,
+      "state_change_values": 2652
+    },
+    "hex-failedtrue-forktrue": {
+      "legacy_values": 4432,
+      "success_receipt_id_values": 70,
+      "state_change_values": 2652
+    },
+    "hex_no_prefix-failedfalse-forkfalse": {
+      "legacy_values": 4208,
+      "success_receipt_id_values": 70,
+      "state_change_values": 2652
+    },
+    "hex_no_prefix-failedfalse-forktrue": {
+      "legacy_values": 4432,
+      "success_receipt_id_values": 70,
+      "state_change_values": 2652
+    },
+    "hex_no_prefix-failedtrue-forkfalse": {
+      "legacy_values": 4208,
+      "success_receipt_id_values": 70,
+      "state_change_values": 2652
+    },
+    "hex_no_prefix-failedtrue-forktrue": {
+      "legacy_values": 4432,
+      "success_receipt_id_values": 70,
+      "state_change_values": 2652
+    },
+    "tron_base58-failedfalse-forkfalse": {
+      "legacy_values": 4208,
+      "success_receipt_id_values": 70,
+      "state_change_values": 2652
+    },
+    "tron_base58-failedfalse-forktrue": {
+      "legacy_values": 4432,
+      "success_receipt_id_values": 70,
+      "state_change_values": 2652
+    },
+    "tron_base58-failedtrue-forkfalse": {
+      "legacy_values": 4208,
+      "success_receipt_id_values": 70,
+      "state_change_values": 2652
+    },
+    "tron_base58-failedtrue-forktrue": {
+      "legacy_values": 4432,
+      "success_receipt_id_values": 70,
+      "state_change_values": 2652
+    }
+  },
+  "totals": {
+    "legacy_values": 86400,
+    "success_receipt_id_values": 1400,
+    "state_change_values": 53040,
+    "populated_other_table_rows": 4480
+  },
+  "source_state_changes": {
+    "total": 221,
+    "types": {
+      "account_update": 111,
+      "access_key_update": 37,
+      "data_update": 73
+    },
+    "causes": {
+      "transaction_processing": 42,
+      "receipt_processing": 158,
+      "action_receipt_gas_reward": 21
+    }
+  },
+  "success_receipt_id_receipts": 1
+}

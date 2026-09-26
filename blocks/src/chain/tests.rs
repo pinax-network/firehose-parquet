@@ -490,13 +490,16 @@ fn inventory_lines(
     options: &MapperOptions,
     mapper: &mut dyn BlockMapper,
 ) -> Vec<String> {
-    inventory_lines_with(kind, options, mapper, |_, schema| schema.clone())
+    inventory_lines_with(kind, options, mapper, |_, schema| Some(schema.clone()))
 }
 
-/// Parent-outcome columns #550 appended to Tron, Antelope and NEAR tables.
-/// Solana's `transaction_success` predates #550 (#607) and is not listed.
-fn outcome_columns_550(kind: ChainKind, table: &str) -> &'static [&'static str] {
+/// Columns appended since the pre-#550 baseline: the #550 parent-outcome
+/// columns on Tron, Antelope and NEAR tables, and #507's NEAR
+/// `receipts.success_receipt_id`. Solana's `transaction_success` predates #550
+/// (#607) and is not listed.
+fn appended_columns(kind: ChainKind, table: &str) -> &'static [&'static str] {
     match (kind, table) {
+        (ChainKind::Near, "receipts") => &["success_receipt_id"],
         (ChainKind::Tron, "blocks") => &[],
         (ChainKind::Tron, _) => &["transaction_success"],
         (ChainKind::Antelope, "transactions") => &["transaction_success"],
@@ -508,9 +511,20 @@ fn outcome_columns_550(kind: ChainKind, table: &str) -> &'static [&'static str] 
     }
 }
 
-/// The schema without the #550 outcome columns, which must be its last fields.
-fn without_outcome_columns_550(kind: ChainKind, table: &str, schema: &Schema) -> Schema {
-    let added = outcome_columns_550(kind, table);
+/// Tables restructured (not only appended to) since the pre-#550 baseline:
+/// #507 rebuilt NEAR `state_changes`, which every known producer leaves empty.
+/// Their exact layout is pinned by their own tests.
+fn restructured_table(kind: ChainKind, table: &str) -> bool {
+    matches!((kind, table), (ChainKind::Near, "state_changes"))
+}
+
+/// The pre-#550 view of a schema: appended columns, which must be its last
+/// fields, removed; restructured tables left out.
+fn without_appended_columns(kind: ChainKind, table: &str, schema: &Schema) -> Option<Schema> {
+    if restructured_table(kind, table) {
+        return None;
+    }
+    let added = appended_columns(kind, table);
     let fields = schema.fields();
     let kept = fields.len() - added.len();
     let trailing: Vec<&str> = fields[kept..]
@@ -519,16 +533,19 @@ fn without_outcome_columns_550(kind: ChainKind, table: &str, schema: &Schema) ->
         .collect();
     assert_eq!(
         trailing, added,
-        "{kind} {table}: #550 columns are appended last"
+        "{kind} {table}: audit columns are appended last"
     );
-    Schema::new_with_metadata(fields[..kept].to_vec(), schema.metadata().clone())
+    Some(Schema::new_with_metadata(
+        fields[..kept].to_vec(),
+        schema.metadata().clone(),
+    ))
 }
 
 fn inventory_lines_with(
     kind: ChainKind,
     options: &MapperOptions,
     mapper: &mut dyn BlockMapper,
-    project: impl Fn(&str, &Schema) -> Schema,
+    project: impl Fn(&str, &Schema) -> Option<Schema>,
 ) -> Vec<String> {
     let context = format!(
         "{}|{:?}|ext={}|votes={}|fork={}|synth={}|failed={}",
@@ -545,13 +562,14 @@ fn inventory_lines_with(
     let mut tables: Vec<_> = batches.iter().collect();
     tables.sort_by(|left, right| left.0.cmp(right.0));
     for (table, batch) in tables {
-        let schema = project(table, &batch.schema());
-        lines.push(format!("{context}|{table}|{schema:?}"));
+        if let Some(schema) = project(table, &batch.schema()) {
+            lines.push(format!("{context}|{table}|{schema:?}"));
+        }
     }
     lines
 }
 
-fn schema_digest(project: impl Fn(ChainKind, &str, &Schema) -> Schema) -> String {
+fn schema_digest(project: impl Fn(ChainKind, &str, &Schema) -> Option<Schema>) -> String {
     let mut hasher = Sha256::new();
     for kind in ChainKind::ALL {
         for options in option_matrix() {
@@ -611,24 +629,26 @@ fn create_mapper_matches_the_legacy_constructor_dispatch_for_every_option() {
 #[test]
 fn every_mapper_schema_matches_the_pinned_digest() {
     assert_eq!(
-        schema_digest(|_, _, schema| schema.clone()),
+        schema_digest(|_, _, schema| Some(schema.clone())),
         CURRENT_SCHEMA_DIGEST
     );
 }
 
-/// Without the columns #550 appended, every schema of every family and option
-/// is exactly the pre-#550 schema. That pinned value was produced by the
-/// pre-#526 `create_mapper` on origin/main `9372f99` and held through #526.
+/// Without the columns appended by #550 and #507, every schema of every family
+/// and option is exactly the pre-#550 schema, except the restructured NEAR
+/// `state_changes`, which both sides leave out. The pinned value was produced by
+/// the same loop, with the same table left out, on origin/main `8462692` (after
+/// #526, before #550).
 #[test]
-fn removing_the_550_outcome_columns_restores_the_pre_550_schemas() {
+fn removing_appended_audit_columns_restores_the_pre_550_schemas() {
     assert_eq!(
-        schema_digest(without_outcome_columns_550),
-        PRE_550_SCHEMA_DIGEST
+        schema_digest(without_appended_columns),
+        PRE_550_SCHEMA_DIGEST_WITHOUT_RESTRUCTURED
     );
 }
 
 const CURRENT_SCHEMA_DIGEST: &str =
-    "14283beaab78c6ad4a3473f68f410b5dc45cfb411ca55c401cfee2b367fd871c";
+    "3016cf74a6850831805ed6a4d2176bcd2021e3256faeb1ecef7dd0c0bd8a6789";
 
-const PRE_550_SCHEMA_DIGEST: &str =
-    "68e8859576f696910042452f8815a6e7f9002c9357e4dd2a26edf30c61249dde";
+const PRE_550_SCHEMA_DIGEST_WITHOUT_RESTRUCTURED: &str =
+    "3ce80c35c066465df494458b6187eff2ef5714446e24356288f2d2aaf97cbd3f";

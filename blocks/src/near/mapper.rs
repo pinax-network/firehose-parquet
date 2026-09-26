@@ -172,6 +172,18 @@ struct ReceiptRowContext<'a> {
     receipt_status: &'static str,
 }
 
+/// The receipt a `SuccessReceiptId` outcome hands its result to (#507).
+fn success_receipt_id(outcome: &near::ExecutionOutcome) -> Option<&[u8]> {
+    match &outcome.status {
+        Some(near::execution_outcome::Status::SuccessReceiptId(status)) => status
+            .id
+            .as_ref()
+            .map(|id| id.bytes.as_ref())
+            .filter(|id| !id.is_empty()),
+        _ => None,
+    }
+}
+
 /// Get execution status string from an ExecutionOutcome.
 fn execution_status_str(outcome: &near::ExecutionOutcome) -> &'static str {
     match &outcome.status {
@@ -238,48 +250,71 @@ fn state_change_account_id(value: &near::StateChangeValue) -> &str {
     }
 }
 
-/// Extract key bytes from a state change value (data changes only), base64 encoded.
-fn state_change_key_base64(value: &near::StateChangeValue) -> String {
-    use base64_encode;
-    match &value.value {
-        Some(near::state_change_value::Value::DataUpdate(v)) => base64_encode(&v.key),
-        Some(near::state_change_value::Value::DataDeletion(v)) => base64_encode(&v.key),
-        _ => String::new(),
+/// The hash a state-change cause refers to (#507), split by what it identifies.
+///
+/// nearcore's `StateChangeCause` carries `tx_hash` only for
+/// `TransactionProcessing`; `ActionReceiptProcessingStarted`,
+/// `ActionReceiptGasReward`, `ReceiptProcessing` and `PostponedReceipt` carry a
+/// `receipt_hash`. The checked-in protobuf names the field `tx_hash` for the last
+/// three, but its value is the receipt hash.
+enum CauseHash<'a> {
+    Transaction(&'a [u8]),
+    Receipt(&'a [u8]),
+    None,
+}
+
+fn state_change_cause_hash(cause: &near::StateChangeCause) -> CauseHash<'_> {
+    use near::state_change_cause::Cause;
+    fn hash(hash: &Option<near::CryptoHash>) -> Option<&[u8]> {
+        hash.as_ref()
+            .map(|hash| hash.bytes.as_ref())
+            .filter(|bytes| !bytes.is_empty())
+    }
+    match &cause.cause {
+        Some(Cause::TransactionProcessing(c)) => {
+            hash(&c.tx_hash).map_or(CauseHash::None, CauseHash::Transaction)
+        }
+        Some(Cause::ActionReceiptProcessingStarted(c)) => {
+            hash(&c.receipt_hash).map_or(CauseHash::None, CauseHash::Receipt)
+        }
+        Some(Cause::ActionReceiptGasReward(c)) => {
+            hash(&c.tx_hash).map_or(CauseHash::None, CauseHash::Receipt)
+        }
+        Some(Cause::ReceiptProcessing(c)) => {
+            hash(&c.tx_hash).map_or(CauseHash::None, CauseHash::Receipt)
+        }
+        Some(Cause::PostponedReceipt(c)) => {
+            hash(&c.tx_hash).map_or(CauseHash::None, CauseHash::Receipt)
+        }
+        _ => CauseHash::None,
     }
 }
 
-/// Extract value bytes from a state change value (data updates only), base64 encoded.
-fn state_change_value_base64(value: &near::StateChangeValue) -> String {
-    use base64_encode;
+/// Data key and value of a state change: set for data updates (key and value)
+/// and data deletions (key only), absent otherwise (#507).
+fn state_change_data(value: &near::StateChangeValue) -> (Option<&[u8]>, Option<&[u8]>) {
     match &value.value {
-        Some(near::state_change_value::Value::DataUpdate(v)) => base64_encode(&v.value),
-        _ => String::new(),
+        Some(near::state_change_value::Value::DataUpdate(v)) => {
+            (Some(v.key.as_ref()), Some(v.value.as_ref()))
+        }
+        Some(near::state_change_value::Value::DataDeletion(v)) => (Some(v.key.as_ref()), None),
+        _ => (None, None),
     }
 }
 
-/// Simple base64 encoding (standard alphabet, with padding).
-fn base64_encode(data: &[u8]) -> String {
-    const CHARS: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = String::with_capacity((data.len() + 2) / 3 * 4);
-    for chunk in data.chunks(3) {
-        let b0 = chunk[0] as u32;
-        let b1 = if chunk.len() > 1 { chunk[1] as u32 } else { 0 };
-        let b2 = if chunk.len() > 2 { chunk[2] as u32 } else { 0 };
-        let triple = (b0 << 16) | (b1 << 8) | b2;
-        out.push(CHARS[((triple >> 18) & 0x3F) as usize] as char);
-        out.push(CHARS[((triple >> 12) & 0x3F) as usize] as char);
-        if chunk.len() > 1 {
-            out.push(CHARS[((triple >> 6) & 0x3F) as usize] as char);
-        } else {
-            out.push('=');
-        }
-        if chunk.len() > 2 {
-            out.push(CHARS[(triple & 0x3F) as usize] as char);
-        } else {
-            out.push('=');
-        }
+/// The account of an `AccountUpdate` state change (#507).
+fn state_change_account(value: &near::StateChangeValue) -> Option<&near::Account> {
+    match &value.value {
+        Some(near::state_change_value::Value::AccountUpdate(v)) => v.account.as_ref(),
+        _ => None,
     }
-    out
+}
+
+fn append_opt_bytes(column: &mut BytesColumn, value: Option<&[u8]>) {
+    match value {
+        Some(value) => column.append_value(value),
+        None => column.append_null(),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -410,8 +445,11 @@ impl NearBlockMapper {
         }
 
         // --- state_changes ---
-        for sc in &block.state_changes {
-            self.map_state_change(sc, identity, fork_step);
+        // The index is the position in the block's list, counting entries that
+        // are skipped for a missing value or cause (#507). A decodable block is
+        // far below u32::MAX entries (each takes at least two bytes).
+        for (index, sc) in block.state_changes.iter().enumerate() {
+            self.map_state_change(index as u32, sc, identity, fork_step);
         }
     }
 
@@ -560,6 +598,10 @@ impl NearBlockMapper {
             outcome.map_or(&[][..], |o| o.receipt_ids.as_slice()),
         );
         append_fork_step(&mut receipts.fork_step, fork_step);
+        append_opt_bytes(
+            &mut receipts.success_receipt_id,
+            outcome.and_then(success_receipt_id),
+        );
 
         if let Some(action_receipt) = action_receipt {
             for (action_index, action) in action_receipt.actions.iter().enumerate() {
@@ -638,6 +680,7 @@ impl NearBlockMapper {
 
     fn map_state_change(
         &mut self,
+        state_change_index: u32,
         sc: &near::StateChangeWithCause,
         identity: &PreparedIdentity,
         fork_step: Option<&str>,
@@ -651,23 +694,39 @@ impl NearBlockMapper {
             None => return,
         };
 
-        self.state_changes.canonical.append(identity);
-        self.state_changes
-            .r#type
-            .append_value(state_change_type_name(value));
-        self.state_changes
-            .cause
-            .append_value(state_change_cause_name(cause));
-        self.state_changes
+        let changes = &mut self.state_changes;
+        changes.canonical.append(identity);
+        changes.state_change_index.append_value(state_change_index);
+        changes.r#type.append_value(state_change_type_name(value));
+        changes.cause.append_value(state_change_cause_name(cause));
+        let (tx_hash, receipt_hash) = match state_change_cause_hash(cause) {
+            CauseHash::Transaction(hash) => (Some(hash), None),
+            CauseHash::Receipt(hash) => (None, Some(hash)),
+            CauseHash::None => (None, None),
+        };
+        append_opt_bytes(&mut changes.cause_tx_hash, tx_hash);
+        append_opt_bytes(&mut changes.cause_receipt_hash, receipt_hash);
+        changes
             .account_id
             .append_value(state_change_account_id(value));
-        self.state_changes
-            .key_base64
-            .append_value(&state_change_key_base64(value));
-        self.state_changes
-            .value_base64
-            .append_value(&state_change_value_base64(value));
-        append_fork_step(&mut self.state_changes.fork_step, fork_step);
+        let (key, data) = state_change_data(value);
+        append_opt_bytes(&mut changes.data_key, key);
+        append_opt_bytes(&mut changes.data_value, data);
+        let account = state_change_account(value);
+        changes
+            .amount
+            .append_option(account.map(|a| bigint_to_string(&a.amount)));
+        changes
+            .locked
+            .append_option(account.map(|a| bigint_to_string(&a.locked)));
+        changes
+            .storage_usage
+            .append_option(account.map(|a| a.storage_usage));
+        append_opt_bytes(
+            &mut changes.code_hash,
+            account.and_then(|a| a.code_hash.as_ref().map(|h| h.bytes.as_ref())),
+        );
+        append_fork_step(&mut changes.fork_step, fork_step);
     }
 }
 
@@ -825,7 +884,8 @@ impl BlockMapper for NearBlockMapper {
             + est_str(&self.receipts.tokens_burnt)
             + est_str(&self.receipts.executor_id)
             + self.receipts.receipt_ids.estimated_bytes()
-            + est_opt_str(&self.receipts.fork_step);
+            + est_opt_str(&self.receipts.fork_step)
+            + self.receipts.success_receipt_id.estimated_bytes();
         let receipt_actions = self.receipt_actions.canonical.estimated_bytes()
             + self.receipt_actions.receipt_id.estimated_bytes()
             + est_u32(&self.receipt_actions.receipt_index)
@@ -853,13 +913,21 @@ impl BlockMapper for NearBlockMapper {
             + est_str(&self.execution_logs.log)
             + est_opt_str(&self.execution_logs.fork_step)
             + estimated_dictionary_index_bytes(self.execution_logs.receipt_status.len());
-        let state_changes = self.state_changes.canonical.estimated_bytes()
-            + est_str(&self.state_changes.r#type)
-            + est_str(&self.state_changes.cause)
-            + est_str(&self.state_changes.account_id)
-            + est_str(&self.state_changes.key_base64)
-            + est_str(&self.state_changes.value_base64)
-            + est_opt_str(&self.state_changes.fork_step);
+        let changes = &self.state_changes;
+        let state_changes = changes.canonical.estimated_bytes()
+            + est_u32(&changes.state_change_index)
+            + estimated_dictionary_index_bytes(changes.r#type.len())
+            + estimated_dictionary_index_bytes(changes.cause.len())
+            + changes.cause_tx_hash.estimated_bytes()
+            + changes.cause_receipt_hash.estimated_bytes()
+            + est_str(&changes.account_id)
+            + changes.data_key.estimated_bytes()
+            + changes.data_value.estimated_bytes()
+            + est_str(&changes.amount)
+            + est_str(&changes.locked)
+            + est_u64(&changes.storage_usage)
+            + changes.code_hash.estimated_bytes()
+            + est_opt_str(&changes.fork_step);
         [
             ("blocks", blocks),
             ("chunks", chunks),
@@ -1056,6 +1124,8 @@ struct ReceiptsBuilder {
     executor_id: StringBuilder,
     receipt_ids: BytesListColumn,
     fork_step: Option<StringBuilder>,
+    /// `SuccessReceiptId` target (#507).
+    success_receipt_id: BytesColumn,
 }
 
 impl ReceiptsBuilder {
@@ -1075,6 +1145,7 @@ impl ReceiptsBuilder {
             executor_id: StringBuilder::new(),
             receipt_ids: BytesListColumn::new(encoding),
             fork_step: fork_step_builder(include_fork_step),
+            success_receipt_id: BytesColumn::new(encoding),
         }
     }
 
@@ -1095,6 +1166,7 @@ impl ReceiptsBuilder {
             self.receipt_ids.finish(),
         ]);
         finish_fork_step(&mut self.fork_step, &mut columns);
+        columns.push(self.success_receipt_id.finish());
         Ok(RecordBatch::try_new(Arc::new(schema.clone()), columns)?)
     }
 }
@@ -1216,11 +1288,18 @@ impl ExecutionLogsBuilder {
 
 struct StateChangesBuilder {
     canonical: CanonicalBuilder,
-    r#type: StringBuilder,
-    cause: StringBuilder,
+    state_change_index: UInt32Builder,
+    r#type: StringDictionaryBuilder<Int32Type>,
+    cause: StringDictionaryBuilder<Int32Type>,
+    cause_tx_hash: BytesColumn,
+    cause_receipt_hash: BytesColumn,
     account_id: StringBuilder,
-    key_base64: StringBuilder,
-    value_base64: StringBuilder,
+    data_key: BytesColumn,
+    data_value: BytesColumn,
+    amount: StringBuilder,
+    locked: StringBuilder,
+    storage_usage: UInt64Builder,
+    code_hash: BytesColumn,
     fork_step: Option<StringBuilder>,
 }
 
@@ -1228,11 +1307,18 @@ impl StateChangesBuilder {
     fn new(include_fork_step: bool, encoding: &EncodeBytes) -> Self {
         Self {
             canonical: CanonicalBuilder::with_encoding(encoding),
-            r#type: StringBuilder::new(),
-            cause: StringBuilder::new(),
+            state_change_index: UInt32Builder::new(),
+            r#type: StringDictionaryBuilder::new(),
+            cause: StringDictionaryBuilder::new(),
+            cause_tx_hash: BytesColumn::new(encoding),
+            cause_receipt_hash: BytesColumn::new(encoding),
             account_id: StringBuilder::new(),
-            key_base64: StringBuilder::new(),
-            value_base64: StringBuilder::new(),
+            data_key: BytesColumn::new(encoding),
+            data_value: BytesColumn::new(encoding),
+            amount: StringBuilder::new(),
+            locked: StringBuilder::new(),
+            storage_usage: UInt64Builder::new(),
+            code_hash: BytesColumn::new(encoding),
             fork_step: fork_step_builder(include_fork_step),
         }
     }
@@ -1240,11 +1326,18 @@ impl StateChangesBuilder {
     fn finish(&mut self, schema: &Schema) -> anyhow::Result<RecordBatch> {
         let mut columns = self.canonical.finish();
         columns.extend(vec![
+            Arc::new(self.state_change_index.finish()) as Arc<dyn Array>,
             Arc::new(self.r#type.finish()) as Arc<dyn Array>,
             Arc::new(self.cause.finish()) as Arc<dyn Array>,
+            self.cause_tx_hash.finish(),
+            self.cause_receipt_hash.finish(),
             Arc::new(self.account_id.finish()) as Arc<dyn Array>,
-            Arc::new(self.key_base64.finish()) as Arc<dyn Array>,
-            Arc::new(self.value_base64.finish()) as Arc<dyn Array>,
+            self.data_key.finish(),
+            self.data_value.finish(),
+            Arc::new(self.amount.finish()) as Arc<dyn Array>,
+            Arc::new(self.locked.finish()) as Arc<dyn Array>,
+            Arc::new(self.storage_usage.finish()) as Arc<dyn Array>,
+            self.code_hash.finish(),
         ]);
         finish_fork_step(&mut self.fork_step, &mut columns);
         Ok(RecordBatch::try_new(Arc::new(schema.clone()), columns)?)
@@ -1844,39 +1937,21 @@ pub(crate) mod tests {
         assert_eq!(sc_batch.num_rows(), 1);
         let schema = sc_batch.schema();
 
-        // Verify type and cause
-        let type_col = sc_batch
-            .column(schema.index_of("type").unwrap())
-            .as_any()
-            .downcast_ref::<StringArray>()
-            .unwrap();
-        assert_eq!(type_col.value(0), "DataUpdate");
-        let cause_col = sc_batch
-            .column(schema.index_of("cause").unwrap())
-            .as_any()
-            .downcast_ref::<StringArray>()
-            .unwrap();
-        assert_eq!(cause_col.value(0), "ReceiptProcessing");
-        let account_col = sc_batch
-            .column(schema.index_of("account_id").unwrap())
-            .as_any()
-            .downcast_ref::<StringArray>()
-            .unwrap();
-        assert_eq!(account_col.value(0), "contract.near");
-        // key_base64 for "mykey" is "bXlrZXk="
-        let key_col = sc_batch
-            .column(schema.index_of("key_base64").unwrap())
-            .as_any()
-            .downcast_ref::<StringArray>()
-            .unwrap();
-        assert_eq!(key_col.value(0), "bXlrZXk=");
-        // value_base64 for "myvalue" is "bXl2YWx1ZQ=="
-        let val_col = sc_batch
-            .column(schema.index_of("value_base64").unwrap())
-            .as_any()
-            .downcast_ref::<StringArray>()
-            .unwrap();
-        assert_eq!(val_col.value(0), "bXl2YWx1ZQ==");
+        let text = |name: &str| {
+            let column = sc_batch.column(schema.index_of(name).unwrap());
+            array_value_to_string(column, 0).unwrap()
+        };
+        assert_eq!(text("type"), "DataUpdate");
+        assert_eq!(text("cause"), "ReceiptProcessing");
+        assert_eq!(text("account_id"), "contract.near");
+        // Key and value follow the table encoding (#507).
+        assert_eq!(text("data_key"), "0x6d796b6579");
+        assert_eq!(text("data_value"), "0x6d7976616c7565");
+        // The protobuf's `tx_hash` of a ReceiptProcessing cause is a receipt hash.
+        assert_eq!(text("cause_receipt_hash"), format!("0x{}", "20".repeat(32)));
+        assert!(sc_batch
+            .column(schema.index_of("cause_tx_hash").unwrap())
+            .is_null(0));
     }
 
     #[test]
@@ -1922,16 +1997,6 @@ pub(crate) mod tests {
         assert_eq!(hex(&[]), "");
         assert_eq!(hex(&[0x01, 0x02, 0xff]), "0102ff");
         assert_eq!(crypto_hash_hex(&None), "");
-    }
-
-    #[test]
-    fn test_base64_encode() {
-        assert_eq!(base64_encode(b""), "");
-        assert_eq!(base64_encode(b"f"), "Zg==");
-        assert_eq!(base64_encode(b"fo"), "Zm8=");
-        assert_eq!(base64_encode(b"foo"), "Zm9v");
-        assert_eq!(base64_encode(b"mykey"), "bXlrZXk=");
-        assert_eq!(base64_encode(b"myvalue"), "bXl2YWx1ZQ==");
     }
 
     #[test]
@@ -2060,20 +2125,22 @@ pub(crate) mod tests {
             firehose_parquet::encode::encode_base58(&[0x30; 32])
         );
 
+        // The fixture's state change is an AccountUpdate: no data key or value
+        // (NULL, not ""), and its code hash follows the table encoding (#507).
         let state_changes_batch = &batches["state_changes"];
         let state_changes_schema = state_changes_batch.schema();
-        let key_col = state_changes_batch
-            .column(state_changes_schema.index_of("key_base64").unwrap())
-            .as_any()
-            .downcast_ref::<StringArray>()
-            .unwrap();
-        let value_col = state_changes_batch
-            .column(state_changes_schema.index_of("value_base64").unwrap())
-            .as_any()
-            .downcast_ref::<StringArray>()
-            .unwrap();
-        assert_eq!(key_col.value(0), "");
-        assert_eq!(value_col.value(0), "");
+        for name in ["data_key", "data_value"] {
+            assert!(state_changes_batch
+                .column(state_changes_schema.index_of(name).unwrap())
+                .is_null(0));
+        }
+        assert_eq!(
+            state_changes_schema
+                .field_with_name("code_hash")
+                .unwrap()
+                .data_type(),
+            &arrow::datatypes::DataType::Utf8
+        );
     }
 
     // -----------------------------------------------------------------------
