@@ -40,7 +40,11 @@ Related design docs:
   - `src/recovery.rs`: read-only ownership/control summaries and explicit provider-quiescent S3 owner release.
   - `src/encode.rs`: byte encoding modes (`hex`, `base58`, `tron_base58`, etc.).
   - `src/metrics.rs`: Prometheus metrics registry and `/metrics` server helpers.
-  - `src/rollup.rs`, `src/merge.rs`, `src/truncate.rs`: maintenance subcommand implementations.
+  - `src/rollup.rs`, `src/merge.rs`, `src/truncate.rs`: maintenance subcommand implementations (discovery, ownership, local and S3 storage hooks).
+  - `src/merge/engine.rs`: the one crash-safe partition merge sequence (journal claim, outputs, commit, deletes) and recovery step shared by local and S3; `src/merge_journal.rs` holds the journal records and `recover`; `src/merge/read.rs` the bounded S3 read windows.
+  - `src/rollup/engine.rs`: the one two-pass rollup group engine shared by local and S3; `src/rollup/range_reader.rs` the pinned S3 range reads.
+  - `src/maintenance/compaction.rs`: shared schema checks, receipt stripping, writer properties, streaming part writer and the merge/rollup `Encoder`.
+  - `src/maintenance/discovery.rs`: shared local walker policies, S3 listing, prefix-relative keys and whole-object reads for maintenance, verify, scan and validate.
   - `src/artifacts.rs`: reserved dataset artifact names (`cursor.parquet`, `partitions.parquet`, `merkle_roots.parquet`, `verify_runs/`) and `is_reserved_artifact_path`, which commands that walk a dataset tree use to skip them.
   - `src/s3.rs`: shared AWS configuration and S3 builder with explicit credential/retry policies used by writer/cursor/tools.
 - `blocks/`: chain-specific mapping crate and the unified binary.
@@ -103,9 +107,11 @@ Related design docs:
 - Change metrics names/labels/endpoint behavior:
   - `firehose-parquet/src/metrics.rs`
 - Change rollup/merge/truncate behavior:
-  - `firehose-parquet/src/rollup.rs`
-  - `firehose-parquet/src/merge.rs`
+  - `firehose-parquet/src/rollup.rs` and `firehose-parquet/src/rollup/engine.rs`
+  - `firehose-parquet/src/merge.rs`, `firehose-parquet/src/merge/engine.rs` and `firehose-parquet/src/merge_journal.rs`
   - `firehose-parquet/src/truncate.rs`
+  - `firehose-parquet/src/maintenance/{compaction,discovery}.rs` for encoding, schema checks and file discovery shared by several commands
+  - Engine changes apply to local and S3 alike; storage-specific steps stay in each command's local and S3 hook implementations.
 - Change protobuf definitions:
   - `proto/*.proto` (and `proto/core/*.proto` dependencies)
   - generated bindings are rebuilt by Cargo via `firehose-protos/build.rs`

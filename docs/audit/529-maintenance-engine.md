@@ -1,100 +1,170 @@
 # #529 maintenance engine consolidation
 
-Baseline main `81f5b79`, including the merged #528 CLI split. The original audit's four
-writer-property implementations already share writer/properties.rs after #519;
-merge and rollup still duplicate the identical transaction-metadata stripping
-wrapper. #522 already shares StreamingPartWriter, and #523 intentionally gives
-merge bounded whole-object windows while rollup retains pinned range reads.
-Those are accepted policies to preserve, not accidental duplication to erase.
+Baseline: `origin/main` `9372f99`, after the merged schema checks (#479/#542),
+merge journal (#480/#561), dataset ownership (#591), streaming rollup (#522/#604),
+bounded S3 maintenance concurrency (#523/#609), shared AWS configuration
+(#527/#610) and CLI modules (#528/#612).
 
-## Boundaries
+Prior art: Codex's unpushed commit `2ec6413` ("share schema and reader encoding
+engine") was cherry-picked unchanged with its authorship. Its uncommitted
+`maintenance/discovery.rs` and `rollup/engine.rs` drafts in the
+`fireparq-maintenance-engine-529` worktree were adopted, completed (the rollup
+engine was not yet wired or compiling) and tested. That worktree was only read.
 
-1. Introduce a private maintenance/compaction module for the shared schema check,
-   exact metadata policy and encoder. Move StreamingPartWriter without behavior
-   changes. Add one generic reader-to-encoder path used by local/S3 merge and
-   local/S3 rollup. Merge retains lazy first-nonempty writer initialization and
-   its current first-Some file-metadata behavior; rollup retains its all-input
-   row-validating preflight and first-file schema/metadata. The engine takes an
-   explicit initial schema/metadata mode, reader batch policy and publication
-   callback, returns checked row/file/byte stats, and never owns locks/journals.
-   Keep the different metadata initialization semantics explicit, not implicit
-   Option fallback that changes empty-file handling.
+## Re-scoped against current code
 
-2. Introduce a shared ObjectStore-backed *read location* and discovery layer,
-   using Arc<dyn ObjectStore> for S3 and LocalFileSystem for local file access
-   only where it preserves the existing semantics. Native std::fs traversal
-   remains an explicit local discovery policy if ObjectStore listing skips
-   symlinks, changes non-UTF8 paths, hidden paths or errors. Do not silently
-   convert every local walk into LocalFileSystem::list. Deduplicate traversal
-   with explicit policy knobs only for existing differences: missing-root
-   handling, case-sensitive extension vs verify's ASCII-insensitive local
-   extension, control-directory pruning, reserved-artifact filtering, exact
-   object vs prefix handling, ordering, retained path/display labels. Existing
-   S3 credentials, bucket routing and read/mutation retry policy stay at callers.
-   Read mode explicitly selects local file, S3 pinned page ranges, or S3 merge's
-   max4/64MiB complete-window reservation; verify's existing prefetch stays
-   bounded and ordered. A shared get/list helper must not weaken those contracts.
+The audit's figures predate the later fixes. Current state before this change:
 
-3. Share the compaction orchestration after the encoder boundary is proven:
-   backend adapters supply source inventory/preflight readers/publication and
-   mutation hooks, while one operation engine drives the chosen policy. Merge
-   and rollup grouping remains separate and observable behavior stays exact.
-   Merge's durable journal/publication/sync/deletion barriers must remain in
-   the same order. Local publication keeps create_new/temp+fsync+rename and
-   directory inode revalidation, old local run-lock compatibility and source
-   existence recheck after journal claim. S3 keeps owner checks, exact conditional
-   writes, original read versions, first-error stop/drain max10 deletes, no
-   mutation retry or delete after failed output/journal commit. Do not replace
-   these with generic LocalFileSystem::put or a broad bulk delete interface.
-   Rollup remains its existing two-pass group writer with caller's copy cleanup,
-   random names, in-place guard, same-storage restriction and per-group source
-   deletion. Truncate and verify share appropriate read/discovery pieces, not a
-   generic mutation wrapper that changes confirmation, recovery or registry CAS.
+| Audit claim | Current `9372f99` |
+|---|---|
+| `writer_properties` 4x | Shared by `writer::properties::for_schema` since #519; merge and rollup still had identical 13-line metadata wrappers (2x). |
+| File collectors 5x | Six native walkers: merge parquet, merge journals, rollup, truncate, verify, CLI scan/validate. |
+| S3 listing 6x | Six inline `list(prefix).try_collect()` blocks, plus five inlined prefix-relative key copies. |
+| "Rollup is merge with a different grouping key" | They already shared `StreamingPartWriter` (#604) and `SchemaCheck`, but each command still had its own local and S3 copies of its orchestration: two ~200-line merge partition sequences with two grouping loops, header printers and recovery loops, two rollup group loops, and four per-batch encode loops. |
+| Use `Arc<dyn ObjectStore>` with `LocalFileSystem` locally | Rejected, see below. |
 
-## Qualification
+Merge and rollup keep separate orchestration. Their contracts differ on purpose:
+merge is per directory, journaled, deterministic `part-NNNNNN` numbering, lazy
+writer with first-available footer, bounded 4-object/64 MiB whole-object windows
+(#523); rollup groups across directories, validates every source (schema and row
+count) in a first pass, uses random run-id names with copy/in-place rules and
+pinned range reads (#522). Folding them into one sequence would change naming,
+crash-safety and memory semantics. They share the encoder beneath that level.
 
-First freeze fixtures/outcomes from the current production methods, including:
-- local/S3 merge and rollup rows, complete Arrow types/nullability/metadata, part
-  counts and row boundaries, metadata absent/empty/present, leading empty files,
-  zero-row sets, missing paths, mixed schemas, corrupt later inputs;
-- scan/validate/verify/truncate selection under explicit file/root/prefix,
-  extension case, reserved/control trees, sibling textual prefixes, symlinks and
-  representative display paths (including spaces/percent characters);
-- both merge journals at after-outputs, after-commit and after-first-delete, all
-  current owner/path/capability and read/delete concurrency faults;
-- schema mismatch status/messages, no-op estimate, dry-run stats and no writes,
-  all rollup grouping/copy/in-place modes, existing verify hashes and reports;
-- no large-object memory regression; retain #522/#523 reservation tests and run
-  representative guarded baseline/candidate equality and memory measurements.
+### Why local storage stays on `std::fs`
 
-Do not claim #529 complete merely for moving helpers. The final review must show
-one shared compaction path, shared storage/discovery rules with explicitly
-preserved differences, actual duplication removed, full current-main validation
-and documented exceptions. The old approximate1,500-line estimate is not a goal
-for code golf; report actual net production reduction and prior deduplication.
+`LocalFileSystem` would change observable behavior: symlink handling, non-UTF-8
+names, `read_dir` error kinds, and it cannot express `create_new` +
+fsync + rename + directory fsync outputs, hard-link journal claims, directory
+inode revalidation (#591) or recognition of the legacy local run lock. Instead,
+each engine takes a small storage trait: S3 implements it with the existing
+`Arc<dyn ObjectStore>` code, local with the existing `std::fs` code.
 
-## Stage 1: shared reader/encoder
+## What was consolidated
 
-The private `maintenance::compaction` module now owns the previously shared
-StreamingPartWriter plus schema comparison and transaction-metadata stripping.
-One Encoder drives decoded input batches for local/S3 merge and rollup. The moved
-helper bodies are unchanged; independent review compared them to `81f5b79`.
-Storage ownership, discovery, journals, callbacks and deletion order remain at
-their previous call sites in this checkpoint.
+| Shared piece | Replaces | Kept per storage or command |
+|---|---|---|
+| `maintenance::compaction`: `StreamingPartWriter`, `SchemaCheck`, `writer_properties`, receipt stripping, `Encoder` | 2 metadata wrappers; 4 per-batch encode loops (merge local/S3, rollup local/S3) | Merge's lazy first-nonempty writer and first-`Some` footer; rollup's first-file schema/footer, checked row count |
+| `maintenance::discovery`: `collect_local` + `LocalPolicy`, `list_objects`, `relative_key`, `read_object_bytes` | 6 native walkers; 6 S3 listings; 5 relative-key copies; 3 whole-object reads (scan, inspect, validate) | Missing-root handling, control pruning, verify's case-insensitive extension, exact journal name; filtering, sorting, HEAD fallback, clients and retries stay with callers |
+| `rollup::engine` (`Backend`: `Local`, `Remote`) | 2 two-pass group loops | Local revalidation, `create_new` publication and per-file error context; S3 put with retained-sources error, same-bucket source filter, batched single-attempt deletes |
+| `merge::engine` (`PartitionMerge`: `LocalMerge`, `S3PartitionMerge`) | 2 partition sequences, 2 grouping loops, 2 table-header printers, 2 recovery loops | Source sizing, footer reads (local files vs S3 windows), claim-time ownership check in its original order, local changed-source recheck, publication, deletion and crash points |
+| `truncate::plan` | 2 select/report/confirm flows | Inventory, displayed location, deletion and local empty-directory cleanup |
+| CLI `scan_files`, `build_scan_file_result`, `no_files_result` | 2 scan loops, 2 file-result builders, 2 empty validate results | Listing, display paths and error messages |
 
-Merge accepts the first Some footer only until the first nonempty batch starts
-its writer. A later Some cannot supply metadata retroactively. Rollup freezes
-the first input's schema/metadata even if that input is empty. SchemaCheck still
-compares ordered field names, types and nullability while intentionally ignoring
-top-level schema/field metadata. Full output metadata is separately qualified.
+The shared merge sequence is exactly the pre-existing one:
 
-The new six-sequence metadata regression covers absent, empty and populated
-footers, leading empty inputs, nonempty inputs without metadata and all-empty
-groups under both command policies. Three existing writer boundary/memory tests
-moved unchanged. All targeted compaction, merge and rollup tests passed. The first
-compile exposed a missing test-only DataType import, fixed before the clean run.
-Stage 1 alone does not complete #529; shared discovery and orchestration follow.
+```
+estimate -> schema preflight -> journal claim -> [local: changed-source recheck]
+-> streamed outputs -> sync -> after-outputs -> owner check -> commit
+-> after-commit -> source deletes (after-first-delete) -> sync
+-> journal removal -> sync
+```
 
-The baseline executable was preserved before edits (SHA-256
-`6fb841b4f0331348fcaa5863d836ac9d7e65e63c4dfbd3ecda861b1eee6a498c`).
-Builds and later measurements share the repository qualification process lock.
+`S3Partition::sync` was and remains a no-op, so the shared syncs keep the S3
+request sequence unchanged. Output names, journal contents, printed messages,
+tracing fields and targets are unchanged. Code moved into `merge::engine` and
+`rollup::engine` sets the old `firehose_parquet::merge` and
+`firehose_parquet::rollup` log targets explicitly, so `RUST_LOG` filters still
+match.
+
+## Deliberately left separate
+
+- `merge_journal::recover` and `recover_remote_journal`/`recover_guarded_for_ingestion`:
+  the guarded ingestion recovery has request deadlines, uncertainty marking and a
+  separate journal barrier (#468). Merging them would change crash semantics.
+- Merge's bounded S3 read windows and rollup's pinned range reads (#523, #522).
+- Verify's ordered prefetcher, and its atomic local vs conditional S3 registry
+  and report writers.
+- Rollup's and truncate's `cleanup_empty_dirs`: they differ in root removal,
+  control-tree skipping, error handling and counting.
+- `retry_merge_s3_operation` and other single-command policy code with no
+  local/S3 twin.
+
+## Equivalence evidence
+
+Unit tests (all pre-existing tests pass unmodified; the merge and rollup test
+modules only gained a local helper for the removed walker name):
+
+- Discovery: every policy against frozen `origin/main` copies of all six walkers
+  (append order, error kind and message, symlinks, broken links, controls,
+  missing and non-directory roots, permission errors; non-UTF-8 names where the
+  filesystem allows them), the raw listing against the former inline form, and
+  `relative_key` against the inlined copies.
+- Encoder: frozen copies of the four `origin/main` encode loops compared byte for
+  byte with `Encoder` over 4 input sets x 8 settings (32 comparisons: receipt
+  metadata, leading empty files, late footers, all-empty, single file,
+  compression/flush-bytes/flush-rows/initial part). Codex's footer-selection test
+  covers six metadata sequences under both command policies.
+- Engines: recording fixtures pin the merge step order above, each crash point,
+  owner check before commit, in-use claims, changed sources, empty inputs,
+  dry-run/mismatch/no-op preflight and recovery admission; and the rollup hook
+  order per group, copy mode, empty/corrupt preflight, mixed schemas, changed row
+  counts and failures in every mutation hook.
+- Cross-backend: the same sources merge and roll up into identical part names and
+  bytes locally and on an in-memory object store; truncate selects identical files
+  and sizes locally and in memory under eight filter sets.
+
+End-to-end, local data only: the `origin/main` release binary (`9372f99`) and
+the branch release binary ran the same 24 scenarios (33 CLI steps) on fresh
+copies of the retained mainnet blocks 24000000-24000029 dataset (13 tables,
+1,049,978 rows, minute partitions):
+
+- merge: default, `--flush-rows 700 --compression snappy`, `--dry-run`, one table
+  with `--flush-bytes 65536`, and kills (`FIREPARQ_TEST_MERGE_CRASH_AT`) at
+  `after-outputs`, `after-commit` (then a dry run) and `after-first-delete`,
+  each followed by the recovering run;
+- rollup: copy mode to hour twice (replacing the earlier copy), copy mode to date
+  with `--flush-bytes 65536`, in place to date, in place to hour with 64 KiB
+  snappy parts, and the refused in-place run without `--delete-source`;
+- truncate: `--dry-run`, no `--yes` (refused), `--yes` with two filters, a table,
+  and the network root;
+- verify with an explicit registry (update then deep/roots+protocol comparisons,
+  including before and after a merge), validate, scan (`--json`, schema only) and
+  inspect.
+
+Every step had the same exit code and the same stdout/stderr at debug log level
+(timestamps, durations and random run ids normalized). All 4,601 resulting files
+(4,543 Parquet) had identical SHA-256 digests; rollup names were compared with
+their run ids normalized, and the verify registry by content without
+`updated_at`. DuckDB compared 325 table snapshots (25,565,136 rows): row counts
+were equal and `EXCEPT ALL` returned 0 rows in both directions for every table.
+The self-comparison of the baseline binary with itself was also all-equal, which
+validated the normalization.
+
+## Line counts
+
+Measured against `origin/main` with inline `#[cfg(test)] mod tests` blocks and
+test files counted separately.
+
+| | Before | After | Change |
+|---|---:|---:|---:|
+| Production lines (touched files and new modules) | 8,201 | 8,451 | +250 |
+| Production code lines (without blanks and comments) | 7,087 | 7,229 | +142 |
+| Test lines | 4,370 | 6,076 | +1,706 |
+
+`merge.rs` lost 510 production lines and `rollup.rs` 291, while the new shared
+modules added 1,133 (including module and trait documentation). The audit's
+"about 1,500 fewer lines" did not materialize: #519, #522/#604 and #523/#609
+had already removed the writer-property and streaming duplication, and the
+remaining duplication was control flow. Collapsing it into one sequence per
+command with typed storage hooks is roughly line-neutral. The result is one
+implementation of each maintenance sequence instead of two to six, so a fix to
+the merge journal order, rollup barriers, truncate selection, discovery rules or
+encoding now reaches local and S3 alike.
+
+## Found while preserving behavior
+
+`max_part_number_in_s3_objects` ignores objects without a `/` in their key, and
+the S3 written-output set prefixes names with `{partition_key}/`. Merging part
+files that sit directly at an S3 bucket root (empty prefix) therefore numbers the
+output `part-000001.parquet` over an existing source and then deletes it with the
+other sources. An in-memory reproduction on `origin/main` reported one merged
+partition and left no rows. This change preserves the logic exactly; the fix is
+tracked separately.
+
+## Validation
+
+- `cargo fmt --all --check`
+- `cargo test --workspace --locked`: see the pull request for the final count
+  after rebasing on current main.
+- The E2E harness and its self-comparison, described above.

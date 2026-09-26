@@ -128,3 +128,5 @@ any external recovery condition, such as a dependency security rescan.
 - [#527 shared AWS options and S3 construction](527-shared-aws-configuration.md).
 
 - [#528 CLI module extraction and unchanged-item proof](528-cli-modules.md).
+
+- [#529 shared local/S3 maintenance engines and byte-identical equivalence](529-maintenance-engine.md).
