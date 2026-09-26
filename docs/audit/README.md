@@ -12,6 +12,7 @@ lifecycle state; a local implementation or passing test alone is not closure.
 - [#470: exact S3 cursor buckets](470-s3-cursor-buckets.md)
 - [#498: EVM log indices and optional tables](498-evm-log-indices.md)
 - [#499: offline EVM golden-block regression](499-evm-golden-fixture.md)
+- [Validation follow-ups 16-17: owned EVM mapping path and EIP-7702 golden block](validation-misc-followups-evm.md)
 - [#511: Bitcoin amounts and input metadata](511-bitcoin-values.md)
 - [#509: Tron contracts, receipts and internal values](509-tron-contract-fields.md)
 - [#509: bounded native RPC qualification and retained evidence](509-tron-rpc-qualification.md)

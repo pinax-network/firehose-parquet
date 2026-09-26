@@ -38,3 +38,4 @@ parquet = { version = "60", features = ["arrow"] }
 tempfile = "3"
 tonic.workspace = true
 tonic-prost = "0.14"
+zstd = "0.14"
