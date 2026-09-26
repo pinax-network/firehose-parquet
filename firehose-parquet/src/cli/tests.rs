@@ -1,6 +1,5 @@
 use super::*;
 use crate::config::{Compression, Partition};
-use crate::traits::BlockIdentity;
 use clap::{CommandFactory, Parser};
 use serial_test::serial;
 
@@ -635,7 +634,6 @@ fn test_build_config() {
     let config = build_config(&cli.common).expect("build_config should succeed");
     assert_eq!(config.endpoint, "https://example.com:443");
     assert_eq!(config.start_block, Some(100));
-    assert!(config.skip_missing_blocks);
     assert_eq!(config.compression, Compression::Gzip);
     assert_eq!(config.partition, Partition::Date);
     assert!(config.flush_rows.is_none());
@@ -3471,154 +3469,6 @@ fn test_resolve_s3_output_root_requires_output_or_bucket() {
         .contains("--output is required unless --s3-bucket or S3_BUCKET is set"));
 }
 
-#[test]
-fn test_partition_index_builder_snapshot_includes_active_row() {
-    let mut builder =
-        PartitionIndexBuilder::new("eth-mainnet", vec![PartitionBuildType::Date]).expect("builder");
-    builder
-        .observe_block(&BlockIdentity {
-            block_num: 100,
-            timestamp: 1_690_815_540,
-            ..Default::default()
-        })
-        .expect("observe first block");
-    builder
-        .observe_block(&BlockIdentity {
-            block_num: 101,
-            timestamp: 1_690_815_590,
-            ..Default::default()
-        })
-        .expect("observe second block");
-
-    let rows = builder.snapshot(102).expect("snapshot rows");
-    assert_eq!(rows.len(), 1);
-    assert_eq!(rows[0].partition_type, "date");
-    assert_eq!(rows[0].start_block, 100);
-    assert_eq!(rows[0].stop_block, 102);
-    assert_eq!(builder.current_frontier(), Some(102));
-}
-
-#[test]
-fn test_build_partition_rows_from_blocks_mixed_types_and_contiguous() {
-    let blocks = vec![
-        BlockIdentity {
-            block_num: 100,
-            timestamp: 1_690_815_540,
-            ..Default::default()
-        },
-        BlockIdentity {
-            block_num: 101,
-            timestamp: 1_690_815_590,
-            ..Default::default()
-        },
-        BlockIdentity {
-            block_num: 102,
-            timestamp: 1_690_815_600,
-            ..Default::default()
-        },
-    ];
-
-    let rows = build_partition_rows_from_blocks(
-        "eth-mainnet",
-        vec![PartitionBuildType::Date, PartitionBuildType::Hour],
-        &blocks,
-        103,
-    )
-    .expect("build rows");
-
-    assert_eq!(rows.len(), 3);
-
-    let date_rows: Vec<_> = rows
-        .iter()
-        .filter(|row| row.partition_type == "date")
-        .collect();
-    assert_eq!(date_rows.len(), 1);
-    assert_eq!(date_rows[0].partition_value, "2023-07-31 00:00:00");
-    assert_eq!(date_rows[0].start_block, 100);
-    assert_eq!(date_rows[0].stop_block, 103);
-
-    let hour_rows: Vec<_> = rows
-        .iter()
-        .filter(|row| row.partition_type == "hour")
-        .collect();
-    assert_eq!(hour_rows.len(), 2);
-    assert_eq!(hour_rows[0].partition_value, "2023-07-31 14:00:00");
-    assert_eq!(hour_rows[0].start_block, 100);
-    assert_eq!(hour_rows[0].stop_block, 102);
-    assert_eq!(hour_rows[1].partition_value, "2023-07-31 15:00:00");
-    assert_eq!(hour_rows[1].start_block, 102);
-    assert_eq!(hour_rows[1].stop_block, 103);
-}
-
-#[test]
-fn test_build_partition_rows_from_blocks_handles_first_streamable_block() {
-    let blocks = vec![BlockIdentity {
-        block_num: 500,
-        timestamp: 1_690_815_540,
-        ..Default::default()
-    }];
-
-    let rows = build_partition_rows_from_blocks(
-        "eth-mainnet",
-        vec![PartitionBuildType::Hour],
-        &blocks,
-        501,
-    )
-    .expect("build rows");
-
-    assert_eq!(rows.len(), 1);
-    assert_eq!(rows[0].start_block, 500);
-    assert_eq!(rows[0].stop_block, 501);
-    assert_eq!(rows[0].partition_value, "2023-07-31 14:00:00");
-}
-
-#[test]
-fn test_partition_index_builder_resume_extends_terminal_rows() {
-    let existing_rows = vec![PartitionBuildRow {
-        partition_type: "hour".to_string(),
-        partition_interval_seconds: 3_600,
-        partition_start_ts: "2023-07-31 14:00:00".to_string(),
-        partition_value: "2023-07-31 14:00:00".to_string(),
-        start_block: 100,
-        stop_block: 102,
-        start_time: Some("2023-07-31 14:59:00".to_string()),
-        end_time: Some("2023-07-31 14:59:50".to_string()),
-        chain: Some("eth-mainnet".to_string()),
-    }];
-
-    let (mut builder, resume_start_block) = PartitionIndexBuilder::resume_from_existing(
-        "eth-mainnet",
-        vec![PartitionBuildType::Hour],
-        existing_rows,
-    )
-    .expect("resume builder");
-    assert_eq!(resume_start_block, 102);
-
-    builder
-        .observe_block(&BlockIdentity {
-            block_num: 102,
-            timestamp: 1_690_815_590,
-            ..Default::default()
-        })
-        .expect("same-hour block");
-    builder
-        .observe_block(&BlockIdentity {
-            block_num: 103,
-            timestamp: 1_690_815_600,
-            ..Default::default()
-        })
-        .expect("next-hour block");
-
-    let rows = builder.finish(104).expect("finish resumed build");
-    assert_eq!(rows.len(), 2);
-    assert_eq!(rows[0].partition_value, "2023-07-31 14:00:00");
-    assert_eq!(rows[0].start_block, 100);
-    assert_eq!(rows[0].stop_block, 103);
-    assert_eq!(rows[1].partition_value, "2023-07-31 15:00:00");
-    assert_eq!(rows[1].start_block, 103);
-    assert_eq!(rows[1].stop_block, 104);
-}
-
 fn block_range_row(start_block: u64, stop_block: u64, block_range_size: u64) -> PartitionBuildRow {
     PartitionBuildRow {
         partition_type: "block_range".to_string(),
@@ -3631,57 +3481,6 @@ fn block_range_row(start_block: u64, stop_block: u64, block_range_size: u64) -> 
         end_time: None,
         chain: Some("solana-mainnet-beta".to_string()),
     }
-}
-
-#[test]
-fn test_partition_index_builder_resume_block_range_uses_numeric_frontier() {
-    let existing_rows = vec![
-        block_range_row(90_000_000, 100_000_000, 10_000_000),
-        block_range_row(100_000_000, 110_000_000, 10_000_000),
-    ];
-
-    let (_builder, resume_start_block) = PartitionIndexBuilder::resume_from_existing(
-        "solana-mainnet-beta",
-        vec![PartitionBuildType::BlockRange],
-        existing_rows,
-    )
-    .expect("resume builder");
-
-    assert_eq!(resume_start_block, 110_000_000);
-}
-
-#[test]
-fn test_partition_index_builder_resume_block_range_accepts_partial_terminal_row() {
-    let existing_rows = vec![
-        block_range_row(400_000_000, 400_100_000, 100_000),
-        block_range_row(400_100_000, 400_150_000, 100_000),
-    ];
-
-    let (_builder, resume_start_block) = PartitionIndexBuilder::resume_from_existing(
-        "solana-mainnet-beta",
-        vec![PartitionBuildType::BlockRange],
-        existing_rows,
-    )
-    .expect("resume builder");
-
-    assert_eq!(resume_start_block, 400_150_000);
-}
-
-#[test]
-fn test_partition_index_builder_resume_block_range_rejects_gap() {
-    let err = PartitionIndexBuilder::resume_from_existing(
-        "solana-mainnet-beta",
-        vec![PartitionBuildType::BlockRange],
-        vec![
-            block_range_row(400_000_000, 400_100_000, 100_000),
-            block_range_row(400_200_000, 400_300_000, 100_000),
-        ],
-    )
-    .expect_err("gap should fail");
-
-    assert!(err
-        .to_string()
-        .contains("partition type block_range has gap"));
 }
 
 #[test]
@@ -3748,31 +3547,6 @@ fn test_read_partitions_build_rows_sorts_block_range_numerically() {
         .map(|row| row.partition_value.as_str())
         .collect::<Vec<_>>();
     assert_eq!(values, ["8000000", "9000000", "10000000", "11000000"]);
-}
-
-#[test]
-fn test_partition_index_builder_sorts_block_range_rows_numerically() {
-    let mut builder =
-        PartitionIndexBuilder::new("solana-mainnet-beta", vec![PartitionBuildType::BlockRange])
-            .expect("builder")
-            .with_block_range_size(1_000_000);
-    for block_num in [8_000_000, 9_000_000, 10_000_000, 11_000_000] {
-        builder
-            .observe_block(&BlockIdentity {
-                block_num,
-                timestamp: 1_690_815_540,
-                ..Default::default()
-            })
-            .expect("observe block");
-    }
-
-    let starts =
-        |rows: &[PartitionBuildRow]| rows.iter().map(|row| row.start_block).collect::<Vec<_>>();
-    let expected = [8_000_000, 9_000_000, 10_000_000, 11_000_000];
-    let snapshot = builder.snapshot(11_500_000).expect("snapshot rows");
-    assert_eq!(starts(&snapshot), expected);
-    let rows = builder.finish(12_000_000).expect("finish rows");
-    assert_eq!(starts(&rows), expected);
 }
 
 #[test]

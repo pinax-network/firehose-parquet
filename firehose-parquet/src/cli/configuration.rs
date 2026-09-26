@@ -170,7 +170,6 @@ pub fn build_config(args: &CommonArgs) -> anyhow::Result<Config> {
         jwt_token: credentials.jwt_token,
         start_block: args.start_block,
         stop_block: args.stop_block,
-        skip_missing_blocks: true,
         cursor_path: Some(args.cursor.to_string_lossy().to_string()),
         output,
         partition: parse_partition(&args.partition, args.block_range_size)?,

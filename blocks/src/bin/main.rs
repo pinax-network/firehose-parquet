@@ -1420,7 +1420,6 @@ async fn run_partitions_build(
         jwt_token: credentials.jwt_token,
         start_block,
         stop_block,
-        skip_missing_blocks: true,
         cursor_path: None,
         output: PathBuf::from(&output_root),
         partition: Partition::None,
@@ -1802,10 +1801,9 @@ async fn build_verified_block_range_index(
             .checked_add(size)
             .context("block-range boundary overflow")?;
         let end = natural_stop.min(stop);
-        let mut row = build_block_range_partition_row(
-            client, chain, current, end, size, timeout, true, probes,
-        )
-        .await?;
+        let mut row =
+            build_block_range_partition_row(client, chain, current, end, size, timeout, probes)
+                .await?;
         row.partition_value = aligned.to_string();
         row.partition_start_ts = aligned.to_string();
         spans.push(VerifiedPartitionSpan {
@@ -1944,16 +1942,12 @@ struct ProbeRetryPolicy {
 }
 
 impl ProbeRetryPolicy {
-    /// Default policy. Without `confirm_missing`, a "not found" answer is accepted at once,
-    /// which is used once a run of missing blocks is already established.
-    fn new(confirm_missing: bool) -> Self {
+    /// Default policy: a "not found" answer is confirmed by every retry before the
+    /// block is accepted as missing.
+    fn confirm_missing() -> Self {
         Self {
             max_attempts: PARTITIONS_PROBE_FETCH_MAX_ATTEMPTS,
-            missing_attempts: if confirm_missing {
-                PARTITIONS_PROBE_FETCH_MAX_ATTEMPTS
-            } else {
-                1
-            },
+            missing_attempts: PARTITIONS_PROBE_FETCH_MAX_ATTEMPTS,
             initial_backoff: PARTITIONS_PROBE_FETCH_INITIAL_BACKOFF,
         }
     }
@@ -1976,13 +1970,12 @@ enum ProbeFetch<T> {
 /// - timeouts and transient errors are retried up to `policy.max_attempts`, then returned; they
 ///   never count as a missing block, so a slow endpoint cannot make probing skip real blocks
 /// - "not found" is retried up to `policy.missing_attempts`, then reported as
-///   [`ProbeFetch::Missing`] when `skip_missing_blocks` is set (returned as an error otherwise)
+///   [`ProbeFetch::Missing`] (missing blocks, such as skipped Solana slots, are always skipped)
 /// - fatal errors (authentication, permissions) are returned immediately
 async fn retry_probe_fetch_with_policy<T, Op, Fut>(
     block_num: u64,
     context: &str,
     policy: ProbeRetryPolicy,
-    skip_missing_blocks: bool,
     probe_counter: &AtomicU64,
     mut op: Op,
 ) -> Result<ProbeFetch<T>>
@@ -2004,7 +1997,7 @@ where
 
         let kind = classify_fetch_error(&error);
         match kind {
-            FetchErrorKind::NotFound if skip_missing_blocks && attempt >= missing_attempts => {
+            FetchErrorKind::NotFound if attempt >= missing_attempts => {
                 debug!(
                     block_num,
                     context,
@@ -2067,7 +2060,6 @@ async fn probe_block_range_boundary_timestamp(
     client: &FirehoseClient,
     block_num: u64,
     probe_timeout: Duration,
-    skip_missing_blocks: bool,
     probe_counter: &AtomicU64,
 ) -> Result<Option<i64>> {
     // A missing boundary may have a nullable timestamp. Endpoint failures are
@@ -2075,8 +2067,7 @@ async fn probe_block_range_boundary_timestamp(
     let outcome = retry_probe_fetch_with_policy(
         block_num,
         "probing block-range boundary timestamp",
-        ProbeRetryPolicy::new(true),
-        skip_missing_blocks,
+        ProbeRetryPolicy::confirm_missing(),
         probe_counter,
         || probe_fetch_block(client, block_num, Some(probe_timeout)),
     )
@@ -2094,23 +2085,16 @@ async fn build_block_range_partition_row(
     partition_end: u64,
     block_range_size: u64,
     probe_timeout: Duration,
-    skip_missing_blocks: bool,
     probe_counter: &AtomicU64,
 ) -> Result<PartitionBuildRow> {
-    let start_time = probe_block_range_boundary_timestamp(
-        client,
-        boundary,
-        probe_timeout,
-        skip_missing_blocks,
-        probe_counter,
-    )
-    .await?;
+    let start_time =
+        probe_block_range_boundary_timestamp(client, boundary, probe_timeout, probe_counter)
+            .await?;
     let end_time = if partition_end > boundary + 1 {
         probe_block_range_boundary_timestamp(
             client,
             partition_end.saturating_sub(1),
             probe_timeout,
-            skip_missing_blocks,
             probe_counter,
         )
         .await?
@@ -6249,7 +6233,6 @@ mod tests {
                 missing_attempts: 3,
                 initial_backoff: Duration::from_millis(0),
             },
-            true,
             &probe_counter,
             {
                 let attempts = Arc::clone(&attempts);
@@ -6286,7 +6269,6 @@ mod tests {
                 missing_attempts: 3,
                 initial_backoff: Duration::from_millis(0),
             },
-            false,
             &probe_counter,
             {
                 let attempts = Arc::clone(&attempts);
@@ -6323,7 +6305,6 @@ mod tests {
                 missing_attempts: 3,
                 initial_backoff: Duration::from_millis(0),
             },
-            false,
             &probe_counter,
             {
                 let attempts = Arc::clone(&attempts);
@@ -6355,7 +6336,6 @@ mod tests {
                 missing_attempts: 3,
                 initial_backoff: Duration::from_millis(0),
             },
-            true,
             &probe_counter,
             || async {
                 Err::<ProbeFetch<u64>, _>(tonic::Status::unauthenticated("bad token").into())
@@ -6380,7 +6360,6 @@ mod tests {
                 missing_attempts: 3,
                 initial_backoff: Duration::from_millis(0),
             },
-            true,
             &probe_counter,
             {
                 let attempts = Arc::clone(&attempts);
@@ -6415,7 +6394,6 @@ mod tests {
                 missing_attempts: 1,
                 initial_backoff: Duration::from_millis(0),
             },
-            true,
             &probe_counter,
             || async {
                 Err::<ProbeFetch<u64>, _>(tonic::Status::not_found("block 43 not found").into())
@@ -6853,7 +6831,6 @@ mod tests {
                 missing_attempts: 3,
                 initial_backoff: Duration::from_millis(0),
             },
-            true,
             &probe_counter,
             || async { Err::<ProbeFetch<u64>, _>(probe_timeout_error(42)) },
         )

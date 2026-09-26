@@ -1,9 +1,7 @@
 //! Partition command models, vocabulary and shared bound helpers.
 use super::*;
-mod builder;
 mod io;
 mod queries;
-pub use builder::*;
 pub use io::*;
 pub use queries::*;
 
@@ -429,17 +427,6 @@ pub(in crate::cli) fn sort_keyed_partition_rows(rows: &mut [(u64, PartitionBuild
             .then_with(|| left.start_block.cmp(&right.start_block))
             .then_with(|| left.stop_block.cmp(&right.stop_block))
     });
-}
-
-pub(in crate::cli) fn sort_partition_build_rows(
-    rows: Vec<PartitionBuildRow>,
-) -> anyhow::Result<Vec<PartitionBuildRow>> {
-    let mut keyed = rows
-        .into_iter()
-        .map(|row| Ok((row.partition_key()?, row)))
-        .collect::<anyhow::Result<Vec<_>>>()?;
-    sort_keyed_partition_rows(&mut keyed);
-    Ok(keyed.into_iter().map(|(_, row)| row).collect())
 }
 
 /// Parse a user-supplied partition bound (for example `--from`) against a partition type.

@@ -140,8 +140,9 @@ Inputs:
 
 - `cargo fmt`
 - `cargo test -p firehose-parquet test_partitions_build_subcommand_parse -- --nocapture`
-- `cargo test -p firehose-parquet test_build_partition_rows_from_blocks_mixed_types_and_contiguous -- --nocapture`
-- `cargo test -p firehose-parquet test_partition_index_builder_resume_extends_terminal_rows -- --nocapture`
+- the former legacy `PartitionIndexBuilder` / `build_partition_rows_from_blocks`
+  tests (removed together with that unused builder; verified v2 construction is
+  covered by `cargo test -p firehose-parquet partition_index::`)
 - `cargo test -p firehose-parquet test_write_and_read_partitions_build_rows_round_trip -- --nocapture`
 - `cargo test -p firehose-parquet test_partitions_resolve_subcommand_parse -- --nocapture`
 - `cargo test -p firehose-parquet test_partitions_ls_subcommand_parse -- --nocapture`
