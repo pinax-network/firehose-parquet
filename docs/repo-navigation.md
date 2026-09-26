@@ -44,7 +44,9 @@ Related design docs:
   - `src/artifacts.rs`: reserved dataset artifact names (`cursor.parquet`, `partitions.parquet`, `merkle_roots.parquet`, `verify_runs/`) and `is_reserved_artifact_path`, which commands that walk a dataset tree use to skip them.
   - `src/s3.rs`: shared AWS configuration and S3 builder with explicit credential/retry policies used by writer/cursor/tools.
 - `blocks/`: chain-specific mapping crate and the unified binary.
-  - `src/bin/main.rs`: `fireparq` executable entrypoint.
+  - `src/bin/main.rs`: `fireparq` executable entrypoint and shared command helpers.
+  - `src/bin/ingestion/{mod,setup,runtime}.rs`: `fireparq build` orchestration, endpoint/resume setup and ordered runtime.
+  - `src/chain.rs`: `ChainKind`/`ChainProfile`, the per-family facts (label, `type_url` marker, protected family, encoding contract, nullable timestamps, block gaps, extended/votes handling, failed-transaction default, chain-name rules) and mapper construction.
   - `src/<chain>/{mapper,proto,schema}.rs`: per-chain decode, table schema, row mapping.
   - `src/lib.rs`: exports chain modules.
 - `proto/`: source `.proto` files and Buf config.
@@ -58,7 +60,7 @@ Related design docs:
    The primary ingestion path dispatches to `fireparq build` (`Commands::Build(BuildArgs)`) which calls `ingestion::run_ingestion` in `blocks/src/bin/ingestion/mod.rs`.
    Its `setup.rs` resolves the endpoint and owned resume configuration; `runtime.rs` owns receive/filter/routing state and flush windows while borrowing the durable session.
 2. Endpoint metadata and stream messages come from `firehose-parquet/src/grpc.rs`.
-3. Selected chain mapper (`blocks/src/<chain>/mapper.rs`) decodes protobuf blocks and builds Arrow columns using schemas from `schema.rs`.
+3. The chain mapper selected by `ChainKind` (`blocks/src/chain.rs`: from `--block-type`, the endpoint chain names, or the first payload's `type_url` in a dry run) decodes protobuf blocks in `blocks/src/<chain>/mapper.rs` and builds Arrow columns using schemas from `schema.rs`.
 4. `firehose-parquet/src/writer/protected.rs` validates the full table inventory and publishes transaction-owned partitioned Parquet parts (local or S3).
 5. `firehose-parquet/src/ingest/session.rs` journals every all-table flush, advances output authority, and reconciles the optional cursor mirror. Recovery completes before Blocks requests.
 6. Optional observability is emitted by `firehose-parquet/src/metrics.rs`.
@@ -68,11 +70,15 @@ Related design docs:
 - Add/change CLI flag or subcommand:
   - `firehose-parquet/src/cli.rs` (shared flags/subcommands including `BuildArgs` for `fireparq build`); `firehose-parquet/src/cli/configuration.rs` for config conversion and value validation
   - `blocks/src/bin/main.rs` (binary command dispatch) and `blocks/src/bin/ingestion/setup.rs` (ingestion configuration)
-- Add a new chain or adjust chain-specific table mapping:
-  - `blocks/src/<chain>/proto.rs` for protobuf type aliases
-  - `blocks/src/<chain>/schema.rs` for Arrow schema
-  - `blocks/src/<chain>/mapper.rs` for row extraction/transform logic
-  - `blocks/src/bin/main.rs` for mapper wiring and `--block-type` handling
+- Add a new chain family:
+  - `blocks/src/<chain>/{mod,proto,schema,mapper}.rs` (exported from `blocks/src/lib.rs`) for protobuf aliases, Arrow schemas and row mapping; use the shared `firehose_parquet::traits` helpers (`push_fork_step_field`, `fork_step_builder`, `append_fork_step`, `finish_fork_step`, `enum_data_type`, `estimated_dictionary_index_bytes`, `strip_enum_prefix`) instead of per-chain copies.
+  - `blocks/src/chain.rs`: add a `ChainKind` variant (append it to `ChainKind::ALL`, which is also the `type_url` detection order), its `ChainProfile` in `ChainKind::profile` and its constructor in `ChainKind::create_mapper`. Add ordered `CHAIN_NAME_RULES` entries for endpoint-name inference. Fill `strict_chain_names` when the family has votes, nullable timestamps or unsupported extended output, because those flags are resolved before the first block.
+  - `firehose-parquet/src/ingest/state.rs` (`BlockFamily`) and `ingest/mirror.rs`: add the protected family; its serde name must equal the profile label.
+  - `blocks/src/bin/main.rs` (`BLOCK_TYPES`, the unsupported-type error list) and the `--block-type` help in `firehose-parquet/src/cli.rs` (`BuildArgs`): add the label. A test checks that `BLOCK_TYPES` matches `ChainKind::ALL`.
+  - The #526 oracle tests (`blocks/src/chain/tests.rs`, `blocks/src/bin/chain_profile_tests/`) cover the eight pre-#526 families. Extend their expected lists or retire them, and re-pin the schema digest.
+- Adjust chain-specific table mapping or per-family behavior:
+  - `blocks/src/<chain>/schema.rs` and `mapper.rs` for tables and rows.
+  - `blocks/src/chain.rs` (`ChainProfile`) for encodings, timestamps, gaps, extended/votes and failed-transaction defaults; the ingestion code reads these properties instead of comparing `block_type` strings.
   - `firehose-parquet/src/ingest/state.rs` (`MAPPER_EPOCH`): advance the epoch when row/routing semantics change without a schema change; protected output must not silently mix those meanings.
 - Change partitioning or output file layout:
   - `firehose-parquet/src/config.rs` (`Partition::partition_key`)

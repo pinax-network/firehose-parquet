@@ -775,3 +775,12 @@ changes; use a new/rebuilt dataset or explicit reader-side schema reconciliation
   while real genesis/lookahead buffering and restored sparse-chain anchors
   remain. See [#525 qualification](../audit/525-ingestion-decomposition.md).
 
+- Chain-family decisions now come from one `ChainKind`/`ChainProfile` table in
+  `blocks/src/chain.rs` instead of `block_type` string comparisons. The table
+  covers mapper construction, `type_url` detection, chain-name inference,
+  encodings, nullable timestamps, block gaps, extended/votes handling and
+  failed-transaction defaults. The per-chain fork-step and enum helpers are
+  shared in `firehose_parquet::traits`. Auto-detection, encodings, defaults,
+  schemas, file metadata and cursor metadata are unchanged. See
+  [#526 equivalence](../audit/526-chain-profile.md).
+
