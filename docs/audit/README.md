@@ -59,6 +59,7 @@ lifecycle state; a local implementation or passing test alone is not closure.
 - [#468: verification artifact ownership](468-verify-ownership.md)
 - [#468: complete runtime, migration and live recovery qualification](468-ingestion-runtime.md)
 - [#468: live table equality and recovered-state evidence](468-live-comparison.json)
+- [Verify follow-ups: Struct roots, verify beside build, registry scan exclusion, merge refusal](validation-verify-followups.md)
 
 ## Verified lifecycle outcomes
 

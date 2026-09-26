@@ -1,5 +1,13 @@
 # Common ownership for verification artifacts
 
+> **Superseded.** `verify` no longer acquires dataset ownership or recovers
+> protected transactions and merge journals. Holding exclusive ownership made
+> roots unverifiable while `build` ran, and recovery deleted files behind a
+> read-only command. It now reads without ownership, refuses unfinished merges,
+> checks that compared partitions did not change while it read them, and
+> writes the registry under its own lock file or one conditional put. See the
+> [verify follow-ups record](validation-verify-followups.md). The record below describes the #591 design as merged.
+
 ## Scope
 
 Verification that runs root checks can insert missing registry rows even when

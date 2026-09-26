@@ -33,6 +33,8 @@ Related design docs:
   - `src/partition_index.rs`, `src/partition_index/{builder,scan}.rs`: v2 finalized coverage, contiguous raw-time spans, ancestry/routing context and resume.
   - `src/writer.rs`: Arrow builders to Parquet file writing, flush/rollover logic.
   - `src/ingest/`: versioned all-table transactions, authority, accepted frontier, cursor mirrors, recovery and maintenance policy.
+  - `src/ingest/observe.rs`: read-only protected markers and authoritative state, for `verify`, which takes no ownership.
+  - `src/verify.rs`, `src/verify/row_encoding.rs`: `fireparq verify` (read-only scan, open partitions from the writer frontier, unchanged-snapshot check, atomic/conditional registry writes) and the `merkle_v2` row encoding.
   - `src/cursor.rs`: compatible cursor Parquet encoding and legacy inspection.
   - `src/writer/protected.rs`: prepared complete parts and exact receipt/schema verification.
   - `src/dataset_lock/`, `src/dataset_lock_s3.rs`: common local directory and persistent S3 bucket ownership for mutating commands.
@@ -102,6 +104,9 @@ Related design docs:
   - `scripts/generate_networks.rs` (provider policy); regenerate `firehose-parquet/src/networks_generated.rs` instead of editing it, following `docs/network-registry-integration.md`
 - Change metrics names/labels/endpoint behavior:
   - `firehose-parquet/src/metrics.rs`
+- Change verify roots, row encoding or registry behavior:
+  - `firehose-parquet/src/verify.rs`, `firehose-parquet/src/verify/row_encoding.rs`
+  - `docs/verifiability-hash-strategy.md` (spec and golden values; changing an existing encoding rule bumps `merkle_version`) and `docs/verifiability-artifact-runbook.md`
 - Change rollup/merge/truncate behavior:
   - `firehose-parquet/src/rollup.rs`
   - `firehose-parquet/src/merge.rs`
