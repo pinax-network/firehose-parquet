@@ -2,10 +2,8 @@ use anyhow::Context;
 use std::fs;
 use std::io::Write;
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
-use tracing::{info, warn};
+use tracing::info;
 
 use arrow::array::{Array, BinaryArray, Int64Array, StringArray, UInt64Array};
 use arrow::datatypes::{DataType, Field, Schema};
@@ -532,6 +530,10 @@ fn sync_dir(dir: &Path) -> std::io::Result<()> {
 
 /// Save cursor state to a `cursor.parquet` file. Creates parent directories if needed.
 ///
+/// This writes a legacy, unprotected cursor (for fixtures and compatibility
+/// tooling). Protected ingestion does not use it and refuses to initialize a
+/// dataset over an existing cursor.
+///
 /// The save is atomic: the cursor is written to `<name>.tmp` in the same
 /// directory, fsynced, and renamed over the target, then the directory is
 /// fsynced. A crash mid-save leaves the previous cursor intact.
@@ -609,7 +611,13 @@ pub fn load_cursor_parquet(path: &Path) -> anyhow::Result<Option<CursorState>> {
     Ok(state)
 }
 
-/// Where the cursor file lives — local filesystem or S3.
+/// Where a legacy cursor file lives — local filesystem or S3.
+///
+/// Protected `build` never writes through this type: its mirror is published by
+/// the ingestion session from output authority. The type remains for read-only
+/// consumers (dry runs, `partitions build` start inference) and path
+/// resolution. The former `save`, `save_with_retry` and
+/// `save_with_retry_blocking` writers had no production caller and were removed.
 #[derive(Debug, Clone)]
 pub enum CursorLocation {
     Local(std::path::PathBuf),
@@ -620,70 +628,6 @@ pub enum CursorLocation {
 }
 
 impl CursorLocation {
-    /// Persist a local checkpoint up to three times, waiting 1 s and 2 s
-    /// between attempts. S3 checkpoints get exactly one application attempt:
-    /// the client must also disable transport retries (use the mutation builder).
-    /// A lost S3 response is ambiguous even if a later PUT would succeed, so a
-    /// failed checkpoint stops ingestion. Local I/O runs on a blocking worker.
-    ///
-    /// Shutdown interrupts backoff after a failure, but never abandons an
-    /// in-flight save whose result would then be unknown. That interruption
-    /// is a durability error, not a successful graceful shutdown.
-    pub async fn save_with_retry(
-        &self,
-        state: &CursorState,
-        metrics: &crate::metrics::PipelineMetrics,
-        shutdown: &AtomicBool,
-    ) -> anyhow::Result<()> {
-        retry_cursor_save(
-            || async {
-                match self {
-                    Self::Local(path) => {
-                        let path = path.clone();
-                        let state = state.clone();
-                        tokio::task::spawn_blocking(move || save_cursor_parquet(&path, &state))
-                            .await
-                            .context("cursor save worker failed")?
-                    }
-                    Self::S3 { client, key } => {
-                        save_cursor_parquet_s3(client.as_ref(), key, state).await
-                    }
-                }
-            },
-            state.last_block_num,
-            metrics,
-            shutdown,
-            Duration::from_secs(1),
-            if matches!(self, Self::S3 { .. }) {
-                1
-            } else {
-                CURSOR_SAVE_ATTEMPTS
-            },
-        )
-        .await
-    }
-
-    /// Bridge the synchronous stream callback to the async retry loop.
-    /// The multi-thread runtime continues serving signals, metrics, and I/O
-    /// while this callback waits. Async callers on a current-thread runtime
-    /// must await [`Self::save_with_retry`] instead.
-    pub fn save_with_retry_blocking(
-        &self,
-        state: &CursorState,
-        metrics: &crate::metrics::PipelineMetrics,
-        shutdown: &AtomicBool,
-    ) -> anyhow::Result<()> {
-        let runtime = tokio::runtime::Handle::try_current()
-            .context("cursor retry callback requires a Tokio runtime")?;
-        anyhow::ensure!(
-            runtime.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread,
-            "cursor retry callback requires a multi-thread runtime; use save_with_retry in async code"
-        );
-        tokio::task::block_in_place(|| {
-            runtime.block_on(self.save_with_retry(state, metrics, shutdown))
-        })
-    }
-
     /// Resolve cursor location from output path and cursor filename.
     ///
     /// If output is an S3 path, the cursor is placed alongside data in S3.
@@ -732,20 +676,6 @@ impl CursorLocation {
         }
     }
 
-    /// Save cursor state (blocking — safe to call from sync code inside tokio).
-    pub fn save(&self, state: &CursorState) -> anyhow::Result<()> {
-        match self {
-            CursorLocation::Local(path) => save_cursor_parquet(path, state),
-            CursorLocation::S3 { client, key } => tokio::task::block_in_place(|| {
-                tokio::runtime::Handle::current().block_on(save_cursor_parquet_s3(
-                    client.as_ref(),
-                    key,
-                    state,
-                ))
-            }),
-        }
-    }
-
     /// Load cursor state (blocking — safe to call from sync code inside tokio).
     /// Returns `Ok(None)` if there is no cursor to resume from, and an error
     /// if a cursor exists but cannot be read or parsed.
@@ -758,85 +688,6 @@ impl CursorLocation {
             }),
         }
     }
-}
-
-const CURSOR_SAVE_ATTEMPTS: u32 = 3;
-const CURSOR_RETRY_SHUTDOWN_POLL: Duration = Duration::from_millis(50);
-
-async fn retry_cursor_save<Save, SaveFuture>(
-    mut save: Save,
-    block_num: u64,
-    metrics: &crate::metrics::PipelineMetrics,
-    shutdown: &AtomicBool,
-    initial_backoff: Duration,
-    max_attempts: u32,
-) -> anyhow::Result<()>
-where
-    Save: FnMut() -> SaveFuture,
-    SaveFuture: std::future::Future<Output = anyhow::Result<()>>,
-{
-    let mut backoff = initial_backoff;
-    for attempt in 1..=max_attempts {
-        let error = match save().await {
-            Ok(()) => {
-                metrics.cursor_saves_total.inc();
-                metrics.cursor_last_block_num.set(block_num as i64);
-                metrics
-                    .cursor_last_success_timestamp_seconds
-                    .set(time::OffsetDateTime::now_utc().unix_timestamp());
-                return Ok(());
-            }
-            Err(error) => error,
-        };
-        metrics.cursor_save_failures_total.inc();
-        metrics
-            .errors_total
-            .get_or_create(&crate::metrics::ErrorLabels {
-                kind: "cursor_save".to_string(),
-            })
-            .inc();
-        if attempt == max_attempts {
-            let noun = if attempt == 1 { "attempt" } else { "attempts" };
-            return Err(error.context(format!(
-                "cursor persistence failed after {attempt} {noun} at block {block_num}; stopping ingestion"
-            )));
-        }
-        warn!(attempt, max_attempts, block_num,
-            retry_in = ?backoff, error = %error, "cursor save failed; retrying the same checkpoint");
-        let deadline = tokio::time::Instant::now() + backoff;
-        loop {
-            if shutdown.load(Ordering::SeqCst) {
-                return Err(error.context(format!(
-                    "cursor persistence interrupted by shutdown after {attempt} failed attempts at block {block_num}"
-                )));
-            }
-            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-            if remaining.is_zero() {
-                break;
-            }
-            tokio::time::sleep(remaining.min(CURSOR_RETRY_SHUTDOWN_POLL)).await;
-        }
-        backoff = backoff.saturating_mul(2);
-    }
-    unreachable!("the final failed attempt returns an error")
-}
-
-/// Save cursor state to S3 as a parquet file.
-async fn save_cursor_parquet_s3(
-    client: &dyn ObjectStore,
-    key: &str,
-    state: &CursorState,
-) -> anyhow::Result<()> {
-    // A single PUT replaces the object atomically, but a failed response does
-    // not establish whether it completed. Never retry this at either layer.
-    let buf = encode_cursor(state)?;
-
-    let path = object_store::path::Path::from(key);
-    let payload = object_store::PutPayload::from(Bytes::from(buf));
-    let opts = crate::writer::s3_put_options("");
-    client.put_opts(&path, payload, opts).await?;
-    info!(key = %key, "saved cursor.parquet to S3");
-    Ok(())
 }
 
 /// Load cursor state from S3.
@@ -1234,155 +1085,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn transient_cursor_save_failures_retry_and_update_success_metrics() {
-        let (registry, metrics) = crate::metrics::init();
-        let mut attempts = 0;
-        retry_cursor_save(
-            || {
-                attempts += 1;
-                std::future::ready(if attempts < 3 {
-                    Err(anyhow::anyhow!("injected temporary storage failure"))
-                } else {
-                    Ok(())
-                })
-            },
-            123,
-            &metrics,
-            &AtomicBool::new(false),
-            Duration::from_millis(1),
-            CURSOR_SAVE_ATTEMPTS,
-        )
-        .await
-        .unwrap();
-        assert_eq!(attempts, 3);
-        assert_eq!(metrics.cursor_save_failures_total.get(), 2);
-        assert_eq!(metrics.cursor_saves_total.get(), 1);
-        assert_eq!(metrics.cursor_last_block_num.get(), 123);
-        assert!(metrics.cursor_last_success_timestamp_seconds.get() > 0);
-        let mut encoded = String::new();
-        prometheus_client::encoding::text::encode(&mut encoded, &registry).unwrap();
-        assert!(encoded.contains("firehose_parquet_cursor_save_failures_total 2"));
-        assert!(encoded.contains(&format!(
-            "firehose_parquet_cursor_last_success_timestamp_seconds {}",
-            metrics.cursor_last_success_timestamp_seconds.get()
-        )));
-    }
-
-    #[tokio::test]
-    async fn exhausted_cursor_saves_keep_the_previous_checkpoint_and_success_metrics() {
-        let dir = TempDir::new().unwrap();
-        let path = dir.path().join(CURSOR_PARQUET_FILENAME);
-        let (_, metrics) = crate::metrics::init();
-        let shutdown = AtomicBool::new(false);
-        let previous = CursorState {
-            cursor: "previous".into(),
-            last_block_num: 100,
-            ..CursorState::default()
-        };
-        CursorLocation::Local(path.clone())
-            .save_with_retry(&previous, &metrics, &shutdown)
-            .await
-            .unwrap();
-        let last_success = metrics.cursor_last_success_timestamp_seconds.get();
-        fs::create_dir(temp_cursor_path(&path)).unwrap();
-        let next = CursorState {
-            cursor: "next".into(),
-            last_block_num: 200,
-            ..previous
-        };
-        let mut attempts = 0;
-        let error = retry_cursor_save(
-            || {
-                attempts += 1;
-                std::future::ready(save_cursor_parquet(&path, &next))
-            },
-            next.last_block_num,
-            &metrics,
-            &shutdown,
-            Duration::ZERO,
-            CURSOR_SAVE_ATTEMPTS,
-        )
-        .await
-        .unwrap_err();
-        assert!(error.to_string().contains("failed after 3 attempts"));
-        assert_eq!(attempts, 3);
-        assert_eq!(
-            load_cursor_parquet(&path).unwrap().unwrap().last_block_num,
-            100
-        );
-        assert_eq!(metrics.cursor_save_failures_total.get(), 3);
-        assert_eq!(metrics.cursor_saves_total.get(), 1);
-        assert_eq!(metrics.cursor_last_block_num.get(), 100);
-        assert_eq!(
-            metrics.cursor_last_success_timestamp_seconds.get(),
-            last_success
-        );
-        assert_eq!(
-            metrics
-                .errors_total
-                .get_or_create(&crate::metrics::ErrorLabels {
-                    kind: "cursor_save".into(),
-                })
-                .get(),
-            3
-        );
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
-    async fn blocking_cursor_retry_keeps_runtime_responsive_to_shutdown() {
-        let dir = TempDir::new().unwrap();
-        let invalid_parent = dir.path().join("not-a-directory");
-        fs::write(&invalid_parent, b"file").unwrap();
-        let location = CursorLocation::Local(invalid_parent.join(CURSOR_PARQUET_FILENAME));
-        let (_, metrics) = crate::metrics::init();
-        let shutdown = Arc::new(AtomicBool::new(false));
-        let signal = Arc::clone(&shutdown);
-        let signal_task = tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_millis(10)).await;
-            signal.store(true, Ordering::SeqCst);
-        });
-        let started = std::time::Instant::now();
-        let error = location
-            .save_with_retry_blocking(&CursorState::default(), &metrics, &shutdown)
-            .unwrap_err();
-        signal_task.await.unwrap();
-        assert!(error.to_string().contains("interrupted by shutdown"));
-        assert!(started.elapsed() < Duration::from_secs(1));
-        assert_eq!(metrics.cursor_save_failures_total.get(), 1);
-        assert_eq!(metrics.cursor_saves_total.get(), 0);
-        assert_eq!(metrics.cursor_last_success_timestamp_seconds.get(), 0);
-    }
-
-    #[tokio::test]
-    async fn single_attempt_saves_s3_cursor_without_blocking_the_current_thread_runtime() {
-        let store = Arc::new(object_store::memory::InMemory::new());
-        let location = CursorLocation::S3 {
-            client: store.clone(),
-            key: "cursor.parquet".into(),
-        };
-        let (_, metrics) = crate::metrics::init();
-        let state = CursorState {
-            cursor: "saved".into(),
-            last_block_num: 42,
-            ..CursorState::default()
-        };
-        location
-            .save_with_retry(&state, &metrics, &AtomicBool::new(false))
-            .await
-            .unwrap();
-        assert_eq!(
-            load_cursor_parquet_s3(store.as_ref(), "cursor.parquet")
-                .await
-                .unwrap()
-                .unwrap()
-                .last_block_num,
-            42
-        );
-        assert_eq!(metrics.cursor_saves_total.get(), 1);
-        assert_eq!(metrics.cursor_save_failures_total.get(), 0);
-    }
-
-    #[tokio::test]
     async fn test_load_cursor_parquet_s3_round_trip_and_missing_object() {
         let store = object_store::memory::InMemory::new();
         let key = "output/mainnet/cursor.parquet";
@@ -1393,7 +1095,13 @@ mod tests {
             last_block_num: 77,
             ..CursorState::default()
         };
-        save_cursor_parquet_s3(&store, key, &state).await.unwrap();
+        store
+            .put(
+                &object_store::path::Path::from(key),
+                Bytes::from(encode_cursor(&state).unwrap()).into(),
+            )
+            .await
+            .unwrap();
         let loaded = load_cursor_parquet_s3(&store, key).await.unwrap().unwrap();
         assert_eq!(loaded.cursor, "s3-cursor");
         assert_eq!(loaded.last_block_num, 77);
@@ -1502,11 +1210,19 @@ mod tests {
         let sibling = CursorLocation::resolve(output, "c.parquet", store_for_bucket).unwrap();
 
         for (location, cursor) in [(&x, "worker-x"), (&y, "worker-y"), (&sibling, "output")] {
-            location
-                .save(&CursorState {
-                    cursor: cursor.into(),
-                    ..Default::default()
-                })
+            let CursorLocation::S3 { client, key } = location else {
+                panic!("expected S3 cursor location");
+            };
+            let state = CursorState {
+                cursor: cursor.into(),
+                ..Default::default()
+            };
+            client
+                .put(
+                    &object_store::path::Path::from(key.as_str()),
+                    Bytes::from(encode_cursor(&state).unwrap()).into(),
+                )
+                .await
                 .unwrap();
         }
         assert_eq!(x.load().unwrap().unwrap().cursor, "worker-x");
@@ -1577,10 +1293,11 @@ mod tests {
             ..CursorState::default()
         };
 
-        location.save(&state).expect("cursor save should succeed");
-
         match &location {
-            CursorLocation::Local(path) => assert!(path.exists()),
+            CursorLocation::Local(path) => {
+                assert_eq!(path, &output_root.join(CURSOR_PARQUET_FILENAME));
+                save_cursor_parquet(path, &state).expect("cursor save should succeed");
+            }
             CursorLocation::S3 { .. } => panic!("expected local cursor location"),
         }
 

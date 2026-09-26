@@ -2,9 +2,7 @@
 //! a loopback test server. Production credential, bucket and retry builders run.
 use super::*;
 use crate::cli::AwsConfig;
-use crate::cursor::{CursorLocation, CursorState};
 use bytes::Bytes;
-use std::sync::atomic::AtomicBool;
 use std::sync::Mutex;
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -196,61 +194,6 @@ async fn data_mutation_builders_do_not_retry_accepted_put_or_delete() {
                 }
                 assert_eq!(server.finish().await, [method]);
             }
-        }
-    }
-}
-
-#[tokio::test]
-async fn cursor_save_never_retries_ambiguous_s3_publication() {
-    for maintenance in [false, true] {
-        for loss in [
-            LostResponse::Close,
-            LostResponse::Timeout,
-            LostResponse::ServerError,
-        ] {
-            let server = Server::start(loss).await;
-            let location = CursorLocation::S3 {
-                client: Arc::new(server.builder(maintenance, true).build().unwrap()),
-                key: "cursor.parquet".into(),
-            };
-            let (_, metrics) = crate::metrics::init();
-            metrics.cursor_last_block_num.set(99);
-            metrics.cursor_last_success_timestamp_seconds.set(123);
-            let state = CursorState {
-                cursor: "synthetic-cursor".into(),
-                last_block_num: 100,
-                ..Default::default()
-            };
-            let error = tokio::time::timeout(
-                Duration::from_secs(5),
-                location.save_with_retry(&state, &metrics, &AtomicBool::new(false)),
-            )
-            .await
-            .unwrap()
-            .unwrap_err();
-            assert!(error.to_string().contains("failed after 1 attempt"));
-            assert_eq!(metrics.cursor_save_failures_total.get(), 1);
-            assert_eq!(metrics.cursor_saves_total.get(), 0);
-            assert_eq!(metrics.cursor_last_block_num.get(), 99);
-            assert_eq!(metrics.cursor_last_success_timestamp_seconds.get(), 123);
-            assert_eq!(
-                metrics
-                    .errors_total
-                    .get_or_create(&crate::metrics::ErrorLabels {
-                        kind: "cursor_save".into()
-                    })
-                    .get(),
-                1
-            );
-            let published = server.observed.lock().unwrap().body.clone();
-            assert_eq!(
-                crate::cursor::parse_cursor(Bytes::from(published))
-                    .unwrap()
-                    .unwrap()
-                    .last_block_num,
-                100
-            );
-            assert_eq!(server.finish().await, ["PUT"]);
         }
     }
 }

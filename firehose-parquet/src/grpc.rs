@@ -1084,10 +1084,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn cursor_save_exhaustion_stops_stream_before_the_next_block() {
-        use crate::cursor::{CursorLocation, CursorState};
-        use std::sync::atomic::AtomicBool;
-
+    async fn handler_error_stops_stream_before_the_next_block() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let endpoint = format!("http://{}", listener.local_addr().unwrap());
         let incoming = futures::stream::unfold(listener, |listener| async {
@@ -1106,10 +1103,6 @@ mod tests {
                 .await
                 .unwrap();
         });
-        let dir = tempfile::tempdir().unwrap();
-        let blocked_parent = dir.path().join("not-a-directory");
-        std::fs::write(&blocked_parent, b"file").unwrap();
-        let location = CursorLocation::Local(blocked_parent.join("cursor.parquet"));
         let (_, metrics) = crate::metrics::init();
         let mut config = test_config(&endpoint);
         config.start_block = Some(100);
@@ -1118,37 +1111,22 @@ mod tests {
         client.set_metrics(metrics.clone());
         let mut processed = vec![];
         let result = client
-            .stream_blocks(
-                None,
-                &CancellationToken::new(),
-                |_, _, cursor, identity, _| {
-                    processed.push(identity.block_num);
-                    location.save_with_retry_blocking(
-                        &CursorState {
-                            cursor,
-                            last_block_num: identity.block_num,
-                            ..Default::default()
-                        },
-                        &metrics,
-                        &AtomicBool::new(false),
-                    )
-                },
-            )
+            .stream_blocks(None, &CancellationToken::new(), |_, _, _, identity, _| {
+                // A durable commit failure in the protected session surfaces
+                // exactly like this handler error.
+                processed.push(identity.block_num);
+                Err(anyhow::anyhow!("injected checkpoint persistence failure"))
+            })
             .await;
         stop.send(()).unwrap();
         server.await.unwrap();
         let error = result.unwrap_err();
-        assert!(error
-            .to_string()
-            .contains("cursor persistence failed after 3 attempts"));
+        assert!(format!("{error:#}").contains("injected checkpoint persistence failure"));
         assert_eq!(
             processed,
             vec![100],
             "a failed checkpoint must stop ingestion"
         );
-        assert_eq!(metrics.cursor_save_failures_total.get(), 3);
-        assert_eq!(metrics.cursor_saves_total.get(), 0);
-        assert_eq!(metrics.cursor_last_success_timestamp_seconds.get(), 0);
         assert_eq!(metrics.grpc_reconnects_total.get(), 0);
     }
 
