@@ -6,8 +6,8 @@ use crate::cursor::{parse_cursor, CURSOR_PARQUET_FILENAME};
 use crate::ingest::binding::resolve_output_identity;
 use crate::ingest::maintenance::{self, MaintenanceTarget};
 use crate::ingest::observe;
-use crate::maintenance::discovery::{self, LocalPolicy};
 use crate::ingest::state::AuthorityState;
+use crate::maintenance::discovery::{self, LocalPolicy};
 use crate::merge_journal::JOURNAL_FILE;
 use crate::writer::parse_s3_url;
 use anyhow::{anyhow, Context, Result};
@@ -460,6 +460,8 @@ struct ScanOutput {
     /// The files each fully read partition was computed from, to detect a
     /// concurrent rewrite before its root is trusted.
     partition_files: BTreeMap<String, Vec<FileIdentity>>,
+    /// Partitions with a listed file that could not be read, and that file.
+    vanished: BTreeMap<String, String>,
     /// Partition whose files were only partly read when fail-fast stopped the scan.
     truncated_partition: Option<String>,
 }
@@ -602,8 +604,8 @@ struct ListedFile {
 struct FileIdentity {
     path: String,
     size: u64,
-    /// Local: device, inode and modification time. S3: ETag, version and
-    /// last-modified time.
+    /// Local: device, inode and modification time. S3: the listed ETag,
+    /// version (when listed) and last-modified time.
     version: String,
 }
 
@@ -643,6 +645,29 @@ impl DataSource {
         }
     }
 
+    /// The first data file this run would scan, to locate the chain root. On
+    /// S3 it stops at the first matching object instead of listing them all.
+    fn first_file(&self, excluded: &ExcludedPaths) -> Result<String> {
+        let (path, bucket, prefix, store) = match self {
+            Self::Local { path } => {
+                return Ok(list_verify_files(path, excluded)?.files.remove(0).path)
+            }
+            Self::Remote {
+                path,
+                bucket,
+                prefix,
+                store,
+            } => (path, bucket, prefix, store),
+        };
+        let first = block_on_async(discovery::first_object(store.as_ref(), prefix, |object| {
+            is_verified_object(object.location.as_ref(), bucket, prefix, excluded)
+        }))
+        .map_err(|e| anyhow!("listing S3 objects: {e}"))?;
+        first
+            .map(|object| format!("s3://{bucket}/{}", object.location))
+            .ok_or_else(|| anyhow!("no parquet files found in {path}"))
+    }
+
     /// Reads every listed file into one scan. A local file is identified by
     /// the handle actually read; an S3 read is pinned to the listed ETag.
     fn scan(
@@ -657,12 +682,18 @@ impl DataSource {
         match self {
             Self::Local { .. } => {
                 for (index, file) in listing.files.iter().enumerate() {
-                    let handle = File::open(&file.path).with_context(|| {
-                        format!(
-                            "opening {} (a concurrent command may have removed it; re-run verify)",
-                            file.path
-                        )
-                    })?;
+                    let handle = match File::open(&file.path) {
+                        Ok(handle) => handle,
+                        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                            scan.add_vanished(&file.path, &file.partition, None);
+                            continue;
+                        }
+                        Err(err) => {
+                            return Err(
+                                anyhow::Error::new(err).context(format!("opening {}", file.path))
+                            )
+                        }
+                    };
                     let identity = local_identity(&file.path, &handle.metadata()?);
                     let builder = ParquetRecordBatchReaderBuilder::try_new(handle)?;
                     if !scan.add_file(builder, identity, &file.partition, next_partition(index))? {
@@ -683,15 +714,28 @@ impl DataSource {
                     PREFETCH_BUDGET_BYTES,
                 );
                 for (index, (file, meta)) in listing.files.iter().zip(&objects).enumerate() {
-                    let object = prefetcher
+                    let object = match prefetcher
                         .next_object()
                         .ok_or_else(|| anyhow!("S3 prefetch ended before {}", file.path))?
-                        .with_context(|| {
-                            format!(
-                                "reading {} (it may have changed after it was listed; re-run verify)",
-                                file.path
-                            )
-                        })?;
+                    {
+                        Ok(object) => object,
+                        // Removed, or replaced (the read is pinned to the listed ETag).
+                        Err(err)
+                            if err
+                                .downcast_ref::<object_store::Error>()
+                                .is_some_and(|err| {
+                                    matches!(
+                                        err,
+                                        object_store::Error::NotFound { .. }
+                                            | object_store::Error::Precondition { .. }
+                                    )
+                                }) =>
+                        {
+                            scan.add_vanished(&file.path, &file.partition, Some(meta));
+                            continue;
+                        }
+                        Err(err) => return Err(err.context(format!("reading {}", file.path))),
+                    };
                     let builder = ParquetRecordBatchReaderBuilder::try_new(object.data.clone())?;
                     let identity = remote_identity(&file.path, meta);
                     if !scan.add_file(builder, identity, &file.partition, next_partition(index))? {
@@ -728,8 +772,8 @@ impl DataSource {
         Ok(by_partition)
     }
 
-    /// Reads a file in the chain root (local, or in the verified bucket), or
-    /// `None` when it does not exist.
+    /// Reads the legacy cursor in the chain root (local, or in the verified
+    /// bucket), or `None` when it does not exist.
     fn read_optional(&self, path: &str) -> Result<Option<Vec<u8>>> {
         match self {
             Self::Local { .. } => match std::fs::read(path) {
@@ -744,7 +788,7 @@ impl DataSource {
                     "{path} is outside the verified bucket"
                 );
                 let location = object_store::path::Path::from(key.as_str());
-                match block_on_async(async { store.get(&location).await?.bytes().await }) {
+                match block_on_async(discovery::read_object_bytes(store.as_ref(), &location)) {
                     Ok(data) => Ok(Some(data.to_vec())),
                     Err(object_store::Error::NotFound { .. }) => Ok(None),
                     Err(err) => Err(anyhow!("reading {path}: {err}")),
@@ -843,10 +887,23 @@ fn refuse_unfinished_merges(path: &str, listing: &Listing) -> Result<()> {
 
 #[cfg(test)]
 thread_local! {
-    /// Runs between the scan and the check that its files are unchanged, to
-    /// simulate a concurrent command.
-    static AFTER_SCAN: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
-        const { std::cell::RefCell::new(None) };
+    /// Closures run at named points of a run (`after-frontier`,
+    /// `before-scan`, `after-scan`), to simulate a concurrent command.
+    static TEST_HOOKS: std::cell::RefCell<Vec<(&'static str, Box<dyn FnOnce()>)>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+#[cfg(test)]
+fn run_test_hooks(point: &str) {
+    let hooks = TEST_HOOKS.with(|hooks| {
+        let mut hooks = hooks.borrow_mut();
+        let (run, keep) = hooks.drain(..).partition(|(at, _)| *at == point);
+        *hooks = keep;
+        run
+    });
+    for (_, hook) in hooks {
+        hook();
+    }
 }
 
 /// Where `fireparq build` stands for a chain root, read before the listing
@@ -856,13 +913,21 @@ enum WriterProgress {
     /// No writer state in the chain root: no protected dataset and no
     /// `cursor.parquet`.
     Unknown,
+    /// A legacy `cursor.parquet` exists but cannot be read, so nothing can be
+    /// placed relative to the writer.
+    Unreadable { source: String, error: String },
     Known {
         /// Last block the writer committed (protected) or saved (legacy
         /// cursor); `None` before the first one. Every row at or below it was
         /// published before it was recorded.
         frontier: Option<u64>,
-        /// The requested stop was reached and nothing was accepted after it.
-        finished: bool,
+        /// The stop block of the completed request, while the stream is still
+        /// exactly at it.
+        finished_at: Option<u64>,
+        /// A later, longer request can extend a finished stream. True for
+        /// protected datasets; the current `build` refuses to append to
+        /// legacy data.
+        extendable: bool,
         /// A reversible stream (`--final-blocks-only=false`) may append rows
         /// for earlier blocks on a reorg.
         reversible: bool,
@@ -874,7 +939,7 @@ enum WriterProgress {
 impl WriterProgress {
     fn frontier(&self) -> Option<u64> {
         match self {
-            Self::Unknown => None,
+            Self::Unknown | Self::Unreadable { .. } => None,
             Self::Known { frontier, .. } => *frontier,
         }
     }
@@ -883,13 +948,14 @@ impl WriterProgress {
         let frontier = state.checkpoint.event.as_ref().map(|event| event.block_num);
         // `completed_stop` persists while a later, longer request extends the
         // stream, so the stream is finished only while it is still at that bound.
-        let finished = matches!(
-            (state.checkpoint.completed_stop, frontier),
-            (Some(stop), Some(block)) if block.saturating_add(1) == stop
-        );
+        let finished_at = match (state.checkpoint.completed_stop, frontier) {
+            (Some(stop), Some(block)) if block.saturating_add(1) == stop => Some(stop),
+            _ => None,
+        };
         Self::Known {
             frontier,
-            finished,
+            finished_at,
+            extendable: true,
             reversible: !state.descriptor.final_blocks_only,
             source: format!("the authoritative ingestion state of {chain_root}"),
         }
@@ -901,7 +967,6 @@ impl WriterProgress {
 fn read_writer_progress(
     source: &DataSource,
     chain_root: &str,
-    warnings: &mut Vec<String>,
 ) -> Result<(WriterProgress, Option<AuthorityState>)> {
     if let Some(state) = source.read_authority(chain_root)? {
         let progress = WriterProgress::from_authority(&state, chain_root);
@@ -915,19 +980,21 @@ fn read_writer_progress(
         Ok(Some(Some(state))) => state,
         Ok(_) => return Ok((WriterProgress::Unknown, None)),
         Err(err) => {
-            warnings.push(format!(
-                "could not read {cursor_path} ({err:#}); partitions were not checked for ongoing writes"
-            ));
-            return Ok((WriterProgress::Unknown, None));
+            let progress = WriterProgress::Unreadable {
+                source: cursor_path,
+                error: format!("{err:#}"),
+            };
+            return Ok((progress, None));
         }
     };
-    let finished = state
+    let finished_at = state
         .stop_block
-        .is_some_and(|stop| state.last_block_num.saturating_add(1) >= stop);
+        .filter(|stop| state.last_block_num.saturating_add(1) >= *stop);
     Ok((
         WriterProgress::Known {
             frontier: Some(state.last_block_num),
-            finished,
+            finished_at,
+            extendable: false,
             reversible: false,
             source: cursor_path,
         },
@@ -935,22 +1002,33 @@ fn read_writer_progress(
     ))
 }
 
-/// Fails when a partition that is compared or recorded no longer holds
-/// exactly the files that were read.
+/// How [`ensure_unchanged`] checks one partition that was read.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SnapshotCheck {
+    /// An open partition: `build` may add or roll back files.
+    Skip,
+    /// A partition whose root is compared or recorded: exactly the files
+    /// that were read, unchanged.
+    Exact,
+    /// Protocol findings for a published report: every file that was read is
+    /// still there, unchanged. Files may be added.
+    ReadFiles,
+}
+
+/// Fails when a partition no longer holds the files that were read, as
+/// `check` requires for it, or when one of its listed files could not be read.
 fn ensure_unchanged(
-    read: &BTreeMap<String, Vec<FileIdentity>>,
+    scan: &ScanOutput,
     now: &BTreeMap<String, Vec<FileIdentity>>,
-    open: &HashMap<String, String>,
+    check: impl Fn(&str) -> SnapshotCheck,
 ) -> Result<()> {
-    for (partition, files) in read {
-        if open.contains_key(partition) {
+    for (partition, files) in &scan.partition_files {
+        let mode = check(partition);
+        if mode == SnapshotCheck::Skip {
             continue;
         }
         let current = now.get(partition).map(Vec::as_slice).unwrap_or_default();
-        if current == files.as_slice() {
-            continue;
-        }
-        let detail = files
+        let changed_or_removed = files
             .iter()
             .find_map(|file| match current.iter().find(|c| c.path == file.path) {
                 None => Some(format!("{} was removed", file.path)),
@@ -958,15 +1036,26 @@ fn ensure_unchanged(
                 Some(_) => None,
             })
             .or_else(|| {
-                current
-                    .iter()
-                    .find(|c| !files.iter().any(|file| file.path == c.path))
-                    .map(|c| format!("{} was added", c.path))
-            })
-            .unwrap_or_else(|| "its files changed".to_string());
+                scan.vanished
+                    .get(partition)
+                    .map(|path| format!("{path} was removed or replaced before it was read"))
+            });
+        let added = || {
+            current
+                .iter()
+                .find(|c| !files.iter().any(|file| file.path == c.path))
+                .map(|c| format!("{} was added", c.path))
+        };
+        let detail = match mode {
+            SnapshotCheck::Exact => changed_or_removed.or_else(added),
+            _ => changed_or_removed,
+        };
+        let Some(detail) = detail else {
+            continue;
+        };
         tracing::warn!(%partition, %detail, "table data changed while verify read it");
         return Err(anyhow!(
-            "the data changed while verify was reading it: in partition {partition}, {detail}. Another command (for example merge, rollup or truncate) modified the table, so the computed roots may not match any complete state; nothing was compared or written. Re-run verify"
+            "the data changed while verify was reading it: in partition {partition}, {detail}. Another command (for example merge, rollup or truncate) modified the table, so the results may not match any complete state; nothing was compared or written. Re-run verify"
         ));
     }
     Ok(())
@@ -1079,26 +1168,70 @@ fn verify_source(
     let resolved_path = source.path().to_string();
     let excluded = ExcludedPaths::for_run(opts);
     let mut warnings = Vec::new();
+    let writes_reports =
+        opts.report_json.is_some() || opts.publish_report || opts.publish_report_path.is_some();
 
-    // Roots need where `build` stands, read before the listing that is
+    // A run that records roots or publishes a report locates the chain root
+    // first, so its artifact destinations are checked before any row is read.
+    // Roots also need where `build` stands, read before the listing that is
     // scanned: every row at or below its frontier was published before the
     // frontier was recorded, so it is in that listing.
-    let (progress, authority, discovered_root) = if runs_roots {
-        let discovery = source.list(&excluded)?;
-        refuse_unfinished_merges(&resolved_path, &discovery)?;
-        let chain_root = file_layout(&discovery.files[0].path).chain_root;
-        let (progress, authority) = read_writer_progress(source, &chain_root, &mut warnings)?;
-        (progress, authority, Some(chain_root))
+    let discovered_root = if runs_roots || writes_reports {
+        Some(file_layout(&source.first_file(&excluded)?).chain_root)
     } else {
-        (WriterProgress::Unknown, None, None)
+        None
     };
+    let (progress, authority) = match (&discovered_root, runs_roots) {
+        (Some(chain_root), true) => read_writer_progress(source, chain_root)?,
+        _ => (WriterProgress::Unknown, None),
+    };
+    #[cfg(test)]
+    run_test_hooks("after-frontier");
+    let registry_path = |chain_root: &str| {
+        opts.registry_path
+            .clone()
+            .unwrap_or_else(|| join_artifact_path(chain_root, MERKLE_ROOTS_FILENAME))
+    };
+    let run_report_path = |chain_root: &str| {
+        join_artifact_path(
+            chain_root,
+            &format!("{VERIFY_RUNS_DIR}/{run_id}/report.json"),
+        )
+    };
+    let published_path = |chain_root: &str| {
+        (opts.publish_report || opts.publish_report_path.is_some()).then(|| {
+            opts.publish_report_path
+                .clone()
+                .unwrap_or_else(|| run_report_path(chain_root))
+        })
+    };
+    if let Some(chain_root) = &discovered_root {
+        let artifacts = artifact_destinations(
+            opts,
+            &registry_path(chain_root),
+            published_path(chain_root).as_deref(),
+        );
+        let chain_authority = match authority {
+            Some(state) => Some(state),
+            None if !runs_roots => source.read_authority(chain_root)?,
+            None => None,
+        };
+        validate_artifact_destinations(
+            &artifacts,
+            source,
+            chain_root,
+            chain_authority.as_ref(),
+            aws,
+        )?;
+    }
+
     let listing = source.list(&excluded)?;
     refuse_unfinished_merges(&resolved_path, &listing)?;
+    #[cfg(test)]
+    run_test_hooks("before-scan");
     let scan_output = source.scan(&listing, opts, progress.frontier())?;
     #[cfg(test)]
-    if let Some(hook) = AFTER_SCAN.with(|slot| slot.borrow_mut().take()) {
-        hook();
-    }
+    run_test_hooks("after-scan");
 
     let target = scan_output.target.clone();
     anyhow::ensure!(
@@ -1107,39 +1240,44 @@ fn verify_source(
     );
     let partition_roots = &scan_output.partition_roots;
     let algorithm = target.hash_strategy.as_str().to_string();
-    let registry_path = opts
-        .registry_path
-        .clone()
-        .unwrap_or_else(|| join_artifact_path(&target.chain_root, MERKLE_ROOTS_FILENAME));
-    let suggested_run_report_path = join_artifact_path(
-        &target.chain_root,
-        &format!("{VERIFY_RUNS_DIR}/{run_id}/report.json"),
-    );
-    let published_report_path = if opts.publish_report || opts.publish_report_path.is_some() {
-        Some(
-            opts.publish_report_path
-                .clone()
-                .unwrap_or_else(|| suggested_run_report_path.clone()),
-        )
+    let registry_path = registry_path(&target.chain_root);
+    let suggested_run_report_path = run_report_path(&target.chain_root);
+    let published_report_path = published_path(&target.chain_root);
+    let open = if runs_roots {
+        open_partitions(&progress, &scan_output, &mut warnings)
     } else {
-        None
+        HashMap::new()
     };
-    let artifacts = artifact_destinations(opts, &registry_path, published_report_path.as_deref());
-    if !artifacts.is_empty() {
-        let chain_authority = match authority {
-            Some(state) => Some(state),
-            None if !runs_roots => source.read_authority(&target.chain_root)?,
-            None => None,
-        };
-        validate_artifact_destinations(
-            &artifacts,
-            source,
-            &target.chain_root,
-            chain_authority.as_ref(),
-            aws,
-        )?;
+    // Roots are compared or recorded only for partitions that still hold
+    // exactly the files that were read. A published protocol report needs
+    // every file it read to be unchanged.
+    if runs_roots || writes_reports {
+        let relisted = source.list(&excluded)?;
+        refuse_unfinished_merges(&resolved_path, &relisted)?;
+        ensure_unchanged(&scan_output, &source.identities(&relisted)?, |partition| {
+            if !runs_roots {
+                SnapshotCheck::ReadFiles
+            } else if open.contains_key(partition) {
+                SnapshotCheck::Skip
+            } else {
+                SnapshotCheck::Exact
+            }
+        })?;
     }
 
+    // Only files that did not matter are left here: in open partitions, or
+    // in a protocol run without output, which reads once without a snapshot.
+    if let Some((partition, path)) = scan_output.vanished.iter().next() {
+        warnings.push(format!(
+            "{} listed file(s) disappeared before verify could read them (first: {path} in partition {partition}); they were not checked{}",
+            scan_output.vanished.len(),
+            if runs_roots {
+                ", and only open partitions were affected"
+            } else {
+                ""
+            }
+        ));
+    }
     if let Some(registry) = opts.registry_path.as_deref().filter(|_| runs_roots) {
         warnings.extend(registry_inside_table_warning(registry, &target));
     }
@@ -1189,16 +1327,6 @@ fn verify_source(
     let mut updated = 0usize;
     let mut open_count = 0usize;
     let wrote_registry = if runs_roots {
-        let open = open_partitions(&progress, &scan_output, &mut warnings);
-        // Roots are compared or recorded only for partitions that still hold
-        // exactly the files that were read.
-        let relisted = source.list(&excluded)?;
-        refuse_unfinished_merges(&resolved_path, &relisted)?;
-        ensure_unchanged(
-            &scan_output.partition_files,
-            &source.identities(&relisted)?,
-            &open,
-        )?;
         let snapshot = load_registry(&registry_path, aws)?;
         let network = target.network.clone().unwrap_or_default();
 
@@ -1697,6 +1825,8 @@ fn relative_path(file: &str, base: &str) -> String {
 struct ExcludedPaths {
     /// Local files, with their parent directory canonicalized.
     local: HashSet<PathBuf>,
+    /// Their file names, to canonicalize only the listed files that could match.
+    local_names: HashSet<std::ffi::OsString>,
     /// `s3://bucket/key` objects.
     remote: HashSet<String>,
 }
@@ -1717,11 +1847,17 @@ impl ExcludedPaths {
         if let Some(path) = &opts.report_json {
             excluded.local.extend(canonical_file_path(path));
         }
+        excluded.local_names = excluded
+            .local
+            .iter()
+            .filter_map(|path| path.file_name().map(|name| name.to_os_string()))
+            .collect();
         excluded
     }
 
     fn contains_local(&self, file: &Path) -> bool {
-        !self.local.is_empty()
+        file.file_name()
+            .is_some_and(|name| self.local_names.contains(name))
             && canonical_file_path(file).is_some_and(|file| self.local.contains(&file))
     }
 
@@ -1813,13 +1949,20 @@ fn list_verify_files(path: &str, excluded: &ExcludedPaths) -> Result<Listing> {
         files: files
             .into_iter()
             .map(|path| ListedFile {
-                partition: detect_partition(&path, &base),
+                partition: detect_partition(&path),
                 path,
                 object: None,
             })
             .collect(),
         merge_journals,
     })
+}
+
+/// Whether an S3 key under the verified prefix is table data this run reads.
+fn is_verified_object(key: &str, bucket: &str, prefix: &str, excluded: &ExcludedPaths) -> bool {
+    key.ends_with(".parquet")
+        && !is_reserved_artifact_path(discovery::relative_key(prefix, key))
+        && !excluded.contains_remote(bucket, key)
 }
 
 fn list_verify_objects(
@@ -1830,7 +1973,7 @@ fn list_verify_objects(
     excluded: &ExcludedPaths,
 ) -> Result<Listing> {
     let listed = block_on_async(discovery::list_objects(store, prefix))
-    .map_err(|e| anyhow!("listing S3 objects: {e}"))?;
+        .map_err(|e| anyhow!("listing S3 objects: {e}"))?;
 
     let mut merge_journals = Vec::new();
     let mut objects = Vec::new();
@@ -1838,10 +1981,7 @@ fn list_verify_objects(
         let key = obj.location.as_ref();
         if obj.location.filename() == Some(JOURNAL_FILE) && !is_control_path(key) {
             merge_journals.push(format!("s3://{bucket}/{key}"));
-        } else if key.ends_with(".parquet")
-            && !is_reserved_artifact_path(discovery::relative_key(prefix, key))
-            && !excluded.contains_remote(bucket, key)
-        {
+        } else if is_verified_object(key, bucket, prefix, excluded) {
             objects.push(obj);
         }
     }
@@ -1854,10 +1994,13 @@ fn list_verify_objects(
     Ok(Listing {
         files: objects
             .into_iter()
-            .map(|object| ListedFile {
-                path: format!("s3://{bucket}/{}", object.location),
-                partition: detect_partition(object.location.as_ref(), prefix),
-                object: Some(object),
+            .map(|object| {
+                let path = format!("s3://{bucket}/{}", object.location);
+                ListedFile {
+                    partition: detect_partition(&path),
+                    path,
+                    object: Some(object),
+                }
             })
             .collect(),
         merge_journals,
@@ -1875,6 +2018,7 @@ struct ScanAccumulator<'a> {
     protocol_state: HashMap<String, ProtocolPartitionState>,
     partition_blocks: HashMap<String, PartitionBlocks>,
     partition_files: BTreeMap<String, Vec<FileIdentity>>,
+    vanished: BTreeMap<String, String>,
     truncated_partition: Option<String>,
 }
 
@@ -1888,8 +2032,36 @@ impl<'a> ScanAccumulator<'a> {
             protocol_state: HashMap::new(),
             partition_blocks: HashMap::new(),
             partition_files: BTreeMap::new(),
+            vanished: BTreeMap::new(),
             truncated_partition: None,
         }
+    }
+
+    /// A listed file that was removed, or replaced (S3), before it could be
+    /// read. Harmless in a partition `build` may still write; anywhere else
+    /// the scan did not read a complete state, which the snapshot check
+    /// reports.
+    fn add_vanished(
+        &mut self,
+        path: &str,
+        partition: &str,
+        listed: Option<&object_store::ObjectMeta>,
+    ) {
+        let identity = match listed {
+            Some(object) => remote_identity(path, object),
+            None => FileIdentity {
+                path: path.to_string(),
+                size: 0,
+                version: "removed before it was read".to_string(),
+            },
+        };
+        self.partition_files
+            .entry(partition.to_string())
+            .or_default()
+            .push(identity);
+        self.vanished
+            .entry(partition.to_string())
+            .or_insert_with(|| path.to_string());
     }
 
     /// Scans one file. Returns `false` when fail-fast stops the scan at a
@@ -1978,6 +2150,7 @@ impl<'a> ScanAccumulator<'a> {
             protocol_findings,
             partition_blocks: self.partition_blocks,
             partition_files: self.partition_files,
+            vanished: self.vanished,
             truncated_partition: self.truncated_partition,
         })
     }
@@ -2719,19 +2892,21 @@ fn merkle_root(leaves: &[[u8; 32]], hash_strategy: HashStrategy) -> [u8; 32] {
     tree.root()
 }
 
-fn detect_partition(file_path: &str, base_path: &str) -> String {
-    let rel = file_path.strip_prefix(base_path).unwrap_or(file_path);
-    let rel = rel.trim_start_matches('/');
-    let segments: Vec<&str> = rel.split('/').collect();
-    let parts: Vec<&str> = segments
-        .into_iter()
-        .filter(|seg| seg.contains('=') && !seg.ends_with(".parquet"))
-        .collect();
-
-    if parts.is_empty() {
+/// The Hive partition of a data file: the `k=v` directories directly above
+/// it, below its table directory (see [`file_layout`]). It does not depend on
+/// where the scan started, so verifying a partition directory or a single file
+/// records its root under the same key as verifying the whole table.
+fn detect_partition(file_path: &str) -> String {
+    let mut dirs: Vec<&str> = file_path.split('/').filter(|c| !c.is_empty()).collect();
+    dirs.pop(); // file name
+    let start = dirs
+        .iter()
+        .rposition(|dir| !dir.contains('='))
+        .map_or(0, |table| table + 1);
+    if start == dirs.len() {
         "unpartitioned".to_string()
     } else {
-        parts.join("/")
+        dirs[start..].join("/")
     }
 }
 
@@ -3131,55 +3306,74 @@ fn write_file_atomic(path: &Path, data: &[u8]) -> Result<()> {
 /// roots are provisional, so they are neither compared nor recorded.
 ///
 /// Rows after the writer frontier are uncommitted, or were written after the
-/// last legacy cursor save, so their partitions are open. While the stream
-/// has not reached its stop block, the partition holding the last block at or
-/// before the frontier is open too: the next blocks can land in it, and a
-/// running transaction may already have published a later partition's part
-/// but not yet this one's. Earlier partitions cannot receive rows, provided
-/// block timestamps (and so time partitions) never decrease. An unfinished
-/// reversible stream can append rows for earlier blocks on a reorg, and a
-/// table without `block_num` cannot be placed, so every partition of those is
-/// open.
+/// last legacy cursor save, so their partitions are always open. While the
+/// stream can still grow, the partition holding the last block at or before
+/// the frontier is open too: the next blocks can land in it, and a running
+/// transaction may already have published a later partition's part but not
+/// yet this one's. A stream can grow while it has not reached its stop block,
+/// and, for a protected dataset, after it did, because a later, longer
+/// request extends it; then only a `block_range` partition that ends at or
+/// before the stop is complete. Earlier partitions cannot receive rows,
+/// provided block timestamps (and so time partitions) never decrease. A
+/// growing reversible stream can append rows for earlier blocks on a reorg,
+/// and a partition without `block_num` values cannot be placed, so those are
+/// open too.
 fn open_partitions(
     progress: &WriterProgress,
     scan: &ScanOutput,
     warnings: &mut Vec<String>,
 ) -> HashMap<String, String> {
-    let WriterProgress::Known {
-        frontier,
-        finished,
-        reversible,
-        source,
-    } = progress
-    else {
-        return HashMap::new();
+    let (frontier, finished_at, extendable, reversible, source) = match progress {
+        WriterProgress::Unknown => return HashMap::new(),
+        WriterProgress::Unreadable { source, error } => {
+            let open: HashMap<String, String> = scan
+                .partition_roots
+                .keys()
+                .map(|partition| {
+                    (
+                        partition.clone(),
+                        format!("open: {source} could not be read, so it is unknown whether `fireparq build` may still write it; not compared or recorded"),
+                    )
+                })
+                .collect();
+            warnings.push(format!(
+                "could not read {source} ({error}); every partition was treated as open and nothing was compared or recorded"
+            ));
+            return open;
+        }
+        WriterProgress::Known {
+            frontier,
+            finished_at,
+            extendable,
+            reversible,
+            source,
+        } => (frontier, finished_at, extendable, reversible, source),
     };
     let at = match frontier {
         Some(block) => format!("is at block {block}"),
         None => "has no committed block yet".to_string(),
     };
+    let may_grow = finished_at.is_none() || *extendable;
     let mut open = HashMap::new();
-    if !finished {
-        let every = if *reversible {
-            Some(format!(
-                "open: {source} {at} and its reversible stream (--final-blocks-only=false) has not reached its stop block; a reorg can append rows to any partition"
-            ))
-        } else if frontier.is_none() {
-            Some(format!("open: {source} {at}"))
-        } else {
-            None
-        };
-        for partition in scan.partition_roots.keys() {
-            let reason = every.clone().or_else(|| {
-                // Without block numbers a partition cannot be placed before
-                // or after the frontier.
-                (!scan.partition_blocks.contains_key(partition)).then(|| {
-                    format!("open: {source} {at}, and this partition has no block_num values to tell whether it is complete")
-                })
-            });
-            if let Some(reason) = reason {
-                open.insert(partition.clone(), reason);
-            }
+    let every = if frontier.is_none() {
+        Some(format!("open: {source} {at}"))
+    } else if may_grow && *reversible {
+        Some(format!(
+            "open: {source} {at} and its reversible stream (--final-blocks-only=false) can still grow; a reorg can append rows to any partition"
+        ))
+    } else {
+        None
+    };
+    for partition in scan.partition_roots.keys() {
+        let reason = every.clone().or_else(|| {
+            // Without block numbers a partition cannot be placed before or
+            // after the frontier.
+            (may_grow && !scan.partition_blocks.contains_key(partition)).then(|| {
+                format!("open: {source} {at}, and this partition has no block_num values to tell whether it is complete")
+            })
+        });
+        if let Some(reason) = reason {
+            open.insert(partition.clone(), reason);
         }
     }
     if let Some(frontier) = frontier {
@@ -3195,12 +3389,21 @@ fn open_partitions(
             .iter()
             .filter_map(|(partition, blocks)| blocks.max_committed.map(|block| (partition, block)))
             .max_by(|a, b| a.1.cmp(&b.1).then_with(|| a.0.cmp(b.0)));
-        if let (false, Some((partition, block))) = (finished, last_committed) {
-            open.entry(partition.clone()).or_insert_with(|| {
-                format!(
+        if let (true, Some((partition, block))) = (may_grow, last_committed) {
+            let reason = match finished_at {
+                None => Some(format!(
                     "open: holds block {block}, the last one at or before block {frontier} where {source} is, and the unfinished stream can append to it"
-                )
-            });
+                )),
+                // A block range ending at or before the stop cannot receive
+                // a block of a longer request.
+                Some(stop) if block_range_end(partition).is_some_and(|end| end <= *stop) => None,
+                Some(stop) => Some(format!(
+                    "open: holds block {block}, the last block of the completed request (stop block {stop}); a later, longer `fireparq build` request appends to it"
+                )),
+            };
+            if let Some(reason) = reason {
+                open.entry(partition.clone()).or_insert(reason);
+            }
         }
     }
     open.retain(|partition, _| scan.partition_roots.contains_key(partition));
@@ -3210,18 +3413,27 @@ fn open_partitions(
     if !open.is_empty() {
         let mut names: Vec<&str> = open.keys().map(String::as_str).collect();
         names.sort_unstable();
+        let state = match finished_at {
+            None => " and has not reached its stop block".to_string(),
+            Some(stop) => format!(", the end of its completed request (stop block {stop})"),
+        };
         warnings.push(format!(
-            "{} partition(s) may still receive rows from `fireparq build` ({source} {at}{}): {}; they were not compared or recorded",
+            "{} partition(s) may still receive rows from `fireparq build` ({source} {at}{state}): {}; they were not compared or recorded",
             open.len(),
-            if *finished {
-                ""
-            } else {
-                " and has not reached its stop block"
-            },
             names.join(", ")
         ));
     }
     open
+}
+
+/// The exclusive end block of a `block_range=<start>-<end>` partition.
+fn block_range_end(partition: &str) -> Option<u64> {
+    partition
+        .strip_prefix("block_range=")?
+        .split_once('-')?
+        .1
+        .parse()
+        .ok()
 }
 
 fn write_report_bytes(path: &str, aws: Option<&AwsConfig>, data: &[u8]) -> Result<()> {
@@ -3842,7 +4054,8 @@ mod tests {
                 Some(network),
             );
             // Reserved artifacts beside the table and inside the table directory.
-            write_block_nums(&root.join(network).join("cursor.parquet"), &[99]);
+            // The cursor is a finished bounded build, so nothing is open.
+            save_cursor(&root.join(network), 99, Some(100));
             write_block_nums(&root.join(network).join("partitions.parquet"), &[99]);
             write_block_nums(
                 &root

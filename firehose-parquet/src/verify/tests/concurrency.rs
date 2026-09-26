@@ -19,9 +19,15 @@ use crate::ingest::state::{
 use crate::ingest::store::TransactionStateStore;
 use std::collections::BTreeSet;
 
-/// Runs `hook` between the scan and the check that its files are unchanged.
+/// Runs `hook` at a named point of the next run on this thread:
+/// `after-frontier` (writer progress read, nothing listed yet), `before-scan`
+/// (files listed, none read) or `after-scan` (before the snapshot check).
+fn at(point: &'static str, hook: impl FnOnce() + 'static) {
+    super::super::TEST_HOOKS.with(|hooks| hooks.borrow_mut().push((point, Box::new(hook))));
+}
+
 fn after_scan(hook: impl FnOnce() + 'static) {
-    super::super::AFTER_SCAN.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
+    at("after-scan", hook);
 }
 
 /// Every file below `dir`, relative to it.
@@ -76,18 +82,21 @@ fn verify_writes_roots_and_reports_while_another_command_owns_every_scope() {
     assert!(second.is_valid());
 }
 
-/// One protected transaction per window of blocks, committed by the real
-/// ingestion controller into `block_range=` partitions of ten blocks.
-fn protected_dataset(root: &Path, windows: &[&[u64]]) -> StreamDescriptor {
-    use crate::config::{BlockMetadata, Compression};
-    use crate::writer::{protected::schema_sha256, ParquetFileMetadata};
-    std::fs::create_dir_all(root).unwrap();
-    let schema = Arc::new(Schema::new(vec![Field::new(
+fn block_num_schema() -> Arc<Schema> {
+    Arc::new(Schema::new(vec![Field::new(
         "block_num",
         DataType::UInt64,
         false,
-    )]));
+    )]))
+}
+
+/// Initializes a protected dataset with `block_range=` partitions of ten
+/// blocks from block 100, without committing anything.
+fn protected_root(root: &Path, final_blocks_only: bool) -> StreamDescriptor {
+    use crate::writer::protected::schema_sha256;
+    std::fs::create_dir_all(root).unwrap();
     let mut descriptor = descriptor(RoutingPolicy::DirectV1);
+    descriptor.final_blocks_only = final_blocks_only;
     descriptor.partition = PartitionPolicy::BlockRange {
         size: 10,
         anchor: 100,
@@ -105,7 +114,7 @@ fn protected_dataset(root: &Path, windows: &[&[u64]]) -> StreamDescriptor {
     .unwrap();
     descriptor.tables = std::collections::BTreeMap::from([(
         "blocks".into(),
-        Digest::parse(schema_sha256(&schema).unwrap()).unwrap(),
+        Digest::parse(schema_sha256(&block_num_schema()).unwrap()).unwrap(),
     )]);
     super::super::block_on_async(async {
         let ownership = DatasetOwnership::acquire(
@@ -115,18 +124,36 @@ fn protected_dataset(root: &Path, windows: &[&[u64]]) -> StreamDescriptor {
         )
         .await
         .unwrap();
-        let local = ownership.local().unwrap();
-        TransactionStateStore::local(root, local)
+        TransactionStateStore::local(root, ownership.local().unwrap())
             .unwrap()
             .initialize(AuthorityState::initial(descriptor.clone()).unwrap())
             .await
             .unwrap();
+        ownership.release().await.unwrap();
+    });
+    descriptor
+}
+
+/// Commits one protected transaction per window of blocks with the real
+/// ingestion controller, as `build` does.
+fn commit_windows(root: &Path, descriptor: &StreamDescriptor, windows: &[&[u64]]) {
+    use crate::config::{BlockMetadata, Compression};
+    use crate::writer::ParquetFileMetadata;
+    super::super::block_on_async(async {
+        let ownership = DatasetOwnership::acquire(
+            "fixture",
+            vec![MutationScope::directory(root.to_string_lossy())],
+            None,
+        )
+        .await
+        .unwrap();
+        let local = ownership.local().unwrap();
         let mirror = ProtectedMirror::new(&ownership, &MirrorBinding::Disabled, None).unwrap();
         let mut controller = TransactionController::open(
             TransactionStateStore::local(root, local).unwrap(),
             TransactionParts::local(root, local).unwrap(),
             &mirror,
-            &descriptor,
+            descriptor,
         )
         .await
         .unwrap();
@@ -139,7 +166,7 @@ fn protected_dataset(root: &Path, windows: &[&[u64]]) -> StreamDescriptor {
                     .unwrap();
             }
             let batch = RecordBatch::try_new(
-                schema.clone(),
+                block_num_schema(),
                 vec![Arc::new(UInt64Array::from(window.to_vec()))],
             )
             .unwrap();
@@ -162,6 +189,12 @@ fn protected_dataset(root: &Path, windows: &[&[u64]]) -> StreamDescriptor {
         drop(controller);
         ownership.release().await.unwrap();
     });
+}
+
+/// A final-only protected dataset with one committed transaction per window.
+fn protected_dataset(root: &Path, windows: &[&[u64]]) -> StreamDescriptor {
+    let descriptor = protected_root(root, true);
+    commit_windows(root, &descriptor, windows);
     descriptor
 }
 
@@ -223,7 +256,7 @@ fn registry_partitions(registry: &Path) -> Vec<String> {
 fn the_protected_frontier_decides_open_partitions_while_build_owns_the_dataset() {
     let dir = tempfile::tempdir().unwrap();
     let root = std::fs::canonicalize(dir.path()).unwrap().join("mainnet");
-    let descriptor = protected_dataset(&root, &[&[100, 101, 105], &[110, 112]]);
+    let descriptor = protected_dataset(&root, &[&[100, 101, 105], &[110, 112, 119]]);
     let data = root.join("blocks");
     let registry = root.join(MERKLE_ROOTS_FILENAME);
     let (first, last) = (
@@ -235,7 +268,7 @@ fn the_protected_frontier_decides_open_partitions_while_build_owns_the_dataset()
         .map(|file| file.split('/').next().unwrap().to_string())
         .collect();
     assert_eq!(written, BTreeSet::from([first.clone(), last.clone()]));
-    // A running transaction already published a part after the frontier (112).
+    // A running transaction already published a part after the frontier (119).
     let pending_partition = "block_range=120-130".to_string();
     let pending = data.join(&pending_partition).join("part-pending.parquet");
     write_block_nums(&pending, &[120, 121]);
@@ -252,15 +285,16 @@ fn the_protected_frontier_decides_open_partitions_while_build_owns_the_dataset()
     assert!(report
         .warnings
         .iter()
-        .any(|w| w.contains("authoritative ingestion state") && w.contains("block 112")));
+        .any(|w| w.contains("authoritative ingestion state") && w.contains("block 119")));
     assert_eq!(registry_partitions(&registry), [first.clone()]);
 
-    // The stream completes at its stop block: only the uncommitted part is
-    // open now, and the last committed partition is recorded.
+    // The request completes at stop block 120, where `block_range=110-120`
+    // ends: no longer request can add to it, so it is recorded. Only the
+    // uncommitted part stays open.
     drop(_build);
     std::fs::remove_file(&pending).unwrap();
     std::fs::remove_dir(pending.parent().unwrap()).unwrap();
-    complete_request(&root, &descriptor, 113);
+    complete_request(&root, &descriptor, 120);
     write_block_nums(&pending, &[120, 121]);
     let report = verify_parquet(data.to_str().unwrap(), None, &base_opts()).unwrap();
     assert_eq!(partitions(&report, "open"), [pending_partition.clone()]);
@@ -272,30 +306,42 @@ fn the_protected_frontier_decides_open_partitions_while_build_owns_the_dataset()
 }
 
 #[test]
-fn an_extension_after_a_completed_stop_reopens_the_last_partition() {
+fn a_completed_request_keeps_its_last_partition_open_until_it_cannot_grow() {
     let dir = tempfile::tempdir().unwrap();
     let root = std::fs::canonicalize(dir.path()).unwrap().join("mainnet");
     let descriptor = protected_dataset(&root, &[&[100, 101]]);
     complete_request(&root, &descriptor, 102);
     let data = root.join("blocks");
+    // `block_range=100-110` ends after stop block 102: a later, longer request
+    // appends to it, so it is not recorded.
     let finished = verify_parquet(data.to_str().unwrap(), None, &base_opts()).unwrap();
-    assert!(partitions(&finished, "open").is_empty());
-    assert_eq!(finished.summary.missing_expected, 1);
+    assert_eq!(partitions(&finished, "open"), ["block_range=100-110"]);
+    assert!(finished.findings[0]
+        .error
+        .as_deref()
+        .unwrap()
+        .contains("completed request (stop block 102)"));
+    assert!(!finished.summary.wrote_registry);
 
-    // A longer request resumes: `completed_stop` keeps the old bound while the
-    // frontier moves past it, so the stream is live again.
-    let mut state = observe::read_local_authority(&root).unwrap().unwrap();
+    // The longer request commits blocks 105 and 111: `completed_stop` keeps
+    // the old bound while the frontier moves past it, so the stream is live.
+    commit_windows(&root, &descriptor, &[&[105], &[111]]);
+    let state = observe::read_local_authority(&root).unwrap().unwrap();
     assert_eq!(state.checkpoint.completed_stop, Some(102));
-    state.checkpoint.event.as_mut().unwrap().block_num = 104;
-    let progress = WriterProgress::from_authority(&state, "root");
     assert!(matches!(
-        progress,
+        WriterProgress::from_authority(&state, "root"),
         WriterProgress::Known {
-            frontier: Some(104),
-            finished: false,
+            frontier: Some(111),
+            finished_at: None,
             ..
         }
     ));
+    let extended = verify_parquet(data.to_str().unwrap(), None, &base_opts()).unwrap();
+    assert_eq!(
+        partitions(&extended, "missing_expected"),
+        ["block_range=100-110"]
+    );
+    assert_eq!(partitions(&extended, "open"), ["block_range=110-120"]);
 }
 
 #[test]
@@ -447,8 +493,8 @@ fn an_unfinished_merge_is_refused_without_recovering_anything() {
 fn artifact_destinations_inside_a_protected_dataset_keep_their_guards() {
     let dir = tempfile::tempdir().unwrap();
     let root = std::fs::canonicalize(dir.path()).unwrap().join("mainnet");
-    let descriptor = protected_dataset(&root, &[&[100, 101]]);
-    complete_request(&root, &descriptor, 102);
+    let descriptor = protected_dataset(&root, &[&[100, 109]]);
+    complete_request(&root, &descriptor, 110);
     let data = root.join("blocks");
     let partition = tree(&data)
         .into_iter()
@@ -747,4 +793,271 @@ fn protocol_only_runs_stay_read_only_while_owned() {
     let report = verify_parquet(data.to_str().unwrap(), None, &opts).unwrap();
     assert!(!report.summary.wrote_registry);
     assert!(!root.join("mainnet").join(MERKLE_ROOTS_FILENAME).exists());
+}
+
+#[test]
+fn the_frontier_is_read_before_the_scanned_listing() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(dir.path()).unwrap();
+    let data = legacy_fixture(&root);
+    let chain_root = root.join("mainnet");
+    save_cursor(&chain_root, 4, None);
+    // `build` commits blocks 5 and 6 after verify read the frontier but
+    // before it listed the files: they are in the scan, so they must be open.
+    let (hooked_data, hooked_root) = (data.clone(), chain_root.clone());
+    at("after-frontier", move || {
+        write_block_nums(&hooked_data.join("day=3/part-0.parquet"), &[5, 6]);
+        save_cursor(&hooked_root, 6, None);
+    });
+    let report = verify_parquet(data.to_str().unwrap(), None, &base_opts()).unwrap();
+    assert!(
+        report.warnings.iter().any(|w| w.contains("is at block 4")),
+        "{:?}",
+        report.warnings
+    );
+    assert_eq!(partitions(&report, "open"), ["day=2", "day=3"]);
+    assert_eq!(partitions(&report, "missing_expected"), ["day=1"]);
+}
+
+#[test]
+fn a_merge_that_starts_during_the_scan_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(dir.path()).unwrap();
+    let data = legacy_fixture(&root);
+    let hooked = data.clone();
+    after_scan(move || std::fs::write(hooked.join("day=1").join(JOURNAL_FILE), b"{}").unwrap());
+    let err = verify_parquet(data.to_str().unwrap(), None, &base_opts()).unwrap_err();
+    assert!(format!("{err:#}").contains("unfinished merge"), "{err:#}");
+    assert!(!root.join("mainnet").join(MERKLE_ROOTS_FILENAME).exists());
+}
+
+#[test]
+fn files_that_vanish_are_tolerated_only_in_open_partitions() {
+    let fixture = |root: &Path| {
+        let data = root.join("mainnet/blocks");
+        write_block_nums(&data.join("day=1/part-0.parquet"), &[1]);
+        write_block_nums(&data.join("day=1/part-1.parquet"), &[2]);
+        write_block_nums(&data.join("day=2/part-0.parquet"), &[3, 4]);
+        write_block_nums(&data.join("day=2/part-1.parquet"), &[5]);
+        save_cursor(&root.join("mainnet"), 4, None);
+        data
+    };
+    // A restarted build rolls back an uncommitted part in an open partition
+    // while verify is listing: harmless.
+    let dir = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(dir.path()).unwrap();
+    let data = fixture(&root);
+    let hooked = data.clone();
+    at("before-scan", move || {
+        std::fs::remove_file(hooked.join("day=2/part-1.parquet")).unwrap()
+    });
+    let report = verify_parquet(data.to_str().unwrap(), None, &base_opts()).unwrap();
+    assert_eq!(partitions(&report, "open"), ["day=2"]);
+    assert_eq!(partitions(&report, "missing_expected"), ["day=1"]);
+    assert!(
+        report
+            .warnings
+            .iter()
+            .any(|w| w.contains("disappeared") && w.contains("day=2/part-1.parquet")),
+        "{:?}",
+        report.warnings
+    );
+
+    // A file of a closed partition that disappears fails the run.
+    let dir = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(dir.path()).unwrap();
+    let data = fixture(&root);
+    let hooked = data.clone();
+    at("before-scan", move || {
+        std::fs::remove_file(hooked.join("day=1/part-1.parquet")).unwrap()
+    });
+    let err = format!(
+        "{:#}",
+        verify_parquet(data.to_str().unwrap(), None, &base_opts()).unwrap_err()
+    );
+    assert!(err.contains("changed while verify was reading"), "{err}");
+    assert!(err.contains("day=1"), "{err}");
+    assert!(!root.join("mainnet").join(MERKLE_ROOTS_FILENAME).exists());
+}
+
+#[test]
+fn a_reversible_stream_leaves_every_partition_open_while_it_can_grow() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(dir.path()).unwrap().join("mainnet");
+    let descriptor = protected_root(&root, false);
+    commit_windows(&root, &descriptor, &[&[100, 101], &[110]]);
+    let report = verify_parquet(root.join("blocks").to_str().unwrap(), None, &base_opts()).unwrap();
+    assert_eq!(
+        partitions(&report, "open"),
+        ["block_range=100-110", "block_range=110-120"]
+    );
+    assert!(report.findings[0]
+        .error
+        .as_deref()
+        .unwrap()
+        .contains("reversible"));
+    assert!(!report.summary.wrote_registry);
+}
+
+#[test]
+fn a_protected_dataset_without_a_committed_block_leaves_everything_open() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(dir.path()).unwrap().join("mainnet");
+    protected_root(&root, true);
+    // A first transaction published a part but has not committed.
+    let data = root.join("blocks");
+    write_block_nums(
+        &data.join("block_range=100-110/part-pending.parquet"),
+        &[100],
+    );
+    let report = verify_parquet(data.to_str().unwrap(), None, &base_opts()).unwrap();
+    assert_eq!(partitions(&report, "open"), ["block_range=100-110"]);
+    assert!(report.findings[0]
+        .error
+        .as_deref()
+        .unwrap()
+        .contains("has no committed block yet"));
+}
+
+#[test]
+fn a_protected_marker_without_authoritative_state_is_an_error() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(dir.path()).unwrap();
+    let data = legacy_fixture(&root);
+    std::fs::create_dir(root.join("mainnet/.fireparq-ingest")).unwrap();
+    let err = format!(
+        "{:#}",
+        verify_parquet(data.to_str().unwrap(), None, &base_opts()).unwrap_err()
+    );
+    assert!(err.contains("no authoritative ingestion state"), "{err}");
+    assert!(!root.join("mainnet").join(MERKLE_ROOTS_FILENAME).exists());
+}
+
+#[test]
+fn an_unreadable_legacy_cursor_leaves_every_partition_open() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(dir.path()).unwrap();
+    let data = legacy_fixture(&root);
+    std::fs::write(root.join("mainnet/cursor.parquet"), b"not parquet").unwrap();
+    let report = verify_parquet(data.to_str().unwrap(), None, &base_opts()).unwrap();
+    assert_eq!(partitions(&report, "open"), ["day=1", "day=2"]);
+    assert!(report.warnings.iter().any(|w| w.contains("could not read")));
+    assert!(!report.summary.wrote_registry);
+    assert!(report.is_valid());
+}
+
+#[test]
+fn a_published_protocol_report_needs_every_file_it_read() {
+    let run = |rewrite: fn(&Path), report: bool| {
+        let dir = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        let data = legacy_fixture(&root);
+        let mut opts = base_opts();
+        opts.checks = vec![VerifyCheck::Protocol];
+        if report {
+            opts.report_json = Some(root.join("report.json"));
+        }
+        let hooked = data.clone();
+        after_scan(move || rewrite(&hooked));
+        verify_parquet(data.to_str().unwrap(), None, &opts).map(|_| ())
+    };
+    let remove: fn(&Path) = |data| std::fs::remove_file(data.join("day=2/part-0.parquet")).unwrap();
+    let add: fn(&Path) = |data| write_block_nums(&data.join("day=1/part-1.parquet"), &[2]);
+    let err = format!("{:#}", run(remove, true).unwrap_err());
+    assert!(err.contains("was removed"), "{err}");
+    // Added files do not invalidate what was read.
+    run(add, true).unwrap();
+    // A protocol run without output stays observational.
+    run(remove, false).unwrap();
+}
+
+#[test]
+fn a_partition_directory_or_file_is_recorded_under_its_own_partition() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(dir.path()).unwrap();
+    let data = legacy_fixture(&root);
+    let table = verify_parquet(data.to_str().unwrap(), None, &base_opts()).unwrap();
+    assert_eq!(partitions(&table, "missing_expected"), ["day=1", "day=2"]);
+    let partition =
+        verify_parquet(data.join("day=1").to_str().unwrap(), None, &base_opts()).unwrap();
+    assert_eq!(partitions(&partition, "match"), ["day=1"]);
+    let file = verify_parquet(
+        data.join("day=2/part-0.parquet").to_str().unwrap(),
+        None,
+        &base_opts(),
+    )
+    .unwrap();
+    assert_eq!(partitions(&file, "match"), ["day=2"]);
+    assert_eq!(
+        registry_partitions(&root.join("mainnet").join(MERKLE_ROOTS_FILENAME)),
+        ["day=1", "day=2"]
+    );
+}
+
+#[test]
+fn artifact_destinations_are_checked_before_any_row_is_read() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(dir.path()).unwrap().join("mainnet");
+    protected_dataset(&root, &[&[100, 101]]);
+    let scanned = std::rc::Rc::new(std::cell::Cell::new(false));
+    let flag = scanned.clone();
+    at("before-scan", move || flag.set(true));
+    let mut opts = base_opts();
+    opts.registry_path = Some(root.join("cursor.parquet").display().to_string());
+    let err = verify_parquet(root.join("blocks").to_str().unwrap(), None, &opts).unwrap_err();
+    assert!(format!("{err:#}").contains("protected recovery metadata"));
+    assert!(!scanned.get(), "the destination is refused before the scan");
+    super::super::TEST_HOOKS.with(|hooks| hooks.borrow_mut().clear());
+}
+
+#[test]
+fn remote_reads_are_pinned_to_the_listed_object() {
+    let dir = tempfile::tempdir().unwrap();
+    let store: Arc<dyn object_store::ObjectStore> = Arc::new(object_store::memory::InMemory::new());
+    put_block_nums(
+        store.as_ref(),
+        "mainnet/blocks/day=1/part-0.parquet",
+        &[1, 2],
+    );
+    put_block_nums(
+        store.as_ref(),
+        "mainnet/blocks/day=2/part-0.parquet",
+        &[3, 4],
+    );
+
+    // An object replaced after the listing is not read: the GET carries the
+    // listed ETag, so the new content is never hashed under the old identity.
+    let source = remote_source(store.clone());
+    let listing = source
+        .list(&super::super::ExcludedPaths::default())
+        .unwrap();
+    put_block_nums(
+        store.as_ref(),
+        "mainnet/blocks/day=1/part-0.parquet",
+        &[1, 2, 2],
+    );
+    let scan = source.scan(&listing, &base_opts(), None).unwrap();
+    assert_eq!(
+        scan.vanished.keys().collect::<Vec<_>>(),
+        ["day=1"],
+        "the pinned read of the replaced object failed"
+    );
+
+    // End to end, the run fails before anything is compared or written.
+    let registry = dir.path().join("roots.parquet");
+    let hooked = store.clone();
+    at("before-scan", move || {
+        put_block_nums(
+            hooked.as_ref(),
+            "mainnet/blocks/day=1/part-0.parquet",
+            &[1, 2, 2, 2],
+        )
+    });
+    let err = format!(
+        "{:#}",
+        verify_remote(&store, &roots_opts(&registry)).unwrap_err()
+    );
+    assert!(err.contains("changed while verify was reading"), "{err}");
+    assert!(err.contains("day=1"), "{err}");
+    assert!(!registry.exists());
 }

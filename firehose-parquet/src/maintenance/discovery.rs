@@ -98,6 +98,24 @@ pub(crate) async fn list_objects(
     store.list(prefix.as_ref()).try_collect().await
 }
 
+/// The first listed object that `select` accepts, in backend order, without
+/// listing the rest. For callers that need one sample object (verify locates
+/// its chain root this way); filtering stays with the caller, as above.
+pub(crate) async fn first_object(
+    store: &dyn ObjectStore,
+    prefix: &str,
+    mut select: impl FnMut(&ObjectMeta) -> bool,
+) -> object_store::Result<Option<ObjectMeta>> {
+    let prefix = (!prefix.is_empty()).then(|| ObjectPath::from(prefix));
+    let mut objects = store.list(prefix.as_ref());
+    while let Some(object) = objects.try_next().await? {
+        if select(&object) {
+            return Ok(Some(object));
+        }
+    }
+    Ok(None)
+}
+
 /// `key` relative to the listed `prefix`, without a leading `/`. A key outside the
 /// prefix is returned unchanged.
 pub(crate) fn relative_key<'a>(prefix: &str, key: &'a str) -> &'a str {
@@ -106,9 +124,10 @@ pub(crate) fn relative_key<'a>(prefix: &str, key: &'a str) -> &'a str {
         .unwrap_or(key)
 }
 
-/// Existing unversioned whole-object read used by scan/inspect/validate only.
-/// Do not use this for merge's reserved windows, rollup's pinned ranges, or
-/// verify's ordered prefetch: those callers own materially different contracts.
+/// Existing unversioned whole-object read used by scan/inspect/validate and by
+/// verify's legacy `cursor.parquet` read. Do not use this for merge's reserved
+/// windows, rollup's pinned ranges, or verify's ETag-pinned ordered prefetch:
+/// those callers own materially different contracts.
 pub(crate) async fn read_object_bytes(
     store: &dyn ObjectStore,
     location: &ObjectPath,

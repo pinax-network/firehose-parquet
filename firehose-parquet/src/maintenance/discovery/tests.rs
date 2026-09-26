@@ -297,6 +297,34 @@ async fn raw_object_listing_and_complete_reads_match_existing_contract() {
     );
 }
 
+#[tokio::test]
+async fn first_object_is_the_first_selected_entry_of_the_same_listing() {
+    use object_store::memory::InMemory;
+    let store = InMemory::new();
+    for key in [
+        "root/a/cursor.parquet",
+        "root/b/part-1.parquet",
+        "root/b/part-2.parquet",
+        "root2/part.parquet",
+    ] {
+        store
+            .put(&ObjectPath::from(key), bytes::Bytes::new().into())
+            .await
+            .unwrap();
+    }
+    let data = |meta: &ObjectMeta| !meta.location.as_ref().ends_with("cursor.parquet");
+    for prefix in ["", "root", "root/b", "root/missing"] {
+        let expected = list_objects(&store, prefix)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|meta| data(meta));
+        let first = first_object(&store, prefix, data).await.unwrap();
+        assert_eq!(first, expected, "prefix {prefix:?}");
+    }
+    assert_eq!(first_object(&store, "root", |_| false).await.unwrap(), None);
+}
+
 // --- Frozen walkers from origin/main 9372f99 -------------------------------
 
 // merge.rs collect_parquet_files_recursive

@@ -81,8 +81,9 @@ pub(crate) fn remote_marker(store: &dyn ObjectStore, prefix: &str) -> Result<boo
         tokio::time::timeout(REMOTE_TIMEOUT, async {
             let mut objects = store.list(Some(&location));
             while let Some(object) = objects.next().await {
-                let object = object
-                    .map_err(|_| anyhow::anyhow!("listing protected control markers failed"))?;
+                let object = object.map_err(|error| {
+                    anyhow::anyhow!("listing protected control markers failed: {error}")
+                })?;
                 let key = object.location.as_ref();
                 if key == marker || key.starts_with(&format!("{marker}/")) {
                     return Ok(true);
@@ -112,7 +113,7 @@ pub(crate) fn read_remote_authority(
             let object = match store.get(&location).await {
                 Ok(object) => object,
                 Err(object_store::Error::NotFound { .. }) => return Ok(None),
-                Err(_) => bail!("reading the authoritative state failed"),
+                Err(error) => bail!("reading the authoritative state failed: {error}"),
             };
             ensure!(
                 object.meta.size <= MAX_CONTROL_BYTES as u64,
@@ -121,8 +122,9 @@ pub(crate) fn read_remote_authority(
             let mut stream = object.into_stream();
             let mut bytes = Vec::new();
             while let Some(chunk) = stream.next().await {
-                let chunk =
-                    chunk.map_err(|_| anyhow::anyhow!("reading the authoritative state failed"))?;
+                let chunk = chunk.map_err(|error| {
+                    anyhow::anyhow!("reading the authoritative state failed: {error}")
+                })?;
                 ensure!(
                     bytes.len().saturating_add(chunk.len()) <= MAX_CONTROL_BYTES,
                     "authoritative state exceeds the size limit"
