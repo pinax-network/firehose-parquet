@@ -27,6 +27,7 @@ lifecycle state; a local implementation or passing test alone is not closure.
 - [#505: Beacon value semantics and migration](505-beacon-values.md)
 - [#485: partition probe reliability](485-partition-probe-reliability.md)
 - [#486: exact finalized partition coverage and strict consumers](486-partition-index-design.md)
+- [Validation follow-ups 10-15: validate precision, live partition retries, index time type and v2 validation](validation-misc-followups-partitions.md)
 - [#500: stable Solana reward indices](500-solana-reward-index.md)
 - [#501: conservative Solana vote classification](501-solana-vote-classification.md)
 - [#502: explicit Solana instruction positions](502-solana-instruction-order.md)
