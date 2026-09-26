@@ -173,7 +173,9 @@ tracked separately.
   1,115 passed and 14 ignored on the branch before the rebase; 1,129 passed and
   14 ignored after rebasing on `8462692`; 1,143 passed and 14 ignored after
   rebasing on `050f9ec`, including its new `maintenance_output_properties`
-  integration tests (26 tests come from this change). One earlier run on the
+  integration tests; 1,157 passed and 14 ignored after rebasing on `97dd244`
+  (#622 changed only mappers, cursor defaults and docs, so the E2E comparison was
+  not repeated). 26 tests come from this change. One earlier run on the
   rebased branch hit a transient failure in the unrelated
   `ingest::controller` publication-boundary test under load; it passed three
   isolated reruns and the next two complete runs.
