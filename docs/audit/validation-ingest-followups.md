@@ -100,8 +100,10 @@ Beacon with a warning, while the real build requires the accepted boundary to
 reach `stop - 1`. The #466 release note still described the old allowance.
 
 **Fix.** Made consistent: dry runs now apply the protected rule on every chain
-and say what the real build would do. The unused gap allowance and its field
-were removed. The #466 release note and README now agree with the #468 note.
+and say what the real build would do. The dry-run gap allowance and the runtime
+field that only fed it were removed. After #614, `ChainProfile::block_number_gaps`
+remains as a documented chain fact whose comment now states that it does not
+relax completion. The #466 release note and README now agree with the #468 note.
 
 **Tests.** `test_bounded_dry_run_on_sparse_chain_matches_protected_completion`;
 CLI `dry_run_refuses_the_same_unproven_sparse_tail_as_a_real_build` next to the
