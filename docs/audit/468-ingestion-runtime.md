@@ -120,6 +120,8 @@ Protected truncate, in-place rollup and source-deleting rollup are refused.
 Lossless merge and copy-only rollup into separate unprotected output remain
 available. Partition-index output is an explicit artifact file target, so it
 cannot overwrite a bound cursor or ordinary protected part.
+(Update: `verify` no longer acquires ownership or recovers; see the
+[verify follow-ups record](validation-verify-followups.md).)
 
 Local support requires macOS/Linux directory inode locking, atomic same-directory
 hard links and renames, file/directory sync and readable ancestry. Explicit root

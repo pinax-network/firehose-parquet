@@ -79,15 +79,20 @@ Column names are UTF-8. A null is only the `0x00` tag, so it can never collide w
 | `Timestamp(unit, tz)` | The instant as nanoseconds since the Unix epoch, base-10 ASCII, computed without overflow. The unit and timezone are not encoded. |
 | `Dictionary(K, V)` | The canonical bytes of the referenced value, per `V`. Keys are not encoded. |
 | `List(T)`, `LargeList(T)`, `FixedSizeList(T, n)` | `u32le(element_count)`, then each element encoded as a `value` (with its own null tag) |
+| `Struct(fields)` | `u32le(field_count)`, then each field's value in declared field order, each encoded as a `value` (with its own null tag). Field names are not encoded. A null struct is only the `0x00` tag; its fields are not read. |
 | `Null` | Always null |
 
-Any other Arrow type (for example `Decimal128`, `Struct`, `Map`, `Date64`, `Time*`, `Duration`, `Interval`) has no `merkle_v2` encoding. `verify` fails with an error naming the column and type instead of guessing. Adding a type means adding a rule here and bumping `merkle_version`.
+Rules nest: a `List<Struct<...>>` column (Cosmos `transactions.fee_amount` and `signer_infos`) encodes each list element as a struct `value`, and each struct field as a `value` of its own type.
+
+Any other Arrow type (for example `Decimal128`, `Map`, `Union`, `Date64`, `Time*`, `Duration`, `Interval`) has no `merkle_v2` encoding. `verify` fails with an error naming the column (and struct field) and type instead of guessing. Every column type of every table of every chain has an encoding; `blocks/src/schema_contract_tests.rs` (`verify_hashes_every_table_of_every_chain`) fails when a chain adds one that does not.
+
+Changing an existing rule changes roots, so it must bump `merkle_version`. Adding a rule for a type that had none cannot change a root that an earlier build could compute (such a column made `verify` fail), so it does not need a new version. The `Struct` rule was added to `merkle_v2` before its first release.
 
 ### Consequences
 
 - **Physical representation does not matter.** `Utf8`, `LargeUtf8`, `Utf8View` and `Dictionary(Int32, Utf8)` holding the same strings encode identically. The same holds for the binary family, for list variants, and for integer widths (`UInt32` 7 and `UInt64` 7). A reader or writer choosing a different Arrow representation for the same data does not change the root.
 - **Timestamps hash the instant.** `Timestamp(Second, "UTC")` `1700000000` and `Timestamp(Millisecond, "UTC")` `1700000000000` both encode as `1700000000000000000`, so moving the canonical `timestamp` column from seconds to milliseconds (#491) does not change roots for identical block times. Millisecond precision is kept: `1700000000001` ms encodes differently.
-- **Arrow types are not committed.** Only values are. As before, a hex string column and a binary column with the same bytes encode identically (text/binary parity), and so do a `UInt64` and a `Utf8` column of base-10 digits. A column rename changes the root, because names are encoded.
+- **Arrow types are not committed.** Only values are. As before, a hex string column and a binary column with the same bytes encode identically (text/binary parity), and so do a `UInt64` and a `Utf8` column of base-10 digits. A list and a struct holding the same child values also encode identically. A column rename changes the root, because names are encoded; a struct field rename does not, because struct field names are not.
 
 ### Golden values
 
@@ -109,6 +114,13 @@ The encoder's unit tests pin these encodings (hex), computed independently from 
 | `List<UInt8>` `[1, 2, 255]` | `01 18000000 03000000 01 01000000 31 01 01000000 32 01 03000000 323535` |
 | `List<UInt64>` `[1, null]` | `01 0b000000 02000000 01 01000000 31 00` |
 | `List<UInt64>` `[]` | `01 04000000 00000000` |
+| `Struct<denom: Utf8, amount: Utf8>` `{"uatom", "5000"}` | `01 17000000 02000000 01 05000000 7561746f6d 01 04000000 35303030` |
+| `Struct<Utf8, Binary, Binary, UInt64>` `{null, 0xab, null, 7}` | `01 13000000 04000000 00 01 02000000 6162 00 01 01000000 37` |
+| `Struct` null | `00` |
+| `Struct` with no fields | `01 04000000 00000000` |
+| `List<Struct<denom, amount>>` `[{"a", "1"}, {"b", "22"}]` | `01 2f000000 02000000` + `01 10000000 02000000 01 01000000 61 01 01000000 31` + `01 11000000 02000000 01 01000000 62 01 02000000 3232` |
+| `List<Struct<...>>` `[null]` | `01 05000000 01000000 00` |
+| `List<Struct<n: UInt64, tags: List<Utf8>>>` `[{5, ["x", null]}]` | `01 23000000 01000000 01 1a000000 02000000 01 01000000 35 01 0b000000 02000000 01 01000000 78 00` |
 
 ## Merkle Construction (`merkle_v2`)
 

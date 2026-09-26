@@ -202,8 +202,10 @@ and [design and validation record](../audit/486-partition-index-design.md).
 
 ### Mutations require common ownership (#468 prerequisite)
 
-Build, partition-index construction, maintenance, and verification that writes
-artifacts now coordinate ownership over their source/output/cursor locations.
+Build, partition-index construction and maintenance now coordinate ownership
+over their source/output/cursor locations. `verify` does not: it only reads
+table data, runs beside these commands, and writes its registry with its own
+lock file or conditional put (see the #489 entry below).
 Local mutation requires supported macOS/Linux directory inode locking and readable
 ancestry. Nested symlinks inside guarded trees are refused; explicit root aliases
 remain supported. Missing output roots are protected through their existing
@@ -429,7 +431,7 @@ Migration:
 What `merkle_v2` fixes:
 
 - **Duplicated trailing rows were invisible (#487).** The old tree paired an odd last node with itself, so rows `[a, b, c]` and `[a, b, c, c]` had the same root, and a final block re-emitted on resume passed verification. Leaves and interior nodes are now domain-separated, odd nodes are promoted unchanged, and the row count is committed.
-- **Roots depended on Arrow display formatting (#490).** Every Arrow type now has an explicit encoding, specified in `docs/verifiability-hash-strategy.md` and pinned by golden tests. Physical variants of the same data encode identically: `Utf8`/`LargeUtf8`/`Utf8View`, dictionaries and their values, the binary family, and timestamps in any unit. A null can no longer collide with the string `<null>`. Arrow types without an encoding make `verify` fail with an error instead of guessing.
+- **Roots depended on Arrow display formatting (#490).** Every Arrow type now has an explicit encoding, specified in `docs/verifiability-hash-strategy.md` and pinned by golden tests. Physical variants of the same data encode identically: `Utf8`/`LargeUtf8`/`Utf8View`, dictionaries and their values, the binary family, and timestamps in any unit. A null can no longer collide with the string `<null>`. Nested `Struct` values, including the Cosmos `transactions.fee_amount` and `signer_infos` lists (#510), are encoded field by field, so every table of every chain can be verified. Arrow types without an encoding make `verify` fail with an error instead of guessing.
 - **Timestamps were not covered.** In v0.7.1 and earlier, every `Timestamp(_, "UTC")` value, including the canonical `timestamp` column of every table, was hashed as the same constant, because Arrow's formatter rejects named timezones without the `chrono-tz` feature. Changing a timestamp did not change the root. `merkle_v2` hashes the instant (nanoseconds since the epoch), so the switch of `timestamp` to milliseconds (#491) keeps roots unchanged for identical block times.
 
 Migration:
@@ -485,7 +487,7 @@ Now:
 
 - **The chain and table are inferred.** The chain comes from the `firehose-parquet.block_type` file metadata and the table from the directory layout (`<output>/<chain_name>/<table>/...`). `--chain` and `--table` are only needed for data without that information. An explicit value that contradicts the data is an error, and so is a verify path that spans several tables or networks.
 - **The registry lives in the network directory.** It is `<output>/<chain_name>/merkle_roots.parquet`, one per network and shared by its tables (rows are keyed by network, chain, table and partition, #489). Published reports go to `<output>/<chain_name>/verify_runs/<run_id>/report.json`. The report gains `network` and `warnings`.
-- **Reserved artifacts are never scanned as data.** `cursor.parquet`, `partitions.parquet`, `merkle_roots.parquet` and `verify_runs/` are skipped. Paths are matched by component instead of by substring.
+- **Reserved artifacts are never scanned as data.** `cursor.parquet`, `partitions.parquet`, `merkle_roots.parquet` and `verify_runs/` are skipped. Paths are matched by component instead of by substring. The configured `--registry-path`, `--report-json` and `--publish-report-path` files are skipped too, whatever their names: a custom registry such as `<table>/roots.parquet` inside the verified path used to be hashed as data, so the run after the one that wrote it failed. Such a registry now gets a warning, because `merge`, `rollup` and `validate` still read it as data.
 
 Migration:
 
@@ -507,14 +509,18 @@ Now:
 
 - **A failing run never writes.** The registry is written only when no protocol check failed, the scan was not cut short, and no root differs (or `--update-registry` was given). A partly read partition is never compared or recorded. The report's `warnings` say why a write was held back.
 - **`--update-registry` passes once it has written.** Replaced roots are reported with the new finding status `updated` (previous root in `expected_root`) and no longer count as mismatches. A rebuild runs to the end without `--no-fail-fast` and exits 0 once the registry is written. Previously it exited 1.
-- **Partitions still being written are `open`.** When `<chain_root>/cursor.parquet` has not reached its stop block (a live or interrupted build), the newest partition and any partition with rows beyond the cursor are reported as `open`, and are neither compared nor recorded. The report gains `summary.updated` and `summary.open_partitions`.
+- **`verify` runs while `build` runs.** It reads table data without taking dataset ownership, so it no longer fails with `cannot acquire Exclusive dataset ownership` while `build` (or `merge`, `rollup`, `truncate`) owns the network. It never recovers or deletes anything.
+- **Partitions still being written are `open`.** `verify` reads where the writer stands before it lists files: the authoritative ingestion state of a protected dataset (`<chain_root>/.fireparq-ingest/state.json`), else a legacy `<chain_root>/cursor.parquet`. Until the stream reaches its stop block, the partition holding the last committed block and every partition with rows after it are `open`, and are neither compared nor recorded; so is every partition of a reversible (`--final-blocks-only=false`) stream. After the stop block, only rows past the frontier are open. The report gains `summary.updated` and `summary.open_partitions`.
+- **A concurrent rewrite fails the run instead of recording a wrong root.** `verify` records the identity of every file it reads (S3 reads are pinned to the listed ETag) and lists the table again after the scan. If a partition it would compare or record gained, lost or replaced a file, for example because a `merge` or `truncate` ran meanwhile, it fails with `the data changed while verify was reading it` before comparing or writing anything.
+- **An unfinished merge is refused, not recovered.** While a `_fireparq_merge.json` journal exists, a partition may hold rows twice or miss some. `verify` fails with `cannot verify ...: it has an unfinished merge ...` before reading any row, and leaves the files alone: it never finishes or rolls back a merge itself. Run `fireparq recovery recover <path>` (or wait for the running merge), then `verify`.
 - **Registry rows are keyed by network.** A new `network` column lets one custom registry serve several networks. Rows without a network (older registries) still apply to any network.
-- **Writes are safe under concurrency.** Local writes take a lock file (`merkle_roots.parquet.lock`) and replace the registry atomically (temporary file, fsync, rename). S3 writes use a conditional put on the ETag and retry after a concurrent update. A run fails instead of overwriting a row that another run changed to a different root.
+- **Writes are safe under concurrency.** Local writes take a lock file (`merkle_roots.parquet.lock`) and replace the registry atomically (temporary file, fsync, rename). S3 writes make one conditional put (`If-Match` on the ETag read before comparing, or `If-None-Match: *` for a new registry) with no retry and no unconditional fallback: a concurrent update, a store without conditional writes, or any other error fails the run, and re-running `verify` compares against the new registry. A run fails instead of overwriting a row that another run changed to a different root.
 
 Migration:
 
 - Scripts that expected `--update-registry` to exit 1 should check the report's `updated` findings instead.
 - Runs that fail (a mismatch or a protocol failure) no longer fill missing roots. Fix the failure, or pass `--update-registry`, first.
+- Scheduled `verify` runs no longer need to avoid `build`. They fail with a clear error, and write nothing, when an unfinished merge or a concurrent rewrite is found; re-run them afterwards.
 
 ### EVM: failed transactions are included by default, with their persistent state changes (#494)
 
