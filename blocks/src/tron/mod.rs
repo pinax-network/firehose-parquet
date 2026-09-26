@@ -5,3 +5,5 @@ pub mod schema;
 
 #[cfg(test)]
 mod field_tests;
+#[cfg(test)]
+mod outcome_tests;
