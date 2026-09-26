@@ -247,6 +247,14 @@ directory links. Recovery verifies exact journal ownership before removing a
 partial transaction or accepting a committed file. Canonical and lexical output
 ancestry are both synced, preserving explicit output-root symlink aliases.
 
+The staging names are `.fireparq-txn-<transaction>-<index>.tmp` next to each
+final part; plain `*.parquet` globs ignore them. After an ordinary error (a
+failed write, publish, journal update or mirror save) the build removes its own
+staging names before exiting, on a best-effort basis, and leaves the journal for
+recovery. If that cleanup itself fails, for example because the directory is no
+longer writable, or the process is killed, a staging name can remain until the
+next `build` or `fireparq recovery recover <root>` removes it from the journal plan.
+
 This requires atomic same-directory hard links, file and directory sync, readable
 directory ancestry, and macOS/Linux inode locking. Unsupported operations fail
 closed. Nested symlink entries inside guarded trees are refused. External writers

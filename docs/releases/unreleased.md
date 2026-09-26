@@ -149,6 +149,10 @@ truncate, in-place rollup and source-deleting rollup are refused. Discovery cove
 ancestor and descendant dataset roots plus external mirrors. `recovery recover`
 performs offline owned recovery. S3 retains its explicit provider-quiescence
 release requirement; no time-based takeover or generic request-drain claim is added.
+An ordinary error removes the failed transaction's hidden local
+`.fireparq-txn-*.tmp` staging files before exit and keeps its journal for
+recovery; if that best-effort cleanup fails or the process is killed, the next
+`build` or `recovery recover` removes them.
 
 A completed bounded request must have an acknowledged boundary event. A clean
 sparse/empty tail alone no longer implies completion on skipped-height chains;

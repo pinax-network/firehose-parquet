@@ -245,37 +245,27 @@ impl<'a, M: MirrorAction> TransactionController<'a, M> {
             file_metadata,
         )?;
         self.parts.require_unoccupied(&pending).await?;
-        let mut pending = self.states.begin(&self.authority, pending).await?;
-        checkpoint(Stage::WritingPersisted)?;
-        for part in prepared.parts() {
-            let encoded = self.parts.encode(&prepared, part.entry_index)?;
-            self.parts.stage(&encoded)?;
-            checkpoint(Stage::Staged(part.entry_index))?;
-            let receipt = PartReceipt {
-                byte_size: encoded.receipt().byte_size,
-                sha256: Digest::parse(encoded.receipt().sha256.clone())?,
-            };
-            pending = self
-                .states
-                .record_receipt(&self.authority, &pending, part.entry_index, receipt)
-                .await?;
-            checkpoint(Stage::ReceiptPersisted(part.entry_index))?;
-            self.parts.publish(&encoded).await?;
-            checkpoint(Stage::Published(part.entry_index))?;
-        }
-        self.parts.verify_all_finals(&pending.payload).await?;
-        pending = self
-            .states
-            .mark_committed(&self.authority, &pending)
-            .await?;
-        checkpoint(Stage::CommittedPersisted)?;
-        self.authority = self.states.advance(&self.authority, &pending).await?;
-        checkpoint(Stage::AuthorityAdvanced)?;
-        self.mirror.reconcile(&self.authority.payload).await?;
-        checkpoint(Stage::MirrorReconciled)?;
-        self.parts.cleanup_temporaries(&pending.payload)?;
-        self.states.clear(&self.authority, &pending).await?;
-        checkpoint(Stage::PendingCleared)?;
+        // The exact temporary names are fixed by this plan before Writing.
+        let owned_temporaries = pending.clone();
+        let pending = self.states.begin(&self.authority, pending).await?;
+        let pending = match self.publish_and_commit(&prepared, pending).await {
+            Ok(pending) => pending,
+            Err(error) => {
+                // The journal stays pending for recovery, which never needs a
+                // staged temporary: Writing rollback verifies finals by receipt
+                // and Committed roll-forward verifies finals only. Remove this
+                // transaction's private staging names now instead of leaving
+                // them until the next build or `recovery recover`. A cleanup
+                // failure must not mask the original error.
+                if let Err(cleanup) = self.parts.cleanup_temporaries(&owned_temporaries) {
+                    tracing::warn!(
+                        error = %format!("{cleanup:#}"),
+                        "could not remove this failed transaction's staged temporary parts; the next build or `recovery recover` removes them"
+                    );
+                }
+                return Err(error);
+            }
+        };
         let result = CommittedFlush {
             checkpoint_id: self.authority.payload.checkpoint.id.clone(),
             ordinal: self.authority.payload.checkpoint.ordinal,
@@ -316,6 +306,48 @@ impl<'a, M: MirrorAction> TransactionController<'a, M> {
         };
         self.failed = false;
         Ok(result)
+    }
+}
+
+impl<'a, M: MirrorAction> TransactionController<'a, M> {
+    /// Everything after Writing is persisted. Any error leaves the journal
+    /// pending and the controller poisoned; the caller removes owned temps.
+    async fn publish_and_commit(
+        &mut self,
+        prepared: &PreparedFlush,
+        mut pending: Versioned<PendingTransaction>,
+    ) -> Result<Versioned<PendingTransaction>> {
+        checkpoint(Stage::WritingPersisted)?;
+        for part in prepared.parts() {
+            let encoded = self.parts.encode(prepared, part.entry_index)?;
+            self.parts.stage(&encoded)?;
+            checkpoint(Stage::Staged(part.entry_index))?;
+            let receipt = PartReceipt {
+                byte_size: encoded.receipt().byte_size,
+                sha256: Digest::parse(encoded.receipt().sha256.clone())?,
+            };
+            pending = self
+                .states
+                .record_receipt(&self.authority, &pending, part.entry_index, receipt)
+                .await?;
+            checkpoint(Stage::ReceiptPersisted(part.entry_index))?;
+            self.parts.publish(&encoded).await?;
+            checkpoint(Stage::Published(part.entry_index))?;
+        }
+        self.parts.verify_all_finals(&pending.payload).await?;
+        pending = self
+            .states
+            .mark_committed(&self.authority, &pending)
+            .await?;
+        checkpoint(Stage::CommittedPersisted)?;
+        self.authority = self.states.advance(&self.authority, &pending).await?;
+        checkpoint(Stage::AuthorityAdvanced)?;
+        self.mirror.reconcile(&self.authority.payload).await?;
+        checkpoint(Stage::MirrorReconciled)?;
+        self.parts.cleanup_temporaries(&pending.payload)?;
+        self.states.clear(&self.authority, &pending).await?;
+        checkpoint(Stage::PendingCleared)?;
+        Ok(pending)
     }
 }
 
