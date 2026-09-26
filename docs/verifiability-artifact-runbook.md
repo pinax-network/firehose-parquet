@@ -31,7 +31,7 @@ It complements:
 
 An explicit `--chain` or `--table` that differs from what the files say is an error, so a mislabeled run cannot write rows under the wrong key. `verify` also fails when the scanned files span more than one table directory or more than one `firehose-parquet.chain_name`; verify each table directory separately.
 
-Paths are matched by component, so `output/blocks-archive/mainnet/transactions` resolves to table `transactions`, not `blocks`. Reserved artifacts (`cursor.parquet`, `partitions.parquet`, `merkle_roots.parquet` and anything under `verify_runs/`) are never scanned as table data, wherever they sit under the verify path. Neither are the files this run writes: the `--registry-path`, `--report-json` and `--publish-report-path` files are skipped whatever their names (a local path is matched after resolving its directory, an S3 path by bucket and key). Reports are JSON, so earlier reports are never read as data either.
+Paths are matched by component, so `output/blocks-archive/mainnet/transactions` resolves to table `transactions`, not `blocks`. Reserved artifacts (`cursor.parquet`, `partitions.parquet`, `merkle_roots.parquet` and anything under `verify_runs/`) are never scanned as table data, wherever they sit under the verify path. Neither are the files this run writes: the `--registry-path`, `--report-json` and `--publish-report-path` files are skipped whatever their names (a local path is matched after resolving its directory, an S3 path by bucket and key). A report from an earlier run is skipped only if it is named `.json` (or passed to the same flag again), so keep reports out of table directories or give them a `.json` name.
 
 An explicit registry inside the table directory under a non-reserved name (for example `output/mainnet/blocks/roots.parquet`) is skipped by `verify`, which adds a warning: `merge`, `rollup` and `validate` still read it as table data. Keep the registry at the default `<chain_root>/merkle_roots.parquet`, or outside the table directories.
 
@@ -139,35 +139,35 @@ Per partition:
 
 ### Open Partitions
 
-`fireparq build` may be writing the newest partitions of a table while `verify` runs, or may resume into them later. Recording such a partition's root would make the next verify fail as soon as more rows land, so these partitions are `open`: neither compared nor recorded, and listed in `warnings`.
+`fireparq build` may be writing the newest partitions of a table while `verify` runs, or may append to them later. Recording such a partition's root would make the next verify fail as soon as more rows land, so these partitions are `open`: neither compared nor recorded, and listed in `warnings`. Each `open` finding's `error` names the rule that applied.
 
 `verify` reads where the writer stands before it lists the files it scans:
 
-- **Protected datasets** (every dataset written by `build` since #468): the authoritative ingestion state in `<chain_root>/.fireparq-ingest/state.json`. Its frontier is the last committed block. A running or interrupted transaction may already have published parts, but only for blocks after that frontier. The state is read as it is, without ownership and without recovering a pending transaction. A `.fireparq-ingest` marker without a readable state is an error.
-- **Legacy datasets**: `<chain_root>/cursor.parquet`. Its frontier is the last saved block. A cursor kept elsewhere with `build --cursor` is not detected, and an unreadable cursor only adds a warning.
+- **Protected datasets** (every dataset written by `build` since #468): the authoritative ingestion state in `<chain_root>/.fireparq-ingest/state.json`, with or without a cursor mirror (`build --cursor none`). Its frontier is the last committed block. A running or interrupted transaction may already have published parts, but only for blocks after that frontier. The state is read as it is, without ownership and without recovering a pending transaction. A `.fireparq-ingest` marker without a readable state is an error.
+- **Legacy datasets**: `<chain_root>/cursor.parquet`. Its frontier is the last saved block. A cursor kept elsewhere with `build --cursor` is not detected. A cursor that cannot be read makes every partition `open`, with a warning.
 - Neither: nothing is open.
 
-The stream is finished when it reached its requested stop block (protected: the accepted frontier is exactly the last block of the completed request; legacy: `last_block_num + 1 >= stop_block`). Then only partitions holding rows after the frontier are open. A later, longer `build` request moves the frontier past the completed stop, and the stream counts as unfinished again.
+Partitions holding rows after the frontier are always open. The other rules depend on whether the stream can still grow:
 
-While the stream is unfinished, these partitions are open:
+- A stream that has not reached its requested stop block can grow. So can a protected stream that did: a later, longer `build` request extends it, appending to its last partition. (The completed stop stays recorded while the frontier moves past it, and the stream counts as unfinished again.) A legacy stream that reached its stop cannot grow, because the current `build` refuses to append to legacy data.
+- While the stream can grow, these partitions are also open:
+  - the partition holding the last block at or before the frontier. The next blocks can land in it, and a running transaction may already have published a later partition's part but not yet this one's. After a completed request, a `block_range` partition that ends at or before the stop block is complete and is recorded; a time partition, an unpartitioned table, or a block range that extends past the stop stays open;
+  - every partition of a reversible stream (`--final-blocks-only=false`), because a reorg can append rows for earlier blocks;
+  - every partition without `block_num` values, because it cannot be placed relative to the frontier.
+- Before the first committed block, every partition is open.
 
-- every partition holding rows after the frontier;
-- the partition holding the last block at or before the frontier. The next blocks can land in it, and a running transaction may already have published a later partition's part but not yet this one's;
-- every partition of a reversible stream (`--final-blocks-only=false`), because a reorg can append rows for earlier blocks;
-- every partition while no block is committed yet, and every partition without `block_num` values, because they cannot be placed relative to the frontier.
-
-When `verify` reads only part of a table (a partition directory or file), these rules apply to the partitions it reads, so the newest of them can be reported `open` even if later partitions exist.
+So the last partition of a completed protected build is recorded only when the stop block falls on a `block_range` boundary. Otherwise it is verified after the stream moves past it.
 
 Every earlier partition is closed: `build` appends blocks in order, and time partitions follow block timestamps. This assumes block timestamps never decrease. On a chain where they can (Bitcoin block times can be earlier than their parent's), a block can land in a partition `verify` already treated as closed. When that happens during the run, the run fails (see below); afterwards, the next run reports a mismatch for that partition.
 
-An unpartitioned table is a single partition that keeps growing, so it is `open` for as long as the stream is unfinished.
+A partition is keyed by the `k=v` directories directly above its files, wherever the scan starts, so verifying a partition directory or a single file records the same key as verifying the whole table. The open rules then apply to the partitions read: the newest of them can be reported `open` even if later partitions exist.
 
 ### Concurrency and Atomic Writes
 
 `verify` only reads table data. It takes no dataset ownership, so it runs while `build`, `merge`, `rollup`, `truncate` or `partitions build` owns the dataset, and it never recovers or deletes anything. Its roots stay sound because:
 
 - **Open partitions come from the writer frontier.** It is read before the scanned listing, and every row at or below it was published before it was recorded, so a closed partition's files are all in that listing (see [Open Partitions](#open-partitions)).
-- **Closed partitions must not change while they are read.** `verify` records the identity of every file it reads (local: device, inode, size and modification time; S3: ETag, version, size and last-modified time), and S3 reads are pinned to the listed ETag. After the scan, it lists the table again. If any partition it would compare or record gained, lost or replaced a file, the run fails with `the data changed while verify was reading it: ...` before anything is compared or written. Re-run it once the other command is done. Files added to open partitions are expected and ignored. A change after this check is an ordinary later change, which the next run compares.
+- **Closed partitions must not change while they are read.** `verify` records the identity of every file it reads (local: device, inode, size and modification time of the handle it read; S3: the listed ETag, size and last-modified time, and version when the listing has one), and S3 reads are pinned to the listed ETag with `If-Match`. On a store whose listings omit ETags, reads are not pinned and identity rests on size and last-modified time. After the scan, `verify` lists the table again. If any partition it would compare or record gained, lost or replaced a file, or had a listed file that was removed or replaced before it could be read, the run fails with `the data changed while verify was reading it: ...` before anything is compared or written. Re-run it once the other command is done. Changes in open partitions are expected and ignored, including an uncommitted part that a restarted `build` rolls back. A change after this check is an ordinary later change, which the next run compares.
 - **An unfinished merge is refused.** A merge writes its outputs before deleting its sources, so while a merge journal (`_fireparq_merge.json`) exists, a partition may hold rows twice or miss some. `verify` fails with `cannot verify ...: it has an unfinished merge ...` before reading any row, whatever the checks. It does not finish or roll back the merge. Wait for a running merge to end, or run `fireparq recovery recover <path>` to complete or roll back an interrupted one, then re-run `verify`.
 - **Registry writes are atomic or conditional**, so two `verify` runs never lose each other's rows:
   - **Local.** `verify` takes an exclusive lock on `merkle_roots.parquet.lock`, re-reads the registry, applies its changes, and replaces the file atomically. It writes a unique temporary file in the same directory, fsyncs it, renames it over the registry, and fsyncs the directory. A crash leaves the old or the new registry, never a partial one. Only this lock file is taken, never the dataset's directory ownership, so `verify` writes while `build` runs.
@@ -175,7 +175,11 @@ An unpartitioned table is a single partition that keeps growing, so it is `open`
 
 A change is applied only if the row it was compared against is unchanged, or already holds the same root. Locally, if another run changed that row to a different root in the meantime, `verify` fails with `the registry row for ... changed while verify was running ...`. Re-run it to compare against the new registry.
 
-Reports are written the same way: a local report (`--report-json`, or a local `--publish-report-path`) is replaced atomically; an S3 report is one put without retry. Artifact destinations keep the guards that `build` and maintenance enforce: a registry or report path may not be a recovery control path, a protected dataset's cursor mirror or recovery metadata, or an ordinary `.parquet` data part inside a protected dataset.
+A protocol run that writes a report (`--report-json` or `--publish-report`) lists the table again too, and fails if any file it read was removed or replaced; files added meanwhile do not invalidate what it read. A protocol run without output reads once and does not promise a snapshot.
+
+Reports are written the same way: a local report (`--report-json`, or a local `--publish-report-path`) is replaced atomically; an S3 report is one unconditional put without retry. The default report path includes the run id; a response lost on a reused explicit `--publish-report-path` could let a delayed put overwrite a newer report there.
+
+Artifact destinations keep the guards that `build` and maintenance enforce, and are checked before any row is read: a registry or report path may not be a recovery control path, a protected dataset's cursor mirror or recovery metadata, or an ordinary `.parquet` data part inside a protected dataset. Unlike the #591 ownership design, the destination directories are not re-checked for an alias swap between that check and the write; cooperating commands never swap them.
 
 Recommended operator posture:
 

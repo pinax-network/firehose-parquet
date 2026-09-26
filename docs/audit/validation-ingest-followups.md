@@ -25,9 +25,10 @@ completed stop and routing anchors, exactly as it already did with a mirror, so
 resume, extension, same-bound no-ops and recovery are unchanged. The mirror
 binding is part of the immutable stream identity: a later run without
 `--cursor none`, or `--cursor none` against a dataset created with a mirror, is
-refused before Blocks with a specific message. Without a mirror, `verify` cannot
-classify open partitions and `partitions build` cannot infer `--start-block`
-from `<chain>/cursor.parquet`; the README documents both.
+refused before Blocks with a specific message. Without a mirror, `partitions build` cannot infer `--start-block`
+from `<chain>/cursor.parquet`; the README documents it. (`verify` used to need
+the mirror to classify open partitions; since the
+[verify follow-ups](validation-verify-followups.md) it reads the authority.)
 
 **Tests.** `cli::tests::test_cursor_none_disables_the_mirror_case_insensitively`,
 `cli::tests::test_cursor_none_rejects_contradictory_template_and_near_misses`;
