@@ -1,9 +1,7 @@
 //! Partition command models, vocabulary and shared bound helpers.
 use super::*;
-mod builder;
 mod io;
 mod queries;
-pub use builder::*;
 pub use io::*;
 pub use queries::*;
 
@@ -252,6 +250,12 @@ pub enum PartitionValidationIssueKind {
     Gap,
     Overlap,
     OutOfOrder,
+    /// V2: an internal boundary between two source-adjacent spans is not
+    /// established on both sides. Only the snapshot's outer edges may be open.
+    IncompleteBoundary,
+    /// V2: two source-adjacent spans share one partition key, so one routing
+    /// run was split instead of recorded as a single maximal span.
+    SplitRun,
 }
 
 #[derive(Debug, Clone, serde::Serialize, PartialEq, Eq)]
@@ -274,6 +278,9 @@ pub struct PartitionValidateResult {
     pub issue_count: usize,
     pub valid: bool,
     pub issues: Vec<PartitionValidationIssue>,
+    /// Non-fatal notes, such as a `--allow-gaps` request that has no effect on a v2 index.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
 }
 
 pub fn parse_partition_build_types(spec: &str) -> anyhow::Result<Vec<PartitionBuildType>> {
@@ -429,17 +436,6 @@ pub(in crate::cli) fn sort_keyed_partition_rows(rows: &mut [(u64, PartitionBuild
             .then_with(|| left.start_block.cmp(&right.start_block))
             .then_with(|| left.stop_block.cmp(&right.stop_block))
     });
-}
-
-pub(in crate::cli) fn sort_partition_build_rows(
-    rows: Vec<PartitionBuildRow>,
-) -> anyhow::Result<Vec<PartitionBuildRow>> {
-    let mut keyed = rows
-        .into_iter()
-        .map(|row| Ok((row.partition_key()?, row)))
-        .collect::<anyhow::Result<Vec<_>>>()?;
-    sort_keyed_partition_rows(&mut keyed);
-    Ok(keyed.into_iter().map(|(_, row)| row).collect())
 }
 
 /// Parse a user-supplied partition bound (for example `--from`) against a partition type.

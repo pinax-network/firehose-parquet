@@ -120,6 +120,15 @@ pub fn list_partitions_from_index(
     request: &PartitionListRequest,
     aws: Option<&AwsConfig>,
 ) -> anyhow::Result<PartitionListResult> {
+    Ok(list_partitions_with_verified_index(request, aws)?.0)
+}
+
+/// List rows and return the verified v2 model decoded from the same snapshot
+/// (`None` for a legacy index), so callers never read the object twice.
+pub(in crate::cli) fn list_partitions_with_verified_index(
+    request: &PartitionListRequest,
+    aws: Option<&AwsConfig>,
+) -> anyhow::Result<(PartitionListResult, Option<VerifiedPartitionIndex>)> {
     let request = normalize_partition_list_request(request.clone())?;
 
     if request.limit == 0 {
@@ -133,21 +142,24 @@ pub fn list_partitions_from_index(
     let mut rows = Vec::new();
     let snapshot = read_partition_index_snapshot(&request.index_path, aws)?;
     let coverage = snapshot.coverage.clone();
+    let mut verified = None;
     let inspected = if coverage.is_some() {
         let index = verified_index_from_snapshot(snapshot)?;
-        index
+        let rows = index
             .spans
-            .into_iter()
+            .iter()
             .map(|span| {
-                let context = require_independent_routing_start(&index.coverage, &span).is_err();
+                let context = require_independent_routing_start(&index.coverage, span).is_err();
                 Ok((
                     span.row.partition_key()?,
-                    span.row,
+                    span.row.clone(),
                     Some(span.proof.complete()),
                     Some(context),
                 ))
             })
-            .collect::<anyhow::Result<Vec<_>>>()?
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        verified = Some(index);
+        rows
     } else {
         snapshot
             .rows
@@ -214,14 +226,64 @@ pub fn list_partitions_from_index(
     rows.truncate(request.limit);
     let rows = rows.into_iter().map(|(_, row)| row).collect::<Vec<_>>();
 
-    Ok(PartitionListResult {
-        coverage,
-        partitions_index: request.index_path.clone(),
-        limit: request.limit,
-        total_matches,
-        returned_rows: rows.len(),
-        rows,
-    })
+    Ok((
+        PartitionListResult {
+            coverage,
+            partitions_index: request.index_path.clone(),
+            limit: request.limit,
+            total_matches,
+            returned_rows: rows.len(),
+            rows,
+        },
+        verified,
+    ))
+}
+
+/// Model checks for a v2 index beyond what the verified reader enforces.
+///
+/// The reader already guarantees one chain/type/interval, spans inside the
+/// declared finalized coverage that are contiguous in source block order (so no
+/// gap or overlap), aligned block-range bounds, routing-consistent time keys and
+/// boundary flags consistent with clipping. These checks add the span-level
+/// invariants every builder snapshot satisfies: each internal boundary is
+/// established on both sides, and adjacent spans never repeat one key.
+pub(in crate::cli) fn verified_index_issues(
+    index: &VerifiedPartitionIndex,
+) -> anyhow::Result<Vec<PartitionValidationIssue>> {
+    let mut issues = Vec::new();
+    for pair in index.spans.windows(2) {
+        let (left, right) = (&pair[0], &pair[1]);
+        let issue = |kind, message| PartitionValidationIssue {
+            kind,
+            partition_type: right.row.partition_type.clone(),
+            partition_value: right.row.partition_value.clone(),
+            chain: right.row.chain.clone(),
+            message,
+        };
+        if left.row.partition_key()? == right.row.partition_key()? {
+            issues.push(issue(
+                PartitionValidationIssueKind::SplitRun,
+                format!(
+                    "adjacent spans [{}, {}) and [{}, {}) share partition {}; one routing run must be one span",
+                    left.row.start_block,
+                    left.row.stop_block,
+                    right.row.start_block,
+                    right.row.stop_block,
+                    right.row.partition_value
+                ),
+            ));
+        }
+        if !(left.proof.end_complete && right.proof.start_complete) {
+            issues.push(issue(
+                PartitionValidationIssueKind::IncompleteBoundary,
+                format!(
+                    "internal boundary at block {} is not established on both sides (previous end_complete={}, next start_complete={}); only the snapshot's first and last edges may be open",
+                    right.row.start_block, left.proof.end_complete, right.proof.start_complete
+                ),
+            ));
+        }
+    }
+    Ok(issues)
 }
 
 pub fn parse_partition_shard_strategy(value: &str) -> anyhow::Result<PartitionShardStrategy> {
@@ -316,13 +378,19 @@ pub fn shard_partitions_from_index(
     })
 }
 
+/// Validate a partitions index.
+///
+/// A v2 index is validated by the verified reader (a read failure is an error)
+/// plus [`verified_index_issues`]; incomplete outer edge spans are counted, not
+/// reported as issues. `--allow-gaps` cannot relax v2 validation and only adds a
+/// warning. Legacy indexes keep the geometric gap/overlap/order checks.
 pub fn validate_partitions_index(
     request: &PartitionValidateRequest,
     aws: Option<&AwsConfig>,
 ) -> anyhow::Result<PartitionValidateResult> {
     let mut list_request = request.list.clone();
     list_request.limit = usize::MAX;
-    let list_result = list_partitions_from_index(&list_request, aws)?;
+    let (list_result, verified) = list_partitions_with_verified_index(&list_request, aws)?;
 
     let incomplete_spans = list_result
         .rows
@@ -334,18 +402,32 @@ pub fn validate_partitions_index(
         .iter()
         .filter(|row| row.complete.is_none())
         .count();
-    // V2 validation already checked global source-ordered coverage. Repeated
-    // calendar values are valid and filtering can deliberately select disjoint runs.
-    if list_result.coverage.is_some() {
+    // The verified reader already checked global source-ordered coverage.
+    // Repeated calendar values are valid and filtering can deliberately select
+    // disjoint runs, so model checks run on the whole snapshot in source order.
+    if let Some(index) = verified {
+        let mut warnings = Vec::new();
+        if request.allow_gaps {
+            warnings.push(
+                "--allow-gaps has no effect on a v2 partitions index: its verified coverage is one contiguous source-order range, so gaps and overlaps are rejected when the file is read".to_string(),
+            );
+        }
+        // A v2 index holds one chain/type, so the filters select all spans or none.
+        let issues = if list_result.total_matches > 0 {
+            verified_index_issues(&index)?
+        } else {
+            Vec::new()
+        };
         return Ok(PartitionValidateResult {
             partitions_index: request.list.index_path.clone(),
             coverage: list_result.coverage,
             incomplete_spans,
             unknown_spans,
             total_rows: list_result.total_matches,
-            issue_count: 0,
-            valid: true,
-            issues: Vec::new(),
+            issue_count: issues.len(),
+            valid: issues.is_empty(),
+            issues,
+            warnings,
         });
     }
     let mut issues = Vec::new();
@@ -431,6 +513,7 @@ pub fn validate_partitions_index(
         issue_count: issues.len(),
         valid: issues.is_empty(),
         issues,
+        warnings: Vec::new(),
     })
 }
 

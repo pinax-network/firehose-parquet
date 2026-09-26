@@ -101,8 +101,15 @@ or prove finality. Block ranges require no prior timestamp context.
 ## Live snapshots and publication
 
 `--live` conflicts with `--stop-block` and extends coverage only to a newly proven
-finalized frontier. `--poll-interval-secs` defaults to 30. Head-check timeouts and
-known transient errors back off; fatal statuses and contradictory proof fail.
+finalized frontier. `--poll-interval-secs` defaults to 30. Transient head-check and
+scan failures keep the last published snapshot and retry from its frontier:
+timeouts (including a stalled traversal message past its 5 s deadline or elapsed
+bounded deadlines), exhausted boundary probes, transport errors and non-fatal gRPC
+statuses. The retry delay is the poll interval doubled per consecutive failure,
+capped at 300 s (never shorter than the poll interval) and reset after a
+successful iteration. Fatal statuses (authentication, permissions, invalid
+requests, decompression limits), missing blocks and contradictory proof fail.
+Bounded runs fail on the first error.
 An in-progress time span at the finalized head remains incomplete until a later
 canonical key transition establishes its end. Full block-range boundaries can
 be complete by arithmetic.

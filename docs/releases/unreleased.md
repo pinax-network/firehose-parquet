@@ -180,6 +180,26 @@ conversion, and verification roots change. Default-profile mapping was 72–80%
 faster on two retained blocks; this is not an end-to-end throughput or memory
 reduction claim. See [the benchmark and 19,714-row comparison](../audit/503-solana-binary-payloads.md).
 
+### `partitions.parquet` time columns are `Timestamp(Millisecond, UTC)`
+
+`start_time`, `end_time` and `routing_start_timestamp` are now written as
+`TIMESTAMP(MILLIS, UTC)`, so DuckDB, Spark and other Parquet readers see
+timestamps instead of BIGINT (the fix #491 made for data tables). Values remain
+whole seconds. Second-precision indexes from earlier releases still load and are
+rewritten in the new form on the next `--resume`, `--live` extension or
+`--overwrite`. Older `fireparq` releases cannot read the new indexes, so upgrade
+readers before a writer publishes one. See
+[the file contract](../partitions-parquet-contract.md) and
+[the partitions follow-ups](../audit/validation-misc-followups-partitions.md).
+
+The public `cli::TimestampReversal` fields are renamed to `timestamp_ms` /
+`prev_timestamp_ms` (see the `validate` fix below). The unused public
+`PartitionIndexBuilder` and `build_partition_rows_from_blocks` APIs, whose
+pre-#486 semantics routed missing times to 1970, are removed; use
+`ExactTimeIndexBuilder` / `write_verified_partitions_index`. The never-read
+`Config::skip_missing_blocks` field is removed; missing-block skipping is
+unchanged.
+
 ### Partition indexes require verified finalized coverage (#486)
 
 Time index construction now checks every finalized canonical block and preserves
@@ -693,6 +713,24 @@ Both tables carry `receipt_index`, `tx_hash`, `shard_id` and `predecessor_id`, l
 
 - **An interrupted `merge` no longer leaves duplicate rows (#480).** A crash, a `kill`, or a failed upload between writing a partition's merged files and deleting its original parts used to leave both, and the next merge folded them into one file for good. Each partition merge is now journaled in `_fireparq_merge.json`, and the next run finishes or undoes an interrupted merge before doing anything else: it deletes the remaining original parts if the merge had committed, and otherwise it deletes the partial outputs and merges the partition again. Local outputs are written to a temporary file, fsynced, and renamed, so a partial Parquet file is never visible.
 - **Overlapping `merge` runs are refused (#480).** `merge` holds `.fireparq-merge.lock` at its path: an OS file lock locally, and a conditionally created object on S3 that is refreshed while the run is active and taken over after 30 minutes without a refresh. A second merge on the same path now fails right away, and a partition that a merge on an enclosing or nested path is working on is skipped. On an S3 store without conditional writes, merge warns and the lock is best effort.
+
+- **`fireparq validate` compares timestamps in milliseconds.** It truncated
+  every timestamp to whole seconds, so a reversal within one second of the
+  canonical millisecond column (#491), such as `.900` then `.100`, was missed.
+  The unit now comes from the column type (legacy `Int64` stays seconds), and
+  reports print `.mmm`.
+- **Live `partitions build` survives transient scan failures (#485 follow-up).**
+  A stalled traversal message past its 5 s deadline, four failed boundary probes,
+  transport errors or non-fatal gRPC statuses used to end a live run. It now keeps
+  the last published snapshot and retries from its frontier after the poll
+  interval, doubled per consecutive failure up to 300 s. Fatal statuses, missing
+  blocks and proof failures still stop it; bounded runs are unchanged.
+- **`partitions validate` checks v2 indexes (#486 follow-up).** It used to report
+  a v2 index as valid with zero issues whenever the file loaded. It now reports
+  `split_run` (adjacent spans with one partition key) and `incomplete_boundary`
+  (an internal boundary not established on both sides) issues. `--allow-gaps`
+  has no effect on v2 indexes, whose reader already rejects gaps and overlaps,
+  and now adds a warning (also in JSON `warnings`).
 
 ## Performance
 

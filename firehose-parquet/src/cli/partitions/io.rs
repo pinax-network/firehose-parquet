@@ -93,8 +93,7 @@ pub(in crate::cli) fn partition_index_snapshot_from_reader<
     bounded: bool,
 ) -> anyhow::Result<PartitionIndexSnapshot> {
     use arrow::array::{
-        Array, Int32Array, Int64Array, LargeStringArray, StringArray, TimestampSecondArray,
-        UInt32Array, UInt64Array,
+        Array, Int32Array, Int64Array, LargeStringArray, StringArray, UInt32Array, UInt64Array,
     };
     use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 
@@ -121,11 +120,13 @@ pub(in crate::cli) fn partition_index_snapshot_from_reader<
         if let Some(arr) = column.as_any().downcast_ref::<LargeStringArray>() {
             return Ok(Some(arr.value(row).to_string()));
         }
-        if let Some(arr) = column.as_any().downcast_ref::<TimestampSecondArray>() {
-            return Ok(Some(format_partition_timestamp(arr.value(row))?));
+        if crate::partition_index::is_index_timestamp_type(column.data_type()) {
+            return crate::partition_index::index_timestamp_seconds(column, row)?
+                .map(format_partition_timestamp)
+                .transpose();
         }
         anyhow::bail!(
-            "expected utf8 or timestamp(second, UTC) column, found {}",
+            "expected utf8 or timestamp(millisecond/second, UTC) column, found {}",
             column.data_type()
         )
     }
@@ -183,26 +184,26 @@ pub(in crate::cli) fn partition_index_snapshot_from_reader<
     ) -> anyhow::Result<()> {
         let schema = batch.schema();
         if file_ctx.coverage.is_some() {
-            use arrow::datatypes::{DataType, Field, TimeUnit};
+            use arrow::datatypes::{DataType, Field};
             for expected in [
                 Field::new("partition", DataType::UInt64, false),
                 Field::new("start_block", DataType::UInt64, false),
                 Field::new("stop_block", DataType::UInt64, false),
-                Field::new(
-                    "start_time",
-                    DataType::Timestamp(TimeUnit::Second, Some("UTC".into())),
-                    true,
-                ),
-                Field::new(
-                    "end_time",
-                    DataType::Timestamp(TimeUnit::Second, Some("UTC".into())),
-                    true,
-                ),
             ] {
                 anyhow::ensure!(
                     schema.field_with_name(expected.name())? == &expected,
                     "verified partition column {} has an unexpected type/nullability",
                     expected.name()
+                );
+            }
+            // Written as Timestamp(Millisecond, UTC); v2 indexes from earlier
+            // releases used Timestamp(Second, UTC) and are cast by unit on read.
+            for name in ["start_time", "end_time"] {
+                let field = schema.field_with_name(name)?;
+                anyhow::ensure!(
+                    crate::partition_index::is_index_timestamp_type(field.data_type())
+                        && field.is_nullable(),
+                    "verified partition column {name} has an unexpected type/nullability"
                 );
             }
         }
@@ -480,8 +481,8 @@ pub(in crate::cli) fn write_partitions_index_impl(
     file_metadata: Option<&crate::writer::ParquetFileMetadata>,
     proofs: Option<&[PartitionSpanProof]>,
 ) -> anyhow::Result<()> {
-    use arrow::array::{TimestampSecondArray, UInt64Array};
-    use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
+    use arrow::array::UInt64Array;
+    use arrow::datatypes::{DataType, Field, Schema};
     use arrow::record_batch::RecordBatch;
     use parquet::arrow::ArrowWriter;
     use parquet::file::metadata::KeyValue;
@@ -530,14 +531,10 @@ pub(in crate::cli) fn write_partitions_index_impl(
         Field::new("stop_block", DataType::UInt64, false),
         Field::new(
             "start_time",
-            DataType::Timestamp(TimeUnit::Second, Some(Arc::from("UTC"))),
+            crate::traits::timestamp_millis_utc_type(),
             true,
         ),
-        Field::new(
-            "end_time",
-            DataType::Timestamp(TimeUnit::Second, Some(Arc::from("UTC"))),
-            true,
-        ),
+        Field::new("end_time", crate::traits::timestamp_millis_utc_type(), true),
     ];
     if proofs.is_some() {
         fields.extend(crate::partition_index::proof_fields());
@@ -584,11 +581,11 @@ pub(in crate::cli) fn write_partitions_index_impl(
         Arc::new(UInt64Array::from(
             rows.iter().map(|row| row.stop_block).collect::<Vec<_>>(),
         )),
-        Arc::new(TimestampSecondArray::from(start_time_values).with_timezone("UTC")),
-        Arc::new(TimestampSecondArray::from(end_time_values).with_timezone("UTC")),
+        crate::partition_index::index_timestamp_column(&start_time_values)?,
+        crate::partition_index::index_timestamp_column(&end_time_values)?,
     ];
     if let Some(proofs) = proofs {
-        columns.extend(crate::partition_index::proof_columns(proofs));
+        columns.extend(crate::partition_index::proof_columns(proofs)?);
     }
     let batch = RecordBatch::try_new(schema.clone(), columns)?;
 
@@ -672,17 +669,6 @@ pub(in crate::cli) fn is_integer_like(data_type: &arrow::datatypes::DataType) ->
     )
 }
 
-pub(in crate::cli) fn is_timestamp_second_utc(data_type: &arrow::datatypes::DataType) -> bool {
-    matches!(
-        data_type,
-        arrow::datatypes::DataType::Timestamp(
-            arrow::datatypes::TimeUnit::Second,
-            Some(timezone)
-        )
-            if timezone.as_ref() == "UTC"
-    )
-}
-
 pub(in crate::cli) fn validate_partitions_schema(
     schema: &arrow::datatypes::Schema,
 ) -> anyhow::Result<()> {
@@ -732,9 +718,11 @@ pub(in crate::cli) fn validate_partitions_schema(
         ("end_time", schema.field_with_name("end_time")),
     ] {
         if let Ok(field) = field {
-            if !(is_utf8_like(field.data_type()) || is_timestamp_second_utc(field.data_type())) {
+            if !(is_utf8_like(field.data_type())
+                || crate::partition_index::is_index_timestamp_type(field.data_type()))
+            {
                 anyhow::bail!(
-                    "invalid partitions.parquet column type for {name}: expected Utf8/LargeUtf8 or Timestamp(Second, UTC), got {}",
+                    "invalid partitions.parquet column type for {name}: expected Utf8/LargeUtf8 or Timestamp(Millisecond/Second, UTC), got {}",
                     field.data_type()
                 );
             }

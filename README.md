@@ -544,7 +544,6 @@ rather than the default workflow:
 | Flag | Use when |
 |---|---|
 | `--cursor-override` | Legacy dry-run override; protected output refuses rewinds and requires a new empty root for changed semantics |
-| `--skip-missing-blocks` | Sparse chains legitimately skip block numbers and you want probes/streams to continue past gaps |
 | `--stream-idle-timeout-secs <N>` | Supervising long-lived pipelines that should self-reconnect after a silent stream stall (default 120; `0` disables and relies on HTTP/2 keepalive). On slow chains such as Bitcoin (~600 s blocks), set it above the block time to avoid a reconnect every 120 s. An idle reconnect is not counted as a failure. |
 | `--reconnect-stall-timeout-secs <N>` | Fail fast when reconnect loops should hand control back to an external supervisor (default 900; `0` disables). The timer starts at the first failed attempt and is reset only when a stream message arrives, not when a connection or RPC succeeds. |
 
@@ -714,6 +713,7 @@ Behavior:
 - `--resume` and `--live` continue from the stored source-block frontier and verified context, including an open final span. They do not resume by the greatest calendar key. A bounded stop already covered is a no-op after endpoint/finality validation.
 - Existing files require `--resume` or `--overwrite`. Legacy indexes lack trustworthy completeness and must be rebuilt with `--overwrite` or into a fresh output root.
 - Each successful bounded run or live extension publishes one validated snapshot. A failed or cancelled scan leaves the previous snapshot intact. Long backfills should use successive bounded runs; time index construction now reads every covered block.
+- In `--live` mode, transient failures (a head check or traversal message exceeding its 5 s deadline, exhausted boundary probes, transport errors or non-fatal gRPC statuses) keep the last snapshot and retry from its frontier after the poll interval, doubled per consecutive failure up to 300 s. Fatal statuses and proof failures still stop the command; bounded runs fail on the first error.
 
 See [the build contract and limits](docs/partitions-build-defaults.md) for finality,
 parent context, skipped-slot handling and endpoint requirements.
@@ -816,13 +816,19 @@ fireparq partitions validate \
   --json
 ```
 
-V2 validation checks the entire snapshot's source-order continuity, declared
-finalized bounds, span flags, identity links and routing evidence. Repeated
-calendar values are valid. The report separately counts incomplete spans;
-`valid=true` means structurally valid, not that every span is complete or that a
-calendar date is globally covered. Legacy files retain geometry checks, report
-unknown completeness and cannot be used for strict resolution. `--allow-gaps`
-applies only to legacy geometry checks. Malformed v2 files fail regardless of it.
+V2 validation first reads the whole snapshot with the verified reader, which
+rejects (as an error) any break in source-order continuity (a gap or overlap),
+spans outside the declared finalized bounds, misaligned block ranges, time keys
+that disagree with their routing evidence, and boundary flags that contradict
+clipping. It then reports two span-model issues: `split_run` (adjacent spans
+share one partition key) and `incomplete_boundary` (an internal boundary between
+adjacent spans is not established on both sides; only the snapshot's first and
+last edges may be open). Repeated, non-adjacent calendar values are valid. The
+report separately counts incomplete spans; `valid=true` does not mean that every
+span is complete or that a calendar date is globally covered. Legacy files keep
+the gap/overlap/order geometry checks, report unknown completeness and cannot be
+used for strict resolution. `--allow-gaps` applies only to legacy geometry
+checks; with a v2 index it changes nothing and adds a `warnings` entry.
 
 Violations exit non-zero for CI gating.
 

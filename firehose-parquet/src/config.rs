@@ -123,7 +123,6 @@ pub struct Config {
     pub jwt_token: Option<String>,
     pub start_block: Option<u64>,
     pub stop_block: Option<u64>,
-    pub skip_missing_blocks: bool,
     /// Resolved cursor location — either a local path or an `s3://` URI.
     /// Must have a `.parquet` extension.
     pub cursor_path: Option<String>,
@@ -407,7 +406,6 @@ impl Default for Config {
             jwt_token: None,
             start_block: None,
             stop_block: None,
-            skip_missing_blocks: true,
             cursor_path: None,
             output: PathBuf::from("."),
             partition: Partition::None,
@@ -512,7 +510,6 @@ mod tests {
 
     #[test]
     fn test_config_default_skips_missing_blocks() {
-        assert!(Config::default().skip_missing_blocks);
         assert!(Config::default()
             .to_string()
             .contains("missing_blocks     skip after probe retries"));

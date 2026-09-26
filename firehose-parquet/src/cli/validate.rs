@@ -28,12 +28,15 @@ pub struct DuplicateBlock {
 }
 
 /// A timestamp reversal between consecutive blocks.
+///
+/// Timestamps are UTC epoch milliseconds: the canonical `timestamp` column is
+/// `Timestamp(Millisecond, UTC)`, so a reversal within one second is reported.
 #[derive(Debug)]
 pub struct TimestampReversal {
     pub block_num: u64,
-    pub timestamp: i64,
+    pub timestamp_ms: i64,
     pub prev_block_num: u64,
-    pub prev_timestamp: i64,
+    pub prev_timestamp_ms: i64,
 }
 
 /// An empty partition (no files or 0 rows).
@@ -188,9 +191,9 @@ impl ValidateResult {
                     println!(
                         "    timestamp reversal at block {}: {} < previous block {} timestamp {}",
                         tr.block_num,
-                        format_epoch_seconds(tr.timestamp),
+                        format_epoch_millis(tr.timestamp_ms),
                         tr.prev_block_num,
-                        format_epoch_seconds(tr.prev_timestamp)
+                        format_epoch_millis(tr.prev_timestamp_ms)
                     );
                 }
             }
@@ -298,9 +301,9 @@ impl ValidateResult {
                 println!(
                     "    block {}: timestamp {} < previous block {} timestamp {}",
                     tr.block_num,
-                    format_epoch_seconds(tr.timestamp),
+                    format_epoch_millis(tr.timestamp_ms),
                     tr.prev_block_num,
-                    format_epoch_seconds(tr.prev_timestamp)
+                    format_epoch_millis(tr.prev_timestamp_ms)
                 );
             }
         }
@@ -328,12 +331,14 @@ impl ValidateResult {
     }
 }
 
-/// Render epoch seconds as UTC `YYYY-MM-DD HH:MM:SS`, falling back to the raw value.
-pub(in crate::cli) fn format_epoch_seconds(timestamp: i64) -> String {
-    format_partition_timestamp(timestamp).unwrap_or_else(|_| timestamp.to_string())
+/// Render epoch milliseconds as UTC `YYYY-MM-DD HH:MM:SS.mmm`, falling back to the raw value.
+pub(in crate::cli) fn format_epoch_millis(timestamp_ms: i64) -> String {
+    format_partition_timestamp(timestamp_ms.div_euclid(1_000))
+        .map(|seconds| format!("{seconds}.{:03}", timestamp_ms.rem_euclid(1_000)))
+        .unwrap_or_else(|_| format!("{timestamp_ms}ms"))
 }
 
-/// A block tuple: (block_num, block_id, parent_id, timestamp in epoch seconds).
+/// A block tuple: (block_num, block_id, parent_id, timestamp in epoch milliseconds).
 ///
 /// The timestamp is `None` when the table has no `timestamp` column or the value is null.
 pub(in crate::cli) type BlockTuple = (u64, String, String, Option<i64>);
@@ -354,29 +359,30 @@ pub(in crate::cli) fn read_id_string(
     }
 }
 
-/// Read a `timestamp` column as epoch seconds, whatever its unit.
+/// Read a `timestamp` column as epoch milliseconds, whatever its unit.
 ///
-/// Accepts any Arrow `Timestamp` unit (the canonical column is `Timestamp(Second, UTC)`,
-/// and finer units such as milliseconds are truncated to whole seconds) as well as
-/// legacy `Int64` epoch seconds. Null values stay null.
-pub(in crate::cli) fn timestamp_column_as_epoch_seconds(
+/// The unit comes from the column type: `Timestamp(Second)` values are scaled up,
+/// the canonical `Timestamp(Millisecond, UTC)` is read as-is, and finer units are
+/// truncated to whole milliseconds (monotonic, so truncation never invents a
+/// reversal). Legacy `Int64` columns hold epoch seconds. Null values stay null.
+pub(in crate::cli) fn timestamp_column_as_epoch_millis(
     column: &dyn arrow::array::Array,
 ) -> anyhow::Result<arrow::array::Int64Array> {
     use arrow::array::AsArray;
     use arrow::compute::cast;
     use arrow::datatypes::{DataType, Int64Type, TimeUnit};
 
-    if !matches!(
-        column.data_type(),
-        DataType::Timestamp(_, _) | DataType::Int64
-    ) {
-        anyhow::bail!(
-            "timestamp column has unsupported type {}: expected Timestamp or Int64 epoch seconds",
-            column.data_type()
-        );
-    }
-    let seconds = cast(column, &DataType::Timestamp(TimeUnit::Second, None))?;
-    Ok(cast(&seconds, &DataType::Int64)?
+    let column = match column.data_type() {
+        DataType::Timestamp(_, _) => cast(column, &DataType::Timestamp(TimeUnit::Millisecond, None))?,
+        DataType::Int64 => {
+            let seconds = cast(column, &DataType::Timestamp(TimeUnit::Second, None))?;
+            cast(&seconds, &DataType::Timestamp(TimeUnit::Millisecond, None))?
+        }
+        other => anyhow::bail!(
+            "timestamp column has unsupported type {other}: expected Timestamp or Int64 epoch seconds"
+        ),
+    };
+    Ok(cast(&column, &DataType::Int64)?
         .as_primitive::<Int64Type>()
         .clone())
 }
@@ -402,14 +408,14 @@ pub(in crate::cli) fn extract_block_tuples(
         let block_id_col = batch.column(block_id_idx).as_ref();
         let parent_id_col = batch.column(parent_id_idx).as_ref();
         let timestamps = timestamp_idx
-            .map(|idx| timestamp_column_as_epoch_seconds(batch.column(idx).as_ref()))
+            .map(|idx| timestamp_column_as_epoch_millis(batch.column(idx).as_ref()))
             .transpose()?;
 
         for i in 0..batch.num_rows() {
             let ts = timestamps
                 .as_ref()
-                .filter(|seconds| seconds.is_valid(i))
-                .map(|seconds| seconds.value(i));
+                .filter(|millis| millis.is_valid(i))
+                .map(|millis| millis.value(i));
             tuples.push((
                 block_nums.value(i),
                 read_id_string(block_id_col, i, "block_id")?,
@@ -612,9 +618,9 @@ pub(in crate::cli) fn check_tuples(tuples: &[BlockTuple]) -> CheckResult {
                 if curr_ts < last_ts && curr_num > last_num {
                     timestamp_reversals.push(TimestampReversal {
                         block_num: curr_num,
-                        timestamp: curr_ts,
+                        timestamp_ms: curr_ts,
                         prev_block_num: last_num,
-                        prev_timestamp: last_ts,
+                        prev_timestamp_ms: last_ts,
                     });
                 }
             }

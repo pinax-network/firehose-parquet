@@ -1,6 +1,5 @@
 use super::*;
 use crate::config::{Compression, Partition};
-use crate::traits::BlockIdentity;
 use clap::{CommandFactory, Parser};
 use serial_test::serial;
 
@@ -635,7 +634,6 @@ fn test_build_config() {
     let config = build_config(&cli.common).expect("build_config should succeed");
     assert_eq!(config.endpoint, "https://example.com:443");
     assert_eq!(config.start_block, Some(100));
-    assert!(config.skip_missing_blocks);
     assert_eq!(config.compression, Compression::Gzip);
     assert_eq!(config.partition, Partition::Date);
     assert!(config.flush_rows.is_none());
@@ -1326,6 +1324,7 @@ fn test_merge_help_aligns_flush_controls_with_build() {
 }
 
 #[test]
+#[serial]
 fn test_flush_memory_threshold_is_positive_and_propagated() {
     assert!(TestCli::try_parse_from([
         "test-cli",
@@ -3102,7 +3101,14 @@ fn validate_local(path: &std::path::Path) -> ValidateResult {
 fn reversal_summary(reversals: &[TimestampReversal]) -> Vec<(u64, i64, u64, i64)> {
     reversals
         .iter()
-        .map(|r| (r.block_num, r.timestamp, r.prev_block_num, r.prev_timestamp))
+        .map(|r| {
+            (
+                r.block_num,
+                r.timestamp_ms,
+                r.prev_block_num,
+                r.prev_timestamp_ms,
+            )
+        })
         .collect()
 }
 
@@ -3152,11 +3158,82 @@ fn test_validate_parquet_reports_timestamp_reversal_in_any_timestamp_unit() {
         let result = validate_local(dir.path());
         assert_eq!(
             reversal_summary(&result.timestamp_reversals),
-            [(3, 1_690_815_595, 2, 1_690_815_600)],
+            [(3, 1_690_815_595_000, 2, 1_690_815_600_000)],
             "{label}"
         );
         assert_eq!(result.total_blocks, 4, "{label}");
     }
+}
+
+#[test]
+fn test_validate_parquet_reports_sub_second_timestamp_reversal() {
+    use arrow::array::{
+        ArrayRef, TimestampMicrosecondArray, TimestampMillisecondArray, TimestampNanosecondArray,
+        TimestampSecondArray,
+    };
+    use std::sync::Arc;
+
+    // Canonical millisecond timestamps: .900 then .100 within the same second is a
+    // reversal that whole-second comparison would miss.
+    let millis = [
+        1_690_815_600_000_i64,
+        1_690_815_600_900,
+        1_690_815_600_100,
+        1_690_815_601_000,
+    ];
+    let scaled = |factor: i64| millis.iter().map(|ms| ms * factor).collect::<Vec<_>>();
+    let columns: Vec<(&str, ArrayRef)> = vec![
+        (
+            "timestamp_millisecond_utc",
+            Arc::new(TimestampMillisecondArray::from(scaled(1)).with_timezone("UTC")),
+        ),
+        (
+            "timestamp_microsecond_utc",
+            Arc::new(TimestampMicrosecondArray::from(scaled(1_000)).with_timezone("UTC")),
+        ),
+        (
+            "timestamp_nanosecond",
+            Arc::new(TimestampNanosecondArray::from(scaled(1_000_000))),
+        ),
+    ];
+    for (label, column) in columns {
+        let dir = tempfile::tempdir().expect("tempdir");
+        write_validate_blocks_file(&dir.path().join("blocks.parquet"), column);
+        let result = validate_local(dir.path());
+        assert_eq!(
+            reversal_summary(&result.timestamp_reversals),
+            [(3, 1_690_815_600_100, 2, 1_690_815_600_900)],
+            "{label}"
+        );
+    }
+
+    // Second-precision data with equal and increasing times stays clean, and its
+    // values are compared (and reported) in milliseconds.
+    let dir = tempfile::tempdir().expect("tempdir");
+    write_validate_blocks_file(
+        &dir.path().join("blocks.parquet"),
+        Arc::new(
+            TimestampSecondArray::from(vec![
+                1_690_815_600,
+                1_690_815_600,
+                1_690_815_601,
+                1_690_815_612,
+            ])
+            .with_timezone("UTC"),
+        ),
+    );
+    let result = validate_local(dir.path());
+    assert!(result.timestamp_reversals.is_empty());
+    assert!(result.is_valid());
+
+    assert_eq!(
+        super::validate::format_epoch_millis(1_690_815_600_100),
+        "2023-07-31 15:00:00.100"
+    );
+    assert_eq!(
+        super::validate::format_epoch_millis(-1),
+        "1969-12-31 23:59:59.999"
+    );
 }
 
 #[test]
@@ -3182,7 +3259,7 @@ fn test_validate_parquet_compares_null_timestamps_against_last_known_timestamp()
     let result = validate_local(dir.path());
     assert_eq!(
         reversal_summary(&result.timestamp_reversals),
-        [(4, 1_690_815_590, 2, 1_690_815_600)]
+        [(4, 1_690_815_590_000, 2, 1_690_815_600_000)]
     );
 }
 
@@ -3221,7 +3298,7 @@ fn test_validate_parquet_reports_timestamp_reversal_per_partition() {
         [
             (
                 "date=2023-07-31",
-                vec![(2, 1_690_815_580, 1, 1_690_815_590)]
+                vec![(2, 1_690_815_580_000, 1, 1_690_815_590_000)]
             ),
             ("date=2023-08-01", vec![]),
         ]
@@ -3393,154 +3470,6 @@ fn test_resolve_s3_output_root_requires_output_or_bucket() {
         .contains("--output is required unless --s3-bucket or S3_BUCKET is set"));
 }
 
-#[test]
-fn test_partition_index_builder_snapshot_includes_active_row() {
-    let mut builder =
-        PartitionIndexBuilder::new("eth-mainnet", vec![PartitionBuildType::Date]).expect("builder");
-    builder
-        .observe_block(&BlockIdentity {
-            block_num: 100,
-            timestamp: 1_690_815_540,
-            ..Default::default()
-        })
-        .expect("observe first block");
-    builder
-        .observe_block(&BlockIdentity {
-            block_num: 101,
-            timestamp: 1_690_815_590,
-            ..Default::default()
-        })
-        .expect("observe second block");
-
-    let rows = builder.snapshot(102).expect("snapshot rows");
-    assert_eq!(rows.len(), 1);
-    assert_eq!(rows[0].partition_type, "date");
-    assert_eq!(rows[0].start_block, 100);
-    assert_eq!(rows[0].stop_block, 102);
-    assert_eq!(builder.current_frontier(), Some(102));
-}
-
-#[test]
-fn test_build_partition_rows_from_blocks_mixed_types_and_contiguous() {
-    let blocks = vec![
-        BlockIdentity {
-            block_num: 100,
-            timestamp: 1_690_815_540,
-            ..Default::default()
-        },
-        BlockIdentity {
-            block_num: 101,
-            timestamp: 1_690_815_590,
-            ..Default::default()
-        },
-        BlockIdentity {
-            block_num: 102,
-            timestamp: 1_690_815_600,
-            ..Default::default()
-        },
-    ];
-
-    let rows = build_partition_rows_from_blocks(
-        "eth-mainnet",
-        vec![PartitionBuildType::Date, PartitionBuildType::Hour],
-        &blocks,
-        103,
-    )
-    .expect("build rows");
-
-    assert_eq!(rows.len(), 3);
-
-    let date_rows: Vec<_> = rows
-        .iter()
-        .filter(|row| row.partition_type == "date")
-        .collect();
-    assert_eq!(date_rows.len(), 1);
-    assert_eq!(date_rows[0].partition_value, "2023-07-31 00:00:00");
-    assert_eq!(date_rows[0].start_block, 100);
-    assert_eq!(date_rows[0].stop_block, 103);
-
-    let hour_rows: Vec<_> = rows
-        .iter()
-        .filter(|row| row.partition_type == "hour")
-        .collect();
-    assert_eq!(hour_rows.len(), 2);
-    assert_eq!(hour_rows[0].partition_value, "2023-07-31 14:00:00");
-    assert_eq!(hour_rows[0].start_block, 100);
-    assert_eq!(hour_rows[0].stop_block, 102);
-    assert_eq!(hour_rows[1].partition_value, "2023-07-31 15:00:00");
-    assert_eq!(hour_rows[1].start_block, 102);
-    assert_eq!(hour_rows[1].stop_block, 103);
-}
-
-#[test]
-fn test_build_partition_rows_from_blocks_handles_first_streamable_block() {
-    let blocks = vec![BlockIdentity {
-        block_num: 500,
-        timestamp: 1_690_815_540,
-        ..Default::default()
-    }];
-
-    let rows = build_partition_rows_from_blocks(
-        "eth-mainnet",
-        vec![PartitionBuildType::Hour],
-        &blocks,
-        501,
-    )
-    .expect("build rows");
-
-    assert_eq!(rows.len(), 1);
-    assert_eq!(rows[0].start_block, 500);
-    assert_eq!(rows[0].stop_block, 501);
-    assert_eq!(rows[0].partition_value, "2023-07-31 14:00:00");
-}
-
-#[test]
-fn test_partition_index_builder_resume_extends_terminal_rows() {
-    let existing_rows = vec![PartitionBuildRow {
-        partition_type: "hour".to_string(),
-        partition_interval_seconds: 3_600,
-        partition_start_ts: "2023-07-31 14:00:00".to_string(),
-        partition_value: "2023-07-31 14:00:00".to_string(),
-        start_block: 100,
-        stop_block: 102,
-        start_time: Some("2023-07-31 14:59:00".to_string()),
-        end_time: Some("2023-07-31 14:59:50".to_string()),
-        chain: Some("eth-mainnet".to_string()),
-    }];
-
-    let (mut builder, resume_start_block) = PartitionIndexBuilder::resume_from_existing(
-        "eth-mainnet",
-        vec![PartitionBuildType::Hour],
-        existing_rows,
-    )
-    .expect("resume builder");
-    assert_eq!(resume_start_block, 102);
-
-    builder
-        .observe_block(&BlockIdentity {
-            block_num: 102,
-            timestamp: 1_690_815_590,
-            ..Default::default()
-        })
-        .expect("same-hour block");
-    builder
-        .observe_block(&BlockIdentity {
-            block_num: 103,
-            timestamp: 1_690_815_600,
-            ..Default::default()
-        })
-        .expect("next-hour block");
-
-    let rows = builder.finish(104).expect("finish resumed build");
-    assert_eq!(rows.len(), 2);
-    assert_eq!(rows[0].partition_value, "2023-07-31 14:00:00");
-    assert_eq!(rows[0].start_block, 100);
-    assert_eq!(rows[0].stop_block, 103);
-    assert_eq!(rows[1].partition_value, "2023-07-31 15:00:00");
-    assert_eq!(rows[1].start_block, 103);
-    assert_eq!(rows[1].stop_block, 104);
-}
-
 fn block_range_row(start_block: u64, stop_block: u64, block_range_size: u64) -> PartitionBuildRow {
     PartitionBuildRow {
         partition_type: "block_range".to_string(),
@@ -3553,57 +3482,6 @@ fn block_range_row(start_block: u64, stop_block: u64, block_range_size: u64) -> 
         end_time: None,
         chain: Some("solana-mainnet-beta".to_string()),
     }
-}
-
-#[test]
-fn test_partition_index_builder_resume_block_range_uses_numeric_frontier() {
-    let existing_rows = vec![
-        block_range_row(90_000_000, 100_000_000, 10_000_000),
-        block_range_row(100_000_000, 110_000_000, 10_000_000),
-    ];
-
-    let (_builder, resume_start_block) = PartitionIndexBuilder::resume_from_existing(
-        "solana-mainnet-beta",
-        vec![PartitionBuildType::BlockRange],
-        existing_rows,
-    )
-    .expect("resume builder");
-
-    assert_eq!(resume_start_block, 110_000_000);
-}
-
-#[test]
-fn test_partition_index_builder_resume_block_range_accepts_partial_terminal_row() {
-    let existing_rows = vec![
-        block_range_row(400_000_000, 400_100_000, 100_000),
-        block_range_row(400_100_000, 400_150_000, 100_000),
-    ];
-
-    let (_builder, resume_start_block) = PartitionIndexBuilder::resume_from_existing(
-        "solana-mainnet-beta",
-        vec![PartitionBuildType::BlockRange],
-        existing_rows,
-    )
-    .expect("resume builder");
-
-    assert_eq!(resume_start_block, 400_150_000);
-}
-
-#[test]
-fn test_partition_index_builder_resume_block_range_rejects_gap() {
-    let err = PartitionIndexBuilder::resume_from_existing(
-        "solana-mainnet-beta",
-        vec![PartitionBuildType::BlockRange],
-        vec![
-            block_range_row(400_000_000, 400_100_000, 100_000),
-            block_range_row(400_200_000, 400_300_000, 100_000),
-        ],
-    )
-    .expect_err("gap should fail");
-
-    assert!(err
-        .to_string()
-        .contains("partition type block_range has gap"));
 }
 
 #[test]
@@ -3670,31 +3548,6 @@ fn test_read_partitions_build_rows_sorts_block_range_numerically() {
         .map(|row| row.partition_value.as_str())
         .collect::<Vec<_>>();
     assert_eq!(values, ["8000000", "9000000", "10000000", "11000000"]);
-}
-
-#[test]
-fn test_partition_index_builder_sorts_block_range_rows_numerically() {
-    let mut builder =
-        PartitionIndexBuilder::new("solana-mainnet-beta", vec![PartitionBuildType::BlockRange])
-            .expect("builder")
-            .with_block_range_size(1_000_000);
-    for block_num in [8_000_000, 9_000_000, 10_000_000, 11_000_000] {
-        builder
-            .observe_block(&BlockIdentity {
-                block_num,
-                timestamp: 1_690_815_540,
-                ..Default::default()
-            })
-            .expect("observe block");
-    }
-
-    let starts =
-        |rows: &[PartitionBuildRow]| rows.iter().map(|row| row.start_block).collect::<Vec<_>>();
-    let expected = [8_000_000, 9_000_000, 10_000_000, 11_000_000];
-    let snapshot = builder.snapshot(11_500_000).expect("snapshot rows");
-    assert_eq!(starts(&snapshot), expected);
-    let rows = builder.finish(12_000_000).expect("finish rows");
-    assert_eq!(starts(&rows), expected);
 }
 
 #[test]
@@ -3947,7 +3800,7 @@ fn test_write_partitions_index_uses_updated_schema() {
             .field_with_name("start_time")
             .expect("start_time")
             .data_type(),
-        &DataType::Timestamp(TimeUnit::Second, Some(Arc::from("UTC")))
+        &DataType::Timestamp(TimeUnit::Millisecond, Some(Arc::from("UTC")))
     );
     assert!(
         schema
@@ -3961,7 +3814,7 @@ fn test_write_partitions_index_uses_updated_schema() {
             .field_with_name("end_time")
             .expect("end_time")
             .data_type(),
-        &DataType::Timestamp(TimeUnit::Second, Some(Arc::from("UTC")))
+        &DataType::Timestamp(TimeUnit::Millisecond, Some(Arc::from("UTC")))
     );
     assert!(
         schema
@@ -4775,7 +4628,7 @@ fn numeric_ranges_refuse_unseen_routing_context_but_inspection_preserves_evidenc
 }
 #[test]
 fn verified_reader_rejects_invalid_canonical_times_instead_of_nulling_them() {
-    use arrow::{array::TimestampSecondArray, record_batch::RecordBatch};
+    use arrow::{array::TimestampMillisecondArray, record_batch::RecordBatch};
     use parquet::{
         arrow::{arrow_reader::ParquetRecordBatchReaderBuilder, ArrowWriter},
         file::properties::WriterProperties,
@@ -4795,7 +4648,8 @@ fn verified_reader_rejects_invalid_canonical_times_instead_of_nulling_them() {
     let batch = reader.build().unwrap().next().unwrap().unwrap();
     let mut columns = batch.columns().to_vec();
     columns[3] = Arc::new(
-        TimestampSecondArray::from(vec![Some(i64::MAX); batch.num_rows()]).with_timezone("UTC"),
+        TimestampMillisecondArray::from(vec![Some(i64::MAX); batch.num_rows()])
+            .with_timezone("UTC"),
     );
     let bad = RecordBatch::try_new(schema.clone(), columns).unwrap();
     let properties = WriterProperties::builder()
@@ -4811,4 +4665,311 @@ fn verified_reader_rejects_invalid_canonical_times_instead_of_nulling_them() {
     writer.close().unwrap();
     assert!(read_verified_partitions_index(path.to_str().unwrap(), None).is_err());
     assert!(list_partitions_from_index(&verified_list_request(&path), None).is_err());
+}
+
+/// Rewrite an index file with its timestamp columns cast to `Timestamp(Second, UTC)`,
+/// the layout written before partition-index times moved to milliseconds.
+fn rewrite_index_with_second_timestamps(path: &std::path::Path) {
+    use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
+    use arrow::record_batch::RecordBatch;
+    use parquet::{
+        arrow::{arrow_reader::ParquetRecordBatchReaderBuilder, ArrowWriter},
+        file::properties::WriterProperties,
+    };
+    use std::sync::Arc;
+    let reader =
+        ParquetRecordBatchReaderBuilder::try_new(std::fs::File::open(path).unwrap()).unwrap();
+    let metadata = reader
+        .metadata()
+        .file_metadata()
+        .key_value_metadata()
+        .cloned();
+    let batch = reader.build().unwrap().next().unwrap().unwrap();
+    let seconds = DataType::Timestamp(TimeUnit::Second, Some(Arc::from("UTC")));
+    let mut fields = Vec::new();
+    let mut columns = Vec::new();
+    for (field, column) in batch.schema().fields().iter().zip(batch.columns()) {
+        if matches!(field.data_type(), DataType::Timestamp(_, _)) {
+            fields.push(Field::new(
+                field.name(),
+                seconds.clone(),
+                field.is_nullable(),
+            ));
+            columns.push(arrow::compute::cast(column, &seconds).unwrap());
+        } else {
+            fields.push(field.as_ref().clone());
+            columns.push(column.clone());
+        }
+    }
+    let schema = Arc::new(Schema::new(fields));
+    let batch = RecordBatch::try_new(schema.clone(), columns).unwrap();
+    let properties = WriterProperties::builder()
+        .set_key_value_metadata(metadata)
+        .build();
+    let mut writer = ArrowWriter::try_new(
+        std::fs::File::create(path).unwrap(),
+        schema,
+        Some(properties),
+    )
+    .unwrap();
+    writer.write(&batch).unwrap();
+    writer.close().unwrap();
+}
+
+#[test]
+fn partitions_index_writes_millisecond_times_and_reads_second_indexes() {
+    use arrow::datatypes::{DataType, TimeUnit};
+    use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("partitions.parquet");
+    write_test_verified_partitions_index(&path, verified_test_rows()).unwrap();
+    let original = read_verified_partitions_index(path.to_str().unwrap(), None).unwrap();
+    assert!(original
+        .spans
+        .iter()
+        .all(|span| span.row.start_time.is_some() && span.proof.routing_start_timestamp.is_some()));
+
+    // New indexes store every time column as TIMESTAMP(MILLIS, UTC), so external
+    // readers such as DuckDB see timestamps rather than BIGINT.
+    let reader =
+        ParquetRecordBatchReaderBuilder::try_new(std::fs::File::open(&path).unwrap()).unwrap();
+    let millis = DataType::Timestamp(TimeUnit::Millisecond, Some("UTC".into()));
+    for name in ["start_time", "end_time", "routing_start_timestamp"] {
+        assert_eq!(
+            reader.schema().field_with_name(name).unwrap().data_type(),
+            &millis,
+            "{name}"
+        );
+    }
+    let descr = reader.parquet_schema();
+    for name in ["start_time", "end_time", "routing_start_timestamp"] {
+        let column = (0..descr.num_columns())
+            .map(|i| descr.column(i))
+            .find(|column| column.name() == name)
+            .unwrap();
+        assert_eq!(
+            column.logical_type_ref(),
+            Some(&parquet::basic::LogicalType::timestamp(
+                true,
+                parquet::basic::TimeUnit::MILLIS
+            )),
+            "{name}"
+        );
+    }
+    let first = reader.build().unwrap().next().unwrap().unwrap();
+    let stored = first
+        .column_by_name("start_time")
+        .unwrap()
+        .as_any()
+        .downcast_ref::<arrow::array::TimestampMillisecondArray>()
+        .unwrap()
+        .value(0);
+    assert_eq!(
+        stored,
+        parse_partition_timestamp(original.spans[0].row.start_time.as_deref().unwrap()).unwrap()
+            * 1_000
+    );
+
+    // Indexes written before the change used Timestamp(Second, UTC): they keep
+    // reading as the same verified model, and resume/rewrite upgrades them.
+    rewrite_index_with_second_timestamps(&path);
+    let reader =
+        ParquetRecordBatchReaderBuilder::try_new(std::fs::File::open(&path).unwrap()).unwrap();
+    assert_eq!(
+        reader
+            .schema()
+            .field_with_name("routing_start_timestamp")
+            .unwrap()
+            .data_type(),
+        &DataType::Timestamp(TimeUnit::Second, Some("UTC".into()))
+    );
+    let legacy = read_verified_partitions_index(path.to_str().unwrap(), None).unwrap();
+    assert_eq!(legacy, original);
+    let listed = list_partitions_from_index(&verified_list_request(&path), None).unwrap();
+    assert_eq!(listed.rows.len(), original.spans.len());
+    write_verified_partitions_index(
+        path.to_str().unwrap(),
+        &legacy,
+        Compression::Zstd,
+        None,
+        None,
+    )
+    .unwrap();
+    let reader =
+        ParquetRecordBatchReaderBuilder::try_new(std::fs::File::open(&path).unwrap()).unwrap();
+    assert_eq!(
+        reader
+            .schema()
+            .field_with_name("end_time")
+            .unwrap()
+            .data_type(),
+        &millis
+    );
+    assert_eq!(
+        read_verified_partitions_index(path.to_str().unwrap(), None).unwrap(),
+        original
+    );
+
+    // Legacy (pre-v2) row files with second-precision times remain inspectable.
+    let legacy_path = temp.path().join("legacy.parquet");
+    let mut legacy_rows = verified_test_rows();
+    for row in &mut legacy_rows {
+        row.start_time = Some(row.partition_value.clone());
+    }
+    write_test_partitions_index(&legacy_path, legacy_rows.clone()).unwrap();
+    rewrite_index_with_second_timestamps(&legacy_path);
+    let mut rows = read_partitions_build_rows(legacy_path.to_str().unwrap(), None).unwrap();
+    rows.sort_by_key(|row| row.start_block);
+    assert_eq!(
+        rows.iter()
+            .map(|row| row.start_time.clone())
+            .collect::<Vec<_>>(),
+        legacy_rows
+            .iter()
+            .map(|row| row.start_time.clone())
+            .collect::<Vec<_>>()
+    );
+}
+
+fn validate_v2(path: &std::path::Path, allow_gaps: bool) -> PartitionValidateResult {
+    validate_partitions_index(
+        &PartitionValidateRequest {
+            list: PartitionListRequest {
+                index_path: path.to_string_lossy().into(),
+                partition_type: None,
+                chain: None,
+                from: None,
+                to: None,
+                limit: usize::MAX,
+            },
+            allow_gaps,
+        },
+        None,
+    )
+    .expect("validation should run")
+}
+
+#[test]
+fn v2_validate_reports_split_runs_and_open_internal_boundaries() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("partitions.parquet");
+    write_test_verified_partitions_index(
+        &path,
+        vec![
+            block_range_row(8, 12, 4),
+            block_range_row(12, 16, 4),
+            block_range_row(16, 20, 4),
+        ],
+    )
+    .unwrap();
+    let report = validate_v2(&path, false);
+    assert!(report.valid, "{:?}", report.issues);
+    assert!(report.warnings.is_empty());
+    assert!(serde_json::to_value(&report)
+        .unwrap()
+        .get("warnings")
+        .is_none());
+
+    // Split [12, 16) into two clipped spans of the same aligned partition. The
+    // verified reader accepts it (flags match the clipping), validate does not.
+    let mut index = read_verified_partitions_index(path.to_str().unwrap(), None).unwrap();
+    let mut right = index.spans[1].clone();
+    index.spans[1].row.stop_block = 14;
+    index.spans[1].proof.end_complete = false;
+    right.row.start_block = 14;
+    right.proof.start_complete = false;
+    index.spans.insert(2, right);
+    write_verified_partitions_index(
+        path.to_str().unwrap(),
+        &index,
+        Compression::Zstd,
+        None,
+        None,
+    )
+    .unwrap();
+    let report = validate_v2(&path, false);
+    assert!(!report.valid);
+    assert_eq!(report.issue_count, 2, "{:?}", report.issues);
+    let kinds = report
+        .issues
+        .iter()
+        .map(|issue| (issue.kind.clone(), issue.partition_value.as_str()))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        kinds,
+        [
+            (PartitionValidationIssueKind::SplitRun, "12"),
+            (PartitionValidationIssueKind::IncompleteBoundary, "12"),
+        ]
+    );
+    assert!(report.issues[1].message.contains("block 14"));
+    assert_eq!(report.incomplete_spans, 2);
+    assert_eq!(
+        serde_json::to_value(&report.issues[0]).unwrap()["kind"],
+        "split_run"
+    );
+}
+
+#[test]
+fn v2_validate_allows_open_outer_edges_but_not_open_internal_boundaries() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("partitions.parquet");
+    write_test_verified_partitions_index(&path, verified_test_rows()).unwrap();
+    let original = read_verified_partitions_index(path.to_str().unwrap(), None).unwrap();
+    let write = |index: &VerifiedPartitionIndex| {
+        write_verified_partitions_index(
+            path.to_str().unwrap(),
+            index,
+            Compression::Zstd,
+            None,
+            None,
+        )
+        .unwrap()
+    };
+
+    // A clipped first edge (bounded start) is incomplete but valid.
+    let mut index = original.clone();
+    index.spans[0].proof.start_complete = false;
+    write(&index);
+    let report = validate_v2(&path, false);
+    assert!(report.valid, "{:?}", report.issues);
+    assert_eq!(report.incomplete_spans, 1);
+
+    // An internal boundary between different keys must be established on both sides.
+    let mut index = original.clone();
+    index.spans[0].proof.end_complete = false;
+    write(&index);
+    let report = validate_v2(&path, false);
+    assert!(!report.valid);
+    assert_eq!(report.issues.len(), 1, "{:?}", report.issues);
+    assert_eq!(
+        report.issues[0].kind,
+        PartitionValidationIssueKind::IncompleteBoundary
+    );
+    assert_eq!(report.issues[0].partition_value, "2023-11-14 23:00:00");
+
+    // --allow-gaps cannot relax v2 validation; it only produces a warning.
+    let report = validate_v2(&path, true);
+    assert!(!report.valid);
+    assert_eq!(report.warnings.len(), 1);
+    assert!(report.warnings[0].contains("--allow-gaps has no effect"));
+
+    // Filters that select nothing from the single-chain index report no issues.
+    let filtered = validate_partitions_index(
+        &PartitionValidateRequest {
+            list: PartitionListRequest {
+                index_path: path.to_string_lossy().into(),
+                partition_type: Some("date".into()),
+                chain: None,
+                from: None,
+                to: None,
+                limit: usize::MAX,
+            },
+            allow_gaps: false,
+        },
+        None,
+    )
+    .unwrap();
+    assert_eq!(filtered.total_rows, 0);
+    assert!(filtered.valid);
 }
