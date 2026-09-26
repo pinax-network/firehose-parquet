@@ -784,3 +784,12 @@ changes; use a new/rebuilt dataset or explicit reader-side schema reconciliation
   schemas, file metadata and cursor metadata are unchanged. See
   [#526 equivalence](../audit/526-chain-profile.md).
 
+- `merge`, `rollup`, `truncate`, `verify`, `scan` and `validate` now share one
+  implementation of each maintenance step for local and S3 paths (#529): one
+  partition merge sequence (journal, outputs, commit, deletes), one rollup group
+  engine, one Parquet encoder, one truncate plan and one set of discovery rules.
+  Local storage still uses the filesystem directly (durable temp-file writes,
+  journals and ownership checks are unchanged). Output files, names, messages,
+  crash recovery and lock behavior are unchanged; baseline and new binaries
+  produced byte-identical results in 24 local scenarios. See
+  [#529 validation](../audit/529-maintenance-engine.md).

@@ -130,34 +130,58 @@ pub(in crate::cli) fn collect_scan_parquet_local(
         files.push(path.to_path_buf());
         true
     } else if path.is_dir() {
-        collect_parquet_files(&path.to_path_buf(), &mut files)?;
+        crate::maintenance::discovery::collect_local(
+            path,
+            crate::maintenance::discovery::LocalPolicy::PARQUET,
+            &mut files,
+        )?;
         files.sort();
         false
     } else {
         anyhow::bail!("path does not exist: {}", path.display());
     };
 
+    scan_files(
+        &files,
+        rows,
+        offset,
+        schema_only,
+        |file_path, rows, offset| {
+            let display_path = if single_file {
+                file_path.display().to_string()
+            } else {
+                file_path
+                    .strip_prefix(path)
+                    .unwrap_or(file_path)
+                    .display()
+                    .to_string()
+            };
+            build_scan_file_result_from_local(
+                file_path,
+                display_path,
+                rows,
+                offset,
+                order,
+                schema_only,
+            )
+        },
+    )
+}
+
+/// Scans `files` in order, carrying the global row limit and offset across files and
+/// stopping once the limit is reached (unless only schemas are read).
+pub(in crate::cli) fn scan_files<T>(
+    files: &[T],
+    rows: usize,
+    offset: usize,
+    schema_only: bool,
+    mut scan: impl FnMut(&T, usize, usize) -> anyhow::Result<ScanFileResult>,
+) -> anyhow::Result<Vec<ScanFileResult>> {
     let mut results = Vec::with_capacity(files.len());
     let mut remaining_rows = rows;
     let mut remaining_offset = offset;
-    for file_path in &files {
-        let display_path = if single_file {
-            file_path.display().to_string()
-        } else {
-            file_path
-                .strip_prefix(path)
-                .unwrap_or(file_path)
-                .display()
-                .to_string()
-        };
-        let result = build_scan_file_result_from_local(
-            file_path,
-            display_path,
-            remaining_rows,
-            remaining_offset,
-            order,
-            schema_only,
-        )?;
+    for file in files {
+        let result = scan(file, remaining_rows, remaining_offset)?;
         update_scan_progress(
             &mut remaining_rows,
             &mut remaining_offset,
@@ -182,44 +206,19 @@ pub(in crate::cli) fn build_scan_file_result_from_local(
     order: ScanOrder,
     schema_only: bool,
 ) -> anyhow::Result<ScanFileResult> {
-    use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
-    use std::fs;
-
-    let file = fs::File::open(file_path)?;
+    let file = std::fs::File::open(file_path)?;
     let file_size = file.metadata()?.len();
-    let builder = ParquetRecordBatchReaderBuilder::try_new(file)?;
-    let metadata = builder.metadata();
-    let total_rows: i64 = metadata.row_groups().iter().map(|rg| rg.num_rows()).sum();
-    let row_groups = metadata.num_row_groups();
-    let columns = metadata.file_metadata().schema().get_fields().len();
-    let schema = builder.schema().clone();
-    let sample_rows = if schema_only || rows == 0 {
-        Vec::new()
-    } else {
-        let file = fs::File::open(file_path)?;
-        let builder = ParquetRecordBatchReaderBuilder::try_new(file)?;
-        let reader = builder.build()?;
-        let total_rows_for_sampling = scan_total_rows_for_sampling(total_rows)?;
-        collect_sample_rows(
-            &schema,
-            reader,
-            total_rows_for_sampling,
-            rows,
-            offset,
-            order,
-        )
-    };
-
-    Ok(ScanFileResult {
-        path: display_path,
-        total_rows,
-        row_groups,
-        columns,
-        size_bytes: file_size,
-        size_human: format_bytes(file_size),
-        schema: build_scan_schema(&schema),
-        sample_rows,
-    })
+    let reopen = || Ok(std::fs::File::open(file_path)?);
+    build_scan_file_result(
+        file,
+        reopen,
+        file_size,
+        display_path,
+        rows,
+        offset,
+        order,
+        schema_only,
+    )
 }
 
 /// Scan parquet files from an S3 bucket.
@@ -232,7 +231,6 @@ pub(in crate::cli) fn collect_scan_parquet_s3(
     aws: &AwsConfig,
 ) -> anyhow::Result<Vec<ScanFileResult>> {
     use crate::writer::parse_s3_url;
-    use object_store::ObjectStore;
 
     let (bucket, prefix) = parse_s3_url(path)?;
     let client = aws.build_s3_client(&bucket)?;
@@ -240,36 +238,22 @@ pub(in crate::cli) fn collect_scan_parquet_s3(
         block_on_async(collect_scan_s3_parquet_objects(&client, &prefix))
             .map_err(|e| anyhow::anyhow!("listing S3 objects: {e}"))?;
 
-    let mut results = Vec::with_capacity(parquet_objects.len());
-    let mut remaining_rows = rows;
-    let mut remaining_offset = offset;
-    for obj in &parquet_objects {
-        let data = block_on_async(async { client.get(&obj.location).await?.bytes().await })
+    scan_files(
+        &parquet_objects,
+        rows,
+        offset,
+        schema_only,
+        |obj, rows, offset| {
+            let data = block_on_async(crate::maintenance::discovery::read_object_bytes(
+                &client,
+                &obj.location,
+            ))
             .map_err(|e| anyhow::anyhow!("reading s3://{bucket}/{}: {e}", obj.location))?;
-        let display_key = scan_s3_display_key(obj.location.as_ref(), &prefix, exact_object_path);
-        let result = build_scan_file_result_from_bytes(
-            data,
-            display_key,
-            remaining_rows,
-            remaining_offset,
-            order,
-            schema_only,
-        )?;
-        update_scan_progress(
-            &mut remaining_rows,
-            &mut remaining_offset,
-            result.total_rows,
-            result.sample_rows.len(),
-            rows,
-            schema_only,
-        )?;
-        results.push(result);
-        if !schema_only && remaining_rows == 0 {
-            break;
-        }
-    }
-
-    Ok(results)
+            let display_key =
+                scan_s3_display_key(obj.location.as_ref(), &prefix, exact_object_path);
+            build_scan_file_result_from_bytes(data, display_key, rows, offset, order, schema_only)
+        },
+    )
 }
 
 pub(in crate::cli) fn build_scan_file_result_from_bytes(
@@ -280,10 +264,34 @@ pub(in crate::cli) fn build_scan_file_result_from_bytes(
     order: ScanOrder,
     schema_only: bool,
 ) -> anyhow::Result<ScanFileResult> {
+    let file_size = data.len() as u64;
+    build_scan_file_result(
+        data.clone(),
+        || Ok(data),
+        file_size,
+        display_path,
+        rows,
+        offset,
+        order,
+        schema_only,
+    )
+}
+
+/// Footer summary and optional sample rows of one Parquet file; `reopen` provides a
+/// second reader of the same bytes for sampling.
+fn build_scan_file_result<R: parquet::file::reader::ChunkReader + 'static>(
+    first: R,
+    reopen: impl FnOnce() -> anyhow::Result<R>,
+    file_size: u64,
+    display_path: String,
+    rows: usize,
+    offset: usize,
+    order: ScanOrder,
+    schema_only: bool,
+) -> anyhow::Result<ScanFileResult> {
     use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 
-    let file_size = data.len() as u64;
-    let builder = ParquetRecordBatchReaderBuilder::try_new(data.clone())?;
+    let builder = ParquetRecordBatchReaderBuilder::try_new(first)?;
     let metadata = builder.metadata();
     let total_rows: i64 = metadata.row_groups().iter().map(|rg| rg.num_rows()).sum();
     let row_groups = metadata.num_row_groups();
@@ -292,7 +300,7 @@ pub(in crate::cli) fn build_scan_file_result_from_bytes(
     let sample_rows = if schema_only || rows == 0 {
         Vec::new()
     } else {
-        let builder = ParquetRecordBatchReaderBuilder::try_new(data)?;
+        let builder = ParquetRecordBatchReaderBuilder::try_new(reopen()?)?;
         let reader = builder.build()?;
         let total_rows_for_sampling = scan_total_rows_for_sampling(total_rows)?;
         collect_sample_rows(
@@ -321,8 +329,6 @@ pub(in crate::cli) async fn collect_scan_s3_parquet_objects(
     store: &dyn object_store::ObjectStore,
     prefix: &str,
 ) -> anyhow::Result<(Vec<object_store::ObjectMeta>, bool)> {
-    use futures::TryStreamExt;
-
     if prefix.ends_with(".parquet") && !prefix.is_empty() {
         let object_path = object_store::path::Path::from(prefix);
         match store.head(&object_path).await {
@@ -336,13 +342,7 @@ pub(in crate::cli) async fn collect_scan_s3_parquet_objects(
         }
     }
 
-    let list_prefix = if prefix.is_empty() {
-        None
-    } else {
-        Some(object_store::path::Path::from(prefix))
-    };
-    let objects: Vec<object_store::ObjectMeta> =
-        store.list(list_prefix.as_ref()).try_collect().await?;
+    let objects = crate::maintenance::discovery::list_objects(store, prefix).await?;
     let mut parquet_objects: Vec<_> = objects
         .into_iter()
         .filter(|obj| obj.location.as_ref().ends_with(".parquet"))
@@ -359,10 +359,7 @@ pub(in crate::cli) fn scan_s3_display_key(
     if exact_object_path {
         return location.to_string();
     }
-    location
-        .strip_prefix(prefix)
-        .map(|s| s.trim_start_matches('/').to_string())
-        .unwrap_or_else(|| location.to_string())
+    crate::maintenance::discovery::relative_key(prefix, location).to_string()
 }
 
 pub(in crate::cli) fn build_scan_schema(
@@ -971,7 +968,6 @@ pub(in crate::cli) fn inspect_parquet_s3(
     aws: &AwsConfig,
 ) -> anyhow::Result<()> {
     use crate::writer::parse_s3_url;
-    use object_store::ObjectStore;
     use parquet::file::reader::FileReader;
     use parquet::file::serialized_reader::SerializedFileReader;
 
@@ -985,8 +981,10 @@ pub(in crate::cli) fn inspect_parquet_s3(
     )?;
 
     let obj_path = object_store::path::Path::from(key.as_str());
-    let data = block_on_async(async { client.get(&obj_path).await?.bytes().await })
-        .map_err(|e| anyhow::anyhow!("reading {path}: {e}"))?;
+    let data = block_on_async(crate::maintenance::discovery::read_object_bytes(
+        &client, &obj_path,
+    ))
+    .map_err(|e| anyhow::anyhow!("reading {path}: {e}"))?;
 
     let file_size = data.len() as u64;
     let reader = SerializedFileReader::new(bytes::Bytes::from(data))
@@ -1279,23 +1277,6 @@ pub(in crate::cli) fn print_schema_field(field: &parquet::schema::types::Type, i
             }
         }
     }
-}
-
-/// Recursively collect `.parquet` files from a directory.
-pub(in crate::cli) fn collect_parquet_files(
-    dir: &PathBuf,
-    out: &mut Vec<PathBuf>,
-) -> anyhow::Result<()> {
-    for entry in std::fs::read_dir(dir)? {
-        let entry = entry?;
-        let path = entry.path();
-        if path.is_dir() {
-            collect_parquet_files(&path, out)?;
-        } else if path.extension().map_or(false, |ext| ext == "parquet") {
-            out.push(path);
-        }
-    }
-    Ok(())
 }
 
 /// Human-readable byte size formatting.

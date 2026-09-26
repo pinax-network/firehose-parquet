@@ -15,10 +15,10 @@ use crate::cli::{block_on_async, format_bytes, resolve_destructive_input_path, A
 use crate::config::{Compression, DAY_PARTITION_PREFIX, LEGACY_DAY_PARTITION_PREFIX};
 use crate::dataset_lock::DatasetOwnership;
 use crate::ingest::maintenance::{self, MaintenancePolicy, MaintenanceTarget};
-use crate::merge::{SchemaCheck, StreamingPartWriter};
+use crate::maintenance::compaction::{Encoder, SchemaCheck};
+use crate::maintenance::discovery::{self, LocalPolicy};
 use crate::writer::parse_s3_url;
 use anyhow::{Context, Result};
-use arrow::datatypes::Schema;
 #[cfg(test)]
 use arrow::record_batch::RecordBatch;
 use object_store::ObjectStore;
@@ -26,10 +26,12 @@ use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 #[cfg(test)]
 use parquet::arrow::ArrowWriter;
 use parquet::file::metadata::KeyValue;
+#[cfg(test)]
 use parquet::file::properties::WriterProperties;
 use std::collections::{BTreeMap, HashSet};
 use std::io::Write;
 
+mod engine;
 mod range_reader;
 use range_reader::RangeReader;
 const READER_BATCH_ROWS: usize = 1024;
@@ -250,7 +252,7 @@ fn run_rollup_local(config: &RollupConfig, ownership: &DatasetOwnership) -> Resu
 
     // Discover all .parquet files under source and keep the ones to roll up.
     let mut files: Vec<PathBuf> = Vec::new();
-    collect_parquet_files_recursive(&source, &mut files)?;
+    discovery::collect_local(&source, LocalPolicy::PARQUET, &mut files)?;
     files.sort();
     let discovered = files.len();
     files.retain(|file| {
@@ -281,136 +283,7 @@ fn run_rollup_local(config: &RollupConfig, ownership: &DatasetOwnership) -> Resu
     // Group files by (table, target_partition_key).
     // The key is the output directory relative to the output root.
     let groups = group_files_by_target(&source, &files, config.target)?;
-    let names = OutputNames::new(config.delete_source);
-
-    let mut total_input_files = 0usize;
-    let mut total_output_files = 0usize;
-    let mut total_rows = 0usize;
-    let mut deleted_sources = 0usize;
-    let mut written: HashSet<PathBuf> = HashSet::new();
-    let mut schema_mismatches: Vec<String> = Vec::new();
-
-    'groups: for (group_key, group_files) in &groups {
-        info!(
-            group = %group_key,
-            files = group_files.len(),
-            "processing group"
-        );
-
-        // Validate every input before any group output. Retain only one decoded
-        // batch during this first pass; encoding happens in a second streaming pass.
-        let mut file_kv_metadata: Option<Vec<KeyValue>> = None;
-        let mut schema_check = SchemaCheck::default();
-        let mut schema = None;
-        let mut rows = 0usize;
-        for file_path in group_files {
-            let file = std::fs::File::open(file_path)
-                .with_context(|| format!("opening {}", file_path.display()))?;
-            let builder =
-                ParquetRecordBatchReaderBuilder::try_new(file)?.with_batch_size(READER_BATCH_ROWS);
-            let rel = file_path.strip_prefix(&source).unwrap_or(file_path);
-            if let Some(reason) = schema_check.check(&rel.to_string_lossy(), builder.schema()) {
-                record_schema_mismatch(group_key, reason, &mut schema_mismatches);
-                continue 'groups;
-            }
-            if schema.is_none() {
-                schema = Some(crate::merge::strip_transaction_schema(
-                    builder.schema().clone(),
-                ));
-                file_kv_metadata = builder
-                    .metadata()
-                    .file_metadata()
-                    .key_value_metadata()
-                    .cloned();
-            }
-            for batch in builder.build()? {
-                rows = rows
-                    .checked_add(batch?.num_rows())
-                    .context("rollup row count overflow")?;
-            }
-        }
-        if rows == 0 {
-            continue;
-        }
-        total_rows = total_rows
-            .checked_add(rows)
-            .context("rollup row count overflow")?;
-        total_input_files += group_files.len();
-        ownership.revalidate_local_paths()?;
-        let out_dir = output.join(group_key);
-        std::fs::create_dir_all(&out_dir)
-            .with_context(|| format!("creating output dir {}", out_dir.display()))?;
-        let schema = schema.context("rollup group has no schema")?;
-        let props = writer_properties(
-            config.compression,
-            schema.as_ref(),
-            file_kv_metadata.as_deref(),
-        );
-        let mut writer = StreamingPartWriter::new(schema, props, config.flush_bytes, None, 0);
-        let mut group_written = Vec::new();
-        let mut publish = |part: u32, bytes: Vec<u8>, part_rows: usize| -> Result<()> {
-            ownership.revalidate_local_paths()?;
-            let path = out_dir.join(names.file_name(part));
-            create_output_file(&path)?
-                .write_all(&bytes)
-                .with_context(|| format!("writing {}", path.display()))?;
-            info!(path=%path.display(),rows=part_rows,size=%format_bytes(bytes.len() as u64),"wrote rolled-up part");
-            group_written.push(path);
-            Ok(())
-        };
-        let mut written_rows = 0usize;
-        for file_path in group_files {
-            let builder =
-                ParquetRecordBatchReaderBuilder::try_new(std::fs::File::open(file_path)?)?
-                    .with_batch_size(READER_BATCH_ROWS);
-            for batch in builder.build()? {
-                let batch = crate::merge::strip_transaction_metadata(batch?)?;
-                written_rows = written_rows
-                    .checked_add(batch.num_rows())
-                    .context("rollup row count overflow")?;
-                writer.write_batch(&batch, &mut publish)?;
-            }
-        }
-        anyhow::ensure!(
-            written_rows == rows,
-            "rollup source row count changed after preflight; source files were retained"
-        );
-        writer.finish(&mut publish)?;
-        total_output_files += group_written.len();
-        written.extend(group_written);
-
-        ownership.revalidate_local_paths()?;
-        remove_previous_copies_local(&out_dir, &written)?;
-
-        // Delete this group's sources as soon as its output is written, so a failure in a
-        // later group cannot leave them behind to be rolled up a second time.
-        if config.delete_source {
-            for f in group_files {
-                if written.contains(f) {
-                    continue;
-                }
-                debug!(path = %f.display(), "deleting rolled-up source Parquet file");
-                std::fs::remove_file(f)
-                    .with_context(|| format!("deleting source file {}", f.display()))?;
-                deleted_sources += 1;
-            }
-        }
-    }
-
-    if deleted_sources > 0 {
-        info!(files = deleted_sources, "deleted source files");
-        // Clean up empty directories.
-        cleanup_empty_dirs(&source)?;
-    }
-
-    info!(
-        input_files = total_input_files,
-        output_files = total_output_files,
-        total_rows,
-        "rollup complete"
-    );
-
-    schema_mismatch_result(&schema_mismatches)
+    engine::local(&source, &output, ownership, &groups, config)
 }
 
 /// Reports a target partition left untouched because its source files have different schemas.
@@ -536,20 +409,6 @@ fn compute_group_key(rel_path: &str, target: RollupTarget) -> String {
     }
 }
 
-/// Recursively collect `.parquet` files from a directory.
-fn collect_parquet_files_recursive(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
-    for entry in std::fs::read_dir(dir)? {
-        let entry = entry?;
-        let path = entry.path();
-        if path.is_dir() {
-            collect_parquet_files_recursive(&path, out)?;
-        } else if path.extension().is_some_and(|ext| ext == "parquet") {
-            out.push(path);
-        }
-    }
-    Ok(())
-}
-
 /// Remove empty directories recursively (bottom-up).
 fn cleanup_empty_dirs(dir: &Path) -> Result<()> {
     if !dir.is_dir() {
@@ -565,20 +424,6 @@ fn cleanup_empty_dirs(dir: &Path) -> Result<()> {
     // Try to remove — will fail if not empty, which is fine.
     let _ = std::fs::remove_dir(dir);
     Ok(())
-}
-
-fn writer_properties(
-    compression: Compression,
-    schema: &Schema,
-    kv_metadata: Option<&[KeyValue]>,
-) -> WriterProperties {
-    let metadata = kv_metadata.map(|kvs| {
-        kvs.iter()
-            .filter(|kv| !kv.key.starts_with("fireparq.ingest.") && kv.key != "ARROW:schema")
-            .cloned()
-            .collect()
-    });
-    crate::writer::properties::for_schema(compression, schema, metadata)
 }
 
 // ---------------------------------------------------------------------------
@@ -604,9 +449,7 @@ impl S3Root {
 
     /// `key` relative to this root.
     fn relative<'a>(&self, key: &'a str) -> &'a str {
-        key.strip_prefix(&self.prefix)
-            .map(|s| s.trim_start_matches('/'))
-            .unwrap_or(key)
+        discovery::relative_key(&self.prefix, key)
     }
 }
 
@@ -643,16 +486,8 @@ fn run_rollup_s3(config: &RollupConfig) -> Result<()> {
 
 fn rollup_s3(config: &RollupConfig, src: &S3Root, out: &S3Root) -> Result<()> {
     // List all .parquet objects under source prefix.
-    let objects: Vec<object_store::ObjectMeta> = block_on_async(async {
-        use futures::TryStreamExt;
-        let prefix = if src.prefix.is_empty() {
-            None
-        } else {
-            Some(object_store::path::Path::from(src.prefix.as_str()))
-        };
-        src.client.list(prefix.as_ref()).try_collect().await
-    })
-    .map_err(|e| anyhow::anyhow!("listing S3 objects: {e}"))?;
+    let objects = block_on_async(discovery::list_objects(src.client.as_ref(), &src.prefix))
+        .map_err(|e| anyhow::anyhow!("listing S3 objects: {e}"))?;
 
     let mut discovered = 0usize;
     let mut groups: BTreeMap<String, Vec<object_store::ObjectMeta>> = BTreeMap::new();
@@ -685,133 +520,7 @@ fn rollup_s3(config: &RollupConfig, src: &S3Root, out: &S3Root) -> Result<()> {
         return Ok(());
     }
 
-    let names = OutputNames::new(config.delete_source);
-    let same_bucket = src.bucket == out.bucket;
-
-    let mut total_input_files = 0usize;
-    let mut total_output_files = 0usize;
-    let mut total_rows = 0usize;
-    let mut deleted_sources = 0usize;
-    let mut written: HashSet<String> = HashSet::new();
-    let mut schema_mismatches: Vec<String> = Vec::new();
-
-    'groups: for (group_key, group_keys) in &groups {
-        info!(group = %group_key, files = group_keys.len(), "processing group");
-
-        let mut file_kv_metadata: Option<Vec<KeyValue>> = None;
-        let mut schema_check = SchemaCheck::default();
-        let mut schema = None;
-        let mut rows = 0usize;
-        for object in group_keys {
-            let builder = ParquetRecordBatchReaderBuilder::try_new(RangeReader::new(
-                src.client.clone(),
-                object.clone(),
-            ))?
-            .with_batch_size(READER_BATCH_ROWS);
-            if let Some(reason) =
-                schema_check.check(src.relative(object.location.as_ref()), builder.schema())
-            {
-                record_schema_mismatch(group_key, reason, &mut schema_mismatches);
-                continue 'groups;
-            }
-            if schema.is_none() {
-                schema = Some(crate::merge::strip_transaction_schema(
-                    builder.schema().clone(),
-                ));
-                file_kv_metadata = builder
-                    .metadata()
-                    .file_metadata()
-                    .key_value_metadata()
-                    .cloned();
-            }
-            for batch in builder.build()? {
-                rows = rows
-                    .checked_add(batch?.num_rows())
-                    .context("rollup row count overflow")?;
-            }
-        }
-        if rows == 0 {
-            continue;
-        }
-        total_rows = total_rows
-            .checked_add(rows)
-            .context("rollup row count overflow")?;
-        total_input_files += group_keys.len();
-        let schema = schema.context("rollup group has no schema")?;
-        let props = writer_properties(
-            config.compression,
-            schema.as_ref(),
-            file_kv_metadata.as_deref(),
-        );
-        let mut writer = StreamingPartWriter::new(schema, props, config.flush_bytes, None, 0);
-        let mut group_written = Vec::new();
-        let mut publish = |part: u32, bytes: Vec<u8>, part_rows: usize| -> Result<()> {
-            let path = object_store::path::Path::from(
-                out.key(&format!("{group_key}/{}", names.file_name(part))),
-            );
-            let size = bytes.len();
-            block_on_async(out.client.put_opts(
-                &path,
-                bytes.into(),
-                crate::writer::s3_put_options(&config.cache_control),
-            ))
-            .map_err(|_| {
-                anyhow::anyhow!("publishing rollup output failed; source files were retained")
-            })?;
-            info!(path=%path,rows=part_rows,size=%format_bytes(size as u64),"wrote rolled-up part");
-            group_written.push(path.as_ref().to_owned());
-            Ok(())
-        };
-        let mut written_rows = 0usize;
-        for object in group_keys {
-            let builder = ParquetRecordBatchReaderBuilder::try_new(RangeReader::new(
-                src.client.clone(),
-                object.clone(),
-            ))?
-            .with_batch_size(READER_BATCH_ROWS);
-            for batch in builder.build()? {
-                let batch = crate::merge::strip_transaction_metadata(batch?)?;
-                written_rows = written_rows
-                    .checked_add(batch.num_rows())
-                    .context("rollup row count overflow")?;
-                writer.write_batch(&batch, &mut publish)?;
-            }
-        }
-        anyhow::ensure!(
-            written_rows == rows,
-            "rollup source row count changed after preflight; source files were retained"
-        );
-        writer.finish(&mut publish)?;
-        total_output_files += group_written.len();
-        written.extend(group_written);
-
-        remove_previous_copies_s3(out, group_key, &written)?;
-
-        // Delete this group's sources as soon as its output is written, so a failure in a
-        // later group cannot leave them behind to be rolled up a second time.
-        if config.delete_source {
-            let keys = group_keys
-                .iter()
-                .filter(|object| !(same_bucket && written.contains(object.location.as_ref())))
-                .map(|object| object.location.clone())
-                .collect::<Vec<_>>();
-            block_on_async(crate::s3::delete::delete_objects_once(&src.client, &keys))?;
-            deleted_sources += keys.len();
-        }
-    }
-
-    if deleted_sources > 0 {
-        info!(files = deleted_sources, "deleted source files from S3");
-    }
-
-    info!(
-        input_files = total_input_files,
-        output_files = total_output_files,
-        total_rows,
-        "rollup complete"
-    );
-
-    schema_mismatch_result(&schema_mismatches)
+    engine::remote(src, out, &groups, config)
 }
 
 /// Delete copy outputs (`part-rollup-*.parquet`) of earlier runs directly under `group_key`.
@@ -850,6 +559,10 @@ fn build_s3_client(bucket: &str, aws: &AwsConfig) -> Result<Arc<dyn ObjectStore>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn collect_parquet_files_recursive(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
+        Ok(discovery::collect_local(dir, LocalPolicy::PARQUET, out)?)
+    }
     use arrow::array::{UInt64Array, UInt64Builder};
     use arrow::datatypes::{DataType, Field, Schema};
     use object_store::memory::InMemory;
@@ -2055,5 +1768,92 @@ mod tests {
         for (key, bytes) in keys.iter().zip(&before) {
             assert_eq!(&get_object(&store, key), bytes, "{key}");
         }
+    }
+
+    /// Local and S3 rollups run the same group engine, so the same sources roll up into
+    /// byte-identical parts (names differ only by each run's random id).
+    #[test]
+    fn local_and_s3_rollups_publish_identical_parts() {
+        let sources = [
+            (
+                "blocks/year=2024/month=01/day=15/hour=00/part-000001.parquet",
+                0,
+                300,
+            ),
+            (
+                "blocks/year=2024/month=01/day=15/hour=01/part-000001.parquet",
+                300,
+                200,
+            ),
+            (
+                "blocks/year=2024/month=01/day=15/hour=01/part-000002.parquet",
+                500,
+                900,
+            ),
+            (
+                "blocks/year=2024/month=01/day=16/hour=05/part-000001.parquet",
+                2000,
+                40,
+            ),
+            (
+                "logs/year=2024/month=01/day=15/hour=00/part-000001.parquet",
+                0,
+                1200,
+            ),
+            ("cursor.parquet", 0, 1),
+        ];
+        let dir = tempfile::tempdir().unwrap();
+        let (src, out) = (dir.path().join("src"), dir.path().join("out"));
+        let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        for (rel, start, rows) in sources {
+            write_range_file(&src.join(rel), start, rows);
+            put_object(
+                &store,
+                &format!("src/{rel}"),
+                std::fs::read(src.join(rel)).unwrap(),
+            );
+        }
+        let mut local = local_config(&src, &out, false);
+        local.flush_bytes = 2048;
+        run_rollup(&local).unwrap();
+        let mut remote = s3_config("src", "out", false);
+        remote.flush_bytes = 2048;
+        rollup_s3(
+            &remote,
+            &memory_root(&store, "src"),
+            &memory_root(&store, "out"),
+        )
+        .unwrap();
+
+        // (group directory, part suffix, bytes) with the run id removed from the name.
+        let normalize = |rel: &str, data: Vec<u8>| {
+            let (group, name) = rel.rsplit_once('/').unwrap();
+            let suffix = name.rsplit_once('-').unwrap().1.to_string();
+            assert!(name.starts_with(COPY_OUTPUT_PREFIX), "{name}");
+            (group.to_string(), suffix, data)
+        };
+        let mut local_parts = Vec::new();
+        collect_parquet_files_recursive(&out, &mut local_parts).unwrap();
+        let mut local_parts: Vec<_> = local_parts
+            .iter()
+            .map(|path| {
+                let rel = path
+                    .strip_prefix(&out)
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned();
+                normalize(&rel, std::fs::read(path).unwrap())
+            })
+            .collect();
+        let mut remote_parts: Vec<_> = s3_keys(&store, "out")
+            .iter()
+            .map(|key| normalize(&key["out/".len()..], get_object(&store, key).to_vec()))
+            .collect();
+        local_parts.sort();
+        remote_parts.sort();
+        assert!(local_parts.len() > 3, "flush target must split groups");
+        assert!(local_parts == remote_parts);
+        // Copy mode keeps every source in both storages.
+        assert_eq!(s3_keys(&store, "src").len(), sources.len());
     }
 }

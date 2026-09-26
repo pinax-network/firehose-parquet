@@ -1,0 +1,4019 @@
+{
+ "all_equal": true,
+ "baseline": "origin/main 8462692 release fireparq (sha256 e0a28e2be65357f4f12f19e2bf3e068ff45e0042b418c7d94a47d407904f1463)",
+ "candidate": "audit/529-maintenance-engine 476c029 release fireparq (sha256 053c4b06d78ce895969ee7cef9d7e9b5488fae1471196610868bb1a72edab509)",
+ "dataset": "retained EVM mainnet blocks 24000000-24000029, 13 tables, 1049978 rows, minute partitions",
+ "scenarios": {
+  "inspect-part": {
+   "steps": [
+    {
+     "argv": [
+      "inspect",
+      "data/blocks/year=2025/month=12/date=13/hour=00/minute=09/part-a4213a22-000001.parquet"
+     ],
+     "env": {},
+     "exit": [
+      0,
+      0
+     ],
+     "files": 108,
+     "parquet_files": 107,
+     "same_exit": true,
+     "same_files": true,
+     "same_log": true
+    }
+   ],
+   "tables": {
+    "data/balance_changes": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      23696,
+      23696
+     ]
+    },
+    "data/blocks": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      30,
+      30
+     ]
+    },
+    "data/calls": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      136770,
+      136770
+     ]
+    },
+    "data/code_changes": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      1034,
+      1034
+     ]
+    },
+    "data/gas_changes": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      732666,
+      732666
+     ]
+    },
+    "data/logs": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      50710,
+      50710
+     ]
+    },
+    "data/nonce_changes": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      7500,
+      7500
+     ]
+    },
+    "data/storage_changes": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      91084,
+      91084
+     ]
+    },
+    "data/system_balance_changes": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      480,
+      480
+     ]
+    },
+    "data/system_calls": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      120,
+      120
+     ]
+    },
+    "data/system_gas_changes": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      240,
+      240
+     ]
+    },
+    "data/system_storage_changes": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      90,
+      90
+     ]
+    },
+    "data/transactions": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      5558,
+      5558
+     ]
+    }
+   }
+  },
+  "merge-crash-after-commit": {
+   "steps": [
+    {
+     "argv": [
+      "merge",
+      "data"
+     ],
+     "env": {
+      "FIREPARQ_TEST_MERGE_CRASH_AT": "after-commit"
+     },
+     "exit": [
+      -6,
+      -6
+     ],
+     "files": 111,
+     "parquet_files": 108,
+     "same_exit": true,
+     "same_files": true,
+     "same_log": true
+    },
+    {
+     "argv": [
+      "merge",
+      "data",
+      "--dry-run"
+     ],
+     "env": {},
+     "exit": [
+      0,
+      0
+     ],
+     "files": 111,
+     "parquet_files": 108,
+     "same_exit": true,
+     "same_files": true,
+     "same_log": true
+    },
+    {
+     "argv": [
+      "merge",
+      "data"
+     ],
+     "env": {},
+     "exit": [
+      0,
+      0
+     ],
+     "files": 82,
+     "parquet_files": 81,
+     "same_exit": true,
+     "same_files": true,
+     "same_log": true
+    }
+   ],
+   "tables": {
+    "data/balance_changes": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      23696,
+      23696
+     ]
+    },
+    "data/blocks": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      30,
+      30
+     ]
+    },
+    "data/calls": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      136770,
+      136770
+     ]
+    },
+    "data/code_changes": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      1034,
+      1034
+     ]
+    },
+    "data/gas_changes": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      732666,
+      732666
+     ]
+    },
+    "data/logs": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      50710,
+      50710
+     ]
+    },
+    "data/nonce_changes": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      7500,
+      7500
+     ]
+    },
+    "data/storage_changes": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      91084,
+      91084
+     ]
+    },
+    "data/system_balance_changes": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      480,
+      480
+     ]
+    },
+    "data/system_calls": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      120,
+      120
+     ]
+    },
+    "data/system_gas_changes": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      240,
+      240
+     ]
+    },
+    "data/system_storage_changes": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      90,
+      90
+     ]
+    },
+    "data/transactions": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      5558,
+      5558
+     ]
+    }
+   }
+  },
+  "merge-crash-after-first-delete": {
+   "steps": [
+    {
+     "argv": [
+      "merge",
+      "data"
+     ],
+     "env": {
+      "FIREPARQ_TEST_MERGE_CRASH_AT": "after-first-delete"
+     },
+     "exit": [
+      -6,
+      -6
+     ],
+     "files": 110,
+     "parquet_files": 107,
+     "same_exit": true,
+     "same_files": true,
+     "same_log": true
+    },
+    {
+     "argv": [
+      "merge",
+      "data"
+     ],
+     "env": {},
+     "exit": [
+      0,
+      0
+     ],
+     "files": 82,
+     "parquet_files": 81,
+     "same_exit": true,
+     "same_files": true,
+     "same_log": true
+    }
+   ],
+   "tables": {
+    "data/balance_changes": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      23696,
+      23696
+     ]
+    },
+    "data/blocks": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      30,
+      30
+     ]
+    },
+    "data/calls": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      136770,
+      136770
+     ]
+    },
+    "data/code_changes": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      1034,
+      1034
+     ]
+    },
+    "data/gas_changes": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      732666,
+      732666
+     ]
+    },
+    "data/logs": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      50710,
+      50710
+     ]
+    },
+    "data/nonce_changes": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      7500,
+      7500
+     ]
+    },
+    "data/storage_changes": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      91084,
+      91084
+     ]
+    },
+    "data/system_balance_changes": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      480,
+      480
+     ]
+    },
+    "data/system_calls": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      120,
+      120
+     ]
+    },
+    "data/system_gas_changes": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      240,
+      240
+     ]
+    },
+    "data/system_storage_changes": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      90,
+      90
+     ]
+    },
+    "data/transactions": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      5558,
+      5558
+     ]
+    }
+   }
+  },
+  "merge-crash-after-outputs": {
+   "steps": [
+    {
+     "argv": [
+      "merge",
+      "data"
+     ],
+     "env": {
+      "FIREPARQ_TEST_MERGE_CRASH_AT": "after-outputs"
+     },
+     "exit": [
+      -6,
+      -6
+     ],
+     "files": 111,
+     "parquet_files": 108,
+     "same_exit": true,
+     "same_files": true,
+     "same_log": true
+    },
+    {
+     "argv": [
+      "merge",
+      "data"
+     ],
+     "env": {},
+     "exit": [
+      0,
+      0
+     ],
+     "files": 82,
+     "parquet_files": 81,
+     "same_exit": true,
+     "same_files": true,
+     "same_log": true
+    }
+   ],
+   "tables": {
+    "data/balance_changes": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      23696,
+      23696
+     ]
+    },
+    "data/blocks": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      30,
+      30
+     ]
+    },
+    "data/calls": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      136770,
+      136770
+     ]
+    },
+    "data/code_changes": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      1034,
+      1034
+     ]
+    },
+    "data/gas_changes": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      732666,
+      732666
+     ]
+    },
+    "data/logs": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      50710,
+      50710
+     ]
+    },
+    "data/nonce_changes": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      7500,
+      7500
+     ]
+    },
+    "data/storage_changes": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      91084,
+      91084
+     ]
+    },
+    "data/system_balance_changes": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      480,
+      480
+     ]
+    },
+    "data/system_calls": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      120,
+      120
+     ]
+    },
+    "data/system_gas_changes": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      240,
+      240
+     ]
+    },
+    "data/system_storage_changes": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      90,
+      90
+     ]
+    },
+    "data/transactions": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      5558,
+      5558
+     ]
+    }
+   }
+  },
+  "merge-default": {
+   "steps": [
+    {
+     "argv": [
+      "merge",
+      "data"
+     ],
+     "env": {},
+     "exit": [
+      0,
+      0
+     ],
+     "files": 82,
+     "parquet_files": 81,
+     "same_exit": true,
+     "same_files": true,
+     "same_log": true
+    }
+   ],
+   "tables": {
+    "data/balance_changes": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      23696,
+      23696
+     ]
+    },
+    "data/blocks": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      30,
+      30
+     ]
+    },
+    "data/calls": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      136770,
+      136770
+     ]
+    },
+    "data/code_changes": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      1034,
+      1034
+     ]
+    },
+    "data/gas_changes": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      732666,
+      732666
+     ]
+    },
+    "data/logs": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      50710,
+      50710
+     ]
+    },
+    "data/nonce_changes": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      7500,
+      7500
+     ]
+    },
+    "data/storage_changes": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      91084,
+      91084
+     ]
+    },
+    "data/system_balance_changes": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      480,
+      480
+     ]
+    },
+    "data/system_calls": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      120,
+      120
+     ]
+    },
+    "data/system_gas_changes": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      240,
+      240
+     ]
+    },
+    "data/system_storage_changes": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      90,
+      90
+     ]
+    },
+    "data/transactions": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      5558,
+      5558
+     ]
+    }
+   }
+  },
+  "merge-dry-run": {
+   "steps": [
+    {
+     "argv": [
+      "merge",
+      "data",
+      "--dry-run"
+     ],
+     "env": {},
+     "exit": [
+      0,
+      0
+     ],
+     "files": 108,
+     "parquet_files": 107,
+     "same_exit": true,
+     "same_files": true,
+     "same_log": true
+    }
+   ],
+   "tables": {
+    "data/balance_changes": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      23696,
+      23696
+     ]
+    },
+    "data/blocks": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      30,
+      30
+     ]
+    },
+    "data/calls": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      136770,
+      136770
+     ]
+    },
+    "data/code_changes": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      1034,
+      1034
+     ]
+    },
+    "data/gas_changes": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      732666,
+      732666
+     ]
+    },
+    "data/logs": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      50710,
+      50710
+     ]
+    },
+    "data/nonce_changes": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      7500,
+      7500
+     ]
+    },
+    "data/storage_changes": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      91084,
+      91084
+     ]
+    },
+    "data/system_balance_changes": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      480,
+      480
+     ]
+    },
+    "data/system_calls": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      120,
+      120
+     ]
+    },
+    "data/system_gas_changes": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      240,
+      240
+     ]
+    },
+    "data/system_storage_changes": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      90,
+      90
+     ]
+    },
+    "data/transactions": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      5558,
+      5558
+     ]
+    }
+   }
+  },
+  "merge-rows-snappy": {
+   "steps": [
+    {
+     "argv": [
+      "merge",
+      "data",
+      "--flush-rows",
+      "700",
+      "--compression",
+      "snappy"
+     ],
+     "env": {},
+     "exit": [
+      0,
+      0
+     ],
+     "files": 599,
+     "parquet_files": 598,
+     "same_exit": true,
+     "same_files": true,
+     "same_log": true
+    }
+   ],
+   "tables": {
+    "data/balance_changes": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      23696,
+      23696
+     ]
+    },
+    "data/blocks": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      30,
+      30
+     ]
+    },
+    "data/calls": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      136770,
+      136770
+     ]
+    },
+    "data/code_changes": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      1034,
+      1034
+     ]
+    },
+    "data/gas_changes": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      732666,
+      732666
+     ]
+    },
+    "data/logs": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      50710,
+      50710
+     ]
+    },
+    "data/nonce_changes": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      7500,
+      7500
+     ]
+    },
+    "data/storage_changes": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      91084,
+      91084
+     ]
+    },
+    "data/system_balance_changes": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      480,
+      480
+     ]
+    },
+    "data/system_calls": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      120,
+      120
+     ]
+    },
+    "data/system_gas_changes": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      240,
+      240
+     ]
+    },
+    "data/system_storage_changes": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      90,
+      90
+     ]
+    },
+    "data/transactions": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      5558,
+      5558
+     ]
+    }
+   }
+  },
+  "merge-table-dir": {
+   "steps": [
+    {
+     "argv": [
+      "merge",
+      "data/logs",
+      "--flush-bytes",
+      "65536"
+     ],
+     "env": {},
+     "exit": [
+      0,
+      0
+     ],
+     "files": 108,
+     "parquet_files": 107,
+     "same_exit": true,
+     "same_files": true,
+     "same_log": true
+    }
+   ],
+   "tables": {
+    "data/balance_changes": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      23696,
+      23696
+     ]
+    },
+    "data/blocks": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      30,
+      30
+     ]
+    },
+    "data/calls": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      136770,
+      136770
+     ]
+    },
+    "data/code_changes": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      1034,
+      1034
+     ]
+    },
+    "data/gas_changes": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      732666,
+      732666
+     ]
+    },
+    "data/logs": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      50710,
+      50710
+     ]
+    },
+    "data/nonce_changes": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      7500,
+      7500
+     ]
+    },
+    "data/storage_changes": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      91084,
+      91084
+     ]
+    },
+    "data/system_balance_changes": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      480,
+      480
+     ]
+    },
+    "data/system_calls": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      120,
+      120
+     ]
+    },
+    "data/system_gas_changes": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      240,
+      240
+     ]
+    },
+    "data/system_storage_changes": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      90,
+      90
+     ]
+    },
+    "data/transactions": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      5558,
+      5558
+     ]
+    }
+   }
+  },
+  "rollup-copy-date-small": {
+   "steps": [
+    {
+     "argv": [
+      "rollup",
+      "data",
+      "-o",
+      "out",
+      "-p",
+      "date",
+      "--flush-bytes",
+      "65536"
+     ],
+     "env": {},
+     "exit": [
+      0,
+      0
+     ],
+     "files": 616,
+     "parquet_files": 615,
+     "same_exit": true,
+     "same_files": true,
+     "same_log": true
+    }
+   ],
+   "tables": {
+    "data/balance_changes": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      23696,
+      23696
+     ]
+    },
+    "data/blocks": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      30,
+      30
+     ]
+    },
+    "data/calls": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      136770,
+      136770
+     ]
+    },
+    "data/code_changes": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      1034,
+      1034
+     ]
+    },
+    "data/gas_changes": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      732666,
+      732666
+     ]
+    },
+    "data/logs": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      50710,
+      50710
+     ]
+    },
+    "data/nonce_changes": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      7500,
+      7500
+     ]
+    },
+    "data/storage_changes": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      91084,
+      91084
+     ]
+    },
+    "data/system_balance_changes": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      480,
+      480
+     ]
+    },
+    "data/system_calls": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      120,
+      120
+     ]
+    },
+    "data/system_gas_changes": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      240,
+      240
+     ]
+    },
+    "data/system_storage_changes": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      90,
+      90
+     ]
+    },
+    "data/transactions": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      5558,
+      5558
+     ]
+    },
+    "out/balance_changes": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      23696,
+      23696
+     ]
+    },
+    "out/blocks": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      30,
+      30
+     ]
+    },
+    "out/calls": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      136770,
+      136770
+     ]
+    },
+    "out/code_changes": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      1034,
+      1034
+     ]
+    },
+    "out/gas_changes": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      732666,
+      732666
+     ]
+    },
+    "out/logs": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      50710,
+      50710
+     ]
+    },
+    "out/nonce_changes": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      7500,
+      7500
+     ]
+    },
+    "out/storage_changes": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      91084,
+      91084
+     ]
+    },
+    "out/system_balance_changes": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      480,
+      480
+     ]
+    },
+    "out/system_calls": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      120,
+      120
+     ]
+    },
+    "out/system_gas_changes": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      240,
+      240
+     ]
+    },
+    "out/system_storage_changes": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      90,
+      90
+     ]
+    },
+    "out/transactions": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      5558,
+      5558
+     ]
+    }
+   }
+  },
+  "rollup-copy-hour": {
+   "steps": [
+    {
+     "argv": [
+      "rollup",
+      "data",
+      "-o",
+      "out",
+      "-p",
+      "hour"
+     ],
+     "env": {},
+     "exit": [
+      0,
+      0
+     ],
+     "files": 121,
+     "parquet_files": 120,
+     "same_exit": true,
+     "same_files": true,
+     "same_log": true
+    },
+    {
+     "argv": [
+      "rollup",
+      "data",
+      "-o",
+      "out",
+      "-p",
+      "hour"
+     ],
+     "env": {},
+     "exit": [
+      0,
+      0
+     ],
+     "files": 121,
+     "parquet_files": 120,
+     "same_exit": true,
+     "same_files": true,
+     "same_log": true
+    }
+   ],
+   "tables": {
+    "data/balance_changes": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      23696,
+      23696
+     ]
+    },
+    "data/blocks": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      30,
+      30
+     ]
+    },
+    "data/calls": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      136770,
+      136770
+     ]
+    },
+    "data/code_changes": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      1034,
+      1034
+     ]
+    },
+    "data/gas_changes": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      732666,
+      732666
+     ]
+    },
+    "data/logs": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      50710,
+      50710
+     ]
+    },
+    "data/nonce_changes": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      7500,
+      7500
+     ]
+    },
+    "data/storage_changes": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      91084,
+      91084
+     ]
+    },
+    "data/system_balance_changes": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      480,
+      480
+     ]
+    },
+    "data/system_calls": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      120,
+      120
+     ]
+    },
+    "data/system_gas_changes": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      240,
+      240
+     ]
+    },
+    "data/system_storage_changes": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      90,
+      90
+     ]
+    },
+    "data/transactions": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      5558,
+      5558
+     ]
+    },
+    "out/balance_changes": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      23696,
+      23696
+     ]
+    },
+    "out/blocks": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      30,
+      30
+     ]
+    },
+    "out/calls": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      136770,
+      136770
+     ]
+    },
+    "out/code_changes": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      1034,
+      1034
+     ]
+    },
+    "out/gas_changes": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      732666,
+      732666
+     ]
+    },
+    "out/logs": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      50710,
+      50710
+     ]
+    },
+    "out/nonce_changes": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      7500,
+      7500
+     ]
+    },
+    "out/storage_changes": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      91084,
+      91084
+     ]
+    },
+    "out/system_balance_changes": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      480,
+      480
+     ]
+    },
+    "out/system_calls": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      120,
+      120
+     ]
+    },
+    "out/system_gas_changes": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      240,
+      240
+     ]
+    },
+    "out/system_storage_changes": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      90,
+      90
+     ]
+    },
+    "out/transactions": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      5558,
+      5558
+     ]
+    }
+   }
+  },
+  "rollup-inplace-date": {
+   "steps": [
+    {
+     "argv": [
+      "rollup",
+      "data",
+      "--delete-source",
+      "-p",
+      "date"
+     ],
+     "env": {},
+     "exit": [
+      0,
+      0
+     ],
+     "files": 17,
+     "parquet_files": 16,
+     "same_exit": true,
+     "same_files": true,
+     "same_log": true
+    }
+   ],
+   "tables": {
+    "data/balance_changes": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      23696,
+      23696
+     ]
+    },
+    "data/blocks": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      30,
+      30
+     ]
+    },
+    "data/calls": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      136770,
+      136770
+     ]
+    },
+    "data/code_changes": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      1034,
+      1034
+     ]
+    },
+    "data/gas_changes": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      732666,
+      732666
+     ]
+    },
+    "data/logs": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      50710,
+      50710
+     ]
+    },
+    "data/nonce_changes": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      7500,
+      7500
+     ]
+    },
+    "data/storage_changes": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      91084,
+      91084
+     ]
+    },
+    "data/system_balance_changes": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      480,
+      480
+     ]
+    },
+    "data/system_calls": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      120,
+      120
+     ]
+    },
+    "data/system_gas_changes": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      240,
+      240
+     ]
+    },
+    "data/system_storage_changes": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      90,
+      90
+     ]
+    },
+    "data/transactions": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      5558,
+      5558
+     ]
+    }
+   }
+  },
+  "rollup-inplace-hour-small": {
+   "steps": [
+    {
+     "argv": [
+      "rollup",
+      "data",
+      "--delete-source",
+      "-p",
+      "hour",
+      "--flush-bytes",
+      "65536",
+      "--compression",
+      "snappy"
+     ],
+     "env": {},
+     "exit": [
+      0,
+      0
+     ],
+     "files": 512,
+     "parquet_files": 511,
+     "same_exit": true,
+     "same_files": true,
+     "same_log": true
+    }
+   ],
+   "tables": {
+    "data/balance_changes": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      23696,
+      23696
+     ]
+    },
+    "data/blocks": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      30,
+      30
+     ]
+    },
+    "data/calls": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      136770,
+      136770
+     ]
+    },
+    "data/code_changes": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      1034,
+      1034
+     ]
+    },
+    "data/gas_changes": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      732666,
+      732666
+     ]
+    },
+    "data/logs": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      50710,
+      50710
+     ]
+    },
+    "data/nonce_changes": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      7500,
+      7500
+     ]
+    },
+    "data/storage_changes": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      91084,
+      91084
+     ]
+    },
+    "data/system_balance_changes": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      480,
+      480
+     ]
+    },
+    "data/system_calls": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      120,
+      120
+     ]
+    },
+    "data/system_gas_changes": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      240,
+      240
+     ]
+    },
+    "data/system_storage_changes": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      90,
+      90
+     ]
+    },
+    "data/transactions": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      5558,
+      5558
+     ]
+    }
+   }
+  },
+  "rollup-inplace-refused": {
+   "steps": [
+    {
+     "argv": [
+      "rollup",
+      "data",
+      "-p",
+      "date"
+     ],
+     "env": {},
+     "exit": [
+      1,
+      1
+     ],
+     "files": 108,
+     "parquet_files": 107,
+     "same_exit": true,
+     "same_files": true,
+     "same_log": true
+    }
+   ],
+   "tables": {
+    "data/balance_changes": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      23696,
+      23696
+     ]
+    },
+    "data/blocks": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      30,
+      30
+     ]
+    },
+    "data/calls": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      136770,
+      136770
+     ]
+    },
+    "data/code_changes": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      1034,
+      1034
+     ]
+    },
+    "data/gas_changes": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      732666,
+      732666
+     ]
+    },
+    "data/logs": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      50710,
+      50710
+     ]
+    },
+    "data/nonce_changes": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      7500,
+      7500
+     ]
+    },
+    "data/storage_changes": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      91084,
+      91084
+     ]
+    },
+    "data/system_balance_changes": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      480,
+      480
+     ]
+    },
+    "data/system_calls": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      120,
+      120
+     ]
+    },
+    "data/system_gas_changes": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      240,
+      240
+     ]
+    },
+    "data/system_storage_changes": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      90,
+      90
+     ]
+    },
+    "data/transactions": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      5558,
+      5558
+     ]
+    }
+   }
+  },
+  "scan-blocks": {
+   "steps": [
+    {
+     "argv": [
+      "scan",
+      "data/blocks",
+      "-n",
+      "3",
+      "--json"
+     ],
+     "env": {},
+     "exit": [
+      0,
+      0
+     ],
+     "files": 108,
+     "parquet_files": 107,
+     "same_exit": true,
+     "same_files": true,
+     "same_log": true
+    }
+   ],
+   "tables": {
+    "data/balance_changes": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      23696,
+      23696
+     ]
+    },
+    "data/blocks": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      30,
+      30
+     ]
+    },
+    "data/calls": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      136770,
+      136770
+     ]
+    },
+    "data/code_changes": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      1034,
+      1034
+     ]
+    },
+    "data/gas_changes": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      732666,
+      732666
+     ]
+    },
+    "data/logs": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      50710,
+      50710
+     ]
+    },
+    "data/nonce_changes": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      7500,
+      7500
+     ]
+    },
+    "data/storage_changes": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      91084,
+      91084
+     ]
+    },
+    "data/system_balance_changes": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      480,
+      480
+     ]
+    },
+    "data/system_calls": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      120,
+      120
+     ]
+    },
+    "data/system_gas_changes": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      240,
+      240
+     ]
+    },
+    "data/system_storage_changes": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      90,
+      90
+     ]
+    },
+    "data/transactions": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      5558,
+      5558
+     ]
+    }
+   }
+  },
+  "scan-root-schema": {
+   "steps": [
+    {
+     "argv": [
+      "scan",
+      "data",
+      "--schema-only"
+     ],
+     "env": {},
+     "exit": [
+      0,
+      0
+     ],
+     "files": 108,
+     "parquet_files": 107,
+     "same_exit": true,
+     "same_files": true,
+     "same_log": true
+    }
+   ],
+   "tables": {
+    "data/balance_changes": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      23696,
+      23696
+     ]
+    },
+    "data/blocks": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      30,
+      30
+     ]
+    },
+    "data/calls": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      136770,
+      136770
+     ]
+    },
+    "data/code_changes": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      1034,
+      1034
+     ]
+    },
+    "data/gas_changes": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      732666,
+      732666
+     ]
+    },
+    "data/logs": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      50710,
+      50710
+     ]
+    },
+    "data/nonce_changes": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      7500,
+      7500
+     ]
+    },
+    "data/storage_changes": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      91084,
+      91084
+     ]
+    },
+    "data/system_balance_changes": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      480,
+      480
+     ]
+    },
+    "data/system_calls": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      120,
+      120
+     ]
+    },
+    "data/system_gas_changes": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      240,
+      240
+     ]
+    },
+    "data/system_storage_changes": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      90,
+      90
+     ]
+    },
+    "data/transactions": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      5558,
+      5558
+     ]
+    }
+   }
+  },
+  "truncate-dry-run": {
+   "steps": [
+    {
+     "argv": [
+      "truncate",
+      "data",
+      "-p",
+      "minute=0*",
+      "--dry-run"
+     ],
+     "env": {},
+     "exit": [
+      0,
+      0
+     ],
+     "files": 108,
+     "parquet_files": 107,
+     "same_exit": true,
+     "same_files": true,
+     "same_log": true
+    }
+   ],
+   "tables": {
+    "data/balance_changes": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      23696,
+      23696
+     ]
+    },
+    "data/blocks": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      30,
+      30
+     ]
+    },
+    "data/calls": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      136770,
+      136770
+     ]
+    },
+    "data/code_changes": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      1034,
+      1034
+     ]
+    },
+    "data/gas_changes": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      732666,
+      732666
+     ]
+    },
+    "data/logs": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      50710,
+      50710
+     ]
+    },
+    "data/nonce_changes": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      7500,
+      7500
+     ]
+    },
+    "data/storage_changes": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      91084,
+      91084
+     ]
+    },
+    "data/system_balance_changes": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      480,
+      480
+     ]
+    },
+    "data/system_calls": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      120,
+      120
+     ]
+    },
+    "data/system_gas_changes": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      240,
+      240
+     ]
+    },
+    "data/system_storage_changes": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      90,
+      90
+     ]
+    },
+    "data/transactions": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      5558,
+      5558
+     ]
+    }
+   }
+  },
+  "truncate-no-yes": {
+   "steps": [
+    {
+     "argv": [
+      "truncate",
+      "data",
+      "-p",
+      "minute=0*"
+     ],
+     "env": {},
+     "exit": [
+      1,
+      1
+     ],
+     "files": 108,
+     "parquet_files": 107,
+     "same_exit": true,
+     "same_files": true,
+     "same_log": true
+    }
+   ],
+   "tables": {
+    "data/balance_changes": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      23696,
+      23696
+     ]
+    },
+    "data/blocks": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      30,
+      30
+     ]
+    },
+    "data/calls": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      136770,
+      136770
+     ]
+    },
+    "data/code_changes": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      1034,
+      1034
+     ]
+    },
+    "data/gas_changes": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      732666,
+      732666
+     ]
+    },
+    "data/logs": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      50710,
+      50710
+     ]
+    },
+    "data/nonce_changes": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      7500,
+      7500
+     ]
+    },
+    "data/storage_changes": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      91084,
+      91084
+     ]
+    },
+    "data/system_balance_changes": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      480,
+      480
+     ]
+    },
+    "data/system_calls": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      120,
+      120
+     ]
+    },
+    "data/system_gas_changes": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      240,
+      240
+     ]
+    },
+    "data/system_storage_changes": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      90,
+      90
+     ]
+    },
+    "data/transactions": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      5558,
+      5558
+     ]
+    }
+   }
+  },
+  "truncate-yes-filter": {
+   "steps": [
+    {
+     "argv": [
+      "truncate",
+      "data",
+      "-p",
+      "minute=0*",
+      "-p",
+      "day=13",
+      "--yes"
+     ],
+     "env": {},
+     "exit": [
+      0,
+      0
+     ],
+     "files": 43,
+     "parquet_files": 42,
+     "same_exit": true,
+     "same_files": true,
+     "same_log": true
+    }
+   ],
+   "tables": {
+    "data/balance_changes": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      7293,
+      7293
+     ]
+    },
+    "data/blocks": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      10,
+      10
+     ]
+    },
+    "data/calls": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      48642,
+      48642
+     ]
+    },
+    "data/code_changes": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      140,
+      140
+     ]
+    },
+    "data/gas_changes": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      258503,
+      258503
+     ]
+    },
+    "data/logs": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      17529,
+      17529
+     ]
+    },
+    "data/nonce_changes": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      1884,
+      1884
+     ]
+    },
+    "data/storage_changes": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      29724,
+      29724
+     ]
+    },
+    "data/system_balance_changes": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      160,
+      160
+     ]
+    },
+    "data/system_calls": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      40,
+      40
+     ]
+    },
+    "data/system_gas_changes": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      80,
+      80
+     ]
+    },
+    "data/system_storage_changes": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      30,
+      30
+     ]
+    },
+    "data/transactions": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      1659,
+      1659
+     ]
+    }
+   }
+  },
+  "truncate-yes-root": {
+   "steps": [
+    {
+     "argv": [
+      "truncate",
+      "data",
+      "--yes"
+     ],
+     "env": {},
+     "exit": [
+      0,
+      0
+     ],
+     "files": 1,
+     "parquet_files": 0,
+     "same_exit": true,
+     "same_files": true,
+     "same_log": true
+    }
+   ],
+   "tables": {}
+  },
+  "truncate-yes-table": {
+   "steps": [
+    {
+     "argv": [
+      "truncate",
+      "data/blocks",
+      "--yes"
+     ],
+     "env": {},
+     "exit": [
+      0,
+      0
+     ],
+     "files": 100,
+     "parquet_files": 99,
+     "same_exit": true,
+     "same_files": true,
+     "same_log": true
+    }
+   ],
+   "tables": {
+    "data/balance_changes": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      23696,
+      23696
+     ]
+    },
+    "data/blocks": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      0,
+      0
+     ]
+    },
+    "data/calls": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      136770,
+      136770
+     ]
+    },
+    "data/code_changes": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      1034,
+      1034
+     ]
+    },
+    "data/gas_changes": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      732666,
+      732666
+     ]
+    },
+    "data/logs": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      50710,
+      50710
+     ]
+    },
+    "data/nonce_changes": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      7500,
+      7500
+     ]
+    },
+    "data/storage_changes": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      91084,
+      91084
+     ]
+    },
+    "data/system_balance_changes": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      480,
+      480
+     ]
+    },
+    "data/system_calls": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      120,
+      120
+     ]
+    },
+    "data/system_gas_changes": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      240,
+      240
+     ]
+    },
+    "data/system_storage_changes": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      90,
+      90
+     ]
+    },
+    "data/transactions": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      5558,
+      5558
+     ]
+    }
+   }
+  },
+  "validate-blocks": {
+   "steps": [
+    {
+     "argv": [
+      "validate",
+      "data/blocks"
+     ],
+     "env": {},
+     "exit": [
+      0,
+      0
+     ],
+     "files": 108,
+     "parquet_files": 107,
+     "same_exit": true,
+     "same_files": true,
+     "same_log": true
+    }
+   ],
+   "tables": {
+    "data/balance_changes": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      23696,
+      23696
+     ]
+    },
+    "data/blocks": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      30,
+      30
+     ]
+    },
+    "data/calls": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      136770,
+      136770
+     ]
+    },
+    "data/code_changes": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      1034,
+      1034
+     ]
+    },
+    "data/gas_changes": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      732666,
+      732666
+     ]
+    },
+    "data/logs": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      50710,
+      50710
+     ]
+    },
+    "data/nonce_changes": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      7500,
+      7500
+     ]
+    },
+    "data/storage_changes": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      91084,
+      91084
+     ]
+    },
+    "data/system_balance_changes": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      480,
+      480
+     ]
+    },
+    "data/system_calls": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      120,
+      120
+     ]
+    },
+    "data/system_gas_changes": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      240,
+      240
+     ]
+    },
+    "data/system_storage_changes": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      90,
+      90
+     ]
+    },
+    "data/transactions": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      5558,
+      5558
+     ]
+    }
+   }
+  },
+  "verify-before-after-merge": {
+   "steps": [
+    {
+     "argv": [
+      "verify",
+      "data/transactions",
+      "--registry-path",
+      "registry.parquet",
+      "--update-registry",
+      "--report-json",
+      "report.json"
+     ],
+     "env": {},
+     "exit": [
+      0,
+      0
+     ],
+     "files": 111,
+     "parquet_files": 108,
+     "same_exit": true,
+     "same_files": true,
+     "same_log": true
+    },
+    {
+     "argv": [
+      "merge",
+      "data"
+     ],
+     "env": {},
+     "exit": [
+      0,
+      0
+     ],
+     "files": 85,
+     "parquet_files": 82,
+     "same_exit": true,
+     "same_files": true,
+     "same_log": true
+    },
+    {
+     "argv": [
+      "verify",
+      "data/transactions",
+      "--registry-path",
+      "registry.parquet",
+      "--report-json",
+      "report2.json"
+     ],
+     "env": {},
+     "exit": [
+      0,
+      0
+     ],
+     "files": 86,
+     "parquet_files": 82,
+     "same_exit": true,
+     "same_files": true,
+     "same_log": true
+    }
+   ],
+   "tables": {
+    "data/balance_changes": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      23696,
+      23696
+     ]
+    },
+    "data/blocks": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      30,
+      30
+     ]
+    },
+    "data/calls": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      136770,
+      136770
+     ]
+    },
+    "data/code_changes": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      1034,
+      1034
+     ]
+    },
+    "data/gas_changes": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      732666,
+      732666
+     ]
+    },
+    "data/logs": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      50710,
+      50710
+     ]
+    },
+    "data/nonce_changes": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      7500,
+      7500
+     ]
+    },
+    "data/storage_changes": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      91084,
+      91084
+     ]
+    },
+    "data/system_balance_changes": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      480,
+      480
+     ]
+    },
+    "data/system_calls": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      120,
+      120
+     ]
+    },
+    "data/system_gas_changes": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      240,
+      240
+     ]
+    },
+    "data/system_storage_changes": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      90,
+      90
+     ]
+    },
+    "data/transactions": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      5558,
+      5558
+     ]
+    }
+   }
+  },
+  "verify-blocks": {
+   "steps": [
+    {
+     "argv": [
+      "verify",
+      "data/blocks",
+      "--registry-path",
+      "registry.parquet",
+      "--update-registry",
+      "--report-json",
+      "report.json"
+     ],
+     "env": {},
+     "exit": [
+      0,
+      0
+     ],
+     "files": 111,
+     "parquet_files": 108,
+     "same_exit": true,
+     "same_files": true,
+     "same_log": true
+    },
+    {
+     "argv": [
+      "verify",
+      "data/blocks",
+      "--registry-path",
+      "registry.parquet",
+      "--profile",
+      "deep",
+      "--report-json",
+      "report2.json"
+     ],
+     "env": {},
+     "exit": [
+      0,
+      0
+     ],
+     "files": 112,
+     "parquet_files": 108,
+     "same_exit": true,
+     "same_files": true,
+     "same_log": true
+    }
+   ],
+   "tables": {
+    "data/balance_changes": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      23696,
+      23696
+     ]
+    },
+    "data/blocks": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      30,
+      30
+     ]
+    },
+    "data/calls": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      136770,
+      136770
+     ]
+    },
+    "data/code_changes": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      1034,
+      1034
+     ]
+    },
+    "data/gas_changes": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      732666,
+      732666
+     ]
+    },
+    "data/logs": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      50710,
+      50710
+     ]
+    },
+    "data/nonce_changes": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      7500,
+      7500
+     ]
+    },
+    "data/storage_changes": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      91084,
+      91084
+     ]
+    },
+    "data/system_balance_changes": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      480,
+      480
+     ]
+    },
+    "data/system_calls": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      120,
+      120
+     ]
+    },
+    "data/system_gas_changes": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      240,
+      240
+     ]
+    },
+    "data/system_storage_changes": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      90,
+      90
+     ]
+    },
+    "data/transactions": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      5558,
+      5558
+     ]
+    }
+   }
+  },
+  "verify-logs-nofailfast": {
+   "steps": [
+    {
+     "argv": [
+      "verify",
+      "data/logs",
+      "--registry-path",
+      "registry.parquet",
+      "--update-registry",
+      "--no-fail-fast",
+      "--report-json",
+      "report.json"
+     ],
+     "env": {},
+     "exit": [
+      0,
+      0
+     ],
+     "files": 111,
+     "parquet_files": 108,
+     "same_exit": true,
+     "same_files": true,
+     "same_log": true
+    },
+    {
+     "argv": [
+      "verify",
+      "data/logs",
+      "--registry-path",
+      "registry.parquet",
+      "--checks",
+      "roots",
+      "--checks",
+      "protocol",
+      "--report-json",
+      "report2.json"
+     ],
+     "env": {},
+     "exit": [
+      0,
+      0
+     ],
+     "files": 112,
+     "parquet_files": 108,
+     "same_exit": true,
+     "same_files": true,
+     "same_log": true
+    }
+   ],
+   "tables": {
+    "data/balance_changes": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      23696,
+      23696
+     ]
+    },
+    "data/blocks": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      30,
+      30
+     ]
+    },
+    "data/calls": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      136770,
+      136770
+     ]
+    },
+    "data/code_changes": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      1034,
+      1034
+     ]
+    },
+    "data/gas_changes": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      732666,
+      732666
+     ]
+    },
+    "data/logs": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      50710,
+      50710
+     ]
+    },
+    "data/nonce_changes": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      7500,
+      7500
+     ]
+    },
+    "data/storage_changes": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      91084,
+      91084
+     ]
+    },
+    "data/system_balance_changes": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      480,
+      480
+     ]
+    },
+    "data/system_calls": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      120,
+      120
+     ]
+    },
+    "data/system_gas_changes": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      240,
+      240
+     ]
+    },
+    "data/system_storage_changes": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      90,
+      90
+     ]
+    },
+    "data/transactions": {
+     "except_all": [
+      0,
+      0
+     ],
+     "rows": [
+      5558,
+      5558
+     ]
+    }
+   }
+  }
+ }
+}
