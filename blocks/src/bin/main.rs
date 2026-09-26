@@ -27,9 +27,9 @@ use firehose_parquet::ingest::{
 use firehose_parquet::metrics;
 use firehose_parquet::networks::{resolve_network_endpoint, EndpointSource};
 use firehose_parquet::partition_index::{
-    append_verified_extension, scan_time_index, IndexRoutingPolicy, PartitionCoverage,
-    PartitionSpanProof, RoutingWitness, VerifiedPartitionIndex, VerifiedPartitionSpan,
-    INDEX_FORMAT_VERSION,
+    append_verified_extension, is_transient_partition_error, scan_time_index, IndexRoutingPolicy,
+    PartitionCoverage, PartitionSpanProof, RoutingWitness, VerifiedPartitionIndex,
+    VerifiedPartitionSpan, INDEX_FORMAT_VERSION,
 };
 use firehose_parquet::traits::{fork_step_name, BlockIdentity, BlockMapper};
 #[cfg(test)]
@@ -1565,6 +1565,9 @@ async fn run_partitions_build(
         live, resumed = snapshot.is_some(), "building exact finalized partition coverage");
     let probe_counter = AtomicU64::new(0);
     let mut initial_finalized = Some(initial_finalized);
+    // Consecutive transient live failures (head checks or scans) since the last
+    // successful iteration; drives a bounded exponential retry delay.
+    let mut live_failures = 0_u32;
     loop {
         if shutdown.is_cancelled() {
             if !live {
@@ -1580,20 +1583,15 @@ async fn run_partitions_build(
             {
                 Ok(anchor) => anchor,
                 Err(error) if is_shutdown_error(&error) => break,
-                Err(error)
-                    if live
-                        && matches!(
-                            classify_fetch_error(&error),
-                            FetchErrorKind::Timeout | FetchErrorKind::Transient
-                        ) =>
-                {
-                    warn!(error = %error, "finalized head check failed; retaining the previous verified snapshot");
-                    if unless_shutdown(
-                        &shutdown,
-                        tokio::time::sleep(Duration::from_secs(poll_interval_secs)),
-                    )
-                    .await
-                    .is_err()
+                Err(error) if live && is_transient_partition_error(&error) => {
+                    live_failures = live_failures.saturating_add(1);
+                    let delay = live_partition_retry_delay(poll_interval_secs, live_failures);
+                    warn!(error = %format!("{error:#}"), consecutive_failures = live_failures,
+                        retry_in_secs = delay.as_secs(),
+                        "finalized head check failed; retaining the previous verified snapshot");
+                    if unless_shutdown(&shutdown, tokio::time::sleep(delay))
+                        .await
+                        .is_err()
                     {
                         break;
                     }
@@ -1668,6 +1666,23 @@ async fn run_partitions_build(
             let extension = match extension {
                 Ok(value) => value,
                 Err(error) if live && is_shutdown_error(&error) => break,
+                // A stalled traversal message, exhausted boundary probes or a
+                // transport failure must not end a live run: the last published
+                // snapshot is kept and the scan restarts from its frontier.
+                Err(error) if live && is_transient_partition_error(&error) => {
+                    live_failures = live_failures.saturating_add(1);
+                    let delay = live_partition_retry_delay(poll_interval_secs, live_failures);
+                    warn!(error = %format!("{error:#}"), consecutive_failures = live_failures,
+                        retry_in_secs = delay.as_secs(), frontier, stop,
+                        "partition scan failed; retaining the previous verified snapshot");
+                    if unless_shutdown(&shutdown, tokio::time::sleep(delay))
+                        .await
+                        .is_err()
+                    {
+                        break;
+                    }
+                    continue;
+                }
                 Err(error) => return Err(error),
             };
             let next = match snapshot.take() {
@@ -1696,6 +1711,7 @@ async fn run_partitions_build(
             );
             snapshot = Some(next);
         }
+        live_failures = 0;
         if !live {
             break;
         }
@@ -1931,6 +1947,19 @@ fn validate_block_range_bounds(
 
 const PARTITIONS_PROBE_FETCH_MAX_ATTEMPTS: usize = 4;
 const PARTITIONS_PROBE_FETCH_INITIAL_BACKOFF: Duration = Duration::from_millis(250);
+/// Upper bound for the live partitions retry delay after repeated transient failures.
+const PARTITIONS_LIVE_RETRY_MAX_BACKOFF: Duration = Duration::from_secs(300);
+
+/// Delay before live retry `failures` (1-based): the poll interval doubled per
+/// consecutive failure, capped at [`PARTITIONS_LIVE_RETRY_MAX_BACKOFF`].
+fn live_partition_retry_delay(poll_interval_secs: u64, failures: u32) -> Duration {
+    let base = Duration::from_secs(poll_interval_secs.max(1));
+    let factor = 1_u32
+        .checked_shl(failures.saturating_sub(1).min(16))
+        .unwrap_or(u32::MAX);
+    base.saturating_mul(factor)
+        .min(PARTITIONS_LIVE_RETRY_MAX_BACKOFF.max(base))
+}
 
 /// Retry settings for one probe fetch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -6820,6 +6849,21 @@ mod tests {
             Some("snappy")
         );
     }
+    #[test]
+    fn live_partition_retry_delay_doubles_per_failure_up_to_a_cap() {
+        assert_eq!(live_partition_retry_delay(30, 1), Duration::from_secs(30));
+        assert_eq!(live_partition_retry_delay(30, 2), Duration::from_secs(60));
+        assert_eq!(live_partition_retry_delay(30, 4), Duration::from_secs(240));
+        assert_eq!(live_partition_retry_delay(30, 5), Duration::from_secs(300));
+        assert_eq!(
+            live_partition_retry_delay(30, u32::MAX),
+            Duration::from_secs(300)
+        );
+        assert_eq!(live_partition_retry_delay(0, 1), Duration::from_secs(1));
+        // A poll interval above the cap is never shortened.
+        assert_eq!(live_partition_retry_delay(600, 3), Duration::from_secs(600));
+    }
+
     #[tokio::test]
     async fn test_retry_probe_fetch_with_policy_never_treats_timeouts_as_missing_blocks() {
         let probe_counter = AtomicU64::new(0);

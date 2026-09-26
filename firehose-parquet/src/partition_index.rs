@@ -7,7 +7,7 @@ mod scan;
 pub use builder::{
     append_verified_extension, ExactTimeIndexBuilder, RoutingWitness, SOLANA_GENESIS_TIMESTAMP,
 };
-pub use scan::{resolve_routing_parent, scan_time_index};
+pub use scan::{is_transient_partition_error, resolve_routing_parent, scan_time_index};
 
 use crate::cli::{PartitionBuildRow, PartitionBuildType};
 use crate::grpc::FinalizedAnchor;
@@ -785,6 +785,45 @@ mod tests {
             .to_string()
             .contains("clipped right edge"));
     }
+    #[tokio::test]
+    async fn only_timeouts_transport_and_non_fatal_statuses_are_transient() {
+        let elapsed = tokio::time::timeout(
+            std::time::Duration::from_millis(1),
+            std::future::pending::<()>(),
+        )
+        .await
+        .unwrap_err();
+        let stalled =
+            anyhow::Error::from(elapsed).context("finalized traversal message deadline exceeded");
+        assert!(is_transient_partition_error(&stalled));
+        let probes = anyhow::Error::from(crate::grpc::FetchTimeoutError {
+            block_num: 42,
+            timeout: std::time::Duration::from_secs(5),
+        })
+        .context("probing block-range boundary timestamp: failed after 4 attempts");
+        assert!(is_transient_partition_error(&probes));
+        for status in [
+            tonic::Status::unavailable("restarting"),
+            tonic::Status::internal("stream reset"),
+            tonic::Status::deadline_exceeded("slow"),
+        ] {
+            let error = anyhow::Error::from(status).context("requesting finalized candidate proof");
+            assert!(is_transient_partition_error(&error), "{error:#}");
+        }
+        for status in [
+            tonic::Status::unauthenticated("bad token"),
+            tonic::Status::permission_denied("quota"),
+            tonic::Status::invalid_argument("bad request"),
+            tonic::Status::not_found("missing"),
+        ] {
+            let error = anyhow::Error::from(status);
+            assert!(!is_transient_partition_error(&error), "{error:#}");
+        }
+        assert!(!is_transient_partition_error(&anyhow::anyhow!(
+            "partition traversal omitted or reordered a canonical block"
+        )));
+    }
+
     #[test]
     fn right_witness_at_finalized_height_must_match_the_exact_anchor_identity() {
         let mut value = coverage();
