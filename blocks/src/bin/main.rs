@@ -1228,34 +1228,23 @@ impl StartBlockFilter {
     }
 }
 
-/// Check that a bounded stream which ended cleanly reached its last requested
-/// block (`stop_block - 1`). `last_block_num` is the highest block processed
-/// by this run or recorded in the cursor it resumed from.
+/// Dry-run check that a bounded stream which ended cleanly reached its last
+/// requested block (`stop_block - 1`). `last_block_num` is the highest block
+/// processed by this run or recorded in the legacy cursor it previewed.
 ///
-/// On chains without block-number gaps an early end is an error, so a bounded
-/// run never exits 0 with part of its range missing. The output and cursor
-/// already cover the blocks received, so a rerun resumes after them.
-fn ensure_bounded_stream_reached_stop(
-    stop_block: u64,
-    last_block_num: Option<u64>,
-    block_number_gaps_allowed: bool,
-) -> Result<()> {
+/// This mirrors the protected completion rule (`Checkpoint::complete_request`)
+/// on every chain: a sparse or empty tail cannot prove the bound, even where
+/// block numbers legitimately skip (Solana, NEAR, Beacon). A dry run therefore
+/// fails exactly where the real build would retain its prefix and exit nonzero.
+fn ensure_bounded_stream_reached_stop(stop_block: u64, last_block_num: Option<u64>) -> Result<()> {
     let last_requested_block = stop_block.saturating_sub(1);
     if last_block_num.is_some_and(|block| block >= last_requested_block) {
-        return Ok(());
-    }
-    if block_number_gaps_allowed {
-        warn!(
-            last_block_num = ?last_block_num,
-            last_requested_block,
-            "stream ended below the last requested block; the server has no more blocks in the range (skipped slots)"
-        );
         return Ok(());
     }
     let reached =
         last_block_num.map_or_else(|| "no block".to_string(), |block| format!("block {block}"));
     Err(anyhow!(
-        "Firehose stream ended at {reached}, before the last requested block {last_requested_block} (--stop-block {stop_block} is exclusive). The output and cursor cover the blocks received; rerun to resume"
+        "Firehose stream ended at {reached}, before the last requested block {last_requested_block} (--stop-block {stop_block} is exclusive). A real build would keep the accepted prefix but exit nonzero, on every chain, because a sparse or empty tail cannot prove the bound; choose a stop bound ending at an observed block"
     ))
 }
 
@@ -4732,30 +4721,36 @@ mod tests {
 
     #[test]
     fn test_bounded_stream_ending_early_is_an_error() {
-        let error = ensure_bounded_stream_reached_stop(200, Some(150), false).unwrap_err();
+        let error = ensure_bounded_stream_reached_stop(200, Some(150)).unwrap_err();
         let message = error.to_string();
         assert!(message.contains("block 150"), "{message}");
         assert!(message.contains("last requested block 199"), "{message}");
 
-        let error = ensure_bounded_stream_reached_stop(200, None, false).unwrap_err();
+        let error = ensure_bounded_stream_reached_stop(200, None).unwrap_err();
         assert!(error.to_string().contains("no block"), "{error}");
     }
 
     #[test]
     fn test_bounded_stream_reaching_last_requested_block_is_complete() {
-        assert!(ensure_bounded_stream_reached_stop(200, Some(199), false).is_ok());
-        assert!(ensure_bounded_stream_reached_stop(200, Some(250), false).is_ok());
+        assert!(ensure_bounded_stream_reached_stop(200, Some(199)).is_ok());
+        assert!(ensure_bounded_stream_reached_stop(200, Some(250)).is_ok());
     }
 
+    /// Dry runs used to accept a sparse tail on Solana, NEAR and Beacon while
+    /// the real protected build refused it. Both now apply one rule.
     #[test]
-    fn test_bounded_stream_on_sparse_chain_may_end_below_last_requested_block() {
+    fn test_bounded_dry_run_on_sparse_chain_matches_protected_completion() {
+        // Skipped heights remain a chain fact, but they no longer relax the
+        // completion proof for any family.
         assert!(ChainKind::Solana.profile().block_number_gaps);
         assert!(ChainKind::Near.profile().block_number_gaps);
         assert!(ChainKind::Beacon.profile().block_number_gaps);
         assert!(!ChainKind::Evm.profile().block_number_gaps);
         assert!(!ChainKind::Bitcoin.profile().block_number_gaps);
-
-        assert!(ensure_bounded_stream_reached_stop(200, Some(197), true).is_ok());
+        let error = ensure_bounded_stream_reached_stop(200, Some(197)).unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains("block 197"), "{message}");
+        assert!(message.contains("on every chain"), "{message}");
     }
 
     #[test]

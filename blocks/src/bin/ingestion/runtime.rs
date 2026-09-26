@@ -182,7 +182,6 @@ pub(super) struct IngestionRuntime<'run, 'owner> {
     stats: RunStats,
     buffered_bootstrap_blocks: Vec<BufferedBootstrapBlock>,
     start_block_filter: StartBlockFilter,
-    resolved_block_type: Option<ChainKind>,
     cursor_state_template: CursorState,
 }
 
@@ -213,7 +212,6 @@ impl<'run, 'owner> IngestionRuntime<'run, 'owner> {
             },
             buffered_bootstrap_blocks: Vec::new(),
             start_block_filter: StartBlockFilter::new(setup.config.start_block),
-            resolved_block_type: setup.block_type,
             cursor_state_template: CursorState::default(),
         };
         runtime.cursor_state_template = runtime.dry_run_cursor_template()?;
@@ -515,7 +513,6 @@ impl<'run, 'owner> IngestionRuntime<'run, 'owner> {
             self.cursor_state_template.file_metadata = cursor_meta;
             self.cursor_state_template.extended = self.state.extended;
             self.state.nullable_timestamps = profile.nullable_timestamps;
-            self.resolved_block_type = Some(detected);
             self.state.use_synthetic_partition_routing = detected_uses_synthetic_partition_routing;
             self.state.timestamp_routing =
                 TimestampRouting::new(self.state.use_synthetic_partition_routing);
@@ -898,14 +895,11 @@ impl<'run, 'owner> IngestionRuntime<'run, 'owner> {
                 )
                 .and(self.setup.existing_cursor_state.as_ref())
                 .map(|state| state.last_block_num);
-                let gaps_allowed = self
-                    .resolved_block_type
-                    .or(self.setup.initial_block_type)
-                    .is_some_and(|kind| kind.profile().block_number_gaps);
+                // A dry run predicts the protected completion rule on every
+                // chain, including Solana, NEAR and Beacon skipped heights.
                 ensure_bounded_stream_reached_stop(
                     stop,
                     self.stats.max_block.max(resumed_block_num),
-                    gaps_allowed,
                 )?;
             }
         }

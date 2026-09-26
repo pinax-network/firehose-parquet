@@ -713,6 +713,38 @@ async fn eof_without_boundary_retains_prefix_but_cannot_claim_completed_range() 
     server.assert_drained();
 }
 
+/// A dry run predicts the real bounded-completion rule: the same exhausted
+/// sparse tail fails in both, without writing anything in the dry run.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn dry_run_refuses_the_same_unproven_sparse_tail_as_a_real_build() {
+    let server = MockFirehose::start(
+        vec![response(100, 3)],
+        vec![
+            Plan::complete("", 100, 101),
+            Plan::complete("fixture-100", 100, 101),
+        ],
+    )
+    .await;
+    let dir = tempfile::tempdir().unwrap();
+    let mut request = command(&server, dir.path(), 100, 102);
+    request.arg("--dry-run");
+    let output = run(request).await;
+    assert!(!output.status.success(), "{}", logs(&output));
+    assert!(
+        logs(&output).contains("before the last requested block 101"),
+        "{}",
+        logs(&output)
+    );
+    assert!(
+        logs(&output).contains("on every chain"),
+        "{}",
+        logs(&output)
+    );
+    assert!(!root(dir.path()).join(CONTROL_DIRECTORY).exists());
+    assert_eq!(server.calls(), 2);
+    server.assert_drained();
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn genesis_bootstrap_keeps_zero_height_filtered_ordinals_and_lookahead_provenance() {
     for malformed_anchor in [false, true] {

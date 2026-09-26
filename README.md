@@ -444,8 +444,10 @@ flushes the remaining buffers and saves the final cursor.
   clean EOF, all received events are acknowledged, and the last accepted event
   reaches `stop_block - 1`. A sparse or empty tail alone cannot prove coverage,
   including on Solana, NEAR and Beacon: the accepted prefix is durable, but the
-  command exits nonzero with a diagnostic. Repeating an already proven bound
-  opens no Blocks request; extending it uses the authoritative cursor.
+  command exits nonzero with a diagnostic. `--dry-run` applies the same rule
+  on every chain, so it fails exactly where the real build would. Repeating an
+  already proven bound opens no Blocks request; extending it uses the
+  authoritative cursor.
 - **Live runs** (no `--stop-block`) never end on their own: if the server or a
   proxy closes the stream cleanly, the run reconnects from the last cursor with
   the usual back-off.
