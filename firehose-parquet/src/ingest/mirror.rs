@@ -1,6 +1,5 @@
 //! Non-authoritative cursor mirrors, reconciled only from mandatory authority.
 //! No legacy cursor load participates in protected resume or initialization.
-#![allow(dead_code)] // The staged controller will wire these crate-private APIs.
 
 use super::state::{
     AuthorityState, BlockFamily, Checkpoint, Digest, MirrorBinding, PartitionPolicy,

@@ -31,7 +31,8 @@ Related design docs:
   - `src/grpc.rs`: Firehose stream client, auth headers, reconnect/backoff/timeouts.
   - `src/grpc/{finality,finalized_range}.rs`: bounded explicit finalized-anchor proof and exact metadata traversal.
   - `src/partition_index.rs`, `src/partition_index/{builder,scan}.rs`: v2 finalized coverage, contiguous raw-time spans, ancestry/routing context and resume.
-  - `src/writer.rs`: Arrow builders to Parquet file writing, flush/rollover logic.
+  - `src/writer.rs`: Parquet encoding, partition routing (`ParquetTableWriter::partition_suffix`) and the unprotected single-file `OutputWriter`; protected `build` does not use `OutputWriter`.
+  - `src/flush.rs`: adaptive compressed flush sizing and the summed mapper memory trigger.
   - `src/ingest/`: versioned all-table transactions, authority, accepted frontier, cursor mirrors, recovery and maintenance policy.
   - `src/cursor.rs`: compatible cursor Parquet encoding and legacy inspection.
   - `src/writer/protected.rs`: prepared complete parts and exact receipt/schema verification.
@@ -82,14 +83,16 @@ Related design docs:
   - `firehose-parquet/src/ingest/state.rs` (`MAPPER_EPOCH`): advance the epoch when row/routing semantics change without a schema change; protected output must not silently mix those meanings.
 - Change partitioning or output file layout:
   - `firehose-parquet/src/config.rs` (`Partition::partition_key`)
-  - `firehose-parquet/src/writer.rs` (directory/file naming and flush behavior)
+  - `firehose-parquet/src/writer.rs` (`ParquetTableWriter::partition_suffix` partition directories, shared by protected commits)
+  - `firehose-parquet/src/ingest/state.rs` (`PendingTransaction` deterministic `part-v1-*` and `.fireparq-txn-*.tmp` names) and `firehose-parquet/src/writer/protected.rs` (staging, publication and receipt verification)
+  - `blocks/src/bin/ingestion/runtime.rs` (flush windows and partition-boundary flushes) and `firehose-parquet/src/flush.rs` (size/memory triggers)
 - Change partition index building/consumption:
   - `firehose-parquet/src/partition_index{.rs,/}` (proof model, scanner and span builder)
   - `firehose-parquet/src/cli/partitions/{io,queries,builder}.rs` (v2 IO, strict range queries and incremental construction)
   - `blocks/src/bin/main.rs` (`run_partitions_build` lifecycle and publication)
   - `docs/partitions-parquet-contract.md`, `docs/partitions-build-defaults.md` (coverage and migration contract)
 - Change resume/cursor behavior:
-  - `firehose-parquet/src/ingest/{state,frontier,controller,session,mirror}.rs`
+  - `firehose-parquet/src/ingest/{state,frontier,controller,session,mirror,binding}.rs` (`binding.rs` resolves the output and mirror identities; `session::ingestion_mutation_scopes` derives build ownership from that binding; `--cursor none` binds no mirror)
   - `firehose-parquet/src/cursor.rs` (Parquet row format and legacy inspection)
   - `blocks/src/bin/ingestion/{setup,runtime}.rs` (request defaults and ordered receipt/mapping queues)
 - Change encoding of hashes/addresses/bytes:
@@ -114,6 +117,7 @@ Related design docs:
 
 - Build workspace: `cargo build --workspace`
 - Run tests: `cargo test --workspace`
+- Real-path ingestion regressions: `blocks/tests/ingestion_transactions.rs` drives the built `fireparq` binary against a cursor-aware mock Firehose; prefer it over unit tests of helpers when a fix concerns what `build` commits
 - Build release: `cargo build --release --workspace`
 - Run binary from source: `cargo run --bin fireparq -- --help`
 - Run ingestion (preferred form): `cargo run --bin fireparq -- build --network mainnet --start-block 100`

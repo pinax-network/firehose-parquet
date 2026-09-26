@@ -1,6 +1,8 @@
-//! All-table publication and restart decisions. This private controller is not
-//! yet wired to command ingestion; eligibility, accepted envelopes and completion
-//! proof must be supplied by the final session integration.
+//! All-table publication and restart decisions. Every non-dry-run `build`
+//! reaches this controller through `IngestionSession`, which supplies
+//! eligibility, the accepted envelope prefix and completion proof; the
+//! controller journals each flush, publishes its parts, advances authority and
+//! then reconciles the optional `ProtectedMirror`.
 
 use anyhow::{bail, Context, Result};
 use arrow::record_batch::RecordBatch;
