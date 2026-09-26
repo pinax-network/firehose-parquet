@@ -11,6 +11,7 @@ use crate::cli::{block_on_async, format_bytes, resolve_destructive_input_path, A
 use crate::config::{DAY_PARTITION_PREFIX, LEGACY_DAY_PARTITION_PREFIX};
 use crate::dataset_lock::DatasetOwnership;
 use crate::ingest::maintenance::{self, MaintenancePolicy, MaintenanceTarget};
+use crate::maintenance::discovery::{self, LocalPolicy};
 use anyhow::{Context, Result};
 use object_store::ObjectStore;
 use std::collections::BTreeMap;
@@ -374,7 +375,7 @@ fn collect_local_parquet_targets(path: &Path) -> Result<Vec<PathBuf>> {
             files.push(path.to_path_buf());
         }
     } else {
-        collect_parquet_files_recursive(path, &mut files)?;
+        discovery::collect_local(path, LocalPolicy::MUTATION_PARQUET, &mut files)?;
         files.sort();
     }
     Ok(files)
@@ -395,25 +396,6 @@ fn local_match_path(file: &Path, root: &Path) -> String {
 
 fn is_parquet_file(path: &Path) -> bool {
     path.extension().is_some_and(|ext| ext == "parquet")
-}
-
-fn collect_parquet_files_recursive(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
-    if !dir.is_dir() {
-        return Ok(());
-    }
-    for entry in std::fs::read_dir(dir)? {
-        let entry = entry?;
-        let path = entry.path();
-        if is_control_path(&path.to_string_lossy()) {
-            continue;
-        }
-        if path.is_dir() {
-            collect_parquet_files_recursive(&path, out)?;
-        } else if is_parquet_file(&path) {
-            out.push(path);
-        }
-    }
-    Ok(())
 }
 
 /// Remove empty directories recursively (bottom-up). Returns count of dirs removed.
@@ -468,22 +450,13 @@ fn truncate_s3(
     bucket: &str,
     prefix: &str,
 ) -> Result<TruncateResult> {
-    use futures::TryStreamExt;
-
     let root = if prefix.is_empty() {
         format!("s3://{bucket}")
     } else {
         format!("s3://{bucket}/{prefix}")
     };
-    let list_prefix = if prefix.is_empty() {
-        None
-    } else {
-        Some(object_store::path::Path::from(prefix))
-    };
-
-    let objects: Vec<object_store::ObjectMeta> =
-        block_on_async(async { client.list(list_prefix.as_ref()).try_collect().await })
-            .map_err(|e| anyhow::anyhow!("listing S3 objects: {e}"))?;
+    let objects = block_on_async(discovery::list_objects(client.as_ref(), prefix))
+        .map_err(|e| anyhow::anyhow!("listing S3 objects: {e}"))?;
 
     let parquet_objects: Vec<_> = objects
         .into_iter()
@@ -501,10 +474,7 @@ fn truncate_s3(
         .into_iter()
         .filter_map(|obj| {
             let key = obj.location.as_ref();
-            let rel = key
-                .strip_prefix(prefix)
-                .map(|s| s.trim_start_matches('/'))
-                .unwrap_or(key);
+            let rel = discovery::relative_key(prefix, key);
             filters.matches(rel).then(|| Matched {
                 display: format!("s3://{bucket}/{key}"),
                 size: obj.size,
