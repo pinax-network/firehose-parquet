@@ -16,6 +16,11 @@ impl ResolvedEndpoint {
         shutdown: &CancellationToken,
     ) -> Result<Option<Self>> {
         let mut block_type = parse_requested_block_type(&args.block_type)?;
+        // Refuse before any endpoint or storage access, so a new root behaves
+        // like every later run instead of silently ignoring the flag once.
+        if args.cursor_override && !args.common.dry_run {
+            return Err(anyhow!(CURSOR_OVERRIDE_REFUSED));
+        }
 
         let mut common = args.common.clone();
         let mut resolved_network_name: Option<String> = None;
@@ -109,18 +114,16 @@ impl ResolvedEndpoint {
     }
 
     pub(super) async fn acquire_ownership(&self) -> Result<Option<DatasetOwnership>> {
-        let Self {
-            config,
-            cursor_location,
-            ..
-        } = self;
+        let config = &self.config;
         let ownership = if config.dry_run {
             None
         } else {
             let aws = AwsConfig::from(config);
+            // The mirror scope comes from the same binding the session records,
+            // after template expansion, never from a second bucket derivation.
             Some(
                 DatasetOwnership::acquire_for_ingestion(
-                    ingestion_mutation_scopes(config, cursor_location.as_ref())?,
+                    ingestion_mutation_scopes(config)?,
                     Some(&aws),
                     config
                         .output

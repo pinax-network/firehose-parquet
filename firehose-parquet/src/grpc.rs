@@ -912,7 +912,7 @@ fn fatal_status_error(status: &tonic::Status) -> Option<anyhow::Error> {
             "check that the API key or token (--api-key-envvar / --api-token-envvar) is valid for this endpoint"
         }
         tonic::Code::InvalidArgument | tonic::Code::FailedPrecondition => {
-            "check --start-block, --stop-block and the stored cursor (--cursor-override restarts from the CLI bounds)"
+            "check --start-block, --stop-block and the resume cursor; protected output cannot be rewound, so to restart from other bounds build into a new empty output root (inspect the current one with `fireparq recovery status`)"
         }
         tonic::Code::OutOfRange => {
             "the request or a response is out of range, e.g. a block past the chain head or larger than --grpc-max-message-bytes"
@@ -1084,10 +1084,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn cursor_save_exhaustion_stops_stream_before_the_next_block() {
-        use crate::cursor::{CursorLocation, CursorState};
-        use std::sync::atomic::AtomicBool;
-
+    async fn handler_error_stops_stream_before_the_next_block() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let endpoint = format!("http://{}", listener.local_addr().unwrap());
         let incoming = futures::stream::unfold(listener, |listener| async {
@@ -1106,10 +1103,6 @@ mod tests {
                 .await
                 .unwrap();
         });
-        let dir = tempfile::tempdir().unwrap();
-        let blocked_parent = dir.path().join("not-a-directory");
-        std::fs::write(&blocked_parent, b"file").unwrap();
-        let location = CursorLocation::Local(blocked_parent.join("cursor.parquet"));
         let (_, metrics) = crate::metrics::init();
         let mut config = test_config(&endpoint);
         config.start_block = Some(100);
@@ -1118,37 +1111,22 @@ mod tests {
         client.set_metrics(metrics.clone());
         let mut processed = vec![];
         let result = client
-            .stream_blocks(
-                None,
-                &CancellationToken::new(),
-                |_, _, cursor, identity, _| {
-                    processed.push(identity.block_num);
-                    location.save_with_retry_blocking(
-                        &CursorState {
-                            cursor,
-                            last_block_num: identity.block_num,
-                            ..Default::default()
-                        },
-                        &metrics,
-                        &AtomicBool::new(false),
-                    )
-                },
-            )
+            .stream_blocks(None, &CancellationToken::new(), |_, _, _, identity, _| {
+                // A durable commit failure in the protected session surfaces
+                // exactly like this handler error.
+                processed.push(identity.block_num);
+                Err(anyhow::anyhow!("injected checkpoint persistence failure"))
+            })
             .await;
         stop.send(()).unwrap();
         server.await.unwrap();
         let error = result.unwrap_err();
-        assert!(error
-            .to_string()
-            .contains("cursor persistence failed after 3 attempts"));
+        assert!(format!("{error:#}").contains("injected checkpoint persistence failure"));
         assert_eq!(
             processed,
             vec![100],
             "a failed checkpoint must stop ingestion"
         );
-        assert_eq!(metrics.cursor_save_failures_total.get(), 3);
-        assert_eq!(metrics.cursor_saves_total.get(), 0);
-        assert_eq!(metrics.cursor_last_success_timestamp_seconds.get(), 0);
         assert_eq!(metrics.grpc_reconnects_total.get(), 0);
     }
 
@@ -1458,7 +1436,8 @@ mod tests {
         let error = fatal_status_error(&status).expect("fatal").to_string();
         assert!(error.contains("InvalidArgument"), "{error}");
         assert!(error.contains("start block 24000005"), "{error}");
-        assert!(error.contains("--cursor-override"), "{error}");
+        assert!(error.contains("new empty output root"), "{error}");
+        assert!(!error.contains("--cursor-override"), "{error}");
 
         let status = tonic::Status::unknown("rpc error: code = Unavailable desc = backend down");
         assert_eq!(effective_status_code(&status), tonic::Code::Unavailable);

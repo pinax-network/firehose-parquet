@@ -1,5 +1,14 @@
 # Cursor persistence failures stop ingestion (#469)
 
+> Current path (after #600): `build` persists the cursor only as a protected
+> mirror through `ProtectedMirror::reconcile`, after the all-table commit has
+> advanced authority. The legacy `CursorLocation::save*` / `retry_cursor_save`
+> APIs described below had no production caller and were removed in the
+> [validation follow-up](validation-ingest-followups.md), which also added the
+> real CLI regression `persistent_mirror_save_failure_exits_nonzero_and_rerun_repairs_the_mirror`
+> and made every failed mirror reconciliation, including S3 failures before the
+> PUT, count in `cursor_save_failures_total`.
+
 ## Diagnosis
 
 Partition-boundary flushes, threshold flushes, and the final writer flush logged

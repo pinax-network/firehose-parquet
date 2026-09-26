@@ -1,5 +1,31 @@
 # Final completion checkpoints (#572)
 
+## Current path (after #600)
+
+The diagnosis and helper-level fix below describe the pre-#600 writer, which no
+longer exists. `run_ingestion` no longer uses `OutputWriter`, and the
+`flush_writer_on_exit` / `write_mapper_flush` helpers and their unit tests were
+deleted in the [validation follow-up](validation-ingest-followups.md).
+
+On a clean end of stream, `IngestionRuntime::finish` takes the remaining mapper
+window and calls `IngestionSession::flush`. That is one all-table transaction:
+the controller journals the flush, publishes every part, advances authority to
+the last accepted event and then reconciles the cursor mirror. Only after it
+returns does `complete_request` record the proven completed stop, again in
+authority first and the mirror second. There is no separate "did the final
+write materialize" flag to lose: a stream-end window either commits with its
+checkpoint or the command fails and recovery reconciles the journal. A shutdown
+or failed stream discards the window without committing.
+
+The real-path regression is
+`stream_end_mapper_flush_commits_the_final_checkpoint` in
+`blocks/tests/ingestion_transactions.rs`: five blocks with `--flush-blocks 2`
+leave block 104 for the stream-end drain; the test checks that its part carries
+ordinals 5..5, authority and the mirror both reach block 104 with
+`completed_stop = 105`, and no journal remains.
+
+## Historical record (pre-#600 writer)
+
 ## Diagnosis and reproduction
 
 On a successfully completed stream, `run_ingestion` flushed the remaining

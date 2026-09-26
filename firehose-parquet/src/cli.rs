@@ -187,7 +187,12 @@ pub struct CommonArgs {
     )]
     pub stop_block: Option<u64>,
 
-    /// Path to cursor parquet file for resuming a previous session (must end in .parquet)
+    /// Optional cursor mirror (must end in .parquet), or `none` to disable it.
+    ///
+    /// `build` always resumes from the output's mandatory authority under
+    /// `.fireparq-ingest/`; this file is a derived compatibility copy. The
+    /// choice is bound when a dataset is created: later runs must pass the same
+    /// value, including `none`.
     #[arg(
         short = 'c',
         long,
@@ -497,9 +502,12 @@ pub struct BuildArgs {
     )]
     pub exclude_failed_transactions: bool,
 
-    /// Ignore legacy cursor defaults during a read-only dry run. Protected
-    /// ingestion refuses cursor overrides; use a new empty output root and an
-    /// absent mirror to change the original range or mapper semantics.
+    /// Only with --dry-run: ignore legacy cursor defaults or an unreadable cursor.
+    ///
+    /// A real `build` rejects this flag, even at a new output root: protected
+    /// output never rewinds or resets. Omit it to resume from authority, or use
+    /// a new empty output root (and absent mirror) to change the original range
+    /// or mapper semantics.
     #[arg(
         long,
         env = "CURSOR_OVERRIDE",

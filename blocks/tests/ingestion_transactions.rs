@@ -50,6 +50,8 @@ struct Plan {
     // A bounded delivery limit models a disconnect/paused source, not a cursor.
     limit: Option<usize>,
     keep_open: bool,
+    // A start above LIB is served from LIB+1: deliver earlier blocks than asked.
+    serve_from: Option<u64>,
 }
 impl Plan {
     fn complete(cursor: &'static str, origin: i64, stop: u64) -> Self {
@@ -59,6 +61,7 @@ impl Plan {
             stop,
             limit: None,
             keep_open: false,
+            serve_from: None,
         }
     }
 }
@@ -91,11 +94,10 @@ impl tonic::server::ServerStreamingService<firehose::Request> for Stream {
         // Resolve the actual opaque cursor into a source position. A bad resume
         // cannot accidentally pass just because the fixture starts after it.
         let from = if request.cursor.is_empty() {
+            let first = plan.serve_from.unwrap_or(request.start_block_num as u64);
             self.events
                 .iter()
-                .position(|event| {
-                    event.metadata.as_ref().unwrap().num >= request.start_block_num as u64
-                })
+                .position(|event| event.metadata.as_ref().unwrap().num >= first)
                 .unwrap_or(self.events.len())
         } else {
             self.events
@@ -298,6 +300,24 @@ fn logs(output: &Output) -> String {
         String::from_utf8_lossy(&output.stderr)
     )
 }
+/// Logs without terminal styling, for matching structured `key=value` fields.
+fn plain_logs(output: &Output) -> String {
+    let logs = logs(output);
+    let mut plain = String::with_capacity(logs.len());
+    let mut chars = logs.chars();
+    while let Some(ch) = chars.next() {
+        if ch == '\u{1b}' {
+            for next in chars.by_ref() {
+                if next.is_ascii_alphabetic() {
+                    break;
+                }
+            }
+        } else {
+            plain.push(ch);
+        }
+    }
+    plain
+}
 async fn run(mut command: tokio::process::Command) -> Output {
     tokio::time::timeout(Duration::from_secs(15), command.output())
         .await
@@ -368,8 +388,11 @@ fn parts(root: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
     result
 }
 fn block_numbers(root: &Path) -> Vec<u64> {
+    table_block_numbers(root, "blocks")
+}
+fn table_block_numbers(root: &Path, table: &str) -> Vec<u64> {
     let mut numbers = Vec::new();
-    for path in parts(root).keys().filter(|path| path.starts_with("blocks")) {
+    for path in parts(root).keys().filter(|path| path.starts_with(table)) {
         for batch in read_parquet(&root.join(path)).unwrap() {
             let column = batch
                 .column_by_name("block_num")
@@ -516,7 +539,13 @@ async fn legacy_data_and_cursors_cannot_initialize_authority_even_with_override(
             }
             let output = run(request).await;
             assert!(!output.status.success(), "{}", logs(&output));
-            assert!(logs(&output).contains("legacy"), "{}", logs(&output));
+            // The override is refused before eligibility is even inspected.
+            let expected = if override_cursor {
+                "--cursor-override is only valid with --dry-run"
+            } else {
+                "legacy"
+            };
+            assert!(logs(&output).contains(expected), "{}", logs(&output));
             assert_eq!(server.calls(), 0);
             assert_eq!(std::fs::read(existing).unwrap(), before);
             assert!(!root
@@ -525,6 +554,142 @@ async fn legacy_data_and_cursors_cannot_initialize_authority_even_with_override(
                 .exists());
         }
     }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cursor_override_is_refused_at_a_new_root_but_still_serves_dry_runs() {
+    let server =
+        MockFirehose::start(vec![response(100, 3)], vec![Plan::complete("", 100, 100)]).await;
+    let dir = tempfile::tempdir().unwrap();
+    let mut request = command(&server, dir.path(), 100, 101);
+    request.arg("--cursor-override");
+    let output = run(request).await;
+    assert!(!output.status.success(), "{}", logs(&output));
+    assert!(
+        logs(&output).contains("--cursor-override is only valid with --dry-run"),
+        "{}",
+        logs(&output)
+    );
+    // Refused before endpoint startup: no Blocks request and no output root.
+    assert_eq!(server.calls(), 0);
+    assert!(!dir.path().join("output").exists());
+
+    // The documented read-only use is unchanged.
+    let mut request = command(&server, dir.path(), 100, 101);
+    request.args(["--cursor-override", "--dry-run"]);
+    success(request).await;
+    assert_eq!(server.calls(), 1);
+    let output_dir = dir.path().join("output");
+    assert!(!output_dir.exists() || parts(&output_dir).is_empty());
+    assert!(!root(dir.path()).join(CONTROL_DIRECTORY).exists());
+    server.assert_drained();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cursor_none_keeps_mandatory_authority_without_a_mirror_and_binds_that_choice() {
+    let server = MockFirehose::start(
+        (100..103).map(|n| response(n, 3)).collect(),
+        vec![
+            Plan::complete("", 100, 101),
+            Plan::complete("fixture-101", 100, 102),
+        ],
+    )
+    .await;
+    let dir = tempfile::tempdir().unwrap();
+    let root = root(dir.path());
+    let without_mirror = |origin, stop| {
+        let mut request = command(&server, dir.path(), origin, stop);
+        request.args(["--cursor", "NONE"]);
+        request
+    };
+    success(without_mirror(100, 102)).await;
+    assert_eq!(block_numbers(&root), [100, 101]);
+    let state = authority(&root);
+    assert_eq!(state["descriptor"]["mirror"]["kind"], "disabled");
+    assert_eq!(state["checkpoint"]["ordinal"], 2);
+    assert_eq!(state["checkpoint"]["event"]["cursor"], "fixture-101");
+    assert_eq!(state["checkpoint"]["completed_stop"], 102);
+    assert!(!root.join("cursor.parquet").exists());
+
+    // Same-bound completion is still an authority-backed no-op.
+    let repeated = success(without_mirror(100, 102)).await;
+    assert!(logs(&repeated).contains("without opening Blocks"));
+    assert_eq!(server.calls(), 1);
+
+    // The disabled mirror is part of the stream identity: omitting --cursor
+    // none would add a mirror, which is refused before Blocks and before any
+    // cursor file is created.
+    let before = (authority(&root), parts(&root));
+    let output = run(command(&server, dir.path(), 100, 103)).await;
+    assert!(!output.status.success(), "{}", logs(&output));
+    assert!(
+        logs(&output).contains("created without a cursor mirror; rerun with --cursor none"),
+        "{}",
+        logs(&output)
+    );
+    assert_eq!(server.calls(), 1);
+    assert_eq!((authority(&root), parts(&root)), before);
+    assert!(!root.join("cursor.parquet").exists());
+
+    // Extension resumes from the authoritative cursor alone.
+    success(without_mirror(100, 103)).await;
+    assert_eq!(server.calls(), 2);
+    assert_eq!(block_numbers(&root), [100, 101, 102]);
+    let state = authority(&root);
+    assert_eq!(state["checkpoint"]["ordinal"], 3);
+    assert_eq!(state["checkpoint"]["event"]["cursor"], "fixture-102");
+    assert_eq!(state["checkpoint"]["completed_stop"], 103);
+    assert!(!root.join("cursor.parquet").exists());
+    server.assert_drained();
+}
+
+/// Ownership and authority must resolve a `--cursor-template` mirror outside
+/// the output root to the same file; otherwise the mirror write is refused as
+/// outside held ownership.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn external_cursor_template_is_owned_and_bound_as_one_mirror() {
+    let server =
+        MockFirehose::start(vec![response(100, 3)], vec![Plan::complete("", 100, 100)]).await;
+    let dir = tempfile::tempdir().unwrap();
+    let state = dir.path().join("state");
+    let template = format!("{}/worker-{{{{a}}}}.parquet", state.display());
+    let mirror = state.join("worker-{a}.parquet");
+    let mut request = command(&server, dir.path(), 100, 101);
+    request.args(["--cursor-template", &template]);
+    let output = success(request).await;
+    assert!(logs(&output).contains("resolved cursor path"));
+    let root = root(dir.path());
+    let descriptor = &authority(&root)["descriptor"]["mirror"];
+    assert_eq!(descriptor["kind"], "local");
+    assert_eq!(descriptor["absolute_path"], mirror.to_str().unwrap());
+    let saved = load_cursor_parquet(&mirror).unwrap().unwrap();
+    assert_eq!(saved.last_block_num, 100);
+    assert_eq!(saved.cursor, "fixture-100");
+    assert!(!root.join("cursor.parquet").exists());
+    server.assert_drained();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cursor_none_cannot_drop_an_existing_bound_mirror() {
+    let server =
+        MockFirehose::start(vec![response(100, 3)], vec![Plan::complete("", 100, 100)]).await;
+    let dir = tempfile::tempdir().unwrap();
+    let root = root(dir.path());
+    success(command(&server, dir.path(), 100, 101)).await;
+    assert!(root.join("cursor.parquet").exists());
+    let before = (authority(&root), parts(&root));
+    let mut request = command(&server, dir.path(), 100, 102);
+    request.args(["--cursor", "none"]);
+    let output = run(request).await;
+    assert!(!output.status.success(), "{}", logs(&output));
+    assert!(
+        logs(&output).contains("--cursor none cannot disable it"),
+        "{}",
+        logs(&output)
+    );
+    assert_eq!(server.calls(), 1);
+    assert_eq!((authority(&root), parts(&root)), before);
+    server.assert_drained();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -567,6 +732,38 @@ async fn eof_without_boundary_retains_prefix_but_cannot_claim_completed_range() 
     assert_eq!(state["checkpoint"]["event"]["cursor"], "fixture-100");
     assert!(state["checkpoint"]["completed_stop"].is_null());
     assert_eq!(block_numbers(&root), [100]);
+    assert_eq!(server.calls(), 2);
+    server.assert_drained();
+}
+
+/// A dry run predicts the real bounded-completion rule: the same exhausted
+/// sparse tail fails in both, without writing anything in the dry run.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn dry_run_refuses_the_same_unproven_sparse_tail_as_a_real_build() {
+    let server = MockFirehose::start(
+        vec![response(100, 3)],
+        vec![
+            Plan::complete("", 100, 101),
+            Plan::complete("fixture-100", 100, 101),
+        ],
+    )
+    .await;
+    let dir = tempfile::tempdir().unwrap();
+    let mut request = command(&server, dir.path(), 100, 102);
+    request.arg("--dry-run");
+    let output = run(request).await;
+    assert!(!output.status.success(), "{}", logs(&output));
+    assert!(
+        logs(&output).contains("before the last requested block 101"),
+        "{}",
+        logs(&output)
+    );
+    assert!(
+        logs(&output).contains("on every chain"),
+        "{}",
+        logs(&output)
+    );
+    assert!(!root(dir.path()).join(CONTROL_DIRECTORY).exists());
     assert_eq!(server.calls(), 2);
     server.assert_drained();
 }
@@ -683,6 +880,338 @@ async fn genesis_bootstrap_keeps_zero_height_filtered_ordinals_and_lookahead_pro
     }
 }
 
+fn pending(root: &Path) -> Option<Value> {
+    let path = root
+        .join(CONTROL_DIRECTORY)
+        .join(ControlKey::Pending.filename());
+    let bytes = match std::fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(error) => panic!("{error}"),
+    };
+    let record: Value = serde_json::from_slice(&bytes).unwrap();
+    (record["deleted"] == false).then(|| record["payload"].clone())
+}
+fn staged_temporaries(root: &Path) -> Vec<PathBuf> {
+    let mut found = Vec::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                stack.push(path);
+            } else if path
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with(".fireparq-txn-")
+            {
+                found.push(path);
+            }
+        }
+    }
+    found
+}
+
+/// Make `directory` read-only. Returns false when this user bypasses directory
+/// permissions (for example root), so the failure cannot be modeled.
+#[cfg(unix)]
+fn deny_writes(directory: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(directory, std::fs::Permissions::from_mode(0o555)).unwrap();
+    let probe = directory.join(".permission-probe");
+    if std::fs::write(&probe, b"").is_ok() {
+        std::fs::remove_file(probe).unwrap();
+        allow_writes(directory);
+        eprintln!("skipping: directory permissions are not enforced for this user");
+        return false;
+    }
+    true
+}
+#[cfg(unix)]
+fn allow_writes(directory: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(directory, std::fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+/// #464 on the real path: a table write failing inside an all-table flush
+/// (after an earlier table's part was already published) exits nonzero,
+/// leaves authority and the mirror unchanged, and the next run rolls back the
+/// failed transaction before replaying, so every row appears exactly once.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn storage_failure_during_flush_keeps_authority_and_rerun_recovers_rows_once() {
+    let server = MockFirehose::start(
+        (100..102)
+            .map(|height| response_with_sizing_payload(height, true))
+            .collect(),
+        vec![
+            Plan::complete("", 100, 100),
+            Plan::complete("fixture-100", 100, 101),
+            Plan::complete("fixture-100", 100, 101),
+        ],
+    )
+    .await;
+    let dir = tempfile::tempdir().unwrap();
+    let root = root(dir.path());
+    success(command(&server, dir.path(), 100, 101)).await;
+    assert_eq!(table_block_numbers(&root, "blocks"), [100]);
+    assert_eq!(table_block_numbers(&root, "transactions"), [100]);
+    let before_state = authority(&root);
+    let before_mirror = std::fs::read(root.join("cursor.parquet")).unwrap();
+    let before_parts = parts(&root);
+
+    let blocked = root.join("transactions");
+    if !deny_writes(&blocked) {
+        return;
+    }
+    let output = run(command(&server, dir.path(), 100, 102)).await;
+    allow_writes(&blocked);
+    assert!(!output.status.success(), "{}", logs(&output));
+    assert!(
+        logs(&output).contains("creating planned staging file"),
+        "{}",
+        logs(&output)
+    );
+    assert_eq!(authority(&root), before_state);
+    assert_eq!(
+        std::fs::read(root.join("cursor.parquet")).unwrap(),
+        before_mirror
+    );
+    // `blocks` sorts before `transactions`, so its part was published by the
+    // failed transaction. The Writing journal owns it; no temp survives.
+    let failed_parts = parts(&root);
+    assert_eq!(failed_parts.len(), before_parts.len() + 1);
+    let orphan: Vec<_> = failed_parts
+        .keys()
+        .filter(|path| !before_parts.contains_key(*path))
+        .collect();
+    assert!(orphan[0].starts_with("blocks"), "{orphan:?}");
+    assert_eq!(pending(&root).unwrap()["phase"], "writing");
+    assert!(staged_temporaries(&root).is_empty());
+
+    success(command(&server, dir.path(), 100, 102)).await;
+    assert_eq!(table_block_numbers(&root, "blocks"), [100, 101]);
+    assert_eq!(table_block_numbers(&root, "transactions"), [100, 101]);
+    assert_checkpoint(&root, 2, 101, 102);
+    assert!(pending(&root).is_none());
+    let recovered = parts(&root);
+    assert_eq!(recovered.len(), 4);
+    // Recovery removed the Writing part before replay; deterministic transaction
+    // names let the replay publish the identical part again, never a second copy.
+    assert_eq!(recovered.get(orphan[0]), failed_parts.get(orphan[0]));
+    for (path, digest) in before_parts {
+        assert_eq!(recovered.get(&path), Some(&digest));
+    }
+    assert_eq!(server.calls(), 3);
+    server.assert_drained();
+}
+
+/// #469 on the real path: a persistently failing mirror save is fatal and
+/// reported, although the all-table commit and authority already advanced.
+/// The next run repairs the mirror from authority without replaying rows.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn persistent_mirror_save_failure_exits_nonzero_and_rerun_repairs_the_mirror() {
+    let server = MockFirehose::start(
+        (100..102).map(|n| response(n, 3)).collect(),
+        vec![
+            Plan::complete("", 100, 101),
+            // The resumed stream has nothing left; it is resumed once more to
+            // confirm the range is exhausted, then completion is proven.
+            Plan::complete("fixture-101", 100, 101),
+            Plan::complete("fixture-101", 100, 101),
+        ],
+    )
+    .await;
+    let dir = tempfile::tempdir().unwrap();
+    let root = root(dir.path());
+    let state = dir.path().join("state");
+    std::fs::create_dir(&state).unwrap();
+    let mirror = state.join("cursor.parquet");
+    let with_mirror = || {
+        let mut request = command(&server, dir.path(), 100, 102);
+        request.args(["--cursor", mirror.to_str().unwrap()]);
+        request
+    };
+    if !deny_writes(&state) {
+        return;
+    }
+    let output = run(with_mirror()).await;
+    allow_writes(&state);
+    assert!(!output.status.success(), "{}", logs(&output));
+    assert!(
+        logs(&output).contains("protected mirror persistence failed after three local attempts"),
+        "{}",
+        logs(&output)
+    );
+    assert!(!mirror.exists());
+    assert_eq!(block_numbers(&root), [100, 101]);
+    let committed = authority(&root);
+    assert_eq!(committed["checkpoint"]["ordinal"], 2);
+    assert!(committed["checkpoint"]["completed_stop"].is_null());
+    assert_eq!(pending(&root).unwrap()["phase"], "committed");
+    let committed_parts = parts(&root);
+
+    success(with_mirror()).await;
+    assert!(pending(&root).is_none());
+    let state = authority(&root);
+    assert_eq!(state["checkpoint"]["ordinal"], 2);
+    assert_eq!(state["checkpoint"]["completed_stop"], 102);
+    let saved = load_cursor_parquet(&mirror).unwrap().unwrap();
+    assert_eq!(saved.last_block_num, 101);
+    assert_eq!(saved.cursor, "fixture-101");
+    assert_eq!(parts(&root), committed_parts);
+    assert_eq!(block_numbers(&root), [100, 101]);
+    assert_eq!(server.calls(), 3);
+    server.assert_drained();
+}
+
+/// #572 on the real path: when the last mapper window is flushed only by the
+/// stream-end drain, that commit and the completion checkpoint both land.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn stream_end_mapper_flush_commits_the_final_checkpoint() {
+    let server = MockFirehose::start(
+        (100..105).map(|n| response(n, 3)).collect(),
+        vec![Plan::complete("", 100, 104)],
+    )
+    .await;
+    let dir = tempfile::tempdir().unwrap();
+    // Two block-count flushes ([100,101], [102,103]); 104 remains buffered
+    // until the clean end of stream.
+    let output = success(command_with_flush(&server, dir.path(), 100, 105, 2)).await;
+    let root = root(dir.path());
+    assert!(
+        plain_logs(&output).contains("committed flush size observation trigger=\"stream_end\""),
+        "{}",
+        plain_logs(&output)
+    );
+    assert_eq!(block_numbers(&root), [100, 101, 102, 103, 104]);
+    let blocks: Vec<_> = parts(&root)
+        .into_keys()
+        .filter(|path| path.starts_with("blocks"))
+        .collect();
+    assert_eq!(blocks.len(), 3);
+    let mut final_window = None;
+    for path in &blocks {
+        let footer = inspect_footer(&root.join(path)).await;
+        if footer_value(&footer, "fireparq.ingest.first_ordinal") == "5" {
+            assert_eq!(footer_value(&footer, "fireparq.ingest.last_ordinal"), "5");
+            final_window = Some(path.clone());
+        }
+    }
+    assert!(
+        final_window.is_some(),
+        "no part holds the stream-end window"
+    );
+    assert_checkpoint(&root, 5, 104, 105);
+    assert!(pending(&root).is_none());
+    server.assert_drained();
+}
+
+/// #466 on the real path: Firehose serves a start above LIB from LIB+1, so
+/// blocks below `--start-block` arrive on a non-dry run. They are counted as
+/// accepted zero-row events and never written.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn blocks_served_below_start_are_skipped_and_never_written() {
+    let server = MockFirehose::start(
+        (100..104).map(|n| response(n, 3)).collect(),
+        vec![Plan {
+            serve_from: Some(100),
+            ..Plan::complete("", 102, 103)
+        }],
+    )
+    .await;
+    let dir = tempfile::tempdir().unwrap();
+    let output = success(command(&server, dir.path(), 102, 104)).await;
+    let root = root(dir.path());
+    assert!(
+        plain_logs(&output).contains("blocks_skipped_below_start=2"),
+        "{}",
+        plain_logs(&output)
+    );
+    assert_eq!(block_numbers(&root), [102, 103]);
+    for table in ["blocks", "transactions", "calls", "logs"] {
+        assert!(
+            table_block_numbers(&root, table)
+                .iter()
+                .all(|number| *number >= 102),
+            "{table}"
+        );
+    }
+    let state = authority(&root);
+    assert_eq!(state["descriptor"]["origin_start"], 102);
+    // Every received envelope is ordered, including the two filtered ones.
+    assert_checkpoint(&root, 4, 103, 104);
+    server.assert_drained();
+}
+
+/// Replaces a unit test that routed through the test-only `OutputWriter`: a
+/// Solana payload without `block_time` keeps a null row timestamp, while the
+/// protected commit routes it by the received Firehose source time.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn solana_null_block_time_routes_by_source_metadata_on_the_real_path() {
+    let mut event = response(42, 3);
+    event.block = Some(prost_types::Any {
+        type_url: "type.googleapis.com/sf.solana.type.v1.Block".into(),
+        value: firehose_protos::sf::solana::r#type::v1::Block {
+            slot: 42,
+            parent_slot: 41,
+            block_time: None,
+            ..Default::default()
+        }
+        .encode_to_vec()
+        .into(),
+    });
+    let server = MockFirehose::start(vec![event], vec![Plan::complete("", 42, 42)]).await;
+    let dir = tempfile::tempdir().unwrap();
+    let mut request = tokio::process::Command::new(env!("CARGO_BIN_EXE_fireparq"));
+    request
+        .kill_on_drop(true)
+        .env_clear()
+        .current_dir(dir.path())
+        .args([
+            "build",
+            "--endpoint",
+            &server.endpoint,
+            "--block-type",
+            "solana",
+            "--start-block",
+            "42",
+            "--stop-block",
+            "43",
+            "--partition",
+            "date",
+            "--stream-idle-timeout-secs",
+            "0",
+            "--output",
+        ])
+        .arg(dir.path().join("output"));
+    success(request).await;
+    let root = root(dir.path());
+    let blocks: Vec<_> = parts(&root)
+        .into_keys()
+        .filter(|path| path.starts_with("blocks"))
+        .collect();
+    assert_eq!(blocks.len(), 1);
+    // 1_700_000_000 is 2023-11-14 UTC.
+    assert!(
+        blocks[0].starts_with("blocks/year=2023/month=11/day=14"),
+        "{blocks:?}"
+    );
+    let batches = read_parquet(&root.join(&blocks[0])).unwrap();
+    assert_eq!(
+        batches.iter().map(|batch| batch.num_rows()).sum::<usize>(),
+        1
+    );
+    assert_eq!(
+        batches[0].column_by_name("timestamp").unwrap().null_count(),
+        1
+    );
+    assert_checkpoint(&root, 1, 42, 43);
+    server.assert_drained();
+}
+
 async fn wait_for_buffer(port: u16) {
     tokio::time::timeout(Duration::from_secs(10), async {
         loop {
@@ -721,6 +1250,7 @@ async fn abrupt_restart_replays_only_accepted_unflushed_events_without_duplicate
                 stop: 101,
                 limit: Some(1),
                 keep_open: true,
+                serve_from: None,
             },
             Plan::complete("fixture-99", 99, 101),
         ],

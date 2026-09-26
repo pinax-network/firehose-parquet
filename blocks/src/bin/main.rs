@@ -13,7 +13,7 @@ use firehose_parquet::cli::{
 };
 use firehose_parquet::config::{BlockMetadata, Compression, Config, Partition};
 use firehose_parquet::cursor::{CursorLocation, CursorState};
-use firehose_parquet::dataset_lock::{DatasetOwnership, MutationScope};
+use firehose_parquet::dataset_lock::DatasetOwnership;
 use firehose_parquet::encode::EncodeBytes;
 use firehose_parquet::flush::{FlushSizing, MapperBufferEstimate, SizeFlushTrigger};
 use firehose_parquet::grpc::{
@@ -21,8 +21,8 @@ use firehose_parquet::grpc::{
     FetchErrorKind, FirehoseClient, ShutdownRequested,
 };
 use firehose_parquet::ingest::{
-    declare_inventory, load_authoritative_resume, prepare_partitions_index_write, IngestionSession,
-    MapperSemantics,
+    declare_inventory, ingestion_mutation_scopes, load_authoritative_resume,
+    prepare_partitions_index_write, IngestionSession, MapperSemantics, CURSOR_OVERRIDE_REFUSED,
 };
 use firehose_parquet::metrics;
 use firehose_parquet::networks::{resolve_network_endpoint, EndpointSource};
@@ -32,8 +32,6 @@ use firehose_parquet::partition_index::{
     INDEX_FORMAT_VERSION,
 };
 use firehose_parquet::traits::{fork_step_name, BlockIdentity, BlockMapper};
-#[cfg(test)]
-use firehose_parquet::writer::OutputWriter;
 use firehose_parquet::writer::{ParquetFileMetadata, WriterBufferStats};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -238,20 +236,6 @@ fn next_mapper_flush_trigger(
     }
 }
 
-#[cfg(test)]
-fn write_mapper_flush(
-    writer: &mut OutputWriter,
-    batches: &HashMap<String, RecordBatch>,
-    metadata: &BlockMetadata,
-) -> Result<WriterFlushOutcome> {
-    let materialized = writer.write_all(batches, metadata)?;
-
-    Ok(WriterFlushOutcome {
-        materialized,
-        buffered: writer.buffered_stats(),
-    })
-}
-
 fn log_writer_flush_outcome(
     trigger: &str,
     tables: usize,
@@ -283,8 +267,8 @@ fn log_writer_flush_outcome(
     }
 }
 
-/// How the Firehose stream ended, which decides whether buffered output may be
-/// materialized and the cursor committed on exit.
+/// How the Firehose stream ended, which decides whether the remaining mapper
+/// window is committed through the protected session on exit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum StreamExit {
     /// The stream ended cleanly (stop block reached or server closed it).
@@ -354,61 +338,14 @@ impl StreamExit {
         }
     }
 
-    /// Only a completed stream flushes partial buffers and commits the cursor.
-    /// After a shutdown or a failure the buffers are discarded and the cursor
-    /// stays at the last committed flush, so the next run replays that window.
-    /// Flushing after a failure could save the cursor past rows whose write
-    /// had failed.
+    /// Only a completed stream commits its partial mapper window (one all-table
+    /// transaction that also advances authority and the mirror). After a
+    /// shutdown or a failure the window is discarded and authority stays at the
+    /// last committed flush, so the next run replays it; committing after a
+    /// failure could advance authority past rows whose mapping or write failed.
     fn materializes_buffers(self) -> bool {
         matches!(self, Self::Completed)
     }
-}
-
-/// Final writer flush when the stream ends. Remaining buffers are written, and
-/// `commit_cursor` runs, only when the stream completed and either its final
-/// mapper write or this remaining-buffer flush materialized data. Earlier
-/// normal-loop writes have already been checkpointed and do not count here.
-/// Returns whether the cursor commit ran.
-#[cfg(test)]
-fn flush_writer_on_exit(
-    exit: StreamExit,
-    writer: &mut OutputWriter,
-    final_mapper_materialized: bool,
-    pipeline_metrics: &metrics::PipelineMetrics,
-    commit_cursor: impl FnOnce() -> Result<()>,
-) -> Result<bool> {
-    if !exit.materializes_buffers() {
-        return Ok(false);
-    }
-
-    // Always drain before committing, even if a final write already materialized
-    // data. Any retained table write must succeed before the cursor can advance.
-    let wrote_remaining = writer.flush_remaining()?;
-    if !final_mapper_materialized && !wrote_remaining {
-        info!(
-            trigger = "shutdown",
-            "no writer-buffered parquet data remained to materialize before exit"
-        );
-        return Ok(false);
-    }
-
-    let writer_buffered = writer.buffered_stats();
-    info!(
-        trigger = "shutdown",
-        buffered_tables = writer_buffered.tables,
-        buffered_rows = writer_buffered.rows,
-        buffered_estimated_bytes =
-            firehose_parquet::cli::format_bytes(writer_buffered.estimated_compressed_bytes),
-        "writer materialized final parquet output before exit"
-    );
-    pipeline_metrics
-        .flushes_total
-        .get_or_create(&metrics::FlushLabels {
-            trigger: "shutdown".to_string(),
-        })
-        .inc();
-    commit_cursor()?;
-    Ok(true)
 }
 
 fn output_block_id_encoding_label(encoding: &EncodeBytes) -> Option<&'static str> {
@@ -585,15 +522,19 @@ fn maybe_add_synthetic_timestamp_metadata(
     }
 }
 
+/// Logged when resumed EVM state keeps excluding failed transactions.
+const EVM_FAILED_TRANSACTIONS_EXCLUDED_WARNING: &str = "this output's resume state records failed transactions as excluded (--exclude-failed-transactions, or the EVM default before #494); still excluding them so this output stays consistent. Pass --exclude-failed-transactions to keep this and silence the warning. To switch to the new default, rebuild into a new empty output root with an absent cursor mirror; --cursor-override cannot change protected output";
+
 /// Resolve whether failed/reverted transactions are written (#494).
 ///
 /// - `--exclude-failed-transactions` always drops them.
 /// - EVM (`ChainProfile::failed_transactions_by_default`) writes them by
 ///   default, with only their persistent state changes.
-///   `--include-failed-transactions` is a deprecated no-op there. A resumed EVM
-///   cursor that was written with failed transactions excluded (the default
-///   before #494) keeps excluding them, so one output does not mix both modes;
-///   `--cursor-override` opts out of that.
+///   `--include-failed-transactions` is a deprecated no-op there. Resumed EVM
+///   state (protected authority, or a legacy cursor in a dry run) that records
+///   failed transactions as excluded keeps excluding them, so one output does
+///   not mix both modes. Only a read-only dry run's `--cursor-override` ignores
+///   that state; a protected build must use a new empty output root instead.
 /// - Other chains exclude them unless `--include-failed-transactions` is set.
 ///
 /// Returns the effective value and the warnings to log.
@@ -625,10 +566,7 @@ fn resolve_include_failed_transactions(
     }
     if let Some(cursor_state) = cursor_state.filter(|_| !cursor_override) {
         if !cursor_state.include_failed_transactions {
-            warnings.push(
-                "cursor.parquet was written with failed transactions excluded (the EVM default before #494); still excluding them so this output stays consistent. Pass --exclude-failed-transactions to keep this and silence the warning, or --cursor-override with --start-block to switch this output to the new default"
-                    .to_string(),
-            );
+            warnings.push(EVM_FAILED_TRANSACTIONS_EXCLUDED_WARNING.to_string());
             return (false, warnings);
         }
     }
@@ -1227,34 +1165,23 @@ impl StartBlockFilter {
     }
 }
 
-/// Check that a bounded stream which ended cleanly reached its last requested
-/// block (`stop_block - 1`). `last_block_num` is the highest block processed
-/// by this run or recorded in the cursor it resumed from.
+/// Dry-run check that a bounded stream which ended cleanly reached its last
+/// requested block (`stop_block - 1`). `last_block_num` is the highest block
+/// processed by this run or recorded in the legacy cursor it previewed.
 ///
-/// On chains without block-number gaps an early end is an error, so a bounded
-/// run never exits 0 with part of its range missing. The output and cursor
-/// already cover the blocks received, so a rerun resumes after them.
-fn ensure_bounded_stream_reached_stop(
-    stop_block: u64,
-    last_block_num: Option<u64>,
-    block_number_gaps_allowed: bool,
-) -> Result<()> {
+/// This mirrors the protected completion rule (`Checkpoint::complete_request`)
+/// on every chain: a sparse or empty tail cannot prove the bound, even where
+/// block numbers legitimately skip (Solana, NEAR, Beacon). A dry run therefore
+/// fails exactly where the real build would retain its prefix and exit nonzero.
+fn ensure_bounded_stream_reached_stop(stop_block: u64, last_block_num: Option<u64>) -> Result<()> {
     let last_requested_block = stop_block.saturating_sub(1);
     if last_block_num.is_some_and(|block| block >= last_requested_block) {
-        return Ok(());
-    }
-    if block_number_gaps_allowed {
-        warn!(
-            last_block_num = ?last_block_num,
-            last_requested_block,
-            "stream ended below the last requested block; the server has no more blocks in the range (skipped slots)"
-        );
         return Ok(());
     }
     let reached =
         last_block_num.map_or_else(|| "no block".to_string(), |block| format!("block {block}"));
     Err(anyhow!(
-        "Firehose stream ended at {reached}, before the last requested block {last_requested_block} (--stop-block {stop_block} is exclusive). The output and cursor cover the blocks received; rerun to resume"
+        "Firehose stream ended at {reached}, before the last requested block {last_requested_block} (--stop-block {stop_block} is exclusive). A real build would keep the accepted prefix but exit nonzero, on every chain, because a sparse or empty tail cannot prove the bound; choose a stop bound ending at an observed block"
     ))
 }
 
@@ -1326,13 +1253,13 @@ fn resolve_cursor_location(
     }
 }
 
-/// Load the stored cursor for `fireparq build`.
+/// Load a legacy cursor for a read-only `fireparq build --dry-run`.
 ///
+/// Protected builds never call this: they resume only from output authority.
 /// A cursor that exists but cannot be read (permission denied, S3 5xx/403,
-/// truncated or corrupt file) is a hard error: silently starting fresh would
-/// re-ingest from `--start-block` and overwrite the resume point on the first
-/// flush. With `--cursor-override` the unreadable cursor is ignored, since the
-/// run restarts from the CLI bounds anyway.
+/// truncated or corrupt file) is a hard error rather than a silent fresh
+/// start. With `--cursor-override` the dry run ignores the unreadable cursor
+/// and previews the CLI bounds instead.
 fn load_existing_cursor(
     cursor_location: Option<&CursorLocation>,
     cursor_override: bool,
@@ -1350,7 +1277,7 @@ fn load_existing_cursor(
             Ok(None)
         }
         Err(error) => Err(error.context(
-            "stored cursor exists but could not be loaded; refusing to start fresh. Fix access to the cursor, or pass --cursor-override to ignore it and restart from --start-block (the cursor is overwritten on the next flush)",
+            "stored cursor exists but could not be loaded; this read-only dry run refuses to guess a resume point. Fix access to the cursor, or pass --cursor-override to ignore it for this dry run only. A real build never resumes from this file: it reads output authority, repairs a missing mirror and refuses a corrupt one",
         )),
     }
 }
@@ -2957,14 +2884,9 @@ async fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use arrow::array::UInt64Builder;
-    use arrow::datatypes::{DataType, Field, Schema};
-    use arrow::record_batch::RecordBatch;
     use blocks::evm::mapper::EvmBlockMapper;
-    use blocks::solana::mapper::SolanaBlockMapper;
     use clap::CommandFactory;
     use firehose_parquet::cursor::CursorLocation;
-    use std::collections::HashMap;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
     use std::sync::Arc;
@@ -3006,36 +2928,6 @@ mod tests {
         }
     }
 
-    fn make_test_batch() -> RecordBatch {
-        let schema = Arc::new(Schema::new(vec![
-            Field::new("block_num", DataType::UInt64, false),
-            Field::new(
-                "timestamp",
-                firehose_parquet::traits::timestamp_millis_utc_type(),
-                false,
-            ),
-        ]));
-        let mut builder = UInt64Builder::new();
-        builder.append_value(42);
-        RecordBatch::try_new(
-            schema,
-            vec![
-                Arc::new(builder.finish()),
-                Arc::new(
-                    arrow::array::TimestampMillisecondArray::from(vec![1_705_320_000_000])
-                        .with_timezone("UTC"),
-                ),
-            ],
-        )
-        .unwrap()
-    }
-
-    fn make_test_batches() -> HashMap<String, RecordBatch> {
-        let mut batches = HashMap::new();
-        batches.insert("blocks".to_string(), make_test_batch());
-        batches
-    }
-
     fn make_temp_output_dir() -> PathBuf {
         // SystemTime has microsecond resolution on macOS, so tests starting in
         // the same microsecond got the same path; the counter keeps them apart.
@@ -3053,50 +2945,6 @@ mod tests {
         ));
         std::fs::create_dir_all(&path).unwrap();
         path
-    }
-
-    #[test]
-    fn test_empty_mapper_flush_does_not_materialize() {
-        let dir = make_temp_output_dir();
-        let mut writer = OutputWriter::new(&dir, Partition::Date, Compression::None, u64::MAX);
-        let outcome = write_mapper_flush(
-            &mut writer,
-            &HashMap::new(),
-            &BlockMetadata {
-                min_block_number: 0,
-                max_block_number: 0,
-                min_timestamp: None,
-                max_timestamp: None,
-            },
-        )
-        .unwrap();
-        assert!(!outcome.materialized);
-        assert_eq!(outcome.buffered, WriterBufferStats::default());
-        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 0);
-        std::fs::remove_dir_all(&dir).unwrap();
-    }
-
-    #[test]
-    fn test_write_mapper_flush_materializes_partition_boundary() {
-        let dir = make_temp_output_dir();
-        let batches = make_test_batches();
-        let metadata = BlockMetadata {
-            min_block_number: 100,
-            max_block_number: 200,
-            min_timestamp: Some(1705320000),
-            max_timestamp: Some(1705320000),
-        };
-        let mut writer = OutputWriter::new(&dir, Partition::Date, Compression::None, 1_000_000);
-
-        let outcome = write_mapper_flush(&mut writer, &batches, &metadata).unwrap();
-
-        assert!(outcome.materialized);
-        assert_eq!(outcome.buffered, WriterBufferStats::default());
-        assert!(
-            dir.join("blocks/year=2024/month=01/day=15").exists(),
-            "partition-boundary materialization should write the old partition immediately"
-        );
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[cfg(unix)]
@@ -3186,384 +3034,6 @@ mod tests {
         assert!(StreamExit::Completed.materializes_buffers());
         assert!(!StreamExit::Shutdown.materializes_buffers());
         assert!(!StreamExit::Failed.materializes_buffers());
-    }
-
-    #[test]
-    fn test_failed_table_write_does_not_save_cursor_on_exit() {
-        let dir = make_temp_output_dir();
-        let output = dir.join("output");
-        let cursor_path = dir.join("cursor.parquet");
-        let cursor_location = CursorLocation::Local(cursor_path.clone());
-        let (_registry, pipeline_metrics) = metrics::init();
-        let metadata = BlockMetadata {
-            min_block_number: 100,
-            max_block_number: 200,
-            min_timestamp: Some(1705320000),
-            max_timestamp: Some(1705320000),
-        };
-        let mut batches = make_test_batches();
-        batches.insert("logs".to_string(), make_test_batch());
-        let mut writer = OutputWriter::new(&output, Partition::None, Compression::None, 0);
-
-        // A mapper flush whose `logs` write fails ends the stream with an error.
-        std::fs::create_dir_all(&output).unwrap();
-        std::fs::write(output.join("logs"), b"").unwrap();
-        let stream_result = write_mapper_flush(&mut writer, &batches, &metadata).map(|_| ());
-        let exit = StreamExit::from_result(&stream_result);
-        assert_eq!(exit, StreamExit::Failed);
-
-        let save_cursor = || {
-            cursor_location.save(&CursorState {
-                cursor: "cursor-at-block-200".to_string(),
-                last_block_num: 200,
-                ..CursorState::default()
-            })
-        };
-        let committed =
-            flush_writer_on_exit(exit, &mut writer, false, &pipeline_metrics, save_cursor).unwrap();
-        assert!(!committed);
-        assert!(
-            !cursor_path.exists(),
-            "the error exit path must not save the cursor past the failed rows"
-        );
-        assert!(
-            writer.buffered_stats().rows >= 1,
-            "the failed table's rows stay buffered instead of being dropped"
-        );
-
-        // The same final flush on a completed stream writes and commits.
-        std::fs::remove_file(output.join("logs")).unwrap();
-        let committed = flush_writer_on_exit(
-            StreamExit::Completed,
-            &mut writer,
-            false,
-            &pipeline_metrics,
-            save_cursor,
-        )
-        .unwrap();
-        assert!(committed);
-        assert!(cursor_path.exists());
-        assert!(output.join("logs").is_dir());
-        std::fs::remove_dir_all(&dir).unwrap();
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
-    async fn test_final_cursor_failure_is_not_a_successful_completion() {
-        // Exercise both a buffered batch and one already materialized by the
-        // final mapper write. Either must surface an exhausted cursor save.
-        for materialize_on_write in [false, true] {
-            let dir = make_temp_output_dir();
-            let mut writer = OutputWriter::new(&dir, Partition::None, Compression::None, u64::MAX);
-            let metadata = BlockMetadata {
-                min_block_number: 100,
-                max_block_number: 200,
-                min_timestamp: Some(1705320000),
-                max_timestamp: Some(1705320000),
-            };
-            let final_mapper_materialized = if materialize_on_write {
-                writer.write_all(&make_test_batches(), &metadata).unwrap()
-            } else {
-                // A known pre-publication failure retains a batch for the drain.
-                let blocker = dir.join("blocks");
-                std::fs::write(&blocker, b"not-a-directory").unwrap();
-                assert!(writer.write_all(&make_test_batches(), &metadata).is_err());
-                std::fs::remove_file(blocker).unwrap();
-                false
-            };
-            assert_eq!(final_mapper_materialized, materialize_on_write);
-            let invalid_parent = dir.join("not-a-directory");
-            std::fs::write(&invalid_parent, b"file").unwrap();
-            let location = CursorLocation::Local(invalid_parent.join("cursor.parquet"));
-            let (_, metrics) = metrics::init();
-            let error = flush_writer_on_exit(
-                StreamExit::Completed,
-                &mut writer,
-                final_mapper_materialized,
-                &metrics,
-                || {
-                    location.save_with_retry_blocking(
-                        &CursorState {
-                            last_block_num: 200,
-                            ..CursorState::default()
-                        },
-                        &metrics,
-                        &AtomicBool::new(false),
-                    )
-                },
-            )
-            .unwrap_err();
-            assert!(error
-                .to_string()
-                .contains("cursor persistence failed after 3 attempts"));
-            assert_eq!(StreamExit::from_result(&Err(error)), StreamExit::Failed);
-            assert_eq!(metrics.cursor_save_failures_total.get(), 3);
-            assert_eq!(metrics.cursor_saves_total.get(), 0);
-            assert_eq!(metrics.cursor_last_success_timestamp_seconds.get(), 0);
-            std::fs::remove_dir_all(&dir).unwrap();
-        }
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
-    async fn test_final_mapper_write_commits_cursor_with_empty_writer_buffers() {
-        let dir = make_temp_output_dir();
-        let output = dir.join("output");
-        let location = CursorLocation::Local(dir.join("cursor.parquet"));
-        let mut mapper = SolanaBlockMapper::new(false, false, EncodeBytes::Binary, false, false);
-        let block = firehose_protos::sf::solana::r#type::v1::Block {
-            slot: 42,
-            parent_slot: 41,
-            block_time: Some(firehose_protos::sf::solana::r#type::v1::UnixTimestamp {
-                timestamp: 1_705_320_000,
-            }),
-            ..Default::default()
-        };
-        let identity = BlockIdentity {
-            block_num: 42,
-            timestamp: 1_705_320_000,
-            ..Default::default()
-        };
-        mapper
-            .map_block(&prost::Message::encode_to_vec(&block), &identity, None)
-            .unwrap();
-        let flush_bytes = 4_096;
-        let mapper_estimate = mapper.estimated_bytes() as u64;
-        assert!(next_mapper_flush_trigger(
-            None,
-            mapper.max_table_rows(),
-            None,
-            1,
-            None,
-            Instant::now(),
-            &FlushSizing::new(flush_bytes, u64::MAX).unwrap(),
-            MapperBufferEstimate {
-                largest_table_bytes: mapper_estimate,
-                total_bytes: mapper_estimate
-            },
-        )
-        .is_none());
-
-        let batches = mapper.flush().unwrap();
-        let mut writer =
-            OutputWriter::new(&output, Partition::None, Compression::Zstd, flush_bytes);
-        let metadata = BlockMetadata {
-            min_block_number: 42,
-            max_block_number: 42,
-            min_timestamp: Some(identity.timestamp),
-            max_timestamp: Some(identity.timestamp),
-        };
-        // The real mapper did not trigger a normal loop flush. Its final write
-        // now always materializes, so completion must retain that result even
-        // though there is nothing left for the final drain.
-        let materialized = writer.write_all(&batches, &metadata).unwrap();
-        assert!(materialized);
-        assert_eq!(writer.buffered_stats(), WriterBufferStats::default());
-        assert_eq!(std::fs::read_dir(output.join("blocks")).unwrap().count(), 1);
-        let (_, metrics) = metrics::init();
-        let committed = flush_writer_on_exit(
-            StreamExit::Completed,
-            &mut writer,
-            materialized,
-            &metrics,
-            || {
-                location.save_with_retry_blocking(
-                    &CursorState {
-                        cursor: "cursor-42".to_string(),
-                        last_block_num: 42,
-                        ..Default::default()
-                    },
-                    &metrics,
-                    &AtomicBool::new(false),
-                )
-            },
-        )
-        .unwrap();
-        assert!(committed);
-        let saved = location.load().unwrap().unwrap();
-        assert_eq!(saved.cursor, "cursor-42");
-        assert_eq!(saved.last_block_num, 42);
-        assert_eq!(metrics.cursor_saves_total.get(), 1);
-        assert_eq!(metrics.cursor_save_failures_total.get(), 0);
-        assert!(metrics.cursor_last_success_timestamp_seconds.get() > 0);
-        std::fs::remove_dir_all(&dir).unwrap();
-    }
-
-    #[test]
-    fn test_real_solana_null_time_uses_metadata_partition_anchor() {
-        let dir = make_temp_output_dir();
-        let mut mapper = SolanaBlockMapper::new(false, false, EncodeBytes::Binary, true, false);
-        let block = firehose_protos::sf::solana::r#type::v1::Block {
-            slot: 42,
-            parent_slot: 41,
-            block_time: None,
-            ..Default::default()
-        };
-        let identity = BlockIdentity {
-            block_num: 42,
-            timestamp: 1_705_320_000,
-            ..Default::default()
-        };
-        mapper
-            .map_block(&prost::Message::encode_to_vec(&block), &identity, None)
-            .unwrap();
-        let batches = mapper.flush().unwrap();
-        assert_eq!(
-            batches["blocks"]
-                .column_by_name("timestamp")
-                .unwrap()
-                .null_count(),
-            1
-        );
-        let mut writer = OutputWriter::new(&dir, Partition::Date, Compression::Zstd, 0);
-        let outcome = write_mapper_flush(
-            &mut writer,
-            &batches,
-            &BlockMetadata {
-                min_block_number: 42,
-                max_block_number: 42,
-                min_timestamp: Some(identity.timestamp),
-                max_timestamp: Some(identity.timestamp),
-            },
-        )
-        .unwrap();
-        assert!(outcome.materialized);
-        assert_eq!(outcome.buffered, WriterBufferStats::default());
-        assert_eq!(
-            std::fs::read_dir(dir.join("blocks/year=2024/month=01/day=15"))
-                .unwrap()
-                .count(),
-            1
-        );
-        std::fs::remove_dir_all(&dir).unwrap();
-    }
-
-    // Preserve the completion-drain invariant with an explicit pre-publication
-    // table failure. The normal ingestion path stops on this error; these tests
-    // exercise recovery and ensure a materialization flag never skips the drain.
-    fn writer_with_failed_completion_table(output: &std::path::Path) -> (OutputWriter, PathBuf) {
-        let mut writer = OutputWriter::new(output, Partition::None, Compression::None, u64::MAX);
-        let mut batches = make_test_batches();
-        batches.insert("logs".into(), make_test_batch());
-        let pending_path = output.join("logs");
-        std::fs::write(&pending_path, b"not-a-directory").unwrap();
-        let metadata = BlockMetadata {
-            min_block_number: 42,
-            max_block_number: 42,
-            min_timestamp: Some(1_705_320_000),
-            max_timestamp: Some(1_705_320_000),
-        };
-        assert!(writer.write_all(&batches, &metadata).is_err());
-        assert_eq!(writer.buffered_stats().rows, 1);
-        assert_eq!(std::fs::read_dir(output.join("blocks")).unwrap().count(), 1);
-        std::fs::remove_file(&pending_path).unwrap();
-        (writer, pending_path)
-    }
-
-    #[test]
-    fn test_completion_drains_retained_table_before_one_checkpoint() {
-        let dir = make_temp_output_dir();
-        let (mut writer, pending_path) = writer_with_failed_completion_table(&dir);
-        let (_, metrics) = metrics::init();
-        let mut commits = 0;
-        let committed =
-            flush_writer_on_exit(StreamExit::Completed, &mut writer, true, &metrics, || {
-                assert_eq!(std::fs::read_dir(&pending_path).unwrap().count(), 1);
-                commits += 1;
-                Ok(())
-            })
-            .unwrap();
-        assert!(committed);
-        assert_eq!(commits, 1);
-        assert_eq!(writer.buffered_stats(), WriterBufferStats::default());
-        assert_eq!(
-            metrics
-                .flushes_total
-                .get_or_create(&metrics::FlushLabels {
-                    trigger: "shutdown".into()
-                })
-                .get(),
-            1
-        );
-        std::fs::remove_dir_all(&dir).unwrap();
-    }
-
-    #[test]
-    fn test_completion_drain_failure_prevents_checkpoint_after_materialization() {
-        let dir = make_temp_output_dir();
-        let (mut writer, pending_path) = writer_with_failed_completion_table(&dir);
-        std::fs::write(&pending_path, b"not-a-directory").unwrap();
-        let (_, metrics) = metrics::init();
-        let error =
-            flush_writer_on_exit(StreamExit::Completed, &mut writer, true, &metrics, || {
-                panic!("a failed retained table write must prevent checkpointing");
-            })
-            .unwrap_err();
-        assert_eq!(StreamExit::from_result(&Err(error)), StreamExit::Failed);
-        assert_eq!(writer.buffered_stats().rows, 1);
-        assert_eq!(
-            metrics
-                .flushes_total
-                .get_or_create(&metrics::FlushLabels {
-                    trigger: "shutdown".into()
-                })
-                .get(),
-            0
-        );
-        std::fs::remove_dir_all(&dir).unwrap();
-    }
-
-    #[test]
-    fn test_completion_without_new_output_does_not_checkpoint() {
-        for previously_materialized in [false, true] {
-            let dir = make_temp_output_dir();
-            let mut writer = OutputWriter::new(&dir, Partition::None, Compression::None, u64::MAX);
-            if previously_materialized {
-                let metadata = BlockMetadata {
-                    min_block_number: 42,
-                    max_block_number: 42,
-                    min_timestamp: None,
-                    max_timestamp: None,
-                };
-                assert!(
-                    write_mapper_flush(&mut writer, &make_test_batches(), &metadata)
-                        .unwrap()
-                        .materialized
-                );
-            }
-            let (_, metrics) = metrics::init();
-            let committed =
-                flush_writer_on_exit(StreamExit::Completed, &mut writer, false, &metrics, || {
-                    panic!("earlier normal-loop output must not trigger another final checkpoint");
-                })
-                .unwrap();
-            assert!(!committed);
-            assert_eq!(
-                metrics
-                    .flushes_total
-                    .get_or_create(&metrics::FlushLabels {
-                        trigger: "shutdown".into()
-                    })
-                    .get(),
-                0
-            );
-            std::fs::remove_dir_all(&dir).unwrap();
-        }
-    }
-
-    #[test]
-    fn test_interrupted_exit_does_not_drain_or_checkpoint_after_materialization() {
-        for exit in [StreamExit::Failed, StreamExit::Shutdown] {
-            let dir = make_temp_output_dir();
-            let (mut writer, pending_path) = writer_with_failed_completion_table(&dir);
-            let (_, metrics) = metrics::init();
-            let committed = flush_writer_on_exit(exit, &mut writer, true, &metrics, || {
-                panic!("failed or shutdown exits must not checkpoint");
-            })
-            .unwrap();
-            assert!(!committed);
-            assert!(!pending_path.exists());
-            assert_eq!(writer.buffered_stats().rows, 1);
-            std::fs::remove_dir_all(&dir).unwrap();
-        }
     }
 
     #[test]
@@ -4047,18 +3517,21 @@ mod tests {
         assert!(load_existing_cursor(None, false).unwrap().is_none());
 
         // A truncated cursor is a hard error that points at the remediation.
-        location
-            .save(&CursorState {
+        firehose_parquet::cursor::save_cursor_parquet(
+            &cursor_path,
+            &CursorState {
                 cursor: "cursor-at-block-200".to_string(),
                 last_block_num: 200,
                 ..CursorState::default()
-            })
-            .unwrap();
+            },
+        )
+        .unwrap();
         let bytes = std::fs::read(&cursor_path).unwrap();
         std::fs::write(&cursor_path, &bytes[..bytes.len() / 2]).unwrap();
         let error = load_existing_cursor(Some(&location), false).unwrap_err();
         let rendered = format!("{error:#}");
         assert!(rendered.contains("--cursor-override"), "{rendered}");
+        assert!(rendered.contains("for this dry run only"), "{rendered}");
         assert!(
             rendered.contains(&cursor_path.display().to_string()),
             "{rendered}"
@@ -4233,7 +3706,7 @@ mod tests {
             ),
             (false, vec![])
         );
-        // --cursor-override switches the output to the new default.
+        // A read-only dry run's --cursor-override previews the new default.
         assert_eq!(
             resolve_include_failed_transactions(
                 Some(ChainKind::Evm),
@@ -4730,30 +4203,36 @@ mod tests {
 
     #[test]
     fn test_bounded_stream_ending_early_is_an_error() {
-        let error = ensure_bounded_stream_reached_stop(200, Some(150), false).unwrap_err();
+        let error = ensure_bounded_stream_reached_stop(200, Some(150)).unwrap_err();
         let message = error.to_string();
         assert!(message.contains("block 150"), "{message}");
         assert!(message.contains("last requested block 199"), "{message}");
 
-        let error = ensure_bounded_stream_reached_stop(200, None, false).unwrap_err();
+        let error = ensure_bounded_stream_reached_stop(200, None).unwrap_err();
         assert!(error.to_string().contains("no block"), "{error}");
     }
 
     #[test]
     fn test_bounded_stream_reaching_last_requested_block_is_complete() {
-        assert!(ensure_bounded_stream_reached_stop(200, Some(199), false).is_ok());
-        assert!(ensure_bounded_stream_reached_stop(200, Some(250), false).is_ok());
+        assert!(ensure_bounded_stream_reached_stop(200, Some(199)).is_ok());
+        assert!(ensure_bounded_stream_reached_stop(200, Some(250)).is_ok());
     }
 
+    /// Dry runs used to accept a sparse tail on Solana, NEAR and Beacon while
+    /// the real protected build refused it. Both now apply one rule.
     #[test]
-    fn test_bounded_stream_on_sparse_chain_may_end_below_last_requested_block() {
+    fn test_bounded_dry_run_on_sparse_chain_matches_protected_completion() {
+        // Skipped heights remain a chain fact, but they no longer relax the
+        // completion proof for any family.
         assert!(ChainKind::Solana.profile().block_number_gaps);
         assert!(ChainKind::Near.profile().block_number_gaps);
         assert!(ChainKind::Beacon.profile().block_number_gaps);
         assert!(!ChainKind::Evm.profile().block_number_gaps);
         assert!(!ChainKind::Bitcoin.profile().block_number_gaps);
-
-        assert!(ensure_bounded_stream_reached_stop(200, Some(197), true).is_ok());
+        let error = ensure_bounded_stream_reached_stop(200, Some(197)).unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains("block 197"), "{message}");
+        assert!(message.contains("on every chain"), "{message}");
     }
 
     #[test]

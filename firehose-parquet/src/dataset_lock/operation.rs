@@ -10,6 +10,7 @@ use crate::dataset_lock_s3::S3Ownership;
 
 use super::LocalOwnership;
 
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MutationScope {
     path: String,
     file: bool,
