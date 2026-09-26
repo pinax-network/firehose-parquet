@@ -4829,3 +4829,146 @@ fn partitions_index_writes_millisecond_times_and_reads_second_indexes() {
             .collect::<Vec<_>>()
     );
 }
+
+fn validate_v2(path: &std::path::Path, allow_gaps: bool) -> PartitionValidateResult {
+    validate_partitions_index(
+        &PartitionValidateRequest {
+            list: PartitionListRequest {
+                index_path: path.to_string_lossy().into(),
+                partition_type: None,
+                chain: None,
+                from: None,
+                to: None,
+                limit: usize::MAX,
+            },
+            allow_gaps,
+        },
+        None,
+    )
+    .expect("validation should run")
+}
+
+#[test]
+fn v2_validate_reports_split_runs_and_open_internal_boundaries() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("partitions.parquet");
+    write_test_verified_partitions_index(
+        &path,
+        vec![
+            block_range_row(8, 12, 4),
+            block_range_row(12, 16, 4),
+            block_range_row(16, 20, 4),
+        ],
+    )
+    .unwrap();
+    let report = validate_v2(&path, false);
+    assert!(report.valid, "{:?}", report.issues);
+    assert!(report.warnings.is_empty());
+    assert!(serde_json::to_value(&report)
+        .unwrap()
+        .get("warnings")
+        .is_none());
+
+    // Split [12, 16) into two clipped spans of the same aligned partition. The
+    // verified reader accepts it (flags match the clipping), validate does not.
+    let mut index = read_verified_partitions_index(path.to_str().unwrap(), None).unwrap();
+    let mut right = index.spans[1].clone();
+    index.spans[1].row.stop_block = 14;
+    index.spans[1].proof.end_complete = false;
+    right.row.start_block = 14;
+    right.proof.start_complete = false;
+    index.spans.insert(2, right);
+    write_verified_partitions_index(
+        path.to_str().unwrap(),
+        &index,
+        Compression::Zstd,
+        None,
+        None,
+    )
+    .unwrap();
+    let report = validate_v2(&path, false);
+    assert!(!report.valid);
+    assert_eq!(report.issue_count, 2, "{:?}", report.issues);
+    let kinds = report
+        .issues
+        .iter()
+        .map(|issue| (issue.kind.clone(), issue.partition_value.as_str()))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        kinds,
+        [
+            (PartitionValidationIssueKind::SplitRun, "12"),
+            (PartitionValidationIssueKind::IncompleteBoundary, "12"),
+        ]
+    );
+    assert!(report.issues[1].message.contains("block 14"));
+    assert_eq!(report.incomplete_spans, 2);
+    assert_eq!(
+        serde_json::to_value(&report.issues[0]).unwrap()["kind"],
+        "split_run"
+    );
+}
+
+#[test]
+fn v2_validate_allows_open_outer_edges_but_not_open_internal_boundaries() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("partitions.parquet");
+    write_test_verified_partitions_index(&path, verified_test_rows()).unwrap();
+    let original = read_verified_partitions_index(path.to_str().unwrap(), None).unwrap();
+    let write = |index: &VerifiedPartitionIndex| {
+        write_verified_partitions_index(
+            path.to_str().unwrap(),
+            index,
+            Compression::Zstd,
+            None,
+            None,
+        )
+        .unwrap()
+    };
+
+    // A clipped first edge (bounded start) is incomplete but valid.
+    let mut index = original.clone();
+    index.spans[0].proof.start_complete = false;
+    write(&index);
+    let report = validate_v2(&path, false);
+    assert!(report.valid, "{:?}", report.issues);
+    assert_eq!(report.incomplete_spans, 1);
+
+    // An internal boundary between different keys must be established on both sides.
+    let mut index = original.clone();
+    index.spans[0].proof.end_complete = false;
+    write(&index);
+    let report = validate_v2(&path, false);
+    assert!(!report.valid);
+    assert_eq!(report.issues.len(), 1, "{:?}", report.issues);
+    assert_eq!(
+        report.issues[0].kind,
+        PartitionValidationIssueKind::IncompleteBoundary
+    );
+    assert_eq!(report.issues[0].partition_value, "2023-11-14 23:00:00");
+
+    // --allow-gaps cannot relax v2 validation; it only produces a warning.
+    let report = validate_v2(&path, true);
+    assert!(!report.valid);
+    assert_eq!(report.warnings.len(), 1);
+    assert!(report.warnings[0].contains("--allow-gaps has no effect"));
+
+    // Filters that select nothing from the single-chain index report no issues.
+    let filtered = validate_partitions_index(
+        &PartitionValidateRequest {
+            list: PartitionListRequest {
+                index_path: path.to_string_lossy().into(),
+                partition_type: Some("date".into()),
+                chain: None,
+                from: None,
+                to: None,
+                limit: usize::MAX,
+            },
+            allow_gaps: false,
+        },
+        None,
+    )
+    .unwrap();
+    assert_eq!(filtered.total_rows, 0);
+    assert!(filtered.valid);
+}

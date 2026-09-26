@@ -250,6 +250,12 @@ pub enum PartitionValidationIssueKind {
     Gap,
     Overlap,
     OutOfOrder,
+    /// V2: an internal boundary between two source-adjacent spans is not
+    /// established on both sides. Only the snapshot's outer edges may be open.
+    IncompleteBoundary,
+    /// V2: two source-adjacent spans share one partition key, so one routing
+    /// run was split instead of recorded as a single maximal span.
+    SplitRun,
 }
 
 #[derive(Debug, Clone, serde::Serialize, PartialEq, Eq)]
@@ -272,6 +278,9 @@ pub struct PartitionValidateResult {
     pub issue_count: usize,
     pub valid: bool,
     pub issues: Vec<PartitionValidationIssue>,
+    /// Non-fatal notes, such as a `--allow-gaps` request that has no effect on a v2 index.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
 }
 
 pub fn parse_partition_build_types(spec: &str) -> anyhow::Result<Vec<PartitionBuildType>> {

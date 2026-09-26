@@ -1189,7 +1189,7 @@ Examples:
   fireparq partitions validate \\
     --partitions-index ./output/eth-mainnet/partitions.parquet
 
-  # Validate one chain/type and allow gaps
+  # Validate one chain/type of a legacy index and allow gaps
   fireparq partitions validate \\
     --partitions-index s3://my-bucket/partitions.parquet \\
     --partition-type date \\
@@ -1207,7 +1207,7 @@ Examples:
         /// Optional chain filter (matches the index chain scope)
         #[arg(long)]
         partition_chain: Option<String>,
-        /// Allow gaps between adjacent partitions in the same chain/type
+        /// Allow gaps between adjacent partitions in the same chain/type (legacy indexes only; a v2 index is contiguous by construction, so this only warns)
         #[arg(long, default_value = "false")]
         allow_gaps: bool,
         /// Emit machine-readable JSON output

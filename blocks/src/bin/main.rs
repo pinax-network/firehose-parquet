@@ -2574,6 +2574,9 @@ async fn main() -> Result<()> {
                     };
                     let aws = AwsConfig::from(aws);
                     let result = validate_partitions_index(&request, Some(&aws))?;
+                    for warning in &result.warnings {
+                        warn!("{warning}");
+                    }
 
                     if *json {
                         println!("{}", serde_json::to_string_pretty(&result)?);
