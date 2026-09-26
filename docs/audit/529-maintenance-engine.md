@@ -108,8 +108,9 @@ End-to-end, local data only, with [the harness](529-equivalence.py): the
 `origin/main` release binary and the branch release binary ran the same 24
 scenarios (33 CLI steps) on fresh copies of the retained mainnet blocks
 24000000-24000029 dataset (13 tables, 1,049,978 rows, minute partitions). This
-ran once against `9372f99` and again after rebasing, against `8462692`, with
-identical results; [compact report](529-equivalence.json).
+ran against `9372f99` and, after each rebase, against `8462692` and `050f9ec`
+(which renamed the S3 client builders), with identical results each time;
+[compact report](529-equivalence.json).
 
 - merge: default, `--flush-rows 700 --compression snappy`, `--dry-run`, one table
   with `--flush-bytes 65536`, and kills (`FIREPARQ_TEST_MERGE_CRASH_AT`) at
@@ -170,7 +171,9 @@ tracked separately.
 - `cargo fmt --all --check`: clean.
 - `cargo test --workspace --locked`: 1,089 passed and 14 ignored at `9372f99`;
   1,115 passed and 14 ignored on the branch before the rebase; 1,129 passed and
-  14 ignored after rebasing on `8462692` (26 new tests). One earlier run on the
+  14 ignored after rebasing on `8462692`; 1,143 passed and 14 ignored after
+  rebasing on `050f9ec`, including its new `maintenance_output_properties`
+  integration tests (26 tests come from this change). One earlier run on the
   rebased branch hit a transient failure in the unrelated
   `ingest::controller` publication-boundary test under load; it passed three
   isolated reruns and the next two complete runs.

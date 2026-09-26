@@ -1,7 +1,7 @@
 {
  "all_equal": true,
- "baseline": "origin/main 8462692 release fireparq (sha256 e0a28e2be65357f4f12f19e2bf3e068ff45e0042b418c7d94a47d407904f1463)",
- "candidate": "audit/529-maintenance-engine 476c029 release fireparq (sha256 053c4b06d78ce895969ee7cef9d7e9b5488fae1471196610868bb1a72edab509)",
+ "baseline": "origin/main 050f9ec release fireparq (sha256 8904e59306913d96ccaff3906de46624830cdf87c0abb1b7dfb7ed40c42c41f8)",
+ "candidate": "audit/529-maintenance-engine 5b23c0e release fireparq (sha256 b1824e0ac09ac0bc728f21fb4984d6c338830f61d24ba94e7c13e3fd3ce2299d)",
  "dataset": "retained EVM mainnet blocks 24000000-24000029, 13 tables, 1049978 rows, minute partitions",
  "scenarios": {
   "inspect-part": {
