@@ -2289,6 +2289,71 @@ mod tests {
         );
     }
 
+    /// Local and S3 merges run the same partition engine, so the same parts merge into
+    /// identically named, byte-identical outputs with identical summaries.
+    #[test]
+    fn local_and_s3_merges_publish_identical_parts() {
+        let layout: &[(&str, &[(u64, u64)])] = &[
+            ("blocks/day=01", &[(0, 400), (400, 350), (750, 600)]),
+            ("blocks/day=02", &[(2000, 10), (2010, 20)]),
+            ("blocks/day=03", &[(3000, 50)]),
+            (
+                "logs/day=01",
+                &[(0, 900), (900, 900), (1800, 100), (1900, 5)],
+            ),
+        ];
+        let dir = tempfile::tempdir().unwrap();
+        let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        for (partition, parts) in layout {
+            for (index, (start, rows)) in parts.iter().enumerate() {
+                let name = format!("part-{:06}.parquet", index + 3);
+                let data = parquet_bytes(&make_range_batch(*start, *rows));
+                let path = dir.path().join(partition).join(&name);
+                std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                std::fs::write(&path, &data).unwrap();
+                put_object(&store, &format!("evm/{partition}/{name}"), data);
+            }
+        }
+        let mut config = test_merge_config(&dir.path().to_string_lossy());
+        config.flush_rows = Some(700);
+        let local = run_merge(&config).unwrap();
+        config.path = "s3://bucket/evm".into();
+        let remote = merge_s3(&config, &store, "bucket", "evm").unwrap();
+
+        let summary = |r: &MergeResult| {
+            (
+                r.partitions_merged,
+                r.partitions_skipped,
+                r.files_read,
+                r.files_written,
+                r.bytes_before,
+                r.bytes_after,
+            )
+        };
+        assert_eq!(summary(&local), summary(&remote));
+        assert_eq!(local.partitions_merged, 3);
+        for (partition, _) in layout {
+            let local_dir = dir.path().join(partition);
+            let local_files: Vec<(String, Vec<u8>)> = entries(&local_dir)
+                .into_iter()
+                .map(|name| {
+                    let data = std::fs::read(local_dir.join(&name)).unwrap();
+                    (name, data)
+                })
+                .collect();
+            let remote_files: Vec<(String, Vec<u8>)> =
+                list_keys(&store, &format!("evm/{partition}"))
+                    .into_iter()
+                    .map(|key| {
+                        let data = get_object(&store, &key).to_vec();
+                        (key.rsplit_once('/').unwrap().1.to_string(), data)
+                    })
+                    .collect();
+            assert!(!local_files.is_empty());
+            assert!(local_files == remote_files, "{partition}");
+        }
+    }
+
     #[tokio::test]
     async fn remote_recovery_data_error_never_removes_journal_or_other_phase_keys() {
         use crate::merge_journal::JournalState;
