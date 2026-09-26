@@ -686,10 +686,17 @@ fn put_block_nums(store: &dyn object_store::ObjectStore, key: &str, values: &[u6
 }
 
 fn remote_source(store: Arc<dyn object_store::ObjectStore>) -> super::super::DataSource {
+    remote_source_at(store, "mainnet/blocks")
+}
+
+fn remote_source_at(
+    store: Arc<dyn object_store::ObjectStore>,
+    prefix: &str,
+) -> super::super::DataSource {
     super::super::DataSource::Remote {
-        path: "s3://bucket/mainnet/blocks".to_string(),
+        path: format!("s3://bucket/{prefix}"),
         bucket: "bucket".to_string(),
-        prefix: "mainnet/blocks".to_string(),
+        prefix: prefix.to_string(),
         store,
     }
 }
@@ -1060,4 +1067,134 @@ fn remote_reads_are_pinned_to_the_listed_object() {
     assert!(err.contains("changed while verify was reading"), "{err}");
     assert!(err.contains("day=1"), "{err}");
     assert!(!registry.exists());
+}
+
+#[test]
+fn an_unfinished_rollup_is_refused_without_recovering_anything() {
+    use crate::rollup::{run_rollup, RollupConfig, RollupTarget, ROLLUP_JOURNAL_FILE};
+    let dir = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(dir.path()).unwrap();
+    let chain = root.join("mainnet");
+    let data = chain.join("blocks");
+    let day = data.join("year=2024/month=01/day=15");
+    let minute = day.join("hour=00/minute=00");
+    for (partition, blocks) in [
+        (minute.clone(), [1u64, 2]),
+        (day.join("hour=00/minute=01"), [3, 4]),
+    ] {
+        for (index, block) in blocks.iter().enumerate() {
+            write_block_nums(
+                &partition.join(format!("part-{:06}.parquet", index + 1)),
+                &[*block],
+            );
+        }
+    }
+    let config = RollupConfig {
+        source: chain.display().to_string(),
+        output: chain.display().to_string(),
+        target: RollupTarget::Date,
+        compression: crate::config::Compression::None,
+        flush_bytes: 0,
+        delete_source: true,
+        aws: None,
+        cache_control: String::new(),
+    };
+    // The in-place rollup dies after committing its output and before
+    // deleting any source: every row is there twice.
+    crate::merge_journal::INJECTED_CRASH
+        .with(|crash| *crash.borrow_mut() = Some("rollup-after-commit"));
+    let crashed = run_rollup(&config);
+    crate::merge_journal::INJECTED_CRASH.with(|crash| *crash.borrow_mut() = None);
+    assert!(crashed.is_err());
+    assert!(day.join(ROLLUP_JOURNAL_FILE).is_file());
+    let before = tree(&data);
+
+    let registry = chain.join(MERKLE_ROOTS_FILENAME);
+    let mut protocol_only = base_opts();
+    protocol_only.checks = vec![VerifyCheck::Protocol];
+    for (path, opts) in [
+        (data.clone(), base_opts()),
+        (data.clone(), protocol_only),
+        // A source partition below the target's journal, and one of its files.
+        (minute.clone(), base_opts()),
+        (minute.join("part-000001.parquet"), base_opts()),
+    ] {
+        let err = format!(
+            "{:#}",
+            verify_parquet(path.to_str().unwrap(), None, &opts).unwrap_err()
+        );
+        assert!(
+            err.contains("unfinished rollup"),
+            "{}: {err}",
+            path.display()
+        );
+        assert!(err.contains(ROLLUP_JOURNAL_FILE), "{err}");
+        assert!(err.contains("re-run the same `fireparq rollup`"), "{err}");
+        assert_eq!(tree(&data), before, "verify must not delete or add files");
+        assert!(!registry.exists());
+    }
+
+    // Re-running the same rollup finishes it; then verify records the day.
+    run_rollup(&config).unwrap();
+    assert!(!day.join(ROLLUP_JOURNAL_FILE).exists());
+    let report = verify_parquet(data.to_str().unwrap(), None, &base_opts()).unwrap();
+    assert_eq!(
+        partitions(&report, "missing_expected"),
+        ["year=2024/month=01/day=15"]
+    );
+    assert!(report.summary.wrote_registry);
+}
+
+#[test]
+fn a_remote_rollup_journal_above_the_verified_prefix_is_refused() {
+    let store: Arc<dyn object_store::ObjectStore> = Arc::new(object_store::memory::InMemory::new());
+    put_block_nums(
+        store.as_ref(),
+        "mainnet/blocks/day=15/hour=00/part-000001.parquet",
+        &[1, 2],
+    );
+    super::super::block_on_async(store.put(
+        &object_store::path::Path::from("mainnet/blocks/day=15/_fireparq_rollup.json"),
+        object_store::PutPayload::from_static(b"{}"),
+    ))
+    .unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let opts = roots_opts(&dir.path().join("roots.parquet"));
+    for prefix in ["mainnet/blocks", "mainnet/blocks/day=15/hour=00"] {
+        let err = format!(
+            "{:#}",
+            super::super::verify_source(
+                &remote_source_at(store.clone(), prefix),
+                None,
+                &opts,
+                time::OffsetDateTime::now_utc(),
+                uuid::Uuid::new_v4().to_string(),
+            )
+            .unwrap_err()
+        );
+        assert!(err.contains("unfinished rollup"), "{prefix}: {err}");
+        assert!(
+            err.contains("s3://bucket/mainnet/blocks/day=15/_fireparq_rollup.json"),
+            "{err}"
+        );
+    }
+    assert!(!dir.path().join("roots.parquet").exists());
+}
+
+#[test]
+fn journal_ancestors_are_the_file_directory_and_the_partitions_above() {
+    use super::super::journal_ancestors;
+    assert_eq!(
+        journal_ancestors("/a/t/year=1/month=2/day=3", false),
+        ["/a/t/year=1/month=2", "/a/t/year=1"]
+    );
+    assert_eq!(journal_ancestors("/a/t/year=1", true), ["/a/t/year=1"]);
+    assert_eq!(
+        journal_ancestors("mainnet/blocks/day=15/hour=00", false),
+        ["mainnet/blocks/day=15"]
+    );
+    assert!(journal_ancestors("mainnet/blocks", false).is_empty());
+    assert_eq!(journal_ancestors("day=15/hour=00", false), ["day=15"]);
+    // A directory with `=` above the table does not count.
+    assert!(journal_ancestors("/x=y/mainnet/blocks", false).is_empty());
 }

@@ -9,6 +9,10 @@ use crate::ingest::observe;
 use crate::ingest::state::AuthorityState;
 use crate::maintenance::discovery::{self, LocalPolicy};
 use crate::merge_journal::JOURNAL_FILE;
+use crate::rollup::ROLLUP_JOURNAL_FILE;
+
+/// Journals of the maintenance commands whose interrupted runs verify refuses.
+const JOURNALS: &[&str] = &[JOURNAL_FILE, ROLLUP_JOURNAL_FILE];
 use crate::writer::parse_s3_url;
 use anyhow::{anyhow, Context, Result};
 use arrow::array::{Array, AsArray, Int64Array, LargeStringArray, StringArray, UInt64Array};
@@ -569,7 +573,8 @@ pub fn verify_parquet(
 /// - every other partition must still hold exactly the files that were read
 ///   (same paths, sizes and versions) before any root is compared or written,
 ///   so a concurrent merge, rollup or truncate makes the run fail instead;
-/// - an unfinished merge journal makes the run fail before anything is read;
+/// - an unfinished merge or rollup journal makes the run fail before
+///   anything is read;
 /// - registry writes are atomic (local lock file and rename) or conditional
 ///   (S3 `If-Match` / `If-None-Match`).
 enum DataSource {
@@ -584,11 +589,12 @@ enum DataSource {
     },
 }
 
-/// The data files of one listing, in path order, and the merge journals
-/// found beside them.
+/// The data files of one listing, in path order, and the maintenance
+/// journals that claim any of them.
 struct Listing {
     files: Vec<ListedFile>,
     merge_journals: Vec<String>,
+    rollup_journals: Vec<String>,
 }
 
 struct ListedFile {
@@ -867,23 +873,69 @@ fn remote_identity(path: &str, object: &object_store::ObjectMeta) -> FileIdentit
     }
 }
 
-/// Refuses to read a table while a merge journal exists beside its files.
+/// Refuses to read a table while a merge or rollup journal claims any of its
+/// files.
 ///
-/// A merge writes its outputs before it deletes its sources, so a running or
-/// interrupted merge can leave rows twice or not at all. `verify` reads data
-/// only: it does not finish or roll back the merge, and it does not guess.
-fn refuse_unfinished_merges(path: &str, listing: &Listing) -> Result<()> {
-    let Some(first) = listing.merge_journals.first() else {
-        return Ok(());
+/// Both commands write their outputs before they delete their sources, so a
+/// running or interrupted one can leave rows twice or not at all. `verify`
+/// reads data only: it does not finish or roll back either, and it does not
+/// guess. Each points to its own recovery.
+fn refuse_unfinished_maintenance(path: &str, listing: &Listing) -> Result<()> {
+    let journals = |list: &[String]| {
+        let first = list.first()?;
+        let more = match list.len() {
+            1 => String::new(),
+            n => format!(" and {} more", n - 1),
+        };
+        Some(format!("{first}{more}"))
     };
-    let more = match listing.merge_journals.len() {
-        1 => String::new(),
-        n => format!(" and {} more", n - 1),
-    };
-    tracing::warn!(journal = %first, "verify refused a table with an unfinished merge");
-    Err(anyhow!(
-        "cannot verify {path}: it has an unfinished merge ({first}{more}). A merge is running there or was interrupted, so a partition may hold rows twice or miss some. verify reads data only and never recovers it: wait for the merge to finish, or run `fireparq recovery recover {path}` to complete or roll back an interrupted merge, then re-run verify"
-    ))
+    if let Some(journals) = journals(&listing.merge_journals) {
+        tracing::warn!(%journals, "verify refused a table with an unfinished merge");
+        return Err(anyhow!(
+            "cannot verify {path}: it has an unfinished merge ({journals}). A merge is running there or was interrupted, so a partition may hold rows twice or miss some. verify reads data only and never recovers it: wait for the merge to finish, or run `fireparq recovery recover {path}` to complete or roll back an interrupted merge, then re-run verify"
+        ));
+    }
+    if let Some(journals) = journals(&listing.rollup_journals) {
+        tracing::warn!(%journals, "verify refused a table with an unfinished rollup");
+        return Err(anyhow!(
+            "cannot verify {path}: it has an unfinished rollup ({journals}). A rollup is running there or was interrupted, so a partition may hold rows twice or miss some. verify reads data only and never recovers it: wait for the rollup to finish, or re-run the same `fireparq rollup` command (same source, output and --partition) to finish or roll back the interrupted rollup, then re-run verify"
+        ));
+    }
+    Ok(())
+}
+
+/// Directories above a verified path whose journals claim its files: the
+/// verified file's own directory (`include_dir`), then every Hive partition
+/// (`k=v`) directory above. A rollup journal sits in its coarser target
+/// partition and claims the finer source partitions below it.
+fn journal_ancestors(dir: &str, include_dir: bool) -> Vec<String> {
+    let trimmed = dir.trim_end_matches('/');
+    let mut dirs = Vec::new();
+    if include_dir {
+        dirs.push(trimmed.to_string());
+    }
+    let mut current = trimmed;
+    while let Some((parent, _)) = current.rsplit_once('/') {
+        let name = parent.rsplit('/').next().unwrap_or_default();
+        if !name.contains('=') {
+            break;
+        }
+        dirs.push(parent.to_string());
+        current = parent;
+    }
+    dirs
+}
+
+/// Sorts found journals into merge and rollup journals.
+fn sort_journals(found: impl IntoIterator<Item = String>) -> (Vec<String>, Vec<String>) {
+    let (mut merge, mut rollup): (Vec<String>, Vec<String>) = found
+        .into_iter()
+        .partition(|journal| journal.rsplit('/').next() == Some(JOURNAL_FILE));
+    merge.sort();
+    merge.dedup();
+    rollup.sort();
+    rollup.dedup();
+    (merge, rollup)
 }
 
 #[cfg(test)]
@@ -1226,7 +1278,7 @@ fn verify_source(
     }
 
     let listing = source.list(&excluded)?;
-    refuse_unfinished_merges(&resolved_path, &listing)?;
+    refuse_unfinished_maintenance(&resolved_path, &listing)?;
     #[cfg(test)]
     run_test_hooks("before-scan");
     let scan_output = source.scan(&listing, opts, progress.frontier())?;
@@ -1253,7 +1305,7 @@ fn verify_source(
     // every file it read to be unchanged.
     if writes {
         let relisted = source.list(&excluded)?;
-        refuse_unfinished_merges(&resolved_path, &relisted)?;
+        refuse_unfinished_maintenance(&resolved_path, &relisted)?;
         ensure_unchanged(&scan_output, &source.identities(&relisted)?, |partition| {
             if !runs_roots {
                 SnapshotCheck::ReadFiles
@@ -1902,14 +1954,11 @@ fn list_verify_files(path: &str, excluded: &ExcludedPaths) -> Result<Listing> {
     let mut files = Vec::new();
     let mut journals = Vec::new();
 
-    let base = if pathbuf.is_dir() {
+    let is_dir = pathbuf.is_dir();
+    let base = if is_dir {
         discovery::collect_local(&pathbuf, LocalPolicy::VERIFY_PARQUET, &mut files)?;
-        // Merge journals claim partition directories; the walk prunes controls.
-        discovery::collect_local(
-            &pathbuf,
-            LocalPolicy::named(JOURNAL_FILE),
-            &mut journals,
-        )?;
+        // Journals below the verified path; the walk prunes controls.
+        discovery::collect_local(&pathbuf, LocalPolicy::named_any(JOURNALS), &mut journals)?;
         pathbuf.clone()
     } else {
         if pathbuf
@@ -1918,14 +1967,17 @@ fn list_verify_files(path: &str, excluded: &ExcludedPaths) -> Result<Listing> {
         {
             files.push(pathbuf.clone());
         }
-        let parent = pathbuf.parent().unwrap_or(Path::new("/")).to_path_buf();
-        // A merge journal claims the partition directory of a verified file.
-        let journal = parent.join(JOURNAL_FILE);
-        if journal.is_file() {
-            journals.push(journal);
-        }
-        parent
+        pathbuf.parent().unwrap_or(Path::new("/")).to_path_buf()
     };
+    // Journals above it that claim its files.
+    for dir in journal_ancestors(&base.to_string_lossy(), !is_dir) {
+        for name in JOURNALS {
+            let journal = Path::new(&dir).join(name);
+            if journal.is_file() {
+                journals.push(journal);
+            }
+        }
+    }
     let base = base.to_string_lossy().to_string();
     let mut files: Vec<String> = files
         .iter()
@@ -1939,11 +1991,11 @@ fn list_verify_files(path: &str, excluded: &ExcludedPaths) -> Result<Listing> {
     if files.is_empty() {
         return Err(anyhow!("no parquet files found in {}", path));
     }
-    let mut merge_journals: Vec<String> = journals
-        .iter()
-        .map(|journal| journal.to_string_lossy().into_owned())
-        .collect();
-    merge_journals.sort();
+    let (merge_journals, rollup_journals) = sort_journals(
+        journals
+            .iter()
+            .map(|journal| journal.to_string_lossy().into_owned()),
+    );
 
     Ok(Listing {
         files: files
@@ -1955,6 +2007,7 @@ fn list_verify_files(path: &str, excluded: &ExcludedPaths) -> Result<Listing> {
             })
             .collect(),
         merge_journals,
+        rollup_journals,
     })
 }
 
@@ -1975,21 +2028,42 @@ fn list_verify_objects(
     let listed = block_on_async(discovery::list_objects(store, prefix))
         .map_err(|e| anyhow!("listing S3 objects: {e}"))?;
 
-    let mut merge_journals = Vec::new();
+    let mut journals = Vec::new();
     let mut objects = Vec::new();
     for obj in listed {
         let key = obj.location.as_ref();
-        if obj.location.filename() == Some(JOURNAL_FILE) && !is_control_path(key) {
-            merge_journals.push(format!("s3://{bucket}/{key}"));
+        if obj
+            .location
+            .filename()
+            .is_some_and(|name| JOURNALS.contains(&name))
+            && !is_control_path(key)
+        {
+            journals.push(format!("s3://{bucket}/{key}"));
         } else if is_verified_object(key, bucket, prefix, excluded) {
             objects.push(obj);
         }
     }
     objects.sort_by(|a, b| a.location.cmp(&b.location));
-    merge_journals.sort();
     if objects.is_empty() {
         return Err(anyhow!("no parquet files found in {}", path));
     }
+    // Journals above the verified prefix that claim its objects. (Listings
+    // are by path segment, so the prefix is always a directory.)
+    for dir in journal_ancestors(prefix, false) {
+        for name in JOURNALS {
+            let key = if dir.is_empty() {
+                name.to_string()
+            } else {
+                format!("{dir}/{name}")
+            };
+            match block_on_async(store.head(&object_store::path::Path::from(key.as_str()))) {
+                Ok(_) => journals.push(format!("s3://{bucket}/{key}")),
+                Err(object_store::Error::NotFound { .. }) => {}
+                Err(err) => return Err(anyhow!("checking s3://{bucket}/{key}: {err}")),
+            }
+        }
+    }
+    let (merge_journals, rollup_journals) = sort_journals(journals);
 
     Ok(Listing {
         files: objects
@@ -2004,6 +2078,7 @@ fn list_verify_objects(
             })
             .collect(),
         merge_journals,
+        rollup_journals,
     })
 }
 

@@ -297,6 +297,34 @@ async fn raw_object_listing_and_complete_reads_match_existing_contract() {
     );
 }
 
+#[test]
+fn named_any_selects_exactly_the_union_of_its_single_name_walks() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    for relative in [
+        "t/day=1/_a.json",
+        "t/day=1/hour=2/_b.json",
+        "t/day=2/_a.json.bak",
+        "t/day=2/part.parquet",
+        "t/.fireparq-ingest/_a.json",
+    ] {
+        write(root, relative);
+    }
+    let walk = |policy: LocalPolicy<'_>| {
+        let mut out = Vec::new();
+        collect_local(root, policy, &mut out).unwrap();
+        out.into_iter().collect::<BTreeSet<_>>()
+    };
+    let mut expected = walk(LocalPolicy::named("_a.json"));
+    expected.extend(walk(LocalPolicy::named("_b.json")));
+    assert_eq!(
+        walk(LocalPolicy::named_any(&["_a.json", "_b.json"])),
+        expected
+    );
+    assert_eq!(expected.len(), 2, "control trees are pruned: {expected:?}");
+    assert!(walk(LocalPolicy::named_any(&[])).is_empty());
+}
+
 #[tokio::test]
 async fn first_object_is_the_first_selected_entry_of_the_same_listing() {
     use object_store::memory::InMemory;

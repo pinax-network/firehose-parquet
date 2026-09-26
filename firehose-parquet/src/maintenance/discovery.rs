@@ -13,6 +13,7 @@ enum Selection<'a> {
     LowercaseParquet,
     AsciiInsensitiveParquet,
     Name(&'a str),
+    Names(&'a [&'a str]),
 }
 
 /// Policies correspond to actual differences in the existing native walkers.
@@ -51,6 +52,15 @@ impl<'a> LocalPolicy<'a> {
             ..Self::MUTATION_PARQUET
         }
     }
+
+    /// The same walk selecting any of several exact file names, so one pass
+    /// finds every kind of journal (verify refuses merge and rollup journals).
+    pub(crate) fn named_any(names: &'a [&'a str]) -> Self {
+        Self {
+            selection: Selection::Names(names),
+            ..Self::MUTATION_PARQUET
+        }
+    }
 }
 
 /// Append native traversal results without sorting or path normalization.
@@ -78,6 +88,9 @@ pub(crate) fn collect_local(
                     .extension()
                     .is_some_and(|ext| ext.eq_ignore_ascii_case("parquet")),
                 Selection::Name(name) => path.file_name().is_some_and(|file| file == name),
+                Selection::Names(names) => path
+                    .file_name()
+                    .is_some_and(|file| names.iter().any(|name| file == *name)),
             };
             if selected {
                 out.push(path);
