@@ -503,6 +503,7 @@ fn outcome_columns_550(kind: ChainKind, table: &str) -> &'static [&'static str] 
         (ChainKind::Antelope, "actions" | "db_ops") => {
             &["transaction_status", "transaction_success"]
         }
+        (ChainKind::Near, "receipt_actions" | "execution_logs") => &["receipt_status"],
         _ => &[],
     }
 }
@@ -627,7 +628,7 @@ fn removing_the_550_outcome_columns_restores_the_pre_550_schemas() {
 }
 
 const CURRENT_SCHEMA_DIGEST: &str =
-    "dac51ea380ba2357c0f7d2914709bb7790be10405a9db93fb0ffeb59156720fd";
+    "14283beaab78c6ad4a3473f68f410b5dc45cfb411ca55c401cfee2b367fd871c";
 
 const PRE_550_SCHEMA_DIGEST: &str =
     "68e8859576f696910042452f8815a6e7f9002c9357e4dd2a26edf30c61249dde";

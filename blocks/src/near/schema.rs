@@ -123,6 +123,9 @@ pub fn receipt_actions_schema(include_fork_step: bool, encoding: &EncodeBytes) -
         Field::new("deposit", DataType::Utf8, true),
     ]);
     push_fork_step_field(&mut fields, include_fork_step);
+    // The parent receipt's own outcome, as `receipts.status` (#550), after every
+    // earlier column. A `Failure` receipt's actions did not take effect.
+    fields.push(Field::new("receipt_status", enum_data_type(), false));
     Schema::new(fields)
 }
 
@@ -144,6 +147,9 @@ pub fn execution_logs_schema(include_fork_step: bool, encoding: &EncodeBytes) ->
         Field::new("log", DataType::Utf8, false),
     ]);
     push_fork_step_field(&mut fields, include_fork_step);
+    // The parent receipt's own outcome, as `receipts.status` (#550), after every
+    // earlier column. A `Failure` receipt's actions did not take effect.
+    fields.push(Field::new("receipt_status", enum_data_type(), false));
     Schema::new(fields)
 }
 
