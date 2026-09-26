@@ -159,8 +159,10 @@ untouched.
 
 ## Validation (group A)
 
-- `cargo fmt --all`; `cargo test --workspace --locked --no-fail-fast`: 1,096
-  passed, 0 failed, 14 ignored.
+- `cargo fmt --all`; `cargo test --workspace --locked --no-fail-fast` after
+  rebasing onto `origin/main` 8462692 (#614): 1,110 passed, 0 failed, 14 ignored.
+- Integration: A, C and B merged together locally on 8462692 without conflicts;
+  the full suite passed with 1,115 tests, 0 failed, 14 ignored.
 - `cargo clippy --workspace --all-targets --locked`: no warnings in the changed
   code (the tree has unrelated pre-existing warnings).
 - `cargo deny --locked check advisories`: `advisories ok`.
