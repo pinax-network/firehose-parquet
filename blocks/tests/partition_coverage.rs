@@ -46,7 +46,7 @@ fn metadata(num: u64, parent: u64, timestamp: i64) -> firehose::BlockMetadata {
     }
 }
 fn alternating(n: u64) -> i64 {
-    if n % 2 == 0 {
+    if n.is_multiple_of(2) {
         A
     } else {
         B

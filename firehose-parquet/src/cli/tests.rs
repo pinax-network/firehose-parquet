@@ -1324,6 +1324,7 @@ fn test_merge_help_aligns_flush_controls_with_build() {
 }
 
 #[test]
+#[serial]
 fn test_flush_memory_threshold_is_positive_and_propagated() {
     assert!(TestCli::try_parse_from([
         "test-cli",
