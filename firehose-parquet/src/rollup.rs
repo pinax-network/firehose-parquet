@@ -1769,4 +1769,91 @@ mod tests {
             assert_eq!(&get_object(&store, key), bytes, "{key}");
         }
     }
+
+    /// Local and S3 rollups run the same group engine, so the same sources roll up into
+    /// byte-identical parts (names differ only by each run's random id).
+    #[test]
+    fn local_and_s3_rollups_publish_identical_parts() {
+        let sources = [
+            (
+                "blocks/year=2024/month=01/day=15/hour=00/part-000001.parquet",
+                0,
+                300,
+            ),
+            (
+                "blocks/year=2024/month=01/day=15/hour=01/part-000001.parquet",
+                300,
+                200,
+            ),
+            (
+                "blocks/year=2024/month=01/day=15/hour=01/part-000002.parquet",
+                500,
+                900,
+            ),
+            (
+                "blocks/year=2024/month=01/day=16/hour=05/part-000001.parquet",
+                2000,
+                40,
+            ),
+            (
+                "logs/year=2024/month=01/day=15/hour=00/part-000001.parquet",
+                0,
+                1200,
+            ),
+            ("cursor.parquet", 0, 1),
+        ];
+        let dir = tempfile::tempdir().unwrap();
+        let (src, out) = (dir.path().join("src"), dir.path().join("out"));
+        let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        for (rel, start, rows) in sources {
+            write_range_file(&src.join(rel), start, rows);
+            put_object(
+                &store,
+                &format!("src/{rel}"),
+                std::fs::read(src.join(rel)).unwrap(),
+            );
+        }
+        let mut local = local_config(&src, &out, false);
+        local.flush_bytes = 2048;
+        run_rollup(&local).unwrap();
+        let mut remote = s3_config("src", "out", false);
+        remote.flush_bytes = 2048;
+        rollup_s3(
+            &remote,
+            &memory_root(&store, "src"),
+            &memory_root(&store, "out"),
+        )
+        .unwrap();
+
+        // (group directory, part suffix, bytes) with the run id removed from the name.
+        let normalize = |rel: &str, data: Vec<u8>| {
+            let (group, name) = rel.rsplit_once('/').unwrap();
+            let suffix = name.rsplit_once('-').unwrap().1.to_string();
+            assert!(name.starts_with(COPY_OUTPUT_PREFIX), "{name}");
+            (group.to_string(), suffix, data)
+        };
+        let mut local_parts = Vec::new();
+        collect_parquet_files_recursive(&out, &mut local_parts).unwrap();
+        let mut local_parts: Vec<_> = local_parts
+            .iter()
+            .map(|path| {
+                let rel = path
+                    .strip_prefix(&out)
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned();
+                normalize(&rel, std::fs::read(path).unwrap())
+            })
+            .collect();
+        let mut remote_parts: Vec<_> = s3_keys(&store, "out")
+            .iter()
+            .map(|key| normalize(&key["out/".len()..], get_object(&store, key).to_vec()))
+            .collect();
+        local_parts.sort();
+        remote_parts.sort();
+        assert!(local_parts.len() > 3, "flush target must split groups");
+        assert!(local_parts == remote_parts);
+        // Copy mode keeps every source in both storages.
+        assert_eq!(s3_keys(&store, "src").len(), sources.len());
+    }
 }
