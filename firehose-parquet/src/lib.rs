@@ -11,6 +11,7 @@ pub mod encode;
 pub mod flush;
 pub mod grpc;
 pub mod ingest;
+mod maintenance;
 pub mod merge;
 pub(crate) mod merge_journal;
 pub mod metrics;
