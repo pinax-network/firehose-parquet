@@ -104,10 +104,12 @@ modules only gained a local helper for the removed walker name):
   bytes locally and on an in-memory object store; truncate selects identical files
   and sizes locally and in memory under eight filter sets.
 
-End-to-end, local data only: the `origin/main` release binary (`9372f99`) and
-the branch release binary ran the same 24 scenarios (33 CLI steps) on fresh
-copies of the retained mainnet blocks 24000000-24000029 dataset (13 tables,
-1,049,978 rows, minute partitions):
+End-to-end, local data only, with [the harness](529-equivalence.py): the
+`origin/main` release binary and the branch release binary ran the same 24
+scenarios (33 CLI steps) on fresh copies of the retained mainnet blocks
+24000000-24000029 dataset (13 tables, 1,049,978 rows, minute partitions). This
+ran once against `9372f99` and again after rebasing, against `8462692`, with
+identical results; [compact report](529-equivalence.json).
 
 - merge: default, `--flush-rows 700 --compression snappy`, `--dry-run`, one table
   with `--flush-bytes 65536`, and kills (`FIREPARQ_TEST_MERGE_CRASH_AT`) at
@@ -129,7 +131,8 @@ their run ids normalized, and the verify registry by content without
 `updated_at`. DuckDB compared 325 table snapshots (25,565,136 rows): row counts
 were equal and `EXCEPT ALL` returned 0 rows in both directions for every table.
 The self-comparison of the baseline binary with itself was also all-equal, which
-validated the normalization.
+validated the normalization. Every run used an empty S3/AWS environment and a
+working directory outside the repository, so no `.env` could supply a bucket.
 
 ## Line counts
 
@@ -164,7 +167,11 @@ tracked separately.
 
 ## Validation
 
-- `cargo fmt --all --check`
-- `cargo test --workspace --locked`: see the pull request for the final count
-  after rebasing on current main.
+- `cargo fmt --all --check`: clean.
+- `cargo test --workspace --locked`: 1,089 passed and 14 ignored at `9372f99`;
+  1,115 passed and 14 ignored on the branch before the rebase; 1,129 passed and
+  14 ignored after rebasing on `8462692` (26 new tests). One earlier run on the
+  rebased branch hit a transient failure in the unrelated
+  `ingest::controller` publication-boundary test under load; it passed three
+  isolated reruns and the next two complete runs.
 - The E2E harness and its self-comparison, described above.
