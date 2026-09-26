@@ -6,38 +6,23 @@ use arrow::datatypes::Schema;
 use arrow::record_batch::RecordBatch;
 use firehose_parquet::encode::{BytesColumn, EncodeBytes};
 use firehose_parquet::traits::{
-    decode_id_bytes, est_bool, est_i64, est_opt_str, est_str, est_ts_ms, est_u32, est_u64,
-    timestamp_millis, BlockIdentity, BlockMapper, CanonicalBuilder, PreparedIdentity,
+    append_fork_step, decode_id_bytes, est_bool, est_i64, est_opt_str, est_str, est_ts_ms, est_u32,
+    est_u64, finish_fork_step, fork_step_builder, strip_enum_prefix, timestamp_millis,
+    BlockIdentity, BlockMapper, CanonicalBuilder, PreparedIdentity,
 };
 use prost::Message;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-fn append_fork_step(builder: &mut Option<StringBuilder>, fork_step: Option<&str>) {
-    if let Some(ref mut b) = builder {
-        b.append_value(fork_step.unwrap_or("UNKNOWN"));
-    }
-}
-
-fn finish_fork_step(builder: &mut Option<StringBuilder>, columns: &mut Vec<Arc<dyn Array>>) {
-    if let Some(ref mut b) = builder {
-        columns.push(Arc::new(b.finish()) as Arc<dyn Array>);
-    }
-}
-
-fn enum_text(name: &'static str, prefix: &str) -> &'static str {
-    name.strip_prefix(prefix).unwrap_or(name)
-}
-
 fn transaction_status_text(value: i32) -> &'static str {
     antelope::TransactionStatus::try_from(value)
-        .map(|status| enum_text(status.as_str_name(), "TRANSACTIONSTATUS_"))
+        .map(|status| strip_enum_prefix(status.as_str_name(), "TRANSACTIONSTATUS_"))
         .unwrap_or("UNKNOWN")
 }
 
 fn db_op_operation_text(value: i32) -> &'static str {
     antelope::db_op::Operation::try_from(value)
-        .map(|operation| enum_text(operation.as_str_name(), "OPERATION_"))
+        .map(|operation| strip_enum_prefix(operation.as_str_name(), "OPERATION_"))
         .unwrap_or("UNKNOWN")
 }
 
@@ -536,11 +521,7 @@ impl BlocksBuilder {
             producer: StringBuilder::new(),
             confirmed: UInt32Builder::new(),
             schedule_version: UInt32Builder::new(),
-            fork_step: if include_fork_step {
-                Some(StringBuilder::new())
-            } else {
-                None
-            },
+            fork_step: fork_step_builder(include_fork_step),
         }
     }
 
@@ -579,11 +560,7 @@ impl TransactionsBuilder {
             cpu_usage_us: UInt32Builder::new(),
             net_usage: UInt64Builder::new(),
             elapsed: Int64Builder::new(),
-            fork_step: if include_fork_step {
-                Some(StringBuilder::new())
-            } else {
-                None
-            },
+            fork_step: fork_step_builder(include_fork_step),
         }
     }
 
@@ -669,11 +646,7 @@ impl ActionsBuilder {
             receipt_recv_sequence: UInt64Builder::new(),
             receipt_code_sequence: UInt64Builder::new(),
             receipt_abi_sequence: UInt64Builder::new(),
-            fork_step: if include_fork_step {
-                Some(StringBuilder::new())
-            } else {
-                None
-            },
+            fork_step: fork_step_builder(include_fork_step),
         }
     }
 
@@ -754,11 +727,7 @@ impl DbOpsBuilder {
             tx_hash: StringBuilder::new(),
             tx_index: UInt64Builder::new(),
             db_op_index: UInt32Builder::new(),
-            fork_step: if include_fork_step {
-                Some(StringBuilder::new())
-            } else {
-                None
-            },
+            fork_step: fork_step_builder(include_fork_step),
         }
     }
 

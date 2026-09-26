@@ -5,19 +5,13 @@ use arrow::datatypes::{Int32Type, Schema};
 use arrow::record_batch::RecordBatch;
 use firehose_parquet::encode::{BytesColumn, BytesListColumn, EncodeBytes, EncodedBytes};
 use firehose_parquet::traits::{
-    est_bin, est_opt_str, est_str, est_u32, est_u64, BlockIdentity, BlockMapper, CanonicalBuilder,
-    PreparedIdentity,
+    append_fork_step, est_bin, est_opt_str, est_str, est_u32, est_u64,
+    estimated_dictionary_index_bytes, finish_fork_step, fork_step_builder, BlockIdentity,
+    BlockMapper, CanonicalBuilder, PreparedIdentity,
 };
 use prost::Message;
 use std::collections::HashMap;
 use std::sync::Arc;
-
-fn estimated_dictionary_index_bytes(len: usize) -> usize {
-    // Largest-table tracking only needs a cheap relative estimate. Enum-like
-    // dictionary columns have a small fixed set of values, so the per-row
-    // indices dominate.
-    len * std::mem::size_of::<i32>()
-}
 
 fn append_opt_encoded(column: &mut BytesColumn, value: Option<&EncodedBytes>) {
     match value {
@@ -31,26 +25,6 @@ fn append_receipt_ids(column: &mut BytesListColumn, receipt_ids: &[near::CryptoH
         column.append_value(&receipt_id.bytes);
     }
     column.append(true);
-}
-
-fn append_fork_step(builder: &mut Option<StringBuilder>, fork_step: Option<&str>) {
-    if let Some(ref mut b) = builder {
-        b.append_value(fork_step.unwrap_or("UNKNOWN"));
-    }
-}
-
-fn finish_fork_step(builder: &mut Option<StringBuilder>, columns: &mut Vec<Arc<dyn Array>>) {
-    if let Some(ref mut b) = builder {
-        columns.push(Arc::new(b.finish()) as Arc<dyn Array>);
-    }
-}
-
-fn mk_fork_step(include: bool) -> Option<StringBuilder> {
-    if include {
-        Some(StringBuilder::new())
-    } else {
-        None
-    }
 }
 
 /// Extract bytes from a CryptoHash option, returning empty slice for None.
@@ -928,7 +902,7 @@ impl BlocksBuilder {
             total_supply: StringBuilder::new(),
             chunks_included: UInt64Builder::new(),
             latest_protocol_version: UInt32Builder::new(),
-            fork_step: mk_fork_step(include_fork_step),
+            fork_step: fork_step_builder(include_fork_step),
         }
     }
 
@@ -978,7 +952,7 @@ impl ChunksBuilder {
             height_included: UInt64Builder::new(),
             encoded_length: UInt64Builder::new(),
             author: StringBuilder::new(),
-            fork_step: mk_fork_step(include_fork_step),
+            fork_step: fork_step_builder(include_fork_step),
         }
     }
 
@@ -1033,7 +1007,7 @@ impl TransactionsBuilder {
             tokens_burnt: StringBuilder::new(),
             receipt_ids: BytesListColumn::new(encoding),
             converted_into_receipt_id: BytesColumn::new(encoding),
-            fork_step: mk_fork_step(include_fork_step),
+            fork_step: fork_step_builder(include_fork_step),
         }
     }
 
@@ -1091,7 +1065,7 @@ impl ReceiptsBuilder {
             tokens_burnt: StringBuilder::new(),
             executor_id: StringBuilder::new(),
             receipt_ids: BytesListColumn::new(encoding),
-            fork_step: mk_fork_step(include_fork_step),
+            fork_step: fork_step_builder(include_fork_step),
         }
     }
 
@@ -1151,7 +1125,7 @@ impl ReceiptActionsBuilder {
             args: BinaryBuilder::new(),
             gas: UInt64Builder::new(),
             deposit: StringBuilder::new(),
-            fork_step: mk_fork_step(include_fork_step),
+            fork_step: fork_step_builder(include_fork_step),
         }
     }
 
@@ -1202,7 +1176,7 @@ impl ExecutionLogsBuilder {
             executor_id: StringBuilder::new(),
             predecessor_id: StringBuilder::new(),
             log: StringBuilder::new(),
-            fork_step: mk_fork_step(include_fork_step),
+            fork_step: fork_step_builder(include_fork_step),
         }
     }
 
@@ -1242,7 +1216,7 @@ impl StateChangesBuilder {
             account_id: StringBuilder::new(),
             key_base64: StringBuilder::new(),
             value_base64: StringBuilder::new(),
-            fork_step: mk_fork_step(include_fork_step),
+            fork_step: fork_step_builder(include_fork_step),
         }
     }
 
@@ -2258,7 +2232,7 @@ pub(crate) mod tests {
                 .field_with_name("action_kind")
                 .unwrap()
                 .data_type(),
-            &schema::enum_data_type()
+            &firehose_parquet::traits::enum_data_type()
         );
         assert_eq!(
             values(actions, "action_kind"),

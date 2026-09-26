@@ -21,8 +21,8 @@ use firehose_parquet::grpc::{
     FetchErrorKind, FirehoseClient, ShutdownRequested,
 };
 use firehose_parquet::ingest::{
-    declare_inventory, load_authoritative_resume, prepare_partitions_index_write, BlockFamily,
-    IngestionSession, MapperSemantics,
+    declare_inventory, load_authoritative_resume, prepare_partitions_index_write, IngestionSession,
+    MapperSemantics,
 };
 use firehose_parquet::metrics;
 use firehose_parquet::networks::{resolve_network_endpoint, EndpointSource};
@@ -42,15 +42,10 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tracing::{debug, info, warn};
 
-use blocks::antelope::mapper::AntelopeBlockMapper;
-use blocks::beacon::mapper::BeaconBlockMapper;
-use blocks::bitcoin::mapper::BitcoinBlockMapper;
-use blocks::cosmos::mapper::CosmosBlockMapper;
-use blocks::evm::mapper::EvmBlockMapper;
-use blocks::near::mapper::NearBlockMapper;
-use blocks::solana::mapper::SolanaBlockMapper;
-use blocks::tron::mapper::TronBlockMapper;
+use blocks::chain::{ChainKind, ChainProfile, ExtendedOutput, MapperOptions};
 
+#[cfg(test)]
+mod chain_profile_tests;
 mod ingestion;
 use ingestion::run_ingestion;
 
@@ -444,63 +439,15 @@ fn chain_uses_tron_style_evm_profile(chain: &str, endpoint_info: &Option<Endpoin
     is_tron_style_chain_name(chain) || endpoint_uses_tron_style_evm_profile(endpoint_info)
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct OutputEncodingPolicy {
-    bytes_encoding: EncodeBytes,
-    block_id_encoding: &'static str,
-    allow_endpoint_block_id_hint: bool,
-}
-
-fn output_encoding_policy(
-    block_type: &str,
-    tron_style_evm_profile: bool,
-) -> Option<OutputEncodingPolicy> {
-    match block_type {
-        "evm" if tron_style_evm_profile => Some(OutputEncodingPolicy {
-            bytes_encoding: EncodeBytes::TronBase58,
-            block_id_encoding: "hex_no_prefix",
-            allow_endpoint_block_id_hint: false,
-        }),
-        "evm" | "bitcoin" | "cosmos" | "beacon" => Some(OutputEncodingPolicy {
-            bytes_encoding: EncodeBytes::Hex,
-            block_id_encoding: "hex_0x",
-            allow_endpoint_block_id_hint: false,
-        }),
-        "antelope" => Some(OutputEncodingPolicy {
-            bytes_encoding: EncodeBytes::HexNoPrefix,
-            block_id_encoding: "hex_no_prefix",
-            allow_endpoint_block_id_hint: false,
-        }),
-        "solana" | "near" => Some(OutputEncodingPolicy {
-            bytes_encoding: EncodeBytes::Base58,
-            block_id_encoding: "base58",
-            allow_endpoint_block_id_hint: false,
-        }),
-        "tron" => Some(OutputEncodingPolicy {
-            bytes_encoding: EncodeBytes::TronBase58,
-            block_id_encoding: "hex_no_prefix",
-            allow_endpoint_block_id_hint: false,
-        }),
-        _ => None,
-    }
-}
-
+/// A known family's output encoding contract wins over the endpoint's
+/// block-id encoding hint; an unknown family uses the hint, then hex.
 fn resolve_auto_encode_bytes(
-    block_type: Option<&str>,
+    block_type: Option<ChainKind>,
     endpoint_info: &Option<EndpointInfo>,
     tron_style_evm_profile: bool,
 ) -> EncodeBytes {
-    if let Some(block_type) = block_type {
-        if let Some(policy) = output_encoding_policy(block_type, tron_style_evm_profile) {
-            if policy.allow_endpoint_block_id_hint {
-                return endpoint_info
-                    .as_ref()
-                    .and_then(|ei| encode_bytes_from_block_id_encoding(ei.block_id_encoding))
-                    .unwrap_or(policy.bytes_encoding);
-            }
-
-            return policy.bytes_encoding;
-        }
+    if let Some(kind) = block_type {
+        return kind.default_bytes_encoding(tron_style_evm_profile);
     }
 
     endpoint_info
@@ -509,30 +456,48 @@ fn resolve_auto_encode_bytes(
         .unwrap_or(EncodeBytes::Hex)
 }
 
+/// Endpoint chain names in inference order: the nonempty `chain_name`, then
+/// its aliases.
+fn endpoint_chain_names(endpoint_info: &Option<EndpointInfo>) -> impl Iterator<Item = &str> {
+    endpoint_info.iter().flat_map(|info| {
+        (!info.chain_name.is_empty())
+            .then_some(info.chain_name.as_str())
+            .into_iter()
+            .chain(info.chain_name_aliases.iter().map(String::as_str))
+    })
+}
+
 fn inferred_block_type_from_endpoint_info(
     endpoint_info: &Option<EndpointInfo>,
-) -> Option<&'static str> {
-    let info = endpoint_info.as_ref()?;
+) -> Option<ChainKind> {
+    ChainKind::infer_from_chain_names(endpoint_chain_names(endpoint_info))
+}
 
-    if !info.chain_name.is_empty() {
-        return infer_partitions_block_type(&info.chain_name, endpoint_info);
-    }
-
-    info.chain_name_aliases
-        .iter()
-        .find_map(|alias| infer_partitions_block_type(alias, endpoint_info))
+/// The best family known before streaming (`--block-type`, else endpoint
+/// inference), and the family that decides failed-transaction defaults, which
+/// falls back to the cursor's `block_type` label. An unknown cursor label has
+/// no family and gets the non-EVM default, as before.
+fn pre_stream_block_types(
+    block_type: Option<ChainKind>,
+    endpoint_info: &Option<EndpointInfo>,
+    cursor_state: Option<&CursorState>,
+) -> (Option<ChainKind>, Option<ChainKind>) {
+    let initial = block_type.or_else(|| inferred_block_type_from_endpoint_info(endpoint_info));
+    let failed_transactions = initial
+        .or_else(|| cursor_metadata_block_type(cursor_state).and_then(ChainKind::from_label));
+    (initial, failed_transactions)
 }
 
 fn add_common_file_metadata(
     meta: &mut ParquetFileMetadata,
-    block_type: Option<&str>,
+    block_type: Option<ChainKind>,
     encoding: Option<&EncodeBytes>,
     endpoint: &str,
     endpoint_info: &Option<EndpointInfo>,
 ) {
     meta.add("firehose-parquet.version", env!("CARGO_PKG_VERSION"));
-    if let Some(block_type) = block_type {
-        meta.add("firehose-parquet.block_type", block_type);
+    if let Some(kind) = block_type {
+        meta.add("firehose-parquet.block_type", kind.label());
     }
     if let Some(encoding) = encoding {
         meta.add(
@@ -588,7 +553,7 @@ fn add_common_file_metadata(
 }
 
 fn build_file_metadata(
-    block_type: &str,
+    block_type: ChainKind,
     encoding: &firehose_parquet::encode::EncodeBytes,
     endpoint: &str,
     compression: Compression,
@@ -608,10 +573,10 @@ fn build_file_metadata(
 
 fn maybe_add_synthetic_timestamp_metadata(
     meta: &mut ParquetFileMetadata,
-    block_type: &str,
+    block_type: ChainKind,
     synthetic_partition_routing: bool,
 ) {
-    if block_type_has_nullable_timestamps(block_type) && synthetic_partition_routing {
+    if block_type.profile().nullable_timestamps && synthetic_partition_routing {
         meta.add("firehose-parquet.synthetic_timestamps", "true");
         meta.add(
             "firehose-parquet.synthetic_timestamp_policy",
@@ -623,7 +588,8 @@ fn maybe_add_synthetic_timestamp_metadata(
 /// Resolve whether failed/reverted transactions are written (#494).
 ///
 /// - `--exclude-failed-transactions` always drops them.
-/// - EVM writes them by default, with only their persistent state changes.
+/// - EVM (`ChainProfile::failed_transactions_by_default`) writes them by
+///   default, with only their persistent state changes.
 ///   `--include-failed-transactions` is a deprecated no-op there. A resumed EVM
 ///   cursor that was written with failed transactions excluded (the default
 ///   before #494) keeps excluding them, so one output does not mix both modes;
@@ -632,7 +598,7 @@ fn maybe_add_synthetic_timestamp_metadata(
 ///
 /// Returns the effective value and the warnings to log.
 fn resolve_include_failed_transactions(
-    block_type: Option<&str>,
+    block_type: Option<ChainKind>,
     include_flag: bool,
     exclude_flag: bool,
     cursor_state: Option<&CursorState>,
@@ -648,7 +614,7 @@ fn resolve_include_failed_transactions(
         }
         return (false, warnings);
     }
-    if block_type != Some("evm") {
+    if !block_type.is_some_and(|kind| kind.profile().failed_transactions_by_default) {
         return (include_flag, warnings);
     }
     if include_flag {
@@ -687,7 +653,7 @@ fn add_cursor_compatibility_metadata(
 }
 
 fn build_cursor_file_metadata(
-    block_type: Option<&str>,
+    block_type: Option<ChainKind>,
     encoding: Option<&EncodeBytes>,
     endpoint: &str,
     compression: Compression,
@@ -724,14 +690,13 @@ fn partition_requires_timestamp(partition: &Partition) -> bool {
     )
 }
 
-fn block_type_has_nullable_timestamps(block_type: &str) -> bool {
-    block_type == "solana"
-}
-
 use firehose_parquet::partition_index::SOLANA_GENESIS_TIMESTAMP;
 
-fn use_last_known_timestamp_partition_routing(block_type: &str, partition: &Partition) -> bool {
-    block_type_has_nullable_timestamps(block_type) && partition_requires_timestamp(partition)
+fn use_last_known_timestamp_partition_routing(
+    block_type: ChainKind,
+    partition: &Partition,
+) -> bool {
+    block_type.profile().nullable_timestamps && partition_requires_timestamp(partition)
 }
 
 fn validate_block_timestamp(block_num: u64, timestamp: i64, partition: &Partition) -> Result<()> {
@@ -930,7 +895,7 @@ fn restore_sparse_routing_cursor_anchor(
     timestamp_routing: &mut TimestampRouting,
     cursor_state: Option<&CursorState>,
     cursor_override: bool,
-    block_type: &str,
+    block_type: ChainKind,
     partition: &Partition,
 ) {
     if cursor_override || !use_last_known_timestamp_partition_routing(block_type, partition) {
@@ -1000,50 +965,10 @@ fn should_emit_progress_log(counter: u64) -> bool {
 fn infer_partitions_block_type(
     chain: &str,
     endpoint_info: &Option<EndpointInfo>,
-) -> Option<&'static str> {
-    let mut candidates = vec![chain.to_ascii_lowercase()];
-    if let Some(info) = endpoint_info {
-        if !info.chain_name.is_empty() {
-            candidates.push(info.chain_name.to_ascii_lowercase());
-        }
-        candidates.extend(
-            info.chain_name_aliases
-                .iter()
-                .map(|alias| alias.to_ascii_lowercase()),
-        );
-    }
-
-    for candidate in candidates {
-        if candidate.eq_ignore_ascii_case("tron-evm") {
-            return Some("evm");
-        }
-        if candidate.contains("beacon") {
-            return Some("beacon");
-        }
-        if candidate.contains("solana") {
-            return Some("solana");
-        }
-        if candidate.contains("bitcoin") {
-            return Some("bitcoin");
-        }
-        if candidate.contains("near") {
-            return Some("near");
-        }
-        if candidate.contains("antelope") || candidate.contains("eos") {
-            return Some("antelope");
-        }
-        if candidate.contains("cosmos") {
-            return Some("cosmos");
-        }
-        if candidate.contains("tron") {
-            return Some("tron");
-        }
-        if candidate.contains("ethereum") || candidate.contains("evm") || candidate == "mainnet" {
-            return Some("evm");
-        }
-    }
-
-    None
+) -> Option<ChainKind> {
+    ChainKind::infer_from_chain_names(
+        std::iter::once(chain).chain(endpoint_chain_names(endpoint_info)),
+    )
 }
 
 /// Validate that existing partitions rows match current build parameters.
@@ -1162,42 +1087,23 @@ fn log_existing_partitions_index_state(
     }
 }
 
-fn protected_block_family(label: &str) -> Result<BlockFamily> {
-    Ok(match label {
-        "evm" => BlockFamily::Evm,
-        "bitcoin" => BlockFamily::Bitcoin,
-        "solana" => BlockFamily::Solana,
-        "near" => BlockFamily::Near,
-        "antelope" => BlockFamily::Antelope,
-        "cosmos" => BlockFamily::Cosmos,
-        "tron" => BlockFamily::Tron,
-        "beacon" => BlockFamily::Beacon,
-        _ => return Err(anyhow!("unsupported resolved mapper family")),
+/// Parse `--block-type`; `None` is `auto`.
+fn parse_requested_block_type(block_type: &str) -> Result<Option<ChainKind>> {
+    let block_type = block_type.to_lowercase();
+    if block_type == "auto" {
+        return Ok(None);
+    }
+    ChainKind::from_label(&block_type).map(Some).ok_or_else(|| {
+        anyhow!(
+            "unsupported block type: {block_type}. Supported: {}",
+            BLOCK_TYPES.join(", ")
+        )
     })
 }
 
-fn detect_block_type(type_url: &str) -> Result<String> {
-    if type_url.contains("ethereum") {
-        Ok("evm".to_string())
-    } else if type_url.contains("bitcoin") {
-        Ok("bitcoin".to_string())
-    } else if type_url.contains("solana") {
-        Ok("solana".to_string())
-    } else if type_url.contains("near") {
-        Ok("near".to_string())
-    } else if type_url.contains("antelope") {
-        Ok("antelope".to_string())
-    } else if type_url.contains("cosmos") {
-        Ok("cosmos".to_string())
-    } else if type_url.contains("tron") {
-        Ok("tron".to_string())
-    } else if type_url.contains("beacon") {
-        Ok("beacon".to_string())
-    } else {
-        Err(anyhow!(
-            "unable to auto-detect block type from type_url: {type_url}"
-        ))
-    }
+fn detect_block_type(type_url: &str) -> Result<ChainKind> {
+    ChainKind::from_type_url(type_url)
+        .ok_or_else(|| anyhow!("unable to auto-detect block type from type_url: {type_url}"))
 }
 
 /// Resolve `EncodeBytes` from the endpoint info `block_id_encoding` field.
@@ -1319,12 +1225,6 @@ impl StartBlockFilter {
             _ => true,
         }
     }
-}
-
-/// Chains whose block numbers can legitimately have gaps (skipped slots or
-/// heights), so a bounded range may end below `stop_block - 1`.
-fn block_type_allows_block_number_gaps(block_type: &str) -> bool {
-    matches!(block_type, "solana" | "near" | "beacon")
 }
 
 /// Check that a bounded stream which ended cleanly reached its last requested
@@ -1617,7 +1517,7 @@ async fn run_partitions_build(
     }
     let policy = if partition_type == PartitionBuildType::BlockRange {
         IndexRoutingPolicy::BlockNumber
-    } else if endpoint_chain_is_solana(&endpoint_info) {
+    } else if endpoint_chain_has(&endpoint_info, has_nullable_timestamps) {
         IndexRoutingPolicy::SolanaPriorTimestamp
     } else {
         IndexRoutingPolicy::CanonicalTimestamp
@@ -2260,33 +2160,36 @@ fn supports_extended(endpoint_info: &Option<EndpointInfo>) -> bool {
     })
 }
 
-fn chain_name_is_solana(name: &str) -> bool {
-    let normalized = name.to_ascii_lowercase();
-    normalized == "solana" || normalized.starts_with("solana-")
+/// A [`ChainProfile`] property that decides chain-specific flag handling.
+type ProfileProperty = fn(&ChainProfile) -> bool;
+
+fn has_vote_transactions(profile: &ChainProfile) -> bool {
+    profile.vote_transactions
 }
 
-fn chain_name_is_antelope(name: &str) -> bool {
-    let normalized = name.to_ascii_lowercase();
-    normalized == "antelope" || normalized.starts_with("antelope-") || normalized == "eos"
+fn has_unsupported_extended_output(profile: &ChainProfile) -> bool {
+    profile.extended == ExtendedOutput::Unsupported
 }
 
-fn endpoint_chain_is_solana(endpoint_info: &Option<EndpointInfo>) -> bool {
+fn has_nullable_timestamps(profile: &ChainProfile) -> bool {
+    profile.nullable_timestamps
+}
+
+/// Whether `name` strictly identifies a family with `property` (see
+/// `ChainProfile::strict_chain_names`).
+fn chain_name_has(name: &str, property: ProfileProperty) -> bool {
+    ChainKind::ALL
+        .into_iter()
+        .any(|kind| property(kind.profile()) && kind.matches_chain_name(name))
+}
+
+fn endpoint_chain_has(endpoint_info: &Option<EndpointInfo>, property: ProfileProperty) -> bool {
     endpoint_info.as_ref().is_some_and(|ei| {
-        chain_name_is_solana(&ei.chain_name)
+        chain_name_has(&ei.chain_name, property)
             || ei
                 .chain_name_aliases
                 .iter()
-                .any(|alias| chain_name_is_solana(alias))
-    })
-}
-
-fn endpoint_chain_is_antelope(endpoint_info: &Option<EndpointInfo>) -> bool {
-    endpoint_info.as_ref().is_some_and(|ei| {
-        chain_name_is_antelope(&ei.chain_name)
-            || ei
-                .chain_name_aliases
-                .iter()
-                .any(|alias| chain_name_is_antelope(alias))
+                .any(|alias| chain_name_has(alias, property))
     })
 }
 
@@ -2294,91 +2197,160 @@ fn cursor_metadata_block_type<'a>(cursor_state: Option<&'a CursorState>) -> Opti
     cursor_state.and_then(|state| state.get_metadata("firehose-parquet.block_type"))
 }
 
-fn cursor_chain_is_solana(cursor_state: Option<&CursorState>) -> bool {
-    cursor_metadata_block_type(cursor_state).is_some_and(chain_name_is_solana)
+fn cursor_chain_has(cursor_state: Option<&CursorState>, property: ProfileProperty) -> bool {
+    cursor_metadata_block_type(cursor_state).is_some_and(|name| chain_name_has(name, property))
         || cursor_state.is_some_and(|state| {
             state
                 .get_metadata("firehose-parquet.chain_name")
-                .is_some_and(chain_name_is_solana)
+                .is_some_and(|name| chain_name_has(name, property))
                 || state
                     .get_metadata("firehose-parquet.chain_name_aliases")
-                    .is_some_and(|aliases| aliases.split(',').any(chain_name_is_solana))
+                    .is_some_and(|aliases| {
+                        aliases
+                            .split(',')
+                            .any(|alias| chain_name_has(alias, property))
+                    })
         })
 }
 
-fn cursor_chain_is_antelope(cursor_state: Option<&CursorState>) -> bool {
-    cursor_metadata_block_type(cursor_state).is_some_and(chain_name_is_antelope)
-        || cursor_state.is_some_and(|state| {
-            state
-                .get_metadata("firehose-parquet.chain_name")
-                .is_some_and(chain_name_is_antelope)
-                || state
-                    .get_metadata("firehose-parquet.chain_name_aliases")
-                    .is_some_and(|aliases| aliases.split(',').any(chain_name_is_antelope))
-        })
-}
-
-fn chain_is_solana(
-    requested_block_type: &str,
+/// Whether the chain has `property` before the first block: from an explicit
+/// `--block-type`, or for `auto` (`None`) from a strict chain-name match in the
+/// endpoint or cursor metadata.
+fn chain_has(
+    requested_block_type: Option<ChainKind>,
     endpoint_info: &Option<EndpointInfo>,
     cursor_state: Option<&CursorState>,
-) -> bool {
-    requested_block_type == "solana"
-        || (requested_block_type == "auto"
-            && (endpoint_chain_is_solana(endpoint_info) || cursor_chain_is_solana(cursor_state)))
-}
-
-fn chain_is_antelope(
-    requested_block_type: &str,
-    endpoint_info: &Option<EndpointInfo>,
-    cursor_state: Option<&CursorState>,
-) -> bool {
-    requested_block_type == "antelope"
-        || (requested_block_type == "auto"
-            && (endpoint_chain_is_antelope(endpoint_info)
-                || cursor_chain_is_antelope(cursor_state)))
-}
-
-fn chain_is_known_non_solana(
-    requested_block_type: &str,
-    endpoint_info: &Option<EndpointInfo>,
-    cursor_state: Option<&CursorState>,
+    property: ProfileProperty,
 ) -> bool {
     match requested_block_type {
-        "auto" => {
+        Some(kind) => property(kind.profile()),
+        None => {
+            endpoint_chain_has(endpoint_info, property) || cursor_chain_has(cursor_state, property)
+        }
+    }
+}
+
+/// Whether the chain is known to lack `property` before the first block. For
+/// `auto`, endpoint metadata decides when present; otherwise only a cursor
+/// `block_type` makes the chain known.
+fn chain_known_without(
+    requested_block_type: Option<ChainKind>,
+    endpoint_info: &Option<EndpointInfo>,
+    cursor_state: Option<&CursorState>,
+    property: ProfileProperty,
+) -> bool {
+    match requested_block_type {
+        Some(kind) => !property(kind.profile()),
+        None => {
             if endpoint_info.is_some() {
-                !endpoint_chain_is_solana(endpoint_info)
+                !endpoint_chain_has(endpoint_info, property)
             } else {
                 cursor_metadata_block_type(cursor_state)
-                    .is_some_and(|block_type| !chain_name_is_solana(block_type))
+                    .is_some_and(|block_type| !chain_name_has(block_type, property))
             }
         }
-        "solana" => false,
-        _ => true,
+    }
+}
+
+/// Chain-specific feature handling that is resolved before the first block.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PreStreamChainFeatures {
+    /// The chain writes `vote_transactions`; `--without-votes` applies.
+    vote_transactions: bool,
+    /// Extended output is statically unsupported and always disabled.
+    extended_unsupported: bool,
+    /// The chain is known and has no `vote_transactions`: `--without-votes`
+    /// warns, and extended output follows the endpoint capability.
+    known_without_votes: bool,
+}
+
+impl PreStreamChainFeatures {
+    fn resolve(
+        requested_block_type: Option<ChainKind>,
+        endpoint_info: &Option<EndpointInfo>,
+        cursor_state: Option<&CursorState>,
+    ) -> Self {
+        Self {
+            vote_transactions: chain_has(
+                requested_block_type,
+                endpoint_info,
+                cursor_state,
+                has_vote_transactions,
+            ),
+            extended_unsupported: chain_has(
+                requested_block_type,
+                endpoint_info,
+                cursor_state,
+                has_unsupported_extended_output,
+            ),
+            known_without_votes: chain_known_without(
+                requested_block_type,
+                endpoint_info,
+                cursor_state,
+                has_vote_transactions,
+            ),
+        }
     }
 }
 
 fn unsupported_chain_feature_flag_warnings(
-    requested_block_type: &str,
+    requested_block_type: Option<ChainKind>,
     endpoint_info: &Option<EndpointInfo>,
     cursor_state: Option<&CursorState>,
     without_extended: bool,
     without_votes: bool,
 ) -> Vec<&'static str> {
     let mut warnings = Vec::new();
-    let solana_chain = chain_is_solana(requested_block_type, endpoint_info, cursor_state);
-    let antelope_chain = chain_is_antelope(requested_block_type, endpoint_info, cursor_state);
-    let known_non_solana_chain =
-        chain_is_known_non_solana(requested_block_type, endpoint_info, cursor_state);
+    let features =
+        PreStreamChainFeatures::resolve(requested_block_type, endpoint_info, cursor_state);
 
-    if without_extended && (solana_chain || antelope_chain) {
+    if without_extended && features.extended_unsupported {
         warnings.push(without_extended_warning_message());
     }
-    if without_votes && known_non_solana_chain {
+    if without_votes && features.known_without_votes {
         warnings.push(without_votes_warning_message());
     }
 
     warnings
+}
+
+/// Extended output before the first block. Statically unsupported chains
+/// disable it; other known chains log the endpoint capability. Protected runs
+/// keep it only for a family that maps extended tables.
+fn resolve_pre_stream_extended(
+    features: PreStreamChainFeatures,
+    block_type: Option<ChainKind>,
+    extended_enabled: bool,
+    without_extended: bool,
+    endpoint_info: &Option<EndpointInfo>,
+    dry_run: bool,
+) -> bool {
+    let mut extended = extended_enabled;
+    if features.extended_unsupported {
+        extended = false;
+    } else if features.known_without_votes {
+        extended = resolve_extended_mode(extended, without_extended, endpoint_info);
+    }
+    let maps_extended_tables =
+        block_type.is_some_and(|kind| kind.profile().extended == ExtendedOutput::Supported);
+    if !dry_run && !maps_extended_tables {
+        extended = false;
+    }
+    extended
+}
+
+/// Extended output for a family detected from the first payload (dry-run `auto`).
+fn resolve_detected_extended(
+    detected: ChainKind,
+    extended_enabled: bool,
+    without_extended: bool,
+    endpoint_info: &Option<EndpointInfo>,
+) -> bool {
+    if has_unsupported_extended_output(detected.profile()) {
+        false
+    } else {
+        resolve_extended_mode(extended_enabled, without_extended, endpoint_info)
+    }
 }
 
 fn without_extended_warning_message() -> &'static str {
@@ -2397,13 +2369,17 @@ fn log_solana_vote_mode(with_votes: bool) {
     }
 }
 
-fn maybe_add_solana_with_votes_metadata(
+fn add_with_votes_metadata(meta: &mut ParquetFileMetadata, with_votes: bool) {
+    meta.add("firehose-parquet.with_votes", with_votes.to_string());
+}
+
+fn maybe_add_with_votes_metadata(
     meta: &mut ParquetFileMetadata,
-    block_type: Option<&str>,
+    block_type: ChainKind,
     with_votes: bool,
 ) {
-    if block_type == Some("solana") {
-        meta.add("firehose-parquet.with_votes", with_votes.to_string());
+    if block_type.profile().vote_transactions {
+        add_with_votes_metadata(meta, with_votes);
     }
 }
 
@@ -2471,65 +2447,6 @@ fn resolve_extended_mode(
     }
 
     extended_enabled
-}
-
-/// Create a `Box<dyn BlockMapper>` for the given block type.
-fn create_mapper(
-    block_type: &str,
-    extended: bool,
-    with_votes: bool,
-    include_fork_step: bool,
-    encode_bytes: EncodeBytes,
-    synthetic_partition_routing: bool,
-    include_failed_transactions: bool,
-) -> Result<Box<dyn BlockMapper>> {
-    match block_type {
-        "evm" => Ok(Box::new(EvmBlockMapper::new(
-            extended,
-            include_fork_step,
-            encode_bytes,
-            include_failed_transactions,
-        ))),
-        "bitcoin" => Ok(Box::new(BitcoinBlockMapper::new(
-            include_fork_step,
-            encode_bytes.clone(),
-        ))),
-        "solana" => Ok(Box::new(SolanaBlockMapper::new(
-            with_votes,
-            include_fork_step,
-            encode_bytes,
-            synthetic_partition_routing,
-            include_failed_transactions,
-        ))),
-        "near" => Ok(Box::new(NearBlockMapper::new(
-            include_fork_step,
-            encode_bytes,
-            include_failed_transactions,
-        ))),
-        "antelope" => Ok(Box::new(AntelopeBlockMapper::new(
-            include_fork_step,
-            encode_bytes,
-            include_failed_transactions,
-        ))),
-        "cosmos" => Ok(Box::new(CosmosBlockMapper::new(
-            include_fork_step,
-            encode_bytes,
-            include_failed_transactions,
-        ))),
-        "tron" => Ok(Box::new(TronBlockMapper::new(
-            include_fork_step,
-            encode_bytes,
-            include_failed_transactions,
-        ))),
-        "beacon" => Ok(Box::new(BeaconBlockMapper::new(
-            include_fork_step,
-            encode_bytes,
-        ))),
-        other => Err(anyhow!(
-            "unsupported block type: {other}. Supported: {}",
-            BLOCK_TYPES.join(", ")
-        )),
-    }
 }
 
 #[tokio::main]
@@ -3043,6 +2960,8 @@ mod tests {
     use arrow::array::UInt64Builder;
     use arrow::datatypes::{DataType, Field, Schema};
     use arrow::record_batch::RecordBatch;
+    use blocks::evm::mapper::EvmBlockMapper;
+    use blocks::solana::mapper::SolanaBlockMapper;
     use clap::CommandFactory;
     use firehose_parquet::cursor::CursorLocation;
     use std::collections::HashMap;
@@ -3053,11 +2972,7 @@ mod tests {
 
     #[test]
     fn protected_inventory_declares_every_effective_mapper_schema_before_receipt() {
-        for family in BLOCK_TYPES
-            .iter()
-            .copied()
-            .filter(|family| *family != "auto")
-        {
+        for family in ChainKind::ALL {
             for encoding in [
                 EncodeBytes::Binary,
                 EncodeBytes::Hex,
@@ -3067,16 +2982,14 @@ mod tests {
             ] {
                 for fork_steps in [false, true] {
                     for feature in [false, true] {
-                        let mut mapper = create_mapper(
-                            family,
-                            feature,
-                            feature,
-                            fork_steps,
-                            encoding.clone(),
-                            family == "solana" && feature,
-                            feature,
-                        )
-                        .unwrap();
+                        let mut mapper = family.create_mapper(MapperOptions {
+                            extended: feature,
+                            with_votes: feature,
+                            include_fork_step: fork_steps,
+                            encode_bytes: encoding.clone(),
+                            synthetic_partition_routing: family == ChainKind::Solana && feature,
+                            include_failed_transactions: feature,
+                        });
                         let first = mapper.flush().unwrap();
                         let inventory = declare_inventory(&first, &mapper.table_names())
                             .unwrap_or_else(|error| panic!("{family} empty inventory: {error}"));
@@ -4233,11 +4146,11 @@ mod tests {
     #[test]
     fn test_resolve_include_failed_transactions_evm_defaults_to_include() {
         assert_eq!(
-            resolve_include_failed_transactions(Some("evm"), false, false, None, false),
+            resolve_include_failed_transactions(Some(ChainKind::Evm), false, false, None, false),
             (true, vec![])
         );
         let (include, warnings) =
-            resolve_include_failed_transactions(Some("evm"), false, true, None, false);
+            resolve_include_failed_transactions(Some(ChainKind::Evm), false, true, None, false);
         assert!(!include);
         assert!(warnings.is_empty());
     }
@@ -4245,7 +4158,7 @@ mod tests {
     #[test]
     fn test_resolve_include_failed_transactions_evm_include_flag_is_deprecated_no_op() {
         let (include, warnings) =
-            resolve_include_failed_transactions(Some("evm"), true, false, None, false);
+            resolve_include_failed_transactions(Some(ChainKind::Evm), true, false, None, false);
         assert!(include);
         assert_eq!(warnings.len(), 1);
         assert!(warnings[0].contains("deprecated"));
@@ -4253,7 +4166,7 @@ mod tests {
 
     #[test]
     fn test_resolve_include_failed_transactions_exclude_wins_over_include() {
-        for block_type in [Some("evm"), Some("solana"), None] {
+        for block_type in [Some(ChainKind::Evm), Some(ChainKind::Solana), None] {
             let (include, warnings) =
                 resolve_include_failed_transactions(block_type, true, true, None, false);
             assert!(!include);
@@ -4265,11 +4178,11 @@ mod tests {
     #[test]
     fn test_resolve_include_failed_transactions_non_evm_unchanged() {
         for block_type in [
-            Some("solana"),
-            Some("tron"),
-            Some("near"),
-            Some("antelope"),
-            Some("cosmos"),
+            Some(ChainKind::Solana),
+            Some(ChainKind::Tron),
+            Some(ChainKind::Near),
+            Some(ChainKind::Antelope),
+            Some(ChainKind::Cosmos),
             None,
         ] {
             assert_eq!(
@@ -4290,7 +4203,7 @@ mod tests {
             ..CursorState::default()
         };
         let (include, warnings) = resolve_include_failed_transactions(
-            Some("evm"),
+            Some(ChainKind::Evm),
             false,
             false,
             Some(&legacy_cursor),
@@ -4312,7 +4225,7 @@ mod tests {
         // An explicit --exclude-failed-transactions matches silently.
         assert_eq!(
             resolve_include_failed_transactions(
-                Some("evm"),
+                Some(ChainKind::Evm),
                 false,
                 true,
                 Some(&legacy_cursor),
@@ -4323,7 +4236,7 @@ mod tests {
         // --cursor-override switches the output to the new default.
         assert_eq!(
             resolve_include_failed_transactions(
-                Some("evm"),
+                Some(ChainKind::Evm),
                 false,
                 false,
                 Some(&legacy_cursor),
@@ -4338,7 +4251,7 @@ mod tests {
         };
         assert_eq!(
             resolve_include_failed_transactions(
-                Some("evm"),
+                Some(ChainKind::Evm),
                 false,
                 false,
                 Some(&included_cursor),
@@ -4834,11 +4747,11 @@ mod tests {
 
     #[test]
     fn test_bounded_stream_on_sparse_chain_may_end_below_last_requested_block() {
-        assert!(block_type_allows_block_number_gaps("solana"));
-        assert!(block_type_allows_block_number_gaps("near"));
-        assert!(block_type_allows_block_number_gaps("beacon"));
-        assert!(!block_type_allows_block_number_gaps("evm"));
-        assert!(!block_type_allows_block_number_gaps("bitcoin"));
+        assert!(ChainKind::Solana.profile().block_number_gaps);
+        assert!(ChainKind::Near.profile().block_number_gaps);
+        assert!(ChainKind::Beacon.profile().block_number_gaps);
+        assert!(!ChainKind::Evm.profile().block_number_gaps);
+        assert!(!ChainKind::Bitcoin.profile().block_number_gaps);
 
         assert!(ensure_bounded_stream_reached_stop(200, Some(197), true).is_ok());
     }
@@ -4930,7 +4843,7 @@ mod tests {
     fn test_detect_block_type_evm() {
         assert_eq!(
             detect_block_type("type.googleapis.com/sf.ethereum.type.v2.Block").unwrap(),
-            "evm"
+            ChainKind::Evm
         );
     }
 
@@ -4938,7 +4851,7 @@ mod tests {
     fn test_detect_block_type_bitcoin() {
         assert_eq!(
             detect_block_type("type.googleapis.com/sf.bitcoin.type.v1.Block").unwrap(),
-            "bitcoin"
+            ChainKind::Bitcoin
         );
     }
 
@@ -4946,7 +4859,7 @@ mod tests {
     fn test_detect_block_type_solana() {
         assert_eq!(
             detect_block_type("type.googleapis.com/sf.solana.type.v1.Block").unwrap(),
-            "solana"
+            ChainKind::Solana
         );
     }
 
@@ -4954,7 +4867,7 @@ mod tests {
     fn test_detect_block_type_near() {
         assert_eq!(
             detect_block_type("type.googleapis.com/sf.near.type.v1.Block").unwrap(),
-            "near"
+            ChainKind::Near
         );
     }
 
@@ -4962,7 +4875,7 @@ mod tests {
     fn test_detect_block_type_antelope() {
         assert_eq!(
             detect_block_type("type.googleapis.com/sf.antelope.type.v1.Block").unwrap(),
-            "antelope"
+            ChainKind::Antelope
         );
     }
 
@@ -4970,7 +4883,7 @@ mod tests {
     fn test_detect_block_type_cosmos() {
         assert_eq!(
             detect_block_type("type.googleapis.com/sf.cosmos.type.v2.Block").unwrap(),
-            "cosmos"
+            ChainKind::Cosmos
         );
     }
 
@@ -4978,7 +4891,7 @@ mod tests {
     fn test_detect_block_type_tron() {
         assert_eq!(
             detect_block_type("type.googleapis.com/sf.tron.type.v1.Block").unwrap(),
-            "tron"
+            ChainKind::Tron
         );
     }
 
@@ -4986,7 +4899,7 @@ mod tests {
     fn test_detect_block_type_beacon() {
         assert_eq!(
             detect_block_type("type.googleapis.com/sf.beacon.type.v1.Block").unwrap(),
-            "beacon"
+            ChainKind::Beacon
         );
     }
 
@@ -4998,39 +4911,39 @@ mod tests {
     #[test]
     fn test_output_encoding_policy_defaults() {
         assert_eq!(
-            output_encoding_policy("evm", false).map(|policy| policy.bytes_encoding),
+            Some(ChainKind::Evm.default_bytes_encoding(false)),
             Some(EncodeBytes::Hex)
         );
         assert_eq!(
-            output_encoding_policy("evm", true).map(|policy| policy.bytes_encoding),
+            Some(ChainKind::Evm.default_bytes_encoding(true)),
             Some(EncodeBytes::TronBase58)
         );
         assert_eq!(
-            output_encoding_policy("bitcoin", false).map(|policy| policy.bytes_encoding),
+            Some(ChainKind::Bitcoin.default_bytes_encoding(false)),
             Some(EncodeBytes::Hex)
         );
         assert_eq!(
-            output_encoding_policy("solana", false).map(|policy| policy.bytes_encoding),
+            Some(ChainKind::Solana.default_bytes_encoding(false)),
             Some(EncodeBytes::Base58)
         );
         assert_eq!(
-            output_encoding_policy("tron", false).map(|policy| policy.bytes_encoding),
+            Some(ChainKind::Tron.default_bytes_encoding(false)),
             Some(EncodeBytes::TronBase58)
         );
         assert_eq!(
-            output_encoding_policy("near", false).map(|policy| policy.bytes_encoding),
+            Some(ChainKind::Near.default_bytes_encoding(false)),
             Some(EncodeBytes::Base58)
         );
         assert_eq!(
-            output_encoding_policy("antelope", false).map(|policy| policy.bytes_encoding),
+            Some(ChainKind::Antelope.default_bytes_encoding(false)),
             Some(EncodeBytes::HexNoPrefix)
         );
         assert_eq!(
-            output_encoding_policy("cosmos", false).map(|policy| policy.bytes_encoding),
+            Some(ChainKind::Cosmos.default_bytes_encoding(false)),
             Some(EncodeBytes::Hex)
         );
         assert_eq!(
-            output_encoding_policy("beacon", false).map(|policy| policy.bytes_encoding),
+            Some(ChainKind::Beacon.default_bytes_encoding(false)),
             Some(EncodeBytes::Hex)
         );
     }
@@ -5038,39 +4951,39 @@ mod tests {
     #[test]
     fn test_default_block_id_encoding_contract() {
         assert_eq!(
-            output_encoding_policy("evm", false).map(|policy| policy.block_id_encoding),
+            output_block_id_encoding_label(&ChainKind::Evm.default_bytes_encoding(false)),
             Some("hex_0x")
         );
         assert_eq!(
-            output_encoding_policy("evm", true).map(|policy| policy.block_id_encoding),
+            output_block_id_encoding_label(&ChainKind::Evm.default_bytes_encoding(true)),
             Some("hex_no_prefix")
         );
         assert_eq!(
-            output_encoding_policy("bitcoin", false).map(|policy| policy.block_id_encoding),
+            output_block_id_encoding_label(&ChainKind::Bitcoin.default_bytes_encoding(false)),
             Some("hex_0x")
         );
         assert_eq!(
-            output_encoding_policy("solana", false).map(|policy| policy.block_id_encoding),
+            output_block_id_encoding_label(&ChainKind::Solana.default_bytes_encoding(false)),
             Some("base58")
         );
         assert_eq!(
-            output_encoding_policy("tron", false).map(|policy| policy.block_id_encoding),
+            output_block_id_encoding_label(&ChainKind::Tron.default_bytes_encoding(false)),
             Some("hex_no_prefix")
         );
         assert_eq!(
-            output_encoding_policy("near", false).map(|policy| policy.block_id_encoding),
+            output_block_id_encoding_label(&ChainKind::Near.default_bytes_encoding(false)),
             Some("base58")
         );
         assert_eq!(
-            output_encoding_policy("antelope", false).map(|policy| policy.block_id_encoding),
+            output_block_id_encoding_label(&ChainKind::Antelope.default_bytes_encoding(false)),
             Some("hex_no_prefix")
         );
         assert_eq!(
-            output_encoding_policy("cosmos", false).map(|policy| policy.block_id_encoding),
+            output_block_id_encoding_label(&ChainKind::Cosmos.default_bytes_encoding(false)),
             Some("hex_0x")
         );
         assert_eq!(
-            output_encoding_policy("beacon", false).map(|policy| policy.block_id_encoding),
+            output_block_id_encoding_label(&ChainKind::Beacon.default_bytes_encoding(false)),
             Some("hex_0x")
         );
     }
@@ -5103,32 +5016,35 @@ mod tests {
 
     #[test]
     fn test_create_mapper_all_types() {
-        for block_type in &[
-            "evm", "bitcoin", "solana", "near", "antelope", "cosmos", "tron", "beacon",
-        ] {
-            let encode_bytes = output_encoding_policy(block_type, false)
-                .map(|policy| policy.bytes_encoding)
-                .unwrap_or(EncodeBytes::Hex);
-            let mapper = create_mapper(block_type, false, false, false, encode_bytes, false, false);
-            assert!(
-                mapper.is_ok(),
-                "create_mapper failed for block_type: {block_type}"
-            );
+        for kind in ChainKind::ALL {
+            let mut mapper = kind.create_mapper(MapperOptions {
+                extended: false,
+                with_votes: false,
+                include_fork_step: false,
+                encode_bytes: kind.default_bytes_encoding(false),
+                synthetic_partition_routing: false,
+                include_failed_transactions: false,
+            });
+            assert!(!mapper.table_names().is_empty(), "{kind}");
+            assert!(mapper.flush().is_ok(), "{kind}");
         }
     }
 
     #[test]
-    fn test_create_mapper_invalid_type() {
-        assert!(create_mapper(
-            "unknown",
-            false,
-            false,
-            false,
-            EncodeBytes::Hex,
-            false,
-            false
-        )
-        .is_err());
+    fn test_parse_requested_block_type_rejects_unknown_types() {
+        assert_eq!(parse_requested_block_type("auto").unwrap(), None);
+        assert_eq!(parse_requested_block_type("AUTO").unwrap(), None);
+        assert_eq!(
+            parse_requested_block_type("Solana").unwrap(),
+            Some(ChainKind::Solana)
+        );
+        let error = parse_requested_block_type("Unknown")
+            .unwrap_err()
+            .to_string();
+        assert_eq!(
+            error,
+            "unsupported block type: unknown. Supported: auto, evm, bitcoin, solana, near, antelope, cosmos, tron, beacon"
+        );
     }
 
     #[test]
@@ -5143,6 +5059,13 @@ mod tests {
         assert!(BLOCK_TYPES.contains(&"tron"));
         assert!(BLOCK_TYPES.contains(&"beacon"));
         assert_eq!(BLOCK_TYPES.len(), 9); // auto + 8 chains
+
+        // `--block-type` help and errors list every profile, in profile order.
+        assert_eq!(BLOCK_TYPES[0], "auto");
+        assert!(BLOCK_TYPES[1..]
+            .iter()
+            .copied()
+            .eq(ChainKind::ALL.map(ChainKind::label)));
     }
 
     #[test]
@@ -5190,7 +5113,7 @@ mod tests {
             block_features: vec![],
         });
 
-        let resolved = resolve_auto_encode_bytes(Some("evm"), &endpoint_info, true);
+        let resolved = resolve_auto_encode_bytes(Some(ChainKind::Evm), &endpoint_info, true);
 
         assert_eq!(resolved, EncodeBytes::TronBase58);
     }
@@ -5206,7 +5129,7 @@ mod tests {
             block_features: vec![],
         });
 
-        let resolved = resolve_auto_encode_bytes(Some("near"), &endpoint_info, false);
+        let resolved = resolve_auto_encode_bytes(Some(ChainKind::Near), &endpoint_info, false);
 
         assert_eq!(resolved, EncodeBytes::Base58);
     }
@@ -5214,15 +5137,15 @@ mod tests {
     #[test]
     fn test_resolve_auto_encode_bytes_supported_contracts_override_endpoint_hints() {
         let cases = [
-            ("evm", false, 3, EncodeBytes::Hex),
-            ("bitcoin", false, 3, EncodeBytes::Hex),
-            ("solana", false, 2, EncodeBytes::Base58),
-            ("near", false, 2, EncodeBytes::Base58),
-            ("antelope", false, 3, EncodeBytes::HexNoPrefix),
-            ("cosmos", false, 3, EncodeBytes::Hex),
-            ("tron", false, 2, EncodeBytes::TronBase58),
-            ("beacon", false, 3, EncodeBytes::Hex),
-            ("evm", true, 2, EncodeBytes::TronBase58),
+            (ChainKind::Evm, false, 3, EncodeBytes::Hex),
+            (ChainKind::Bitcoin, false, 3, EncodeBytes::Hex),
+            (ChainKind::Solana, false, 2, EncodeBytes::Base58),
+            (ChainKind::Near, false, 2, EncodeBytes::Base58),
+            (ChainKind::Antelope, false, 3, EncodeBytes::HexNoPrefix),
+            (ChainKind::Cosmos, false, 3, EncodeBytes::Hex),
+            (ChainKind::Tron, false, 2, EncodeBytes::TronBase58),
+            (ChainKind::Beacon, false, 3, EncodeBytes::Hex),
+            (ChainKind::Evm, true, 2, EncodeBytes::TronBase58),
         ];
 
         for (block_type, tron_style_evm_profile, endpoint_block_id_encoding, expected) in cases {
@@ -5256,7 +5179,7 @@ mod tests {
             block_features: vec![],
         });
 
-        let resolved = resolve_auto_encode_bytes(Some("evm"), &endpoint_info, true);
+        let resolved = resolve_auto_encode_bytes(Some(ChainKind::Evm), &endpoint_info, true);
 
         assert_eq!(resolved, EncodeBytes::TronBase58);
     }
@@ -5274,10 +5197,6 @@ mod tests {
 
         assert_eq!(
             resolve_auto_encode_bytes(None, &base58_endpoint, false),
-            EncodeBytes::Base58
-        );
-        assert_eq!(
-            resolve_auto_encode_bytes(Some("unknown"), &base58_endpoint, false),
             EncodeBytes::Base58
         );
         assert_eq!(
@@ -5444,16 +5363,17 @@ mod tests {
             Partition::Second,
         ] {
             assert!(use_last_known_timestamp_partition_routing(
-                "solana", &partition
+                ChainKind::Solana,
+                &partition
             ));
         }
 
         assert!(!use_last_known_timestamp_partition_routing(
-            "solana",
+            ChainKind::Solana,
             &Partition::None
         ));
         assert!(!use_last_known_timestamp_partition_routing(
-            "evm",
+            ChainKind::Evm,
             &Partition::Date
         ));
     }
@@ -5619,7 +5539,7 @@ mod tests {
             &mut backfill,
             Some(&cursor_state),
             false,
-            "solana",
+            ChainKind::Solana,
             &Partition::Hour,
         );
 
@@ -5642,7 +5562,7 @@ mod tests {
     #[test]
     fn test_build_file_metadata_includes_block_type() {
         let metadata = build_file_metadata(
-            "solana",
+            ChainKind::Solana,
             &EncodeBytes::Base58,
             "https://example.com:443",
             Compression::Zstd,
@@ -5663,13 +5583,13 @@ mod tests {
     #[test]
     fn test_synthetic_timestamp_metadata_added_for_solana_backfill() {
         let mut metadata = build_file_metadata(
-            "solana",
+            ChainKind::Solana,
             &EncodeBytes::Base58,
             "https://example.com:443",
             Compression::Zstd,
             &None,
         );
-        maybe_add_synthetic_timestamp_metadata(&mut metadata, "solana", true);
+        maybe_add_synthetic_timestamp_metadata(&mut metadata, ChainKind::Solana, true);
 
         assert_eq!(
             find_meta(&metadata, "firehose-parquet.synthetic_timestamps"),
@@ -5684,13 +5604,13 @@ mod tests {
     #[test]
     fn test_synthetic_timestamp_metadata_not_added_when_backfill_disabled() {
         let mut metadata = build_file_metadata(
-            "solana",
+            ChainKind::Solana,
             &EncodeBytes::Base58,
             "https://example.com:443",
             Compression::Zstd,
             &None,
         );
-        maybe_add_synthetic_timestamp_metadata(&mut metadata, "solana", false);
+        maybe_add_synthetic_timestamp_metadata(&mut metadata, ChainKind::Solana, false);
 
         assert_eq!(
             find_meta(&metadata, "firehose-parquet.synthetic_timestamps"),
@@ -5735,17 +5655,17 @@ mod tests {
 
     #[test]
     fn test_chain_name_is_solana_matches_expected_aliases() {
-        assert!(chain_name_is_solana("solana"));
-        assert!(chain_name_is_solana("solana-mainnet-beta"));
-        assert!(!chain_name_is_solana("mainnet"));
+        assert!(ChainKind::Solana.matches_chain_name("solana"));
+        assert!(ChainKind::Solana.matches_chain_name("solana-mainnet-beta"));
+        assert!(!ChainKind::Solana.matches_chain_name("mainnet"));
     }
 
     #[test]
     fn test_chain_name_is_antelope_matches_expected_aliases() {
-        assert!(chain_name_is_antelope("antelope"));
-        assert!(chain_name_is_antelope("antelope-mainnet"));
-        assert!(chain_name_is_antelope("eos"));
-        assert!(!chain_name_is_antelope("mainnet"));
+        assert!(ChainKind::Antelope.matches_chain_name("antelope"));
+        assert!(ChainKind::Antelope.matches_chain_name("antelope-mainnet"));
+        assert!(ChainKind::Antelope.matches_chain_name("eos"));
+        assert!(!ChainKind::Antelope.matches_chain_name("mainnet"));
     }
 
     #[test]
@@ -5759,7 +5679,8 @@ mod tests {
             block_features: vec![],
         });
 
-        assert!(endpoint_chain_is_solana(&ei));
+        assert!(endpoint_chain_has(&ei, has_vote_transactions));
+        assert!(endpoint_chain_has(&ei, has_nullable_timestamps));
     }
 
     #[test]
@@ -5773,7 +5694,8 @@ mod tests {
             block_features: vec![],
         });
 
-        assert!(endpoint_chain_is_antelope(&ei));
+        assert!(endpoint_chain_has(&ei, has_unsupported_extended_output));
+        assert!(!endpoint_chain_has(&ei, has_vote_transactions));
     }
 
     #[test]
@@ -5787,7 +5709,7 @@ mod tests {
             block_features: vec![],
         });
 
-        assert!(!endpoint_chain_is_solana(&ei));
+        assert!(!endpoint_chain_has(&ei, has_vote_transactions));
         assert_eq!(
             without_extended_warning_message(),
             "--without-extended had no effect because extended output is not supported for this chain"
@@ -5825,7 +5747,13 @@ mod tests {
     #[test]
     fn test_unsupported_chain_feature_flag_warnings_warn_for_without_extended_on_solana() {
         assert_eq!(
-            unsupported_chain_feature_flag_warnings("solana", &None, None, true, false),
+            unsupported_chain_feature_flag_warnings(
+                Some(ChainKind::Solana),
+                &None,
+                None,
+                true,
+                false
+            ),
             vec![WITHOUT_EXTENDED_WARNING]
         );
     }
@@ -5833,7 +5761,7 @@ mod tests {
     #[test]
     fn test_unsupported_chain_feature_flag_warnings_warn_for_without_votes_on_non_solana() {
         assert_eq!(
-            unsupported_chain_feature_flag_warnings("evm", &None, None, false, true),
+            unsupported_chain_feature_flag_warnings(Some(ChainKind::Evm), &None, None, false, true),
             vec![WITHOUT_VOTES_NON_SOLANA_WARNING]
         );
     }
@@ -5841,7 +5769,13 @@ mod tests {
     #[test]
     fn test_unsupported_chain_feature_flag_warnings_warn_for_without_extended_on_antelope() {
         assert_eq!(
-            unsupported_chain_feature_flag_warnings("antelope", &None, None, true, false),
+            unsupported_chain_feature_flag_warnings(
+                Some(ChainKind::Antelope),
+                &None,
+                None,
+                true,
+                false
+            ),
             vec![WITHOUT_EXTENDED_WARNING]
         );
     }
@@ -5857,13 +5791,22 @@ mod tests {
             block_features: vec!["base".to_string(), "extended".to_string()],
         });
 
-        assert!(
-            unsupported_chain_feature_flag_warnings("evm", &endpoint_info, None, true, false)
-                .is_empty()
-        );
-        assert!(
-            unsupported_chain_feature_flag_warnings("solana", &None, None, false, true).is_empty()
-        );
+        assert!(unsupported_chain_feature_flag_warnings(
+            Some(ChainKind::Evm),
+            &endpoint_info,
+            None,
+            true,
+            false
+        )
+        .is_empty());
+        assert!(unsupported_chain_feature_flag_warnings(
+            Some(ChainKind::Solana),
+            &None,
+            None,
+            false,
+            true
+        )
+        .is_empty());
     }
 
     #[test]
@@ -5925,14 +5868,14 @@ mod tests {
     #[test]
     fn test_maybe_add_solana_with_votes_metadata_only_for_solana() {
         let mut solana_meta = ParquetFileMetadata::new();
-        maybe_add_solana_with_votes_metadata(&mut solana_meta, Some("solana"), true);
+        maybe_add_with_votes_metadata(&mut solana_meta, ChainKind::Solana, true);
         assert_eq!(
             find_meta(&solana_meta, "firehose-parquet.with_votes"),
             Some("true")
         );
 
         let mut evm_meta = ParquetFileMetadata::new();
-        maybe_add_solana_with_votes_metadata(&mut evm_meta, Some("evm"), true);
+        maybe_add_with_votes_metadata(&mut evm_meta, ChainKind::Evm, true);
         assert_eq!(find_meta(&evm_meta, "firehose-parquet.with_votes"), None);
     }
 
@@ -5969,7 +5912,7 @@ mod tests {
             block_features: vec!["base".to_string(), "extended".to_string()],
         });
         let meta = build_file_metadata(
-            "evm",
+            ChainKind::Evm,
             &EncodeBytes::Hex,
             "https://example.com",
             Compression::Zstd,
@@ -6013,7 +5956,7 @@ mod tests {
             block_features: vec!["base".to_string()],
         });
         let meta = build_file_metadata(
-            "evm",
+            ChainKind::Evm,
             &EncodeBytes::TronBase58,
             "https://example.com",
             Compression::Zstd,
@@ -6041,7 +5984,7 @@ mod tests {
             block_features: vec!["base".to_string()],
         });
         let meta = build_file_metadata(
-            "near",
+            ChainKind::Near,
             &EncodeBytes::Base58,
             "https://example.com",
             Compression::Zstd,
@@ -6071,7 +6014,7 @@ mod tests {
             block_features: vec![],
         });
         let meta = build_file_metadata(
-            "evm",
+            ChainKind::Evm,
             &EncodeBytes::Hex,
             "https://example.com",
             Compression::Zstd,
@@ -6101,7 +6044,7 @@ mod tests {
             block_features: vec![],
         });
         let meta = build_file_metadata(
-            "evm",
+            ChainKind::Evm,
             &EncodeBytes::Hex,
             "https://example.com",
             Compression::Zstd,
@@ -6130,7 +6073,7 @@ mod tests {
             block_features: vec![],
         });
         let meta = build_file_metadata(
-            "evm",
+            ChainKind::Evm,
             &EncodeBytes::Hex,
             "https://example.com",
             Compression::Zstd,
@@ -6150,7 +6093,7 @@ mod tests {
     #[test]
     fn test_build_file_metadata_no_endpoint_info() {
         let meta = build_file_metadata(
-            "evm",
+            ChainKind::Evm,
             &EncodeBytes::Hex,
             "https://example.com",
             Compression::Zstd,
@@ -6193,7 +6136,7 @@ mod tests {
             block_features: vec![],
         });
         let meta = build_file_metadata(
-            "evm",
+            ChainKind::Evm,
             &EncodeBytes::Hex,
             "https://example.com",
             Compression::Zstd,
@@ -6223,7 +6166,7 @@ mod tests {
     #[test]
     fn test_build_file_metadata_honors_requested_compression() {
         let meta = build_file_metadata(
-            "evm",
+            ChainKind::Evm,
             &EncodeBytes::Hex,
             "https://example.com",
             Compression::Snappy,
@@ -6247,7 +6190,7 @@ mod tests {
             block_features: vec!["base".to_string()],
         });
         let meta = build_cursor_file_metadata(
-            Some("evm"),
+            Some(ChainKind::Evm),
             Some(&EncodeBytes::TronBase58),
             "https://example.com",
             Compression::Zstd,

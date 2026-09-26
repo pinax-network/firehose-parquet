@@ -5,32 +5,13 @@ use arrow::datatypes::{Int32Type, Schema};
 use arrow::record_batch::RecordBatch;
 use firehose_parquet::encode::{BytesColumn, EncodeBytes};
 use firehose_parquet::traits::{
-    est_bin, est_bool, est_i32, est_i64, est_opt_str, est_str, est_u32, est_u64, BlockIdentity,
+    append_fork_step, est_bin, est_bool, est_i32, est_i64, est_opt_str, est_str, est_u32, est_u64,
+    estimated_dictionary_index_bytes, finish_fork_step, fork_step_builder, BlockIdentity,
     BlockMapper, CanonicalBuilder, PreparedIdentity,
 };
 use prost::Message;
 use std::collections::HashMap;
 use std::sync::Arc;
-
-fn append_fork_step(builder: &mut Option<StringBuilder>, fork_step: Option<&str>) {
-    if let Some(ref mut b) = builder {
-        b.append_value(fork_step.unwrap_or("UNKNOWN"));
-    }
-}
-
-fn finish_fork_step(builder: &mut Option<StringBuilder>, columns: &mut Vec<Arc<dyn Array>>) {
-    if let Some(ref mut b) = builder {
-        columns.push(Arc::new(b.finish()) as Arc<dyn Array>);
-    }
-}
-
-fn mk_fork_step(include: bool) -> Option<StringBuilder> {
-    if include {
-        Some(StringBuilder::new())
-    } else {
-        None
-    }
-}
 
 fn tron_reserved_encoding(encoding: &EncodeBytes) -> EncodeBytes {
     match encoding {
@@ -54,13 +35,6 @@ fn contract_type_text(value: i32) -> &'static str {
     protocol::transaction::contract::ContractType::try_from(value)
         .map(|contract_type| contract_type.as_str_name())
         .unwrap_or("UNKNOWN")
-}
-
-fn estimated_dictionary_index_bytes(len: usize) -> usize {
-    // Largest-table tracking only needs a cheap relative estimate. For enum-backed
-    // dictionary columns, the shared string dictionary cardinality is fixed and
-    // small, so counting the per-row indices is sufficient for that comparison.
-    len * std::mem::size_of::<i32>()
 }
 
 // ---------------------------------------------------------------------------
@@ -610,7 +584,7 @@ impl BlocksBuilder {
             tx_trie_root: BytesColumn::new(&reserved_encoding),
             parent_number: UInt64Builder::new(),
             num_transactions: UInt32Builder::new(),
-            fork_step: mk_fork_step(include_fork_step),
+            fork_step: fork_step_builder(include_fork_step),
         }
     }
 
@@ -683,7 +657,7 @@ impl TransactionsBuilder {
             receipt_energy_penalty_total: Int64Builder::new(),
             contract_address: BytesColumn::new(encoding),
             res_message: BinaryBuilder::new(),
-            fork_step: mk_fork_step(include_fork_step),
+            fork_step: fork_step_builder(include_fork_step),
         }
     }
 
@@ -749,7 +723,7 @@ impl LogsBuilder {
             data: BytesColumn::new(encoding),
             transaction_index: UInt32Builder::new(),
             block_log_index: UInt64Builder::new(),
-            fork_step: mk_fork_step(include_fork_step),
+            fork_step: fork_step_builder(include_fork_step),
         }
     }
 
@@ -801,7 +775,7 @@ impl InternalTransactionsBuilder {
             note: StringBuilder::new(),
             rejected: BooleanBuilder::new(),
             transaction_index: UInt32Builder::new(),
-            fork_step: mk_fork_step(include_fork_step),
+            fork_step: fork_step_builder(include_fork_step),
         }
     }
 
@@ -1199,7 +1173,7 @@ impl ContractsBuilder {
             call_value: Int64Builder::new(),
             call_token_value: Int64Builder::new(),
             token_id: Int64Builder::new(),
-            fork_step: mk_fork_step(include_fork_step),
+            fork_step: fork_step_builder(include_fork_step),
         }
     }
     fn finish(&mut self, schema: &Schema) -> anyhow::Result<RecordBatch> {
@@ -1269,7 +1243,7 @@ impl InternalCallValuesBuilder {
             call_value_index: UInt32Builder::new(),
             call_value: Int64Builder::new(),
             token_id: StringBuilder::new(),
-            fork_step: mk_fork_step(include_fork_step),
+            fork_step: fork_step_builder(include_fork_step),
         }
     }
     fn finish(&mut self, schema: &Schema) -> anyhow::Result<RecordBatch> {

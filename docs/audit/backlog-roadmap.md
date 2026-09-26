@@ -118,8 +118,10 @@ and test against current main. Never reset or discard the previous worktree.
   were checked, and issue closure was verified. #525 merged in PR #611 as
   `ab0888e` after actual retained-block CLI/state parity and final CI; its issue
   closure was verified. See [qualification](525-ingestion-decomposition.md). #528 extracts
-  CLI operation modules with an unchanged-item proof. #526 shared chain helpers
-  and #529 maintenance consolidation remain open, scoped against current code.
+  CLI operation modules with an unchanged-item proof. #526 chain profiles and
+  shared mapper helpers are implemented with an
+  [equivalence record](526-chain-profile.md); PR review and merge are pending.
+  #529 maintenance consolidation remains open, scoped against current code.
   [#516 concurrency](516-concurrency-design.md) remains a proposal only. The remaining #530 auth/client duplication merged in PR #603
   as `39d49f6` after 1,010 tests, protocol/retry regressions, independent review
   and CI; issue closure was verified.

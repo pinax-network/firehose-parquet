@@ -6,33 +6,13 @@ use arrow::datatypes::Schema;
 use arrow::record_batch::RecordBatch;
 use firehose_parquet::encode::{BytesColumn, EncodeBytes};
 use firehose_parquet::traits::{
-    est_bin, est_i64, est_opt_str, est_str, est_u32, BlockIdentity, BlockMapper, CanonicalBuilder,
-    PreparedIdentity,
+    append_fork_step, est_bin, est_i64, est_opt_str, est_str, est_u32, finish_fork_step,
+    fork_step_builder, BlockIdentity, BlockMapper, CanonicalBuilder, PreparedIdentity,
 };
 use prost::Message;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::sync::Arc;
-
-fn append_fork_step(builder: &mut Option<StringBuilder>, fork_step: Option<&str>) {
-    if let Some(ref mut b) = builder {
-        b.append_value(fork_step.unwrap_or("UNKNOWN"));
-    }
-}
-
-fn finish_fork_step(builder: &mut Option<StringBuilder>, columns: &mut Vec<Arc<dyn Array>>) {
-    if let Some(ref mut b) = builder {
-        columns.push(Arc::new(b.finish()) as Arc<dyn Array>);
-    }
-}
-
-fn mk_fork_step(include: bool) -> Option<StringBuilder> {
-    if include {
-        Some(StringBuilder::new())
-    } else {
-        None
-    }
-}
 
 /// Compute SHA256 hash of raw tx bytes, returning raw digest bytes.
 fn tx_hash_bytes(raw: &[u8]) -> Vec<u8> {
@@ -374,7 +354,7 @@ impl BlocksBuilder {
             next_validators_hash: BytesColumn::new(encoding),
             num_txs: UInt32Builder::new(),
             tx_decode_failures: UInt32Builder::new(),
-            fork_step: mk_fork_step(include_fork_step),
+            fork_step: fork_step_builder(include_fork_step),
         }
     }
 
@@ -424,7 +404,7 @@ impl TransactionsBuilder {
             info: StringBuilder::new(),
             codespace: StringBuilder::new(),
             metadata: TxMetadataBuilder::new(),
-            fork_step: mk_fork_step(include_fork_step),
+            fork_step: fork_step_builder(include_fork_step),
         }
     }
 
@@ -471,7 +451,7 @@ impl EventsBuilder {
             r#type: StringBuilder::new(),
             key: StringBuilder::new(),
             value: StringBuilder::new(),
-            fork_step: mk_fork_step(include_fork_step),
+            fork_step: fork_step_builder(include_fork_step),
         }
     }
 
@@ -543,7 +523,7 @@ impl MessagesBuilder {
             message_index: UInt32Builder::new(),
             type_url: StringBuilder::new(),
             value: BinaryBuilder::new(),
-            fork_step: mk_fork_step(include_fork_step),
+            fork_step: fork_step_builder(include_fork_step),
         }
     }
 

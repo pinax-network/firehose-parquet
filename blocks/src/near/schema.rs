@@ -1,18 +1,8 @@
 use arrow::datatypes::{DataType, Field, Schema};
 use firehose_parquet::encode::{bytes_data_type, BytesListColumn, EncodeBytes};
-use firehose_parquet::traits::{canonical_fields_with_encoding, fork_step_field};
-
-fn maybe_fork_step(fields: &mut Vec<Field>, include: bool) {
-    if include {
-        fields.push(fork_step_field());
-    }
-}
-
-/// Enum-like label columns are dictionary-encoded `Utf8` (see the Parquet enum
-/// convention in `docs/repo-navigation.md`).
-pub(crate) fn enum_data_type() -> DataType {
-    DataType::Dictionary(Box::new(DataType::Int32), Box::new(DataType::Utf8))
-}
+use firehose_parquet::traits::{
+    canonical_fields_with_encoding, enum_data_type, push_fork_step_field,
+};
 
 pub fn blocks_schema(include_fork_step: bool, encoding: &EncodeBytes) -> Schema {
     let bd = bytes_data_type(encoding);
@@ -29,7 +19,7 @@ pub fn blocks_schema(include_fork_step: bool, encoding: &EncodeBytes) -> Schema 
         Field::new("chunks_included", DataType::UInt64, false),
         Field::new("latest_protocol_version", DataType::UInt32, false),
     ]);
-    maybe_fork_step(&mut fields, include_fork_step);
+    push_fork_step_field(&mut fields, include_fork_step);
     Schema::new(fields)
 }
 
@@ -47,7 +37,7 @@ pub fn chunks_schema(include_fork_step: bool, encoding: &EncodeBytes) -> Schema 
         Field::new("encoded_length", DataType::UInt64, false),
         Field::new("author", DataType::Utf8, false),
     ]);
-    maybe_fork_step(&mut fields, include_fork_step);
+    push_fork_step_field(&mut fields, include_fork_step);
     Schema::new(fields)
 }
 
@@ -75,7 +65,7 @@ pub fn transactions_schema(include_fork_step: bool, encoding: &EncodeBytes) -> S
         // entry of `receipt_ids`. Joins `receipts.receipt_id`.
         Field::new("converted_into_receipt_id", bd, true),
     ]);
-    maybe_fork_step(&mut fields, include_fork_step);
+    push_fork_step_field(&mut fields, include_fork_step);
     Schema::new(fields)
 }
 
@@ -104,7 +94,7 @@ pub fn receipts_schema(include_fork_step: bool, encoding: &EncodeBytes) -> Schem
         // Receipts created by this execution (the outcome's `receipt_ids`).
         Field::new("receipt_ids", BytesListColumn::data_type(encoding), false),
     ]);
-    maybe_fork_step(&mut fields, include_fork_step);
+    push_fork_step_field(&mut fields, include_fork_step);
     Schema::new(fields)
 }
 
@@ -132,7 +122,7 @@ pub fn receipt_actions_schema(include_fork_step: bool, encoding: &EncodeBytes) -
         // FunctionCall and Transfer only: yoctoNEAR, as a decimal string.
         Field::new("deposit", DataType::Utf8, true),
     ]);
-    maybe_fork_step(&mut fields, include_fork_step);
+    push_fork_step_field(&mut fields, include_fork_step);
     Schema::new(fields)
 }
 
@@ -153,7 +143,7 @@ pub fn execution_logs_schema(include_fork_step: bool, encoding: &EncodeBytes) ->
         Field::new("predecessor_id", DataType::Utf8, false),
         Field::new("log", DataType::Utf8, false),
     ]);
-    maybe_fork_step(&mut fields, include_fork_step);
+    push_fork_step_field(&mut fields, include_fork_step);
     Schema::new(fields)
 }
 
@@ -166,7 +156,7 @@ pub fn state_changes_schema(include_fork_step: bool, encoding: &EncodeBytes) -> 
         Field::new("key_base64", DataType::Utf8, false),
         Field::new("value_base64", DataType::Utf8, false),
     ]);
-    maybe_fork_step(&mut fields, include_fork_step);
+    push_fork_step_field(&mut fields, include_fork_step);
     Schema::new(fields)
 }
 

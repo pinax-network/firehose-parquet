@@ -1,14 +1,8 @@
 use arrow::datatypes::{DataType, Field, Schema};
 use firehose_parquet::encode::{bytes_data_type, EncodeBytes};
 use firehose_parquet::traits::{
-    canonical_fields_with_encoding, fork_step_field, timestamp_millis_utc_type,
+    canonical_fields_with_encoding, push_fork_step_field, timestamp_millis_utc_type,
 };
-
-fn maybe_fork_step(fields: &mut Vec<Field>, include: bool) {
-    if include {
-        fields.push(fork_step_field());
-    }
-}
 
 pub fn blocks_schema(include_fork_step: bool, encoding: &EncodeBytes) -> Schema {
     let mut fields = canonical_fields_with_encoding(encoding);
@@ -19,7 +13,7 @@ pub fn blocks_schema(include_fork_step: bool, encoding: &EncodeBytes) -> Schema 
         Field::new("confirmed", DataType::UInt32, false),
         Field::new("schedule_version", DataType::UInt32, false),
     ]);
-    maybe_fork_step(&mut fields, include_fork_step);
+    push_fork_step_field(&mut fields, include_fork_step);
     Schema::new(fields)
 }
 
@@ -33,7 +27,7 @@ pub fn transactions_schema(include_fork_step: bool, encoding: &EncodeBytes) -> S
         Field::new("net_usage", DataType::UInt64, false),
         Field::new("elapsed", DataType::Int64, false),
     ]);
-    maybe_fork_step(&mut fields, include_fork_step);
+    push_fork_step_field(&mut fields, include_fork_step);
     Schema::new(fields)
 }
 
@@ -75,7 +69,7 @@ pub fn actions_schema(include_fork_step: bool, encoding: &EncodeBytes) -> Schema
         Field::new("receipt_code_sequence", DataType::UInt64, false),
         Field::new("receipt_abi_sequence", DataType::UInt64, false),
     ]);
-    maybe_fork_step(&mut fields, include_fork_step);
+    push_fork_step_field(&mut fields, include_fork_step);
     Schema::new(fields)
 }
 
@@ -99,7 +93,7 @@ pub fn db_ops_schema(include_fork_step: bool, encoding: &EncodeBytes) -> Schema 
         Field::new("tx_index", DataType::UInt64, false),
         Field::new("db_op_index", DataType::UInt32, false),
     ]);
-    maybe_fork_step(&mut fields, include_fork_step);
+    push_fork_step_field(&mut fields, include_fork_step);
     Schema::new(fields)
 }
 

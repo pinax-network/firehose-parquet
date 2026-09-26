@@ -10,7 +10,8 @@ pub(super) struct MapperState {
     sizing: FlushSizing,
     extended: bool,
     include_failed_transactions: bool,
-    is_solana: bool,
+    /// The resolved family may omit block timestamps (see `ChainProfile`).
+    nullable_timestamps: bool,
     use_synthetic_partition_routing: bool,
     genesis_timestamp_bootstrap: GenesisTimestampBootstrap,
     timestamp_routing: TimestampRouting,
@@ -20,47 +21,47 @@ impl MapperState {
     pub(super) fn new(args: &BuildArgs, setup: &IngestionSetup) -> Result<Self> {
         let config = &setup.config;
         let sizing = FlushSizing::new(config.flush_bytes, config.flush_memory_bytes)?;
-        let block_type = &setup.block_type;
-        let use_synthetic_partition_routing =
-            use_last_known_timestamp_partition_routing(block_type, &config.partition);
+        let block_type = setup.block_type;
+        let use_synthetic_partition_routing = block_type.is_some_and(|kind| {
+            use_last_known_timestamp_partition_routing(kind, &config.partition)
+        });
         let genesis_timestamp_bootstrap = GenesisTimestampBootstrap::new(config.start_block);
         let mut timestamp_routing = TimestampRouting::new(use_synthetic_partition_routing);
-        if block_type != "auto" {
+        if let Some(kind) = block_type {
             restore_sparse_routing_cursor_anchor(
                 &mut timestamp_routing,
                 setup.existing_cursor_state.as_ref(),
                 args.cursor_override,
-                block_type,
+                kind,
                 &config.partition,
             );
         }
         let mut current_file_metadata = ParquetFileMetadata::new();
-        let mapper = if block_type != "auto" {
+        let mapper = if let Some(kind) = block_type {
             let encode_bytes = setup.initial_bytes_encoding.clone();
             let mut metadata = build_file_metadata(
-                block_type,
+                kind,
                 &encode_bytes,
                 &config.endpoint,
                 config.compression,
                 &setup.endpoint_info,
             );
-            maybe_add_solana_with_votes_metadata(&mut metadata, Some(block_type), setup.with_votes);
+            maybe_add_with_votes_metadata(&mut metadata, kind, setup.with_votes);
             maybe_add_synthetic_timestamp_metadata(
                 &mut metadata,
-                block_type,
+                kind,
                 use_synthetic_partition_routing,
             );
             log_file_metadata(&metadata);
             current_file_metadata = metadata;
-            Some(create_mapper(
-                block_type,
-                setup.extended,
-                setup.with_votes,
-                !config.final_blocks_only,
+            Some(kind.create_mapper(MapperOptions {
+                extended: setup.extended,
+                with_votes: setup.with_votes,
+                include_fork_step: !config.final_blocks_only,
                 encode_bytes,
-                use_synthetic_partition_routing,
-                setup.include_failed_transactions,
-            )?)
+                synthetic_partition_routing: use_synthetic_partition_routing,
+                include_failed_transactions: setup.include_failed_transactions,
+            }))
         } else {
             None
         };
@@ -70,7 +71,7 @@ impl MapperState {
             sizing,
             extended: setup.extended,
             include_failed_transactions: setup.include_failed_transactions,
-            is_solana: block_type == "solana",
+            nullable_timestamps: block_type.is_some_and(|kind| kind.profile().nullable_timestamps),
             use_synthetic_partition_routing,
             genesis_timestamp_bootstrap,
             timestamp_routing,
@@ -91,7 +92,11 @@ impl MapperState {
                 .context("endpoint identity is required")?
                 .chain_name
                 .clone(),
-            family: protected_block_family(&setup.block_type)?,
+            family: setup
+                .block_type
+                .context("unsupported resolved mapper family")?
+                .profile()
+                .family,
             bytes_encoding: setup.initial_bytes_encoding_label.clone(),
             extended: self.extended,
             with_votes: setup.with_votes,
@@ -177,7 +182,7 @@ pub(super) struct IngestionRuntime<'run, 'owner> {
     stats: RunStats,
     buffered_bootstrap_blocks: Vec<BufferedBootstrapBlock>,
     start_block_filter: StartBlockFilter,
-    resolved_block_type: Option<String>,
+    resolved_block_type: Option<ChainKind>,
     cursor_state_template: CursorState,
 }
 
@@ -208,7 +213,7 @@ impl<'run, 'owner> IngestionRuntime<'run, 'owner> {
             },
             buffered_bootstrap_blocks: Vec::new(),
             start_block_filter: StartBlockFilter::new(setup.config.start_block),
-            resolved_block_type: (setup.block_type != "auto").then(|| setup.block_type.clone()),
+            resolved_block_type: setup.block_type,
             cursor_state_template: CursorState::default(),
         };
         runtime.cursor_state_template = runtime.dry_run_cursor_template()?;
@@ -232,11 +237,7 @@ impl<'run, 'owner> IngestionRuntime<'run, 'owner> {
         // pipeline parameters.
         let initial_cursor_encoding = Some(self.setup.initial_bytes_encoding.clone());
         let cursor_file_metadata = build_cursor_file_metadata(
-            if self.setup.block_type != "auto" {
-                Some(self.setup.block_type.as_str())
-            } else {
-                self.setup.initial_block_type.as_deref()
-            },
+            self.setup.block_type.or(self.setup.initial_block_type),
             initial_cursor_encoding.as_ref(),
             &self.setup.config.endpoint,
             self.setup.config.compression,
@@ -247,12 +248,8 @@ impl<'run, 'owner> IngestionRuntime<'run, 'owner> {
             self.state.include_failed_transactions,
         );
         let mut cursor_file_metadata = cursor_file_metadata;
-        if self.setup.solana_chain {
-            maybe_add_solana_with_votes_metadata(
-                &mut cursor_file_metadata,
-                Some("solana"),
-                self.setup.with_votes,
-            );
+        if self.setup.chain_features.vote_transactions {
+            add_with_votes_metadata(&mut cursor_file_metadata, self.setup.with_votes);
         }
 
         // Build a template CursorState with pipeline parameters that stay constant.
@@ -275,13 +272,13 @@ impl<'run, 'owner> IngestionRuntime<'run, 'owner> {
         {
             let mut mismatches = loaded.validate_params(&cursor_state_template);
             mismatches.retain(|mismatch| !mismatch.starts_with("stop_block:"));
-            if self.setup.solana_chain {
+            if self.setup.chain_features.vote_transactions {
                 apply_solana_cursor_feature_validation(
                     &mut mismatches,
                     loaded,
                     self.setup.with_votes,
                 );
-            } else if self.setup.antelope_chain {
+            } else if self.setup.chain_features.extended_unsupported {
                 apply_antelope_cursor_feature_validation(&mut mismatches);
             }
             if !mismatches.is_empty() {
@@ -312,7 +309,7 @@ impl<'run, 'owner> IngestionRuntime<'run, 'owner> {
     ) -> Result<()> {
         // Receipt must precede every filter and any buffered lookahead.
         let received_ordinal = if let Some(active_session) = self.session.as_mut() {
-            let family = protected_block_family(&detect_block_type(&type_url)?)?;
+            let family = detect_block_type(&type_url)?.profile().family;
             active_session.receive(cursor_str.clone(), &identity, step, family)?
         } else {
             0
@@ -341,24 +338,24 @@ impl<'run, 'owner> IngestionRuntime<'run, 'owner> {
         let block_number = identity.block_num;
         let ts = identity.timestamp;
         let fork_step_owned = fork_step_str.map(str::to_owned);
-        let mut routed_block = if self.state.is_solana && self.state.use_synthetic_partition_routing
-        {
-            self.state.timestamp_routing.route_block(
-                block_bytes,
-                cursor_str,
-                fork_step_owned,
-                identity,
-            )?
-        } else {
-            BufferedBootstrapBlock {
-                received_ordinal: 0,
-                block_bytes,
-                cursor: cursor_str,
-                fork_step: fork_step_owned,
-                identity,
-            }
-        };
-        let resumed_bootstrap_timestamp = (!self.state.is_solana && ts == 0)
+        let mut routed_block =
+            if self.state.nullable_timestamps && self.state.use_synthetic_partition_routing {
+                self.state.timestamp_routing.route_block(
+                    block_bytes,
+                    cursor_str,
+                    fork_step_owned,
+                    identity,
+                )?
+            } else {
+                BufferedBootstrapBlock {
+                    received_ordinal: 0,
+                    block_bytes,
+                    cursor: cursor_str,
+                    fork_step: fork_step_owned,
+                    identity,
+                }
+            };
+        let resumed_bootstrap_timestamp = (!self.state.nullable_timestamps && ts == 0)
             .then(|| {
                 self.session
                     .as_deref()
@@ -370,9 +367,9 @@ impl<'run, 'owner> IngestionRuntime<'run, 'owner> {
             routed_block.identity.timestamp = seconds;
         }
         let current_anchor_timestamp = routed_block.identity.timestamp;
-        // For Solana, blocks may legitimately lack timestamps — skip the
-        // genesis bootstrap and timestamp validation entirely.
-        if !self.state.is_solana && resumed_bootstrap_timestamp.is_none() {
+        // Nullable-timestamp chains (Solana) may legitimately lack timestamps;
+        // skip the genesis bootstrap and timestamp validation entirely.
+        if !self.state.nullable_timestamps && resumed_bootstrap_timestamp.is_none() {
             match self.state.genesis_timestamp_bootstrap.observe_block(
                 self.stats.blocks,
                 block_number,
@@ -413,7 +410,7 @@ impl<'run, 'owner> IngestionRuntime<'run, 'owner> {
                 }
                 GenesisTimestampBootstrapAction::None => {}
             }
-        } // end if !is_solana
+        } // end if !nullable_timestamps
 
         let anchored_blocks = take_anchored_bootstrap_blocks(
             &mut self.buffered_bootstrap_blocks,
@@ -448,7 +445,7 @@ impl<'run, 'owner> IngestionRuntime<'run, 'owner> {
             let detected = detect_block_type(&type_url)?;
             info!(detected_type = %detected, type_url = %type_url, "auto-detected block type");
             for warning in unsupported_chain_feature_flag_warnings(
-                &detected,
+                Some(detected),
                 &self.setup.endpoint_info,
                 self.setup.existing_cursor_state.as_ref(),
                 self.args.without_extended,
@@ -456,21 +453,19 @@ impl<'run, 'owner> IngestionRuntime<'run, 'owner> {
             ) {
                 warn!("{}", warning);
             }
-            if detected == "solana" {
-                self.state.extended = false;
+            let profile = detected.profile();
+            if profile.vote_transactions {
                 log_solana_vote_mode(self.setup.with_votes);
-            } else if detected == "antelope" {
-                self.state.extended = false;
-            } else {
-                self.state.extended = resolve_extended_mode(
-                    self.state.extended,
-                    self.args.without_extended,
-                    &self.setup.endpoint_info,
-                );
             }
-            if self.setup.failed_transactions_block_type.as_deref() != Some(detected.as_str()) {
+            self.state.extended = resolve_detected_extended(
+                detected,
+                self.state.extended,
+                self.args.without_extended,
+                &self.setup.endpoint_info,
+            );
+            if self.setup.failed_transactions_block_type != Some(detected) {
                 let (resolved, warnings) = resolve_include_failed_transactions(
-                    Some(&detected),
+                    Some(detected),
                     self.args.include_failed_transactions,
                     self.args.exclude_failed_transactions,
                     self.setup.existing_cursor_state.as_ref(),
@@ -483,30 +478,30 @@ impl<'run, 'owner> IngestionRuntime<'run, 'owner> {
                 self.cursor_state_template.include_failed_transactions = resolved;
             }
             let encode_bytes = resolve_auto_encode_bytes(
-                Some(&detected),
+                Some(detected),
                 &self.setup.endpoint_info,
                 self.setup.tron_style_evm_profile,
             );
             let meta = build_file_metadata(
-                &detected,
+                detected,
                 &encode_bytes,
                 &self.setup.config.endpoint,
                 self.setup.config.compression,
                 &self.setup.endpoint_info,
             );
             let mut meta = meta;
-            maybe_add_solana_with_votes_metadata(&mut meta, Some(&detected), self.setup.with_votes);
+            maybe_add_with_votes_metadata(&mut meta, detected, self.setup.with_votes);
             let detected_uses_synthetic_partition_routing =
-                use_last_known_timestamp_partition_routing(&detected, &self.setup.config.partition);
+                use_last_known_timestamp_partition_routing(detected, &self.setup.config.partition);
             maybe_add_synthetic_timestamp_metadata(
                 &mut meta,
-                &detected,
+                detected,
                 detected_uses_synthetic_partition_routing,
             );
             log_file_metadata(&meta);
             self.state.current_file_metadata = meta;
             let mut cursor_meta = build_cursor_file_metadata(
-                Some(&detected),
+                Some(detected),
                 Some(&encode_bytes),
                 &self.setup.config.endpoint,
                 self.setup.config.compression,
@@ -516,15 +511,11 @@ impl<'run, 'owner> IngestionRuntime<'run, 'owner> {
                 self.setup.config.final_blocks_only,
                 self.state.include_failed_transactions,
             );
-            maybe_add_solana_with_votes_metadata(
-                &mut cursor_meta,
-                Some(&detected),
-                self.setup.with_votes,
-            );
+            maybe_add_with_votes_metadata(&mut cursor_meta, detected, self.setup.with_votes);
             self.cursor_state_template.file_metadata = cursor_meta;
             self.cursor_state_template.extended = self.state.extended;
-            self.state.is_solana = detected == "solana";
-            self.resolved_block_type = Some(detected.clone());
+            self.state.nullable_timestamps = profile.nullable_timestamps;
+            self.resolved_block_type = Some(detected);
             self.state.use_synthetic_partition_routing = detected_uses_synthetic_partition_routing;
             self.state.timestamp_routing =
                 TimestampRouting::new(self.state.use_synthetic_partition_routing);
@@ -532,18 +523,17 @@ impl<'run, 'owner> IngestionRuntime<'run, 'owner> {
                 &mut self.state.timestamp_routing,
                 self.setup.existing_cursor_state.as_ref(),
                 self.args.cursor_override,
-                &detected,
+                detected,
                 &self.setup.config.partition,
             );
-            self.state.mapper = Some(create_mapper(
-                &detected,
-                self.state.extended,
-                self.setup.with_votes,
-                !self.setup.config.final_blocks_only,
+            self.state.mapper = Some(detected.create_mapper(MapperOptions {
+                extended: self.state.extended,
+                with_votes: self.setup.with_votes,
+                include_fork_step: !self.setup.config.final_blocks_only,
                 encode_bytes,
-                self.state.use_synthetic_partition_routing,
-                self.state.include_failed_transactions,
-            )?);
+                synthetic_partition_routing: self.state.use_synthetic_partition_routing,
+                include_failed_transactions: self.state.include_failed_transactions,
+            }));
         }
         Ok(())
     }
@@ -558,8 +548,8 @@ impl<'run, 'owner> IngestionRuntime<'run, 'owner> {
     ) -> Result<()> {
         let block_number = identity.block_num;
         let ts = identity.timestamp;
-        // Solana blocks may have no timestamp; skip validation for Solana.
-        if !self.state.is_solana {
+        // Nullable-timestamp (Solana) blocks may have no timestamp; skip validation.
+        if !self.state.nullable_timestamps {
             validate_block_timestamp(block_number, ts, &self.setup.config.partition)?;
         }
         let has_timestamp = ts != 0;
@@ -910,9 +900,8 @@ impl<'run, 'owner> IngestionRuntime<'run, 'owner> {
                 .map(|state| state.last_block_num);
                 let gaps_allowed = self
                     .resolved_block_type
-                    .as_deref()
-                    .or(self.setup.initial_block_type.as_deref())
-                    .is_some_and(block_type_allows_block_number_gaps);
+                    .or(self.setup.initial_block_type)
+                    .is_some_and(|kind| kind.profile().block_number_gaps);
                 ensure_bounded_stream_reached_stop(
                     stop,
                     self.stats.max_block.max(resumed_block_num),

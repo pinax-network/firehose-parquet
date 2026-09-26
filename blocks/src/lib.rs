@@ -1,6 +1,7 @@
 pub mod antelope;
 pub mod beacon;
 pub mod bitcoin;
+pub mod chain;
 pub mod cosmos;
 pub mod evm;
 pub mod near;

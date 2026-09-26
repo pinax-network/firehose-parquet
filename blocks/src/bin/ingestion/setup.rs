@@ -4,7 +4,8 @@ use super::*;
 
 pub(super) struct ResolvedEndpoint {
     config: Config,
-    block_type: String,
+    /// `None` is `--block-type auto`.
+    block_type: Option<ChainKind>,
     endpoint_info: Option<EndpointInfo>,
     cursor_location: Option<CursorLocation>,
 }
@@ -14,13 +15,7 @@ impl ResolvedEndpoint {
         args: &BuildArgs,
         shutdown: &CancellationToken,
     ) -> Result<Option<Self>> {
-        let mut block_type = args.block_type.to_lowercase();
-        if block_type != "auto" && !BLOCK_TYPES.contains(&block_type.as_str()) {
-            return Err(anyhow!(
-                "unsupported block type: {block_type}. Supported: {}",
-                BLOCK_TYPES.join(", ")
-            ));
-        }
+        let mut block_type = parse_requested_block_type(&args.block_type)?;
 
         let mut common = args.common.clone();
         let mut resolved_network_name: Option<String> = None;
@@ -100,9 +95,9 @@ impl ResolvedEndpoint {
 
         // Protected authority must bind the actual mapper before opening Blocks.
         // Unknown custom endpoint metadata therefore requires an explicit family.
-        if !config.dry_run && block_type == "auto" {
-            block_type = inferred_block_type_from_endpoint_info(&endpoint_info)
-            .context("cannot resolve the mapper from EndpointInfo before protected recovery; provide --block-type explicitly")?.to_owned();
+        if !config.dry_run && block_type.is_none() {
+            block_type = Some(inferred_block_type_from_endpoint_info(&endpoint_info)
+            .context("cannot resolve the mapper from EndpointInfo before protected recovery; provide --block-type explicitly")?);
         }
         let cursor_location = resolve_cursor_location(&config)?;
         Ok(Some(Self {
@@ -141,18 +136,19 @@ impl ResolvedEndpoint {
 
 pub(super) struct IngestionSetup {
     pub config: Config,
-    pub block_type: String,
+    /// Requested or protected-resolved family; `None` is dry-run `auto`.
+    pub block_type: Option<ChainKind>,
     pub endpoint_info: Option<EndpointInfo>,
     pub existing_cursor_state: Option<CursorState>,
     pub extended: bool,
     pub with_votes: bool,
     pub include_failed_transactions: bool,
-    pub initial_block_type: Option<String>,
-    pub failed_transactions_block_type: Option<String>,
+    /// `block_type`, else the family inferred from endpoint chain names.
+    pub initial_block_type: Option<ChainKind>,
+    pub failed_transactions_block_type: Option<ChainKind>,
     pub initial_bytes_encoding: EncodeBytes,
     pub initial_bytes_encoding_label: String,
-    pub solana_chain: bool,
-    pub antelope_chain: bool,
+    pub chain_features: PreStreamChainFeatures,
     pub tron_style_evm_profile: bool,
 }
 
@@ -168,22 +164,21 @@ impl IngestionSetup {
             endpoint_info,
             cursor_location,
         } = endpoint;
-        let mut extended = !args.without_extended;
+        let extended = !args.without_extended;
         let with_votes = !args.without_votes;
         let existing_cursor_state = if let Some(ownership) = ownership {
             load_authoritative_resume(&config, ownership, args.cursor_override).await?
         } else {
             load_existing_cursor(cursor_location.as_ref(), args.cursor_override)?
         };
-        let solana_chain =
-            chain_is_solana(&block_type, &endpoint_info, existing_cursor_state.as_ref());
-        let antelope_chain =
-            chain_is_antelope(&block_type, &endpoint_info, existing_cursor_state.as_ref());
-        let known_non_solana_chain =
-            chain_is_known_non_solana(&block_type, &endpoint_info, existing_cursor_state.as_ref());
+        let chain_features = PreStreamChainFeatures::resolve(
+            block_type,
+            &endpoint_info,
+            existing_cursor_state.as_ref(),
+        );
 
         for warning in unsupported_chain_feature_flag_warnings(
-            &block_type,
+            block_type,
             &endpoint_info,
             existing_cursor_state.as_ref(),
             args.without_extended,
@@ -226,33 +221,26 @@ impl IngestionSetup {
                 .set_block_range_start(effective_start_block);
         }
 
-        if solana_chain {
-            extended = false;
+        if chain_features.vote_transactions {
             log_solana_vote_mode(with_votes);
-        } else if antelope_chain {
-            extended = false;
-        } else if known_non_solana_chain {
-            extended = resolve_extended_mode(extended, args.without_extended, &endpoint_info);
         }
-
-        if !config.dry_run && block_type != "evm" {
-            extended = false;
-        }
+        let extended = resolve_pre_stream_extended(
+            chain_features,
+            block_type,
+            extended,
+            args.without_extended,
+            &endpoint_info,
+            config.dry_run,
+        );
 
         let tron_style_evm_profile = endpoint_uses_tron_style_evm_profile(&endpoint_info);
-        let initial_block_type = if block_type != "auto" {
-            Some(block_type.as_str())
-        } else {
-            inferred_block_type_from_endpoint_info(&endpoint_info)
-        };
         // Failed-transaction handling depends on the chain, so resolve it from the
         // best block type known before streaming; auto-detection re-resolves it.
-        let failed_transactions_block_type = initial_block_type.map(str::to_string).or_else(|| {
-            cursor_metadata_block_type(existing_cursor_state.as_ref()).map(str::to_string)
-        });
+        let (initial_block_type, failed_transactions_block_type) =
+            pre_stream_block_types(block_type, &endpoint_info, existing_cursor_state.as_ref());
         let (include_failed_transactions, failed_transactions_warnings) =
             resolve_include_failed_transactions(
-                failed_transactions_block_type.as_deref(),
+                failed_transactions_block_type,
                 args.include_failed_transactions,
                 args.exclude_failed_transactions,
                 existing_cursor_state.as_ref(),
@@ -266,7 +254,7 @@ impl IngestionSetup {
         let initial_bytes_encoding_label = encode_bytes_label(&initial_bytes_encoding).to_string();
 
         info!(
-            block_type,
+            block_type = block_type.map_or("auto", ChainKind::label),
             extended,
             with_votes,
             bytes_encoding = %initial_bytes_encoding_label,
@@ -301,7 +289,6 @@ impl IngestionSetup {
             );
         }
 
-        let initial_block_type = initial_block_type.map(str::to_owned);
         Ok(Self {
             config,
             block_type,
@@ -314,8 +301,7 @@ impl IngestionSetup {
             failed_transactions_block_type,
             initial_bytes_encoding,
             initial_bytes_encoding_label,
-            solana_chain,
-            antelope_chain,
+            chain_features,
             tron_style_evm_profile,
         })
     }
@@ -427,7 +413,7 @@ mod native_upload_tests {
                 aws_endpoint_url: Some(format!("http://{}", listener.local_addr().unwrap())),
                 ..Config::default()
             },
-            block_type: "evm".into(),
+            block_type: Some(ChainKind::Evm),
             endpoint_info: None,
             cursor_location: None,
         };

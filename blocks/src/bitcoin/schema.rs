@@ -1,13 +1,7 @@
 use arrow::datatypes::{DataType, Field, Schema};
 use firehose_parquet::encode::EncodeBytes;
-use firehose_parquet::traits::{canonical_fields_with_encoding, fork_step_field};
+use firehose_parquet::traits::{canonical_fields_with_encoding, push_fork_step_field};
 use std::sync::Arc;
-
-fn maybe_fork_step(fields: &mut Vec<Field>, include: bool) {
-    if include {
-        fields.push(fork_step_field());
-    }
-}
 
 pub fn blocks_schema(include_fork_step: bool, encoding: &EncodeBytes) -> Schema {
     let mut fields = canonical_fields_with_encoding(encoding);
@@ -28,7 +22,7 @@ pub fn blocks_schema(include_fork_step: bool, encoding: &EncodeBytes) -> Schema 
         Field::new("mediantime", DataType::Int64, false),
         Field::new("chainwork", DataType::Utf8, false),
     ]);
-    maybe_fork_step(&mut fields, include_fork_step);
+    push_fork_step_field(&mut fields, include_fork_step);
     Schema::new(fields)
 }
 
@@ -47,7 +41,7 @@ pub fn transactions_schema(include_fork_step: bool, encoding: &EncodeBytes) -> S
         Field::new("block_time", DataType::Int64, false),
         Field::new("tx_index", DataType::UInt32, false),
     ]);
-    maybe_fork_step(&mut fields, include_fork_step);
+    push_fork_step_field(&mut fields, include_fork_step);
     Schema::new(fields)
 }
 
@@ -70,7 +64,7 @@ pub fn inputs_schema(include_fork_step: bool, encoding: &EncodeBytes) -> Schema 
         ),
         Field::new("tx_index", DataType::UInt32, false),
     ]);
-    maybe_fork_step(&mut fields, include_fork_step);
+    push_fork_step_field(&mut fields, include_fork_step);
     Schema::new(fields)
 }
 
@@ -87,7 +81,7 @@ pub fn outputs_schema(include_fork_step: bool, encoding: &EncodeBytes) -> Schema
         Field::new("script_pubkey_address", DataType::Utf8, true),
         Field::new("value_sats", DataType::UInt64, false),
     ]);
-    maybe_fork_step(&mut fields, include_fork_step);
+    push_fork_step_field(&mut fields, include_fork_step);
     Schema::new(fields)
 }
 

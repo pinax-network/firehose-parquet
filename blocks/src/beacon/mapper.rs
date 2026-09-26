@@ -5,8 +5,9 @@ use arrow::datatypes::{Int32Type, Schema};
 use arrow::record_batch::RecordBatch;
 use firehose_parquet::encode::{BytesColumn, EncodeBytes};
 use firehose_parquet::traits::{
-    est_bin, est_i64, est_list_u64, est_opt_str, est_str, est_u32, est_u64, BlockIdentity,
-    BlockMapper, CanonicalBuilder, PreparedIdentity,
+    append_fork_step, est_bin, est_i64, est_list_u64, est_opt_str, est_str, est_u32, est_u64,
+    finish_fork_step, fork_step_builder, BlockIdentity, BlockMapper, CanonicalBuilder,
+    PreparedIdentity,
 };
 use num_bigint::BigUint;
 use prost::Message;
@@ -50,26 +51,6 @@ fn base_fee_decimal(bytes: &[u8], encoding: BaseFeeEncoding) -> anyhow::Result<S
         }
     };
     Ok(value.to_str_radix(10))
-}
-
-fn append_fork_step(builder: &mut Option<StringBuilder>, fork_step: Option<&str>) {
-    if let Some(ref mut b) = builder {
-        b.append_value(fork_step.unwrap_or("UNKNOWN"));
-    }
-}
-
-fn finish_fork_step(builder: &mut Option<StringBuilder>, columns: &mut Vec<Arc<dyn Array>>) {
-    if let Some(ref mut b) = builder {
-        columns.push(Arc::new(b.finish()) as Arc<dyn Array>);
-    }
-}
-
-fn mk_fork_step(include: bool) -> Option<StringBuilder> {
-    if include {
-        Some(StringBuilder::new())
-    } else {
-        None
-    }
 }
 
 /// Append one list entry holding `values`.
@@ -1105,7 +1086,7 @@ impl BlocksBuilder {
             signature: BytesColumn::new(encoding),
             spec: StringDictionaryBuilder::new(),
             graffiti: BytesColumn::new(encoding),
-            fork_step: mk_fork_step(include_fork_step),
+            fork_step: fork_step_builder(include_fork_step),
         }
     }
 
@@ -1161,7 +1142,7 @@ impl AttestationsBuilder {
             target_root: BytesColumn::new(encoding),
             signature: BytesColumn::new(encoding),
             committee_bits: BytesColumn::new(encoding),
-            fork_step: mk_fork_step(include_fork_step),
+            fork_step: fork_step_builder(include_fork_step),
         }
     }
 
@@ -1207,7 +1188,7 @@ impl DepositsBuilder {
             withdrawal_credentials: BytesColumn::new(encoding),
             amount: UInt64Builder::new(),
             signature: BytesColumn::new(encoding),
-            fork_step: mk_fork_step(include_fork_step),
+            fork_step: fork_step_builder(include_fork_step),
         }
     }
 
@@ -1259,7 +1240,7 @@ impl ProposerSlashingsBuilder {
             header_2_parent_root: BytesColumn::new(encoding),
             header_2_state_root: BytesColumn::new(encoding),
             header_2_body_root: BytesColumn::new(encoding),
-            fork_step: mk_fork_step(include_fork_step),
+            fork_step: fork_step_builder(include_fork_step),
         }
     }
 
@@ -1329,7 +1310,7 @@ impl AttesterSlashingsBuilder {
             attestation_2_target_root: BytesColumn::new(encoding),
             attestation_1_attesting_indices: ListBuilder::new(UInt64Builder::new()),
             attestation_2_attesting_indices: ListBuilder::new(UInt64Builder::new()),
-            fork_step: mk_fork_step(include_fork_step),
+            fork_step: fork_step_builder(include_fork_step),
         }
     }
 
@@ -1379,7 +1360,7 @@ impl VoluntaryExitsBuilder {
             epoch: UInt64Builder::new(),
             validator_index: UInt64Builder::new(),
             signature: BytesColumn::new(encoding),
-            fork_step: mk_fork_step(include_fork_step),
+            fork_step: fork_step_builder(include_fork_step),
         }
     }
 
@@ -1434,7 +1415,7 @@ impl ExecutionPayloadBuilder {
             base_fee_per_gas: StringBuilder::new(),
             blob_gas_used: UInt64Builder::new(),
             excess_blob_gas: UInt64Builder::new(),
-            fork_step: mk_fork_step(include_fork_step),
+            fork_step: fork_step_builder(include_fork_step),
         }
     }
 
@@ -1480,7 +1461,7 @@ impl BlobSidecarsBuilder {
             blob: BinaryBuilder::new(),
             kzg_commitment: BytesColumn::new(encoding),
             kzg_proof: BytesColumn::new(encoding),
-            fork_step: mk_fork_step(include_fork_step),
+            fork_step: fork_step_builder(include_fork_step),
         }
     }
 
@@ -1517,7 +1498,7 @@ impl WithdrawalsBuilder {
             validator_index: UInt64Builder::new(),
             address: BytesColumn::new(encoding),
             amount: UInt64Builder::new(),
-            fork_step: mk_fork_step(include_fork_step),
+            fork_step: fork_step_builder(include_fork_step),
         }
     }
 
@@ -1566,7 +1547,7 @@ impl BlsToExecutionChangesBuilder {
             from_bls_pubkey: BytesColumn::new(encoding),
             to_execution_address: BytesColumn::new(encoding),
             signature: BytesColumn::new(encoding),
-            fork_step: mk_fork_step(include_fork_step),
+            fork_step: fork_step_builder(include_fork_step),
         }
     }
 
@@ -1619,7 +1600,7 @@ impl DepositRequestsBuilder {
             withdrawal_credentials: BytesColumn::new(encoding),
             amount: UInt64Builder::new(),
             signature: BytesColumn::new(encoding),
-            fork_step: mk_fork_step(include_fork_step),
+            fork_step: fork_step_builder(include_fork_step),
         }
     }
 
@@ -1670,7 +1651,7 @@ impl WithdrawalRequestsBuilder {
             source_address: BytesColumn::new(encoding),
             validator_pubkey: BytesColumn::new(encoding),
             amount: UInt64Builder::new(),
-            fork_step: mk_fork_step(include_fork_step),
+            fork_step: fork_step_builder(include_fork_step),
         }
     }
 
@@ -1717,7 +1698,7 @@ impl ConsolidationRequestsBuilder {
             source_address: BytesColumn::new(encoding),
             source_pubkey: BytesColumn::new(encoding),
             target_pubkey: BytesColumn::new(encoding),
-            fork_step: mk_fork_step(include_fork_step),
+            fork_step: fork_step_builder(include_fork_step),
         }
     }
 

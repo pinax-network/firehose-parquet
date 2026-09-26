@@ -6,8 +6,9 @@ use arrow::datatypes::{Int32Type, Schema};
 use arrow::record_batch::RecordBatch;
 use firehose_parquet::encode::{BytesColumn, BytesListColumn, EncodeBytes};
 use firehose_parquet::traits::{
-    est_bool, est_opt_str, est_str, est_u32, est_u64, BlockIdentity, BlockMapper, CanonicalBuilder,
-    PreparedIdentity,
+    append_fork_step, est_bool, est_opt_str, est_str, est_u32, est_u64,
+    estimated_dictionary_index_bytes, finish_fork_step, fork_step_builder, strip_enum_prefix,
+    BlockIdentity, BlockMapper, CanonicalBuilder, PreparedIdentity,
 };
 use prost::Message;
 use std::collections::HashMap;
@@ -52,34 +53,15 @@ fn append_optional_bigint(builder: &mut StringBuilder, value: &Option<eth::BigIn
     }
 }
 
-fn append_fork_step(builder: &mut Option<StringBuilder>, fork_step: Option<&str>) {
-    if let Some(ref mut b) = builder {
-        b.append_value(fork_step.unwrap_or("UNKNOWN"));
-    }
-}
-
-fn remove_enum_prefix_if_present(name: &'static str, prefix: &str) -> &'static str {
-    name.strip_prefix(prefix).unwrap_or(name)
-}
-
-fn estimated_dictionary_index_bytes(len: usize) -> usize {
-    // Largest-table tracking only needs a cheap relative estimate. For enum-backed
-    // dictionary columns, the shared string dictionary cardinality is fixed and
-    // small, so counting the per-row indices is sufficient for that comparison.
-    len * std::mem::size_of::<i32>()
-}
-
 fn detail_level_text(value: i32) -> &'static str {
     eth::block::DetailLevel::try_from(value)
-        .map(|detail_level| {
-            remove_enum_prefix_if_present(detail_level.as_str_name(), "DETAILLEVEL_")
-        })
+        .map(|detail_level| strip_enum_prefix(detail_level.as_str_name(), "DETAILLEVEL_"))
         .unwrap_or("UNKNOWN")
 }
 
 fn transaction_type_text(value: i32) -> &'static str {
     eth::transaction_trace::Type::try_from(value)
-        .map(|tx_type| remove_enum_prefix_if_present(tx_type.as_str_name(), "TRX_TYPE_"))
+        .map(|tx_type| strip_enum_prefix(tx_type.as_str_name(), "TRX_TYPE_"))
         .unwrap_or("UNKNOWN")
 }
 
@@ -225,31 +207,14 @@ fn call_type_text(value: i32) -> &'static str {
 
 fn balance_change_reason_text(value: i32) -> &'static str {
     eth::balance_change::Reason::try_from(value)
-        .map(|reason| remove_enum_prefix_if_present(reason.as_str_name(), "REASON_"))
+        .map(|reason| strip_enum_prefix(reason.as_str_name(), "REASON_"))
         .unwrap_or("UNKNOWN")
 }
 
 fn gas_change_reason_text(value: i32) -> &'static str {
     eth::gas_change::Reason::try_from(value)
-        .map(|reason| remove_enum_prefix_if_present(reason.as_str_name(), "REASON_"))
+        .map(|reason| strip_enum_prefix(reason.as_str_name(), "REASON_"))
         .unwrap_or("UNKNOWN")
-}
-
-fn finish_fork_step(
-    builder: &mut Option<StringBuilder>,
-    columns: &mut Vec<Arc<dyn arrow::array::Array>>,
-) {
-    if let Some(ref mut b) = builder {
-        columns.push(Arc::new(b.finish()) as Arc<dyn arrow::array::Array>);
-    }
-}
-
-fn mk_fork_step(include: bool) -> Option<StringBuilder> {
-    if include {
-        Some(StringBuilder::new())
-    } else {
-        None
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1516,7 +1481,7 @@ impl EvmBlocksBuilder {
             excess_blob_gas: UInt64Builder::new(),
             parent_beacon_root: BytesColumn::new(encoding),
             requests_hash: BytesColumn::new(encoding),
-            fork_step: mk_fork_step(include_fork_step),
+            fork_step: fork_step_builder(include_fork_step),
         }
     }
 
@@ -1618,7 +1583,7 @@ impl EvmTransactionsBuilder {
             blob_gas_price: StringBuilder::new(),
             begin_ordinal: UInt64Builder::new(),
             end_ordinal: UInt64Builder::new(),
-            fork_step: mk_fork_step(include_fork_step),
+            fork_step: fork_step_builder(include_fork_step),
         }
     }
 
@@ -1692,7 +1657,7 @@ impl EvmLogsBuilder {
             topic3: BytesColumn::new(encoding),
             data: BytesColumn::new(encoding),
             ordinal: UInt64Builder::new(),
-            fork_step: mk_fork_step(include_fork_step),
+            fork_step: fork_step_builder(include_fork_step),
         }
     }
 
@@ -1736,7 +1701,7 @@ impl EvmWithdrawalsBuilder {
             validator_index: UInt64Builder::new(),
             address: BytesColumn::new(encoding),
             amount_gwei: UInt64Builder::new(),
-            fork_step: mk_fork_step(include_fork_step),
+            fork_step: fork_step_builder(include_fork_step),
         }
     }
 
@@ -1802,7 +1767,7 @@ impl EvmAccessListsBuilder {
             access_index: UInt32Builder::new(),
             address: BytesColumn::new(encoding),
             storage_keys: BytesListColumn::new(encoding),
-            fork_step: mk_fork_step(include_fork_step),
+            fork_step: fork_step_builder(include_fork_step),
         }
     }
 
@@ -1887,7 +1852,7 @@ impl EvmSetCodeAuthorizationsBuilder {
             s: BytesColumn::new(encoding),
             authority: BytesColumn::new(encoding),
             discarded: BooleanBuilder::new(),
-            fork_step: mk_fork_step(include_fork_step),
+            fork_step: fork_step_builder(include_fork_step),
         }
     }
 
@@ -2012,7 +1977,7 @@ impl EvmCallsBuilder {
             address_delegates_to: BytesColumn::new(encoding),
             begin_ordinal: UInt64Builder::new(),
             end_ordinal: UInt64Builder::new(),
-            fork_step: mk_fork_step(include_fork_step),
+            fork_step: fork_step_builder(include_fork_step),
         }
     }
 
@@ -2122,7 +2087,7 @@ impl EvmBalanceChangesBuilder {
             reason: StringDictionaryBuilder::new(),
             state_reverted: BooleanBuilder::new(),
             persisted: BooleanBuilder::new(),
-            fork_step: mk_fork_step(include_fork_step),
+            fork_step: fork_step_builder(include_fork_step),
         }
     }
 
@@ -2203,7 +2168,7 @@ impl EvmCodeChangesBuilder {
             new_code: BytesColumn::new(encoding),
             state_reverted: BooleanBuilder::new(),
             persisted: BooleanBuilder::new(),
-            fork_step: mk_fork_step(include_fork_step),
+            fork_step: fork_step_builder(include_fork_step),
         }
     }
 
@@ -2283,7 +2248,7 @@ impl EvmStorageChangesBuilder {
             new_value: BytesColumn::new(encoding),
             state_reverted: BooleanBuilder::new(),
             persisted: BooleanBuilder::new(),
-            fork_step: mk_fork_step(include_fork_step),
+            fork_step: fork_step_builder(include_fork_step),
         }
     }
 
@@ -2359,7 +2324,7 @@ impl EvmNonceChangesBuilder {
             new_value: UInt64Builder::new(),
             state_reverted: BooleanBuilder::new(),
             persisted: BooleanBuilder::new(),
-            fork_step: mk_fork_step(include_fork_step),
+            fork_step: fork_step_builder(include_fork_step),
         }
     }
 
@@ -2431,7 +2396,7 @@ impl EvmGasChangesBuilder {
             new_value: UInt64Builder::new(),
             reason: StringDictionaryBuilder::new(),
             state_reverted: BooleanBuilder::new(),
-            fork_step: mk_fork_step(include_fork_step),
+            fork_step: fork_step_builder(include_fork_step),
         }
     }
 
@@ -2499,7 +2464,7 @@ impl EvmAccountCreationsBuilder {
             account: BytesColumn::new(encoding),
             state_reverted: BooleanBuilder::new(),
             persisted: BooleanBuilder::new(),
-            fork_step: mk_fork_step(include_fork_step),
+            fork_step: fork_step_builder(include_fork_step),
         }
     }
 
@@ -2595,7 +2560,7 @@ impl SystemCallsBuilder {
             address_delegates_to: BytesColumn::new(encoding),
             begin_ordinal: UInt64Builder::new(),
             end_ordinal: UInt64Builder::new(),
-            fork_step: mk_fork_step(include_fork_step),
+            fork_step: fork_step_builder(include_fork_step),
         }
     }
 
@@ -2691,7 +2656,7 @@ impl SystemBalanceChangesBuilder {
             old_value: StringBuilder::new(),
             new_value: StringBuilder::new(),
             reason: StringDictionaryBuilder::new(),
-            fork_step: mk_fork_step(include_fork_step),
+            fork_step: fork_step_builder(include_fork_step),
         }
     }
 
@@ -2756,7 +2721,7 @@ impl SystemCodeChangesBuilder {
             new_hash: BytesColumn::new(encoding),
             old_code: BytesColumn::new(encoding),
             new_code: BytesColumn::new(encoding),
-            fork_step: mk_fork_step(include_fork_step),
+            fork_step: fork_step_builder(include_fork_step),
         }
     }
 
@@ -2820,7 +2785,7 @@ impl SystemStorageChangesBuilder {
             key: BytesColumn::new(encoding),
             old_value: BytesColumn::new(encoding),
             new_value: BytesColumn::new(encoding),
-            fork_step: mk_fork_step(include_fork_step),
+            fork_step: fork_step_builder(include_fork_step),
         }
     }
 
@@ -2880,7 +2845,7 @@ impl SystemNonceChangesBuilder {
             address: BytesColumn::new(encoding),
             old_value: UInt64Builder::new(),
             new_value: UInt64Builder::new(),
-            fork_step: mk_fork_step(include_fork_step),
+            fork_step: fork_step_builder(include_fork_step),
         }
     }
 
@@ -2938,7 +2903,7 @@ impl SystemGasChangesBuilder {
             old_value: UInt64Builder::new(),
             new_value: UInt64Builder::new(),
             reason: StringDictionaryBuilder::new(),
-            fork_step: mk_fork_step(include_fork_step),
+            fork_step: fork_step_builder(include_fork_step),
         }
     }
 
@@ -2992,7 +2957,7 @@ impl SystemAccountCreationsBuilder {
             call_index: UInt32Builder::new(),
             ordinal: UInt64Builder::new(),
             account: BytesColumn::new(encoding),
-            fork_step: mk_fork_step(include_fork_step),
+            fork_step: fork_step_builder(include_fork_step),
         }
     }
 

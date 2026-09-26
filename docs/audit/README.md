@@ -44,6 +44,7 @@ lifecycle state; a local implementation or passing test alone is not closure.
 - [#515: adaptive compressed flush sizing and summed mapper limit](515-adaptive-flush-sizing.md)
 - [#530: shared authenticated gRPC clients](530-grpc-client-deduplication.md)
 - [#525: ingestion setup, runtime and flush decomposition](525-ingestion-decomposition.md)
+- [#526: chain profiles and shared mapper helpers](526-chain-profile.md)
 - [#516: proposed bounded ingestion concurrency; not implemented](516-concurrency-design.md)
 - [#565: safe fixed-width Base58 conversion](565-fixed-base58.md)
 
