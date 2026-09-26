@@ -9,7 +9,7 @@ use futures::{stream, StreamExt, TryStreamExt};
 use object_store::{GetOptions, GetRange, ObjectMeta, ObjectStore, UpdateVersion};
 use parquet::arrow::arrow_reader::{ArrowReaderMetadata, ArrowReaderOptions};
 use parquet::errors::ParquetError;
-use parquet::file::metadata::ParquetMetaDataReader;
+use parquet::file::metadata::{KeyValue, ParquetMetaDataReader};
 use std::ops::Range;
 use std::sync::Arc;
 use std::time::Duration;
@@ -90,14 +90,14 @@ fn validate_window(window: &[ObjectMeta]) -> Result<()> {
     Ok(())
 }
 
-pub(super) fn schemas(
-    client: &Arc<dyn ObjectStore>,
-    window: &[ObjectMeta],
-) -> Result<Vec<SchemaRef>> {
+/// Arrow schema and footer key-value metadata of one source.
+pub(super) type Footer = (SchemaRef, Option<Vec<KeyValue>>);
+
+pub(super) fn footers(client: &Arc<dyn ObjectStore>, window: &[ObjectMeta]) -> Result<Vec<Footer>> {
     validate_window(window)?;
     crate::cli::block_on_async(async {
         stream::iter(window)
-            .map(|object| arrow_schema(client, object, super::S3_FOOTER_PREFETCH_BYTES))
+            .map(|object| footer(client, object, super::S3_FOOTER_PREFETCH_BYTES))
             .buffered(MAX_ACTIVE)
             .try_collect()
             .await
@@ -114,11 +114,11 @@ pub(super) fn objects(client: &Arc<dyn ObjectStore>, window: &[ObjectMeta]) -> R
     })
 }
 
-pub(super) async fn arrow_schema(
+pub(super) async fn footer(
     client: &Arc<dyn ObjectStore>,
     object: &ObjectMeta,
     prefetch: u64,
-) -> Result<SchemaRef> {
+) -> Result<Footer> {
     ensure!(prefetch > 0, "S3 footer prefetch must be positive");
     let mut tail_len = object.size.min(prefetch);
     let mut reader = ParquetMetaDataReader::new();
@@ -140,26 +140,31 @@ pub(super) async fn arrow_schema(
     }
     let metadata =
         ArrowReaderMetadata::try_new(Arc::new(reader.finish()?), ArrowReaderOptions::default())?;
-    Ok(metadata.schema().clone())
+    let key_values = metadata
+        .metadata()
+        .file_metadata()
+        .key_value_metadata()
+        .cloned();
+    Ok((metadata.schema().clone(), key_values))
 }
 
 #[derive(Debug, thiserror::Error)]
 enum ReadFailure {
-    #[error("S3 merge source snapshot or range is invalid")]
+    #[error("S3 source snapshot or range is invalid")]
     InvalidRequest,
-    #[error("S3 merge source changed or was removed after listing")]
+    #[error("S3 source changed or was removed after listing")]
     Changed,
-    #[error("S3 merge response metadata does not match its listed snapshot")]
+    #[error("S3 source response metadata does not match its listed snapshot")]
     Metadata,
-    #[error("S3 merge response length does not match its requested range")]
+    #[error("S3 source response length does not match its requested range")]
     BodyLength,
-    #[error("S3 merge response buffer cannot be allocated")]
+    #[error("S3 source response buffer cannot be allocated")]
     Allocation,
-    #[error("S3 merge source request failed or its response was rejected")]
+    #[error("S3 source request failed or its response was rejected")]
     Request,
-    #[error("S3 merge source body read failed")]
+    #[error("S3 source body read failed")]
     Transport,
-    #[error("S3 merge source request timed out")]
+    #[error("S3 source request timed out")]
     Timeout,
 }
 impl ReadFailure {
@@ -168,7 +173,10 @@ impl ReadFailure {
     }
 }
 
-async fn pinned_range(
+/// Reads `range` of the listed snapshot of `object`, retrying transient failures of the same
+/// pinned version (never a freshly listed one) with bounded deadlines. Used by merge windows
+/// and rollup range reads.
+pub(crate) async fn pinned_range(
     client: &Arc<dyn ObjectStore>,
     object: &ObjectMeta,
     range: Range<u64>,

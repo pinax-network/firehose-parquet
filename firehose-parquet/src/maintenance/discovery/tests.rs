@@ -65,7 +65,7 @@ fn compare(root: &Path) {
     let before = legacy_named(root, "_fireparq_merge.json", &mut expected);
     let after = collect_local(
         root,
-        LocalPolicy::merge_journals("_fireparq_merge.json"),
+        LocalPolicy::named("_fireparq_merge.json"),
         &mut actual,
     );
     assert_eq!(
@@ -122,7 +122,7 @@ fn native_policy_matches_frozen_walkers_and_explicit_inventory() {
     let mut journals = vec![];
     collect_local(
         root.path(),
-        LocalPolicy::merge_journals("_fireparq_merge.json"),
+        LocalPolicy::named("_fireparq_merge.json"),
         &mut journals,
     )
     .unwrap();

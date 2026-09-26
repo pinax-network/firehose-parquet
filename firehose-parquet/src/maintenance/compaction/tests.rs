@@ -488,3 +488,61 @@ fn encoder_output_is_byte_identical_to_the_frozen_merge_and_rollup_loops() {
         .metadata()
         .contains_key("fireparq.ingest.transaction"));
 }
+
+#[test]
+fn schema_check_refuses_value_metadata_differences_but_ignores_descriptive_keys() {
+    let schema = make_test_batch(0).schema();
+    let kv = |pairs: &[(&str, &str)]| -> Vec<KeyValue> {
+        pairs
+            .iter()
+            .map(|(key, value)| KeyValue::new(key.to_string(), value.to_string()))
+            .collect()
+    };
+    let hex = kv(&[
+        ("firehose-parquet.block_id_encoding", "hex"),
+        ("firehose-parquet.version", "0.7.0"),
+        ("firehose-parquet.endpoint", "a:443"),
+    ]);
+    let hex_other_build = kv(&[
+        ("firehose-parquet.block_id_encoding", "hex"),
+        ("firehose-parquet.version", "0.7.1"),
+        ("firehose-parquet.endpoint", "b:443"),
+    ]);
+    let base58 = kv(&[("firehose-parquet.block_id_encoding", "base58")]);
+
+    let mut check = SchemaCheck::default();
+    assert_eq!(check.check("a", &schema, Some(&hex)), None);
+    // Tool version and endpoint describe the producer, not the values.
+    assert_eq!(check.check("b", &schema, Some(&hex_other_build)), None);
+    assert_eq!(
+        check.check("c", &schema, Some(&base58)).unwrap(),
+        "c does not match a: file metadata `firehose-parquet.block_id_encoding` is `base58` instead of `hex`"
+    );
+    assert_eq!(
+        check.check("d", &schema, None).unwrap(),
+        "d does not match a: file metadata `firehose-parquet.block_id_encoding` is absent instead of `hex`"
+    );
+
+    // Column and metadata differences are reported together.
+    let other_columns = Arc::new(Schema::new(vec![Field::new("x", DataType::Utf8, true)]));
+    let chains = kv(&[("firehose-parquet.chain_name", "sepolia")]);
+    let mut check = SchemaCheck::default();
+    assert_eq!(check.check("a", &schema, None), None);
+    let reason = check.check("b", &other_columns, Some(&chains)).unwrap();
+    assert!(reason.contains("missing column `block_number`"), "{reason}");
+    assert!(
+        reason
+            .contains("file metadata `firehose-parquet.chain_name` is `sepolia` instead of absent"),
+        "{reason}"
+    );
+    for key in VALUE_METADATA_KEYS {
+        let mut check = SchemaCheck::default();
+        assert_eq!(check.check("a", &schema, Some(&kv(&[(key, "1")]))), None);
+        assert!(
+            check
+                .check("b", &schema, Some(&kv(&[(key, "2")])))
+                .is_some(),
+            "{key}"
+        );
+    }
+}

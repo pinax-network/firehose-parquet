@@ -1,0 +1,159 @@
+{
+ "cases": {
+  "copy-merge-copy-fixed": {
+   "balance_changes": 23696,
+   "exits": [
+    0,
+    0,
+    0
+   ],
+   "rows_equal_pristine": true,
+   "total": 1049978
+  },
+  "copy-merge-copy-main": {
+   "balance_changes": 47392,
+   "exits": [
+    0,
+    0,
+    0
+   ],
+   "rows_equal_pristine": false,
+   "total": 2098996
+  },
+  "crash-copy-after-commit": {
+   "crash_exit": -6,
+   "except_all_zero": true,
+   "journals_left": 0,
+   "recovered": true,
+   "rerun_exit": 0,
+   "rows_equal_pristine": true,
+   "sources_left": 104,
+   "total": 1049978
+  },
+  "crash-copy-after-first-part": {
+   "crash_exit": -6,
+   "except_all_zero": true,
+   "journals_left": 0,
+   "recovered": true,
+   "rerun_exit": 0,
+   "rows_equal_pristine": true,
+   "sources_left": 104,
+   "total": 1049978
+  },
+  "crash-copy-after-outputs": {
+   "crash_exit": -6,
+   "except_all_zero": true,
+   "journals_left": 0,
+   "recovered": true,
+   "rerun_exit": 0,
+   "rows_equal_pristine": true,
+   "sources_left": 104,
+   "total": 1049978
+  },
+  "crash-inplace-after-commit": {
+   "crash_exit": -6,
+   "except_all_zero": true,
+   "journals_left": 0,
+   "recovered": true,
+   "rerun_exit": 0,
+   "rows_equal_pristine": true,
+   "sources_left": 0,
+   "total": 1049978
+  },
+  "crash-inplace-after-first-delete": {
+   "crash_exit": -6,
+   "except_all_zero": true,
+   "journals_left": 0,
+   "recovered": true,
+   "rerun_exit": 0,
+   "rows_equal_pristine": true,
+   "sources_left": 0,
+   "total": 1049978
+  },
+  "crash-inplace-after-first-part": {
+   "crash_exit": -6,
+   "except_all_zero": true,
+   "journals_left": 0,
+   "recovered": true,
+   "rerun_exit": 0,
+   "rows_equal_pristine": true,
+   "sources_left": 0,
+   "total": 1049978
+  },
+  "crash-inplace-after-outputs": {
+   "crash_exit": -6,
+   "except_all_zero": true,
+   "journals_left": 0,
+   "recovered": true,
+   "rerun_exit": 0,
+   "rows_equal_pristine": true,
+   "sources_left": 0,
+   "total": 1049978
+  },
+  "hex-base58-merge-fixed": {
+   "block_id_encoding_labels_after": [
+    "base58",
+    "hex"
+   ],
+   "exit": 1,
+   "files_after": [
+    "part-a4213a22-000001.parquet",
+    "part-a4213a22-000002.parquet"
+   ],
+   "files_before": [
+    "part-a4213a22-000001.parquet",
+    "part-a4213a22-000002.parquet"
+   ],
+   "reported": true
+  },
+  "hex-base58-merge-main": {
+   "block_id_encoding_labels_after": [
+    "hex"
+   ],
+   "exit": 0,
+   "files_after": [
+    "part-000001.parquet"
+   ],
+   "files_before": [
+    "part-a4213a22-000001.parquet",
+    "part-a4213a22-000002.parquet"
+   ],
+   "reported": false
+  },
+  "inplace-sigkill-fixed": {
+   "exit": -9,
+   "extra_rows": 0,
+   "journals_left": 0,
+   "killed": true,
+   "rerun_exit": 0,
+   "total": 1049978
+  },
+  "inplace-sigkill-main": {
+   "exit": -9,
+   "extra_rows": 1024,
+   "journals_left": 0,
+   "killed": true,
+   "rerun_exit": 0,
+   "total": 1051002
+  }
+ },
+ "dataset": "retained EVM mainnet blocks 24000000-24000029, 13 tables, minute partitions",
+ "fixed": "audit/maintenance-safety 9c25f5a release fireparq (sha256 462318f0f4cfe70ff997a44fc796315f9f3c707e64fab714c3c57dba6eaeac5e)",
+ "main": "origin/main 050f9ec release fireparq (sha256 8904e59306913d96ccaff3906de46624830cdf87c0abb1b7dfb7ed40c42c41f8)",
+ "pristine_rows": {
+  "balance_changes": 23696,
+  "blocks": 30,
+  "calls": 136770,
+  "code_changes": 1034,
+  "gas_changes": 732666,
+  "logs": 50710,
+  "nonce_changes": 7500,
+  "storage_changes": 91084,
+  "system_balance_changes": 480,
+  "system_calls": 120,
+  "system_gas_changes": 240,
+  "system_storage_changes": 90,
+  "transactions": 5558
+ },
+ "pristine_total": 1049978
+}

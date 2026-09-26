@@ -38,6 +38,20 @@ impl PartitionFiles for Files {
     fn label(&self) -> String {
         "fixture".into()
     }
+    // The fixture records journal-level events, so it overrides the journal methods and
+    // never reaches the raw record operations.
+    fn read_record(&self, _: &str, _: &str) -> Result<Option<Vec<u8>>> {
+        unreachable!()
+    }
+    fn create_record(&self, _: &str, _: &str, _: &[u8]) -> Result<bool> {
+        unreachable!()
+    }
+    fn replace_record(&self, _: &str, _: &str, _: &[u8]) -> Result<()> {
+        unreachable!()
+    }
+    fn journal_location(&self) -> &'static str {
+        "fixture"
+    }
     fn list_names(&self) -> Result<Vec<String>> {
         self.events.borrow_mut().push("list".into());
         Ok(vec![

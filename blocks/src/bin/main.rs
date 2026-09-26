@@ -2891,6 +2891,13 @@ async fn main() -> Result<()> {
                         result.schema_mismatches.len()
                     );
                 }
+                if !result.rollups_pending.is_empty() {
+                    anyhow::bail!(
+                        "{} partition(s) were not merged because an interrupted rollup of \
+                         their directory must be finished first; run that rollup again",
+                        result.rollups_pending.len()
+                    );
+                }
                 return Ok(());
             }
             Commands::Truncate {

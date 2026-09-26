@@ -8,7 +8,9 @@
 //! outside time partitions, and reserved dataset artifacts (`cursor.parquet`, see
 //! [`crate::artifacts`]) are never read, rewritten, or deleted. Every run writes new, uniquely
 //! named files, so a re-run cannot overwrite or delete its own output. A target partition whose
-//! source files have different schemas is left untouched and reported as an error.
+//! source files have different schemas or value-defining file metadata (see
+//! [`crate::maintenance::compaction::VALUE_METADATA_KEYS`]) is left untouched and reported
+//! as an error.
 
 use crate::artifacts::is_reserved_artifact_path;
 use crate::cli::{block_on_async, format_bytes, resolve_destructive_input_path, AwsConfig};
@@ -29,10 +31,11 @@ use parquet::file::metadata::KeyValue;
 #[cfg(test)]
 use parquet::file::properties::WriterProperties;
 use std::collections::{BTreeMap, HashSet};
-use std::io::Write;
 
 mod engine;
+mod journal;
 mod range_reader;
+pub(crate) use journal::ROLLUP_JOURNAL_FILE;
 use range_reader::RangeReader;
 const READER_BATCH_ROWS: usize = 1024;
 use std::path::{Path, PathBuf};
@@ -144,7 +147,7 @@ pub fn run_rollup(config: &RollupConfig) -> Result<()> {
     )?
     .ownership;
     if resolved.source.starts_with("s3://") || resolved.output.starts_with("s3://") {
-        run_rollup_s3(&resolved)
+        run_rollup_s3(&resolved, &ownership)
     } else {
         run_rollup_local(&resolved, &ownership)
     }?;
@@ -226,6 +229,10 @@ impl OutputNames {
         }
     }
 
+    fn run_id(&self) -> &str {
+        &self.run_id
+    }
+
     fn file_name(&self, part: u32) -> String {
         if self.copy {
             format!("{COPY_OUTPUT_PREFIX}{}-{part:06}.parquet", self.run_id)
@@ -249,6 +256,10 @@ fn run_rollup_local(config: &RollupConfig, ownership: &DatasetOwnership) -> Resu
     }
 
     let output = PathBuf::from(&config.output);
+
+    // Finish or undo interrupted rollups first: a committed one may still have sources
+    // that must be deleted, not rolled up again.
+    engine::recover_local(&source, &output, ownership)?;
 
     // Discover all .parquet files under source and keep the ones to roll up.
     let mut files: Vec<PathBuf> = Vec::new();
@@ -312,34 +323,47 @@ fn schema_mismatch_result(mismatches: &[String]) -> Result<()> {
     )
 }
 
-/// Create a new output file, failing instead of overwriting an existing one.
-fn create_output_file(path: &Path) -> Result<std::fs::File> {
-    std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(path)
-        .with_context(|| format!("creating output file {}", path.display()))
-}
-
-/// Delete copy outputs (`part-rollup-*.parquet`) of earlier runs directly inside `out_dir`.
+/// Delete copy outputs of earlier runs directly inside `out_dir`: files named
+/// `part-rollup-*.parquet`, or Parquet files whose footer carries the rollup copy marker
+/// (merge keeps it when it renames copies).
 ///
 /// They hold rows from sources that were kept, and those rows were just rolled up again into
 /// the files in `written`.
 fn remove_previous_copies_local(out_dir: &Path, written: &HashSet<PathBuf>) -> Result<()> {
     for entry in std::fs::read_dir(out_dir)? {
         let path = entry?.path();
-        let is_copy = path.is_file()
-            && path
-                .file_name()
-                .and_then(|name| name.to_str())
-                .is_some_and(is_copy_output);
-        if is_copy && !written.contains(&path) {
+        if !path.is_file() || written.contains(&path) {
+            continue;
+        }
+        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        let is_copy = is_copy_output(name)
+            || (name.ends_with(".parquet") && {
+                let file = std::fs::File::open(&path)
+                    .with_context(|| format!("opening {}", path.display()))?;
+                footer_is_copy(&file)
+                    .with_context(|| format!("reading Parquet footer of {}", path.display()))?
+            });
+        if is_copy {
             debug!(path = %path.display(), "deleting copy output of an earlier rollup");
             std::fs::remove_file(&path)
                 .with_context(|| format!("deleting earlier rollup output {}", path.display()))?;
         }
     }
     Ok(())
+}
+
+/// Whether a Parquet file's footer carries the rollup copy marker.
+fn footer_is_copy<R: parquet::file::reader::ChunkReader>(reader: &R) -> Result<bool> {
+    let metadata =
+        parquet::file::metadata::ParquetMetaDataReader::new().parse_and_finish(reader)?;
+    Ok(crate::maintenance::compaction::is_rollup_copy(
+        metadata
+            .file_metadata()
+            .key_value_metadata()
+            .map(Vec::as_slice),
+    ))
 }
 
 /// Group source files by their target (coarser) partition key.
@@ -453,7 +477,7 @@ impl S3Root {
     }
 }
 
-fn run_rollup_s3(config: &RollupConfig) -> Result<()> {
+fn run_rollup_s3(config: &RollupConfig, ownership: &DatasetOwnership) -> Result<()> {
     let aws = config
         .aws
         .as_ref()
@@ -481,10 +505,35 @@ fn run_rollup_s3(config: &RollupConfig) -> Result<()> {
         bucket: out_bucket,
         prefix: out_prefix,
     };
-    rollup_s3(config, &src, &out)
+    // Every mutated bucket's persistent owner is checked before each journal commit.
+    let mut owners = vec![ownership
+        .remote(&out.bucket)
+        .context("rollup output bucket is not owned")?];
+    if config.delete_source && src.bucket != out.bucket {
+        owners.push(
+            ownership
+                .remote(&src.bucket)
+                .context("rollup source bucket is not owned")?,
+        );
+    }
+    rollup_s3_owned(config, &src, &out, &owners)
 }
 
+#[cfg(test)]
 fn rollup_s3(config: &RollupConfig, src: &S3Root, out: &S3Root) -> Result<()> {
+    rollup_s3_owned(config, src, out, &[])
+}
+
+fn rollup_s3_owned(
+    config: &RollupConfig,
+    src: &S3Root,
+    out: &S3Root,
+    owners: &[&crate::dataset_lock_s3::S3Ownership],
+) -> Result<()> {
+    // Finish or undo interrupted rollups first: a committed one may still have sources
+    // that must be deleted, not rolled up again.
+    engine::recover_remote(src, out, config, owners)?;
+
     // List all .parquet objects under source prefix.
     let objects = block_on_async(discovery::list_objects(src.client.as_ref(), &src.prefix))
         .map_err(|e| anyhow::anyhow!("listing S3 objects: {e}"))?;
@@ -520,30 +569,40 @@ fn rollup_s3(config: &RollupConfig, src: &S3Root, out: &S3Root) -> Result<()> {
         return Ok(());
     }
 
-    engine::remote(src, out, &groups, config)
+    engine::remote(src, out, &groups, config, owners)
 }
 
-/// Delete copy outputs (`part-rollup-*.parquet`) of earlier runs directly under `group_key`.
+/// Delete copy outputs of earlier runs directly under the output directory key `dir`: objects named
+/// `part-rollup-*.parquet`, or Parquet objects whose footer carries the rollup copy marker
+/// (merge keeps it when it renames copies).
 ///
 /// They hold rows from sources that were kept, and those rows were just rolled up again into
 /// the objects in `written`.
-fn remove_previous_copies_s3(
-    out: &S3Root,
-    group_key: &str,
-    written: &HashSet<String>,
-) -> Result<()> {
-    let dir = object_store::path::Path::from(out.key(group_key).as_str());
+fn remove_previous_copies_s3(out: &S3Root, dir: &str, written: &HashSet<String>) -> Result<()> {
+    let dir = object_store::path::Path::from(dir);
     let listing = block_on_async(out.client.list_with_delimiter(Some(&dir)))
         .map_err(|e| anyhow::anyhow!("listing s3://{}/{dir}: {e}", out.bucket))?;
-    let keys = listing
-        .objects
-        .into_iter()
-        .filter(|object| {
-            object.location.filename().is_some_and(is_copy_output)
-                && !written.contains(object.location.as_ref())
-        })
-        .map(|object| object.location)
-        .collect::<Vec<_>>();
+    let mut keys = Vec::new();
+    for object in listing.objects {
+        if written.contains(object.location.as_ref()) {
+            continue;
+        }
+        let Some(name) = object.location.filename() else {
+            continue;
+        };
+        let is_copy = is_copy_output(name)
+            || (name.ends_with(".parquet")
+                && footer_is_copy(&RangeReader::new(out.client.clone(), object.clone()))
+                    .with_context(|| {
+                        format!(
+                            "reading Parquet footer of s3://{}/{}",
+                            out.bucket, object.location
+                        )
+                    })?);
+        if is_copy {
+            keys.push(object.location);
+        }
+    }
     block_on_async(crate::s3::delete::delete_objects_once(&out.client, &keys))?;
     Ok(())
 }
@@ -1466,6 +1525,9 @@ mod tests {
     fn s3_block_numbers(store: &Arc<dyn ObjectStore>, prefix: &str) -> Vec<u64> {
         let mut values = Vec::new();
         for key in s3_keys(store, prefix) {
+            if !key.ends_with(".parquet") {
+                continue;
+            }
             let reader = ParquetRecordBatchReaderBuilder::try_new(get_object(store, &key))
                 .unwrap()
                 .build()
@@ -1516,6 +1578,15 @@ mod tests {
             &[object_store::path::Path::from(prior_copy)]
         );
         assert_eq!(fake.counters.active.load(Ordering::SeqCst), 0);
+        // The group committed before the cleanup failed, so its journal stays for the next
+        // run to finish; the sources are still recorded there.
+        let journal = get_object(&store, &format!("out/{DAY}/{ROLLUP_JOURNAL_FILE}"));
+        let journal = journal::RollupJournal::decode(&journal, "test").unwrap();
+        assert_eq!(journal.state, crate::merge_journal::JournalState::Committed);
+        assert_eq!(
+            journal.sources,
+            [format!("{DAY}/hour=14/minute=30/part-first.parquet")]
+        );
     }
 
     /// Reproductions 1 and 3 on S3: an in-place re-run keeps the earlier output, and root
@@ -1856,5 +1927,389 @@ mod tests {
         assert!(local_parts == remote_parts);
         // Copy mode keeps every source in both storages.
         assert_eq!(s3_keys(&store, "src").len(), sources.len());
+    }
+
+    #[test]
+    fn test_rollup_skips_group_with_different_value_metadata() {
+        let encoding = |value: &str| {
+            vec![KeyValue::new(
+                "firehose-parquet.bytes_encoding".to_string(),
+                value.to_string(),
+            )]
+        };
+        let source = tempfile::tempdir().unwrap();
+        let output = tempfile::tempdir().unwrap();
+        let day = source.path().join(DAY);
+        std::fs::create_dir_all(day.join("hour=14/minute=30")).unwrap();
+        std::fs::create_dir_all(day.join("hour=14/minute=31")).unwrap();
+        write_test_parquet_with_metadata(
+            &day.join("hour=14/minute=30/part-aaaaaaaa-000001.parquet"),
+            &make_range_batch(0, 5),
+            encoding("hex"),
+        );
+        write_test_parquet_with_metadata(
+            &day.join("hour=14/minute=31/part-bbbbbbbb-000001.parquet"),
+            &make_range_batch(5, 5),
+            encoding("base58"),
+        );
+        let before = snapshot_parquet_files(source.path());
+
+        let err = run_rollup(&local_config(source.path(), output.path(), true))
+            .unwrap_err()
+            .to_string();
+
+        assert!(
+            err.contains(
+                "file metadata `firehose-parquet.bytes_encoding` is `base58` instead of `hex`"
+            ),
+            "{err}"
+        );
+        assert_eq!(snapshot_parquet_files(source.path()), before);
+        assert!(snapshot_parquet_files(output.path()).is_empty());
+
+        // The same group on S3 is refused the same way.
+        let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        for minute in ["30", "31"] {
+            let path = day.join(format!("hour=14/minute={minute}"));
+            let file = std::fs::read_dir(&path)
+                .unwrap()
+                .next()
+                .unwrap()
+                .unwrap()
+                .path();
+            put_object(
+                &store,
+                &format!(
+                    "mainnet/{DAY}/hour=14/minute={minute}/{}",
+                    file.file_name().unwrap().to_string_lossy()
+                ),
+                std::fs::read(&file).unwrap(),
+            );
+        }
+        let root = memory_root(&store, "mainnet");
+        let err = rollup_s3(&s3_config("mainnet", "mainnet", true), &root, &root)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("bytes_encoding"), "{err}");
+        assert_eq!(s3_keys(&store, "mainnet").len(), 2);
+    }
+
+    fn merge_config(path: &str) -> crate::merge::MergeConfig {
+        crate::merge::MergeConfig {
+            path: path.to_string(),
+            compression: Compression::None,
+            flush_rows: None,
+            flush_bytes: 0,
+            dry_run: false,
+            verbose: false,
+            aws: None,
+            cache_control: String::new(),
+        }
+    }
+
+    fn footer_marker(data: bytes::Bytes) -> bool {
+        let reader = ParquetRecordBatchReaderBuilder::try_new(data).unwrap();
+        crate::maintenance::compaction::is_rollup_copy(
+            reader
+                .metadata()
+                .file_metadata()
+                .key_value_metadata()
+                .map(Vec::as_slice),
+        )
+    }
+
+    /// Merge renames `part-rollup-*` copies. A re-run used to miss them and add a second copy
+    /// of every row; the footer marker that merge keeps now identifies them.
+    #[test]
+    fn copy_rollup_replaces_its_earlier_copies_after_merge_renamed_them() {
+        let dir = tempfile::tempdir().unwrap();
+        let (src, out) = (dir.path().join("src"), dir.path().join("out"));
+        for (minute, start) in [("30", 0), ("31", 1000), ("32", 2000)] {
+            write_range_file(
+                &src.join(format!(
+                    "{DAY}/hour=14/minute={minute}/part-00000001.parquet"
+                )),
+                start,
+                400,
+            );
+        }
+        let mut config = local_config(&src, &out, false);
+        config.flush_bytes = 1024;
+        run_rollup(&config).unwrap();
+        let group = out.join(DAY);
+        let first = file_names_in(&group);
+        assert!(
+            first.len() > 1,
+            "flush target must split the copy: {first:?}"
+        );
+        assert!(first.iter().all(|name| is_copy_output(name)));
+        for name in &first {
+            assert!(footer_marker(
+                std::fs::read(group.join(name)).unwrap().into()
+            ));
+        }
+
+        let merged = crate::merge::run_merge(&merge_config(&out.to_string_lossy())).unwrap();
+        assert_eq!(merged.partitions_merged, 1);
+        let renamed = file_names_in(&group);
+        assert_eq!(renamed, ["part-000001.parquet"]);
+        assert!(footer_marker(
+            std::fs::read(group.join(&renamed[0])).unwrap().into()
+        ));
+
+        run_rollup(&config).unwrap();
+        assert_eq!(local_block_numbers(&out), local_block_numbers(&src));
+        assert!(file_names_in(&group)
+            .iter()
+            .all(|name| is_copy_output(name)));
+
+        // Outputs that replace unmarked sources are not copies.
+        let in_place = dir.path().join("in-place");
+        write_range_file(
+            &in_place.join(format!("{DAY}/hour=14/minute=30/part-00000001.parquet")),
+            0,
+            10,
+        );
+        run_rollup(&local_config(&in_place, &in_place, true)).unwrap();
+        let outputs = file_names_in(&in_place.join(DAY));
+        assert_eq!(outputs.len(), 1);
+        assert!(!footer_marker(
+            std::fs::read(in_place.join(DAY).join(&outputs[0]))
+                .unwrap()
+                .into()
+        ));
+    }
+
+    #[test]
+    fn s3_copy_rollup_replaces_its_earlier_copies_after_merge_renamed_them() {
+        let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        for (minute, start) in [("30", 0), ("31", 1000), ("32", 2000)] {
+            put_range_object(
+                &store,
+                &format!("src/{DAY}/hour=14/minute={minute}/part-00000001.parquet"),
+                start,
+                400,
+            );
+        }
+        let mut config = s3_config("src", "out", false);
+        config.flush_bytes = 1024;
+        let (src, out) = (memory_root(&store, "src"), memory_root(&store, "out"));
+        rollup_s3(&config, &src, &out).unwrap();
+        assert!(s3_keys(&store, "out").len() > 1);
+
+        let merged =
+            crate::merge::merge_s3(&merge_config("s3://bucket/out"), &store, "bucket", "out")
+                .unwrap();
+        assert_eq!(merged.partitions_merged, 1);
+        let renamed: Vec<String> = s3_keys(&store, "out")
+            .into_iter()
+            .filter(|key| key.ends_with(".parquet"))
+            .collect();
+        assert_eq!(renamed, [format!("out/{DAY}/part-000001.parquet")]);
+        assert!(footer_marker(get_object(&store, &renamed[0])));
+
+        rollup_s3(&config, &src, &out).unwrap();
+        assert_eq!(
+            s3_block_numbers(&store, "out"),
+            s3_block_numbers(&store, "src")
+        );
+    }
+
+    // -- Crash safety --
+
+    const CRASH_STEPS: [&str; 4] = [
+        "after-first-part",
+        "after-outputs",
+        "after-commit",
+        "after-first-delete",
+    ];
+
+    /// Two days, several hours and minutes, two parts per minute: `(relative path, start, rows)`.
+    fn crash_layout() -> Vec<(String, u64, u64)> {
+        let mut files = Vec::new();
+        let mut start = 0;
+        for day in ["day=15", "day=16"] {
+            for hour in ["hour=00", "hour=01"] {
+                for minute in ["minute=00", "minute=01", "minute=02"] {
+                    for part in 1..=2 {
+                        files.push((
+                            format!(
+                                "blocks/year=2024/month=01/{day}/{hour}/{minute}/part-{part:06}.parquet"
+                            ),
+                            start,
+                            150,
+                        ));
+                        start += 1000;
+                    }
+                }
+            }
+        }
+        files
+    }
+
+    fn with_crash<T>(step: &str, f: impl FnOnce() -> T) -> T {
+        let injected: &'static str = Box::leak(format!("rollup-{step}").into_boxed_str());
+        crate::merge_journal::INJECTED_CRASH.with(|crash| *crash.borrow_mut() = Some(injected));
+        let value = f();
+        crate::merge_journal::INJECTED_CRASH.with(|crash| *crash.borrow_mut() = None);
+        value
+    }
+
+    fn local_journals(dir: &Path) -> Vec<PathBuf> {
+        let mut journals = Vec::new();
+        discovery::collect_local(dir, LocalPolicy::named(ROLLUP_JOURNAL_FILE), &mut journals)
+            .unwrap();
+        journals
+    }
+
+    /// Before journals, an in-place `rollup --delete-source` killed after its first part and
+    /// re-run kept the orphaned part next to a complete second rollup: permanent duplicates.
+    /// Every crash point now recovers to exactly the original rows.
+    #[test]
+    fn local_rollup_recovers_every_crash_point_to_exactly_the_original_rows() {
+        for copy in [false, true] {
+            for step in CRASH_STEPS {
+                if copy && step == "after-first-delete" {
+                    continue; // copies never delete sources
+                }
+                let dir = tempfile::tempdir().unwrap();
+                let src = dir.path().join("mainnet");
+                for (rel, start, rows) in crash_layout() {
+                    write_range_file(&src.join(rel), start, rows);
+                }
+                let original = local_block_numbers(&src);
+                let out = if copy {
+                    dir.path().join("copy")
+                } else {
+                    src.clone()
+                };
+                let mut config = local_config(&src, &out, !copy);
+                config.flush_bytes = 2048;
+
+                let error = with_crash(step, || run_rollup(&config)).unwrap_err();
+                assert!(format!("{error:#}").contains(step), "{step}: {error:#}");
+                assert_eq!(local_journals(&out).len(), 1, "{step} copy={copy}");
+
+                run_rollup(&config).unwrap();
+                assert!(local_journals(&out).is_empty(), "{step} copy={copy}");
+                assert_eq!(local_block_numbers(&out), original, "{step} copy={copy}");
+                if copy {
+                    assert_eq!(local_block_numbers(&src), original, "{step}: sources kept");
+                } else {
+                    let mut left = Vec::new();
+                    collect_parquet_files_recursive(&src, &mut left).unwrap();
+                    assert!(
+                        left.iter()
+                            .all(|file| !file.to_string_lossy().contains("hour=")),
+                        "{step}: every source was rolled up and deleted: {left:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn s3_rollup_recovers_every_crash_point_to_exactly_the_original_rows() {
+        for copy in [false, true] {
+            for step in CRASH_STEPS {
+                if copy && step == "after-first-delete" {
+                    continue;
+                }
+                let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+                for (rel, start, rows) in crash_layout() {
+                    put_range_object(&store, &format!("mainnet/{rel}"), start, rows);
+                }
+                let original = s3_block_numbers(&store, "mainnet");
+                let output = if copy { "copy" } else { "mainnet" };
+                let mut config = s3_config("mainnet", output, !copy);
+                config.flush_bytes = 2048;
+                let (src, out) = (memory_root(&store, "mainnet"), memory_root(&store, output));
+
+                let error = with_crash(step, || rollup_s3(&config, &src, &out)).unwrap_err();
+                assert!(format!("{error:#}").contains(step), "{step}: {error:#}");
+                let journals = |prefix: &str| {
+                    s3_keys(&store, prefix)
+                        .into_iter()
+                        .filter(|key| key.ends_with(ROLLUP_JOURNAL_FILE))
+                        .count()
+                };
+                assert_eq!(journals(output), 1, "{step} copy={copy}");
+
+                rollup_s3(&config, &src, &out).unwrap();
+                assert_eq!(journals(output), 0, "{step} copy={copy}");
+                assert_eq!(
+                    s3_block_numbers(&store, output),
+                    original,
+                    "{step} copy={copy}"
+                );
+                if copy {
+                    assert_eq!(s3_block_numbers(&store, "mainnet"), original);
+                } else {
+                    assert!(
+                        s3_keys(&store, "mainnet")
+                            .iter()
+                            .all(|key| !key.contains("hour=")),
+                        "{step}: every source was rolled up and deleted"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Merge renames parts, which would hide an interrupted rollup's outputs or remaining
+    /// sources from its recovery, so it leaves those partitions alone until rollup finishes.
+    #[test]
+    fn merge_waits_for_an_interrupted_rollup_below_its_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("mainnet");
+        for (rel, start, rows) in crash_layout() {
+            write_range_file(&src.join(rel), start, rows);
+        }
+        let original = local_block_numbers(&src);
+        let config = local_config(&src, &src, true);
+        assert!(with_crash("after-first-part", || run_rollup(&config)).is_err());
+        let before = snapshot_parquet_files(&src);
+
+        let merged = crate::merge::run_merge(&merge_config(&src.to_string_lossy())).unwrap();
+        assert!(!merged.rollups_pending.is_empty());
+        assert!(merged
+            .rollups_pending
+            .iter()
+            .all(|partition| partition.contains("day=15")));
+        // Minutes of the day that was not being rolled up still merge.
+        assert!(merged.partitions_merged > 0);
+        let after = snapshot_parquet_files(&src);
+        for (path, bytes) in &before {
+            if path.to_string_lossy().contains("day=15") {
+                assert!(after.contains(&(path.clone(), bytes.clone())), "{path:?}");
+            }
+        }
+
+        run_rollup(&config).unwrap();
+        assert_eq!(local_block_numbers(&src), original);
+        assert!(local_journals(&src).is_empty());
+
+        // The same partitions on S3.
+        let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        for (rel, start, rows) in crash_layout() {
+            put_range_object(&store, &format!("mainnet/{rel}"), start, rows);
+        }
+        let root = memory_root(&store, "mainnet");
+        let s3 = s3_config("mainnet", "mainnet", true);
+        assert!(with_crash("after-first-part", || rollup_s3(&s3, &root, &root)).is_err());
+        let merged = crate::merge::merge_s3(
+            &merge_config("s3://bucket/mainnet"),
+            &store,
+            "bucket",
+            "mainnet",
+        )
+        .unwrap();
+        assert!(!merged.rollups_pending.is_empty());
+        rollup_s3(&s3, &root, &root).unwrap();
+        assert_eq!(
+            s3_block_numbers(&store, "mainnet"),
+            original,
+            "S3 rows after recovery"
+        );
     }
 }

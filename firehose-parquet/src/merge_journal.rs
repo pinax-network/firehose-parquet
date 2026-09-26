@@ -42,6 +42,10 @@ pub(crate) const LOCK_FILE: &str = ".fireparq-merge.lock";
 /// `after-outputs`, `after-commit`, or `after-first-delete`.
 pub(crate) const CRASH_ENV: &str = "FIREPARQ_TEST_MERGE_CRASH_AT";
 
+/// Environment variable that aborts `rollup` at a named step, to test crash recovery:
+/// `after-first-part`, `after-outputs`, `after-commit`, or `after-first-delete`.
+pub(crate) const ROLLUP_CRASH_ENV: &str = "FIREPARQ_TEST_ROLLUP_CRASH_AT";
+
 const JOURNAL_VERSION: u32 = 1;
 
 #[cfg(test)]
@@ -54,12 +58,24 @@ thread_local! {
 /// Simulates a crash at `step` when [`CRASH_ENV`] names it: the process aborts without any
 /// cleanup, like `kill -9`. Tests inject an error instead.
 pub(crate) fn crash_point(step: &str) -> Result<()> {
+    crash_at(CRASH_ENV, step, step)
+}
+
+/// [`crash_point`] for `rollup`, driven by [`ROLLUP_CRASH_ENV`]. Tests inject
+/// `rollup-<step>` so merge and rollup steps stay distinct.
+pub(crate) fn rollup_crash_point(step: &str) -> Result<()> {
+    crash_at(ROLLUP_CRASH_ENV, step, &format!("rollup-{step}"))
+}
+
+fn crash_at(env: &str, step: &str, injected: &str) -> Result<()> {
     #[cfg(test)]
-    if INJECTED_CRASH.with(|crash| *crash.borrow() == Some(step)) {
-        anyhow::bail!("injected crash at {step}");
+    if INJECTED_CRASH.with(|crash| *crash.borrow() == Some(injected)) {
+        anyhow::bail!("injected crash at {injected}");
     }
-    if std::env::var(CRASH_ENV).is_ok_and(|value| value == step) {
-        eprintln!("{CRASH_ENV}={step}: aborting to simulate a crash");
+    #[cfg(not(test))]
+    let _ = injected;
+    if std::env::var(env).is_ok_and(|value| value == step) {
+        eprintln!("{env}={step}: aborting to simulate a crash");
         std::process::abort();
     }
     Ok(())
@@ -221,17 +237,40 @@ pub(crate) fn temp_output_name(name: &str, run_id: &str) -> String {
 }
 
 /// File operations on one partition directory, locally or on S3.
+///
+/// Control records (the merge journal `_fireparq_merge.json` and the rollup journal
+/// `_fireparq_rollup.json`) are bounded to [`crate::durable_state::MAX_CONTROL_BYTES`],
+/// created exclusively and replaced atomically; `what` names the record in errors.
 pub(crate) trait PartitionFiles {
     /// Human-readable location of the partition, for messages.
     fn label(&self) -> String;
     /// Names of every file directly in the partition directory.
     fn list_names(&self) -> Result<Vec<String>>;
-    fn read_journal(&self) -> Result<Option<Journal>>;
+    /// Bytes of the control record `name`, or `None` when it does not exist.
+    fn read_record(&self, name: &str, what: &str) -> Result<Option<Vec<u8>>>;
+    /// Creates the control record only if none exists. Returns false when one already does.
+    fn create_record(&self, name: &str, what: &str, data: &[u8]) -> Result<bool>;
+    /// Replaces the control record atomically.
+    fn replace_record(&self, name: &str, what: &str, data: &[u8]) -> Result<()>;
+
+    fn read_journal(&self) -> Result<Option<Journal>> {
+        self.read_record(JOURNAL_FILE, "merge journal")?
+            .map(|data| Journal::decode(&data, self.journal_location()))
+            .transpose()
+    }
     /// Creates the journal only if none exists. Returns false when one already does.
-    fn create_journal(&self, journal: &Journal) -> Result<bool>;
+    fn create_journal(&self, journal: &Journal) -> Result<bool> {
+        self.create_record(JOURNAL_FILE, "merge journal", &journal.encode()?)
+    }
     /// Replaces the journal atomically.
-    fn replace_journal(&self, journal: &Journal) -> Result<()>;
-    fn remove_journal(&self) -> Result<()>;
+    fn replace_journal(&self, journal: &Journal) -> Result<()> {
+        self.replace_record(JOURNAL_FILE, "merge journal", &journal.encode()?)
+    }
+    fn remove_journal(&self) -> Result<()> {
+        self.delete(JOURNAL_FILE)
+    }
+    /// How decode errors name this partition's journal.
+    fn journal_location(&self) -> &'static str;
     /// Deletes a file; a file that is already gone is not an error.
     fn delete(&self, name: &str) -> Result<()>;
     /// Delete one already-validated recovery phase; controls are handled separately.
@@ -335,32 +374,43 @@ pub(crate) async fn read_remote_journal(
     client: &Arc<dyn ObjectStore>,
     path: &object_store::path::Path,
 ) -> Result<Option<Journal>> {
+    read_remote_record(client, path, "merge journal")
+        .await?
+        .map(|bytes| Journal::decode(&bytes, "remote partition"))
+        .transpose()
+}
+
+/// Bounded read of one remote control record. NotFound alone means no record.
+pub(crate) async fn read_remote_record(
+    client: &Arc<dyn ObjectStore>,
+    path: &object_store::path::Path,
+    what: &str,
+) -> Result<Option<Vec<u8>>> {
     use futures::StreamExt;
     tokio::time::timeout(std::time::Duration::from_secs(60), async {
         let response = match client.get(path).await {
             Ok(response) => response,
             Err(object_store::Error::NotFound { .. }) => return Ok(None),
-            Err(_) => anyhow::bail!("reading remote merge journal failed"),
+            Err(_) => anyhow::bail!("reading remote {what} failed"),
         };
         anyhow::ensure!(
             response.meta.size <= crate::durable_state::MAX_CONTROL_BYTES as u64,
-            "merge journal exceeds the control-record byte limit"
+            "{what} exceeds the control-record byte limit"
         );
         let mut bytes = Vec::new();
         let mut stream = response.into_stream();
         while let Some(chunk) = stream.next().await {
-            let chunk =
-                chunk.map_err(|_| anyhow::anyhow!("reading remote merge journal body failed"))?;
+            let chunk = chunk.map_err(|_| anyhow::anyhow!("reading remote {what} body failed"))?;
             anyhow::ensure!(
                 chunk.len() <= crate::durable_state::MAX_CONTROL_BYTES.saturating_sub(bytes.len()),
-                "merge journal exceeds the control-record byte limit"
+                "{what} exceeds the control-record byte limit"
             );
             bytes.extend_from_slice(&chunk);
         }
-        Journal::decode(&bytes, "remote partition").map(Some)
+        Ok(Some(bytes))
     })
     .await
-    .map_err(|_| anyhow::anyhow!("remote merge journal read timed out"))?
+    .map_err(|_| anyhow::anyhow!("remote {what} read timed out"))?
 }
 
 // ---------------------------------------------------------------------------
@@ -377,10 +427,6 @@ impl LocalPartition {
         Self {
             dir: dir.to_path_buf(),
         }
-    }
-
-    fn journal_path(&self) -> PathBuf {
-        self.dir.join(JOURNAL_FILE)
     }
 
     /// Writes `data` to a new temporary file next to `name` and fsyncs it.
@@ -416,29 +462,29 @@ impl PartitionFiles for LocalPartition {
         Ok(names)
     }
 
-    fn read_journal(&self) -> Result<Option<Journal>> {
-        let path = self.journal_path();
+    fn read_record(&self, name: &str, what: &str) -> Result<Option<Vec<u8>>> {
+        let path = self.dir.join(name);
         let metadata = match std::fs::symlink_metadata(&path) {
             Ok(metadata) => metadata,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(error) => return Err(error).context("reading merge journal metadata"),
+            Err(error) => return Err(error).with_context(|| format!("reading {what} metadata")),
         };
         anyhow::ensure!(
             metadata.is_file()
                 && !metadata.file_type().is_symlink()
                 && metadata.len() <= crate::durable_state::MAX_CONTROL_BYTES as u64,
-            "merge journal is not a bounded regular file"
+            "{what} is not a bounded regular file"
         );
         let mut data = Vec::new();
         File::open(path)?
             .take((crate::durable_state::MAX_CONTROL_BYTES + 1) as u64)
             .read_to_end(&mut data)?;
-        Journal::decode(&data, "local partition").map(Some)
+        Ok(Some(data))
     }
 
-    fn create_journal(&self, journal: &Journal) -> Result<bool> {
-        let path = self.journal_path();
-        let tmp = self.write_temp(JOURNAL_FILE, &journal.encode()?)?;
+    fn create_record(&self, name: &str, _what: &str, data: &[u8]) -> Result<bool> {
+        let path = self.dir.join(name);
+        let tmp = self.write_temp(name, data)?;
         // A hard link fails when the target exists, so this claims the partition atomically
         // with complete contents.
         let linked = std::fs::hard_link(&tmp, &path);
@@ -453,9 +499,9 @@ impl PartitionFiles for LocalPartition {
         }
     }
 
-    fn replace_journal(&self, journal: &Journal) -> Result<()> {
-        let path = self.journal_path();
-        let tmp = self.write_temp(JOURNAL_FILE, &journal.encode()?)?;
+    fn replace_record(&self, name: &str, _what: &str, data: &[u8]) -> Result<()> {
+        let path = self.dir.join(name);
+        let tmp = self.write_temp(name, data)?;
         if let Err(err) = std::fs::rename(&tmp, &path) {
             let _ = std::fs::remove_file(&tmp);
             return Err(err).with_context(|| format!("replacing {}", path.display()));
@@ -463,8 +509,8 @@ impl PartitionFiles for LocalPartition {
         self.sync()
     }
 
-    fn remove_journal(&self) -> Result<()> {
-        self.delete(JOURNAL_FILE)
+    fn journal_location(&self) -> &'static str {
+        "local partition"
     }
 
     fn delete(&self, name: &str) -> Result<()> {
@@ -506,7 +552,32 @@ pub(crate) fn write_local_output(
     Ok(path)
 }
 
-fn sync_dir(dir: &Path) -> Result<()> {
+/// [`write_local_output`] that never replaces an existing file: the fsynced temporary file
+/// is hard-linked into place, which fails when `name` exists.
+pub(crate) fn write_local_output_exclusive(
+    dir: &Path,
+    name: &str,
+    data: &[u8],
+    run_id: &str,
+) -> Result<PathBuf> {
+    let path = dir.join(name);
+    let tmp = dir.join(temp_output_name(name, run_id));
+    let write = || -> Result<()> {
+        let mut file =
+            File::create_new(&tmp).with_context(|| format!("creating {}", tmp.display()))?;
+        file.write_all(data)
+            .and_then(|()| file.sync_all())
+            .with_context(|| format!("writing {}", tmp.display()))?;
+        std::fs::hard_link(&tmp, &path)
+            .with_context(|| format!("creating output file {}", path.display()))
+    };
+    let written = write();
+    let _ = std::fs::remove_file(&tmp);
+    written.map(|()| path)
+}
+
+/// Fsyncs a directory so earlier creates, renames and deletes in it are durable.
+pub(crate) fn sync_dir(dir: &Path) -> Result<()> {
     #[cfg(unix)]
     File::open(dir)
         .and_then(|dir| dir.sync_all())
@@ -651,14 +722,14 @@ impl PartitionFiles for S3Partition<'_> {
         Ok(names)
     }
 
-    fn read_journal(&self) -> Result<Option<Journal>> {
-        let path = self.path(JOURNAL_FILE);
-        block_on_async(read_remote_journal(self.client, &path))
+    fn read_record(&self, name: &str, what: &str) -> Result<Option<Vec<u8>>> {
+        let path = self.path(name);
+        block_on_async(read_remote_record(self.client, &path, what))
     }
 
-    fn create_journal(&self, journal: &Journal) -> Result<bool> {
-        let path = self.path(JOURNAL_FILE);
-        let payload = object_store::PutPayload::from(journal.encode()?);
+    fn create_record(&self, name: &str, what: &str, data: &[u8]) -> Result<bool> {
+        let path = self.path(name);
+        let payload = object_store::PutPayload::from(data.to_vec());
         match block_on_async(self.client.put_opts(
             &path,
             payload.clone(),
@@ -670,26 +741,24 @@ impl PartitionFiles for S3Partition<'_> {
                 | object_store::Error::Precondition { .. },
             ) => Ok(false),
             Err(object_store::Error::NotImplemented | object_store::Error::NotSupported { .. }) => {
-                anyhow::bail!(
-                    "S3 merge requires conditional journal creation; refusing unsafe fallback"
-                )
+                anyhow::bail!("S3 {what} requires conditional creation; refusing unsafe fallback")
             }
             Err(err) => Err(err).with_context(|| format!("writing s3://{}/{path}", self.bucket)),
         }
     }
 
-    fn replace_journal(&self, journal: &Journal) -> Result<()> {
-        let path = self.path(JOURNAL_FILE);
+    fn replace_record(&self, name: &str, _what: &str, data: &[u8]) -> Result<()> {
+        let path = self.path(name);
         block_on_async(
             self.client
-                .put(&path, object_store::PutPayload::from(journal.encode()?)),
+                .put(&path, object_store::PutPayload::from(data.to_vec())),
         )
         .with_context(|| format!("writing s3://{}/{path}", self.bucket))?;
         Ok(())
     }
 
-    fn remove_journal(&self) -> Result<()> {
-        self.delete(JOURNAL_FILE)
+    fn journal_location(&self) -> &'static str {
+        "remote partition"
     }
 
     fn delete(&self, name: &str) -> Result<()> {

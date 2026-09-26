@@ -16,7 +16,6 @@ use crate::merge_journal::{
 };
 use crate::writer::s3_put_options;
 use anyhow::{Context, Result};
-use arrow::datatypes::SchemaRef;
 #[cfg(test)]
 use arrow::record_batch::RecordBatch;
 use object_store::ObjectStore;
@@ -34,7 +33,7 @@ use std::time::Duration;
 use tracing::{debug, info, info_span, warn};
 
 mod engine;
-mod read;
+pub(crate) mod read;
 
 #[cfg(test)]
 use crate::maintenance::compaction::describe_schema_mismatch;
@@ -92,13 +91,16 @@ pub struct MergeResult {
     pub files_written: usize,
     pub bytes_before: u64,
     pub bytes_after: u64,
-    /// Partitions left untouched because their parts have different schemas, each as
-    /// `<partition>: <reason>`.
+    /// Partitions left untouched because their parts have different schemas or value-defining
+    /// file metadata, each as `<partition>: <reason>`.
     pub schema_mismatches: Vec<String>,
     /// Interrupted partition merges from earlier runs that were finished or undone first.
     pub merges_recovered: usize,
     /// Partitions another running merge was working on, left alone.
     pub partitions_in_use: Vec<String>,
+    /// Partitions left alone because an interrupted rollup of their directory must be
+    /// finished first.
+    pub rollups_pending: Vec<String>,
 }
 
 impl MergeResult {
@@ -121,6 +123,12 @@ impl MergeResult {
             println!(
                 "  In use by another merge: {}",
                 self.partitions_in_use.join(", ")
+            );
+        }
+        if !self.rollups_pending.is_empty() {
+            println!(
+                "  Waiting for an interrupted rollup: {}",
+                self.rollups_pending.join(", ")
             );
         }
         if !self.schema_mismatches.is_empty() {
@@ -180,12 +188,17 @@ fn file_name_string(path: &Path) -> String {
         .unwrap_or_else(|| path.display().to_string())
 }
 
-/// Reads the Arrow schema of a local Parquet file from its footer.
-fn read_local_arrow_schema(path: &Path) -> Result<SchemaRef> {
+/// Reads the Arrow schema and key-value metadata of a local Parquet file from its footer.
+fn read_local_footer(path: &Path) -> Result<read::Footer> {
     let file = std::fs::File::open(path).with_context(|| format!("opening {}", path.display()))?;
     let builder = ParquetRecordBatchReaderBuilder::try_new(file)
         .with_context(|| format!("reading Parquet footer of {}", path.display()))?;
-    Ok(Arc::clone(builder.schema()))
+    let key_values = builder
+        .metadata()
+        .file_metadata()
+        .key_value_metadata()
+        .cloned();
+    Ok((Arc::clone(builder.schema()), key_values))
 }
 
 // ---------------------------------------------------------------------------
@@ -282,11 +295,7 @@ fn recover_local_merges(
     result: &mut MergeResult,
 ) -> Result<()> {
     let mut journals = Vec::new();
-    discovery::collect_local(
-        root,
-        LocalPolicy::merge_journals(JOURNAL_FILE),
-        &mut journals,
-    )?;
+    discovery::collect_local(root, LocalPolicy::named(JOURNAL_FILE), &mut journals)?;
     journals.sort();
     for journal_path in journals {
         let dir = journal_path.parent().unwrap_or(root);
@@ -330,6 +339,13 @@ fn merge_local_partitions(
         !reserved
     });
     all_files.sort();
+    let mut rollups = Vec::new();
+    discovery::collect_local(
+        root,
+        LocalPolicy::named(crate::rollup::ROLLUP_JOURNAL_FILE),
+        &mut rollups,
+    )?;
+    let rollup_dirs: Vec<&Path> = rollups.iter().filter_map(|path| path.parent()).collect();
 
     engine::for_each_partition(
         &root.display().to_string(),
@@ -338,6 +354,7 @@ fn merge_local_partitions(
         |dir, files, current_table| {
             let partition = LocalMerge {
                 label: local_partition_label(root, dir),
+                rollup_pending: rollup_dirs.iter().any(|rollup| dir.starts_with(rollup)),
                 dir,
                 files: LocalPartition::new(dir),
                 run,
@@ -360,9 +377,23 @@ fn record_partition_in_use(partition_label: &str, result: &mut MergeResult) {
     result.partitions_in_use.push(partition_label.to_string());
 }
 
+/// Reports a partition below an interrupted rollup, which that rollup must finish first.
+fn record_rollup_pending(partition_label: &str, result: &mut MergeResult) {
+    warn!(
+        partition = partition_label,
+        "not merging partition: an interrupted rollup must be finished first"
+    );
+    println!(
+        "  {partition_label}: skipped; an interrupted rollup must be finished first (run the same rollup again)"
+    );
+    result.partitions_skipped += 1;
+    result.rollups_pending.push(partition_label.to_string());
+}
+
 /// One local partition directory under the common directory guard and the legacy run lock.
 struct LocalMerge<'a> {
     label: String,
+    rollup_pending: bool,
     dir: &'a Path,
     files: LocalPartition,
     run: &'a RunContext,
@@ -413,8 +444,9 @@ impl engine::PartitionMerge for LocalMerge<'_> {
     fn schema_mismatch(&self, files: &[PathBuf]) -> Result<Option<String>> {
         let mut schema_check = SchemaCheck::default();
         for file in files {
-            let schema = read_local_arrow_schema(file)?;
-            if let Some(reason) = schema_check.check(&file_name_string(file), &schema) {
+            let (schema, key_values) = read_local_footer(file)?;
+            let key_values = key_values.as_deref();
+            if let Some(reason) = schema_check.check(&file_name_string(file), &schema, key_values) {
                 return Ok(Some(reason));
             }
         }
@@ -470,6 +502,10 @@ impl engine::PartitionMerge for LocalMerge<'_> {
 
     fn check_owner(&self) -> Result<()> {
         self.revalidate()
+    }
+
+    fn rollup_pending(&self) -> bool {
+        self.rollup_pending
     }
 
     fn delete_sources(&self, files: &[PathBuf], outputs: &[String]) -> Result<()> {
@@ -541,9 +577,10 @@ fn max_part_number_in_local_files(files: &[PathBuf]) -> u32 {
 }
 
 fn max_part_number_in_s3_objects(objects: &[object_store::ObjectMeta]) -> u32 {
+    // Objects directly at the bucket root have no '/' but still have a file name.
     objects
         .iter()
-        .filter_map(|obj| obj.location.as_ref().rsplit_once('/').map(|(_, name)| name))
+        .filter_map(|obj| obj.location.filename())
         .filter_map(parse_part_number)
         .max()
         .unwrap_or(0)
@@ -597,7 +634,7 @@ struct S3Merge<'a> {
 }
 
 #[cfg(test)]
-fn merge_s3(
+pub(crate) fn merge_s3(
     config: &MergeConfig,
     client: &Arc<dyn ObjectStore>,
     bucket: &str,
@@ -656,12 +693,18 @@ fn list_s3_objects(s3: &S3Merge<'_>) -> Result<Vec<object_store::ObjectMeta>> {
 }
 
 fn assert_s3_ownership(owner: &S3Ownership) -> Result<()> {
+    assert_s3_owner(owner, "merge")
+}
+
+/// Fails when a persistent bucket owner is unresolved or changed; `operation` names the
+/// command in the error. A changed ownership record is never taken over.
+pub(crate) fn assert_s3_owner(owner: &S3Ownership, operation: &str) -> Result<()> {
     if owner.is_mutation_uncertain()
         || block_on_async(S3Ownership::status(owner.object_store()))?.as_ref()
             != Some(owner.record())
     {
         anyhow::bail!(
-            "S3 merge ownership is unresolved or changed; stopping before further mutation"
+            "S3 {operation} ownership is unresolved or changed; stopping before further mutation"
         );
     }
     Ok(())
@@ -709,7 +752,21 @@ fn merge_s3_partitions(
     result: &mut MergeResult,
 ) -> Result<()> {
     let prefix = s3.prefix;
-    let mut parquet_objects: Vec<_> = list_s3_objects(s3)?
+    let objects = list_s3_objects(s3)?;
+    let rollup_dirs: Vec<String> = objects
+        .iter()
+        .filter(|obj| {
+            obj.location.filename() == Some(crate::rollup::ROLLUP_JOURNAL_FILE)
+                && !crate::artifacts::is_control_path(obj.location.as_ref())
+        })
+        .map(|obj| {
+            obj.location
+                .as_ref()
+                .rsplit_once('/')
+                .map_or(String::new(), |(dir, _)| dir.to_string())
+        })
+        .collect();
+    let mut parquet_objects: Vec<_> = objects
         .into_iter()
         .filter(|obj| obj.location.as_ref().ends_with(".parquet"))
         .filter(|obj| {
@@ -739,6 +796,13 @@ fn merge_s3_partitions(
                 s3,
                 key: partition_key,
                 label,
+                rollup_pending: rollup_dirs.iter().any(|rollup| {
+                    rollup.is_empty()
+                        || partition_key == rollup
+                        || partition_key
+                            .strip_prefix(rollup.as_str())
+                            .is_some_and(|tail| tail.starts_with('/'))
+                }),
                 table: engine::table_of(label),
                 files: S3Partition {
                     client: s3.client,
@@ -750,6 +814,16 @@ fn merge_s3_partitions(
             engine::merge_partition(&partition, objects, config, current_table, result)
         },
     )
+}
+
+/// Key of `name` inside the partition `key`; a bucket-root partition has no `/` prefix,
+/// matching listed object locations.
+fn s3_child_key(key: &str, name: &str) -> String {
+    if key.is_empty() {
+        name.to_owned()
+    } else {
+        format!("{key}/{name}")
+    }
 }
 
 /// Partition key relative to the merged prefix, `(root)` for the prefix itself.
@@ -767,6 +841,7 @@ struct S3PartitionMerge<'a> {
     s3: &'a S3Merge<'a>,
     key: &'a str,
     label: &'a str,
+    rollup_pending: bool,
     table: &'a str,
     files: S3Partition<'a>,
     config: &'a MergeConfig,
@@ -816,10 +891,10 @@ impl<'a> engine::PartitionMerge for S3PartitionMerge<'a> {
         let mut schema_check = SchemaCheck::default();
         for window in read::windows(objects) {
             let window = window?;
-            let schemas = read::schemas(self.s3.client, window)?;
-            for (obj, schema) in window.iter().zip(schemas) {
+            let footers = read::footers(self.s3.client, window)?;
+            for (obj, (schema, key_values)) in window.iter().zip(footers) {
                 let name = obj.location.filename().unwrap_or(obj.location.as_ref());
-                if let Some(reason) = schema_check.check(name, &schema) {
+                if let Some(reason) = schema_check.check(name, &schema, key_values.as_deref()) {
                     return Ok(Some(reason));
                 }
             }
@@ -885,7 +960,7 @@ impl<'a> engine::PartitionMerge for S3PartitionMerge<'a> {
 
     fn publish(&self, name: &str, data: Vec<u8>, _rows: usize) -> Result<()> {
         let (client, bucket) = (self.s3.client, self.s3.bucket);
-        let s3_path = object_store::path::Path::from(format!("{}/{name}", self.key));
+        let s3_path = object_store::path::Path::from(s3_child_key(self.key, name));
         let size = data.len();
         put_s3_bytes_once(
             client,
@@ -914,6 +989,10 @@ impl<'a> engine::PartitionMerge for S3PartitionMerge<'a> {
         self.assert_owner()
     }
 
+    fn rollup_pending(&self) -> bool {
+        self.rollup_pending
+    }
+
     fn delete_sources(
         &self,
         objects: &[object_store::ObjectMeta],
@@ -922,7 +1001,7 @@ impl<'a> engine::PartitionMerge for S3PartitionMerge<'a> {
         let bucket = self.s3.bucket;
         let written: HashSet<String> = outputs
             .iter()
-            .map(|name| format!("{}/{name}", self.key))
+            .map(|name| s3_child_key(self.key, name))
             .collect();
         let source_keys = objects
             .iter()
@@ -1685,7 +1764,7 @@ mod tests {
 
         // A 16-byte prefetch holds only the footer tail, so the metadata is fetched again.
         for prefetch in [16, S3_FOOTER_PREFETCH_BYTES] {
-            let schema = block_on_async(read::arrow_schema(&store, &meta, prefetch)).unwrap();
+            let (schema, _) = block_on_async(read::footer(&store, &meta, prefetch)).unwrap();
             assert_eq!(
                 schema.fields(),
                 batch.schema().fields(),
@@ -2346,6 +2425,132 @@ mod tests {
         }
     }
 
+    /// Part files directly at an S3 bucket root used to be numbered from zero, so the first
+    /// output overwrote `part-000001.parquet` and the source deletes then removed it too.
+    #[test]
+    fn s3_bucket_root_merge_numbers_after_sources_and_keeps_every_row() {
+        let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        for part in 0..3u64 {
+            put_object(
+                &store,
+                &format!("part-{:06}.parquet", part + 1),
+                parquet_bytes(&make_range_batch(part * 10, 10)),
+            );
+        }
+        let result = merge_s3(&test_merge_config("s3://bucket"), &store, "bucket", "").unwrap();
+        assert_eq!((result.partitions_merged, result.files_written), (1, 1));
+        let keys: Vec<String> = list_keys(&store, "")
+            .into_iter()
+            .filter(|key| key.ends_with(".parquet"))
+            .collect();
+        assert_eq!(keys, ["part-000004.parquet"]);
+        assert_eq!(s3_values(&store, ""), (0..30).collect::<Vec<_>>());
+    }
+
+    fn encoding_metadata(encoding: &str) -> Vec<KeyValue> {
+        vec![
+            KeyValue::new("firehose-parquet.block_type".to_string(), "evm".to_string()),
+            KeyValue::new(
+                "firehose-parquet.block_id_encoding".to_string(),
+                encoding.to_string(),
+            ),
+        ]
+    }
+
+    fn parquet_bytes_with_metadata(batch: &RecordBatch, kvs: Vec<KeyValue>) -> Vec<u8> {
+        let props = WriterProperties::builder()
+            .set_key_value_metadata(Some(kvs))
+            .build();
+        let mut buf = Vec::new();
+        let mut writer = ArrowWriter::try_new(&mut buf, batch.schema(), Some(props)).unwrap();
+        writer.write(batch).unwrap();
+        writer.close().unwrap();
+        buf
+    }
+
+    /// Parts with identical columns but hex and base58 block ids used to merge into one file
+    /// labelled with the first part's encoding.
+    #[test]
+    fn test_merge_skips_partition_with_different_value_metadata() {
+        let dir = tempfile::tempdir().unwrap();
+        let mixed = dir.path().join("blocks/year=2024/month=01/day=15");
+        let healthy = dir.path().join("blocks/year=2024/month=01/day=16");
+        std::fs::create_dir_all(&mixed).unwrap();
+        std::fs::create_dir_all(&healthy).unwrap();
+        write_test_parquet_with_metadata(
+            &mixed.join("part-000001.parquet"),
+            &make_range_batch(0, 10),
+            encoding_metadata("hex"),
+        );
+        write_test_parquet_with_metadata(
+            &mixed.join("part-000002.parquet"),
+            &make_range_batch(10, 10),
+            encoding_metadata("base58"),
+        );
+        for part in 1..=2u64 {
+            let mut kvs = encoding_metadata("hex");
+            // Descriptive keys may differ between the parts that merge.
+            kvs.push(KeyValue::new(
+                "firehose-parquet.version".to_string(),
+                format!("0.7.{part}"),
+            ));
+            write_test_parquet_with_metadata(
+                &healthy.join(format!("part-00000{part}.parquet")),
+                &make_range_batch(part * 100, 10),
+                kvs,
+            );
+        }
+        let before = snapshot_dir(&mixed);
+
+        let result = run_merge(&test_merge_config(&dir.path().to_string_lossy())).unwrap();
+
+        assert_eq!(result.partitions_merged, 1);
+        assert_eq!(result.schema_mismatches.len(), 1);
+        assert!(
+            result.schema_mismatches[0].contains(
+                "file metadata `firehose-parquet.block_id_encoding` is `base58` instead of `hex`"
+            ),
+            "{:?}",
+            result.schema_mismatches
+        );
+        assert_eq!(snapshot_dir(&mixed), before);
+        assert_eq!(entries(&healthy), ["part-000003.parquet"]);
+    }
+
+    #[test]
+    fn test_merge_s3_skips_partition_with_different_value_metadata() {
+        let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let mixed = "evm/blocks/year=2024/month=01/day=15";
+        for (part, encoding) in [(1u64, "hex"), (2, "base58")] {
+            put_object(
+                &store,
+                &format!("{mixed}/part-00000{part}.parquet"),
+                parquet_bytes_with_metadata(
+                    &make_range_batch(part * 10, 10),
+                    encoding_metadata(encoding),
+                ),
+            );
+        }
+        let keys = list_keys(&store, mixed);
+        let before: Vec<bytes::Bytes> = keys.iter().map(|key| get_object(&store, key)).collect();
+
+        let result = merge_s3(
+            &test_merge_config("s3://bucket/evm"),
+            &store,
+            "bucket",
+            "evm",
+        )
+        .unwrap();
+
+        assert_eq!(result.partitions_merged, 0);
+        assert_eq!(result.schema_mismatches.len(), 1);
+        assert!(result.schema_mismatches[0].contains("block_id_encoding"));
+        assert_eq!(list_keys(&store, mixed), keys);
+        for (key, bytes) in keys.iter().zip(&before) {
+            assert_eq!(&get_object(&store, key), bytes, "{key}");
+        }
+    }
+
     #[tokio::test]
     async fn remote_recovery_data_error_never_removes_journal_or_other_phase_keys() {
         use crate::merge_journal::JournalState;
@@ -2458,7 +2663,7 @@ pub(crate) async fn recover_guarded_for_ingestion(
                 .context("merge recovery has no local owner")?;
 
             let mut paths = Vec::new();
-            discovery::collect_local(root, LocalPolicy::merge_journals(JOURNAL_FILE), &mut paths)?;
+            discovery::collect_local(root, LocalPolicy::named(JOURNAL_FILE), &mut paths)?;
             paths.sort();
             if paths.is_empty() {
                 return Ok(0);

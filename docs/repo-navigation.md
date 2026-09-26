@@ -43,7 +43,7 @@ Related design docs:
   - `src/metrics.rs`: Prometheus metrics registry and `/metrics` server helpers.
   - `src/rollup.rs`, `src/merge.rs`, `src/truncate.rs`: maintenance subcommand implementations (discovery, ownership, local and S3 storage hooks).
   - `src/merge/engine.rs`: the one crash-safe partition merge sequence (journal claim, outputs, commit, deletes) and recovery step shared by local and S3; `src/merge_journal.rs` holds the journal records and `recover`; `src/merge/read.rs` the bounded S3 read windows.
-  - `src/rollup/engine.rs`: the one two-pass rollup group engine shared by local and S3; `src/rollup/range_reader.rs` the pinned S3 range reads.
+  - `src/rollup/engine.rs`: the one two-pass, journaled rollup group engine and its recovery, shared by local and S3; `src/rollup/journal.rs` the `_fireparq_rollup.json` record; `src/rollup/range_reader.rs` the pinned S3 range reads (retried through `merge::read::pinned_range`).
   - `src/maintenance/compaction.rs`: shared schema checks, receipt stripping, writer properties, streaming part writer and the merge/rollup `Encoder`.
   - `src/maintenance/discovery.rs`: shared local walker policies, S3 listing, prefix-relative keys and whole-object reads for maintenance, verify, scan and validate.
   - `src/artifacts.rs`: reserved dataset artifact names (`cursor.parquet`, `partitions.parquet`, `merkle_roots.parquet`, `verify_runs/`) and `is_reserved_artifact_path`, which commands that walk a dataset tree use to skip them.
@@ -110,7 +110,7 @@ Related design docs:
 - Change metrics names/labels/endpoint behavior:
   - `firehose-parquet/src/metrics.rs`
 - Change rollup/merge/truncate behavior:
-  - `firehose-parquet/src/rollup.rs` and `firehose-parquet/src/rollup/engine.rs`
+  - `firehose-parquet/src/rollup.rs`, `firehose-parquet/src/rollup/engine.rs` and `firehose-parquet/src/rollup/journal.rs`
   - `firehose-parquet/src/merge.rs`, `firehose-parquet/src/merge/engine.rs` and `firehose-parquet/src/merge_journal.rs`
   - `firehose-parquet/src/truncate.rs`
   - `firehose-parquet/src/maintenance/{compaction,discovery}.rs` for encoding, schema checks and file discovery shared by several commands

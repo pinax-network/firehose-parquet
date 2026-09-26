@@ -789,11 +789,20 @@ Examples:
 Only part-*.parquet files below a partition finer than --partition are read.
 Files already at the target granularity and root artifacts (cursor.parquet,
 partitions.parquet, merkle_roots.parquet, verify_runs/) are left untouched, so
-re-running a rollup is safe. Without --delete-source, each re-run replaces the
-part-rollup-*.parquet files it wrote earlier in the target partitions it rolls up.
+re-running a rollup is safe. Without --delete-source, outputs carry the
+firehose-parquet.rollup_copy=true footer marker, and each re-run replaces the
+copies it wrote earlier in the target partitions it rolls up, also after merge
+renamed them.
+
+Each target partition is journaled in _fireparq_rollup.json in its output
+directory. The next rollup into the same output finishes or undoes an
+interrupted partition before discovering sources, so a crash never leaves rows
+stored twice.
 
 A target partition whose source files have different columns (names, types,
-nullability, or order) is left untouched, and rollup exits non-zero.
+nullability, or order) or different value-defining file metadata (chain, block
+type, byte or block-id encoding, vote or failed-transaction coverage, synthetic
+timestamps, stream mode) is left untouched, and rollup exits non-zero.
 
 The source path must exist locally or be an explicit s3://bucket/... URI. Unlike
 scan and inspect, rollup never falls back to s3://$S3_BUCKET/<path> for a missing
@@ -865,8 +874,11 @@ Examples:
 
 Root artifacts (cursor.parquet, partitions.parquet, merkle_roots.parquet,
 verify_runs/) are skipped. A partition whose parts have different columns
-(names, types, nullability, or order) is left untouched and listed in the
-summary, and merge exits non-zero.
+(names, types, nullability, or order) or different value-defining file metadata
+(chain, block type, byte or block-id encoding, vote or failed-transaction
+coverage, synthetic timestamps, stream mode) is left untouched and listed in the
+summary, and merge exits non-zero. Partitions below an interrupted rollup
+(_fireparq_rollup.json) are left alone until that rollup is run again.
 
 Each partition merge is journaled in _fireparq_merge.json. Local interrupted
 merges recover under the common directory guard. S3 mutations hold a persistent
