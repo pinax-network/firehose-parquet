@@ -421,8 +421,6 @@ impl engine::PartitionMerge for LocalMerge<'_> {
         Ok(None)
     }
 
-    fn log_start(&self, _sources: usize, _source_bytes: u64, _config: &MergeConfig) {}
-
     fn max_part_number(&self, files: &[PathBuf]) -> u32 {
         max_part_number_in_local_files(files)
     }
@@ -485,8 +483,6 @@ impl engine::PartitionMerge for LocalMerge<'_> {
         }
         Ok(())
     }
-
-    fn log_done(&self, _sources: usize, _outputs: usize, _output_bytes: u64) {}
 }
 
 /// The claiming journal of a partition merge whose outputs follow `initial_part_num`.
@@ -864,10 +860,6 @@ impl<'a> engine::PartitionMerge for S3PartitionMerge<'a> {
             self.s3.protected_roots,
             &format!("s3://{}/{}", self.s3.bucket, self.key),
         )
-    }
-
-    fn changed_source(&self, _objects: &[object_store::ObjectMeta]) -> Option<String> {
-        None
     }
 
     fn encode<F>(
