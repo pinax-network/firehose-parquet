@@ -37,6 +37,7 @@ lifecycle state; a local implementation or passing test alone is not closure.
 - [#477: single-partition writer contract](477-writer-partition-contract.md)
 - [#475: bounded metrics and stream readiness](475-metrics-readiness.md)
 - [#523: bounded S3 maintenance concurrency](523-s3-maintenance-concurrency.md)
+- [#520: bounded native S3 ingestion, memory and wire qualification](520-bounded-s3-ingestion.md)
 - [#522: streaming rollup memory and remote range reads](522-streaming-rollup.md)
 - [#524: projected validation and partition boundary performance](524-validation-performance.md)
 - [#517: measured gRPC receive transport](517-grpc-transport.md)

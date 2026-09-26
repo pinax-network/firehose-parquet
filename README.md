@@ -316,6 +316,17 @@ An S3 cursor requires complete explicit AWS credentials even when data output
 is local. This is validated after `--cursor-template` expansion as well as for
 `--cursor`; neither form silently falls back to instance metadata credentials.
 
+Authenticated S3 `build` spools one Parquet part to private temporary disk, then
+streams one conditional PUT and verifies the entire object through a second
+private spool before committing. Budget temporary disk for two encoded parts,
+in addition to mapper memory. Native ingestion requires an HTTPS endpoint and
+limits a part to 5,000,000,000 encoded bytes and its serialized footer to 32 MiB;
+resume verification applies the same limits. Connections have a 10-second timeout;
+upload and complete readback each have a 15-minute deadline. Failed or cancelled
+writes retain ownership for provider-quiescent recovery. Maintenance commands and
+the generic `ParquetTableWriter::new_s3` API keep their existing buffering and
+endpoint policy. See [qualification and limits](docs/audit/520-bounded-s3-ingestion.md).
+
 ### Parameter Validation on Resume
 
 Protected output binds the original start and block-range anchor, chain and mapper

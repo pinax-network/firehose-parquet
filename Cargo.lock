@@ -876,6 +876,7 @@ dependencies = [
  "prometheus-client",
  "prost",
  "prost-types",
+ "reqwest",
  "serde",
  "serde_json",
  "serial_test",

@@ -248,7 +248,7 @@ impl<'a, M: MirrorAction> TransactionController<'a, M> {
         let mut pending = self.states.begin(&self.authority, pending).await?;
         checkpoint(Stage::WritingPersisted)?;
         for part in prepared.parts() {
-            let encoded = prepared.encode(part.entry_index)?;
+            let encoded = self.parts.encode(&prepared, part.entry_index)?;
             self.parts.stage(&encoded)?;
             checkpoint(Stage::Staged(part.entry_index))?;
             let receipt = PartReceipt {

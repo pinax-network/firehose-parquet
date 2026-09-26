@@ -43,6 +43,9 @@ impl<'a> TransactionParts<'a> {
     }
     pub fn s3(prefix: &str, owner: &'a S3Ownership, cache_control: &str) -> Result<Self> {
         validate_relative_path(prefix, true)?;
+        if let Some(native) = owner.native_upload() {
+            native.validate_cache_control(cache_control)?;
+        }
         Ok(Self::S3 {
             prefix: prefix.to_string(),
             owner,
@@ -66,6 +69,19 @@ impl<'a> TransactionParts<'a> {
             }
         }
         Ok(())
+    }
+
+    pub fn encode(
+        &self,
+        prepared: &protected::PreparedFlush,
+        entry_index: u32,
+    ) -> Result<EncodedPart> {
+        match self {
+            Self::S3 { owner, .. } if owner.native_upload().is_some() => {
+                prepared.encode_spooled(entry_index)
+            }
+            _ => prepared.encode(entry_index),
+        }
     }
 
     pub fn stage(&self, encoded: &EncodedPart) -> Result<()> {

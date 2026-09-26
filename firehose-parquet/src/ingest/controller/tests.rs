@@ -14,6 +14,7 @@ use std::fs;
 use std::path::Path;
 use std::sync::Arc;
 
+mod native_upload;
 mod remote_deletion;
 
 thread_local! {static FAIL:Cell<Option<Stage>>=const{Cell::new(None)};}

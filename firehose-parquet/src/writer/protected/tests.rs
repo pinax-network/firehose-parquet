@@ -889,3 +889,107 @@ fn protected_and_legacy_parts_share_lookup_metadata_without_changing_rows() {
         }
     }
 }
+
+#[test]
+fn native_spool_preserves_small_part_bytes_schema_rows_and_receipt() {
+    let prepared = prepare(data(), Partition::Date, metadata());
+    let memory = prepared.encode(0).unwrap();
+    let native = prepared.encode_spooled(0).unwrap();
+    assert!(native.bytes.is_empty());
+    assert_eq!(memory.receipt, native.receipt);
+    let mut file = native.spool.as_ref().unwrap().try_clone().unwrap();
+    file.seek(SeekFrom::Start(0)).unwrap();
+    let mut actual = Vec::new();
+    file.read_to_end(&mut actual).unwrap();
+    assert_eq!(actual, memory.bytes);
+    verify_file(
+        &native.plan,
+        &native.receipt,
+        native.spool.as_ref().unwrap(),
+    )
+    .unwrap();
+    let batches: Vec<_> = ParquetRecordBatchReaderBuilder::try_new(file)
+        .unwrap()
+        .build()
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    assert_eq!(
+        batches.iter().map(RecordBatch::num_rows).sum::<usize>(),
+        data().num_rows()
+    );
+}
+
+#[test]
+fn native_spool_rejects_bad_receipt_and_bounded_footer_before_parsing() {
+    let encoded = prepare(data(), Partition::Date, metadata())
+        .encode_spooled(0)
+        .unwrap();
+    let file = encoded.spool.as_ref().unwrap();
+    let mut receipt = encoded.receipt.clone();
+    receipt.sha256 = "f".repeat(64);
+    assert!(verify_file(&encoded.plan, &receipt, file).is_err());
+    receipt = encoded.receipt.clone();
+    receipt.byte_size += 1;
+    assert!(verify_file(&encoded.plan, &receipt, file).is_err());
+    let mut changed = file.try_clone().unwrap();
+    changed.seek(SeekFrom::End(-8)).unwrap();
+    changed
+        .write_all(&(u32::try_from(MAX_FOOTER_BYTES + 1).unwrap()).to_le_bytes())
+        .unwrap();
+    let error = verify_file(&encoded.plan, &encoded.receipt, file).unwrap_err();
+    assert!(error.to_string().contains("32 MiB"));
+}
+
+#[test]
+fn native_spool_size_limit_does_not_accept_partial_overflow_write() {
+    let mut spool = SpoolWriter::new(8).unwrap();
+    spool.write_all(b"1234").unwrap();
+    assert!(spool.write_all(b"56789").is_err());
+    assert_eq!(spool.size, 4);
+    assert_eq!(spool.file.metadata().unwrap().len(), 4);
+    assert_eq!(
+        hex::encode(spool.hash.finalize()),
+        hex::encode(Sha256::digest(b"1234"))
+    );
+}
+
+#[test]
+fn native_spool_roundtrips_retained_parquet58_types_without_value_or_schema_changes() {
+    use arrow::compute::concat_batches;
+    let bytes = Bytes::from_static(include_bytes!(
+        "../../../tests/fixtures/parquet58/types.parquet"
+    ));
+    let reader = ParquetRecordBatchReaderBuilder::try_new(bytes).unwrap();
+    let schema = reader.schema().clone();
+    let batches = reader
+        .build()
+        .unwrap()
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .unwrap();
+    let input = concat_batches(&schema, &batches).unwrap();
+    let prepared = prepare(
+        input.clone(),
+        Partition::None,
+        BlockMetadata {
+            min_block_number: 100,
+            max_block_number: 102,
+            min_timestamp: Some(1_700_000_000),
+            max_timestamp: Some(1_700_000_002),
+        },
+    );
+    let encoded = prepared.encode_spooled(0).unwrap();
+    let reader = ParquetRecordBatchReaderBuilder::try_new(encoded.spool.unwrap()).unwrap();
+    // Default readers merge operational footer keys into schema metadata;
+    // verify_file has already compared the complete embedded physical schema.
+    assert_eq!(reader.schema().fields(), schema.fields());
+    let actual = reader
+        .build()
+        .unwrap()
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .unwrap();
+    let actual = concat_batches(&schema, &actual).unwrap();
+    assert_eq!(input, actual);
+}
+
+mod qualification;

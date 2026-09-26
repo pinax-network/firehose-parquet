@@ -60,6 +60,31 @@ impl DatasetOwnership {
         scopes: Vec<MutationScope>,
         aws: Option<&AwsConfig>,
     ) -> Result<Self> {
+        Self::acquire_inner(operation, scopes, aws, None).await
+    }
+
+    /// Protected CLI ingestion may stream large authenticated S3 parts. The
+    /// output owner and its signer are constructed from the same native client.
+    /// Ordinary maintenance and external cursor buckets retain existing policy.
+    pub async fn acquire_for_ingestion(
+        scopes: Vec<MutationScope>,
+        aws: Option<&AwsConfig>,
+        output: &str,
+    ) -> Result<Self> {
+        let bucket = if output.starts_with("s3://") {
+            Some(crate::writer::parse_s3_url(output)?.0)
+        } else {
+            None
+        };
+        Self::acquire_inner("build", scopes, aws, bucket.as_deref()).await
+    }
+
+    async fn acquire_inner(
+        operation: &str,
+        scopes: Vec<MutationScope>,
+        aws: Option<&AwsConfig>,
+        native_bucket: Option<&str>,
+    ) -> Result<Self> {
         let mut local = Vec::new();
         let mut remote: BTreeMap<String, Vec<String>> = BTreeMap::new();
         for scope in scopes {
@@ -95,14 +120,23 @@ impl DatasetOwnership {
         // Build clients and validate credentials/endpoint routing before taking
         // any persistent owner. Local scope reduction happens in one call.
         let mut clients = Vec::new();
+        anyhow::ensure!(
+            native_bucket.is_none_or(|bucket| remote.contains_key(bucket)),
+            "native ingestion output is absent from ownership scopes"
+        );
         for (bucket, scopes) in remote {
             let aws = aws.context("AWS configuration is required for remote ownership")?;
-            clients.push((
-                bucket.clone(),
-                Arc::new(aws.build_s3_client_for_mutation(&bucket)?)
+            let native = if native_bucket == Some(bucket.as_str()) {
+                Some(crate::s3::upload::NativeS3Upload::new(aws, &bucket)?)
+            } else {
+                None
+            };
+            let client = match &native {
+                Some(native) => native.object_store(),
+                None => Arc::new(aws.build_s3_client_for_mutation(&bucket)?)
                     as Arc<dyn object_store::ObjectStore>,
-                scopes,
-            ));
+            };
+            clients.push((bucket.clone(), client, native, scopes));
         }
         let local = if local.is_empty() {
             None
@@ -116,8 +150,12 @@ impl DatasetOwnership {
             local,
             remote: BTreeMap::new(),
         };
-        for (bucket, client, scopes) in clients {
-            let guard = match S3Ownership::acquire(client, operation, scopes).await {
+        for (bucket, client, native, scopes) in clients {
+            let acquired = match native {
+                Some(native) => S3Ownership::acquire_native(native, operation, scopes).await,
+                None => S3Ownership::acquire(client, operation, scopes).await,
+            };
+            let guard = match acquired {
                 Ok(guard) => guard,
                 Err(error) => {
                     // Earlier bucket acquisitions are resolved and have not
