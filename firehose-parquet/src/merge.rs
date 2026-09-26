@@ -33,7 +33,7 @@ use std::time::Duration;
 use tracing::{debug, info, info_span, warn};
 
 mod engine;
-mod read;
+pub(crate) mod read;
 
 #[cfg(test)]
 use crate::maintenance::compaction::describe_schema_mismatch;
@@ -98,6 +98,9 @@ pub struct MergeResult {
     pub merges_recovered: usize,
     /// Partitions another running merge was working on, left alone.
     pub partitions_in_use: Vec<String>,
+    /// Partitions left alone because an interrupted rollup of their directory must be
+    /// finished first.
+    pub rollups_pending: Vec<String>,
 }
 
 impl MergeResult {
@@ -120,6 +123,12 @@ impl MergeResult {
             println!(
                 "  In use by another merge: {}",
                 self.partitions_in_use.join(", ")
+            );
+        }
+        if !self.rollups_pending.is_empty() {
+            println!(
+                "  Waiting for an interrupted rollup: {}",
+                self.rollups_pending.join(", ")
             );
         }
         if !self.schema_mismatches.is_empty() {
@@ -286,11 +295,7 @@ fn recover_local_merges(
     result: &mut MergeResult,
 ) -> Result<()> {
     let mut journals = Vec::new();
-    discovery::collect_local(
-        root,
-        LocalPolicy::merge_journals(JOURNAL_FILE),
-        &mut journals,
-    )?;
+    discovery::collect_local(root, LocalPolicy::named(JOURNAL_FILE), &mut journals)?;
     journals.sort();
     for journal_path in journals {
         let dir = journal_path.parent().unwrap_or(root);
@@ -334,6 +339,13 @@ fn merge_local_partitions(
         !reserved
     });
     all_files.sort();
+    let mut rollups = Vec::new();
+    discovery::collect_local(
+        root,
+        LocalPolicy::named(crate::rollup::ROLLUP_JOURNAL_FILE),
+        &mut rollups,
+    )?;
+    let rollup_dirs: Vec<&Path> = rollups.iter().filter_map(|path| path.parent()).collect();
 
     engine::for_each_partition(
         &root.display().to_string(),
@@ -342,6 +354,7 @@ fn merge_local_partitions(
         |dir, files, current_table| {
             let partition = LocalMerge {
                 label: local_partition_label(root, dir),
+                rollup_pending: rollup_dirs.iter().any(|rollup| dir.starts_with(rollup)),
                 dir,
                 files: LocalPartition::new(dir),
                 run,
@@ -364,9 +377,23 @@ fn record_partition_in_use(partition_label: &str, result: &mut MergeResult) {
     result.partitions_in_use.push(partition_label.to_string());
 }
 
+/// Reports a partition below an interrupted rollup, which that rollup must finish first.
+fn record_rollup_pending(partition_label: &str, result: &mut MergeResult) {
+    warn!(
+        partition = partition_label,
+        "not merging partition: an interrupted rollup must be finished first"
+    );
+    println!(
+        "  {partition_label}: skipped; an interrupted rollup must be finished first (run the same rollup again)"
+    );
+    result.partitions_skipped += 1;
+    result.rollups_pending.push(partition_label.to_string());
+}
+
 /// One local partition directory under the common directory guard and the legacy run lock.
 struct LocalMerge<'a> {
     label: String,
+    rollup_pending: bool,
     dir: &'a Path,
     files: LocalPartition,
     run: &'a RunContext,
@@ -475,6 +502,10 @@ impl engine::PartitionMerge for LocalMerge<'_> {
 
     fn check_owner(&self) -> Result<()> {
         self.revalidate()
+    }
+
+    fn rollup_pending(&self) -> bool {
+        self.rollup_pending
     }
 
     fn delete_sources(&self, files: &[PathBuf], outputs: &[String]) -> Result<()> {
@@ -662,12 +693,18 @@ fn list_s3_objects(s3: &S3Merge<'_>) -> Result<Vec<object_store::ObjectMeta>> {
 }
 
 fn assert_s3_ownership(owner: &S3Ownership) -> Result<()> {
+    assert_s3_owner(owner, "merge")
+}
+
+/// Fails when a persistent bucket owner is unresolved or changed; `operation` names the
+/// command in the error. A changed ownership record is never taken over.
+pub(crate) fn assert_s3_owner(owner: &S3Ownership, operation: &str) -> Result<()> {
     if owner.is_mutation_uncertain()
         || block_on_async(S3Ownership::status(owner.object_store()))?.as_ref()
             != Some(owner.record())
     {
         anyhow::bail!(
-            "S3 merge ownership is unresolved or changed; stopping before further mutation"
+            "S3 {operation} ownership is unresolved or changed; stopping before further mutation"
         );
     }
     Ok(())
@@ -715,7 +752,21 @@ fn merge_s3_partitions(
     result: &mut MergeResult,
 ) -> Result<()> {
     let prefix = s3.prefix;
-    let mut parquet_objects: Vec<_> = list_s3_objects(s3)?
+    let objects = list_s3_objects(s3)?;
+    let rollup_dirs: Vec<String> = objects
+        .iter()
+        .filter(|obj| {
+            obj.location.filename() == Some(crate::rollup::ROLLUP_JOURNAL_FILE)
+                && !crate::artifacts::is_control_path(obj.location.as_ref())
+        })
+        .map(|obj| {
+            obj.location
+                .as_ref()
+                .rsplit_once('/')
+                .map_or(String::new(), |(dir, _)| dir.to_string())
+        })
+        .collect();
+    let mut parquet_objects: Vec<_> = objects
         .into_iter()
         .filter(|obj| obj.location.as_ref().ends_with(".parquet"))
         .filter(|obj| {
@@ -745,6 +796,13 @@ fn merge_s3_partitions(
                 s3,
                 key: partition_key,
                 label,
+                rollup_pending: rollup_dirs.iter().any(|rollup| {
+                    rollup.is_empty()
+                        || partition_key == rollup
+                        || partition_key
+                            .strip_prefix(rollup.as_str())
+                            .is_some_and(|tail| tail.starts_with('/'))
+                }),
                 table: engine::table_of(label),
                 files: S3Partition {
                     client: s3.client,
@@ -783,6 +841,7 @@ struct S3PartitionMerge<'a> {
     s3: &'a S3Merge<'a>,
     key: &'a str,
     label: &'a str,
+    rollup_pending: bool,
     table: &'a str,
     files: S3Partition<'a>,
     config: &'a MergeConfig,
@@ -928,6 +987,10 @@ impl<'a> engine::PartitionMerge for S3PartitionMerge<'a> {
 
     fn check_owner(&self) -> Result<()> {
         self.assert_owner()
+    }
+
+    fn rollup_pending(&self) -> bool {
+        self.rollup_pending
     }
 
     fn delete_sources(
@@ -2600,7 +2663,7 @@ pub(crate) async fn recover_guarded_for_ingestion(
                 .context("merge recovery has no local owner")?;
 
             let mut paths = Vec::new();
-            discovery::collect_local(root, LocalPolicy::merge_journals(JOURNAL_FILE), &mut paths)?;
+            discovery::collect_local(root, LocalPolicy::named(JOURNAL_FILE), &mut paths)?;
             paths.sort();
             if paths.is_empty() {
                 return Ok(0);

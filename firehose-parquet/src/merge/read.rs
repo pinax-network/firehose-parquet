@@ -150,21 +150,21 @@ pub(super) async fn footer(
 
 #[derive(Debug, thiserror::Error)]
 enum ReadFailure {
-    #[error("S3 merge source snapshot or range is invalid")]
+    #[error("S3 source snapshot or range is invalid")]
     InvalidRequest,
-    #[error("S3 merge source changed or was removed after listing")]
+    #[error("S3 source changed or was removed after listing")]
     Changed,
-    #[error("S3 merge response metadata does not match its listed snapshot")]
+    #[error("S3 source response metadata does not match its listed snapshot")]
     Metadata,
-    #[error("S3 merge response length does not match its requested range")]
+    #[error("S3 source response length does not match its requested range")]
     BodyLength,
-    #[error("S3 merge response buffer cannot be allocated")]
+    #[error("S3 source response buffer cannot be allocated")]
     Allocation,
-    #[error("S3 merge source request failed or its response was rejected")]
+    #[error("S3 source request failed or its response was rejected")]
     Request,
-    #[error("S3 merge source body read failed")]
+    #[error("S3 source body read failed")]
     Transport,
-    #[error("S3 merge source request timed out")]
+    #[error("S3 source request timed out")]
     Timeout,
 }
 impl ReadFailure {
@@ -173,7 +173,10 @@ impl ReadFailure {
     }
 }
 
-async fn pinned_range(
+/// Reads `range` of the listed snapshot of `object`, retrying transient failures of the same
+/// pinned version (never a freshly listed one) with bounded deadlines. Used by merge windows
+/// and rollup range reads.
+pub(crate) async fn pinned_range(
     client: &Arc<dyn ObjectStore>,
     object: &ObjectMeta,
     range: Range<u64>,

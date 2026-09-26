@@ -3,17 +3,14 @@
 //! to retain all selected column chunks of a row group at once.
 
 use bytes::Bytes;
-use futures::TryStreamExt;
-use object_store::{GetOptions, GetRange, ObjectMeta, ObjectStore};
+use object_store::{ObjectMeta, ObjectStore};
 use parquet::errors::{ParquetError, Result};
 use parquet::file::reader::{ChunkReader, Length};
 use std::io::Read;
 use std::ops::Range;
 use std::sync::Arc;
-use std::time::Duration;
 
 const HEADER_BUFFER_BYTES: u64 = 64 * 1024;
-const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 
 #[derive(Clone)]
 pub(super) struct RangeReader {
@@ -26,86 +23,16 @@ impl RangeReader {
         Self { store, snapshot }
     }
 
+    /// Reads `range` of the pinned snapshot with merge's bounded read-only retries: transient
+    /// request, body and timeout failures are retried against the same version; a changed
+    /// object or a mismatching response fails immediately.
     fn fetch(&self, range: Range<u64>) -> Result<Bytes> {
-        if !crate::dataset_lock_s3::usable_version(&object_store::UpdateVersion {
-            e_tag: self.snapshot.e_tag.clone(),
-            version: self.snapshot.version.clone(),
-        }) {
-            return Err(ParquetError::General(
-                "source listing returned no usable version for pinned range reads".into(),
-            ));
-        }
-        if range.start > range.end || range.end > self.snapshot.size {
-            return Err(ParquetError::General(
-                "source range is outside the listed object".into(),
-            ));
-        }
-        if range.is_empty() {
-            return Ok(Bytes::new());
-        }
-        let expected = range.end - range.start;
-        let options = GetOptions {
-            range: Some(GetRange::Bounded(range.clone())),
-            if_match: self.snapshot.e_tag.clone(),
-            version: self.snapshot.version.clone(),
-            ..Default::default()
-        };
-        crate::cli::block_on_async(async {
-            tokio::time::timeout(REQUEST_TIMEOUT, async {
-                let result = self
-                    .store
-                    .get_opts(&self.snapshot.location, options)
-                    .await
-                    .map_err(|_| {
-                        ParquetError::General(
-                            "reading source range failed or its snapshot changed".into(),
-                        )
-                    })?;
-                if result.range != range
-                    || result.meta.location != self.snapshot.location
-                    || result.meta.size != self.snapshot.size
-                    || self
-                        .snapshot
-                        .e_tag
-                        .as_ref()
-                        .is_some_and(|tag| result.meta.e_tag.as_ref() != Some(tag))
-                    || self
-                        .snapshot
-                        .version
-                        .as_ref()
-                        .is_some_and(|version| result.meta.version.as_ref() != Some(version))
-                {
-                    return Err(ParquetError::General(
-                        "source range response does not match its listed snapshot".into(),
-                    ));
-                }
-                let mut stream = result.into_stream();
-                let mut bytes = Vec::new();
-                while let Some(chunk) = stream
-                    .try_next()
-                    .await
-                    .map_err(|_| ParquetError::General("reading source range body failed".into()))?
-                {
-                    if (bytes.len() as u64)
-                        .checked_add(chunk.len() as u64)
-                        .is_none_or(|length| length > expected)
-                    {
-                        return Err(ParquetError::General(
-                            "source range response exceeds its requested length".into(),
-                        ));
-                    }
-                    bytes.extend_from_slice(&chunk);
-                }
-                if bytes.len() as u64 != expected {
-                    return Err(ParquetError::General(
-                        "source range response has an unexpected length".into(),
-                    ));
-                }
-                Ok(Bytes::from(bytes))
-            })
-            .await
-            .map_err(|_| ParquetError::General("reading source range timed out".into()))?
-        })
+        crate::cli::block_on_async(crate::merge::read::pinned_range(
+            &self.store,
+            &self.snapshot,
+            range,
+        ))
+        .map_err(|error| ParquetError::General(format!("{error:#}")))
     }
 }
 
@@ -173,8 +100,8 @@ mod tests {
     use futures::stream::{self, BoxStream};
     use futures::StreamExt;
     use object_store::{
-        memory::InMemory, path::Path, GetResult, GetResultPayload, ListResult, MultipartUpload,
-        PutMultipartOptions, PutOptions, PutPayload, PutResult,
+        memory::InMemory, path::Path, GetOptions, GetRange, GetResult, GetResultPayload,
+        ListResult, MultipartUpload, PutMultipartOptions, PutOptions, PutPayload, PutResult,
     };
     use std::sync::Mutex;
 
@@ -194,6 +121,14 @@ mod tests {
         async fn get_opts(&self, path: &Path, opts: GetOptions) -> object_store::Result<GetResult> {
             self.requests.lock().unwrap().push(opts.clone());
             let fault = *self.fault.lock().unwrap();
+            if fault == 3 {
+                // One transient provider failure, then healthy responses.
+                *self.fault.lock().unwrap() = 0;
+                return Err(object_store::Error::Generic {
+                    store: "range-fixture",
+                    source: "transient".into(),
+                });
+            }
             let mut result = self
                 .inner
                 .get_opts(
@@ -374,5 +309,24 @@ mod tests {
         *store.fault.lock().unwrap() = 0;
         object(&store, Bytes::from_static(b"replaced-object-bytes"));
         assert!(reader.get_bytes(0, 8).is_err());
+    }
+
+    /// Rollup used a single attempt, so one transient S3 read error aborted the run; reads now
+    /// retry the same pinned snapshot like merge.
+    #[test]
+    fn transient_failures_retry_the_same_pinned_snapshot() {
+        let store = Arc::new(TracedStore::default());
+        let snapshot = object(&store, Bytes::from_static(b"original-object-bytes"));
+        let reader = RangeReader::new(store.clone(), snapshot.clone());
+        *store.fault.lock().unwrap() = 3;
+        assert_eq!(
+            reader.get_bytes(0, 8).unwrap(),
+            Bytes::from_static(b"original")
+        );
+        let requests = store.requests.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+        assert!(requests.iter().all(
+            |request| request.if_match == snapshot.e_tag && request.version == snapshot.version
+        ));
     }
 }

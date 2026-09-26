@@ -44,8 +44,8 @@ impl LocalPolicy<'_> {
 }
 
 impl<'a> LocalPolicy<'a> {
-    /// Merge journal discovery: the mutation walk selecting one exact file name.
-    pub(crate) fn merge_journals(name: &'a str) -> Self {
+    /// Journal discovery: the mutation walk selecting one exact file name.
+    pub(crate) fn named(name: &'a str) -> Self {
         Self {
             selection: Selection::Name(name),
             ..Self::MUTATION_PARQUET

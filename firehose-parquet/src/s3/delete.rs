@@ -61,7 +61,9 @@ where
                 && !crate::artifacts::is_control_path(key.as_ref())
                 && !key.as_ref().split('/').any(|part| matches!(
                     part,
-                    crate::merge_journal::JOURNAL_FILE | crate::merge_journal::LOCK_FILE
+                    crate::merge_journal::JOURNAL_FILE
+                        | crate::merge_journal::LOCK_FILE
+                        | crate::rollup::ROLLUP_JOURNAL_FILE
                 )),
             "data deletion plan includes an empty or reserved control key"
         );
