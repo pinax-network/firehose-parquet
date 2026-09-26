@@ -181,8 +181,13 @@ unprotected single-file writer.
 
 ## Validation
 
-- `cargo fmt --all --check` and `cargo test --workspace --locked`: see the PR
-  for the final counts on the rebased head.
+- On the head rebased onto `8462692` (#614 ChainProfile), `cargo fmt --all --check`
+  passed and `cargo test --workspace --locked` passed **1,105 tests with 14
+  intentional ignores** (blocks lib 182, `fireparq` binary 171, ingestion CLI 19,
+  other blocks integration 12, core library 715, generator 3, compatibility 3).
+  The CI example `refresh_evm_golden`, `cargo build --bin fireparq` (no warnings)
+  and Bash/Zsh/Fish completions also passed. The rebase needed one follow-up:
+  #614's equivalence oracle shares the updated EVM exclusion warning text.
 - No live provider request was needed: every changed behavior is exercised by
   the real binary against the mock Firehose, and no provider-specific behavior
   changed. No S3 writes were performed.
