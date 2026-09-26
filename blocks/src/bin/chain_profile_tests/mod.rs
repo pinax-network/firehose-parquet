@@ -365,10 +365,10 @@ mod legacy {
         }
         if let Some(cursor_state) = cursor_state.filter(|_| !cursor_override) {
             if !cursor_state.include_failed_transactions {
-                warnings.push(
-                    "cursor.parquet was written with failed transactions excluded (the EVM default before #494); still excluding them so this output stays consistent. Pass --exclude-failed-transactions to keep this and silence the warning, or --cursor-override with --start-block to switch this output to the new default"
-                        .to_string(),
-                );
+                // The only departure from the verbatim copy: the validation
+                // follow-up replaced this message's stale --cursor-override
+                // advice. The decision logic under comparison is unchanged.
+                warnings.push(crate::EVM_FAILED_TRANSACTIONS_EXCLUDED_WARNING.to_string());
                 return (false, warnings);
             }
         }

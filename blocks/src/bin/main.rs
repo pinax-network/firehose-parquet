@@ -522,6 +522,9 @@ fn maybe_add_synthetic_timestamp_metadata(
     }
 }
 
+/// Logged when resumed EVM state keeps excluding failed transactions.
+const EVM_FAILED_TRANSACTIONS_EXCLUDED_WARNING: &str = "this output's resume state records failed transactions as excluded (--exclude-failed-transactions, or the EVM default before #494); still excluding them so this output stays consistent. Pass --exclude-failed-transactions to keep this and silence the warning. To switch to the new default, rebuild into a new empty output root with an absent cursor mirror; --cursor-override cannot change protected output";
+
 /// Resolve whether failed/reverted transactions are written (#494).
 ///
 /// - `--exclude-failed-transactions` always drops them.
@@ -563,10 +566,7 @@ fn resolve_include_failed_transactions(
     }
     if let Some(cursor_state) = cursor_state.filter(|_| !cursor_override) {
         if !cursor_state.include_failed_transactions {
-            warnings.push(
-                "this output's resume state records failed transactions as excluded (--exclude-failed-transactions, or the EVM default before #494); still excluding them so this output stays consistent. Pass --exclude-failed-transactions to keep this and silence the warning. To switch to the new default, rebuild into a new empty output root with an absent cursor mirror; --cursor-override cannot change protected output"
-                    .to_string(),
-            );
+            warnings.push(EVM_FAILED_TRANSACTIONS_EXCLUDED_WARNING.to_string());
             return (false, warnings);
         }
     }
