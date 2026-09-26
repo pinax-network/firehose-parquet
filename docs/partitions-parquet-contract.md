@@ -20,18 +20,29 @@ The five existing columns remain; six proof columns are appended:
 | `partition` | UInt64 | no | Aligned block-range start or rounded UTC epoch seconds |
 | `start_block` | UInt64 | no | Span start, inclusive |
 | `stop_block` | UInt64 | no | Span stop, exclusive |
-| `start_time` | Timestamp(second, UTC) | yes | Canonical first-block timestamp, without routing substitution |
-| `end_time` | Timestamp(second, UTC) | yes | Canonical last covered block time (time spans), or optional boundary probe time (block ranges) |
+| `start_time` | Timestamp(millisecond, UTC) | yes | Canonical first-block timestamp, without routing substitution |
+| `end_time` | Timestamp(millisecond, UTC) | yes | Canonical last covered block time (time spans), or optional boundary probe time (block ranges) |
 | `complete` | Boolean | no | `start_complete && end_complete` |
 | `start_complete` | Boolean | no | Natural left boundary established |
 | `end_complete` | Boolean | no | Natural right boundary established |
 | `first_observed_block` | UInt64 | yes | First canonical block in the time span |
 | `first_observed_block_id` | Utf8 | yes | Its exact ID, paired with block number |
-| `routing_start_timestamp` | Timestamp(second, UTC) | yes | Proven initial routing seed; distinct from nullable canonical time |
+| `routing_start_timestamp` | Timestamp(millisecond, UTC) | yes | Proven initial routing seed; distinct from nullable canonical time |
 
 Block-range spans may omit canonical identity and routing seed. Time spans
 require both. The existing UInt64 time-key format rejects pre-1970 partition
 keys. No column is repurposed as a running timestamp maximum.
+
+The three time columns are written as Arrow `Timestamp(Millisecond, UTC)`, stored
+as Parquet `TIMESTAMP(MILLIS, isAdjustedToUTC=true)`, so DuckDB, Spark and other
+Parquet readers see timestamps (the same fix #491 made for data-table block
+times). Their values remain whole seconds: the index model routes by UTC epoch
+seconds. Indexes written by earlier releases used `Timestamp(Second, UTC)`, which
+has no Parquet logical type and reads back as BIGINT outside Arrow. Readers accept
+both units and cast by unit, and the next `--resume`, `--live` extension or
+`--overwrite` rewrites the file with millisecond columns. Older `fireparq`
+releases reject millisecond-typed v2 indexes, so upgrade every reader before a
+writer publishes one.
 
 The coverage record contains `version=2`, `[start_block, stop_block)`,
 `finalized={block_num, block_id}`, `routing_policy` (`block_number`,
@@ -83,9 +94,14 @@ Inspection preserves the seed and explicitly marks `routing_context_required`.
   inclusive `--from` / `--to` filters remain unchanged. It reports coverage,
   completeness and prior-context requirements. This display order is not resume
   order.
-- `validate` checks the entire v2 snapshot in source order, then reports selected
-  incomplete counts. Structural validity is distinct from complete coverage.
-  `--allow-gaps` cannot bypass a v2 coverage contradiction.
+- `validate` reads the entire v2 snapshot with the verified reader; any structural
+  contradiction above (including a gap or overlap in source order) is an error.
+  It then reports `split_run` (source-adjacent spans with one partition key) and
+  `incomplete_boundary` (an internal boundary not established on both sides) as
+  issues, and counts incomplete spans. Only the first span's start and the last
+  span's end may be open, from a clipped bound or the finalized head. Structural
+  validity is distinct from complete coverage. `--allow-gaps` applies only to
+  legacy geometry checks; with a v2 index it adds a warning and changes nothing.
 
 `build` still accepts explicit block bounds. It has no direct index-bound mode;
 its previously removed partition-selection flags remain removed.

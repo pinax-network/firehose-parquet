@@ -14,6 +14,25 @@ fn genesis(block: &BlockIdentity) -> bool {
     block.block_num == 0 && block.parent_num == 0 && block.parent_id.is_empty()
 }
 
+/// Whether a partition head check, traversal or boundary probe failed for a
+/// transient endpoint reason, so a live build may retry from its last verified
+/// snapshot.
+///
+/// Timeouts (including a stalled traversal message or an elapsed bounded
+/// deadline), transport failures and non-fatal gRPC statuses are transient.
+/// Fatal statuses (authentication, permissions, invalid request, decompression
+/// limits), missing blocks and every proof or integrity failure (non-final
+/// blocks, contradictory ancestry, out-of-range responses) are not.
+pub fn is_transient_partition_error(error: &anyhow::Error) -> bool {
+    match classify_fetch_error(error) {
+        FetchErrorKind::Timeout | FetchErrorKind::Transient => true,
+        FetchErrorKind::Fatal | FetchErrorKind::NotFound => false,
+        FetchErrorKind::Unexpected => error
+            .chain()
+            .any(|cause| cause.is::<tokio::time::error::Elapsed>() || cause.is::<tonic::Status>()),
+    }
+}
+
 /// Fetch and verify canonical ancestry only when needed for the initial routing
 /// anchor or natural left-boundary comparison. A missing optional parent leaves
 /// that edge incomplete; a needed Solana seed fails closed after this budget.
