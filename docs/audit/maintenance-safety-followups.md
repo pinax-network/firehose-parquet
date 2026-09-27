@@ -126,6 +126,10 @@ rows), the `origin/main` `050f9ec` release binary and the fixed release binary:
 
 Every run used an empty S3/AWS environment and a working directory outside the repository.
 
+Release binaries now ignore `FIREPARQ_TEST_ROLLUP_CRASH_AT`: re-running the
+deterministic-crash cases needs a debug build, or one built with
+`CARGO_PROFILE_RELEASE_DEBUG_ASSERTIONS=true` (see the script's docstring).
+
 ## Compatibility and limits
 
 - Rollup outputs have not changed except for copies, which gain the `rollup_copy` footer

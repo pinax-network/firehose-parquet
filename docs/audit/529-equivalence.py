@@ -12,6 +12,11 @@ found by dotenv can supply a bucket or credentials. Keep --work outside the
 repository tree. Compare a binary with a copy of itself first: the result must be
 all-equal, which validates the normalization.
 
+The merge-crash-* scenarios set FIREPARQ_TEST_MERGE_CRASH_AT, which only debug
+builds read. Pass debug binaries (target/debug/fireparq), or optimized ones built
+with debug assertions (CARGO_PROFILE_RELEASE_DEBUG_ASSERTIONS=true cargo build
+--release). A plain release binary ignores the hook, so those runs never crash.
+
     529-equivalence.py --baseline main/fireparq --candidate branch/fireparq \
         --pristine /abs/dataset --work /abs/scratch/run --report /abs/report.json
 """

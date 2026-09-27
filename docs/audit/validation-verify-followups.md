@@ -364,3 +364,7 @@ compared with the main binary at `9372f99`.
   twice. The branch refused both the table and a source minute partition below
   the journal, with the files unchanged. After re-running the same rollup, it
   recorded the single day partition.
+
+Release binaries now ignore `FIREPARQ_TEST_MERGE_CRASH_AT` and
+`FIREPARQ_TEST_ROLLUP_CRASH_AT`: repeating the two interrupted cases needs a debug
+build, or one built with `CARGO_PROFILE_RELEASE_DEBUG_ASSERTIONS=true`.

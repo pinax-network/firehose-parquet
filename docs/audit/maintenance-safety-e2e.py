@@ -2,6 +2,11 @@
 """Reproduce the validated rollup/merge defects with the main binary and check the fix.
 
 Local data only; every run has empty S3/AWS variables and a cwd outside the repository.
+
+Case 1b sets FIREPARQ_TEST_ROLLUP_CRASH_AT, which only debug builds read: --fixed
+must be a debug binary (target/debug/fireparq) or an optimized one built with debug
+assertions (CARGO_PROFILE_RELEASE_DEBUG_ASSERTIONS=true cargo build --release). A
+plain release binary ignores the hook, so those runs never crash.
 """
 import argparse
 import json

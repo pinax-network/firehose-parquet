@@ -135,6 +135,10 @@ The self-comparison of the baseline binary with itself was also all-equal, which
 validated the normalization. Every run used an empty S3/AWS environment and a
 working directory outside the repository, so no `.env` could supply a bucket.
 
+Release binaries now ignore `FIREPARQ_TEST_MERGE_CRASH_AT`: re-running the
+merge-crash scenarios needs debug builds, or builds with
+`CARGO_PROFILE_RELEASE_DEBUG_ASSERTIONS=true` (see the harness docstring).
+
 ## Line counts
 
 Measured against `origin/main` with inline `#[cfg(test)] mod tests` blocks and
