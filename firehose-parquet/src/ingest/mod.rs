@@ -12,7 +12,7 @@ pub(crate) mod session;
 pub(crate) mod state;
 pub(crate) mod store;
 
-pub use controller::CommittedFlush;
+pub use controller::{CommittedFlush, FlushWorkStats};
 pub use session::{
     declare_inventory, ingestion_mutation_scopes, load_authoritative_resume, IngestionSession,
     MapperSemantics, CURSOR_OVERRIDE_REFUSED,

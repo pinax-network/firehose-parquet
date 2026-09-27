@@ -923,7 +923,7 @@ async fn maintenance_rolls_back_writing_or_finishes_committed_before_returning_g
             ParquetFileMetadata::new(),
         )
         .unwrap();
-        let encoded = prepared.encode(0).unwrap();
+        let encoded = prepared.encode(0, None).unwrap();
         pending = pending
             .with_receipt(
                 0,

@@ -326,7 +326,8 @@ impl<'a> IngestionSession<'a> {
             &expected,
             permit,
         )
-        .await?;
+        .await?
+        .with_concurrency(config.flush_concurrency)?;
         super::maintenance::prepare_ingestion(&expected.output, ownership, &aws).await?;
         let frontier = AcceptedFrontier::resume(&controller.authority().checkpoint);
         if let (Some(metrics), Some(event)) =

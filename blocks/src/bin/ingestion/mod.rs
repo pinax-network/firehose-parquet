@@ -24,6 +24,12 @@ fn record_committed_flush_sizing(
         largest_mapper_estimated_bytes = estimate.largest_table_bytes,
         total_mapper_estimated_bytes = estimate.total_bytes,
         compressed_to_mapper_ratio = sizing.ratio(),
+        commit_ms = committed.elapsed.as_millis() as u64,
+        files = committed.files,
+        peak_encoders = committed.work.peak_encoders,
+        peak_publications = committed.work.peak_publications,
+        peak_inflight_bytes = committed.work.peak_inflight_bytes,
+        reencoded_parts = committed.work.reencoded_parts,
         "committed flush size observation"
     );
 }

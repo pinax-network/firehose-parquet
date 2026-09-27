@@ -8,17 +8,23 @@ use anyhow::{bail, Context, Result};
 use arrow::record_batch::RecordBatch;
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use super::frontier::AcceptedFrontier;
 use super::parts::{writer_plan, TransactionParts};
 use super::state::{
-    AcceptedPrefix, AuthorityState, Digest, PartCompression, PartReceipt, PartitionPolicy,
-    PendingTransaction, StreamDescriptor, TablePlan, TransactionPhase,
+    AcceptedPrefix, AuthorityState, Digest, PartCompression, PartitionPolicy, PendingTransaction,
+    StreamDescriptor, TablePlan, TransactionPhase,
 };
 use super::store::{TransactionStateStore, Versioned};
-use crate::config::{BlockMetadata, Compression, Partition};
+use crate::config::{BlockMetadata, Compression, FlushConcurrency, Partition};
+
+mod lane;
+mod pipeline;
 use crate::writer::protected::PreparedFlush;
 use crate::writer::{ParquetFileMetadata, ParquetTableWriter};
+pub use pipeline::FlushWorkStats;
 
 pub trait MirrorAction {
     async fn reconcile(&self, authority: &AuthorityState) -> Result<()>;
@@ -43,6 +49,7 @@ pub struct TransactionController<'a, M: MirrorAction> {
     authority: Versioned<AuthorityState>,
     mirror: M,
     failed: bool,
+    concurrency: FlushConcurrency,
     _session: crate::dataset_lock::session::SessionPermit<'a>,
 }
 
@@ -53,6 +60,10 @@ pub struct CommittedFlush {
     pub bytes: u64,
     pub files: usize,
     pub tables: Vec<CommittedTable>,
+    /// Wall time from commit start to the cleared journal.
+    pub elapsed: Duration,
+    /// High-water marks of the bounded table work.
+    pub work: FlushWorkStats,
 }
 pub struct CommittedTable {
     pub table: String,
@@ -101,7 +112,7 @@ impl<'a, M: MirrorAction> TransactionController<'a, M> {
                     // Verify first, even if authority was already advanced by
                     // the interrupted process. Missing/corrupt data never becomes
                     // a reason to remap a committed prefix.
-                    parts.verify_all_finals(&pending.payload).await?;
+                    parts.verify_all_finals(&pending.payload, 1).await?;
                     if authority.payload.checkpoint.id == pending.payload.predecessor {
                         authority = states.advance(&authority, &pending).await?;
                     }
@@ -121,8 +132,16 @@ impl<'a, M: MirrorAction> TransactionController<'a, M> {
             authority,
             mirror,
             failed: false,
+            concurrency: FlushConcurrency::SERIAL,
             _session: session,
         })
+    }
+
+    /// Bound table work inside each later commit. Journal order is unchanged.
+    pub fn with_concurrency(mut self, concurrency: FlushConcurrency) -> Result<Self> {
+        concurrency.validate()?;
+        self.concurrency = concurrency;
+        Ok(self)
     }
 
     pub fn authority(&self) -> &AuthorityState {
@@ -183,6 +202,7 @@ impl<'a, M: MirrorAction> TransactionController<'a, M> {
             );
         }
         self.failed = true;
+        let started = Instant::now();
         let partition = runtime_partition(&self.authority.payload.descriptor.partition);
         let routing = ParquetTableWriter::new(PathBuf::new(), partition.clone(), compression);
         let tables = self
@@ -250,8 +270,8 @@ impl<'a, M: MirrorAction> TransactionController<'a, M> {
         // The exact temporary names are fixed by this plan before Writing.
         let owned_temporaries = pending.clone();
         let pending = self.states.begin(&self.authority, pending).await?;
-        let pending = match self.publish_and_commit(&prepared, pending).await {
-            Ok(pending) => pending,
+        let (pending, work) = match self.publish_and_commit(Arc::new(prepared), pending).await {
+            Ok(done) => done,
             Err(error) => {
                 // The journal stays pending for recovery, which never needs a
                 // staged temporary: Writing rollback verifies finals by receipt
@@ -305,6 +325,8 @@ impl<'a, M: MirrorAction> TransactionController<'a, M> {
                     })
                 })
                 .collect::<Result<_>>()?,
+            elapsed: started.elapsed(),
+            work,
         };
         self.failed = false;
         Ok(result)
@@ -316,27 +338,14 @@ impl<'a, M: MirrorAction> TransactionController<'a, M> {
     /// pending and the controller poisoned; the caller removes owned temps.
     async fn publish_and_commit(
         &mut self,
-        prepared: &PreparedFlush,
-        mut pending: Versioned<PendingTransaction>,
-    ) -> Result<Versioned<PendingTransaction>> {
+        prepared: Arc<PreparedFlush>,
+        pending: Versioned<PendingTransaction>,
+    ) -> Result<(Versioned<PendingTransaction>, FlushWorkStats)> {
         checkpoint(Stage::WritingPersisted)?;
-        for part in prepared.parts() {
-            let encoded = self.parts.encode(prepared, part.entry_index)?;
-            self.parts.stage(&encoded)?;
-            checkpoint(Stage::Staged(part.entry_index))?;
-            let receipt = PartReceipt {
-                byte_size: encoded.receipt().byte_size,
-                sha256: Digest::parse(encoded.receipt().sha256.clone())?,
-            };
-            pending = self
-                .states
-                .record_receipt(&self.authority, &pending, part.entry_index, receipt)
-                .await?;
-            checkpoint(Stage::ReceiptPersisted(part.entry_index))?;
-            self.parts.publish(&encoded).await?;
-            checkpoint(Stage::Published(part.entry_index))?;
-        }
-        self.parts.verify_all_finals(&pending.payload).await?;
+        // Bounded concurrent table work; every receipt is durable before its
+        // part publishes, and nothing below runs unless all parts succeeded
+        // and every final verified.
+        let (mut pending, work) = self.publish_and_verify(prepared, pending).await?;
         pending = self
             .states
             .mark_committed(&self.authority, &pending)
@@ -349,8 +358,88 @@ impl<'a, M: MirrorAction> TransactionController<'a, M> {
         self.parts.cleanup_temporaries(&pending.payload)?;
         self.states.clear(&self.authority, &pending).await?;
         checkpoint(Stage::PendingCleared)?;
-        Ok(pending)
+        Ok((pending, work))
     }
+}
+
+impl<'a, M: MirrorAction> TransactionController<'a, M> {
+    /// Local parts use blocking file I/O that borrows the ownership guard. With
+    /// more than one publication on a multi-thread runtime it runs on a scoped
+    /// lane whose threads are all joined before this returns; otherwise (and
+    /// for remote parts, whose requests are polled futures) it stays inline.
+    async fn publish_and_verify(
+        &self,
+        prepared: Arc<PreparedFlush>,
+        pending: Versioned<PendingTransaction>,
+    ) -> Result<(Versioned<PendingTransaction>, FlushWorkStats)> {
+        let limits = self.concurrency;
+        let (parts, states, authority) = (&self.parts, &self.states, &self.authority);
+        let lane_supported = parts.is_local()
+            && limits.publications > 1
+            && tokio::runtime::Handle::try_current().is_ok_and(|handle| {
+                handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread
+            });
+        if !lane_supported {
+            let (pending, work) =
+                pipeline::publish_parts(parts, states, authority, prepared, pending, limits, None)
+                    .await?;
+            parts
+                .verify_all_finals(&pending.payload, limits.publications)
+                .await?;
+            return Ok((pending, work));
+        }
+        let handle = tokio::runtime::Handle::current();
+        tokio::task::block_in_place(|| {
+            std::thread::scope(|scope| {
+                let lane = lane::BlockingLane::start(scope, limits.publications);
+                let result = handle.block_on(async {
+                    let (pending, work) = pipeline::publish_parts(
+                        parts,
+                        states,
+                        authority,
+                        prepared,
+                        pending,
+                        limits,
+                        Some(&lane),
+                    )
+                    .await?;
+                    verify_local_finals(parts, Arc::new(pending.payload.clone()), &lane).await?;
+                    Ok((pending, work))
+                });
+                lane.close();
+                result
+            })
+        })
+    }
+}
+
+/// Verify every local final on the lane. Each check is read-only apart from
+/// re-establishing durability of an already published file.
+async fn verify_local_finals<'s>(
+    parts: &'s TransactionParts<'_>,
+    pending: Arc<PendingTransaction>,
+    lane: &lane::BlockingLane<'s>,
+) -> Result<()> {
+    let checks = (0..pending.parts.len()).map(|index| {
+        let pending = Arc::clone(&pending);
+        lane.run(move || {
+            let part = &pending.parts[index];
+            if parts.verify_final_local(&pending, part)?
+                != crate::writer::protected::PartPresence::Present
+            {
+                bail!("committed transaction is missing a required final part");
+            }
+            Ok(())
+        })
+    });
+    // Every started check is awaited before the first error is returned.
+    let mut first_error = None;
+    for result in futures::future::join_all(checks).await {
+        if let (Err(error), None) = (result, &first_error) {
+            first_error = Some(error);
+        }
+    }
+    first_error.map_or(Ok(()), Err)
 }
 
 fn runtime_partition(partition: &PartitionPolicy) -> Partition {
