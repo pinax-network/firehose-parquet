@@ -5,9 +5,9 @@ use arrow::datatypes::{Int32Type, Schema};
 use arrow::record_batch::RecordBatch;
 use firehose_parquet::encode::{BytesColumn, EncodeBytes};
 use firehose_parquet::traits::{
-    append_fork_step, est_bin, est_bool, est_i32, est_i64, est_opt_str, est_str, est_u32, est_u64,
-    estimated_dictionary_index_bytes, finish_fork_step, fork_step_builder, BlockIdentity,
-    BlockMapper, CanonicalBuilder, PreparedIdentity,
+    append_fork_step, est_bin, est_bool, est_fork_step, est_i32, est_i64, est_str, est_u32,
+    est_u64, estimated_dictionary_index_bytes, finish_fork_step, fork_step_builder, BlockIdentity,
+    BlockMapper, CanonicalBuilder, ForkStepBuilder, PreparedIdentity, StreamEvent,
 };
 use prost::Message;
 use std::collections::HashMap;
@@ -116,7 +116,7 @@ impl TronBlockMapper {
         &mut self,
         block: &tron::Block,
         identity: &PreparedIdentity,
-        fork_step: Option<&str>,
+        fork_step: StreamEvent<'_>,
         decoded: &[Vec<super::contracts::DecodedContract>],
     ) {
         let header = block.header.as_ref();
@@ -177,7 +177,7 @@ impl TronBlockMapper {
         transaction_success: bool,
         decoded: &[super::contracts::DecodedContract],
         identity: &PreparedIdentity,
-        fork_step: Option<&str>,
+        fork_step: StreamEvent<'_>,
     ) {
         let info = tx.info.as_ref();
         let fee = info.map_or(0, |i| i.fee);
@@ -441,7 +441,7 @@ impl TronBlockMapper {
         &mut self,
         block: tron::Block,
         identity: &BlockIdentity,
-        fork_step: Option<&str>,
+        fork_step: StreamEvent<'_>,
     ) -> anyhow::Result<u64> {
         let tx_count = block.transactions.len() as u64;
         let identity = self.blocks.canonical.prepare(identity)?;
@@ -456,7 +456,7 @@ impl BlockMapper for TronBlockMapper {
         &mut self,
         block_bytes: &[u8],
         identity: &BlockIdentity,
-        fork_step: Option<&str>,
+        fork_step: StreamEvent<'_>,
     ) -> anyhow::Result<u64> {
         self.map_decoded(tron::Block::decode(block_bytes)?, identity, fork_step)
     }
@@ -465,7 +465,7 @@ impl BlockMapper for TronBlockMapper {
         &mut self,
         block_bytes: prost::bytes::Bytes,
         identity: &BlockIdentity,
-        fork_step: Option<&str>,
+        fork_step: StreamEvent<'_>,
     ) -> anyhow::Result<u64> {
         self.map_decoded(tron::Block::decode(block_bytes)?, identity, fork_step)
     }
@@ -528,7 +528,7 @@ impl BlockMapper for TronBlockMapper {
             + self.blocks.tx_trie_root.estimated_bytes()
             + est_u64(&self.blocks.parent_number)
             + est_u32(&self.blocks.num_transactions)
-            + est_opt_str(&self.blocks.fork_step);
+            + est_fork_step(&self.blocks.fork_step);
         let transactions = self.transactions.canonical.estimated_bytes()
             + est_u64(&self.transactions.block_number)
             + self.transactions.txid.estimated_bytes()
@@ -551,7 +551,7 @@ impl BlockMapper for TronBlockMapper {
             + est_i64(&self.transactions.receipt_energy_penalty_total)
             + self.transactions.contract_address.estimated_bytes()
             + est_bin(&self.transactions.res_message)
-            + est_opt_str(&self.transactions.fork_step)
+            + est_fork_step(&self.transactions.fork_step)
             + est_bool(&self.transactions.transaction_success);
         let logs = self.logs.canonical.estimated_bytes()
             + est_u64(&self.logs.block_number)
@@ -565,7 +565,7 @@ impl BlockMapper for TronBlockMapper {
             + self.logs.data.estimated_bytes()
             + est_u32(&self.logs.transaction_index)
             + est_u64(&self.logs.block_log_index)
-            + est_opt_str(&self.logs.fork_step)
+            + est_fork_step(&self.logs.fork_step)
             + est_bool(&self.logs.transaction_success);
         let internal_transactions = self.internal_transactions.canonical.estimated_bytes()
             + est_u64(&self.internal_transactions.block_number)
@@ -580,7 +580,7 @@ impl BlockMapper for TronBlockMapper {
             + est_str(&self.internal_transactions.note)
             + est_bool(&self.internal_transactions.rejected)
             + est_u32(&self.internal_transactions.transaction_index)
-            + est_opt_str(&self.internal_transactions.fork_step)
+            + est_fork_step(&self.internal_transactions.fork_step)
             + est_bool(&self.internal_transactions.transaction_success);
         [
             ("blocks", blocks),
@@ -616,7 +616,7 @@ struct BlocksBuilder {
     tx_trie_root: BytesColumn,
     parent_number: UInt64Builder,
     num_transactions: UInt32Builder,
-    fork_step: Option<StringBuilder>,
+    fork_step: Option<ForkStepBuilder>,
 }
 
 impl BlocksBuilder {
@@ -676,7 +676,7 @@ struct TransactionsBuilder {
     receipt_energy_penalty_total: Int64Builder,
     contract_address: BytesColumn,
     res_message: BinaryBuilder,
-    fork_step: Option<StringBuilder>,
+    fork_step: Option<ForkStepBuilder>,
     /// Parent transaction outcome (#550).
     transaction_success: BooleanBuilder,
 }
@@ -756,7 +756,7 @@ struct LogsBuilder {
     data: BytesColumn,
     transaction_index: UInt32Builder,
     block_log_index: UInt64Builder,
-    fork_step: Option<StringBuilder>,
+    fork_step: Option<ForkStepBuilder>,
     /// Parent transaction outcome (#550).
     transaction_success: BooleanBuilder,
 }
@@ -814,7 +814,7 @@ struct InternalTransactionsBuilder {
     note: StringBuilder,
     rejected: BooleanBuilder,
     transaction_index: UInt32Builder,
-    fork_step: Option<StringBuilder>,
+    fork_step: Option<ForkStepBuilder>,
     /// Parent transaction outcome (#550).
     transaction_success: BooleanBuilder,
 }
@@ -987,7 +987,11 @@ pub(crate) mod tests {
         let block_bytes = prost::Message::encode_to_vec(&block);
         let mut mapper = TronBlockMapper::new(false, EncodeBytes::Hex, false);
         mapper
-            .map_block(&block_bytes, &BlockIdentity::default(), None)
+            .map_block(
+                &block_bytes,
+                &BlockIdentity::default(),
+                StreamEvent::default(),
+            )
             .unwrap();
 
         let batches = mapper.flush().unwrap();
@@ -1030,7 +1034,11 @@ pub(crate) mod tests {
         let block_bytes = prost::Message::encode_to_vec(&block);
         let mut mapper = TronBlockMapper::new(false, EncodeBytes::Hex, false);
         mapper
-            .map_block(&block_bytes, &BlockIdentity::default(), None)
+            .map_block(
+                &block_bytes,
+                &BlockIdentity::default(),
+                StreamEvent::default(),
+            )
             .unwrap();
 
         let batches = mapper.flush().unwrap();
@@ -1076,7 +1084,11 @@ pub(crate) mod tests {
         let block_bytes = prost::Message::encode_to_vec(&block);
         let mut mapper = TronBlockMapper::new(false, EncodeBytes::Hex, false);
         mapper
-            .map_block(&block_bytes, &BlockIdentity::default(), None)
+            .map_block(
+                &block_bytes,
+                &BlockIdentity::default(),
+                StreamEvent::default(),
+            )
             .unwrap();
         let batches = mapper.flush().unwrap();
         assert_eq!(batches["blocks"].num_rows(), 1);
@@ -1091,7 +1103,11 @@ pub(crate) mod tests {
         let block_bytes = prost::Message::encode_to_vec(&block);
         let mut mapper = TronBlockMapper::new(false, EncodeBytes::Hex, false);
         mapper
-            .map_block(&block_bytes, &BlockIdentity::default(), None)
+            .map_block(
+                &block_bytes,
+                &BlockIdentity::default(),
+                StreamEvent::default(),
+            )
             .unwrap();
         let _ = mapper.flush().unwrap();
         assert_eq!(mapper.max_table_rows(), 0);
@@ -1113,13 +1129,28 @@ pub(crate) mod tests {
         let block_bytes = prost::Message::encode_to_vec(&block);
         let mut mapper = TronBlockMapper::new(true, EncodeBytes::Hex, false);
         mapper
-            .map_block(&block_bytes, &BlockIdentity::default(), Some("FINAL"))
+            .map_block(
+                &block_bytes,
+                &BlockIdentity::default(),
+                StreamEvent::new(Some("FINAL"), 1),
+            )
             .unwrap();
 
         let batches = mapper.flush().unwrap();
         let blocks_batch = &batches["blocks"];
-        let last_col = blocks_batch.num_columns() - 1;
+        // `stream_ordinal` directly follows `fork_step` and carries the event ordinal.
+        let last_col = blocks_batch.num_columns() - 2;
         assert_eq!(blocks_batch.schema().field(last_col).name(), "fork_step");
+        assert_eq!(
+            blocks_batch.schema().field(last_col + 1).name(),
+            "stream_ordinal"
+        );
+        let ordinals = blocks_batch
+            .column(last_col + 1)
+            .as_any()
+            .downcast_ref::<arrow::array::UInt64Array>()
+            .unwrap();
+        assert_eq!(ordinals.value(0), 1);
         let fork_col = blocks_batch
             .column(last_col)
             .as_any()
@@ -1143,7 +1174,9 @@ pub(crate) mod tests {
             fork_step: None,
         };
         let mut mapper = TronBlockMapper::new(false, EncodeBytes::TronBase58, false);
-        mapper.map_block(&block_bytes, &identity, None).unwrap();
+        mapper
+            .map_block(&block_bytes, &identity, StreamEvent::default())
+            .unwrap();
 
         let batches = mapper.flush().unwrap();
 
@@ -1210,7 +1243,7 @@ struct ContractsBuilder {
     call_value: Int64Builder,
     call_token_value: Int64Builder,
     token_id: Int64Builder,
-    fork_step: Option<StringBuilder>,
+    fork_step: Option<ForkStepBuilder>,
     /// Parent transaction outcome (#550).
     transaction_success: BooleanBuilder,
 }
@@ -1283,7 +1316,7 @@ impl ContractsBuilder {
             + est_i64(&self.call_value)
             + est_i64(&self.call_token_value)
             + est_i64(&self.token_id)
-            + est_opt_str(&self.fork_step)
+            + est_fork_step(&self.fork_step)
             + est_bool(&self.transaction_success)
     }
 }
@@ -1296,7 +1329,7 @@ struct InternalCallValuesBuilder {
     call_value_index: UInt32Builder,
     call_value: Int64Builder,
     token_id: StringBuilder,
-    fork_step: Option<StringBuilder>,
+    fork_step: Option<ForkStepBuilder>,
     /// Parent transaction outcome (#550).
     transaction_success: BooleanBuilder,
 }
@@ -1336,7 +1369,7 @@ impl InternalCallValuesBuilder {
             + est_u32(&self.call_value_index)
             + est_i64(&self.call_value)
             + est_str(&self.token_id)
-            + est_opt_str(&self.fork_step)
+            + est_fork_step(&self.fork_step)
             + est_bool(&self.transaction_success)
     }
 }

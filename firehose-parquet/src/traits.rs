@@ -368,66 +368,137 @@ pub fn fork_step_name(step: i32) -> Option<&'static str> {
     }
 }
 
-/// Returns the fork_step field definition.
-pub fn fork_step_field() -> Field {
-    Field::new("fork_step", DataType::Utf8, false)
+/// Name of the non-final `fork_step` column.
+pub const FORK_STEP_COLUMN: &str = "fork_step";
+
+/// Name of the non-final `stream_ordinal` column, which always directly
+/// follows `fork_step`.
+pub const STREAM_ORDINAL_COLUMN: &str = "stream_ordinal";
+
+/// The stream event that produced a mapped block: its Firehose fork step and
+/// its accepted-event ordinal.
+///
+/// Mappers write both, as the `fork_step` and `stream_ordinal` columns of every
+/// row of every table, only when fork-step columns are included (non-final
+/// streams, `--final-blocks-only=false`). Final-only schemas carry neither.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct StreamEvent<'a> {
+    /// `NEW`, `UNDO` or `FINAL`; `None` (an unrecognized step) is written as
+    /// `UNKNOWN`.
+    pub fork_step: Option<&'a str>,
+    /// The protected ingestion session's accepted-event ordinal of the envelope
+    /// (`AcceptedFrontier::receive`): strictly increasing in delivery order,
+    /// continued from the durable checkpoint across reconnects and restarts,
+    /// and identical for every row the envelope produces in every table.
+    /// Dry runs, which write nothing, use 0.
+    pub stream_ordinal: u64,
 }
 
-/// Builder for the fork_step column (a simple StringBuilder wrapper).
+impl<'a> StreamEvent<'a> {
+    pub const fn new(fork_step: Option<&'a str>, stream_ordinal: u64) -> Self {
+        Self {
+            fork_step,
+            stream_ordinal,
+        }
+    }
+}
+
+/// Returns the fork_step field definition.
+pub fn fork_step_field() -> Field {
+    Field::new(FORK_STEP_COLUMN, DataType::Utf8, false)
+}
+
+/// Returns the stream_ordinal field definition. `UInt64`, like every block
+/// number column, and never null.
+pub fn stream_ordinal_field() -> Field {
+    Field::new(STREAM_ORDINAL_COLUMN, DataType::UInt64, false)
+}
+
+/// Builder for the non-final event columns, `fork_step` and `stream_ordinal`.
 pub struct ForkStepBuilder {
-    inner: StringBuilder,
+    fork_step: StringBuilder,
+    stream_ordinal: UInt64Builder,
+}
+
+impl Default for ForkStepBuilder {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl ForkStepBuilder {
     pub fn new() -> Self {
         Self {
-            inner: StringBuilder::new(),
+            fork_step: StringBuilder::new(),
+            stream_ordinal: UInt64Builder::new(),
         }
     }
 
-    pub fn append(&mut self, value: &str) {
-        self.inner.append_value(value);
+    /// Append one row. A missing step is written as `UNKNOWN`.
+    pub fn append(&mut self, event: StreamEvent<'_>) {
+        self.fork_step
+            .append_value(event.fork_step.unwrap_or("UNKNOWN"));
+        self.stream_ordinal.append_value(event.stream_ordinal);
     }
 
-    pub fn finish(&mut self) -> Arc<dyn arrow::array::Array> {
-        Arc::new(self.inner.finish())
+    /// Push the finished `fork_step` and `stream_ordinal` columns, in that order.
+    pub fn finish_into(&mut self, columns: &mut Vec<Arc<dyn arrow::array::Array>>) {
+        columns.push(Arc::new(self.fork_step.finish()));
+        columns.push(Arc::new(self.stream_ordinal.finish()));
     }
 
     pub fn len(&self) -> usize {
-        self.inner.len()
+        self.fork_step.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// Estimate in-memory byte usage of both columns.
+    pub fn estimated_bytes(&self) -> usize {
+        est_str(&self.fork_step) + est_u64(&self.stream_ordinal)
     }
 }
 
-/// Append the `fork_step` field to a table schema when fork steps are
-/// included (non-final streams). It follows each table's original columns;
-/// columns added later may be pushed after it, so it is not always last.
+/// Append the `fork_step` and `stream_ordinal` fields to a table schema when
+/// fork steps are included (non-final streams). They follow each table's
+/// original columns; columns added later may be pushed after them, so they are
+/// not always last, but `stream_ordinal` always directly follows `fork_step`.
 pub fn push_fork_step_field(fields: &mut Vec<Field>, include: bool) {
     if include {
         fields.push(fork_step_field());
+        fields.push(stream_ordinal_field());
     }
 }
 
-/// Optional `fork_step` column builder: present only when fork steps are included.
-pub fn fork_step_builder(include: bool) -> Option<StringBuilder> {
-    include.then(StringBuilder::new)
+/// Optional non-final event column builder: present only when fork steps are included.
+pub fn fork_step_builder(include: bool) -> Option<ForkStepBuilder> {
+    include.then(ForkStepBuilder::new)
 }
 
-/// Append one row to an optional `fork_step` column. A missing step is
-/// written as `UNKNOWN`.
-pub fn append_fork_step(builder: &mut Option<StringBuilder>, fork_step: Option<&str>) {
+/// Append one row to the optional `fork_step` and `stream_ordinal` columns.
+/// A missing step is written as `UNKNOWN`.
+pub fn append_fork_step(builder: &mut Option<ForkStepBuilder>, event: StreamEvent<'_>) {
     if let Some(builder) = builder {
-        builder.append_value(fork_step.unwrap_or("UNKNOWN"));
+        builder.append(event);
     }
 }
 
-/// Finish an optional `fork_step` column after the table's other columns.
+/// Finish the optional `fork_step` and `stream_ordinal` columns after the
+/// table's other columns.
 pub fn finish_fork_step(
-    builder: &mut Option<StringBuilder>,
+    builder: &mut Option<ForkStepBuilder>,
     columns: &mut Vec<Arc<dyn arrow::array::Array>>,
 ) {
     if let Some(builder) = builder {
-        columns.push(Arc::new(builder.finish()));
+        builder.finish_into(columns);
     }
+}
+
+/// Estimate memory usage of the optional non-final event columns.
+pub fn est_fork_step(builder: &Option<ForkStepBuilder>) -> usize {
+    builder.as_ref().map_or(0, ForkStepBuilder::estimated_bytes)
 }
 
 /// Arrow type of enum-backed label columns: dictionary-encoded `Utf8`
@@ -453,12 +524,14 @@ pub fn strip_enum_prefix(name: &'static str, prefix: &str) -> &'static str {
 /// Trait for mapping raw protobuf block bytes into Arrow RecordBatches.
 pub trait BlockMapper {
     /// Map raw protobuf bytes (from Any.value) into internal builders.
-    /// Returns the number of transactions mapped for the block.
+    /// Returns the number of transactions mapped for the block. `fork_step`
+    /// is the stream event that delivered it; its step and ordinal are written
+    /// to every row only when the mapper includes fork-step columns.
     fn map_block(
         &mut self,
         block_bytes: &[u8],
         identity: &BlockIdentity,
-        fork_step: Option<&str>,
+        fork_step: StreamEvent<'_>,
     ) -> anyhow::Result<u64>;
 
     /// Map an owned protobuf buffer. Chain implementations can retain shared byte
@@ -467,7 +540,7 @@ pub trait BlockMapper {
         &mut self,
         block_bytes: bytes::Bytes,
         identity: &BlockIdentity,
-        fork_step: Option<&str>,
+        fork_step: StreamEvent<'_>,
     ) -> anyhow::Result<u64> {
         self.map_block(block_bytes.as_ref(), identity, fork_step)
     }
@@ -648,18 +721,25 @@ mod tests {
         push_fork_step_field(&mut fields, false);
         assert_eq!(fields.len(), 1);
         push_fork_step_field(&mut fields, true);
-        assert_eq!(fields.last(), Some(&fork_step_field()));
+        assert_eq!(fields[1..], [fork_step_field(), stream_ordinal_field()]);
+        assert_eq!(
+            (fields[2].name().as_str(), fields[2].data_type()),
+            (STREAM_ORDINAL_COLUMN, &DataType::UInt64)
+        );
+        assert!(!fields[2].is_nullable());
 
         let mut absent = fork_step_builder(false);
         assert!(absent.is_none());
-        append_fork_step(&mut absent, Some("NEW"));
+        append_fork_step(&mut absent, StreamEvent::new(Some("NEW"), 1));
         let mut columns = Vec::new();
         finish_fork_step(&mut absent, &mut columns);
         assert!(columns.is_empty());
+        assert_eq!(est_fork_step(&absent), 0);
 
         let mut present = fork_step_builder(true);
-        append_fork_step(&mut present, Some("UNDO"));
-        append_fork_step(&mut present, None);
+        append_fork_step(&mut present, StreamEvent::new(Some("UNDO"), 7));
+        append_fork_step(&mut present, StreamEvent::new(None, 9));
+        assert_eq!(est_fork_step(&present), "UNDOUNKNOWN".len() + 3 * 4 + 2 * 8);
         finish_fork_step(&mut present, &mut columns);
         let values = columns[0]
             .as_any()
@@ -669,9 +749,15 @@ mod tests {
             values.iter().collect::<Vec<_>>(),
             [Some("UNDO"), Some("UNKNOWN")]
         );
+        let ordinals = columns[1]
+            .as_any()
+            .downcast_ref::<UInt64Array>()
+            .expect("stream_ordinal is UInt64");
+        assert_eq!(ordinals.values(), &[7, 9]);
+        assert_eq!(arrow::array::Array::null_count(ordinals), 0);
         // The builder is reusable after finish, like the per-mapper copies.
-        append_fork_step(&mut present, Some("FINAL"));
-        assert_eq!(present.as_ref().map(ArrayBuilder::len), Some(1));
+        append_fork_step(&mut present, StreamEvent::new(Some("FINAL"), 10));
+        assert_eq!(present.as_ref().map(ForkStepBuilder::len), Some(1));
     }
 
     #[test]

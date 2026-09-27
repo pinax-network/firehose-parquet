@@ -6,9 +6,9 @@ use arrow::datatypes::{Int32Type, Schema};
 use arrow::record_batch::RecordBatch;
 use firehose_parquet::encode::{BytesColumn, BytesListColumn, EncodeBytes};
 use firehose_parquet::traits::{
-    append_fork_step, est_bool, est_opt_str, est_str, est_u32, est_u64,
+    append_fork_step, est_bool, est_fork_step, est_str, est_u32, est_u64,
     estimated_dictionary_index_bytes, finish_fork_step, fork_step_builder, strip_enum_prefix,
-    BlockIdentity, BlockMapper, CanonicalBuilder, PreparedIdentity,
+    BlockIdentity, BlockMapper, CanonicalBuilder, ForkStepBuilder, PreparedIdentity, StreamEvent,
 };
 use prost::Message;
 use std::collections::HashMap;
@@ -385,7 +385,7 @@ impl EvmBlockMapper {
         &mut self,
         block: &eth::Block,
         identity: &PreparedIdentity,
-        fork_step: Option<&str>,
+        fork_step: StreamEvent<'_>,
     ) {
         let number = block.number;
         let header = block.header.as_ref();
@@ -508,7 +508,7 @@ impl EvmBlockMapper {
         block_number: u64,
         tx: &eth::TransactionTrace,
         identity: &PreparedIdentity,
-        fork_step: Option<&str>,
+        fork_step: StreamEvent<'_>,
     ) {
         let tx_hash = &tx.hash;
 
@@ -635,7 +635,7 @@ impl EvmBlockMapper {
         block_number: u64,
         tx: &eth::TransactionTrace,
         identity: &PreparedIdentity,
-        fork_step: Option<&str>,
+        fork_step: StreamEvent<'_>,
     ) {
         // Persistent changes all come from the root call.
         if let Some(root) = tx.calls.first() {
@@ -674,7 +674,7 @@ impl EvmBlockMapper {
         tx_index: u32,
         log: &eth::Log,
         identity: &PreparedIdentity,
-        fork_step: Option<&str>,
+        fork_step: StreamEvent<'_>,
     ) {
         self.logs.canonical.append(identity);
         self.logs.block_number.append_value(block_number);
@@ -714,7 +714,7 @@ impl EvmBlockMapper {
         tx: &eth::TransactionTrace,
         call: &eth::Call,
         identity: &PreparedIdentity,
-        fork_step: Option<&str>,
+        fork_step: StreamEvent<'_>,
     ) {
         if !self.extended {
             return;
@@ -760,7 +760,7 @@ impl EvmBlockMapper {
         block_number: u64,
         call: &eth::Call,
         identity: &PreparedIdentity,
-        fork_step: Option<&str>,
+        fork_step: StreamEvent<'_>,
     ) {
         if !self.extended {
             return;
@@ -805,7 +805,7 @@ impl EvmBlockMapper {
         &mut self,
         block: eth::Block,
         identity: &BlockIdentity,
-        fork_step: Option<&str>,
+        fork_step: StreamEvent<'_>,
     ) -> anyhow::Result<u64> {
         let tx_count = block.transaction_traces.len() as u64;
         let identity = self.blocks.canonical.prepare(identity)?;
@@ -819,7 +819,7 @@ impl BlockMapper for EvmBlockMapper {
         &mut self,
         block_bytes: &[u8],
         identity: &BlockIdentity,
-        fork_step: Option<&str>,
+        fork_step: StreamEvent<'_>,
     ) -> anyhow::Result<u64> {
         self.map_decoded(eth::Block::decode(block_bytes)?, identity, fork_step)
     }
@@ -828,7 +828,7 @@ impl BlockMapper for EvmBlockMapper {
         &mut self,
         block_bytes: prost::bytes::Bytes,
         identity: &BlockIdentity,
-        fork_step: Option<&str>,
+        fork_step: StreamEvent<'_>,
     ) -> anyhow::Result<u64> {
         self.map_decoded(eth::Block::decode(block_bytes)?, identity, fork_step)
     }
@@ -1079,7 +1079,7 @@ impl BlockMapper for EvmBlockMapper {
             + est_u64(&self.blocks.excess_blob_gas)
             + self.blocks.parent_beacon_root.estimated_bytes()
             + self.blocks.requests_hash.estimated_bytes()
-            + est_opt_str(&self.blocks.fork_step);
+            + est_fork_step(&self.blocks.fork_step);
         // transactions
         let transactions = self.transactions.canonical.estimated_bytes()
             + est_u64(&self.transactions.block_number)
@@ -1110,7 +1110,7 @@ impl BlockMapper for EvmBlockMapper {
             + est_str(&self.transactions.blob_gas_price)
             + est_u64(&self.transactions.begin_ordinal)
             + est_u64(&self.transactions.end_ordinal)
-            + est_opt_str(&self.transactions.fork_step);
+            + est_fork_step(&self.transactions.fork_step);
         // logs
         let logs = self.logs.canonical.estimated_bytes()
             + est_u64(&self.logs.block_number)
@@ -1125,7 +1125,7 @@ impl BlockMapper for EvmBlockMapper {
             + self.logs.topic3.estimated_bytes()
             + self.logs.data.estimated_bytes()
             + est_u64(&self.logs.ordinal)
-            + est_opt_str(&self.logs.fork_step);
+            + est_fork_step(&self.logs.fork_step);
         let mut tables: Vec<(&str, usize)> = vec![
             ("blocks", blocks),
             ("transactions", transactions),
@@ -1164,7 +1164,7 @@ impl BlockMapper for EvmBlockMapper {
                     + $b.address_delegates_to.estimated_bytes()
                     + est_u64(&$b.begin_ordinal)
                     + est_u64(&$b.end_ordinal)
-                    + est_opt_str(&$b.fork_step)
+                    + est_fork_step(&$b.fork_step)
             };
         }
         // system_calls (block-level, no tx_hash/tx_index)
@@ -1192,7 +1192,7 @@ impl BlockMapper for EvmBlockMapper {
                     + $b.address_delegates_to.estimated_bytes()
                     + est_u64(&$b.begin_ordinal)
                     + est_u64(&$b.end_ordinal)
-                    + est_opt_str(&$b.fork_step)
+                    + est_fork_step(&$b.fork_step)
             };
         }
         macro_rules! est_balance_changes {
@@ -1209,7 +1209,7 @@ impl BlockMapper for EvmBlockMapper {
                     + estimated_dictionary_index_bytes($b.reason.len())
                     + est_bool(&$b.state_reverted)
                     + est_bool(&$b.persisted)
-                    + est_opt_str(&$b.fork_step)
+                    + est_fork_step(&$b.fork_step)
             };
         }
         macro_rules! est_sys_balance_changes {
@@ -1222,7 +1222,7 @@ impl BlockMapper for EvmBlockMapper {
                     + est_str(&$b.old_value)
                     + est_str(&$b.new_value)
                     + estimated_dictionary_index_bytes($b.reason.len())
-                    + est_opt_str(&$b.fork_step)
+                    + est_fork_step(&$b.fork_step)
             };
         }
         macro_rules! est_code_changes {
@@ -1240,7 +1240,7 @@ impl BlockMapper for EvmBlockMapper {
                     + $b.new_code.estimated_bytes()
                     + est_bool(&$b.state_reverted)
                     + est_bool(&$b.persisted)
-                    + est_opt_str(&$b.fork_step)
+                    + est_fork_step(&$b.fork_step)
             };
         }
         macro_rules! est_sys_code_changes {
@@ -1254,7 +1254,7 @@ impl BlockMapper for EvmBlockMapper {
                     + $b.new_hash.estimated_bytes()
                     + $b.old_code.estimated_bytes()
                     + $b.new_code.estimated_bytes()
-                    + est_opt_str(&$b.fork_step)
+                    + est_fork_step(&$b.fork_step)
             };
         }
         macro_rules! est_storage_changes {
@@ -1271,7 +1271,7 @@ impl BlockMapper for EvmBlockMapper {
                     + $b.new_value.estimated_bytes()
                     + est_bool(&$b.state_reverted)
                     + est_bool(&$b.persisted)
-                    + est_opt_str(&$b.fork_step)
+                    + est_fork_step(&$b.fork_step)
             };
         }
         macro_rules! est_sys_storage_changes {
@@ -1284,7 +1284,7 @@ impl BlockMapper for EvmBlockMapper {
                     + $b.key.estimated_bytes()
                     + $b.old_value.estimated_bytes()
                     + $b.new_value.estimated_bytes()
-                    + est_opt_str(&$b.fork_step)
+                    + est_fork_step(&$b.fork_step)
             };
         }
         macro_rules! est_nonce_changes {
@@ -1300,7 +1300,7 @@ impl BlockMapper for EvmBlockMapper {
                     + est_u64(&$b.new_value)
                     + est_bool(&$b.state_reverted)
                     + est_bool(&$b.persisted)
-                    + est_opt_str(&$b.fork_step)
+                    + est_fork_step(&$b.fork_step)
             };
         }
         macro_rules! est_sys_nonce_changes {
@@ -1312,7 +1312,7 @@ impl BlockMapper for EvmBlockMapper {
                     + $b.address.estimated_bytes()
                     + est_u64(&$b.old_value)
                     + est_u64(&$b.new_value)
-                    + est_opt_str(&$b.fork_step)
+                    + est_fork_step(&$b.fork_step)
             };
         }
         macro_rules! est_gas_changes {
@@ -1327,7 +1327,7 @@ impl BlockMapper for EvmBlockMapper {
                     + est_u64(&$b.new_value)
                     + estimated_dictionary_index_bytes($b.reason.len())
                     + est_bool(&$b.state_reverted)
-                    + est_opt_str(&$b.fork_step)
+                    + est_fork_step(&$b.fork_step)
             };
         }
         macro_rules! est_sys_gas_changes {
@@ -1339,7 +1339,7 @@ impl BlockMapper for EvmBlockMapper {
                     + est_u64(&$b.old_value)
                     + est_u64(&$b.new_value)
                     + estimated_dictionary_index_bytes($b.reason.len())
-                    + est_opt_str(&$b.fork_step)
+                    + est_fork_step(&$b.fork_step)
             };
         }
         macro_rules! est_account_creations {
@@ -1353,7 +1353,7 @@ impl BlockMapper for EvmBlockMapper {
                     + $b.account.estimated_bytes()
                     + est_bool(&$b.state_reverted)
                     + est_bool(&$b.persisted)
-                    + est_opt_str(&$b.fork_step)
+                    + est_fork_step(&$b.fork_step)
             };
         }
         macro_rules! est_sys_account_creations {
@@ -1363,7 +1363,7 @@ impl BlockMapper for EvmBlockMapper {
                     + est_u32(&$b.call_index)
                     + est_u64(&$b.ordinal)
                     + $b.account.estimated_bytes()
-                    + est_opt_str(&$b.fork_step)
+                    + est_fork_step(&$b.fork_step)
             };
         }
         if let Some(ref b) = self.calls {
@@ -1450,7 +1450,7 @@ struct EvmBlocksBuilder {
     excess_blob_gas: UInt64Builder,
     parent_beacon_root: BytesColumn,
     requests_hash: BytesColumn,
-    fork_step: Option<StringBuilder>,
+    fork_step: Option<ForkStepBuilder>,
 }
 
 impl EvmBlocksBuilder {
@@ -1548,7 +1548,7 @@ struct EvmTransactionsBuilder {
     blob_gas_price: StringBuilder,
     begin_ordinal: UInt64Builder,
     end_ordinal: UInt64Builder,
-    fork_step: Option<StringBuilder>,
+    fork_step: Option<ForkStepBuilder>,
 }
 
 impl EvmTransactionsBuilder {
@@ -1638,7 +1638,7 @@ struct EvmLogsBuilder {
     topic3: BytesColumn,
     data: BytesColumn,
     ordinal: UInt64Builder,
-    fork_step: Option<StringBuilder>,
+    fork_step: Option<ForkStepBuilder>,
 }
 
 impl EvmLogsBuilder {
@@ -1689,7 +1689,7 @@ struct EvmWithdrawalsBuilder {
     validator_index: UInt64Builder,
     address: BytesColumn,
     amount_gwei: UInt64Builder,
-    fork_step: Option<StringBuilder>,
+    fork_step: Option<ForkStepBuilder>,
 }
 
 impl EvmWithdrawalsBuilder {
@@ -1710,7 +1710,7 @@ impl EvmWithdrawalsBuilder {
         block_number: u64,
         withdrawal: &eth::Withdrawal,
         identity: &PreparedIdentity,
-        fork_step: Option<&str>,
+        fork_step: StreamEvent<'_>,
     ) {
         self.canonical.append(identity);
         self.block_number.append_value(block_number);
@@ -1729,7 +1729,7 @@ impl EvmWithdrawalsBuilder {
             + est_u64(&self.validator_index)
             + self.address.estimated_bytes()
             + est_u64(&self.amount_gwei)
-            + est_opt_str(&self.fork_step)
+            + est_fork_step(&self.fork_step)
     }
 
     fn finish(&mut self, schema: &Schema) -> anyhow::Result<RecordBatch> {
@@ -1754,7 +1754,7 @@ struct EvmAccessListsBuilder {
     access_index: UInt32Builder,
     address: BytesColumn,
     storage_keys: BytesListColumn,
-    fork_step: Option<StringBuilder>,
+    fork_step: Option<ForkStepBuilder>,
 }
 
 impl EvmAccessListsBuilder {
@@ -1778,7 +1778,7 @@ impl EvmAccessListsBuilder {
         access_index: u32,
         tuple: &eth::AccessTuple,
         identity: &PreparedIdentity,
-        fork_step: Option<&str>,
+        fork_step: StreamEvent<'_>,
     ) {
         self.canonical.append(identity);
         self.block_number.append_value(block_number);
@@ -1801,7 +1801,7 @@ impl EvmAccessListsBuilder {
             + est_u32(&self.access_index)
             + self.address.estimated_bytes()
             + self.storage_keys.estimated_bytes()
-            + est_opt_str(&self.fork_step)
+            + est_fork_step(&self.fork_step)
     }
 
     fn finish(&mut self, schema: &Schema) -> anyhow::Result<RecordBatch> {
@@ -1833,7 +1833,7 @@ struct EvmSetCodeAuthorizationsBuilder {
     s: BytesColumn,
     authority: BytesColumn,
     discarded: BooleanBuilder,
-    fork_step: Option<StringBuilder>,
+    fork_step: Option<ForkStepBuilder>,
 }
 
 impl EvmSetCodeAuthorizationsBuilder {
@@ -1863,7 +1863,7 @@ impl EvmSetCodeAuthorizationsBuilder {
         authorization_index: u32,
         auth: &eth::SetCodeAuthorization,
         identity: &PreparedIdentity,
-        fork_step: Option<&str>,
+        fork_step: StreamEvent<'_>,
     ) {
         self.canonical.append(identity);
         self.block_number.append_value(block_number);
@@ -1898,7 +1898,7 @@ impl EvmSetCodeAuthorizationsBuilder {
             + self.s.estimated_bytes()
             + self.authority.estimated_bytes()
             + est_bool(&self.discarded)
-            + est_opt_str(&self.fork_step)
+            + est_fork_step(&self.fork_step)
     }
 
     fn finish(&mut self, schema: &Schema) -> anyhow::Result<RecordBatch> {
@@ -1947,7 +1947,7 @@ struct EvmCallsBuilder {
     address_delegates_to: BytesColumn,
     begin_ordinal: UInt64Builder,
     end_ordinal: UInt64Builder,
-    fork_step: Option<StringBuilder>,
+    fork_step: Option<ForkStepBuilder>,
 }
 
 impl EvmCallsBuilder {
@@ -1988,7 +1988,7 @@ impl EvmCallsBuilder {
         tx_index: u32,
         call: &eth::Call,
         identity: &PreparedIdentity,
-        fork_step: Option<&str>,
+        fork_step: StreamEvent<'_>,
     ) {
         self.canonical.append(identity);
         self.block_number.append_value(block_number);
@@ -2069,7 +2069,7 @@ struct EvmBalanceChangesBuilder {
     reason: StringDictionaryBuilder<Int32Type>,
     state_reverted: BooleanBuilder,
     persisted: BooleanBuilder,
-    fork_step: Option<StringBuilder>,
+    fork_step: Option<ForkStepBuilder>,
 }
 
 impl EvmBalanceChangesBuilder {
@@ -2097,7 +2097,7 @@ impl EvmBalanceChangesBuilder {
         ctx: &ChangeContext,
         bc: &eth::BalanceChange,
         identity: &PreparedIdentity,
-        fork_step: Option<&str>,
+        fork_step: StreamEvent<'_>,
     ) {
         self.canonical.append(identity);
         self.block_number.append_value(block_number);
@@ -2149,7 +2149,7 @@ struct EvmCodeChangesBuilder {
     new_code: BytesColumn,
     state_reverted: BooleanBuilder,
     persisted: BooleanBuilder,
-    fork_step: Option<StringBuilder>,
+    fork_step: Option<ForkStepBuilder>,
 }
 
 impl EvmCodeChangesBuilder {
@@ -2178,7 +2178,7 @@ impl EvmCodeChangesBuilder {
         ctx: &ChangeContext,
         cc: &eth::CodeChange,
         identity: &PreparedIdentity,
-        fork_step: Option<&str>,
+        fork_step: StreamEvent<'_>,
     ) {
         self.canonical.append(identity);
         self.block_number.append_value(block_number);
@@ -2230,7 +2230,7 @@ struct EvmStorageChangesBuilder {
     new_value: BytesColumn,
     state_reverted: BooleanBuilder,
     persisted: BooleanBuilder,
-    fork_step: Option<StringBuilder>,
+    fork_step: Option<ForkStepBuilder>,
 }
 
 impl EvmStorageChangesBuilder {
@@ -2258,7 +2258,7 @@ impl EvmStorageChangesBuilder {
         ctx: &ChangeContext,
         sc: &eth::StorageChange,
         identity: &PreparedIdentity,
-        fork_step: Option<&str>,
+        fork_step: StreamEvent<'_>,
     ) {
         self.canonical.append(identity);
         self.block_number.append_value(block_number);
@@ -2307,7 +2307,7 @@ struct EvmNonceChangesBuilder {
     new_value: UInt64Builder,
     state_reverted: BooleanBuilder,
     persisted: BooleanBuilder,
-    fork_step: Option<StringBuilder>,
+    fork_step: Option<ForkStepBuilder>,
 }
 
 impl EvmNonceChangesBuilder {
@@ -2334,7 +2334,7 @@ impl EvmNonceChangesBuilder {
         ctx: &ChangeContext,
         nc: &eth::NonceChange,
         identity: &PreparedIdentity,
-        fork_step: Option<&str>,
+        fork_step: StreamEvent<'_>,
     ) {
         self.canonical.append(identity);
         self.block_number.append_value(block_number);
@@ -2380,7 +2380,7 @@ struct EvmGasChangesBuilder {
     new_value: UInt64Builder,
     reason: StringDictionaryBuilder<Int32Type>,
     state_reverted: BooleanBuilder,
-    fork_step: Option<StringBuilder>,
+    fork_step: Option<ForkStepBuilder>,
 }
 
 impl EvmGasChangesBuilder {
@@ -2406,7 +2406,7 @@ impl EvmGasChangesBuilder {
         ctx: &ChangeContext,
         gc: &eth::GasChange,
         identity: &PreparedIdentity,
-        fork_step: Option<&str>,
+        fork_step: StreamEvent<'_>,
     ) {
         self.canonical.append(identity);
         self.block_number.append_value(block_number);
@@ -2449,7 +2449,7 @@ struct EvmAccountCreationsBuilder {
     account: BytesColumn,
     state_reverted: BooleanBuilder,
     persisted: BooleanBuilder,
-    fork_step: Option<StringBuilder>,
+    fork_step: Option<ForkStepBuilder>,
 }
 
 impl EvmAccountCreationsBuilder {
@@ -2474,7 +2474,7 @@ impl EvmAccountCreationsBuilder {
         ctx: &ChangeContext,
         ac: &eth::AccountCreation,
         identity: &PreparedIdentity,
-        fork_step: Option<&str>,
+        fork_step: StreamEvent<'_>,
     ) {
         self.canonical.append(identity);
         self.block_number.append_value(block_number);
@@ -2532,7 +2532,7 @@ struct SystemCallsBuilder {
     address_delegates_to: BytesColumn,
     begin_ordinal: UInt64Builder,
     end_ordinal: UInt64Builder,
-    fork_step: Option<StringBuilder>,
+    fork_step: Option<ForkStepBuilder>,
 }
 
 impl SystemCallsBuilder {
@@ -2569,7 +2569,7 @@ impl SystemCallsBuilder {
         block_number: u64,
         call: &eth::Call,
         identity: &PreparedIdentity,
-        fork_step: Option<&str>,
+        fork_step: StreamEvent<'_>,
     ) {
         self.canonical.append(identity);
         self.block_number.append_value(block_number);
@@ -2642,7 +2642,7 @@ struct SystemBalanceChangesBuilder {
     old_value: StringBuilder,
     new_value: StringBuilder,
     reason: StringDictionaryBuilder<Int32Type>,
-    fork_step: Option<StringBuilder>,
+    fork_step: Option<ForkStepBuilder>,
 }
 
 impl SystemBalanceChangesBuilder {
@@ -2666,7 +2666,7 @@ impl SystemBalanceChangesBuilder {
         call_index: Option<u32>,
         bc: &eth::BalanceChange,
         identity: &PreparedIdentity,
-        fork_step: Option<&str>,
+        fork_step: StreamEvent<'_>,
     ) {
         self.canonical.append(identity);
         self.block_number.append_value(block_number);
@@ -2706,7 +2706,7 @@ struct SystemCodeChangesBuilder {
     new_hash: BytesColumn,
     old_code: BytesColumn,
     new_code: BytesColumn,
-    fork_step: Option<StringBuilder>,
+    fork_step: Option<ForkStepBuilder>,
 }
 
 impl SystemCodeChangesBuilder {
@@ -2731,7 +2731,7 @@ impl SystemCodeChangesBuilder {
         call_index: Option<u32>,
         cc: &eth::CodeChange,
         identity: &PreparedIdentity,
-        fork_step: Option<&str>,
+        fork_step: StreamEvent<'_>,
     ) {
         self.canonical.append(identity);
         self.block_number.append_value(block_number);
@@ -2771,7 +2771,7 @@ struct SystemStorageChangesBuilder {
     key: BytesColumn,
     old_value: BytesColumn,
     new_value: BytesColumn,
-    fork_step: Option<StringBuilder>,
+    fork_step: Option<ForkStepBuilder>,
 }
 
 impl SystemStorageChangesBuilder {
@@ -2795,7 +2795,7 @@ impl SystemStorageChangesBuilder {
         call_index: Option<u32>,
         sc: &eth::StorageChange,
         identity: &PreparedIdentity,
-        fork_step: Option<&str>,
+        fork_step: StreamEvent<'_>,
     ) {
         self.canonical.append(identity);
         self.block_number.append_value(block_number);
@@ -2832,7 +2832,7 @@ struct SystemNonceChangesBuilder {
     address: BytesColumn,
     old_value: UInt64Builder,
     new_value: UInt64Builder,
-    fork_step: Option<StringBuilder>,
+    fork_step: Option<ForkStepBuilder>,
 }
 
 impl SystemNonceChangesBuilder {
@@ -2855,7 +2855,7 @@ impl SystemNonceChangesBuilder {
         call_index: Option<u32>,
         nc: &eth::NonceChange,
         identity: &PreparedIdentity,
-        fork_step: Option<&str>,
+        fork_step: StreamEvent<'_>,
     ) {
         self.canonical.append(identity);
         self.block_number.append_value(block_number);
@@ -2890,7 +2890,7 @@ struct SystemGasChangesBuilder {
     old_value: UInt64Builder,
     new_value: UInt64Builder,
     reason: StringDictionaryBuilder<Int32Type>,
-    fork_step: Option<StringBuilder>,
+    fork_step: Option<ForkStepBuilder>,
 }
 
 impl SystemGasChangesBuilder {
@@ -2913,7 +2913,7 @@ impl SystemGasChangesBuilder {
         call_index: Option<u32>,
         gc: &eth::GasChange,
         identity: &PreparedIdentity,
-        fork_step: Option<&str>,
+        fork_step: StreamEvent<'_>,
     ) {
         self.canonical.append(identity);
         self.block_number.append_value(block_number);
@@ -2946,7 +2946,7 @@ struct SystemAccountCreationsBuilder {
     call_index: UInt32Builder,
     ordinal: UInt64Builder,
     account: BytesColumn,
-    fork_step: Option<StringBuilder>,
+    fork_step: Option<ForkStepBuilder>,
 }
 
 impl SystemAccountCreationsBuilder {
@@ -2967,7 +2967,7 @@ impl SystemAccountCreationsBuilder {
         call_index: Option<u32>,
         ac: &eth::AccountCreation,
         identity: &PreparedIdentity,
-        fork_step: Option<&str>,
+        fork_step: StreamEvent<'_>,
     ) {
         self.canonical.append(identity);
         self.block_number.append_value(block_number);
@@ -3206,7 +3206,11 @@ pub(crate) mod tests {
         let block_bytes = prost::Message::encode_to_vec(&block);
         let mut mapper = EvmBlockMapper::new(false, false, EncodeBytes::Hex, false);
         mapper
-            .map_block(&block_bytes, &BlockIdentity::default(), None)
+            .map_block(
+                &block_bytes,
+                &BlockIdentity::default(),
+                StreamEvent::default(),
+            )
             .unwrap();
 
         let batches = mapper.flush().unwrap();
@@ -3222,7 +3226,11 @@ pub(crate) mod tests {
         let block_bytes = prost::Message::encode_to_vec(&block);
         let mut mapper = EvmBlockMapper::new(true, false, EncodeBytes::Hex, false);
         mapper
-            .map_block(&block_bytes, &BlockIdentity::default(), None)
+            .map_block(
+                &block_bytes,
+                &BlockIdentity::default(),
+                StreamEvent::default(),
+            )
             .unwrap();
 
         let batches = mapper.flush().unwrap();
@@ -3286,7 +3294,11 @@ pub(crate) mod tests {
         let block_bytes = prost::Message::encode_to_vec(&block);
         let mut mapper = EvmBlockMapper::new(true, false, EncodeBytes::Hex, false);
         mapper
-            .map_block(&block_bytes, &BlockIdentity::default(), None)
+            .map_block(
+                &block_bytes,
+                &BlockIdentity::default(),
+                StreamEvent::default(),
+            )
             .unwrap();
 
         let batches = mapper.flush().unwrap();
@@ -3330,7 +3342,11 @@ pub(crate) mod tests {
         let block_bytes = prost::Message::encode_to_vec(&block);
         let mut mapper = EvmBlockMapper::new(true, false, EncodeBytes::Hex, false);
         mapper
-            .map_block(&block_bytes, &BlockIdentity::default(), None)
+            .map_block(
+                &block_bytes,
+                &BlockIdentity::default(),
+                StreamEvent::default(),
+            )
             .unwrap();
         let _ = mapper.flush().unwrap();
         assert_eq!(mapper.max_table_rows(), 0);
@@ -3381,7 +3397,11 @@ pub(crate) mod tests {
         let block_bytes = prost::Message::encode_to_vec(&block);
         let mut mapper = EvmBlockMapper::new(false, false, EncodeBytes::Hex, false);
         mapper
-            .map_block(&block_bytes, &BlockIdentity::default(), None)
+            .map_block(
+                &block_bytes,
+                &BlockIdentity::default(),
+                StreamEvent::default(),
+            )
             .unwrap();
         let batches = mapper.flush().unwrap();
         assert_eq!(batches["blocks"].num_rows(), 1);
@@ -3420,13 +3440,28 @@ pub(crate) mod tests {
         let block_bytes = prost::Message::encode_to_vec(&block);
         let mut mapper = EvmBlockMapper::new(false, true, EncodeBytes::Hex, false);
         mapper
-            .map_block(&block_bytes, &BlockIdentity::default(), Some("NEW"))
+            .map_block(
+                &block_bytes,
+                &BlockIdentity::default(),
+                StreamEvent::new(Some("NEW"), 1),
+            )
             .unwrap();
 
         let batches = mapper.flush().unwrap();
         let blocks_batch = &batches["blocks"];
-        let last_col = blocks_batch.num_columns() - 1;
+        // `stream_ordinal` directly follows `fork_step` and carries the event ordinal.
+        let last_col = blocks_batch.num_columns() - 2;
         assert_eq!(blocks_batch.schema().field(last_col).name(), "fork_step");
+        assert_eq!(
+            blocks_batch.schema().field(last_col + 1).name(),
+            "stream_ordinal"
+        );
+        let ordinals = blocks_batch
+            .column(last_col + 1)
+            .as_any()
+            .downcast_ref::<arrow::array::UInt64Array>()
+            .unwrap();
+        assert_eq!(ordinals.value(0), 1);
         let fork_col = blocks_batch
             .column(last_col)
             .as_any()
@@ -3441,7 +3476,11 @@ pub(crate) mod tests {
         let block_bytes = prost::Message::encode_to_vec(&block);
         let mut mapper = EvmBlockMapper::new(false, false, EncodeBytes::Binary, false);
         mapper
-            .map_block(&block_bytes, &BlockIdentity::default(), None)
+            .map_block(
+                &block_bytes,
+                &BlockIdentity::default(),
+                StreamEvent::default(),
+            )
             .unwrap();
         let batches = mapper.flush().unwrap();
         assert_eq!(batches["blocks"].num_rows(), 1);
@@ -3460,7 +3499,11 @@ pub(crate) mod tests {
         let block_bytes = prost::Message::encode_to_vec(&block);
         let mut mapper = EvmBlockMapper::new(false, false, EncodeBytes::Base58, false);
         mapper
-            .map_block(&block_bytes, &BlockIdentity::default(), None)
+            .map_block(
+                &block_bytes,
+                &BlockIdentity::default(),
+                StreamEvent::default(),
+            )
             .unwrap();
         let batches = mapper.flush().unwrap();
         assert_eq!(batches["blocks"].num_rows(), 1);
@@ -3488,7 +3531,9 @@ pub(crate) mod tests {
             fork_step: None,
         };
         let mut mapper = EvmBlockMapper::new(false, false, EncodeBytes::TronBase58, false);
-        mapper.map_block(&block_bytes, &identity, None).unwrap();
+        mapper
+            .map_block(&block_bytes, &identity, StreamEvent::default())
+            .unwrap();
 
         let batches = mapper.flush().unwrap();
 
@@ -3810,7 +3855,11 @@ pub(crate) mod tests {
         let block_bytes = prost::Message::encode_to_vec(&block);
         let mut mapper = EvmBlockMapper::new(true, false, EncodeBytes::Hex, true);
         mapper
-            .map_block(&block_bytes, &BlockIdentity::default(), None)
+            .map_block(
+                &block_bytes,
+                &BlockIdentity::default(),
+                StreamEvent::default(),
+            )
             .unwrap();
         let batches = mapper.flush().unwrap();
 
@@ -3841,7 +3890,11 @@ pub(crate) mod tests {
         let block_bytes = prost::Message::encode_to_vec(&block);
         let mut mapper = EvmBlockMapper::new(true, false, EncodeBytes::Hex, false);
         mapper
-            .map_block(&block_bytes, &BlockIdentity::default(), None)
+            .map_block(
+                &block_bytes,
+                &BlockIdentity::default(),
+                StreamEvent::default(),
+            )
             .unwrap();
         let batches = mapper.flush().unwrap();
 
@@ -3870,7 +3923,11 @@ pub(crate) mod tests {
         let block_bytes = prost::Message::encode_to_vec(&block);
         let mut mapper = EvmBlockMapper::new(true, false, EncodeBytes::Hex, true);
         mapper
-            .map_block(&block_bytes, &BlockIdentity::default(), None)
+            .map_block(
+                &block_bytes,
+                &BlockIdentity::default(),
+                StreamEvent::default(),
+            )
             .unwrap();
         let batches = mapper.flush().unwrap();
 
@@ -3909,7 +3966,11 @@ pub(crate) mod tests {
         let block_bytes = prost::Message::encode_to_vec(block);
         let mut mapper = EvmBlockMapper::new(true, false, EncodeBytes::Hex, true);
         mapper
-            .map_block(&block_bytes, &BlockIdentity::default(), None)
+            .map_block(
+                &block_bytes,
+                &BlockIdentity::default(),
+                StreamEvent::default(),
+            )
             .unwrap();
         mapper.flush().unwrap()
     }
@@ -4353,7 +4414,11 @@ pub(crate) mod tests {
         let block_bytes = prost::Message::encode_to_vec(&block);
         let mut mapper = EvmBlockMapper::new(true, false, EncodeBytes::Binary, true);
         mapper
-            .map_block(&block_bytes, &BlockIdentity::default(), None)
+            .map_block(
+                &block_bytes,
+                &BlockIdentity::default(),
+                StreamEvent::default(),
+            )
             .unwrap();
         let batches = mapper.flush().unwrap();
         let schema = batches["transactions"].schema();
@@ -4452,7 +4517,11 @@ pub(crate) mod tests {
         for extended in [false, true] {
             let mut mapper = EvmBlockMapper::new(extended, false, EncodeBytes::Hex, true);
             mapper
-                .map_block(&block_bytes, &BlockIdentity::default(), None)
+                .map_block(
+                    &block_bytes,
+                    &BlockIdentity::default(),
+                    StreamEvent::default(),
+                )
                 .unwrap();
             let names: Vec<String> = mapper.table_names().iter().map(|n| n.to_string()).collect();
             let batches = mapper.flush().unwrap();
@@ -4533,7 +4602,11 @@ pub(crate) mod tests {
         let block_bytes = prost::Message::encode_to_vec(&block);
         let mut mapper = EvmBlockMapper::new(true, false, EncodeBytes::Hex, false);
         mapper
-            .map_block(&block_bytes, &BlockIdentity::default(), None)
+            .map_block(
+                &block_bytes,
+                &BlockIdentity::default(),
+                StreamEvent::default(),
+            )
             .unwrap();
         let batches = mapper.flush().unwrap();
         assert_eq!(batches["access_lists"].num_rows(), 0);

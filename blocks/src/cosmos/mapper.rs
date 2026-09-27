@@ -6,8 +6,9 @@ use arrow::datatypes::Schema;
 use arrow::record_batch::RecordBatch;
 use firehose_parquet::encode::{BytesColumn, EncodeBytes};
 use firehose_parquet::traits::{
-    append_fork_step, est_bin, est_i64, est_opt_str, est_str, est_u32, finish_fork_step,
-    fork_step_builder, BlockIdentity, BlockMapper, CanonicalBuilder, PreparedIdentity,
+    append_fork_step, est_bin, est_fork_step, est_i64, est_str, est_u32, finish_fork_step,
+    fork_step_builder, BlockIdentity, BlockMapper, CanonicalBuilder, ForkStepBuilder,
+    PreparedIdentity, StreamEvent,
 };
 use prost::Message;
 use sha2::{Digest, Sha256};
@@ -68,7 +69,7 @@ impl CosmosBlockMapper {
         &mut self,
         block: &cosmos::Block,
         identity: &PreparedIdentity,
-        fork_step: Option<&str>,
+        fork_step: StreamEvent<'_>,
     ) {
         let height = block.height;
 
@@ -196,7 +197,7 @@ impl CosmosBlockMapper {
         &mut self,
         block: cosmos::Block,
         identity: &BlockIdentity,
-        fork_step: Option<&str>,
+        fork_step: StreamEvent<'_>,
     ) -> anyhow::Result<u64> {
         let tx_count = block.txs.len() as u64;
         let identity = self.blocks.canonical.prepare_with_ids(
@@ -214,7 +215,7 @@ impl BlockMapper for CosmosBlockMapper {
         &mut self,
         block_bytes: &[u8],
         identity: &BlockIdentity,
-        fork_step: Option<&str>,
+        fork_step: StreamEvent<'_>,
     ) -> anyhow::Result<u64> {
         self.map_decoded(cosmos::Block::decode(block_bytes)?, identity, fork_step)
     }
@@ -223,7 +224,7 @@ impl BlockMapper for CosmosBlockMapper {
         &mut self,
         block_bytes: prost::bytes::Bytes,
         identity: &BlockIdentity,
-        fork_step: Option<&str>,
+        fork_step: StreamEvent<'_>,
     ) -> anyhow::Result<u64> {
         self.map_decoded(cosmos::Block::decode(block_bytes)?, identity, fork_step)
     }
@@ -277,7 +278,7 @@ impl BlockMapper for CosmosBlockMapper {
             + self.blocks.next_validators_hash.estimated_bytes()
             + est_u32(&self.blocks.num_txs)
             + est_u32(&self.blocks.tx_decode_failures)
-            + est_opt_str(&self.blocks.fork_step);
+            + est_fork_step(&self.blocks.fork_step);
         let transactions = self.transactions.canonical.estimated_bytes()
             + self.transactions.tx_hash.estimated_bytes()
             + est_u32(&self.transactions.index)
@@ -288,7 +289,7 @@ impl BlockMapper for CosmosBlockMapper {
             + est_str(&self.transactions.info)
             + est_str(&self.transactions.codespace)
             + self.transactions.metadata.estimated_bytes()
-            + est_opt_str(&self.transactions.fork_step);
+            + est_fork_step(&self.transactions.fork_step);
         let events = self.events.canonical.estimated_bytes()
             + est_str(&self.events.source)
             + self.events.tx_hash.estimated_bytes()
@@ -298,14 +299,14 @@ impl BlockMapper for CosmosBlockMapper {
             + est_str(&self.events.r#type)
             + est_str(&self.events.key)
             + est_str(&self.events.value)
-            + est_opt_str(&self.events.fork_step);
+            + est_fork_step(&self.events.fork_step);
         let messages = self.messages.canonical.estimated_bytes()
             + self.messages.tx_hash.estimated_bytes()
             + est_u32(&self.messages.tx_index)
             + est_u32(&self.messages.message_index)
             + est_str(&self.messages.type_url)
             + est_bin(&self.messages.value)
-            + est_opt_str(&self.messages.fork_step);
+            + est_fork_step(&self.messages.fork_step);
         [
             ("blocks", blocks),
             ("transactions", transactions),
@@ -337,7 +338,7 @@ struct BlocksBuilder {
     next_validators_hash: BytesColumn,
     num_txs: UInt32Builder,
     tx_decode_failures: UInt32Builder,
-    fork_step: Option<StringBuilder>,
+    fork_step: Option<ForkStepBuilder>,
 }
 
 impl BlocksBuilder {
@@ -388,7 +389,7 @@ struct TransactionsBuilder {
     info: StringBuilder,
     codespace: StringBuilder,
     metadata: TxMetadataBuilder,
-    fork_step: Option<StringBuilder>,
+    fork_step: Option<ForkStepBuilder>,
 }
 
 impl TransactionsBuilder {
@@ -436,7 +437,7 @@ struct EventsBuilder {
     r#type: StringBuilder,
     key: StringBuilder,
     value: StringBuilder,
-    fork_step: Option<StringBuilder>,
+    fork_step: Option<ForkStepBuilder>,
 }
 
 impl EventsBuilder {
@@ -464,7 +465,7 @@ impl EventsBuilder {
         tx_index: Option<u32>,
         event_index: u32,
         event: &cosmos::Event,
-        fork_step: Option<&str>,
+        fork_step: StreamEvent<'_>,
     ) {
         for attribute in 0..event.attributes.len().max(1) {
             self.canonical.append(identity);
@@ -511,7 +512,7 @@ struct MessagesBuilder {
     message_index: UInt32Builder,
     type_url: StringBuilder,
     value: BinaryBuilder,
-    fork_step: Option<StringBuilder>,
+    fork_step: Option<ForkStepBuilder>,
 }
 
 impl MessagesBuilder {
@@ -638,7 +639,11 @@ pub(crate) mod tests {
         let block_bytes = prost::Message::encode_to_vec(&block);
         let mut mapper = CosmosBlockMapper::new(false, EncodeBytes::Hex, false);
         mapper
-            .map_block(&block_bytes, &BlockIdentity::default(), None)
+            .map_block(
+                &block_bytes,
+                &BlockIdentity::default(),
+                StreamEvent::default(),
+            )
             .unwrap();
 
         let batches = mapper.flush().unwrap();
@@ -673,7 +678,11 @@ pub(crate) mod tests {
         let block_bytes = prost::Message::encode_to_vec(&block);
         let mut mapper = CosmosBlockMapper::new(false, EncodeBytes::Hex, false);
         mapper
-            .map_block(&block_bytes, &BlockIdentity::default(), None)
+            .map_block(
+                &block_bytes,
+                &BlockIdentity::default(),
+                StreamEvent::default(),
+            )
             .unwrap();
 
         let batches = mapper.flush().unwrap();
@@ -689,7 +698,11 @@ pub(crate) mod tests {
         let block_bytes = prost::Message::encode_to_vec(&block);
         let mut mapper = CosmosBlockMapper::new(false, EncodeBytes::Hex, false);
         mapper
-            .map_block(&block_bytes, &BlockIdentity::default(), None)
+            .map_block(
+                &block_bytes,
+                &BlockIdentity::default(),
+                StreamEvent::default(),
+            )
             .unwrap();
         let _ = mapper.flush().unwrap();
         assert_eq!(mapper.max_table_rows(), 0);
@@ -711,13 +724,28 @@ pub(crate) mod tests {
         let block_bytes = prost::Message::encode_to_vec(&block);
         let mut mapper = CosmosBlockMapper::new(true, EncodeBytes::Hex, false);
         mapper
-            .map_block(&block_bytes, &BlockIdentity::default(), Some("FINAL"))
+            .map_block(
+                &block_bytes,
+                &BlockIdentity::default(),
+                StreamEvent::new(Some("FINAL"), 1),
+            )
             .unwrap();
 
         let batches = mapper.flush().unwrap();
         let blocks_batch = &batches["blocks"];
-        let last_col = blocks_batch.num_columns() - 1;
+        // `stream_ordinal` directly follows `fork_step` and carries the event ordinal.
+        let last_col = blocks_batch.num_columns() - 2;
         assert_eq!(blocks_batch.schema().field(last_col).name(), "fork_step");
+        assert_eq!(
+            blocks_batch.schema().field(last_col + 1).name(),
+            "stream_ordinal"
+        );
+        let ordinals = blocks_batch
+            .column(last_col + 1)
+            .as_any()
+            .downcast_ref::<arrow::array::UInt64Array>()
+            .unwrap();
+        assert_eq!(ordinals.value(0), 1);
         let fork_col = blocks_batch
             .column(last_col)
             .as_any()
@@ -742,7 +770,9 @@ pub(crate) mod tests {
             fork_step: None,
         };
 
-        mapper.map_block(&block_bytes, &identity, None).unwrap();
+        mapper
+            .map_block(&block_bytes, &identity, StreamEvent::default())
+            .unwrap();
         let batches = mapper.flush().unwrap();
         let blocks = &batches["blocks"];
 

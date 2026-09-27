@@ -5,7 +5,7 @@ use std::hint::black_box;
 use std::time::Instant;
 
 use firehose_parquet::encode::EncodeBytes;
-use firehose_parquet::traits::{BlockIdentity, BlockMapper};
+use firehose_parquet::traits::{BlockIdentity, BlockMapper, StreamEvent};
 use prost::Message;
 
 use crate::evm::mapper::EvmBlockMapper;
@@ -53,7 +53,7 @@ fn bench(label: &str, mapper: &mut dyn BlockMapper, block: &[u8]) {
     let start = Instant::now();
     for _ in 0..ITERATIONS {
         mapper
-            .map_block(black_box(block), &identity, None)
+            .map_block(black_box(block), &identity, StreamEvent::default())
             .expect("map block");
         let batches = mapper.flush().expect("flush");
         rows = batches

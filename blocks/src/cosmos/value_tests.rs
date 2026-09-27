@@ -7,7 +7,7 @@ use arrow::datatypes::UInt32Type;
 use arrow::record_batch::RecordBatch;
 use firehose_parquet::{
     encode::EncodeBytes,
-    traits::{BlockIdentity, BlockMapper},
+    traits::{BlockIdentity, BlockMapper, StreamEvent},
 };
 use prost::Message;
 
@@ -65,7 +65,7 @@ fn map(
         .map_block(
             &block.encode_to_vec(),
             &BlockIdentity::default(),
-            Some("NEW"),
+            StreamEvent::new(Some("NEW"), 1),
         )
         .unwrap();
     mapper.flush().unwrap()

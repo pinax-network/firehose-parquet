@@ -7,11 +7,11 @@ Generated from the `antelope` mapper; do not edit by hand. Regenerate with `carg
 - Block type: `--block-type antelope`.
 - Byte encoding: `hex_no_prefix` (lowercase hex without a `0x` prefix), fixed for this chain in v1.0.0.
 - Columns typed `Utf8` (hex_no_prefix) hold binary values written as text in that encoding.
-- `fork_step` is listed where it sits on non-final streams (`--final-blocks-only=false`); with the default `--final-blocks-only=true` it is absent.
+- `fork_step` and `stream_ordinal` are listed where they sit on non-final streams (`--final-blocks-only=false`); with the default `--final-blocks-only=true` they are absent.
 
 ## Tables
 
-| Table | Columns (without `fork_step`) | Written |
+| Table | Columns (without `fork_step`, `stream_ordinal`) | Written |
 |---|---|---|
 | [`blocks`](#blocks) | 12 | Always. |
 | [`transactions`](#transactions) | 14 | Always. |
@@ -35,6 +35,7 @@ Generated from the `antelope` mapper; do not edit by hand. Regenerate with `carg
 | `confirmed` | `UInt32` | no | |
 | `schedule_version` | `UInt32` | no | |
 | `fork_step` | `Utf8` | no | **Non-final streams only** (`--final-blocks-only=false`): the Firehose fork step of the block, `NEW`, `UNDO` or `FINAL`. |
+| `stream_ordinal` | `UInt64` | no | **Non-final streams only** (`--final-blocks-only=false`): accepted-event ordinal of the stream event (`NEW`, `UNDO` or `FINAL`) that produced the row. Strictly increasing in delivery order and durable across reconnects and restarts; every row of one event, in every table, has the same value. |
 
 ## `transactions`
 
@@ -54,6 +55,7 @@ Generated from the `antelope` mapper; do not edit by hand. Regenerate with `carg
 | `net_usage` | `UInt64` | no | |
 | `elapsed` | `Int64` | no | |
 | `fork_step` | `Utf8` | no | **Non-final streams only** (`--final-blocks-only=false`): the Firehose fork step of the block, `NEW`, `UNDO` or `FINAL`. |
+| `stream_ordinal` | `UInt64` | no | **Non-final streams only** (`--final-blocks-only=false`): accepted-event ordinal of the stream event (`NEW`, `UNDO` or `FINAL`) that produced the row. Strictly increasing in delivery order and durable across reconnects and restarts; every row of one event, in every table, has the same value. |
 | `transaction_success` | `Boolean` | no | Whether the transaction's effects persisted (#550). |
 
 ## `actions`
@@ -97,6 +99,7 @@ Generated from the `antelope` mapper; do not edit by hand. Regenerate with `carg
 | `receipt_code_sequence` | `UInt64` | no | |
 | `receipt_abi_sequence` | `UInt64` | no | |
 | `fork_step` | `Utf8` | no | **Non-final streams only** (`--final-blocks-only=false`): the Firehose fork step of the block, `NEW`, `UNDO` or `FINAL`. |
+| `stream_ordinal` | `UInt64` | no | **Non-final streams only** (`--final-blocks-only=false`): accepted-event ordinal of the stream event (`NEW`, `UNDO` or `FINAL`) that produced the row. Strictly increasing in delivery order and durable across reconnects and restarts; every row of one event, in every table, has the same value. |
 | `transaction_status` | `Dictionary(Int32, Utf8)` | no | Parent transaction outcome (#550). |
 | `transaction_success` | `Boolean` | no | Parent transaction outcome (#550). |
 
@@ -127,5 +130,6 @@ Generated from the `antelope` mapper; do not edit by hand. Regenerate with `carg
 | `tx_index` | `UInt64` | no | |
 | `db_op_index` | `UInt32` | no | |
 | `fork_step` | `Utf8` | no | **Non-final streams only** (`--final-blocks-only=false`): the Firehose fork step of the block, `NEW`, `UNDO` or `FINAL`. |
+| `stream_ordinal` | `UInt64` | no | **Non-final streams only** (`--final-blocks-only=false`): accepted-event ordinal of the stream event (`NEW`, `UNDO` or `FINAL`) that produced the row. Strictly increasing in delivery order and durable across reconnects and restarts; every row of one event, in every table, has the same value. |
 | `transaction_status` | `Dictionary(Int32, Utf8)` | no | Parent transaction outcome (#550). |
 | `transaction_success` | `Boolean` | no | Parent transaction outcome (#550). |

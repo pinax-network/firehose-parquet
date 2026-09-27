@@ -11,7 +11,7 @@ use arrow::array::*;
 use arrow::record_batch::RecordBatch;
 use firehose_parquet::{
     encode::EncodeBytes,
-    traits::{BlockIdentity, BlockMapper},
+    traits::{BlockIdentity, BlockMapper, StreamEvent},
 };
 use prost::Message;
 use std::collections::HashMap;
@@ -63,7 +63,7 @@ fn map(block: &tron::Block, include_failed: bool) -> HashMap<String, RecordBatch
         .map_block(
             &block.encode_to_vec(),
             &BlockIdentity::default(),
-            Some("NEW"),
+            StreamEvent::new(Some("NEW"), 1),
         )
         .unwrap();
     let batches = mapper.flush().unwrap();
@@ -191,6 +191,11 @@ fn outcome_column_is_last_and_not_nullable_with_or_without_fork_step() {
             let fork_position = schema.index_of("fork_step").ok();
             assert_eq!(
                 fork_position,
+                fork.then(|| schema.fields().len() - 3),
+                "{table}"
+            );
+            assert_eq!(
+                schema.index_of("stream_ordinal").ok(),
                 fork.then(|| schema.fields().len() - 2),
                 "{table}"
             );
@@ -227,7 +232,11 @@ fn estimates_count_the_outcome_columns() {
     block.transactions = vec![reverted_call()];
     let mut mapper = TronBlockMapper::new(false, EncodeBytes::Binary, true);
     mapper
-        .map_block(&block.encode_to_vec(), &BlockIdentity::default(), None)
+        .map_block(
+            &block.encode_to_vec(),
+            &BlockIdentity::default(),
+            StreamEvent::default(),
+        )
         .unwrap();
     let estimates: HashMap<_, _> = mapper
         .table_estimates()

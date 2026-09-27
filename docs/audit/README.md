@@ -92,6 +92,7 @@ All of them are closed.
 | [#572](https://github.com/pinax-network/firehose-parquet/issues/572) | - | - | [#576](https://github.com/pinax-network/firehose-parquet/pull/576) | The final mapper flush on completion is checkpointed. |
 | [#578](https://github.com/pinax-network/firehose-parquet/issues/578) | - | - | [#580](https://github.com/pinax-network/firehose-parquet/pull/580) | Local Parquet parts are published atomically after sync. |
 | [#617](https://github.com/pinax-network/firehose-parquet/issues/617) | N6 | high | [#623](https://github.com/pinax-network/firehose-parquet/pull/623) | `.env` is read from the working directory only; S3 writes need an explicit `s3://` destination. |
+| [#648](https://github.com/pinax-network/firehose-parquet/issues/648) | - | - | [#649](https://github.com/pinax-network/firehose-parquet/pull/649) | Non-final rows carry a durable `stream_ordinal`; the README documents a tested canonical live view, the two-bucket union and the live + final deployment ([record](648-stream-ordinal.md)). |
 
 ### Validation follow-up PRs
 
@@ -155,6 +156,7 @@ Docker runs before a release.
 - [#470: exact S3 cursor buckets](470-s3-cursor-buckets.md)
 - [#473: responsive shutdown](473-responsive-shutdown.md)
 - [#474: append-only non-final streams and query limits](474-non-final-streams.md)
+- [#648: durable per-row `stream_ordinal`, the canonical live view and live bucket expiry](648-stream-ordinal.md)
 - [#475: bounded metrics and stream readiness](475-metrics-readiness.md)
 - [#476: timestamp and streamed identity validation](476-timestamp-validation.md)
 - [#477: single-partition writer contract](477-writer-partition-contract.md)

@@ -5,7 +5,7 @@ use blocks::solana::{mapper::SolanaBlockMapper, proto::solana};
 use clap::Parser;
 use firehose_parquet::{
     encode::EncodeBytes,
-    traits::{BlockIdentity, BlockMapper},
+    traits::{BlockIdentity, BlockMapper, StreamEvent},
 };
 use prost::Message;
 use sha2::{Digest, Sha256};
@@ -40,7 +40,7 @@ fn main() -> Result<()> {
     for encoding in [EncodeBytes::Base58, EncodeBytes::Binary] {
         let mut mapper = SolanaBlockMapper::new(true, false, encoding.clone(), false, true);
         let mut run = || -> Result<(usize, usize)> {
-            mapper.map_block(black_box(&bytes), &identity, None)?;
+            mapper.map_block(black_box(&bytes), &identity, StreamEvent::default())?;
             let batches = mapper.flush()?;
             let rows = batches.values().map(|b| b.num_rows()).sum();
             let allocated = batches.values().map(|b| b.get_array_memory_size()).sum();

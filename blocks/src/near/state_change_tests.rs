@@ -7,7 +7,7 @@ use arrow::record_batch::RecordBatch;
 use arrow::util::display::array_value_to_string;
 use firehose_parquet::{
     encode::{encode_base58, EncodeBytes},
-    traits::{BlockIdentity, BlockMapper},
+    traits::{BlockIdentity, BlockMapper, StreamEvent},
 };
 use prost::Message;
 use std::collections::HashMap;
@@ -134,7 +134,11 @@ fn block() -> near::Block {
 fn map(block: &near::Block, encoding: EncodeBytes) -> HashMap<String, RecordBatch> {
     let mut mapper = NearBlockMapper::new(false, encoding, false);
     mapper
-        .map_block(&block.encode_to_vec(), &BlockIdentity::default(), None)
+        .map_block(
+            &block.encode_to_vec(),
+            &BlockIdentity::default(),
+            StreamEvent::default(),
+        )
         .unwrap();
     let batches = mapper.flush().unwrap();
     assert_eq!(mapper.total_rows(), 0);
@@ -306,7 +310,7 @@ fn state_changes_schema_is_the_507_layout() {
             "code_hash",
         ];
         if fork {
-            expected.push("fork_step");
+            expected.extend(["fork_step", "stream_ordinal"]);
         }
         assert_eq!(names, expected);
         for name in ["type", "cause"] {

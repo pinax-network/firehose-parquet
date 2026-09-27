@@ -1,5 +1,12 @@
 # Issue #474: selectable append-only non-final streams
 
+> **Superseded query (#648).** Non-final rows now carry `stream_ordinal`, the
+> durable accepted-event ordinal of their envelope, so the README replaces the
+> finalized-intersection query discussed below with a tested canonical live view
+> ([record](648-stream-ordinal.md)). This record describes the schema before that
+> column; [474-check-query.py](474-check-query.py) keeps the original query
+> verbatim.
+
 ## Decision and implementation
 
 The maintainer's decision in [#463](https://github.com/pinax-network/firehose-parquet/issues/463)
@@ -64,8 +71,9 @@ is presented as reliable.
 - Warning applicability is unit-tested for bounded/unbounded and both finality
   modes. The subprocess test verifies the warning is actually invoked by the
   binary, rather than testing only an unused helper.
-- [474-check-query.py](474-check-query.py) extracts the exact README SQL and runs
-  it using DuckDB against temporary local Parquet. Cases include recurrence,
+- [474-check-query.py](474-check-query.py) runs the exact README SQL of that
+  time (extracted from the README then, embedded in the script since #648)
+  using DuckDB against temporary local Parquet. Cases include recurrence,
   replay duplicates, competing identities at one height, reference-uncovered
   tail, UNDO-only identity and unknown steps. Reordering the physical rows leaves
   the supported result unchanged, and the unordered-state counterexample is

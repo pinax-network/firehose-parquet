@@ -43,6 +43,21 @@ jobs:
           cache-on-failure: true
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
+      # blocks/tests/non_final_stream.rs runs the README's live-view SQL in
+      # DuckDB; FIREPARQ_REQUIRE_DUCKDB makes a missing CLI fail instead of skip.
+      - name: Install DuckDB CLI
+        env:
+          DUCKDB_VERSION: v1.1.1
+          DUCKDB_SHA256: 7f3f1a26e98b3f1fcc673ffb81d2daf43c07689ed60e88173d6a4fd307f118ae
+        run: |
+          curl -fsSL -o "$RUNNER_TEMP/duckdb.zip" \
+            "https://github.com/duckdb/duckdb/releases/download/${DUCKDB_VERSION}/duckdb_cli-linux-amd64.zip"
+          echo "${DUCKDB_SHA256}  $RUNNER_TEMP/duckdb.zip" | sha256sum --check
+          unzip -q "$RUNNER_TEMP/duckdb.zip" -d "$RUNNER_TEMP/duckdb"
+          "$RUNNER_TEMP/duckdb/duckdb" -version
+          echo "FIREPARQ_DUCKDB=$RUNNER_TEMP/duckdb/duckdb" >> "$GITHUB_ENV"
+          echo "FIREPARQ_REQUIRE_DUCKDB=1" >> "$GITHUB_ENV"
+
       - name: Run tests
         run: |
           cargo test --workspace --locked

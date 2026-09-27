@@ -32,7 +32,7 @@ use firehose_parquet::partition_index::{
     PartitionCoverage, PartitionSpanProof, RoutingWitness, VerifiedPartitionIndex,
     VerifiedPartitionSpan, INDEX_FORMAT_VERSION,
 };
-use firehose_parquet::traits::{fork_step_name, BlockIdentity, BlockMapper};
+use firehose_parquet::traits::{fork_step_name, BlockIdentity, BlockMapper, StreamEvent};
 use firehose_parquet::writer::ParquetFileMetadata;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -3125,7 +3125,7 @@ mod tests {
                     timestamp: 1_700_000_000,
                     ..Default::default()
                 },
-                None,
+                StreamEvent::default(),
             )
             .unwrap();
         let buffered = update_mapper_buffer_metrics(&metrics, &mut mapper);

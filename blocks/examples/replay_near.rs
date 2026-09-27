@@ -6,7 +6,7 @@ use clap::Parser;
 use firehose_parquet::{
     config::{BlockMetadata, Compression, Partition},
     encode::{encode_hex_no_prefix, EncodeBytes},
-    traits::{BlockIdentity, BlockMapper},
+    traits::{BlockIdentity, BlockMapper, StreamEvent},
     writer::ParquetTableWriter,
 };
 use prost::Message;
@@ -79,7 +79,11 @@ fn main() -> Result<()> {
                     Partition::None,
                     Compression::Zstd,
                 );
-                mapper.map_block_bytes(bytes.clone().into(), &identity, Some("FINAL"))?;
+                mapper.map_block_bytes(
+                    bytes.clone().into(),
+                    &identity,
+                    StreamEvent::new(Some("FINAL"), 1),
+                )?;
                 let mut rows = BTreeMap::new();
                 let mut schemas = BTreeMap::new();
                 for (table, batch) in mapper.flush()? {

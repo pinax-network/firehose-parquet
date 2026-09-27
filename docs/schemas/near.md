@@ -7,11 +7,11 @@ Generated from the `near` mapper; do not edit by hand. Regenerate with `cargo ru
 - Block type: `--block-type near`.
 - Byte encoding: `base58` (Base58), fixed for this chain in v1.0.0.
 - Columns typed `Utf8` (base58) or `List<Utf8>` (base58) hold binary values written as text in that encoding.
-- `fork_step` is listed where it sits on non-final streams (`--final-blocks-only=false`); with the default `--final-blocks-only=true` it is absent.
+- `fork_step` and `stream_ordinal` are listed where they sit on non-final streams (`--final-blocks-only=false`); with the default `--final-blocks-only=true` they are absent.
 
 ## Tables
 
-| Table | Columns (without `fork_step`) | Written |
+| Table | Columns (without `fork_step`, `stream_ordinal`) | Written |
 |---|---|---|
 | [`blocks`](#blocks) | 17 | Always. |
 | [`chunks`](#chunks) | 16 | Always. |
@@ -43,6 +43,7 @@ Generated from the `near` mapper; do not edit by hand. Regenerate with `cargo ru
 | `chunks_included` | `UInt64` | no | |
 | `latest_protocol_version` | `UInt32` | no | |
 | `fork_step` | `Utf8` | no | **Non-final streams only** (`--final-blocks-only=false`): the Firehose fork step of the block, `NEW`, `UNDO` or `FINAL`. |
+| `stream_ordinal` | `UInt64` | no | **Non-final streams only** (`--final-blocks-only=false`): accepted-event ordinal of the stream event (`NEW`, `UNDO` or `FINAL`) that produced the row. Strictly increasing in delivery order and durable across reconnects and restarts; every row of one event, in every table, has the same value. |
 
 ## `chunks`
 
@@ -65,6 +66,7 @@ Generated from the `near` mapper; do not edit by hand. Regenerate with `cargo ru
 | `encoded_length` | `UInt64` | no | |
 | `author` | `Utf8` | no | |
 | `fork_step` | `Utf8` | no | **Non-final streams only** (`--final-blocks-only=false`): the Firehose fork step of the block, `NEW`, `UNDO` or `FINAL`. |
+| `stream_ordinal` | `UInt64` | no | **Non-final streams only** (`--final-blocks-only=false`): accepted-event ordinal of the stream event (`NEW`, `UNDO` or `FINAL`) that produced the row. Strictly increasing in delivery order and durable across reconnects and restarts; every row of one event, in every table, has the same value. |
 
 ## `transactions`
 
@@ -90,6 +92,7 @@ Generated from the `near` mapper; do not edit by hand. Regenerate with `cargo ru
 | `receipt_ids` | `List<Utf8>` (base58) | no | The outcome's `receipt_ids`. |
 | `converted_into_receipt_id` | `Utf8` (base58) | yes | The receipt the transaction was converted into: the first (and only) entry of `receipt_ids`. Joins `receipts.receipt_id`. |
 | `fork_step` | `Utf8` | no | **Non-final streams only** (`--final-blocks-only=false`): the Firehose fork step of the block, `NEW`, `UNDO` or `FINAL`. |
+| `stream_ordinal` | `UInt64` | no | **Non-final streams only** (`--final-blocks-only=false`): accepted-event ordinal of the stream event (`NEW`, `UNDO` or `FINAL`) that produced the row. Strictly increasing in delivery order and durable across reconnects and restarts; every row of one event, in every table, has the same value. |
 
 ## `receipts`
 
@@ -115,6 +118,7 @@ Generated from the `near` mapper; do not edit by hand. Regenerate with `cargo ru
 | `executor_id` | `Utf8` | no | |
 | `receipt_ids` | `List<Utf8>` (base58) | no | Receipts created by this execution (the outcome's `receipt_ids`). |
 | `fork_step` | `Utf8` | no | **Non-final streams only** (`--final-blocks-only=false`): the Firehose fork step of the block, `NEW`, `UNDO` or `FINAL`. |
+| `stream_ordinal` | `UInt64` | no | **Non-final streams only** (`--final-blocks-only=false`): accepted-event ordinal of the stream event (`NEW`, `UNDO` or `FINAL`) that produced the row. Strictly increasing in delivery order and durable across reconnects and restarts; every row of one event, in every table, has the same value. |
 | `success_receipt_id` | `Utf8` (base58) | yes | For a `SuccessReceiptId` outcome, the receipt whose outcome becomes this receipt's result; null otherwise (#507). |
 
 ## `receipt_actions`
@@ -144,6 +148,7 @@ One row per action of an executed action receipt.
 | `gas` | `UInt64` | yes | FunctionCall only: the gas attached to the call. |
 | `deposit` | `Utf8` | yes | FunctionCall and Transfer only: yoctoNEAR, as a decimal string. |
 | `fork_step` | `Utf8` | no | **Non-final streams only** (`--final-blocks-only=false`): the Firehose fork step of the block, `NEW`, `UNDO` or `FINAL`. |
+| `stream_ordinal` | `UInt64` | no | **Non-final streams only** (`--final-blocks-only=false`): accepted-event ordinal of the stream event (`NEW`, `UNDO` or `FINAL`) that produced the row. Strictly increasing in delivery order and durable across reconnects and restarts; every row of one event, in every table, has the same value. |
 | `receipt_status` | `Dictionary(Int32, Utf8)` | no | The parent receipt's own outcome, as `receipts.status` (#550). A `Failure` receipt's actions did not take effect. |
 
 ## `execution_logs`
@@ -168,6 +173,7 @@ One row per log line of an executed receipt (`ExecutionOutcome.logs`). NEP-297 e
 | `predecessor_id` | `Utf8` | no | |
 | `log` | `Utf8` | no | |
 | `fork_step` | `Utf8` | no | **Non-final streams only** (`--final-blocks-only=false`): the Firehose fork step of the block, `NEW`, `UNDO` or `FINAL`. |
+| `stream_ordinal` | `UInt64` | no | **Non-final streams only** (`--final-blocks-only=false`): accepted-event ordinal of the stream event (`NEW`, `UNDO` or `FINAL`) that produced the row. Strictly increasing in delivery order and durable across reconnects and restarts; every row of one event, in every table, has the same value. |
 | `receipt_status` | `Dictionary(Int32, Utf8)` | no | The parent receipt's own outcome, as `receipts.status` (#550). A `Failure` receipt's actions did not take effect. |
 
 ## `state_changes`
@@ -196,3 +202,4 @@ One row per entry of the block's `state_changes` (#507). The pinned producer nev
 | `storage_usage` | `UInt64` | yes | `AccountUpdate`: storage in bytes. |
 | `code_hash` | `Utf8` (base58) | yes | |
 | `fork_step` | `Utf8` | no | **Non-final streams only** (`--final-blocks-only=false`): the Firehose fork step of the block, `NEW`, `UNDO` or `FINAL`. |
+| `stream_ordinal` | `UInt64` | no | **Non-final streams only** (`--final-blocks-only=false`): accepted-event ordinal of the stream event (`NEW`, `UNDO` or `FINAL`) that produced the row. Strictly increasing in delivery order and durable across reconnects and restarts; every row of one event, in every table, has the same value. |

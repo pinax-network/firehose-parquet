@@ -6,10 +6,10 @@ use arrow::datatypes::{Int32Type, Schema};
 use arrow::record_batch::RecordBatch;
 use firehose_parquet::encode::{BytesColumn, EncodeBytes};
 use firehose_parquet::traits::{
-    append_fork_step, decode_id_bytes, est_bool, est_i64, est_opt_str, est_str, est_ts_ms, est_u32,
-    est_u64, estimated_dictionary_index_bytes, finish_fork_step, fork_step_builder,
+    append_fork_step, decode_id_bytes, est_bool, est_fork_step, est_i64, est_str, est_ts_ms,
+    est_u32, est_u64, estimated_dictionary_index_bytes, finish_fork_step, fork_step_builder,
     strip_enum_prefix, timestamp_millis, BlockIdentity, BlockMapper, CanonicalBuilder,
-    PreparedIdentity,
+    ForkStepBuilder, PreparedIdentity, StreamEvent,
 };
 use prost::Message;
 use std::collections::HashMap;
@@ -101,7 +101,7 @@ impl AntelopeBlockMapper {
         &mut self,
         block: &antelope::Block,
         identity: &PreparedIdentity,
-        fork_step: Option<&str>,
+        fork_step: StreamEvent<'_>,
     ) -> anyhow::Result<()> {
         let header = block.header.as_ref();
 
@@ -161,7 +161,7 @@ impl AntelopeBlockMapper {
         trace: &antelope::TransactionTrace,
         action_times: &[Option<i64>],
         identity: &PreparedIdentity,
-        fork_step: Option<&str>,
+        fork_step: StreamEvent<'_>,
     ) {
         let receipt = trace.receipt.as_ref();
         let outcome = TransactionOutcome {
@@ -222,7 +222,7 @@ impl AntelopeBlockMapper {
         tx_hash: &str,
         outcome: TransactionOutcome,
         identity: &PreparedIdentity,
-        fork_step: Option<&str>,
+        fork_step: StreamEvent<'_>,
     ) {
         let action = action_trace.action.as_ref();
 
@@ -334,7 +334,7 @@ impl AntelopeBlockMapper {
         db_op_index: u32,
         outcome: TransactionOutcome,
         identity: &PreparedIdentity,
-        fork_step: Option<&str>,
+        fork_step: StreamEvent<'_>,
     ) {
         db_ops.canonical.append(identity);
         db_ops.tx_hash.append_value(tx_hash);
@@ -379,7 +379,7 @@ impl AntelopeBlockMapper {
         &mut self,
         block: antelope::Block,
         identity: &BlockIdentity,
-        fork_step: Option<&str>,
+        fork_step: StreamEvent<'_>,
     ) -> anyhow::Result<u64> {
         let tx_count = if block.filtering_applied {
             block.filtered_transaction_traces.len()
@@ -402,7 +402,7 @@ impl BlockMapper for AntelopeBlockMapper {
         &mut self,
         block_bytes: &[u8],
         identity: &BlockIdentity,
-        fork_step: Option<&str>,
+        fork_step: StreamEvent<'_>,
     ) -> anyhow::Result<u64> {
         self.map_decoded(antelope::Block::decode(block_bytes)?, identity, fork_step)
     }
@@ -411,7 +411,7 @@ impl BlockMapper for AntelopeBlockMapper {
         &mut self,
         block_bytes: prost::bytes::Bytes,
         identity: &BlockIdentity,
-        fork_step: Option<&str>,
+        fork_step: StreamEvent<'_>,
     ) -> anyhow::Result<u64> {
         self.map_decoded(antelope::Block::decode(block_bytes)?, identity, fork_step)
     }
@@ -466,7 +466,7 @@ impl BlockMapper for AntelopeBlockMapper {
             + est_str(&self.blocks.producer)
             + est_u32(&self.blocks.confirmed)
             + est_u32(&self.blocks.schedule_version)
-            + est_opt_str(&self.blocks.fork_step);
+            + est_fork_step(&self.blocks.fork_step);
         let transactions = self.transactions.canonical.estimated_bytes()
             + est_str(&self.transactions.tx_hash)
             + est_u64(&self.transactions.index)
@@ -474,7 +474,7 @@ impl BlockMapper for AntelopeBlockMapper {
             + est_u32(&self.transactions.cpu_usage_us)
             + est_u64(&self.transactions.net_usage)
             + est_i64(&self.transactions.elapsed)
-            + est_opt_str(&self.transactions.fork_step)
+            + est_fork_step(&self.transactions.fork_step)
             + est_bool(&self.transactions.transaction_success);
         let actions = self.actions.canonical.estimated_bytes()
             + est_str(&self.actions.tx_hash)
@@ -506,7 +506,7 @@ impl BlockMapper for AntelopeBlockMapper {
             + est_u64(&self.actions.receipt_recv_sequence)
             + est_u64(&self.actions.receipt_code_sequence)
             + est_u64(&self.actions.receipt_abi_sequence)
-            + est_opt_str(&self.actions.fork_step)
+            + est_fork_step(&self.actions.fork_step)
             + estimated_dictionary_index_bytes(self.actions.transaction_status.len())
             + est_bool(&self.actions.transaction_success);
         let mut tables: Vec<(&str, usize)> = vec![
@@ -533,7 +533,7 @@ impl BlockMapper for AntelopeBlockMapper {
                     + est_str(&db_ops.tx_hash)
                     + est_u64(&db_ops.tx_index)
                     + est_u32(&db_ops.db_op_index)
-                    + est_opt_str(&db_ops.fork_step)
+                    + est_fork_step(&db_ops.fork_step)
                     + estimated_dictionary_index_bytes(db_ops.transaction_status.len())
                     + est_bool(&db_ops.transaction_success),
             ));
@@ -557,7 +557,7 @@ struct BlocksBuilder {
     producer: StringBuilder,
     confirmed: UInt32Builder,
     schedule_version: UInt32Builder,
-    fork_step: Option<StringBuilder>,
+    fork_step: Option<ForkStepBuilder>,
 }
 
 impl BlocksBuilder {
@@ -595,7 +595,7 @@ struct TransactionsBuilder {
     cpu_usage_us: UInt32Builder,
     net_usage: UInt64Builder,
     elapsed: Int64Builder,
-    fork_step: Option<StringBuilder>,
+    fork_step: Option<ForkStepBuilder>,
     /// Whether the parent transaction's effects persisted (#550).
     transaction_success: BooleanBuilder,
 }
@@ -662,7 +662,7 @@ struct ActionsBuilder {
     receipt_recv_sequence: UInt64Builder,
     receipt_code_sequence: UInt64Builder,
     receipt_abi_sequence: UInt64Builder,
-    fork_step: Option<StringBuilder>,
+    fork_step: Option<ForkStepBuilder>,
     /// Parent transaction receipt status (#550).
     transaction_status: StringDictionaryBuilder<Int32Type>,
     /// Whether the parent transaction's effects persisted (#550).
@@ -765,7 +765,7 @@ struct DbOpsBuilder {
     tx_hash: StringBuilder,
     tx_index: UInt64Builder,
     db_op_index: UInt32Builder,
-    fork_step: Option<StringBuilder>,
+    fork_step: Option<ForkStepBuilder>,
     /// Parent transaction receipt status (#550).
     transaction_status: StringDictionaryBuilder<Int32Type>,
     /// Whether the parent transaction's effects persisted (#550).
@@ -1071,7 +1071,7 @@ pub(crate) mod tests {
                             .map_block(
                                 &block.encode_to_vec(),
                                 &BlockIdentity::default(),
-                                Some("FINAL"),
+                                StreamEvent::new(Some("FINAL"), 1),
                             )
                             .unwrap();
                         let batches = mapper.flush().unwrap();
@@ -1129,11 +1129,18 @@ pub(crate) mod tests {
                         assert_eq!(
                             names[names.len() - 3..],
                             [
-                                if fork { "fork_step" } else { "db_op_index" },
+                                if fork {
+                                    "stream_ordinal"
+                                } else {
+                                    "db_op_index"
+                                },
                                 "transaction_status",
                                 "transaction_success",
                             ]
                         );
+                        if fork {
+                            assert_eq!(names[names.len() - 4], "fork_step");
+                        }
                         let actions = &batches["actions"];
                         let row = actions.num_rows() - 2;
                         let alias = actions
@@ -1184,13 +1191,13 @@ pub(crate) mod tests {
             let mut subject = AntelopeBlockMapper::new(true, EncodeBytes::HexNoPrefix, false);
             let identity = BlockIdentity::default();
             baseline
-                .map_block(&valid.encode_to_vec(), &identity, None)
+                .map_block(&valid.encode_to_vec(), &identity, StreamEvent::default())
                 .unwrap();
             subject
-                .map_block(&valid.encode_to_vec(), &identity, None)
+                .map_block(&valid.encode_to_vec(), &identity, StreamEvent::default())
                 .unwrap();
             assert!(subject
-                .map_block(&invalid.encode_to_vec(), &identity, None)
+                .map_block(&invalid.encode_to_vec(), &identity, StreamEvent::default())
                 .is_err());
             assert_eq!(subject.flush().unwrap(), baseline.flush().unwrap());
         }
@@ -1202,7 +1209,11 @@ pub(crate) mod tests {
         let block_bytes = prost::Message::encode_to_vec(&block);
         let mut mapper = AntelopeBlockMapper::new(true, EncodeBytes::HexNoPrefix, false);
         mapper
-            .map_block(&block_bytes, &BlockIdentity::default(), None)
+            .map_block(
+                &block_bytes,
+                &BlockIdentity::default(),
+                StreamEvent::default(),
+            )
             .unwrap();
 
         assert_eq!(mapper.max_table_rows(), 2); // 2 actions
@@ -1230,7 +1241,9 @@ pub(crate) mod tests {
             fork_step: None,
         };
 
-        mapper.map_block(&block_bytes, &identity, None).unwrap();
+        mapper
+            .map_block(&block_bytes, &identity, StreamEvent::default())
+            .unwrap();
         let batches = mapper.flush().unwrap();
         let blocks = &batches["blocks"];
 
@@ -1274,7 +1287,9 @@ pub(crate) mod tests {
             fork_step: None,
         };
 
-        mapper.map_block(&block_bytes, &identity, None).unwrap();
+        mapper
+            .map_block(&block_bytes, &identity, StreamEvent::default())
+            .unwrap();
         let batches = mapper.flush().unwrap();
         let blocks = &batches["blocks"];
 
@@ -1309,7 +1324,11 @@ pub(crate) mod tests {
         let block_bytes = prost::Message::encode_to_vec(&block);
         let mut mapper = AntelopeBlockMapper::new(true, EncodeBytes::HexNoPrefix, false);
         mapper
-            .map_block(&block_bytes, &BlockIdentity::default(), None)
+            .map_block(
+                &block_bytes,
+                &BlockIdentity::default(),
+                StreamEvent::default(),
+            )
             .unwrap();
         let _ = mapper.flush().unwrap();
         assert_eq!(mapper.max_table_rows(), 0);
@@ -1331,7 +1350,11 @@ pub(crate) mod tests {
         let block_bytes = prost::Message::encode_to_vec(&block);
         let mut mapper = AntelopeBlockMapper::new(true, EncodeBytes::HexNoPrefix, false);
         mapper
-            .map_block(&block_bytes, &BlockIdentity::default(), None)
+            .map_block(
+                &block_bytes,
+                &BlockIdentity::default(),
+                StreamEvent::default(),
+            )
             .unwrap();
         let batches = mapper.flush().unwrap();
         assert_eq!(batches["blocks"].num_rows(), 1);
@@ -1346,13 +1369,28 @@ pub(crate) mod tests {
         let block_bytes = prost::Message::encode_to_vec(&block);
         let mut mapper = AntelopeBlockMapper::new(true, EncodeBytes::Hex, false);
         mapper
-            .map_block(&block_bytes, &BlockIdentity::default(), Some("NEW"))
+            .map_block(
+                &block_bytes,
+                &BlockIdentity::default(),
+                StreamEvent::new(Some("NEW"), 1),
+            )
             .unwrap();
 
         let batches = mapper.flush().unwrap();
         let blocks_batch = &batches["blocks"];
-        let last_col = blocks_batch.num_columns() - 1;
+        // `stream_ordinal` directly follows `fork_step` and carries the event ordinal.
+        let last_col = blocks_batch.num_columns() - 2;
         assert_eq!(blocks_batch.schema().field(last_col).name(), "fork_step");
+        assert_eq!(
+            blocks_batch.schema().field(last_col + 1).name(),
+            "stream_ordinal"
+        );
+        let ordinals = blocks_batch
+            .column(last_col + 1)
+            .as_any()
+            .downcast_ref::<arrow::array::UInt64Array>()
+            .unwrap();
+        assert_eq!(ordinals.value(0), 1);
         let fork_col = blocks_batch
             .column(last_col)
             .as_any()
@@ -1389,7 +1427,11 @@ pub(crate) mod tests {
         let block_bytes = prost::Message::encode_to_vec(&block);
         let mut mapper = AntelopeBlockMapper::new(false, EncodeBytes::Hex, false);
         mapper
-            .map_block(&block_bytes, &BlockIdentity::default(), None)
+            .map_block(
+                &block_bytes,
+                &BlockIdentity::default(),
+                StreamEvent::default(),
+            )
             .unwrap();
 
         let batches = mapper.flush().unwrap();
@@ -1511,7 +1553,11 @@ pub(crate) mod tests {
         let block_bytes = prost::Message::encode_to_vec(&block);
         let mut mapper = AntelopeBlockMapper::new(false, EncodeBytes::HexNoPrefix, false);
         mapper
-            .map_block(&block_bytes, &BlockIdentity::default(), None)
+            .map_block(
+                &block_bytes,
+                &BlockIdentity::default(),
+                StreamEvent::default(),
+            )
             .unwrap();
 
         let batches = mapper.flush().unwrap();

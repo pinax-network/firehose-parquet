@@ -10,7 +10,7 @@ use clap::Parser;
 use firehose_parquet::{
     config::{BlockMetadata, Compression, Partition},
     encode::EncodeBytes,
-    traits::{BlockIdentity, BlockMapper},
+    traits::{BlockIdentity, BlockMapper, StreamEvent},
     writer::ParquetTableWriter,
 };
 use serde::Deserialize;
@@ -89,7 +89,11 @@ fn main() -> Result<()> {
                     Compression::Zstd,
                 );
                 for (bytes, identity) in &blocks {
-                    mapper.map_block_bytes(bytes.clone().into(), identity, Some("FINAL"))?;
+                    mapper.map_block_bytes(
+                        bytes.clone().into(),
+                        identity,
+                        StreamEvent::new(Some("FINAL"), 1),
+                    )?;
                 }
                 let mut rows = BTreeMap::new();
                 let mut schemas = BTreeMap::new();

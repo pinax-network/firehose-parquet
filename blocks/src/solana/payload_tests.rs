@@ -6,7 +6,7 @@ use super::{
 use arrow::{array::*, datatypes::DataType, record_batch::RecordBatch};
 use firehose_parquet::{
     encode::{encode_bytes, EncodeBytes},
-    traits::{BlockIdentity, BlockMapper},
+    traits::{BlockIdentity, BlockMapper, StreamEvent},
 };
 use prost::Message;
 
@@ -85,7 +85,7 @@ fn payloads_are_binary_and_indices_are_lists_under_every_identity_encoding() {
                     .map_block(
                         &block.encode_to_vec(),
                         &BlockIdentity::default(),
-                        Some("FINAL"),
+                        StreamEvent::new(Some("FINAL"), 1),
                     )
                     .unwrap();
                 // Exercise changed memory estimates without altering builder contents.
@@ -195,7 +195,11 @@ fn vote_table_uses_identical_payload_types_and_retains_filtering() {
                 include_failed,
             );
             mapper
-                .map_block(&block.encode_to_vec(), &BlockIdentity::default(), None)
+                .map_block(
+                    &block.encode_to_vec(),
+                    &BlockIdentity::default(),
+                    StreamEvent::default(),
+                )
                 .unwrap();
             let batches = mapper.flush().unwrap();
             assert_eq!(batches["transactions"].num_rows(), 0);

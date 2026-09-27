@@ -774,3 +774,267 @@ async fn remote_bucket_root_cannot_initialize_above_an_existing_chain_root() {
     );
     assert_eq!(bucket_keys(&store).await, keys);
 }
+
+// ---------------------------------------------------------------------------
+// Non-final streams: `stream_ordinal` and lifecycle-expired parts
+// ---------------------------------------------------------------------------
+
+/// Non-final tables as the mappers write them: `fork_step` then `stream_ordinal`.
+fn event_batches(rows: &[(u64, &str, u64)], timestamp: i64) -> HashMap<String, RecordBatch> {
+    use arrow::array::{StringArray, TimestampMillisecondArray};
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("block_num", DataType::UInt64, false),
+        Field::new(
+            "timestamp",
+            crate::traits::timestamp_millis_utc_type(),
+            false,
+        ),
+        crate::traits::fork_step_field(),
+        crate::traits::stream_ordinal_field(),
+    ]));
+    ["blocks", "logs"]
+        .into_iter()
+        .map(|table| {
+            (
+                table.into(),
+                RecordBatch::try_new(
+                    schema.clone(),
+                    vec![
+                        Arc::new(UInt64Array::from_iter_values(rows.iter().map(|row| row.0))),
+                        Arc::new(
+                            TimestampMillisecondArray::from_iter_values(
+                                rows.iter().map(|_| timestamp * 1_000),
+                            )
+                            .with_timezone("UTC"),
+                        ),
+                        Arc::new(StringArray::from_iter_values(rows.iter().map(|row| row.1))),
+                        Arc::new(UInt64Array::from_iter_values(rows.iter().map(|row| row.2))),
+                    ],
+                )
+                .unwrap(),
+            )
+        })
+        .collect()
+}
+fn non_final_mapper() -> MapperSemantics {
+    MapperSemantics {
+        tables: declare_inventory(&event_batches(&[], 0), &["blocks", "logs"]).unwrap(),
+        ..mapper(BlockFamily::Evm)
+    }
+}
+async fn flush_events(
+    session: &mut IngestionSession<'_>,
+    rows: &[(u64, &str, u64)],
+    timestamp: i64,
+) -> Result<Option<CommittedFlush>> {
+    session
+        .flush(
+            event_batches(rows, timestamp),
+            BlockMetadata {
+                min_block_number: rows.iter().map(|row| row.0).min().unwrap_or(0),
+                max_block_number: rows.iter().map(|row| row.0).max().unwrap_or(0),
+                min_timestamp: Some(timestamp),
+                max_timestamp: Some(timestamp),
+            },
+            Compression::Zstd,
+            ParquetFileMetadata::new(),
+        )
+        .await
+}
+/// Receive and map one event, returning the ordinal its rows must carry.
+fn deliver(session: &mut IngestionSession<'_>, num: u64, time: i64, step: i32) -> u64 {
+    let ordinal = receive(session, num, time, step);
+    session.accept_mapped(ordinal, Some(time), None).unwrap();
+    ordinal
+}
+
+/// The ordinal a non-final row carries is the session's accepted-event
+/// ordinal: strictly increasing in delivery order (NEW(A), UNDO(A), NEW(A)
+/// get three distinct ordinals), continued from the durable checkpoint by a
+/// restarted session, and never reused once a row carrying it is committed.
+/// A flush whose rows claim an ordinal outside its own accepted prefix, or
+/// lack the column, is refused before anything is journaled.
+#[tokio::test]
+async fn non_final_rows_carry_durable_strictly_increasing_stream_ordinals() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = Config {
+        final_blocks_only: false,
+        ..config(dir.path())
+    };
+    let owner = own(&config).await;
+    let open = || IngestionSession::open(&config, non_final_mapper(), &owner, None, None);
+    let t = 1_700_000_000;
+
+    let mut session = open().await.unwrap();
+    let ordinals = [
+        deliver(&mut session, 100, t, 1),
+        deliver(&mut session, 100, t, 2),
+        deliver(&mut session, 100, t, 1),
+    ];
+    assert_eq!(ordinals, [1, 2, 3]);
+    let committed = flush_events(
+        &mut session,
+        &[(100, "NEW", 1), (100, "UNDO", 2), (100, "NEW", 3)],
+        t,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!((committed.ordinal, committed.rows), (3, 6));
+    // Received and mapped but never committed: a restart reassigns it.
+    assert_eq!(deliver(&mut session, 101, t + 1, 1), 4);
+    drop(session);
+
+    let mut session = open().await.unwrap();
+    assert_eq!(session.authority().checkpoint.ordinal, 3);
+    assert_eq!(deliver(&mut session, 101, t + 1, 1), 4);
+    flush_events(&mut session, &[(101, "NEW", 4)], t + 1)
+        .await
+        .unwrap()
+        .unwrap();
+    drop(session);
+
+    let mut session = open().await.unwrap();
+    assert_eq!(deliver(&mut session, 102, t + 2, 1), 5);
+    // Rows of an earlier, committed event cannot be committed again under a
+    // later prefix.
+    let error = flush_events(&mut session, &[(102, "NEW", 4)], t + 2)
+        .await
+        .err()
+        .unwrap();
+    assert!(
+        format!("{error:#}").contains("outside the accepted prefix 5..=5"),
+        "{error:#}"
+    );
+    drop(session);
+
+    let mut session = open().await.unwrap();
+    assert_eq!(session.authority().checkpoint.ordinal, 4);
+    assert_eq!(deliver(&mut session, 102, t + 2, 1), 5);
+    let error = session
+        .flush(
+            batches(&[102]),
+            meta(102, 102),
+            Compression::Zstd,
+            ParquetFileMetadata::new(),
+        )
+        .await
+        .err()
+        .unwrap();
+    assert!(
+        format!("{error:#}").contains("lacks a UInt64 stream_ordinal"),
+        "{error:#}"
+    );
+    assert!(
+        TransactionStateStore::local(&config.output, owner.local().unwrap())
+            .unwrap()
+            .load()
+            .await
+            .unwrap()
+            .pending
+            .is_none()
+    );
+}
+
+/// A live bucket expires old committed parts with an S3 lifecycle rule that
+/// fireparq does not own. Neither the running session (its next flush) nor a
+/// restarted one (ownership, marker and merge-journal discovery, recovery,
+/// resume) reads a committed part outside its own pending transaction, so
+/// removing every part of earlier hours changes nothing but the data. Control
+/// records under `.fireparq-ingest/` and the bucket owner record must stay.
+#[tokio::test]
+async fn remote_live_session_is_unaffected_when_expired_committed_parts_disappear() {
+    use futures::TryStreamExt;
+    use object_store::ObjectStore as _;
+    let store = Arc::new(object_store::memory::InMemory::new());
+    let config = Config {
+        partition: Partition::Hour,
+        final_blocks_only: false,
+        ..remote_config()
+    };
+    let hour = 1_700_000_000 - 1_700_000_000 % 3_600;
+    let owner = remote_owner(&store).await;
+    let mut session = IngestionSession::open(&config, non_final_mapper(), &owner, None, None)
+        .await
+        .unwrap();
+    for (num, time, step) in [(100, hour, 1), (100, hour + 1, 2), (101, hour + 2, 1)] {
+        let ordinal = deliver(&mut session, num, time, step);
+        let label = if step == 1 { "NEW" } else { "UNDO" };
+        flush_events(&mut session, &[(num, label, ordinal)], time)
+            .await
+            .unwrap()
+            .unwrap();
+    }
+    let ordinal = deliver(&mut session, 102, hour + 3_600, 1);
+    flush_events(&mut session, &[(102, "NEW", ordinal)], hour + 3_600)
+        .await
+        .unwrap()
+        .unwrap();
+
+    let keys = |store: Arc<object_store::memory::InMemory>| async move {
+        store
+            .list(None)
+            .map_ok(|object| object.location.to_string())
+            .try_collect::<Vec<_>>()
+            .await
+            .unwrap()
+    };
+    let parts: Vec<String> = keys(store.clone())
+        .await
+        .into_iter()
+        .filter(|key| key.contains("/part-v1-"))
+        .collect();
+    assert_eq!(parts.len(), 8, "{parts:?}");
+    // The lifecycle rule: every part older than the current hour disappears.
+    let (expired, current): (Vec<_>, Vec<_>) = parts
+        .into_iter()
+        .partition(|key| !key.contains(&format!("-{ordinal}-{ordinal}-")));
+    assert_eq!((expired.len(), current.len()), (6, 2));
+    for key in &expired {
+        object_store::ObjectStore::delete(store.as_ref(), &key.as_str().into())
+            .await
+            .unwrap();
+    }
+
+    // Running: the next flush commits in the current hour.
+    let ordinal = deliver(&mut session, 103, hour + 3_601, 1);
+    assert_eq!(ordinal, 5);
+    flush_events(&mut session, &[(103, "NEW", ordinal)], hour + 3_601)
+        .await
+        .unwrap()
+        .unwrap();
+    drop(session);
+    owner.finish(Ok(())).await.unwrap();
+
+    // Restarted: recovery, discovery and resume succeed, and ordinals continue.
+    let owner = remote_owner(&store).await;
+    let mut session = IngestionSession::open(&config, non_final_mapper(), &owner, None, None)
+        .await
+        .unwrap();
+    assert_eq!(session.authority().checkpoint.ordinal, 5);
+    assert_eq!(session.resume_cursor(), Some("private-cursor-103-1"));
+    let ordinal = deliver(&mut session, 104, hour + 3_602, 1);
+    assert_eq!(ordinal, 6);
+    flush_events(&mut session, &[(104, "NEW", ordinal)], hour + 3_602)
+        .await
+        .unwrap()
+        .unwrap();
+    drop(session);
+    owner.finish(Ok(())).await.unwrap();
+
+    let remaining = keys(store.clone()).await;
+    assert!(remaining.iter().all(|key| !expired.contains(key)));
+    assert_eq!(
+        remaining
+            .iter()
+            .filter(|key| key.contains("/part-v1-"))
+            .count(),
+        6
+    );
+    let owner = remote_owner(&store).await;
+    let states = TransactionStateStore::s3("chain", owner.remote("data").unwrap()).unwrap();
+    let snapshot = states.load().await.unwrap();
+    assert!(snapshot.pending.is_none());
+    assert_eq!(snapshot.authority.unwrap().payload.checkpoint.ordinal, 6);
+    owner.finish(Ok(())).await.unwrap();
+}

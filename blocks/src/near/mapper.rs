@@ -5,9 +5,9 @@ use arrow::datatypes::{Int32Type, Schema};
 use arrow::record_batch::RecordBatch;
 use firehose_parquet::encode::{BytesColumn, BytesListColumn, EncodeBytes, EncodedBytes};
 use firehose_parquet::traits::{
-    append_fork_step, est_bin, est_opt_str, est_str, est_u32, est_u64,
+    append_fork_step, est_bin, est_fork_step, est_str, est_u32, est_u64,
     estimated_dictionary_index_bytes, finish_fork_step, fork_step_builder, BlockIdentity,
-    BlockMapper, CanonicalBuilder, PreparedIdentity,
+    BlockMapper, CanonicalBuilder, ForkStepBuilder, PreparedIdentity, StreamEvent,
 };
 use prost::Message;
 use std::collections::HashMap;
@@ -369,7 +369,7 @@ impl NearBlockMapper {
         &mut self,
         block: &near::Block,
         identity: &PreparedIdentity,
-        fork_step: Option<&str>,
+        fork_step: StreamEvent<'_>,
     ) {
         let header = match &block.header {
             Some(h) => h,
@@ -458,7 +458,7 @@ impl NearBlockMapper {
         header: &near::ChunkHeader,
         author: &str,
         identity: &PreparedIdentity,
-        fork_step: Option<&str>,
+        fork_step: StreamEvent<'_>,
     ) {
         self.chunks.canonical.append(identity);
         self.chunks.shard_id.append_value(header.shard_id);
@@ -487,7 +487,7 @@ impl NearBlockMapper {
         transaction_index: u32,
         tx_with_outcome: &near::IndexerTransactionWithOutcome,
         identity: &PreparedIdentity,
-        fork_step: Option<&str>,
+        fork_step: StreamEvent<'_>,
     ) {
         let tx = match &tx_with_outcome.transaction {
             Some(t) => t,
@@ -540,7 +540,7 @@ impl NearBlockMapper {
         receipt_outcome: &near::IndexerExecutionOutcomeWithReceipt,
         origins: &ReceiptOrigins<'_>,
         identity: &PreparedIdentity,
-        fork_step: Option<&str>,
+        fork_step: StreamEvent<'_>,
     ) {
         let receipt = match &receipt_outcome.receipt {
             Some(r) => r,
@@ -644,7 +644,7 @@ impl NearBlockMapper {
         action_index: u32,
         action: &near::Action,
         identity: &PreparedIdentity,
-        fork_step: Option<&str>,
+        fork_step: StreamEvent<'_>,
     ) {
         let actions = &mut self.receipt_actions;
         actions.canonical.append(identity);
@@ -683,7 +683,7 @@ impl NearBlockMapper {
         state_change_index: u32,
         sc: &near::StateChangeWithCause,
         identity: &PreparedIdentity,
-        fork_step: Option<&str>,
+        fork_step: StreamEvent<'_>,
     ) {
         let value = match &sc.value {
             Some(v) => v,
@@ -735,7 +735,7 @@ impl NearBlockMapper {
         &mut self,
         block: near::Block,
         identity: &BlockIdentity,
-        fork_step: Option<&str>,
+        fork_step: StreamEvent<'_>,
     ) -> anyhow::Result<u64> {
         let tx_count = block
             .shards
@@ -761,7 +761,7 @@ impl BlockMapper for NearBlockMapper {
         &mut self,
         block_bytes: &[u8],
         identity: &BlockIdentity,
-        fork_step: Option<&str>,
+        fork_step: StreamEvent<'_>,
     ) -> anyhow::Result<u64> {
         self.map_decoded(near::Block::decode(block_bytes)?, identity, fork_step)
     }
@@ -770,7 +770,7 @@ impl BlockMapper for NearBlockMapper {
         &mut self,
         block_bytes: prost::bytes::Bytes,
         identity: &BlockIdentity,
-        fork_step: Option<&str>,
+        fork_step: StreamEvent<'_>,
     ) -> anyhow::Result<u64> {
         self.map_decoded(near::Block::decode(block_bytes)?, identity, fork_step)
     }
@@ -842,7 +842,7 @@ impl BlockMapper for NearBlockMapper {
             + est_str(&self.blocks.total_supply)
             + est_u64(&self.blocks.chunks_included)
             + est_u32(&self.blocks.latest_protocol_version)
-            + est_opt_str(&self.blocks.fork_step);
+            + est_fork_step(&self.blocks.fork_step);
         let chunks = self.chunks.canonical.estimated_bytes()
             + est_u64(&self.chunks.shard_id)
             + self.chunks.chunk_hash.estimated_bytes()
@@ -853,7 +853,7 @@ impl BlockMapper for NearBlockMapper {
             + est_u64(&self.chunks.height_included)
             + est_u64(&self.chunks.encoded_length)
             + est_str(&self.chunks.author)
-            + est_opt_str(&self.chunks.fork_step);
+            + est_fork_step(&self.chunks.fork_step);
         let transactions = self.transactions.canonical.estimated_bytes()
             + self.transactions.hash.estimated_bytes()
             + est_u32(&self.transactions.transaction_index)
@@ -870,7 +870,7 @@ impl BlockMapper for NearBlockMapper {
                 .transactions
                 .converted_into_receipt_id
                 .estimated_bytes()
-            + est_opt_str(&self.transactions.fork_step);
+            + est_fork_step(&self.transactions.fork_step);
         let receipts = self.receipts.canonical.estimated_bytes()
             + self.receipts.receipt_id.estimated_bytes()
             + est_u32(&self.receipts.receipt_index)
@@ -884,7 +884,7 @@ impl BlockMapper for NearBlockMapper {
             + est_str(&self.receipts.tokens_burnt)
             + est_str(&self.receipts.executor_id)
             + self.receipts.receipt_ids.estimated_bytes()
-            + est_opt_str(&self.receipts.fork_step)
+            + est_fork_step(&self.receipts.fork_step)
             + self.receipts.success_receipt_id.estimated_bytes();
         let receipt_actions = self.receipt_actions.canonical.estimated_bytes()
             + self.receipt_actions.receipt_id.estimated_bytes()
@@ -900,7 +900,7 @@ impl BlockMapper for NearBlockMapper {
             + est_bin(&self.receipt_actions.args)
             + est_u64(&self.receipt_actions.gas)
             + est_str(&self.receipt_actions.deposit)
-            + est_opt_str(&self.receipt_actions.fork_step)
+            + est_fork_step(&self.receipt_actions.fork_step)
             + estimated_dictionary_index_bytes(self.receipt_actions.receipt_status.len());
         let execution_logs = self.execution_logs.canonical.estimated_bytes()
             + self.execution_logs.receipt_id.estimated_bytes()
@@ -911,7 +911,7 @@ impl BlockMapper for NearBlockMapper {
             + est_str(&self.execution_logs.executor_id)
             + est_str(&self.execution_logs.predecessor_id)
             + est_str(&self.execution_logs.log)
-            + est_opt_str(&self.execution_logs.fork_step)
+            + est_fork_step(&self.execution_logs.fork_step)
             + estimated_dictionary_index_bytes(self.execution_logs.receipt_status.len());
         let changes = &self.state_changes;
         let state_changes = changes.canonical.estimated_bytes()
@@ -927,7 +927,7 @@ impl BlockMapper for NearBlockMapper {
             + est_str(&changes.locked)
             + est_u64(&changes.storage_usage)
             + changes.code_hash.estimated_bytes()
-            + est_opt_str(&changes.fork_step);
+            + est_fork_step(&changes.fork_step);
         [
             ("blocks", blocks),
             ("chunks", chunks),
@@ -962,7 +962,7 @@ struct BlocksBuilder {
     total_supply: StringBuilder,
     chunks_included: UInt64Builder,
     latest_protocol_version: UInt32Builder,
-    fork_step: Option<StringBuilder>,
+    fork_step: Option<ForkStepBuilder>,
 }
 
 impl BlocksBuilder {
@@ -1013,7 +1013,7 @@ struct ChunksBuilder {
     height_included: UInt64Builder,
     encoded_length: UInt64Builder,
     author: StringBuilder,
-    fork_step: Option<StringBuilder>,
+    fork_step: Option<ForkStepBuilder>,
 }
 
 impl ChunksBuilder {
@@ -1065,7 +1065,7 @@ struct TransactionsBuilder {
     tokens_burnt: StringBuilder,
     receipt_ids: BytesListColumn,
     converted_into_receipt_id: BytesColumn,
-    fork_step: Option<StringBuilder>,
+    fork_step: Option<ForkStepBuilder>,
 }
 
 impl TransactionsBuilder {
@@ -1123,7 +1123,7 @@ struct ReceiptsBuilder {
     tokens_burnt: StringBuilder,
     executor_id: StringBuilder,
     receipt_ids: BytesListColumn,
-    fork_step: Option<StringBuilder>,
+    fork_step: Option<ForkStepBuilder>,
     /// `SuccessReceiptId` target (#507).
     success_receipt_id: BytesColumn,
 }
@@ -1186,7 +1186,7 @@ struct ReceiptActionsBuilder {
     args: BinaryBuilder,
     gas: UInt64Builder,
     deposit: StringBuilder,
-    fork_step: Option<StringBuilder>,
+    fork_step: Option<ForkStepBuilder>,
     /// Parent receipt outcome (#550).
     receipt_status: StringDictionaryBuilder<Int32Type>,
 }
@@ -1246,7 +1246,7 @@ struct ExecutionLogsBuilder {
     executor_id: StringBuilder,
     predecessor_id: StringBuilder,
     log: StringBuilder,
-    fork_step: Option<StringBuilder>,
+    fork_step: Option<ForkStepBuilder>,
     /// Parent receipt outcome (#550).
     receipt_status: StringDictionaryBuilder<Int32Type>,
 }
@@ -1300,7 +1300,7 @@ struct StateChangesBuilder {
     locked: StringBuilder,
     storage_usage: UInt64Builder,
     code_hash: BytesColumn,
-    fork_step: Option<StringBuilder>,
+    fork_step: Option<ForkStepBuilder>,
 }
 
 impl StateChangesBuilder {
@@ -1796,7 +1796,11 @@ pub(crate) mod tests {
         let block_bytes = prost::Message::encode_to_vec(&block);
         let mut mapper = NearBlockMapper::new(false, EncodeBytes::Hex, false);
         mapper
-            .map_block(&block_bytes, &BlockIdentity::default(), None)
+            .map_block(
+                &block_bytes,
+                &BlockIdentity::default(),
+                StreamEvent::default(),
+            )
             .unwrap();
 
         let batches = mapper.flush().unwrap();
@@ -1831,7 +1835,11 @@ pub(crate) mod tests {
         let block_bytes = prost::Message::encode_to_vec(&block);
         let mut mapper = NearBlockMapper::new(false, EncodeBytes::Hex, false);
         mapper
-            .map_block(&block_bytes, &BlockIdentity::default(), None)
+            .map_block(
+                &block_bytes,
+                &BlockIdentity::default(),
+                StreamEvent::default(),
+            )
             .unwrap();
         let batches = mapper.flush().unwrap();
         assert_eq!(batches["blocks"].num_rows(), 1);
@@ -1849,7 +1857,11 @@ pub(crate) mod tests {
         let block_bytes = prost::Message::encode_to_vec(&block);
         let mut mapper = NearBlockMapper::new(false, EncodeBytes::Hex, false);
         mapper
-            .map_block(&block_bytes, &BlockIdentity::default(), None)
+            .map_block(
+                &block_bytes,
+                &BlockIdentity::default(),
+                StreamEvent::default(),
+            )
             .unwrap();
         let _ = mapper.flush().unwrap();
         assert_eq!(mapper.max_table_rows(), 0);
@@ -1874,13 +1886,28 @@ pub(crate) mod tests {
         let block_bytes = prost::Message::encode_to_vec(&block);
         let mut mapper = NearBlockMapper::new(true, EncodeBytes::Hex, false);
         mapper
-            .map_block(&block_bytes, &BlockIdentity::default(), Some("FINAL"))
+            .map_block(
+                &block_bytes,
+                &BlockIdentity::default(),
+                StreamEvent::new(Some("FINAL"), 1),
+            )
             .unwrap();
 
         let batches = mapper.flush().unwrap();
         let blocks_batch = &batches["blocks"];
-        let last_col = blocks_batch.num_columns() - 1;
+        // `stream_ordinal` directly follows `fork_step` and carries the event ordinal.
+        let last_col = blocks_batch.num_columns() - 2;
         assert_eq!(blocks_batch.schema().field(last_col).name(), "fork_step");
+        assert_eq!(
+            blocks_batch.schema().field(last_col + 1).name(),
+            "stream_ordinal"
+        );
+        let ordinals = blocks_batch
+            .column(last_col + 1)
+            .as_any()
+            .downcast_ref::<arrow::array::UInt64Array>()
+            .unwrap();
+        assert_eq!(ordinals.value(0), 1);
         let fork_col = blocks_batch
             .column(last_col)
             .as_any()
@@ -1930,7 +1957,11 @@ pub(crate) mod tests {
         let block_bytes = prost::Message::encode_to_vec(&block);
         let mut mapper = NearBlockMapper::new(false, EncodeBytes::Hex, false);
         mapper
-            .map_block(&block_bytes, &BlockIdentity::default(), None)
+            .map_block(
+                &block_bytes,
+                &BlockIdentity::default(),
+                StreamEvent::default(),
+            )
             .unwrap();
         let batches = mapper.flush().unwrap();
         let sc_batch = &batches["state_changes"];
@@ -2018,7 +2049,9 @@ pub(crate) mod tests {
             fork_step: None,
         };
         let mut mapper = NearBlockMapper::new(false, EncodeBytes::Base58, false);
-        mapper.map_block(&block_bytes, &identity, None).unwrap();
+        mapper
+            .map_block(&block_bytes, &identity, StreamEvent::default())
+            .unwrap();
 
         let batches = mapper.flush().unwrap();
 
@@ -2155,7 +2188,11 @@ pub(crate) mod tests {
         let mut mapper = NearBlockMapper::new(false, encoding, include_failed_transactions);
         for block in blocks {
             mapper
-                .map_block(&block.encode_to_vec(), &BlockIdentity::default(), None)
+                .map_block(
+                    &block.encode_to_vec(),
+                    &BlockIdentity::default(),
+                    StreamEvent::default(),
+                )
                 .unwrap();
         }
         mapper.flush().unwrap()

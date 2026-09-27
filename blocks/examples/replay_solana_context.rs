@@ -5,7 +5,7 @@ use blocks::solana::{mapper::SolanaBlockMapper, proto::solana};
 use clap::Parser;
 use firehose_parquet::{
     encode::EncodeBytes,
-    traits::{BlockIdentity, BlockMapper},
+    traits::{BlockIdentity, BlockMapper, StreamEvent},
 };
 use parquet::arrow::ArrowWriter;
 use prost::Message;
@@ -82,10 +82,14 @@ fn main() -> Result<()> {
                             mapper.map_block_bytes(
                                 bytes.clone().into(),
                                 identity,
-                                Some("FINAL"),
+                                StreamEvent::new(Some("FINAL"), 1),
                             )?;
                         } else {
-                            mapper.map_block(bytes, identity, Some("FINAL"))?;
+                            mapper.map_block(
+                                bytes,
+                                identity,
+                                StreamEvent::new(Some("FINAL"), 1),
+                            )?;
                         }
                         if flush_each || index + 1 == inputs.len() {
                             for (table, batch) in mapper.flush()? {

@@ -8,7 +8,7 @@ use firehose_parquet::{
     config::{BlockMetadata, Compression, Partition},
     encode::EncodeBytes,
     flush::{FlushSizing, MapperBufferEstimate, SizeFlushTrigger},
-    traits::{BlockIdentity, BlockMapper},
+    traits::{BlockIdentity, BlockMapper, StreamEvent},
     writer::ParquetTableWriter,
 };
 use firehose_protos::{eth, solana};
@@ -188,7 +188,7 @@ fn main() -> Result<()> {
             .then(|| vary_evm(bytes, ordinal as u64))
             .transpose()?;
         let bytes = varied.as_deref().unwrap_or(bytes);
-        mapper.map_block(bytes, identity, None)?;
+        mapper.map_block(bytes, identity, StreamEvent::default())?;
         blocks_in_window += 1;
         min_block = min_block.min(identity.block_num);
         max_block = max_block.max(identity.block_num);

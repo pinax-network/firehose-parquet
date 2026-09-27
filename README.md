@@ -19,9 +19,9 @@ A production-grade Rust toolkit that consumes [StreamingFast Firehose](https://f
 
 The generated [schema reference](docs/schemas/README.md) lists every table,
 column, Arrow type and nullability. The sections below explain semantics, joins
-and queries. Select columns by name, not position: `fork_step` is not always the
-last column, because later additions follow it on several Solana, Antelope,
-NEAR and Tron tables.
+and queries. Select columns by name, not position: the non-final `fork_step` and
+`stream_ordinal` are not always the last columns, because later additions follow
+them on several Solana, Antelope, NEAR and Tron tables.
 
 ## What's new in v1.0.0
 
@@ -75,7 +75,7 @@ the upgrade guide.
 - **S3-aware cursor** — cursor automatically stored alongside output (local or S3)
 - **Partitioning** — `none`, `block_range`, `date`, `hour`, `minute`, or `second` layouts
 - **File rollover** — flush by row count, byte size, or time interval
-- **Fork handling** — finalized output by default; `--final-blocks-only=false` preserves append-only `fork_step` events ([query semantics](#non-final-streams-and-reorgs))
+- **Fork handling** — finalized output by default; `--final-blocks-only=false` preserves append-only `fork_step` events numbered by a durable `stream_ordinal` ([canonical live view](#canonical-live-view))
 - **Failed transactions** — EVM includes failed/reverted txs by default with only their persistent state changes (`--exclude-failed-transactions` drops them); Solana, Tron, Antelope, Cosmos and NEAR exclude them unless `--include-failed-transactions` is set, and label child rows with their parent outcome ([details](#failed-transaction-filtering))
 - **Block-type-based encoding** — identifiers follow the resolved chain/profile defaults, recorded in Parquet metadata; opaque Solana payloads use Binary and account indices use UInt8 lists
 - **Compression** — zstd (default level 3), explicit `zstd:<level>`, snappy, gzip, or none
@@ -613,60 +613,256 @@ Whether a run is live (no `--stop-block`) is independent of whether blocks must
 be final.
 
 Non-final output is an **append-only event history**. Every mapped envelope adds
-rows carrying `fork_step`: `NEW` adds a block, `UNDO` records its removal from the
-chain, and `FINAL` is an explicit final event if the endpoint sends it. The usual
-non-final protocol sends `NEW` and occasional `UNDO`, not a later `FINAL` for
-every block. UNDO does not delete earlier rows. A block identity can return as
-`NEW` after an `UNDO`; replay/reconnect can also repeat deliveries. Treat unknown
-steps as unresolved rather than inferring their effect.
+its block's rows (to `blocks` and to every other table the block has rows in),
+with two extra columns that final-only output does not have, `stream_ordinal`
+directly after `fork_step`:
 
-The current table schema has **no global event sequence**. Block height, block
-time, `lib_num`, filenames, file enumeration, and row order in a multi-file scan
-are not delivery-order keys. The opaque saved cursor is a resume checkpoint,
-not a sortable per-row sequence. Neither filtering out every identity with an
-UNDO nor counting NEW minus UNDO reconstructs arbitrary canonical state:
-`NEW(A), UNDO(A), NEW(A)` ends with A present, while a repeated `NEW(A), NEW(A),
-UNDO(A)` ends with A absent despite the same unordered rows. Consequently the
-current reversible dataset alone cannot supply a general canonical-tail query.
+- `fork_step` (`Utf8`): `NEW` adds a block, `UNDO` records its removal from the
+  chain (the undone block's rows are written again, marked `UNDO`), and `FINAL`
+  is an explicit final event if the endpoint sends it. The usual non-final
+  protocol sends `NEW` and occasional `UNDO`, not a later `FINAL` for every
+  block. UNDO does not delete earlier rows.
+- `stream_ordinal` (`UInt64`): the accepted-event ordinal of the envelope that
+  produced the row, the same for every row of that envelope in every table. It
+  is strictly increasing in delivery order and durable: the protected session
+  assigns it when the envelope is received and continues it from the output
+  authority (`.fireparq-ingest/`) across reconnects and restarts, and each
+  part's name records the window of ordinals its rows belong to
+  (`part-v1-<stream>-<first>-<last>-...`). After a crash, recovery either keeps
+  a transaction's rows with their ordinals or removes its rows before those
+  ordinals are assigned again, so no two committed events share an ordinal.
+  Ordinals can skip values (envelopes below `--start-block` write no rows).
 
-For a safe **finalized block-identity subset**, build a separate dataset with
-`--final-blocks-only=true` covering the desired range on the same chain/network,
-with matching identifier encoding. Then intersect its authoritative identities with observed
-positive events:
+A block identity can return as `NEW` after an `UNDO`, and a replay or reconnect
+can deliver the same block again; every delivery is a new event with a new
+ordinal. Block height, block time, `lib_num`, file names and row order are not
+delivery-order keys, and neither the steps alone nor counting NEW minus UNDO
+gives the current state: `NEW(A), UNDO(A), NEW(A)` ends with A present, while
+`NEW(A), NEW(A), UNDO(A)` ends with A absent despite the same unordered rows.
+`stream_ordinal` is the order that decides.
+
+#### Canonical live view
+
+For each `block_num`, the event with the highest `stream_ordinal` decides the
+head:
+
+- latest is `NEW` (or `FINAL`) of block X: X is canonical at that height;
+- latest is `UNDO`: the height currently has no block (a reorg removed it and
+  nothing has replaced it yet, typically at the tip);
+- any other step is treated as unresolved: no block.
+
+A row of any table, `blocks` included, belongs to the head only when its
+`(block_num, block_id, stream_ordinal)` matches that latest event. Matching the
+ordinal and not only the block identity keeps exactly one copy of a block that
+was delivered more than once: after `NEW(A), UNDO(A), NEW(B)` only B's rows
+remain, and after `NEW(A), UNDO(A), NEW(A)` only the rows of the second
+`NEW(A)`.
 
 ```sql
--- DuckDB: finality comes from the separate finalized-only capture.
--- Returns one identity per finalized block also observed as NEW/FINAL.
-WITH finalized AS (
-  SELECT DISTINCT block_num, block_id
-  FROM read_parquet('finalized/mainnet/blocks/**/*.parquet')
-), observed AS (
-  SELECT DISTINCT block_num, block_id
-  FROM read_parquet('reversible/mainnet/blocks/**/*.parquet')
-  WHERE fork_step IN ('NEW', 'FINAL')
-)
-SELECT f.block_num, f.block_id
-FROM finalized f
-JOIN observed o USING (block_num, block_id)
-ORDER BY f.block_num, f.block_id;
+-- DuckDB views over one live (non-final) chain root. Replace live/mainnet
+-- with that root, for example s3://live-bucket/v1/mainnet.
+CREATE OR REPLACE VIEW live_head AS
+SELECT block_num, block_id, stream_ordinal
+FROM (
+  SELECT block_num, block_id, fork_step, stream_ordinal,
+         row_number() OVER (PARTITION BY block_num ORDER BY stream_ordinal DESC) AS latest
+  FROM read_parquet('live/mainnet/blocks/**/*.parquet', hive_partitioning = false)
+) events
+WHERE latest = 1 AND fork_step IN ('NEW', 'FINAL');
+
+-- One view per table, blocks included: the rows of each height's latest event.
+CREATE OR REPLACE VIEW live_blocks AS
+SELECT t.*
+FROM read_parquet('live/mainnet/blocks/**/*.parquet', hive_partitioning = false) t
+WHERE EXISTS (
+  SELECT 1 FROM live_head h
+  WHERE h.block_num = t.block_num
+    AND h.block_id = t.block_id
+    AND h.stream_ordinal = t.stream_ordinal
+);
+
+CREATE OR REPLACE VIEW live_transactions AS
+SELECT t.*
+FROM read_parquet('live/mainnet/transactions/**/*.parquet', hive_partitioning = false) t
+WHERE EXISTS (
+  SELECT 1 FROM live_head h
+  WHERE h.block_num = t.block_num
+    AND h.block_id = t.block_id
+    AND h.stream_ordinal = t.stream_ordinal
+);
 ```
 
-This query is limited to the finalized reference's coverage; it says nothing
-about the remaining reversible tail or the ordering of its events. It handles
-repeated NEW/UNDO/NEW identities without inventing ordering. For transaction,
-log, or other child-table aggregates, query the finalized-only dataset directly.
-Joining child rows to these identities does **not** remove repeated deliveries,
-and generic `DISTINCT *` can collapse legitimate duplicate rows. Reconstructing
-a full reversible state requires a separately preserved, complete ordered event
-log and event/row occurrence keys; the current public Parquet schema does not
-provide those guarantees.
+`live_head` reads only the `blocks` table, which has exactly one row per event.
+`hive_partitioning = false` keeps the partition directories out of the columns,
+so every view has the table's own schema.
+
+**Spark and Trino.** The window subquery and the `EXISTS` semi-join are standard
+SQL and run unchanged there (DuckDB's `QUALIFY` is avoided because Spark and
+Trino lack it); replace `read_parquet(...)` with a table or path over the same
+files, for example `` parquet.`s3a://live-bucket/v1/mainnet/blocks/` `` with
+`recursiveFileLookup` in Spark, or an external Hive table in Trino. Engines
+without unsigned integers may read `block_num` and `stream_ordinal` as
+`DECIMAL(20,0)` (Spark) or as a signed 64-bit integer; ordinals stay far below
+2^63, so ordering and equality are unaffected. The union below uses DuckDB's
+`SELECT * EXCLUDE` and `UNION ALL BY NAME`: in Spark use
+`DataFrame.drop("fork_step", "stream_ordinal")` and `unionByName`, in Trino list
+the columns.
+
+#### Two-bucket union
+
+A live view shows the reversible head, but the separately built final-only
+dataset is the source of truth (see
+[Live + final two-bucket deployment](#live--final-two-bucket-deployment)). Read
+every table from the final bucket up to its **final frontier**, the highest
+`block_num` in its `blocks` table, and from the live view above it:
+
+```sql
+-- DuckDB, after the live views above. Replace final/mainnet with the final
+-- dataset's chain root, for example s3://final-bucket/v1/mainnet.
+CREATE OR REPLACE VIEW final_frontier AS
+SELECT max(block_num) AS block_num
+FROM read_parquet('final/mainnet/blocks/**/*.parquet', hive_partitioning = false);
+
+CREATE OR REPLACE VIEW canonical_blocks AS
+SELECT *
+FROM read_parquet('final/mainnet/blocks/**/*.parquet', hive_partitioning = false)
+WHERE block_num <= (SELECT block_num FROM final_frontier)
+UNION ALL BY NAME
+SELECT * EXCLUDE (fork_step, stream_ordinal)
+FROM live_blocks
+WHERE block_num > (SELECT block_num FROM final_frontier)
+   OR (SELECT block_num FROM final_frontier) IS NULL;
+
+CREATE OR REPLACE VIEW canonical_transactions AS
+SELECT *
+FROM read_parquet('final/mainnet/transactions/**/*.parquet', hive_partitioning = false)
+WHERE block_num <= (SELECT block_num FROM final_frontier)
+UNION ALL BY NAME
+SELECT * EXCLUDE (fork_step, stream_ordinal)
+FROM live_transactions
+WHERE block_num > (SELECT block_num FROM final_frontier)
+   OR (SELECT block_num FROM final_frontier) IS NULL;
+```
+
+- The result has the final-only schema. Both datasets must be the same chain
+  with the same byte encoding and table options (for example both with or both
+  without `--without-extended`).
+- Every table is cut at the frontier of `blocks`, so a table never mixes both
+  buckets at one height. A final flush publishes its tables one after another:
+  a query that runs while the final writer publishes can briefly see a new
+  `blocks` part before its child parts. Query between final runs, or accept
+  that short gap.
+- The live bucket must still hold every height above the final frontier. Size
+  its expiration so that the frontier's worst lag (a day, plus the time the
+  daily job takes) stays well inside it.
 
 Use different output roots/cursors for final-only and non-final captures;
 resuming a cursor with a different mode is incompatible. A bounded non-final
 run warns on successful completion because reaching its stop does not prove
 that its tail is final, and later UNDO events will not be received after it
 stops. A saved cursor or successful exit is not a finality certificate. See the
-[implementation and offline query checks](docs/audit/474-non-final-streams.md).
+[`stream_ordinal` and live view record](docs/audit/648-stream-ordinal.md) and the
+[original non-final implementation](docs/audit/474-non-final-streams.md).
+
+### Live + final two-bucket deployment
+
+A dataset that shows the chain head while keeping a canonical history uses two
+writers, each with its own bucket (S3 ownership is bucket-wide, so a live
+`build` that never stops would block every other mutating command in its
+bucket). Query them with the [two-bucket union](#two-bucket-union).
+
+| Setting | Final writer (source of truth) | Live writer (chain head) |
+|---|---|---|
+| `FINAL_BLOCKS_ONLY` | `true` (the default) | `false` |
+| `PARTITION` | `date` | `hour` |
+| Range | Bounded daily runs: the same `START_BLOCK` on every run, `STOP_BLOCK` at the first block of the next UTC day | Live: no `STOP_BLOCK` |
+| Flush | Defaults (`FLUSH_BYTES` 32 MiB target) | `FLUSH_INTERVAL_SECS` and/or `FLUSH_BLOCKS` |
+| After each run | `merge`, then `verify` | Nothing: no `merge`, `rollup` or `truncate` |
+| Retention | Kept | S3 lifecycle expiration, for example after 2 days (48 hours), on table prefixes only |
+| `verify` | Yes | Not applicable |
+
+**Final writer.** One protected stream per root: each run repeats the original
+`START_BLOCK` and extends `STOP_BLOCK` (exclusive) to the first block of the
+next UTC day, for example the `stop_block` that
+`partitions resolve --partition-type date --partition-value '<day> 00:00:00' --json`
+returns for a date index of the chain. A repeated bound opens no Blocks request;
+a larger one resumes from the output authority. Run the day's commands one after
+another, since each needs the bucket's owner: `build` exits at the bound, then
+`fireparq merge s3://final-bucket/v1/mainnet` compacts the completed `date`
+partitions, then `verify` records their roots (the newest day stays `open` until
+the next run moves the frontier past it). A run that stops early only leaves
+more parts to merge the next day.
+
+**Live writer.** One unbounded `build` with `FINAL_BLOCKS_ONLY=false` and
+`PARTITION=hour`. For the first run, set `START_BLOCK` at or below the final
+dataset's frontier so the union has no gap; later runs resume from authority.
+Rows reach the bucket at the next flush: `FLUSH_INTERVAL_SECS=N` flushes when a
+block arrives at least N seconds after the previous flush, `FLUSH_BLOCKS=K`
+after K blocks, whichever comes first (hour boundaries and the size triggers,
+`FLUSH_BYTES` and `FLUSH_MEMORY_BYTES`, also flush). Lower values mean fresher
+data and more objects. Do not run `merge`, `rollup` or `truncate` on the live
+bucket: they need its owner, which the running `build` holds, and the live
+parts are expired rather than compacted.
+
+**Expected objects per day.** Each flush writes one part per table that has rows
+in it.
+
+- Live: about (flushes per day) × (tables with rows). Flushes per day are the
+  larger of 86,400 / `FLUSH_INTERVAL_SECS` (at most one per block) and blocks
+  per day / `FLUSH_BLOCKS`, plus 24 hour boundaries and any size-triggered
+  flushes. Ethereum (7,200 blocks a day) with
+  `FLUSH_INTERVAL_SECS=60` makes about 1,460 flushes a day: with 15 tables with
+  rows, about 22,000 objects a day. `FLUSH_BLOCKS=1` instead makes about 108,000.
+  Because S3 rounds each expiry up to the next midnight UTC, a 48-hour rule
+  keeps two to three days of objects.
+- Final: before `merge`, about one part per table per flush, where flushes
+  follow the 32 MiB target of the largest table plus one per day boundary; after
+  `merge`, about one file per 32 MiB of compressed data per table and day
+  (`merge --flush-bytes`).
+
+Every S3 `build` start lists the whole dataset root three times (for nested
+control markers and merge journals), each listing limited to 60 seconds. S3
+returns 1,000 keys per list request, so keep the live bucket's retained objects
+in the low hundreds of thousands at most: prefer `FLUSH_INTERVAL_SECS` to a
+small `FLUSH_BLOCKS` on fast chains.
+
+**Lifecycle expiration.** S3 lifecycle filters select objects by prefix, tag or
+size and cannot exclude a path, so create one expiration rule per table prefix:
+`<prefix>/<chain>/<table>/` (or `<table>/` with `--without-chain-dir`), for
+every table the chain writes ([schema reference](docs/schemas/README.md)). A rule
+must never match control state:
+
+- `.fireparq-ingest/` in the dataset root: the output authority, checkpoint and
+  transaction journal;
+- the `.fireparq-owner*` records at the bucket root: the owner record and its
+  probes;
+- `_fireparq/`, which holds the cursor mirror, the partition index, the Merkle
+  registry and verify reports;
+- `merge` and `rollup` journals (`_fireparq_merge.json`, `_fireparq_rollup.json`),
+  which live inside table directories. Never run those commands on a bucket
+  with an expiration rule.
+
+If bucket versioning is enabled, an expiration only adds a delete marker: add a
+noncurrent-version expiration (and expired delete marker cleanup) to reclaim the
+space.
+
+Expiring committed parts is safe for the live writer. `build` never reads a
+committed part outside its own pending transaction: a running build and its
+next flushes, a restart (recovery and resume from authority, including the S3
+marker and journal listings), the cursor mirror, `recovery status` and
+`recovery recover` are unaffected when every part of earlier hours disappears.
+The one exception is a writer that crashes with a committed but unfinished
+transaction and then stays down longer than the expiration: its next start
+verifies that transaction's parts and refuses if they expired
+(`committed transaction is missing a required final part`). Live data is
+disposable: start a new live dataset (a new prefix or an emptied bucket) at or
+below the final frontier.
+
+**`verify` does not apply to live data.** A reversible stream can append rows to
+any partition, so `verify` reports every partition of a growing non-final
+dataset as `open` and neither compares nor records a root, and expiration would
+change every root anyway. It still reads every part, and a part that expires
+during the scan fails the run. Run `verify` on the final bucket after `merge`.
 
 ### Advanced authentication
 
@@ -1452,9 +1648,9 @@ every table, column, Arrow type and nullability:
 
 The README keeps the semantics that a column list cannot show: failed-transaction
 rules, join keys, ordering and example queries. `fireparq inspect <file> --schema-only`
-prints the schema of an existing file. Select columns by name: `fork_step`
-(non-final streams only) is followed by later columns on several Solana,
-Antelope, NEAR and Tron tables.
+prints the schema of an existing file. Select columns by name: `fork_step` and
+`stream_ordinal` (non-final streams only) are followed by later columns on
+several Solana, Antelope, NEAR and Tron tables.
 
 ## Failed Transaction Filtering
 

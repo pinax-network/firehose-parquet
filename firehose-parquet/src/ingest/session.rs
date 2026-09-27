@@ -549,6 +549,9 @@ impl<'a> IngestionSession<'a> {
             self.failed = false;
             return Ok(None);
         };
+        if !self.authority().descriptor.final_blocks_only {
+            require_prefix_stream_ordinals(&batches, &prefix)?;
+        }
         let _buffer_metrics = SessionBufferMetrics::new(self.metrics, &batches, compression);
         let committed = self
             .controller
@@ -594,6 +597,42 @@ impl<'a> IngestionSession<'a> {
         self.failed = false;
         Ok(changed)
     }
+}
+
+/// Non-final rows carry the accepted-event ordinal of the envelope that produced
+/// them (`stream_ordinal`, assigned by [`AcceptedFrontier::receive`]). Every
+/// nonempty table of a flush must hold only ordinals of the frozen prefix it
+/// commits, so no row can claim an event outside its own transaction. Together
+/// with contiguous prefixes resumed from the durable checkpoint, this keeps the
+/// column strictly increasing in delivery order across flushes and restarts.
+fn require_prefix_stream_ordinals(
+    batches: &HashMap<String, RecordBatch>,
+    prefix: &AcceptedPrefix,
+) -> Result<()> {
+    use arrow::array::{Array, UInt64Array};
+    for (table, batch) in batches {
+        if batch.num_rows() == 0 {
+            continue;
+        }
+        let ordinals = batch
+            .column_by_name(crate::traits::STREAM_ORDINAL_COLUMN)
+            .and_then(|column| column.as_any().downcast_ref::<UInt64Array>())
+            .with_context(|| format!("non-final table {table} lacks a UInt64 stream_ordinal"))?;
+        ensure!(
+            ordinals.null_count() == 0,
+            "non-final table {table} has a null stream_ordinal"
+        );
+        let within = arrow::compute::min(ordinals)
+            .zip(arrow::compute::max(ordinals))
+            .is_some_and(|(min, max)| min >= prefix.first_ordinal && max <= prefix.last_ordinal);
+        ensure!(
+            within,
+            "non-final table {table} has a stream_ordinal outside the accepted prefix {}..={}",
+            prefix.first_ordinal,
+            prefix.last_ordinal
+        );
+    }
+    Ok(())
 }
 
 /// A failed/cancelled controller consumes and drops its in-memory prepared map;
