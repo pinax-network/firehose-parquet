@@ -264,23 +264,17 @@ pub fn validate_stop_block_after_start(
 /// `--cursor` value that disables the optional cursor mirror (case-insensitive).
 const CURSOR_MIRROR_DISABLED: &str = "none";
 
-/// Resolve `--cursor` / `--cursor-template` into the configured mirror path.
+/// Resolve `--cursor` into the configured mirror path.
 ///
 /// `--cursor none` (any case) returns `None`: protected ingestion then keeps
 /// only its mandatory output authority and writes no `cursor.parquet` mirror.
 /// Every other value must be a `.parquet` path or `s3://` URI.
 fn resolve_cursor_mirror_path(args: &CommonArgs) -> anyhow::Result<Option<String>> {
     let cursor_str = args.cursor.to_string_lossy();
-    let template = normalize_opt_string(&args.cursor_template);
     if cursor_str
         .trim()
         .eq_ignore_ascii_case(CURSOR_MIRROR_DISABLED)
     {
-        if let Some(template) = template {
-            anyhow::bail!(
-                "--cursor none disables the cursor mirror and cannot be combined with --cursor-template ({template})"
-            );
-        }
         return Ok(None);
     }
     if cursor_str.starts_with("s3://") {
@@ -295,11 +289,6 @@ fn resolve_cursor_mirror_path(args: &CommonArgs) -> anyhow::Result<Option<String
         anyhow::bail!(
             "--cursor path must end in .parquet (or be `none` to disable the mirror), got: {cursor_str}"
         );
-    }
-    if let Some(template) = template {
-        if !template.ends_with(".parquet") {
-            anyhow::bail!("--cursor-template must end in .parquet, got: {template}");
-        }
     }
     Ok(Some(cursor_str.into_owned()))
 }

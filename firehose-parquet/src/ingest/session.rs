@@ -167,9 +167,9 @@ async fn existing(
 
 /// Ownership scopes for one protected build: the output root plus the cursor
 /// mirror resolved by exactly the binding that authority records. Deriving the
-/// guarded bucket/key or file from that binding (after any `--cursor-template`
-/// expansion stored in `config.cursor_path`) means ownership can never cover a
-/// different location than the one the session later writes.
+/// guarded bucket/key or file from that binding (`config.cursor_path`) means
+/// ownership can never cover a different location than the one the session
+/// later writes.
 pub fn ingestion_mutation_scopes(config: &Config) -> Result<Vec<MutationScope>> {
     let output = config
         .output
@@ -254,10 +254,10 @@ fn mirror_binding_mismatch(stored: &MirrorBinding, configured: &MirrorBinding) -
             "this protected dataset was created without a cursor mirror; rerun with --cursor none (a mirror cannot be added to an existing dataset)"
         }
         (_, MirrorBinding::Disabled) => {
-            "this protected dataset has a bound cursor mirror; --cursor none cannot disable it, so rerun with its original --cursor/--cursor-template"
+            "this protected dataset has a bound cursor mirror; --cursor none cannot disable it, so rerun with its original --cursor"
         }
         _ => {
-            "configured cursor binding differs from authority; rerun with the original --cursor/--cursor-template (changing it requires an explicit migration)"
+            "configured cursor binding differs from authority; rerun with the original --cursor (changing it requires an explicit migration)"
         }
     }
 }

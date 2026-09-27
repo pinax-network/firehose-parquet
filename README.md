@@ -46,8 +46,7 @@ the upgrade guide.
   one `_fireparq/merkle_roots.parquet` registry per network. It infers the chain and table
   from the data, and a failing run never changes the registry.
 - **Engine-friendly layout.** A dataset root holds only its table directories,
-  `_fireparq/` (cursor mirror, partition index, Merkle registry and verify
-  reports) and dot-prefixed control state, so engines that skip `_` and `.`
+  `_fireparq/` (cursor mirror, Merkle registry and verify reports) and dot-prefixed control state, so engines that skip `_` and `.`
   paths never read fireparq's own files as table data. `--output` is that
   root, used exactly as given; `{chain}` opts into a directory named after the
   network (`--output 's3://datasets/{chain}'`). v0.7.x appended the chain
@@ -203,8 +202,7 @@ cargo build --release --workspace
 ### Authentication
 
 Credentials are selected from the **resolved endpoint host**, including any
-`--endpoint`, `ENDPOINT`, or `FIREHOSE_ENDPOINT_*` override. The same rules apply
-to `build` and `partitions build`:
+`--endpoint`, `ENDPOINT`, or `FIREHOSE_ENDPOINT_*` override:
 
 | Destination | API key environment variables, in priority order | Bearer token environment variables, in priority order |
 |---|---|---|
@@ -283,8 +281,7 @@ deleting the mirror cannot rewind ingestion. These controls contain opaque sourc
 and should receive the same access restrictions as the cursor file.
 
 Existing datasets without this authority are not adopted automatically. Rebuild
-into a new empty output root, with an absent cursor mirror. A verified same-chain
-v2 `_fireparq/partitions.parquet` may already exist there. Keep legacy datasets available
+into a new empty output root, with an absent cursor mirror. Keep legacy datasets available
 for read-only tools and guarded legacy maintenance. See the
 [transaction and migration contract](docs/audit/468-ingestion-runtime.md).
 
@@ -313,7 +310,7 @@ Per-network env overrides normalize network names by uppercasing and converting 
 
 Removed networks are rejected during argument parsing, and startup fails early if the resolved endpoint is unavailable or unhealthy.
 
-Both `build` and `partitions build` require EndpointInfo with a nonempty chain name before resolving output or cursor paths. Transient Info failures get three attempts with bounded backoff; exhausted retries, authentication errors, or unsupported Info stop startup. `--network`, `--block-type`, and `--cursor-override` do not bypass this requirement. This prevents a temporary metadata failure from changing the output root or hiding the existing cursor. Older servers must expose the Info RPC. Protected ingestion resolves its mapper before recovery; unknown custom chain metadata requires an explicit `--block-type`. See [the implementation record](docs/audit/467-endpoint-info.md) for retry limits and validation.
+`build` requires EndpointInfo with a nonempty chain name before resolving output or cursor paths. Transient Info failures get three attempts with bounded backoff; exhausted retries, authentication errors, or unsupported Info stop startup. `--network`, `--block-type`, and `--cursor-override` do not bypass this requirement. This prevents a temporary metadata failure from changing the output root or hiding the existing cursor. Older servers must expose the Info RPC. Protected ingestion resolves its mapper before recovery; unknown custom chain metadata requires an explicit `--block-type`. See [the implementation record](docs/audit/467-endpoint-info.md) for retry limits and validation.
 
 ```bash
 # Built-in alias
@@ -431,12 +428,10 @@ passing `--cursor cursor.parquet` (`CURSOR=cursor.parquet`) for it. The mirror
 is never moved automatically.
 
 **S3 writes require an explicit `s3://bucket/prefix` output** (#617). `build`
-(`--output` / `OUTPUT`) and `partitions build` (`--output`, required, no
-environment variable) never expand a relative output into `--s3-bucket` /
+(`--output` / `OUTPUT`) never expands a relative output into `--s3-bucket` /
 `S3_BUCKET`. When a bucket option is set, a relative output (including the
-`build` default `.`) is rejected before contacting Firehose or storage, with the
-explicit URI suggested; a missing `partitions build --output` fails at parse
-time.
+default `.`) is rejected before contacting Firehose or storage, with the
+explicit URI suggested.
 Without a bucket option a relative output is a local path. Explicit local paths
 (`./output`, `../output`, or an absolute path) are always local. When `--output`
 is an S3 URI, `--s3-bucket` / `S3_BUCKET`, if set, must name the same bucket; this
@@ -444,12 +439,10 @@ check does not restrict an explicit cursor URI to the data bucket. The bucket
 name is always literal (`{chain}` may only appear in the key prefix), so these
 checks run before the endpoint is contacted. Before the first write, `build`
 logs `resolved write destinations` with the absolute output and cursor-mirror
-locations (and `resolved --output template` when `{chain}` was expanded), and
-`partitions build` logs the dataset root and the index destination.
+locations (and `resolved --output template` when `{chain}` was expanded).
 
 An S3 cursor requires complete explicit AWS credentials even when data output
-is local. This is validated after `--cursor-template` expansion as well as for
-`--cursor`; neither form silently falls back to instance metadata credentials.
+is local; `--cursor` never silently falls back to instance metadata credentials.
 
 Authenticated S3 `build` spools each Parquet part to private temporary disk in
 `$TMPDIR` (else `/tmp`), then streams one conditional PUT and verifies the entire
@@ -497,11 +490,10 @@ mirror. Authority under `.fireparq-ingest/` remains mandatory and alone selects
 the resume cursor, completed bounds and routing anchors, so resume, extension,
 same-bound no-ops and recovery behave exactly as with a mirror. The choice is
 bound when the dataset is created: every later `build` must pass `--cursor none`
-again, and a dataset created with a mirror cannot drop it. `--cursor none`
-cannot be combined with `--cursor-template`. Without a mirror there is no
-`<root>/_fireparq/cursor.parquet` hint for other tools: `partitions build` cannot infer
-`--start-block` from it (pass it explicitly). `verify` reads the authority
-itself, so it marks partitions `build` may still write as `open` either way.
+again, and a dataset created with a mirror cannot drop it. Without a mirror
+there is no `<root>/_fireparq/cursor.parquet` hint for other tools. `verify`
+reads the authority itself, so it marks partitions `build` may still write as
+`open` either way.
 
 Local mirror saves use private same-directory temporary files, atomic replacement,
 file and directory sync, and up to three attempts with 1 and 2 second backoff.
@@ -523,7 +515,7 @@ pending: the next `build` recovers that transaction before streaming. It keeps
 ownership after an uncertain request (timeout, lost acknowledgement, connection
 reset, unverifiable readback, 5xx, 409/412), a second shutdown signal or a
 panic, and its error then says why and prints the exact `recovery status` and
-`recovery release` commands. `merge`, `truncate`, `partitions build`
+`recovery release` commands. `merge`, `truncate`
 and `recovery` keep S3 ownership after any error and log the same guidance.
 `fireparq recovery status <path>` reads a summary. Explicit remote release requires
 the exact owner/generation and evidence that both the writer and all prior remote
@@ -603,7 +595,7 @@ flushes the remaining buffers and saves the final cursor.
 ## CLI Reference
 
 The primary ingestion workflow is `fireparq build`. Utility workflows stay
-under the subcommands `partitions`, `scan`, `inspect`, `validate`, `verify`,
+under the subcommands `scan`, `inspect`, `validate`, `verify`,
 `merge`, `truncate`, `recovery` and `completions`. The global flags
 `--log-level` (`LOG_LEVEL`, default `info`), `--verbose` (`VERBOSE`) and
 `--env-file` (`FIREPARQ_ENV_FILE`) apply to every command.
@@ -805,9 +797,8 @@ bucket). Query them with the [two-bucket union](#two-bucket-union).
 
 **Final writer.** One protected stream per root: each run repeats the original
 `START_BLOCK` and extends `STOP_BLOCK` (exclusive) to the first block of the
-next UTC day, for example the `stop_block` that
-`partitions resolve --partition-type date --partition-value '<day> 00:00:00' --json`
-returns for a date index of the chain. A repeated bound opens no Blocks request;
+next UTC day, for example the live bucket's first block of that day (see
+[block range of a day](#block-range-of-a-day)). A repeated bound opens no Blocks request;
 a larger one resumes from the output authority. Run the day's commands one after
 another, since each needs the bucket's owner: `build` exits at the bound, then
 `fireparq merge s3://final-bucket/v1/mainnet` compacts the completed `date`
@@ -858,8 +849,8 @@ must never match control state:
   transaction journal;
 - the `.fireparq-owner*` records at the bucket root: the owner record and its
   probes;
-- `_fireparq/`, which holds the cursor mirror, the partition index, the Merkle
-  registry and verify reports;
+- `_fireparq/`, which holds the cursor mirror, the Merkle registry and verify
+  reports;
 - `merge` journals (`_fireparq_merge.json`), which live inside table
   directories. Never run `merge` on a bucket with an expiration rule.
 
@@ -916,8 +907,8 @@ rather than the default workflow:
 
 #### Receive transport
 
-Both `build` and `partitions build` use 16 MiB HTTP/2 stream and connection
-receive windows and accept plain, gzip, or zstd replies. The server selects the
+`build` uses 16 MiB HTTP/2 stream and connection
+receive windows and accepts plain, gzip, or zstd replies. The server selects the
 response encoding; requests remain uncompressed. Parquet `--compression` is
 independent of transport compression.
 
@@ -925,7 +916,7 @@ independent of transport compression.
 |---|---|
 | `--grpc-window-bytes` / `GRPC_WINDOW_BYTES` | Initial stream and connection receive window, default `16777216`. `0` restores the underlying library defaults. Larger windows allow more data in flight and can increase buffering. |
 | `--grpc-adaptive-window[=true\|false]` / `GRPC_ADAPTIVE_WINDOW` | Opt into automatic window tuning; default false. When true, it overrides `--grpc-window-bytes`. |
-| `--grpc-max-message-bytes` / `GRPC_MAX_MESSAGE_BYTES` | Maximum encoded or decompressed protobuf response bytes, default `134217728` (128 MiB). Values must be positive and fit UInt32. Applies to Info, Fetch, ingestion, and finalized index traversal/proof calls. |
+| `--grpc-max-message-bytes` / `GRPC_MAX_MESSAGE_BYTES` | Maximum encoded or decompressed protobuf response bytes, default `134217728` (128 MiB). Values must be positive and fit UInt32. Applies to Info and the ingestion stream. |
 
 The message limit is a per-response bound, not a cap on total process memory.
 An oversized response fails with an error; increasing the limit permits larger
@@ -960,9 +951,9 @@ end-to-end ingestion or provider performance guarantee. See the
 ### Advanced S3 / deployment knobs
 
 Most operators point `--output` at a local path or an explicit
-`s3://bucket/prefix`. S3 output or an S3 cursor for `build` and
-`partitions build` requires both an access key ID and a secret access key, from
-the flags or `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`. These commands never
+`s3://bucket/prefix`. S3 output or an S3 cursor for `build` requires both an
+access key ID and a secret access key, from the flags or `AWS_ACCESS_KEY_ID` /
+`AWS_SECRET_ACCESS_KEY`. `build` never
 fall back to profile or instance-metadata credentials. The remaining flags are
 only needed for custom deployment environments:
 
@@ -1038,308 +1029,12 @@ automatically preserves those leading bootstrap blocks in output and
 synthesizes their timestamps from the first later block that includes timestamp
 metadata.
 
-For Solana time-based partitions, missing `block_time` values keep canonical
+For Solana date partitions, missing `block_time` values keep canonical
 `timestamp` / `date` null. Partition routing uses the last known timestamp only,
 seeded from the Solana first-streamable anchor (`2020-03-16 14:29:00 UTC`) for
 the initial span and updated whenever a real block timestamp is observed.
 
 ## Subcommands
-
-### `partitions build` — Generate `<output>/_fireparq/partitions.parquet`
-
-Builds a canonical partition index directly from Firehose block timestamps, without requiring a pre-existing `blocks/` table.
-
-```bash
-# Build a date index locally
-fireparq partitions build \
-  --endpoint https://eth.firehose.pinax.network:443 \
-  --stop-block 10010000 \
-  --partition date \
-  --output ./output
-
-# Override the default zstd compression with snappy
-fireparq partitions build \
-  --endpoint https://eth.firehose.pinax.network:443 \
-  --stop-block 10010000 \
-  --partition date \
-  --compression snappy \
-  --output ./output
-
-# Build an hour index to S3 (S3 writes need an explicit s3:// URI)
-fireparq partitions build \
-  --endpoint https://eth.firehose.pinax.network:443 \
-  --stop-block 10010000 \
-  --partition hour \
-  --output s3://my-bucket \
-  --json
-
-# Resume from an existing canonical index and append only missing coverage
-fireparq partitions build \
-  --endpoint https://eth.firehose.pinax.network:443 \
-  --stop-block 10020000 \
-  --partition date \
-  --output ./output \
-  --resume
-
-# Continue extending the canonical index in live mode
-fireparq partitions build \
-  --network mainnet \
-  --partition date \
-  --output ./output \
-  --live
-
-# Poll every 15s while keeping the canonical index current
-fireparq partitions build \
-  --network mainnet \
-  --partition date \
-  --output ./output \
-  --live \
-  --poll-interval-secs 15
-```
-
-Behavior:
-
-- Writes a v2 finalized snapshot to `<root>/_fireparq/partitions.parquet`, with `zstd` compression by default. `<root>` is resolved exactly as for `build`: `--output` as given, with `{chain}` expanded to the endpoint's chain name (`--output './output/{chain}'` writes `./output/mainnet/_fireparq/partitions.parquet`). Chain and partition type are stored in file metadata.
-- An index that a release before v1.0.0 wrote at the dataset root (`<root>/partitions.parquet`) is not migrated or shadowed: every mode fails before reading or writing an index until you move it to `_fireparq/partitions.parquet`.
-- Time indexes traverse every finalized block in the requested interval and check canonical parent links. They preserve the existing raw-timestamp routing: timestamps `[A, B, A]` produce three contiguous runs, including two separate runs for A.
-- `--start-block` is inclusive and `--stop-block` is exclusive. Bounds are never expanded. Clipped first/last spans and the current finalized-head time span carry `complete=false`.
-- A complete span has both natural boundaries established within the declared snapshot. It does **not** establish globally complete calendar coverage: the same date can recur elsewhere or later.
-- A bounded two-call Stream check proves an exact finalized block identity before accepting coverage. A future stop, non-final response, missing identity, contradictory ancestry or unresolved boundary fails without publishing a new snapshot.
-- Solana missing timestamps use a verified prior anchor, matching ongoing ingestion routing. Missing required context fails; there is no future-timestamp borrowing. Non-Solana missing-time bootstrap is refused for time indexes. `block_range` remains available without timestamp routing.
-- `--resume` and `--live` continue from the stored source-block frontier and verified context, including an open final span. They do not resume by the greatest calendar key. A bounded stop already covered is a no-op after endpoint/finality validation.
-- Existing files require `--resume` or `--overwrite`. Legacy indexes lack trustworthy completeness and must be rebuilt with `--overwrite` or into a fresh output root.
-- Each successful bounded run or live extension publishes one validated snapshot. A failed or cancelled scan leaves the previous snapshot intact. Long backfills should use successive bounded runs; time index construction now reads every covered block.
-- In `--live` mode, transient failures (a head check or traversal message exceeding its 5 s deadline, exhausted boundary probes, transport errors or non-fatal gRPC statuses) keep the last snapshot and retry from its frontier after the poll interval, doubled per consecutive failure up to 300 s. Fatal statuses and proof failures still stop the command; bounded runs fail on the first error.
-
-See [the build contract and limits](docs/partitions-build-defaults.md) for finality,
-parent context, skipped-slot handling and endpoint requirements.
-
-| Flag | Default | Description |
-|---|---|---|
-| `--network` / `--endpoint` | none | Firehose network name or endpoint URL (`NETWORK` / `ENDPOINT`), resolved as for `build` |
-| `--partition` | required | `date`, `hour`, `minute`, `second`, or `block_range` |
-| `--block-range-size` | required for `block_range` | Width of deterministic block-number partitions |
-| `--start-block` | inferred | Fresh bounded start: explicit value, the frontier of the dataset's default cursor mirror `_fireparq/cursor.parquet`, then endpoint first streamable block; fresh live uses explicit value or endpoint |
-| `--stop-block` | none in live mode | Exclusive bounded stop, no later than the proven finalized block plus one; incompatible with `--live` |
-| `--live` | `false` | Poll finalized coverage and extend the stored source frontier |
-| `--poll-interval-secs` | `30` | Wait between live finalized-head checks |
-| `--output` | required | Dataset root, resolved like `build --output`: a local path or explicit `s3://bucket/prefix`, used as given, with an opt-in `{chain}` placeholder (for example `'s3://datasets/{chain}'`). The index and the default cursor mirror used to infer `--start-block` are both in its `_fireparq/`. With a bucket option set, a relative path is rejected |
-| `--compression` | `zstd` | Codec for `_fireparq/partitions.parquet`: zstd (level 3), `zstd:<level>`, snappy, gzip, none |
-| `--s3-bucket` | none | Optional check that an explicit `s3://` output uses this bucket; never supplies the output |
-| `--resume` | `false` | Extend an existing verified v2 index |
-| `--overwrite` | `false` | Rebuild and replace the index after successful validation; conflicts with `--resume` |
-| `--json` | `false` | Emit result and declared coverage as JSON; use `--log-level error` for stdout without progress logs |
-
-### `partitions ls` — Query Partition Index Rows
-
-Lists rows from `partitions.parquet` with declared coverage, per-span completeness, required prior routing context, optional filters and deterministic ascending order by partition value. Legacy completeness is reported as unknown. Ordering and `--from` / `--to` filters use the numeric partition value (start block for `block_range`, UTC epoch seconds otherwise), so block ranges such as `8000000` sort before `10000000`.
-
-```bash
-# List hour partitions from a local index
-fireparq partitions ls \
-  --partitions-index ./output/eth-mainnet/_fireparq/partitions.parquet \
-  --partition-type hour
-
-# Filter chain + time window and return JSON
-fireparq partitions ls \
-  --partitions-index s3://my-bucket/eth-mainnet/_fireparq/partitions.parquet \
-  --partition-type date \
-  --partition-chain eth-mainnet \
-  --from '2015-07-29 00:00:00' \
-  --to '2015-07-31 00:00:00' \
-  --limit 200 \
-  --json
-```
-
-| Flag | Default | Description |
-|---|---|---|
-| `--partitions-index` | required | Index file: local path, shorthand S3 key via `S3_BUCKET`, or `s3://` URI |
-| `--partition-type` | none | Optional partition type filter |
-| `--partition-chain` | none | Optional chain filter |
-| `--from` | none | Inclusive lower bound on the partition value (`YYYY-MM-DD HH:MM:SS`, or a start block for `block_range`) |
-| `--to` | none | Inclusive upper bound on the partition value (`YYYY-MM-DD HH:MM:SS`, or a start block for `block_range`) |
-| `--limit` | `100` | Maximum rows returned |
-| `--json` | `false` | Emit machine-readable output |
-
-### `partitions shard` — Deterministic Partition Assignment
-
-Assigns complete, independently routable v2 spans to one shard for multi-container runs. Any selected incomplete or legacy row is refused. Each returned row carries its own exact bounds; repeated calendar values are never collapsed into one range. Hash assignment keeps repeated values on the same shard.
-
-```bash
-# Ordinal assignment: shard 1 of 4
-fireparq partitions shard \
-  --partitions-index ./output/eth-mainnet/_fireparq/partitions.parquet \
-  --partition-type hour \
-  --shard-count 4 \
-  --shard-index 1
-
-# Hash assignment over a window with JSON output
-fireparq partitions shard \
-  --partitions-index s3://my-bucket/eth-mainnet/_fireparq/partitions.parquet \
-  --partition-type date \
-  --partition-chain eth-mainnet \
-  --from '2015-07-29 00:00:00' \
-  --to '2015-07-31 00:00:00' \
-  --shard-count 8 \
-  --shard-index 0 \
-  --strategy hash \
-  --json
-```
-
-Strategies:
-
-- `ordinal` — assigns by sorted row ordinal modulo `shard_count`
-- `hash` — assigns by stable hash of `(chain, partition_type, partition_value)` modulo `shard_count`
-
-| Flag | Default | Description |
-|---|---|---|
-| `--partitions-index` | required | Index file, as for `partitions ls` |
-| `--partition-type`, `--partition-chain`, `--from`, `--to` | none | Optional filters, as for `partitions ls` |
-| `--shard-count` | required | Total shard count |
-| `--shard-index` | required | Zero-based shard index |
-| `--strategy` | `ordinal` | Assignment strategy: `ordinal` or `hash` |
-| `--json` | `false` | Emit machine-readable output |
-
-### `partitions validate` — Check Partition Index Integrity
-
-Validates continuity and basic invariants in `partitions.parquet`.
-
-```bash
-# Validate all rows in a local index
-fireparq partitions validate \
-  --partitions-index ./output/eth-mainnet/_fireparq/partitions.parquet
-
-# Validate one chain/type and emit JSON
-fireparq partitions validate \
-  --partitions-index s3://my-bucket/eth-mainnet/_fireparq/partitions.parquet \
-  --partition-type date \
-  --partition-chain eth-mainnet \
-  --json
-```
-
-| Flag | Default | Description |
-|---|---|---|
-| `--partitions-index` | required | Index file, as for `partitions ls` |
-| `--partition-type`, `--partition-chain` | none | Optional filters |
-| `--allow-gaps` | `false` | Legacy indexes only; with a v2 index it only adds a warning |
-| `--json` | `false` | Emit machine-readable output |
-
-V2 validation first reads the whole snapshot with the verified reader, which
-rejects (as an error) any break in source-order continuity (a gap or overlap),
-spans outside the declared finalized bounds, misaligned block ranges, time keys
-that disagree with their routing evidence, and boundary flags that contradict
-clipping. It then reports two span-model issues: `split_run` (adjacent spans
-share one partition key) and `incomplete_boundary` (an internal boundary between
-adjacent spans is not established on both sides; only the snapshot's first and
-last edges may be open). Repeated, non-adjacent calendar values are valid. The
-report separately counts incomplete spans; `valid=true` does not mean that every
-span is complete or that a calendar date is globally covered. Legacy files keep
-the gap/overlap/order geometry checks, report unknown completeness and cannot be
-used for strict resolution. `--allow-gaps` applies only to legacy geometry
-checks; with a v2 index it changes nothing and adds a `warnings` entry.
-
-Violations exit non-zero for CI gating.
-
-### `partitions resolve` — Resolve Partition Block Bounds
-
-Resolves one complete, independently routable span from a v2 index and prints its exact bounds (`start_block` inclusive, `stop_block` exclusive) plus the declared finalized coverage. Incomplete, legacy and ambiguous repeated-value lookups fail. This is coverage within the observed snapshot, not a promise that every occurrence of the date has been found.
-
-```bash
-# Local index
-fireparq partitions resolve \
-  --partitions-index ./output/eth-mainnet/_fireparq/partitions.parquet \
-  --partition-type hour \
-  --partition-value '2015-07-30 15:00:00' \
-  --partition-chain eth-mainnet
-
-# S3 index with machine-readable output
-fireparq partitions resolve \
-  --partitions-index s3://my-bucket/eth-mainnet/_fireparq/partitions.parquet \
-  --partition-type date \
-  --partition-value '2015-07-30 00:00:00' \
-  --partition-chain eth-mainnet \
-  --json
-
-# Inspect every complete run for a repeated calendar value
-fireparq --log-level error partitions resolve \
-  --partitions-index ./output/eth-mainnet/_fireparq/partitions.parquet \
-  --partition-type date \
-  --partition-value '2015-07-30 00:00:00' \
-  --all-spans --json
-```
-
-| Flag | Default | Description |
-|---|---|---|
-| `--partitions-index` | required | Index file, as for `partitions ls` |
-| `--partition-type` | required | Partition type to resolve, such as `hour` or `date` |
-| `--partition-value` | required | Partition value, such as `2015-07-30 15:00:00`, or a start block for `block_range` |
-| `--partition-chain` | none | Optional chain filter |
-| `--all-spans` | `false` | Return every matching complete span (requires `--json`) |
-| `--strict-single-chain` | `false` | Accepted for compatibility |
-| `--json` | `false` | Emit machine-readable output |
-
-`--all-spans` requires `--json` and returns ordered separate spans without an
-enclosing `start_block`/`stop_block`. It still rejects incomplete matches and
-marks any span whose routing requires prior timestamp context. Such a span is
-inspection evidence, not an independently usable ingestion range. `--strict-single-chain`
-remains accepted for compatibility; v2 already requires one chain per index.
-
-See `docs/partitions-parquet-contract.md` for the versioned `partitions.parquet` schema and metadata compatibility contract.
-
-`partitions resolve` reads the canonical `partitions.parquet` index directly.
-
-### Resolving ranges from `partitions.parquet`
-
-The main `fireparq build` workflow uses explicit block bounds or `--live`.
-If you want to ingest the range covered by a partition in `partitions.parquet`,
-resolve it first under the `partitions` namespace and then run `build` with the
-returned block range.
-
-```bash
-# 1) Resolve an exact block range from the canonical index
-fireparq partitions resolve \
-  --partitions-index ./output/eth-mainnet/_fireparq/partitions.parquet \
-  --partition-type hour \
-  --partition-value '2015-07-30 15:00:00' \
-  --partition-chain eth-mainnet
-
-# 2) Run ingestion with explicit block bounds
-fireparq build --network mainnet \
-  --start-block 200 \
-  --stop-block 300
-```
-
-### Advanced Cursor Management (`--cursor-template`)
-
-Most operators can rely on the default `_fireparq/cursor.parquet` placement. Use
-`--cursor-template` only when you need deterministic per-run or per-deployment
-cursor paths.
-
-```bash
-# Keep a dedicated cursor for this live pipeline (no --stop-block)
-fireparq build --network mainnet \
-  --output ./output \
-  --cursor-template 'cursor/live-mainnet.parquet'
-
-# Store a cursor under the S3 output prefix
-fireparq build --network mainnet \
-  --start-block 20000000 \
-  --stop-block 20001000 \
-  --output s3://my-bucket/backfill/eth-mainnet \
-  --cursor-template 'cursor/backfill.parquet'
-```
-
-Rules:
-
-- template path must end in `.parquet`
-- `build` supplies no template variables, so a `{chain}`-style placeholder is
-  an error; use a literal path (`--output` does accept `{chain}`, and a
-  relative cursor path follows the resolved dataset root)
-- `{{` and `}}` escape literal braces
-- with S3 output, relative cursor template paths are stored under the output prefix
-- a template cannot be combined with `--cursor none`
-- the resolved mirror location is bound when the dataset is created; later runs
-  must resolve to the same location
 
 ### `scan` — Inspect Parquet Files
 
@@ -1349,7 +1044,7 @@ Read and inspect Parquet files: shows schema, row counts, and sample rows. By de
 fireparq scan ./output/blocks/
 S3_BUCKET=my-bucket fireparq scan evm/blocks/
 fireparq scan s3://my-bucket/evm/blocks/
-fireparq scan s3://my-bucket/evm/_fireparq/partitions.parquet
+fireparq scan s3://my-bucket/evm/_fireparq/cursor.parquet
 fireparq scan ./output/blocks/part-000001.parquet --vertical
 fireparq scan ./output/blocks/part-000001.parquet --json
 fireparq scan ./output/blocks/ --limit 10
@@ -1382,16 +1077,16 @@ Displays comprehensive metadata for a single Parquet file: file-level key-value 
 fireparq inspect ./output/blocks/date=2026-01-15/part-000001.parquet
 
 # Resolve a shorthand key against S3_BUCKET when no local path matches
-S3_BUCKET=my-bucket fireparq inspect evm/_fireparq/partitions.parquet
+S3_BUCKET=my-bucket fireparq inspect evm/_fireparq/cursor.parquet
 
 # Inspect an S3 file
 fireparq inspect s3://my-bucket/evm/blocks/date=2026-01-15/part-000001.parquet
 
 # Show only schema fields, including explicit nullability
-fireparq inspect s3://my-bucket/evm/_fireparq/partitions.parquet --schema-only
+fireparq inspect s3://my-bucket/evm/_fireparq/merkle_roots.parquet --schema-only
 
 # Emit machine-readable schema JSON for a single parquet artifact
-fireparq inspect s3://my-bucket/evm/_fireparq/partitions.parquet --schema-only --json
+fireparq inspect s3://my-bucket/evm/_fireparq/merkle_roots.parquet --schema-only --json
 ```
 
 Lookup order matches `scan`: explicit `s3://...` URIs win, existing local paths win over shorthand S3 resolution, and only missing relative paths fall back to `s3://<S3_BUCKET>/<path>`.
@@ -1489,7 +1184,7 @@ See [Verifiability artifact runbook](docs/verifiability-artifact-runbook.md) for
 
 Consolidates multiple small part files within each `date=YYYY-MM-DD` partition directory into fewer, larger files. `merge` keeps the partition layout but reduces file count. Supports local paths and explicit S3 URIs.
 
-`merge` processes one table at a time and, within each table, one partition at a time. It reads the parts of a partition one after another in file-name order and streams their rows into new files, starting a new file at `--flush-bytes` or `--flush-rows`. Rows keep the order of the parts they came from; they are not re-sorted, so when a partition holds parts from several writers, `block_num` is not necessarily ascending across the merged file. The original parts are deleted once the merged files are written. The `_fireparq/` artifact directory and legacy root artifacts (`cursor.parquet`, `partitions.parquet`, `merkle_roots.parquet`, and anything under `verify_runs/`) are skipped, so merging a network root is safe.
+`merge` processes one table at a time and, within each table, one partition at a time. It reads the parts of a partition one after another in file-name order and streams their rows into new files, starting a new file at `--flush-bytes` or `--flush-rows`. Rows keep the order of the parts they came from; they are not re-sorted, so when a partition holds parts from several writers, `block_num` is not necessarily ascending across the merged file. The original parts are deleted once the merged files are written. The `_fireparq/` artifact directory and legacy root artifacts (`cursor.parquet`, `merkle_roots.parquet`, and anything under `verify_runs/`) are skipped, so merging a network root is safe.
 
 Parts are only merged when every part in the partition has the same columns (the same names, types, nullability, and order) and the same value-defining file metadata: chain name, block type, byte and block-id encodings, vote and failed-transaction coverage, synthetic timestamps and stream mode. Merge checks each part's footer before writing anything. A partition with mixed parts, such as files from two tool versions, with `--without-extended` toggled, or with different block-id encodings, is left untouched and listed in the summary, and `merge` exits non-zero after processing the other partitions. `--dry-run` reports these partitions too.
 
@@ -1534,7 +1229,7 @@ Local interrupted merges recover under exclusive ownership:
 
 Deletes `.parquet` files from local filesystem or S3 with optional partition filtering. Never deletes buckets or non-parquet files.
 
-Nothing is deleted without `--yes`. Without it, `truncate` prints a summary of what matched (file count, total size, and the first 10 paths) and exits non-zero. `--dry-run` lists every matched file instead. When truncating a network root without filters, the parquet artifacts under `_fireparq/` (and legacy root ones such as `partitions.parquet`) are included; the summary calls them out. A partition filter never matches them. You can also target a single `.parquet` file directly, such as `fireparq truncate ./unichain/_fireparq/partitions.parquet --yes`.
+Nothing is deleted without `--yes`. Without it, `truncate` prints a summary of what matched (file count, total size, and the first 10 paths) and exits non-zero. `--dry-run` lists every matched file instead. When truncating a network root without filters, the parquet artifacts under `_fireparq/` (and legacy root ones such as `merkle_roots.parquet`) are included; the summary calls them out. A partition filter never matches them. You can also target a single `.parquet` file directly, such as `fireparq truncate ./unichain/_fireparq/merkle_roots.parquet --yes`.
 
 ```bash
 # Preview what would be deleted
@@ -1580,7 +1275,7 @@ The path must exist locally or be an explicit `s3://...` URI. Unlike `scan` and 
 
 ### `recovery` — Ownership and Recovery State
 
-Mutating commands (`build`, `partitions build`, `merge` and `truncate`) hold
+Mutating commands (`build`, `merge` and `truncate`) hold
 dataset ownership; `verify` takes none. After an interrupted
 run, use `recovery` to inspect and finish that state. Each
 subcommand takes an existing local dataset root or an explicit
@@ -2174,11 +1869,8 @@ Every Parquet file written by the pipeline embeds key-value metadata in the file
 | `firehose-parquet.with_votes` | `true` |
 
 Table files carry the pipeline, chain, encoding and compression keys.
-`partition` (always `date` for table output; the index granularity in the
-index) is written to `_fireparq/cursor.parquet` and
-`_fireparq/partitions.parquet`, which also records `block_range_size`, and the
-cursor mirror also records `extended`, `final_blocks_only` and
-`include_failed_transactions`. `with_votes` appears on Solana output, and the
+`partition` (always `date`) is written to `_fireparq/cursor.parquet`, which also
+records `extended`, `final_blocks_only` and `include_failed_transactions`. `with_votes` appears on Solana output, and the
 `synthetic_*` keys only when synthetic routing is used.
 
 `firehose-parquet.bytes_encoding` and `firehose-parquet.block_id_encoding` describe the emitted output contract, not just the upstream Firehose endpoint. See [Output Encoding by Block Type](#output-encoding-by-block-type) for the operator-facing defaults by supported chain/profile.
@@ -2250,8 +1942,8 @@ the `{chain}` placeholder anywhere in the path or S3 key prefix:
   also recorded in the `firehose-parquet.chain_name` file metadata and in the
   protected dataset identity. It must be one path segment of ASCII letters,
   digits, `-`, `_` and `.`; every built-in network qualifies.
-- `{chain}` is the only variable. `{{` and `}}` are literal braces, as in
-  `--cursor-template`. An unknown variable, an unterminated `{` or an unmatched
+- `{chain}` is the only variable. `{{` and `}}` are literal braces. An unknown
+  variable, an unterminated `{` or an unmatched
   `}` is an error before the endpoint is contacted.
 - The S3 bucket name is literal, so `s3://{chain}/...` is refused. Credentials,
   the `S3_BUCKET` check and the bucket-wide owner are settled per bucket before
@@ -2264,9 +1956,6 @@ the `{chain}` placeholder anywhere in the path or S3 key prefix:
   example, a dataset created at `s3://b` cannot be resumed as `s3://b/{chain}`,
   and one created at `s3://b/{chain}` cannot be resumed as `s3://b`. Any other
   root is a different dataset and must start empty.
-- `partitions build --output` resolves the same way. Pass it the same value as
-  `build`, so the index lands at `<root>/_fireparq/partitions.parquet` and a
-  missing `--start-block` is inferred from `<root>/_fireparq/cursor.parquet`.
 - v0.7.x appended `<chain_name>` to `--output`. To keep that layout, add
   `/{chain}`: `--output ./output` becomes `--output './output/{chain}'`.
 
@@ -2275,7 +1964,6 @@ the `{chain}` placeholder anywhere in the path or S3 key prefix:
 ├── .fireparq-ingest/          # authoritative checkpoint and transaction journal (do not edit)
 ├── _fireparq/                 # fireparq's artifacts, never table data
 │   ├── cursor.parquet         # optional mirror of the checkpoint (absent with --cursor none)
-│   ├── partitions.parquet     # written by `partitions build`
 │   ├── merkle_roots.parquet   # written by `verify`
 │   └── verify_runs/<run_id>/report.json
 ├── blocks/
@@ -2300,12 +1988,11 @@ dot-prefixed control state (`.fireparq-ingest/`, and at a bucket root the
 Trino, Hive and Delta skip paths that start with `_` or `.`, so a table
 location or a dataset-wide read never picks up fireparq's files; DuckDB does
 not skip them, so glob per table (`<root>/<table>/**/*.parquet`), as below.
-Releases before v1.0.0 wrote `cursor.parquet`, `partitions.parquet`,
-`merkle_roots.parquet` and `verify_runs/` at the dataset root. Those names stay
-reserved; `verify` and `partitions build` refuse to create a new
-`_fireparq/` registry or index beside a legacy one, and a dataset whose mirror
-was bound at the old default keeps `--cursor cursor.parquet`. Move the other
-files into `_fireparq/` (see the
+Releases before v1.0.0 wrote `cursor.parquet`, `merkle_roots.parquet` and
+`verify_runs/` at the dataset root. Those names stay reserved; `verify` refuses
+to create a new `_fireparq/` registry beside a legacy one, and a dataset whose
+mirror was bound at the old default keeps `--cursor cursor.parquet`. Move the
+other files into `_fireparq/` (see the
 [runbook](docs/verifiability-artifact-runbook.md#moving-artifacts-into-_fireparq)).
 
 Every table is partitioned by UTC day: `build` writes
@@ -2367,6 +2054,30 @@ dataset = ds.dataset(
 )
 ```
 
+#### Block range of a day
+
+fireparq keeps no partition index (`partitions.parquet` and the `partitions`
+subcommands were removed in #653): the `date=` directory and the files'
+`block_num` values answer the lookup. The block range of one UTC day is:
+
+```sql
+-- DuckDB, plain Parquet output
+SELECT min(block_num), max(block_num)
+FROM read_parquet('<root>/blocks/date=2026-09-25/*.parquet');
+```
+
+Once the output is a Delta table
+([#643](https://github.com/pinax-network/firehose-parquet/issues/643)), the Delta
+log records each file's `date` partition and `block_num` statistics, so the same
+answer comes from the log:
+
+```sql
+-- DuckDB delta extension
+SELECT min(block_num), max(block_num)
+FROM delta_scan('<root>/blocks')
+WHERE date = DATE '2026-09-25';
+```
+
 ### Engine compatibility
 
 DuckDB and Polars are the supported engines. CI builds real EVM (final and
@@ -2403,9 +2114,6 @@ OUTPUT=s3://<bucket> fireparq build --network mainnet
 # s3://<bucket>/<table>/date=YYYY-MM-DD/part-*.parquet
 ```
 
-- `partitions build --output s3://<bucket>` writes its index at
-  `s3://<bucket>/_fireparq/partitions.parquet` and infers a missing
-  `--start-block` from `s3://<bucket>/_fireparq/cursor.parquet`.
 - Other commands take the root or its tables directly:
   `verify s3://<bucket>/blocks` (registry at
   `s3://<bucket>/_fireparq/merkle_roots.parquet`), `merge s3://<bucket>`,
@@ -2416,8 +2124,8 @@ OUTPUT=s3://<bucket> fireparq build --network mainnet
   dot-prefixed control state, so a Spark, Trino, Hive or Delta table location
   at `s3://<bucket>/<table>/` or a hidden-path-aware scan of the whole bucket
   reads table data only; with DuckDB, read `s3://<bucket>/<table>/**/*.parquet`.
-- The first `build` needs an empty bucket; only the bucket owner record and a
-  same-chain `_fireparq/partitions.parquet` may already exist there. S3 ownership is
+- The first `build` needs an empty bucket; only the bucket owner record may
+  already exist there. S3 ownership is
   bucket-wide in any case, so a bucket per network also gives each concurrently
   running `build` its own owner.
 - To keep several networks in one bucket instead, use
@@ -2683,8 +2391,8 @@ in the directory you run `fireparq` from. Since #617:
   exactly that file instead; it must exist, and `./.env` is then ignored.
 - Process environment variables and CLI flags win over the file.
 - Startup names the loaded file and the variables it supplied, never their
-  values: an INFO `loaded env file` log line for `build`, `partitions build`,
-  `merge`, `truncate` and `verify`, and one stderr line for other
+  values: an INFO `loaded env file` log line for `build`, `merge`, `truncate`
+  and `verify`, and one stderr line for other
   commands. A malformed file is an error that never echoes the offending line.
 
 ```bash
@@ -2712,7 +2420,7 @@ See `.env.example` for the full list of supported environment variables.
 ### Migrating Kubernetes deployments (#617)
 
 Deployments that set `S3_BUCKET` plus a relative `OUTPUT` (or no `OUTPUT`) must
-switch to an explicit S3 URI; otherwise `build` and `partitions build` now exit
+switch to an explicit S3 URI; otherwise `build` now exits
 with an error before writing anything. Kubernetes expands `$(VAR)` references to
 variables defined earlier in the same container's `env` list:
 
@@ -2764,7 +2472,7 @@ use firehose_parquet::cli::{build_config, init_tracing, Commands};
 #[derive(Parser)]
 struct Cli {
     #[command(subcommand)]
-    command: Option<Commands>, // Build(BuildArgs), Partitions, Scan, Verify, Recovery, ...
+    command: Option<Commands>, // Build(BuildArgs), Scan, Verify, Recovery, ...
 
     #[command(flatten)]
     global: GlobalArgs, // --log-level, --verbose, --env-file
@@ -2811,7 +2519,7 @@ firehose-parquet/
 ├── firehose-parquet/                       # core library
 │   └── src/
 │       ├── cli.rs, cli/                    # shared Clap args and subcommands; configuration, paths,
-│       │                                   #   inspect, validate and partitions/ helpers
+│       │                                   #   inspect and validate helpers
 │       ├── ingest/                         # all-table transactions, output authority, cursor mirror, recovery
 │       ├── date_partition.rs               # the date=YYYY-MM-DD key, formatted and parsed in one place
 │       ├── writer.rs, writer/              # Arrow -> Parquet encoding, partition routing, protected parts
@@ -2822,8 +2530,7 @@ firehose-parquet/
 │       ├── truncate.rs                     # `fireparq truncate`
 │       ├── maintenance/                    # shared compaction and discovery for maintenance commands
 │       ├── verify.rs, verify/              # `fireparq verify` and the merkle_v2 row encoding
-│       ├── partition_index.rs, partition_index/  # partitions.parquet coverage, scan and builder
-│       ├── grpc.rs, grpc/                  # Firehose client, reconnects, finality proofs
+│       ├── grpc.rs, grpc/                  # Firehose stream client, auth, reconnects
 │       ├── s3.rs, s3/                      # AWS config, bounded uploads, S3 deletes
 │       ├── auth.rs                         # provider-scoped credential selection
 │       ├── networks.rs, networks_generated.rs  # built-in --network names (generated)

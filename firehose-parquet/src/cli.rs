@@ -1,28 +1,20 @@
 //! Command-line declarations with stable re-exports of command operations.
 mod configuration;
 mod inspect;
-mod partitions;
 mod paths;
 mod validate;
 // Keep the established crate::cli API while implementations live in focused modules.
 // Restricted helpers stay visible only inside cli and are not made public by re-export.
 pub use configuration::*;
 pub use inspect::*;
-pub use partitions::*;
 pub use paths::*;
 pub use validate::*;
 
 use crate::config::{Compression, Config};
 use crate::networks::KNOWN_NETWORK_NAMES;
-use crate::partition_index::{
-    PartitionCoverage, PartitionSpanProof, VerifiedPartitionIndex, VerifiedPartitionSpan,
-    INDEX_COVERAGE_METADATA,
-};
 use clap::builder::PossibleValuesParser;
 use clap::Args;
 use clap_complete::{generate, Shell};
-#[cfg(test)]
-use parquet::basic::Compression as PqCompression;
 use std::io;
 use std::path::{Component, Path, PathBuf};
 
@@ -32,7 +24,7 @@ use crate::config::{
     DEFAULT_FLUSH_PUBLISH_CONCURRENCY, DEFAULT_GRPC_MAX_MESSAGE_BYTES, DEFAULT_GRPC_WINDOW_BYTES,
 };
 
-/// Transport options shared by ingestion and partition index construction.
+/// Transport options of the Firehose client used by `build`.
 #[derive(Args, Debug, Clone)]
 pub struct GrpcArgs {
     /// Adapt HTTP/2 receive windows to measured bandwidth/latency, overriding --grpc-window-bytes
@@ -207,17 +199,6 @@ pub struct CommonArgs {
         help_heading = "Block Range"
     )]
     pub cursor: PathBuf,
-
-    /// Optional template used to derive the cursor path.
-    ///
-    /// Literal paths are supported directly. Use `{{` and `}}` to escape braces.
-    #[arg(
-        long,
-        env = "CURSOR_TEMPLATE",
-        hide_env_values = true,
-        help_heading = "Block Range"
-    )]
-    pub cursor_template: Option<String>,
 
     /// Only process finalized blocks; =false appends NEW/UNDO rows with fork_step
     #[arg(
@@ -579,9 +560,6 @@ pub enum Commands {
     /// `_fireparq/cursor.parquet` is only an optional mirror (`--cursor none`
     /// disables it).
     Build(BuildArgs),
-    /// Partition index utilities (`_fireparq/partitions.parquet` workflows).
-    #[command(subcommand)]
-    Partitions(PartitionsCommands),
     /// Read and inspect Parquet files (schema, row counts, sample rows).
     /// Supports local paths, shorthand S3 keys via `S3_BUCKET`, and `s3://bucket/prefix` URIs.
     #[command(after_long_help = "\
@@ -599,10 +577,10 @@ Examples:
   fireparq scan s3://bucket/eth-mainnet/blocks/
 
   # Resolve a shorthand key via S3_BUCKET when no local match exists
-  S3_BUCKET=my-bucket fireparq scan eth-mainnet/_fireparq/partitions.parquet
+  S3_BUCKET=my-bucket fireparq scan eth-mainnet/_fireparq/cursor.parquet
 
   # Scan a single S3 parquet file
-  fireparq scan s3://bucket/eth-mainnet/_fireparq/partitions.parquet
+  fireparq scan s3://bucket/eth-mainnet/_fireparq/cursor.parquet
 
   # Use row-by-row vertical output
   fireparq scan ./output/blocks/part-000001.parquet --vertical
@@ -844,11 +822,11 @@ Examples:
   fireparq merge ./output/blocks/ --compression snappy
 
 The _fireparq/ artifact directory and legacy root artifacts (cursor.parquet,
-partitions.parquet, merkle_roots.parquet, verify_runs/) are skipped. A partition
-whose parts have different columns (names, types, nullability, or order) or
-different value-defining file metadata (chain, block type, byte or block-id
-encoding, vote or failed-transaction coverage, synthetic timestamps, stream
-mode) is left untouched and listed in the summary, and merge exits non-zero.
+merkle_roots.parquet, verify_runs/) are skipped. A partition whose parts have
+different columns (names, types, nullability, or order) or different
+value-defining file metadata (chain, block type, byte or block-id encoding,
+vote or failed-transaction coverage, synthetic timestamps, stream mode) is left
+untouched and listed in the summary, and merge exits non-zero.
 
 Each partition merge is journaled in _fireparq_merge.json. Local interrupted
 merges recover under the common directory guard. S3 mutations hold a persistent
@@ -899,13 +877,13 @@ Examples:
   fireparq inspect s3://bucket/eth-mainnet/blocks/part-000001.parquet
 
   # Resolve a shorthand key via S3_BUCKET when no local match exists
-  S3_BUCKET=my-bucket fireparq inspect eth-mainnet/_fireparq/partitions.parquet
+  S3_BUCKET=my-bucket fireparq inspect eth-mainnet/_fireparq/cursor.parquet
 
   # Show only the schema with explicit nullability
-  fireparq inspect s3://bucket/eth-mainnet/_fireparq/partitions.parquet --schema-only
+  fireparq inspect s3://bucket/eth-mainnet/_fireparq/merkle_roots.parquet --schema-only
 
   # Emit machine-readable schema details
-  fireparq inspect s3://bucket/eth-mainnet/_fireparq/partitions.parquet --schema-only --json
+  fireparq inspect s3://bucket/eth-mainnet/_fireparq/merkle_roots.parquet --schema-only --json
 
 Lookup order:
   1. Explicit s3://bucket/... URIs are used as-is.
@@ -929,7 +907,7 @@ Lookup order:
     ///
     /// Deletes only .parquet files. Never deletes buckets or non-parquet files.
     /// Truncating a network root without filters includes the parquet artifacts
-    /// under `_fireparq/` (and legacy root ones such as partitions.parquet), and
+    /// under `_fireparq/` (and legacy root ones such as merkle_roots.parquet), and
     /// --dry-run lists each matched file.
     /// Use --partition to target specific partitions. Nothing is deleted without --yes:
     /// without it, truncate prints a summary of what matched and exits non-zero.
@@ -942,7 +920,7 @@ Examples:
   fireparq truncate ./output/blocks/ --yes
 
   # Delete a single parquet file directly
-  fireparq truncate ./output/mainnet/_fireparq/partitions.parquet --yes
+  fireparq truncate ./output/mainnet/_fireparq/merkle_roots.parquet --yes
 
   # Delete one day
   fireparq truncate ./output/blocks/ -p date=2026-01-15 --yes
@@ -980,374 +958,6 @@ inspect, truncate never falls back to s3://$S3_BUCKET/<path> for a missing local
         /// Delete the matched files. Without --yes, truncate prints a summary and exits non-zero
         #[arg(long, short = 'y', default_value = "false", help_heading = "Execution")]
         yes: bool,
-        #[command(flatten)]
-        aws: AwsArgs,
-    },
-}
-
-/// Subcommands under `fireparq partitions`.
-#[derive(clap::Subcommand, Debug)]
-pub enum PartitionsCommands {
-    /// Build `_fireparq/partitions.parquet` directly from Firehose block timestamps.
-    /// Time spans traverse exact finalized ancestry; clipped spans stay incomplete.
-    #[command(after_long_help = "\
-Examples:
-  # Build a local date index for one chain
-  fireparq partitions build \\
-    --network mainnet \\
-    --stop-block 10010000 \\
-    --partition date \\
-    --output ./output
-
-  # Build to S3 with JSON output (S3 writes need an explicit s3:// URI)
-  fireparq partitions build \\
-    --network mainnet \\
-    --stop-block 10010000 \\
-    --partition hour \\
-    --output s3://my-bucket \\
-    --json
-
-  # Let start block fall back to a sibling cursor or endpoint metadata
-  fireparq partitions build \\
-    --network mainnet \\
-    --stop-block 10010000 \\
-    --partition date \\
-    --output ./output
-
-  # Continue maintaining the canonical index in live mode
-  fireparq partitions build \\
-    --network mainnet \\
-    --partition date \\
-    --output ./output \\
-    --live
-
-  # Poll for new finalized blocks every 15s in live mode
-  fireparq partitions build \\
-    --network mainnet \\
-    --partition date \\
-    --output ./output \\
-    --live \\
-    --poll-interval-secs 15
-
-  # Override the default zstd compression
-  fireparq partitions build \\
-    --network mainnet \\
-    --stop-block 10010000 \\
-    --partition date \\
-    --compression snappy \\
-    --output ./output
-
-  # Build block-range partitions for Solana (1M blocks each)
-  fireparq partitions build \\
-    --network solana-mainnet-beta \\
-    --start-block 0 \\
-    --stop-block 300000000 \\
-    --partition block_range \\
-    --block-range-size 1000000 \\
-    --output ./output
-")]
-    Build {
-        #[command(flatten)]
-        grpc: GrpcArgs,
-        /// Firehose gRPC endpoint URL
-        #[arg(
-            long,
-            env = "ENDPOINT",
-            hide_env_values = true,
-            help_heading = "Connection"
-        )]
-        endpoint: Option<String>,
-        /// Firehose network `chainName`
-        #[arg(
-            long,
-            env = "NETWORK",
-            hide_env_values = true,
-            value_parser = PossibleValuesParser::new(KNOWN_NETWORK_NAMES),
-            help_heading = "Connection"
-        )]
-        network: Option<String>,
-        /// Explicit API key env var for this endpoint (default: provider-scoped credentials)
-        #[arg(
-            long,
-            env = "API_KEY_ENVVAR",
-            hide_env_values = true,
-            help_heading = "Connection"
-        )]
-        api_key_envvar: Option<String>,
-        /// Explicit bearer token env var for this endpoint (default: provider-scoped credentials)
-        #[arg(
-            long,
-            env = "API_TOKEN_ENVVAR",
-            hide_env_values = true,
-            help_heading = "Connection"
-        )]
-        api_token_envvar: Option<String>,
-        /// Start block number (inclusive).
-        ///
-        /// When omitted in bounded mode, falls back to the dataset's default cursor
-        /// mirror (`_fireparq/cursor.parquet`) if present, then to the endpoint's
-        /// first streamable block.
-        ///
-        /// When omitted in `--live` mode, existing `_fireparq/partitions.parquet` rows take
-        /// precedence as the restart anchor.
-        ///
-        /// With `--resume` (or `--live`) and an existing index, the build continues
-        /// from the index frontier; an explicit value past that frontier is rejected
-        /// because it would leave the blocks in between unindexed.
-        ///
-        /// Use `--overwrite` to ignore any existing canonical index and rebuild it
-        /// from the requested start point instead.
-        ///
-        /// When `--partition block_range` is used, explicit values must align to
-        /// `--block-range-size`.
-        #[arg(long, help_heading = "Block Range")]
-        start_block: Option<u64>,
-        /// Stop block number (exclusive).
-        ///
-        /// Required for bounded builds and incompatible with `--live`.
-        /// When `--partition block_range` is used, explicit values must align to
-        /// `--block-range-size`.
-        #[arg(
-            long,
-            conflicts_with = "live",
-            help_heading = "Block Range",
-            value_parser = clap::value_parser!(u64).range(1..)
-        )]
-        stop_block: Option<u64>,
-        /// Keep extending `_fireparq/partitions.parquet` from its latest covered frontier.
-        #[arg(long, default_value = "false", help_heading = "Block Range")]
-        live: bool,
-        /// Poll interval used by `--live` finalized-head checks while waiting for new blocks.
-        #[arg(long, default_value_t = 30, help_heading = "Runtime / Logging")]
-        poll_interval_secs: u64,
-        /// Partition to build: date, hour, minute, second, or block_range
-        #[arg(long = "partition", help_heading = "Partitioning")]
-        partition: String,
-        /// Block range size (required when --partition block_range).
-        /// Natural partitions have this width; inferred/live edge spans can be clipped.
-        #[arg(
-            long,
-            help_heading = "Partitioning",
-            value_parser = clap::value_parser!(u64).range(1..)
-        )]
-        block_range_size: Option<u64>,
-        /// Compression codec for the written `_fireparq/partitions.parquet`: zstd (level 3), zstd:<level>, snappy, gzip, none
-        #[arg(long, default_value = "zstd", help_heading = "Output")]
-        compression: String,
-        /// Dataset root: a local directory or an explicit s3://bucket/prefix URI (required).
-        ///
-        /// Resolved exactly like `build --output`: used as given, with
-        /// `{chain}` expanded to the endpoint's chain_name (for example
-        /// `s3://datasets/{chain}`). The index goes to
-        /// `<root>/_fireparq/partitions.parquet`, and the default cursor
-        /// mirror `<root>/_fireparq/cursor.parquet` is read from the same root.
-        /// S3 writes need an explicit `s3://` URI. When `--s3-bucket` /
-        /// `S3_BUCKET` is set, a relative output is rejected as ambiguous; use
-        /// `./path` or an absolute path for local output.
-        #[arg(long, required = true, help_heading = "Output")]
-        output: Option<String>,
-        /// Optional check that an explicit s3:// output uses this bucket; never expands relative paths
-        #[arg(
-            long,
-            env = "S3_BUCKET",
-            hide_env_values = true,
-            help_heading = "Output"
-        )]
-        s3_bucket: Option<String>,
-        /// Resume from an existing canonical index under the resolved output path,
-        /// continuing from its stored frontier. Bounded builds require `--resume` or
-        /// `--overwrite` when an index already exists.
-        #[arg(
-            long,
-            default_value = "false",
-            conflicts_with = "overwrite",
-            help_heading = "Output"
-        )]
-        resume: bool,
-        /// Ignore and replace any existing canonical index instead of reading it
-        #[arg(
-            long,
-            default_value = "false",
-            conflicts_with = "resume",
-            help_heading = "Output"
-        )]
-        overwrite: bool,
-        /// Emit machine-readable JSON output
-        #[arg(long, default_value = "false", help_heading = "Runtime / Logging")]
-        json: bool,
-        #[command(flatten)]
-        aws: AwsArgs,
-    },
-    /// Validate continuity and invariants in `_fireparq/partitions.parquet`.
-    #[command(after_long_help = "\
-Examples:
-  # Validate all rows in a local index
-  fireparq partitions validate \\
-    --partitions-index ./output/eth-mainnet/_fireparq/partitions.parquet
-
-  # Validate one chain/type of a legacy index and allow gaps
-  fireparq partitions validate \\
-    --partitions-index s3://my-bucket/_fireparq/partitions.parquet \\
-    --partition-type date \\
-    --partition-chain eth-mainnet \\
-    --allow-gaps \\
-    --json
-")]
-    Validate {
-        /// Path to partitions index parquet file (local path, shorthand S3 key via S3_BUCKET, or s3:// URI)
-        #[arg(long)]
-        partitions_index: String,
-        /// Optional partition type filter (e.g. hour, date)
-        #[arg(long)]
-        partition_type: Option<String>,
-        /// Optional chain filter (matches the index chain scope)
-        #[arg(long)]
-        partition_chain: Option<String>,
-        /// Allow gaps between adjacent partitions in the same chain/type (legacy indexes only; a v2 index is contiguous by construction, so this only warns)
-        #[arg(long, default_value = "false")]
-        allow_gaps: bool,
-        /// Emit machine-readable JSON output
-        #[arg(long, default_value = "false")]
-        json: bool,
-        #[command(flatten)]
-        aws: AwsArgs,
-    },
-    /// Deterministically assign partitions to one shard.
-    #[command(after_long_help = "\
-Examples:
-  # Select shard 1 of 4 using ordinal assignment
-  fireparq partitions shard \\
-    --partitions-index ./output/eth-mainnet/_fireparq/partitions.parquet \\
-    --partition-type hour \\
-    --shard-count 4 \\
-    --shard-index 1
-
-  # Select shard 0 of 8 using hash assignment and emit JSON
-  fireparq partitions shard \\
-    --partitions-index s3://my-bucket/eth-mainnet/_fireparq/partitions.parquet \\
-    --partition-type date \\
-    --partition-chain eth-mainnet \\
-    --from '2015-07-29 00:00:00' \\
-    --to '2015-07-31 00:00:00' \\
-    --shard-count 8 \\
-    --shard-index 0 \\
-    --strategy hash \\
-    --json
-")]
-    Shard {
-        /// Path to partitions index parquet file (local path, shorthand S3 key via S3_BUCKET, or s3:// URI)
-        #[arg(long)]
-        partitions_index: String,
-        /// Optional partition type filter (e.g. hour, date)
-        #[arg(long)]
-        partition_type: Option<String>,
-        /// Optional chain filter (matches the index chain scope)
-        #[arg(long)]
-        partition_chain: Option<String>,
-        /// Lower bound (inclusive) on the partition value (`YYYY-MM-DD HH:MM:SS`, or a start block for block_range)
-        #[arg(long)]
-        from: Option<String>,
-        /// Upper bound (inclusive) on the partition value (`YYYY-MM-DD HH:MM:SS`, or a start block for block_range)
-        #[arg(long)]
-        to: Option<String>,
-        /// Total number of shards
-        #[arg(long)]
-        shard_count: usize,
-        /// Zero-based shard index to select
-        #[arg(long)]
-        shard_index: usize,
-        /// Assignment strategy: ordinal or hash
-        #[arg(long, default_value = "ordinal")]
-        strategy: String,
-        /// Emit machine-readable JSON output
-        #[arg(long, default_value = "false")]
-        json: bool,
-        #[command(flatten)]
-        aws: AwsArgs,
-    },
-    /// List/query partition rows from `_fireparq/partitions.parquet`.
-    #[command(after_long_help = "\
-Examples:
-  # List hour partitions from local index
-  fireparq partitions ls \\
-    --partitions-index ./output/eth-mainnet/_fireparq/partitions.parquet \\
-    --partition-type hour
-
-  # Filter by chain + time window and emit JSON
-  fireparq partitions ls \\
-    --partitions-index s3://my-bucket/eth-mainnet/_fireparq/partitions.parquet \\
-    --partition-type date \\
-    --partition-chain eth-mainnet \\
-    --from '2015-07-29 00:00:00' \\
-    --to '2015-07-31 00:00:00' \\
-    --limit 200 \\
-    --json
-")]
-    Ls {
-        /// Path to partitions index parquet file (local path, shorthand S3 key via S3_BUCKET, or s3:// URI)
-        #[arg(long)]
-        partitions_index: String,
-        /// Optional partition type filter (e.g. hour, date)
-        #[arg(long)]
-        partition_type: Option<String>,
-        /// Optional chain filter (matches the index chain scope)
-        #[arg(long)]
-        partition_chain: Option<String>,
-        /// Lower bound (inclusive) on the partition value (`YYYY-MM-DD HH:MM:SS`, or a start block for block_range)
-        #[arg(long)]
-        from: Option<String>,
-        /// Upper bound (inclusive) on the partition value (`YYYY-MM-DD HH:MM:SS`, or a start block for block_range)
-        #[arg(long)]
-        to: Option<String>,
-        /// Maximum rows to return (sorted ascending by numeric partition value)
-        #[arg(long, default_value = "100")]
-        limit: usize,
-        /// Emit machine-readable JSON output
-        #[arg(long, default_value = "false")]
-        json: bool,
-        #[command(flatten)]
-        aws: AwsArgs,
-    },
-    /// Resolve one complete span within declared finalized coverage.
-    #[command(after_long_help = "\
-Examples:
-  # Resolve from local index
-  fireparq partitions resolve \\
-    --partitions-index ./output/eth-mainnet/_fireparq/partitions.parquet \\
-    --partition-type hour \\
-    --partition-value '2015-07-30 15:00:00' \\
-    --partition-chain eth-mainnet
-
-  # Resolve from S3 index and emit JSON
-  fireparq partitions resolve \\
-    --partitions-index s3://my-bucket/eth-mainnet/_fireparq/partitions.parquet \\
-    --partition-type date \\
-    --partition-value '2015-07-30 00:00:00' \\
-    --partition-chain eth-mainnet \\
-    --json
-")]
-    Resolve {
-        /// Path to partitions index parquet file (local path, shorthand S3 key via S3_BUCKET, or s3:// URI)
-        #[arg(long)]
-        partitions_index: String,
-        /// Partition type to resolve (e.g. hour, date)
-        #[arg(long)]
-        partition_type: String,
-        /// Partition value to resolve (e.g. "2015-07-30 15:00:00", or a start block for block_range)
-        #[arg(long)]
-        partition_value: String,
-        /// Optional chain filter (matches the index chain scope)
-        #[arg(long)]
-        partition_chain: Option<String>,
-        /// Require that the partition resolves to exactly one chain when `--partition-chain` is omitted
-        #[arg(long, default_value = "false")]
-        strict_single_chain: bool,
-        /// Return every matching complete span in source order, with finalized coverage.
-        #[arg(long, requires = "json", default_value = "false")]
-        all_spans: bool,
-        /// Emit machine-readable JSON output
-        #[arg(long, default_value = "false")]
-        json: bool,
         #[command(flatten)]
         aws: AwsArgs,
     },

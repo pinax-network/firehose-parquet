@@ -143,45 +143,6 @@ mod legacy {
         meta
     }
 
-    pub(crate) fn build_partitions_file_metadata(
-        endpoint: &str,
-        chain: &str,
-        partition: &str,
-        compression: Compression,
-        endpoint_info: &Option<EndpointInfo>,
-        block_range_size: Option<u64>,
-    ) -> ParquetFileMetadata {
-        let inferred_block_type = infer_partitions_block_type(chain, endpoint_info);
-        let tron_style_evm_profile = chain_uses_tron_style_evm_profile(chain, endpoint_info);
-        let encoding =
-            resolve_auto_encode_bytes(inferred_block_type, endpoint_info, tron_style_evm_profile);
-
-        let mut meta = ParquetFileMetadata::new();
-        add_common_file_metadata(
-            &mut meta,
-            inferred_block_type,
-            Some(&encoding),
-            endpoint,
-            endpoint_info,
-        );
-        if let Some(info) = endpoint_info {
-            if !info.chain_name.is_empty() {
-                // already set by `add_common_file_metadata`
-            } else {
-                meta.add("firehose-parquet.chain_name", chain);
-            }
-        } else {
-            meta.add("firehose-parquet.chain_name", chain);
-        }
-        meta.add("firehose-parquet.partition", partition);
-        meta.add(
-            "firehose-parquet.block_range_size",
-            block_range_size.unwrap_or(0).to_string(),
-        );
-        meta.add("firehose-parquet.compression", compression.to_string());
-        meta
-    }
-
     pub(crate) fn maybe_add_solana_with_votes_metadata(
         meta: &mut ParquetFileMetadata,
         block_type: Option<&str>,
@@ -982,53 +943,13 @@ fn auto_detected_family_decisions_match_legacy() {
 }
 
 #[test]
-fn endpoint_and_partition_inference_match_legacy() {
-    let endpoints = endpoint_corpus();
-    let chains: Vec<&str> = KNOWN_NETWORK_NAMES
-        .iter()
-        .copied()
-        .chain(["", "tron-evm", "Mystery", "eos", "solana-devnet", "mainnet"])
-        .collect();
-    for endpoint_info in &endpoints {
+fn endpoint_inference_matches_legacy() {
+    for endpoint_info in &endpoint_corpus() {
         assert_eq!(
             inferred_block_type_from_endpoint_info(endpoint_info).map(ChainKind::label),
             legacy::inferred_block_type_from_endpoint_info(endpoint_info),
             "{endpoint_info:?}"
         );
-        assert_eq!(
-            endpoint_chain_has(endpoint_info, has_nullable_timestamps),
-            legacy::endpoint_chain_is_solana(endpoint_info),
-            "partition routing policy {endpoint_info:?}"
-        );
-        for chain in &chains {
-            assert_eq!(
-                infer_partitions_block_type(chain, endpoint_info).map(ChainKind::label),
-                legacy::infer_partitions_block_type(chain, endpoint_info),
-                "{chain} {endpoint_info:?}"
-            );
-            for compression in [Compression::Zstd, Compression::Snappy] {
-                let current = build_partitions_file_metadata(
-                    "https://example.com:443",
-                    chain,
-                    "date",
-                    compression,
-                    endpoint_info,
-                    Some(100),
-                );
-                let expected = legacy::build_partitions_file_metadata(
-                    "https://example.com:443",
-                    chain,
-                    "date",
-                    compression,
-                    endpoint_info,
-                    Some(100),
-                );
-                assert_eq!(
-                    current.entries, expected.entries,
-                    "{chain} {endpoint_info:?}"
-                );
-            }
-        }
     }
 }
 

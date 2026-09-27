@@ -59,14 +59,6 @@ async fn unavailable_info_never_creates_output_or_changes_an_existing_cursor() {
     for (index, arguments) in [
         vec!["build", "--endpoint", &endpoint, "--block-type", "evm"],
         vec!["build", "--network", "mainnet"],
-        vec![
-            "partitions",
-            "build",
-            "--endpoint",
-            &endpoint,
-            "--partition",
-            "date",
-        ],
     ]
     .into_iter()
     .enumerate()
@@ -80,10 +72,9 @@ async fn unavailable_info_never_creates_output_or_changes_an_existing_cursor() {
             .env("FIREHOSE_ENDPOINT_MAINNET", &endpoint)
             .args(&arguments)
             .args(["--start-block", "100", "--stop-block", "102", "--output"])
-            .arg(&output);
-        if arguments[0] == "build" {
-            command.arg("--cursor").arg(&cursor);
-        }
+            .arg(&output)
+            .arg("--cursor")
+            .arg(&cursor);
         let result = tokio::time::timeout(std::time::Duration::from_secs(10), command.output())
             .await
             .expect("startup must fail promptly")
@@ -99,8 +90,8 @@ async fn unavailable_info_never_creates_output_or_changes_an_existing_cursor() {
     }
     assert_eq!(
         requests.load(Ordering::SeqCst),
-        3,
-        "all three reached Info after healthcheck"
+        2,
+        "both reached Info after healthcheck"
     );
     stop.send(()).unwrap();
     server.await.unwrap();

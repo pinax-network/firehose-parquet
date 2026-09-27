@@ -20,7 +20,6 @@ fn fixture(root: &Path) {
         "nested/_fireparq_merge.json",
         "nested/_fireparq_merge.json.parquet",
         "cursor.parquet",
-        "partitions.parquet",
         "merkle_roots.parquet",
         "verify_runs/run/artifact.parquet",
         ".fireparq-ingest/hidden.parquet",
@@ -92,7 +91,6 @@ fn native_policy_matches_frozen_walkers_and_explicit_inventory() {
             .collect();
         for reserved in [
             "cursor.parquet",
-            "partitions.parquet",
             "merkle_roots.parquet",
             "verify_runs/run/artifact.parquet",
         ] {
@@ -138,7 +136,7 @@ fn native_policy_matches_frozen_walkers_and_explicit_inventory() {
 fn journal_discovery_prunes_the_artifact_directory() {
     let root = tempfile::tempdir().unwrap();
     for name in [
-        "_fireparq/partitions.parquet",
+        "_fireparq/cursor.parquet",
         "_fireparq/_fireparq_merge.json",
         "_fireparq/verify_runs/run/_fireparq_other.json",
         "blocks/date=2024-01-01/part.parquet",
@@ -153,7 +151,7 @@ fn journal_discovery_prunes_the_artifact_directory() {
     assert_eq!(
         files,
         [
-            root.path().join("_fireparq/partitions.parquet"),
+            root.path().join("_fireparq/cursor.parquet"),
             root.path().join("blocks/date=2024-01-01/part.parquet"),
         ]
     );

@@ -5,7 +5,7 @@
 //!
 //! - table directories (`blocks/`, `transactions/`, ...),
 //! - fireparq's artifact directory [`ARTIFACTS_DIR`] (`_fireparq/`) with the cursor mirror,
-//!   the partition index, the merkle roots registry and the verify reports,
+//!   the merkle roots registry and the verify reports,
 //! - dot-prefixed control state (`.fireparq-ingest/`, `.fireparq-owner-v1.json`,
 //!   `.fireparq-owner-probes-v1/`).
 //!
@@ -34,9 +34,6 @@ pub const ARTIFACTS_DIR: &str = artifacts_dir!();
 /// [`DatasetArtifact::CursorMirror`]'s relative path.
 pub const DEFAULT_CURSOR_MIRROR: &str = concat!(artifacts_dir!(), "/cursor.parquet");
 
-/// Block-to-partition index written by `fireparq partitions build`.
-pub const PARTITIONS_INDEX_FILENAME: &str = "partitions.parquet";
-
 /// Merkle root registry written by `fireparq verify`.
 pub const MERKLE_ROOTS_FILENAME: &str = "merkle_roots.parquet";
 
@@ -57,8 +54,6 @@ pub const OWNERSHIP_PROBES_DIRECTORY: &str = ".fireparq-owner-probes-v1";
 pub enum DatasetArtifact {
     /// The optional, non-authoritative `--cursor` mirror of `build` (default location only).
     CursorMirror,
-    /// The partition index written by `partitions build`.
-    PartitionsIndex,
     /// The merkle roots registry written by `verify`.
     MerkleRoots,
     /// The directory of per-run verify reports.
@@ -66,18 +61,12 @@ pub enum DatasetArtifact {
 }
 
 impl DatasetArtifact {
-    pub const ALL: [Self; 4] = [
-        Self::CursorMirror,
-        Self::PartitionsIndex,
-        Self::MerkleRoots,
-        Self::VerifyRuns,
-    ];
+    pub const ALL: [Self; 3] = [Self::CursorMirror, Self::MerkleRoots, Self::VerifyRuns];
 
     /// File or directory name, inside `_fireparq/` and (legacy) at the dataset root.
     pub const fn name(self) -> &'static str {
         match self {
             Self::CursorMirror => CURSOR_PARQUET_FILENAME,
-            Self::PartitionsIndex => PARTITIONS_INDEX_FILENAME,
             Self::MerkleRoots => MERKLE_ROOTS_FILENAME,
             Self::VerifyRuns => VERIFY_RUNS_DIR,
         }
@@ -87,7 +76,6 @@ impl DatasetArtifact {
     pub const fn description(self) -> &'static str {
         match self {
             Self::CursorMirror => "cursor mirror",
-            Self::PartitionsIndex => "partition index",
             Self::MerkleRoots => "merkle roots registry",
             Self::VerifyRuns => "verify reports directory",
         }
@@ -167,15 +155,11 @@ pub fn is_control_path(path: &str) -> bool {
 
 /// File names that are never table data, wherever they appear in a dataset tree: inside
 /// `_fireparq/`, and at the dataset root where releases before v1.0.0 wrote them.
-pub const RESERVED_ARTIFACT_FILENAMES: [&str; 3] = [
-    CURSOR_PARQUET_FILENAME,
-    PARTITIONS_INDEX_FILENAME,
-    MERKLE_ROOTS_FILENAME,
-];
+pub const RESERVED_ARTIFACT_FILENAMES: [&str; 2] = [CURSOR_PARQUET_FILENAME, MERKLE_ROOTS_FILENAME];
 
 /// Returns true when `rel_path` points at a reserved dataset artifact rather than table data:
-/// anything under (or named) `_fireparq`, a legacy `cursor.parquet`, `partitions.parquet` or
-/// `merkle_roots.parquet`, anything under a `verify_runs/` directory, or control state
+/// anything under (or named) `_fireparq`, a legacy `cursor.parquet` or `merkle_roots.parquet`,
+/// anything under a `verify_runs/` directory, or control state
 /// ([`is_control_path`]).
 ///
 /// `rel_path` is a `/`-separated path (local path or S3 key) relative to the directory being
@@ -220,7 +204,6 @@ mod tests {
         );
         let expected = [
             ("_fireparq/cursor.parquet", "cursor.parquet"),
-            ("_fireparq/partitions.parquet", "partitions.parquet"),
             ("_fireparq/merkle_roots.parquet", "merkle_roots.parquet"),
             ("_fireparq/verify_runs", "verify_runs"),
         ];
@@ -283,15 +266,16 @@ mod tests {
         for path in [
             "_fireparq",
             "_fireparq/cursor.parquet",
-            "_fireparq/partitions.parquet",
             "_fireparq/merkle_roots.parquet",
             "_fireparq/verify_runs/run-1/report.json",
             "_fireparq/verify_runs/run-1/roots.parquet",
-            // Anything a future release or an operator puts there.
+            // Anything an older release, a future release or an operator puts
+            // there, such as the removed partition index.
+            "_fireparq/partitions.parquet",
             "_fireparq/other.parquet",
             "_fireparq/nested/part-000001.parquet",
             // Below a chain directory or several datasets.
-            "mainnet/_fireparq/partitions.parquet",
+            "mainnet/_fireparq/cursor.parquet",
             "evm/mainnet/_fireparq/other.parquet",
         ] {
             assert!(is_reserved_artifact_path(path), "{path}");
@@ -311,7 +295,6 @@ mod tests {
     fn test_is_reserved_artifact_path_root_files() {
         // The legacy root names (releases before v1.0.0) stay reserved.
         assert!(is_reserved_artifact_path("cursor.parquet"));
-        assert!(is_reserved_artifact_path("partitions.parquet"));
         assert!(is_reserved_artifact_path("merkle_roots.parquet"));
         assert!(is_reserved_artifact_path("mainnet/cursor.parquet"));
         assert!(is_reserved_artifact_path(
@@ -353,6 +336,8 @@ mod tests {
         ));
         assert!(!is_reserved_artifact_path("blocks/part-000001.parquet"));
         assert!(!is_reserved_artifact_path("my_cursor.parquet"));
+        // The partition index is gone (#653), so its old root name is not reserved.
+        assert!(!is_reserved_artifact_path("partitions.parquet"));
         assert!(!is_reserved_artifact_path(
             "verify_runs_old/part-000001.parquet"
         ));
@@ -386,7 +371,7 @@ mod tests {
     #[test]
     fn read_walks_skip_artifacts_unless_rooted_inside_them() {
         for root in ["/data/mainnet", "/data/mainnet/", "", "mainnet"] {
-            assert!(read_walk_skips(root, "_fireparq/partitions.parquet"));
+            assert!(read_walk_skips(root, "_fireparq/merkle_roots.parquet"));
             assert!(read_walk_skips(root, "cursor.parquet"));
             assert!(read_walk_skips(root, ".fireparq-ingest/hidden.parquet"));
             assert!(!read_walk_skips(root, "blocks/part-1.parquet"));
@@ -397,7 +382,7 @@ mod tests {
             "mainnet/_fireparq",
             "_fireparq/verify_runs",
         ] {
-            assert!(!read_walk_skips(root, "partitions.parquet"), "{root}");
+            assert!(!read_walk_skips(root, "merkle_roots.parquet"), "{root}");
             assert!(!read_walk_skips(root, "cursor.parquet"), "{root}");
         }
     }

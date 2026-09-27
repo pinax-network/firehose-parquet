@@ -1,7 +1,7 @@
-//! Local/S3 path policy, the `--output` dataset root and cursor-template resolution.
+//! Local/S3 path policy and the `--output` dataset root.
 use super::*;
 
-/// Resolve the output root of a command that writes (`build`, `partitions build`).
+/// Resolve the output root of `build`, the command that writes a dataset.
 ///
 /// The result is still the `--output` template: [`resolve_output_root`]
 /// expands its `{chain}` placeholder once EndpointInfo names the chain. The
@@ -80,13 +80,11 @@ pub fn reject_implicit_s3_write(
     Ok(())
 }
 
-/// The `--output` variable of `build` and `partitions build`: the endpoint's
-/// canonical `chain_name`.
+/// The `--output` variable of `build`: the endpoint's canonical `chain_name`.
 pub const OUTPUT_CHAIN_VARIABLE: &str = "chain";
 
-/// Check an `--output` template of `build` / `partitions build` before any
-/// endpoint request: the brace syntax shared with `--cursor-template`, the
-/// variable names (only `{chain}`), and a literal S3 bucket.
+/// Check an `--output` template of `build` before any endpoint request: the
+/// brace syntax, the variable names (only `{chain}`), and a literal S3 bucket.
 pub fn validate_output_template(output: &str) -> anyhow::Result<()> {
     output_template_parts(output).map(|_| ())
 }
@@ -137,8 +135,7 @@ fn validate_output_chain_segment(chain_name: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// The dataset root of `build` and `partitions build`: the one place where
-/// `--output` becomes the directory or `s3://bucket[/prefix]` that holds the
+/// The dataset root of `build`: the one place where `--output` becomes the directory or `s3://bucket[/prefix]` that holds the
 /// table directories, `_fireparq/` and the protected control state.
 ///
 /// - `--output` is the dataset root exactly as given. No `<chain_name>`
@@ -146,15 +143,14 @@ fn validate_output_chain_segment(chain_name: &str) -> anyhow::Result<()> {
 /// - `{chain}` expands to the endpoint's canonical `chain_name`, in any
 ///   position of the path or S3 key prefix: `s3://datasets/{chain}`,
 ///   `s3://datasets/v1/{chain}/raw`, `./data/{chain}-final`. `{{` and `}}` are
-///   literal braces, as in `--cursor-template`. The S3 bucket name is literal.
+///   literal braces. The S3 bucket name is literal.
 /// - An S3 root loses its trailing `/` separators, so `s3://bucket/` and
 ///   `s3://bucket` are the same bucket root. A local root is returned as given.
 ///
 /// `chain_name` comes from EndpointInfo and must be nonempty even when the
 /// template does not use it: it is still recorded in file metadata and in the
-/// protected dataset identity. The cursor mirror, the ownership scopes,
-/// recovery and `partitions build` (its index and the sibling cursor mirror)
-/// all resolve against the returned root.
+/// protected dataset identity. The cursor mirror, the ownership scopes and
+/// recovery all resolve against the returned root.
 pub fn resolve_output_root(output: &str, chain_name: &str) -> anyhow::Result<String> {
     anyhow::ensure!(
         !chain_name.trim().is_empty(),
@@ -329,61 +325,7 @@ pub fn validate_s3_output_credentials(
     );
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CursorTemplateContext {
-    pub chain: Option<String>,
-    pub partition_type: Option<String>,
-    pub partition_value: Option<String>,
-    pub partition_from: Option<String>,
-    pub partition_to: Option<String>,
-}
-
-pub(in crate::cli) fn normalize_opt_string(value: &Option<String>) -> Option<String> {
-    value
-        .as_ref()
-        .map(|v| v.trim().to_string())
-        .filter(|v| !v.is_empty())
-}
-
-pub(in crate::cli) fn sanitize_cursor_template_value(value: &str) -> String {
-    value.replace(['/', '\\'], "_")
-}
-
-pub(in crate::cli) fn cursor_template_value<'a>(
-    key: &str,
-    context: &'a CursorTemplateContext,
-) -> anyhow::Result<&'a str> {
-    match key {
-        "chain" => context.chain.as_deref(),
-        "partition_type" => context.partition_type.as_deref(),
-        "partition_value" => context.partition_value.as_deref(),
-        "partition_from" => context.partition_from.as_deref(),
-        "partition_to" => context.partition_to.as_deref(),
-        other => anyhow::bail!(
-            "unknown --cursor-template variable {{{other}}}; supported: {{chain}}, {{partition_type}}, {{partition_value}}, {{partition_from}}, {{partition_to}}"
-        ),
-    }
-    .ok_or_else(|| anyhow::anyhow!("--cursor-template variable {{{key}}} requires partition selection context"))
-}
-
-pub fn resolve_cursor_template(
-    template: &str,
-    context: &CursorTemplateContext,
-) -> anyhow::Result<String> {
-    let mut out = String::with_capacity(template.len());
-    for part in parse_template(template, "--cursor-template")? {
-        match part {
-            TemplatePart::Literal(text) => out.push_str(&text),
-            TemplatePart::Variable(key) => {
-                let value = cursor_template_value(&key, context)?;
-                out.push_str(&sanitize_cursor_template_value(value));
-            }
-        }
-    }
-    Ok(out)
-}
-
-/// A piece of a `{variable}` template (`--cursor-template`, `--output`).
+/// A piece of an `--output` `{variable}` template.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(in crate::cli) enum TemplatePart {
     /// Literal text, with `{{` and `}}` already unescaped.
@@ -392,11 +334,10 @@ pub(in crate::cli) enum TemplatePart {
     Variable(String),
 }
 
-/// Split a template into literal text and `{variable}` references: the syntax
-/// shared by `--cursor-template` and `--output`. `{{` and `}}` are literal
-/// braces; any other `{` opens a variable that the next `}` closes, and any
-/// other `}` is an error. `flag` names the option in errors; the caller decides
-/// which variable names exist.
+/// Split a template into literal text and `{variable}` references (the
+/// `--output` syntax). `{{` and `}}` are literal braces; any other `{` opens a
+/// variable that the next `}` closes, and any other `}` is an error. `flag`
+/// names the option in errors; the caller decides which variable names exist.
 pub(in crate::cli) fn parse_template(
     template: &str,
     flag: &str,

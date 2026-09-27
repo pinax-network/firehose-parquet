@@ -482,7 +482,6 @@ dependencies = [
  "firehose-protos",
  "futures",
  "num-bigint",
- "object_store",
  "parquet",
  "prometheus-client",
  "prost",

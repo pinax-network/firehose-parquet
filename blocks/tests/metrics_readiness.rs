@@ -206,8 +206,6 @@ async fn resumed_cli_reports_freshness_actual_buffers_and_saved_cursor() {
             .arg(dir.path().join("output"))
             .arg("--cursor")
             .arg(&cursor)
-            .arg("--cursor-template")
-            .arg(&cursor)
             .output(),
     )
     .await
@@ -259,8 +257,6 @@ async fn resumed_cli_reports_freshness_actual_buffers_and_saved_cursor() {
         ])
         .arg(dir.path().join("output"))
         .arg("--cursor")
-        .arg(&cursor)
-        .arg("--cursor-template")
         .arg(&cursor)
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::inherit())

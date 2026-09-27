@@ -1065,9 +1065,9 @@ async fn direct_source_time_preserves_positive_negative_zero_and_null() {
 
 /// The default mirror is `<root>/_fireparq/cursor.parquet`, two levels below
 /// the dataset root. Publication creates `_fireparq/` beside the table
-/// directories with default permissions (it also holds the partition index,
-/// the registry and the verify reports), keeps the mirror file private, and
-/// still creates other missing mirror directories with mode 0700.
+/// directories with default permissions (it also holds the registry and the
+/// verify reports), keeps the mirror file private, and still creates other
+/// missing mirror directories with mode 0700.
 #[cfg(unix)]
 #[tokio::test]
 async fn default_mirror_creates_the_shared_artifact_directory() {

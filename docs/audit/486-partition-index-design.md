@@ -1,5 +1,7 @@
 # Partition index correctness design (#486)
 
+> Superseded by [#653](653-remove-partitions.md): `partitions.parquet` and the `partitions` subcommands are removed, replaced by Delta log metadata. This record is kept as history.
+
 Status: implementation, strict consumers, combined validation and bounded live qualification are complete; GitHub review/CI and issue lifecycle are tracked by the pull request.
 
 Issue: <https://github.com/pinax-network/firehose-parquet/issues/486>

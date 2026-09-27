@@ -694,7 +694,7 @@ impl<'run, 'owner> IngestionRuntime<'run, 'owner> {
             } else {
                 0.0
             };
-            let timestamp = format_optional_probe_timestamp(ts);
+            let timestamp = format_optional_block_timestamp(ts);
             match (timestamp.as_deref(), self.window.partition_key.as_deref()) {
                 (Some(timestamp), Some(partition)) => info!(
                     blocks = self.stats.blocks,

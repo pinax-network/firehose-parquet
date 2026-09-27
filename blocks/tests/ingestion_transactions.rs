@@ -73,33 +73,6 @@ struct Stream {
     events: Arc<Vec<firehose::Response>>,
     plans: Arc<Mutex<VecDeque<Plan>>>,
     requests: Arc<Mutex<Vec<firehose::Request>>>,
-    /// Also answer the finality probes of `partitions build` (outside the
-    /// plans and never counted as ingestion requests).
-    partition_probes: bool,
-}
-impl Stream {
-    /// `partitions build` proves its finalized anchor with two Stream calls:
-    /// a near-head witness (negative start, not final-only), then the exact
-    /// finalized candidate. The last fixture event is the head and its own
-    /// LIB; ingestion requests always ask for final blocks over a range.
-    fn partition_probe(&self, request: &firehose::Request) -> Option<Vec<firehose::Response>> {
-        let head = self.events.last()?;
-        if request.start_block_num < 0 && !request.final_blocks_only {
-            return Some(vec![head.clone()]);
-        }
-        let candidate = u64::try_from(request.start_block_num).ok()?;
-        (request.final_blocks_only
-            && request.cursor.is_empty()
-            && candidate == request.stop_block_num
-            && self.plans.lock().unwrap().is_empty())
-        .then(|| {
-            self.events
-                .iter()
-                .filter(|event| event.metadata.as_ref().unwrap().num == candidate)
-                .cloned()
-                .collect()
-        })
-    }
 }
 impl tonic::server::ServerStreamingService<firehose::Request> for Stream {
     type Response = firehose::Response;
@@ -109,17 +82,6 @@ impl tonic::server::ServerStreamingService<firehose::Request> for Stream {
     type Future = BoxFuture<tonic::Response<Self::ResponseStream>, tonic::Status>;
     fn call(&mut self, request: tonic::Request<firehose::Request>) -> Self::Future {
         let request = request.into_inner();
-        if let Some(replies) = self
-            .partition_probes
-            .then(|| self.partition_probe(&request))
-            .flatten()
-        {
-            return Box::pin(async move {
-                let stream: Self::ResponseStream =
-                    Box::pin(futures::stream::iter(replies.into_iter().map(Ok)));
-                Ok(tonic::Response::new(stream))
-            });
-        }
         self.requests.lock().unwrap().push(request.clone());
         let planned = self.plans.lock().unwrap().pop_front();
         let Some(plan) = planned else {
@@ -189,37 +151,8 @@ macro_rules! service {
         }
     };
 }
-/// Block metadata by number, for the boundary probes of `partitions build`.
-#[derive(Clone)]
-struct Fetch {
-    events: Arc<Vec<firehose::Response>>,
-}
-impl tonic::server::UnaryService<firehose::SingleBlockRequest> for Fetch {
-    type Response = firehose::SingleBlockResponse;
-    type Future = BoxFuture<tonic::Response<Self::Response>, tonic::Status>;
-    fn call(&mut self, request: tonic::Request<firehose::SingleBlockRequest>) -> Self::Future {
-        let Some(firehose::single_block_request::Reference::BlockNumber(number)) =
-            request.into_inner().reference
-        else {
-            panic!("expected a block number reference")
-        };
-        let metadata = self
-            .events
-            .iter()
-            .filter_map(|event| event.metadata.clone())
-            .find(|metadata| metadata.num == number.num);
-        Box::pin(async move {
-            Ok(tonic::Response::new(firehose::SingleBlockResponse {
-                metadata: Some(metadata.ok_or_else(|| tonic::Status::not_found("missing block"))?),
-                block: None,
-            }))
-        })
-    }
-}
-
 service!(Info, "sf.firehose.v2.EndpointInfo", unary);
 service!(Stream, "sf.firehose.v2.Stream", server_streaming);
-service!(Fetch, "sf.firehose.v2.Fetch", unary);
 
 struct MockFirehose {
     endpoint: String,
@@ -229,20 +162,6 @@ struct MockFirehose {
 }
 impl MockFirehose {
     async fn start(events: Vec<firehose::Response>, plans: Vec<Plan>) -> Self {
-        Self::start_with(events, plans, false).await
-    }
-    /// Like [`Self::start`], and also serves `partitions build` probes.
-    async fn start_with_partition_probes(
-        events: Vec<firehose::Response>,
-        plans: Vec<Plan>,
-    ) -> Self {
-        Self::start_with(events, plans, true).await
-    }
-    async fn start_with(
-        events: Vec<firehose::Response>,
-        plans: Vec<Plan>,
-        partition_probes: bool,
-    ) -> Self {
         let first = events
             .first()
             .and_then(|e| e.metadata.as_ref())
@@ -254,21 +173,15 @@ impl MockFirehose {
         });
         let requests = Arc::new(Mutex::new(Vec::new()));
         let plans = Arc::new(Mutex::new(VecDeque::from(plans)));
-        let events = Arc::new(events);
-        let fetch = Fetch {
-            events: events.clone(),
-        };
         let stream = Stream {
-            events,
+            events: Arc::new(events),
             plans: plans.clone(),
             requests: requests.clone(),
-            partition_probes,
         };
         let task = tokio::spawn(async move {
             tonic::transport::Server::builder()
                 .add_service(Info { first })
                 .add_service(stream)
-                .add_service(fetch)
                 .serve_with_incoming(incoming)
                 .await
                 .unwrap();
@@ -888,21 +801,18 @@ async fn cursor_none_keeps_mandatory_authority_without_a_mirror_and_binds_that_c
     server.assert_drained();
 }
 
-/// Ownership and authority must resolve a `--cursor-template` mirror outside
-/// the output root to the same file; otherwise the mirror write is refused as
-/// outside held ownership.
+/// Ownership and authority must resolve a `--cursor` mirror outside the
+/// output root to the same file; otherwise the mirror write is refused as
+/// outside held ownership. Braces in the path are literal.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn external_cursor_template_is_owned_and_bound_as_one_mirror() {
+async fn external_cursor_is_owned_and_bound_as_one_mirror() {
     let server =
         MockFirehose::start(vec![response(100, 3)], vec![Plan::complete("", 100, 100)]).await;
     let dir = tempfile::tempdir().unwrap();
-    let state = dir.path().join("state");
-    let template = format!("{}/worker-{{{{a}}}}.parquet", state.display());
-    let mirror = state.join("worker-{a}.parquet");
+    let mirror = dir.path().join("state").join("worker-{a}.parquet");
     let mut request = command(&server, dir.path(), 100, 101);
-    request.args(["--cursor-template", &template]);
-    let output = success(request).await;
-    assert!(logs(&output).contains("resolved cursor path"));
+    request.arg("--cursor").arg(&mirror);
+    success(request).await;
     let root = root(dir.path());
     let descriptor = &authority(&root)["descriptor"]["mirror"];
     assert_eq!(descriptor["kind"], "local");
@@ -2520,16 +2430,14 @@ async fn fireparq_output(dir: &Path, args: &[&str]) -> Output {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn output_is_the_dataset_root_and_every_command_follows_it() {
     // 2023-11-14 22:13:20 UTC. Blocks 100 to 102 share 2023-11-14, so the two
-    // runs leave two parts there for merge; 103 starts 2023-11-15, and 104 is
-    // the finalized head that `partitions build` proves.
+    // runs leave two parts there for merge; 103 starts 2023-11-15.
     const T: i64 = 1_700_000_000;
-    let server = MockFirehose::start_with_partition_probes(
+    let server = MockFirehose::start(
         vec![
             response_at(100, T),
             response_at(101, T + 3_600),
             response_at(102, T + 3_660),
             response_at(103, T + 7_200),
-            response_at(104, T + 7_260),
         ],
         vec![
             Plan::complete("", 100, 101),
@@ -2728,131 +2636,9 @@ async fn output_is_the_dataset_root_and_every_command_follows_it() {
         assert_eq!(tree_digests(&root), before);
     }
 
-    // partitions build --output output writes
-    // <output>/_fireparq/partitions.parquet and infers --start-block from the
-    // default mirror <output>/_fireparq/cursor.parquet (block 103 + 1).
-    let partitions_build = |extra: &[&str]| {
-        let mut command = fireparq(dir.path());
-        command
-            .args([
-                "--log-level",
-                "error",
-                "partitions",
-                "build",
-                "--endpoint",
-                &server.endpoint,
-                "--output",
-                "output",
-                "--partition",
-                "block_range",
-                "--json",
-            ])
-            .args(extra);
-        command
-    };
-    let built = json_output(
-        &success(partitions_build(&[
-            "--block-range-size",
-            "1",
-            "--stop-block",
-            "105",
-        ]))
-        .await,
-    );
-    assert_eq!(
-        built["partitions_index"],
-        "output/_fireparq/partitions.parquet"
-    );
-    assert_eq!(built["chain"], CHAIN);
-    assert_eq!(
-        (built["start_block"].as_u64(), built["stop_block"].as_u64()),
-        (Some(104), Some(105))
-    );
-    let rebuilt = json_output(
-        &success(partitions_build(&[
-            "--block-range-size",
-            "2",
-            "--overwrite",
-            "--start-block",
-            "100",
-            "--stop-block",
-            "104",
-        ]))
-        .await,
-    );
-    assert_eq!(rebuilt["row_count"], 2);
-    assert!(!root.join(CHAIN).exists());
-    let index = root.join("_fireparq/partitions.parquet");
-    assert!(!root.join("partitions.parquet").exists());
-    let listed = json_output(
-        &fireparq_output(
-            dir.path(),
-            &[
-                "partitions",
-                "ls",
-                "--partitions-index",
-                index.to_str().unwrap(),
-                "--json",
-            ],
-        )
-        .await,
-    );
-    assert_eq!(listed["total_matches"], 2);
-    assert_eq!(listed["rows"][0]["chain"], CHAIN);
-    let output = fireparq_output(
-        dir.path(),
-        &[
-            "partitions",
-            "validate",
-            "--partitions-index",
-            index.to_str().unwrap(),
-        ],
-    )
-    .await;
-    assert!(output.status.success(), "{}", logs(&output));
-    assert!(
-        logs(&output).contains("valid:            true"),
-        "{}",
-        logs(&output)
-    );
-    let resolved = json_output(
-        &fireparq_output(
-            dir.path(),
-            &[
-                "partitions",
-                "resolve",
-                "--partitions-index",
-                index.to_str().unwrap(),
-                "--partition-type",
-                "block_range",
-                "--partition-value",
-                "100",
-                "--json",
-            ],
-        )
-        .await,
-    );
-    assert_eq!(
-        (
-            resolved["start_block"].as_u64(),
-            resolved["stop_block"].as_u64()
-        ),
-        (Some(100), Some(102))
-    );
-
-    // The index in `_fireparq/` is a reserved artifact: later maintenance and
-    // verify runs leave it and every other artifact alone.
-    let artifacts_before = artifacts(&root);
-    assert!(artifacts_before.contains_key("_fireparq/partitions.parquet"));
-    let output = fireparq_output(dir.path(), &["merge", &root_arg]).await;
-    assert!(output.status.success(), "{}", logs(&output));
-    assert_eq!(artifacts(&root), artifacts_before);
-    success(verify(&dir.path().join("verify-4.json"))).await;
-    assert_eq!(statuses(&verify_report("verify-4.json")), expected("match"));
-
-    // The root holds table directories, `_fireparq/` (mirror, index,
-    // registry) and dot-prefixed control state only, and a per-table glob is
-    // unaffected by the artifacts.
+    // The root holds table directories, `_fireparq/` (mirror and registry)
+    // and dot-prefixed control state only, and a per-table glob is unaffected
+    // by the artifacts.
     assert_eq!(MIRROR, firehose_parquet::artifacts::DEFAULT_CURSOR_MIRROR);
     let tables: Vec<String> = std::fs::read_dir(&root)
         .unwrap()
@@ -2863,11 +2649,7 @@ async fn output_is_the_dataset_root_and_every_command_follows_it() {
     assert_dataset_root_layout(
         &root,
         &tables.iter().map(String::as_str).collect::<Vec<_>>(),
-        &[
-            "cursor.parquet",
-            "partitions.parquet",
-            "merkle_roots.parquet",
-        ],
+        &["cursor.parquet", "merkle_roots.parquet"],
     );
     // The same with DuckDB: the per-table glob the README recommends reads
     // every block row and no artifact. DuckDB does not skip `_` paths, so a
@@ -3117,13 +2899,10 @@ async fn invalid_output_templates_are_refused_before_the_endpoint_is_contacted()
         ("output/chain}", "unmatched } in --output"),
         ("s3://{chain}/datasets", "S3 bucket name"),
     ] {
-        for arguments in [
-            &["partitions", "build", "--partition", "date"][..],
-            &["build"],
-        ] {
+        {
             let mut command = fireparq(dir.path());
             command
-                .args(arguments)
+                .arg("build")
                 .args(["--endpoint", "http://127.0.0.1:9", "--stop-block", "200"])
                 .args(["--output", output])
                 .env("AWS_ACCESS_KEY_ID", "test")

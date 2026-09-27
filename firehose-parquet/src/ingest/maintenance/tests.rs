@@ -36,7 +36,7 @@ async fn selected_partition_expands_to_whole_protected_root_and_external_mirror(
         vec![MaintenanceTarget::directory(
             root.join("blocks/date=2023-11-14").to_string_lossy(),
         )],
-        MaintenancePolicy::Artifacts,
+        MaintenancePolicy::Recover,
         None,
     )
     .await
@@ -55,14 +55,14 @@ async fn parent_selection_finds_siblings_but_nested_authorities_are_refused() {
     protected(&temp.path().join("one"), MirrorBinding::Disabled);
     protected(&temp.path().join("two"), MirrorBinding::Disabled);
     let selection = || vec![MaintenanceTarget::directory(temp.path().to_string_lossy())];
-    let prepared = acquire("fixture", selection(), MaintenancePolicy::Artifacts, None)
+    let prepared = acquire("fixture", selection(), MaintenancePolicy::Recover, None)
         .await
         .unwrap();
     assert_eq!(prepared.roots.len(), 2);
     prepared.ownership.release().await.unwrap();
     protected(&temp.path().join("one/nested"), MirrorBinding::Disabled);
     assert!(
-        acquire("fixture", selection(), MaintenancePolicy::Artifacts, None)
+        acquire("fixture", selection(), MaintenancePolicy::Recover, None)
             .await
             .is_err()
     );
@@ -79,7 +79,7 @@ async fn orphan_marker_refuses_reads_and_destructive_policy_precedes_recovery() 
         .err()
         .unwrap();
     assert!(error.to_string().contains("truncate is unsupported"));
-    let error = acquire("verify", selection(), MaintenancePolicy::Artifacts, None)
+    let error = acquire("verify", selection(), MaintenancePolicy::Recover, None)
         .await
         .err()
         .unwrap();
@@ -101,7 +101,7 @@ async fn explicit_alias_resolves_root_but_nested_alias_is_refused() {
     let prepared = acquire(
         "fixture",
         vec![MaintenanceTarget::directory(alias.to_string_lossy())],
-        MaintenancePolicy::Artifacts,
+        MaintenancePolicy::Recover,
         None,
     )
     .await
@@ -112,7 +112,7 @@ async fn explicit_alias_resolves_root_but_nested_alias_is_refused() {
     assert!(acquire(
         "fixture",
         vec![MaintenanceTarget::directory(root.to_string_lossy())],
-        MaintenancePolicy::Artifacts,
+        MaintenancePolicy::Recover,
         None
     )
     .await
@@ -209,6 +209,19 @@ async fn remote_discovery_finds_a_protected_bucket_root_and_refuses_nesting() {
     owner.release().await.unwrap();
 }
 
+/// Acquire `root` and `destination` as `verify` does, then check the
+/// destination against the recovered protected roots.
+async fn validate_destination(root: &Path, destination: &Path) -> Result<()> {
+    let targets = vec![
+        MaintenanceTarget::directory(root.to_string_lossy()),
+        MaintenanceTarget::file(destination.to_string_lossy()),
+    ];
+    let prepared = acquire("verify", targets.clone(), MaintenancePolicy::Recover, None).await?;
+    let result = validate_artifact_destinations(&targets, &prepared.roots, &empty_aws());
+    prepared.ownership.release().await?;
+    result
+}
+
 #[tokio::test]
 async fn artifact_destinations_cannot_replace_parts_or_the_bound_cursor() {
     let temp = tempfile::tempdir().unwrap();
@@ -227,41 +240,18 @@ async fn artifact_destinations_cannot_replace_parts_or_the_bound_cursor() {
         root.join("_fireparq/cursor.parquet"),
         root.join("blocks/date=2023-11-14/_fireparq_merge.json"),
     ] {
-        let result = acquire(
-            "verify",
-            vec![
-                MaintenanceTarget::directory(root.to_string_lossy()),
-                MaintenanceTarget::file(destination.to_string_lossy()),
-            ],
-            MaintenancePolicy::Artifacts,
-            None,
-        )
-        .await;
-        assert!(result.is_err());
+        assert!(validate_destination(&root, &destination).await.is_err());
         assert!(!destination.exists());
     }
     for destination in [
         root.join("_fireparq/merkle_roots.parquet"),
-        root.join("_fireparq/partitions.parquet"),
         root.join("_fireparq/verify_runs/run/report.json"),
         root.join("_fireparq/verify_runs/run/roots.parquet"),
         root.join("merkle_roots.parquet"),
-        root.join("partitions.parquet"),
         root.join("verify_runs/run/report.json"),
         root.join("report.json"),
     ] {
-        let prepared = acquire(
-            "verify",
-            vec![
-                MaintenanceTarget::directory(root.to_string_lossy()),
-                MaintenanceTarget::file(destination.to_string_lossy()),
-            ],
-            MaintenancePolicy::Artifacts,
-            None,
-        )
-        .await
-        .unwrap();
-        prepared.ownership.release().await.unwrap();
+        validate_destination(&root, &destination).await.unwrap();
         assert!(!destination.exists());
     }
     let input = root.join("blocks/date=2023-11-14/part-000001.parquet");
@@ -269,7 +259,7 @@ async fn artifact_destinations_cannot_replace_parts_or_the_bound_cursor() {
     let prepared = acquire(
         "verify",
         vec![MaintenanceTarget::input(input.to_string_lossy()).unwrap()],
-        MaintenancePolicy::Artifacts,
+        MaintenancePolicy::Recover,
         None,
     )
     .await
@@ -379,7 +369,7 @@ async fn bound_merge_recovers_before_artifact_reads_and_unbound_merge_is_refused
     assert!(acquire(
         "verify",
         vec![MaintenanceTarget::directory(root.to_string_lossy())],
-        MaintenancePolicy::Artifacts,
+        MaintenancePolicy::Recover,
         None
     )
     .await
@@ -398,7 +388,7 @@ async fn bound_merge_recovers_before_artifact_reads_and_unbound_merge_is_refused
         vec![MaintenanceTarget::directory(
             root.join("blocks/date=2023-11-14").to_string_lossy(),
         )],
-        MaintenancePolicy::Artifacts,
+        MaintenancePolicy::Recover,
         None,
     )
     .await
@@ -425,7 +415,7 @@ async fn legacy_merge_is_recovered_without_creating_ingestion_authority() {
                 .to_string_lossy(),
         )
         .unwrap()],
-        MaintenancePolicy::Artifacts,
+        MaintenancePolicy::Recover,
         None,
     )
     .await
@@ -902,7 +892,7 @@ async fn maintenance_rolls_back_writing_or_finishes_committed_before_returning_g
             vec![MaintenanceTarget::directory(
                 root.join("blocks").to_string_lossy(),
             )],
-            MaintenancePolicy::Artifacts,
+            MaintenancePolicy::Recover,
             None,
         )
         .await

@@ -49,11 +49,7 @@ impl tonic::server::ServerStreamingService<firehose::Request> for StreamService 
         let fixture = self.0.clone();
         let request = request.into_inner();
         Box::pin(async move {
-            let (start, stop) = if request.start_block_num < 0 {
-                (10, 10)
-            } else {
-                (request.start_block_num as u64, request.stop_block_num)
-            };
+            let (start, stop) = (request.start_block_num as u64, request.stop_block_num);
             assert!(
                 stop >= start && stop - start < 128,
                 "bounded fixture requests only"
@@ -63,21 +59,6 @@ impl tonic::server::ServerStreamingService<firehose::Request> for StreamService 
                     .map(move |num| Ok(fixture.response(num)))
                     .boxed(),
             ))
-        })
-    }
-}
-#[derive(Clone)]
-struct FetchService(Fixture);
-impl tonic::server::UnaryService<firehose::SingleBlockRequest> for FetchService {
-    type Response = firehose::SingleBlockResponse;
-    type Future = tonic::codegen::BoxFuture<tonic::Response<Self::Response>, tonic::Status>;
-    fn call(&mut self, _: tonic::Request<firehose::SingleBlockRequest>) -> Self::Future {
-        let response = self.0.response(100);
-        Box::pin(async move {
-            Ok(tonic::Response::new(firehose::SingleBlockResponse {
-                block: response.block,
-                metadata: response.metadata,
-            }))
         })
     }
 }
@@ -170,7 +151,6 @@ macro_rules! transport_service {
     };
 }
 transport_service!(StreamService, "sf.firehose.v2.Stream", server_streaming);
-transport_service!(FetchService, "sf.firehose.v2.Fetch", unary);
 transport_service!(InfoService, "sf.firehose.v2.EndpointInfo", unary);
 
 struct Server {
@@ -199,7 +179,6 @@ impl Server {
         let task = tokio::spawn(async move {
             tonic::transport::Server::builder()
                 .add_service(StreamService(fixture.clone()))
-                .add_service(FetchService(fixture.clone()))
                 .add_service(InfoService(fixture))
                 .serve_with_incoming(incoming)
                 .await
@@ -236,15 +215,6 @@ async fn all_rpc_paths_accept_plain_gzip_zstd_and_preserve_payloads() {
         let server = Server::new(4096, encoding).await;
         let client = server.client(8192);
         assert_eq!(client.info().await.unwrap().chain_name.len(), 4096);
-        assert_eq!(
-            client
-                .fetch_block_identity(100, None)
-                .await
-                .unwrap()
-                .unwrap()
-                .block_num,
-            100
-        );
         let shutdown = CancellationToken::new();
         let mut seen = 0;
         client
@@ -264,21 +234,7 @@ async fn all_rpc_paths_accept_plain_gzip_zstd_and_preserve_payloads() {
             .await
             .unwrap();
         assert_eq!(seen, 1);
-        assert_eq!(
-            client
-                .finalized_anchor(Duration::from_secs(2), &shutdown)
-                .await
-                .unwrap()
-                .block_num,
-            8
-        );
-        let mut traversal = client
-            .finalized_metadata_stream(100, 100, Duration::from_secs(2), &shutdown)
-            .await
-            .unwrap();
-        assert_eq!(traversal.next().await.unwrap().unwrap().block_num, 100);
-        assert!(traversal.next().await.unwrap().is_none());
-        assert_eq!(server.calls.lock().unwrap().len(), 6);
+        assert_eq!(server.calls.lock().unwrap().len(), 2);
     }
 }
 
@@ -294,7 +250,6 @@ async fn limits_reject_large_plain_or_decompressed_responses_on_every_rpc_path()
         let shutdown = CancellationToken::new();
         let mut errors = Vec::new();
         errors.push(client.info().await.unwrap_err());
-        errors.push(client.fetch_block_identity(100, None).await.unwrap_err());
         errors.push(
             tokio::time::timeout(
                 Duration::from_secs(2),
@@ -306,25 +261,12 @@ async fn limits_reject_large_plain_or_decompressed_responses_on_every_rpc_path()
             .unwrap()
             .unwrap_err(),
         );
-        errors.push(
-            client
-                .finalized_anchor(Duration::from_secs(2), &shutdown)
-                .await
-                .unwrap_err(),
-        );
-        match client
-            .finalized_metadata_stream(100, 100, Duration::from_secs(2), &shutdown)
-            .await
-        {
-            Ok(mut stream) => errors.push(stream.next().await.unwrap_err()),
-            Err(error) => errors.push(error),
-        }
         for error in errors {
             assert!(format!("{error:#}").contains("1024"), "{error:#}");
         }
         assert_eq!(
             server.calls.lock().unwrap().len(),
-            5,
+            2,
             "oversized messages must not retry"
         );
     }
@@ -355,10 +297,6 @@ fn transport_validation_and_local_limit_classification_do_not_change_quota_polic
     ] {
         let status = tonic::Status::resource_exhausted(message);
         assert!(fatal_status_error(&status).is_none());
-        assert_eq!(
-            classify_fetch_error(&status.into()),
-            FetchErrorKind::Transient
-        );
     }
     let status = tonic::Status::resource_exhausted(
         "Error decompressing: size limit, of 1024 bytes, exceeded while decompressing message",
@@ -367,7 +305,6 @@ fn transport_validation_and_local_limit_classification_do_not_change_quota_polic
         .unwrap()
         .to_string()
         .contains("grpc-max-message-bytes=1024"));
-    assert_eq!(classify_fetch_error(&status.into()), FetchErrorKind::Fatal);
     assert!(fatal_status_error(&tonic::Status::resource_exhausted(
         "billable egress bytes quota exceeded"
     ))

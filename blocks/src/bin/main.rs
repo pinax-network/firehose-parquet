@@ -2,14 +2,8 @@ use anyhow::{anyhow, Context, Result};
 use arrow::record_batch::RecordBatch;
 use clap::{Args, Parser};
 use firehose_parquet::cli::{
-    build_config, init_tracing, list_partitions_from_index, load_env_file,
-    parse_partition_build_types, parse_partition_shard_strategy, partitions_index_path_in,
-    read_verified_partitions_index_at, resolve_cursor_template, resolve_output_root,
-    resolve_partition_command, resolve_s3_output_root, shard_partitions_from_index,
-    validate_partitions_index, validate_s3_output_credentials, write_verified_partitions_index,
-    AwsConfig, BuildArgs, Commands, CursorTemplateContext, PartitionBoundsRequest,
-    PartitionBuildResult, PartitionBuildRow, PartitionBuildType, PartitionListRequest,
-    PartitionResolveOptions, PartitionShardRequest, PartitionValidateRequest, PartitionsCommands,
+    build_config, init_tracing, load_env_file, resolve_output_root, validate_s3_output_credentials,
+    AwsConfig, BuildArgs, Commands,
 };
 use firehose_parquet::config::{BlockMetadata, Compression, Config};
 use firehose_parquet::cursor::{CursorLocation, CursorState};
@@ -17,25 +11,20 @@ use firehose_parquet::dataset_lock::DatasetOwnership;
 use firehose_parquet::encode::EncodeBytes;
 use firehose_parquet::flush::{FlushSizing, MapperBufferEstimate, SizeFlushTrigger};
 use firehose_parquet::grpc::{
-    classify_fetch_error, is_shutdown_error, unless_shutdown, CancellationToken, EndpointInfo,
-    FetchErrorKind, FirehoseClient, ShutdownRequested,
+    is_shutdown_error, unless_shutdown, CancellationToken, EndpointInfo, FirehoseClient,
+    ShutdownRequested,
 };
 use firehose_parquet::ingest::{
-    declare_inventory, ingestion_mutation_scopes, load_authoritative_resume,
-    prepare_partitions_index_write, IngestionSession, MapperSemantics, CURSOR_OVERRIDE_REFUSED,
+    declare_inventory, ingestion_mutation_scopes, load_authoritative_resume, IngestionSession,
+    MapperSemantics, CURSOR_OVERRIDE_REFUSED, SOLANA_GENESIS_ROUTING_SECONDS,
 };
 use firehose_parquet::metrics;
 use firehose_parquet::networks::{resolve_network_endpoint, EndpointSource};
-use firehose_parquet::partition_index::{
-    append_verified_extension, is_transient_partition_error, scan_time_index, IndexRoutingPolicy,
-    PartitionCoverage, PartitionSpanProof, RoutingWitness, VerifiedPartitionIndex,
-    VerifiedPartitionSpan, INDEX_FORMAT_VERSION,
-};
 use firehose_parquet::traits::{fork_step_name, BlockIdentity, BlockMapper, StreamEvent};
 use firehose_parquet::writer::ParquetFileMetadata;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tracing::{debug, info, warn};
@@ -46,29 +35,6 @@ use blocks::chain::{ChainKind, ChainProfile, ExtendedOutput, MapperOptions};
 mod chain_profile_tests;
 mod ingestion;
 use ingestion::run_ingestion;
-
-fn print_partition_coverage(coverage: Option<&PartitionCoverage>) {
-    match coverage {
-        Some(coverage) => {
-            println!(
-                "coverage:         [{}, {}) (finalized snapshot)",
-                coverage.start_block, coverage.stop_block
-            );
-            println!("finalized_block:  {}", coverage.finalized.block_num);
-            println!("finalized_id:     {}", coverage.finalized.block_id);
-            println!("routing_policy:   {:?}", coverage.routing_policy);
-        }
-        None => println!("coverage:         unknown (legacy index; rebuild before resolving)"),
-    }
-}
-
-fn partition_completeness(complete: Option<bool>) -> &'static str {
-    match complete {
-        Some(true) => "complete",
-        Some(false) => "incomplete",
-        None => "unknown",
-    }
-}
 
 /// Supported block types.
 const BLOCK_TYPES: &[&str] = &[
@@ -89,7 +55,7 @@ const WITHOUT_VOTES_NON_SOLANA_WARNING: &str =
     after_long_help = "\
 Primary workflow:
   Use `fireparq build` to run the ingestion pipeline.
-  Utility workflows live under subcommands such as `partitions`, `scan`, `inspect`, `validate`, and `verify`.
+  Utility workflows live under subcommands such as `scan`, `inspect`, `validate`, and `verify`.
 
 Examples:
   # Run a bounded historical ingestion
@@ -367,10 +333,6 @@ fn endpoint_uses_tron_style_evm_profile(endpoint_info: &Option<EndpointInfo>) ->
     })
 }
 
-fn chain_uses_tron_style_evm_profile(chain: &str, endpoint_info: &Option<EndpointInfo>) -> bool {
-    is_tron_style_chain_name(chain) || endpoint_uses_tron_style_evm_profile(endpoint_info)
-}
-
 /// A known family's output encoding contract wins over the endpoint's
 /// block-id encoding hint; an unknown family uses the hint, then hex.
 fn resolve_auto_encode_bytes(
@@ -608,8 +570,6 @@ fn build_cursor_file_metadata(
     meta
 }
 
-use firehose_parquet::partition_index::SOLANA_GENESIS_TIMESTAMP;
-
 /// Whether blocks of this family route by the last known block time: every
 /// table is partitioned by date, and these families may omit block times.
 fn use_last_known_timestamp_partition_routing(block_type: ChainKind) -> bool {
@@ -744,7 +704,7 @@ impl TimestampRouting {
             enabled,
             last_anchor: enabled.then_some(TimestampAnchor {
                 block_num: 0,
-                timestamp: SOLANA_GENESIS_TIMESTAMP,
+                timestamp: SOLANA_GENESIS_ROUTING_SECONDS,
             }),
         }
     }
@@ -871,131 +831,6 @@ fn update_mapper_buffer_metrics(
 
 fn should_emit_progress_log(counter: u64) -> bool {
     counter > 0 && counter % 100 == 0
-}
-
-fn infer_partitions_block_type(
-    chain: &str,
-    endpoint_info: &Option<EndpointInfo>,
-) -> Option<ChainKind> {
-    ChainKind::infer_from_chain_names(
-        std::iter::once(chain).chain(endpoint_chain_names(endpoint_info)),
-    )
-}
-
-/// Validate that existing partitions rows match current build parameters.
-/// Prevents mixing chains, partition types, or block range sizes.
-fn validate_existing_partitions_params(
-    existing_rows: &[PartitionBuildRow],
-    chain: &str,
-    partition_type: PartitionBuildType,
-    block_range_size: Option<u64>,
-) -> Result<()> {
-    // Validate chain consistency
-    for row in existing_rows {
-        if let Some(ref existing_chain) = row.chain {
-            if existing_chain != chain {
-                return Err(anyhow!(
-                    "existing partitions.parquet was built for chain '{}' but current resolved chain is '{}'; \
-                     cannot mix chains in the same partitions file",
-                    existing_chain,
-                    chain
-                ));
-            }
-        }
-    }
-
-    // Validate partition type consistency
-    let current_pt = partition_type.as_str();
-    for row in existing_rows {
-        if row.partition_type != current_pt {
-            return Err(anyhow!(
-                "existing partitions.parquet uses partition type '{}' but current --partition is '{}'; \
-                 cannot mix partition types in the same file",
-                row.partition_type,
-                current_pt
-            ));
-        }
-    }
-
-    // Validate block_range_size consistency (when block_range)
-    if let Some(brs) = block_range_size {
-        for row in existing_rows {
-            if row.partition_interval_seconds > 0 && row.partition_interval_seconds != brs as i64 {
-                return Err(anyhow!(
-                    "existing partitions.parquet uses block_range_size={} but current --block-range-size is {}; \
-                     cannot change block range size for an existing partitions file",
-                    row.partition_interval_seconds,
-                    brs
-                ));
-            }
-        }
-    }
-
-    Ok(())
-}
-
-fn build_partitions_file_metadata(
-    endpoint: &str,
-    chain: &str,
-    partition: &str,
-    compression: Compression,
-    endpoint_info: &Option<EndpointInfo>,
-    block_range_size: Option<u64>,
-) -> ParquetFileMetadata {
-    let inferred_block_type = infer_partitions_block_type(chain, endpoint_info);
-    let tron_style_evm_profile = chain_uses_tron_style_evm_profile(chain, endpoint_info);
-    let encoding =
-        resolve_auto_encode_bytes(inferred_block_type, endpoint_info, tron_style_evm_profile);
-
-    let mut meta = ParquetFileMetadata::new();
-    add_common_file_metadata(
-        &mut meta,
-        inferred_block_type,
-        Some(&encoding),
-        endpoint,
-        endpoint_info,
-    );
-    if let Some(info) = endpoint_info {
-        if !info.chain_name.is_empty() {
-            // already set by `add_common_file_metadata`
-        } else {
-            meta.add("firehose-parquet.chain_name", chain);
-        }
-    } else {
-        meta.add("firehose-parquet.chain_name", chain);
-    }
-    meta.add("firehose-parquet.partition", partition);
-    meta.add(
-        "firehose-parquet.block_range_size",
-        block_range_size.unwrap_or(0).to_string(),
-    );
-    meta.add("firehose-parquet.compression", compression.to_string());
-    meta
-}
-
-fn log_existing_partitions_index_state(
-    partitions_index: &str,
-    existing_rows: &[PartitionBuildRow],
-    overwrite: bool,
-) {
-    if overwrite {
-        info!(
-            partitions_index = %partitions_index,
-            "overwrite requested; ignoring any existing partitions index until the next successful write"
-        );
-    } else if let Some(existing_frontier) = existing_rows.iter().map(|row| row.stop_block).max() {
-        info!(
-            partitions_index = %partitions_index,
-            existing_rows = existing_rows.len(),
-            existing_frontier,
-            "loaded existing partitions index"
-        );
-    } else {
-        info!(
-            partitions_index = %partitions_index,
-            "no existing partitions index found; starting with a fresh canonical index"
-        );
-    }
 }
 
 /// Parse `--block-type`; `None` is `auto`.
@@ -1165,38 +1000,7 @@ fn ensure_bounded_stream_reached_stop(stop_block: u64, last_block_num: Option<u6
     ))
 }
 
-fn validate_block_range_alignment(
-    explicit_start_block: Option<u64>,
-    effective_start_block: Option<u64>,
-    stop_block: Option<u64>,
-    block_range_size: u64,
-) -> Result<()> {
-    if let Some(start_block) = explicit_start_block {
-        if start_block % block_range_size != 0 {
-            return Err(anyhow!(
-                "--start-block must align to --block-range-size ({block_range_size}) when --partition block_range; got {start_block}"
-            ));
-        }
-    }
-
-    if let Some(stop_block) = stop_block {
-        let effective_start_block = effective_start_block.expect("validated by caller");
-        if stop_block < effective_start_block
-            || stop_block
-                .saturating_sub(effective_start_block)
-                .rem_euclid(block_range_size)
-                != 0
-        {
-            return Err(anyhow!(
-                "--stop-block must align to the effective start block ({effective_start_block}) in --block-range-size ({block_range_size}) increments when --partition block_range; got {stop_block}"
-            ));
-        }
-    }
-
-    Ok(())
-}
-
-/// Validate the effective cursor after any template expansion, before startup I/O.
+/// Validate the effective cursor before startup I/O.
 fn validate_cursor_storage(config: &Config) -> Result<()> {
     firehose_parquet::s3::validate_output_bucket(
         config.output.to_string_lossy().as_ref(),
@@ -1262,804 +1066,7 @@ fn load_existing_cursor(
     }
 }
 
-async fn run_partitions_build(
-    endpoint: &str,
-    grpc: firehose_parquet::config::GrpcConfig,
-    network: Option<&str>,
-    api_key_envvar: Option<&str>,
-    api_token_envvar: Option<&str>,
-    start_block: Option<u64>,
-    stop_block: Option<u64>,
-    live: bool,
-    poll_interval_secs: u64,
-    partition_types_spec: &str,
-    block_range_size: Option<u64>,
-    compression: Compression,
-    output: Option<&str>,
-    s3_bucket: Option<&str>,
-    resume: bool,
-    overwrite: bool,
-    aws: &AwsConfig,
-) -> Result<PartitionBuildResult> {
-    const PARTITIONS_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
-    if !live && stop_block.is_none() {
-        return Err(anyhow!("--stop-block is required unless --live is set"));
-    }
-    if live && stop_block.is_some() {
-        return Err(anyhow!("--stop-block is incompatible with --live"));
-    }
-    if live && poll_interval_secs == 0 {
-        return Err(anyhow!(
-            "--poll-interval-secs must be greater than 0 when --live is set"
-        ));
-    }
-
-    let partition_types = parse_partition_build_types(partition_types_spec)?;
-    let partition_type = partition_types[0];
-    let partition_label = partition_type.to_string();
-
-    // Validate block_range_size requirement
-    if partition_type == PartitionBuildType::BlockRange && block_range_size.is_none() {
-        return Err(anyhow!(
-            "--block-range-size is required when --partition block_range"
-        ));
-    }
-    if partition_type != PartitionBuildType::BlockRange && block_range_size.is_some() {
-        return Err(anyhow!(
-            "--block-range-size is only valid when --partition block_range"
-        ));
-    }
-    validate_block_range_bounds(partition_type, start_block, stop_block, block_range_size)?;
-
-    let output_root = resolve_s3_output_root(output, s3_bucket)?;
-    validate_s3_output_credentials(
-        &output_root,
-        aws.aws_access_key_id.as_deref(),
-        aws.aws_secret_access_key.as_deref(),
-    )?;
-
-    let credentials =
-        firehose_parquet::auth::resolve_credentials(endpoint, api_key_envvar, api_token_envvar)?;
-    let base_config = Config {
-        endpoint: endpoint.to_string(),
-        grpc,
-        api_key: credentials.api_key,
-        jwt_token: credentials.jwt_token,
-        start_block,
-        stop_block,
-        cursor_path: None,
-        output: PathBuf::from(&output_root),
-        flush_rows: None,
-        flush_blocks: None,
-        flush_bytes: 0,
-        flush_memory_bytes: firehose_parquet::config::DEFAULT_FLUSH_MEMORY_BYTES,
-        flush_interval_secs: None,
-        flush_concurrency: firehose_parquet::config::FlushConcurrency::default(),
-        compression,
-        final_blocks_only: true,
-        dry_run: false,
-        aws_access_key_id: aws.aws_access_key_id.clone(),
-        aws_secret_access_key: aws.aws_secret_access_key.clone(),
-        aws_session_token: aws.aws_session_token.clone(),
-        aws_region: aws.aws_region.clone(),
-        aws_endpoint_url: aws.aws_endpoint_url.clone(),
-        s3_bucket: s3_bucket.map(str::to_string),
-        cache_control: None,
-        metrics_port: None,
-        stream_idle_timeout_secs: None,
-        reconnect_stall_timeout_secs: None,
-    };
-
-    let shutdown = CancellationToken::new();
-    let _signal_task = spawn_partitions_shutdown_handler(shutdown.clone());
-    let info_client = FirehoseClient::new(base_config.clone())?;
-    unless_shutdown(
-        &shutdown,
-        ensure_endpoint_available(&info_client, endpoint, network),
-    )
-    .await??;
-    let endpoint_info = Some(unless_shutdown(&shutdown, info_client.info()).await??);
-    let chain = endpoint_info
-        .as_ref()
-        .map(|info| info.chain_name.clone())
-        .filter(|name| !name.is_empty())
-        .ok_or_else(|| {
-            anyhow!(
-                "partitions build requires endpoint info with chain_name; the legacy --chain override has been removed"
-            )
-        })?;
-
-    let partitions_file_metadata = build_partitions_file_metadata(
-        endpoint,
-        &chain,
-        &partition_label,
-        compression,
-        &endpoint_info,
-        block_range_size,
-    );
-    // The same dataset root as `build --output`: the index and the default
-    // cursor mirror used to infer --start-block both live in its `_fireparq/`
-    // directory.
-    let dataset_root = resolve_output_root(&output_root, &chain)?;
-    let partitions_index = partitions_index_path_in(&dataset_root);
-
-    // Prove the requested bound before acquiring remote ownership or reading
-    // an existing index. No failed probe can create or replace an index.
-    let initial_finalized = info_client
-        .finalized_anchor(PARTITIONS_PROBE_TIMEOUT, &shutdown)
-        .await?;
-    if let Some(stop) = stop_block {
-        anyhow::ensure!(
-            stop <= initial_finalized.exclusive_stop()?,
-            "--stop-block {stop} exceeds proven finalized coverage ending at {}",
-            initial_finalized.exclusive_stop()?
-        );
-    }
-    info!(
-        output = %firehose_parquet::cli::display_destination(&dataset_root),
-        partitions_index = %firehose_parquet::cli::display_destination(&partitions_index),
-        "resolved partition index destination"
-    );
-    let ownership = prepare_partitions_index_write(&dataset_root, &partitions_index, aws).await?;
-    let mut snapshot = load_existing_verified_partitions_index(&partitions_index, aws, overwrite)?;
-    let existing_rows = snapshot
-        .as_ref()
-        .map(|index| {
-            index
-                .spans
-                .iter()
-                .map(|span| span.row.clone())
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
-    log_existing_partitions_index_state(&partitions_index, &existing_rows, overwrite);
-    ensure_existing_partitions_index_mode(
-        &partitions_index,
-        &existing_rows,
-        live,
-        resume,
-        overwrite,
-    )?;
-    if !existing_rows.is_empty() {
-        validate_existing_partitions_params(
-            &existing_rows,
-            &chain,
-            partition_type,
-            block_range_size,
-        )?;
-    }
-    let policy = if partition_type == PartitionBuildType::BlockRange {
-        IndexRoutingPolicy::BlockNumber
-    } else if endpoint_chain_has(&endpoint_info, has_nullable_timestamps) {
-        IndexRoutingPolicy::SolanaPriorTimestamp
-    } else {
-        IndexRoutingPolicy::CanonicalTimestamp
-    };
-    if let Some(index) = &snapshot {
-        anyhow::ensure!(
-            index.coverage.routing_policy == policy,
-            "existing index routing policy differs from this endpoint"
-        );
-    }
-    let resumed_from_block = snapshot.as_ref().map(|index| index.coverage.stop_block);
-    let effective_start_block = resolve_partitions_build_start_block(
-        resumed_from_block,
-        start_block,
-        live,
-        || {
-            let cursor = CursorLocation::resolve(
-                &dataset_root,
-                firehose_parquet::artifacts::DEFAULT_CURSOR_MIRROR,
-                |bucket| Ok(Arc::new(aws.build_read_client(bucket)?)),
-            )?;
-            Ok(cursor
-                .load()
-                .context("reading the default cursor mirror _fireparq/cursor.parquet to infer --start-block")?
-                .map(|cursor| {
-                    cursor
-                        .last_block_num
-                        .checked_add(1)
-                        .context("cursor frontier overflows block range")
-                })
-                .transpose()?)
-        },
-        endpoint_info
-            .as_ref()
-            .map(|info| info.first_streamable_block_num),
-    )?;
-    if snapshot.is_none() {
-        if let Some(stop) = stop_block {
-            anyhow::ensure!(
-                effective_start_block < stop,
-                "--stop-block must exceed the effective start block"
-            );
-        }
-    }
-    info!(chain = %chain, partition = %partition_label, effective_start_block, requested_stop_block = stop_block,
-        live, resumed = snapshot.is_some(), "building exact finalized partition coverage");
-    let probe_counter = AtomicU64::new(0);
-    let mut initial_finalized = Some(initial_finalized);
-    // Consecutive transient live failures (head checks or scans) since the last
-    // successful iteration; drives a bounded exponential retry delay.
-    let mut live_failures = 0_u32;
-    loop {
-        if shutdown.is_cancelled() {
-            if !live {
-                return Err(ShutdownRequested.into());
-            }
-            break;
-        }
-        let finalized = match initial_finalized.take() {
-            Some(anchor) => anchor,
-            None => match info_client
-                .finalized_anchor(PARTITIONS_PROBE_TIMEOUT, &shutdown)
-                .await
-            {
-                Ok(anchor) => anchor,
-                Err(error) if is_shutdown_error(&error) => break,
-                Err(error) if live && is_transient_partition_error(&error) => {
-                    live_failures = live_failures.saturating_add(1);
-                    let delay = live_partition_retry_delay(poll_interval_secs, live_failures);
-                    warn!(error = %format!("{error:#}"), consecutive_failures = live_failures,
-                        retry_in_secs = delay.as_secs(),
-                        "finalized head check failed; retaining the previous verified snapshot");
-                    if unless_shutdown(&shutdown, tokio::time::sleep(delay))
-                        .await
-                        .is_err()
-                    {
-                        break;
-                    }
-                    continue;
-                }
-                Err(error) => return Err(error),
-            },
-        };
-        let frontier = snapshot
-            .as_ref()
-            .map(|index| index.coverage.stop_block)
-            .unwrap_or(effective_start_block);
-        let stop = stop_block.unwrap_or(finalized.exclusive_stop()?);
-        anyhow::ensure!(
-            stop <= finalized.exclusive_stop()?,
-            "requested stop exceeds the proven finalized range"
-        );
-        if let Some(previous) = &snapshot {
-            anyhow::ensure!(
-                finalized.block_num >= previous.coverage.finalized.block_num,
-                "endpoint finalized anchor moved behind the existing verified snapshot"
-            );
-            anyhow::ensure!(
-                finalized.block_num != previous.coverage.finalized.block_num
-                    || finalized.block_id == previous.coverage.finalized.block_id,
-                "endpoint contradicts the stored finalized anchor identity"
-            );
-        }
-        if frontier < stop {
-            let extension = if partition_type == PartitionBuildType::BlockRange {
-                unless_shutdown(
-                    &shutdown,
-                    build_verified_block_range_index(
-                        &info_client,
-                        &chain,
-                        frontier,
-                        stop,
-                        block_range_size.expect("validated above"),
-                        finalized,
-                        PARTITIONS_PROBE_TIMEOUT,
-                        &probe_counter,
-                    ),
-                )
-                .await
-                .and_then(|result| result)
-            } else {
-                let parent = snapshot.as_ref().map(|index| RoutingWitness {
-                    block: index
-                        .coverage
-                        .last_observed
-                        .clone()
-                        .expect("validated time index"),
-                    timestamp: index
-                        .coverage
-                        .last_routing_timestamp
-                        .expect("validated routing timestamp"),
-                });
-                scan_time_index(
-                    &info_client,
-                    chain.clone(),
-                    partition_type,
-                    frontier,
-                    stop,
-                    finalized,
-                    policy.clone(),
-                    parent,
-                    PARTITIONS_PROBE_TIMEOUT,
-                    &shutdown,
-                )
-                .await
-            };
-            let extension = match extension {
-                Ok(value) => value,
-                Err(error) if live && is_shutdown_error(&error) => break,
-                // A stalled traversal message, exhausted boundary probes or a
-                // transport failure must not end a live run: the last published
-                // snapshot is kept and the scan restarts from its frontier.
-                Err(error) if live && is_transient_partition_error(&error) => {
-                    live_failures = live_failures.saturating_add(1);
-                    let delay = live_partition_retry_delay(poll_interval_secs, live_failures);
-                    warn!(error = %format!("{error:#}"), consecutive_failures = live_failures,
-                        retry_in_secs = delay.as_secs(), frontier, stop,
-                        "partition scan failed; retaining the previous verified snapshot");
-                    if unless_shutdown(&shutdown, tokio::time::sleep(delay))
-                        .await
-                        .is_err()
-                    {
-                        break;
-                    }
-                    continue;
-                }
-                Err(error) => return Err(error),
-            };
-            let next = match snapshot.take() {
-                Some(previous) => append_verified_extension(previous, extension)?,
-                None => extension,
-            };
-            ownership.revalidate_local_paths()?;
-            write_verified_partitions_index(
-                &partitions_index,
-                &next,
-                compression,
-                Some(aws),
-                Some(&partitions_file_metadata),
-            )?;
-            info!(
-                start_block = next.coverage.start_block,
-                stop_block = next.coverage.stop_block,
-                finalized_block = next.coverage.finalized.block_num,
-                spans = next.spans.len(),
-                incomplete_spans = next
-                    .spans
-                    .iter()
-                    .filter(|span| !span.proof.complete())
-                    .count(),
-                "published verified partition snapshot"
-            );
-            snapshot = Some(next);
-        }
-        live_failures = 0;
-        if !live {
-            break;
-        }
-        if unless_shutdown(
-            &shutdown,
-            tokio::time::sleep(Duration::from_secs(poll_interval_secs)),
-        )
-        .await
-        .is_err()
-        {
-            break;
-        }
-    }
-    // Reads may be cancelled without an in-flight publication: writes above
-    // finish synchronously before this release and retain errors as fatal.
-    ownership.release().await?;
-    Ok(PartitionBuildResult {
-        partitions_index,
-        chain,
-        partition: partition_label,
-        row_count: snapshot.as_ref().map_or(0, |index| index.spans.len()),
-        start_block: snapshot
-            .as_ref()
-            .map_or(effective_start_block, |index| index.coverage.start_block),
-        stop_block: snapshot
-            .as_ref()
-            .map_or(effective_start_block, |index| index.coverage.stop_block),
-        resumed: resumed_from_block.is_some(),
-        resumed_from_block,
-        coverage: snapshot.map(|index| index.coverage),
-    })
-}
-
-struct PartitionsSignalTask(tokio::task::JoinHandle<()>);
-impl Drop for PartitionsSignalTask {
-    fn drop(&mut self) {
-        self.0.abort();
-    }
-}
-
-fn spawn_partitions_shutdown_handler(shutdown: CancellationToken) -> PartitionsSignalTask {
-    let mut signals = ShutdownSignals::install();
-    PartitionsSignalTask(tokio::spawn(async move {
-        signals.next().await;
-        info!("shutdown requested; retaining the last verified partition snapshot");
-        shutdown.cancel();
-        signals.next().await;
-        warn!("second shutdown signal received; an in-flight index write may be interrupted");
-        std::process::exit(130);
-    }))
-}
-
-fn load_existing_verified_partitions_index(
-    path: &str,
-    aws: &AwsConfig,
-    overwrite: bool,
-) -> Result<Option<VerifiedPartitionIndex>> {
-    if overwrite {
-        return Ok(None);
-    }
-    // Exact destination only: never the read-only S3_BUCKET shorthand (#617).
-    match read_verified_partitions_index_at(path, Some(aws)) {
-        Ok(index) => Ok(Some(index)),
-        Err(error)
-            if error.chain().any(|cause| {
-                cause
-                    .downcast_ref::<std::io::Error>()
-                    .is_some_and(|error| error.kind() == std::io::ErrorKind::NotFound)
-                    || cause
-                        .downcast_ref::<object_store::Error>()
-                        .is_some_and(|error| matches!(error, object_store::Error::NotFound { .. }))
-            }) =>
-        {
-            Ok(None)
-        }
-        Err(error) => Err(error),
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn build_verified_block_range_index(
-    client: &FirehoseClient,
-    chain: &str,
-    start: u64,
-    stop: u64,
-    size: u64,
-    finalized: firehose_parquet::grpc::FinalizedAnchor,
-    timeout: Duration,
-    probes: &AtomicU64,
-) -> Result<VerifiedPartitionIndex> {
-    anyhow::ensure!(
-        size > 0 && size <= i64::MAX as u64,
-        "invalid block-range size"
-    );
-    anyhow::ensure!(
-        start < stop && stop <= finalized.exclusive_stop()?,
-        "block range exceeds finalized coverage"
-    );
-    let mut spans = Vec::new();
-    let mut current = start;
-    while current < stop {
-        let aligned = (current / size) * size;
-        let natural_stop = aligned
-            .checked_add(size)
-            .context("block-range boundary overflow")?;
-        let end = natural_stop.min(stop);
-        let mut row =
-            build_block_range_partition_row(client, chain, current, end, size, timeout, probes)
-                .await?;
-        row.partition_value = aligned.to_string();
-        row.partition_start_ts = aligned.to_string();
-        spans.push(VerifiedPartitionSpan {
-            row,
-            proof: PartitionSpanProof {
-                start_complete: current == aligned,
-                end_complete: end == natural_stop,
-                first_block: None,
-                routing_start_timestamp: None,
-            },
-        });
-        current = end;
-    }
-    let index = VerifiedPartitionIndex {
-        coverage: PartitionCoverage {
-            version: INDEX_FORMAT_VERSION,
-            start_block: start,
-            stop_block: stop,
-            finalized,
-            routing_policy: IndexRoutingPolicy::BlockNumber,
-            first_observed: None,
-            last_observed: None,
-            next_observed: None,
-            last_routing_timestamp: None,
-        },
-        spans,
-    };
-    index.validate()?;
-    Ok(index)
-}
-
-/// Refuse to modify an existing canonical index unless the caller chose how to treat it.
-///
-/// Without `--resume`, a bounded build would replace `partitions.parquet` with only the new
-/// range (time-based) or append rows that overlap the stored ones (block_range). Live mode
-/// always continues from the stored frontier, and `--overwrite` replaces the index.
-fn ensure_existing_partitions_index_mode(
-    partitions_index: &str,
-    existing_rows: &[PartitionBuildRow],
-    live: bool,
-    resume: bool,
-    overwrite: bool,
-) -> Result<()> {
-    if live || resume || overwrite || existing_rows.is_empty() {
-        return Ok(());
-    }
-
-    let start_block = existing_rows
-        .iter()
-        .map(|row| row.start_block)
-        .min()
-        .unwrap_or_default();
-    let frontier = existing_rows
-        .iter()
-        .map(|row| row.stop_block)
-        .max()
-        .unwrap_or_default();
-    Err(anyhow!(
-        "{partitions_index} already exists with {} rows covering blocks [{start_block}, {frontier}); pass --resume to extend it from block {frontier}, or --overwrite to replace it",
-        existing_rows.len()
-    ))
-}
-
-/// Resolve the first block a partitions build probes.
-///
-/// When an existing index is resumed (`--live`, or bounded `--resume`), its stored frontier
-/// is the only valid start: the default cursor mirror and endpoint metadata are not consulted,
-/// and an explicit `--start-block` past the frontier is rejected because the terminal row would
-/// otherwise be stretched across the unprobed blocks in between. A new index starts at the
-/// explicit `--start-block`, then the default cursor mirror `_fireparq/cursor.parquet` (bounded
-/// mode only), then the endpoint's first streamable block.
-fn resolve_partitions_build_start_block(
-    resume_frontier: Option<u64>,
-    explicit_start_block: Option<u64>,
-    live: bool,
-    cursor_start_block: impl FnOnce() -> Result<Option<u64>>,
-    first_streamable_block: Option<u64>,
-) -> Result<u64> {
-    if let Some(frontier) = resume_frontier {
-        return match explicit_start_block {
-            Some(start_block) if live && start_block != frontier => Err(anyhow!(
-                "--live resumes from existing partitions.parquet frontier {frontier}; explicit --start-block {start_block} does not match"
-            )),
-            Some(start_block) if start_block > frontier => Err(anyhow!(
-                "--start-block {start_block} is past the existing partitions.parquet frontier {frontier}; resuming would leave blocks [{frontier}, {start_block}) unindexed. Omit --start-block to resume from {frontier}, or pass --overwrite to rebuild the index from {start_block}"
-            )),
-            _ => Ok(frontier),
-        };
-    }
-
-    if let Some(start_block) = explicit_start_block {
-        return Ok(start_block);
-    }
-    if !live {
-        if let Some(start_block) = cursor_start_block()? {
-            return Ok(start_block);
-        }
-    }
-    first_streamable_block.ok_or_else(|| {
-        if live {
-            anyhow!(
-                "--start-block is required when --live has no existing partitions.parquet frontier and the endpoint does not expose first_streamable_block_num"
-            )
-        } else {
-            anyhow!(
-                "--start-block is required when no default cursor mirror (_fireparq/cursor.parquet) exists and the endpoint does not expose first_streamable_block_num"
-            )
-        }
-    })
-}
-
-fn validate_block_range_bounds(
-    partition_type: PartitionBuildType,
-    start_block: Option<u64>,
-    stop_block: Option<u64>,
-    block_range_size: Option<u64>,
-) -> Result<()> {
-    if partition_type != PartitionBuildType::BlockRange {
-        return Ok(());
-    }
-
-    let block_range_size = block_range_size.expect("validated by caller");
-    validate_block_range_alignment(start_block, Some(0), stop_block, block_range_size)
-}
-
-const PARTITIONS_PROBE_FETCH_MAX_ATTEMPTS: usize = 4;
-const PARTITIONS_PROBE_FETCH_INITIAL_BACKOFF: Duration = Duration::from_millis(250);
-/// Upper bound for the live partitions retry delay after repeated transient failures.
-const PARTITIONS_LIVE_RETRY_MAX_BACKOFF: Duration = Duration::from_secs(300);
-
-/// Delay before live retry `failures` (1-based): the poll interval doubled per
-/// consecutive failure, capped at [`PARTITIONS_LIVE_RETRY_MAX_BACKOFF`].
-fn live_partition_retry_delay(poll_interval_secs: u64, failures: u32) -> Duration {
-    let base = Duration::from_secs(poll_interval_secs.max(1));
-    let factor = 1_u32
-        .checked_shl(failures.saturating_sub(1).min(16))
-        .unwrap_or(u32::MAX);
-    base.saturating_mul(factor)
-        .min(PARTITIONS_LIVE_RETRY_MAX_BACKOFF.max(base))
-}
-
-/// Retry settings for one probe fetch.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct ProbeRetryPolicy {
-    max_attempts: usize,
-    /// Attempts before a "not found" answer is accepted as a missing block.
-    missing_attempts: usize,
-    initial_backoff: Duration,
-}
-
-impl ProbeRetryPolicy {
-    /// Default policy: a "not found" answer is confirmed by every retry before the
-    /// block is accepted as missing.
-    fn confirm_missing() -> Self {
-        Self {
-            max_attempts: PARTITIONS_PROBE_FETCH_MAX_ATTEMPTS,
-            missing_attempts: PARTITIONS_PROBE_FETCH_MAX_ATTEMPTS,
-            initial_backoff: PARTITIONS_PROBE_FETCH_INITIAL_BACKOFF,
-        }
-    }
-}
-
-/// Outcome of probing one block number.
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum ProbeFetch<T> {
-    /// The endpoint returned the requested block.
-    Found(T),
-    /// The endpoint has no block at this number, e.g. a skipped Solana slot.
-    Missing,
-    /// The number is past the chain head: the endpoint answered with an earlier block.
-    PastHead,
-}
-
-/// Probe one block number, retrying failures with exponential backoff.
-///
-/// Errors are classified with [`classify_fetch_error`]:
-/// - timeouts and transient errors are retried up to `policy.max_attempts`, then returned; they
-///   never count as a missing block, so a slow endpoint cannot make probing skip real blocks
-/// - "not found" is retried up to `policy.missing_attempts`, then reported as
-///   [`ProbeFetch::Missing`] (missing blocks, such as skipped Solana slots, are always skipped)
-/// - fatal errors (authentication, permissions) are returned immediately
-async fn retry_probe_fetch_with_policy<T, Op, Fut>(
-    block_num: u64,
-    context: &str,
-    policy: ProbeRetryPolicy,
-    probe_counter: &AtomicU64,
-    mut op: Op,
-) -> Result<ProbeFetch<T>>
-where
-    Op: FnMut() -> Fut,
-    Fut: std::future::Future<Output = Result<ProbeFetch<T>>>,
-{
-    let attempts = policy.max_attempts.max(1);
-    let missing_attempts = policy.missing_attempts.clamp(1, attempts);
-    let mut attempt = 1usize;
-    let mut backoff = policy.initial_backoff;
-
-    loop {
-        probe_counter.fetch_add(1, Ordering::Relaxed);
-        let error = match op().await {
-            Ok(outcome) => return Ok(outcome),
-            Err(error) => error,
-        };
-
-        let kind = classify_fetch_error(&error);
-        match kind {
-            FetchErrorKind::NotFound if attempt >= missing_attempts => {
-                debug!(
-                    block_num,
-                    context,
-                    attempts = attempt,
-                    error = %format!("{error:#}"),
-                    "probe found no block at this number; treating it as skipped"
-                );
-                return Ok(ProbeFetch::Missing);
-            }
-            FetchErrorKind::Fatal => {
-                return Err(error.context(format!(
-                    "{context}: probe fetch for block {block_num} failed"
-                )));
-            }
-            _ if attempt >= attempts => {
-                return Err(error.context(format!(
-                    "{context}: probe fetch for block {block_num} failed after {attempt} attempts"
-                )));
-            }
-            _ => {
-                warn!(
-                    block_num,
-                    context,
-                    attempt,
-                    max_attempts = attempts,
-                    kind = ?kind,
-                    retry_backoff_ms = backoff.as_millis() as u64,
-                    error = %format!("{error:#}"),
-                    "probe fetch failed; retrying"
-                );
-            }
-        }
-
-        tokio::time::sleep(backoff).await;
-        attempt = attempt.saturating_add(1);
-        backoff = backoff.saturating_mul(2);
-    }
-}
-
-/// Fetch one block number, mapping an answer for an earlier block to [`ProbeFetch::PastHead`].
-async fn probe_fetch_block(
-    client: &FirehoseClient,
-    block_num: u64,
-    wait_timeout: Option<Duration>,
-) -> Result<ProbeFetch<BlockIdentity>> {
-    match client.fetch_block_identity(block_num, wait_timeout).await? {
-        Some(block) if block.block_num < block_num => Ok(ProbeFetch::PastHead),
-        Some(block) if block.block_num == block_num => Ok(ProbeFetch::Found(block)),
-        Some(block) => Err(anyhow!(
-            "fetch for block {block_num} returned unexpected later block {}",
-            block.block_num
-        )),
-        None => Err(anyhow!(
-            "fetch for block {block_num} returned no block metadata"
-        )),
-    }
-}
-
-async fn probe_block_range_boundary_timestamp(
-    client: &FirehoseClient,
-    block_num: u64,
-    probe_timeout: Duration,
-    probe_counter: &AtomicU64,
-) -> Result<Option<i64>> {
-    // A missing boundary may have a nullable timestamp. Endpoint failures are
-    // not missing metadata and must never produce an apparently valid row.
-    let outcome = retry_probe_fetch_with_policy(
-        block_num,
-        "probing block-range boundary timestamp",
-        ProbeRetryPolicy::confirm_missing(),
-        probe_counter,
-        || probe_fetch_block(client, block_num, Some(probe_timeout)),
-    )
-    .await?;
-    Ok(match outcome {
-        ProbeFetch::Found(block) if block.timestamp != 0 => Some(block.timestamp),
-        ProbeFetch::Found(_) | ProbeFetch::Missing | ProbeFetch::PastHead => None,
-    })
-}
-
-async fn build_block_range_partition_row(
-    client: &FirehoseClient,
-    chain: &str,
-    boundary: u64,
-    partition_end: u64,
-    block_range_size: u64,
-    probe_timeout: Duration,
-    probe_counter: &AtomicU64,
-) -> Result<PartitionBuildRow> {
-    let start_time =
-        probe_block_range_boundary_timestamp(client, boundary, probe_timeout, probe_counter)
-            .await?;
-    let end_time = if partition_end > boundary + 1 {
-        probe_block_range_boundary_timestamp(
-            client,
-            partition_end.saturating_sub(1),
-            probe_timeout,
-            probe_counter,
-        )
-        .await?
-    } else {
-        start_time
-    };
-
-    Ok(PartitionBuildRow {
-        partition_type: "block_range".to_string(),
-        partition_interval_seconds: block_range_size as i64,
-        partition_start_ts: boundary.to_string(),
-        partition_value: boundary.to_string(),
-        start_block: boundary,
-        stop_block: partition_end,
-        start_time: start_time.map(format_probe_timestamp).transpose()?,
-        end_time: end_time.map(format_probe_timestamp).transpose()?,
-        chain: Some(chain.to_string()),
-    })
-}
-
-fn format_probe_timestamp(timestamp: i64) -> Result<String> {
+fn format_block_timestamp(timestamp: i64) -> Result<String> {
     let dt = time::OffsetDateTime::from_unix_timestamp(timestamp)
         .map_err(|err| anyhow!("invalid unix timestamp {timestamp}: {err}"))?;
     Ok(format!(
@@ -2074,9 +1081,9 @@ fn format_probe_timestamp(timestamp: i64) -> Result<String> {
 }
 
 // Progress logging must never turn an otherwise successful operation into an error.
-fn format_optional_probe_timestamp(timestamp: i64) -> Option<String> {
+fn format_optional_block_timestamp(timestamp: i64) -> Option<String> {
     (timestamp != 0).then(|| {
-        format_probe_timestamp(timestamp)
+        format_block_timestamp(timestamp)
             .unwrap_or_else(|_| format!("invalid unix timestamp {timestamp}"))
     })
 }
@@ -2097,10 +1104,6 @@ fn has_vote_transactions(profile: &ChainProfile) -> bool {
 
 fn has_unsupported_extended_output(profile: &ChainProfile) -> bool {
     profile.extended == ExtendedOutput::Unsupported
-}
-
-fn has_nullable_timestamps(profile: &ChainProfile) -> bool {
-    profile.nullable_timestamps
 }
 
 /// Whether `name` strictly identifies a family with `property` (see
@@ -2385,7 +1388,6 @@ fn env_file_notice_on_stderr(command: Option<&Commands>) -> bool {
         command,
         Some(
             Commands::Build(_)
-                | Commands::Partitions(PartitionsCommands::Build { .. })
                 | Commands::Verify { .. }
                 | Commands::Merge { .. }
                 | Commands::Truncate { .. }
@@ -2420,318 +1422,6 @@ async fn main() -> Result<()> {
                 run_ingestion(build_args, &cli.global).await?;
                 return Ok(());
             }
-            Commands::Partitions(subcommand) => match subcommand {
-                PartitionsCommands::Build {
-                    grpc,
-                    endpoint,
-                    network,
-                    api_key_envvar,
-                    api_token_envvar,
-                    start_block,
-                    stop_block,
-                    live,
-                    poll_interval_secs,
-                    partition,
-                    block_range_size,
-                    compression,
-                    output,
-                    s3_bucket,
-                    resume,
-                    overwrite,
-                    json,
-                    aws,
-                } => {
-                    init_tracing(&cli.global.log_level, cli.global.verbose);
-                    let compression = firehose_parquet::cli::parse_compression(compression)?;
-                    let aws = AwsConfig::from(aws);
-                    let resolved_endpoint = if let Some(endpoint) = endpoint.as_deref() {
-                        endpoint.to_string()
-                    } else if let Some(network) = network.as_deref() {
-                        let resolved = resolve_network_endpoint(network)?;
-                        resolved.endpoint
-                    } else {
-                        return Err(anyhow!("either --endpoint or --network is required"));
-                    };
-
-                    let result = run_partitions_build(
-                        &resolved_endpoint,
-                        grpc.config(),
-                        network.as_deref(),
-                        api_key_envvar.as_deref(),
-                        api_token_envvar.as_deref(),
-                        *start_block,
-                        *stop_block,
-                        *live,
-                        *poll_interval_secs,
-                        partition,
-                        *block_range_size,
-                        compression,
-                        output.as_deref(),
-                        s3_bucket.as_deref(),
-                        *resume,
-                        *overwrite,
-                        &aws,
-                    )
-                    .await?;
-
-                    if *json {
-                        println!("{}", serde_json::to_string_pretty(&result)?);
-                    } else {
-                        println!("partitions_index: {}", result.partitions_index);
-                        println!("chain:            {}", result.chain);
-                        println!("partition:        {}", result.partition);
-                        println!("row_count:        {}", result.row_count);
-                        println!("start_block:      {}", result.start_block);
-                        println!("stop_block:       {}", result.stop_block);
-                        println!("resumed:          {}", result.resumed);
-                        print_partition_coverage(result.coverage.as_ref());
-                        if let Some(resumed_from_block) = result.resumed_from_block {
-                            println!("resumed_from:     {}", resumed_from_block);
-                        }
-                    }
-
-                    return Ok(());
-                }
-                PartitionsCommands::Validate {
-                    partitions_index,
-                    partition_type,
-                    partition_chain,
-                    allow_gaps,
-                    json,
-                    aws,
-                } => {
-                    let request = PartitionValidateRequest {
-                        list: PartitionListRequest {
-                            index_path: partitions_index.clone(),
-                            partition_type: partition_type.clone(),
-                            chain: partition_chain.clone(),
-                            from: None,
-                            to: None,
-                            limit: usize::MAX,
-                        },
-                        allow_gaps: *allow_gaps,
-                    };
-                    let aws = AwsConfig::from(aws);
-                    let result = validate_partitions_index(&request, Some(&aws))?;
-                    for warning in &result.warnings {
-                        warn!("{warning}");
-                    }
-
-                    if *json {
-                        println!("{}", serde_json::to_string_pretty(&result)?);
-                    } else {
-                        println!("partitions_index: {}", result.partitions_index);
-                        println!("total_rows:       {}", result.total_rows);
-                        println!("issue_count:      {}", result.issue_count);
-                        println!("valid:            {}", result.valid);
-                        println!("incomplete_spans: {}", result.incomplete_spans);
-                        println!("unknown_spans:    {}", result.unknown_spans);
-                        print_partition_coverage(result.coverage.as_ref());
-                        for issue in &result.issues {
-                            let chain = issue.chain.as_deref().unwrap_or("<none>");
-                            println!(
-                                "- {:?} chain={} partition_type={} partition_value={} {}",
-                                issue.kind,
-                                chain,
-                                issue.partition_type,
-                                issue.partition_value,
-                                issue.message
-                            );
-                        }
-                    }
-
-                    if !result.valid {
-                        std::process::exit(1);
-                    }
-                    return Ok(());
-                }
-                PartitionsCommands::Shard {
-                    partitions_index,
-                    partition_type,
-                    partition_chain,
-                    from,
-                    to,
-                    shard_count,
-                    shard_index,
-                    strategy,
-                    json,
-                    aws,
-                } => {
-                    let list = PartitionListRequest {
-                        index_path: partitions_index.clone(),
-                        partition_type: partition_type.clone(),
-                        chain: partition_chain.clone(),
-                        from: from.clone(),
-                        to: to.clone(),
-                        limit: usize::MAX,
-                    };
-                    let request = PartitionShardRequest {
-                        list,
-                        shard_count: *shard_count,
-                        shard_index: *shard_index,
-                        strategy: parse_partition_shard_strategy(strategy)?,
-                    };
-                    let aws = AwsConfig::from(aws);
-                    let result = shard_partitions_from_index(&request, Some(&aws))?;
-
-                    if *json {
-                        println!("{}", serde_json::to_string_pretty(&result)?);
-                    } else {
-                        println!("partitions_index: {}", result.partitions_index);
-                        println!("shard_count:      {}", result.shard_count);
-                        println!("shard_index:      {}", result.shard_index);
-                        println!("strategy:         {:?}", result.strategy);
-                        println!("total_matches:    {}", result.total_matches);
-                        println!("returned_rows:    {}", result.returned_rows);
-                        print_partition_coverage(Some(&result.coverage));
-                        if !result.rows.is_empty() {
-                            println!();
-                            println!(
-                                "{:<15} {:<19} {:<19} {:>12} {:>12} {:<10} {:<16} {}",
-                                "partition_type",
-                                "partition_value",
-                                "partition_start_ts",
-                                "start_block",
-                                "stop_block",
-                                "span",
-                                "prior_context",
-                                "chain"
-                            );
-                            for row in result.rows {
-                                println!(
-                                    "{:<15} {:<19} {:<19} {:>12} {:>12} {:<10} {:<16} {}",
-                                    row.partition_type,
-                                    row.partition_value,
-                                    row.partition_start_ts,
-                                    row.start_block,
-                                    row.stop_block,
-                                    partition_completeness(row.complete),
-                                    match row.routing_context_required {
-                                        Some(true) => "required",
-                                        Some(false) => "independent",
-                                        None => "unknown",
-                                    },
-                                    row.chain.unwrap_or_default()
-                                );
-                            }
-                        }
-                    }
-
-                    return Ok(());
-                }
-                PartitionsCommands::Ls {
-                    partitions_index,
-                    partition_type,
-                    partition_chain,
-                    from,
-                    to,
-                    limit,
-                    json,
-                    aws,
-                } => {
-                    let request = PartitionListRequest {
-                        index_path: partitions_index.clone(),
-                        partition_type: partition_type.clone(),
-                        chain: partition_chain.clone(),
-                        from: from.clone(),
-                        to: to.clone(),
-                        limit: *limit,
-                    };
-                    let aws = AwsConfig::from(aws);
-                    let result = list_partitions_from_index(&request, Some(&aws))?;
-
-                    if *json {
-                        println!("{}", serde_json::to_string_pretty(&result)?);
-                    } else {
-                        println!("partitions_index: {}", result.partitions_index);
-                        println!("limit:            {}", result.limit);
-                        println!("total_matches:    {}", result.total_matches);
-                        println!("returned_rows:    {}", result.returned_rows);
-                        print_partition_coverage(result.coverage.as_ref());
-                        if !result.rows.is_empty() {
-                            println!();
-                            println!(
-                                "{:<15} {:<19} {:<19} {:>12} {:>12} {:<10} {:<16} {}",
-                                "partition_type",
-                                "partition_value",
-                                "partition_start_ts",
-                                "start_block",
-                                "stop_block",
-                                "span",
-                                "prior_context",
-                                "chain"
-                            );
-                            for row in result.rows {
-                                println!(
-                                    "{:<15} {:<19} {:<19} {:>12} {:>12} {:<10} {:<16} {}",
-                                    row.partition_type,
-                                    row.partition_value,
-                                    row.partition_start_ts,
-                                    row.start_block,
-                                    row.stop_block,
-                                    partition_completeness(row.complete),
-                                    match row.routing_context_required {
-                                        Some(true) => "required",
-                                        Some(false) => "independent",
-                                        None => "unknown",
-                                    },
-                                    row.chain.unwrap_or_default()
-                                );
-                            }
-                        }
-                    }
-
-                    return Ok(());
-                }
-                PartitionsCommands::Resolve {
-                    partitions_index,
-                    partition_type,
-                    partition_value,
-                    partition_chain,
-                    strict_single_chain,
-                    all_spans,
-                    json,
-                    aws,
-                } => {
-                    let request = PartitionBoundsRequest {
-                        index_path: partitions_index.clone(),
-                        partition_type: partition_type.clone(),
-                        partition_value: partition_value.clone(),
-                        chain: partition_chain.clone(),
-                    };
-                    let aws = AwsConfig::from(aws);
-                    let result = resolve_partition_command(
-                        request,
-                        Some(&aws),
-                        &PartitionResolveOptions {
-                            strict_single_chain: *strict_single_chain,
-                            all_spans: *all_spans,
-                        },
-                    )?;
-
-                    if *json {
-                        println!("{}", serde_json::to_string_pretty(&result)?);
-                    } else {
-                        println!("partitions_index: {}", result.partitions_index);
-                        println!("partition_type:   {}", result.partition_type);
-                        println!("partition_value:  {}", result.partition_value);
-                        print_partition_coverage(Some(&result.coverage));
-                        if let Some(chain) = result.partition_chain {
-                            println!("partition_chain:  {chain}");
-                        }
-                        println!(
-                            "start_block:      {}",
-                            result.start_block.expect("single span")
-                        );
-                        println!(
-                            "stop_block:       {}",
-                            result.stop_block.expect("single span")
-                        );
-                    }
-
-                    return Ok(());
-                }
-            },
             Commands::Scan {
                 path,
                 limit,
@@ -2889,7 +1579,6 @@ mod tests {
     use firehose_parquet::cursor::CursorLocation;
     use firehose_parquet::date_partition::DatePartition;
     use std::path::PathBuf;
-    use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
     use std::sync::Arc;
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -3330,7 +2019,7 @@ mod tests {
     }
 
     /// `build` resumes from `.fireparq-ingest/` authority, not from the optional
-    /// `cursor.parquet` mirror, and only `partitions build` probes missing blocks.
+    /// `cursor.parquet` mirror, and never probes missing blocks.
     #[test]
     fn test_root_and_build_help_describe_authoritative_resume() {
         let root = Cli::command().render_long_help().to_string();
@@ -3535,18 +2224,8 @@ mod tests {
     }
 
     #[test]
-    fn test_effective_s3_cursor_template_requires_complete_credentials() {
-        let cursor = resolve_cursor_template(
-            "s3://state/worker.parquet",
-            &CursorTemplateContext {
-                chain: None,
-                partition_type: None,
-                partition_value: None,
-                partition_from: None,
-                partition_to: None,
-            },
-        )
-        .unwrap();
+    fn test_effective_s3_cursor_requires_complete_credentials() {
+        let cursor = "s3://state/worker.parquet".to_string();
         for (key, secret) in [(None, None), (Some("key"), None), (None, Some("secret"))] {
             let config = Config {
                 output: "./local".into(),
@@ -3977,7 +2656,7 @@ mod tests {
         assert!(help.contains("authoritative state"));
         assert!(help.contains("first streamable block"));
         assert!(help.contains("When omitted, the build runs in live mode"));
-        // Only `partitions build` probes missing blocks.
+        // `build` never probes missing blocks.
         assert!(!help.contains("Missing blocks are skipped automatically"));
         assert!(!help.contains("--bootstrap-missing-genesis-timestamp"));
         assert!(!help.contains("--backfill-missing-timestamps"));
@@ -4034,37 +2713,23 @@ mod tests {
         assert!(rendered.contains("unexpected argument"));
     }
 
-    #[test]
-    fn test_partitions_build_help_omits_chain_override_flag() {
-        let help = command_help(&["fireparq", "partitions", "build", "--help"]);
-        assert!(!help.contains("--chain"));
-        assert!(help.contains("chainName"));
-        assert!(help.contains("Time spans traverse exact finalized ancestry"));
-        assert!(!help.contains("--skip-missing-blocks"));
-    }
-
-    /// `--output` is the only layout control of `build` and `partitions
-    /// build`: neither has a chain-directory flag or env var, and both help
-    /// texts document the opt-in `{chain}` placeholder with an example.
+    /// `--output` is the only layout control of `build`: it has no
+    /// chain-directory flag or env var, and its help documents the opt-in
+    /// `{chain}` placeholder with an example.
     #[test]
     fn test_output_is_the_only_layout_control_and_help_documents_chain() {
-        for name in ["build", "partitions"] {
-            let mut command = Cli::command();
-            let mut subcommand = command.find_subcommand_mut(name).unwrap().clone();
-            if name == "partitions" {
-                subcommand = subcommand.find_subcommand("build").unwrap().clone();
-            }
-            for argument in subcommand.get_arguments() {
-                let long = argument.get_long().unwrap_or_default();
-                let env = argument
-                    .get_env()
-                    .map(|env| env.to_string_lossy().into_owned())
-                    .unwrap_or_default();
-                assert!(
-                    !long.contains("chain-dir") && !env.contains("CHAIN_DIR"),
-                    "{name}: {long} {env}"
-                );
-            }
+        let command = Cli::command();
+        let build = command.find_subcommand("build").unwrap();
+        for argument in build.get_arguments() {
+            let long = argument.get_long().unwrap_or_default();
+            let env = argument
+                .get_env()
+                .map(|env| env.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            assert!(
+                !long.contains("chain-dir") && !env.contains("CHAIN_DIR"),
+                "{long} {env}"
+            );
         }
         let build = command_help(&["fireparq", "build", "--help"]);
         for snippet in [
@@ -4075,14 +2740,18 @@ mod tests {
         ] {
             assert!(build.contains(snippet), "{snippet}: {build}");
         }
-        let partitions = command_help(&["fireparq", "partitions", "build", "--help"]);
-        for snippet in [
-            "Resolved exactly like `build --output`",
-            "`s3://datasets/{chain}`",
-            "<root>/_fireparq/partitions.parquet",
-        ] {
-            assert!(partitions.contains(snippet), "{snippet}: {partitions}");
+    }
+
+    /// `partitions` and all of its subcommands are removed (#653).
+    #[test]
+    fn test_partitions_subcommand_is_removed() {
+        for subcommand in ["build", "ls", "validate", "resolve", "shard"] {
+            let err = Cli::try_parse_from(["fireparq", "partitions", subcommand])
+                .expect_err("partitions is not a subcommand");
+            assert_eq!(err.kind(), clap::error::ErrorKind::InvalidSubcommand);
         }
+        assert!(Cli::command().find_subcommand("partitions").is_none());
+        assert!(!command_help(&["fireparq", "--help"]).contains("partitions"));
     }
 
     #[test]
@@ -4203,6 +2872,7 @@ mod tests {
             ("--partitions-index", "./partitions.parquet"),
             ("--partition-from", "2015-07-30 14:00:00"),
             ("--partition-to", "2015-07-30 18:00:00"),
+            ("--cursor-template", "cursor/{chain}.parquet"),
         ] {
             let err = Cli::try_parse_from([
                 "fireparq",
@@ -4433,89 +3103,6 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_block_range_alignment_accepts_aligned_values() {
-        validate_block_range_alignment(Some(0), Some(0), Some(30_000_000), 10_000_000)
-            .expect("aligned block-range bounds should be accepted");
-    }
-
-    #[test]
-    fn test_validate_block_range_alignment_rejects_misaligned_stop_block() {
-        let err = validate_block_range_alignment(Some(0), Some(0), Some(30_000_001), 10_000_000)
-            .expect_err("misaligned stop block should fail");
-
-        assert_eq!(
-            err.to_string(),
-            "--stop-block must align to the effective start block (0) in --block-range-size (10000000) increments when --partition block_range; got 30000001"
-        );
-    }
-
-    #[test]
-    fn test_validate_block_range_alignment_accepts_implicit_start_block_anchor() {
-        validate_block_range_alignment(None, Some(9_820_210), Some(9_820_510), 100)
-            .expect("implicit start block should anchor block-range alignment");
-    }
-
-    #[test]
-    fn test_validate_block_range_alignment_rejects_misaligned_relative_stop_block() {
-        let err = validate_block_range_alignment(None, Some(9_820_210), Some(9_820_500), 100)
-            .expect_err("stop block misaligned to implicit anchor should fail");
-
-        assert_eq!(
-            err.to_string(),
-            "--stop-block must align to the effective start block (9820210) in --block-range-size (100) increments when --partition block_range; got 9820500"
-        );
-    }
-
-    #[test]
-    fn test_validate_block_range_bounds_accepts_aligned_values() {
-        validate_block_range_bounds(
-            PartitionBuildType::BlockRange,
-            Some(0),
-            Some(30_000_000),
-            Some(10_000_000),
-        )
-        .expect("aligned block-range bounds should be accepted");
-    }
-
-    #[test]
-    fn test_validate_block_range_bounds_rejects_misaligned_start_block() {
-        let err = validate_block_range_bounds(
-            PartitionBuildType::BlockRange,
-            Some(1),
-            Some(30_000_000),
-            Some(10_000_000),
-        )
-        .expect_err("misaligned start block should fail");
-
-        assert_eq!(
-            err.to_string(),
-            "--start-block must align to --block-range-size (10000000) when --partition block_range; got 1"
-        );
-    }
-
-    #[test]
-    fn test_validate_block_range_bounds_rejects_misaligned_stop_block() {
-        let err = validate_block_range_bounds(
-            PartitionBuildType::BlockRange,
-            Some(0),
-            Some(30_000_001),
-            Some(10_000_000),
-        )
-        .expect_err("misaligned stop block should fail");
-
-        assert_eq!(
-            err.to_string(),
-            "--stop-block must align to the effective start block (0) in --block-range-size (10000000) increments when --partition block_range; got 30000001"
-        );
-    }
-
-    #[test]
-    fn test_validate_block_range_bounds_ignores_non_block_range_partitions() {
-        validate_block_range_bounds(PartitionBuildType::Date, Some(1), Some(2), None)
-            .expect("non block-range partitions should not enforce alignment");
-    }
-
-    #[test]
     fn test_detect_block_type_evm() {
         assert_eq!(
             detect_block_type("type.googleapis.com/sf.ethereum.type.v2.Block").unwrap(),
@@ -4675,8 +3262,6 @@ mod tests {
             block_features: vec![],
         });
         assert!(endpoint_uses_tron_style_evm_profile(&ei));
-        assert!(chain_uses_tron_style_evm_profile("eth-mainnet", &ei));
-        assert!(chain_uses_tron_style_evm_profile("tron-evm", &None));
 
         let tron = Some(EndpointInfo {
             chain_name: "tron".to_string(),
@@ -4687,7 +3272,6 @@ mod tests {
             block_features: vec![],
         });
         assert!(endpoint_uses_tron_style_evm_profile(&tron));
-        assert!(chain_uses_tron_style_evm_profile("tron", &None));
     }
 
     #[test]
@@ -5157,7 +3741,7 @@ mod tests {
             )
             .expect("genesis anchor should route the first missing-timestamp block");
         assert_eq!(ready.identity.block_num, 0);
-        assert_eq!(ready.identity.timestamp, SOLANA_GENESIS_TIMESTAMP);
+        assert_eq!(ready.identity.timestamp, SOLANA_GENESIS_ROUTING_SECONDS);
     }
 
     #[test]
@@ -5209,7 +3793,7 @@ mod tests {
                 },
             )
             .expect("genesis anchor should route the first missing-timestamp block");
-        assert_eq!(routed.identity.timestamp, SOLANA_GENESIS_TIMESTAMP);
+        assert_eq!(routed.identity.timestamp, SOLANA_GENESIS_ROUTING_SECONDS);
     }
 
     #[test]
@@ -5365,7 +3949,6 @@ mod tests {
         });
 
         assert!(endpoint_chain_has(&ei, has_vote_transactions));
-        assert!(endpoint_chain_has(&ei, has_nullable_timestamps));
     }
 
     #[test]
@@ -5913,695 +4496,22 @@ mod tests {
         );
     }
 
-    fn probe_timeout_error(block_num: u64) -> anyhow::Error {
-        firehose_parquet::grpc::FetchTimeoutError {
-            block_num,
-            timeout: Duration::from_secs(5),
-        }
-        .into()
-    }
-
-    #[tokio::test]
-    async fn test_retry_probe_fetch_with_policy_retries_timeouts_until_success() {
-        let attempts = Arc::new(AtomicUsize::new(0));
-        let probe_counter = AtomicU64::new(0);
-        let result = retry_probe_fetch_with_policy(
-            42,
-            "testing probe retry",
-            ProbeRetryPolicy {
-                max_attempts: 3,
-                missing_attempts: 3,
-                initial_backoff: Duration::from_millis(0),
-            },
-            &probe_counter,
-            {
-                let attempts = Arc::clone(&attempts);
-                move || {
-                    let attempts = Arc::clone(&attempts);
-                    async move {
-                        let current = attempts.fetch_add(1, AtomicOrdering::SeqCst);
-                        if current < 2 {
-                            Err(probe_timeout_error(42))
-                        } else {
-                            Ok(ProbeFetch::Found(99_u64))
-                        }
-                    }
-                }
-            },
-        )
-        .await
-        .expect("retry should succeed");
-
-        assert_eq!(result, ProbeFetch::Found(99));
-        assert_eq!(attempts.load(AtomicOrdering::SeqCst), 3);
-        assert_eq!(probe_counter.load(Ordering::Relaxed), 3);
-    }
-
-    #[tokio::test]
-    async fn test_retry_probe_fetch_with_policy_retries_error_until_success() {
-        let attempts = Arc::new(AtomicUsize::new(0));
-        let probe_counter = AtomicU64::new(0);
-        let result = retry_probe_fetch_with_policy(
-            42,
-            "testing probe retry",
-            ProbeRetryPolicy {
-                max_attempts: 3,
-                missing_attempts: 3,
-                initial_backoff: Duration::from_millis(0),
-            },
-            &probe_counter,
-            {
-                let attempts = Arc::clone(&attempts);
-                move || {
-                    let attempts = Arc::clone(&attempts);
-                    async move {
-                        let current = attempts.fetch_add(1, AtomicOrdering::SeqCst);
-                        if current < 2 {
-                            Err(anyhow!("transient failure"))
-                        } else {
-                            Ok(ProbeFetch::Found(77_u64))
-                        }
-                    }
-                }
-            },
-        )
-        .await
-        .expect("retry should succeed");
-
-        assert_eq!(result, ProbeFetch::Found(77));
-        assert_eq!(attempts.load(AtomicOrdering::SeqCst), 3);
-        assert_eq!(probe_counter.load(Ordering::Relaxed), 3);
-    }
-
-    #[tokio::test]
-    async fn test_retry_probe_fetch_with_policy_exhausts_errors() {
-        let attempts = Arc::new(AtomicUsize::new(0));
-        let probe_counter = AtomicU64::new(0);
-        let err = retry_probe_fetch_with_policy(
-            42,
-            "testing probe retry",
-            ProbeRetryPolicy {
-                max_attempts: 3,
-                missing_attempts: 3,
-                initial_backoff: Duration::from_millis(0),
-            },
-            &probe_counter,
-            {
-                let attempts = Arc::clone(&attempts);
-                move || {
-                    let attempts = Arc::clone(&attempts);
-                    async move {
-                        attempts.fetch_add(1, AtomicOrdering::SeqCst);
-                        Err::<ProbeFetch<u64>, _>(anyhow!("still failing"))
-                    }
-                }
-            },
-        )
-        .await
-        .expect_err("retries should exhaust");
-
-        assert!(err.to_string().contains("failed after 3 attempts"));
-        assert_eq!(attempts.load(AtomicOrdering::SeqCst), 3);
-        assert_eq!(probe_counter.load(Ordering::Relaxed), 3);
-    }
-
-    #[tokio::test]
-    async fn test_retry_probe_fetch_with_policy_fails_fast_on_fatal_errors() {
-        let probe_counter = AtomicU64::new(0);
-        let err = retry_probe_fetch_with_policy(
-            42,
-            "testing probe retry",
-            ProbeRetryPolicy {
-                max_attempts: 3,
-                missing_attempts: 3,
-                initial_backoff: Duration::from_millis(0),
-            },
-            &probe_counter,
-            || async {
-                Err::<ProbeFetch<u64>, _>(tonic::Status::unauthenticated("bad token").into())
-            },
-        )
-        .await
-        .expect_err("authentication errors cannot be retried away");
-
-        assert_eq!(classify_fetch_error(&err), FetchErrorKind::Fatal);
-        assert_eq!(probe_counter.load(Ordering::Relaxed), 1);
-    }
-
-    #[tokio::test]
-    async fn test_retry_probe_fetch_with_policy_skips_missing_block_errors() {
-        let attempts = Arc::new(AtomicUsize::new(0));
-        let probe_counter = AtomicU64::new(0);
-        let result = retry_probe_fetch_with_policy(
-            42,
-            "testing probe retry",
-            ProbeRetryPolicy {
-                max_attempts: 3,
-                missing_attempts: 3,
-                initial_backoff: Duration::from_millis(0),
-            },
-            &probe_counter,
-            {
-                let attempts = Arc::clone(&attempts);
-                move || {
-                    let attempts = Arc::clone(&attempts);
-                    async move {
-                        attempts.fetch_add(1, AtomicOrdering::SeqCst);
-                        Err::<ProbeFetch<u64>, _>(
-                            tonic::Status::unknown(
-                                "rpc error: code = NotFound desc = block not found in files",
-                            )
-                            .into(),
-                        )
-                    }
-                }
-            },
-        )
-        .await
-        .expect("missing block errors should be skippable");
-
-        assert_eq!(result, ProbeFetch::Missing);
-        assert_eq!(attempts.load(AtomicOrdering::SeqCst), 3);
-        assert_eq!(probe_counter.load(Ordering::Relaxed), 3);
-
-        // Once a run of missing blocks is established, each further block is fetched once.
-        let probe_counter = AtomicU64::new(0);
-        let result = retry_probe_fetch_with_policy(
-            43,
-            "testing probe retry",
-            ProbeRetryPolicy {
-                max_attempts: 3,
-                missing_attempts: 1,
-                initial_backoff: Duration::from_millis(0),
-            },
-            &probe_counter,
-            || async {
-                Err::<ProbeFetch<u64>, _>(tonic::Status::not_found("block 43 not found").into())
-            },
-        )
-        .await
-        .expect("missing block errors should be skippable");
-        assert_eq!(result, ProbeFetch::Missing);
-        assert_eq!(probe_counter.load(Ordering::Relaxed), 1);
-    }
-
-    // -- build_partitions_file_metadata tests --
-
     #[test]
-    fn test_build_partitions_file_metadata_with_endpoint_info() {
-        let ei = Some(EndpointInfo {
-            chain_name: "eth-mainnet".to_string(),
-            chain_name_aliases: vec!["eth".to_string(), "mainnet".to_string()],
-            first_streamable_block_num: 0,
-            first_streamable_block_id: "0xd4e56740".to_string(),
-            block_id_encoding: 2,
-            block_features: vec!["base".to_string(), "extended".to_string()],
-        });
-        let meta = build_partitions_file_metadata(
-            "https://example.com",
-            "eth-mainnet",
-            "date",
-            Compression::Zstd,
-            &ei,
-            None,
-        );
-
+    fn test_format_optional_block_timestamp_handles_missing_timestamp() {
         assert_eq!(
-            find_meta(&meta, "firehose-parquet.version"),
-            Some(env!("CARGO_PKG_VERSION"))
-        );
-        assert_eq!(find_meta(&meta, "firehose-parquet.partition"), Some("date"));
-        assert_eq!(
-            find_meta(&meta, "firehose-parquet.endpoint"),
-            Some("https://example.com")
-        );
-        assert_eq!(
-            find_meta(&meta, "firehose-parquet.chain_name"),
-            Some("eth-mainnet")
-        );
-        assert_eq!(
-            find_meta(&meta, "firehose-parquet.chain_name_aliases"),
-            Some("eth,mainnet")
-        );
-        assert_eq!(
-            find_meta(&meta, "firehose-parquet.first_streamable_block_id"),
-            Some("0xd4e56740")
-        );
-        assert_eq!(
-            find_meta(&meta, "firehose-parquet.block_features"),
-            Some("base,extended")
-        );
-        assert_eq!(
-            find_meta(&meta, "firehose-parquet.compression"),
-            Some("zstd")
-        );
-        assert_eq!(
-            find_meta(&meta, "firehose-parquet.block_range_size"),
-            Some("0")
-        );
-        assert_eq!(
-            find_meta(&meta, "firehose-parquet.bytes_encoding"),
-            Some("hex")
-        );
-        assert_eq!(
-            find_meta(&meta, "firehose-parquet.block_id_encoding"),
-            Some("hex_0x")
-        );
-        assert_eq!(find_meta(&meta, "partition_type"), None);
-    }
-
-    #[test]
-    fn test_validate_existing_partitions_params_rejects_block_range_size_change() {
-        let existing_rows = vec![PartitionBuildRow {
-            partition_type: "block_range".to_string(),
-            partition_interval_seconds: 1_000_000,
-            partition_start_ts: "0".to_string(),
-            partition_value: "0".to_string(),
-            start_block: 0,
-            stop_block: 1_000_000,
-            start_time: None,
-            end_time: None,
-            chain: Some("solana-mainnet-beta".to_string()),
-        }];
-
-        let err = validate_existing_partitions_params(
-            &existing_rows,
-            "solana-mainnet-beta",
-            PartitionBuildType::BlockRange,
-            Some(10_000_000),
-        )
-        .expect_err("block range size changes should be rejected");
-
-        assert!(err
-            .to_string()
-            .contains("cannot change block range size for an existing partitions file"));
-    }
-
-    #[test]
-    fn test_format_optional_probe_timestamp_handles_missing_timestamp() {
-        assert_eq!(
-            format_optional_probe_timestamp(-1).as_deref(),
+            format_optional_block_timestamp(-1).as_deref(),
             Some("1969-12-31 23:59:59")
         );
         for timestamp in [i64::MIN, i64::MAX, 1_700_000_000_000] {
             assert_eq!(
-                format_optional_probe_timestamp(timestamp),
+                format_optional_block_timestamp(timestamp),
                 Some(format!("invalid unix timestamp {timestamp}"))
             );
         }
-        assert_eq!(format_optional_probe_timestamp(0), None);
+        assert_eq!(format_optional_block_timestamp(0), None);
         assert_eq!(
-            format_optional_probe_timestamp(1_690_815_590).as_deref(),
+            format_optional_block_timestamp(1_690_815_590).as_deref(),
             Some("2023-07-31 14:59:50")
         );
-    }
-
-    fn partitions_test_row(
-        partition_type: &str,
-        partition_value: &str,
-        start_block: u64,
-        stop_block: u64,
-    ) -> PartitionBuildRow {
-        PartitionBuildRow {
-            partition_type: partition_type.to_string(),
-            partition_interval_seconds: if partition_type == "block_range" {
-                (stop_block - start_block) as i64
-            } else {
-                PartitionBuildType::from_cli_value(partition_type)
-                    .expect("partition type")
-                    .interval_seconds()
-            },
-            partition_start_ts: partition_value.to_string(),
-            partition_value: partition_value.to_string(),
-            start_block,
-            stop_block,
-            start_time: None,
-            end_time: None,
-            chain: Some("mainnet".to_string()),
-        }
-    }
-
-    fn unused_cursor_start() -> Result<Option<u64>> {
-        panic!("the sibling cursor must not be consulted")
-    }
-
-    #[test]
-    fn test_resolve_partitions_build_start_block_resumes_from_frontier_not_cursor() {
-        // Audit C2 reproduction: a sibling cursor far past the stored frontier used to become
-        // the resumed start, stretching the terminal row across the unprobed gap.
-        let start = resolve_partitions_build_start_block(
-            Some(14_000),
-            None,
-            false,
-            unused_cursor_start,
-            Some(0),
-        )
-        .expect("resume start");
-        assert_eq!(start, 14_000);
-
-        for explicit in [100, 14_000] {
-            let start = resolve_partitions_build_start_block(
-                Some(14_000),
-                Some(explicit),
-                false,
-                unused_cursor_start,
-                Some(0),
-            )
-            .expect("explicit start at or before the frontier");
-            assert_eq!(start, 14_000, "explicit --start-block {explicit}");
-        }
-    }
-
-    #[test]
-    fn test_resolve_partitions_build_start_block_rejects_start_past_resume_frontier() {
-        let err = resolve_partitions_build_start_block(
-            Some(14_000),
-            Some(50_000),
-            false,
-            unused_cursor_start,
-            Some(0),
-        )
-        .expect_err("a start past the frontier would leave a gap");
-        let message = err.to_string();
-        assert!(
-            message.contains("past the existing partitions.parquet frontier 14000"),
-            "{message}"
-        );
-        assert!(message.contains("[14000, 50000)"), "{message}");
-
-        let err = resolve_partitions_build_start_block(
-            Some(14_000),
-            Some(100),
-            true,
-            unused_cursor_start,
-            Some(0),
-        )
-        .expect_err("live mode requires an explicit start to match the frontier");
-        assert!(err.to_string().contains("does not match"), "{err}");
-        let start = resolve_partitions_build_start_block(
-            Some(14_000),
-            Some(14_000),
-            true,
-            unused_cursor_start,
-            Some(0),
-        )
-        .expect("live start at the frontier");
-        assert_eq!(start, 14_000);
-    }
-
-    #[test]
-    fn test_resolve_partitions_build_start_block_for_new_index() {
-        let explicit =
-            resolve_partitions_build_start_block(None, Some(500), false, unused_cursor_start, None)
-                .expect("explicit start");
-        assert_eq!(explicit, 500);
-
-        let from_cursor =
-            resolve_partitions_build_start_block(None, None, false, || Ok(Some(900)), Some(0))
-                .expect("cursor start");
-        assert_eq!(from_cursor, 900);
-
-        let from_endpoint =
-            resolve_partitions_build_start_block(None, None, false, || Ok(None), Some(42))
-                .expect("first streamable start");
-        assert_eq!(from_endpoint, 42);
-
-        let live =
-            resolve_partitions_build_start_block(None, None, true, unused_cursor_start, Some(42))
-                .expect("live ignores the cursor");
-        assert_eq!(live, 42);
-
-        let err = resolve_partitions_build_start_block(
-            None,
-            None,
-            false,
-            || Err(anyhow!("cursor unreadable")),
-            Some(42),
-        )
-        .expect_err("an unreadable cursor is an error");
-        assert!(err.to_string().contains("cursor unreadable"), "{err}");
-
-        let err = resolve_partitions_build_start_block(None, None, false, || Ok(None), None)
-            .expect_err("no start source");
-        assert!(
-            err.to_string().contains("--start-block is required"),
-            "{err}"
-        );
-    }
-
-    #[test]
-    fn test_build_partitions_file_metadata_no_endpoint_info() {
-        let meta = build_partitions_file_metadata(
-            "https://example.com",
-            "solana-mainnet",
-            "hour",
-            Compression::Zstd,
-            &None,
-            None,
-        );
-
-        assert_eq!(
-            find_meta(&meta, "firehose-parquet.version"),
-            Some(env!("CARGO_PKG_VERSION"))
-        );
-        assert_eq!(find_meta(&meta, "firehose-parquet.partition"), Some("hour"));
-        assert_eq!(
-            find_meta(&meta, "firehose-parquet.endpoint"),
-            Some("https://example.com")
-        );
-        // Falls back to the inferred chain name when no endpoint_info is available
-        assert_eq!(
-            find_meta(&meta, "firehose-parquet.chain_name"),
-            Some("solana-mainnet")
-        );
-        assert_eq!(
-            find_meta(&meta, "firehose-parquet.chain_name_aliases"),
-            None
-        );
-        assert_eq!(
-            find_meta(&meta, "firehose-parquet.first_streamable_block_id"),
-            None
-        );
-        assert_eq!(
-            find_meta(&meta, "firehose-parquet.compression"),
-            Some("zstd")
-        );
-        assert_eq!(
-            find_meta(&meta, "firehose-parquet.block_range_size"),
-            Some("0")
-        );
-        assert_eq!(
-            find_meta(&meta, "firehose-parquet.block_id_encoding"),
-            Some("base58")
-        );
-    }
-
-    #[test]
-    fn test_build_partitions_file_metadata_unknown_chain_uses_endpoint_hint_fallback() {
-        let ei = Some(EndpointInfo {
-            chain_name: "mystery-mainnet".to_string(),
-            chain_name_aliases: vec![],
-            first_streamable_block_num: 0,
-            first_streamable_block_id: String::new(),
-            block_id_encoding: 3,
-            block_features: vec![],
-        });
-        let meta = build_partitions_file_metadata(
-            "https://example.com",
-            "mystery-mainnet",
-            "hour",
-            Compression::Zstd,
-            &ei,
-            None,
-        );
-
-        assert_eq!(find_meta(&meta, "firehose-parquet.block_type"), None);
-        assert_eq!(
-            find_meta(&meta, "firehose-parquet.bytes_encoding"),
-            Some("base58")
-        );
-        assert_eq!(
-            find_meta(&meta, "firehose-parquet.block_id_encoding"),
-            Some("base58")
-        );
-    }
-
-    #[test]
-    fn test_build_partitions_file_metadata_tron_evm_uses_tron_encoding_contract() {
-        let meta = build_partitions_file_metadata(
-            "https://example.com",
-            "tron-evm",
-            "hour",
-            Compression::Zstd,
-            &None,
-            None,
-        );
-
-        assert_eq!(find_meta(&meta, "firehose-parquet.block_type"), Some("evm"));
-        assert_eq!(
-            find_meta(&meta, "firehose-parquet.bytes_encoding"),
-            Some("tron_base58")
-        );
-        assert_eq!(
-            find_meta(&meta, "firehose-parquet.block_id_encoding"),
-            Some("hex_no_prefix")
-        );
-        assert_eq!(
-            find_meta(&meta, "firehose-parquet.chain_name"),
-            Some("tron-evm")
-        );
-    }
-
-    #[test]
-    fn test_build_partitions_file_metadata_chain_name_from_endpoint_info_overrides_arg() {
-        // endpoint_info.chain_name takes precedence over the chain arg
-        let ei = Some(EndpointInfo {
-            chain_name: "polygon".to_string(),
-            chain_name_aliases: vec![],
-            first_streamable_block_num: 0,
-            first_streamable_block_id: String::new(),
-            block_id_encoding: 0,
-            block_features: vec![],
-        });
-        let meta = build_partitions_file_metadata(
-            "https://example.com",
-            "polygon-override",
-            "date",
-            Compression::Zstd,
-            &ei,
-            None,
-        );
-
-        assert_eq!(
-            find_meta(&meta, "firehose-parquet.chain_name"),
-            Some("polygon")
-        );
-    }
-
-    #[test]
-    fn test_build_partitions_file_metadata_empty_chain_name_falls_back_to_arg() {
-        // When endpoint_info.chain_name is empty, fall back to the chain arg
-        let ei = Some(EndpointInfo {
-            chain_name: String::new(),
-            chain_name_aliases: vec![],
-            first_streamable_block_num: 0,
-            first_streamable_block_id: String::new(),
-            block_id_encoding: 0,
-            block_features: vec![],
-        });
-        let meta = build_partitions_file_metadata(
-            "https://example.com",
-            "eth-mainnet",
-            "date",
-            Compression::Zstd,
-            &ei,
-            None,
-        );
-
-        assert_eq!(
-            find_meta(&meta, "firehose-parquet.chain_name"),
-            Some("eth-mainnet")
-        );
-    }
-
-    #[test]
-    fn test_build_partitions_file_metadata_honors_requested_compression() {
-        let meta = build_partitions_file_metadata(
-            "https://example.com",
-            "eth-mainnet",
-            "date",
-            Compression::Snappy,
-            &None,
-            None,
-        );
-
-        assert_eq!(
-            find_meta(&meta, "firehose-parquet.compression"),
-            Some("snappy")
-        );
-    }
-    #[test]
-    fn live_partition_retry_delay_doubles_per_failure_up_to_a_cap() {
-        assert_eq!(live_partition_retry_delay(30, 1), Duration::from_secs(30));
-        assert_eq!(live_partition_retry_delay(30, 2), Duration::from_secs(60));
-        assert_eq!(live_partition_retry_delay(30, 4), Duration::from_secs(240));
-        assert_eq!(live_partition_retry_delay(30, 5), Duration::from_secs(300));
-        assert_eq!(
-            live_partition_retry_delay(30, u32::MAX),
-            Duration::from_secs(300)
-        );
-        assert_eq!(live_partition_retry_delay(0, 1), Duration::from_secs(1));
-        // A poll interval above the cap is never shortened.
-        assert_eq!(live_partition_retry_delay(600, 3), Duration::from_secs(600));
-    }
-
-    #[tokio::test]
-    async fn test_retry_probe_fetch_with_policy_never_treats_timeouts_as_missing_blocks() {
-        let probe_counter = AtomicU64::new(0);
-        let err = retry_probe_fetch_with_policy(
-            42,
-            "testing probe retry",
-            ProbeRetryPolicy {
-                max_attempts: 3,
-                missing_attempts: 3,
-                initial_backoff: Duration::from_millis(0),
-            },
-            &probe_counter,
-            || async { Err::<ProbeFetch<u64>, _>(probe_timeout_error(42)) },
-        )
-        .await
-        .expect_err("exhausted timeouts must surface as an error, not a skipped block");
-
-        assert!(
-            err.to_string().contains("failed after 3 attempts"),
-            "{err:#}"
-        );
-        assert_eq!(classify_fetch_error(&err), FetchErrorKind::Timeout);
-        assert_eq!(probe_counter.load(Ordering::Relaxed), 3);
-    }
-
-    #[test]
-    fn verified_resume_refuses_legacy_and_malformed_files_but_overwrite_can_rebuild() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("partitions.parquet");
-        let aws = AwsConfig {
-            aws_access_key_id: None,
-            aws_secret_access_key: None,
-            aws_session_token: None,
-            aws_region: None,
-            aws_endpoint_url: None,
-        };
-        assert!(
-            load_existing_verified_partitions_index(path.to_str().unwrap(), &aws, false)
-                .unwrap()
-                .is_none()
-        );
-        let rows = vec![partitions_test_row("hour", "2024-01-01 00:00:00", 100, 200)];
-        firehose_parquet::cli::write_partitions_index(path.to_str().unwrap(), &rows, None).unwrap();
-        assert!(
-            load_existing_verified_partitions_index(path.to_str().unwrap(), &aws, false)
-                .unwrap_err()
-                .to_string()
-                .contains("rebuild")
-        );
-        assert!(
-            load_existing_verified_partitions_index(path.to_str().unwrap(), &aws, true)
-                .unwrap()
-                .is_none()
-        );
-        std::fs::write(&path, b"corrupt index: not found is not an IO error").unwrap();
-        assert!(
-            load_existing_verified_partitions_index(path.to_str().unwrap(), &aws, false).is_err()
-        );
-        assert_eq!(
-            std::fs::read(&path).unwrap(),
-            b"corrupt index: not found is not an IO error"
-        );
-        assert!(
-            ensure_existing_partitions_index_mode("index", &rows, false, false, false).is_err()
-        );
-        ensure_existing_partitions_index_mode("index", &rows, false, true, false).unwrap();
-        ensure_existing_partitions_index_mode("index", &rows, true, false, false).unwrap();
-        ensure_existing_partitions_index_mode("index", &[], false, false, true).unwrap();
     }
 }

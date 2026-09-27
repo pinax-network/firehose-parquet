@@ -68,85 +68,6 @@ impl Drop for EnvVarGuard {
     }
 }
 
-fn write_test_partitions_index(
-    path: &std::path::Path,
-    rows: Vec<PartitionBuildRow>,
-) -> anyhow::Result<()> {
-    write_partitions_index(&path.to_string_lossy(), &rows, None)
-}
-
-fn write_test_verified_partitions_index(
-    path: &std::path::Path,
-    mut rows: Vec<PartitionBuildRow>,
-) -> anyhow::Result<()> {
-    use crate::grpc::FinalizedAnchor;
-    use crate::partition_index::{CoveredBlock, IndexRoutingPolicy};
-    rows.sort_by_key(|row| row.start_block);
-    let first = rows.first().unwrap().start_block;
-    let stop = rows.last().unwrap().stop_block;
-    let block_number = rows[0].partition_type == "block_range";
-    let identity = |number| CoveredBlock {
-        block_num: number,
-        block_id: format!("id-{number}"),
-        parent_num: number.saturating_sub(1),
-        parent_id: if number == 0 {
-            String::new()
-        } else {
-            format!("id-{}", number - 1)
-        },
-    };
-    let mut last_timestamp = None;
-    let spans = rows
-        .into_iter()
-        .map(|mut row| {
-            let timestamp = if block_number {
-                None
-            } else {
-                Some(parse_partition_timestamp(&row.partition_value)?)
-            };
-            if row.start_time.is_none() {
-                row.start_time = timestamp.map(format_partition_timestamp).transpose()?;
-            }
-            last_timestamp = timestamp;
-            let proof = PartitionSpanProof {
-                start_complete: true,
-                end_complete: true,
-                first_block: (!block_number).then(|| FinalizedAnchor {
-                    block_num: row.start_block,
-                    block_id: format!("id-{}", row.start_block),
-                }),
-                routing_start_timestamp: timestamp,
-            };
-            Ok(VerifiedPartitionSpan { row, proof })
-        })
-        .collect::<anyhow::Result<Vec<_>>>()?;
-    let coverage = PartitionCoverage {
-        version: 2,
-        start_block: first,
-        stop_block: stop,
-        finalized: FinalizedAnchor {
-            block_num: stop + 5,
-            block_id: format!("id-{}", stop + 5),
-        },
-        routing_policy: if block_number {
-            IndexRoutingPolicy::BlockNumber
-        } else {
-            IndexRoutingPolicy::CanonicalTimestamp
-        },
-        first_observed: (!block_number).then(|| identity(first)),
-        last_observed: (!block_number).then(|| identity(stop - 1)),
-        next_observed: (!block_number).then(|| identity(stop)),
-        last_routing_timestamp: last_timestamp,
-    };
-    write_verified_partitions_index(
-        path.to_str().unwrap(),
-        &VerifiedPartitionIndex { coverage, spans },
-        Compression::Zstd,
-        None,
-        None,
-    )
-}
-
 fn write_scan_test_parquet(path: &std::path::Path, values: &[i32]) {
     use arrow::array::Int32Array;
     use arrow::record_batch::RecordBatch;
@@ -170,28 +91,6 @@ fn write_scan_test_parquet(path: &std::path::Path, values: &[i32]) {
     let mut writer = ArrowWriter::try_new(file, schema, None).expect("create arrow writer");
     writer.write(&batch).expect("write batch");
     writer.close().expect("close writer");
-}
-
-fn time_partition_row(
-    chain: Option<&str>,
-    partition_type: &str,
-    partition_value: &str,
-    start_block: u64,
-    stop_block: u64,
-) -> PartitionBuildRow {
-    PartitionBuildRow {
-        partition_type: partition_type.to_string(),
-        partition_interval_seconds: PartitionBuildType::from_cli_value(partition_type)
-            .expect("valid partition type")
-            .interval_seconds(),
-        partition_start_ts: partition_value.to_string(),
-        partition_value: partition_value.to_string(),
-        start_block,
-        stop_block,
-        start_time: None,
-        end_time: None,
-        chain: chain.map(str::to_string),
-    }
 }
 
 #[test]
@@ -253,48 +152,25 @@ fn bounded_tail_warning_applies_only_to_non_final_bounded_runs() {
 
 #[test]
 #[serial]
-fn grpc_transport_flags_validate_limits_and_apply_to_both_build_commands() {
+fn grpc_transport_flags_validate_limits_and_apply_to_build() {
     let _adaptive = EnvVarGuard::set("GRPC_ADAPTIVE_WINDOW", "false");
     let _window = EnvVarGuard::set("GRPC_WINDOW_BYTES", "16777216");
     let _limit = EnvVarGuard::set("GRPC_MAX_MESSAGE_BYTES", "134217728");
     let parsed = parse(&["test-cli", "--endpoint", "http://localhost"]);
     let default = build_config(&parsed.common).unwrap();
     assert_eq!(default.grpc, crate::config::GrpcConfig::default());
-    for args in [
-        vec![
-            "test-cli",
-            "--endpoint",
-            "http://localhost",
-            "--grpc-adaptive-window=false",
-            "--grpc-max-message-bytes",
-            "268435456",
-        ],
-        vec![
-            "test-cli",
-            "partitions",
-            "build",
-            "--endpoint",
-            "http://localhost",
-            "--partition",
-            "date",
-            "--stop-block",
-            "10",
-            "--output",
-            "./output",
-            "--grpc-adaptive-window=false",
-            "--grpc-max-message-bytes",
-            "268435456",
-        ],
-    ] {
-        let parsed = try_parse(&args).unwrap();
-        let grpc = match parsed.command {
-            Some(Commands::Partitions(PartitionsCommands::Build { grpc, .. })) => grpc.config(),
-            None => build_config(&parsed.common).unwrap().grpc,
-            _ => unreachable!(),
-        };
-        assert!(!grpc.adaptive_window);
-        assert_eq!(grpc.max_message_bytes, 268435456);
-    }
+    let parsed = try_parse(&[
+        "test-cli",
+        "--endpoint",
+        "http://localhost",
+        "--grpc-adaptive-window=false",
+        "--grpc-max-message-bytes",
+        "268435456",
+    ])
+    .unwrap();
+    let grpc = build_config(&parsed.common).unwrap().grpc;
+    assert!(!grpc.adaptive_window);
+    assert_eq!(grpc.max_message_bytes, 268435456);
     for value in ["0", "-1", "4294967296", "nope"] {
         assert!(try_parse(&["test-cli", "--grpc-max-message-bytes", value]).is_err());
     }
@@ -564,7 +440,6 @@ fn test_defaults() {
         cli.common.cursor,
         PathBuf::from(crate::artifacts::DEFAULT_CURSOR_MIRROR)
     );
-    assert!(cli.common.cursor_template.is_none());
     assert!(cli.common.flush_interval_secs.is_none());
     assert!(cli.common.aws.aws_access_key_id.is_none());
     assert!(cli.common.aws.aws_secret_access_key.is_none());
@@ -744,56 +619,6 @@ fn build_has_no_partition_mode() {
     assert!(build
         .get_arguments()
         .all(|arg| arg.get_id() != "partition" && arg.get_id() != "block_range_size"));
-}
-
-#[test]
-fn test_partitions_build_block_range_size_zero_is_rejected() {
-    assert_rejected_value(
-        &[
-            "test-cli",
-            "partitions",
-            "build",
-            "--endpoint",
-            "https://eth.firehose.pinax.network:443",
-            "--stop-block",
-            "200",
-            "--partition",
-            "block_range",
-            "--block-range-size",
-            "0",
-            "--output",
-            "./output",
-        ],
-        "--block-range-size",
-    );
-}
-
-/// Like `build`, `partitions build` rejects `--stop-block 0` at parse time, before
-/// any endpoint is contacted; 1 is the smallest accepted exclusive stop.
-#[test]
-fn test_partitions_build_stop_block_zero_is_rejected() {
-    let args = |stop: &'static str| {
-        [
-            "test-cli",
-            "partitions",
-            "build",
-            "--network",
-            "mainnet",
-            "--stop-block",
-            stop,
-            "--partition",
-            "date",
-            "--output",
-            "./output",
-        ]
-    };
-    assert_rejected_value(&args("0"), "--stop-block");
-    match try_parse(&args("1")).unwrap().command {
-        Some(Commands::Partitions(PartitionsCommands::Build { stop_block, .. })) => {
-            assert_eq!(stop_block, Some(1));
-        }
-        _ => panic!("expected partitions build subcommand"),
-    }
 }
 
 #[test]
@@ -999,21 +824,7 @@ fn test_cursor_none_disables_the_mirror_case_insensitively() {
 
 #[test]
 #[serial]
-fn test_cursor_none_rejects_contradictory_template_and_near_misses() {
-    let cli = parse(&[
-        "test-cli",
-        "--endpoint",
-        "https://example.com:443",
-        "--cursor",
-        "none",
-        "--cursor-template",
-        "worker.parquet",
-    ]);
-    let error = build_config(&cli.common).unwrap_err().to_string();
-    assert!(
-        error.contains("cannot be combined with --cursor-template"),
-        "{error}"
-    );
+fn test_cursor_none_rejects_near_misses() {
     for value in ["nothing", "none.txt", "no"] {
         let cli = parse(&[
             "test-cli",
@@ -1041,80 +852,6 @@ fn test_cursor_none_rejects_contradictory_template_and_near_misses() {
 
 #[test]
 #[serial]
-fn test_cursor_template_must_end_in_parquet() {
-    let cli = parse(&[
-        "test-cli",
-        "--endpoint",
-        "https://example.com:443",
-        "--cursor-template",
-        "cursor/{partition_type}/{partition_value}.txt",
-    ]);
-    let result = build_config(&cli.common);
-    assert!(result.is_err());
-    assert!(result
-        .unwrap_err()
-        .to_string()
-        .contains("--cursor-template must end in .parquet"));
-}
-
-#[test]
-fn test_resolve_cursor_template_single_partition() {
-    let context = CursorTemplateContext {
-        chain: Some("eth-mainnet".to_string()),
-        partition_type: Some("hour".to_string()),
-        partition_value: Some("2015-07-30 15:00:00".to_string()),
-        partition_from: None,
-        partition_to: None,
-    };
-    let resolved = resolve_cursor_template(
-        "cursor/{chain}/{partition_type}/{partition_value}.parquet",
-        &context,
-    )
-    .expect("template should resolve");
-    assert_eq!(
-        resolved,
-        "cursor/eth-mainnet/hour/2015-07-30 15:00:00.parquet"
-    );
-}
-
-#[test]
-fn test_resolve_cursor_template_window_partition() {
-    let context = CursorTemplateContext {
-        chain: Some("eth-mainnet".to_string()),
-        partition_type: Some("hour".to_string()),
-        partition_value: None,
-        partition_from: Some("2015/07/30 14:00:00".to_string()),
-        partition_to: Some("2015-07-30 18:00:00".to_string()),
-    };
-    let resolved = resolve_cursor_template(
-        "cursor/{chain}/{partition_type}/{partition_from}-{partition_to}.parquet",
-        &context,
-    )
-    .expect("template should resolve");
-    assert_eq!(
-        resolved,
-        "cursor/eth-mainnet/hour/2015_07_30 14:00:00-2015-07-30 18:00:00.parquet"
-    );
-}
-
-#[test]
-fn test_resolve_cursor_template_requires_context() {
-    let context = CursorTemplateContext {
-        chain: None,
-        partition_type: None,
-        partition_value: None,
-        partition_from: None,
-        partition_to: None,
-    };
-    let err = resolve_cursor_template("cursor/{partition_value}.parquet", &context)
-        .expect_err("missing context should fail");
-    assert!(err
-        .to_string()
-        .contains("requires partition selection context"));
-}
-
-#[test]
-#[serial]
 fn test_completions_subcommand_parse() {
     let cli = parse(&["test-cli", "completions", "bash"]);
     assert!(cli.command.is_some());
@@ -1122,436 +859,6 @@ fn test_completions_subcommand_parse() {
         Commands::Completions { shell } => assert_eq!(shell, Shell::Bash),
         _ => panic!("expected Completions subcommand"),
     }
-}
-
-#[test]
-fn test_partitions_resolve_subcommand_parse() {
-    let cli = parse(&[
-        "test-cli",
-        "partitions",
-        "resolve",
-        "--partitions-index",
-        "./partitions.parquet",
-        "--partition-type",
-        "hour",
-        "--partition-value",
-        "2015-07-30 15:00:00",
-        "--partition-chain",
-        "eth-mainnet",
-        "--strict-single-chain",
-        "--json",
-    ]);
-    assert!(cli.command.is_some());
-    match cli.command.unwrap() {
-        Commands::Partitions(PartitionsCommands::Resolve {
-            partitions_index,
-            partition_type,
-            partition_value,
-            partition_chain,
-            strict_single_chain,
-            json,
-            ..
-        }) => {
-            assert_eq!(partitions_index, "./partitions.parquet");
-            assert_eq!(partition_type, "hour");
-            assert_eq!(partition_value, "2015-07-30 15:00:00");
-            assert_eq!(partition_chain.as_deref(), Some("eth-mainnet"));
-            assert!(strict_single_chain);
-            assert!(json);
-        }
-        _ => panic!("expected partitions resolve subcommand"),
-    }
-}
-
-#[test]
-#[serial]
-fn test_partitions_build_subcommand_parse() {
-    let cli = parse(&[
-        "test-cli",
-        "partitions",
-        "build",
-        "--endpoint",
-        "https://eth.firehose.pinax.network:443",
-        "--stop-block",
-        "200",
-        "--partition",
-        "date",
-        "--output",
-        "./output",
-        "--resume",
-        "--json",
-    ]);
-    match cli.command.expect("command should exist") {
-        Commands::Partitions(PartitionsCommands::Build {
-            endpoint,
-            start_block,
-            stop_block,
-            live,
-            partition,
-            compression,
-            output,
-            s3_bucket,
-            resume,
-            overwrite,
-            json,
-            ..
-        }) => {
-            assert_eq!(
-                endpoint.as_deref(),
-                Some("https://eth.firehose.pinax.network:443")
-            );
-            assert_eq!(start_block, None);
-            assert_eq!(stop_block, Some(200));
-            assert!(!live);
-            assert_eq!(partition, "date");
-            assert_eq!(compression, "zstd");
-            assert_eq!(output.as_deref(), Some("./output"));
-            assert!(s3_bucket.is_none());
-            assert!(resume);
-            assert!(!overwrite);
-            assert!(json);
-        }
-        _ => panic!("expected partitions build subcommand"),
-    }
-}
-
-/// Clap enforces `partitions build --output`: the usage line marks it required and a
-/// missing output fails at parse time, before the runtime check.
-#[test]
-fn test_partitions_build_requires_output_at_parse_time() {
-    let base = [
-        "test-cli",
-        "partitions",
-        "build",
-        "--network",
-        "mainnet",
-        "--stop-block",
-        "200",
-        "--partition",
-        "date",
-    ];
-    let error = try_parse(&base).expect_err("--output is required");
-    assert_eq!(
-        error.kind(),
-        clap::error::ErrorKind::MissingRequiredArgument
-    );
-    assert!(error.to_string().contains("--output <OUTPUT>"), "{error}");
-
-    let mut args = base.to_vec();
-    args.extend(["--output", "./output"]);
-    match try_parse(&args).unwrap().command {
-        Some(Commands::Partitions(PartitionsCommands::Build { output, .. })) => {
-            assert_eq!(output.as_deref(), Some("./output"));
-        }
-        _ => panic!("expected partitions build subcommand"),
-    }
-
-    let mut command = TestCli::command();
-    let build = command
-        .find_subcommand_mut("partitions")
-        .and_then(|partitions| partitions.find_subcommand_mut("build"))
-        .expect("partitions build");
-    let usage = build.render_usage().to_string();
-    assert!(usage.contains("--output <OUTPUT>"), "{usage}");
-    assert!(!usage.contains("[--output"), "{usage}");
-}
-
-/// `partitions build --network` accepts only built-in aliases at parse time, like
-/// `build`. (Setting `NETWORK` here could race with tests that do not pass `--network`.)
-#[test]
-fn test_partitions_build_rejects_unknown_network_at_parse_time() {
-    let args = |network: &'static str| {
-        [
-            "test-cli",
-            "partitions",
-            "build",
-            "--network",
-            network,
-            "--stop-block",
-            "200",
-            "--partition",
-            "date",
-            "--output",
-            "./output",
-        ]
-    };
-    for (network, listed) in [
-        ("unknown", "solana-mainnet-beta"),
-        ("arbitrum-nova", "arbitrum-one"),
-    ] {
-        let error = try_parse(&args(network)).expect_err("unknown network");
-        assert_eq!(error.kind(), clap::error::ErrorKind::InvalidValue);
-        let rendered = error.to_string();
-        assert!(
-            rendered.contains(&format!("invalid value '{network}'")),
-            "{rendered}"
-        );
-        assert!(rendered.contains(listed), "{rendered}");
-    }
-    match try_parse(&args("solana-mainnet-beta")).unwrap().command {
-        Some(Commands::Partitions(PartitionsCommands::Build { network, .. })) => {
-            assert_eq!(network.as_deref(), Some("solana-mainnet-beta"));
-        }
-        _ => panic!("expected partitions build subcommand"),
-    }
-}
-
-#[test]
-fn test_partitions_build_subcommand_parse_overwrite() {
-    let cli = parse(&[
-        "test-cli",
-        "partitions",
-        "build",
-        "--endpoint",
-        "https://eth.firehose.pinax.network:443",
-        "--stop-block",
-        "200",
-        "--partition",
-        "date",
-        "--output",
-        "./output",
-        "--overwrite",
-    ]);
-    match cli.command.expect("command should exist") {
-        Commands::Partitions(PartitionsCommands::Build { overwrite, .. }) => {
-            assert!(overwrite);
-        }
-        _ => panic!("expected partitions build subcommand"),
-    }
-}
-
-#[test]
-fn test_partitions_build_subcommand_rejects_resume_with_overwrite() {
-    let err = TestCli::try_parse_from([
-        "test-cli",
-        "partitions",
-        "build",
-        "--endpoint",
-        "https://eth.firehose.pinax.network:443",
-        "--stop-block",
-        "200",
-        "--partition",
-        "date",
-        "--output",
-        "./output",
-        "--resume",
-        "--overwrite",
-    ])
-    .expect_err("resume and overwrite should conflict");
-
-    let rendered = err.to_string();
-    assert!(rendered.contains("--resume"));
-    assert!(rendered.contains("--overwrite"));
-}
-
-#[test]
-fn test_partitions_build_subcommand_rejects_s3_bucket_without_output() {
-    // A bucket never selects the output: without --output the command does not parse.
-    let error = try_parse(&[
-        "test-cli",
-        "partitions",
-        "build",
-        "--endpoint",
-        "https://eth.firehose.pinax.network:443",
-        "--stop-block",
-        "200",
-        "--partition",
-        "hour",
-        "--s3-bucket",
-        "my-bucket",
-    ])
-    .expect_err("--output is required");
-    assert_eq!(
-        error.kind(),
-        clap::error::ErrorKind::MissingRequiredArgument
-    );
-    assert!(error.to_string().contains("--output <OUTPUT>"), "{error}");
-}
-
-#[test]
-fn test_partitions_build_subcommand_live_parse() {
-    let cli = parse(&[
-        "test-cli",
-        "partitions",
-        "build",
-        "--network",
-        "mainnet",
-        "--partition",
-        "date",
-        "--output",
-        "./output",
-        "--live",
-        "--poll-interval-secs",
-        "15",
-    ]);
-    match cli.command.expect("command should exist") {
-        Commands::Partitions(PartitionsCommands::Build {
-            network,
-            stop_block,
-            live,
-            poll_interval_secs,
-            partition,
-            compression,
-            output,
-            ..
-        }) => {
-            assert_eq!(network.as_deref(), Some("mainnet"));
-            assert_eq!(stop_block, None);
-            assert!(live);
-            assert_eq!(poll_interval_secs, 15);
-            assert_eq!(partition, "date");
-            assert_eq!(compression, "zstd");
-            assert_eq!(output.as_deref(), Some("./output"));
-        }
-        _ => panic!("expected partitions build subcommand"),
-    }
-}
-
-#[test]
-fn test_partitions_build_subcommand_rejects_removed_skip_missing_blocks_flag() {
-    let err = TestCli::try_parse_from([
-        "test-cli",
-        "partitions",
-        "build",
-        "--network",
-        "solana-mainnet-beta",
-        "--partition",
-        "date",
-        "--output",
-        "./output",
-        "--live",
-        "--skip-missing-blocks",
-    ])
-    .expect_err("removed skip-missing-blocks flag should fail clap parsing");
-
-    assert_eq!(err.kind(), clap::error::ErrorKind::UnknownArgument);
-    let rendered = err.to_string();
-    assert!(rendered.contains("--skip-missing-blocks"));
-    assert!(rendered.contains("unexpected argument"));
-}
-
-#[test]
-fn test_partitions_build_subcommand_compression_override_parse() {
-    let cli = parse(&[
-        "test-cli",
-        "partitions",
-        "build",
-        "--endpoint",
-        "https://eth.firehose.pinax.network:443",
-        "--stop-block",
-        "200",
-        "--partition",
-        "date",
-        "--compression",
-        "snappy",
-        "--output",
-        "./output",
-    ]);
-    match cli.command.expect("command should exist") {
-        Commands::Partitions(PartitionsCommands::Build { compression, .. }) => {
-            assert_eq!(compression, "snappy");
-        }
-        _ => panic!("expected partitions build subcommand"),
-    }
-}
-
-#[test]
-fn test_partitions_build_block_range_parse() {
-    let cli = parse(&[
-        "test-cli",
-        "partitions",
-        "build",
-        "--endpoint",
-        "https://sol.firehose.pinax.network:443",
-        "--stop-block",
-        "10000000",
-        "--partition",
-        "block_range",
-        "--block-range-size",
-        "1000000",
-        "--output",
-        "./output",
-    ]);
-    match cli.command.expect("command should exist") {
-        Commands::Partitions(PartitionsCommands::Build {
-            partition,
-            block_range_size,
-            ..
-        }) => {
-            assert_eq!(partition, "block_range");
-            assert_eq!(block_range_size, Some(1000000));
-        }
-        _ => panic!("expected partitions build subcommand"),
-    }
-}
-
-#[test]
-fn test_partitions_build_live_block_range_parse_without_stop_block() {
-    let cli = parse(&[
-        "test-cli",
-        "partitions",
-        "build",
-        "--network",
-        "solana-mainnet-beta",
-        "--partition",
-        "block_range",
-        "--block-range-size",
-        "1000000",
-        "--output",
-        "./output",
-        "--live",
-    ]);
-    match cli.command.expect("command should exist") {
-        Commands::Partitions(PartitionsCommands::Build {
-            network,
-            stop_block,
-            live,
-            partition,
-            block_range_size,
-            ..
-        }) => {
-            assert_eq!(network.as_deref(), Some("solana-mainnet-beta"));
-            assert_eq!(stop_block, None);
-            assert!(live);
-            assert_eq!(partition, "block_range");
-            assert_eq!(block_range_size, Some(1000000));
-        }
-        _ => panic!("expected partitions build subcommand"),
-    }
-}
-
-#[test]
-fn test_partitions_build_help_uses_grouped_headings() {
-    let cmd = TestCli::command();
-    let partitions = cmd
-        .get_subcommands()
-        .find(|subcmd| subcmd.get_name() == "partitions")
-        .expect("partitions subcommand should exist");
-    let build = partitions
-        .get_subcommands()
-        .find(|subcmd| subcmd.get_name() == "build")
-        .expect("partitions build subcommand should exist");
-
-    let help = build.clone().render_long_help().to_string();
-
-    for heading in [
-        "Connection:",
-        "Block Range:",
-        "Output:",
-        "AWS / S3:",
-        "Partitioning:",
-        "Runtime / Logging:",
-    ] {
-        assert!(
-            help.contains(heading),
-            "expected help to contain heading `{heading}`\n{help}"
-        );
-    }
-
-    assert!(help.contains("--aws-region"));
-    assert!(help.contains("--partition"));
-    assert!(help.contains("--json"));
-    assert!(!help.contains("--strict-timestamps"));
 }
 
 #[test]
@@ -1662,128 +969,11 @@ fn test_build_help_does_not_mention_antelope_extended_behavior() {
 }
 
 #[test]
-fn test_partitions_build_subcommand_rejects_removed_strict_timestamps_flag() {
-    let err = TestCli::try_parse_from([
-        "test-cli",
-        "partitions",
-        "build",
-        "--network",
-        "solana-mainnet-beta",
-        "--partition",
-        "block_range",
-        "--block-range-size",
-        "1000000",
-        "--strict-timestamps",
-        "false",
-        "--output",
-        "./output",
-    ])
-    .expect_err("removed strict timestamp flag should fail clap parsing");
-
-    let rendered = err.to_string();
-    assert!(rendered.contains("--strict-timestamps"));
-    assert!(rendered.contains("unexpected argument"));
-}
-
-#[test]
-fn test_partition_build_type_block_range() {
-    let bt = PartitionBuildType::from_cli_value("block_range").expect("parse");
-    assert_eq!(bt, PartitionBuildType::BlockRange);
-    assert_eq!(bt.as_str(), "block_range");
-    assert!(!bt.is_time_based());
-    assert_eq!(bt.interval_seconds(), 0);
-
-    // Also accept alternate spellings
-    assert_eq!(
-        PartitionBuildType::from_cli_value("block-range").expect("parse"),
-        PartitionBuildType::BlockRange
-    );
-    assert_eq!(
-        PartitionBuildType::from_cli_value("blocks").expect("parse"),
-        PartitionBuildType::BlockRange
-    );
-}
-
-#[test]
-fn test_write_read_block_range_partitions_index() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let path = dir.path().join("solana-mainnet").join("partitions.parquet");
-    let rows = vec![
-        PartitionBuildRow {
-            partition_type: "block_range".to_string(),
-            partition_interval_seconds: 1_000_000,
-            partition_start_ts: "0".to_string(),
-            partition_value: "0".to_string(),
-            start_block: 0,
-            stop_block: 1_000_000,
-            start_time: None,
-            end_time: Some("2021-04-06 12:00:00".to_string()),
-            chain: Some("solana-mainnet".to_string()),
-        },
-        PartitionBuildRow {
-            partition_type: "block_range".to_string(),
-            partition_interval_seconds: 1_000_000,
-            partition_start_ts: "1000000".to_string(),
-            partition_value: "1000000".to_string(),
-            start_block: 1_000_000,
-            stop_block: 2_000_000,
-            start_time: Some("2021-04-06 12:00:01".to_string()),
-            end_time: Some("2021-04-10 08:30:00".to_string()),
-            chain: Some("solana-mainnet".to_string()),
-        },
-    ];
-    write_partitions_index(&path.to_string_lossy(), &rows, None).expect("write rows");
-
-    let read_rows = read_partitions_build_rows(&path.to_string_lossy(), None).expect("read rows");
-    assert_eq!(read_rows.len(), 2);
-    assert_eq!(read_rows[0].partition_type, "block_range");
-    assert_eq!(read_rows[0].partition_value, "0");
-    assert_eq!(read_rows[0].start_block, 0);
-    assert_eq!(read_rows[0].stop_block, 1_000_000);
-    assert!(read_rows[0].start_time.is_none());
-    assert_eq!(
-        read_rows[0].end_time.as_deref(),
-        Some("2021-04-06 12:00:00")
-    );
-    assert_eq!(read_rows[1].partition_value, "1000000");
-    assert_eq!(read_rows[1].start_block, 1_000_000);
-    assert_eq!(read_rows[1].stop_block, 2_000_000);
-    assert_eq!(
-        read_rows[1].start_time.as_deref(),
-        Some("2021-04-06 12:00:01")
-    );
-}
-
-#[test]
-fn test_write_read_time_partitions_with_nullable_timestamps() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let path = dir.path().join("sol-mainnet").join("partitions.parquet");
-    let rows = vec![PartitionBuildRow {
-        partition_type: "date".to_string(),
-        partition_interval_seconds: 86_400,
-        partition_start_ts: "2021-04-06 00:00:00".to_string(),
-        partition_value: "2021-04-06 00:00:00".to_string(),
-        start_block: 100,
-        stop_block: 200,
-        start_time: None, // nullable
-        end_time: None,   // nullable
-        chain: Some("sol-mainnet".to_string()),
-    }];
-    write_partitions_index(&path.to_string_lossy(), &rows, None).expect("write rows");
-
-    let read_rows = read_partitions_build_rows(&path.to_string_lossy(), None).expect("read rows");
-    assert_eq!(read_rows.len(), 1);
-    assert_eq!(read_rows[0].partition_type, "date");
-    assert!(read_rows[0].start_time.is_none());
-    assert!(read_rows[0].end_time.is_none());
-}
-
-#[test]
 fn test_inspect_subcommand_schema_only_parse() {
     let cli = parse(&[
         "test-cli",
         "inspect",
-        "s3://bucket/mainnet/partitions.parquet",
+        "s3://bucket/mainnet/part-000001.parquet",
         "--schema-only",
     ]);
     match cli.command.expect("command should exist") {
@@ -1793,7 +983,7 @@ fn test_inspect_subcommand_schema_only_parse() {
             json,
             ..
         } => {
-            assert_eq!(path, "s3://bucket/mainnet/partitions.parquet");
+            assert_eq!(path, "s3://bucket/mainnet/part-000001.parquet");
             assert!(schema_only);
             assert!(!json);
         }
@@ -1806,7 +996,7 @@ fn test_inspect_subcommand_schema_only_json_parse() {
     let cli = parse(&[
         "test-cli",
         "inspect",
-        "./output/mainnet/partitions.parquet",
+        "./output/mainnet/part-000001.parquet",
         "--schema-only",
         "--json",
     ]);
@@ -1817,7 +1007,7 @@ fn test_inspect_subcommand_schema_only_json_parse() {
             json,
             ..
         } => {
-            assert_eq!(path, "./output/mainnet/partitions.parquet");
+            assert_eq!(path, "./output/mainnet/part-000001.parquet");
             assert!(schema_only);
             assert!(json);
         }
@@ -1913,8 +1103,8 @@ fn test_configured_s3_bucket_ignores_blank_values() {
 #[test]
 fn test_shorthand_s3_key_normalizes_relative_paths() {
     assert_eq!(
-        shorthand_s3_key(".//mainnet//partitions.parquet"),
-        Some("mainnet/partitions.parquet".to_string())
+        shorthand_s3_key(".//mainnet//part-000001.parquet"),
+        Some("mainnet/part-000001.parquet".to_string())
     );
 }
 
@@ -1922,8 +1112,8 @@ fn test_shorthand_s3_key_normalizes_relative_paths() {
 fn test_shorthand_s3_key_rejects_empty_and_non_relative_paths() {
     assert_eq!(shorthand_s3_key(""), None);
     assert_eq!(shorthand_s3_key("./"), None);
-    assert_eq!(shorthand_s3_key("../partitions.parquet"), None);
-    assert_eq!(shorthand_s3_key("/partitions.parquet"), None);
+    assert_eq!(shorthand_s3_key("../part-000001.parquet"), None);
+    assert_eq!(shorthand_s3_key("/part-000001.parquet"), None);
 }
 
 #[test]
@@ -1932,15 +1122,15 @@ fn test_resolve_parquet_input_path_prefers_existing_local_relative_path() {
     let _bucket = EnvVarGuard::set("S3_BUCKET", "configured-bucket");
     let dir = tempfile::tempdir().expect("tempdir");
     let _cwd = CurrentDirGuard::set(dir.path());
-    let local_path = dir.path().join("mainnet").join("partitions.parquet");
+    let local_path = dir.path().join("mainnet").join("part-000001.parquet");
     std::fs::create_dir_all(local_path.parent().expect("parent")).expect("create dir");
     std::fs::write(&local_path, b"not-a-real-parquet").expect("write file");
 
-    let resolved = resolve_parquet_input_path("./mainnet/partitions.parquet");
+    let resolved = resolve_parquet_input_path("./mainnet/part-000001.parquet");
 
     assert_eq!(
         resolved,
-        ParquetInputPath::Local(PathBuf::from("./mainnet/partitions.parquet"))
+        ParquetInputPath::Local(PathBuf::from("./mainnet/part-000001.parquet"))
     );
 }
 
@@ -1951,11 +1141,11 @@ fn test_resolve_parquet_input_path_falls_back_to_configured_s3_bucket() {
     let dir = tempfile::tempdir().expect("tempdir");
     let _cwd = CurrentDirGuard::set(dir.path());
 
-    let resolved = resolve_parquet_input_path("./mainnet/partitions.parquet");
+    let resolved = resolve_parquet_input_path("./mainnet/part-000001.parquet");
 
     assert_eq!(
         resolved,
-        ParquetInputPath::S3("s3://configured-bucket/mainnet/partitions.parquet".to_string())
+        ParquetInputPath::S3("s3://configured-bucket/mainnet/part-000001.parquet".to_string())
     );
 }
 
@@ -1966,11 +1156,11 @@ fn test_resolve_parquet_input_path_keeps_missing_local_path_without_bucket() {
     let dir = tempfile::tempdir().expect("tempdir");
     let _cwd = CurrentDirGuard::set(dir.path());
 
-    let resolved = resolve_parquet_input_path("./mainnet/partitions.parquet");
+    let resolved = resolve_parquet_input_path("./mainnet/part-000001.parquet");
 
     assert_eq!(
         resolved,
-        ParquetInputPath::Local(PathBuf::from("./mainnet/partitions.parquet"))
+        ParquetInputPath::Local(PathBuf::from("./mainnet/part-000001.parquet"))
     );
 }
 
@@ -1979,11 +1169,11 @@ fn test_resolve_parquet_input_path_keeps_missing_local_path_without_bucket() {
 fn test_resolve_parquet_input_path_keeps_explicit_s3_uri() {
     let _bucket = EnvVarGuard::set("S3_BUCKET", "configured-bucket");
 
-    let resolved = resolve_parquet_input_path("s3://other-bucket/mainnet/partitions.parquet");
+    let resolved = resolve_parquet_input_path("s3://other-bucket/mainnet/part-000001.parquet");
 
     assert_eq!(
         resolved,
-        ParquetInputPath::S3("s3://other-bucket/mainnet/partitions.parquet".to_string())
+        ParquetInputPath::S3("s3://other-bucket/mainnet/part-000001.parquet".to_string())
     );
 }
 
@@ -1992,11 +1182,11 @@ fn test_resolve_parquet_input_path_keeps_explicit_s3_uri() {
 fn test_resolve_parquet_input_path_does_not_rewrite_missing_absolute_paths() {
     let _bucket = EnvVarGuard::set("S3_BUCKET", "configured-bucket");
 
-    let resolved = resolve_parquet_input_path("/definitely/missing/partitions.parquet");
+    let resolved = resolve_parquet_input_path("/definitely/missing/part-000001.parquet");
 
     assert_eq!(
         resolved,
-        ParquetInputPath::Local(PathBuf::from("/definitely/missing/partitions.parquet"))
+        ParquetInputPath::Local(PathBuf::from("/definitely/missing/part-000001.parquet"))
     );
 }
 
@@ -2007,11 +1197,11 @@ fn test_resolve_parquet_input_path_does_not_rewrite_parent_relative_paths() {
     let dir = tempfile::tempdir().expect("tempdir");
     let _cwd = CurrentDirGuard::set(dir.path());
 
-    let resolved = resolve_parquet_input_path("./../../partitions.parquet");
+    let resolved = resolve_parquet_input_path("./../../part-000001.parquet");
 
     assert_eq!(
         resolved,
-        ParquetInputPath::Local(PathBuf::from("./../../partitions.parquet"))
+        ParquetInputPath::Local(PathBuf::from("./../../part-000001.parquet"))
     );
 }
 
@@ -2022,11 +1212,11 @@ fn test_resolve_parquet_input_path_normalizes_redundant_current_dir_segments() {
     let dir = tempfile::tempdir().expect("tempdir");
     let _cwd = CurrentDirGuard::set(dir.path());
 
-    let resolved = resolve_parquet_input_path(".//mainnet//partitions.parquet");
+    let resolved = resolve_parquet_input_path(".//mainnet//part-000001.parquet");
 
     assert_eq!(
         resolved,
-        ParquetInputPath::S3("s3://configured-bucket/mainnet/partitions.parquet".to_string())
+        ParquetInputPath::S3("s3://configured-bucket/mainnet/part-000001.parquet".to_string())
     );
 }
 
@@ -2110,12 +1300,6 @@ fn test_updated_commands_fall_back_to_configured_s3_bucket_for_missing_relative_
             "{message}"
         );
     }
-
-    let partitions_err = read_partitions_build_rows("./mainnet/partitions.parquet", None)
-        .expect_err("partitions index reader should resolve to S3 without a local path");
-    assert!(partitions_err
-        .to_string()
-        .contains("AWS config required for S3 paths"));
 }
 
 /// Commands that delete or rewrite files must not turn a missing (for example mistyped)
@@ -2220,26 +1404,6 @@ fn test_updated_commands_prefer_existing_local_paths_over_configured_s3_bucket()
     let verify_message = verify_err.to_string();
     assert!(verify_message.contains("no parquet files found in"));
     assert!(!verify_message.contains("AWS config required for S3 paths"));
-
-    let partitions_path = dir.path().join("mainnet").join("partitions.parquet");
-    write_test_partitions_index(
-        &partitions_path,
-        vec![PartitionBuildRow {
-            partition_type: "date".to_string(),
-            partition_interval_seconds: PartitionBuildType::Date.interval_seconds(),
-            partition_start_ts: "2015-07-30 00:00:00".to_string(),
-            partition_value: "2015-07-30 00:00:00".to_string(),
-            start_block: 10,
-            stop_block: 20,
-            start_time: Some("2015-07-30 00:00:00".to_string()),
-            end_time: Some("2015-07-31 00:00:00".to_string()),
-            chain: Some("eth-mainnet".to_string()),
-        }],
-    )
-    .expect("write partitions index");
-    let rows = read_partitions_build_rows("./mainnet/partitions.parquet", None)
-        .expect("partitions index reader should stay local when the file exists");
-    assert_eq!(rows.len(), 1);
 }
 
 /// `rollup` is removed (#652): with one `date` partition key there is no
@@ -2250,6 +1414,18 @@ fn rollup_subcommand_is_removed() {
         .expect_err("rollup is not a subcommand");
     assert_eq!(error.kind(), clap::error::ErrorKind::InvalidSubcommand);
     assert!(TestCli::command().find_subcommand("rollup").is_none());
+}
+
+/// `partitions` and every subcommand are removed (#653): Delta log metadata
+/// replaces `partitions.parquet`.
+#[test]
+fn partitions_subcommands_are_removed() {
+    for subcommand in ["build", "ls", "validate", "resolve", "shard"] {
+        let error = try_parse(&["test-cli", "partitions", subcommand])
+            .expect_err("partitions is not a subcommand");
+        assert_eq!(error.kind(), clap::error::ErrorKind::InvalidSubcommand);
+    }
+    assert!(TestCli::command().find_subcommand("partitions").is_none());
 }
 
 #[test]
@@ -2273,135 +1449,6 @@ fn test_merge_subcommand_flush_rows_parse() {
             assert_eq!(flush_bytes, DEFAULT_FLUSH_BYTES);
         }
         _ => panic!("expected merge subcommand"),
-    }
-}
-
-#[test]
-fn test_partitions_ls_subcommand_parse() {
-    let cli = parse(&[
-        "test-cli",
-        "partitions",
-        "ls",
-        "--partitions-index",
-        "./partitions.parquet",
-        "--partition-type",
-        "date",
-        "--partition-chain",
-        "eth-mainnet",
-        "--from",
-        "2015-07-29 00:00:00",
-        "--to",
-        "2015-07-31 00:00:00",
-        "--limit",
-        "25",
-        "--json",
-    ]);
-    assert!(cli.command.is_some());
-    match cli.command.unwrap() {
-        Commands::Partitions(PartitionsCommands::Ls {
-            partitions_index,
-            partition_type,
-            partition_chain,
-            from,
-            to,
-            limit,
-            json,
-            ..
-        }) => {
-            assert_eq!(partitions_index, "./partitions.parquet");
-            assert_eq!(partition_type.as_deref(), Some("date"));
-            assert_eq!(partition_chain.as_deref(), Some("eth-mainnet"));
-            assert_eq!(from.as_deref(), Some("2015-07-29 00:00:00"));
-            assert_eq!(to.as_deref(), Some("2015-07-31 00:00:00"));
-            assert_eq!(limit, 25);
-            assert!(json);
-        }
-        _ => panic!("expected partitions ls subcommand"),
-    }
-}
-
-#[test]
-fn test_partitions_shard_subcommand_parse() {
-    let cli = parse(&[
-        "test-cli",
-        "partitions",
-        "shard",
-        "--partitions-index",
-        "./partitions.parquet",
-        "--partition-type",
-        "date",
-        "--partition-chain",
-        "eth-mainnet",
-        "--from",
-        "2015-07-29 00:00:00",
-        "--to",
-        "2015-07-31 00:00:00",
-        "--shard-count",
-        "4",
-        "--shard-index",
-        "1",
-        "--strategy",
-        "hash",
-        "--json",
-    ]);
-    match cli.command.expect("command should exist") {
-        Commands::Partitions(PartitionsCommands::Shard {
-            partitions_index,
-            partition_type,
-            partition_chain,
-            from,
-            to,
-            shard_count,
-            shard_index,
-            strategy,
-            json,
-            ..
-        }) => {
-            assert_eq!(partitions_index, "./partitions.parquet");
-            assert_eq!(partition_type.as_deref(), Some("date"));
-            assert_eq!(partition_chain.as_deref(), Some("eth-mainnet"));
-            assert_eq!(from.as_deref(), Some("2015-07-29 00:00:00"));
-            assert_eq!(to.as_deref(), Some("2015-07-31 00:00:00"));
-            assert_eq!(shard_count, 4);
-            assert_eq!(shard_index, 1);
-            assert_eq!(strategy, "hash");
-            assert!(json);
-        }
-        _ => panic!("expected partitions shard subcommand"),
-    }
-}
-
-#[test]
-fn test_partitions_validate_subcommand_parse() {
-    let cli = parse(&[
-        "test-cli",
-        "partitions",
-        "validate",
-        "--partitions-index",
-        "./partitions.parquet",
-        "--partition-type",
-        "date",
-        "--partition-chain",
-        "eth-mainnet",
-        "--allow-gaps",
-        "--json",
-    ]);
-    match cli.command.expect("command should exist") {
-        Commands::Partitions(PartitionsCommands::Validate {
-            partitions_index,
-            partition_type,
-            partition_chain,
-            allow_gaps,
-            json,
-            ..
-        }) => {
-            assert_eq!(partitions_index, "./partitions.parquet");
-            assert_eq!(partition_type.as_deref(), Some("date"));
-            assert_eq!(partition_chain.as_deref(), Some("eth-mainnet"));
-            assert!(allow_gaps);
-            assert!(json);
-        }
-        _ => panic!("expected partitions validate subcommand"),
     }
 }
 
@@ -2514,45 +1561,6 @@ fn test_credentials_are_selected_from_resolved_endpoint_and_explicit_flags() {
         build_config(&cli.common).unwrap().api_key.as_deref(),
         Some("legacy-test-key")
     );
-}
-
-#[test]
-#[serial]
-fn test_partitions_auth_selectors_distinguish_default_from_explicit_legacy_name() {
-    let _selector_key = EnvVarGuard::remove("API_KEY_ENVVAR");
-    let _selector_token = EnvVarGuard::remove("API_TOKEN_ENVVAR");
-    for explicit in [false, true] {
-        let mut args = vec![
-            "test-cli",
-            "partitions",
-            "build",
-            "--partition",
-            "date",
-            "--network",
-            "tron",
-            "--stop-block",
-            "100",
-            "--output",
-            "./output",
-        ];
-        if explicit {
-            args.extend(["--api-token-envvar", "SUBSTREAMS_API_TOKEN"]);
-        }
-        let cli = parse(&args);
-        let Some(Commands::Partitions(PartitionsCommands::Build {
-            api_key_envvar,
-            api_token_envvar,
-            ..
-        })) = cli.command
-        else {
-            panic!("expected partitions build");
-        };
-        assert_eq!(api_key_envvar, None);
-        assert_eq!(
-            api_token_envvar.as_deref(),
-            explicit.then_some("SUBSTREAMS_API_TOKEN")
-        );
-    }
 }
 
 #[test]
@@ -2898,11 +1906,12 @@ fn test_s3_bucket_default_output() {
 }
 
 #[test]
-fn test_common_args_reject_removed_partition_flags() {
+fn test_common_args_reject_removed_partition_and_cursor_template_flags() {
     for (flag, value) in [
         ("--partitions-index", "./partitions.parquet"),
         ("--partition-from", "2015-07-30 15:00:00"),
         ("--partition-to", "2015-07-30 18:00:00"),
+        ("--cursor-template", "cursor/{chain}.parquet"),
     ] {
         let err = try_parse(&[
             "test-cli",
@@ -2915,471 +1924,6 @@ fn test_common_args_reject_removed_partition_flags() {
         assert_eq!(err.kind(), clap::error::ErrorKind::UnknownArgument);
         assert!(err.to_string().contains(flag));
     }
-}
-
-#[test]
-fn test_resolve_partition_bounds_from_index_local() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let path = dir.path().join("partitions.parquet");
-    write_test_verified_partitions_index(
-        &path,
-        vec![
-            time_partition_row(Some("eth-mainnet"), "hour", "2015-07-30 14:00:00", 100, 200),
-            time_partition_row(Some("eth-mainnet"), "hour", "2015-07-30 15:00:00", 200, 300),
-        ],
-    )
-    .expect("write partitions index");
-
-    let request = PartitionBoundsRequest {
-        index_path: path.to_string_lossy().to_string(),
-        partition_type: "hour".to_string(),
-        partition_value: "2015-07-30 15:00:00".to_string(),
-        chain: Some("eth-mainnet".to_string()),
-    };
-    let bounds = resolve_partition_bounds_from_index(&request, None)
-        .expect("partition bounds should resolve");
-    assert_eq!(bounds.start_block, 200);
-    assert_eq!(bounds.stop_block, 300);
-}
-
-#[test]
-fn test_resolve_partition_bounds_from_index_ambiguous() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let path = dir.path().join("partitions.parquet");
-    write_test_verified_partitions_index(
-        &path,
-        vec![
-            time_partition_row(Some("eth-mainnet"), "hour", "2015-07-30 15:00:00", 200, 300),
-            time_partition_row(Some("eth-mainnet"), "hour", "2015-07-30 16:00:00", 300, 400),
-            time_partition_row(Some("eth-mainnet"), "hour", "2015-07-30 15:00:00", 400, 500),
-        ],
-    )
-    .expect("write partitions index");
-
-    let request = PartitionBoundsRequest {
-        index_path: path.to_string_lossy().to_string(),
-        partition_type: "hour".to_string(),
-        partition_value: "2015-07-30 15:00:00".to_string(),
-        chain: None,
-    };
-    let err = resolve_partition_bounds_from_index(&request, None)
-        .expect_err("duplicate rows should be rejected");
-    assert!(err.to_string().contains("ambiguous"));
-}
-
-#[test]
-fn test_resolve_partition_command_rejects_unverified_multi_chain_index() {
-    use arrow::array::{StringArray, UInt64Array};
-    use arrow::record_batch::RecordBatch;
-    use parquet::arrow::ArrowWriter;
-    use parquet::file::metadata::KeyValue;
-    use parquet::file::properties::WriterProperties;
-    use std::fs::File;
-    use std::sync::Arc;
-
-    let dir = tempfile::tempdir().expect("tempdir");
-    let path = dir.path().join("partitions.parquet");
-    let schema = Arc::new(arrow::datatypes::Schema::new(vec![
-        arrow::datatypes::Field::new("chain", arrow::datatypes::DataType::Utf8, false),
-        arrow::datatypes::Field::new("partition", arrow::datatypes::DataType::UInt64, false),
-        arrow::datatypes::Field::new("start_block", arrow::datatypes::DataType::UInt64, false),
-        arrow::datatypes::Field::new("stop_block", arrow::datatypes::DataType::UInt64, false),
-    ]));
-    let partition_value =
-        parse_partition_timestamp("2015-07-30 00:00:00").expect("partition timestamp") as u64;
-    let batch = RecordBatch::try_new(
-        Arc::clone(&schema),
-        vec![
-            Arc::new(StringArray::from(vec!["eth-mainnet", "polygon-mainnet"])),
-            Arc::new(UInt64Array::from(vec![partition_value, partition_value])),
-            Arc::new(UInt64Array::from(vec![100_u64, 200_u64])),
-            Arc::new(UInt64Array::from(vec![200_u64, 300_u64])),
-        ],
-    )
-    .expect("record batch");
-    let props = WriterProperties::builder()
-        .set_key_value_metadata(Some(vec![KeyValue::new(
-            "firehose-parquet.partition".to_string(),
-            "date".to_string(),
-        )]))
-        .build();
-    let file = File::create(&path).expect("create parquet");
-    let mut writer = ArrowWriter::try_new(file, schema, Some(props)).expect("writer");
-    writer.write(&batch).expect("write batch");
-    writer.close().expect("close writer");
-
-    let err = resolve_partition_command(
-        PartitionBoundsRequest {
-            index_path: path.to_string_lossy().to_string(),
-            partition_type: "date".to_string(),
-            partition_value: "2015-07-30 00:00:00".to_string(),
-            chain: None,
-        },
-        None,
-        &PartitionResolveOptions {
-            strict_single_chain: true,
-            all_spans: false,
-        },
-    )
-    .expect_err("strict single chain should fail on multi-chain match");
-    assert!(err.to_string().contains("rebuild"));
-}
-
-#[test]
-fn test_resolve_partition_window_bounds_from_index_local() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let path = dir.path().join("partitions.parquet");
-    write_test_verified_partitions_index(
-        &path,
-        vec![
-            time_partition_row(Some("eth-mainnet"), "hour", "2015-07-30 14:00:00", 100, 200),
-            time_partition_row(Some("eth-mainnet"), "hour", "2015-07-30 15:00:00", 200, 300),
-            time_partition_row(Some("eth-mainnet"), "hour", "2015-07-30 16:00:00", 300, 400),
-        ],
-    )
-    .expect("write partitions index");
-
-    let request = PartitionWindowRequest {
-        index_path: path.to_string_lossy().to_string(),
-        partition_type: "hour".to_string(),
-        partition_from: "2015-07-30 14:00:00".to_string(),
-        partition_to: "2015-07-30 16:00:00".to_string(),
-        chain: Some("eth-mainnet".to_string()),
-    };
-    let bounds = resolve_partition_window_bounds_from_index(&request, None)
-        .expect("partition window bounds should resolve");
-    assert_eq!(bounds.start_block, 100);
-    assert_eq!(bounds.stop_block, 300);
-    assert_eq!(bounds.partitions_count, 2);
-}
-
-#[test]
-fn test_list_partitions_from_index_filters_sort_and_limit() {
-    use arrow::array::{StringArray, UInt64Array};
-    use arrow::record_batch::RecordBatch;
-    use parquet::arrow::ArrowWriter;
-    use parquet::file::metadata::KeyValue;
-    use parquet::file::properties::WriterProperties;
-    use std::fs::File;
-    use std::sync::Arc;
-
-    let dir = tempfile::tempdir().expect("tempdir");
-    let path = dir.path().join("partitions.parquet");
-    let partition_values = [
-        "2015-07-30 00:00:00",
-        "2015-07-29 00:00:00",
-        "2015-07-31 00:00:00",
-        "2015-07-29 00:00:00",
-    ]
-    .into_iter()
-    .map(|value| parse_partition_timestamp(value).expect("partition timestamp") as u64)
-    .collect::<Vec<_>>();
-    let schema = Arc::new(arrow::datatypes::Schema::new(vec![
-        arrow::datatypes::Field::new("chain", arrow::datatypes::DataType::Utf8, false),
-        arrow::datatypes::Field::new("partition", arrow::datatypes::DataType::UInt64, false),
-        arrow::datatypes::Field::new("start_block", arrow::datatypes::DataType::UInt64, false),
-        arrow::datatypes::Field::new("stop_block", arrow::datatypes::DataType::UInt64, false),
-    ]));
-    let batch = RecordBatch::try_new(
-        Arc::clone(&schema),
-        vec![
-            Arc::new(StringArray::from(vec![
-                "eth-mainnet",
-                "eth-mainnet",
-                "eth-mainnet",
-                "btc-mainnet",
-            ])),
-            Arc::new(UInt64Array::from(partition_values)),
-            Arc::new(UInt64Array::from(vec![200_u64, 100_u64, 300_u64, 999_u64])),
-            Arc::new(UInt64Array::from(vec![300_u64, 200_u64, 400_u64, 1000_u64])),
-        ],
-    )
-    .expect("record batch");
-    let props = WriterProperties::builder()
-        .set_key_value_metadata(Some(vec![KeyValue::new(
-            "firehose-parquet.partition".to_string(),
-            "date".to_string(),
-        )]))
-        .build();
-    let file = File::create(&path).expect("create parquet");
-    let mut writer = ArrowWriter::try_new(file, schema, Some(props)).expect("writer");
-    writer.write(&batch).expect("write batch");
-    writer.close().expect("close writer");
-
-    let request = PartitionListRequest {
-        index_path: path.to_string_lossy().to_string(),
-        partition_type: Some("date".to_string()),
-        chain: Some("eth-mainnet".to_string()),
-        from: Some("2015-07-29 00:00:00".to_string()),
-        to: Some("2015-07-31 00:00:00".to_string()),
-        limit: 2,
-    };
-
-    let result = list_partitions_from_index(&request, None).expect("list should succeed");
-    assert_eq!(result.total_matches, 3);
-    assert_eq!(result.returned_rows, 2);
-    assert_eq!(result.rows.len(), 2);
-    assert_eq!(result.rows[0].partition_start_ts, "2015-07-29 00:00:00");
-    assert_eq!(result.rows[0].start_block, 100);
-    assert_eq!(result.rows[1].partition_start_ts, "2015-07-30 00:00:00");
-    assert_eq!(result.rows[1].start_block, 200);
-    assert!(result
-        .rows
-        .iter()
-        .all(|row| row.chain.as_deref() == Some("eth-mainnet")));
-}
-
-#[test]
-fn test_parse_partition_shard_strategy() {
-    assert_eq!(
-        parse_partition_shard_strategy("ordinal").expect("ordinal should parse"),
-        PartitionShardStrategy::Ordinal
-    );
-    assert_eq!(
-        parse_partition_shard_strategy("hash").expect("hash should parse"),
-        PartitionShardStrategy::Hash
-    );
-    assert!(parse_partition_shard_strategy("unknown").is_err());
-}
-
-#[test]
-fn test_shard_partitions_from_index_ordinal_completeness_and_non_overlap() {
-    use std::collections::BTreeSet;
-
-    let dir = tempfile::tempdir().expect("tempdir");
-    let path = dir.path().join("partitions.parquet");
-
-    let values = vec![
-        "2015-07-29 00:00:00",
-        "2015-07-30 00:00:00",
-        "2015-07-31 00:00:00",
-        "2015-08-01 00:00:00",
-        "2015-08-02 00:00:00",
-    ];
-    let rows = values
-        .into_iter()
-        .zip([100_u64, 200, 300, 400, 500])
-        .zip([200_u64, 300, 400, 500, 600])
-        .map(|((partition_value, start_block), stop_block)| {
-            time_partition_row(
-                Some("eth-mainnet"),
-                "date",
-                partition_value,
-                start_block,
-                stop_block,
-            )
-        })
-        .collect::<Vec<_>>();
-    write_test_verified_partitions_index(&path, rows).expect("write partitions index");
-
-    let base_request = PartitionListRequest {
-        index_path: path.to_string_lossy().to_string(),
-        partition_type: Some("date".to_string()),
-        chain: Some("eth-mainnet".to_string()),
-        from: None,
-        to: None,
-        limit: usize::MAX,
-    };
-
-    let mut seen = BTreeSet::new();
-    for shard_index in 0..3 {
-        let result = shard_partitions_from_index(
-            &PartitionShardRequest {
-                list: base_request.clone(),
-                shard_count: 3,
-                shard_index,
-                strategy: PartitionShardStrategy::Ordinal,
-            },
-            None,
-        )
-        .expect("shard should succeed");
-
-        for row in result.rows {
-            let inserted = seen.insert(row.partition_value);
-            assert!(inserted, "partition appeared in multiple shards");
-        }
-    }
-
-    assert_eq!(seen.len(), 5);
-}
-
-#[test]
-fn test_list_partitions_from_index_rejects_legacy_partitions_metadata() {
-    use arrow::array::{StringArray, UInt64Array};
-    use arrow::record_batch::RecordBatch;
-    use parquet::arrow::ArrowWriter;
-    use parquet::basic::Compression;
-    use parquet::file::metadata::KeyValue;
-    use parquet::file::properties::WriterProperties;
-    use std::fs::File;
-    use std::sync::Arc;
-
-    let dir = tempfile::tempdir().expect("tempdir");
-    let path = dir.path().join("partitions.parquet");
-
-    let schema = Arc::new(arrow::datatypes::Schema::new(vec![
-        arrow::datatypes::Field::new("chain", arrow::datatypes::DataType::Utf8, false),
-        arrow::datatypes::Field::new("partition_type", arrow::datatypes::DataType::Utf8, false),
-        arrow::datatypes::Field::new("partition_value", arrow::datatypes::DataType::Utf8, false),
-        arrow::datatypes::Field::new("start_block", arrow::datatypes::DataType::UInt64, false),
-        arrow::datatypes::Field::new("stop_block", arrow::datatypes::DataType::UInt64, false),
-    ]));
-
-    let batch = RecordBatch::try_new(
-        Arc::clone(&schema),
-        vec![
-            Arc::new(StringArray::from(vec!["eth-mainnet"])),
-            Arc::new(StringArray::from(vec!["day"])),
-            Arc::new(StringArray::from(vec!["2015-07-30 00:00:00"])),
-            Arc::new(UInt64Array::from(vec![100_u64])),
-            Arc::new(UInt64Array::from(vec![200_u64])),
-        ],
-    )
-    .expect("record batch");
-
-    let props = WriterProperties::builder()
-        .set_compression(Compression::SNAPPY)
-        .set_key_value_metadata(Some(vec![KeyValue::new(
-            "firehose-parquet.partitions.schema_version".to_string(),
-            "999".to_string(),
-        )]))
-        .build();
-
-    let file = File::create(&path).expect("create parquet");
-    let mut writer = ArrowWriter::try_new(file, schema, Some(props)).expect("create arrow writer");
-    writer.write(&batch).expect("write batch");
-    writer.close().expect("close writer");
-
-    let err = list_partitions_from_index(
-        &PartitionListRequest {
-            index_path: path.to_string_lossy().to_string(),
-            partition_type: Some("day".to_string()),
-            chain: None,
-            from: None,
-            to: None,
-            limit: 10,
-        },
-        None,
-    )
-    .expect_err("legacy partitions metadata should be rejected");
-    let message = err.to_string();
-    assert!(
-        message.contains("missing required column: partition")
-            || message.contains("missing required metadata: firehose-parquet.partition")
-    );
-}
-
-#[test]
-fn test_read_partitions_build_rows_rejects_legacy_schema_and_metadata() {
-    use arrow::array::{StringArray, UInt64Array};
-    use arrow::record_batch::RecordBatch;
-    use parquet::arrow::ArrowWriter;
-    use parquet::basic::Compression;
-    use parquet::file::metadata::KeyValue;
-    use parquet::file::properties::WriterProperties;
-    use std::fs::File;
-    use std::sync::Arc;
-
-    let dir = tempfile::tempdir().expect("tempdir");
-    let path = dir.path().join("partitions.parquet");
-
-    let schema = Arc::new(arrow::datatypes::Schema::new(vec![
-        arrow::datatypes::Field::new("chain", arrow::datatypes::DataType::Utf8, false),
-        arrow::datatypes::Field::new("partition_type", arrow::datatypes::DataType::Utf8, false),
-        arrow::datatypes::Field::new("partition_value", arrow::datatypes::DataType::Utf8, false),
-        arrow::datatypes::Field::new("start_block", arrow::datatypes::DataType::UInt64, false),
-        arrow::datatypes::Field::new("end_block", arrow::datatypes::DataType::UInt64, false),
-    ]));
-
-    let batch = RecordBatch::try_new(
-        Arc::clone(&schema),
-        vec![
-            Arc::new(StringArray::from(vec!["eth-mainnet"])),
-            Arc::new(StringArray::from(vec!["day"])),
-            Arc::new(StringArray::from(vec!["2015-07-30 00:00:00"])),
-            Arc::new(UInt64Array::from(vec![100_u64])),
-            Arc::new(UInt64Array::from(vec![200_u64])),
-        ],
-    )
-    .expect("record batch");
-
-    let props = WriterProperties::builder()
-        .set_compression(Compression::SNAPPY)
-        .set_key_value_metadata(Some(vec![
-            KeyValue::new(
-                "firehose-parquet.partitions.partition_types".to_string(),
-                "hour".to_string(),
-            ),
-            KeyValue::new(
-                "firehose-parquet.partitions.max_end_block".to_string(),
-                "999999".to_string(),
-            ),
-        ]))
-        .build();
-
-    let file = File::create(&path).expect("create parquet");
-    let mut writer = ArrowWriter::try_new(file, schema, Some(props)).expect("create arrow writer");
-    writer.write(&batch).expect("write batch");
-    writer.close().expect("close writer");
-
-    let err = read_partitions_build_rows(&path.to_string_lossy(), None)
-        .expect_err("legacy partitions schema should be rejected");
-    let message = err.to_string();
-    assert!(
-        message.contains("missing required column: partition")
-            || message.contains("missing required metadata: firehose-parquet.partition")
-    );
-}
-
-#[test]
-fn test_resolve_partition_bounds_from_index_rejects_legacy_end_block_column() {
-    use arrow::array::{StringArray, UInt64Array};
-    use arrow::record_batch::RecordBatch;
-    use parquet::arrow::ArrowWriter;
-    use std::fs::File;
-    use std::sync::Arc;
-
-    let dir = tempfile::tempdir().expect("tempdir");
-    let path = dir.path().join("partitions.parquet");
-
-    let schema = Arc::new(arrow::datatypes::Schema::new(vec![
-        arrow::datatypes::Field::new("chain", arrow::datatypes::DataType::Utf8, false),
-        arrow::datatypes::Field::new("partition_type", arrow::datatypes::DataType::Utf8, false),
-        arrow::datatypes::Field::new("partition_value", arrow::datatypes::DataType::Utf8, false),
-        arrow::datatypes::Field::new("start_block", arrow::datatypes::DataType::UInt64, false),
-        arrow::datatypes::Field::new("end_block", arrow::datatypes::DataType::UInt64, false),
-    ]));
-
-    let batch = RecordBatch::try_new(
-        Arc::clone(&schema),
-        vec![
-            Arc::new(StringArray::from(vec!["eth-mainnet"])),
-            Arc::new(StringArray::from(vec!["hour"])),
-            Arc::new(StringArray::from(vec!["2015-07-30 15:00:00"])),
-            Arc::new(UInt64Array::from(vec![200_u64])),
-            Arc::new(UInt64Array::from(vec![300_u64])),
-        ],
-    )
-    .expect("record batch");
-
-    let file = File::create(&path).expect("create parquet");
-    let mut writer = ArrowWriter::try_new(file, schema, None).expect("writer");
-    writer.write(&batch).expect("write batch");
-    writer.close().expect("close writer");
-
-    let request = PartitionBoundsRequest {
-        index_path: path.to_string_lossy().to_string(),
-        partition_type: "hour".to_string(),
-        partition_value: "2015-07-30 15:00:00".to_string(),
-        chain: Some("eth-mainnet".to_string()),
-    };
-    let err = resolve_partition_bounds_from_index(&request, None)
-        .expect_err("legacy end_block column should be rejected");
-    let message = err.to_string();
-    assert!(
-        message.contains("missing required column: partition")
-            || message.contains("missing required file metadata")
-    );
 }
 
 /// Write a minimal blocks table (blocks `1..=n` with a valid parent chain) whose
@@ -3659,63 +2203,6 @@ fn test_validate_parquet_rejects_unsupported_timestamp_type() {
 }
 
 #[test]
-fn test_validate_partitions_index_detects_gap_and_overlap() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let path = dir.path().join("partitions.parquet");
-    write_test_partitions_index(
-        &path,
-        vec![
-            time_partition_row(Some("eth-mainnet"), "date", "2015-07-29 00:00:00", 100, 200),
-            time_partition_row(Some("eth-mainnet"), "date", "2015-07-30 00:00:00", 250, 300),
-            time_partition_row(Some("eth-mainnet"), "date", "2015-07-31 00:00:00", 290, 400),
-        ],
-    )
-    .expect("write partitions index");
-
-    let result = validate_partitions_index(
-        &PartitionValidateRequest {
-            list: PartitionListRequest {
-                index_path: path.to_string_lossy().to_string(),
-                partition_type: Some("date".to_string()),
-                chain: Some("eth-mainnet".to_string()),
-                from: None,
-                to: None,
-                limit: usize::MAX,
-            },
-            allow_gaps: false,
-        },
-        None,
-    )
-    .expect("validation should run");
-
-    assert!(!result.valid);
-    assert_eq!(result.issue_count, 2);
-    assert!(result
-        .issues
-        .iter()
-        .any(|i| i.kind == PartitionValidationIssueKind::Gap));
-    assert!(result
-        .issues
-        .iter()
-        .any(|i| i.kind == PartitionValidationIssueKind::Overlap));
-}
-
-#[test]
-fn test_parse_partition_build_types_accepts_date_and_day_alias() {
-    let parsed = parse_partition_build_types("date").expect("parse types");
-    assert_eq!(parsed, vec![PartitionBuildType::Date]);
-
-    let parsed = parse_partition_build_types("day").expect("parse alias");
-    assert_eq!(parsed, vec![PartitionBuildType::Date]);
-}
-
-#[test]
-fn test_parse_partition_build_types_rejects_multiple_values() {
-    let err = parse_partition_build_types("date,hour").expect_err("multiple values should fail");
-    assert!(err.to_string().contains("exactly one value per run"));
-}
-
-#[test]
 #[serial]
 fn test_build_config_allows_independent_cursor_bucket_with_local_output() {
     let _bucket = EnvVarGuard::set("S3_BUCKET", "data");
@@ -3880,411 +2367,6 @@ fn test_write_destinations_are_absolute_for_logs() {
     );
 }
 
-fn block_range_row(start_block: u64, stop_block: u64, block_range_size: u64) -> PartitionBuildRow {
-    PartitionBuildRow {
-        partition_type: "block_range".to_string(),
-        partition_interval_seconds: block_range_size as i64,
-        partition_start_ts: start_block.to_string(),
-        partition_value: start_block.to_string(),
-        start_block,
-        stop_block,
-        start_time: None,
-        end_time: None,
-        chain: Some("solana-mainnet-beta".to_string()),
-    }
-}
-
-#[test]
-fn test_partition_value_key_orders_block_ranges_and_timestamps_numerically() {
-    let key = |partition_type, value| {
-        partition_value_key(partition_type, value).expect("valid partition value")
-    };
-    assert_eq!(key("block_range", "10000000"), 10_000_000);
-    assert!(key("block_range", "8000000") < key("block_range", "10000000"));
-    assert_eq!(key("date", "2015-07-30 00:00:00"), 1_438_214_400);
-    assert_eq!(key("hour", "1970-01-01 01:00:00"), 3_600);
-    assert!(key("hour", "2015-07-30 09:00:00") < key("hour", "2015-07-30 10:00:00"));
-
-    for (partition_type, value) in [
-        ("block_range", "2015-07-30 00:00:00"),
-        ("block_range", "-1"),
-        ("date", "10000000"),
-        ("date", "2015-07-30"),
-        ("date", "1969-12-31 00:00:00"),
-        ("unknown", "0"),
-    ] {
-        assert!(
-            partition_value_key(partition_type, value).is_err(),
-            "expected {partition_type}={value} to be rejected"
-        );
-    }
-}
-
-/// Block-range rows for [8M, 12M) written out of order, so that lexicographic
-/// sorting (`"10000000" < "8000000"`) and numeric sorting disagree.
-fn write_multi_digit_block_range_index(path: &std::path::Path) {
-    write_test_partitions_index(
-        path,
-        vec![
-            block_range_row(10_000_000, 11_000_000, 1_000_000),
-            block_range_row(8_000_000, 9_000_000, 1_000_000),
-            block_range_row(11_000_000, 12_000_000, 1_000_000),
-            block_range_row(9_000_000, 10_000_000, 1_000_000),
-        ],
-    )
-    .expect("write partitions index");
-}
-
-fn block_range_list_request(path: &std::path::Path) -> PartitionListRequest {
-    PartitionListRequest {
-        index_path: path.to_string_lossy().to_string(),
-        partition_type: Some("block_range".to_string()),
-        chain: None,
-        from: None,
-        to: None,
-        limit: usize::MAX,
-    }
-}
-
-#[test]
-fn test_read_partitions_build_rows_sorts_block_range_numerically() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let path = dir.path().join("partitions.parquet");
-    write_multi_digit_block_range_index(&path);
-
-    let rows = read_partitions_build_rows(&path.to_string_lossy(), None).expect("read rows");
-    let values = rows
-        .iter()
-        .map(|row| row.partition_value.as_str())
-        .collect::<Vec<_>>();
-    assert_eq!(values, ["8000000", "9000000", "10000000", "11000000"]);
-}
-
-#[test]
-fn test_list_partitions_from_index_orders_and_filters_block_range_numerically() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let path = dir.path().join("partitions.parquet");
-    write_multi_digit_block_range_index(&path);
-
-    let mut request = block_range_list_request(&path);
-    request.limit = 2;
-    let result = list_partitions_from_index(&request, None).expect("list should succeed");
-    assert_eq!(result.total_matches, 4);
-    let starts = result
-        .rows
-        .iter()
-        .map(|row| row.start_block)
-        .collect::<Vec<_>>();
-    assert_eq!(starts, [8_000_000, 9_000_000]);
-
-    let mut request = block_range_list_request(&path);
-    request.from = Some("9000000".to_string());
-    request.to = Some("10000000".to_string());
-    let result = list_partitions_from_index(&request, None).expect("list should succeed");
-    let starts = result
-        .rows
-        .iter()
-        .map(|row| row.start_block)
-        .collect::<Vec<_>>();
-    assert_eq!(starts, [9_000_000, 10_000_000]);
-}
-
-#[test]
-fn test_list_partitions_from_index_rejects_bound_in_wrong_format() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let path = dir.path().join("partitions.parquet");
-    write_multi_digit_block_range_index(&path);
-
-    let mut request = block_range_list_request(&path);
-    request.from = Some("2015-07-29 00:00:00".to_string());
-    let err = list_partitions_from_index(&request, None)
-        .expect_err("timestamp bound should be rejected for block_range rows");
-    assert!(err.to_string().contains("--from"), "{err}");
-}
-
-#[test]
-fn test_shard_partitions_from_index_ordinal_uses_numeric_block_range_order() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let path = dir.path().join("partitions.parquet");
-    write_multi_digit_block_range_index(&path);
-    let rows = read_partitions_build_rows(path.to_str().unwrap(), None).unwrap();
-    write_test_verified_partitions_index(&path, rows).unwrap();
-
-    let shard_starts = |shard_index| {
-        shard_partitions_from_index(
-            &PartitionShardRequest {
-                list: block_range_list_request(&path),
-                shard_count: 2,
-                shard_index,
-                strategy: PartitionShardStrategy::Ordinal,
-            },
-            None,
-        )
-        .expect("shard should succeed")
-        .rows
-        .iter()
-        .map(|row| row.start_block)
-        .collect::<Vec<_>>()
-    };
-    assert_eq!(shard_starts(0), [8_000_000, 10_000_000]);
-    assert_eq!(shard_starts(1), [9_000_000, 11_000_000]);
-}
-
-#[test]
-fn test_validate_partitions_index_accepts_contiguous_multi_digit_block_ranges() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let path = dir.path().join("partitions.parquet");
-    write_multi_digit_block_range_index(&path);
-
-    let result = validate_partitions_index(
-        &PartitionValidateRequest {
-            list: block_range_list_request(&path),
-            allow_gaps: false,
-        },
-        None,
-    )
-    .expect("validation should run");
-    assert!(result.valid, "unexpected issues: {:?}", result.issues);
-    assert_eq!(result.total_rows, 4);
-}
-
-#[test]
-fn test_validate_partitions_index_reports_single_multi_digit_block_range_gap() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let path = dir.path().join("partitions.parquet");
-    write_test_partitions_index(
-        &path,
-        vec![
-            block_range_row(11_000_000, 12_000_000, 1_000_000),
-            block_range_row(8_000_000, 9_000_000, 1_000_000),
-            block_range_row(9_000_000, 10_000_000, 1_000_000),
-        ],
-    )
-    .expect("write partitions index");
-
-    let result = validate_partitions_index(
-        &PartitionValidateRequest {
-            list: block_range_list_request(&path),
-            allow_gaps: false,
-        },
-        None,
-    )
-    .expect("validation should run");
-    assert_eq!(result.issue_count, 1, "issues: {:?}", result.issues);
-    assert_eq!(result.issues[0].kind, PartitionValidationIssueKind::Gap);
-    assert_eq!(result.issues[0].partition_value, "11000000");
-}
-
-#[test]
-fn test_resolve_partition_window_bounds_from_index_block_range_numeric() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let path = dir.path().join("partitions.parquet");
-    write_multi_digit_block_range_index(&path);
-    let rows = read_partitions_build_rows(path.to_str().unwrap(), None).unwrap();
-    write_test_verified_partitions_index(&path, rows).unwrap();
-
-    let bounds = resolve_partition_window_bounds_from_index(
-        &PartitionWindowRequest {
-            index_path: path.to_string_lossy().to_string(),
-            partition_type: "block_range".to_string(),
-            partition_from: "9000000".to_string(),
-            partition_to: "11000000".to_string(),
-            chain: None,
-        },
-        None,
-    )
-    .expect("partition window bounds should resolve");
-    assert_eq!(bounds.start_block, 9_000_000);
-    assert_eq!(bounds.stop_block, 11_000_000);
-    assert_eq!(bounds.partitions_count, 2);
-}
-
-#[test]
-fn test_resolve_partition_bounds_from_index_block_range_multi_digit() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let path = dir.path().join("partitions.parquet");
-    write_multi_digit_block_range_index(&path);
-    let rows = read_partitions_build_rows(path.to_str().unwrap(), None).unwrap();
-    write_test_verified_partitions_index(&path, rows).unwrap();
-
-    let bounds = resolve_partition_bounds_from_index(
-        &PartitionBoundsRequest {
-            index_path: path.to_string_lossy().to_string(),
-            partition_type: "block_range".to_string(),
-            partition_value: "10000000".to_string(),
-            chain: None,
-        },
-        None,
-    )
-    .expect("partition bounds should resolve");
-    assert_eq!(bounds.start_block, 10_000_000);
-    assert_eq!(bounds.stop_block, 11_000_000);
-}
-
-#[test]
-fn test_write_and_read_partitions_build_rows_round_trip() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let path = dir.path().join("eth-mainnet").join("partitions.parquet");
-    let rows = vec![PartitionBuildRow {
-        partition_type: "hour".to_string(),
-        partition_interval_seconds: 3_600,
-        partition_start_ts: "2023-07-31 14:00:00".to_string(),
-        partition_value: "2023-07-31 14:00:00".to_string(),
-        start_block: 100,
-        stop_block: 103,
-        start_time: Some("2023-07-31 14:59:00".to_string()),
-        end_time: Some("2023-07-31 15:00:00".to_string()),
-        chain: Some("eth-mainnet".to_string()),
-    }];
-
-    write_partitions_index(&path.to_string_lossy(), &rows, None).expect("write rows");
-    let read_back =
-        read_partitions_build_rows(&path.to_string_lossy(), None).expect("read rows back");
-    assert_eq!(read_back, rows);
-}
-
-#[test]
-fn test_write_partitions_index_uses_updated_schema() {
-    use arrow::datatypes::{DataType, TimeUnit};
-    use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
-    use std::sync::Arc;
-
-    let dir = tempfile::tempdir().expect("tempdir");
-    let path = dir.path().join("eth-mainnet").join("partitions.parquet");
-    let rows = vec![PartitionBuildRow {
-        partition_type: "hour".to_string(),
-        partition_interval_seconds: 3_600,
-        partition_start_ts: "2023-07-31 14:00:00".to_string(),
-        partition_value: "2023-07-31 14:00:00".to_string(),
-        start_block: 100,
-        stop_block: 103,
-        start_time: Some("2023-07-31 14:59:00".to_string()),
-        end_time: Some("2023-07-31 15:00:00".to_string()),
-        chain: Some("eth-mainnet".to_string()),
-    }];
-
-    write_partitions_index(&path.to_string_lossy(), &rows, None).expect("write rows");
-
-    let file = std::fs::File::open(&path).expect("open parquet");
-    let builder = ParquetRecordBatchReaderBuilder::try_new(file).expect("builder");
-    let schema = builder.schema();
-
-    assert_eq!(
-        schema
-            .fields()
-            .iter()
-            .map(|field| field.name())
-            .collect::<Vec<_>>(),
-        vec![
-            "partition",
-            "start_block",
-            "stop_block",
-            "start_time",
-            "end_time",
-        ]
-    );
-    // chain, type, interval are in file-level metadata, not columns
-    assert!(schema.field_with_name("chain").is_err());
-    assert!(schema.field_with_name("type").is_err());
-    assert!(schema.field_with_name("interval").is_err());
-    assert!(schema.field_with_name("partition_start_ts").is_err());
-    assert_eq!(
-        schema
-            .field_with_name("partition")
-            .expect("partition")
-            .data_type(),
-        &DataType::UInt64
-    );
-
-    // Verify file-level metadata uses the namespaced partition key only
-    let file_metadata = builder.metadata().file_metadata();
-    let kvs = file_metadata.key_value_metadata().expect("metadata");
-    let partition_kv = kvs
-        .iter()
-        .find(|kv| kv.key == "firehose-parquet.partition")
-        .expect("firehose-parquet.partition metadata");
-    assert_eq!(partition_kv.value.as_deref(), Some("hour"));
-    assert!(!kvs.iter().any(|kv| kv.key == "partition_type"));
-    assert_eq!(
-        schema
-            .field_with_name("start_time")
-            .expect("start_time")
-            .data_type(),
-        &DataType::Timestamp(TimeUnit::Millisecond, Some(Arc::from("UTC")))
-    );
-    assert!(
-        schema
-            .field_with_name("start_time")
-            .expect("start_time")
-            .is_nullable(),
-        "start_time should be nullable"
-    );
-    assert_eq!(
-        schema
-            .field_with_name("end_time")
-            .expect("end_time")
-            .data_type(),
-        &DataType::Timestamp(TimeUnit::Millisecond, Some(Arc::from("UTC")))
-    );
-    assert!(
-        schema
-            .field_with_name("end_time")
-            .expect("end_time")
-            .is_nullable(),
-        "end_time should be nullable"
-    );
-}
-
-#[test]
-fn test_write_partitions_index_with_metadata_preserves_firehose_metadata() {
-    use crate::writer::ParquetFileMetadata;
-    use parquet::file::reader::{FileReader, SerializedFileReader};
-
-    let dir = tempfile::tempdir().expect("tempdir");
-    let path = dir.path().join("eth-mainnet").join("partitions.parquet");
-    let rows = vec![PartitionBuildRow {
-        partition_type: "hour".to_string(),
-        partition_interval_seconds: 3_600,
-        partition_start_ts: "2023-07-31 14:00:00".to_string(),
-        partition_value: "2023-07-31 14:00:00".to_string(),
-        start_block: 100,
-        stop_block: 103,
-        start_time: Some("2023-07-31 14:59:00".to_string()),
-        end_time: Some("2023-07-31 15:00:00".to_string()),
-        chain: Some("eth-mainnet".to_string()),
-    }];
-    let mut metadata = ParquetFileMetadata::new();
-    metadata.add("firehose-parquet.version", "0.5.4-test");
-    metadata.add("firehose-parquet.endpoint", "https://example.com:443");
-
-    write_partitions_index_with_metadata(
-        &path.to_string_lossy(),
-        &rows,
-        Compression::Zstd,
-        None,
-        Some(&metadata),
-    )
-    .expect("write rows with metadata");
-
-    let file = std::fs::File::open(&path).expect("open parquet");
-    let reader = SerializedFileReader::new(file).expect("reader");
-    let file_meta = reader.metadata().file_metadata();
-    let kv = file_meta
-        .key_value_metadata()
-        .expect("key value metadata should exist");
-
-    assert!(kv.iter().any(|entry| {
-        entry.key == "firehose-parquet.version" && entry.value.as_deref() == Some("0.5.4-test")
-    }));
-    assert!(kv.iter().any(|entry| {
-        entry.key == "firehose-parquet.endpoint"
-            && entry.value.as_deref() == Some("https://example.com:443")
-    }));
-    assert!(!kv
-        .iter()
-        .any(|entry| entry.key.starts_with("firehose-parquet.partitions.")));
-}
-
 #[test]
 fn test_collect_scan_s3_parquet_objects_treats_exact_file_as_single_object() {
     use bytes::Bytes;
@@ -4293,7 +2375,7 @@ fn test_collect_scan_s3_parquet_objects_treats_exact_file_as_single_object() {
     use object_store::ObjectStore;
 
     let store = InMemory::new();
-    let location = Path::from("mainnet/partitions.parquet");
+    let location = Path::from("mainnet/part-000001.parquet");
     block_on_async(async {
         store
             .put(
@@ -4306,13 +2388,13 @@ fn test_collect_scan_s3_parquet_objects_treats_exact_file_as_single_object() {
 
     let (objects, exact_object_path) = block_on_async(collect_scan_s3_parquet_objects(
         &store,
-        "mainnet/partitions.parquet",
+        "mainnet/part-000001.parquet",
     ))
     .expect("collect objects");
 
     assert!(exact_object_path);
     assert_eq!(objects.len(), 1);
-    assert_eq!(objects[0].location.as_ref(), "mainnet/partitions.parquet");
+    assert_eq!(objects[0].location.as_ref(), "mainnet/part-000001.parquet");
 }
 
 #[test]
@@ -4363,16 +2445,16 @@ fn test_collect_scan_s3_parquet_objects_lists_prefix_and_filters_parquet() {
 fn test_scan_s3_display_key_keeps_exact_object_key() {
     assert_eq!(
         scan_s3_display_key(
-            "mainnet/partitions.parquet",
-            "mainnet/partitions.parquet",
+            "mainnet/part-000001.parquet",
+            "mainnet/part-000001.parquet",
             true
         ),
-        "mainnet/partitions.parquet"
+        "mainnet/part-000001.parquet"
     );
 }
 
 /// Read-only commands on a dataset written with `--output s3://<bucket>` to a
-/// bucket root: the index is an exact object in `_fireparq/`, a table is a
+/// bucket root: the registry is an exact object in `_fireparq/`, a table is a
 /// prefix directly below the bucket, and a scan of the whole bucket reads only
 /// table data.
 #[test]
@@ -4384,12 +2466,11 @@ fn test_collect_scan_s3_parquet_objects_at_a_bucket_root_dataset() {
 
     let store = InMemory::new();
     for key in [
-        "_fireparq/partitions.parquet",
         "_fireparq/cursor.parquet",
         "_fireparq/merkle_roots.parquet",
         "_fireparq/verify_runs/run-1/roots.parquet",
         // Legacy root artifacts of a release before v1.0.0.
-        "partitions.parquet",
+        "merkle_roots.parquet",
         "cursor.parquet",
         "blocks/date=2023-11-14/part-v1-a.parquet",
         "blocks-archive/part-v1-b.parquet",
@@ -4405,18 +2486,18 @@ fn test_collect_scan_s3_parquet_objects_at_a_bucket_root_dataset() {
     }
     let (objects, exact) = block_on_async(collect_scan_s3_parquet_objects(
         &store,
-        "_fireparq/partitions.parquet",
+        "_fireparq/merkle_roots.parquet",
     ))
-    .expect("collect index");
+    .expect("collect registry");
     assert!(exact);
     assert_eq!(objects.len(), 1);
     assert_eq!(
         scan_s3_display_key(
             objects[0].location.as_ref(),
-            "_fireparq/partitions.parquet",
+            "_fireparq/merkle_roots.parquet",
             exact
         ),
-        "_fireparq/partitions.parquet"
+        "_fireparq/merkle_roots.parquet"
     );
     let (objects, exact) =
         block_on_async(collect_scan_s3_parquet_objects(&store, "blocks")).expect("collect table");
@@ -4449,7 +2530,6 @@ fn test_collect_scan_s3_parquet_objects_at_a_bucket_root_dataset() {
         [
             "_fireparq/cursor.parquet",
             "_fireparq/merkle_roots.parquet",
-            "_fireparq/partitions.parquet",
             "_fireparq/verify_runs/run-1/roots.parquet",
         ]
     );
@@ -4463,7 +2543,7 @@ fn test_local_directory_walks_skip_dataset_artifacts() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().join("mainnet");
     let files = [
-        "_fireparq/partitions.parquet",
+        "_fireparq/merkle_roots.parquet",
         "_fireparq/cursor.parquet",
         "_fireparq/verify_runs/run-1/roots.parquet",
         "cursor.parquet",
@@ -4502,15 +2582,15 @@ fn test_local_directory_walks_skip_dataset_artifacts() {
         walk(&root.join("_fireparq")),
         [
             "cursor.parquet",
-            "partitions.parquet",
+            "merkle_roots.parquet",
             "verify_runs/run-1/roots.parquet"
         ]
     );
 }
 
 /// Without a placeholder, `--output` is the dataset root byte for byte: no
-/// `<chain_name>` directory is appended, locally or on S3. `partitions build`
-/// puts its index, and reads the sibling cursor mirror, below the same root.
+/// `<chain_name>` directory is appended, locally or on S3. The artifacts sit
+/// below the same root.
 #[test]
 fn test_output_root_default_is_byte_identical_to_output() {
     for output in [
@@ -4529,16 +2609,17 @@ fn test_output_root_default_is_byte_identical_to_output() {
         let root = resolve_output_root(output, "mainnet").unwrap();
         assert_eq!(root, output, "{output}");
         assert_eq!(
-            partitions_index_path_in(&root),
-            crate::artifacts::DatasetArtifact::PartitionsIndex.path_in(output)
+            crate::artifacts::DatasetArtifact::CursorMirror.path_in(&root),
+            crate::artifacts::DatasetArtifact::CursorMirror.path_in(output)
         );
         // The chain name is not needed by the template, so any nonempty
         // EndpointInfo name leaves the root unchanged.
         assert_eq!(resolve_output_root(output, "a/b c").unwrap(), output);
     }
     assert_eq!(
-        partitions_index_path_in(&resolve_output_root("./output", "mainnet").unwrap()),
-        "./output/_fireparq/partitions.parquet"
+        crate::artifacts::DatasetArtifact::MerkleRoots
+            .path_in(&resolve_output_root("./output", "mainnet").unwrap()),
+        "./output/_fireparq/merkle_roots.parquet"
     );
     assert_eq!(
         crate::artifacts::DatasetArtifact::CursorMirror
@@ -4561,10 +2642,9 @@ fn test_output_root_normalizes_s3_trailing_slashes() {
         assert_eq!(resolve_output_root(output, "mainnet").unwrap(), root);
     }
     assert_eq!(
-        partitions_index_path_in(
-            &resolve_output_root("s3://ethereum-mainnet/", "mainnet").unwrap()
-        ),
-        "s3://ethereum-mainnet/_fireparq/partitions.parquet"
+        crate::artifacts::DatasetArtifact::MerkleRoots
+            .path_in(&resolve_output_root("s3://ethereum-mainnet/", "mainnet").unwrap()),
+        "s3://ethereum-mainnet/_fireparq/merkle_roots.parquet"
     );
 }
 
@@ -4600,13 +2680,14 @@ fn test_output_root_expands_the_chain_placeholder() {
         "s3://datasets/solana-mainnet-beta"
     );
     assert_eq!(
-        partitions_index_path_in(&resolve_output_root("s3://datasets/{chain}", "mainnet").unwrap()),
-        "s3://datasets/mainnet/_fireparq/partitions.parquet"
+        crate::artifacts::DatasetArtifact::MerkleRoots
+            .path_in(&resolve_output_root("s3://datasets/{chain}", "mainnet").unwrap()),
+        "s3://datasets/mainnet/_fireparq/merkle_roots.parquet"
     );
 }
 
-/// `{{` and `}}` are literal braces, as in `--cursor-template`; an escaped
-/// `{{chain}}` is not a placeholder.
+/// `{{` and `}}` are literal braces; an escaped `{{chain}}` is not a
+/// placeholder.
 #[test]
 fn test_output_root_escapes_braces() {
     for (output, root) in [
@@ -4624,34 +2705,6 @@ fn test_output_root_escapes_braces() {
             "{output}"
         );
         validate_output_template(output).unwrap();
-    }
-    // The same parser serves --cursor-template.
-    let context = CursorTemplateContext {
-        chain: Some("mainnet".to_string()),
-        partition_type: None,
-        partition_value: None,
-        partition_from: None,
-        partition_to: None,
-    };
-    assert_eq!(
-        resolve_cursor_template("cursor/{{x}}/{chain}.parquet", &context).unwrap(),
-        "cursor/{x}/mainnet.parquet"
-    );
-    for (template, expected) in [
-        (
-            "cursor/{chain.parquet",
-            "unterminated --cursor-template variable",
-        ),
-        ("cursor/chain}.parquet", "unmatched } in --cursor-template"),
-        (
-            "cursor/{nope}.parquet",
-            "unknown --cursor-template variable {nope}",
-        ),
-    ] {
-        let error = resolve_cursor_template(template, &context)
-            .unwrap_err()
-            .to_string();
-        assert!(error.contains(expected), "{template}: {error}");
     }
 }
 
@@ -4742,70 +2795,6 @@ fn test_resolve_s3_output_root_keeps_a_valid_output_template() {
         .unwrap_err()
         .to_string();
     assert!(error.contains("disagrees with --s3-bucket"), "{error}");
-}
-
-#[test]
-fn test_write_partitions_index_defaults_to_zstd_compression() {
-    use parquet::file::reader::{FileReader, SerializedFileReader};
-
-    let dir = tempfile::tempdir().expect("tempdir");
-    let path = dir.path().join("eth-mainnet").join("partitions.parquet");
-    let rows = vec![PartitionBuildRow {
-        partition_type: "hour".to_string(),
-        partition_interval_seconds: 3_600,
-        partition_start_ts: "2023-07-31 14:00:00".to_string(),
-        partition_value: "2023-07-31 14:00:00".to_string(),
-        start_block: 100,
-        stop_block: 103,
-        start_time: Some("2023-07-31 14:59:00".to_string()),
-        end_time: Some("2023-07-31 15:00:00".to_string()),
-        chain: Some("eth-mainnet".to_string()),
-    }];
-
-    write_partitions_index(&path.to_string_lossy(), &rows, None).expect("write rows");
-
-    let file = std::fs::File::open(&path).expect("open parquet");
-    let reader = SerializedFileReader::new(file).expect("reader");
-    let compression = reader.metadata().row_group(0).column(0).compression();
-
-    assert!(matches!(compression, PqCompression::ZSTD(_)));
-}
-
-#[test]
-fn test_write_partitions_index_with_metadata_honors_snappy_compression() {
-    use crate::writer::ParquetFileMetadata;
-    use parquet::file::reader::{FileReader, SerializedFileReader};
-
-    let dir = tempfile::tempdir().expect("tempdir");
-    let path = dir.path().join("eth-mainnet").join("partitions.parquet");
-    let rows = vec![PartitionBuildRow {
-        partition_type: "hour".to_string(),
-        partition_interval_seconds: 3_600,
-        partition_start_ts: "2023-07-31 14:00:00".to_string(),
-        partition_value: "2023-07-31 14:00:00".to_string(),
-        start_block: 100,
-        stop_block: 103,
-        start_time: Some("2023-07-31 14:59:00".to_string()),
-        end_time: Some("2023-07-31 15:00:00".to_string()),
-        chain: Some("eth-mainnet".to_string()),
-    }];
-    let mut metadata = ParquetFileMetadata::new();
-    metadata.add("firehose-parquet.compression", "snappy");
-
-    write_partitions_index_with_metadata(
-        &path.to_string_lossy(),
-        &rows,
-        Compression::Snappy,
-        None,
-        Some(&metadata),
-    )
-    .expect("write rows with snappy compression");
-
-    let file = std::fs::File::open(&path).expect("open parquet");
-    let reader = SerializedFileReader::new(file).expect("reader");
-    let compression = reader.metadata().row_group(0).column(0).compression();
-
-    assert_eq!(compression, PqCompression::SNAPPY);
 }
 
 #[test]
@@ -5095,666 +3084,6 @@ fn test_format_scan_rows_vertical_matches_legacy_style() {
     assert!(rendered.contains("Row 1:"));
     assert!(rendered.contains("block_num"));
     assert!(rendered.contains("42"));
-}
-fn verified_test_request(path: &std::path::Path, value: &str) -> PartitionBoundsRequest {
-    PartitionBoundsRequest {
-        index_path: path.to_string_lossy().into(),
-        partition_type: "hour".into(),
-        partition_value: value.into(),
-        chain: Some("test-chain".into()),
-    }
-}
-fn verified_test_rows() -> Vec<PartitionBuildRow> {
-    [
-        (10, "2023-11-14 22:00:00"),
-        (11, "2023-11-14 23:00:00"),
-        (12, "2023-11-14 22:00:00"),
-    ]
-    .into_iter()
-    .map(|(number, value)| {
-        time_partition_row(Some("test-chain"), "hour", value, number, number + 1)
-    })
-    .collect()
-}
-fn verified_list_request(path: &std::path::Path) -> PartitionListRequest {
-    PartitionListRequest {
-        index_path: path.to_string_lossy().into(),
-        partition_type: Some("hour".into()),
-        chain: Some("test-chain".into()),
-        from: None,
-        to: None,
-        limit: 100,
-    }
-}
-
-#[test]
-fn verified_consumers_preserve_disjoint_runs_and_refuse_enclosing_holes() {
-    let temp = tempfile::tempdir().unwrap();
-    let path = temp.path().join("index.parquet");
-    write_test_verified_partitions_index(&path, verified_test_rows()).unwrap();
-    let request = verified_test_request(&path, "2023-11-14 22:00:00");
-    assert!(resolve_partition_bounds_from_index(&request, None)
-        .unwrap_err()
-        .to_string()
-        .contains("ambiguous"));
-    let all = resolve_partition_command(
-        request,
-        None,
-        &PartitionResolveOptions {
-            strict_single_chain: true,
-            all_spans: true,
-        },
-    )
-    .unwrap();
-    assert_eq!(all.start_block, None);
-    assert_eq!(all.stop_block, None);
-    assert_eq!(all.coverage.start_block, 10);
-    assert_eq!(all.coverage.stop_block, 13);
-    let spans = all.spans.unwrap();
-    assert_eq!(
-        spans
-            .iter()
-            .map(|span| (span.start_block, span.stop_block))
-            .collect::<Vec<_>>(),
-        vec![(10, 11), (12, 13)]
-    );
-    let mut window = PartitionWindowRequest {
-        index_path: path.to_string_lossy().into(),
-        partition_type: "hour".into(),
-        partition_from: "2023-11-14 22:00:00".into(),
-        partition_to: "2023-11-14 23:00:00".into(),
-        chain: None,
-    };
-    assert!(resolve_partition_window_bounds_from_index(&window, None)
-        .unwrap_err()
-        .to_string()
-        .contains("non-contiguous"));
-    window.partition_to = "2023-11-15 00:00:00".into();
-    let bounds = resolve_partition_window_bounds_from_index(&window, None).unwrap();
-    assert_eq!(
-        (
-            bounds.start_block,
-            bounds.stop_block,
-            bounds.partitions_count
-        ),
-        (10, 13, 3)
-    );
-    let report = validate_partitions_index(
-        &PartitionValidateRequest {
-            list: verified_list_request(&path),
-            allow_gaps: false,
-        },
-        None,
-    )
-    .unwrap();
-    assert!(report.valid);
-    assert_eq!(report.incomplete_spans, 0);
-    assert_eq!(report.unknown_spans, 0);
-}
-
-#[test]
-fn incomplete_edges_remain_inspectable_but_never_resolve_or_shard() {
-    let temp = tempfile::tempdir().unwrap();
-    let path = temp.path().join("index.parquet");
-    write_test_verified_partitions_index(&path, verified_test_rows()).unwrap();
-    let mut index = read_verified_partitions_index(path.to_str().unwrap(), None).unwrap();
-    index.spans[2].proof.end_complete = false;
-    write_verified_partitions_index(
-        path.to_str().unwrap(),
-        &index,
-        Compression::Zstd,
-        None,
-        None,
-    )
-    .unwrap();
-    for all_spans in [false, true] {
-        assert!(resolve_partition_command(
-            verified_test_request(&path, "2023-11-14 22:00:00"),
-            None,
-            &PartitionResolveOptions {
-                strict_single_chain: false,
-                all_spans
-            }
-        )
-        .unwrap_err()
-        .to_string()
-        .contains("incomplete"));
-    }
-    let list = verified_list_request(&path);
-    let inspected = list_partitions_from_index(&list, None).unwrap();
-    assert!(inspected.coverage.is_some());
-    assert!(inspected
-        .rows
-        .iter()
-        .any(|row| row.start_block == 12 && row.complete == Some(false)));
-    assert!(shard_partitions_from_index(
-        &PartitionShardRequest {
-            list: list.clone(),
-            shard_count: 2,
-            shard_index: 0,
-            strategy: PartitionShardStrategy::Ordinal
-        },
-        None
-    )
-    .unwrap_err()
-    .to_string()
-    .contains("incomplete"));
-    let report = validate_partitions_index(
-        &PartitionValidateRequest {
-            list,
-            allow_gaps: false,
-        },
-        None,
-    )
-    .unwrap();
-    assert!(report.valid);
-    assert_eq!(report.incomplete_spans, 1);
-}
-
-#[test]
-fn legacy_completeness_is_unknown_for_inspection_and_refused_by_all_range_helpers() {
-    let temp = tempfile::tempdir().unwrap();
-    let path = temp.path().join("legacy.parquet");
-    write_test_partitions_index(&path, verified_test_rows()).unwrap();
-    let list = verified_list_request(&path);
-    let inspected = list_partitions_from_index(&list, None).unwrap();
-    assert_eq!(inspected.coverage, None);
-    assert!(inspected.rows.iter().all(|row| row.complete.is_none()));
-    assert!(resolve_partition_command(
-        verified_test_request(&path, "2023-11-14 23:00:00"),
-        None,
-        &PartitionResolveOptions {
-            strict_single_chain: false,
-            all_spans: true
-        }
-    )
-    .unwrap_err()
-    .to_string()
-    .contains("rebuild"));
-    assert!(resolve_partition_bounds_from_index(
-        &verified_test_request(&path, "2023-11-14 23:00:00"),
-        None
-    )
-    .is_err());
-    assert!(resolve_partition_window_bounds_from_index(
-        &PartitionWindowRequest {
-            index_path: path.to_string_lossy().into(),
-            partition_type: "hour".into(),
-            partition_from: "2023-11-14 22:00:00".into(),
-            partition_to: "2023-11-15 00:00:00".into(),
-            chain: None
-        },
-        None
-    )
-    .is_err());
-    assert!(shard_partitions_from_index(
-        &PartitionShardRequest {
-            list: list.clone(),
-            shard_count: 1,
-            shard_index: 0,
-            strategy: PartitionShardStrategy::Ordinal
-        },
-        None
-    )
-    .unwrap_err()
-    .to_string()
-    .contains("rebuild"));
-    let report = validate_partitions_index(
-        &PartitionValidateRequest {
-            list,
-            allow_gaps: false,
-        },
-        None,
-    )
-    .unwrap();
-    assert_eq!(report.unknown_spans, 3);
-    assert_eq!(report.coverage, None);
-}
-
-#[test]
-fn numeric_ranges_refuse_unseen_routing_context_but_inspection_preserves_evidence() {
-    use crate::grpc::FinalizedAnchor;
-    use crate::partition_index::{
-        ExactTimeIndexBuilder, IndexRoutingPolicy, SOLANA_GENESIS_TIMESTAMP,
-    };
-    let temp = tempfile::tempdir().unwrap();
-    let path = temp.path().join("index.parquet");
-    write_test_verified_partitions_index(&path, vec![verified_test_rows()[0].clone()]).unwrap();
-    let mut index = read_verified_partitions_index(path.to_str().unwrap(), None).unwrap();
-    index.coverage.routing_policy = IndexRoutingPolicy::SolanaPriorTimestamp;
-    index.spans[0].row.start_time = None;
-    write_verified_partitions_index(
-        path.to_str().unwrap(),
-        &index,
-        Compression::Zstd,
-        None,
-        None,
-    )
-    .unwrap();
-    let request = verified_test_request(&path, "2023-11-14 22:00:00");
-    assert!(resolve_partition_bounds_from_index(&request, None)
-        .unwrap_err()
-        .to_string()
-        .contains("unseen prior"));
-    let all = resolve_partition_command(
-        request,
-        None,
-        &PartitionResolveOptions {
-            strict_single_chain: false,
-            all_spans: true,
-        },
-    )
-    .unwrap();
-    assert!(all.spans.unwrap()[0].routing_context_required);
-    assert!(shard_partitions_from_index(
-        &PartitionShardRequest {
-            list: verified_list_request(&path),
-            shard_count: 1,
-            shard_index: 0,
-            strategy: PartitionShardStrategy::Ordinal
-        },
-        None
-    )
-    .unwrap_err()
-    .to_string()
-    .contains("unseen routing"));
-    // Only actual block zero with its canonical genesis parent and shared seed is independent.
-    let mut builder = ExactTimeIndexBuilder::new(
-        "test-chain".into(),
-        PartitionBuildType::Hour,
-        0,
-        1,
-        FinalizedAnchor {
-            block_num: 1,
-            block_id: "id-1".into(),
-        },
-        IndexRoutingPolicy::SolanaPriorTimestamp,
-        None,
-    )
-    .unwrap();
-    builder
-        .observe_final(
-            &crate::traits::BlockIdentity {
-                block_num: 0,
-                block_id: "id-0".into(),
-                ..Default::default()
-            },
-            3,
-        )
-        .unwrap();
-    builder
-        .observe_final(
-            &crate::traits::BlockIdentity {
-                block_num: 1,
-                block_id: "id-1".into(),
-                parent_num: 0,
-                parent_id: "id-0".into(),
-                timestamp: SOLANA_GENESIS_TIMESTAMP + 3_600,
-                ..Default::default()
-            },
-            3,
-        )
-        .unwrap();
-    let genesis = builder.finish().unwrap();
-    let key = genesis.spans[0].row.partition_value.clone();
-    write_verified_partitions_index(
-        path.to_str().unwrap(),
-        &genesis,
-        Compression::Zstd,
-        None,
-        None,
-    )
-    .unwrap();
-    let bounds =
-        resolve_partition_bounds_from_index(&verified_test_request(&path, &key), None).unwrap();
-    assert_eq!((bounds.start_block, bounds.stop_block), (0, 1));
-}
-#[test]
-fn verified_reader_rejects_invalid_canonical_times_instead_of_nulling_them() {
-    use arrow::{array::TimestampMillisecondArray, record_batch::RecordBatch};
-    use parquet::{
-        arrow::{arrow_reader::ParquetRecordBatchReaderBuilder, ArrowWriter},
-        file::properties::WriterProperties,
-    };
-    use std::sync::Arc;
-    let temp = tempfile::tempdir().unwrap();
-    let path = temp.path().join("index.parquet");
-    write_test_verified_partitions_index(&path, verified_test_rows()).unwrap();
-    let reader =
-        ParquetRecordBatchReaderBuilder::try_new(std::fs::File::open(&path).unwrap()).unwrap();
-    let metadata = reader
-        .metadata()
-        .file_metadata()
-        .key_value_metadata()
-        .cloned();
-    let schema = reader.schema().clone();
-    let batch = reader.build().unwrap().next().unwrap().unwrap();
-    let mut columns = batch.columns().to_vec();
-    columns[3] = Arc::new(
-        TimestampMillisecondArray::from(vec![Some(i64::MAX); batch.num_rows()])
-            .with_timezone("UTC"),
-    );
-    let bad = RecordBatch::try_new(schema.clone(), columns).unwrap();
-    let properties = WriterProperties::builder()
-        .set_key_value_metadata(metadata)
-        .build();
-    let mut writer = ArrowWriter::try_new(
-        std::fs::File::create(&path).unwrap(),
-        schema,
-        Some(properties),
-    )
-    .unwrap();
-    writer.write(&bad).unwrap();
-    writer.close().unwrap();
-    assert!(read_verified_partitions_index(path.to_str().unwrap(), None).is_err());
-    assert!(list_partitions_from_index(&verified_list_request(&path), None).is_err());
-}
-
-/// Rewrite an index file with its timestamp columns cast to `Timestamp(Second, UTC)`,
-/// the layout written before partition-index times moved to milliseconds.
-fn rewrite_index_with_second_timestamps(path: &std::path::Path) {
-    use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
-    use arrow::record_batch::RecordBatch;
-    use parquet::{
-        arrow::{arrow_reader::ParquetRecordBatchReaderBuilder, ArrowWriter},
-        file::properties::WriterProperties,
-    };
-    use std::sync::Arc;
-    let reader =
-        ParquetRecordBatchReaderBuilder::try_new(std::fs::File::open(path).unwrap()).unwrap();
-    let metadata = reader
-        .metadata()
-        .file_metadata()
-        .key_value_metadata()
-        .cloned();
-    let batch = reader.build().unwrap().next().unwrap().unwrap();
-    let seconds = DataType::Timestamp(TimeUnit::Second, Some(Arc::from("UTC")));
-    let mut fields = Vec::new();
-    let mut columns = Vec::new();
-    for (field, column) in batch.schema().fields().iter().zip(batch.columns()) {
-        if matches!(field.data_type(), DataType::Timestamp(_, _)) {
-            fields.push(Field::new(
-                field.name(),
-                seconds.clone(),
-                field.is_nullable(),
-            ));
-            columns.push(arrow::compute::cast(column, &seconds).unwrap());
-        } else {
-            fields.push(field.as_ref().clone());
-            columns.push(column.clone());
-        }
-    }
-    let schema = Arc::new(Schema::new(fields));
-    let batch = RecordBatch::try_new(schema.clone(), columns).unwrap();
-    let properties = WriterProperties::builder()
-        .set_key_value_metadata(metadata)
-        .build();
-    let mut writer = ArrowWriter::try_new(
-        std::fs::File::create(path).unwrap(),
-        schema,
-        Some(properties),
-    )
-    .unwrap();
-    writer.write(&batch).unwrap();
-    writer.close().unwrap();
-}
-
-#[test]
-fn partitions_index_writes_millisecond_times_and_reads_second_indexes() {
-    use arrow::datatypes::{DataType, TimeUnit};
-    use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
-    let temp = tempfile::tempdir().unwrap();
-    let path = temp.path().join("partitions.parquet");
-    write_test_verified_partitions_index(&path, verified_test_rows()).unwrap();
-    let original = read_verified_partitions_index(path.to_str().unwrap(), None).unwrap();
-    assert!(original
-        .spans
-        .iter()
-        .all(|span| span.row.start_time.is_some() && span.proof.routing_start_timestamp.is_some()));
-
-    // New indexes store every time column as TIMESTAMP(MILLIS, UTC), so external
-    // readers such as DuckDB see timestamps rather than BIGINT.
-    let reader =
-        ParquetRecordBatchReaderBuilder::try_new(std::fs::File::open(&path).unwrap()).unwrap();
-    let millis = DataType::Timestamp(TimeUnit::Millisecond, Some("UTC".into()));
-    for name in ["start_time", "end_time", "routing_start_timestamp"] {
-        assert_eq!(
-            reader.schema().field_with_name(name).unwrap().data_type(),
-            &millis,
-            "{name}"
-        );
-    }
-    let descr = reader.parquet_schema();
-    for name in ["start_time", "end_time", "routing_start_timestamp"] {
-        let column = (0..descr.num_columns())
-            .map(|i| descr.column(i))
-            .find(|column| column.name() == name)
-            .unwrap();
-        assert_eq!(
-            column.logical_type_ref(),
-            Some(&parquet::basic::LogicalType::timestamp(
-                true,
-                parquet::basic::TimeUnit::MILLIS
-            )),
-            "{name}"
-        );
-    }
-    let first = reader.build().unwrap().next().unwrap().unwrap();
-    let stored = first
-        .column_by_name("start_time")
-        .unwrap()
-        .as_any()
-        .downcast_ref::<arrow::array::TimestampMillisecondArray>()
-        .unwrap()
-        .value(0);
-    assert_eq!(
-        stored,
-        parse_partition_timestamp(original.spans[0].row.start_time.as_deref().unwrap()).unwrap()
-            * 1_000
-    );
-
-    // Indexes written before the change used Timestamp(Second, UTC): they keep
-    // reading as the same verified model, and resume/rewrite upgrades them.
-    rewrite_index_with_second_timestamps(&path);
-    let reader =
-        ParquetRecordBatchReaderBuilder::try_new(std::fs::File::open(&path).unwrap()).unwrap();
-    assert_eq!(
-        reader
-            .schema()
-            .field_with_name("routing_start_timestamp")
-            .unwrap()
-            .data_type(),
-        &DataType::Timestamp(TimeUnit::Second, Some("UTC".into()))
-    );
-    let legacy = read_verified_partitions_index(path.to_str().unwrap(), None).unwrap();
-    assert_eq!(legacy, original);
-    let listed = list_partitions_from_index(&verified_list_request(&path), None).unwrap();
-    assert_eq!(listed.rows.len(), original.spans.len());
-    write_verified_partitions_index(
-        path.to_str().unwrap(),
-        &legacy,
-        Compression::Zstd,
-        None,
-        None,
-    )
-    .unwrap();
-    let reader =
-        ParquetRecordBatchReaderBuilder::try_new(std::fs::File::open(&path).unwrap()).unwrap();
-    assert_eq!(
-        reader
-            .schema()
-            .field_with_name("end_time")
-            .unwrap()
-            .data_type(),
-        &millis
-    );
-    assert_eq!(
-        read_verified_partitions_index(path.to_str().unwrap(), None).unwrap(),
-        original
-    );
-
-    // Legacy (pre-v2) row files with second-precision times remain inspectable.
-    let legacy_path = temp.path().join("legacy.parquet");
-    let mut legacy_rows = verified_test_rows();
-    for row in &mut legacy_rows {
-        row.start_time = Some(row.partition_value.clone());
-    }
-    write_test_partitions_index(&legacy_path, legacy_rows.clone()).unwrap();
-    rewrite_index_with_second_timestamps(&legacy_path);
-    let mut rows = read_partitions_build_rows(legacy_path.to_str().unwrap(), None).unwrap();
-    rows.sort_by_key(|row| row.start_block);
-    assert_eq!(
-        rows.iter()
-            .map(|row| row.start_time.clone())
-            .collect::<Vec<_>>(),
-        legacy_rows
-            .iter()
-            .map(|row| row.start_time.clone())
-            .collect::<Vec<_>>()
-    );
-}
-
-fn validate_v2(path: &std::path::Path, allow_gaps: bool) -> PartitionValidateResult {
-    validate_partitions_index(
-        &PartitionValidateRequest {
-            list: PartitionListRequest {
-                index_path: path.to_string_lossy().into(),
-                partition_type: None,
-                chain: None,
-                from: None,
-                to: None,
-                limit: usize::MAX,
-            },
-            allow_gaps,
-        },
-        None,
-    )
-    .expect("validation should run")
-}
-
-#[test]
-fn v2_validate_reports_split_runs_and_open_internal_boundaries() {
-    let temp = tempfile::tempdir().unwrap();
-    let path = temp.path().join("partitions.parquet");
-    write_test_verified_partitions_index(
-        &path,
-        vec![
-            block_range_row(8, 12, 4),
-            block_range_row(12, 16, 4),
-            block_range_row(16, 20, 4),
-        ],
-    )
-    .unwrap();
-    let report = validate_v2(&path, false);
-    assert!(report.valid, "{:?}", report.issues);
-    assert!(report.warnings.is_empty());
-    assert!(serde_json::to_value(&report)
-        .unwrap()
-        .get("warnings")
-        .is_none());
-
-    // Split [12, 16) into two clipped spans of the same aligned partition. The
-    // verified reader accepts it (flags match the clipping), validate does not.
-    let mut index = read_verified_partitions_index(path.to_str().unwrap(), None).unwrap();
-    let mut right = index.spans[1].clone();
-    index.spans[1].row.stop_block = 14;
-    index.spans[1].proof.end_complete = false;
-    right.row.start_block = 14;
-    right.proof.start_complete = false;
-    index.spans.insert(2, right);
-    write_verified_partitions_index(
-        path.to_str().unwrap(),
-        &index,
-        Compression::Zstd,
-        None,
-        None,
-    )
-    .unwrap();
-    let report = validate_v2(&path, false);
-    assert!(!report.valid);
-    assert_eq!(report.issue_count, 2, "{:?}", report.issues);
-    let kinds = report
-        .issues
-        .iter()
-        .map(|issue| (issue.kind.clone(), issue.partition_value.as_str()))
-        .collect::<Vec<_>>();
-    assert_eq!(
-        kinds,
-        [
-            (PartitionValidationIssueKind::SplitRun, "12"),
-            (PartitionValidationIssueKind::IncompleteBoundary, "12"),
-        ]
-    );
-    assert!(report.issues[1].message.contains("block 14"));
-    assert_eq!(report.incomplete_spans, 2);
-    assert_eq!(
-        serde_json::to_value(&report.issues[0]).unwrap()["kind"],
-        "split_run"
-    );
-}
-
-#[test]
-fn v2_validate_allows_open_outer_edges_but_not_open_internal_boundaries() {
-    let temp = tempfile::tempdir().unwrap();
-    let path = temp.path().join("partitions.parquet");
-    write_test_verified_partitions_index(&path, verified_test_rows()).unwrap();
-    let original = read_verified_partitions_index(path.to_str().unwrap(), None).unwrap();
-    let write = |index: &VerifiedPartitionIndex| {
-        write_verified_partitions_index(
-            path.to_str().unwrap(),
-            index,
-            Compression::Zstd,
-            None,
-            None,
-        )
-        .unwrap()
-    };
-
-    // A clipped first edge (bounded start) is incomplete but valid.
-    let mut index = original.clone();
-    index.spans[0].proof.start_complete = false;
-    write(&index);
-    let report = validate_v2(&path, false);
-    assert!(report.valid, "{:?}", report.issues);
-    assert_eq!(report.incomplete_spans, 1);
-
-    // An internal boundary between different keys must be established on both sides.
-    let mut index = original.clone();
-    index.spans[0].proof.end_complete = false;
-    write(&index);
-    let report = validate_v2(&path, false);
-    assert!(!report.valid);
-    assert_eq!(report.issues.len(), 1, "{:?}", report.issues);
-    assert_eq!(
-        report.issues[0].kind,
-        PartitionValidationIssueKind::IncompleteBoundary
-    );
-    assert_eq!(report.issues[0].partition_value, "2023-11-14 23:00:00");
-
-    // --allow-gaps cannot relax v2 validation; it only produces a warning.
-    let report = validate_v2(&path, true);
-    assert!(!report.valid);
-    assert_eq!(report.warnings.len(), 1);
-    assert!(report.warnings[0].contains("--allow-gaps has no effect"));
-
-    // Filters that select nothing from the single-chain index report no issues.
-    let filtered = validate_partitions_index(
-        &PartitionValidateRequest {
-            list: PartitionListRequest {
-                index_path: path.to_string_lossy().into(),
-                partition_type: Some("date".into()),
-                chain: None,
-                from: None,
-                to: None,
-                limit: usize::MAX,
-            },
-            allow_gaps: false,
-        },
-        None,
-    )
-    .unwrap();
-    assert_eq!(filtered.total_rows, 0);
-    assert!(filtered.valid);
 }
 
 fn env_file_load(
