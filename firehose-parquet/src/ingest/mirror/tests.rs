@@ -448,6 +448,8 @@ struct RemoteFaults {
     hide_version: bool,
     readback_fails: bool,
     stale_version: bool,
+    /// Refuse the mirror PUT with HTTP 403 without storing it.
+    forbid: bool,
     writes: Vec<PutMode>,
 }
 #[derive(Default)]
@@ -482,7 +484,14 @@ impl ObjectStore for RemoteStore {
     ) -> object_store::Result<PutResult> {
         let mirror = key.as_ref() == KEY;
         if mirror {
-            self.faults.lock().unwrap().writes.push(opts.mode.clone());
+            let mut faults = self.faults.lock().unwrap();
+            faults.writes.push(opts.mode.clone());
+            if faults.forbid {
+                return Err(object_store::Error::PermissionDenied {
+                    path: key.to_string(),
+                    source: "private-secret-body".into(),
+                });
+            }
         }
         let mut result = self.inner.put_opts(key, payload, opts).await?;
         let (lose, cancel, hide) = {
@@ -666,6 +675,38 @@ async fn ambiguous_remote_writes_or_cancel_never_retry_or_release() {
             Some(&retained)
         );
     }
+}
+
+/// A 403 is the provider's final refusal: the mirror save fails and counts
+/// once, but nothing is uncertain, so a failed build releases the bucket.
+#[tokio::test]
+async fn refused_remote_mirror_write_is_counted_but_not_uncertain() {
+    let (store, ownership, initial, service) = remote_fixture().await;
+    let current = advance(&initial, 100);
+    let metrics = metrics();
+    store.faults.lock().unwrap().forbid = true;
+    let adapter = ProtectedMirror::new(&ownership, &current.descriptor.mirror, Some(&service))
+        .unwrap()
+        .with_metrics(&metrics);
+    let error = adapter.reconcile(&current).await.unwrap_err();
+    let message = format!("{error:#}");
+    assert!(message.contains("HTTP 403"), "{message}");
+    assert!(!message.contains("private-secret"), "{message}");
+    assert_eq!(store.faults.lock().unwrap().writes.len(), 1);
+    assert!(store.inner.get(&ObjectPath::from(KEY)).await.is_err());
+    assert!(!ownership
+        .remote("cursor-bucket")
+        .unwrap()
+        .is_mutation_uncertain());
+    assert_eq!(metrics.cursor_save_failures_total.get(), 1);
+    assert_eq!(metrics.cursor_saves_total.get(), 0);
+    drop(adapter);
+    assert!(ownership.finish::<()>(Err(error)).await.is_err());
+    let store: Arc<dyn ObjectStore> = store;
+    assert_eq!(
+        S3Ownership::status(&store).await.unwrap().unwrap().state(),
+        crate::dataset_lock_s3::OwnerState::Released
+    );
 }
 
 /// Failures before the conditional PUT used to leave the save-failure metrics

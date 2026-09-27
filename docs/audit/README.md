@@ -63,6 +63,7 @@ lifecycle state; a local implementation or passing test alone is not closure.
 - [#468: staged ownership and durable state implementation](468-stage1-ownership.md)
 - [#468: conditional S3 ownership qualification](468-s3-ownership.md)
 - [#468: single-attempt remote mutations](468-s3-mutation-attempts.md)
+- [#468/#591: release S3 ownership after a provably safe build failure](s3-owner-safe-release.md)
 - [#468: verification artifact ownership](468-verify-ownership.md)
 - [#468: complete runtime, migration and live recovery qualification](468-ingestion-runtime.md)
 - [#468: live table equality and recovered-state evidence](468-live-comparison.json)

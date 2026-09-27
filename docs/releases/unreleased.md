@@ -805,6 +805,23 @@ Both tables carry `receipt_index`, `tx_hash`, `shard_id` and `predecessor_id`, l
 
 ## Fixes
 
+- **A failed S3 `build` releases bucket ownership when that is provably safe (#468, #591).**
+  `build` used to keep the S3 bucket owner after any error, even when nothing
+  was written, for example after a Blocks `Unauthenticated` error or a stream
+  failure before the first flush. Every other writing command on the bucket then
+  failed with "bucket ownership is held" until someone ran `fireparq recovery
+  release` with provider-quiescence evidence. A failed `build` now releases the
+  owner on exit, as a successful run does, when every request it sent had a
+  definite outcome. That includes a failed transaction left pending: the next
+  `build` rolls it back or completes it before streaming. An HTTP 401/403
+  refusal of a part, control-record or cursor-mirror PUT now counts as definite:
+  the provider did not apply it. Ownership is still kept after an uncertain
+  request (timeout, lost acknowledgement, connection reset, unverifiable
+  readback, 5xx, 409/412), a second shutdown signal, or a panic. The error then
+  names each kept owner, why it was kept, and the exact `fireparq recovery
+  status` and `recovery release` commands. A first signal still releases. Local
+  `flock` ownership and other mutating commands are unchanged. See
+  [the exit-path record](../audit/s3-owner-safe-release.md).
 - **Legacy Antelope cursors with `bytes_encoding=auto` validate against `hex_no_prefix` (#550).** Cursor compatibility resolved Antelope's `auto` encoding to `hex`, although Antelope output has always used unprefixed hex, so a legacy cursor reported a false mismatch.
 - **`--flush-rows 0` and `--flush-interval-secs 0` disable those `build` triggers.**
   They used to evaluate `rows >= 0` / `elapsed >= 0` and flush after every block,

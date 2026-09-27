@@ -237,7 +237,8 @@ Build acquires resolved output and cursor scopes before loading the cursor;
 partitions-build acquires the chain output before reading its index or sibling
 cursor. Their write/checkpoint boundaries revalidate local paths, and a successful
 run explicitly releases remote ownership. Error/cancellation drops retain remote
-ownership. Index writes use the shared exact-bucket, zero-retry S3 constructor.
+ownership. (Update: `build` now also releases after a failure whose requests all
+had a definite outcome; see [s3-owner-safe-release.md](s3-owner-safe-release.md).) Index writes use the shared exact-bucket, zero-retry S3 constructor.
 Real subprocess tests prove build, partitions-build, merge, truncate and rollup
 conflict with a held descendant owner before reading private cursor bytes or
 publishing output; an external cursor conflict leaves fresh output absent.

@@ -1,7 +1,7 @@
 //! Authenticated native uploads. The owner and signer share one AmazonS3 client.
 //! Presigned URLs and HTTP errors deliberately never enter Debug/error chains.
 use super::{store_builder, AwsConfig, CredentialPolicy, S3Operation};
-use crate::dataset_lock_s3::usable_version;
+use crate::dataset_lock_s3::{usable_version, ProviderRejected};
 use anyhow::{ensure, Context, Result};
 use futures::StreamExt;
 use object_store::{aws::AmazonS3, path::Path, signer::Signer, ObjectStore, UpdateVersion};
@@ -186,16 +186,28 @@ pub(crate) struct PreparedUpload {
 }
 impl PreparedUpload {
     /// Exactly one non-replayable send. The caller owns cancellation uncertainty.
+    /// A received 401/403 is returned as [`ProviderRejected`]: the provider
+    /// refused the request, so it is resolved. Every other failure is uncertain.
     pub(crate) async fn send(self) -> Result<UpdateVersion> {
         let response = self.http.execute(self.request).await.map_err(|_| {
             anyhow::anyhow!(
                 "native conditional upload failed; retain ownership for quiescent recovery"
             )
         })?;
+        let status = response.status();
+        if matches!(
+            status,
+            reqwest::StatusCode::UNAUTHORIZED | reqwest::StatusCode::FORBIDDEN
+        ) {
+            return Err(ProviderRejected {
+                status: status.as_u16(),
+            }
+            .into());
+        }
         ensure!(
-            response.status() == reqwest::StatusCode::OK,
+            status == reqwest::StatusCode::OK,
             "native conditional upload returned HTTP {}; retain ownership",
-            response.status().as_u16()
+            status.as_u16()
         );
         check_header_bound(response.headers())?;
         let version = response_version(response.headers())?;

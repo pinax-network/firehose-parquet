@@ -2,9 +2,11 @@
 //!
 //! The supplied store must address the bucket root, without a prefix wrapper.
 //! Mutating commands retain this owner through their complete operation. Never
-//! release ownership while a data mutation is unresolved. Operator recovery additionally
-//! requires provider-confirmed request quiescence; stopping a process is not
-//! proof that already-sent remote PUTs cannot still complete.
+//! release ownership while a data mutation is unresolved. A command may release
+//! after a failure only when the latch proves every request was resolved; see
+//! `DatasetOwnership::finish`. Operator recovery additionally requires
+//! provider-confirmed request quiescence; stopping a process is not proof that
+//! already-sent remote PUTs cannot still complete.
 
 use bytes::Bytes;
 use futures::StreamExt;
@@ -396,6 +398,27 @@ fn normalize_request(operation: &str, mut scopes: Vec<String>) -> Result<Vec<Str
     scopes.sort();
     scopes.dedup();
     Ok(scopes)
+}
+
+/// The provider refused a mutation with HTTP 401 or 403. S3 does not apply a
+/// request it rejects, so the attempt is resolved: it cannot complete later and
+/// does not set the uncertainty latch. Only these statuses qualify. Timeouts,
+/// transport errors, lost or unreadable responses, 5xx, 409/412 and every
+/// acknowledgement that fails readback stay uncertain.
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+#[error("S3 refused the request with HTTP {status}; it did not take effect")]
+pub(crate) struct ProviderRejected {
+    pub(crate) status: u16,
+}
+
+/// Classify one object-store mutation error; see [`ProviderRejected`].
+/// object_store maps only a received 401/403 response to these variants.
+pub(crate) fn provider_rejection(error: &object_store::Error) -> Option<ProviderRejected> {
+    match error {
+        object_store::Error::PermissionDenied { .. } => Some(ProviderRejected { status: 403 }),
+        object_store::Error::Unauthenticated { .. } => Some(ProviderRejected { status: 401 }),
+        _ => None,
+    }
 }
 
 pub(crate) fn usable_version(version: &UpdateVersion) -> bool {

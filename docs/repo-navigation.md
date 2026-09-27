@@ -39,7 +39,7 @@ Related design docs:
   - `src/ingest/controller/{pipeline,lane}.rs`: bounded concurrent encode/stage/receipt/publish of one transaction's parts (#516 stage A) and the scoped blocking lane for local part I/O; `src/writer/protected/budget.rs` is the in-flight encoded-byte budget.
   - `src/cursor.rs`: compatible cursor Parquet encoding and legacy inspection.
   - `src/writer/protected.rs`: prepared complete parts and exact receipt/schema verification.
-  - `src/dataset_lock/`, `src/dataset_lock_s3.rs`: common local directory and persistent S3 bucket ownership for mutating commands.
+  - `src/dataset_lock/`, `src/dataset_lock_s3.rs`: common local directory and persistent S3 bucket ownership for mutating commands; `DatasetOwnership::finish` ends `build` ownership (release after success or a failure whose requests were all resolved).
   - `src/durable_state.rs`, `src/durable_state_s3.rs`: strict versioned local/remote control records and CAS tombstones.
   - `src/recovery.rs`: read-only ownership/control summaries and explicit provider-quiescent S3 owner release.
   - `src/encode.rs`: byte encoding modes (`hex`, `base58`, `tron_base58`, etc.).

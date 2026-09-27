@@ -42,7 +42,7 @@ or opaque object version is stored in the record.
 | Object absent | Conditional Create of Owned, generation 1, fresh owner UUID |
 | Released at generation G | Conditional CAS of its exact version to Owned G+1 with fresh UUID |
 | Owned | Refuse ordinary acquisition, regardless of age or prefix |
-| Own exact record/version, all mutations resolved | Conditional CAS to Released at the same generation |
+| Own exact record/version, all mutations resolved (after success, or after a `build` failure with a clear latch) | Conditional CAS to Released at the same generation |
 | Own guard marked uncertain | Refuse ordinary release permanently |
 | Corrupt/unknown state, no usable version, exhausted generation | Fail closed |
 
@@ -101,7 +101,13 @@ has stopped executing.
 `mark_mutation_uncertain(&self)` uses an atomic latch that cannot be cleared.
 The transaction store may mark it through a shared borrowed guard, including
 from a cancellation/drop latch when a PUT future exits before exact readback.
-Ordinary release then refuses to unlock the bucket. Stores borrow
+Ordinary release then refuses to unlock the bucket. A request is resolved only
+by exact readback or by an HTTP 401/403 refusal, which the provider never
+applies; every other failure sets the latch. `build` ends through
+`DatasetOwnership::finish`, which releases after a failure when the latch is
+clear and otherwise retains the owner with the exact recovery commands. See
+[s3-owner-safe-release.md](s3-owner-safe-release.md) for the rule, the
+journaled-Writing reasoning and the exit-path table. Stores borrow
 `object_store()` from the guard and share its async control-mutation mutex.
 Conditional tombstones and fresh record incarnations are still required for
 fixed state slots: a mutex cannot prevent a delayed DELETE from a prior attempt

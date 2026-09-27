@@ -8,8 +8,8 @@
 use super::{local, ParquetFileMetadata, ParquetTableWriter};
 use crate::config::{BlockMetadata, Compression, Partition};
 use crate::dataset_lock::LocalOwnership;
-use crate::dataset_lock_s3::{usable_version, S3Ownership};
-use anyhow::{ensure, Context, Result};
+use crate::dataset_lock_s3::{provider_rejection, usable_version, ProviderRejected, S3Ownership};
+use anyhow::{bail, ensure, Context, Result};
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
 use bytes::Bytes;
@@ -1008,7 +1008,17 @@ impl<'a> S3PartStore<'a> {
                 .put_opts(&key, encoded.bytes.clone().into(), options),
         )
         .await;
-        let result = result.map_err(|_| anyhow::anyhow!("protected part upload timed out"))?.map_err(|_| anyhow::anyhow!("protected part conditional upload failed; retain ownership for quiescent recovery"))?;
+        let result = match result.map_err(|_| anyhow::anyhow!("protected part upload timed out"))? {
+            Ok(result) => result,
+            Err(error) => {
+                if let Some(rejected) = provider_rejection(&error) {
+                    // A refused request cannot complete later: resolved, not uncertain.
+                    attempt.resolved = true;
+                    return Err(anyhow::Error::new(rejected).context("publishing a protected part"));
+                }
+                bail!("protected part conditional upload failed; retain ownership for quiescent recovery")
+            }
+        };
         let version = UpdateVersion {
             e_tag: result.e_tag,
             version: result.version,
@@ -1083,9 +1093,18 @@ impl<'a> S3PartStore<'a> {
             ownership: self.ownership,
             resolved: false,
         };
-        let version = tokio::time::timeout(crate::s3::upload::DATA_TIMEOUT, upload.send())
+        let sent = tokio::time::timeout(crate::s3::upload::DATA_TIMEOUT, upload.send())
             .await
-            .map_err(|_| anyhow::anyhow!("native part upload timed out; retain ownership"))??;
+            .map_err(|_| anyhow::anyhow!("native part upload timed out; retain ownership"))?;
+        let version = match sent {
+            Ok(version) => version,
+            Err(error) if error.is::<ProviderRejected>() => {
+                // A refused request cannot complete later: resolved, not uncertain.
+                attempt.resolved = true;
+                return Err(error.context("publishing a protected part"));
+            }
+            Err(error) => return Err(error),
+        };
         ensure!(
             self.verify_native(&encoded.plan, &encoded.receipt, Some(version))
                 .await?

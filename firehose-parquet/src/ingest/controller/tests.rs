@@ -17,6 +17,7 @@ use std::sync::Arc;
 mod concurrency;
 mod native_upload;
 mod remote_deletion;
+mod safe_release;
 
 thread_local! {static FAIL:Cell<Option<Stage>>=const{Cell::new(None)};}
 pub(super) fn checkpoint(stage: Stage) -> Result<()> {
