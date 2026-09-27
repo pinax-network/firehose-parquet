@@ -17,12 +17,22 @@ use std::path::Path;
 use std::sync::Arc;
 
 mod concurrency;
+mod live_flush;
 mod native_upload;
 mod remote_deletion;
 mod safe_release;
 
 thread_local! {static FAIL:Cell<Option<Stage>>=const{Cell::new(None)};}
+/// When each boundary was reached, recorded only while the ignored #658 phase
+/// benchmark observes it (commit futures move between worker threads).
+static STAGES: std::sync::Mutex<Option<Vec<(Stage, std::time::Instant)>>> =
+    std::sync::Mutex::new(None);
 pub(super) fn checkpoint(stage: Stage) -> Result<()> {
+    if let Ok(mut stages) = STAGES.lock() {
+        if let Some(stages) = stages.as_mut() {
+            stages.push((stage, std::time::Instant::now()));
+        }
+    }
     if FAIL.with(|fail| fail.get()) == Some(stage) {
         bail!("injected transaction boundary failure");
     }

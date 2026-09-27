@@ -38,3 +38,11 @@ tempfile = "3"
 tonic.workspace = true
 tonic-prost = "0.14"
 zstd = "0.14"
+# `examples/bench_live_flush` serves a loopback HTTPS S3 endpoint to the real
+# binary. These crates are already in the lockfile through tonic and reqwest.
+bytes = "1"
+http-body-util = "0.1"
+hyper = { version = "1", features = ["http1", "server"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
