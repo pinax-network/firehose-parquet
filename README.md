@@ -287,6 +287,32 @@ into a new empty output root, with an absent cursor mirror. Keep legacy datasets
 for read-only tools and guarded legacy maintenance. See the
 [transaction and migration contract](docs/audit/468-ingestion-runtime.md).
 
+### Startup cost
+
+A restart costs the same however large the dataset has grown (#655). When
+`--output` already holds a dataset, `build` reads its control records only:
+the S3 owner record, `.fireparq-ingest/` (the authority, a pending transaction and
+the merge intent below) and the `_fireparq/cursor.parquet` mirror. It lists no
+data objects and walks no data directory. The only other requests are one LIST
+of a control prefix (`<ancestor>/.fireparq-ingest/`) per directory above the
+dataset root, which is none for a dataset at the bucket root, and after a crash
+the GETs of the pending transaction's own parts.
+
+The whole root is listed only when the dataset is created, when the root must
+be empty anyway: `build` then checks the root, every directory above it and
+every directory below it for another dataset. A dataset created later inside an
+existing one is refused by its own check of the directories above it, so a
+resume never needs to look below its root. The one other case is a `merge`
+that did not finish: it leaves `.fireparq-ingest/merge-intent.json`, and the
+next `build` then lists the dataset once to finish its journals and clears the
+record. Each listing request has a 60-second timeout; a listing has no overall
+deadline and logs its progress every 10 seconds.
+
+`firehose_parquet_startup_list_requests` and
+`firehose_parquet_startup_listing_seconds` report what the last start listed,
+and the `protected dataset startup checks finished` log line gives the same
+counts. See [the implementation record](docs/audit/655-resume-cost.md).
+
 ## Network Aliases
 
 `fireparq` can resolve a checked-in set of built-in Firehose network names instead of requiring `--endpoint` every time.
@@ -865,8 +891,8 @@ space.
 
 Expiring committed parts is safe for the live writer. `build` never reads a
 committed part outside its own pending transaction: a running build and its
-next flushes, a restart (recovery and resume from authority, including the S3
-marker and journal listings), the cursor mirror, `recovery status` and
+next flushes, a restart (recovery and resume from authority, which read only
+control records, [startup cost](#startup-cost)), the cursor mirror, `recovery status` and
 `recovery recover` are unaffected when every part of earlier hours disappears.
 The one exception is a writer that crashes with a committed but unfinished
 transaction and then stays down longer than the expiration: its next start
@@ -1267,6 +1293,7 @@ The path must exist locally or be an explicit `s3://...` URI. Unlike `scan` and 
 Local interrupted merges recover under exclusive ownership:
 
 - Each partition merge has a journal, `_fireparq_merge.json`, created before output. It is committed after all outputs complete and removed after source deletion. Local output is completed and synced before publication.
+- In a protected dataset, `merge` first records `.fireparq-ingest/merge-intent.json`, and clears it when the run (or a later recovery of the whole dataset) completes. A `build` start looks for merge journals only while that record exists, so an ordinary restart lists nothing ([startup cost](#startup-cost)).
 - Under the common local directory guard, the next run finishes a committed journal or removes an uncommitted run's outputs before retrying. The legacy local `.fireparq-merge.lock` remains for recognizing old journals.
 - S3 uses the persistent bucket-wide owner. An interrupted remote run retains ownership until an operator establishes writer cessation and provider-confirmed request quiescence and explicitly releases that exact owner. The subsequent guarded merge can recover journals written under this ownership protocol. Legacy S3 journals using the old expiring lock require separately reviewed migration and are refused automatically.
 - There is no timestamp takeover or best-effort conditional-write fallback. Conflicting local parent/child operations and all mutations in one S3 bucket fail immediately. See [the recovery limits and procedure](docs/audit/468-stage1-ownership.md).
@@ -1867,6 +1894,8 @@ progress, chain-head agreement or crash/replay safety.
 | `firehose_parquet_cursor_save_failures_total` | Counter | — | Failed cursor mirror saves, once per failed attempt (including local retries, S3 reads/validation/owner checks before the PUT, and ambiguous or refused S3 publication) |
 | `firehose_parquet_cursor_last_success_timestamp_seconds` | Gauge | — | Unix time of the last successful cursor save in this process; 0 before the first save |
 | `firehose_parquet_cursor_last_block_num` | Gauge | — | Block number from the loaded cursor, then the last successful save; 0 when neither exists |
+| `firehose_parquet_startup_list_requests` | Gauge | — | LIST requests (S3 pages of up to 1,000 keys, or local directory reads) made while opening the dataset; a resume lists no data objects ([startup cost](#startup-cost)) |
+| `firehose_parquet_startup_listing_seconds` | Gauge | — | Seconds those startup listings took |
 | `firehose_parquet_errors_total` | Counter | `kind` | Errors by category |
 | `firehose_parquet_grpc_reconnects_total` | Counter | — | gRPC retries scheduled, once per reconnect path |
 | `firehose_parquet_blocks_skipped_below_start_total` | Counter | — | Blocks received below the effective start block and skipped |

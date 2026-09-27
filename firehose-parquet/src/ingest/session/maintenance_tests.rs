@@ -168,6 +168,11 @@ async fn session_refuses_coexisting_journals_before_either_physical_recovery() {
         2,
     )
     .with_protected_stream(Some(&authority.descriptor.id().unwrap()));
+    // `merge` records its intent in the control directory before its first
+    // journal (#655); that record is what makes `build` look for journals.
+    crate::merge_journal::record_merge_intent(&authority.descriptor.output, &owner)
+        .await
+        .unwrap();
     LocalPartition::new(&partition)
         .create_journal(&journal)
         .unwrap();
@@ -197,6 +202,12 @@ async fn session_refuses_coexisting_journals_before_either_physical_recovery() {
         .output
         .join(CONTROL_DIRECTORY)
         .join("pending.json")
+        .exists());
+    // No journal was left, so the intent is cleared and the next start lists nothing.
+    assert!(!config
+        .output
+        .join(CONTROL_DIRECTORY)
+        .join("merge-intent.json")
         .exists());
     assert_eq!(
         fs::read(partition.join("part-000002.parquet")).unwrap(),

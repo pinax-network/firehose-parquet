@@ -146,11 +146,24 @@ async fn remote_discovery_uses_components_and_includes_ancestors_descendants() {
         "s3://bucket/one/blocks/date=2023-11-14",
     )]);
     assert_eq!(
-        discover_markers(&owner, &selected).await.unwrap(),
+        discover_markers(
+            &owner,
+            &selected,
+            MarkerScope::Tree,
+            &ListingStats::default()
+        )
+        .await
+        .unwrap(),
         BTreeSet::from(["s3://bucket/one".into()])
     );
     let parent = BTreeSet::from([MaintenanceTarget::directory("s3://bucket")]);
-    assert_eq!(discover_markers(&owner, &parent).await.unwrap().len(), 3);
+    assert_eq!(
+        discover_markers(&owner, &parent, MarkerScope::Tree, &ListingStats::default())
+            .await
+            .unwrap()
+            .len(),
+        3
+    );
     owner.release().await.unwrap();
 }
 
@@ -189,7 +202,14 @@ async fn remote_discovery_finds_a_protected_bucket_root_and_refuses_nesting() {
     ] {
         let targets = BTreeSet::from([MaintenanceTarget::directory(selected)]);
         assert_eq!(
-            discover_markers(&owner, &targets).await.unwrap(),
+            discover_markers(
+                &owner,
+                &targets,
+                MarkerScope::Tree,
+                &ListingStats::default()
+            )
+            .await
+            .unwrap(),
             BTreeSet::from(["s3://bucket".to_string()]),
             "{selected}"
         );
@@ -198,11 +218,16 @@ async fn remote_discovery_finds_a_protected_bucket_root_and_refuses_nesting() {
     for selected in ["s3://bucket", "s3://bucket/mainnet"] {
         let targets = BTreeSet::from([MaintenanceTarget::directory(selected)]);
         assert!(
-            discover_markers(&owner, &targets)
-                .await
-                .unwrap_err()
-                .to_string()
-                .contains("nested protected datasets"),
+            discover_markers(
+                &owner,
+                &targets,
+                MarkerScope::Tree,
+                &ListingStats::default()
+            )
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("nested protected datasets"),
             "{selected}"
         );
     }
@@ -592,6 +617,88 @@ async fn real_protected_parts_merge_preserves_rows_and_frontier_without_source_r
     prepared.ownership.release().await.unwrap();
 }
 
+/// `merge` records its intent before its first journal (#655). An interrupted
+/// merge leaves both, so `build`'s startup finds the journal through the
+/// intent, rolls it back and clears the intent; a complete merge leaves none.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn interrupted_merge_leaves_its_intent_for_build_and_a_complete_merge_clears_it() {
+    use crate::merge_journal::{INJECTED_CRASH, JOURNAL_FILE};
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("data");
+    let descriptor = committed_dataset(&root).await;
+    let intent = root.join(CONTROL_DIRECTORY).join("merge-intent.json");
+    let partition = root.join("blocks/date=2023-11-14");
+    let merge = crate::merge::MergeConfig {
+        path: root.join("blocks").to_string_lossy().into_owned(),
+        compression: crate::config::Compression::Zstd,
+        flush_rows: None,
+        flush_bytes: 0,
+        dry_run: false,
+        verbose: false,
+        aws: None,
+        cache_control: String::new(),
+    };
+    INJECTED_CRASH.with(|crash| *crash.borrow_mut() = Some("after-outputs"));
+    let crashed = crate::merge::run_merge(&merge);
+    INJECTED_CRASH.with(|crash| *crash.borrow_mut() = None);
+    assert!(crashed.is_err());
+    assert!(intent.is_file());
+    assert!(partition.join(JOURNAL_FILE).is_file());
+    let sources = || {
+        let mut names: Vec<_> = fs::read_dir(&partition)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .collect();
+        names.sort();
+        names
+    };
+    assert_eq!(sources().len(), 4, "two sources, the output, the journal");
+
+    // What `build` runs at startup, under its own ownership and permit.
+    let ownership = DatasetOwnership::acquire(
+        "build",
+        vec![MutationScope::directory(root.to_string_lossy())],
+        None,
+    )
+    .await
+    .unwrap();
+    let permit = ownership
+        .local()
+        .unwrap()
+        .acquire_transaction_session()
+        .unwrap();
+    let listing = ListingStats::default();
+    validate_ingestion_recovery_order(
+        &descriptor.output,
+        &ownership,
+        MergeJournals::IfIntended,
+        &listing,
+    )
+    .await
+    .unwrap();
+    assert_eq!(listing.requests(), 0, "no pending transaction: no walk");
+    prepare_ingestion(
+        &descriptor.output,
+        &ownership,
+        &descriptor.id().unwrap(),
+        &listing,
+    )
+    .await
+    .unwrap();
+    assert!(listing.requests() > 0);
+    assert!(!intent.exists());
+    let remaining = sources();
+    assert_eq!(remaining.len(), 2, "{remaining:?}");
+    assert!(remaining.iter().all(|name| name.starts_with("part-v1-")));
+    drop(permit);
+    ownership.release().await.unwrap();
+
+    let result = crate::merge::run_merge(&merge).unwrap();
+    assert_eq!(result.files_written, 1);
+    assert!(!intent.exists());
+    assert!(!partition.join(JOURNAL_FILE).exists());
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn public_truncate_refuses_a_selected_protected_table() {
     let temp = tempfile::tempdir().unwrap();
@@ -691,12 +798,41 @@ async fn remote_merge_recovery_at(prefix: &str) {
             .unwrap();
     }
     let permit = remote.acquire_transaction_session().unwrap();
-    validate_ingestion_recovery_order(&identity, &ownership)
+    validate_ingestion_recovery_order(
+        &identity,
+        &ownership,
+        MergeJournals::IfIntended,
+        &ListingStats::default(),
+    )
+    .await
+    .unwrap();
+    // Without the merge intent a merge records first, `build` does not look.
+    prepare_ingestion(
+        &identity,
+        &ownership,
+        &descriptor.id().unwrap(),
+        &ListingStats::default(),
+    )
+    .await
+    .unwrap();
+    assert!(store
+        .head(&key("blocks/date=2023-11-14/part-000002.parquet"))
+        .await
+        .is_ok());
+    crate::merge_journal::record_merge_intent(&identity, &ownership)
         .await
         .unwrap();
-    prepare_ingestion(&identity, &ownership, &empty_aws())
+    let listing = ListingStats::default();
+    prepare_ingestion(&identity, &ownership, &descriptor.id().unwrap(), &listing)
         .await
         .unwrap();
+    assert!(listing.requests() >= 1);
+    assert!(
+        !crate::merge_journal::merge_intent_recorded(&identity, &ownership)
+            .await
+            .unwrap(),
+        "a complete recovery clears the intent"
+    );
     assert!(matches!(
         store
             .head(&key("blocks/date=2023-11-14/part-000002.parquet"))
@@ -759,9 +895,14 @@ async fn ingestion_target_refuses_nested_authority_before_creating_any_path() {
         .await
         .unwrap();
         let identity = resolve_output_identity(selected.to_str().unwrap(), &empty_aws()).unwrap();
-        assert!(validate_ingestion_target(&identity, &ownership)
-            .await
-            .is_err());
+        assert!(validate_ingestion_target(
+            &identity,
+            &ownership,
+            IngestionTarget::Create,
+            &ListingStats::default()
+        )
+        .await
+        .is_err());
         ownership.release().await.unwrap();
     }
     assert!(!root.join("not-created").exists());

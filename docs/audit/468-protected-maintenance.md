@@ -21,6 +21,9 @@ exclusive root scope has been added. The guard set is released and reacquired,
 and discovery is repeated. The descriptor's external cursor mirror locations are
 then added in the same way. There are at most eight expansion passes and 256
 protected roots. Remote discovery/read operations have 60-second bounds.
+(Update: since #655, each listing request has a 60-second bound and a listing
+has none; a resumed `build` checks only ancestors and looks for merge journals
+only after an interrupted `merge`. See the [#655 record](655-resume-cost.md).)
 
 Malformed markers, missing or invalid authoritative state, nested protected
 roots, changed runtime output/service bindings and a scope that does not

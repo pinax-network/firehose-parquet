@@ -9,6 +9,7 @@ use object_store::{
 };
 use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
 #[derive(Default, Debug)]
 struct Remote {
@@ -126,7 +127,12 @@ async fn accepted_merge_delete_error_or_cancellation_retains_owner_and_journal()
         backend.fault.store(fault, Ordering::SeqCst);
         let outcome = tokio::time::timeout(
             Duration::from_millis(50),
-            crate::merge::recover_guarded_for_ingestion(&identity, &ownership, None),
+            crate::merge::recover_guarded_for_ingestion(
+                &identity,
+                &ownership,
+                None,
+                &ListingStats::default(),
+            ),
         )
         .await;
         if fault == 1 {

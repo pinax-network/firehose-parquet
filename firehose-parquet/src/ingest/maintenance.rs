@@ -2,11 +2,11 @@
 //! This module never adopts legacy data or infers authority from a mirror.
 
 use anyhow::{bail, ensure, Context, Result};
-use futures::StreamExt;
 use std::collections::BTreeSet;
 use std::fs;
+use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::Instant;
 
 use super::binding::{
     canonical_directory, mirror_service, output_path, resolve_output_identity,
@@ -21,6 +21,7 @@ use crate::cli::AwsConfig;
 use crate::dataset_lock::{DatasetOwnership, MutationScope};
 use crate::durable_state::{ControlKey, LocalStateStore, CONTROL_DIRECTORY};
 use crate::durable_state_s3::S3StateStore;
+use crate::maintenance::discovery::{visit_objects, ListingStats, LIST_REQUEST_TIMEOUT};
 
 /// A protected dataset encloses, or is nested in, the selected ingestion root.
 /// Adding or dropping a `{chain}` segment in `--output` of an existing dataset
@@ -29,7 +30,36 @@ const OVERLAPPING_INGESTION_ROOT: &str = "selected ingestion output overlaps ano
 
 const MAX_ROOTS: usize = 256;
 const MAX_EXPANSIONS: usize = 8;
-const REMOTE_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// How far marker discovery looks around a selected directory.
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum MarkerScope {
+    /// Ancestors, the directory itself and every descendant: maintenance, and
+    /// `build` creating a dataset.
+    Tree,
+    /// Strict ancestors only, O(depth) requests and no data listing: `build`
+    /// resuming a dataset whose authority it already read (#655).
+    Ancestors,
+}
+
+/// What `build` found at its output root before any other startup check.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum IngestionTarget {
+    /// No authority yet: the dataset is being created and the whole tree is
+    /// checked for enclosing and nested protected roots.
+    Create,
+    /// An existing authority: only its ancestors are checked (#655).
+    Resume,
+}
+
+/// Where the ingestion recovery-order check looks for merge journals.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum MergeJournals {
+    /// The whole dataset: maintenance commands.
+    Everywhere,
+    /// Only a dataset with a merge intent record: `build` (#655).
+    IfIntended,
+}
 
 #[derive(Clone, Eq, PartialEq, Ord, PartialOrd)]
 pub(crate) struct MaintenanceTarget {
@@ -110,7 +140,13 @@ pub(crate) async fn acquire(
         )
         .await?;
         let planning = async {
-            let markers = discover_markers(&ownership, &all_targets).await?;
+            let markers = discover_markers(
+                &ownership,
+                &all_targets,
+                MarkerScope::Tree,
+                &ListingStats::default(),
+            )
+            .await?;
             enforce_policy(&markers, &policy)?;
             let mut expanded = all_targets.clone();
             expanded.extend(
@@ -192,9 +228,14 @@ pub(crate) fn acquire_blocking(
 async fn discover_markers(
     ownership: &DatasetOwnership,
     targets: &BTreeSet<MaintenanceTarget>,
+    scope: MarkerScope,
+    stats: &ListingStats,
 ) -> Result<BTreeSet<String>> {
     ownership.revalidate_local_paths()?;
     let mut roots = BTreeSet::new();
+    // With `Ancestors`, the selected directory itself is skipped: its own
+    // authority was already read, and its descendants are not listed.
+    let skip_self = usize::from(scope == MarkerScope::Ancestors);
     for target in targets {
         ensure!(
             !crate::artifacts::is_control_path(&target.path),
@@ -207,51 +248,59 @@ async fn discover_markers(
                 .remote(&bucket)
                 .context("maintenance source bucket is not owned")?;
             let store = owner.object_store();
-            let prefixes = remote_ancestors(&key);
+            let mut prefixes = remote_ancestors(&key);
+            prefixes.truncate(prefixes.len() - skip_self);
             for ancestor in prefixes {
                 let marker = if ancestor.is_empty() {
                     CONTROL_DIRECTORY.to_owned()
                 } else {
                     format!("{ancestor}/{CONTROL_DIRECTORY}")
                 };
+                // object_store prefixes match whole path segments, so the first
+                // page of this control prefix answers the question: one
+                // request per ancestor, never a data listing.
                 let marker_path = object_store::path::Path::from(marker.as_str());
-                let exists = tokio::time::timeout(REMOTE_TIMEOUT, async {
-                    let mut objects = store.list(Some(&marker_path));
-                    while let Some(object) = objects.next().await {
-                        let object = object.map_err(|_| {
-                            anyhow::anyhow!("listing protected control markers failed")
-                        })?;
-                        if contains_remote(&marker, object.location.as_ref()) {
-                            return Ok::<_, anyhow::Error>(true);
-                        }
-                    }
-                    Ok(false)
-                })
-                .await
-                .map_err(|_| anyhow::anyhow!("protected marker discovery timed out"))??;
+                let exists = visit_objects(
+                    store.as_ref(),
+                    Some(&marker_path),
+                    "listing protected control markers",
+                    LIST_REQUEST_TIMEOUT,
+                    stats,
+                    |object| {
+                        Ok(if contains_remote(&marker, object.location.as_ref()) {
+                            ControlFlow::Break(())
+                        } else {
+                            ControlFlow::Continue(())
+                        })
+                    },
+                )
+                .await?
+                .is_some();
                 if exists {
                     insert_root(&mut roots, remote_url(&bucket, &ancestor))?;
                 }
             }
+            if scope == MarkerScope::Ancestors {
+                continue;
+            }
             let prefix = (!key.is_empty()).then(|| object_store::path::Path::from(key.as_str()));
-            tokio::time::timeout(REMOTE_TIMEOUT, async {
-                let mut objects = store.list(prefix.as_ref());
-                while let Some(object) = objects.next().await {
-                    let object = object.map_err(|_| {
-                        anyhow::anyhow!("listing protected descendant markers failed")
-                    })?;
+            visit_objects(
+                store.as_ref(),
+                prefix.as_ref(),
+                "listing protected descendant markers",
+                LIST_REQUEST_TIMEOUT,
+                stats,
+                |object| {
                     let location = object.location.as_ref();
-                    if !contains_remote(&key, location) {
-                        continue;
+                    if contains_remote(&key, location) {
+                        if let Some(root) = marker_parent(location) {
+                            insert_root(&mut roots, remote_url(&bucket, &root))?;
+                        }
                     }
-                    if let Some(root) = marker_parent(location) {
-                        insert_root(&mut roots, remote_url(&bucket, &root))?;
-                    }
-                }
-                Ok::<_, anyhow::Error>(())
-            })
-            .await
-            .map_err(|_| anyhow::anyhow!("protected descendant discovery timed out"))??;
+                    Ok(ControlFlow::<()>::Continue(()))
+                },
+            )
+            .await?;
         } else {
             let lexical = absolute_path(Path::new(&target.path))?;
             let selected = if target.file {
@@ -260,10 +309,11 @@ async fn discover_markers(
                 lexical.as_path()
             };
             let canonical = canonical_directory(selected)?;
+            let skip = usize::from(target.file).max(skip_self);
             for ancestor in lexical
                 .ancestors()
-                .skip(usize::from(target.file))
-                .chain(canonical.ancestors())
+                .skip(skip)
+                .chain(canonical.ancestors().skip(skip_self))
             {
                 if local_marker(ancestor)? {
                     insert_root(
@@ -272,8 +322,12 @@ async fn discover_markers(
                     )?;
                 }
             }
-            if !target.file {
-                collect_local_markers(&canonical, &mut roots)?;
+            if !target.file && scope == MarkerScope::Tree {
+                let started = Instant::now();
+                let mut counts = (0, 0);
+                let walked = collect_local_markers(&canonical, &mut roots, &mut counts);
+                stats.record(counts.0, counts.1, started.elapsed());
+                walked?;
             }
         }
     }
@@ -302,15 +356,21 @@ fn local_marker(root: &Path) -> Result<bool> {
         Err(_) => bail!("inspecting protected control marker failed"),
     }
 }
-fn collect_local_markers(root: &Path, roots: &mut BTreeSet<String>) -> Result<()> {
+fn collect_local_markers(
+    root: &Path,
+    roots: &mut BTreeSet<String>,
+    (reads, entries): &mut (u64, u64),
+) -> Result<()> {
     if !root.exists() {
         return Ok(());
     }
     ensure!(root.is_dir(), "maintenance directory is not a directory");
     let mut pending = vec![root.to_owned()];
     while let Some(path) = pending.pop() {
+        *reads += 1;
         for entry in fs::read_dir(&path).context("listing protected dataset descendants")? {
             let entry = entry.context("reading protected dataset entry")?;
+            *entries += 1;
             let kind = entry.file_type()?;
             ensure!(
                 !kind.is_symlink(),
@@ -454,9 +514,16 @@ async fn recover_roots(
     roots: &[ProtectedRoot],
     aws: &AwsConfig,
 ) -> Result<usize> {
+    let stats = ListingStats::default();
     // Validate every state/pending pair before recovering the first dataset.
     for root in roots {
-        validate_ingestion_recovery_order(&root.identity, ownership).await?;
+        validate_ingestion_recovery_order(
+            &root.identity,
+            ownership,
+            MergeJournals::Everywhere,
+            &stats,
+        )
+        .await?;
     }
     let mut recovered = 0;
     for root in roots {
@@ -474,8 +541,11 @@ async fn recover_roots(
             &root.identity,
             ownership,
             Some(&root.descriptor.id()?),
+            &stats,
         )
         .await?;
+        // Every journal of this root was just recovered: none can remain.
+        crate::merge_journal::clear_merge_intent(&root.identity, ownership).await?;
     }
     Ok(recovered)
 }
@@ -515,24 +585,31 @@ fn part_store<'a>(
     }
 }
 
-/// Called before protected ingestion reads data or opens Blocks. This does not
-/// acquire ownership again or take over an unrecognized legacy remote journal.
+/// Called before protected ingestion opens Blocks, after its transaction
+/// recovery. It acquires no second owner or session permit. A merge journal can
+/// exist only in a dataset with a merge intent record, so without one this
+/// reads a single control record and lists nothing (#655). With one, it
+/// finishes the recognized journals of the whole dataset, then clears the
+/// record. `protected` is the dataset's stream digest.
 pub(crate) async fn prepare_ingestion(
     output: &StorageIdentity,
     ownership: &DatasetOwnership,
-    aws: &AwsConfig,
+    protected: &super::state::Digest,
+    stats: &ListingStats,
 ) -> Result<()> {
-    let path = output_path(output);
-    let targets = BTreeSet::from([MaintenanceTarget::directory(path.clone())]);
-    let markers = discover_markers(ownership, &targets).await?;
-    ensure!(
-        markers.iter().all(|root| *root == path),
-        OVERLAPPING_INGESTION_ROOT
+    if !crate::merge_journal::merge_intent_recorded(output, ownership).await? {
+        return Ok(());
+    }
+    tracing::info!(
+        "an earlier merge may have left journals in this dataset; recovering them before streaming"
     );
-    let roots = load_roots(ownership, &markers, aws).await?;
-    let protected = roots.first().map(|root| root.descriptor.id()).transpose()?;
-    crate::merge::recover_guarded_for_ingestion(output, ownership, protected.as_ref()).await?;
-    Ok(())
+    // `build` acquired without the whole-tree symlink walk; journal discovery
+    // walks the tree, so it needs that check first.
+    let started = Instant::now();
+    let reads = ownership.validate_local_trees()?;
+    stats.record(reads, 0, started.elapsed());
+    crate::merge::recover_guarded_for_ingestion(output, ownership, Some(protected), stats).await?;
+    crate::merge_journal::clear_merge_intent(output, ownership).await
 }
 
 #[cfg(test)]
@@ -602,42 +679,29 @@ pub(crate) fn validate_artifact_destinations(
 async fn has_merge_journal(
     identity: &StorageIdentity,
     ownership: &DatasetOwnership,
+    stats: &ListingStats,
 ) -> Result<bool> {
     match identity {
         StorageIdentity::Local { canonical_root } => {
-            let mut pending = vec![PathBuf::from(canonical_root)];
-            while let Some(path) = pending.pop() {
-                for entry in fs::read_dir(path)? {
-                    let entry = entry?;
-                    let kind = entry.file_type()?;
-                    ensure!(
-                        !kind.is_symlink(),
-                        "nested symlink discovered during recovery"
-                    );
-                    if entry.file_name() == crate::merge_journal::JOURNAL_FILE {
-                        return Ok(true);
-                    }
-                    if kind.is_dir()
-                        && !crate::artifacts::is_control_path(&entry.path().to_string_lossy())
-                        && entry.file_name() != crate::artifacts::ARTIFACTS_DIR
-                    {
-                        pending.push(entry.path());
-                    }
-                }
-            }
-            Ok(false)
+            let started = Instant::now();
+            let mut counts = (0, 0);
+            let found = local_merge_journal(Path::new(canonical_root), &mut counts);
+            stats.record(counts.0, counts.1, started.elapsed());
+            found
         }
         StorageIdentity::S3 { bucket, prefix, .. } => {
             let owner = ownership
                 .remote(bucket)
                 .context("merge discovery bucket is not owned")?;
             let key = (!prefix.is_empty()).then(|| object_store::path::Path::from(prefix.as_str()));
-            tokio::time::timeout(REMOTE_TIMEOUT, async {
-                let mut objects = owner.object_store().list(key.as_ref());
-                while let Some(object) = objects.next().await {
-                    let object =
-                        object.map_err(|_| anyhow::anyhow!("merge journal discovery failed"))?;
-                    if contains_remote(prefix, object.location.as_ref())
+            let found = visit_objects(
+                owner.object_store().as_ref(),
+                key.as_ref(),
+                "merge journal discovery",
+                LIST_REQUEST_TIMEOUT,
+                stats,
+                |object| {
+                    let journal = contains_remote(prefix, object.location.as_ref())
                         && object.location.filename() == Some(crate::merge_journal::JOURNAL_FILE)
                         && !crate::artifacts::is_control_path(object.location.as_ref())
                         && !crate::artifacts::is_reserved_artifact_path(
@@ -645,18 +709,46 @@ async fn has_merge_journal(
                                 prefix,
                                 object.location.as_ref(),
                             ),
-                        )
-                    {
-                        return Ok(true);
-                    }
-                }
-                Ok(false)
-            })
-            .await
-            .map_err(|_| anyhow::anyhow!("merge journal discovery timed out"))?
+                        );
+                    Ok(if journal {
+                        ControlFlow::Break(())
+                    } else {
+                        ControlFlow::Continue(())
+                    })
+                },
+            )
+            .await?;
+            Ok(found.is_some())
         }
     }
 }
+/// Whether a merge journal lies anywhere under the local `root`.
+fn local_merge_journal(root: &Path, (reads, entries): &mut (u64, u64)) -> Result<bool> {
+    let mut pending = vec![root.to_path_buf()];
+    while let Some(path) = pending.pop() {
+        *reads += 1;
+        for entry in fs::read_dir(path)? {
+            let entry = entry?;
+            *entries += 1;
+            let kind = entry.file_type()?;
+            ensure!(
+                !kind.is_symlink(),
+                "nested symlink discovered during recovery"
+            );
+            if entry.file_name() == crate::merge_journal::JOURNAL_FILE {
+                return Ok(true);
+            }
+            if kind.is_dir()
+                && !crate::artifacts::is_control_path(&entry.path().to_string_lossy())
+                && entry.file_name() != crate::artifacts::ARTIFACTS_DIR
+            {
+                pending.push(entry.path());
+            }
+        }
+    }
+    Ok(false)
+}
+
 async fn recover_selected_legacy_merges(
     ownership: &DatasetOwnership,
     targets: &[MaintenanceTarget],
@@ -689,24 +781,36 @@ async fn recover_selected_legacy_merges(
     // an enclosing legacy tree must be unbound legacy journals; foreign stream
     // bindings still fail closed instead of being treated as ordinary files.
     let mut recovered = 0;
+    let stats = ListingStats::default();
     for path in paths {
         let identity = resolve_output_identity(&path, aws)?;
         recovered +=
-            crate::merge::recover_guarded_for_ingestion(&identity, ownership, None).await?;
+            crate::merge::recover_guarded_for_ingestion(&identity, ownership, None, &stats).await?;
     }
     Ok(recovered)
 }
 
 /// Prove disjoint recovery protocols before either one changes public files.
 /// Session calls this while its permit is held, before opening its controller.
+/// `journals` says where merge journals are looked for; `build` passes
+/// [`MergeJournals::IfIntended`], so without a pending transaction or a merge
+/// intent record this reads control records only (#655).
 pub(crate) async fn validate_ingestion_recovery_order(
     output: &StorageIdentity,
     ownership: &DatasetOwnership,
+    journals: MergeJournals,
+    stats: &ListingStats,
 ) -> Result<()> {
     let snapshot = state_store(output, ownership)?.load().await?;
     if snapshot.pending.is_some() {
+        let look = match journals {
+            MergeJournals::Everywhere => true,
+            MergeJournals::IfIntended => {
+                crate::merge_journal::merge_intent_recorded(output, ownership).await?
+            }
+        };
         ensure!(
-            !has_merge_journal(output, ownership).await?,
+            !(look && has_merge_journal(output, ownership, stats).await?),
             "ingestion and merge journals coexist; refusing ambiguous recovery ordering"
         );
     }
@@ -715,13 +819,25 @@ pub(crate) async fn validate_ingestion_recovery_order(
 
 /// Before eligibility or initialization, reject overlapping protected roots using
 /// markers only. A shared ancestor lock does not authorize reading its authority.
+///
+/// Creating a dataset checks its ancestors, itself and all its descendants; the
+/// root is empty then, so that listing is small. Resuming checks only the
+/// ancestors, O(depth) requests of control prefixes and no data listing: a
+/// dataset nested in an existing one could only have been created after it,
+/// and that creation's own ancestor check refuses it (#655).
 pub(crate) async fn validate_ingestion_target(
     output: &StorageIdentity,
     ownership: &DatasetOwnership,
+    target: IngestionTarget,
+    stats: &ListingStats,
 ) -> Result<()> {
     let path = output_path(output);
     let targets = BTreeSet::from([MaintenanceTarget::directory(path.clone())]);
-    let markers = discover_markers(ownership, &targets).await?;
+    let scope = match target {
+        IngestionTarget::Create => MarkerScope::Tree,
+        IngestionTarget::Resume => MarkerScope::Ancestors,
+    };
+    let markers = discover_markers(ownership, &targets, scope, stats).await?;
     ensure!(
         markers.iter().all(|root| root == &path),
         OVERLAPPING_INGESTION_ROOT

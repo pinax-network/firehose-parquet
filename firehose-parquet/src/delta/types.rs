@@ -36,12 +36,12 @@ use arrow::datatypes::{DataType, Field, Fields, Schema, TimeUnit};
 use arrow::util::display::FormatOptions;
 
 use crate::config::BlockMetadata;
-use crate::date_partition::{DatePartition, DATE_KEY};
+use crate::date_partition::DatePartition;
 
-/// The Delta partition column: every table is partitioned by `date`, and its
-/// value lives in the Delta log (`partitionValues.date`) and the
-/// `date=YYYY-MM-DD` directory, not in the data files.
-pub const PARTITION_COLUMN: &str = DATE_KEY;
+/// The Delta partition column (`partitionValues.date`), defined once in
+/// [`crate::delta`]. Its value lives in the Delta log and the `date=YYYY-MM-DD`
+/// directory, not in the data files.
+pub use super::PARTITION_COLUMN;
 
 /// Precision of the `decimal(20,0)` type that holds any `u64`
 /// (`u64::MAX` has 20 digits).

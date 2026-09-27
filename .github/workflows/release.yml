@@ -41,13 +41,16 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      # rust-toolchain.toml pins the toolchain; `rustup show` installs it.
-      # (dtolnay/rust-toolchain@master requires an explicit `toolchain` input,
-      # which is why every v0.7.2 release job failed during setup.)
+      # rust-toolchain.toml pins the toolchain; `rustup toolchain install` with
+      # no argument installs it (auto-install through `rustup show` is
+      # deprecated). (dtolnay/rust-toolchain@master requires an explicit
+      # `toolchain` input, which is why every v0.7.2 release job failed during
+      # setup.)
       - name: Install Rust toolchain
         run: |
-          rustup show
+          rustup toolchain install --no-self-update
           rustup target add ${{ matrix.target }}
+          rustup show
 
       - name: Install protoc (Linux)
         if: runner.os == 'Linux'

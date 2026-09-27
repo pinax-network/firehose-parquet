@@ -42,7 +42,7 @@ Related docs:
     - `frontier.rs`: the accepted-event prefix; `binding.rs`: output and mirror identities from the actual storage configuration (`--cursor none` binds no mirror).
     - `eligibility.rs`: new streams may only initialize empty destinations; legacy data, cursors and any other file are refused.
     - `mirror.rs`: the non-authoritative cursor mirror (default `_fireparq/cursor.parquet`), reconciled from authority.
-    - `maintenance.rs`: protected-root discovery and recovery before maintenance commands; `observe.rs`: read-only authority observation for `verify`.
+    - `maintenance.rs`: protected-root discovery and recovery before maintenance commands, and `build`'s startup checks (the whole tree when a dataset is created, only ancestors and the merge intent on resume, #655); `observe.rs`: read-only authority observation for `verify`.
   - Writing Parquet:
     - `src/delta/types.rs`: the checked flush-boundary mapping onto Delta data file types (#643): `DeltaTypes` (a chain's `decimal(20,0)` columns), `data_schema` (the declared table digests), `data_batches` (every flush, in `IngestionSession::flush` before the transaction journals anything: checked `long`, `decimal(20,0)`, `short`, `string` enums, microsecond timestamps, `date` left out after checking it against the partition), `Conversion` (the rules `docs/schemas/` documents) and `is_delta_type`.
     - `src/writer.rs`: Parquet encoding, the `<table>/date=YYYY-MM-DD` directory of a flush (`ParquetTableWriter::partition_suffix`), the partition contract (every row's time must fall in that directory, and a mapper `date` column must equal it) and the unprotected low-level `OutputWriter` (not used by protected `build`).
@@ -53,6 +53,8 @@ Related docs:
     - `src/cursor.rs`: cursor Parquet row format and legacy inspection.
     - `src/encode.rs`, `src/encode/fixed_base58.rs`: byte encodings (`hex`, `hex_no_prefix`, `base58`, `tron_base58`, `binary`) and the fixed-width Base58 fast path.
     - `src/traits.rs`: `BlockMapper`, canonical identity columns, timestamp helpers, and the shared enum helpers and non-final event helpers (`StreamEvent`: the `fork_step` and `stream_ordinal` columns).
+  - Delta Lake (#643, `docs/design/delta-lake.md`):
+    - `src/delta/mod.rs`: `deltalake-core` 1.0.0 (its own Arrow/Parquet 59 and object_store 0.13, beside the workspace's 60 and 0.12), the table protocol and properties (design §2), and empty-table creation and opening. `build` does not call it yet.
   - Ownership, durable state and S3:
     - `src/dataset_lock/{mod,local,operation,session}.rs`: local directory-inode ownership shared by all mutating commands; `DatasetOwnership::finish` ends `build` ownership (release after success or after a failure whose requests all had a definite outcome). `src/dataset_lock_s3.rs`: the persistent bucket-wide S3 owner (`.fireparq-owner-v1.json`) and its uncertainty latch.
     - `src/durable_state.rs`, `src/durable_state_s3.rs`: strict versioned local/remote control records and CAS tombstones.
@@ -61,10 +63,10 @@ Related docs:
     - `src/s3/upload.rs`: native ingestion uploads (disk spool, one conditional PUT, spooled readback verification, explicit timeouts).
     - `src/s3/delete.rs`: single-attempt, bounded-concurrency maintenance deletes.
   - Maintenance and verification:
-    - `src/merge.rs`, `src/merge/engine.rs`, `src/merge_journal.rs`, `src/merge/read.rs`: `merge`, its crash-safe partition sequence shared by local and S3, the `_fireparq_merge.json` journal and recovery, and bounded pinned S3 read windows.
+    - `src/merge.rs`, `src/merge/engine.rs`, `src/merge_journal.rs`, `src/merge/read.rs`: `merge`, its crash-safe partition sequence shared by local and S3, the `_fireparq_merge.json` journal and recovery, the `.fireparq-ingest/merge-intent.json` record that tells `build` a merge may have left journals (#655), and bounded pinned S3 read windows.
     - `src/truncate.rs`: `truncate` planning (`date=` filters, `--yes`) and deletion.
     - `src/maintenance/compaction.rs`: shared schema/value-metadata checks, receipt stripping, streaming part writer and the merge encoder.
-    - `src/maintenance/discovery.rs`: shared local walker policies, S3 listing and whole-object reads for maintenance, `verify`, `scan` and `validate`.
+    - `src/maintenance/discovery.rs`: shared local walker policies, S3 listing and whole-object reads for maintenance, `verify`, `scan` and `validate`; `visit_objects`, the paged listing with a timeout per request and no total deadline, and `ListingStats` (#655). `discovery/paged_bucket.rs` is a test bucket of a million generated keys that counts LIST pages.
     - `src/artifacts.rs`: the one place dataset artifact paths resolve: `DatasetArtifact` (`_fireparq/cursor.parquet`, `_fireparq/merkle_roots.parquet`, `_fireparq/verify_runs/`, plus their legacy root names) with local/S3 join helpers, `DEFAULT_CURSOR_MIRROR` (the clap default), the legacy-artifact refusal, and `is_reserved_artifact_path`, which every dataset walker uses to skip the whole `_fireparq/` subtree, the legacy root names and control state.
     - `src/verify.rs`, `src/verify/row_encoding.rs`, `src/verify/tests/`: `fireparq verify` (read-only scan, open partitions from the writer frontier, unchanged-snapshot check, atomic/conditional registry writes) and the `merkle_v2` row encoding.
     - `src/metrics.rs`: Prometheus registry, `/metrics`, `/health` and `/ready`.
@@ -82,7 +84,7 @@ Related docs:
   - `src/mapping_bench.rs`: ignored whole-block mapping benchmarks.
   - `examples/`: replay, benchmark and golden-refresh tools (`replay_*`, `bench_*`, `measure_flush_sizing`, `refresh_evm_golden`, `dump_schemas`). `bench_ingestion_concurrency` is the #516 flush-concurrency benchmark; `bench_live_flush` runs the real binary against a looping mock Firehose and a loopback HTTPS S3 with injected latency to measure #658 catch-up throughput and commit phases.
   - `tests/`: real-binary integration tests against a mock Firehose (`ingestion_transactions.rs`, `dataset_ownership.rs`, `endpoint_info_startup.rs`, `non_final_stream.rs`, `metrics_readiness.rs`, `shutdown_signals.rs`, and `adaptive_flush.rs`, which paces its mock faster than or at real time), the DuckDB and Polars engine test (`engine_compat.rs`, with `tests/engines/`), the maintenance crash-hook gating test (`maintenance_crash_hooks.rs`) and the offline EVM golden regression (`evm_golden.rs`, `tests/fixtures/`).
-- `spikes/delta-lake/`: the #643 Delta Lake spike, a standalone crate outside the workspace (its own `[workspace]`, `Cargo.lock` and `rust-toolchain.toml`, because `deltalake-core` 1.0.0 needs Rust 1.94.1 and Arrow 59). It commits pre-written Parquet 60 parts to Delta tables (`src/{mapping,part,delta,storage}.rs`, `tests/spike.rs`), and `run.sh` adds loopback S3 (`py/loopback_s3.py`), `deltalake` maintenance beside the writer (`py/concurrent_maintenance.py`) and DuckDB/Polars reads (`py/read_check.py`). Nothing in `fireparq` depends on it; see `docs/design/delta-lake.md`.
+- `spikes/delta-lake/`: the #643 Delta Lake spike, a standalone crate outside the workspace (its own `[workspace]`, `Cargo.lock` and `rust-toolchain.toml`, kept from before `firehose-parquet` depended on `deltalake-core` 1.0.0). It commits pre-written Parquet 60 parts to Delta tables (`src/{mapping,part,delta,storage}.rs`, `tests/spike.rs`), and `run.sh` adds loopback S3 (`py/loopback_s3.py`), `deltalake` maintenance beside the writer (`py/concurrent_maintenance.py`) and DuckDB/Polars reads (`py/read_check.py`). Nothing in `fireparq` depends on it; see `docs/design/delta-lake.md`.
 - `proto/`: source `.proto` files and Buf config, including `proto/core/*` dependencies.
 - `scripts/`: `generate_networks.rs` (the `generate-networks` bin that writes `firehose-parquet/src/networks_generated.rs`) and `check_network_endpoints.sh` (live check of every built-in endpoint).
 - `.env.example`: every environment variable the CLI reads, kept in sync by a test.
@@ -160,6 +162,7 @@ Related docs:
 
 ## Build, Run, and CI Anchors
 
+- Toolchain: `rust-toolchain.toml` pins Rust 1.98, which CI and the release workflow install with `rustup toolchain install`; the `Dockerfile` builder image matches it. `deltalake-core` 1.0.0 needs at least 1.94.1.
 - Build workspace: `cargo build --workspace`
 - Run tests: `cargo test --workspace --locked`
 - Format: `cargo fmt --all`

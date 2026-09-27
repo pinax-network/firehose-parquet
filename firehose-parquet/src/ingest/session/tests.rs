@@ -1448,3 +1448,5 @@ async fn remote_live_session_is_unaffected_when_expired_committed_parts_disappea
     assert_eq!(snapshot.authority.unwrap().payload.checkpoint.ordinal, 6);
     owner.finish(Ok(())).await.unwrap();
 }
+
+mod resume_cost;
