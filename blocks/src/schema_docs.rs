@@ -977,6 +977,13 @@ fn render_index(references: &[ChainReference]) -> String {
     }
     out.push_str(
         "\n## Conventions\n\n\
+         - Each table is one directory directly below the dataset root \
+         (`<output>/<chain_name>/<table>/`, or `<output>/<table>/` with \
+         `--without-chain-dir`). The `_fireparq/` directory and the dot-prefixed entries \
+         beside the tables hold fireparq's artifacts (cursor mirror, partition index, \
+         Merkle registry, verify reports) and control state, not tables. Engines that \
+         skip `_` and `.` paths (Spark, Trino, Hive, Delta) ignore them; with DuckDB, \
+         read one table with `<root>/<table>/**/*.parquet`.\n\
          - Every table starts with the canonical block identity columns `block_num`, \
          `block_id`, `parent_num`, `parent_id`, `lib_num`, `timestamp` and `date`, shared \
          by all chains (`firehose_parquet::traits`). `timestamp` is \

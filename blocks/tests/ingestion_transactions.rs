@@ -2413,6 +2413,71 @@ fn assert_dataset_root_layout(root: &Path, tables: &[&str], artifacts: &[&str]) 
         .any(|file| file.starts_with(root.join("_fireparq"))));
 }
 
+/// The DuckDB CLI: `FIREPARQ_DUCKDB`, else `duckdb` on `PATH`. CI installs a
+/// pinned CLI and sets `FIREPARQ_REQUIRE_DUCKDB`, so the check can only be
+/// skipped locally (same contract as `non_final_stream.rs`).
+fn duckdb() -> Option<PathBuf> {
+    let candidate = std::env::var_os("FIREPARQ_DUCKDB")
+        .map(PathBuf::from)
+        .or_else(|| {
+            std::env::split_paths(&std::env::var_os("PATH")?)
+                .map(|directory| directory.join("duckdb"))
+                .find(|path| path.is_file())
+        })
+        .unwrap_or_else(|| PathBuf::from("duckdb"));
+    let available = std::process::Command::new(&candidate)
+        .arg("-version")
+        .output()
+        .is_ok_and(|output| output.status.success());
+    if available {
+        return Some(candidate);
+    }
+    assert!(
+        std::env::var_os("FIREPARQ_REQUIRE_DUCKDB").is_none(),
+        "FIREPARQ_REQUIRE_DUCKDB is set but the DuckDB CLI {candidate:?} is unavailable"
+    );
+    eprintln!("skipping the DuckDB table-glob check: no DuckDB CLI ({candidate:?})");
+    None
+}
+
+/// Runs `sql` in a fresh in-memory DuckDB without `~/.duckdbrc` and returns
+/// the rows of the last statement, numbers compared as text.
+fn duckdb_rows(duckdb: &Path, cwd: &Path, sql: &str) -> Vec<Value> {
+    let init = cwd.join("empty.duckdbrc");
+    std::fs::write(&init, "").unwrap();
+    let output = std::process::Command::new(duckdb)
+        .env_clear()
+        .current_dir(cwd)
+        .arg("-init")
+        .arg(&init)
+        .args(["-json", "-c", sql])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{sql}\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let rows: Vec<Value> = serde_json::from_slice(&output.stdout).unwrap();
+    rows.into_iter()
+        .map(|row| {
+            Value::Object(
+                row.as_object()
+                    .unwrap()
+                    .iter()
+                    .map(|(name, value)| {
+                        let text = match value {
+                            Value::String(text) => text.clone(),
+                            other => other.to_string(),
+                        };
+                        (name.clone(), Value::String(text))
+                    })
+                    .collect(),
+            )
+        })
+        .collect()
+}
+
 fn json_output(output: &Output) -> Value {
     serde_json::from_slice(&output.stdout)
         .unwrap_or_else(|error| panic!("{error}: {}", logs(output)))
@@ -2840,6 +2905,42 @@ async fn without_chain_dir_builds_at_the_output_root_and_every_command_follows_i
             "merkle_roots.parquet",
         ],
     );
+    // The same with DuckDB: the per-table glob the README recommends reads
+    // every block row and no artifact. DuckDB does not skip `_` paths, so a
+    // dataset-wide glob would also match `_fireparq/`.
+    if let Some(duckdb) = duckdb() {
+        let blocks_files = parts(&root)
+            .keys()
+            .filter(|path| path.starts_with("blocks"))
+            .count();
+        let root_sql = canonical.to_str().unwrap();
+        let rows = duckdb_rows(
+            &duckdb,
+            dir.path(),
+            &format!(
+                "SELECT count(*) AS n, count(DISTINCT filename) AS files, \
+                 count(*) FILTER (WHERE filename LIKE '%/_fireparq/%') AS artifacts \
+                 FROM read_parquet('{root_sql}/blocks/**/*.parquet', filename = true)"
+            ),
+        );
+        assert_eq!(
+            rows,
+            [serde_json::json!({
+                "n": "4",
+                "files": blocks_files.to_string(),
+                "artifacts": "0",
+            })]
+        );
+        let rows = duckdb_rows(
+            &duckdb,
+            dir.path(),
+            &format!(
+                "SELECT count(*) AS artifacts FROM glob('{root_sql}/**/*.parquet') \
+                 WHERE file LIKE '%/_fireparq/%'"
+            ),
+        );
+        assert_ne!(rows, [serde_json::json!({ "artifacts": "0" })]);
+    }
 
     // recovery reads the same root.
     let status =

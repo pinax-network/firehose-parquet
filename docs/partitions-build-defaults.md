@@ -1,10 +1,11 @@
 # Partitions Build Defaults
 
 `fireparq partitions build` creates one verified v2 snapshot in
-`<output>/<chain>/partitions.parquet`, or in `<output>/partitions.parquet` with
-`--without-chain-dir` (the root that `build --without-chain-dir` writes, whose
-`cursor.parquet` then supplies a missing `--start-block`). It does not change normal ingestion or
-writer timestamp routing. See [the file contract](partitions-parquet-contract.md)
+`<output>/<chain>/_fireparq/partitions.parquet`, or in
+`<output>/_fireparq/partitions.parquet` with `--without-chain-dir` (the root that
+`build --without-chain-dir` writes, whose default cursor mirror
+`_fireparq/cursor.parquet` then supplies a missing `--start-block`). It does not
+change normal ingestion or writer timestamp routing. See [the file contract](partitions-parquet-contract.md)
 and [the correctness decision and tests](audit/486-partition-index-design.md).
 
 ## Coverage and finality
@@ -34,18 +35,21 @@ parent identity. Missing or contradictory metadata never establishes coverage.
 Fresh bounded start resolution is:
 
 1. Explicit `--start-block`.
-2. Sibling `cursor.parquet` last block plus one, if present and readable.
+2. The dataset's default cursor mirror `<dataset root>/_fireparq/cursor.parquet`,
+   last block plus one, if present and readable. A mirror at another `--cursor`
+   location (including the pre-v1.0.0 default `<dataset root>/cursor.parquet`)
+   is not read; pass `--start-block` for such a dataset.
 3. EndpointInfo's first streamable block.
 
 A fresh live run uses its explicit start or endpoint first streamable block; it
-does not inspect the sibling cursor. EndpointInfo is mandatory. An unreadable
+does not inspect the cursor mirror. EndpointInfo is mandatory. An unreadable
 bounded-start cursor is an error. Partition index
 construction never writes that cursor.
 
 An existing index requires `--resume` or `--overwrite` in bounded mode. Resume
 and live mode require verified v2 coverage and use its source-block frontier,
 last canonical identity and stored routing anchor. They do not consult the
-sibling cursor or sort calendar keys to find progress. A bounded explicit start
+cursor mirror or sort calendar keys to find progress. A bounded explicit start
 past the frontier fails; an earlier start still resumes at the frontier. In live
 mode an explicit start must equal the frontier. A bounded stop already covered
 makes no change after endpoint/finality validation.
@@ -134,5 +138,16 @@ output), and a conflicting explicit S3 output is rejected. The existing index is
 read from the exact destination, never through the read-only `S3_BUCKET`
 shorthand, and the absolute index destination is logged before ownership is
 taken. See the README's storage options for credentials and endpoint
-addressing. The artifact path remains `partitions.parquet`; there is no lookup
-sidecar.
+addressing. The artifact path is `<dataset root>/_fireparq/partitions.parquet`;
+there is no lookup sidecar.
+
+## Legacy root index
+
+Releases before v1.0.0 wrote the index at `<dataset root>/partitions.parquet`.
+If that file exists, every mode (bounded, `--resume`, `--live`, `--overwrite`)
+fails after the finality proof and before reading or writing an index, naming
+both paths; ownership taken for the check is released. A new
+`_fireparq/partitions.parquet` would otherwise silently shadow it. Nothing is
+migrated automatically: move the file into `_fireparq/` (`mv`, or
+`aws s3 mv` on S3) to resume from it, or delete it to rebuild. `build` refuses to
+initialize a new dataset beside a legacy root index for the same reason.

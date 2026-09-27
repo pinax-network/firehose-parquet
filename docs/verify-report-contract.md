@@ -6,8 +6,8 @@ This document defines the versioned JSON report contract emitted by `fireparq ve
 
 - Applies to every verify run (local and S3-backed datasets).
 - Separates two artifact families:
-  - **Canonical roots registry**: `merkle_roots.parquet`
-  - **Per-run report artifacts**: `verify_runs/<run_id>/report.json`
+  - **Canonical roots registry**: `_fireparq/merkle_roots.parquet`
+  - **Per-run report artifacts**: `_fireparq/verify_runs/<run_id>/report.json`
 
 ## Schema Versioning
 
@@ -75,7 +75,7 @@ Registries without a `merkle_version` column predate it and are read as `merkle_
 
 The run passes (`fireparq verify` exits 0) when `summary.mismatches` and `summary.protocol_failed` are both 0. `updated` and `open` findings do not fail a run. The registry is written only by a passing run; `warnings` explain a held-back write. See "Root Registry Update Semantics" in `docs/verifiability-artifact-runbook.md`.
 
-`open` partitions are the ones `fireparq build` may still write, decided from the writer frontier (the protected dataset's authoritative ingestion state, else a legacy `cursor.parquet`); the `error` says which rule applied. The last partition of a completed protected request stays `open` unless it is a `block_range` that ends at or before the stop block, because a longer request would append to it. `verify` reads without dataset ownership, so it can run while `build` runs.
+`open` partitions are the ones `fireparq build` may still write, decided from the writer frontier (the protected dataset's authoritative ingestion state, else the legacy root `cursor.parquet` of an unprotected dataset); the `error` says which rule applied. The last partition of a completed protected request stays `open` unless it is a `block_range` that ends at or before the stop block, because a longer request would append to it. `verify` reads without dataset ownership, so it can run while `build` runs.
 
 Some runs end with an error instead of a report: when a table file of a partition that would be compared or recorded changed while `verify` read it, or a protocol run that writes a report finds a file it read removed or replaced (`the data changed while verify was reading it: ...`), and when the table has an unfinished merge or rollup (`cannot verify ...: it has an unfinished merge ...` or `... unfinished rollup ...`). Nothing is compared or written in either case; `verify` never recovers data. See "Concurrency and Atomic Writes" in `docs/verifiability-artifact-runbook.md`.
 
@@ -87,14 +87,14 @@ Suggested report artifact path is deterministic and included as:
 
 Pattern, where `<chain_root>` is the network directory that holds the table directories (`<output>/<chain_name>` for `fireparq build` output, or `<output>` itself for `fireparq build --without-chain-dir`):
 
-- `<chain_root>/verify_runs/<run_id>/report.json`
+- `<chain_root>/_fireparq/verify_runs/<run_id>/report.json`
 
 For S3:
 
-- `s3://<bucket>/<chain_name>/verify_runs/<run_id>/report.json` (with any prefix before `<chain_name>` kept)
-- `s3://<bucket>/verify_runs/<run_id>/report.json` for a dataset written at the bucket root with `--without-chain-dir`
+- `s3://<bucket>/<chain_name>/_fireparq/verify_runs/<run_id>/report.json` (with any prefix before `<chain_name>` kept)
+- `s3://<bucket>/_fireparq/verify_runs/<run_id>/report.json` for a dataset written at the bucket root with `--without-chain-dir`
 
-The default registry is `<chain_root>/merkle_roots.parquet` (`registry_path`). See the dataset resolution rules in `docs/verifiability-artifact-runbook.md`.
+The default registry is `<chain_root>/_fireparq/merkle_roots.parquet` (`registry_path`). While a legacy `<chain_root>/merkle_roots.parquet` from a release before v1.0.0 exists, a `roots` run with the default registry fails before producing a report; move the file into `_fireparq/`. See the dataset resolution rules in `docs/verifiability-artifact-runbook.md`.
 
 `merkle_roots.parquet` remains the canonical registry for computed roots and must not be treated as run-report storage.
 
