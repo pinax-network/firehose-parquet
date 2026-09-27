@@ -16,10 +16,12 @@ pub struct TableLabels {
     pub table: String,
 }
 
-/// Labels for flush trigger types.
+/// Labels for flush trigger types and the stream pace at the flush (#659).
 #[derive(Clone, Debug, Hash, PartialEq, Eq, prometheus_client::encoding::EncodeLabelSet)]
 pub struct FlushLabels {
     pub trigger: String,
+    /// `catching_up` or `caught_up` ([`crate::flush::StreamPace::as_str`]).
+    pub pace: String,
 }
 
 /// Labels for error kinds.
@@ -114,8 +116,11 @@ pub struct PipelineMetrics {
     pub files_written_total: Family<TableLabels, Counter>,
     /// Total compressed parquet bytes written to disk/S3 (labels: table).
     pub file_bytes_total: Family<TableLabels, Counter>,
-    /// Flush count by trigger type.
+    /// Flush count by trigger type and stream pace.
     pub flushes_total: Family<FlushLabels, Counter>,
+    /// 1 while the stream replays history faster than real time, which
+    /// suspends `--flush-interval-secs`; 0 at the chain head or when unknown.
+    pub catching_up: Gauge,
     /// Current writer-owned buffer size (estimated compressed).
     pub buffer_estimated_bytes: Gauge,
     /// Current writer-owned row count per table.
@@ -232,6 +237,7 @@ impl PipelineMetrics {
             files_written_total: Family::default(),
             file_bytes_total: Family::default(),
             flushes_total: Family::default(),
+            catching_up: Gauge::default(),
             buffer_estimated_bytes: Gauge::default(),
             buffer_rows: Family::default(),
             mapper_buffer_rows: Gauge::default(),
@@ -310,8 +316,13 @@ impl PipelineMetrics {
         );
         registry.register(
             "firehose_parquet_flushes",
-            "Flush count by trigger type",
+            "Flush count by trigger type and stream pace (catching_up or caught_up)",
             metrics.flushes_total.clone(),
+        );
+        registry.register(
+            "firehose_parquet_catching_up",
+            "1 while the stream replays history faster than real time (the flush interval is suspended), 0 at the chain head or when the pace is unknown",
+            metrics.catching_up.clone(),
         );
         registry.register(
             "firehose_parquet_buffer_estimated_bytes",
@@ -565,6 +576,7 @@ mod tests {
         let (_, metrics) = init();
         let labels = FlushLabels {
             trigger: "bytes".to_string(),
+            pace: "catching_up".to_string(),
         };
         metrics.flushes_total.get_or_create(&labels).inc();
         assert_eq!(metrics.flushes_total.get_or_create(&labels).get(), 1);
@@ -582,6 +594,21 @@ mod tests {
         assert!(buf.contains("firehose_parquet_blocks_processed_total"));
         assert!(buf.contains("firehose_parquet_current_block_number"));
         assert!(buf.contains("firehose_parquet_blocks_processed_total 42\n"));
+        assert!(buf.contains("firehose_parquet_catching_up 0\n"));
+        metrics.catching_up.set(1);
+        metrics
+            .flushes_total
+            .get_or_create(&FlushLabels {
+                trigger: "interval".into(),
+                pace: "caught_up".into(),
+            })
+            .inc();
+        let mut buf = String::new();
+        encode(&mut buf, &registry).unwrap();
+        assert!(buf.contains("firehose_parquet_catching_up 1\n"));
+        assert!(buf.contains(
+            "firehose_parquet_flushes_total{trigger=\"interval\",pace=\"caught_up\"} 1\n"
+        ));
         assert!(!buf.contains("_total_total"));
         for removed in ["blocks_per_second", "bytes_per_second", "backfill_buffer"] {
             assert!(!buf.contains(removed));
