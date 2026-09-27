@@ -1,0 +1,366 @@
+# Verify follow-ups from the maintenance validation pass
+
+A validation pass at main `9372f99` reproduced five gaps in `fireparq verify`
+after the #487–#490 root work, the #521 streaming rewrite and the #591
+ownership stage. This record covers the diagnosis, the selected behavior, the
+tests and the end-to-end checks. Refs #487, #488, #489, #490, #510 and #591;
+part of #463.
+
+`merkle_v2` and the typed row encoding are unreleased (the next release is
+v1.0.0), so the encoding addition is folded into `merkle_v2`.
+
+## 1. Struct columns had no `merkle_v2` encoding
+
+Cosmos `transactions.fee_amount` and `signer_infos` are `List<Struct>` since
+#510. `verify` failed on them with `Arrow type Struct(...) has no merkle_v2
+encoding`, so no Cosmos `transactions` root could be computed.
+
+A struct now encodes as `u32le(field_count)` followed by each field's value, in
+declared field order, each with its own null tag. A null struct is only the
+null tag; its fields are not read, so child values Arrow keeps under a null
+parent cannot affect the root. Field names are not encoded (the column name is).
+The rule nests, so `List<Struct<...>>` and structs holding lists work. The spec,
+with golden values, is in `docs/verifiability-hash-strategy.md`.
+
+Adding a rule for a type that had none cannot change a root an earlier build
+could compute, because such a column made `verify` fail. `merkle_version`
+therefore stays `merkle_v2`; the spec now says so explicitly, and that changing
+an existing rule still requires a new version.
+
+No other Arrow type is missing: the schema contract fixtures produce exactly
+one previously unsupported type (`Struct`, inside `List`) across every table of
+every chain.
+
+Tests:
+
+- Golden vectors for a struct, null children, a null struct over non-null
+  children, a sliced struct, an empty struct, `List<Struct>` (including an
+  offset into shared struct values and a null element, and `LargeList` parity)
+  and `List<Struct<UInt64, List<Utf8>>>`. They were computed with an
+  independent Python reference encoder,
+  [`validation-verify-struct-vectors.py`](validation-verify-struct-vectors.py),
+  written from the spec without Arrow or fireparq code.
+- An unsupported struct field is named in the error.
+- `verify_hashes_every_table_of_every_chain` (`blocks/src/schema_contract_tests.rs`)
+  hashes every flushed table of every chain under every bytes encoding and both
+  `fork_step` settings with both hash strategies, and asserts the Cosmos
+  nested columns are among them.
+- `verify_records_and_rematches_every_table_of_every_chain` writes every table
+  of every chain (binary and hex encodings) with the production writer, runs
+  `verify_parquet` on each table directory, and checks that a second run
+  matches the recorded root.
+
+## 2. `verify` could not run while `build` owned the network
+
+Since #591, `verify` with roots or report output acquired exclusive dataset
+ownership: of the chain root locally, of the whole bucket on S3. It failed at
+once with `cannot acquire Exclusive dataset ownership` while `build` ran, so
+#489's handling of partitions a live build is writing could never run.
+
+### Decision
+
+`verify` now reads table data **without any dataset ownership**, and writes
+only its own artifacts under their own atomic or conditional protocol. A
+shared lock was not an option: a shared directory lock conflicts with `build`'s
+exclusive one, and S3 ownership has no shared mode. Soundness instead comes from
+four rules:
+
+1. **Frontier before listing.** For a roots run, `verify` reads where the
+   writer stands before it lists the files it scans. For a protected dataset
+   that is the authoritative ingestion state (`.fireparq-ingest/state.json`),
+   read as it is: no ownership, no recovery. Writers replace it atomically.
+   Transactions publish every part before they commit, and authority advances
+   only after the commit, so every row at or below the frontier is in the
+   listing. This works with or without a cursor mirror (`build --cursor
+   none`). Legacy datasets keep using `cursor.parquet`; one that cannot be
+   read makes every partition open (#489 only warned and recorded everything).
+2. **Open partitions.** Rows after the frontier are open (uncommitted, or past
+   the last legacy cursor save). While the stream is unfinished, the partition
+   holding the last block at or before the frontier is open too. #489 opened
+   only the newest partition; that missed a real race, in which a running
+   transaction had published a later partition's part but not yet the part of
+   the partition holding the frontier. An unfinished reversible stream opens
+   every partition (a reorg can append rows for earlier blocks), and so does a
+   partition without `block_num` values. #489 used to record everything in
+   the latter case. A completed request counts as finished only while the
+   frontier is still exactly at its stop. `completed_stop` persists when a
+   longer request extends the stream, and the mirrored cursor's `stop_block`
+   carried that stale bound, so #489's `last + 1 >= stop` check would have
+   declared an extending build finished. Even a finished protected stream can
+   grow, because #468 supports extending a completed request, which appends
+   to its last partition. That partition therefore stays open unless it is a
+   `block_range` ending at or before the stop block; #489 recorded it, and the
+   extension then turned its root into a mismatch. A legacy stream that
+   reached its stop keeps #489's rule (nothing but rows past the cursor is
+   open), because the current `build` refuses to append to legacy data.
+3. **Unchanged snapshot.** `verify` records the identity of every file it reads
+   (local fstat of the handle actually read: device, inode, size, mtime; S3:
+   the listed ETag, size and last-modified time, and version when the listing
+   has one, with each GET pinned by `If-Match` to the listed ETag). After the
+   scan it lists the table again. A partition that would be compared or
+   recorded and that gained, lost or replaced a file, or had a listed file
+   that vanished before it was read, fails the run before anything is compared
+   or written. This covers a concurrent `merge`, `rollup` or `truncate`.
+   Without ownership, none of them can be excluded, but none can go unnoticed
+   during the read either. The snapshot is the one validated by that second
+   listing; a change after it is an ordinary later change for the next run.
+   Open partitions are not checked, so an uncommitted part that a restarted
+   `build` rolls back mid-scan does not abort the run. A protocol run that
+   writes a report makes the same second listing and requires every file it
+   read to be unchanged (additions are allowed); a protocol run without output
+   stays a single observational read.
+4. **Artifact writes keep their own guarantees.** Locally, the registry lock
+   file (`merkle_roots.parquet.lock`) plus a temporary file, fsync and rename.
+   On S3, one conditional put on the ETag read before comparing, with the
+   zero-retry mutation client. A put whose response was lost can land later
+   only if the registry is still unchanged, and then it holds exactly the rows
+   the run computed. The bucket-wide owner is not taken, so `verify` does not
+   block or wait for `build`. Artifact destinations still get the protected
+   dataset guards from maintenance (no control path, cursor mirror, recovery
+   metadata or ordinary protected data part), checked before any row is read;
+   the markers and mirror bindings they need are read without ownership.
+
+Protocol-only runs stay read-only as before.
+
+### Limits
+
+- Time partitions follow block timestamps. Where timestamps can decrease
+  (Bitcoin), a block can land in a partition treated as closed. During a run,
+  rule 3 fails the run; afterwards, the next run reports a mismatch for that
+  partition. This limit already applied to #489's open detection.
+- A legacy dataset whose cursor lives outside the chain root (`build
+  --cursor`) is not detected, as before. Legacy datasets cannot be appended to
+  by the current `build`.
+- The cooperating-writer assumptions of #468 still apply: a process that
+  rewrites a file in place without changing its size, inode or mtime (for
+  example `cp -p` over an existing file) is not detected. ctime was left out
+  on purpose: `build`'s hard-link publication and a macOS metadata update
+  change it without changing data, which would turn harmless events into
+  failed runs.
+- On a store whose listings omit ETags, S3 reads cannot be pinned and file
+  identity rests on size and last-modified time.
+- #591 re-checked artifact directories for an alias swap between validation
+  and write. That check needed dataset ownership and is gone; cooperating
+  commands never swap those directories.
+- An S3 report is one unconditional put. On a reused explicit
+  `--publish-report-path`, a delayed put after a lost response could replace
+  a newer report; the default path includes the run id.
+- The last partition of a completed protected build is verified only once
+  the stream moves past it, unless the stop block falls on a `block_range`
+  boundary. That is the price of never recording a root a supported extension
+  would change.
+
+### Tests
+
+- A real `fireparq build` (protected ingestion, local mock Firehose kept open)
+  commits blocks 100–105 into two-block partitions and keeps streaming. While
+  it holds the dataset, a real `fireparq verify` records `block_range=100-102`
+  and `102-104`, reports `104-106` as `open`, and a second run matches both
+  (`verify_runs_beside_a_live_build_and_leaves_its_partitions_open`).
+- With the real ingestion controller: the partition holding the last committed
+  block and a partition with an uncommitted part stay open while `build` owns
+  the dataset; completing the request at a `block_range` boundary records the
+  former. A request completed inside a block range keeps that range open, and
+  committing past the completed stop keeps the stream live. The same protected
+  state read from an in-memory bucket gives the same result. A reversible
+  stream, and a protected dataset without a committed block, leave every
+  partition open; a marker without a state is an error.
+- Frontier-before-listing is pinned: a commit between the frontier read and
+  the listing lands in open partitions, and the warning names the frontier
+  read first.
+- A part replaced, added or removed in a closed partition between the scan and
+  the check fails the run with nothing written, locally and on S3, and so does
+  a merge journal that appears during the scan. A part added to, or removed
+  from, an open partition does not. An S3 object replaced between the listing
+  and the read fails its pinned GET instead of being hashed.
+- Tables without `block_num` stay open while the stream is live, and an
+  unreadable legacy cursor leaves every partition open.
+- A protocol run that writes a report fails when a file it read is removed,
+  passes when files are added, and a protocol run without output stays
+  observational.
+- A bad artifact destination is refused before any file is read.
+- Verifying a partition directory or a single file records the partition's
+  own key, matching the whole-table run.
+- Three mutations were checked against these tests: reading the frontier
+  after the listing, dropping the `If-Match` pin, and restoring #489's
+  "nothing open after the stop" rule each fail exactly the test written for
+  them.
+- Registry and reports are written while another process owns every scope. S3
+  registry and report writes make exactly one attempt and never create an
+  owner record. A lost acknowledgement leaves the accepted object in place.
+- Writing the registry into a protected partition, over `cursor.parquet` or
+  under `.fireparq-ingest` is refused.
+
+### Independent review
+
+An independent review of the branch found no ordering in which a root could be
+recorded for a partition a live `build` is still writing. It raised one
+medium design gap and several smaller points, all addressed in the final
+commit:
+
+- **Completed requests.** A finished protected stream's last partition was
+  recorded, and a supported extension then made it a mismatch. It now stays
+  open unless provably complete (see rule 2).
+- **Protocol reports.** Protocol runs that publish a report lost #591's
+  serialization. They now make the second listing and require unchanged read
+  files.
+- **Unreadable legacy cursor.** It failed open (everything recorded). It now
+  fails closed (everything open).
+- **Vanished files.** A file removed from an open partition mid-scan aborted
+  the run. It is now tolerated there and fails the run anywhere else.
+- **Destination checks.** They ran after a possibly long scan and now run
+  before it.
+- **Observability and cost.** Remote state reads now include the storage
+  error. The S3 discovery listing stops at the first file, and the local
+  exclusion check canonicalizes only files whose names match.
+- **Pre-existing partition keys.** Verifying a partition directory or file
+  recorded roots under `unpartitioned`. Keys now come from the file path
+  itself.
+- **Tests and wording.** The missing tests listed above were added, and the
+  identity and report wording was corrected. ctime was declined for the
+  reason given under Limits.
+
+## 3. A custom `--registry-path` inside the verified path was hashed
+
+A registry such as `<table>/roots.parquet` has a non-reserved name, so the
+next run scanned it as table data and failed (`cannot infer the chain`).
+
+Scans now skip the configured `--registry-path`, `--report-json` and
+`--publish-report-path` files whatever their names. Local paths match after
+canonicalizing their parent directory, so an aliased spelling is skipped too;
+S3 paths match by bucket and key. A report from an earlier run is skipped
+only if it is named `.json` or passed to the same flag again. A registry inside the table directory under a non-reserved name
+also gets a warning, because `merge`, `rollup` and `validate` still read it.
+
+The regression runs `verify` three times with a registry, a report named
+`.parquet` inside a partition and a published report inside the table
+directory, and once more through a directory alias. Without the fix it fails.
+
+## 4. `verify` recovered interrupted merges (and ignored rollups)
+
+Acquiring ownership ran maintenance recovery, which finished or rolled back
+interrupted merges (deleting files) and recovered pending ingestion
+transactions before hashing, with no trace in the report.
+
+**Decision: refuse, do not recover.** A read-only command must not delete data,
+and without ownership it cannot recover safely anyway. When a merge journal
+(`_fireparq_merge.json`) claims the verified files, `verify` fails before
+reading any row, whatever the checks: `cannot verify <path>: it has an
+unfinished merge (<journal>). ... run `fireparq recovery recover <path>` ...
+then re-run verify`. The refusal is also logged as a warning. The check runs
+again on the second listing, so a merge that starts during the scan is refused
+too. A pending ingestion transaction is not an error: its parts are after the
+frontier and stay open.
+
+#624 added rollup journals (`_fireparq_rollup.json`), one per target partition.
+An interrupted in-place rollup leaves outputs next to sources the same way, so
+`verify` refuses those too, with `... it has an unfinished rollup ...` and the
+rollup's recovery: re-run the same `fireparq rollup` command, which finishes or
+rolls back the interrupted run (`recovery recover` does not handle rollups). A
+rollup journal sits in the coarser target partition and claims the finer source
+partitions below it. So `verify` looks for journals below the verified path,
+and also in every Hive partition directory above it, plus the file's own
+directory for a single file. Locally, one discovery walk finds both journal
+kinds (`LocalPolicy::named_any`). On S3, the listing finds those below and a
+HEAD request checks each partition directory above.
+
+The regressions crash a real `merge` after it wrote its output (sources and
+output coexist). Roots and protocol-only runs both refuse with the file tree
+byte-for-byte unchanged, and so does a single-file verify inside the claimed
+partition. After `recovery recover`, the run records roots. A real in-place
+rollup crashed after its commit (every row twice) is refused for the table,
+for protocol-only, for a source partition below the journal and for one of its
+files, all with the tree unchanged; re-running the rollup lets verify record
+the day. On S3, a rollup journal above the verified prefix is found and
+refused. Removing rollup journals from the refusal, or skipping the ancestor
+check, fails these tests.
+
+## 5. Stale documentation
+
+- `docs/releases/unreleased.md` (#489 entry) and the runbook's Open Partitions
+  section promised live-build support that could not run, and described the
+  cursor-only rule. Both now describe the frontier sources and rules above.
+- Both claimed S3 registry writes retry up to five times with an unconditional
+  fallback. The code makes one conditional put with no retry and no fallback,
+  and the docs now say so.
+- The #591 ownership entry, the report contract, the CLI help and the #468
+  verify-ownership, protected-maintenance and runtime records now state that
+  `verify` takes no ownership and never recovers.
+
+## Integration with the shared maintenance engine (#529)
+
+#620 (#529) moved every walker and S3 listing into `maintenance::discovery`.
+This branch builds on it instead of keeping verify-local walkers:
+
+- Local data files come from `collect_local` with the existing
+  `VERIFY_PARQUET` policy. Merge and rollup journals come from the journal
+  walk merge uses (it prunes recovery control trees), through a new
+  `LocalPolicy::named_any` that selects both names in one pass. Merge's own
+  calls keep `LocalPolicy::named`.
+- S3 keys come from `list_objects` and are filtered with `relative_key`. The
+  scanned listing and the snapshot re-list both use it.
+- Locating the chain root needs only one data file. The new shared helper
+  `first_object` stops the S3 listing at the first object the caller selects.
+- The legacy `cursor.parquet` read uses `read_object_bytes`.
+- Artifact exclusion and journal refusal stay caller policy, like reserved
+  filtering and sorting in the #529 design. So do verify's ETag-pinned
+  prefetch and its registry writers, which #529 left separate.
+- Merge, rollup and truncate code is unchanged. Their tests and the discovery
+  equivalence tests pass.
+
+## Validation
+
+On the branch rebased onto main `355292f` (#626, after #615, #616, #618, #619,
+#620, #622, #623, #624 and #627), `cargo fmt --all -- --check` and
+`cargo test --workspace --locked` passed: **1,211 tests, 0 failures, 14
+intentional ignores**, with no compiler warnings. One earlier run hit a race
+in a #623 CLI test that reads the process cwd while `#[serial]` tests change
+it. The last commit marks that test `#[serial]` as well. CI's extra steps also passed
+locally: the `refresh_evm_golden` example test, the `fireparq` build and the
+bash, zsh and fish completions. The focused verify suite has 70 tests (15
+row-encoding tests, 25 concurrency tests and 30 others). The two
+schema-contract tests and the live-build integration test run in the `blocks`
+crate. `first_object` and `named_any` have their own discovery tests. The
+schema-contract hashing test also covers the table changes #622 made to NEAR,
+Tron and Antelope. The merge, rollup, truncate and discovery suites pass
+unchanged.
+
+## End-to-end checks
+
+All runs used local copies only, absolute paths, and a working directory
+outside the repository with every `S3_BUCKET`/`AWS_*` variable cleared. They
+were repeated with the final release binary after the review fixes, and again
+after the #620 and #624 rebases (the crashed merge and rollup came from their
+engines), with the same results. No
+Firehose endpoint or bucket was contacted. The branch release binary was
+compared with the main binary at `9372f99`.
+
+- **Cosmos.** The retained #510 fixture (`cosmos-33121486`) was prepared with
+  `510-qualify.py` (replay SHA-256 `0cc9f598…` as recorded) and replayed with
+  `replay_cosmos`. The main binary fails on `transactions` with `column
+  fee_amount: Arrow type Struct(...) has no merkle_v2 encoding`. The branch
+  records `blocks`, `events` (1,138 rows), `messages` and `transactions`, and a
+  second run matches each.
+- **Every EVM table.** On the retained 30-block mainnet dataset (e2e-478),
+  `verify` with roots and protocol checks recorded all 13 tables (78 partition
+  roots, 36 protocol passes) and a second run matched all of them. The 78 roots
+  are identical to the main binary's, so no existing encoding changed.
+- **Ownership held.** While another process held an exclusive lock on the
+  chain root, the main binary failed with `cannot acquire Exclusive dataset
+  ownership`; the branch recorded six roots and published its report.
+- **Custom registry.** With `--registry-path <table>/roots.parquet`, the main
+  binary's second run failed; the branch passed three runs with the warning.
+- **Interrupted merge.** After a `merge` aborted with
+  `FIREPARQ_TEST_MERGE_CRASH_AT=after-outputs`, the main binary's verify exited
+  0 after silently deleting files and the journal. The branch refused with the
+  file tree unchanged; after `fireparq recovery recover` it recorded six roots.
+- **Concurrent rewrite.** A `gas_changes` part in a closed partition was
+  replaced while `verify` read the table. The run failed with `the data changed
+  while verify was reading it` and no registry was written.
+- **Interrupted rollup.** An in-place `rollup --delete-source` was aborted with
+  `FIREPARQ_TEST_ROLLUP_CRASH_AT=after-commit`. Its first table,
+  `balance_changes`, then held its day output next to all its minute sources.
+  The main binary's verify recorded 7 partition roots, including rows present
+  twice. The branch refused both the table and a source minute partition below
+  the journal, with the files unchanged. After re-running the same rollup, it
+  recorded the single day partition.

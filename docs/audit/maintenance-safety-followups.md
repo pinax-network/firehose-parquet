@@ -141,7 +141,9 @@ Every run used an empty S3/AWS environment and a working directory outside the r
 - A journal holds every source of one target partition. Its 4 MiB control-record limit is
   roughly 50,000 source paths. Larger groups are refused before any output, with advice to
   roll up to a finer target first.
-- `verify`, `truncate` and `scan` do not consult rollup journals, just as they do not
-  consult merge journals. Run the interrupted rollup again before verifying.
+- `truncate` and `scan` do not consult rollup journals, just as they do not consult
+  merge journals. `verify` refuses both since the
+  [verify follow-ups](validation-verify-followups.md), and says to run the
+  interrupted rollup again.
 - An interrupted S3 rollup keeps the bucket owner, like merge. After a remote error,
   release still requires provider-confirmed quiescence.

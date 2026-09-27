@@ -6,8 +6,9 @@
 //! binary family, dictionaries and their value type, timestamps in any unit),
 //! so a reader or writer choosing a different Arrow representation for the
 //! same data does not change the root. The spec, with the per-type table, is in
-//! `docs/verifiability-hash-strategy.md`; any change here must bump
-//! `MERKLE_VERSION`.
+//! `docs/verifiability-hash-strategy.md`. Changing an existing rule must bump
+//! `MERKLE_VERSION`; adding a rule for a type that had none cannot change a
+//! root that was computable before.
 
 use anyhow::{anyhow, Context, Result};
 use arrow::array::{Array, ArrowPrimitiveType, AsArray, OffsetSizeTrait};
@@ -185,6 +186,25 @@ fn canonical_encoder<'a>(array: &'a dyn Array) -> Result<Canonical<'a>> {
         }
         DataType::List(_) => list::<i32>(array)?,
         DataType::LargeList(_) => list::<i64>(array)?,
+        DataType::Struct(fields) => {
+            // Each field is a `value` with its own null tag, in declared order.
+            // Field names are not encoded; the column name is.
+            let children = fields
+                .iter()
+                .zip(array.as_struct().columns())
+                .map(|(field, child)| {
+                    ValueEncoder::new(child.as_ref())
+                        .with_context(|| format!("struct field `{}`", field.name()))
+                })
+                .collect::<Result<Vec<_>>>()?;
+            let count = (children.len() as u32).to_le_bytes();
+            Box::new(move |row, out| {
+                out.extend_from_slice(&count);
+                for child in &children {
+                    child.encode(row, out);
+                }
+            })
+        }
         DataType::FixedSizeList(_, _) => {
             let list = array.as_fixed_size_list();
             let child = ValueEncoder::new(list.values().as_ref())?;
@@ -268,11 +288,13 @@ mod tests {
         Array, ArrayRef, BinaryArray, BinaryViewArray, BooleanArray, Date32Array, DictionaryArray,
         FixedSizeBinaryArray, FixedSizeListArray, Float32Array, Float64Array, Int32Array,
         Int64Array, LargeBinaryArray, LargeListArray, LargeStringArray, ListArray, NullArray,
-        StringArray, StringViewArray, TimestampMicrosecondArray, TimestampMillisecondArray,
-        TimestampNanosecondArray, TimestampSecondArray, UInt32Array, UInt64Array, UInt8Array,
+        StringArray, StringViewArray, StructArray, TimestampMicrosecondArray,
+        TimestampMillisecondArray, TimestampNanosecondArray, TimestampSecondArray, UInt32Array,
+        UInt64Array, UInt8Array,
     };
+    use arrow::buffer::NullBuffer;
     use arrow::datatypes::{
-        DataType, Decimal128Type, Field, Int32Type, Schema, UInt64Type, UInt8Type,
+        DataType, Decimal128Type, Field, Fields, Int32Type, Schema, UInt64Type, UInt8Type,
     };
     use arrow::record_batch::RecordBatch;
     use std::sync::Arc;
@@ -504,6 +526,130 @@ mod tests {
         );
     }
 
+    fn fee_fields() -> Fields {
+        Fields::from(vec![
+            Field::new("denom", DataType::Utf8, false),
+            Field::new("amount", DataType::Utf8, false),
+        ])
+    }
+
+    #[test]
+    fn struct_golden_and_children_carry_their_own_null_tags() {
+        // Cosmos `transactions.fee_amount` item: Struct<denom: Utf8, amount: Utf8>.
+        let fee = StructArray::new(
+            fee_fields(),
+            vec![
+                Arc::new(StringArray::from(vec!["uatom"])),
+                Arc::new(StringArray::from(vec!["5000"])),
+            ],
+            None,
+        );
+        assert_eq!(
+            encoded(&fee, 0),
+            "01170000000200000001050000007561746f6d010400000035303030"
+        );
+
+        // Cosmos `transactions.signer_infos` item with null children, then a
+        // null struct whose children hold values that must not be encoded.
+        let signer = StructArray::new(
+            Fields::from(vec![
+                Field::new("public_key_type_url", DataType::Utf8, true),
+                Field::new("public_key_value", DataType::Binary, true),
+                Field::new("mode_info", DataType::Binary, true),
+                Field::new("sequence", DataType::UInt64, false),
+            ]),
+            vec![
+                Arc::new(StringArray::from(vec![None, Some("ignored")])),
+                Arc::new(BinaryArray::from(vec![
+                    Some(&[0xabu8][..]),
+                    Some(&[1u8][..]),
+                ])),
+                Arc::new(BinaryArray::from(vec![None::<&[u8]>, None])),
+                Arc::new(UInt64Array::from(vec![7, 8])),
+            ],
+            Some(NullBuffer::from(vec![true, false])),
+        );
+        assert_eq!(
+            encoded(&signer, 0),
+            "011300000004000000000102000000616200010100000037"
+        );
+        assert_eq!(encoded(&signer, 1), "00");
+        // A sliced struct reads its own rows.
+        assert_eq!(encoded(&signer.slice(1, 1), 0), "00");
+
+        // A struct without fields encodes only its field count.
+        let empty = StructArray::new_empty_fields(1, None);
+        assert_eq!(encoded(&empty, 0), "010400000000000000");
+    }
+
+    #[test]
+    fn lists_of_structs_golden() {
+        // [{a, 1}, {b, 22}], [], null, [null struct]; the struct values are
+        // shared by offset, so later rows index into the middle of them.
+        let values = StructArray::new(
+            fee_fields(),
+            vec![
+                Arc::new(StringArray::from(vec!["a", "b", "x"])),
+                Arc::new(StringArray::from(vec!["1", "22", "y"])),
+            ],
+            Some(NullBuffer::from(vec![true, true, false])),
+        );
+        let item = Arc::new(Field::new("item", DataType::Struct(fee_fields()), true));
+        let list = ListArray::new(
+            item,
+            arrow::buffer::OffsetBuffer::new(vec![0, 2, 2, 2, 3].into()),
+            Arc::new(values),
+            Some(NullBuffer::from(vec![true, true, false, true])),
+        );
+        assert_eq!(
+            encoded(&list, 0),
+            "012f0000000200000001100000000200000001010000006101010000003101110000000200000001010000006201020000003232"
+        );
+        assert_eq!(encoded(&list, 1), "010400000000000000");
+        assert_eq!(encoded(&list, 2), "00");
+        assert_eq!(encoded(&list, 3), "01050000000100000000");
+        // LargeList holding the same structs encodes identically.
+        let large = arrow::compute::cast(
+            &list,
+            &DataType::LargeList(Arc::new(Field::new(
+                "item",
+                DataType::Struct(fee_fields()),
+                true,
+            ))),
+        )
+        .unwrap();
+        for row in 0..list.len() {
+            assert_eq!(encoded(large.as_ref(), row), encoded(&list, row));
+        }
+
+        // List<Struct<n: UInt64, tags: List<Utf8>>> [{5, [x, null]}].
+        let tags = ListArray::new(
+            Arc::new(Field::new("item", DataType::Utf8, true)),
+            arrow::buffer::OffsetBuffer::new(vec![0, 2].into()),
+            Arc::new(StringArray::from(vec![Some("x"), None])),
+            None,
+        );
+        let nested_fields = Fields::from(vec![
+            Field::new("n", DataType::UInt64, false),
+            Field::new("tags", tags.data_type().clone(), true),
+        ]);
+        let nested = StructArray::new(
+            nested_fields.clone(),
+            vec![Arc::new(UInt64Array::from(vec![5])), Arc::new(tags)],
+            None,
+        );
+        let list = ListArray::new(
+            Arc::new(Field::new("item", DataType::Struct(nested_fields), true)),
+            arrow::buffer::OffsetBuffer::new(vec![0, 1].into()),
+            Arc::new(nested),
+            None,
+        );
+        assert_eq!(
+            encoded(&list, 0),
+            "012300000001000000011a00000002000000010100000035010b0000000200000001010000007800"
+        );
+    }
+
     #[test]
     fn unsupported_types_are_rejected() {
         let decimals = arrow::array::PrimitiveArray::<Decimal128Type>::from(vec![1i128]);
@@ -511,6 +657,24 @@ mod tests {
             .err()
             .expect("decimal is unsupported");
         assert!(err.to_string().contains("Decimal128"), "{err}");
+
+        // An unsupported struct field is named in the error.
+        let nested = StructArray::new(
+            Fields::from(vec![Field::new(
+                "amount",
+                decimals.data_type().clone(),
+                false,
+            )]),
+            vec![Arc::new(decimals.clone())],
+            None,
+        );
+        let err = ValueEncoder::new(&nested)
+            .err()
+            .expect("decimal struct field is unsupported");
+        assert!(
+            format!("{err:#}").contains("struct field `amount`"),
+            "{err:#}"
+        );
 
         let schema = Arc::new(Schema::new(vec![Field::new(
             "amount",

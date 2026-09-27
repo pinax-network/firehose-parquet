@@ -382,9 +382,9 @@ same-bound no-ops and recovery behave exactly as with a mirror. The choice is
 bound when the dataset is created: every later `build` must pass `--cursor none`
 again, and a dataset created with a mirror cannot drop it. `--cursor none`
 cannot be combined with `--cursor-template`. Without a mirror there is no
-`<chain>/cursor.parquet` hint for other tools: `verify` cannot mark partitions
-of an unfinished build as `open`, and `partitions build` cannot infer
-`--start-block` from it (pass it explicitly).
+`<chain>/cursor.parquet` hint for other tools: `partitions build` cannot infer
+`--start-block` from it (pass it explicitly). `verify` reads the authority
+itself, so it marks partitions `build` may still write as `open` either way.
 
 Local mirror saves use private same-directory temporary files, atomic replacement,
 file and directory sync, and up to three attempts with 1 and 2 second backoff.
@@ -1082,7 +1082,7 @@ Migration note: `--chain` and `--table` no longer default to `evm` and `blocks`,
 
 Roots use the versioned `merkle_v2` construction, recorded as `merkle_version` in `merkle_roots.parquet` and in the report. Registries written by v0.7.1 and earlier hold legacy `merkle_v1` roots: `verify` reports them as mismatches until they are rebuilt with `--update-registry`.
 
-A failing run never changes the registry: roots are recorded only when no protocol check failed and no root differs (or `--update-registry` was given). The newest partition of a dataset whose `cursor.parquet` has not reached its stop block is reported as `open` and is not recorded. Registry writes are atomic locally and use conditional puts on S3, so concurrent runs do not lose updates. See [Root registry update semantics](docs/verifiability-artifact-runbook.md#root-registry-update-semantics). See the [runbook](docs/verifiability-artifact-runbook.md#migrating-a-legacy-merkle_v1-registry) for the procedure.
+A failing run never changes the registry: roots are recorded only when no protocol check failed and no root differs (or `--update-registry` was given). `verify` only reads table data and takes no dataset ownership, so it runs while `build` writes the network. Partitions `build` may still write, decided from the dataset's authoritative ingestion state (or a legacy `cursor.parquet`), are reported as `open` and are not recorded. A partition that changes while `verify` reads it, or an unfinished `merge` or `rollup`, fails the run without writing anything; `verify` never recovers data. Registry writes are atomic locally and use one conditional put on S3, so concurrent runs do not lose updates. See [Root registry update semantics](docs/verifiability-artifact-runbook.md#root-registry-update-semantics). See the [runbook](docs/verifiability-artifact-runbook.md#migrating-a-legacy-merkle_v1-registry) for the procedure.
 
 See [Cross-chain verifiability hash strategy](docs/verifiability-hash-strategy.md) for defaults and normalization rules.
 

@@ -3680,6 +3680,8 @@ fn test_resolve_s3_output_root_requires_output() {
 }
 
 #[test]
+// Reads the process cwd, which the `CurrentDirGuard` tests change.
+#[serial]
 fn test_write_destinations_are_absolute_for_logs() {
     let cwd = std::env::current_dir().unwrap();
     assert_eq!(display_destination("s3://b/p"), "s3://b/p");

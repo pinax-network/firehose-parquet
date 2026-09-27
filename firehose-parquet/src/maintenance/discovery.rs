@@ -13,6 +13,7 @@ enum Selection<'a> {
     LowercaseParquet,
     AsciiInsensitiveParquet,
     Name(&'a str),
+    Names(&'a [&'a str]),
 }
 
 /// Policies correspond to actual differences in the existing native walkers.
@@ -51,6 +52,15 @@ impl<'a> LocalPolicy<'a> {
             ..Self::MUTATION_PARQUET
         }
     }
+
+    /// The same walk selecting any of several exact file names, so one pass
+    /// finds every kind of journal (verify refuses merge and rollup journals).
+    pub(crate) fn named_any(names: &'a [&'a str]) -> Self {
+        Self {
+            selection: Selection::Names(names),
+            ..Self::MUTATION_PARQUET
+        }
+    }
 }
 
 /// Append native traversal results without sorting or path normalization.
@@ -78,6 +88,9 @@ pub(crate) fn collect_local(
                     .extension()
                     .is_some_and(|ext| ext.eq_ignore_ascii_case("parquet")),
                 Selection::Name(name) => path.file_name().is_some_and(|file| file == name),
+                Selection::Names(names) => path
+                    .file_name()
+                    .is_some_and(|file| names.iter().any(|name| file == *name)),
             };
             if selected {
                 out.push(path);
@@ -98,6 +111,24 @@ pub(crate) async fn list_objects(
     store.list(prefix.as_ref()).try_collect().await
 }
 
+/// The first listed object that `select` accepts, in backend order, without
+/// listing the rest. For callers that need one sample object (verify locates
+/// its chain root this way); filtering stays with the caller, as above.
+pub(crate) async fn first_object(
+    store: &dyn ObjectStore,
+    prefix: &str,
+    mut select: impl FnMut(&ObjectMeta) -> bool,
+) -> object_store::Result<Option<ObjectMeta>> {
+    let prefix = (!prefix.is_empty()).then(|| ObjectPath::from(prefix));
+    let mut objects = store.list(prefix.as_ref());
+    while let Some(object) = objects.try_next().await? {
+        if select(&object) {
+            return Ok(Some(object));
+        }
+    }
+    Ok(None)
+}
+
 /// `key` relative to the listed `prefix`, without a leading `/`. A key outside the
 /// prefix is returned unchanged.
 pub(crate) fn relative_key<'a>(prefix: &str, key: &'a str) -> &'a str {
@@ -106,9 +137,10 @@ pub(crate) fn relative_key<'a>(prefix: &str, key: &'a str) -> &'a str {
         .unwrap_or(key)
 }
 
-/// Existing unversioned whole-object read used by scan/inspect/validate only.
-/// Do not use this for merge's reserved windows, rollup's pinned ranges, or
-/// verify's ordered prefetch: those callers own materially different contracts.
+/// Existing unversioned whole-object read used by scan/inspect/validate and by
+/// verify's legacy `cursor.parquet` read. Do not use this for merge's reserved
+/// windows, rollup's pinned ranges, or verify's ETag-pinned ordered prefetch:
+/// those callers own materially different contracts.
 pub(crate) async fn read_object_bytes(
     store: &dyn ObjectStore,
     location: &ObjectPath,

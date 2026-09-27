@@ -64,8 +64,9 @@ at a closed local port.
 - `verify` rejects a data path that only the shorthand resolved to S3 when the
   run writes (`VerifyOptions::writes`: the `roots` check, which fills missing
   roots by default, `--report-json`, `--publish-report` or
-  `--publish-report-path`), because such runs also take dataset ownership next
-  to the data. Protocol-only runs keep the shorthand. `merge`, `rollup` and
+  `--publish-report-path`), because such runs write a registry or report next
+  to the data. (They no longer take dataset ownership since the
+  [verify follow-ups](validation-verify-followups.md).) Protocol-only runs keep the shorthand. `merge`, `rollup` and
   `truncate` already refused the fallback (#549), and `recovery` requires an
   existing local path or an explicit URI.
 

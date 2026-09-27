@@ -297,6 +297,62 @@ async fn raw_object_listing_and_complete_reads_match_existing_contract() {
     );
 }
 
+#[test]
+fn named_any_selects_exactly_the_union_of_its_single_name_walks() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    for relative in [
+        "t/day=1/_a.json",
+        "t/day=1/hour=2/_b.json",
+        "t/day=2/_a.json.bak",
+        "t/day=2/part.parquet",
+        "t/.fireparq-ingest/_a.json",
+    ] {
+        write(root, relative);
+    }
+    let walk = |policy: LocalPolicy<'_>| {
+        let mut out = Vec::new();
+        collect_local(root, policy, &mut out).unwrap();
+        out.into_iter().collect::<BTreeSet<_>>()
+    };
+    let mut expected = walk(LocalPolicy::named("_a.json"));
+    expected.extend(walk(LocalPolicy::named("_b.json")));
+    assert_eq!(
+        walk(LocalPolicy::named_any(&["_a.json", "_b.json"])),
+        expected
+    );
+    assert_eq!(expected.len(), 2, "control trees are pruned: {expected:?}");
+    assert!(walk(LocalPolicy::named_any(&[])).is_empty());
+}
+
+#[tokio::test]
+async fn first_object_is_the_first_selected_entry_of_the_same_listing() {
+    use object_store::memory::InMemory;
+    let store = InMemory::new();
+    for key in [
+        "root/a/cursor.parquet",
+        "root/b/part-1.parquet",
+        "root/b/part-2.parquet",
+        "root2/part.parquet",
+    ] {
+        store
+            .put(&ObjectPath::from(key), bytes::Bytes::new().into())
+            .await
+            .unwrap();
+    }
+    let data = |meta: &ObjectMeta| !meta.location.as_ref().ends_with("cursor.parquet");
+    for prefix in ["", "root", "root/b", "root/missing"] {
+        let expected = list_objects(&store, prefix)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|meta| data(meta));
+        let first = first_object(&store, prefix, data).await.unwrap();
+        assert_eq!(first, expected, "prefix {prefix:?}");
+    }
+    assert_eq!(first_object(&store, "root", |_| false).await.unwrap(), None);
+}
+
 // --- Frozen walkers from origin/main 9372f99 -------------------------------
 
 // merge.rs collect_parquet_files_recursive

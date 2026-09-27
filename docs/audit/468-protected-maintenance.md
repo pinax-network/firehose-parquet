@@ -42,6 +42,8 @@ session permit and opens no nested ingestion controller.
 - Merge, artifact-producing verification, partition-index preparation and the
   explicit recovery command recover each protected ingestion transaction and
   reconcile its mirror before listing table data for the requested operation.
+  (Update: `verify` no longer does; it reads without ownership and refuses
+  unfinished merges. See the [verify follow-ups record](validation-verify-followups.md).)
 - Protected merge compacts within the original table/partition directories. It
   leaves the authoritative descriptor and accepted frontier unchanged. Its
   journal records the exact protected stream digest; unbound or foreign-stream
