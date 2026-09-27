@@ -1,6 +1,6 @@
 # Remove `partitions.parquet` and the `partitions` subcommands (#653)
 
-Closes #653 (PR #TBD); part of #463.
+Closes #653 ([PR #662](https://github.com/pinax-network/firehose-parquet/pull/662)); part of #463.
 
 ## Decision
 
@@ -190,7 +190,8 @@ cargo run -p blocks --example dump_schemas
   list a partition index; the drift test passes.
 - `fireparq partitions ...` fails with `unrecognized subcommand 'partitions'`,
   and the root help lists no `partitions` command.
-- CI: TBD.
+- CI on PR #662: `build-and-test` (with the DuckDB and Polars engine checks
+  required) and `Dependency advisories` passed.
 - No real endpoint or bucket was used: tests run against loopback mock Firehose
   servers and in-memory or loopback S3, in temporary directories with a cleared
   environment.
