@@ -33,8 +33,13 @@ jobs:
         with:
           github_token: ${{ github.token }}
 
+      # rust-toolchain.toml pins the toolchain and its components. With no
+      # argument, `rustup toolchain install` installs exactly that one; relying
+      # on auto-install is deprecated in rustup.
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        run: |
+          rustup toolchain install --no-self-update
+          rustc --version
 
       - name: Cache Rust build artifacts
         uses: Swatinem/rust-cache@v2

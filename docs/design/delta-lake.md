@@ -47,7 +47,7 @@ part of #463.
 
 | Component | Version | Notes |
 |---|---|---|
-| `deltalake-core` | 1.0.0 | Newest release. MSRV **1.94.1** (the workspace pins 1.93). |
+| `deltalake-core` | 1.0.0 | Newest release. MSRV **1.94.1**. The workspace pinned 1.93 and moves to 1.98 with L1. |
 | `buoyant_kernel` | 0.28.1 | delta-rs 1.0.0 depends on this delta-kernel-rs fork. The official `delta_kernel` 0.28.0 has the same Arrow ceiling (`arrow-58`/`arrow-59`, object_store 0.13.2). |
 | Arrow / Parquet inside delta-rs | 59.3.0 | The workspace stays on 60.0.0. Parquet 59.3.0 still lacks the #10979 Thrift list bound ([#11186](https://github.com/apache/arrow-rs/issues/11186) open), so a workspace downgrade is ruled out. |
 | `object_store` inside delta-rs | 0.13.2 | Pulls `quick-xml` 0.39.4, still under RUSTSEC-2026-0194/0195. The fix needs object_store 0.14.2 (`quick-xml` ^0.41), which no delta-rs release uses yet (#632). |
@@ -65,6 +65,12 @@ object_store 0.13.2. Arrow 60 was released 2026-09-15. The 1.0.0 release came
 out six days later on 59. Expect the duplicate Arrow to go away when delta-rs
 adopts Arrow ≥ 60 (an estimate, not a commitment). The upgrade lane (L1 below)
 should check for a newer delta-rs first.
+
+L1 recheck (2026-09-27): `deltalake-core` 1.0.0 is still the newest release on
+crates.io, and it requires Arrow/Parquet `^59`, object_store `^0.13.2` and
+`buoyant_kernel` 0.28.1 (the newest; the official `delta_kernel` is at 0.28.0).
+delta-rs `main` (`d06a585`) still declares Arrow 59 and object_store 0.13.2. So
+L1 pins `deltalake-core =1.0.0`, and two Arrow majors coexist.
 
 ### 1.2 Can fireparq share delta-rs's Arrow?
 
@@ -102,6 +108,28 @@ object_store 0.12/0.13, quick-xml 0.38/0.39, reqwest 0.12/0.13, zstd
 code has to change. Only new modules call delta-rs. The toolchain moves from
 1.93 to ≥ 1.94.1 (`rust-toolchain.toml` and `Dockerfile`), and the #632
 object_store 0.14 upgrade stays independent.
+
+**L1 measurement (committed dependency, 2026-09-27).** macOS arm64 (M1 Max),
+a cold `cargo build --release --locked --bin fireparq` into an empty target
+directory. Other builds shared the host (load average 20–170), so wall times
+are noisy. CPU time (user + sys) is the steadier figure.
+
+| | `main` (`579d932`), Rust 1.93.1 | `main`, Rust 1.98.1 | L1 (`deltalake-core` 1.0.0), Rust 1.98.1 |
+|---|---|---|---|
+| Release `fireparq` binary | 34.4 MB | 36.6 MB | 37.6 MB (+1.0 MB) |
+| Cold release build, wall | 89 s | 101 s, 153 s | 203 s, 215 s |
+| Cold release build, CPU | — | 756 s | 1,393 s (+84%) |
+| Unique normal dependencies (`cargo tree -p blocks`) | 289 | 289 | 366 (+77) |
+| `cargo deny --locked check advisories` (0.20.2) | ok | ok | ok |
+
+The binary grows by only 1.0 MB because nothing in `fireparq` calls
+`firehose_parquet::delta` yet, so the linker drops almost all of delta-rs. The
+trial's 71.5 MB (a probe that loads a snapshot, reads `txn` and builds a
+commit) remains the estimate for when L3 wires the commit layer into `build`.
+The compile cost arrives now: every build compiles delta-rs, the second
+Arrow/Parquet and object_store 0.13. The toolchain alone adds 2.2 MB
+(1.93.1 → 1.98.1). The Docker image was not built locally, because no Docker
+daemon was available.
 
 ### 1.3 Footprint
 
@@ -302,6 +330,12 @@ is the time to open the table and read `txn`.
     same clock-based S3 prefix, and their data mixed until the prefix gained a
     process-wide counter. (Spike-only, but a reminder to derive names from
     identities, never from clocks.)
+17. `deltalake-core` 1.0.0 pins `brotli-decompressor = "=6.0.0"` and
+    `alloc-stdlib = "=0.2.2"`. Adding it (L1) moves the workspace's Parquet 60
+    brotli from `brotli-decompressor` 6.0.1 back to 6.0.0. The 6.0.1 fixes
+    (`fast_mut!` UB and FFI allocator failures) are behind the `unsafe` and
+    `ffi-api` features, which nothing in the graph enables, and no RustSec
+    advisory names 6.0.0.
 
 ### 1.11 Running the spike
 

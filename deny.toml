@@ -21,12 +21,14 @@ unmaintained = "workspace"
 unsound = "workspace"
 yanked = "warn"
 ignore = [
-    # quick-xml 0.38 comes only from object_store 0.12 (`^0.38`), which parses S3
-    # XML responses from the configured S3 endpoint. Both issues need a malicious
-    # or compromised S3 server. The fixed quick-xml 0.41 needs object_store 0.14,
-    # a breaking upgrade tracked separately from this gate.
-    { id = "RUSTSEC-2026-0194", reason = "quick-xml via object_store 0.12 S3 responses; fix needs object_store 0.14" },
-    { id = "RUSTSEC-2026-0195", reason = "quick-xml via object_store 0.12 S3 responses; fix needs object_store 0.14" },
+    # quick-xml comes only from object_store, which parses S3 XML responses from
+    # the configured S3 endpoint: 0.38 from fireparq's object_store 0.12 (`^0.38`)
+    # and 0.39 from object_store 0.13 inside delta-rs (`deltalake-core` 1.0.0 and
+    # its kernel; `^0.39`). Both issues need a malicious or compromised S3 server.
+    # The fixed quick-xml 0.41 needs object_store 0.14.2: a breaking upgrade of
+    # fireparq's own client (#632), and a delta-rs release on object_store 0.14.
+    { id = "RUSTSEC-2026-0194", reason = "quick-xml via object_store 0.12 (fireparq) and 0.13 (delta-rs) S3 responses; fix needs object_store 0.14.2" },
+    { id = "RUSTSEC-2026-0195", reason = "quick-xml via object_store 0.12 (fireparq) and 0.13 (delta-rs) S3 responses; fix needs object_store 0.14.2" },
     # Unmaintained direct dependencies with no maintained drop-in release yet.
     { id = "RUSTSEC-2025-0012", reason = "backoff: gRPC reconnect backoff; replacement tracked separately" },
     { id = "RUSTSEC-2025-0141", reason = "bincode 1.3: blocks crate; replacement tracked separately" },
