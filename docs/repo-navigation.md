@@ -7,6 +7,7 @@ Related docs:
 - `docs/releases/`: release notes; `docs/releases/unreleased.md` collects changes merged since the last release.
 - `docs/schemas/`: per-chain table and column reference, generated from the code (see "Change a table schema" below).
 - `docs/audit/README.md`: issue-by-issue implementation and validation records of the September 2026 audit (#463).
+- `docs/design/delta-lake.md`: the Delta Lake output design for the v1.0.0 launch (#643): dependency spike and pinned versions, protocol and table properties, the commit mapping onto the #468 transaction, crash matrix and VACUUM rule, ownership (#636), type mapping, removals, resume cost (#655), the maintenance CronJob, reader examples and the PR-sized implementation lanes.
 - `docs/verifiability-hash-strategy.md`: `merkle_v2` row encoding, normalization rules and golden values.
 - `docs/verifiability-artifact-runbook.md`: publishing, retaining and migrating verify artifacts (`_fireparq/merkle_roots.parquet`, `_fireparq/verify_runs/<run_id>/report.json`), including moving pre-v1.0.0 root artifacts into `_fireparq/`.
 - `docs/verify-report-contract.md`: the verify report JSON contract.
@@ -79,6 +80,7 @@ Related docs:
   - `src/mapping_bench.rs`: ignored whole-block mapping benchmarks.
   - `examples/`: replay, benchmark and golden-refresh tools (`replay_*`, `bench_*` including `bench_ingestion_concurrency`, `measure_flush_sizing`, `refresh_evm_golden`, `dump_schemas`).
   - `tests/`: real-binary integration tests against a mock Firehose (`ingestion_transactions.rs`, `dataset_ownership.rs`, `endpoint_info_startup.rs`, `non_final_stream.rs`, `metrics_readiness.rs`, `shutdown_signals.rs`), the DuckDB and Polars engine test (`engine_compat.rs`, with `tests/engines/`), the maintenance crash-hook gating test (`maintenance_crash_hooks.rs`) and the offline EVM golden regression (`evm_golden.rs`, `tests/fixtures/`).
+- `spikes/delta-lake/`: the #643 Delta Lake spike, a standalone crate outside the workspace (its own `[workspace]`, `Cargo.lock` and `rust-toolchain.toml`, because `deltalake-core` 1.0.0 needs Rust 1.94.1 and Arrow 59). It commits pre-written Parquet 60 parts to Delta tables (`src/{mapping,part,delta,storage}.rs`, `tests/spike.rs`), and `run.sh` adds loopback S3 (`py/loopback_s3.py`), `deltalake` maintenance beside the writer (`py/concurrent_maintenance.py`) and DuckDB/Polars reads (`py/read_check.py`). Nothing in `fireparq` depends on it; see `docs/design/delta-lake.md`.
 - `proto/`: source `.proto` files and Buf config, including `proto/core/*` dependencies.
 - `scripts/`: `generate_networks.rs` (the `generate-networks` bin that writes `firehose-parquet/src/networks_generated.rs`) and `check_network_endpoints.sh` (live check of every built-in endpoint).
 - `.env.example`: every environment variable the CLI reads, kept in sync by a test.
@@ -167,7 +169,8 @@ Related docs:
 - Run ingestion (preferred form): `cargo run --bin fireparq -- build --network mainnet --start-block 100`
 - Install binary locally: `cargo install --path blocks`
 - Generate shell completions: `cargo run --bin fireparq -- completions zsh`
-- CI entrypoint: `.github/workflows/ci.yml` (`build-and-test` plus the `advisories` job, which calls `advisories.yml`)
+- CI entrypoint: `.github/workflows/ci.yml` (`build-and-test`, the `delta-spike` job and the `advisories` job, which calls `advisories.yml`)
+- Delta Lake spike (#643): the `delta-spike` CI job runs `spikes/delta-lake/run.sh` with DuckDB 1.1.1 and 1.5.5 and the hash-pinned `spikes/delta-lake/requirements.txt`. Locally, `cd spikes/delta-lake && cargo test --locked` (local disk and in-memory store; the directory's toolchain file applies), or `run.sh` with `DELTA_SPIKE_PYTHON`, `DELTA_SPIKE_DUCKDB` and `DELTA_SPIKE_DUCKDB_SIGNED` for everything, as in `docs/design/delta-lake.md` §1.11
 - Dependency advisory gate: `cargo deny --locked check advisories` in `.github/workflows/advisories.yml` (on every push and pull request through `ci.yml`, weekly on its own, and on manual dispatch), configured by `deny.toml` (RustSec advisories only; ignored advisories need a recorded reason)
 - Crash-test hooks: `FIREPARQ_TEST_MERGE_CRASH_AT` and `FIREPARQ_DEBUG_FAULT` abort or fail the real binary at a named step for recovery tests. Only debug builds (as built by `cargo test`) read them; release binaries ignore them (`blocks/tests/maintenance_crash_hooks.rs`).
 - Docker publish workflow: `.github/workflows/docker-publish.yml` (supports a build-only manual run)
@@ -185,6 +188,7 @@ Related docs:
 
 - Source-of-truth directories:
   - `blocks/`, `firehose-parquet/`, `firehose-protos/`, `proto/`, `scripts/`, `.github/workflows/`
+  - `spikes/delta-lake/` (design spike, not part of the workspace)
 - Generated but committed (regenerate instead of editing):
   - `firehose-parquet/src/networks_generated.rs` (`generate-networks`)
   - `docs/schemas/*.md` (`cargo run -p blocks --example dump_schemas`)
