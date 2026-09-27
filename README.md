@@ -415,10 +415,15 @@ An S3 cursor requires complete explicit AWS credentials even when data output
 is local. This is validated after `--cursor-template` expansion as well as for
 `--cursor`; neither form silently falls back to instance metadata credentials.
 
-Authenticated S3 `build` spools one Parquet part to private temporary disk, then
-streams one conditional PUT and verifies the entire object through a second
-private spool before committing. Budget temporary disk for two encoded parts,
-in addition to mapper memory. Native ingestion requires an HTTPS endpoint and
+Authenticated S3 `build` spools each Parquet part to private temporary disk in
+`$TMPDIR` (else `/tmp`), then streams one conditional PUT and verifies the entire
+object through a second private spool before committing. Budget roughly two
+encoded parts of free space for every part in flight, in addition to mapper
+memory: with the default flush concurrency that is up to `--flush-inflight-bytes`
+(256 MiB) of upload spools plus one readback spool per concurrent publication,
+about 400 MiB at the 32 MiB file target; `--flush-inflight-bytes 1` brings it
+back to two parts. Kubernetes pods with `readOnlyRootFilesystem` need a writable
+volume there, for example an `emptyDir` mounted at `/tmp`. Native ingestion requires an HTTPS endpoint and
 limits a part to 5,000,000,000 encoded bytes and its serialized footer to 32 MiB;
 resume verification applies the same limits. Connections have a 10-second timeout;
 upload and complete readback each have a 15-minute deadline. A write whose
@@ -469,14 +474,21 @@ a shutdown during local retry backoff still reports the durability failure.
 
 Mutating commands hold common ownership over output, source and external cursor
 or artifact locations. Local ownership uses macOS/Linux directory locks; nested
-symlinks inside mutation trees are refused. S3 ownership covers the whole bucket
-and requires conditional-write support plus access to reserved control keys.
-Unresolved remote errors retain ownership without an expiry or automatic takeover.
-A failed `build` releases S3 ownership on exit when every request it sent had a
-definite outcome, including when its failed transaction is still pending: the
-next `build` recovers that transaction before streaming. When it keeps ownership,
-its error says why and prints the exact `recovery status` and `recovery release`
-commands. `fireparq recovery status <path>` reads a summary. Explicit remote release requires
+symlinks inside mutation trees are refused. S3 ownership covers the whole bucket:
+there is one owner per bucket, and a second writing command on any prefix of it
+fails with `bucket ownership is held`, so run `merge`, `rollup` or `truncate`
+only when no `build` is writing to that bucket. It requires conditional-write
+support plus access to reserved control keys. Unresolved remote errors retain
+ownership without an expiry or automatic takeover, and the next run fails until
+it is released. A failed `build` releases S3 ownership on exit when every request
+it sent had a definite outcome, including when its failed transaction is still
+pending: the next `build` recovers that transaction before streaming. It keeps
+ownership after an uncertain request (timeout, lost acknowledgement, connection
+reset, unverifiable readback, 5xx, 409/412), a second shutdown signal or a
+panic, and its error then says why and prints the exact `recovery status` and
+`recovery release` commands. `merge`, `rollup`, `truncate`, `partitions build`
+and `recovery` keep S3 ownership after any error and log the same guidance.
+`fireparq recovery status <path>` reads a summary. Explicit remote release requires
 the exact owner/generation and evidence that both the writer and all prior remote
 requests are quiescent; stopping the process alone is insufficient. See the
 [ownership and recovery runbook](docs/audit/468-stage1-ownership.md).

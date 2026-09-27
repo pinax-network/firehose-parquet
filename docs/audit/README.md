@@ -122,6 +122,9 @@ Docker runs before a release.
 |---|---|
 | [#625](https://github.com/pinax-network/firehose-parquet/issues/625) | Open. Every known StreamingFast NEAR producer leaves block state changes empty, so NEAR `state_changes` stays empty. |
 | [#630](https://github.com/pinax-network/firehose-parquet/issues/630) | Open. #516 stage B: decouple gRPC receive and mapping from the writer ([design](516-concurrency-design.md#stage-b-follow-up)). |
+| [#635](https://github.com/pinax-network/firehose-parquet/issues/635) | Open. Protected datasets are bound to their output location; a copied or moved dataset cannot be maintained or resumed, and there is no relocation procedure. |
+| [#636](https://github.com/pinax-network/firehose-parquet/issues/636) | Open. S3 ownership is bucket-wide, so maintenance cannot run beside a live `build` on the same bucket. |
+| [#637](https://github.com/pinax-network/firehose-parquet/issues/637) | Open. A malformed `./.env` breaks `--help` and `--version`, because it is loaded before argument parsing. |
 | [#631](https://github.com/pinax-network/firehose-parquet/issues/631) | Open. NEAR, Tron and Cosmos output was compared with RPC and public sources, not with a Firehose stream of those chains ([#506](506-near-public-qualification.md), [#509](509-tron-rpc-qualification.md), [#510](510-cosmos-values.md)). |
 | [#632](https://github.com/pinax-network/firehose-parquet/issues/632) | Open. object_store 0.14 is needed to clear RUSTSEC-2026-0194/0195 (quick-xml 0.38); both advisories are ignored with a reason in `deny.toml`. |
 | [#633](https://github.com/pinax-network/firehose-parquet/issues/633) | Open. Replace the unmaintained `backoff` and `bincode` crates (RUSTSEC-2025-0012, RUSTSEC-2025-0141, ignored with a reason in `deny.toml`). |
