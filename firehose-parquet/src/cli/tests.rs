@@ -4445,7 +4445,7 @@ fn test_scan_s3_display_key_keeps_exact_object_key() {
     );
 }
 
-/// Read-only commands on a dataset written with `--without-chain-dir` to a
+/// Read-only commands on a dataset written with `--output s3://<bucket>` to a
 /// bucket root: the index is an exact object in `_fireparq/`, a table is a
 /// prefix directly below the bucket, and a scan of the whole bucket reads only
 /// table data.
@@ -4582,72 +4582,240 @@ fn test_local_directory_walks_skip_dataset_artifacts() {
     );
 }
 
-/// `partitions build --without-chain-dir` puts the index, and reads the
-/// sibling cursor, at the output root itself: the same root that
-/// `build --without-chain-dir` writes. Without the flag the chain directory
-/// stays appended exactly as before.
+/// Without a placeholder, `--output` is the dataset root byte for byte: no
+/// `<chain_name>` directory is appended, locally or on S3. `partitions build`
+/// puts its index, and reads the sibling cursor mirror, below the same root.
 #[test]
-fn test_partitions_output_root_with_and_without_chain_dir() {
-    for (output, chain_root, root) in [
-        ("./output", "./output/mainnet", "./output"),
-        ("./output/", "./output/mainnet", "./output/"),
-        ("/data", "/data/mainnet", "/data"),
-        (
-            "s3://ethereum-mainnet",
-            "s3://ethereum-mainnet/mainnet",
-            "s3://ethereum-mainnet",
-        ),
-        (
-            "s3://ethereum-mainnet/",
-            "s3://ethereum-mainnet/mainnet",
-            "s3://ethereum-mainnet",
-        ),
-        (
-            "s3://bucket/v1/",
-            "s3://bucket/v1/mainnet",
-            "s3://bucket/v1",
-        ),
+fn test_output_root_default_is_byte_identical_to_output() {
+    for output in [
+        ".",
+        "output",
+        "./output",
+        "./output/",
+        "../output",
+        "/data/output",
+        "/data/output/",
+        "./out put/mainnet-v1",
+        "s3://ethereum-mainnet",
+        "s3://bucket/v1",
+        "s3://bucket/v1/raw",
     ] {
-        assert_eq!(build_partitions_output_root(output, "mainnet"), chain_root);
+        let root = resolve_output_root(output, "mainnet").unwrap();
+        assert_eq!(root, output, "{output}");
         assert_eq!(
-            resolve_partitions_output_root(output, "mainnet", false),
-            chain_root
+            partitions_index_path_in(&root),
+            crate::artifacts::DatasetArtifact::PartitionsIndex.path_in(output)
         );
-        assert_eq!(
-            partitions_index_path_in(chain_root),
-            build_partitions_index_path(output, "mainnet")
-        );
-        assert_eq!(
-            resolve_partitions_output_root(output, "mainnet", true),
-            root
-        );
-        assert_eq!(output_root_without_chain_dir(output), root);
+        // The chain name is not needed by the template, so any nonempty
+        // EndpointInfo name leaves the root unchanged.
+        assert_eq!(resolve_output_root(output, "a/b c").unwrap(), output);
     }
-    // The index lives in `_fireparq/` below either root.
     assert_eq!(
-        partitions_index_path_in("s3://ethereum-mainnet"),
-        "s3://ethereum-mainnet/_fireparq/partitions.parquet"
-    );
-    assert_eq!(
-        partitions_index_path_in("s3://ethereum-mainnet/"),
-        "s3://ethereum-mainnet/_fireparq/partitions.parquet"
-    );
-    assert_eq!(
-        partitions_index_path_in("./output/"),
+        partitions_index_path_in(&resolve_output_root("./output", "mainnet").unwrap()),
         "./output/_fireparq/partitions.parquet"
     );
     assert_eq!(
-        build_partitions_index_path("s3://bucket", "mainnet"),
-        "s3://bucket/mainnet/_fireparq/partitions.parquet"
+        crate::artifacts::DatasetArtifact::CursorMirror
+            .path_in(&resolve_output_root("s3://bucket", "mainnet").unwrap()),
+        "s3://bucket/_fireparq/cursor.parquet"
+    );
+}
+
+/// `s3://bucket/` and `s3://bucket` are the same bucket root, and a trailing
+/// `/` never changes an S3 prefix root. Local roots keep their spelling.
+#[test]
+fn test_output_root_normalizes_s3_trailing_slashes() {
+    for (output, root) in [
+        ("s3://ethereum-mainnet/", "s3://ethereum-mainnet"),
+        ("s3://ethereum-mainnet//", "s3://ethereum-mainnet"),
+        ("s3://bucket/v1/", "s3://bucket/v1"),
+        ("s3://bucket/{chain}/", "s3://bucket/mainnet"),
+        ("./output/", "./output/"),
+    ] {
+        assert_eq!(resolve_output_root(output, "mainnet").unwrap(), root);
+    }
+    assert_eq!(
+        partitions_index_path_in(
+            &resolve_output_root("s3://ethereum-mainnet/", "mainnet").unwrap()
+        ),
+        "s3://ethereum-mainnet/_fireparq/partitions.parquet"
+    );
+}
+
+/// `{chain}` expands to the EndpointInfo chain name in any position of a local
+/// path or an S3 key prefix, as many times as it appears.
+#[test]
+fn test_output_root_expands_the_chain_placeholder() {
+    for (output, root) in [
+        // Local: the whole path, prefix, middle, suffix and inside a segment.
+        ("{chain}", "mainnet"),
+        ("{chain}/raw", "mainnet/raw"),
+        ("./output/{chain}", "./output/mainnet"),
+        ("/data/{chain}/raw", "/data/mainnet/raw"),
+        ("./output/{chain}-final", "./output/mainnet-final"),
+        ("./{chain}/{chain}", "./mainnet/mainnet"),
+        // S3: first key segment, middle, suffix and inside a segment.
+        ("s3://datasets/{chain}", "s3://datasets/mainnet"),
+        ("s3://datasets/{chain}/v1", "s3://datasets/mainnet/v1"),
+        (
+            "s3://datasets/v1/{chain}/raw",
+            "s3://datasets/v1/mainnet/raw",
+        ),
+        ("s3://datasets/eth-{chain}", "s3://datasets/eth-mainnet"),
+    ] {
+        assert_eq!(
+            resolve_output_root(output, "mainnet").unwrap(),
+            root,
+            "{output}"
+        );
+    }
+    assert_eq!(
+        resolve_output_root("s3://datasets/{chain}", "solana-mainnet-beta").unwrap(),
+        "s3://datasets/solana-mainnet-beta"
     );
     assert_eq!(
-        build_partitions_cursor_path("./output", "mainnet"),
-        "./output/mainnet/_fireparq/cursor.parquet"
+        partitions_index_path_in(&resolve_output_root("s3://datasets/{chain}", "mainnet").unwrap()),
+        "s3://datasets/mainnet/_fireparq/partitions.parquet"
+    );
+}
+
+/// `{{` and `}}` are literal braces, as in `--cursor-template`; an escaped
+/// `{{chain}}` is not a placeholder.
+#[test]
+fn test_output_root_escapes_braces() {
+    for (output, root) in [
+        ("./output/{{chain}}", "./output/{chain}"),
+        ("./output/{{{chain}}}", "./output/{mainnet}"),
+        ("./a}}b{{c", "./a}b{c"),
+        (
+            "s3://bucket/{{chain}}/{chain}",
+            "s3://bucket/{chain}/mainnet",
+        ),
+    ] {
+        assert_eq!(
+            resolve_output_root(output, "mainnet").unwrap(),
+            root,
+            "{output}"
+        );
+        validate_output_template(output).unwrap();
+    }
+    // The same parser serves --cursor-template.
+    let context = CursorTemplateContext {
+        chain: Some("mainnet".to_string()),
+        partition_type: None,
+        partition_value: None,
+        partition_from: None,
+        partition_to: None,
+    };
+    assert_eq!(
+        resolve_cursor_template("cursor/{{x}}/{chain}.parquet", &context).unwrap(),
+        "cursor/{x}/mainnet.parquet"
+    );
+    for (template, expected) in [
+        (
+            "cursor/{chain.parquet",
+            "unterminated --cursor-template variable",
+        ),
+        ("cursor/chain}.parquet", "unmatched } in --cursor-template"),
+        (
+            "cursor/{nope}.parquet",
+            "unknown --cursor-template variable {nope}",
+        ),
+    ] {
+        let error = resolve_cursor_template(template, &context)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains(expected), "{template}: {error}");
+    }
+}
+
+/// Unknown variables, unterminated or unmatched braces, a placeholder or brace
+/// in the S3 bucket name, a missing bucket and a chain name that is not one
+/// safe path segment are errors. Template errors surface through
+/// `resolve_s3_output_root`, before any endpoint request.
+#[test]
+fn test_output_root_template_errors() {
+    for (output, expected) in [
+        ("./output/{network}", "unknown --output variable {network}"),
+        ("./output/{Chain}", "unknown --output variable {Chain}"),
+        ("./output/{}", "unknown --output variable {}"),
+        (
+            "s3://bucket/{chain_name}",
+            "unknown --output variable {chain_name}",
+        ),
+        ("./output/{chain", "unterminated --output variable"),
+        ("s3://bucket/v1/{", "unterminated --output variable"),
+        ("./output/chain}", "unmatched } in --output"),
+        ("s3://bucket/}", "unmatched } in --output"),
+        ("s3://{chain}", "S3 bucket name"),
+        ("s3://{chain}/raw", "S3 bucket name"),
+        ("s3://data-{chain}/raw", "S3 bucket name"),
+        ("s3://{{data}}/raw", "S3 bucket name"),
+    ] {
+        let resolved = resolve_output_root(output, "mainnet")
+            .unwrap_err()
+            .to_string();
+        assert!(resolved.contains(expected), "{output}: {resolved}");
+        let early = resolve_s3_output_root(Some(output), None)
+            .unwrap_err()
+            .to_string();
+        assert_eq!(early, resolved, "{output}");
+        // An S3_BUCKET value never masks the template error.
+        let with_bucket = resolve_s3_output_root(Some(output), Some("bucket"))
+            .unwrap_err()
+            .to_string();
+        assert_eq!(with_bucket, resolved, "{output}");
+    }
+    let message = resolve_output_root("s3://{chain}/raw", "mainnet")
+        .unwrap_err()
+        .to_string();
+    assert!(message.contains("s3://<bucket>/{chain}"), "{message}");
+
+    for output in ["s3://", "s3:///raw", "s3:///{chain}"] {
+        let error = resolve_output_root(output, "mainnet")
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("missing bucket name"), "{output}: {error}");
+    }
+
+    // EndpointInfo must name the chain, whether or not the template uses it.
+    for output in ["./output", "./output/{chain}", "s3://bucket"] {
+        for chain_name in ["", "  "] {
+            let error = resolve_output_root(output, chain_name)
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains("nonempty chain_name"), "{output}: {error}");
+        }
+    }
+    // {chain} only expands to one safe path segment.
+    for chain_name in ["a/b", "a\\b", ".", "..", "s3:", "main net", "main\nnet"] {
+        let error = resolve_output_root("./output/{chain}", chain_name)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("cannot expand {chain}"),
+            "{chain_name:?}: {error}"
+        );
+    }
+}
+
+/// `resolve_s3_output_root` keeps the template for `resolve_output_root`: the
+/// bucket is literal, so the S3_BUCKET check still applies before the endpoint
+/// is contacted.
+#[test]
+fn test_resolve_s3_output_root_keeps_a_valid_output_template() {
+    assert_eq!(
+        resolve_s3_output_root(Some("s3://data/{chain}"), Some("data")).unwrap(),
+        "s3://data/{chain}"
     );
     assert_eq!(
-        build_partitions_cursor_path("s3://bucket/", "mainnet"),
-        "s3://bucket/mainnet/_fireparq/cursor.parquet"
+        resolve_s3_output_root(Some("./output/{chain}"), None).unwrap(),
+        "./output/{chain}"
     );
+    let error = resolve_s3_output_root(Some("s3://data/{chain}"), Some("other"))
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("disagrees with --s3-bucket"), "{error}");
 }
 
 #[test]

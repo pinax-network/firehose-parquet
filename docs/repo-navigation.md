@@ -25,7 +25,7 @@ Related docs:
   - CLI (`src/cli.rs` and `src/cli/`):
     - `cli.rs`: Clap definitions (`Cli`, `Commands`, `GlobalArgs`, `AwsArgs`, `CommonArgs`, `BuildArgs`, `PartitionsCommands`) and the stable public re-exports.
     - `cli/configuration.rs`: CLI-to-`Config` conversion, value parsers, working-directory `.env` / `--env-file` loading, logging and completions.
-    - `cli/paths.rs`: local/S3 input and output policy (explicit `s3://` for writes, `S3_BUCKET` shorthand for reads), credential preflight and cursor templates.
+    - `cli/paths.rs`: local/S3 input and output policy (explicit `s3://` for writes, `S3_BUCKET` shorthand for reads), credential preflight, the `--output` dataset-root resolver (`resolve_output_root`, `{chain}` expansion) and the template parser it shares with `--cursor-template`.
     - `cli/inspect.rs`, `cli/validate.rs`: read-only `scan` / `inspect` and canonical block `validate`.
     - `cli/partitions/{mod,io,queries}.rs`: partition models and vocabulary, strict v2 index IO and publication, and resolution/listing/sharding/completeness.
     - `cli/{tests,validate_tests}.rs`: CLI and validation regressions.
@@ -92,8 +92,8 @@ Related docs:
 ## Data-Flow Mental Model
 
 1. `blocks/src/bin/main.rs` parses the CLI (`firehose-parquet/src/cli.rs`), loads `.env` from the working directory or `--env-file`, and dispatches. `fireparq build` (`Commands::Build(BuildArgs)`) calls `ingestion::run_ingestion` in `blocks/src/bin/ingestion/mod.rs`.
-2. `ingestion/setup.rs` resolves the endpoint and provider-scoped credentials (`auth.rs`), requires EndpointInfo (`grpc.rs`), selects the `ChainKind` (`blocks/src/chain.rs`: from `--block-type`, the endpoint chain names, or the first payload's `type_url` in a dry run) and resolves the output root (`resolve_output`: `<output>/<chain_name>`, or `<output>` itself with `--without-chain-dir`) and cursor mirror.
-3. Mutating commands acquire dataset ownership first (`dataset_lock/`, `dataset_lock_s3.rs`). `ingest/session.rs` then recovers any pending transaction and opens the accepted frontier from the authority under `<chain_root>/.fireparq-ingest/` before any Blocks request.
+2. `ingestion/setup.rs` resolves the endpoint and provider-scoped credentials (`auth.rs`), requires EndpointInfo (`grpc.rs`), selects the `ChainKind` (`blocks/src/chain.rs`: from `--block-type`, the endpoint chain names, or the first payload's `type_url` in a dry run) and resolves the dataset root (`resolve_output`, which calls `firehose_parquet::cli::resolve_output_root`: `--output` as given, with an opt-in `{chain}` placeholder expanded to the EndpointInfo chain name; `partitions build` uses the same resolver) and cursor mirror.
+3. Mutating commands acquire dataset ownership first (`dataset_lock/`, `dataset_lock_s3.rs`). `ingest/session.rs` then recovers any pending transaction and opens the accepted frontier from the authority under `<dataset root>/.fireparq-ingest/` before any Blocks request.
 4. Stream messages come from `grpc.rs`. `ingestion/runtime.rs` filters, orders and routes them; the chain mapper (`blocks/src/<chain>/mapper.rs`) decodes protobuf blocks and appends Arrow columns using `schema.rs`.
 5. When a flush trigger fires (`flush.rs`, partition boundaries, completion), `ingest/controller.rs` journals the all-table transaction, `writer/protected.rs` publishes the deterministic parts (local via `writer/local.rs`, S3 via `s3/upload.rs`) and verifies them, and the controller advances authority, then the optional `_fireparq/cursor.parquet` mirror.
 6. `metrics.rs` exposes counters, readiness and health.

@@ -44,7 +44,7 @@ Current behavior:
 - scans the requested `[start_block, stop_block)` range from Firehose
 - computes UTC interval starts for `date`, `hour`, `minute`, and `second`
 - emits one row per discovered partition with contiguous `[start_block, stop_block)` bounds
-- writes `/<chain>/_fireparq/partitions.parquet` under the supplied local or S3 output root
+- writes `<root>/_fireparq/partitions.parquet`, where `<root>` is the supplied local or S3 `--output` as given, with an opt-in `{chain}` placeholder expanded to the endpoint's chain name (#654)
 - includes file metadata defined in `docs/partitions-parquet-contract.md`
 - supports `--resume` by reusing trailing partition rows from the existing canonical artifact and continuing from the stored frontier
 - refuses to modify an existing canonical artifact in bounded mode unless `--resume` or `--overwrite` is passed (see `docs/partitions-build-defaults.md`)

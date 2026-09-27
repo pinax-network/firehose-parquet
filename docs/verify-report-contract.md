@@ -85,14 +85,14 @@ Suggested report artifact path is deterministic and included as:
 
 - `suggested_run_report_path`
 
-Pattern, where `<chain_root>` is the network directory that holds the table directories (`<output>/<chain_name>` for `fireparq build` output, or `<output>` itself for `fireparq build --without-chain-dir`):
+Pattern, where `<chain_root>` is the dataset root that holds the table directories (the `--output` of `fireparq build`, with any `{chain}` expanded):
 
 - `<chain_root>/_fireparq/verify_runs/<run_id>/report.json`
 
 For S3:
 
-- `s3://<bucket>/<chain_name>/_fireparq/verify_runs/<run_id>/report.json` (with any prefix before `<chain_name>` kept)
-- `s3://<bucket>/_fireparq/verify_runs/<run_id>/report.json` for a dataset written at the bucket root with `--without-chain-dir`
+- `s3://<bucket>/_fireparq/verify_runs/<run_id>/report.json` for a dataset at the bucket root (`--output s3://<bucket>`)
+- `s3://<bucket>/<prefix>/_fireparq/verify_runs/<run_id>/report.json` for a dataset below a prefix, for example `s3://<bucket>/<chain_name>/...` with `--output 's3://<bucket>/{chain}'`
 
 The default registry is `<chain_root>/_fireparq/merkle_roots.parquet` (`registry_path`). While a legacy `<chain_root>/merkle_roots.parquet` from a release before v1.0.0 exists, a `roots` run with the default registry fails before producing a report; move the file into `_fireparq/`. See the dataset resolution rules in `docs/verifiability-artifact-runbook.md`.
 

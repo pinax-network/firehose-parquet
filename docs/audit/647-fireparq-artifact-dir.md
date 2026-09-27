@@ -25,9 +25,10 @@ files did not follow it.
 | S3 owner record and probes | `.fireparq-owner-v1.json`, `.fireparq-owner-probes-v1/` at the bucket root | unchanged | every mutating S3 command |
 | Merge and rollup journals | `_fireparq_merge.json`, `_fireparq_rollup.json` in partitions | unchanged | `merge`, `rollup` |
 
-`<root>` is `<output>/<chain_name>`, or `<output>` itself with
-`--without-chain-dir`, locally and on S3 (including a bucket root). The root now
-holds only table directories, `_fireparq/` and dot-prefixed control state.
+`<root>` is the dataset root, locally and on S3 (including a bucket root): since
+#654 the `--output` of `build` as given, with an opt-in `{chain}` placeholder.
+The root now holds only table directories, `_fireparq/` and dot-prefixed control
+state.
 
 ## One source of truth
 
@@ -135,9 +136,9 @@ Local writes create `_fireparq/` on demand; S3 needs nothing:
 - Real binary (`blocks/tests`): every default-mirror assertion moved to
   `_fireparq/cursor.parquet`;
   `a_mirror_bound_at_the_pre_v1_default_resumes_only_with_that_cursor`;
-  `cli_legacy_root_index_is_refused_until_moved_into_fireparq` (every mode,
-  default layout and `--without-chain-dir`); the `--without-chain-dir` and
-  default-layout tests assert the root layout, that a per-table glob reads only
+  `cli_legacy_root_index_is_refused_until_moved_into_fireparq` (every mode, a
+  root with and without a chain directory); the output-root and chain-directory
+  layout tests assert the root layout, that a per-table glob reads only
   table parts, and that a `_`/`.`-skipping dataset walk equals the union of the
   table globs, and run DuckDB (`read_parquet('<root>/blocks/**/*.parquet')`
   returns every block row and no artifact, while a dataset-wide `glob()` would

@@ -298,46 +298,13 @@ pub fn parse_partition_build_types(spec: &str) -> anyhow::Result<Vec<PartitionBu
     Ok(vec![PartitionBuildType::from_cli_value(value)?])
 }
 
-pub fn build_partitions_output_root(output_root: &str, chain: &str) -> String {
-    let normalized_root = output_root.trim_end_matches('/');
-    if normalized_root.starts_with("s3://") {
-        format!("{normalized_root}/{chain}")
-    } else {
-        std::path::PathBuf::from(normalized_root)
-            .join(chain)
-            .to_string_lossy()
-            .into_owned()
-    }
-}
-
-/// The dataset root that `partitions build` writes its index into and reads the default
-/// cursor mirror from: `<output>/<chain>`, or the output root itself with
-/// `--without-chain-dir` (see [`output_root_without_chain_dir`]).
-pub fn resolve_partitions_output_root(
-    output_root: &str,
-    chain: &str,
-    without_chain_dir: bool,
-) -> String {
-    if without_chain_dir {
-        output_root_without_chain_dir(output_root)
-    } else {
-        build_partitions_output_root(output_root, chain)
-    }
-}
-
-pub fn build_partitions_index_path(output_root: &str, chain: &str) -> String {
-    partitions_index_path_in(&build_partitions_output_root(output_root, chain))
-}
-
 /// `_fireparq/partitions.parquet` under a dataset root (local path or S3 URI).
-pub fn partitions_index_path_in(chain_root: &str) -> String {
-    crate::artifacts::DatasetArtifact::PartitionsIndex.path_in(chain_root)
-}
-
-/// The default cursor mirror `_fireparq/cursor.parquet` under `<output_root>/<chain>`.
-pub fn build_partitions_cursor_path(output_root: &str, chain: &str) -> String {
-    crate::artifacts::DatasetArtifact::CursorMirror
-        .path_in(&build_partitions_output_root(output_root, chain))
+///
+/// `partitions build` resolves that root with [`resolve_output_root`], exactly
+/// as `build` does, and reads the default cursor mirror
+/// (`_fireparq/cursor.parquet`) from the same root.
+pub fn partitions_index_path_in(dataset_root: &str) -> String {
+    crate::artifacts::DatasetArtifact::PartitionsIndex.path_in(dataset_root)
 }
 
 pub(in crate::cli) fn format_partition_timestamp(timestamp: i64) -> anyhow::Result<String> {

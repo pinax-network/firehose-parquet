@@ -39,7 +39,7 @@ All of them are closed.
 | [#485](https://github.com/pinax-network/firehose-parquet/issues/485) | C4 | medium | [#583](https://github.com/pinax-network/firehose-parquet/pull/583), [#618](https://github.com/pinax-network/firehose-parquet/pull/618) | Probe timeouts no longer look like missing blocks; live `partitions build` retries transient failures. |
 | [#486](https://github.com/pinax-network/firehose-parquet/issues/486) | C5 | medium | [#592](https://github.com/pinax-network/firehose-parquet/pull/592), [#618](https://github.com/pinax-network/firehose-parquet/pull/618) | `partitions.parquet` v2 records verified finalized coverage and span proofs; consumers refuse incomplete matches; `partitions validate` checks v2. |
 | [#487](https://github.com/pinax-network/firehose-parquet/issues/487) | D1 | high | [#533](https://github.com/pinax-network/firehose-parquet/pull/533) | `merkle_v2` roots (domain separation, committed row count) detect duplicated trailing rows. |
-| [#488](https://github.com/pinax-network/firehose-parquet/issues/488) | D2 | high | [#546](https://github.com/pinax-network/firehose-parquet/pull/546) | One registry per network at `<output>/<chain_name>/merkle_roots.parquet`; chain and table are inferred from the data. |
+| [#488](https://github.com/pinax-network/firehose-parquet/issues/488) | D2 | high | [#546](https://github.com/pinax-network/firehose-parquet/pull/546) | One registry per network in its dataset root (`_fireparq/merkle_roots.parquet` since #647); chain and table are inferred from the data. |
 | [#489](https://github.com/pinax-network/firehose-parquet/issues/489) | D3 | medium | [#555](https://github.com/pinax-network/firehose-parquet/pull/555), [#621](https://github.com/pinax-network/firehose-parquet/pull/621) | Failing runs never write the registry; writes are atomic or conditional; `verify` runs beside `build` and skips open partitions. |
 | [#490](https://github.com/pinax-network/firehose-parquet/issues/490) | D4 | medium | [#540](https://github.com/pinax-network/firehose-parquet/pull/540), [#621](https://github.com/pinax-network/firehose-parquet/pull/621) | Every Arrow type, including timestamps and structs, has an explicit leaf encoding instead of display strings. |
 | [#491](https://github.com/pinax-network/firehose-parquet/issues/491) | E1 | high | [#539](https://github.com/pinax-network/firehose-parquet/pull/539) | Canonical `timestamp` is `Timestamp(Millisecond, UTC)`, a real Parquet timestamp. |
@@ -94,6 +94,7 @@ All of them are closed.
 | [#617](https://github.com/pinax-network/firehose-parquet/issues/617) | N6 | high | [#623](https://github.com/pinax-network/firehose-parquet/pull/623) | `.env` is read from the working directory only; S3 writes need an explicit `s3://` destination. |
 | [#647](https://github.com/pinax-network/firehose-parquet/issues/647) | - | - | [#650](https://github.com/pinax-network/firehose-parquet/pull/650) | The cursor mirror, partition index, Merkle registry and verify reports live in `<dataset root>/_fireparq/`, which every walker reserves; legacy root registries and indexes are refused instead of shadowed ([record](647-fireparq-artifact-dir.md)). |
 | [#648](https://github.com/pinax-network/firehose-parquet/issues/648) | - | - | [#649](https://github.com/pinax-network/firehose-parquet/pull/649) | Non-final rows carry a durable `stream_ordinal`; the README documents a tested canonical live view, the two-bucket union and the live + final deployment ([record](648-stream-ordinal.md)). |
+| [#654](https://github.com/pinax-network/firehose-parquet/issues/654) | - | - | [#656](https://github.com/pinax-network/firehose-parquet/pull/656) | `--output` is the dataset root, used exactly as given: `build` no longer appends `<chain_name>`, and the opt-in `{chain}` placeholder names a directory after the network; a template that resolves to another root is refused before Blocks ([record](654-output-template.md)). |
 
 ### Validation follow-up PRs
 
@@ -168,6 +169,7 @@ Docker runs before a release.
 
 - [#562: provider-scoped credentials](562-provider-credentials.md)
 - [#617: explicit S3 write destinations and working-directory env files](617-explicit-s3-writes.md)
+- [#654: `--output` is the dataset root, with an opt-in `{chain}` placeholder](654-output-template.md)
 - [#567: compatible dependency security refresh](dependency-security-refresh.md)
 - [#568: Arrow/Parquet security and compatibility](568-arrow-parquet-security.md)
 - [Validation follow-ups 1-9: platform fixes, and index of all 17 findings](validation-misc-followups.md)

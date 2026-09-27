@@ -22,7 +22,7 @@ impl tonic::server::UnaryService<firehose::InfoRequest> for Info {
     fn call(&mut self, _: tonic::Request<firehose::InfoRequest>) -> Self::Future {
         Box::pin(async {
             Ok(tonic::Response::new(firehose::InfoResponse {
-                chain_name: "nonfinal-test".into(),
+                chain_name: CHAIN.into(),
                 first_streamable_block_num: 100,
                 ..Default::default()
             }))
@@ -197,7 +197,8 @@ async fn explicit_false_reaches_rpc_preserves_recurrence_and_warns_only_non_fina
             "{log}"
         );
         assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
-        let root = output.join("nonfinal-test");
+        // `--output` is the dataset root.
+        let root = output.clone();
         let mut values = BTreeMap::new();
         for entry in std::fs::read_dir(root.join("blocks")).unwrap() {
             let path = entry.unwrap().path();
@@ -740,7 +741,7 @@ async fn stream_ordinals_are_durable_and_the_readme_live_view_selects_the_canoni
     assert_eq!(server.cursors(), ["", "event-2", "event-5"]);
     server.assert_drained();
 
-    let live_root = live.join(CHAIN);
+    let live_root = live.clone();
     let blocks = event_rows(&live_root, "blocks");
     let expected: Vec<_> = HISTORY
         .iter()
@@ -816,7 +817,7 @@ async fn stream_ordinals_are_durable_and_the_readme_live_view_selects_the_canoni
     let sql = readme_sql();
     assert!(sql.len() >= 2, "README live view and union: {sql:?}");
     let live_prefix = live_root.to_str().unwrap();
-    let final_prefix = finalized.join(CHAIN);
+    let final_prefix = finalized.clone();
     let views = format!("{};\n{}", sql[0], sql[1])
         .replace("live/mainnet", live_prefix)
         .replace("final/mainnet", final_prefix.to_str().unwrap());
@@ -891,7 +892,7 @@ async fn expired_committed_parts_do_not_affect_a_running_or_restarted_live_build
         .collect();
     let dir = tempfile::tempdir().unwrap();
     let output = dir.path().join("live");
-    let root = output.join(CHAIN);
+    let root = output.clone();
     let server = ReplayServer::start(
         &history,
         vec![

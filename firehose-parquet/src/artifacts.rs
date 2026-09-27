@@ -1,7 +1,7 @@
 //! Dataset-level artifacts and where they live.
 //!
-//! A dataset root (`<output>/<chain_name>`, or `<output>` itself with
-//! `--without-chain-dir`) holds only three kinds of entries:
+//! A dataset root (the `--output` of `build`, with any `{chain}` expanded; see
+//! [`crate::cli::resolve_output_root`]) holds only three kinds of entries:
 //!
 //! - table directories (`blocks/`, `transactions/`, ...),
 //! - fireparq's artifact directory [`ARTIFACTS_DIR`] (`_fireparq/`) with the cursor mirror,

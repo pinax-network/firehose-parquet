@@ -1,7 +1,12 @@
-//! Local/S3 path policy and cursor-template resolution.
+//! Local/S3 path policy, the `--output` dataset root and cursor-template resolution.
 use super::*;
 
 /// Resolve the output root of a command that writes (`build`, `partitions build`).
+///
+/// The result is still the `--output` template: [`resolve_output_root`]
+/// expands its `{chain}` placeholder once EndpointInfo names the chain. The
+/// template itself is checked here, before any endpoint request
+/// ([`validate_output_template`]).
 ///
 /// S3 writes require an explicit `s3://bucket/prefix`. A relative path is never
 /// expanded into `--s3-bucket` / `S3_BUCKET`: an inherited bucket setting must
@@ -14,6 +19,7 @@ pub fn resolve_s3_output_root(
     s3_bucket: Option<&str>,
 ) -> anyhow::Result<String> {
     if let Some(output) = output {
+        validate_output_template(output.trim())?;
         crate::s3::validate_output_bucket(output.trim(), s3_bucket)?;
     }
     match (
@@ -74,18 +80,103 @@ pub fn reject_implicit_s3_write(
     Ok(())
 }
 
-/// The dataset root selected by `--without-chain-dir` (`build` and
-/// `partitions build`): the output root itself instead of
-/// `<output>/<chain_name>`.
-///
-/// An S3 root loses its trailing `/` separators, so `s3://bucket/` and
-/// `s3://bucket` both name the bucket-root dataset. A local path is returned as
-/// given; path components already ignore a trailing separator.
-pub fn output_root_without_chain_dir(output_root: &str) -> String {
-    match output_root.strip_prefix("s3://") {
-        Some(rest) => format!("s3://{}", rest.trim_end_matches('/')),
-        None => output_root.to_string(),
+/// The `--output` variable of `build` and `partitions build`: the endpoint's
+/// canonical `chain_name`.
+pub const OUTPUT_CHAIN_VARIABLE: &str = "chain";
+
+/// Check an `--output` template of `build` / `partitions build` before any
+/// endpoint request: the brace syntax shared with `--cursor-template`, the
+/// variable names (only `{chain}`), and a literal S3 bucket.
+pub fn validate_output_template(output: &str) -> anyhow::Result<()> {
+    output_template_parts(output).map(|_| ())
+}
+
+fn output_template_parts(output: &str) -> anyhow::Result<Vec<TemplatePart>> {
+    let parts = parse_template(output, "--output")?;
+    if let Some(name) = parts.iter().find_map(|part| match part {
+        TemplatePart::Variable(name) if name != OUTPUT_CHAIN_VARIABLE => Some(name),
+        _ => None,
+    }) {
+        anyhow::bail!(
+            "unknown --output variable {{{name}}} in `{output}`; the only variable is \
+             {{{OUTPUT_CHAIN_VARIABLE}}} (the endpoint's chain_name). Write {{{{ and }}}} for \
+             literal braces"
+        );
     }
+    // The bucket is taken literally: credentials, the S3_BUCKET check, the
+    // endpoint's bucket binding and the bucket-wide owner record are all
+    // settled per bucket before the endpoint is contacted.
+    if let Some(rest) = output.strip_prefix("s3://") {
+        let bucket = rest.split('/').next().unwrap_or_default();
+        if bucket.contains(['{', '}']) {
+            anyhow::bail!(
+                "--output `{output}` has a placeholder or brace in its S3 bucket name; the \
+                 bucket is used literally, so put {{{OUTPUT_CHAIN_VARIABLE}}} in the key \
+                 prefix, for example s3://<bucket>/{{{OUTPUT_CHAIN_VARIABLE}}}"
+            );
+        }
+    }
+    Ok(parts)
+}
+
+/// A chain name that `{chain}` may expand to: one path segment of ASCII
+/// letters, digits, `-`, `_` and `.`, other than `.` and `..`. Every built-in
+/// network name qualifies; anything else could change the directory level or
+/// turn a local path into a URI.
+fn validate_output_chain_segment(chain_name: &str) -> anyhow::Result<()> {
+    let valid = !matches!(chain_name, "." | "..")
+        && chain_name
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.'));
+    anyhow::ensure!(
+        valid,
+        "EndpointInfo chain_name `{}` cannot expand {{{OUTPUT_CHAIN_VARIABLE}}} in --output: it \
+         must be one path segment of ASCII letters, digits, `-`, `_` and `.`",
+        chain_name.escape_debug()
+    );
+    Ok(())
+}
+
+/// The dataset root of `build` and `partitions build`: the one place where
+/// `--output` becomes the directory or `s3://bucket[/prefix]` that holds the
+/// table directories, `_fireparq/` and the protected control state.
+///
+/// - `--output` is the dataset root exactly as given. No `<chain_name>`
+///   directory is appended.
+/// - `{chain}` expands to the endpoint's canonical `chain_name`, in any
+///   position of the path or S3 key prefix: `s3://datasets/{chain}`,
+///   `s3://datasets/v1/{chain}/raw`, `./data/{chain}-final`. `{{` and `}}` are
+///   literal braces, as in `--cursor-template`. The S3 bucket name is literal.
+/// - An S3 root loses its trailing `/` separators, so `s3://bucket/` and
+///   `s3://bucket` are the same bucket root. A local root is returned as given.
+///
+/// `chain_name` comes from EndpointInfo and must be nonempty even when the
+/// template does not use it: it is still recorded in file metadata and in the
+/// protected dataset identity. The cursor mirror, the ownership scopes,
+/// recovery and `partitions build` (its index and the sibling cursor mirror)
+/// all resolve against the returned root.
+pub fn resolve_output_root(output: &str, chain_name: &str) -> anyhow::Result<String> {
+    anyhow::ensure!(
+        !chain_name.trim().is_empty(),
+        "EndpointInfo with a nonempty chain_name is required before resolving output and cursor paths"
+    );
+    let mut root = String::with_capacity(output.len() + chain_name.len());
+    for part in output_template_parts(output)? {
+        match part {
+            TemplatePart::Literal(text) => root.push_str(&text),
+            TemplatePart::Variable(_) => {
+                validate_output_chain_segment(chain_name)?;
+                root.push_str(chain_name);
+            }
+        }
+    }
+    if let Some(rest) = root.strip_prefix("s3://") {
+        root = format!("s3://{}", rest.trim_end_matches('/'));
+        crate::writer::parse_s3_url(&root)
+            .map_err(|error| anyhow::anyhow!("--output `{output}`: {error}"))?;
+    }
+    anyhow::ensure!(!root.trim().is_empty(), "--output is required");
+    Ok(root)
 }
 
 /// Human-readable absolute destination for startup logs: S3 URIs as given,
@@ -280,17 +371,47 @@ pub fn resolve_cursor_template(
     context: &CursorTemplateContext,
 ) -> anyhow::Result<String> {
     let mut out = String::with_capacity(template.len());
+    for part in parse_template(template, "--cursor-template")? {
+        match part {
+            TemplatePart::Literal(text) => out.push_str(&text),
+            TemplatePart::Variable(key) => {
+                let value = cursor_template_value(&key, context)?;
+                out.push_str(&sanitize_cursor_template_value(value));
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// A piece of a `{variable}` template (`--cursor-template`, `--output`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(in crate::cli) enum TemplatePart {
+    /// Literal text, with `{{` and `}}` already unescaped.
+    Literal(String),
+    /// The name inside a `{name}` reference.
+    Variable(String),
+}
+
+/// Split a template into literal text and `{variable}` references: the syntax
+/// shared by `--cursor-template` and `--output`. `{{` and `}}` are literal
+/// braces; any other `{` opens a variable that the next `}` closes, and any
+/// other `}` is an error. `flag` names the option in errors; the caller decides
+/// which variable names exist.
+pub(in crate::cli) fn parse_template(
+    template: &str,
+    flag: &str,
+) -> anyhow::Result<Vec<TemplatePart>> {
+    let mut parts = Vec::new();
+    let mut literal = String::new();
     let mut chars = template.chars().peekable();
 
     while let Some(ch) = chars.next() {
         match ch {
+            '{' if chars.peek() == Some(&'{') => {
+                chars.next();
+                literal.push('{');
+            }
             '{' => {
-                if matches!(chars.peek(), Some('{')) {
-                    chars.next();
-                    out.push('{');
-                    continue;
-                }
-
                 let mut key = String::new();
                 let mut found_close = false;
                 for next in chars.by_ref() {
@@ -301,22 +422,28 @@ pub fn resolve_cursor_template(
                     key.push(next);
                 }
                 if !found_close {
-                    anyhow::bail!("unterminated --cursor-template variable");
+                    anyhow::bail!(
+                        "unterminated {flag} variable in `{template}`; close it with }} or \
+                         write {{{{ for a literal brace"
+                    );
                 }
-                let value = cursor_template_value(&key, context)?;
-                out.push_str(&sanitize_cursor_template_value(value));
+                if !literal.is_empty() {
+                    parts.push(TemplatePart::Literal(std::mem::take(&mut literal)));
+                }
+                parts.push(TemplatePart::Variable(key));
+            }
+            '}' if chars.peek() == Some(&'}') => {
+                chars.next();
+                literal.push('}');
             }
             '}' => {
-                if matches!(chars.peek(), Some('}')) {
-                    chars.next();
-                    out.push('}');
-                } else {
-                    anyhow::bail!("unmatched }} in --cursor-template");
-                }
+                anyhow::bail!("unmatched }} in {flag} `{template}`; write }}}} for a literal brace")
             }
-            other => out.push(other),
+            other => literal.push(other),
         }
     }
-
-    Ok(out)
+    if !literal.is_empty() {
+        parts.push(TemplatePart::Literal(literal));
+    }
+    Ok(parts)
 }

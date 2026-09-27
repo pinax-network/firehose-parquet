@@ -763,9 +763,13 @@ async fn bucket_keys(store: &Arc<object_store::memory::InMemory>) -> Vec<String>
     keys
 }
 
-fn bucket_root_config(output: &str) -> Config {
+/// The session configuration of `build --output <template>` against a
+/// `mainnet` endpoint: the root comes from the one output resolver.
+fn bucket_root_config(template: &str) -> Config {
     Config {
-        output: output.into(),
+        output: crate::cli::resolve_output_root(template, "mainnet")
+            .unwrap()
+            .into(),
         start_block: Some(100),
         partition: Partition::None,
         cursor_path: Some(crate::artifacts::DEFAULT_CURSOR_MIRROR.into()),
@@ -781,16 +785,18 @@ async fn bucket_owner(store: &Arc<object_store::memory::InMemory>) -> DatasetOwn
     DatasetOwnership::from_remote_for_test("data", remote)
 }
 
-/// `build --without-chain-dir --output s3://data` keeps the whole dataset at
-/// the bucket root: authority under `.fireparq-ingest/`, parts under the
-/// table prefixes and the default mirror at `_fireparq/cursor.parquet`, beside the bucket-wide
-/// owner record, which does not make the root ineligible. The default layout
-/// of the same stream, `s3://data/<chain>`, is nested in it and refused.
+/// `build --output s3://data` keeps the whole dataset at the bucket root:
+/// authority under `.fireparq-ingest/`, parts under the table prefixes and the
+/// default mirror at `_fireparq/cursor.parquet`, beside the bucket-wide owner
+/// record, which does not make the root ineligible. `s3://data/` resumes the
+/// same root. `--output 's3://data/{chain}'` (`s3://data/mainnet`) is nested in
+/// it and refused.
 #[tokio::test]
-async fn remote_session_at_the_bucket_root_resumes_and_refuses_a_nested_chain_root() {
+async fn remote_session_at_the_bucket_root_resumes_and_refuses_a_chain_template() {
     let store = Arc::new(object_store::memory::InMemory::new());
     let owner = bucket_owner(&store).await;
     let config = bucket_root_config("s3://data");
+    assert_eq!(config.output, bucket_root_config("s3://data/").output);
     assert_eq!(
         ingestion_mutation_scopes(&config).unwrap(),
         [
@@ -849,35 +855,45 @@ async fn remote_session_at_the_bucket_root_resumes_and_refuses_a_nested_chain_ro
         );
     }
 
-    let session = IngestionSession::open(&config, mapper(BlockFamily::Evm), &owner, None, None)
+    for resumed in ["s3://data", "s3://data/"] {
+        let session = IngestionSession::open(
+            &bucket_root_config(resumed),
+            mapper(BlockFamily::Evm),
+            &owner,
+            None,
+            None,
+        )
         .await
         .unwrap();
-    assert_eq!(session.authority().checkpoint.id, checkpoint);
-    drop(session);
+        assert_eq!(session.authority().checkpoint.id, checkpoint);
+        drop(session);
+    }
 
-    let nested = bucket_root_config("s3://data/mainnet");
+    let nested = bucket_root_config("s3://data/{chain}");
+    assert_eq!(nested.output, std::path::PathBuf::from("s3://data/mainnet"));
     let error = IngestionSession::open(&nested, mapper(BlockFamily::Evm), &owner, None, None)
         .await
         .err()
-        .expect("a chain directory inside the bucket-root dataset is refused");
+        .expect("a {chain} root inside the bucket-root dataset is refused");
     assert!(
         error
             .to_string()
             .contains("overlaps another protected root"),
         "{error:#}"
     );
+    assert!(error.to_string().contains("{chain}"), "{error:#}");
     assert_eq!(bucket_keys(&store).await, keys);
     assert!(!owner.remote("data").unwrap().is_mutation_uncertain());
 }
 
-/// The reverse switch: a dataset built with the default layout at
-/// `s3://data/mainnet` cannot be shadowed by a new bucket-root dataset at
-/// `s3://data`.
+/// The reverse: a dataset created with `--output 's3://data/{chain}'` at
+/// `s3://data/mainnet` resumes from the same template (or its expansion) and
+/// cannot be shadowed by a new bucket-root dataset at `s3://data`.
 #[tokio::test]
-async fn remote_bucket_root_cannot_initialize_above_an_existing_chain_root() {
+async fn remote_bucket_root_cannot_initialize_above_an_existing_chain_template_root() {
     let store = Arc::new(object_store::memory::InMemory::new());
     let owner = bucket_owner(&store).await;
-    let nested = bucket_root_config("s3://data/mainnet");
+    let nested = bucket_root_config("s3://data/{chain}");
     let mut session = IngestionSession::open(&nested, mapper(BlockFamily::Evm), &owner, None, None)
         .await
         .unwrap();
@@ -886,6 +902,7 @@ async fn remote_bucket_root_cannot_initialize_above_an_existing_chain_root() {
         .accept_mapped(ordinal, Some(1_700_000_000), None)
         .unwrap();
     flush(&mut session, &[100]).await;
+    let checkpoint = session.authority().checkpoint.id.clone();
     drop(session);
     let keys = bucket_keys(&store).await;
     assert!(
@@ -893,23 +910,38 @@ async fn remote_bucket_root_cannot_initialize_above_an_existing_chain_root() {
             .any(|key| key == "mainnet/_fireparq/cursor.parquet"),
         "{keys:?}"
     );
+    for resumed in ["s3://data/{chain}/", "s3://data/mainnet"] {
+        let session = IngestionSession::open(
+            &bucket_root_config(resumed),
+            mapper(BlockFamily::Evm),
+            &owner,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(session.authority().checkpoint.id, checkpoint);
+        drop(session);
+    }
 
-    let error = IngestionSession::open(
-        &bucket_root_config("s3://data"),
-        mapper(BlockFamily::Evm),
-        &owner,
-        None,
-        None,
-    )
-    .await
-    .err()
-    .expect("a bucket-root dataset above an existing chain root is refused");
-    assert!(
-        error
-            .to_string()
-            .contains("overlaps another protected root"),
-        "{error:#}"
-    );
+    for above in ["s3://data", "s3://data/"] {
+        let error = IngestionSession::open(
+            &bucket_root_config(above),
+            mapper(BlockFamily::Evm),
+            &owner,
+            None,
+            None,
+        )
+        .await
+        .err()
+        .expect("a bucket-root dataset above an existing {chain} root is refused");
+        assert!(
+            error
+                .to_string()
+                .contains("overlaps another protected root"),
+            "{error:#}"
+        );
+    }
     assert_eq!(bucket_keys(&store).await, keys);
 }
 
