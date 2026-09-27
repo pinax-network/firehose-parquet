@@ -106,8 +106,8 @@ and qualification status](../audit/509-tron-contract-fields.md).
 
 Rust CLI argument structures now contain `aws: AwsArgs`; downstream struct
 literals/matches must adapt. Existing flags, environment precedence and resolved
-`Config`/`AwsConfig` fields are unchanged, including recovery's historical
-`AWS_ENDPOINT_URL` binding. Inspection now shares bucket-bound endpoint handling
+`Config`/`AwsConfig` fields are unchanged (recovery's endpoint variable changed
+separately; see Fixes). Inspection now shares bucket-bound endpoint handling
 with ingestion and maintenance. Credential-provider and mutation/read retry
 policies are preserved. See [validation](../audit/527-shared-aws-configuration.md).
 
@@ -825,8 +825,8 @@ Both tables carry `receipt_index`, `tx_hash`, `shard_id` and `predecessor_id`, l
   examples include the required `build` subcommand. `.env.example` is regenerated
   from the clap definitions: `FLUSH_BYTES` shows the 32 MiB default, and
   `FLUSH_MEMORY_BYTES`, `FLUSH_BLOCKS`, `GRPC_*`, `METRICS_STALE_AFTER_SECS`,
-  `CURSOR_OVERRIDE`, the chain toggles, the provider-scoped credential variables
-  and recovery's `AWS_ENDPOINT_URL` are listed. The obsolete `EXTENDED`,
+  `CURSOR_OVERRIDE`, the chain toggles and the provider-scoped credential
+  variables are listed. The obsolete `EXTENDED`,
   `BYTES_ENCODING` and `CURSOR=cursor.txt` entries are gone, and a test keeps
   the file in sync with the CLI. `merge --flush-bytes` help now describes the
   encoded-size target it actually checks.
@@ -883,6 +883,32 @@ Both tables carry `receipt_index`, `tx_hash`, `shard_id` and `predecessor_id`, l
   (an internal boundary not established on both sides) issues. `--allow-gaps`
   has no effect on v2 indexes, whose reader already rejects gaps and overlaps,
   and now adds a warning (also in JSON `warnings`).
+
+- **Release builds ignore the crash-test hooks (#480, #522 follow-up).**
+  `FIREPARQ_TEST_MERGE_CRASH_AT` and `FIREPARQ_TEST_ROLLUP_CRASH_AT`, undocumented
+  hooks that abort `merge` / `rollup` at a named step, were honored by release
+  binaries, so an inherited variable could abort production maintenance. Like
+  `FIREPARQ_DEBUG_FAULT`, only debug builds (as built by `cargo test`) read them
+  now. The audit harnesses that use them need a debug binary, or one built with
+  `CARGO_PROFILE_RELEASE_DEBUG_ASSERTIONS=true`.
+- **`recovery` reads `AWS_ENDPOINT_URL_S3` like every other command (#527
+  follow-up).** Its `--aws-endpoint-url` read only `AWS_ENDPOINT_URL`, so an
+  environment set up for `build` or `merge` sent `recovery status`, `recover` and
+  `release` to AWS instead of the configured S3-compatible endpoint.
+  `AWS_ENDPOINT_URL` is still read when `AWS_ENDPOINT_URL_S3` is unset; when both
+  are set, `AWS_ENDPOINT_URL_S3` wins.
+- **The parser enforces `partitions build --output`.** The usage line marks it
+  required and a missing output (including `--s3-bucket` alone) fails at parse
+  time instead of at runtime. The flag has no environment variable.
+- **`partitions build` validates `--network` and `--stop-block` at parse time,**
+  like `build`: `--network` accepts only built-in aliases and lists them on
+  error, and `--stop-block 0` is rejected before any endpoint is contacted.
+- **Help and messages match current behavior.** Root and `build` help say a rerun
+  resumes from the `.fireparq-ingest/` authority, with `cursor.parquet` only an
+  optional mirror (`--cursor none`), and no longer claim that `build` skips
+  missing blocks after probe retries (only `partitions build` probes). With a
+  bucket option set, the error for the default output `.` suggests
+  `--output "$(pwd)"` or `./output` instead of `./.`.
 
 ## Performance
 
@@ -949,7 +975,10 @@ claim. See [equivalence coverage, recovered-work provenance and all measurements
   dependencies. Four advisories are ignored with recorded reasons: quick-xml
   0.38 through object_store 0.12 (RUSTSEC-2026-0194/0195; the fix needs
   object_store 0.14) and the unmaintained backoff and bincode crates. See
-  [the platform follow-ups](../audit/validation-misc-followups.md).
+  [the platform follow-ups](../audit/validation-misc-followups.md). The job lives
+  in `advisories.yml`, which `ci.yml` calls on every push and pull request and
+  which also runs weekly and on manual dispatch, so an advisory published
+  against an unchanged `Cargo.lock` fails without running the full build.
 - The three functions named `build_s3_client` are renamed by policy:
   `s3::build_ingestion_mutation_client` (zero retries, AWS provider-chain
   credentials) and `AwsConfig::build_read_client` (retrying reads, anonymous

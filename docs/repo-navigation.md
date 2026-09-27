@@ -60,7 +60,7 @@ Related design docs:
 - `proto/`: source `.proto` files and Buf config.
   - Includes top-level chain proto files plus `proto/core/*` dependencies.
 - `scripts/`: `generate_networks.rs` (the `generate-networks` bin that writes `firehose-parquet/src/networks_generated.rs`) and `check_network_endpoints.sh` (live check of every built-in endpoint).
-- `.github/workflows/`: CI/CD entrypoints (`ci.yml`, `docker-publish.yml`, `release.yml`, `network-endpoints.yml`).
+- `.github/workflows/`: CI/CD entrypoints (`ci.yml`, `advisories.yml`, `docker-publish.yml`, `release.yml`, `network-endpoints.yml`).
 
 ## Data-Flow Mental Model
 
@@ -135,8 +135,9 @@ Related design docs:
 - Run ingestion (preferred form): `cargo run --bin fireparq -- build --network mainnet --start-block 100`
 - Install binary locally: `cargo install --path blocks`
 - Generate shell completions: `cargo run --bin fireparq -- completions zsh`
-- CI entrypoint: `.github/workflows/ci.yml` (`build-and-test` plus the `advisories` job)
-- Dependency advisory gate: `cargo deny --locked check advisories`, configured by `deny.toml` (RustSec advisories only; ignored advisories need a recorded reason)
+- CI entrypoint: `.github/workflows/ci.yml` (`build-and-test` plus the `advisories` job, which calls `advisories.yml`)
+- Dependency advisory gate: `cargo deny --locked check advisories` in `.github/workflows/advisories.yml` (on every push and pull request through `ci.yml`, weekly on its own, and on manual dispatch), configured by `deny.toml` (RustSec advisories only; ignored advisories need a recorded reason)
+- Crash-test hooks: `FIREPARQ_TEST_MERGE_CRASH_AT`, `FIREPARQ_TEST_ROLLUP_CRASH_AT` and `FIREPARQ_DEBUG_FAULT` abort or fail the real binary at a named step for recovery tests. Only debug builds (as built by `cargo test`) read them; release binaries ignore them (`blocks/tests/maintenance_crash_hooks.rs`).
 - Docker publish workflow: `.github/workflows/docker-publish.yml`
 - Release assets workflow: `.github/workflows/release.yml`
 - Built-in network endpoint check (weekly, needs network access): `.github/workflows/network-endpoints.yml`, locally `scripts/check_network_endpoints.sh`
