@@ -21,6 +21,9 @@ enum Selection<'a> {
 pub(crate) struct LocalPolicy<'a> {
     skip_non_directory: bool,
     prune_controls: bool,
+    /// Journal discovery also prunes the dataset's `_fireparq/` artifact
+    /// directory: no table partition, so no journal, lives there.
+    prune_artifacts: bool,
     selection: Selection<'a>,
 }
 
@@ -29,12 +32,14 @@ impl LocalPolicy<'_> {
     pub(crate) const PARQUET: Self = Self {
         skip_non_directory: false,
         prune_controls: false,
+        prune_artifacts: false,
         selection: Selection::LowercaseParquet,
     };
     /// Merge/truncate: absent or non-directory roots are empty; control trees prune.
     pub(crate) const MUTATION_PARQUET: Self = Self {
         skip_non_directory: true,
         prune_controls: true,
+        prune_artifacts: false,
         selection: Selection::LowercaseParquet,
     };
     /// Verify alone accepts ASCII case-insensitive local file extensions.
@@ -48,6 +53,7 @@ impl<'a> LocalPolicy<'a> {
     /// Journal discovery: the mutation walk selecting one exact file name.
     pub(crate) fn named(name: &'a str) -> Self {
         Self {
+            prune_artifacts: true,
             selection: Selection::Name(name),
             ..Self::MUTATION_PARQUET
         }
@@ -57,6 +63,7 @@ impl<'a> LocalPolicy<'a> {
     /// finds every kind of journal (verify refuses merge and rollup journals).
     pub(crate) fn named_any(names: &'a [&'a str]) -> Self {
         Self {
+            prune_artifacts: true,
             selection: Selection::Names(names),
             ..Self::MUTATION_PARQUET
         }
@@ -80,6 +87,11 @@ pub(crate) fn collect_local(
             continue;
         }
         if path.is_dir() {
+            if policy.prune_artifacts
+                && path.file_name() == Some(std::ffi::OsStr::new(crate::artifacts::ARTIFACTS_DIR))
+            {
+                continue;
+            }
             collect_local(&path, policy, out)?;
         } else {
             let selected = match policy.selection {

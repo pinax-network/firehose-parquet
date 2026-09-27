@@ -8,11 +8,11 @@ Related docs:
 - `docs/schemas/`: per-chain table and column reference, generated from the code (see "Change a table schema" below).
 - `docs/audit/README.md`: issue-by-issue implementation and validation records of the September 2026 audit (#463).
 - `docs/verifiability-hash-strategy.md`: `merkle_v2` row encoding, normalization rules and golden values.
-- `docs/verifiability-artifact-runbook.md`: publishing, retaining and migrating verify artifacts (`merkle_roots.parquet`, `verify_runs/<run_id>/report.json`).
+- `docs/verifiability-artifact-runbook.md`: publishing, retaining and migrating verify artifacts (`_fireparq/merkle_roots.parquet`, `_fireparq/verify_runs/<run_id>/report.json`), including moving pre-v1.0.0 root artifacts into `_fireparq/`.
 - `docs/verify-report-contract.md`: the verify report JSON contract.
 - `docs/partition-vocabulary.md`: naming convention for partition-related CLI flags.
 - `docs/partitions-build-defaults.md`: inference and bounded-range rules for `fireparq partitions build`.
-- `docs/partitions-parquet-contract.md`: the v2 `partitions.parquet` file contract.
+- `docs/partitions-parquet-contract.md`: the v2 `_fireparq/partitions.parquet` file contract.
 - `docs/network-registry-integration.md`: how built-in `--network` aliases are generated, the provider policy, and the endpoint check.
 
 ## Workspace Layout
@@ -42,7 +42,7 @@ Related docs:
     - `store.rs`, `parts.rs`: typed record transitions, and physical part ownership checks and cleanup.
     - `frontier.rs`: the accepted-event prefix; `binding.rs`: output and mirror identities from the actual storage configuration (`--cursor none` binds no mirror).
     - `eligibility.rs`: new streams may only initialize empty destinations; legacy data and cursors are refused.
-    - `mirror.rs`: the non-authoritative `cursor.parquet` mirror, reconciled from authority.
+    - `mirror.rs`: the non-authoritative cursor mirror (default `_fireparq/cursor.parquet`), reconciled from authority.
     - `maintenance.rs`: protected-root discovery and recovery before maintenance commands; `observe.rs`: read-only authority observation for `verify`.
   - Writing Parquet:
     - `src/writer.rs`: Parquet encoding, partition directories (`ParquetTableWriter::partition_suffix`) and the unprotected low-level `OutputWriter` (not used by protected `build`).
@@ -65,7 +65,7 @@ Related docs:
     - `src/truncate.rs`: `truncate` planning (AND across keys, `--yes`) and deletion.
     - `src/maintenance/compaction.rs`: shared schema/value-metadata checks, receipt stripping, streaming part writer and the merge/rollup encoder.
     - `src/maintenance/discovery.rs`: shared local walker policies, S3 listing and whole-object reads for maintenance, `verify`, `scan` and `validate`.
-    - `src/artifacts.rs`: reserved dataset artifact names (`cursor.parquet`, `partitions.parquet`, `merkle_roots.parquet`, `verify_runs/`) that dataset walkers skip.
+    - `src/artifacts.rs`: the one place dataset artifact paths resolve: `DatasetArtifact` (`_fireparq/cursor.parquet`, `_fireparq/partitions.parquet`, `_fireparq/merkle_roots.parquet`, `_fireparq/verify_runs/`, plus their legacy root names) with local/S3 join helpers, `DEFAULT_CURSOR_MIRROR` (the clap default), the legacy-artifact refusal, and `is_reserved_artifact_path`, which every dataset walker uses to skip the whole `_fireparq/` subtree, the legacy root names and control state.
     - `src/verify.rs`, `src/verify/row_encoding.rs`, `src/verify/tests/`: `fireparq verify` (read-only scan, open partitions from the writer frontier, unchanged-snapshot check, atomic/conditional registry writes) and the `merkle_v2` row encoding.
     - `src/partition_index.rs`, `src/partition_index/{builder,scan}.rs`: v2 finalized coverage, exact source-ordered spans, ancestry/routing context and the bounded scan.
     - `src/metrics.rs`: Prometheus registry, `/metrics`, `/health` and `/ready`.
@@ -95,7 +95,7 @@ Related docs:
 2. `ingestion/setup.rs` resolves the endpoint and provider-scoped credentials (`auth.rs`), requires EndpointInfo (`grpc.rs`), selects the `ChainKind` (`blocks/src/chain.rs`: from `--block-type`, the endpoint chain names, or the first payload's `type_url` in a dry run) and resolves the output root (`resolve_output`: `<output>/<chain_name>`, or `<output>` itself with `--without-chain-dir`) and cursor mirror.
 3. Mutating commands acquire dataset ownership first (`dataset_lock/`, `dataset_lock_s3.rs`). `ingest/session.rs` then recovers any pending transaction and opens the accepted frontier from the authority under `<chain_root>/.fireparq-ingest/` before any Blocks request.
 4. Stream messages come from `grpc.rs`. `ingestion/runtime.rs` filters, orders and routes them; the chain mapper (`blocks/src/<chain>/mapper.rs`) decodes protobuf blocks and appends Arrow columns using `schema.rs`.
-5. When a flush trigger fires (`flush.rs`, partition boundaries, completion), `ingest/controller.rs` journals the all-table transaction, `writer/protected.rs` publishes the deterministic parts (local via `writer/local.rs`, S3 via `s3/upload.rs`) and verifies them, and the controller advances authority, then the optional `cursor.parquet` mirror.
+5. When a flush trigger fires (`flush.rs`, partition boundaries, completion), `ingest/controller.rs` journals the all-table transaction, `writer/protected.rs` publishes the deterministic parts (local via `writer/local.rs`, S3 via `s3/upload.rs`) and verifies them, and the controller advances authority, then the optional `_fireparq/cursor.parquet` mirror.
 6. `metrics.rs` exposes counters, readiness and health.
 7. Maintenance (`merge`, `rollup`, `truncate`) runs the shared engines under the same ownership, after `ingest/maintenance.rs` recovers protected roots. `verify` reads without ownership, using `ingest/observe.rs` to find open partitions.
 
@@ -121,6 +121,7 @@ Related docs:
   - `blocks/src/chain.rs` (`ChainProfile`); ingestion reads these properties instead of comparing `block_type` strings.
 - Change partitioning or output file layout:
   - `firehose-parquet/src/config.rs` (`Partition::partition_key`) and `firehose-parquet/src/writer.rs` (`ParquetTableWriter::partition_suffix`).
+  - Artifact locations (`_fireparq/`) and what walkers reserve: `firehose-parquet/src/artifacts.rs` only; the dataset root must hold only table directories, `_fireparq/` and dot-prefixed control state (`assert_dataset_root_layout` in `blocks/tests/ingestion_transactions.rs`).
   - `firehose-parquet/src/ingest/state.rs` (deterministic `part-v1-*` and `.fireparq-txn-*.tmp` names) and `firehose-parquet/src/writer/protected.rs` (staging, publication, receipt verification).
   - `blocks/src/bin/ingestion/runtime.rs` (flush windows and partition-boundary flushes) and `firehose-parquet/src/flush.rs` (size and memory triggers).
   - `firehose-parquet/src/ingest/controller/pipeline.rs` and `firehose-parquet/src/writer/protected/budget.rs` for flush concurrency and the in-flight byte budget.

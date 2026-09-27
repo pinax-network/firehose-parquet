@@ -62,6 +62,10 @@ legacy cursor loading/logging.
 The guard's local path identity is revalidated before reads and writes. Explicit
 root aliases retain their original spelling after canonical scope validation.
 New directories use mode 0700 and temporary/final mirror files use mode 0600.
+Since #647 the default mirror is `<dataset root>/_fireparq/cursor.parquet`; that
+`_fireparq/` directory is shared with the partition index, the registry and the
+verify reports, so it is the one directory the mirror creates with default
+permissions ([record](647-fireparq-artifact-dir.md)).
 Publication writes a unique sibling temporary, syncs its contents, atomically
 renames it, and syncs the full canonical and lexical directory ancestry.
 

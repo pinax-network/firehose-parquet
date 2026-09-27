@@ -92,6 +92,7 @@ All of them are closed.
 | [#572](https://github.com/pinax-network/firehose-parquet/issues/572) | - | - | [#576](https://github.com/pinax-network/firehose-parquet/pull/576) | The final mapper flush on completion is checkpointed. |
 | [#578](https://github.com/pinax-network/firehose-parquet/issues/578) | - | - | [#580](https://github.com/pinax-network/firehose-parquet/pull/580) | Local Parquet parts are published atomically after sync. |
 | [#617](https://github.com/pinax-network/firehose-parquet/issues/617) | N6 | high | [#623](https://github.com/pinax-network/firehose-parquet/pull/623) | `.env` is read from the working directory only; S3 writes need an explicit `s3://` destination. |
+| [#647](https://github.com/pinax-network/firehose-parquet/issues/647) | - | - | [#650](https://github.com/pinax-network/firehose-parquet/pull/650) | The cursor mirror, partition index, Merkle registry and verify reports live in `<dataset root>/_fireparq/`, which every walker reserves; legacy root registries and indexes are refused instead of shadowed ([record](647-fireparq-artifact-dir.md)). |
 | [#648](https://github.com/pinax-network/firehose-parquet/issues/648) | - | - | [#649](https://github.com/pinax-network/firehose-parquet/pull/649) | Non-final rows carry a durable `stream_ordinal`; the README documents a tested canonical live view, the two-bucket union and the live + final deployment ([record](648-stream-ordinal.md)). |
 
 ### Validation follow-up PRs
@@ -178,6 +179,7 @@ Docker runs before a release.
 - [Validation follow-ups 10-15: validate precision, live partition retries, index time type and v2 validation](validation-misc-followups-partitions.md)
 - [Verify follow-ups: Struct roots, verify beside build, registry scan exclusion, merge refusal](validation-verify-followups.md)
 - [Rollup crash safety, copy ownership and value metadata (#478, #479, #480, #522 follow-ups)](maintenance-safety-followups.md)
+- [#647: dataset artifacts under `_fireparq/`](647-fireparq-artifact-dir.md)
 
 ### Chain schemas and values
 

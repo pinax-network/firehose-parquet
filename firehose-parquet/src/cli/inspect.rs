@@ -135,6 +135,7 @@ pub(in crate::cli) fn collect_scan_parquet_local(
             crate::maintenance::discovery::LocalPolicy::PARQUET,
             &mut files,
         )?;
+        retain_table_files_local(path, &mut files);
         files.sort();
         false
     } else {
@@ -345,10 +346,30 @@ pub(in crate::cli) async fn collect_scan_s3_parquet_objects(
     let objects = crate::maintenance::discovery::list_objects(store, prefix).await?;
     let mut parquet_objects: Vec<_> = objects
         .into_iter()
-        .filter(|obj| obj.location.as_ref().ends_with(".parquet"))
+        .filter(|obj| is_listed_table_object(prefix, obj.location.as_ref()))
         .collect();
     parquet_objects.sort_by(|a, b| a.location.cmp(&b.location));
     Ok((parquet_objects, false))
+}
+
+/// A directory walk of `scan` / `validate` leaves out the `_fireparq/` artifacts,
+/// legacy root artifacts and control state below the walked directory (see
+/// [`crate::artifacts::read_walk_skips`]). A single file is always read.
+pub(in crate::cli) fn retain_table_files_local(root: &std::path::Path, files: &mut Vec<PathBuf>) {
+    let walk_root = root.to_string_lossy();
+    files.retain(|file| {
+        let relative = file.strip_prefix(root).unwrap_or(file).to_string_lossy();
+        !crate::artifacts::read_walk_skips(&walk_root, &relative)
+    });
+}
+
+/// The S3 counterpart of [`retain_table_files_local`] for one listed key.
+pub(in crate::cli) fn is_listed_table_object(prefix: &str, key: &str) -> bool {
+    key.ends_with(".parquet")
+        && !crate::artifacts::read_walk_skips(
+            prefix,
+            crate::maintenance::discovery::relative_key(prefix, key),
+        )
 }
 
 pub(in crate::cli) fn scan_s3_display_key(

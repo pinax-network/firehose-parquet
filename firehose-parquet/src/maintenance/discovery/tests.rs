@@ -132,6 +132,61 @@ fn native_policy_matches_frozen_walkers_and_explicit_inventory() {
     );
 }
 
+/// Parquet walks still select `_fireparq/` files (callers leave them out with
+/// `is_reserved_artifact_path`), while journal discovery prunes the whole
+/// artifact directory below the walk root: no partition lives there.
+#[test]
+fn journal_discovery_prunes_the_artifact_directory() {
+    let root = tempfile::tempdir().unwrap();
+    for name in [
+        "_fireparq/partitions.parquet",
+        "_fireparq/_fireparq_merge.json",
+        "_fireparq/verify_runs/run/_fireparq_rollup.json",
+        "blocks/day=1/part.parquet",
+        "blocks/day=1/_fireparq_merge.json",
+        "blocks/day=2/_fireparq_rollup.json",
+    ] {
+        write(root.path(), name);
+    }
+    let mut files = vec![];
+    collect_local(root.path(), LocalPolicy::MUTATION_PARQUET, &mut files).unwrap();
+    files.sort();
+    assert_eq!(
+        files,
+        [
+            root.path().join("_fireparq/partitions.parquet"),
+            root.path().join("blocks/day=1/part.parquet"),
+        ]
+    );
+    let mut journals = vec![];
+    collect_local(
+        root.path(),
+        LocalPolicy::named_any(&["_fireparq_merge.json", "_fireparq_rollup.json"]),
+        &mut journals,
+    )
+    .unwrap();
+    journals.sort();
+    assert_eq!(
+        journals,
+        [
+            root.path().join("blocks/day=1/_fireparq_merge.json"),
+            root.path().join("blocks/day=2/_fireparq_rollup.json"),
+        ]
+    );
+    // Rooted at the artifact directory itself, nothing below it is pruned.
+    let mut journals = vec![];
+    collect_local(
+        &root.path().join("_fireparq"),
+        LocalPolicy::named("_fireparq_merge.json"),
+        &mut journals,
+    )
+    .unwrap();
+    assert_eq!(
+        journals,
+        [root.path().join("_fireparq/_fireparq_merge.json")]
+    );
+}
+
 #[test]
 fn missing_and_non_directory_roots_keep_skip_vs_read_dir_errors() {
     let root = tempfile::tempdir().unwrap();

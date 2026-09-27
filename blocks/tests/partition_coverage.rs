@@ -252,7 +252,7 @@ async fn run(root: &std::path::Path, endpoint: &str, extra: &[&str]) -> std::pro
     .unwrap()
 }
 fn index_path(root: &std::path::Path) -> std::path::PathBuf {
-    root.join("output/test-chain/partitions.parquet")
+    root.join("output/test-chain/_fireparq/partitions.parquet")
 }
 fn assert_ok(output: &std::process::Output) {
     assert!(
@@ -310,15 +310,15 @@ async fn cli_records_all_backward_runs_and_resumes_by_source_frontier() {
         .unwrap()
         .iter()
         .any(|request| request.start_block_num == 13 && request.stop_block_num == 15));
-    assert!(!root
-        .path()
-        .join("output/test-chain/cursor.parquet")
-        .exists());
+    for cursor in ["_fireparq/cursor.parquet", "cursor.parquet"] {
+        assert!(!root.path().join("output/test-chain").join(cursor).exists());
+    }
 }
 
 /// `--without-chain-dir` (or `WITHOUT_CHAIN_DIR=true`) writes and resumes the
-/// index directly under `--output`, where `build --without-chain-dir` keeps
-/// its dataset; the chain name is still recorded in the rows.
+/// index in `_fireparq/` directly under `--output`, where
+/// `build --without-chain-dir` keeps its dataset; the chain name is still
+/// recorded in the rows.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn cli_without_chain_dir_writes_and_resumes_the_index_at_the_output_root() {
     let root = tempfile::tempdir().unwrap();
@@ -339,9 +339,18 @@ async fn cli_without_chain_dir_writes_and_resumes_the_index_at_the_output_root()
     .await;
     assert_ok(&output);
     let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(json["partitions_index"], "output/partitions.parquet");
+    assert_eq!(
+        json["partitions_index"],
+        "output/_fireparq/partitions.parquet"
+    );
     assert_eq!(json["chain"], "test-chain");
-    let path = root.path().join("output/partitions.parquet");
+    let path = root.path().join("output/_fireparq/partitions.parquet");
+    // The output root holds only the artifact directory.
+    let entries: Vec<_> = std::fs::read_dir(root.path().join("output"))
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+        .collect();
+    assert_eq!(entries, ["_fireparq"]);
     let first = read_verified_partitions_index(path.to_str().unwrap(), None).unwrap();
     assert_eq!(first.spans.len(), 3);
     assert!(first
@@ -365,6 +374,87 @@ async fn cli_without_chain_dir_writes_and_resumes_the_index_at_the_output_root()
     assert_eq!(next.coverage.stop_block, 16);
     assert_eq!(next.spans[..3], first.spans);
     assert!(!root.path().join("output/test-chain").exists());
+}
+
+/// A `partitions.parquet` that a release before v1.0.0 wrote at the dataset
+/// root is never shadowed by a new `_fireparq/partitions.parquet`: every mode
+/// (bounded, `--resume`, `--live`, `--overwrite`) fails before reading or
+/// writing an index, names both paths and the move, and resumes once the
+/// file is moved. Covers the default layout and `--without-chain-dir`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cli_legacy_root_index_is_refused_until_moved_into_fireparq() {
+    for (dataset, extra) in [
+        ("output/test-chain", None),
+        ("output", Some("--without-chain-dir")),
+    ] {
+        let root = tempfile::tempdir().unwrap();
+        let server = spawn_server(Fixture::regular()).await;
+        let with = |args: &[&'static str]| -> Vec<&'static str> {
+            args.iter().copied().chain(extra).collect()
+        };
+        // An index built by this release, then placed at the legacy location.
+        assert_ok(
+            &run(
+                root.path(),
+                &server.url,
+                &with(&[
+                    "--partition",
+                    "hour",
+                    "--start-block",
+                    "10",
+                    "--stop-block",
+                    "13",
+                ]),
+            )
+            .await,
+        );
+        let dataset = root.path().join(dataset);
+        let current = dataset.join("_fireparq/partitions.parquet");
+        let legacy = dataset.join("partitions.parquet");
+        std::fs::rename(&current, &legacy).unwrap();
+        let bytes = std::fs::read(&legacy).unwrap();
+        for mode in [
+            &["--partition", "hour", "--resume", "--stop-block", "16"][..],
+            &["--partition", "hour", "--stop-block", "16"],
+            &[
+                "--partition",
+                "hour",
+                "--overwrite",
+                "--start-block",
+                "10",
+                "--stop-block",
+                "16",
+            ],
+            &["--partition", "hour", "--live"],
+        ] {
+            let output = run(root.path(), &server.url, &with(mode)).await;
+            assert!(!output.status.success(), "{mode:?}");
+            let error = String::from_utf8_lossy(&output.stderr);
+            for expected in [
+                "legacy partition index",
+                "partitions.parquet",
+                "_fireparq/partitions.parquet",
+                "Move it there",
+            ] {
+                assert!(error.contains(expected), "{mode:?} {expected}: {error}");
+            }
+            assert_eq!(std::fs::read(&legacy).unwrap(), bytes, "{mode:?}");
+            assert!(!current.exists(), "{mode:?}");
+        }
+        std::fs::rename(&legacy, &current).unwrap();
+        let output = run(
+            root.path(),
+            &server.url,
+            &with(&["--partition", "hour", "--resume", "--stop-block", "16"]),
+        )
+        .await;
+        assert_ok(&output);
+        let resumed = read_verified_partitions_index(current.to_str().unwrap(), None).unwrap();
+        assert_eq!(
+            (resumed.coverage.start_block, resumed.coverage.stop_block),
+            (10, 16)
+        );
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -642,10 +732,9 @@ async fn cli_consumers_expose_coverage_and_preserve_disjoint_runs() {
     assert_ok(&list);
     let text = String::from_utf8_lossy(&list.stdout);
     assert!(text.contains("unknown (legacy index"));
-    assert!(!root
-        .path()
-        .join("output/test-chain/cursor.parquet")
-        .exists());
+    for cursor in ["_fireparq/cursor.parquet", "cursor.parquet"] {
+        assert!(!root.path().join("output/test-chain").join(cursor).exists());
+    }
 }
 
 fn stderr(output: &std::process::Output) -> String {

@@ -568,7 +568,12 @@ fn test_defaults() {
     assert_eq!(cli.common.api_token_envvar, None);
     assert!(cli.common.start_block.is_none());
     assert!(cli.common.stop_block.is_none());
-    assert_eq!(cli.common.cursor, PathBuf::from("cursor.parquet"));
+    // The default mirror lives in the dataset's `_fireparq/` directory.
+    assert_eq!(cli.common.cursor, PathBuf::from("_fireparq/cursor.parquet"));
+    assert_eq!(
+        cli.common.cursor,
+        PathBuf::from(crate::artifacts::DEFAULT_CURSOR_MIRROR)
+    );
     assert!(cli.common.cursor_template.is_none());
     assert!(cli.common.flush_interval_secs.is_none());
     assert!(cli.common.aws.aws_access_key_id.is_none());
@@ -738,8 +743,11 @@ fn test_build_config() {
     assert!(config.final_blocks_only);
     assert_eq!(config.stream_idle_timeout_secs, Some(120));
     assert_eq!(config.reconnect_stall_timeout_secs, Some(900));
-    // cursor defaults to cursor.parquet
-    assert_eq!(config.cursor_path, Some("cursor.parquet".to_string()));
+    // cursor defaults to the mirror in the dataset's `_fireparq/` directory
+    assert_eq!(
+        config.cursor_path,
+        Some("_fireparq/cursor.parquet".to_string())
+    );
 }
 
 fn assert_rejected_value(args: &[&str], flag: &str) {
@@ -4438,8 +4446,9 @@ fn test_scan_s3_display_key_keeps_exact_object_key() {
 }
 
 /// Read-only commands on a dataset written with `--without-chain-dir` to a
-/// bucket root: the index is an exact object at the root, and a table is a
-/// prefix directly below the bucket.
+/// bucket root: the index is an exact object in `_fireparq/`, a table is a
+/// prefix directly below the bucket, and a scan of the whole bucket reads only
+/// table data.
 #[test]
 fn test_collect_scan_s3_parquet_objects_at_a_bucket_root_dataset() {
     use bytes::Bytes;
@@ -4449,11 +4458,18 @@ fn test_collect_scan_s3_parquet_objects_at_a_bucket_root_dataset() {
 
     let store = InMemory::new();
     for key in [
+        "_fireparq/partitions.parquet",
+        "_fireparq/cursor.parquet",
+        "_fireparq/merkle_roots.parquet",
+        "_fireparq/verify_runs/run-1/roots.parquet",
+        // Legacy root artifacts of a release before v1.0.0.
         "partitions.parquet",
         "cursor.parquet",
         "blocks/year=2023/month=11/day=14/part-v1-a.parquet",
         "blocks-archive/part-v1-b.parquet",
         ".fireparq-ingest/state.json",
+        ".fireparq-ingest/hidden.parquet",
+        ".fireparq-owner-probes-v1/probe.parquet",
     ] {
         block_on_async(store.put(
             &Path::from(key),
@@ -4463,14 +4479,18 @@ fn test_collect_scan_s3_parquet_objects_at_a_bucket_root_dataset() {
     }
     let (objects, exact) = block_on_async(collect_scan_s3_parquet_objects(
         &store,
-        "partitions.parquet",
+        "_fireparq/partitions.parquet",
     ))
     .expect("collect index");
     assert!(exact);
     assert_eq!(objects.len(), 1);
     assert_eq!(
-        scan_s3_display_key(objects[0].location.as_ref(), "partitions.parquet", exact),
-        "partitions.parquet"
+        scan_s3_display_key(
+            objects[0].location.as_ref(),
+            "_fireparq/partitions.parquet",
+            exact
+        ),
+        "_fireparq/partitions.parquet"
     );
     let (objects, exact) =
         block_on_async(collect_scan_s3_parquet_objects(&store, "blocks")).expect("collect table");
@@ -4480,6 +4500,86 @@ fn test_collect_scan_s3_parquet_objects_at_a_bucket_root_dataset() {
         .map(|object| scan_s3_display_key(object.location.as_ref(), "blocks", exact))
         .collect();
     assert_eq!(keys, ["year=2023/month=11/day=14/part-v1-a.parquet"]);
+
+    let keys = |prefix: &str| -> Vec<String> {
+        block_on_async(collect_scan_s3_parquet_objects(&store, prefix))
+            .expect("collect prefix")
+            .0
+            .iter()
+            .map(|object| object.location.to_string())
+            .collect()
+    };
+    // The whole bucket: tables only.
+    assert_eq!(
+        keys(""),
+        [
+            "blocks-archive/part-v1-b.parquet",
+            "blocks/year=2023/month=11/day=14/part-v1-a.parquet",
+        ]
+    );
+    // Asking for the artifact directory itself lists its files.
+    assert_eq!(
+        keys("_fireparq"),
+        [
+            "_fireparq/cursor.parquet",
+            "_fireparq/merkle_roots.parquet",
+            "_fireparq/partitions.parquet",
+            "_fireparq/verify_runs/run-1/roots.parquet",
+        ]
+    );
+}
+
+/// A local directory scan or validate skips `_fireparq/`, the legacy root
+/// artifacts and control state below it, unless the scanned directory is
+/// `_fireparq/` itself.
+#[test]
+fn test_local_directory_walks_skip_dataset_artifacts() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("mainnet");
+    let files = [
+        "_fireparq/partitions.parquet",
+        "_fireparq/cursor.parquet",
+        "_fireparq/verify_runs/run-1/roots.parquet",
+        "cursor.parquet",
+        "merkle_roots.parquet",
+        ".fireparq-ingest/hidden.parquet",
+        "blocks/day=14/part-v1-a.parquet",
+    ];
+    for file in files {
+        let path = root.join(file);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, b"parquet").unwrap();
+    }
+    let walk = |dir: &std::path::Path| {
+        let mut found = Vec::new();
+        crate::maintenance::discovery::collect_local(
+            dir,
+            crate::maintenance::discovery::LocalPolicy::PARQUET,
+            &mut found,
+        )
+        .unwrap();
+        super::inspect::retain_table_files_local(dir, &mut found);
+        let mut found: Vec<String> = found
+            .iter()
+            .map(|file| {
+                file.strip_prefix(dir)
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect();
+        found.sort();
+        found
+    };
+    assert_eq!(walk(&root), ["blocks/day=14/part-v1-a.parquet"]);
+    assert_eq!(
+        walk(&root.join("_fireparq")),
+        [
+            "cursor.parquet",
+            "partitions.parquet",
+            "verify_runs/run-1/roots.parquet"
+        ]
+    );
 }
 
 /// `partitions build --without-chain-dir` puts the index, and reads the
@@ -4523,17 +4623,30 @@ fn test_partitions_output_root_with_and_without_chain_dir() {
         );
         assert_eq!(output_root_without_chain_dir(output), root);
     }
+    // The index lives in `_fireparq/` below either root.
     assert_eq!(
         partitions_index_path_in("s3://ethereum-mainnet"),
-        "s3://ethereum-mainnet/partitions.parquet"
+        "s3://ethereum-mainnet/_fireparq/partitions.parquet"
+    );
+    assert_eq!(
+        partitions_index_path_in("s3://ethereum-mainnet/"),
+        "s3://ethereum-mainnet/_fireparq/partitions.parquet"
     );
     assert_eq!(
         partitions_index_path_in("./output/"),
-        "./output/partitions.parquet"
+        "./output/_fireparq/partitions.parquet"
     );
     assert_eq!(
         build_partitions_index_path("s3://bucket", "mainnet"),
-        "s3://bucket/mainnet/partitions.parquet"
+        "s3://bucket/mainnet/_fireparq/partitions.parquet"
+    );
+    assert_eq!(
+        build_partitions_cursor_path("./output", "mainnet"),
+        "./output/mainnet/_fireparq/cursor.parquet"
+    );
+    assert_eq!(
+        build_partitions_cursor_path("s3://bucket/", "mainnet"),
+        "s3://bucket/mainnet/_fireparq/cursor.parquet"
     );
 }
 

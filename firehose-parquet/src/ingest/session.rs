@@ -235,6 +235,9 @@ pub async fn load_authoritative_resume(
     validate_runtime_bindings(&authority.descriptor, output, &aws)?;
     let configured = resolve_mirror_binding(output, config.cursor_path.as_deref(), &aws)?;
     if authority.descriptor.mirror != configured {
+        if is_pre_v1_default_mirror(output, &authority.descriptor.mirror, &configured, &aws) {
+            bail!("{PRE_V1_DEFAULT_MIRROR}");
+        }
         bail!(
             "{}",
             mirror_binding_mismatch(&authority.descriptor.mirror, &configured)
@@ -244,6 +247,25 @@ pub async fn load_authoritative_resume(
         ensure!(requested==authority.descriptor.origin_start,"explicit start differs from the stream's original start; use a new output root instead of rewinding or skipping");
     }
     Ok(Some(super::mirror::resume_parameters(&authority)?))
+}
+
+/// Refusal for a dataset created before v1.0.0 with the then-default mirror
+/// `<dataset root>/cursor.parquet`, resumed with the current default
+/// `_fireparq/cursor.parquet`. The binding is part of the stream identity, so
+/// the mirror is neither moved nor rebound; no private path is echoed.
+pub const PRE_V1_DEFAULT_MIRROR: &str = "this protected dataset was created with the pre-v1.0.0 default cursor mirror at the dataset root (cursor.parquet); the default is now _fireparq/cursor.parquet, but a mirror location is bound when a dataset is created. Rerun with --cursor cursor.parquet (CURSOR=cursor.parquet) to resume it";
+
+/// Whether the stored binding is the pre-v1.0.0 default mirror and the
+/// configured one is the current default, for the same dataset root.
+fn is_pre_v1_default_mirror(
+    output: &str,
+    stored: &MirrorBinding,
+    configured: &MirrorBinding,
+    aws: &crate::cli::AwsConfig,
+) -> bool {
+    let resolve = |cursor| resolve_mirror_binding(output, Some(cursor), aws).ok();
+    resolve(crate::cursor::CURSOR_PARQUET_FILENAME).as_ref() == Some(stored)
+        && resolve(crate::artifacts::DEFAULT_CURSOR_MIRROR).as_ref() == Some(configured)
 }
 
 /// The mirror binding is part of the immutable stream identity. Name the

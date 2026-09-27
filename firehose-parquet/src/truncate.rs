@@ -144,9 +144,15 @@ impl PartitionFilters {
     }
 
     /// Returns true when the file at `rel_path` (relative to the truncate path) matches.
+    ///
+    /// A partition filter selects table data only: it never matches a reserved dataset
+    /// artifact, even a partition-shaped path under `_fireparq/` or `verify_runs/`.
     fn matches(&self, rel_path: &str) -> bool {
         if self.groups.is_empty() {
             return true;
+        }
+        if is_reserved_artifact_path(rel_path) {
+            return false;
         }
         let mut dirs: Vec<&str> = rel_path.split('/').filter(|s| !s.is_empty()).collect();
         dirs.pop(); // The file name is not a partition directory.
@@ -551,6 +557,7 @@ mod tests {
         let root = dir.path().join("mainnet");
         write_test_file(&root.join("partitions.parquet"), b"partitions");
         write_test_file(&root.join("cursor.parquet"), b"cursor");
+        write_test_file(&root.join("_fireparq/partitions.parquet"), b"partitions");
         write_test_file(
             &root.join("blocks/year=2024/month=01/date=15/part-0001.parquet"),
             b"blocks",
@@ -571,11 +578,20 @@ mod tests {
         assert_eq!(
             rel_paths,
             vec![
+                "_fireparq/partitions.parquet".to_string(),
                 "blocks/year=2024/month=01/date=15/part-0001.parquet".to_string(),
                 "cursor.parquet".to_string(),
                 "partitions.parquet".to_string(),
             ]
         );
+        // Each artifact is labelled as not table data.
+        for rel in [
+            "_fireparq/partitions.parquet",
+            "cursor.parquet",
+            "partitions.parquet",
+        ] {
+            assert!(crate::artifacts::is_reserved_artifact_path(rel), "{rel}");
+        }
     }
 
     #[test]
@@ -717,6 +733,21 @@ mod tests {
         for filter in ["year=2026", "year", "year=2026/month=01", "*"] {
             assert!(!matches("cursor.parquet", &[filter]), "{filter}");
             assert!(!matches("partitions.parquet", &[filter]), "{filter}");
+            assert!(
+                !matches("_fireparq/partitions.parquet", &[filter]),
+                "{filter}"
+            );
+            for artifact in [
+                "_fireparq/year=2026/month=01/part-1.parquet",
+                "_fireparq/verify_runs/run/year=2026/month=01/part-1.parquet",
+                "verify_runs/run/year=2026/month=01/part-1.parquet",
+            ] {
+                assert!(!matches(artifact, &[filter]), "{filter} {artifact}");
+            }
+            assert!(matches(
+                "blocks/year=2026/month=01/part-1.parquet",
+                &[filter]
+            ));
         }
         // Without filters everything under the path matches, root artifacts included.
         assert!(matches("cursor.parquet", &[]));
@@ -953,6 +984,13 @@ mod tests {
     fn truncate_s3_at_a_bucket_root_keeps_artifacts_and_controls() {
         let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let artifacts = [
+            "_fireparq/cursor.parquet",
+            "_fireparq/partitions.parquet",
+            "_fireparq/merkle_roots.parquet",
+            "_fireparq/verify_runs/run-1/roots.parquet",
+            // A partition-shaped path inside `_fireparq/` still never matches
+            // a partition filter.
+            "_fireparq/year=2026/month=01/day=15/part-3.parquet",
             "cursor.parquet",
             "partitions.parquet",
             "merkle_roots.parquet",

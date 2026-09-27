@@ -365,6 +365,24 @@ mod tests {
             resolve_mirror_binding("s3://data/chain", None, &config).unwrap(),
             MirrorBinding::Disabled
         ));
+        // The default mirror lives in the dataset's _fireparq/ directory, below
+        // a chain directory, at a bucket root and under a local root alike.
+        let default = crate::artifacts::DEFAULT_CURSOR_MIRROR;
+        for (output, expected) in [
+            ("s3://data/chain", "chain/_fireparq/cursor.parquet"),
+            ("s3://data", "_fireparq/cursor.parquet"),
+        ] {
+            let binding = resolve_mirror_binding(output, Some(default), &config).unwrap();
+            assert!(
+                matches!(&binding, MirrorBinding::S3 { bucket, key, .. } if bucket=="data" && key==expected),
+                "{output}"
+            );
+        }
+        let local =
+            resolve_mirror_binding(root.path().to_str().unwrap(), Some(default), &config).unwrap();
+        assert!(
+            matches!(local, MirrorBinding::Local { absolute_path } if absolute_path==root.path().join("_fireparq/cursor.parquet").to_str().unwrap())
+        );
         for invalid in [
             "s3://data/a//b",
             "s3://data/../b",

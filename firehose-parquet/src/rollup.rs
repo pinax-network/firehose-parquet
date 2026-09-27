@@ -1233,6 +1233,14 @@ mod tests {
             "verify_runs/run-1/date=15/hour=14/part-000001.parquet",
             date
         ));
+        for artifact in [
+            "_fireparq/cursor.parquet",
+            "_fireparq/date=15/hour=14/part-000001.parquet",
+            "_fireparq/verify_runs/run-1/date=15/hour=14/part-000001.parquet",
+            "mainnet/_fireparq/year=2024/month=01/date=15/hour=14/part-000001.parquet",
+        ] {
+            assert!(!is_rollup_source(artifact, date), "{artifact}");
+        }
         assert!(!is_rollup_source(
             "blocks/part-abc12345-000001.parquet",
             date
@@ -1422,6 +1430,10 @@ mod tests {
             "partitions.parquet",
             "merkle_roots.parquet",
             "verify_runs/run-1/roots.parquet",
+            "_fireparq/cursor.parquet",
+            "_fireparq/partitions.parquet",
+            "_fireparq/merkle_roots.parquet",
+            "_fireparq/verify_runs/run-1/roots.parquet",
         ];
         for (i, rel) in reserved.iter().enumerate() {
             write_range_file(&root.path().join(rel), 1000 + i as u64, 1);
@@ -1597,6 +1609,9 @@ mod tests {
         let root = memory_root(&store, "mainnet");
         let day = format!("mainnet/{DAY}");
         let reserved = [
+            "mainnet/_fireparq/cursor.parquet",
+            "mainnet/_fireparq/partitions.parquet",
+            "mainnet/_fireparq/merkle_roots.parquet",
             "mainnet/cursor.parquet",
             "mainnet/partitions.parquet",
             "mainnet/merkle_roots.parquet",
@@ -1677,6 +1692,10 @@ mod tests {
             prefix: String::new(),
         };
         let artifacts = [
+            "_fireparq/cursor.parquet",
+            "_fireparq/partitions.parquet",
+            "_fireparq/merkle_roots.parquet",
+            "_fireparq/verify_runs/run-1/roots.parquet",
             "cursor.parquet",
             "partitions.parquet",
             "merkle_roots.parquet",

@@ -864,6 +864,7 @@ pub(in crate::cli) fn validate_parquet_local(
             crate::maintenance::discovery::LocalPolicy::PARQUET,
             &mut paths,
         )?;
+        super::inspect::retain_table_files_local(path, &mut paths);
         paths.sort();
     } else {
         anyhow::bail!("path does not exist: {}", path.display());
@@ -916,7 +917,7 @@ pub(in crate::cli) fn validate_parquet_s3(
 
     let mut parquet_objects: Vec<_> = objects
         .into_iter()
-        .filter(|obj| obj.location.as_ref().ends_with(".parquet"))
+        .filter(|obj| super::inspect::is_listed_table_object(&prefix, obj.location.as_ref()))
         .collect();
     parquet_objects.sort_by(|a, b| a.location.cmp(&b.location));
 

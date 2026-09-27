@@ -613,7 +613,7 @@ pub(crate) fn validate_artifact_destinations(
             if path_contains(&base, &path) {
                 let name = path.rsplit('/').next().unwrap_or("");
                 ensure!(
-                    name != "cursor.parquet"
+                    name != crate::cursor::CURSOR_PARQUET_FILENAME
                         && name != crate::merge_journal::JOURNAL_FILE
                         && !name.starts_with(".fireparq-"),
                     "artifact destination would overwrite protected recovery metadata"
@@ -649,6 +649,7 @@ async fn has_merge_journal(
                     }
                     if kind.is_dir()
                         && !crate::artifacts::is_control_path(&entry.path().to_string_lossy())
+                        && entry.file_name() != crate::artifacts::ARTIFACTS_DIR
                     {
                         pending.push(entry.path());
                     }
@@ -669,6 +670,12 @@ async fn has_merge_journal(
                     if contains_remote(prefix, object.location.as_ref())
                         && object.location.filename() == Some(crate::merge_journal::JOURNAL_FILE)
                         && !crate::artifacts::is_control_path(object.location.as_ref())
+                        && !crate::artifacts::is_reserved_artifact_path(
+                            crate::maintenance::discovery::relative_key(
+                                prefix,
+                                object.location.as_ref(),
+                            ),
+                        )
                     {
                         return Ok(true);
                     }

@@ -163,9 +163,9 @@ pub struct CommonArgs {
     /// Start block number (inclusive).
     ///
     /// When omitted, an existing output resumes from its authoritative state
-    /// under `.fireparq-ingest/` (never from the optional `cursor.parquet`
-    /// mirror), and a new output starts from the endpoint's first streamable
-    /// block.
+    /// under `.fireparq-ingest/` (never from the optional
+    /// `_fireparq/cursor.parquet` mirror), and a new output starts from the
+    /// endpoint's first streamable block.
     #[arg(
         short = 's',
         long,
@@ -192,14 +192,17 @@ pub struct CommonArgs {
     /// Optional cursor mirror (must end in .parquet), or `none` to disable it.
     ///
     /// `build` always resumes from the output's mandatory authority under
-    /// `.fireparq-ingest/`; this file is a derived compatibility copy. The
-    /// choice is bound when a dataset is created: later runs must pass the same
-    /// value, including `none`.
+    /// `.fireparq-ingest/`; this file is a derived compatibility copy. A
+    /// relative path resolves against the dataset root (`<output>/<chain_name>`,
+    /// or `<output>` with `--without-chain-dir`), so the default is
+    /// `<dataset root>/_fireparq/cursor.parquet`; an absolute local path or an
+    /// `s3://bucket/key` URI is used as given. The choice is bound when a
+    /// dataset is created: later runs must pass the same value, including `none`.
     #[arg(
         short = 'c',
         long,
         env = "CURSOR",
-        default_value = "cursor.parquet",
+        default_value = crate::artifacts::DEFAULT_CURSOR_MIRROR,
         hide_env_values = true,
         help_heading = "Block Range"
     )]
@@ -463,10 +466,10 @@ Examples:
     --start-block 1000000 --stop-block 1001000
 
   # Resume: rerun the same command. Progress comes from the output's
-  # .fireparq-ingest/ state; cursor.parquet is only an optional mirror
+  # .fireparq-ingest/ state; _fireparq/cursor.parquet is only an optional mirror
   fireparq build --network mainnet --partition date
 
-  # Create an output without the cursor.parquet mirror (bound at creation)
+  # Create an output without the _fireparq/cursor.parquet mirror (bound at creation)
   fireparq build --network mainnet --partition date --cursor none
 
   # One bucket per network: write the dataset at the bucket root instead of
@@ -597,9 +600,10 @@ pub enum Commands {
     /// This is the primary ingestion workflow. Partitions output by block range,
     /// date, hour, minute, or second. Supports live mode and S3 output. A rerun
     /// resumes from the output's authoritative state under `.fireparq-ingest/`;
-    /// `cursor.parquet` is only an optional mirror (`--cursor none` disables it).
+    /// `_fireparq/cursor.parquet` is only an optional mirror (`--cursor none`
+    /// disables it).
     Build(BuildArgs),
-    /// Partition index utilities (`partitions.parquet` workflows).
+    /// Partition index utilities (`_fireparq/partitions.parquet` workflows).
     #[command(subcommand)]
     Partitions(PartitionsCommands),
     /// Read and inspect Parquet files (schema, row counts, sample rows).
@@ -619,10 +623,10 @@ Examples:
   fireparq scan s3://bucket/eth-mainnet/blocks/
 
   # Resolve a shorthand key via S3_BUCKET when no local match exists
-  S3_BUCKET=my-bucket fireparq scan eth-mainnet/partitions.parquet
+  S3_BUCKET=my-bucket fireparq scan eth-mainnet/_fireparq/partitions.parquet
 
   # Scan a single S3 parquet file
-  fireparq scan s3://bucket/eth-mainnet/partitions.parquet
+  fireparq scan s3://bucket/eth-mainnet/_fireparq/partitions.parquet
 
   # Use row-by-row vertical output
   fireparq scan ./output/blocks/part-000001.parquet --vertical
@@ -727,7 +731,7 @@ Lookup order:
     ///
     /// Reads one table directory of `build` output (`<output>/<chain_name>/<table>`),
     /// computes partition-level `merkle_v2` roots, compares them to
-    /// `<output>/<chain_name>/merkle_roots.parquet`, and optionally writes
+    /// `<output>/<chain_name>/_fireparq/merkle_roots.parquet`, and optionally writes
     /// missing/updated entries. The chain and table are inferred from the file
     /// metadata and the directory layout. It only reads table data, so it can
     /// run while `build` writes the network: partitions `build` may still write
@@ -746,12 +750,12 @@ Examples:
   # Continue scanning all partitions (no fail-fast) and emit JSON report
   fireparq verify ./output/mainnet/blocks --no-fail-fast --report-json verify-report.json
 
-  # Publish the report to <output>/<chain_name>/verify_runs/<run_id>/report.json
+  # Publish the report to <output>/<chain_name>/_fireparq/verify_runs/<run_id>/report.json
   fireparq verify ./output/mainnet/blocks --publish-report
 
   # Publish the report to an explicit S3 location
   fireparq verify s3://bucket/mainnet/blocks \
-    --publish-report-path s3://bucket/mainnet/verify_runs/custom-run/report.json
+    --publish-report-path s3://bucket/mainnet/_fireparq/verify_runs/custom-run/report.json
 
   # Read-only protocol checks may resolve a shorthand S3 data path; runs that
   # write roots or reports need the explicit s3:// URI
@@ -759,7 +763,7 @@ Examples:
 
   # Verify S3 parquet data with an explicit registry (rows are keyed by network)
   fireparq verify s3://bucket/mainnet/blocks \
-    --registry-path s3://bucket/mainnet/merkle_roots.parquet
+    --registry-path s3://bucket/mainnet/_fireparq/merkle_roots.parquet
 
   # Data without firehose-parquet.block_type metadata: name the chain explicitly
   fireparq verify ./output/btc/blocks --chain bitcoin
@@ -823,7 +827,7 @@ Lookup order for the data path:
         /// Explicit path to publish the JSON report (local or s3://)
         #[arg(long, help_heading = "Reporting")]
         publish_report_path: Option<String>,
-        /// Explicit merkle roots registry path (local or s3://) [default: <chain_root>/merkle_roots.parquet]
+        /// Explicit merkle roots registry path (local or s3://) [default: <chain_root>/_fireparq/merkle_roots.parquet]
         #[arg(long, help_heading = "Registry")]
         registry_path: Option<String>,
         /// Accept the current data: replace differing roots (including roots from an older Merkle version) with computed values; replaced rows are reported as `updated` and the run passes once the registry is written
@@ -851,12 +855,12 @@ Examples:
   fireparq rollup ./output/blocks/ -o ./daily/blocks/ --flush-bytes 268435456
 
 Only part-*.parquet files below a partition finer than --partition are read.
-Files already at the target granularity and root artifacts (cursor.parquet,
-partitions.parquet, merkle_roots.parquet, verify_runs/) are left untouched, so
-re-running a rollup is safe. Without --delete-source, outputs carry the
-firehose-parquet.rollup_copy=true footer marker, and each re-run replaces the
-copies it wrote earlier in the target partitions it rolls up, also after merge
-renamed them.
+Files already at the target granularity, the _fireparq/ artifact directory and
+legacy root artifacts (cursor.parquet, partitions.parquet, merkle_roots.parquet,
+verify_runs/) are left untouched, so re-running a rollup is safe. Without
+--delete-source, outputs carry the firehose-parquet.rollup_copy=true footer
+marker, and each re-run replaces the copies it wrote earlier in the target
+partitions it rolls up, also after merge renamed them.
 
 Each target partition is journaled in _fireparq_rollup.json in its output
 directory. The next rollup into the same output finishes or undoes an
@@ -936,12 +940,12 @@ Examples:
   # Use snappy compression
   fireparq merge ./output/blocks/ --compression snappy
 
-Root artifacts (cursor.parquet, partitions.parquet, merkle_roots.parquet,
-verify_runs/) are skipped. A partition whose parts have different columns
-(names, types, nullability, or order) or different value-defining file metadata
-(chain, block type, byte or block-id encoding, vote or failed-transaction
-coverage, synthetic timestamps, stream mode) is left untouched and listed in the
-summary, and merge exits non-zero. Partitions below an interrupted rollup
+The _fireparq/ artifact directory and legacy root artifacts (cursor.parquet,
+partitions.parquet, merkle_roots.parquet, verify_runs/) are skipped. A partition
+whose parts have different columns (names, types, nullability, or order) or
+different value-defining file metadata (chain, block type, byte or block-id
+encoding, vote or failed-transaction coverage, synthetic timestamps, stream
+mode) is left untouched and listed in the summary, and merge exits non-zero. Partitions below an interrupted rollup
 (_fireparq_rollup.json) are left alone until that rollup is run again.
 
 Each partition merge is journaled in _fireparq_merge.json. Local interrupted
@@ -993,13 +997,13 @@ Examples:
   fireparq inspect s3://bucket/eth-mainnet/blocks/part-000001.parquet
 
   # Resolve a shorthand key via S3_BUCKET when no local match exists
-  S3_BUCKET=my-bucket fireparq inspect eth-mainnet/partitions.parquet
+  S3_BUCKET=my-bucket fireparq inspect eth-mainnet/_fireparq/partitions.parquet
 
   # Show only the schema with explicit nullability
-  fireparq inspect s3://bucket/eth-mainnet/partitions.parquet --schema-only
+  fireparq inspect s3://bucket/eth-mainnet/_fireparq/partitions.parquet --schema-only
 
   # Emit machine-readable schema details
-  fireparq inspect s3://bucket/eth-mainnet/partitions.parquet --schema-only --json
+  fireparq inspect s3://bucket/eth-mainnet/_fireparq/partitions.parquet --schema-only --json
 
 Lookup order:
   1. Explicit s3://bucket/... URIs are used as-is.
@@ -1022,8 +1026,9 @@ Lookup order:
     /// Delete parquet files from local filesystem or S3, with optional partition filtering.
     ///
     /// Deletes only .parquet files. Never deletes buckets or non-parquet files.
-    /// Truncating a network root includes root-level parquet artifacts like
-    /// partitions.parquet and cursor.parquet, and --dry-run lists each matched file.
+    /// Truncating a network root without filters includes the parquet artifacts
+    /// under `_fireparq/` (and legacy root ones such as partitions.parquet), and
+    /// --dry-run lists each matched file.
     /// Use --partition to target specific partitions. Nothing is deleted without --yes:
     /// without it, truncate prints a summary of what matched and exits non-zero.
     #[command(after_long_help = "\
@@ -1035,7 +1040,7 @@ Examples:
   fireparq truncate ./output/blocks/ --yes
 
   # Delete a single parquet file directly
-  fireparq truncate ./output/mainnet/partitions.parquet --yes
+  fireparq truncate ./output/mainnet/_fireparq/partitions.parquet --yes
 
   # Delete one day (also matches legacy date=15 directories)
   fireparq truncate ./output/blocks/ -p \"year=2026/month=01/day=15\" --yes
@@ -1090,7 +1095,7 @@ inspect, truncate never falls back to s3://$S3_BUCKET/<path> for a missing local
 /// Subcommands under `fireparq partitions`.
 #[derive(clap::Subcommand, Debug)]
 pub enum PartitionsCommands {
-    /// Build `partitions.parquet` directly from Firehose block timestamps.
+    /// Build `_fireparq/partitions.parquet` directly from Firehose block timestamps.
     /// Time spans traverse exact finalized ancestry; clipped spans stay incomplete.
     #[command(after_long_help = "\
 Examples:
@@ -1186,10 +1191,11 @@ Examples:
         api_token_envvar: Option<String>,
         /// Start block number (inclusive).
         ///
-        /// When omitted in bounded mode, falls back to a sibling `cursor.parquet`
-        /// if present, then to the endpoint's first streamable block.
+        /// When omitted in bounded mode, falls back to the dataset's default cursor
+        /// mirror (`_fireparq/cursor.parquet`) if present, then to the endpoint's
+        /// first streamable block.
         ///
-        /// When omitted in `--live` mode, existing `partitions.parquet` rows take
+        /// When omitted in `--live` mode, existing `_fireparq/partitions.parquet` rows take
         /// precedence as the restart anchor.
         ///
         /// With `--resume` (or `--live`) and an existing index, the build continues
@@ -1215,7 +1221,7 @@ Examples:
             value_parser = clap::value_parser!(u64).range(1..)
         )]
         stop_block: Option<u64>,
-        /// Keep extending `partitions.parquet` from its latest covered frontier.
+        /// Keep extending `_fireparq/partitions.parquet` from its latest covered frontier.
         #[arg(long, default_value = "false", help_heading = "Block Range")]
         live: bool,
         /// Poll interval used by `--live` finalized-head checks while waiting for new blocks.
@@ -1232,7 +1238,7 @@ Examples:
             value_parser = clap::value_parser!(u64).range(1..)
         )]
         block_range_size: Option<u64>,
-        /// Compression codec for the written `partitions.parquet`: zstd (level 3), zstd:<level>, snappy, gzip, none
+        /// Compression codec for the written `_fireparq/partitions.parquet`: zstd (level 3), zstd:<level>, snappy, gzip, none
         #[arg(long, default_value = "zstd", help_heading = "Output")]
         compression: String,
         /// Output root path: a local directory or an explicit s3://bucket/prefix URI (required).
@@ -1242,11 +1248,11 @@ Examples:
         /// `./path` or an absolute path for local output.
         #[arg(long, required = true, help_heading = "Output")]
         output: Option<String>,
-        /// Write `partitions.parquet` directly into `--output` instead of `<output>/<chain_name>/`.
+        /// Write `_fireparq/partitions.parquet` directly into `--output` instead of `<output>/<chain_name>/`.
         ///
         /// Use it with a dataset that `build --without-chain-dir` writes into
-        /// the same output root; a sibling `cursor.parquet` is then read from
-        /// that root too.
+        /// the same output root; the default cursor mirror
+        /// `_fireparq/cursor.parquet` is then read from that root too.
         #[arg(
             long,
             env = "WITHOUT_CHAIN_DIR",
@@ -1286,16 +1292,16 @@ Examples:
         #[command(flatten)]
         aws: AwsArgs,
     },
-    /// Validate continuity and invariants in `partitions.parquet`.
+    /// Validate continuity and invariants in `_fireparq/partitions.parquet`.
     #[command(after_long_help = "\
 Examples:
   # Validate all rows in a local index
   fireparq partitions validate \\
-    --partitions-index ./output/eth-mainnet/partitions.parquet
+    --partitions-index ./output/eth-mainnet/_fireparq/partitions.parquet
 
   # Validate one chain/type of a legacy index and allow gaps
   fireparq partitions validate \\
-    --partitions-index s3://my-bucket/partitions.parquet \\
+    --partitions-index s3://my-bucket/_fireparq/partitions.parquet \\
     --partition-type date \\
     --partition-chain eth-mainnet \\
     --allow-gaps \\
@@ -1325,14 +1331,14 @@ Examples:
 Examples:
   # Select shard 1 of 4 using ordinal assignment
   fireparq partitions shard \\
-    --partitions-index ./output/eth-mainnet/partitions.parquet \\
+    --partitions-index ./output/eth-mainnet/_fireparq/partitions.parquet \\
     --partition-type hour \\
     --shard-count 4 \\
     --shard-index 1
 
   # Select shard 0 of 8 using hash assignment and emit JSON
   fireparq partitions shard \\
-    --partitions-index s3://my-bucket/eth-mainnet/partitions.parquet \\
+    --partitions-index s3://my-bucket/eth-mainnet/_fireparq/partitions.parquet \\
     --partition-type date \\
     --partition-chain eth-mainnet \\
     --from '2015-07-29 00:00:00' \\
@@ -1373,17 +1379,17 @@ Examples:
         #[command(flatten)]
         aws: AwsArgs,
     },
-    /// List/query partition rows from `partitions.parquet`.
+    /// List/query partition rows from `_fireparq/partitions.parquet`.
     #[command(after_long_help = "\
 Examples:
   # List hour partitions from local index
   fireparq partitions ls \\
-    --partitions-index ./output/eth-mainnet/partitions.parquet \\
+    --partitions-index ./output/eth-mainnet/_fireparq/partitions.parquet \\
     --partition-type hour
 
   # Filter by chain + time window and emit JSON
   fireparq partitions ls \\
-    --partitions-index s3://my-bucket/eth-mainnet/partitions.parquet \\
+    --partitions-index s3://my-bucket/eth-mainnet/_fireparq/partitions.parquet \\
     --partition-type date \\
     --partition-chain eth-mainnet \\
     --from '2015-07-29 00:00:00' \\
@@ -1421,14 +1427,14 @@ Examples:
 Examples:
   # Resolve from local index
   fireparq partitions resolve \\
-    --partitions-index ./output/eth-mainnet/partitions.parquet \\
+    --partitions-index ./output/eth-mainnet/_fireparq/partitions.parquet \\
     --partition-type hour \\
     --partition-value '2015-07-30 15:00:00' \\
     --partition-chain eth-mainnet
 
   # Resolve from S3 index and emit JSON
   fireparq partitions resolve \\
-    --partitions-index s3://my-bucket/eth-mainnet/partitions.parquet \\
+    --partitions-index s3://my-bucket/eth-mainnet/_fireparq/partitions.parquet \\
     --partition-type date \\
     --partition-value '2015-07-30 00:00:00' \\
     --partition-chain eth-mainnet \\

@@ -762,16 +762,7 @@ fn read_local(path: &Path) -> Result<Option<Bytes>> {
 }
 fn write_local(path: &Path, bytes: &Bytes) -> Result<()> {
     let parent = path.parent().context("mirror has no parent")?;
-    let mut builder = fs::DirBuilder::new();
-    builder.recursive(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::DirBuilderExt;
-        builder.mode(0o700);
-    }
-    builder
-        .create(parent)
-        .map_err(|_| anyhow::anyhow!("creating private mirror directory failed"))?;
+    create_mirror_directory(parent)?;
     sync_links(parent)?;
     let temporary = parent.join(format!(".fireparq-mirror-{}.tmp", uuid::Uuid::new_v4()));
     let result = (|| {
@@ -801,6 +792,32 @@ fn write_local(path: &Path, bytes: &Bytes) -> Result<()> {
         let _ = fs::remove_file(temporary);
     }
     result
+}
+/// Creates the mirror's missing parent directories with mode 0700. The dataset's
+/// `_fireparq/` directory, which holds the default mirror, is the exception: it
+/// is shared with the partition index, the registry and the verify reports, so
+/// it gets default permissions like the table directories. The mirror file
+/// itself is always 0600.
+fn create_mirror_directory(parent: &Path) -> Result<()> {
+    let mut builder = fs::DirBuilder::new();
+    builder.recursive(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
+    }
+    let failed = |_| anyhow::anyhow!("creating private mirror directory failed");
+    if parent.file_name() != Some(std::ffi::OsStr::new(crate::artifacts::ARTIFACTS_DIR)) {
+        return builder.create(parent).map_err(failed);
+    }
+    if let Some(dataset_root) = parent.parent() {
+        builder.create(dataset_root).map_err(failed)?;
+    }
+    match fs::create_dir(parent) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
+        Err(error) => Err(failed(error)),
+    }
 }
 fn sync_private_file(path: &Path) -> Result<()> {
     #[cfg(unix)]

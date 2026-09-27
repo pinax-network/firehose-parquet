@@ -19,6 +19,11 @@ use crate::ingest::state::{
 use crate::ingest::store::TransactionStateStore;
 use std::collections::BTreeSet;
 
+/// The default registry, relative to a chain root: `_fireparq/merkle_roots.parquet`.
+fn default_registry() -> String {
+    crate::artifacts::DatasetArtifact::MerkleRoots.relative_path()
+}
+
 /// Runs `hook` at a named point of the next run on this thread:
 /// `after-frontier` (writer progress read, nothing listed yet), `before-scan`
 /// (files listed, none read) or `after-scan` (before the snapshot check).
@@ -73,7 +78,7 @@ fn verify_writes_roots_and_reports_while_another_command_owns_every_scope() {
     let first = verify_parquet(data.to_str().unwrap(), None, &opts).unwrap();
     assert!(first.summary.wrote_registry);
     assert_eq!(first.summary.missing_expected, 2);
-    assert!(chain_root.join(MERKLE_ROOTS_FILENAME).exists());
+    assert!(chain_root.join(default_registry()).exists());
     assert!(report.exists());
     assert!(Path::new(first.published_report_path.as_ref().unwrap()).exists());
 
@@ -258,7 +263,7 @@ fn the_protected_frontier_decides_open_partitions_while_build_owns_the_dataset()
     let root = std::fs::canonicalize(dir.path()).unwrap().join("mainnet");
     let descriptor = protected_dataset(&root, &[&[100, 101, 105], &[110, 112, 119]]);
     let data = root.join("blocks");
-    let registry = root.join(MERKLE_ROOTS_FILENAME);
+    let registry = root.join(default_registry());
     let (first, last) = (
         "block_range=100-110".to_string(),
         "block_range=110-120".to_string(),
@@ -366,7 +371,7 @@ fn a_rewrite_during_the_scan_fails_before_anything_is_compared_or_written() {
         let dir = tempfile::tempdir().unwrap();
         let root = std::fs::canonicalize(dir.path()).unwrap();
         let data = legacy_fixture(&root);
-        let registry = root.join("mainnet").join(MERKLE_ROOTS_FILENAME);
+        let registry = root.join("mainnet").join(default_registry());
         let hooked = data.clone();
         after_scan(move || rewrite(&hooked));
         let err = verify_parquet(data.to_str().unwrap(), None, &base_opts()).unwrap_err();
@@ -450,7 +455,7 @@ fn an_unfinished_merge_is_refused_without_recovering_anything() {
         "{before:?}"
     );
 
-    let registry = root.join("mainnet").join(MERKLE_ROOTS_FILENAME);
+    let registry = root.join("mainnet").join(default_registry());
     let mut protocol_only = base_opts();
     protocol_only.checks = vec![VerifyCheck::Protocol];
     for opts in [base_opts(), protocol_only] {
@@ -810,6 +815,15 @@ fn remote_protected_dataset_at_the_bucket_root_is_verified_beside_root_artifacts
         }
     }
     // Readable block_num files: scanning any of them would add a partition.
+    put_block_nums(store.as_ref(), "_fireparq/cursor.parquet", &[994]);
+    put_block_nums(store.as_ref(), "_fireparq/partitions.parquet", &[993]);
+    put_block_nums(store.as_ref(), "_fireparq/merkle_roots.parquet", &[992]);
+    put_block_nums(
+        store.as_ref(),
+        "_fireparq/verify_runs/a/roots.parquet",
+        &[991],
+    );
+    // Legacy root artifacts of a release before v1.0.0 stay reserved.
     put_block_nums(store.as_ref(), "cursor.parquet", &[999]);
     put_block_nums(store.as_ref(), "partitions.parquet", &[998]);
     put_block_nums(store.as_ref(), "merkle_roots.parquet", &[997]);
@@ -872,11 +886,19 @@ fn remote_protected_dataset_at_the_bucket_root_is_verified_beside_root_artifacts
     for (registry, expected) in [
         ("s3://bucket/cursor.parquet", "protected recovery metadata"),
         (
+            "s3://bucket/_fireparq/cursor.parquet",
+            "protected recovery metadata",
+        ),
+        (
             "s3://bucket/blocks/block_range=100-110/roots.parquet",
             "ordinary protected data part",
         ),
         ("s3://bucket/.fireparq-ingest/roots.parquet", "control path"),
         ("s3://bucket/merkle_roots.parquet", "AWS config required"),
+        (
+            "s3://bucket/_fireparq/merkle_roots.parquet",
+            "AWS config required",
+        ),
     ] {
         let mut opts = base_opts();
         opts.checks = vec![VerifyCheck::Roots];
@@ -893,6 +915,101 @@ fn remote_protected_dataset_at_the_bucket_root_is_verified_beside_root_artifacts
         assert!(format!("{err:#}").contains(expected), "{registry}: {err:#}");
         assert_eq!(objects(), before, "{registry}");
     }
+    // The default registry is `_fireparq/merkle_roots.parquet`. The bucket
+    // still holds a legacy root `merkle_roots.parquet`, so a default run is
+    // refused before the registry is read, whatever prefix is verified.
+    for prefix in ["blocks", ""] {
+        let mut opts = base_opts();
+        opts.checks = vec![VerifyCheck::Roots];
+        let before = objects();
+        let err = super::super::verify_source(
+            &remote_source_at(store.clone(), prefix),
+            None,
+            &opts,
+            time::OffsetDateTime::now_utc(),
+            uuid::Uuid::new_v4().to_string(),
+        )
+        .unwrap_err();
+        let err = format!("{err:#}");
+        assert!(
+            err.contains("legacy merkle roots registry at s3://bucket/merkle_roots.parquet")
+                && err.contains("s3://bucket/_fireparq/merkle_roots.parquet"),
+            "{prefix:?}: {err}"
+        );
+        assert_eq!(objects(), before, "{prefix:?}");
+    }
+}
+
+/// On S3, below a chain directory and at a bucket root, a default-registry
+/// run refuses a legacy root registry and names the move; once it is moved,
+/// verify reads the moved registry (and only then needs AWS settings).
+#[test]
+fn remote_legacy_root_registry_is_refused_instead_of_shadowed() {
+    for (chain_prefix, table_prefix) in [("mainnet", "mainnet/blocks"), ("", "blocks")] {
+        let store: Arc<dyn object_store::ObjectStore> =
+            Arc::new(object_store::memory::InMemory::new());
+        put_block_nums(
+            store.as_ref(),
+            &format!("{table_prefix}/day=1/part-0.parquet"),
+            &[1, 2],
+        );
+        let join = |name: &str| {
+            if chain_prefix.is_empty() {
+                name.to_string()
+            } else {
+                format!("{chain_prefix}/{name}")
+            }
+        };
+        let legacy = join("merkle_roots.parquet");
+        let moved = join("_fireparq/merkle_roots.parquet");
+        put_block_nums(store.as_ref(), &legacy, &[1]);
+        let mut opts = base_opts();
+        opts.checks = vec![VerifyCheck::Roots];
+        let run = || {
+            super::super::verify_source(
+                &remote_source_at(store.clone(), table_prefix),
+                None,
+                &opts,
+                time::OffsetDateTime::now_utc(),
+                uuid::Uuid::new_v4().to_string(),
+            )
+        };
+        let err = format!("{:#}", run().unwrap_err());
+        assert!(
+            err.contains(&format!("s3://bucket/{legacy}"))
+                && err.contains(&format!("s3://bucket/{moved}"))
+                && err.contains("Move it there"),
+            "{chain_prefix:?}: {err}"
+        );
+        // Moved: the legacy check passes and the run proceeds to the registry.
+        let bytes = super::super::block_on_async(async {
+            store
+                .get(&object_store::path::Path::from(legacy.as_str()))
+                .await
+                .unwrap()
+                .bytes()
+                .await
+        })
+        .unwrap();
+        super::super::block_on_async(async {
+            store
+                .put(
+                    &object_store::path::Path::from(moved.as_str()),
+                    bytes.into(),
+                )
+                .await
+                .unwrap();
+            store
+                .delete(&object_store::path::Path::from(legacy.as_str()))
+                .await
+                .unwrap();
+        });
+        let err = format!("{:#}", run().unwrap_err());
+        assert!(
+            err.contains("AWS config required"),
+            "{chain_prefix:?}: {err}"
+        );
+    }
 }
 
 #[test]
@@ -905,7 +1022,7 @@ fn protocol_only_runs_stay_read_only_while_owned() {
     opts.checks = vec![VerifyCheck::Protocol];
     let report = verify_parquet(data.to_str().unwrap(), None, &opts).unwrap();
     assert!(!report.summary.wrote_registry);
-    assert!(!root.join("mainnet").join(MERKLE_ROOTS_FILENAME).exists());
+    assert!(!root.join("mainnet").join(default_registry()).exists());
 }
 
 #[test]
@@ -941,7 +1058,7 @@ fn a_merge_that_starts_during_the_scan_is_refused() {
     after_scan(move || std::fs::write(hooked.join("day=1").join(JOURNAL_FILE), b"{}").unwrap());
     let err = verify_parquet(data.to_str().unwrap(), None, &base_opts()).unwrap_err();
     assert!(format!("{err:#}").contains("unfinished merge"), "{err:#}");
-    assert!(!root.join("mainnet").join(MERKLE_ROOTS_FILENAME).exists());
+    assert!(!root.join("mainnet").join(default_registry()).exists());
 }
 
 #[test]
@@ -990,7 +1107,7 @@ fn files_that_vanish_are_tolerated_only_in_open_partitions() {
     );
     assert!(err.contains("changed while verify was reading"), "{err}");
     assert!(err.contains("day=1"), "{err}");
-    assert!(!root.join("mainnet").join(MERKLE_ROOTS_FILENAME).exists());
+    assert!(!root.join("mainnet").join(default_registry()).exists());
 }
 
 #[test]
@@ -1043,7 +1160,7 @@ fn a_protected_marker_without_authoritative_state_is_an_error() {
         verify_parquet(data.to_str().unwrap(), None, &base_opts()).unwrap_err()
     );
     assert!(err.contains("no authoritative ingestion state"), "{err}");
-    assert!(!root.join("mainnet").join(MERKLE_ROOTS_FILENAME).exists());
+    assert!(!root.join("mainnet").join(default_registry()).exists());
 }
 
 #[test]
@@ -1102,7 +1219,7 @@ fn a_partition_directory_or_file_is_recorded_under_its_own_partition() {
     .unwrap();
     assert_eq!(partitions(&file, "match"), ["day=2"]);
     assert_eq!(
-        registry_partitions(&root.join("mainnet").join(MERKLE_ROOTS_FILENAME)),
+        registry_partitions(&root.join("mainnet").join(default_registry())),
         ["day=1", "day=2"]
     );
 }
@@ -1215,7 +1332,7 @@ fn an_unfinished_rollup_is_refused_without_recovering_anything() {
     assert!(day.join(ROLLUP_JOURNAL_FILE).is_file());
     let before = tree(&data);
 
-    let registry = chain.join(MERKLE_ROOTS_FILENAME);
+    let registry = chain.join(default_registry());
     let mut protocol_only = base_opts();
     protocol_only.checks = vec![VerifyCheck::Protocol];
     for (path, opts) in [

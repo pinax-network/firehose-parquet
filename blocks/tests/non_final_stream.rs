@@ -244,7 +244,7 @@ async fn explicit_false_reaches_rpc_preserves_recurrence_and_warns_only_non_fina
             );
             assert_eq!(values.values().filter(|&&count| count == 1).count(), 4);
         }
-        let cursor = load_cursor_parquet(&root.join("cursor.parquet"))
+        let cursor = load_cursor_parquet(&root.join("_fireparq/cursor.parquet"))
             .unwrap()
             .unwrap();
         assert_eq!(cursor.last_block_num, 101);
@@ -910,7 +910,7 @@ async fn expired_committed_parts_do_not_affect_a_running_or_restarted_live_build
         .unwrap();
 
     // Wait until the four blocks of the first hour are committed and mirrored.
-    let cursor = root.join("cursor.parquet");
+    let cursor = root.join("_fireparq/cursor.parquet");
     let committed = tokio::time::timeout(Duration::from_secs(30), async {
         loop {
             if let Ok(Some(state)) = load_cursor_parquet(&cursor) {

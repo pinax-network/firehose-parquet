@@ -103,7 +103,7 @@ Examples:
 
   # Resume an existing output from its authoritative .fireparq-ingest/
   # state, or start a new one at the endpoint's first streamable block
-  # (cursor.parquet is only an optional mirror; --cursor none disables it)
+  # (_fireparq/cursor.parquet is only an optional mirror; --cursor none disables it)
   fireparq build --network mainnet
 
   # See all build options
@@ -1410,7 +1410,8 @@ async fn run_partitions_build(
         block_range_size,
     );
     // `<output>/<chain>`, or `<output>` itself with --without-chain-dir: the
-    // index and the sibling cursor used to infer --start-block both live there.
+    // index and the default cursor mirror used to infer --start-block both
+    // live in its `_fireparq/` directory.
     let chain_output_root = resolve_partitions_output_root(&output_root, &chain, without_chain_dir);
     let partitions_index = partitions_index_path_in(&chain_output_root);
 
@@ -1480,12 +1481,12 @@ async fn run_partitions_build(
         || {
             let cursor = CursorLocation::resolve(
                 &chain_output_root,
-                firehose_parquet::cursor::CURSOR_PARQUET_FILENAME,
+                firehose_parquet::artifacts::DEFAULT_CURSOR_MIRROR,
                 |bucket| Ok(Arc::new(aws.build_read_client(bucket)?)),
             )?;
             Ok(cursor
                 .load()
-                .context("reading sibling cursor.parquet to infer --start-block")?
+                .context("reading the default cursor mirror _fireparq/cursor.parquet to infer --start-block")?
                 .map(|cursor| {
                     cursor
                         .last_block_num
@@ -1832,11 +1833,11 @@ fn ensure_existing_partitions_index_mode(
 /// Resolve the first block a partitions build probes.
 ///
 /// When an existing index is resumed (`--live`, or bounded `--resume`), its stored frontier
-/// is the only valid start: the sibling cursor and endpoint metadata are not consulted, and
-/// an explicit `--start-block` past the frontier is rejected because the terminal row would
+/// is the only valid start: the default cursor mirror and endpoint metadata are not consulted,
+/// and an explicit `--start-block` past the frontier is rejected because the terminal row would
 /// otherwise be stretched across the unprobed blocks in between. A new index starts at the
-/// explicit `--start-block`, then the sibling cursor (bounded mode only), then the endpoint's
-/// first streamable block.
+/// explicit `--start-block`, then the default cursor mirror `_fireparq/cursor.parquet` (bounded
+/// mode only), then the endpoint's first streamable block.
 fn resolve_partitions_build_start_block(
     resume_frontier: Option<u64>,
     explicit_start_block: Option<u64>,
@@ -1871,7 +1872,7 @@ fn resolve_partitions_build_start_block(
             )
         } else {
             anyhow!(
-                "--start-block is required when no sibling cursor.parquet exists and the endpoint does not expose first_streamable_block_num"
+                "--start-block is required when no default cursor mirror (_fireparq/cursor.parquet) exists and the endpoint does not expose first_streamable_block_num"
             )
         }
     })
@@ -3638,6 +3639,18 @@ mod tests {
         for (output, cursor, bucket, key) in [
             (
                 "s3://data/mainnet",
+                firehose_parquet::artifacts::DEFAULT_CURSOR_MIRROR,
+                "data",
+                "mainnet/_fireparq/cursor.parquet",
+            ),
+            (
+                "s3://data",
+                firehose_parquet::artifacts::DEFAULT_CURSOR_MIRROR,
+                "data",
+                "_fireparq/cursor.parquet",
+            ),
+            (
+                "s3://data/mainnet",
                 "cursor.parquet",
                 "data",
                 "mainnet/cursor.parquet",
@@ -3692,7 +3705,7 @@ mod tests {
     fn test_resolve_cursor_location_places_default_local_cursor_under_chain_output_root() {
         let config = Config {
             output: std::path::PathBuf::from("./output/mainnet"),
-            cursor_path: Some("cursor.parquet".to_string()),
+            cursor_path: Some(firehose_parquet::artifacts::DEFAULT_CURSOR_MIRROR.to_string()),
             s3_bucket: Some("my-bucket".to_string()),
             aws_access_key_id: Some("AKID123".to_string()),
             aws_secret_access_key: Some("secret456".to_string()),
@@ -3706,7 +3719,7 @@ mod tests {
             Some(CursorLocation::Local(path)) => {
                 assert_eq!(
                     path,
-                    std::path::PathBuf::from("./output/mainnet").join("cursor.parquet")
+                    std::path::PathBuf::from("./output/mainnet/_fireparq/cursor.parquet")
                 );
             }
             other => panic!("expected local cursor location, got {other:?}"),

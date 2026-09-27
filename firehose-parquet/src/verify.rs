@@ -1,8 +1,9 @@
 use crate::artifacts::{
-    is_control_path, is_reserved_artifact_path, MERKLE_ROOTS_FILENAME, VERIFY_RUNS_DIR,
+    is_control_path, is_reserved_artifact_path, join_dataset_path, legacy_artifact_refusal,
+    DatasetArtifact,
 };
 use crate::cli::{block_on_async, resolve_parquet_input_path_string, AwsConfig};
-use crate::cursor::{parse_cursor, CURSOR_PARQUET_FILENAME};
+use crate::cursor::parse_cursor;
 use crate::ingest::binding::resolve_output_identity;
 use crate::ingest::maintenance::{self, MaintenanceTarget};
 use crate::ingest::observe;
@@ -779,6 +780,31 @@ impl DataSource {
         Ok(by_partition)
     }
 
+    /// Whether a file (local) or object (in the verified bucket) exists.
+    /// Lookup errors other than absence are errors.
+    fn contains(&self, path: &str) -> Result<bool> {
+        match self {
+            Self::Local { .. } => match std::fs::symlink_metadata(path) {
+                Ok(_) => Ok(true),
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(false),
+                Err(err) => Err(anyhow::Error::new(err).context(format!("inspecting {path}"))),
+            },
+            Self::Remote { bucket, store, .. } => {
+                let (path_bucket, key) = parse_s3_url(path)?;
+                anyhow::ensure!(
+                    path_bucket == *bucket,
+                    "{path} is outside the verified bucket"
+                );
+                let location = object_store::path::Path::from(key.as_str());
+                match block_on_async(store.head(&location)) {
+                    Ok(_) => Ok(true),
+                    Err(object_store::Error::NotFound { .. }) => Ok(false),
+                    Err(err) => Err(anyhow!("inspecting {path}: {err}")),
+                }
+            }
+        }
+    }
+
     /// Reads the legacy cursor in the chain root (local, or in the verified
     /// bucket), or `None` when it does not exist.
     fn read_optional(&self, path: &str) -> Result<Option<Vec<u8>>> {
@@ -963,11 +989,11 @@ fn run_test_hooks(point: &str) {
 /// that is scanned.
 #[derive(Debug)]
 enum WriterProgress {
-    /// No writer state in the chain root: no protected dataset and no
-    /// `cursor.parquet`.
+    /// No writer state in the chain root: no protected dataset and no legacy
+    /// root `cursor.parquet`.
     Unknown,
-    /// A legacy `cursor.parquet` exists but cannot be read, so nothing can be
-    /// placed relative to the writer.
+    /// A legacy root `cursor.parquet` exists but cannot be read, so nothing can
+    /// be placed relative to the writer.
     Unreadable { source: String, error: String },
     Known {
         /// Last block the writer committed (protected) or saved (legacy
@@ -1016,7 +1042,9 @@ impl WriterProgress {
 }
 
 /// Reads the writer progress of a chain root: the authoritative ingestion
-/// state of a protected dataset, else a legacy `cursor.parquet`.
+/// state of a protected dataset, else the cursor that unprotected releases
+/// wrote at the chain root (`<chain_root>/cursor.parquet`). A protected
+/// dataset's mirror, in `_fireparq/` or elsewhere, is never read: authority wins.
 fn read_writer_progress(
     source: &DataSource,
     chain_root: &str,
@@ -1025,7 +1053,7 @@ fn read_writer_progress(
         let progress = WriterProgress::from_authority(&state, chain_root);
         return Ok((progress, Some(state)));
     }
-    let cursor_path = join_artifact_path(chain_root, CURSOR_PARQUET_FILENAME);
+    let cursor_path = DatasetArtifact::CursorMirror.legacy_path_in(chain_root);
     let state = match source
         .read_optional(&cursor_path)
         .and_then(|data| data.map(|data| parse_cursor(data.into())).transpose())
@@ -1131,6 +1159,24 @@ fn artifact_destinations(
     }
     paths.extend(published.map(str::to_string));
     paths
+}
+
+/// Refuses a default-registry run beside a registry that a release before
+/// v1.0.0 wrote at the chain root: comparing against, and then creating,
+/// `_fireparq/merkle_roots.parquet` would silently shadow it. Nothing is read
+/// or written; the operator moves the file (an explicit `--registry-path`
+/// still selects any registry).
+fn refuse_legacy_registry(source: &DataSource, chain_root: &str) -> Result<()> {
+    let artifact = DatasetArtifact::MerkleRoots;
+    let legacy = artifact.legacy_path_in(chain_root);
+    if source.contains(&legacy)? {
+        return Err(legacy_artifact_refusal(
+            artifact,
+            &legacy,
+            &artifact.path_in(chain_root),
+        ));
+    }
+    Ok(())
 }
 
 /// Refuses artifact destinations that would replace recovery controls, a
@@ -1242,12 +1288,12 @@ fn verify_source(
     let registry_path = |chain_root: &str| {
         opts.registry_path
             .clone()
-            .unwrap_or_else(|| join_artifact_path(chain_root, MERKLE_ROOTS_FILENAME))
+            .unwrap_or_else(|| DatasetArtifact::MerkleRoots.path_in(chain_root))
     };
     let run_report_path = |chain_root: &str| {
-        join_artifact_path(
-            chain_root,
-            &format!("{VERIFY_RUNS_DIR}/{run_id}/report.json"),
+        join_dataset_path(
+            &DatasetArtifact::VerifyRuns.path_in(chain_root),
+            &format!("{run_id}/report.json"),
         )
     };
     let published_path = |chain_root: &str| {
@@ -1258,6 +1304,9 @@ fn verify_source(
         })
     };
     if let Some(chain_root) = &discovered_root {
+        if runs_roots && opts.registry_path.is_none() {
+            refuse_legacy_registry(source, chain_root)?;
+        }
         let artifacts = artifact_destinations(
             opts,
             &registry_path(chain_root),
@@ -1662,8 +1711,9 @@ struct Target {
     table: String,
     /// Network (`firehose-parquet.chain_name`, else the chain root directory name).
     network: Option<String>,
-    /// `<output>/<chain_name>` directory (local path or `s3://bucket/prefix`)
-    /// holding the table directories, `merkle_roots.parquet` and `verify_runs/`.
+    /// `<output>/<chain_name>` directory, or `<output>` with
+    /// `--without-chain-dir` (local path or `s3://bucket/prefix`), holding the
+    /// table directories and `_fireparq/` (`merkle_roots.parquet`, `verify_runs/`).
     chain_root: String,
     hash_strategy: HashStrategy,
 }
@@ -1733,11 +1783,6 @@ fn file_layout(file_path: &str) -> FileLayout {
         table,
         chain_root_name,
     }
-}
-
-/// Joins a `/`-separated artifact path onto a chain root.
-fn join_artifact_path(chain_root: &str, artifact: &str) -> String {
-    format!("{}/{artifact}", chain_root.trim_end_matches('/'))
 }
 
 /// Resolves the [`Target`] from the first scanned file and checks that every
@@ -1839,7 +1884,7 @@ fn check_same_target(
     if layout.chain_root != target.chain_root || layout.table.as_deref() != Some(&target.table) {
         return Err(anyhow!(
             "the verify path holds more than one table: {file_path} is not in {}; verify one table directory at a time",
-            join_artifact_path(&target.chain_root, &target.table)
+            join_dataset_path(&target.chain_root, &target.table)
         ));
     }
     if let Some(block_type) = footer.block_type.as_deref() {
@@ -1929,7 +1974,7 @@ fn canonical_file_path(path: &Path) -> Option<PathBuf> {
 /// A warning when an explicit registry sits inside the verified table
 /// directory under a name other commands do not skip.
 fn registry_inside_table_warning(registry: &str, target: &Target) -> Option<String> {
-    let table_dir = join_artifact_path(&target.chain_root, &target.table);
+    let table_dir = join_dataset_path(&target.chain_root, &target.table);
     let (registry_norm, inside) = if registry.starts_with("s3://") {
         let (bucket, key) = parse_s3_url(registry).ok()?;
         let registry = format!("s3://{bucket}/{key}");
@@ -1944,7 +1989,7 @@ fn registry_inside_table_warning(registry: &str, target: &Target) -> Option<Stri
     (inside && !is_reserved_artifact_path(name)).then(|| {
         format!(
             "the registry {registry_norm} is inside the table directory {table_dir}; verify skips it, but other commands (merge, rollup, validate) read it as table data. Keep the registry at {} or outside the table directories",
-            join_artifact_path(&target.chain_root, MERKLE_ROOTS_FILENAME)
+            DatasetArtifact::MerkleRoots.path_in(&target.chain_root)
         )
     })
 }
@@ -2037,6 +2082,7 @@ fn list_verify_objects(
             .filename()
             .is_some_and(|name| JOURNALS.contains(&name))
             && !is_control_path(key)
+            && !is_reserved_artifact_path(discovery::relative_key(prefix, key))
         {
             journals.push(format!("s3://{bucket}/{key}"));
         } else if is_verified_object(key, bucket, prefix, excluded) {
@@ -3293,7 +3339,8 @@ fn commit_registry_local(path: &Path, changes: &[RegistryChange]) -> Result<()> 
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
         .unwrap_or(Path::new("."));
-    std::fs::create_dir_all(parent)
+    // Creates `_fireparq/` for the default registry, durably.
+    crate::writer::create_dir_all_durable(parent)
         .with_context(|| format!("creating registry dir {}", parent.display()))?;
 
     // Serializes read-modify-write between verify runs; released on drop.
@@ -3521,8 +3568,11 @@ fn write_report_bytes(path: &str, aws: Option<&AwsConfig>, data: &[u8]) -> Resul
             .map_err(|e| anyhow!("writing report to s3://{bucket}/{}: {e}", location))?;
     } else {
         let file_path = PathBuf::from(path);
-        if let Some(parent) = file_path.parent() {
-            std::fs::create_dir_all(parent)
+        if let Some(parent) = file_path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+        {
+            crate::writer::create_dir_all_durable(parent)
                 .with_context(|| format!("creating report dir {}", parent.display()))?;
         }
         write_file_atomic(&file_path, data)?;
@@ -3561,12 +3611,12 @@ mod tests {
     mod concurrency;
     use super::{
         append_batch_leaves, commit_registry_local, commit_registry_to_store, file_layout,
-        join_artifact_path, legacy_default_registry_path, load_registry, load_registry_from_store,
-        merkle_root, registry_key, verify_parquet, FileLayout, FindingStatus, FooterIdentity,
-        HashStrategy, MerkleAccumulator, Prefetcher, RegistryChange, RegistryRow, TargetResolver,
-        VerifyCheck, VerifyOptions, VerifyProfile, VerifyReport, VerifyScope,
-        MERKLE_ROOTS_FILENAME, VERIFY_RUNS_DIR,
+        legacy_default_registry_path, load_registry, load_registry_from_store, merkle_root,
+        registry_key, verify_parquet, FileLayout, FindingStatus, FooterIdentity, HashStrategy,
+        MerkleAccumulator, Prefetcher, RegistryChange, RegistryRow, TargetResolver, VerifyCheck,
+        VerifyOptions, VerifyProfile, VerifyReport, VerifyScope,
     };
+    use crate::artifacts::DatasetArtifact;
     use crate::cursor::{save_cursor_parquet, CursorState};
     use anyhow::Result;
     use arrow::array::{
@@ -3917,12 +3967,16 @@ mod tests {
         assert_eq!(file_layout("s3://bucket/x.parquet").table, None);
 
         assert_eq!(
-            join_artifact_path("s3://bucket/data/mainnet", MERKLE_ROOTS_FILENAME),
-            "s3://bucket/data/mainnet/merkle_roots.parquet"
+            DatasetArtifact::MerkleRoots.path_in("s3://bucket/data/mainnet"),
+            "s3://bucket/data/mainnet/_fireparq/merkle_roots.parquet"
         );
         assert_eq!(
-            join_artifact_path("/", MERKLE_ROOTS_FILENAME),
-            "/merkle_roots.parquet"
+            DatasetArtifact::MerkleRoots.path_in(&layout.chain_root),
+            "/out/mainnet/_fireparq/merkle_roots.parquet"
+        );
+        assert_eq!(
+            DatasetArtifact::MerkleRoots.path_in("/"),
+            "/_fireparq/merkle_roots.parquet"
         );
     }
 
@@ -3942,15 +3996,15 @@ mod tests {
             }
         );
         assert_eq!(
-            join_artifact_path(&layout.chain_root, MERKLE_ROOTS_FILENAME),
-            "s3://ethereum-mainnet/merkle_roots.parquet"
+            DatasetArtifact::MerkleRoots.path_in(&layout.chain_root),
+            "s3://ethereum-mainnet/_fireparq/merkle_roots.parquet"
         );
         assert_eq!(
-            join_artifact_path(
-                &layout.chain_root,
-                &format!("{VERIFY_RUNS_DIR}/run/report.json")
+            crate::artifacts::join_dataset_path(
+                &DatasetArtifact::VerifyRuns.path_in(&layout.chain_root),
+                "run/report.json"
             ),
-            "s3://ethereum-mainnet/verify_runs/run/report.json"
+            "s3://ethereum-mainnet/_fireparq/verify_runs/run/report.json"
         );
         let prefix = file_layout("s3://bucket/v1/logs/block_range=100-200/part-v1-a.parquet");
         assert_eq!(prefix.chain_root, "s3://bucket/v1");
@@ -4086,11 +4140,14 @@ mod tests {
         let chain_root = root.join("mainnet").display().to_string();
         assert_eq!(
             report.registry_path,
-            format!("{chain_root}/merkle_roots.parquet")
+            format!("{chain_root}/_fireparq/merkle_roots.parquet")
         );
         assert_eq!(
             report.suggested_run_report_path,
-            format!("{chain_root}/verify_runs/{}/report.json", report.run_id)
+            format!(
+                "{chain_root}/_fireparq/verify_runs/{}/report.json",
+                report.run_id
+            )
         );
 
         // Matching explicit flags are accepted.
@@ -4196,6 +4253,15 @@ mod tests {
                 &root.join(network).join("verify_runs/run-0/roots.parquet"),
                 &[99],
             );
+            // Anything in the `_fireparq/` artifact directory is never data.
+            for artifact in [
+                "_fireparq/partitions.parquet",
+                "_fireparq/cursor.parquet",
+                "_fireparq/verify_runs/run-0/roots.parquet",
+                "_fireparq/other.parquet",
+            ] {
+                write_block_nums(&root.join(network).join(artifact), &[98]);
+            }
         }
 
         let mut roots = Vec::new();
@@ -4216,14 +4282,14 @@ mod tests {
             }
             assert!(runs[0]
                 .registry_path
-                .ends_with(&format!("/{network}/merkle_roots.parquet")));
+                .ends_with(&format!("/{network}/_fireparq/merkle_roots.parquet")));
             roots.push(runs[0].findings[0].computed_root.clone());
         }
         assert_ne!(roots[0], roots[1]);
 
         let mainnet = load_registry(
             &root
-                .join("mainnet/merkle_roots.parquet")
+                .join("mainnet/_fireparq/merkle_roots.parquet")
                 .display()
                 .to_string(),
             None,
@@ -4324,7 +4390,7 @@ mod tests {
         }
         let rows = load_registry(
             &root
-                .join("mainnet/merkle_roots.parquet")
+                .join("mainnet/_fireparq/merkle_roots.parquet")
                 .display()
                 .to_string(),
             None,
@@ -4334,6 +4400,66 @@ mod tests {
         assert_eq!(rows.len(), 2);
         for table in ["blocks", "transactions"] {
             assert!(rows.contains_key(&registry_key("mainnet", "evm", table, "date=2024-01-01")));
+        }
+    }
+
+    /// A registry that a release before v1.0.0 kept at the chain root is not
+    /// shadowed by a new `_fireparq/merkle_roots.parquet`: a default-registry
+    /// roots run fails before reading any row and names the move. It runs again
+    /// once the file is moved, and an explicit `--registry-path` or a
+    /// protocol-only run is unaffected. Covers `--without-chain-dir` roots too,
+    /// where the chain root is the output root itself.
+    #[test]
+    fn a_legacy_root_registry_is_refused_instead_of_shadowed() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        for (index, chain_root) in [root.join("output/mainnet"), root.join("bucket-root")]
+            .into_iter()
+            .enumerate()
+        {
+            let data = chain_root.join("blocks");
+            write_table_file(
+                &data.join("date=2024-01-01/part-a-000001.parquet"),
+                &[1, 2],
+                Some("evm"),
+                Some("mainnet"),
+            );
+            // A registry holding this partition's root, written elsewhere
+            // and then placed at the legacy location.
+            let scratch = root.join(format!("scratch-{index}.parquet"));
+            let mut fill = inferred_opts();
+            fill.registry_path = Some(scratch.display().to_string());
+            assert!(verify_dir(&data, &fill).unwrap().summary.wrote_registry);
+            let legacy = chain_root.join("merkle_roots.parquet");
+            let moved = chain_root.join("_fireparq/merkle_roots.parquet");
+            std::fs::copy(&scratch, &legacy).unwrap();
+
+            let error = format!("{:#}", verify_dir(&data, &inferred_opts()).unwrap_err());
+            for expected in [
+                "legacy merkle roots registry",
+                &legacy.display().to_string(),
+                &moved.display().to_string(),
+                "Move it there",
+            ] {
+                assert!(error.contains(expected), "{expected}: {error}");
+            }
+            assert!(
+                !chain_root.join("_fireparq").exists(),
+                "nothing was written"
+            );
+
+            let mut protocol = inferred_opts();
+            protocol.checks = vec![VerifyCheck::Protocol];
+            assert!(verify_dir(&data, &protocol).unwrap().is_valid());
+            let mut explicit = inferred_opts();
+            explicit.registry_path = Some(legacy.display().to_string());
+            assert_eq!(verify_dir(&data, &explicit).unwrap().summary.matches, 1);
+
+            std::fs::create_dir_all(moved.parent().unwrap()).unwrap();
+            std::fs::rename(&legacy, &moved).unwrap();
+            let report = verify_dir(&data, &inferred_opts()).unwrap();
+            assert_eq!(report.summary.matches, 1, "{:?}", report.findings);
+            assert_eq!(report.registry_path, moved.display().to_string());
         }
     }
 
@@ -4359,7 +4485,7 @@ mod tests {
         assert_eq!(report.summary.missing_expected, 1);
         assert!(report
             .registry_path
-            .ends_with("/mainnet/merkle_roots.parquet"));
+            .ends_with("/mainnet/_fireparq/merkle_roots.parquet"));
 
         // Data laid out as `<root>/evm/mainnet/<table>` already used the new
         // location, so there is nothing to warn about.
@@ -4374,7 +4500,7 @@ mod tests {
             assert!(report.warnings.is_empty(), "{:?}", report.warnings);
             assert!(report
                 .registry_path
-                .ends_with("/evm/mainnet/merkle_roots.parquet"));
+                .ends_with("/evm/mainnet/_fireparq/merkle_roots.parquet"));
         }
 
         // An explicit --registry-path is the operator's choice: no warning.
@@ -4424,7 +4550,7 @@ mod tests {
         write_tx_file(&day1.join("part-0.parquet"), &[(1, 2)]); // protocol failure
         write_tx_file(&day1.join("part-1.parquet"), &[(3, 3)]);
         write_tx_file(&data.join("date=2024-01-02/part-0.parquet"), &[(4, 4)]);
-        let registry = dir.path().join("mainnet/merkle_roots.parquet");
+        let registry = dir.path().join("mainnet/_fireparq/merkle_roots.parquet");
         let mut opts = base_opts();
         opts.chain = None;
 
@@ -4461,7 +4587,7 @@ mod tests {
         let root = dir.path();
         let data = root.join("mainnet/blocks");
         let registry = root
-            .join("mainnet/merkle_roots.parquet")
+            .join("mainnet/_fireparq/merkle_roots.parquet")
             .display()
             .to_string();
         let day1 = table_file(root, "mainnet", "blocks");
@@ -4537,7 +4663,7 @@ mod tests {
         let chain_root = root.join("mainnet");
         let data = chain_root.join("blocks");
         let registry = chain_root
-            .join("merkle_roots.parquet")
+            .join("_fireparq/merkle_roots.parquet")
             .display()
             .to_string();
         for (day, blocks) in [
@@ -4638,7 +4764,7 @@ mod tests {
             Some("mainnet"),
         );
         let data = root.join("mainnet/blocks");
-        let registry = root.join("mainnet/merkle_roots.parquet");
+        let registry = root.join("mainnet/_fireparq/merkle_roots.parquet");
         let computed = verify_dir(&data, &inferred_opts()).unwrap().findings[0]
             .computed_root
             .clone();

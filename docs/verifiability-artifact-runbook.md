@@ -11,16 +11,20 @@ It complements:
 
 `fireparq build` writes one directory per network, the **chain root**. With
 `--without-chain-dir` the output root itself is the chain root (for example a
-bucket per network, `s3://ethereum-mainnet/blocks/...`), and the artifacts below
-sit directly in it:
+bucket per network, `s3://ethereum-mainnet/blocks/...`), and the tree below
+sits directly in it. fireparq's own artifacts live in the chain root's
+`_fireparq/` directory, which Spark, Trino, Hive and Delta skip like any path
+starting with `_` or `.`:
 
 ```
 <output>/<chain_name>/                 chain root (for example output/mainnet, output/sepolia)
   <table>/<partition dirs>/*.parquet   table data (blocks/, transactions/, ...)
-  cursor.parquet                       resume state (build)
-  partitions.parquet                   partition index (partitions build)
-  merkle_roots.parquet                 canonical root registry (verify)
-  verify_runs/<run_id>/report.json     per-run reports (verify --publish-report)
+  .fireparq-ingest/                    authoritative ingestion state (build)
+  _fireparq/
+    cursor.parquet                     optional resume-state mirror (build)
+    partitions.parquet                 partition index (partitions build)
+    merkle_roots.parquet               canonical root registry (verify)
+    verify_runs/<run_id>/report.json   per-run reports (verify --publish-report)
 ```
 
 `verify` checks one table of one network per run. Point it at a table directory (`output/mainnet/blocks`), a partition directory or file inside it, or a chain root that holds a single table. It resolves:
@@ -34,9 +38,9 @@ sit directly in it:
 
 An explicit `--chain` or `--table` that differs from what the files say is an error, so a mislabeled run cannot write rows under the wrong key. `verify` also fails when the scanned files span more than one table directory or more than one `firehose-parquet.chain_name`; verify each table directory separately.
 
-Paths are matched by component, so `output/blocks-archive/mainnet/transactions` resolves to table `transactions`, not `blocks`. Reserved artifacts (`cursor.parquet`, `partitions.parquet`, `merkle_roots.parquet` and anything under `verify_runs/`) are never scanned as table data, wherever they sit under the verify path. Neither are the files this run writes: the `--registry-path`, `--report-json` and `--publish-report-path` files are skipped whatever their names (a local path is matched after resolving its directory, an S3 path by bucket and key). A report from an earlier run is skipped only if it is named `.json` (or passed to the same flag again), so keep reports out of table directories or give them a `.json` name.
+Paths are matched by component, so `output/blocks-archive/mainnet/transactions` resolves to table `transactions`, not `blocks`. Reserved artifacts (anything under `_fireparq/`, the legacy root names `cursor.parquet`, `partitions.parquet` and `merkle_roots.parquet`, anything under `verify_runs/`, and the dot-prefixed control state) are never scanned as table data, wherever they sit under the verify path. Neither are the files this run writes: the `--registry-path`, `--report-json` and `--publish-report-path` files are skipped whatever their names (a local path is matched after resolving its directory, an S3 path by bucket and key). A report from an earlier run is skipped only if it is named `.json` (or passed to the same flag again), so keep reports out of table directories or give them a `.json` name.
 
-An explicit registry inside the table directory under a non-reserved name (for example `output/mainnet/blocks/roots.parquet`) is skipped by `verify`, which adds a warning: `merge`, `rollup` and `validate` still read it as table data. Keep the registry at the default `<chain_root>/merkle_roots.parquet`, or outside the table directories.
+An explicit registry inside the table directory under a non-reserved name (for example `output/mainnet/blocks/roots.parquet`) is skipped by `verify`, which adds a warning: `merge`, `rollup` and `validate` still read it as table data. Keep the registry at the default `<chain_root>/_fireparq/merkle_roots.parquet`, or outside the table directories.
 
 ## Artifact Families
 
@@ -46,7 +50,7 @@ Two artifact families serve different purposes and should be operated separately
 
 Path:
 
-- `<chain_root>/merkle_roots.parquet`, one registry per network, shared by that network's tables (for example `output/mainnet/merkle_roots.parquet`).
+- `<chain_root>/_fireparq/merkle_roots.parquet`, one registry per network, shared by that network's tables (for example `output/mainnet/_fireparq/merkle_roots.parquet`). A `roots` run with this default fails before reading any row while a legacy `<chain_root>/merkle_roots.parquet` exists; see [Moving artifacts into `_fireparq/`](#moving-artifacts-into-_fireparq).
 - `--registry-path` overrides it. A custom registry can be shared by several networks: rows are keyed by `network`, `chain`, `table` and `partition`, so networks of the same chain family (every EVM network is `chain = evm`) never collide.
 
 Purpose:
@@ -77,13 +81,13 @@ Registries written before `merkle_version` existed lack that column. `verify` re
 
 Registries written before the `network` column existed are read with an empty `network`. A row with an empty `network` applies to whichever network looks it up, so older registries keep matching. When `verify` replaces such a row (`--update-registry`), the new row carries the network, and the old row is removed.
 
-Each write also leaves a `merkle_roots.parquet.lock` file next to a local registry (see [Concurrency and Atomic Writes](#concurrency-and-atomic-writes)). It is not table data, and no command scans it.
+Each write also leaves a `merkle_roots.parquet.lock` file next to a local registry (in `_fireparq/` for the default one) (see [Concurrency and Atomic Writes](#concurrency-and-atomic-writes)). It is not table data, and no command scans it.
 
 ### 2. Per-Run Reports
 
 Path:
 
-- `<chain_root>/verify_runs/<run_id>/report.json` (for example `output/mainnet/verify_runs/<run_id>/report.json`)
+- `<chain_root>/_fireparq/verify_runs/<run_id>/report.json` (for example `output/mainnet/_fireparq/verify_runs/<run_id>/report.json`)
 
 Purpose:
 
@@ -147,7 +151,7 @@ Per partition:
 `verify` reads where the writer stands before it lists the files it scans:
 
 - **Protected datasets** (every dataset written by `build` since #468): the authoritative ingestion state in `<chain_root>/.fireparq-ingest/state.json`, with or without a cursor mirror (`build --cursor none`). Its frontier is the last committed block. A running or interrupted transaction may already have published parts, but only for blocks after that frontier. The state is read as it is, without ownership and without recovering a pending transaction. A `.fireparq-ingest` marker without a readable state is an error.
-- **Legacy datasets**: `<chain_root>/cursor.parquet`. Its frontier is the last saved block. A cursor kept elsewhere with `build --cursor` is not detected. A cursor that cannot be read makes every partition `open`, with a warning.
+- **Legacy datasets** (unprotected, written before #468): `<chain_root>/cursor.parquet`, where those releases kept it. Its frontier is the last saved block. A cursor kept elsewhere with `build --cursor` is not detected. A cursor that cannot be read makes every partition `open`, with a warning.
 - Neither: nothing is open.
 
 Partitions holding rows after the frontier are always open. The other rules depend on whether the stream can still grow:
@@ -213,21 +217,56 @@ Before v0.8.0, the default registry path was derived from `--chain` (default `ev
 
 | Data path | Old default registry | New default registry |
 |-----------|----------------------|----------------------|
-| `output/mainnet/blocks` | `output/mainnet/evm/mainnet/merkle_roots.parquet` | `output/mainnet/merkle_roots.parquet` |
-| `output/sepolia/blocks` | `output/sepolia/evm/mainnet/merkle_roots.parquet` | `output/sepolia/merkle_roots.parquet` |
-| `s3://bucket/mainnet/blocks` | `s3://bucket/evm/mainnet/merkle_roots.parquet` | `s3://bucket/mainnet/merkle_roots.parquet` |
-| `s3://bucket/sepolia/blocks` | `s3://bucket/evm/mainnet/merkle_roots.parquet` (same object) | `s3://bucket/sepolia/merkle_roots.parquet` |
+| `output/mainnet/blocks` | `output/mainnet/evm/mainnet/merkle_roots.parquet` | `output/mainnet/_fireparq/merkle_roots.parquet` |
+| `output/sepolia/blocks` | `output/sepolia/evm/mainnet/merkle_roots.parquet` | `output/sepolia/_fireparq/merkle_roots.parquet` |
+| `s3://bucket/mainnet/blocks` | `s3://bucket/evm/mainnet/merkle_roots.parquet` | `s3://bucket/mainnet/_fireparq/merkle_roots.parquet` |
+| `s3://bucket/sepolia/blocks` | `s3://bucket/evm/mainnet/merkle_roots.parquet` (same object) | `s3://bucket/sepolia/_fireparq/merkle_roots.parquet` |
 
 On S3, every network shared one registry object with colliding keys, so each network's run overwrote the others' roots. Locally, the registry was written under a fake `evm/mainnet/` directory inside the network directory.
 
 `verify` no longer reads the old location. When a file exists there (and no `--registry-path` is given), every run adds a warning to the terminal summary and to the report's `warnings`, naming both paths. To migrate:
 
 1. Keep a copy of the old registry. On S3 it may hold rows from several networks mixed together, so treat it as a record, not as a baseline.
-2. Run `fireparq verify <chain_root>/<table> --update-registry` for each table of each network, against trusted data. This creates `<chain_root>/merkle_roots.parquet`. Old registries from v0.7.x and earlier hold `merkle_v1` roots, which have to be rebuilt anyway (see above).
+2. Run `fireparq verify <chain_root>/<table> --update-registry` for each table of each network, against trusted data. This creates `<chain_root>/_fireparq/merkle_roots.parquet`. Old registries from v0.7.x and earlier hold `merkle_v1` roots, which have to be rebuilt anyway (see above).
 3. Delete the old file. Locally, remove the whole `<chain_root>/evm/` directory. Other commands such as `rollup` would otherwise see `evm/` as a table directory.
 4. Run `verify` again. It should report only matches and no warnings.
 
 To keep using a registry at a custom location, pass `--registry-path` explicitly. No warning is shown then.
+
+### Moving Artifacts Into `_fireparq/`
+
+Releases before v1.0.0 wrote the registry, the partition index, the verify
+reports and the default cursor mirror directly in the chain root. They now live
+in `<chain_root>/_fireparq/`. Nothing is migrated automatically, and nothing is
+silently shadowed:
+
+| Legacy root artifact | New location | Until it is moved |
+|---|---|---|
+| `<chain_root>/merkle_roots.parquet` | `<chain_root>/_fireparq/merkle_roots.parquet` | A `roots` run with the default registry fails before reading any row. Protocol-only runs and an explicit `--registry-path` are unaffected. |
+| `<chain_root>/partitions.parquet` | `<chain_root>/_fireparq/partitions.parquet` | Every `partitions build` mode fails before reading or writing an index, and `build` refuses to initialize a new dataset beside it. |
+| `<chain_root>/verify_runs/` | `<chain_root>/_fireparq/verify_runs/` | Nothing fails; new reports go to `_fireparq/verify_runs/`. Old reports can be moved or kept. |
+| `<chain_root>/cursor.parquet` (mirror bound at the old default) | stays where it is | Do not move it: the mirror location is bound when a dataset is created. Keep passing `--cursor cursor.parquet`; the new default is refused with that instruction. |
+
+The legacy names stay reserved, so no command reads them as table data either
+way. To move the registry and the index, stop `verify` and `partitions build`
+runs for the dataset (neither needs `build` to stop), then:
+
+```bash
+# Local
+mkdir -p <chain_root>/_fireparq
+mv <chain_root>/merkle_roots.parquet <chain_root>/_fireparq/
+mv <chain_root>/partitions.parquet <chain_root>/_fireparq/
+mv <chain_root>/verify_runs <chain_root>/_fireparq/     # optional
+
+# S3 (no directory to create)
+aws s3 mv s3://<bucket>/<prefix>/merkle_roots.parquet s3://<bucket>/<prefix>/_fireparq/merkle_roots.parquet
+aws s3 mv s3://<bucket>/<prefix>/partitions.parquet s3://<bucket>/<prefix>/_fireparq/partitions.parquet
+aws s3 mv --recursive s3://<bucket>/<prefix>/verify_runs/ s3://<bucket>/<prefix>/_fireparq/verify_runs/
+```
+
+Then run `verify` once: it should report only matches. A local registry's
+`merkle_roots.parquet.lock` can be deleted; the next write recreates it next to
+the moved registry.
 
 ## Immutability and Versioning Guidance
 
@@ -273,18 +312,18 @@ Current recommendation:
 
 Recommended layout (the defaults for data written by `fireparq build --output s3://<bucket>`):
 
-- `s3://<bucket>/<chain_name>/merkle_roots.parquet`
-- `s3://<bucket>/<chain_name>/verify_runs/<run_id>/report.json`
+- `s3://<bucket>/<chain_name>/_fireparq/merkle_roots.parquet`
+- `s3://<bucket>/<chain_name>/_fireparq/verify_runs/<run_id>/report.json`
 
 For a bucket per network written with `fireparq build --output s3://<bucket> --without-chain-dir`:
 
-- `s3://<bucket>/merkle_roots.parquet`
-- `s3://<bucket>/verify_runs/<run_id>/report.json`
+- `s3://<bucket>/_fireparq/merkle_roots.parquet`
+- `s3://<bucket>/_fireparq/verify_runs/<run_id>/report.json`
 
 ### Retention
 
-- `verify_runs/`: shorter retention is acceptable.
-- `merkle_roots.parquet`: longer retention is recommended.
+- `_fireparq/verify_runs/`: shorter retention is acceptable.
+- `_fireparq/merkle_roots.parquet`: longer retention is recommended.
 
 ### Versioning
 
@@ -328,11 +367,11 @@ Consumers should not:
 - Run `verify` against an S3 path with explicit AWS configuration.
 - Confirm registry reads/writes resolve correctly.
 - Publish `report.json` to the suggested run path using `--publish-report`.
-- Confirm lifecycle policies for `verify_runs/` and registry are configured independently.
+- Confirm lifecycle policies for `_fireparq/verify_runs/` and the registry are configured independently, and that no table-data expiration rule matches `_fireparq/`.
 
 ## Suggested Team Policy
 
-- Keep one canonical registry per network (the default `<chain_root>/merkle_roots.parquet`).
+- Keep one canonical registry per network (the default `<chain_root>/_fireparq/merkle_roots.parquet`).
 - Publish one immutable report per run.
 - Require a preserved run report for any canonical registry overwrite.
 - Prefer docs-first contract changes before introducing new artifact formats.
