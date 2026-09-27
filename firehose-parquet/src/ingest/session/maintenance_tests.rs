@@ -25,7 +25,13 @@ fn mapper() -> MapperSemantics {
         extended: false,
         with_votes: false,
         include_failed_transactions: true,
-        tables: declare_inventory(&[("blocks".into(), batch)].into(), &["blocks"]).unwrap(),
+        tables: declare_inventory(
+            &[("blocks".into(), batch)].into(),
+            &["blocks"],
+            &DeltaTypes::default(),
+        )
+        .unwrap(),
+        delta_types: DeltaTypes::default(),
     }
 }
 fn config(output: &Path) -> Config {

@@ -233,14 +233,32 @@ impl ParquetTableWriter {
         let column = batch.column_by_name("timestamp").ok_or_else(|| {
             anyhow::anyhow!("table `{table}` needs canonical timestamp for date partitioning")
         })?;
-        anyhow::ensure!(
-            column.data_type() == &crate::traits::timestamp_millis_utc_type(),
-            "table `{table}` timestamp must be Timestamp(Millisecond, UTC)"
-        );
-        let timestamps = column
-            .as_any()
-            .downcast_ref::<arrow::array::TimestampMillisecondArray>()
-            .expect("canonical timestamp type checked above");
+        // The mapper's `Timestamp(Millisecond, UTC)`, or the Delta data file's
+        // `Timestamp(Microsecond, UTC)` (#643): whole seconds of each row.
+        let seconds: Box<dyn Iterator<Item = i64> + '_> =
+            if column.data_type() == &crate::traits::timestamp_millis_utc_type() {
+                let millis = column
+                    .as_any()
+                    .downcast_ref::<arrow::array::TimestampMillisecondArray>()
+                    .expect("millisecond timestamp type checked above");
+                Box::new(millis.iter().flatten().map(|value| value.div_euclid(1_000)))
+            } else if column.data_type() == &crate::traits::timestamp_micros_utc_type() {
+                let micros = column
+                    .as_any()
+                    .downcast_ref::<arrow::array::TimestampMicrosecondArray>()
+                    .expect("microsecond timestamp type checked above");
+                Box::new(
+                    micros
+                        .iter()
+                        .flatten()
+                        .map(|value| value.div_euclid(1_000_000)),
+                )
+            } else {
+                anyhow::bail!(
+                    "table `{table}` timestamp must be Timestamp(Millisecond, UTC) or \
+                 Timestamp(Microsecond, UTC)"
+                )
+            };
         let max = metadata.max_timestamp.ok_or_else(|| {
             anyhow::anyhow!("table `{table}` needs both minimum and maximum routing timestamps")
         })?;
@@ -249,8 +267,7 @@ impl ParquetTableWriter {
             ..metadata.clone()
         })?;
         let mut previous = None;
-        for timestamp in timestamps.iter().flatten() {
-            let seconds = timestamp.div_euclid(1_000);
+        for seconds in seconds {
             if previous == Some(seconds) {
                 continue;
             }

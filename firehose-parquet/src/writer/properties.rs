@@ -6,7 +6,7 @@
 use crate::config::Compression;
 use anyhow::{Context, Result};
 use arrow::{
-    array::{Array, UInt64Array},
+    array::{Array, Int64Array, UInt64Array},
     datatypes::{DataType, Schema},
     record_batch::RecordBatch,
 };
@@ -111,30 +111,43 @@ pub fn for_batch(
 ) -> Result<WriterProperties> {
     let schema = batch.schema();
     let mut properties = builder(compression, schema.as_ref(), metadata);
-    if let Some(blocks) = batch
+    if batch
         .column_by_name("block_num")
-        .and_then(|column| column.as_any().downcast_ref::<UInt64Array>())
+        .is_some_and(|blocks| nondecreasing(blocks.as_ref()))
     {
-        if !blocks.is_empty()
-            && blocks.null_count() == 0
-            && blocks.values().windows(2).all(|pair| pair[0] <= pair[1])
-        {
-            // SortingColumn indexes Parquet leaves, not Arrow root fields.
-            // A preceding list or struct can contribute several leaf columns.
-            let parquet_schema = ArrowSchemaConverter::new().convert(schema.as_ref())?;
-            let index = parquet_schema
-                .columns()
-                .iter()
-                .position(|column| column.path().parts() == ["block_num"])
-                .context("canonical block_num is missing from Parquet schema")?;
-            properties = properties.set_sorting_columns(Some(vec![SortingColumn {
-                column_idx: i32::try_from(index)?,
-                descending: false,
-                nulls_first: false,
-            }]));
-        }
+        // SortingColumn indexes Parquet leaves, not Arrow root fields.
+        // A preceding list or struct can contribute several leaf columns.
+        let parquet_schema = ArrowSchemaConverter::new().convert(schema.as_ref())?;
+        let index = parquet_schema
+            .columns()
+            .iter()
+            .position(|column| column.path().parts() == ["block_num"])
+            .context("canonical block_num is missing from Parquet schema")?;
+        properties = properties.set_sorting_columns(Some(vec![SortingColumn {
+            column_idx: i32::try_from(index)?,
+            descending: false,
+            nulls_first: false,
+        }]));
     }
     Ok(properties.build())
+}
+
+/// A nonempty, null-free and nondecreasing block height column: the mapper's
+/// `UInt64`, or the Delta data file's `Int64` (#643).
+fn nondecreasing(blocks: &dyn Array) -> bool {
+    fn ordered<T: PartialOrd>(values: &[T]) -> bool {
+        values.windows(2).all(|pair| pair[0] <= pair[1])
+    }
+    if blocks.is_empty() || blocks.null_count() != 0 {
+        return false;
+    }
+    if let Some(blocks) = blocks.as_any().downcast_ref::<UInt64Array>() {
+        ordered(blocks.values())
+    } else if let Some(blocks) = blocks.as_any().downcast_ref::<Int64Array>() {
+        ordered(blocks.values())
+    } else {
+        false
+    }
 }
 
 #[cfg(test)]

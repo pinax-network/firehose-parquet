@@ -1,6 +1,6 @@
 //! Protected ingestion through the actual CLI and a cursor-aware local Firehose.
 //! These tests never seed authority: every protected checkpoint is made by a CLI run.
-use arrow::array::{StringArray, TimestampSecondArray, UInt64Array};
+use arrow::array::{Int64Array, StringArray, TimestampSecondArray};
 use arrow::datatypes::{DataType, TimeUnit};
 use firehose_parquet::{
     cursor::{load_cursor_parquet, save_cursor_parquet, CursorState},
@@ -399,9 +399,9 @@ fn table_block_numbers(root: &Path, table: &str) -> Vec<u64> {
                 .column_by_name("block_num")
                 .unwrap()
                 .as_any()
-                .downcast_ref::<UInt64Array>()
+                .downcast_ref::<Int64Array>()
                 .unwrap();
-            numbers.extend(column.values().iter().copied());
+            numbers.extend(column.values().iter().map(|n| u64::try_from(*n).unwrap()));
         }
     }
     numbers.sort_unstable();
@@ -1019,7 +1019,7 @@ async fn genesis_bootstrap_keeps_zero_height_filtered_ordinals_and_lookahead_pro
                     .column_by_name("block_num")
                     .unwrap()
                     .as_any()
-                    .downcast_ref::<UInt64Array>()
+                    .downcast_ref::<Int64Array>()
                     .unwrap();
                 let ids = batch
                     .column_by_name("block_id")
@@ -1550,7 +1550,7 @@ async fn compressed_receipts_train_later_cli_flush_windows() {
                 .column_by_name("block_num")
                 .unwrap()
                 .as_any()
-                .downcast_ref::<UInt64Array>()
+                .downcast_ref::<Int64Array>()
                 .unwrap()
                 .value(0);
             (

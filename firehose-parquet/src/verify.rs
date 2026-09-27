@@ -2257,17 +2257,28 @@ fn hash_parquet_file<R: parquet::file::reader::ChunkReader + 'static>(
     Ok(blocks)
 }
 
-/// The `block_num` range of a batch relative to `frontier`.
+/// The `block_num` range of a batch relative to `frontier`: the mapper's
+/// `UInt64`, or the Delta data file's `Int64` (#643), whose values are never
+/// negative.
 fn batch_blocks(batch: &RecordBatch, frontier: Option<u64>) -> Option<PartitionBlocks> {
-    let column = batch
-        .column_by_name("block_num")?
-        .as_any()
-        .downcast_ref::<UInt64Array>()?;
-    let max = arrow::compute::max(column)?;
-    let max_committed = frontier.and_then(|frontier| {
+    let column = batch.column_by_name("block_num")?;
+    let blocks: Vec<u64> = if let Some(column) = column.as_any().downcast_ref::<UInt64Array>() {
+        column.iter().flatten().collect()
+    } else {
         column
+            .as_any()
+            .downcast_ref::<Int64Array>()?
             .iter()
             .flatten()
+            .map(u64::try_from)
+            .collect::<std::result::Result<_, _>>()
+            .ok()?
+    };
+    let max = blocks.iter().copied().max()?;
+    let max_committed = frontier.and_then(|frontier| {
+        blocks
+            .iter()
+            .copied()
             .filter(|block| *block <= frontier)
             .max()
     });

@@ -33,7 +33,9 @@ fn mapper(family: BlockFamily) -> MapperSemantics {
         extended: false,
         with_votes: false,
         include_failed_transactions: true,
-        tables: declare_inventory(&batches(&[]), &["blocks", "logs"]).unwrap(),
+        tables: declare_inventory(&batches(&[]), &["blocks", "logs"], &DeltaTypes::default())
+            .unwrap(),
+        delta_types: DeltaTypes::default(),
     }
 }
 fn config(root: &Path) -> Config {
@@ -672,8 +674,13 @@ async fn mapper_family_order_time_and_inventory_mismatches_are_fatal_before_publ
         .accept_mapped(ordinal, Some(1_700_000_001), None)
         .is_err());
     assert!(!config.output.join("blocks").exists());
-    assert!(declare_inventory(&batches(&[100]), &["blocks", "logs"]).is_err());
-    assert!(declare_inventory(&batches(&[]), &["blocks"]).is_err());
+    assert!(declare_inventory(
+        &batches(&[100]),
+        &["blocks", "logs"],
+        &DeltaTypes::default()
+    )
+    .is_err());
+    assert!(declare_inventory(&batches(&[]), &["blocks"], &DeltaTypes::default()).is_err());
 }
 
 #[tokio::test]
@@ -1052,7 +1059,12 @@ fn event_batches(rows: &[(u64, &str, u64)], timestamp: i64) -> HashMap<String, R
 }
 fn non_final_mapper() -> MapperSemantics {
     MapperSemantics {
-        tables: declare_inventory(&event_batches(&[], 0), &["blocks", "logs"]).unwrap(),
+        tables: declare_inventory(
+            &event_batches(&[], 0),
+            &["blocks", "logs"],
+            &DeltaTypes::default(),
+        )
+        .unwrap(),
         ..mapper(BlockFamily::Evm)
     }
 }
@@ -1168,6 +1180,171 @@ async fn non_final_rows_carry_durable_strictly_increasing_stream_ordinals() {
             .pending
             .is_none()
     );
+}
+
+/// #643: the flush boundary maps every table onto its Delta data file types.
+/// A value that does not fit its Delta type refuses the flush, with the table,
+/// column and value named, before anything is journaled or written; a flush
+/// that fits is written with `Int64` block numbers, the chain's
+/// `decimal(20,0)` columns, microsecond timestamps and no `date` column.
+#[tokio::test]
+async fn flushes_become_delta_data_files_and_values_that_do_not_fit_are_refused() {
+    use crate::delta::types::DecimalColumn;
+    use arrow::array::{Date32Array, Decimal128Array, Int64Array, TimestampMicrosecondArray};
+    const DECIMALS: &[DecimalColumn] = &[DecimalColumn {
+        table: "logs",
+        column: "amount",
+        reason: "a currency amount",
+    }];
+    let types = DeltaTypes::new(DECIMALS);
+    let seconds = crate::ingest::state::tests::FIXTURE_SECONDS;
+    let day = crate::traits::date32_from_timestamp_seconds(seconds).unwrap();
+    // One row per table: `gas` is a checked long everywhere, `amount` holds
+    // u64::MAX and is decimal(20,0) in `logs` only.
+    let rows = |tables: &[&str]| -> HashMap<String, RecordBatch> {
+        let (timestamp, times) = crate::ingest::state::tests::fixture_timestamp(1);
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("block_num", DataType::UInt64, false),
+            timestamp,
+            Field::new("date", DataType::Date32, false),
+            Field::new("gas", DataType::UInt64, false),
+            Field::new("amount", DataType::UInt64, false),
+        ]));
+        tables
+            .iter()
+            .map(|table| {
+                let batch = RecordBatch::try_new(
+                    schema.clone(),
+                    vec![
+                        Arc::new(UInt64Array::from(vec![100])),
+                        times.clone(),
+                        Arc::new(Date32Array::from(vec![day])),
+                        Arc::new(UInt64Array::from(vec![21_000])),
+                        Arc::new(UInt64Array::from(vec![u64::MAX])),
+                    ],
+                )
+                .unwrap();
+                (table.to_string(), batch)
+            })
+            .collect()
+    };
+    let empty: HashMap<_, _> = rows(&["blocks", "logs"])
+        .into_iter()
+        .map(|(table, batch)| (table, batch.slice(0, 0)))
+        .collect();
+    let semantics = || MapperSemantics {
+        tables: declare_inventory(&empty, &["blocks", "logs"], &types).unwrap(),
+        delta_types: types,
+        ..mapper(BlockFamily::Evm)
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let config = config(dir.path());
+    let owner = own(&config).await;
+    let parts = |table: &str| -> Vec<std::path::PathBuf> {
+        let directory = config.output.join(table).join("date=2023-11-14");
+        std::fs::read_dir(&directory)
+            .map(|entries| {
+                entries
+                    .map(|entry| entry.unwrap().path())
+                    .filter(|path| path.extension().is_some_and(|ext| ext == "parquet"))
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+
+    // `blocks.amount` is not a decimal column, so u64::MAX does not fit its
+    // checked `long`.
+    let mut session = IngestionSession::open(&config, semantics(), &owner, None, None)
+        .await
+        .unwrap();
+    let ordinal = receive(&mut session, 100, seconds, 1);
+    session.accept_mapped(ordinal, Some(seconds), None).unwrap();
+    let error = session
+        .flush(
+            rows(&["blocks", "logs"]),
+            meta(100, 100),
+            Compression::Zstd,
+            ParquetFileMetadata::new(),
+        )
+        .await
+        .err()
+        .unwrap();
+    let message = format!("{error:#}");
+    assert!(
+        message.contains("table `blocks` column `amount`: value 18446744073709551615")
+            && message.contains("refused before anything was written"),
+        "{message}"
+    );
+    let snapshot = TransactionStateStore::local(&config.output, owner.local().unwrap())
+        .unwrap()
+        .load()
+        .await
+        .unwrap();
+    assert!(snapshot.pending.is_none());
+    assert_eq!(snapshot.authority.unwrap().payload.checkpoint.ordinal, 0);
+    assert!(parts("blocks").is_empty() && parts("logs").is_empty());
+    drop(session);
+
+    // Only `logs`, whose `amount` is decimal(20,0): every u64 fits.
+    let mut session = IngestionSession::open(&config, semantics(), &owner, None, None)
+        .await
+        .unwrap();
+    let ordinal = receive(&mut session, 100, seconds, 1);
+    session.accept_mapped(ordinal, Some(seconds), None).unwrap();
+    let committed = session
+        .flush(
+            rows(&["logs"]),
+            meta(100, 100),
+            Compression::Zstd,
+            ParquetFileMetadata::new(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!((committed.rows, committed.files), (1, 1));
+    let [part] = parts("logs").try_into().unwrap();
+    let read = crate::writer::read_parquet(&part).unwrap().remove(0);
+    let names: Vec<String> = read
+        .schema()
+        .fields()
+        .iter()
+        .map(|field| field.name().clone())
+        .collect();
+    assert_eq!(names, ["block_num", "timestamp", "gas", "amount"]);
+    let column = |name: &str| read.column_by_name(name).unwrap();
+    assert_eq!(
+        column("block_num")
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap()
+            .value(0),
+        100
+    );
+    assert_eq!(
+        column("timestamp")
+            .as_any()
+            .downcast_ref::<TimestampMicrosecondArray>()
+            .unwrap()
+            .value(0),
+        seconds * 1_000_000
+    );
+    assert_eq!(
+        column("amount")
+            .as_any()
+            .downcast_ref::<Decimal128Array>()
+            .unwrap()
+            .value_as_string(0),
+        u64::MAX.to_string()
+    );
+    assert_eq!(
+        column("gas")
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap()
+            .value(0),
+        21_000
+    );
+    assert!(parts("blocks").is_empty());
 }
 
 /// A live bucket expires old committed parts with an S3 lifecycle rule that

@@ -560,6 +560,12 @@ deletes only data parts, and log cleanup belongs to the CronJob.
 
 ## 6. Types
 
+Implemented by L2 (`firehose-parquet/src/delta/types.rs`, the per-chain lists
+in `ChainProfile::decimal_columns`; record:
+[643-l2-delta-types.md](../audit/643-l2-delta-types.md)). The mapping runs in
+`IngestionSession::flush`, before the controller's preflight and the Writing
+journal.
+
 Delta has no unsigned or dictionary types. The conversion happens once, at the
 flush boundary, before the Writing journal (`to_delta_batch` in
 `spikes/delta-lake/src/mapping.rs`). Every cast uses `safe: false`, so a value

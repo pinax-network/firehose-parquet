@@ -6,10 +6,14 @@
 //! `committed_schema_docs_match_the_code` test fails when the committed files
 //! differ from what this module renders.
 //!
-//! Tables and columns come from an empty flush of each mapper. Descriptions are
-//! the code comments beside the fields in `blocks/src/<chain>/schema.rs` (and
-//! the canonical fields in `firehose_parquet::traits`), copied into the tables
-//! below: update both together.
+//! Tables and columns come from an empty flush of each mapper. The column types
+//! are the Delta types of the data files, mapped from the mapper's Arrow types
+//! at the flush boundary with each chain's `ChainProfile::delta_types()`
+//! (#643, `firehose_parquet::delta::types`); each file ends with that chain's
+//! mapping. Descriptions are the code comments beside the fields in
+//! `blocks/src/<chain>/schema.rs` (and the canonical fields in
+//! `firehose_parquet::traits`), copied into the tables below: update both
+//! together.
 
 use std::collections::BTreeSet;
 use std::fmt::Write as _;
@@ -17,6 +21,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{ensure, Context, Result};
 use arrow::datatypes::{DataType, Field, SchemaRef};
+use firehose_parquet::delta::types::{Conversion, DecimalColumn, PARTITION_COLUMN};
 use firehose_parquet::encode::EncodeBytes;
 use firehose_parquet::traits::timestamp_millis_utc_type;
 
@@ -119,8 +124,11 @@ fn chain_notes(kind: ChainKind) -> &'static [&'static str] {
              and log topics) are always lowercase hex without `0x`, whatever the encoding \
              (`tron_reserved_encoding` in `blocks/src/tron/schema.rs`).",
         ],
-        ChainKind::Bitcoin
-        | ChainKind::Solana
+        ChainKind::Bitcoin => &[
+            "`outputs.value_sats` is a checked `long`, not a `decimal(20,0)`: consensus caps \
+             it at 2.1·10^15 satoshis (`MAX_MONEY`).",
+        ],
+        ChainKind::Solana
         | ChainKind::Near
         | ChainKind::Antelope
         | ChainKind::Cosmos
@@ -521,8 +529,12 @@ fn canonical_description(column: &str) -> Option<&'static str> {
         "parent_num" => "Parent block number (Firehose block metadata).",
         "parent_id" => "Parent block id, in the chain's byte encoding.",
         "lib_num" => "Last irreversible block number reported with the block.",
-        "timestamp" => "Block time, UTC, millisecond precision.",
-        "date" => "UTC date of `timestamp`.",
+        "timestamp" => "Block time, UTC, millisecond precision (stored in microseconds).",
+        "date" => {
+            "Partition column: the UTC date of the block time, stored in the Delta log \
+             (`partitionValues.date`) and the `date=YYYY-MM-DD` directory, not in the data \
+             files."
+        }
         FORK_STEP => {
             "**Non-final streams only** (`--final-blocks-only=false`): the Firehose fork \
              step of the block, `NEW`, `UNDO` or `FINAL`."
@@ -588,6 +600,8 @@ struct ChainReference {
     /// The encoding on Tron-style endpoints, when it differs from `encoding`.
     tron_style_encoding: Option<EncodeBytes>,
     tables: Vec<TableReference>,
+    /// `ChainProfile::decimal_columns`.
+    decimal_columns: &'static [DecimalColumn],
 }
 
 struct TableReference {
@@ -604,10 +618,15 @@ struct TableReference {
 
 struct ColumnReference {
     name: String,
+    /// The Delta type (`Date32` for the `date` partition column).
     data_type: DataType,
     nullable: bool,
     /// Binary data written as text in the chain's byte encoding.
     encoded: bool,
+    /// The Arrow type the mapper builds.
+    source_type: DataType,
+    /// How the flush maps `source_type` onto `data_type`.
+    conversions: BTreeSet<Conversion>,
 }
 
 impl TableReference {
@@ -685,6 +704,7 @@ fn table_names(tables: &Tables) -> Vec<&str> {
 
 fn chain_reference(kind: ChainKind) -> Result<ChainReference> {
     let profile = kind.profile();
+    let types = profile.delta_types();
     let encoding = kind.default_bytes_encoding(false);
     let defaults = Toggles::defaults(kind);
 
@@ -825,16 +845,38 @@ fn chain_reference(kind: ChainKind) -> Result<ChainReference> {
                     .all(|(b, f)| b.name() == f.name()),
             "{context}: the binary encoding changes the columns"
         );
+        // The Delta data file schema: the mapper's columns without `date`,
+        // with their Delta types.
+        let data = types.data_schema(name, schema)?;
+        let binary_data = types.data_schema(name, &binary[index].1)?;
         let columns = fields
             .iter()
-            .zip(binary_fields)
-            .map(|(field, binary_field)| ColumnReference {
-                name: field.name().clone(),
-                data_type: field.data_type().clone(),
-                nullable: field.is_nullable(),
-                encoded: field.data_type() != binary_field.data_type(),
+            .map(|field| {
+                let conversions = types.conversions(name, field);
+                if field.name() == PARTITION_COLUMN {
+                    // The partition value is always set: a Solana row
+                    // without a block time takes its routing day.
+                    return Ok(ColumnReference {
+                        name: field.name().clone(),
+                        data_type: field.data_type().clone(),
+                        nullable: false,
+                        encoded: false,
+                        source_type: field.data_type().clone(),
+                        conversions,
+                    });
+                }
+                let delta = data.field_with_name(field.name())?;
+                let binary_delta = binary_data.field_with_name(field.name())?;
+                Ok(ColumnReference {
+                    name: field.name().clone(),
+                    data_type: delta.data_type().clone(),
+                    nullable: delta.is_nullable(),
+                    encoded: delta.data_type() != binary_delta.data_type(),
+                    source_type: field.data_type().clone(),
+                    conversions,
+                })
             })
-            .collect();
+            .collect::<Result<Vec<_>>>()?;
 
         tables.push(TableReference {
             name: name.clone(),
@@ -842,7 +884,10 @@ fn chain_reference(kind: ChainKind) -> Result<ChainReference> {
             votes_only: votes_only(name),
             same_as: full[..index]
                 .iter()
-                .find(|(_, earlier)| earlier == schema)
+                .find(|(earlier_name, earlier)| {
+                    earlier == schema
+                        && types.data_schema(earlier_name, earlier).ok().as_ref() == Some(&data)
+                })
                 .map(|(earlier, _)| earlier.clone()),
             columns,
         });
@@ -853,6 +898,7 @@ fn chain_reference(kind: ChainKind) -> Result<ChainReference> {
         encoding,
         tron_style_encoding,
         tables,
+        decimal_columns: profile.decimal_columns,
     })
 }
 
@@ -884,7 +930,8 @@ fn encoding_description(encoding: &EncodeBytes) -> &'static str {
     }
 }
 
-/// A human-readable Arrow type, stable across Arrow releases.
+/// A human-readable Arrow type, stable across Arrow releases: the types the
+/// mappers build.
 fn type_name(data_type: &DataType) -> String {
     match data_type {
         DataType::Timestamp(unit, Some(tz)) => format!("Timestamp({unit:?}, \"{tz}\")"),
@@ -892,11 +939,11 @@ fn type_name(data_type: &DataType) -> String {
         DataType::Dictionary(key, value) => {
             format!("Dictionary({}, {})", type_name(key), type_name(value))
         }
-        DataType::List(item) => format!("List<{}>", nested_type_name(item)),
+        DataType::List(item) => format!("List<{}>", nested_type_name(item, type_name)),
         DataType::Struct(fields) => {
             let fields: Vec<String> = fields
                 .iter()
-                .map(|field| format!("{}: {}", field.name(), nested_type_name(field)))
+                .map(|field| format!("{}: {}", field.name(), nested_type_name(field, type_name)))
                 .collect();
             format!("Struct<{}>", fields.join(", "))
         }
@@ -904,9 +951,31 @@ fn type_name(data_type: &DataType) -> String {
     }
 }
 
-fn nested_type_name(field: &Field) -> String {
+/// The Delta protocol name of a data file type: `long`, `decimal(20,0)`,
+/// `timestamp`, `array<non-null short>`, `struct<name: T, ...>`.
+fn delta_type_name(data_type: &DataType) -> String {
+    match data_type {
+        DataType::List(item) => format!("array<{}>", nested_type_name(item, delta_type_name)),
+        DataType::Struct(fields) => {
+            let fields: Vec<String> = fields
+                .iter()
+                .map(|field| {
+                    format!(
+                        "{}: {}",
+                        field.name(),
+                        nested_type_name(field, delta_type_name)
+                    )
+                })
+                .collect();
+            format!("struct<{}>", fields.join(", "))
+        }
+        other => firehose_parquet::delta::types::delta_type_name(other),
+    }
+}
+
+fn nested_type_name(field: &Field, name: fn(&DataType) -> String) -> String {
     let nullability = if field.is_nullable() { "" } else { "non-null " };
-    format!("{nullability}{}", type_name(field.data_type()))
+    format!("{nullability}{}", name(field.data_type()))
 }
 
 fn escape_cell(text: &str) -> String {
@@ -956,10 +1025,11 @@ fn render_index(references: &[ChainReference]) -> String {
     out.push_str(
         "\n# Output schema reference\n\n\
          One file per chain family lists every table `fireparq` writes and every column \
-         with its Arrow type, nullability and, where the code documents it, a description. \
-         The files are rendered from the production mappers (`ChainKind::create_mapper` in \
-         `blocks/src/chain.rs`) with each chain's default options and byte encoding, so \
-         they match what a v1.0.0 build writes.\n\n",
+         with its Delta type, nullability and, where the code documents it, a description, \
+         then the chain's type mapping. The files are rendered from the production mappers \
+         (`ChainKind::create_mapper` in `blocks/src/chain.rs`) with each chain's default \
+         options and byte encoding, mapped onto Delta types as every flush is \
+         (`ChainProfile::delta_types`), so they match what a v1.0.0 build writes.\n\n",
     );
     out.push_str(
         "| Chain | `--block-type` | Tables | Byte encoding | Reference |\n\
@@ -985,17 +1055,32 @@ fn render_index(references: &[ChainReference]) -> String {
          verify reports) and control state, not tables. Engines that \
          skip `_` and `.` paths (Spark, Trino, Hive, Delta) ignore them; with DuckDB, \
          read one table with `<root>/<table>/**/*.parquet`.\n\
+         - Types are Delta Lake types (#643), the types of the data files: `long`, \
+         `integer`, `short`, `decimal(20,0)`, `double`, `boolean`, `string`, `binary`, \
+         `date`, `timestamp`, `array<T>` and `struct<...>`. Delta has no unsigned, \
+         dictionary or millisecond types, so every flush maps the mapper's Arrow types \
+         once, with checked casts, before anything is written \
+         (`firehose_parquet::delta::types`): `UInt64` becomes a checked `long` (a value \
+         above 9,223,372,036,854,775,807 refuses the flush), or `decimal(20,0)` for the \
+         chain's currency amounts and values a sender or signer chooses without a range \
+         check (`ChainProfile::decimal_columns`); `UInt32` and `UInt16` become `long`, \
+         `UInt8` becomes `short`, dictionaries become `string`, and millisecond \
+         timestamps become `timestamp` (microseconds, UTC) with the same instant. Each \
+         chain file ends with its mapping.\n\
          - Every table starts with the canonical block identity columns `block_num`, \
          `block_id`, `parent_num`, `parent_id`, `lib_num`, `timestamp` and `date`, shared \
-         by all chains (`firehose_parquet::traits`). `timestamp` is \
-         `Timestamp(Millisecond, \"UTC\")` and `date` is `Date32`; both are nullable only \
-         on chains whose blocks may lack a timestamp (Solana).\n\
+         by all chains (`firehose_parquet::traits`). `block_num`, `parent_num` and \
+         `lib_num` are `long`; `timestamp` is a `timestamp` (UTC, whole milliseconds, \
+         stored in microseconds), nullable only on chains whose blocks may lack a \
+         timestamp (Solana); `date` is the partition column.\n\
          - Every table is partitioned by UTC day: its files are \
-         `<table>/date=YYYY-MM-DD/part-*.parquet`, and a row's `date` equals its directory \
-         (a Solana row without `block_time` has a null `date` in the day of the last known \
-         block time). Hive-partition-aware readers such as DuckDB and Polars read the \
-         directory as the same `date` column and prune by it.\n\
-         - `fork_step` (`Utf8`, `NEW`, `UNDO` or `FINAL`) and `stream_ordinal` (`UInt64`) \
+         `<table>/date=YYYY-MM-DD/part-*.parquet`. `date` is the partition column only: \
+         its value is the directory (the Delta `partitionValues.date`), and the data files \
+         have no `date` column. A Solana row without `block_time` has a null `timestamp` \
+         and the `date` of its routing day, the last known block time. Partition-aware \
+         readers such as DuckDB and Polars read the directory as the `date` column and \
+         prune by it.\n\
+         - `fork_step` (`string`, `NEW`, `UNDO` or `FINAL`) and `stream_ordinal` (`long`) \
          exist only on non-final streams (`--final-blocks-only=false`). `stream_ordinal` \
          is the accepted-event ordinal of the stream event that produced the row: strictly \
          increasing in delivery order, durable across reconnects and restarts, and the \
@@ -1011,12 +1096,13 @@ fn render_index(references: &[ChainReference]) -> String {
          - Byte encoding: binary values (hashes, addresses, keys) are written as text in the \
          chain's encoding, fixed per chain in v1.0.0 (`ChainProfile` in \
          `blocks/src/chain.rs`). Their type is suffixed with the encoding, for example \
-         `Utf8` (hex); other `Utf8` columns hold chain-native text and do not depend on the \
-         encoding. `Binary` columns hold raw bytes whatever the encoding.\n\
-         - Enum columns are `Dictionary(Int32, Utf8)` holding stable protobuf labels (the \
-         Parquet enum convention in `docs/repo-navigation.md`).\n\
-         - Type notation: `List<T>` is an Arrow list whose items may be null, \
-         `List<non-null T>` one whose items may not; `Struct<name: T, ...>` spells out the \
+         `string` (hex); other `string` columns hold chain-native text and do not depend \
+         on the encoding. `binary` columns hold raw bytes whatever the encoding.\n\
+         - Enum columns are `string` columns holding stable protobuf labels (the Parquet \
+         enum convention in `docs/repo-navigation.md`). The mappers build them as \
+         `Dictionary(Int32, Utf8)`, and Parquet still dictionary-encodes their pages.\n\
+         - Type notation: `array<T>` is a list whose items may be null, \
+         `array<non-null T>` one whose items may not; `struct<name: T, ...>` spells out the \
          struct fields the same way. Nullable refers to the column itself.\n\
          - Conditional tables are marked: EVM extended tables are omitted with \
          `--without-extended`, Solana `vote_transactions` with `--without-votes`. Every \
@@ -1060,16 +1146,16 @@ fn render_chain(reference: &ChainReference) -> String {
         let _ = write!(
             out,
             " Tron-style endpoints (`tron`, `tron-evm` chain names) use `{}` ({}) instead, \
-             with the same Arrow types.",
+             with the same types.",
             encoding_label(tron_style),
             encoding_description(tron_style)
         );
     }
     out.push('\n');
-    // In order of first appearance: `block_id` makes `Utf8` first.
+    // In order of first appearance: `block_id` makes `string` first.
     let mut encoded_types: Vec<String> = Vec::new();
     for column in reference.tables.iter().flat_map(|table| &table.columns) {
-        let encoded_type = format!("`{}` ({encoding})", type_name(&column.data_type));
+        let encoded_type = format!("`{}` ({encoding})", delta_type_name(&column.data_type));
         if column.encoded && !encoded_types.contains(&encoded_type) {
             encoded_types.push(encoded_type);
         }
@@ -1088,10 +1174,15 @@ fn render_chain(reference: &ChainReference) -> String {
     if profile.nullable_timestamps {
         let _ = writeln!(
             out,
-            "- Blocks may lack a timestamp, so the canonical `timestamp` and `date` are \
-             nullable."
+            "- Blocks may lack a timestamp, so the canonical `timestamp` is nullable. The \
+             `date` partition of such a row is its routing day, the last known block time."
         );
     }
+    let _ = writeln!(
+        out,
+        "- Types are the Delta types of the data files; [Delta type mapping](#delta-type-mapping) \
+         lists how each mapper column gets its type."
+    );
     for note in chain_notes(kind) {
         let _ = writeln!(out, "- {note}");
     }
@@ -1139,16 +1230,149 @@ fn render_chain(reference: &ChainReference) -> String {
             let description = column_description(kind, &table.name, &column.name)
                 .map(|description| format!(" {} ", escape_cell(description)))
                 .unwrap_or_else(|| " ".to_string());
+            let partition = if column.conversions.contains(&Conversion::Partition) {
+                " (partition)"
+            } else {
+                ""
+            };
             let _ = writeln!(
                 out,
-                "| `{}` | `{}`{encoded} | {} |{description}|",
+                "| `{}` | `{}`{encoded}{partition} | {} |{description}|",
                 column.name,
-                type_name(&column.data_type),
+                delta_type_name(&column.data_type),
                 if column.nullable { "yes" } else { "no" },
             );
         }
     }
+    render_mapping(reference, &mut out);
     out
+}
+
+/// One row of a chain's type mapping: every column that goes through the
+/// same conversion from the same Arrow type to the same Delta type.
+struct MappingRow {
+    source: String,
+    delta: String,
+    conversion: Conversion,
+    /// `(column, tables)` in order of first appearance.
+    columns: Vec<(String, Vec<String>)>,
+}
+
+/// The rows of a chain's type mapping, in [`Conversion`] order, then by first
+/// appearance.
+fn mapping_rows(reference: &ChainReference) -> Vec<MappingRow> {
+    let mut rows: Vec<MappingRow> = Vec::new();
+    for table in &reference.tables {
+        for column in &table.columns {
+            for conversion in &column.conversions {
+                let (source, delta) = if *conversion == Conversion::Partition {
+                    ("date".to_string(), "partition column".to_string())
+                } else {
+                    (
+                        type_name(&column.source_type),
+                        delta_type_name(&column.data_type),
+                    )
+                };
+                let row = match rows.iter_mut().find(|row| {
+                    row.conversion == *conversion && row.source == source && row.delta == delta
+                }) {
+                    Some(row) => row,
+                    None => {
+                        rows.push(MappingRow {
+                            source,
+                            delta,
+                            conversion: *conversion,
+                            columns: Vec::new(),
+                        });
+                        rows.last_mut().expect("just pushed")
+                    }
+                };
+                match row
+                    .columns
+                    .iter_mut()
+                    .find(|(name, _)| *name == column.name)
+                {
+                    Some((_, tables)) => tables.push(table.name.clone()),
+                    None => row
+                        .columns
+                        .push((column.name.clone(), vec![table.name.clone()])),
+                }
+            }
+        }
+    }
+    rows.sort_by_key(|row| row.conversion);
+    rows
+}
+
+fn render_mapping(reference: &ChainReference, out: &mut String) {
+    let every_table: Vec<&str> = reference.tables.iter().map(|t| t.name.as_str()).collect();
+    out.push_str(
+        "\n## Delta type mapping\n\n\
+         The mapper builds Arrow types; every flush maps them onto the Delta types above \
+         once, with checked casts, before anything is written (#643, \
+         `firehose_parquet::delta::types`). Columns that are not listed are built with \
+         their Delta type. A column is listed with its tables unless every table has it \
+         (`stream_ordinal` on non-final streams only).\n\n\
+         | Mapper Arrow type | Delta type | Conversion | Columns |\n\
+         |---|---|---|---|\n",
+    );
+    for row in mapping_rows(reference) {
+        let columns: Vec<String> = row
+            .columns
+            .iter()
+            .map(|(column, tables)| {
+                let missing: Vec<String> = every_table
+                    .iter()
+                    .filter(|table| !tables.iter().any(|t| t == *table))
+                    .map(|table| format!("`{table}`"))
+                    .collect();
+                if missing.is_empty() {
+                    format!("`{column}`")
+                } else if missing.len() <= 2 && missing.len() < tables.len() {
+                    format!("`{column}` (every table but {})", missing.join(" and "))
+                } else {
+                    let tables: Vec<String> = tables.iter().map(|t| format!("`{t}`")).collect();
+                    format!("`{column}` ({})", tables.join(", "))
+                }
+            })
+            .collect();
+        let delta = if row.conversion == Conversion::Partition {
+            row.delta.clone()
+        } else {
+            format!("`{}`", row.delta)
+        };
+        let source = if row.conversion == Conversion::Partition {
+            format!("`{}` column (`Date32`)", row.source)
+        } else {
+            format!("`{}`", row.source)
+        };
+        let _ = writeln!(
+            out,
+            "| {source} | {delta} | {} | {} |",
+            escape_cell(row.conversion.rule()),
+            escape_cell(&columns.join("; ")),
+        );
+    }
+    out.push_str(
+        "\n### `decimal(20,0)` columns\n\n\
+         The `UInt64` columns stored as `decimal(20,0)` instead of a checked `long` \
+         (`ChainProfile::decimal_columns` in `blocks/src/chain.rs`). Every other `UInt64` \
+         column is bounded by its protocol.\n\n",
+    );
+    if reference.decimal_columns.is_empty() {
+        out.push_str("None: every `UInt64` column of this chain is a checked `long`.\n");
+        return;
+    }
+    out.push_str("| Column | Why not a checked `long` |\n|---|---|\n");
+    for decimal in reference.decimal_columns {
+        let _ = writeln!(
+            out,
+            "| `{}.{}` | {} |",
+            decimal.table,
+            decimal.column,
+            escape_cell(decimal.reason)
+        );
+    }
 }
 
 #[cfg(test)]
@@ -1333,8 +1557,90 @@ mod tests {
             .into(),
         );
         assert_eq!(
-            type_name(&DataType::List(item(fee, false))),
+            type_name(&DataType::List(item(fee.clone(), false))),
             "List<non-null Struct<denom: non-null Utf8, memo: Utf8>>"
         );
+
+        // The Delta names of the data file types.
+        assert_eq!(
+            delta_type_name(&firehose_parquet::traits::timestamp_micros_utc_type()),
+            "timestamp"
+        );
+        assert_eq!(
+            delta_type_name(&DataType::Decimal128(20, 0)),
+            "decimal(20,0)"
+        );
+        assert_eq!(
+            delta_type_name(&DataType::List(item(DataType::Int16, false))),
+            "array<non-null short>"
+        );
+        assert_eq!(
+            delta_type_name(&DataType::List(item(DataType::Decimal128(20, 0), true))),
+            "array<decimal(20,0)>"
+        );
+        assert_eq!(
+            delta_type_name(&DataType::List(item(fee, false))),
+            "array<non-null struct<denom: non-null string, memo: string>>"
+        );
+        assert_eq!(
+            delta_type_name(&DataType::Timestamp(
+                arrow::datatypes::TimeUnit::Microsecond,
+                None
+            )),
+            DataType::Timestamp(arrow::datatypes::TimeUnit::Microsecond, None).to_string(),
+            "a zone-less timestamp is not a Delta timestamp"
+        );
+    }
+
+    /// Every chain file ends with its mapping: the partition column, the
+    /// profile's `decimal(20,0)` columns with their reasons, and a row for
+    /// every conversion its tables go through.
+    #[test]
+    fn every_chain_documents_its_delta_type_mapping() {
+        for kind in ChainKind::ALL {
+            let reference = chain_reference(kind).unwrap();
+            let markdown = render_chain(&reference);
+            assert!(markdown.contains("\n## Delta type mapping\n"), "{kind}");
+            for decimal in kind.profile().decimal_columns {
+                assert!(
+                    markdown.contains(&format!(
+                        "| `{}.{}` | {} |",
+                        decimal.table, decimal.column, decimal.reason
+                    )),
+                    "{kind}: {decimal:?}"
+                );
+            }
+            let rows = mapping_rows(&reference);
+            let conversions: BTreeSet<Conversion> = rows.iter().map(|row| row.conversion).collect();
+            for expected in [
+                Conversion::CheckedLong,
+                Conversion::LosslessInteger,
+                Conversion::TimestampMicros,
+                Conversion::Partition,
+            ] {
+                assert!(conversions.contains(&expected), "{kind}: {expected:?}");
+            }
+            assert_eq!(
+                conversions.contains(&Conversion::Decimal),
+                !kind.profile().decimal_columns.is_empty(),
+                "{kind}"
+            );
+            // Every converted column is in exactly the rows of its conversions.
+            for table in &reference.tables {
+                for column in &table.columns {
+                    for conversion in &column.conversions {
+                        assert!(
+                            rows.iter().any(|row| row.conversion == *conversion
+                                && row.columns.iter().any(|(name, tables)| {
+                                    *name == column.name && tables.contains(&table.name)
+                                })),
+                            "{kind}: {}.{} {conversion:?}",
+                            table.name,
+                            column.name
+                        );
+                    }
+                }
+            }
+        }
     }
 }

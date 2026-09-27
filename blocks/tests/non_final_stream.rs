@@ -1,7 +1,7 @@
 //! Exercise reversible CLI selection, append-only events and the bounded warning,
 //! the durable per-row `stream_ordinal`, the README canonical live view, and a
 //! live build whose expired committed parts disappear under it.
-use arrow::array::{StringArray, UInt64Array};
+use arrow::array::{Int64Array, StringArray};
 use firehose_parquet::{cursor::load_cursor_parquet, writer::read_parquet};
 use firehose_protos::{eth, firehose};
 use prost::Message;
@@ -208,7 +208,7 @@ async fn explicit_false_reaches_rpc_preserves_recurrence_and_warns_only_non_fina
                     .column_by_name("block_num")
                     .unwrap()
                     .as_any()
-                    .downcast_ref::<UInt64Array>()
+                    .downcast_ref::<Int64Array>()
                     .unwrap();
                 let ids = batch
                     .column_by_name("block_id")
@@ -557,13 +557,18 @@ fn string_column<'a>(batch: &'a arrow::record_batch::RecordBatch, name: &str) ->
         .downcast_ref::<StringArray>()
         .unwrap_or_else(|| panic!("{name} is not Utf8"))
 }
-fn u64_column<'a>(batch: &'a arrow::record_batch::RecordBatch, name: &str) -> &'a UInt64Array {
+/// A Delta `long` column (the mapper's `UInt64`, #643) as `u64` values.
+fn u64_column(batch: &arrow::record_batch::RecordBatch, name: &str) -> Vec<u64> {
     batch
         .column_by_name(name)
         .unwrap_or_else(|| panic!("missing {name}"))
         .as_any()
-        .downcast_ref::<UInt64Array>()
-        .unwrap_or_else(|| panic!("{name} is not UInt64"))
+        .downcast_ref::<Int64Array>()
+        .unwrap_or_else(|| panic!("{name} is not Int64"))
+        .values()
+        .iter()
+        .map(|value| u64::try_from(*value).unwrap())
+        .collect()
 }
 /// The rows of one table, sorted by `stream_ordinal`. Each part's rows must
 /// lie inside the accepted-event window its deterministic name records
@@ -588,15 +593,16 @@ fn event_rows(chain_root: &Path, table: &str) -> Vec<EventRow> {
                 "{name}: stream_ordinal directly follows fork_step"
             );
             let ordinals = u64_column(&batch, "stream_ordinal");
+            let numbers = u64_column(&batch, "block_num");
             for row in 0..batch.num_rows() {
-                let ordinal = ordinals.value(row);
+                let ordinal = ordinals[row];
                 assert!(
                     (window[0]..=window[1]).contains(&ordinal),
                     "{name}: ordinal {ordinal} outside its part window {window:?}"
                 );
                 rows.push(EventRow {
                     ordinal,
-                    num: u64_column(&batch, "block_num").value(row),
+                    num: numbers[row],
                     id: string_column(&batch, "block_id").value(row).to_string(),
                     step: string_column(&batch, "fork_step").value(row).to_string(),
                     tx_hash: (table == "transactions")

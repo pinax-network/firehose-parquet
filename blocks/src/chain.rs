@@ -6,7 +6,9 @@
 //!
 //! 1. Add a [`ChainKind`] variant and append it to [`ChainKind::ALL`]. The order
 //!    of `ALL` is also the `type_url` detection order.
-//! 2. Describe it with a [`ChainProfile`] in [`ChainKind::profile`].
+//! 2. Describe it with a [`ChainProfile`] in [`ChainKind::profile`], including
+//!    the `UInt64` columns its Delta tables store as `decimal(20,0)`
+//!    (`decimal_columns`).
 //! 3. Construct its mapper in [`ChainKind::create_mapper`].
 //! 4. Add any chain-name inference rule to [`CHAIN_NAME_RULES`] (ordered).
 //!
@@ -15,6 +17,7 @@
 
 use std::fmt;
 
+use firehose_parquet::delta::types::{DecimalColumn, DeltaTypes};
 use firehose_parquet::encode::EncodeBytes;
 use firehose_parquet::ingest::BlockFamily;
 use firehose_parquet::traits::BlockMapper;
@@ -88,7 +91,130 @@ pub struct ChainProfile {
     pub strict_chain_names: &'static [&'static str],
     /// Lowercase chain-name prefixes with the same role as `strict_chain_names`.
     pub strict_chain_name_prefixes: &'static [&'static str],
+    /// `UInt64` columns stored as Delta `decimal(20,0)` instead of a checked
+    /// `long` (#643, `docs/design/delta-lake.md` §6): currency amounts,
+    /// balances and fees, and values a sender or signer chooses without a range
+    /// check. Every other `UInt64` column is bounded by its protocol, and a
+    /// value above `i64::MAX` in it refuses the flush
+    /// (`firehose_parquet::delta::types`). Bitcoin satoshis stay `long`:
+    /// consensus caps them at 2.1·10^15.
+    pub decimal_columns: &'static [DecimalColumn],
 }
+
+impl ChainProfile {
+    /// The Delta type decisions for this family's tables.
+    pub fn delta_types(&self) -> DeltaTypes {
+        DeltaTypes::new(self.decimal_columns)
+    }
+}
+
+/// A `decimal(20,0)` column and why a checked `long` does not fit it.
+const fn decimal(table: &'static str, column: &'static str, reason: &'static str) -> DecimalColumn {
+    DecimalColumn {
+        table,
+        column,
+        reason,
+    }
+}
+
+const LAMPORTS: &str = "lamports: a currency amount";
+const GWEI: &str = "Gwei: a currency amount";
+const SIGNED_SLOT: &str = "slashing evidence: the protocol checks the signature over the \
+                           header, not the range of the slot it names";
+const SIGNED_ATTESTATION: &str = "slashing evidence: the protocol checks the signature over \
+                                  the attestation, not the range of its data";
+
+const EVM_DECIMALS: &[DecimalColumn] = &[
+    decimal(
+        "blocks",
+        "nonce",
+        "PoW block nonce: any 64-bit value, often above i64::MAX",
+    ),
+    decimal(
+        "set_code_authorizations",
+        "nonce",
+        "EIP-7702 authorization nonce: chosen by the signer and not range-checked at inclusion",
+    ),
+    decimal("withdrawals", "amount_gwei", GWEI),
+];
+
+const SOLANA_DECIMALS: &[DecimalColumn] = &[
+    decimal("transactions", "fee", LAMPORTS),
+    decimal("transactions", "pre_balances", LAMPORTS),
+    decimal("transactions", "post_balances", LAMPORTS),
+    decimal("vote_transactions", "fee", LAMPORTS),
+    decimal("vote_transactions", "pre_balances", LAMPORTS),
+    decimal("vote_transactions", "post_balances", LAMPORTS),
+    decimal("rewards", "post_balance", LAMPORTS),
+];
+
+const BEACON_DECIMALS: &[DecimalColumn] = &[
+    decimal("deposits", "amount", GWEI),
+    decimal("withdrawals", "amount", GWEI),
+    decimal("deposit_requests", "amount", GWEI),
+    decimal("withdrawal_requests", "amount", GWEI),
+    decimal("proposer_slashings", "header_1_slot", SIGNED_SLOT),
+    decimal("proposer_slashings", "header_2_slot", SIGNED_SLOT),
+    decimal(
+        "attester_slashings",
+        "attestation_1_slot",
+        SIGNED_ATTESTATION,
+    ),
+    decimal(
+        "attester_slashings",
+        "attestation_1_committee_index",
+        SIGNED_ATTESTATION,
+    ),
+    decimal(
+        "attester_slashings",
+        "attestation_1_source_epoch",
+        SIGNED_ATTESTATION,
+    ),
+    decimal(
+        "attester_slashings",
+        "attestation_1_target_epoch",
+        SIGNED_ATTESTATION,
+    ),
+    decimal(
+        "attester_slashings",
+        "attestation_2_slot",
+        SIGNED_ATTESTATION,
+    ),
+    decimal(
+        "attester_slashings",
+        "attestation_2_committee_index",
+        SIGNED_ATTESTATION,
+    ),
+    decimal(
+        "attester_slashings",
+        "attestation_2_source_epoch",
+        SIGNED_ATTESTATION,
+    ),
+    decimal(
+        "attester_slashings",
+        "attestation_2_target_epoch",
+        SIGNED_ATTESTATION,
+    ),
+];
+
+const ANTELOPE_DECIMALS: &[DecimalColumn] = &[decimal(
+    "actions",
+    "error_code",
+    "`eosio_assert_code` error code: the contract passes any uint64",
+)];
+
+const COSMOS_DECIMALS: &[DecimalColumn] = &[
+    decimal(
+        "transactions",
+        "timeout_height",
+        "chosen by the sender and not range-checked",
+    ),
+    decimal(
+        "transactions",
+        "fee_gas_limit",
+        "chosen by the sender; unbounded when a chain's maximum block gas is -1",
+    ),
+];
 
 const EVM: ChainProfile = ChainProfile {
     label: "evm",
@@ -103,6 +229,7 @@ const EVM: ChainProfile = ChainProfile {
     failed_transactions_by_default: true,
     strict_chain_names: &[],
     strict_chain_name_prefixes: &[],
+    decimal_columns: EVM_DECIMALS,
 };
 
 const BITCOIN: ChainProfile = ChainProfile {
@@ -118,6 +245,7 @@ const BITCOIN: ChainProfile = ChainProfile {
     failed_transactions_by_default: false,
     strict_chain_names: &[],
     strict_chain_name_prefixes: &[],
+    decimal_columns: &[],
 };
 
 const SOLANA: ChainProfile = ChainProfile {
@@ -133,6 +261,7 @@ const SOLANA: ChainProfile = ChainProfile {
     failed_transactions_by_default: false,
     strict_chain_names: &["solana"],
     strict_chain_name_prefixes: &["solana-"],
+    decimal_columns: SOLANA_DECIMALS,
 };
 
 const NEAR: ChainProfile = ChainProfile {
@@ -148,6 +277,7 @@ const NEAR: ChainProfile = ChainProfile {
     failed_transactions_by_default: false,
     strict_chain_names: &[],
     strict_chain_name_prefixes: &[],
+    decimal_columns: &[],
 };
 
 const ANTELOPE: ChainProfile = ChainProfile {
@@ -163,6 +293,7 @@ const ANTELOPE: ChainProfile = ChainProfile {
     failed_transactions_by_default: false,
     strict_chain_names: &["antelope", "eos"],
     strict_chain_name_prefixes: &["antelope-"],
+    decimal_columns: ANTELOPE_DECIMALS,
 };
 
 const COSMOS: ChainProfile = ChainProfile {
@@ -178,6 +309,7 @@ const COSMOS: ChainProfile = ChainProfile {
     failed_transactions_by_default: false,
     strict_chain_names: &[],
     strict_chain_name_prefixes: &[],
+    decimal_columns: COSMOS_DECIMALS,
 };
 
 const TRON: ChainProfile = ChainProfile {
@@ -193,6 +325,7 @@ const TRON: ChainProfile = ChainProfile {
     failed_transactions_by_default: false,
     strict_chain_names: &[],
     strict_chain_name_prefixes: &[],
+    decimal_columns: &[],
 };
 
 const BEACON: ChainProfile = ChainProfile {
@@ -208,6 +341,7 @@ const BEACON: ChainProfile = ChainProfile {
     failed_transactions_by_default: false,
     strict_chain_names: &[],
     strict_chain_name_prefixes: &[],
+    decimal_columns: BEACON_DECIMALS,
 };
 
 /// One ordered chain-name inference rule, matched against a lowercase name.

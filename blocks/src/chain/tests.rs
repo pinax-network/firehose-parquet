@@ -678,6 +678,76 @@ fn removing_appended_audit_columns_restores_the_pre_550_schemas() {
     );
 }
 
+/// Every `decimal(20,0)` column of every profile names, once, a `UInt64`
+/// column (or a list of them) of one of its family's tables, with a reason.
+#[test]
+fn decimal_columns_name_unsigned_columns_of_their_family() {
+    use arrow::datatypes::DataType;
+    for kind in ChainKind::ALL {
+        let mut mapper = kind.create_mapper(MapperOptions {
+            extended: true,
+            with_votes: true,
+            include_fork_step: true,
+            encode_bytes: EncodeBytes::Hex,
+            synthetic_partition_routing: false,
+            include_failed_transactions: true,
+        });
+        let batches = mapper.flush().unwrap();
+        let mut seen = std::collections::BTreeSet::new();
+        for decimal in kind.profile().decimal_columns {
+            let context = format!("{kind} {}.{}", decimal.table, decimal.column);
+            assert!(
+                seen.insert((decimal.table, decimal.column)),
+                "{context}: listed twice"
+            );
+            assert!(!decimal.reason.is_empty(), "{context}: no reason");
+            let schema = batches
+                .get(decimal.table)
+                .unwrap_or_else(|| panic!("{context}: no such table"))
+                .schema();
+            let data_type = schema
+                .field_with_name(decimal.column)
+                .unwrap_or_else(|_| panic!("{context}: no such column"))
+                .data_type()
+                .clone();
+            let unsigned = match &data_type {
+                DataType::UInt64 => true,
+                DataType::List(item) => item.data_type() == &DataType::UInt64,
+                _ => false,
+            };
+            assert!(unsigned, "{context}: {data_type} is not UInt64");
+        }
+        for (table, batch) in &batches {
+            kind.profile()
+                .delta_types()
+                .data_schema(table, batch.schema().as_ref())
+                .unwrap_or_else(|error| panic!("{kind} {table}: {error:#}"));
+        }
+    }
+    // Consensus caps Bitcoin satoshis at 2.1·10^15, so they stay `long`.
+    assert!(ChainKind::Bitcoin.profile().decimal_columns.is_empty());
+}
+
+/// SHA-256 over every family's Delta data file schemas (#643) for all 160
+/// option/encoding combinations: the mapper schemas above, mapped by each
+/// profile's `delta_types()`. Update the pinned value only for an intentional
+/// change of a Delta column type, and record that change.
+#[test]
+fn every_delta_data_schema_matches_the_pinned_digest() {
+    assert_eq!(
+        schema_digest(|kind, table, schema| Some(
+            kind.profile()
+                .delta_types()
+                .data_schema(table, schema)
+                .unwrap()
+        )),
+        DELTA_DATA_SCHEMA_DIGEST
+    );
+}
+
+const DELTA_DATA_SCHEMA_DIGEST: &str =
+    "98b767b5b0469e6f49df5c5ce61b55aee7089a2760a0c1db315bbd0e32ff7406";
+
 const CURRENT_SCHEMA_DIGEST: &str =
     "fbaaaf609711200252c3d21113e15ce881ab422c71ae51b65cb9961e658d9b20";
 

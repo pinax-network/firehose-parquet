@@ -81,8 +81,13 @@ impl MapperState {
             .mapper
             .as_mut()
             .context("protected ingestion requires a mapper before recovery")?;
+        let delta_types = setup
+            .block_type
+            .context("unsupported resolved mapper family")?
+            .profile()
+            .delta_types();
         let empty_batches = mapper.flush()?;
-        let tables = declare_inventory(&empty_batches, &mapper.table_names())?;
+        let tables = declare_inventory(&empty_batches, &mapper.table_names(), &delta_types)?;
         Ok(MapperSemantics {
             chain: setup
                 .endpoint_info
@@ -100,6 +105,7 @@ impl MapperState {
             with_votes: setup.with_votes,
             include_failed_transactions: self.include_failed_transactions,
             tables,
+            delta_types,
         })
     }
 

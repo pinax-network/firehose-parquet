@@ -1,7 +1,18 @@
 //! Fixed, independently reviewed raw Firehose data; no network in cargo test.
-use arrow::{array::*, datatypes::DataType, record_batch::RecordBatch};
-use blocks::evm::mapper::EvmBlockMapper;
+//!
+//! The expectations describe what a build writes: the Delta data file batches
+//! of the flush boundary (#643), with Delta types, microsecond timestamps and
+//! the `date` partition column left out.
+use arrow::{
+    array::*,
+    datatypes::{DataType, TimeUnit},
+    record_batch::RecordBatch,
+};
+use blocks::{chain::ChainKind, evm::mapper::EvmBlockMapper};
 use firehose_parquet::{
+    config::BlockMetadata,
+    date_partition::DatePartition,
+    delta::types::is_delta_type,
     encode::EncodeBytes,
     traits::{BlockIdentity, BlockMapper, StreamEvent},
 };
@@ -31,6 +42,7 @@ struct Fixture {
     /// Transaction traces in the payload, the mapper's return value.
     transactions: u64,
     /// Canonical millisecond timestamp and UTC day, from the block header time.
+    /// Delta data files store the timestamp in microseconds.
     timestamp_millis: i64,
     date: i32,
 }
@@ -116,8 +128,11 @@ fn fixture_identity(fixture: &Fixture) -> BlockIdentity {
     identity
 }
 
-/// Normalize Arrow cells only for comparison. Binary values are compared with
-/// the independent fixture's explicit hex bytes; no production encoder is used.
+/// Normalize Delta data file cells only for comparison. Binary values are
+/// compared with the independent fixture's explicit hex bytes; no production
+/// encoder is used. A `decimal(20,0)` is an exact decimal string, so a column
+/// mapped to the wrong Delta type fails against the fixture. The mapper's
+/// unsigned, dictionary and millisecond types never reach a data file.
 fn cell(array: &dyn Array, row: usize) -> Value {
     if array.is_null(row) {
         return Value::Null;
@@ -128,10 +143,14 @@ fn cell(array: &dyn Array, row: usize) -> Value {
         };
     }
     match array.data_type() {
-        DataType::UInt64 => primitive!(UInt64Array),
-        DataType::UInt32 => primitive!(UInt32Array),
         DataType::Int64 => primitive!(Int64Array),
         DataType::Int32 => primitive!(Int32Array),
+        DataType::Int16 => primitive!(Int16Array),
+        DataType::Decimal128(20, 0) => json!(array
+            .as_any()
+            .downcast_ref::<Decimal128Array>()
+            .unwrap()
+            .value_as_string(row)),
         DataType::Boolean => primitive!(BooleanArray),
         DataType::Utf8 => primitive!(StringArray),
         DataType::Binary => json!(hex(array
@@ -139,16 +158,8 @@ fn cell(array: &dyn Array, row: usize) -> Value {
             .downcast_ref::<BinaryArray>()
             .unwrap()
             .value(row))),
-        DataType::Date32 => primitive!(Date32Array),
-        DataType::Timestamp(arrow::datatypes::TimeUnit::Millisecond, _) => {
-            primitive!(TimestampMillisecondArray)
-        }
-        DataType::Dictionary(_, _) => {
-            let dict = array
-                .as_any()
-                .downcast_ref::<DictionaryArray<arrow::datatypes::Int32Type>>()
-                .unwrap();
-            cell(dict.values().as_ref(), dict.key(row).unwrap())
+        DataType::Timestamp(TimeUnit::Microsecond, Some(_)) => {
+            primitive!(TimestampMicrosecondArray)
         }
         DataType::List(_) => {
             let values = array
@@ -181,8 +192,28 @@ fn assert_value(batch: &RecordBatch, row: usize, column: &str, expected: &Value,
 /// streams; every row of every table must carry it.
 const GOLDEN_STREAM_ORDINAL: u64 = 4_242;
 
+/// The fixture flush as a build writes it: every table mapped onto its Delta
+/// data file at the flush boundary (#643), routed to the block's UTC day.
+fn delta_batches(
+    batches: HashMap<String, RecordBatch>,
+    identity: &BlockIdentity,
+) -> HashMap<String, RecordBatch> {
+    let metadata = BlockMetadata {
+        min_block_number: identity.block_num,
+        max_block_number: identity.block_num,
+        min_timestamp: Some(identity.timestamp),
+        max_timestamp: Some(identity.timestamp),
+    };
+    ChainKind::Evm
+        .profile()
+        .delta_types()
+        .data_batches(batches, &metadata)
+        .unwrap()
+}
+
 /// Map the fixture through the borrowed and the owned (production, #518) entry
-/// points and require identical tables, schemas and rows.
+/// points and require identical tables, schemas and rows, then map the flush
+/// onto its Delta data files.
 fn map_both_ways(
     fixture: &Fixture,
     identity: &BlockIdentity,
@@ -222,13 +253,20 @@ fn map_both_ways(
             fixture.name
         );
     }
-    borrowed
+    delta_batches(borrowed, identity)
 }
 
 fn check_fixture(fixture: &Fixture) {
     let identity = fixture_identity(fixture);
     let expected: Value = serde_json::from_str(fixture.expected).unwrap();
     assert_eq!(expected["format_version"], 1);
+    // The `date` partition of every table is the block's UTC day.
+    assert_eq!(
+        DatePartition::from_timestamp(identity.timestamp)
+            .unwrap()
+            .date32(),
+        fixture.date
+    );
     for extended in [false, true] {
         for encoding in [EncodeBytes::Binary, EncodeBytes::Hex] {
             for fork_step in [false, true] {
@@ -255,8 +293,8 @@ fn check_fixture(fixture: &Fixture) {
                     let canonical = json!({
                         "block_num": identity.block_num, "block_id": format!("0x{}", identity.block_id),
                         "parent_num": identity.parent_num, "parent_id": format!("0x{}", identity.parent_id),
-                        "lib_num": identity.lib_num, "timestamp": fixture.timestamp_millis,
-                        "date": fixture.date
+                        "lib_num": identity.lib_num,
+                        "timestamp": fixture.timestamp_millis * 1_000
                     });
                     for row in 0..batch.num_rows() {
                         for (name, value) in canonical.as_object().unwrap() {
@@ -275,6 +313,16 @@ fn check_fixture(fixture: &Fixture) {
                     }
                     assert_eq!(batch.column_by_name("fork_step").is_some(), fork_step);
                     assert_eq!(batch.column_by_name("stream_ordinal").is_some(), fork_step);
+                    // A Delta data file: Delta types only, and no `date`.
+                    assert!(batch.column_by_name("date").is_none(), "{table}");
+                    for field in batch.schema().fields() {
+                        assert!(
+                            is_delta_type(field.data_type()),
+                            "{table}.{}: {}",
+                            field.name(),
+                            field.data_type()
+                        );
+                    }
                     // The byte encoding is a schema contract, not only equal
                     // printable values after conversion.
                     assert_eq!(
@@ -353,7 +401,7 @@ fn mainnet_reverted_set_code_transaction_keeps_only_persistent_changes() {
             .column_by_name("tx_index")
             .unwrap()
             .as_any()
-            .downcast_ref::<UInt32Array>()
+            .downcast_ref::<Int64Array>()
             .unwrap();
         (0..batch.num_rows())
             .filter(|&row| tx_index.value(row) == 130)
