@@ -44,7 +44,8 @@ Related docs:
     - `mirror.rs`: the non-authoritative cursor mirror (default `_fireparq/cursor.parquet`), reconciled from authority.
     - `maintenance.rs`: protected-root discovery and recovery before maintenance commands, and `build`'s startup checks (the whole tree when a dataset is created, only ancestors and the merge intent on resume, #655); `observe.rs`: read-only authority observation for `verify`.
   - Writing Parquet:
-    - `src/writer.rs`: Parquet encoding, the `<table>/date=YYYY-MM-DD` directory of a flush (`ParquetTableWriter::partition_suffix`), the partition contract (every row's time and `date` column must match that directory) and the unprotected low-level `OutputWriter` (not used by protected `build`).
+    - `src/delta/types.rs`: the checked flush-boundary mapping onto Delta data file types (#643): `DeltaTypes` (a chain's `decimal(20,0)` columns), `data_schema` (the declared table digests), `data_batches` (every flush, in `IngestionSession::flush` before the transaction journals anything: checked `long`, `decimal(20,0)`, `short`, `string` enums, microsecond timestamps, `date` left out after checking it against the partition), `Conversion` (the rules `docs/schemas/` documents) and `is_delta_type`.
+    - `src/writer.rs`: Parquet encoding, the `<table>/date=YYYY-MM-DD` directory of a flush (`ParquetTableWriter::partition_suffix`), the partition contract (every row's time must fall in that directory, and a mapper `date` column must equal it) and the unprotected low-level `OutputWriter` (not used by protected `build`).
     - `src/writer/protected.rs`, `src/writer/protected/verification.rs`: prepared complete parts, publication and exact receipt/schema verification; `src/writer/protected/budget.rs`: the `--flush-inflight-bytes` encoded-byte budget.
     - `src/writer/local.rs`: atomic, synced publication of one local part; `src/writer/properties.rs`: bounded Bloom filters, row-group limits and sort metadata shared by ingestion and maintenance.
     - `src/flush.rs`: adaptive compressed `--flush-bytes` targets and the summed `--flush-memory-bytes` trigger.
@@ -76,10 +77,10 @@ Related docs:
   - `src/bin/ingestion/setup.rs`: endpoint preflight (EndpointInfo, block type, encodings), resumed configuration and metrics labels.
   - `src/bin/ingestion/runtime.rs`: ordered receive/filter/routing state and flush windows; only the borrowed session commits authority and mirrors.
   - `src/bin/chain_profile_tests/`: #526 oracle tests for chain detection and profiles.
-  - `src/chain.rs`: `ChainKind` / `ChainProfile`, the per-family facts (label, `type_url` marker, protected family, encoding contract, nullable timestamps, block gaps, extended/votes handling, failed-transaction default, chain-name rules) and mapper construction.
+  - `src/chain.rs`: `ChainKind` / `ChainProfile`, the per-family facts (label, `type_url` marker, protected family, encoding contract, nullable timestamps, block gaps, extended/votes handling, failed-transaction default, chain-name rules, the `decimal_columns` its Delta tables store as `decimal(20,0)`) and mapper construction.
   - `src/<chain>/{mod,proto,schema,mapper}.rs` for `evm`, `solana`, `beacon`, `near`, `antelope`, `tron`, `cosmos`, `bitcoin`: protobuf aliases, Arrow table schemas and row mapping, plus chain-specific helpers (`evm/decimal.rs`, `solana/vote.rs`, `tron/contracts.rs`, `bitcoin/amounts.rs`, `cosmos/tx_metadata.rs`, `antelope/text.rs`) and value/outcome tests.
   - `src/schema_docs.rs`: renders `docs/schemas/<chain>.md` from the schema constructors; `examples/dump_schemas.rs` writes the files and a test fails when they drift.
-  - `src/schema_contract_tests.rs`: every table of every chain, under every encoding and both `fork_step` settings, has unique names and round-trips through Parquet.
+  - `src/schema_contract_tests.rs`: every table of every chain, under every encoding and both `fork_step` settings, has unique names and round-trips through Parquet, and its Delta data file mapping holds only Delta types, exactly the profile's `decimal(20,0)` columns and every value; a value above `i64::MAX` in a `long` column is refused.
   - `src/mapping_bench.rs`: ignored whole-block mapping benchmarks.
   - `examples/`: replay, benchmark and golden-refresh tools (`replay_*`, `bench_*`, `measure_flush_sizing`, `refresh_evm_golden`, `dump_schemas`). `bench_ingestion_concurrency` is the #516 flush-concurrency benchmark; `bench_live_flush` runs the real binary against a looping mock Firehose and a loopback HTTPS S3 with injected latency to measure #658 catch-up throughput and commit phases.
   - `tests/`: real-binary integration tests against a mock Firehose (`ingestion_transactions.rs`, `dataset_ownership.rs`, `endpoint_info_startup.rs`, `non_final_stream.rs`, `metrics_readiness.rs`, `shutdown_signals.rs`, and `adaptive_flush.rs`, which paces its mock faster than or at real time), the DuckDB and Polars engine test (`engine_compat.rs`, with `tests/engines/`), the maintenance crash-hook gating test (`maintenance_crash_hooks.rs`) and the offline EVM golden regression (`evm_golden.rs`, `tests/fixtures/`).
@@ -110,6 +111,7 @@ Related docs:
   - `blocks/src/<chain>/schema.rs` and `mapper.rs`.
   - Regenerate the reference with `cargo run -p blocks --example dump_schemas` and commit `docs/schemas/<chain>.md`; the drift test fails otherwise.
   - A schema change changes the table digests bound by protected output, so existing roots refuse to resume: document it in `docs/releases/unreleased.md` as a rebuild-required change. Row or routing changes without a schema change must advance `MAPPER_EPOCH` in `firehose-parquet/src/ingest/state.rs`.
+  - A new `UInt64` column becomes a checked Delta `long`; list it in the chain's `ChainProfile::decimal_columns` (`blocks/src/chain.rs`) when it holds a currency amount or a value a sender or signer chooses without a range check. The Delta data schema digest in `blocks/src/chain/tests.rs` pins every chain's Delta types.
   - `blocks/src/schema_contract_tests.rs` covers every table; add fixture rows for a new table.
 - Add a new chain family:
   - `blocks/src/<chain>/{mod,proto,schema,mapper}.rs` (exported from `blocks/src/lib.rs`); use the shared `firehose_parquet::traits` helpers (`push_fork_step_field`, `fork_step_builder`, `append_fork_step`, `finish_fork_step`, `est_fork_step`, `enum_data_type`, `estimated_dictionary_index_bytes`, `strip_enum_prefix`) instead of per-chain copies.
@@ -184,7 +186,7 @@ Related docs:
 ## Parquet Enum Convention
 
 - Materialized protobuf enum-backed fields should be written to Parquet as stable protobuf label strings, not raw integer values.
-- Prefer Arrow dictionary-encoded `Utf8` (`Dictionary(Int32, Utf8)`) for enum columns that are newly materialized or migrated for readability.
+- Prefer Arrow dictionary-encoded `Utf8` (`Dictionary(Int32, Utf8)`) for enum columns that are newly materialized or migrated for readability. The Delta data files store them as plain `string` (#643); Parquet still dictionary-encodes their pages.
 - Existing readable `Utf8` enum columns remain acceptable until they are migrated to the shared representation.
 - Bitcoin currently has no protobuf enum-backed fields materialized into Parquet.
 

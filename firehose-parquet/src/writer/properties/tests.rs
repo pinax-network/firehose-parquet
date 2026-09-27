@@ -59,6 +59,42 @@ fn sorting_is_proved_per_complete_part_and_uses_parquet_leaf_ordinal() {
     }
 }
 
+/// Delta data files (#643) carry `block_num` as `Int64`: the same proof applies.
+#[test]
+fn sorting_is_also_proved_for_a_signed_delta_block_num() {
+    for (numbers, expected) in [
+        (vec![Some(1), Some(1), Some(2)], true),
+        (vec![Some(2), Some(1), Some(2)], false),
+        (vec![Some(1), None, Some(2)], false),
+        (vec![], false),
+    ] {
+        let batch = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![Field::new(
+                "block_num",
+                DataType::Int64,
+                true,
+            )])),
+            vec![Arc::new(arrow::array::Int64Array::from(numbers))],
+        )
+        .unwrap();
+        let props = for_batch(Compression::Zstd, &batch, None).unwrap();
+        assert_eq!(props.sorting_columns().is_some(), expected);
+    }
+    let other = RecordBatch::try_new(
+        Arc::new(Schema::new(vec![Field::new(
+            "block_num",
+            DataType::Utf8,
+            false,
+        )])),
+        vec![Arc::new(StringArray::from(vec!["1", "2"]))],
+    )
+    .unwrap();
+    assert!(for_batch(Compression::Zstd, &other, None)
+        .unwrap()
+        .sorting_columns()
+        .is_none());
+}
+
 #[test]
 fn lookup_filters_have_no_false_negatives_across_nulls_encodings_and_row_groups() {
     let n = ROW_GROUP_ROWS + 33;

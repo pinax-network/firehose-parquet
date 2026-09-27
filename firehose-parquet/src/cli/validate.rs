@@ -410,29 +410,41 @@ pub(in crate::cli) fn extract_block_tuples(
     parent_id_idx: usize,
     timestamp_idx: Option<usize>,
 ) -> anyhow::Result<Vec<BlockTuple>> {
-    use arrow::array::{Array, UInt64Array};
+    use arrow::array::{Array, Int64Array, UInt64Array};
 
     let mut tuples = Vec::new();
     for batch_result in reader {
         let batch = batch_result?;
-        let block_nums = batch
-            .column(block_num_idx)
-            .as_any()
-            .downcast_ref::<UInt64Array>()
-            .ok_or_else(|| anyhow::anyhow!("block_num column is not UInt64"))?;
+        // The mapper's `UInt64`, or the Delta data file's `Int64` (#643).
+        let column = batch.column(block_num_idx);
+        let block_nums: Vec<u64> =
+            if let Some(numbers) = column.as_any().downcast_ref::<UInt64Array>() {
+                numbers.values().to_vec()
+            } else if let Some(numbers) = column.as_any().downcast_ref::<Int64Array>() {
+                numbers
+                    .values()
+                    .iter()
+                    .map(|number| {
+                        u64::try_from(*number)
+                            .map_err(|_| anyhow::anyhow!("negative block_num {number}"))
+                    })
+                    .collect::<anyhow::Result<_>>()?
+            } else {
+                anyhow::bail!("block_num column is not UInt64 or Int64")
+            };
         let block_id_col = batch.column(block_id_idx).as_ref();
         let parent_id_col = batch.column(parent_id_idx).as_ref();
         let timestamps = timestamp_idx
             .map(|idx| timestamp_column_as_epoch_millis(batch.column(idx).as_ref()))
             .transpose()?;
 
-        for i in 0..batch.num_rows() {
+        for (i, block_num) in block_nums.into_iter().enumerate() {
             let ts = timestamps
                 .as_ref()
                 .filter(|millis| millis.is_valid(i))
                 .map(|millis| millis.value(i));
             tuples.push((
-                block_nums.value(i),
+                block_num,
                 read_id_string(block_id_col, i, "block_id")?,
                 read_id_string(parent_id_col, i, "parent_id")?,
                 ts,

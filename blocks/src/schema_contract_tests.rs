@@ -7,19 +7,28 @@
 //! duplicate names silently, but Spark and Polars reject such files, DuckDB
 //! renames the second column (`timestamp_1`), and `Schema::index_of` only ever
 //! finds the first one.
+//!
+//! The same tables, mapped onto their Delta data file types at the flush
+//! boundary (#643, `firehose_parquet::delta::types`), must hold only Delta
+//! types, leave out the `date` partition column, keep every value, store
+//! exactly the chain's `decimal(20,0)` columns as decimals, and round-trip
+//! through Parquet too.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use arrow::array::{Array, Int64Array};
 use arrow::compute::concat_batches;
 use arrow::datatypes::DataType;
 use arrow::record_batch::RecordBatch;
 use arrow::util::display::array_value_to_string;
 use firehose_parquet::config::{BlockMetadata, Compression};
+use firehose_parquet::date_partition::DatePartition;
+use firehose_parquet::delta::types::{is_delta_type, PARTITION_COLUMN};
 use firehose_parquet::encode::{decode_base58, EncodeBytes};
 use firehose_parquet::traits::{
-    timestamp_millis_utc_type, BlockIdentity, BlockMapper, StreamEvent,
+    timestamp_micros_utc_type, timestamp_millis_utc_type, BlockIdentity, BlockMapper, StreamEvent,
 };
 use firehose_parquet::verify::{
     partition_root, verify_parquet, HashStrategy, VerifyCheck, VerifyOptions, VerifyProfile,
@@ -32,6 +41,7 @@ use crate::antelope::mapper::AntelopeBlockMapper;
 use crate::beacon::mapper::BeaconBlockMapper;
 use crate::beacon::proto::beacon as beacon_pb;
 use crate::bitcoin::mapper::BitcoinBlockMapper;
+use crate::chain::ChainKind;
 use crate::cosmos::mapper::CosmosBlockMapper;
 use crate::evm::mapper::EvmBlockMapper;
 use crate::evm::proto::eth;
@@ -194,6 +204,7 @@ fn solana_block_with_vote() -> Vec<u8> {
 
 /// One mapper configuration and the fixture blocks it maps before a flush.
 struct Case {
+    kind: ChainKind,
     label: String,
     mapper: Box<dyn BlockMapper>,
     blocks: Vec<Vec<u8>>,
@@ -201,11 +212,13 @@ struct Case {
 
 impl Case {
     fn new(
+        kind: ChainKind,
         label: impl Into<String>,
         mapper: impl BlockMapper + 'static,
         blocks: Vec<Vec<u8>>,
     ) -> Self {
         Self {
+            kind,
             label: label.into(),
             mapper: Box::new(mapper),
             blocks,
@@ -220,11 +233,13 @@ fn cases(encoding: &EncodeBytes, fork_step: bool) -> Vec<Case> {
     let enc = || encoding.clone();
     let mut cases = vec![
         Case::new(
+            ChainKind::Antelope,
             "antelope",
             AntelopeBlockMapper::new(fork_step, enc(), true),
             vec![antelope::mapper::tests::make_test_block(BLOCK_NUM as u32).encode_to_vec()],
         ),
         Case::new(
+            ChainKind::Beacon,
             "beacon",
             BeaconBlockMapper::new(fork_step, enc()),
             vec![
@@ -235,16 +250,19 @@ fn cases(encoding: &EncodeBytes, fork_step: bool) -> Vec<Case> {
             ],
         ),
         Case::new(
+            ChainKind::Bitcoin,
             "bitcoin",
             BitcoinBlockMapper::new(fork_step, enc()),
             vec![bitcoin::mapper::tests::make_test_block(BLOCK_NUM as i64).encode_to_vec()],
         ),
         Case::new(
+            ChainKind::Cosmos,
             "cosmos",
             CosmosBlockMapper::new(fork_step, enc(), true),
             vec![cosmos::mapper::tests::make_test_block(BLOCK_NUM as i64).encode_to_vec()],
         ),
         Case::new(
+            ChainKind::Near,
             "near",
             NearBlockMapper::new(fork_step, enc(), true),
             vec![
@@ -256,6 +274,7 @@ fn cases(encoding: &EncodeBytes, fork_step: bool) -> Vec<Case> {
             ],
         ),
         Case::new(
+            ChainKind::Tron,
             "tron",
             TronBlockMapper::new(fork_step, enc(), true),
             vec![tron::mapper::tests::make_test_block(BLOCK_NUM).encode_to_vec()],
@@ -263,6 +282,7 @@ fn cases(encoding: &EncodeBytes, fork_step: bool) -> Vec<Case> {
     ];
     for extended in [false, true] {
         cases.push(Case::new(
+            ChainKind::Evm,
             format!("evm extended={extended}"),
             EvmBlockMapper::new(extended, fork_step, enc(), true),
             vec![evm_block_with_every_table().encode_to_vec()],
@@ -271,6 +291,7 @@ fn cases(encoding: &EncodeBytes, fork_step: bool) -> Vec<Case> {
     for with_votes in [false, true] {
         for synthetic_routing in [false, true] {
             cases.push(Case::new(
+                ChainKind::Solana,
                 format!("solana with_votes={with_votes} synthetic_routing={synthetic_routing}"),
                 SolanaBlockMapper::new(with_votes, fork_step, enc(), synthetic_routing, true),
                 vec![solana_block_with_vote()],
@@ -295,6 +316,7 @@ fn identity(block_num: u64, fork_step: Option<&str>) -> BlockIdentity {
 
 /// The output of one case: a context label and one flushed batch per table.
 struct Flushed {
+    kind: ChainKind,
     context: String,
     include_fork_step: bool,
     batches: HashMap<String, RecordBatch>,
@@ -357,6 +379,7 @@ fn flush_all_cases() -> Vec<Flushed> {
                 );
 
                 flushed.push(Flushed {
+                    kind: case.kind,
                     context,
                     include_fork_step,
                     batches,
@@ -502,6 +525,257 @@ fn every_table_schema_has_unique_field_names_and_round_trips_through_parquet() {
     }
 
     assert_eq!(checked, expected_table_count());
+}
+
+/// The flush metadata of the fixture blocks: every case routes to the UTC day
+/// of [`TIMESTAMP`].
+fn fixture_metadata() -> BlockMetadata {
+    BlockMetadata {
+        min_block_number: BLOCK_NUM,
+        max_block_number: BLOCK_NUM + 2,
+        min_timestamp: Some(TIMESTAMP),
+        max_timestamp: Some(TIMESTAMP + 2),
+    }
+}
+
+/// The Delta type a mapper type must become (`docs/design/delta-lake.md` §6),
+/// written out independently of `firehose_parquet::delta::types`.
+fn expected_delta_type(source: &DataType, decimal: bool) -> DataType {
+    use arrow::datatypes::{Field, TimeUnit};
+    let item = |field: &Field| {
+        Field::new(
+            field.name(),
+            expected_delta_type(field.data_type(), decimal),
+            field.is_nullable(),
+        )
+    };
+    match source {
+        DataType::UInt64 if decimal => DataType::Decimal128(20, 0),
+        DataType::UInt64 | DataType::UInt32 | DataType::UInt16 => DataType::Int64,
+        DataType::UInt8 => DataType::Int16,
+        DataType::Dictionary(_, value) if **value == DataType::Utf8 => DataType::Utf8,
+        DataType::Timestamp(TimeUnit::Millisecond, zone) => {
+            DataType::Timestamp(TimeUnit::Microsecond, zone.clone())
+        }
+        DataType::List(field) => DataType::List(std::sync::Arc::new(item(field))),
+        DataType::Struct(fields) => DataType::Struct(fields.iter().map(|f| item(f)).collect()),
+        other => other.clone(),
+    }
+}
+
+/// Whether `data_type` is, or holds, a `decimal(20,0)`.
+fn holds_decimal(data_type: &DataType) -> bool {
+    match data_type {
+        DataType::Decimal128(20, 0) => true,
+        DataType::List(field) => holds_decimal(field.data_type()),
+        DataType::Struct(fields) => fields.iter().any(|f| holds_decimal(f.data_type())),
+        _ => false,
+    }
+}
+
+/// #643: every table of every chain, under every encoding and both
+/// `fork_step` settings, maps onto its Delta data file: only Delta types, the
+/// `date` partition column left out, `timestamp` in microseconds, exactly the
+/// profile's `decimal(20,0)` columns, every value kept, and a Parquet
+/// round trip that changes neither the values nor the protected schema digest.
+#[test]
+fn every_table_maps_onto_delta_types_and_round_trips_through_parquet() {
+    let scratch = ScratchDir::new();
+    let partition = DatePartition::from_timestamp(TIMESTAMP).unwrap();
+    let mut checked = 0;
+    for (case_index, flushed) in flush_all_cases().iter().enumerate() {
+        let types = flushed.kind.profile().delta_types();
+        let case_dir = scratch.0.join(format!("delta-{case_index}"));
+        let data = types
+            .data_batches(flushed.batches.clone(), &fixture_metadata())
+            .unwrap_or_else(|error| panic!("{}: {error:#}", flushed.context));
+        for (table, batch) in sorted_tables(&flushed.batches) {
+            let context = format!("{} table={table}", flushed.context);
+            let mapped = &data[table];
+            let schema = mapped.schema();
+            // The batch conversion and the declared schema agree.
+            assert_eq!(
+                schema.as_ref(),
+                &types.data_schema(table, batch.schema().as_ref()).unwrap(),
+                "{context}: data schema"
+            );
+            assert_eq!(
+                mapped,
+                &types.data_batch(table, batch, Some(partition)).unwrap(),
+                "{context}: one table alone maps the same"
+            );
+            // Every mapper column but `date`, in order, with its Delta type.
+            let names = |schema: &arrow::datatypes::Schema| -> Vec<String> {
+                schema
+                    .fields()
+                    .iter()
+                    .map(|f| f.name().clone())
+                    .filter(|name| name != PARTITION_COLUMN)
+                    .collect()
+            };
+            assert_eq!(names(&schema), names(&batch.schema()), "{context}: columns");
+            assert!(
+                schema.field_with_name(PARTITION_COLUMN).is_err(),
+                "{context}: date is a partition column only"
+            );
+            for field in schema.fields() {
+                let source = batch
+                    .schema()
+                    .field_with_name(field.name())
+                    .unwrap()
+                    .clone();
+                let decimal = types.decimal_column(table, field.name()).is_some();
+                assert!(
+                    is_delta_type(field.data_type()),
+                    "{context}: {} is {}",
+                    field.name(),
+                    field.data_type()
+                );
+                assert_eq!(
+                    field.data_type(),
+                    &expected_delta_type(source.data_type(), decimal),
+                    "{context}: {} type",
+                    field.name()
+                );
+                assert_eq!(
+                    field.is_nullable(),
+                    source.is_nullable(),
+                    "{context}: {} nullability",
+                    field.name()
+                );
+            }
+            assert_eq!(
+                schema.field_with_name("timestamp").unwrap().data_type(),
+                &timestamp_micros_utc_type(),
+                "{context}: timestamp"
+            );
+            assert_eq!(
+                schema.field_with_name("block_num").unwrap().data_type(),
+                &DataType::Int64,
+                "{context}: block_num"
+            );
+            assert_eq!(
+                schema
+                    .field_with_name("stream_ordinal")
+                    .ok()
+                    .map(|f| f.data_type().clone()),
+                flushed.include_fork_step.then_some(DataType::Int64),
+                "{context}: stream_ordinal"
+            );
+            // Exactly the profile's decimal columns hold decimals.
+            let decimals: BTreeSet<&str> = schema
+                .fields()
+                .iter()
+                .filter(|f| holds_decimal(f.data_type()))
+                .map(|f| f.name().as_str())
+                .collect();
+            let listed: BTreeSet<&str> = types
+                .decimal_columns()
+                .iter()
+                .filter(|decimal| decimal.table == table.as_str())
+                .map(|decimal| decimal.column)
+                .collect();
+            assert_eq!(decimals, listed, "{context}: decimal(20,0) columns");
+            // Every value survives: timestamps as the same instant, everything
+            // else with the same display (a decimal(20,0), a long and a u64 of
+            // one value print alike, and so do a dictionary and its string).
+            assert_eq!(mapped.num_rows(), batch.num_rows(), "{context}: rows");
+            for field in schema.fields() {
+                let before = batch.column_by_name(field.name()).unwrap();
+                let after = mapped.column_by_name(field.name()).unwrap();
+                if field.data_type() == &timestamp_micros_utc_type() {
+                    let millis = arrow::compute::cast(before, &DataType::Int64).unwrap();
+                    let micros = arrow::compute::cast(after, &DataType::Int64).unwrap();
+                    let millis = millis.as_any().downcast_ref::<Int64Array>().unwrap();
+                    let micros = micros.as_any().downcast_ref::<Int64Array>().unwrap();
+                    for row in 0..mapped.num_rows() {
+                        assert_eq!(
+                            micros.is_valid(row).then(|| micros.value(row)),
+                            millis.is_valid(row).then(|| millis.value(row) * 1_000),
+                            "{context}: {} row {row}",
+                            field.name()
+                        );
+                    }
+                    continue;
+                }
+                for row in 0..mapped.num_rows() {
+                    assert_eq!(
+                        array_value_to_string(after, row).unwrap(),
+                        array_value_to_string(before, row).unwrap(),
+                        "{context}: {} row {row}",
+                        field.name()
+                    );
+                }
+            }
+
+            let read = parquet_round_trip(&case_dir, table, mapped);
+            assert_eq!(
+                read.schema().fields(),
+                schema.fields(),
+                "{context}: Delta schema changed through parquet"
+            );
+            assert_eq!(
+                firehose_parquet::writer::protected::schema_sha256(read.schema().as_ref()).unwrap(),
+                firehose_parquet::writer::protected::schema_sha256(schema.as_ref()).unwrap(),
+                "{context}: protected Delta schema identity changed through parquet"
+            );
+            assert_eq!(
+                &read, mapped,
+                "{context}: Delta values changed through parquet"
+            );
+            checked += 1;
+        }
+    }
+    assert_eq!(checked, expected_table_count());
+}
+
+/// #643: a value above `i64::MAX` in a checked `long` column refuses the
+/// flush with the table, column and value named, while a `decimal(20,0)`
+/// column keeps every `u64` exactly. EVM gas is bounded by the protocol, the
+/// PoW block nonce is not.
+#[test]
+fn values_above_i64_max_are_refused_in_long_columns_and_kept_in_decimal_columns() {
+    let types = ChainKind::Evm.profile().delta_types();
+    let flush = |gas_used: u64| {
+        let mut block = evm::mapper::tests::make_test_evm_block(BLOCK_NUM);
+        let header = block.header.as_mut().unwrap();
+        header.nonce = u64::MAX;
+        header.gas_used = gas_used;
+        let mut mapper = EvmBlockMapper::new(false, false, EncodeBytes::Hex, true);
+        mapper
+            .map_block(
+                &block.encode_to_vec(),
+                &identity(BLOCK_NUM, None),
+                StreamEvent::new(None, 1),
+            )
+            .unwrap();
+        types.data_batches(mapper.flush().unwrap(), &fixture_metadata())
+    };
+    let too_big = i64::MAX as u64 + 1;
+    let error = format!("{:#}", flush(too_big).unwrap_err());
+    assert!(
+        error.contains(&format!(
+            "table `blocks` column `gas_used`: value {too_big} does not fit the Delta type `long`"
+        )) && error.contains("refused before anything was written")
+            && error.contains("ChainProfile::decimal_columns"),
+        "{error}"
+    );
+    let data = flush(i64::MAX as u64).unwrap();
+    let blocks = &data["blocks"];
+    let gas = blocks
+        .column_by_name("gas_used")
+        .unwrap()
+        .as_any()
+        .downcast_ref::<Int64Array>()
+        .unwrap();
+    assert_eq!(gas.value(0), i64::MAX);
+    let nonce = blocks
+        .column_by_name("nonce")
+        .unwrap()
+        .as_any()
+        .downcast_ref::<arrow::array::Decimal128Array>()
+        .unwrap();
+    assert_eq!(nonce.value_as_string(0), "18446744073709551615");
 }
 
 /// Non-final tables carry `stream_ordinal` (`UInt64`, not null) directly after

@@ -92,6 +92,7 @@ All of them are closed.
 | [#572](https://github.com/pinax-network/firehose-parquet/issues/572) | - | - | [#576](https://github.com/pinax-network/firehose-parquet/pull/576) | The final mapper flush on completion is checkpointed. |
 | [#578](https://github.com/pinax-network/firehose-parquet/issues/578) | - | - | [#580](https://github.com/pinax-network/firehose-parquet/pull/580) | Local Parquet parts are published atomically after sync. |
 | [#617](https://github.com/pinax-network/firehose-parquet/issues/617) | N6 | high | [#623](https://github.com/pinax-network/firehose-parquet/pull/623) | `.env` is read from the working directory only; S3 writes need an explicit `s3://` destination. |
+| [#643](https://github.com/pinax-network/firehose-parquet/issues/643) (L2) | - | - | [#669](https://github.com/pinax-network/firehose-parquet/pull/669) | Every part is a Delta data file: one checked mapping per flush, before the journal, turns `UInt64` into a checked `long` (a value above `i64::MAX` refuses the flush) or, for each chain's listed amounts and unchecked values, `decimal(20,0)`; enums become `string`, timestamps microseconds, and `date` the partition column only; mapper epoch `v3` ([record](643-l2-delta-types.md)). |
 | [#647](https://github.com/pinax-network/firehose-parquet/issues/647) | - | - | [#650](https://github.com/pinax-network/firehose-parquet/pull/650) | The cursor mirror, partition index, Merkle registry and verify reports live in `<dataset root>/_fireparq/`, which every walker reserves; legacy root registries and indexes are refused instead of shadowed; the index parts are superseded by #653 ([record](647-fireparq-artifact-dir.md)). |
 | [#648](https://github.com/pinax-network/firehose-parquet/issues/648) | - | - | [#649](https://github.com/pinax-network/firehose-parquet/pull/649) | Non-final rows carry a durable `stream_ordinal`; the README documents a tested canonical live view, the two-bucket union and the live + final deployment ([record](648-stream-ordinal.md)). |
 | [#652](https://github.com/pinax-network/firehose-parquet/issues/652) | - | - | [#660](https://github.com/pinax-network/firehose-parquet/pull/660) | Every table is `<table>/date=YYYY-MM-DD/`, equal to its `date` column; `build --partition` and `rollup` are removed, the mapper epoch refuses pre-release protected roots before Blocks, and CI reads real output with DuckDB and Polars ([record](652-date-partition-key.md)). |
@@ -193,6 +194,7 @@ Docker runs before a release.
 
 ### Chain schemas and values
 
+- [#643 L2: Delta column types at the flush boundary, per-chain `decimal(20,0)` columns](643-l2-delta-types.md)
 - [#498: EVM log indices and optional tables](498-evm-log-indices.md)
 - [#499: offline EVM golden-block regression](499-evm-golden-fixture.md)
 - [Validation follow-ups 16-17: owned EVM mapping path and EIP-7702 golden block](validation-misc-followups-evm.md)

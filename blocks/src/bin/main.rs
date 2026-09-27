@@ -1655,14 +1655,15 @@ mod tests {
                             synthetic_partition_routing: family == ChainKind::Solana && feature,
                             include_failed_transactions: feature,
                         });
+                        let types = family.profile().delta_types();
                         let first = mapper.flush().unwrap();
-                        let inventory = declare_inventory(&first, &mapper.table_names())
+                        let inventory = declare_inventory(&first, &mapper.table_names(), &types)
                             .unwrap_or_else(|error| panic!("{family} empty inventory: {error}"));
                         assert!(!inventory.is_empty());
                         let second = mapper.flush().unwrap();
                         assert_eq!(
                             inventory,
-                            declare_inventory(&second, &mapper.table_names()).unwrap(),
+                            declare_inventory(&second, &mapper.table_names(), &types).unwrap(),
                             "{family} empty schema changes between flushes"
                         );
                     }

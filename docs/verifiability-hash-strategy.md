@@ -71,7 +71,7 @@ Column names are UTF-8. A null is only the `0x00` tag, so it can never collide w
 | Arrow type(s) | `canonical` |
 |---------------|-------------|
 | `Boolean` | ASCII `true` or `false` |
-| `Int8`, `Int16`, `Int32`, `Int64`, `UInt8`, `UInt16`, `UInt32`, `UInt64` | Base-10 ASCII, `-` for negatives, no leading zeros or `+` |
+| `Int8`, `Int16`, `Int32`, `Int64`, `UInt8`, `UInt16`, `UInt32`, `UInt64`, `Decimal128(p, 0)` | Base-10 ASCII, `-` for negatives, no leading zeros or `+`. A scale-0 decimal (the Delta `decimal(20,0)` of a `UInt64`, #643) encodes like the integer it holds. |
 | `Float16`, `Float32`, `Float64` | Value widened exactly to binary64, then its IEEE-754 bits as 8 bytes little-endian. Every NaN becomes `0x7ff8000000000000`. `-0.0` and `0.0` stay distinct. |
 | `Utf8`, `LargeUtf8`, `Utf8View` | The UTF-8 bytes |
 | `Binary`, `LargeBinary`, `BinaryView`, `FixedSizeBinary(n)` | Lowercase hex ASCII, no `0x` prefix |
@@ -84,9 +84,9 @@ Column names are UTF-8. A null is only the `0x00` tag, so it can never collide w
 
 Rules nest: a `List<Struct<...>>` column (Cosmos `transactions.fee_amount` and `signer_infos`) encodes each list element as a struct `value`, and each struct field as a `value` of its own type.
 
-Any other Arrow type (for example `Decimal128`, `Map`, `Union`, `Date64`, `Time*`, `Duration`, `Interval`) has no `merkle_v2` encoding. `verify` fails with an error naming the column (and struct field) and type instead of guessing. Every column type of every table of every chain has an encoding; `blocks/src/schema_contract_tests.rs` (`verify_hashes_every_table_of_every_chain`) fails when a chain adds one that does not.
+Any other Arrow type (for example `Decimal128` with a nonzero scale, `Map`, `Union`, `Date64`, `Time*`, `Duration`, `Interval`) has no `merkle_v2` encoding. `verify` fails with an error naming the column (and struct field) and type instead of guessing. Every column type of every table of every chain has an encoding; `blocks/src/schema_contract_tests.rs` (`verify_hashes_every_table_of_every_chain`) fails when a chain adds one that does not.
 
-Changing an existing rule changes roots, so it must bump `merkle_version`. Adding a rule for a type that had none cannot change a root that an earlier build could compute (such a column made `verify` fail), so it does not need a new version. The `Struct` rule was added to `merkle_v2` before its first release.
+Changing an existing rule changes roots, so it must bump `merkle_version`. Adding a rule for a type that had none cannot change a root that an earlier build could compute (such a column made `verify` fail), so it does not need a new version. The `Struct` and scale-0 `Decimal128` rules were added to `merkle_v2` before its first release.
 
 ### Consequences
 

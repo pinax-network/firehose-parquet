@@ -163,13 +163,23 @@ fn semantic_epoch_and_encoding_fail_closed() {
 /// before any stream or maintenance mutation (#652).
 #[test]
 fn pre_date_layout_epoch_is_refused_with_its_layout() {
-    assert_eq!(MAPPER_EPOCH, "fireparq-mapping-v2");
+    assert_eq!(MAPPER_EPOCH, "fireparq-mapping-v3");
     let mut d = descriptor(RoutingPolicy::GenesisLookaheadV1);
     d.mapper_epoch = "fireparq-mapping-v1".into();
     let error = d.validate().unwrap_err().to_string();
     assert!(
         error.contains("semantic mapper epoch `fireparq-mapping-v1`")
             && error.contains("<table>/date=YYYY-MM-DD/")
+            && error.contains("new, empty output root"),
+        "{error}"
+    );
+    // Epoch `v2` (#652) wrote the mapper's Arrow types and a `date` column in
+    // every file; its parts are not Delta data files (#643).
+    d.mapper_epoch = "fireparq-mapping-v2".into();
+    let error = d.validate().unwrap_err().to_string();
+    assert!(
+        error.contains("semantic mapper epoch `fireparq-mapping-v2`")
+            && error.contains("Delta data file")
             && error.contains("new, empty output root"),
         "{error}"
     );

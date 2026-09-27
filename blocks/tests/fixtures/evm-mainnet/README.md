@@ -12,9 +12,11 @@ checksum. It contains no response cursor, credential or request header.
 The payload has 182 transactions (181 succeeded, one reverted), including
 legacy, dynamic-fee and blob transactions; 557 receipt logs; 16 withdrawals;
 and four system calls. `expected.json` contains the reviewed counts for all
-20 mapper tables and 283 selected values on 28 rows. Each selected row names
+20 mapper tables and 284 selected values on 28 rows. Each selected row names
 its original protobuf source path. Integers represented as decimal strings are
-computed from the raw big-endian bytes, not from mapper output. Hex expectations
+computed from the raw big-endian bytes, not from mapper output. Values of Delta
+`decimal(20,0)` columns (#643: `blocks.nonce`, `withdrawals.amount_gwei`) are
+exact decimal strings too; other integers are JSON numbers. Hex expectations
 spell out the bytes, including leading zeroes. Nullable values distinguish
 absence from zero or empty bytes.
 
@@ -33,8 +35,23 @@ It checks standard/extended output, Binary/Hex schemas, and optional fork-step
 columns, plus canonical identity on every row. Each configuration maps the
 payload through both the borrowed `map_block` and the owned `map_block_bytes`
 entry point used by production ingestion, and requires identical tables,
-schemas and rows. It compares fixed expectations; it does not calculate its
-expected values using the mapper under test.
+schemas and rows. It then checks what a build writes: the Delta data file
+batches of the flush boundary (#643, `firehose_parquet::delta::types`), with
+only Delta types, `timestamp` in microseconds, no `date` column (its
+partition is the block's UTC day) and each selected value in its Delta type.
+It compares fixed expectations; it does not calculate its expected values using
+the mapper under test.
+
+### Re-pinned for Delta types (#643)
+
+The payloads are unchanged. `expected.json` changed in two ways: the values of
+the `decimal(20,0)` columns `withdrawals.amount_gwei` and
+`set_code_authorizations.nonce` became decimal strings (a mistyped column would
+now compare a number with a string and fail), and each `blocks` row gained its
+header `nonce` (`"0"`: both headers leave the proto3 field unset, as every
+proof-of-stake block does). The 26,000,004 oracle,
+`docs/audit/499-evm-golden-oracle.py`, emits the same strings and still
+reproduces its `expected.json` byte for byte.
 
 ## Fixture set
 

@@ -35,10 +35,11 @@ the upgrade guide.
   optional mirror. `merge` uses per-partition journals and recovers from
   crashes. Every mutating command takes dataset ownership, which
   `fireparq recovery` can inspect.
-- **One consistent schema across chains.** Canonical `timestamp` is
-  `Timestamp(Millisecond, UTC)` on every table, and every table is partitioned
-  by UTC day as `<table>/date=YYYY-MM-DD/`, the same type and value as its
-  `date` column. Most chains gain columns and tables, for example EVM withdrawals,
+- **One consistent schema across chains.** Canonical `timestamp` is a UTC
+  timestamp with millisecond values on every table, and every table is
+  partitioned by UTC day as `<table>/date=YYYY-MM-DD/`, which is its `date`
+  column. Every part is a Delta data file with Delta column types (#643).
+  Most chains gain columns and tables, for example EVM withdrawals,
   access lists and EIP-7702 authorizations, NEAR receipt actions and logs,
   Beacon Electra requests and Tron contracts. See the
   [schema reference](docs/schemas/README.md).
@@ -74,7 +75,7 @@ the upgrade guide.
 
 - **Single binary** — one `fireparq` binary handles all chains via `--block-type` with auto-detection
 - **Multi-chain** — pluggable `BlockMapper` trait with per-chain mapper modules
-- **Canonical identity columns** — `block_num`, `block_id`, `parent_num`, `parent_id`, `lib_num`, `timestamp`, `date` on every table; `timestamp` is `Timestamp(Millisecond, UTC)` (Parquet `TIMESTAMP(MILLIS, isAdjustedToUTC=true)`, so DuckDB, Spark, Trino and ClickHouse read it as a timestamp) and keeps sub-second block times where Firehose provides them; `date` is an Arrow `Date32` derived from the UTC block timestamp. For Solana, canonical `timestamp` / `date` stay nullable when `block_time` is missing, and synthetic timing is used only to route rows to a `date=` partition. Chain-specific columns never reuse these names: Tron `transactions` stores the transaction's own creation and expiration times as `tx_timestamp_ms` / `expiration_ms` (Int64 unix milliseconds; `tx_timestamp_ms` is set by the sender, so it can be 0 or use another unit)
+- **Canonical identity columns** — `block_num`, `block_id`, `parent_num`, `parent_id`, `lib_num`, `timestamp`, `date` on every table; `timestamp` is a Delta `timestamp` (Parquet `TIMESTAMP(MICROS, isAdjustedToUTC=true)`, so DuckDB, Polars and ClickHouse read it as a timestamp) and keeps sub-second block times, to the millisecond, where Firehose provides them; `date` is the partition column, the UTC day of the block time, stored as the `date=YYYY-MM-DD` directory rather than in the files. For Solana, canonical `timestamp` stays null when `block_time` is missing, and such a row's `date` is its routing day, the last known block time. Chain-specific columns never reuse these names: Tron `transactions` stores the transaction's own creation and expiration times as `tx_timestamp_ms` / `expiration_ms` (Int64 unix milliseconds; `tx_timestamp_ms` is set by the sender, so it can be 0 or use another unit)
 - **gRPC streaming** — connects to any Firehose v2 endpoint via tonic, with TLS and API key / JWT auth
 - **Network aliases** — `--network` resolves built-in Firehose names and supports `FIREHOSE_ENDPOINT_*` per-network overrides
 - **Automatic retry / resume** — exponential back-off on connection errors; restarts from the authoritative output checkpoint
@@ -82,6 +83,7 @@ the upgrade guide.
 - **Crash recovery** — all-table transactions and an authoritative output checkpoint; `_fireparq/cursor.parquet` remains an optional compatible mirror
 - **S3-aware cursor** — cursor automatically stored alongside output (local or S3)
 - **Date partitions** — every table is written as `<table>/date=YYYY-MM-DD/part-*.parquet`, read by DuckDB and Polars as the table's `date` column ([engine compatibility](#engine-compatibility))
+- **Delta Lake types** — every part is a Delta data file: checked signed integers, `decimal(20,0)` for currency amounts and other unchecked 64-bit values, `string` enums and microsecond timestamps, mapped once per flush before anything is written ([type mapping](docs/schemas/README.md))
 - **File rollover** — flush by row count, byte size, or time interval; the interval applies at the chain head, and a catch-up flushes by size ([details](#flush-interval-and-catch-up))
 - **Fork handling** — finalized output by default; `--final-blocks-only=false` preserves append-only `fork_step` events numbered by a durable `stream_ordinal` ([canonical live view](#canonical-live-view))
 - **Failed transactions** — EVM includes failed/reverted txs by default with only their persistent state changes (`--exclude-failed-transactions` drops them); Solana, Tron, Antelope, Cosmos and NEAR exclude them unless `--include-failed-transactions` is set, and label child rows with their parent outcome ([details](#failed-transaction-filtering))
@@ -662,7 +664,7 @@ directly after `fork_step`:
   is an explicit final event if the endpoint sends it. The usual non-final
   protocol sends `NEW` and occasional `UNDO`, not a later `FINAL` for every
   block. UNDO does not delete earlier rows.
-- `stream_ordinal` (`UInt64`): the accepted-event ordinal of the envelope that
+- `stream_ordinal` (`long`): the accepted-event ordinal of the envelope that
   produced the row, the same for every row of that envelope in every table. It
   is strictly increasing in delivery order and durable: the protected session
   assigns it when the envelope is received and continues it from the output
@@ -1387,7 +1389,9 @@ endpoint from `--aws-endpoint-url` / `AWS_ENDPOINT_URL_S3`, and also accepts
 ## Schema Reference
 
 Per-chain schema references are generated from the mapper schemas and list
-every table, column, Arrow type and nullability:
+every table, column, Delta type and nullability, and each chain's mapping from
+the mapper's Arrow types onto the Delta types of the files (#643). The chain
+sections of this README name the mapper's Arrow types:
 
 - [Schema reference index](docs/schemas/README.md)
 - [EVM](docs/schemas/evm.md), [Solana](docs/schemas/solana.md),
@@ -2073,11 +2077,11 @@ other files into `_fireparq/` (see the
 
 Every table is partitioned by UTC day: `build` writes
 `<table>/date=YYYY-MM-DD/part-*.parquet`, and there is no other layout. The
-`date=` directory has the type and the value of the table's `date` column
-(`Date32`): both come from the same whole-second block time, and `build` refuses
-to write a row whose `date` disagrees with its directory. A single file stays
-self-describing, and a Hive-partition-aware reader sees one `date` column that
-it can prune by. (Earlier releases wrote `year=YYYY/month=MM/` and a `date=DD`
+`date=` directory is the table's `date` column: the Delta partition column,
+which the data files do not store (#643). It comes from the same whole-second
+block time as each row's `timestamp`, and `build` refuses to write a row whose
+time is in another day. A Hive-partition-aware reader sees one `date` column
+that it can prune by; a plain file read has no `date`. (Earlier releases wrote `year=YYYY/month=MM/` and a `date=DD`
 or `day=DD` day of the month; a `date=DD` directory was read over the `date`
 column by DuckDB and failed to parse in Polars. v1.0.0 reads and maintains only
 `date=YYYY-MM-DD`.)
@@ -2116,8 +2120,8 @@ remote = pl.scan_parquet(
 )
 ```
 
-PyArrow infers a Hive key as a string and then fails to merge it with the
-`date` column; give it the partition schema:
+PyArrow infers a Hive key as a string; give it the partition schema to read
+`date` as a date:
 
 ```python
 import pyarrow as pa
@@ -2160,20 +2164,23 @@ DuckDB and Polars are the supported engines. CI builds real EVM (final and
 non-final) and Solana output with a mock Firehose and reads it with both, at
 pinned versions (DuckDB 1.1.1, Polars 1.44.2; `blocks/tests/engine_compat.rs`).
 
-| Arrow type written | DuckDB | Polars | Notes |
+| Delta type written | DuckDB | Polars | Notes |
 |---|---|---|---|
-| `UInt64`, `UInt32`, `UInt8` | `UBIGINT`, `UINTEGER`, `UTINYINT` | `UInt64`, `UInt32`, `UInt8` | Native unsigned types, never cast to signed |
-| `Timestamp(Millisecond, "UTC")` | `TIMESTAMP WITH TIME ZONE` | `Datetime(time_unit='ms', time_zone='UTC')` | Parquet `TIMESTAMP(MILLIS, isAdjustedToUTC=true)`, sub-second values kept |
-| `Date32` (`date`, and the `date=` directory) | `DATE` | `Date` | Filters on `date` prune directories |
-| `Dictionary(Int32, Utf8)` enum labels | `VARCHAR` | `Categorical` | |
-| `List<T>` | `T[]`, for example `UTINYINT[]` | `List(T)`, for example `List(UInt8)` | |
-| `Binary` | `BLOB` | `Binary` | |
+| `long` | `BIGINT` | `Int64` | The mapper's `UInt64` (checked: a value above `i64::MAX` refuses the flush), `UInt32` and `UInt16` |
+| `short` | `SMALLINT` | `Int16` | The mapper's `UInt8` |
+| `decimal(20,0)` | `DECIMAL(20,0)` | `Decimal(precision=20, scale=0)` | Currency amounts and unchecked 64-bit values, exact up to `u64::MAX` |
+| `timestamp` | `TIMESTAMP WITH TIME ZONE` | `Datetime(time_unit='us', time_zone='UTC')` | Parquet `TIMESTAMP(MICROS, isAdjustedToUTC=true)` holding whole milliseconds |
+| `date` (the `date=` directory only) | `DATE` | `Date` | Filters on `date` prune directories |
+| `string` enum labels | `VARCHAR` | `String` | Pages still dictionary-encoded |
+| `array<T>` | `T[]`, for example `SMALLINT[]` | `List(T)`, for example `List(Int16)` | |
+| `binary` | `BLOB` | `Binary` | |
 
-- Both engines read a file's `date` from its directory when Hive partitioning is
-  on. fireparq writes the column and the directory from the same block time, so
-  they never disagree.
+- Both engines read `date` from the directory when Hive partitioning is on; the
+  data files do not contain it.
 - Non-final output adds `fork_step` (`VARCHAR` / `String`) and `stream_ordinal`
-  (`UBIGINT` / `UInt64`).
+  (`BIGINT` / `Int64`).
+- [`docs/schemas/`](docs/schemas/README.md) lists every column's Delta type and
+  each chain's mapping from the mapper's Arrow types.
 - Spark and other JVM engines are not a target for this plain Parquet layout:
   they read `UInt64` as `DECIMAL(20,0)` and reject a partition column (`date`)
   that also appears in the data files. The planned Delta Lake output mode
@@ -2214,15 +2221,15 @@ Every table across all chains includes these 7 columns (from Firehose `BlockMeta
 
 | Column | Type | Description |
 |---|---|---|
-| `block_num` | UInt64 | Block number |
-| `block_id` | Utf8 | Block ID (format depends on block type; see [Output Encoding by Block Type](#output-encoding-by-block-type)) |
-| `parent_num` | UInt64 | Parent block number |
-| `parent_id` | Utf8 | Parent block ID |
-| `lib_num` | UInt64 | Last irreversible block number |
-| `timestamp` | Timestamp(Millisecond, UTC) | Block time. Parquet logical type `TIMESTAMP(MILLIS, isAdjustedToUTC=true)`; keeps sub-second precision where the chain has it (e.g. Antelope's 500 ms blocks) |
-| `date` | Date32 | UTC day of the block time |
+| `block_num` | long | Block number |
+| `block_id` | string | Block ID (format depends on block type; see [Output Encoding by Block Type](#output-encoding-by-block-type)) |
+| `parent_num` | long | Parent block number |
+| `parent_id` | string | Parent block ID |
+| `lib_num` | long | Last irreversible block number |
+| `timestamp` | timestamp | Block time, UTC. Parquet logical type `TIMESTAMP(MICROS, isAdjustedToUTC=true)`; keeps sub-second precision to the millisecond where the chain has it (e.g. Antelope's 500 ms blocks) |
+| `date` | date (partition) | UTC day of the block time: the `date=YYYY-MM-DD` directory, not stored in the files |
 
-The `date=YYYY-MM-DD` directory and `date` are derived from the whole-second block time, so a block at `23:59:59.500` lands in the same day as one at `23:59:59.000`. Solana tables keep `timestamp` and `date` null when `block_time` is missing; such rows are routed to the day of the last known block time.
+The `date=YYYY-MM-DD` directory is derived from the whole-second block time, so a block at `23:59:59.500` lands in the same day as one at `23:59:59.000`. Solana tables keep `timestamp` null when `block_time` is missing; such rows are routed to the day of the last known block time, which is their `date`.
 
 ## Output Encoding by Block Type
 

@@ -35,6 +35,7 @@
         "gas_limit": 60000000,
         "base_fee_per_gas": "705633926",
         "coinbase": "0x396343362be2a4da1ce0c1c210945346fb82aa49",
+        "nonce": "0",
         "num_transactions": 182,
         "detail_level": "EXTENDED",
         "blob_gas_used": 1048576,
@@ -263,7 +264,7 @@
         "index": 144233819,
         "validator_index": 1744861,
         "address": "0x8e609ac80f4324e499a6efd24f221a2caa868224",
-        "amount_gwei": 14267015
+        "amount_gwei": "14267015"
       }
     },
     {
@@ -274,7 +275,7 @@
         "index": 144233834,
         "validator_index": 1744955,
         "address": "0x8e609ac80f4324e499a6efd24f221a2caa868224",
-        "amount_gwei": 14255385
+        "amount_gwei": "14255385"
       }
     },
     {

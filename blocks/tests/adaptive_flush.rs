@@ -6,7 +6,7 @@
 //! 300 ms of fast evidence, caught up after 200 ms of real-time evidence), so
 //! each run takes a few seconds. Phases leave room for local commits of up to
 //! about a second, which pause the stream.
-use arrow::array::UInt64Array;
+use arrow::array::Int64Array;
 use firehose_parquet::writer::read_parquet;
 use firehose_protos::{eth, firehose};
 use prost::Message;
@@ -403,9 +403,9 @@ fn blocks_parts(root: &Path) -> (Vec<usize>, Vec<u64>) {
                 .column_by_name("block_num")
                 .unwrap()
                 .as_any()
-                .downcast_ref::<UInt64Array>()
+                .downcast_ref::<Int64Array>()
                 .unwrap();
-            numbers.extend(column.values().iter().copied());
+            numbers.extend(column.values().iter().map(|n| u64::try_from(*n).unwrap()));
         }
         rows.push(count);
     }

@@ -21,6 +21,7 @@ use crate::cli::AwsConfig;
 use crate::config::{BlockMetadata, Compression, Config};
 use crate::cursor::CursorState;
 use crate::dataset_lock::{session::SessionPermit, DatasetOwnership, MutationScope};
+use crate::delta::types::DeltaTypes;
 use crate::maintenance::discovery::ListingStats;
 use crate::metrics::PipelineMetrics;
 use crate::traits::BlockIdentity;
@@ -28,10 +29,13 @@ use crate::writer::ParquetFileMetadata;
 
 /// The caller gets schemas by flushing a newly constructed, empty mapper. No
 /// blockchain payload is consumed and the complete inventory is frozen before
-/// opening Blocks, including tables which emit zero rows in this run.
+/// opening Blocks, including tables which emit zero rows in this run. Each
+/// digest is of the table's Delta data file schema (`delta_types`, #643):
+/// the schema every part of the table is written with.
 pub fn declare_inventory(
     empty_batches: &HashMap<String, RecordBatch>,
     declared_names: &[&str],
+    delta_types: &DeltaTypes,
 ) -> Result<BTreeMap<String, Digest>> {
     let declared: std::collections::BTreeSet<_> = declared_names.iter().copied().collect();
     ensure!(
@@ -52,11 +56,10 @@ pub fn declare_inventory(
                 batch.num_rows() == 0,
                 "schema declaration must precede mapping any events"
             );
+            let schema = delta_types.data_schema(name, batch.schema().as_ref())?;
             Ok((
                 name.clone(),
-                Digest::parse(crate::writer::protected::schema_sha256(
-                    batch.schema().as_ref(),
-                )?)?,
+                Digest::parse(crate::writer::protected::schema_sha256(&schema)?)?,
             ))
         })
         .collect()
@@ -69,7 +72,11 @@ pub struct MapperSemantics {
     pub extended: bool,
     pub with_votes: bool,
     pub include_failed_transactions: bool,
+    /// Digests of the Delta data file schemas, from [`declare_inventory`]
+    /// with the same `delta_types`.
     pub tables: BTreeMap<String, Digest>,
+    /// The family's Delta type decisions, applied to every flush.
+    pub delta_types: DeltaTypes,
 }
 
 /// Session-local spelling of the shared `From<&Config>` conversion.
@@ -267,6 +274,7 @@ fn mirror_binding_mismatch(stored: &MirrorBinding, configured: &MirrorBinding) -
 pub struct IngestionSession<'a> {
     controller: TransactionController<'a, ProtectedMirror<'a>>,
     frontier: AcceptedFrontier,
+    delta_types: DeltaTypes,
     failed: bool,
     metrics: Option<&'a PipelineMetrics>,
 }
@@ -283,13 +291,22 @@ impl<'a> IngestionSession<'a> {
             !config.dry_run,
             "dry-run cannot open a mutating ingestion session"
         );
+        let delta_types = mapper.delta_types;
         let expected = descriptor(config, mapper)?;
         let aws = aws_config(config);
         let permit = reserve(&expected.output, ownership)?;
         let listing = ListingStats::default();
         let started = std::time::Instant::now();
         let opened = Self::open_reserved(
-            config, expected, &aws, ownership, permit, metrics, shutdown, &listing,
+            config,
+            expected,
+            delta_types,
+            &aws,
+            ownership,
+            permit,
+            metrics,
+            shutdown,
+            &listing,
         )
         .await;
         record_startup_listing(metrics, &listing, started.elapsed(), opened.is_ok());
@@ -304,6 +321,7 @@ impl<'a> IngestionSession<'a> {
     async fn open_reserved(
         config: &Config,
         expected: StreamDescriptor,
+        delta_types: DeltaTypes,
         aws: &AwsConfig,
         ownership: &'a DatasetOwnership,
         permit: SessionPermit<'a>,
@@ -391,6 +409,7 @@ impl<'a> IngestionSession<'a> {
         Ok(Self {
             controller,
             frontier,
+            delta_types,
             failed: false,
             metrics,
         })
@@ -596,6 +615,10 @@ impl<'a> IngestionSession<'a> {
         if !self.authority().descriptor.final_blocks_only {
             require_prefix_stream_ordinals(&batches, &prefix)?;
         }
+        // The flush boundary (#643): every table becomes its Delta data file
+        // batch with checked casts, before the transaction journals anything.
+        // A value that does not fit its Delta type refuses the whole flush.
+        let batches = self.delta_types.data_batches(batches, &metadata)?;
         let _buffer_metrics = SessionBufferMetrics::new(self.metrics, &batches, compression);
         let committed = self
             .controller

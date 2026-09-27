@@ -141,6 +141,15 @@ pub fn timestamp_millis_utc_type() -> DataType {
     DataType::Timestamp(TimeUnit::Millisecond, Some(Arc::from("UTC")))
 }
 
+/// Arrow type of the same columns in the Delta data files (#643):
+/// `Timestamp(Microsecond, UTC)`, written as `TIMESTAMP(MICROS,
+/// isAdjustedToUTC=true)`, the unit of a Delta `timestamp` column. The values
+/// are the mapper's milliseconds × 1,000
+/// ([`crate::delta::types`]).
+pub fn timestamp_micros_utc_type() -> DataType {
+    DataType::Timestamp(TimeUnit::Microsecond, Some(Arc::from("UTC")))
+}
+
 /// Convert a block timestamp expressed as UTC unix seconds into Arrow `Date32`
 /// days since epoch.
 pub fn date32_from_timestamp_seconds(timestamp_seconds: i64) -> Result<i32> {

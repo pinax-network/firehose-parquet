@@ -14,8 +14,8 @@ use anyhow::{anyhow, Context, Result};
 use arrow::array::{Array, ArrowPrimitiveType, AsArray, OffsetSizeTrait};
 use arrow::buffer::NullBuffer;
 use arrow::datatypes::{
-    DataType, Date32Type, Float16Type, Float32Type, Float64Type, Int16Type, Int32Type, Int64Type,
-    Int8Type, TimeUnit, TimestampMicrosecondType, TimestampMillisecondType,
+    DataType, Date32Type, Decimal128Type, Float16Type, Float32Type, Float64Type, Int16Type,
+    Int32Type, Int64Type, Int8Type, TimeUnit, TimestampMicrosecondType, TimestampMillisecondType,
     TimestampNanosecondType, TimestampSecondType, UInt16Type, UInt32Type, UInt64Type, UInt8Type,
 };
 use arrow::record_batch::RecordBatch;
@@ -120,6 +120,9 @@ fn canonical_encoder<'a>(array: &'a dyn Array) -> Result<Canonical<'a>> {
         DataType::UInt16 => decimal::<UInt16Type>(array),
         DataType::UInt32 => decimal::<UInt32Type>(array),
         DataType::UInt64 => decimal::<UInt64Type>(array),
+        // An integer decimal: the Delta `decimal(20,0)` of a `UInt64` (#643)
+        // encodes like that `UInt64`.
+        DataType::Decimal128(_, 0) => decimal::<Decimal128Type>(array),
         DataType::Float16 => {
             let a = array.as_primitive::<Float16Type>();
             Box::new(move |row, out| float_bits(a.value(row).to_f64(), out))
@@ -648,6 +651,20 @@ mod tests {
             encoded(&list, 0),
             "012300000001000000011a00000002000000010100000035010b0000000200000001010000007800"
         );
+    }
+
+    /// #643: a Delta `decimal(20,0)` holds the mapper's `UInt64` exactly and
+    /// encodes like it, up to `u64::MAX`.
+    #[test]
+    fn integer_decimals_encode_like_the_unsigned_values_they_hold() {
+        for value in [0, 7, u64::MAX] {
+            let decimals =
+                arrow::array::PrimitiveArray::<Decimal128Type>::from(vec![i128::from(value)])
+                    .with_precision_and_scale(20, 0)
+                    .unwrap();
+            let unsigned = arrow::array::PrimitiveArray::<UInt64Type>::from(vec![value]);
+            assert_eq!(encoded(&decimals, 0), encoded(&unsigned, 0), "{value}");
+        }
     }
 
     #[test]

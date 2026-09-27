@@ -9,7 +9,9 @@ protoc from proto/ethereum.proto) and applies the documented output rules:
   earliest (ordinal, then recording order) nonce change, and for each accepted
   (non-discarded) EIP-7702 authorization the earliest remaining nonce and code
   change of its authority; all gas changes are kept; no storage/account rows.
-It never imports or runs the Rust mapper.
+It never imports or runs the Rust mapper. Values of Delta `decimal(20,0)`
+columns (#643: `blocks.nonce`, `set_code_authorizations.nonce`) are exact
+decimal strings, like the other decimal columns.
 
 Usage (Python with the `protobuf` package, and `protoc` on PATH):
 
@@ -131,6 +133,7 @@ selections = [{
     'table': 'blocks', 'row': 0, 'source': 'Block and Block.header', 'values': {
         'number': b.number, 'hash': hx(b.hash), 'parent_hash': hx(h.parent_hash), 'gas_used': h.gas_used,
         'gas_limit': h.gas_limit, 'base_fee_per_gas': big(h, 'base_fee_per_gas'), 'coinbase': hx(h.coinbase),
+        'nonce': str(h.nonce),
         'num_transactions': len(b.transaction_traces),
         'detail_level': strip(pool.FindEnumTypeByName('sf.ethereum.type.v2.Block.DetailLevel').values_by_number[b.detail_level].name, 'DETAILLEVEL_'),
         'blob_gas_used': h.blob_gas_used if h.HasField('blob_gas_used') else None,
@@ -162,7 +165,7 @@ for ti in [118, 130, 331, 358]:
             continue
         selections.append({'table': 'set_code_authorizations', 'row': r, 'source': src, 'values': {
             'tx_hash': hx(t.hash), 'tx_index': t.index, 'authorization_index': i, 'chain_id': dec(a.chain_id),
-            'address': hx(a.address) if a.address else None, 'nonce': a.nonce, 'v': a.v, 'r': hx(a.r), 's': hx(a.s),
+            'address': hx(a.address) if a.address else None, 'nonce': str(a.nonce), 'v': a.v, 'r': hx(a.r), 's': hx(a.s),
             'authority': hx(a.authority) if a.HasField('authority') and a.authority else None,
             'discarded': a.discarded}})
 

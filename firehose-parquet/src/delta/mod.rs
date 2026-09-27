@@ -10,6 +10,8 @@
 //! schema is made of Delta types, and commits carry only paths, sizes,
 //! partition values and statistics JSON.
 
+pub mod types;
+
 use deltalake_core::kernel::StructField;
 use deltalake_core::logstore::LogStoreRef;
 use deltalake_core::operations::create::CreateBuilder;

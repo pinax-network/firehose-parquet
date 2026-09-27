@@ -6,8 +6,9 @@ Generated from the `beacon` mapper; do not edit by hand. Regenerate with `cargo 
 
 - Block type: `--block-type beacon`.
 - Byte encoding: `hex` (lowercase hex with a `0x` prefix), fixed for this chain in v1.0.0.
-- Columns typed `Utf8` (hex) hold binary values written as text in that encoding.
+- Columns typed `string` (hex) hold binary values written as text in that encoding.
 - `fork_step` and `stream_ordinal` are listed where they sit on non-final streams (`--final-blocks-only=false`); with the default `--final-blocks-only=true` they are absent.
+- Types are the Delta types of the data files; [Delta type mapping](#delta-type-mapping) lists how each mapper column gets its type.
 
 ## Tables
 
@@ -31,195 +32,195 @@ Generated from the `beacon` mapper; do not edit by hand. Regenerate with `cargo 
 
 | Column | Type | Nullable | Description |
 |---|---|---|---|
-| `block_num` | `UInt64` | no | Block number (Firehose block metadata). |
-| `block_id` | `Utf8` (hex) | no | Block id (hash), in the chain's byte encoding. |
-| `parent_num` | `UInt64` | no | Parent block number (Firehose block metadata). |
-| `parent_id` | `Utf8` (hex) | no | Parent block id, in the chain's byte encoding. |
-| `lib_num` | `UInt64` | no | Last irreversible block number reported with the block. |
-| `timestamp` | `Timestamp(Millisecond, "UTC")` | no | Block time, UTC, millisecond precision. |
-| `date` | `Date32` | no | UTC date of `timestamp`. |
-| `slot` | `UInt64` | no | |
-| `parent_slot` | `UInt64` | no | |
-| `proposer_index` | `UInt64` | no | |
-| `root` | `Utf8` (hex) | no | |
-| `parent_root` | `Utf8` (hex) | no | |
-| `state_root` | `Utf8` (hex) | no | |
-| `body_root` | `Utf8` (hex) | no | |
-| `signature` | `Utf8` (hex) | no | |
-| `spec` | `Dictionary(Int32, Utf8)` | no | |
-| `graffiti` | `Utf8` (hex) | yes | Null only when the block has no body. |
-| `fork_step` | `Utf8` | no | **Non-final streams only** (`--final-blocks-only=false`): the Firehose fork step of the block, `NEW`, `UNDO` or `FINAL`. |
-| `stream_ordinal` | `UInt64` | no | **Non-final streams only** (`--final-blocks-only=false`): accepted-event ordinal of the stream event (`NEW`, `UNDO` or `FINAL`) that produced the row. Strictly increasing in delivery order and durable across reconnects and restarts; every row of one event, in every table, has the same value. |
+| `block_num` | `long` | no | Block number (Firehose block metadata). |
+| `block_id` | `string` (hex) | no | Block id (hash), in the chain's byte encoding. |
+| `parent_num` | `long` | no | Parent block number (Firehose block metadata). |
+| `parent_id` | `string` (hex) | no | Parent block id, in the chain's byte encoding. |
+| `lib_num` | `long` | no | Last irreversible block number reported with the block. |
+| `timestamp` | `timestamp` | no | Block time, UTC, millisecond precision (stored in microseconds). |
+| `date` | `date` (partition) | no | Partition column: the UTC date of the block time, stored in the Delta log (`partitionValues.date`) and the `date=YYYY-MM-DD` directory, not in the data files. |
+| `slot` | `long` | no | |
+| `parent_slot` | `long` | no | |
+| `proposer_index` | `long` | no | |
+| `root` | `string` (hex) | no | |
+| `parent_root` | `string` (hex) | no | |
+| `state_root` | `string` (hex) | no | |
+| `body_root` | `string` (hex) | no | |
+| `signature` | `string` (hex) | no | |
+| `spec` | `string` | no | |
+| `graffiti` | `string` (hex) | yes | Null only when the block has no body. |
+| `fork_step` | `string` | no | **Non-final streams only** (`--final-blocks-only=false`): the Firehose fork step of the block, `NEW`, `UNDO` or `FINAL`. |
+| `stream_ordinal` | `long` | no | **Non-final streams only** (`--final-blocks-only=false`): accepted-event ordinal of the stream event (`NEW`, `UNDO` or `FINAL`) that produced the row. Strictly increasing in delivery order and durable across reconnects and restarts; every row of one event, in every table, has the same value. |
 
 ## `attestations`
 
 | Column | Type | Nullable | Description |
 |---|---|---|---|
-| `block_num` | `UInt64` | no | Block number (Firehose block metadata). |
-| `block_id` | `Utf8` (hex) | no | Block id (hash), in the chain's byte encoding. |
-| `parent_num` | `UInt64` | no | Parent block number (Firehose block metadata). |
-| `parent_id` | `Utf8` (hex) | no | Parent block id, in the chain's byte encoding. |
-| `lib_num` | `UInt64` | no | Last irreversible block number reported with the block. |
-| `timestamp` | `Timestamp(Millisecond, "UTC")` | no | Block time, UTC, millisecond precision. |
-| `date` | `Date32` | no | UTC date of `timestamp`. |
-| `block_slot` | `UInt64` | no | |
-| `attestation_index` | `UInt32` | no | |
-| `slot` | `UInt64` | yes | |
-| `committee_index` | `UInt64` | yes | |
-| `aggregation_bits` | `Utf8` (hex) | no | |
-| `beacon_block_root` | `Utf8` (hex) | yes | |
-| `source_epoch` | `UInt64` | yes | |
-| `source_root` | `Utf8` (hex) | yes | |
-| `target_epoch` | `UInt64` | yes | |
-| `target_root` | `Utf8` (hex) | yes | |
-| `signature` | `Utf8` (hex) | no | |
-| `committee_bits` | `Utf8` (hex) | yes | EIP-7549 (Electra+): the committees the attestation aggregates. Null before Electra, where `committee_index` identifies the committee. |
-| `fork_step` | `Utf8` | no | **Non-final streams only** (`--final-blocks-only=false`): the Firehose fork step of the block, `NEW`, `UNDO` or `FINAL`. |
-| `stream_ordinal` | `UInt64` | no | **Non-final streams only** (`--final-blocks-only=false`): accepted-event ordinal of the stream event (`NEW`, `UNDO` or `FINAL`) that produced the row. Strictly increasing in delivery order and durable across reconnects and restarts; every row of one event, in every table, has the same value. |
+| `block_num` | `long` | no | Block number (Firehose block metadata). |
+| `block_id` | `string` (hex) | no | Block id (hash), in the chain's byte encoding. |
+| `parent_num` | `long` | no | Parent block number (Firehose block metadata). |
+| `parent_id` | `string` (hex) | no | Parent block id, in the chain's byte encoding. |
+| `lib_num` | `long` | no | Last irreversible block number reported with the block. |
+| `timestamp` | `timestamp` | no | Block time, UTC, millisecond precision (stored in microseconds). |
+| `date` | `date` (partition) | no | Partition column: the UTC date of the block time, stored in the Delta log (`partitionValues.date`) and the `date=YYYY-MM-DD` directory, not in the data files. |
+| `block_slot` | `long` | no | |
+| `attestation_index` | `long` | no | |
+| `slot` | `long` | yes | |
+| `committee_index` | `long` | yes | |
+| `aggregation_bits` | `string` (hex) | no | |
+| `beacon_block_root` | `string` (hex) | yes | |
+| `source_epoch` | `long` | yes | |
+| `source_root` | `string` (hex) | yes | |
+| `target_epoch` | `long` | yes | |
+| `target_root` | `string` (hex) | yes | |
+| `signature` | `string` (hex) | no | |
+| `committee_bits` | `string` (hex) | yes | EIP-7549 (Electra+): the committees the attestation aggregates. Null before Electra, where `committee_index` identifies the committee. |
+| `fork_step` | `string` | no | **Non-final streams only** (`--final-blocks-only=false`): the Firehose fork step of the block, `NEW`, `UNDO` or `FINAL`. |
+| `stream_ordinal` | `long` | no | **Non-final streams only** (`--final-blocks-only=false`): accepted-event ordinal of the stream event (`NEW`, `UNDO` or `FINAL`) that produced the row. Strictly increasing in delivery order and durable across reconnects and restarts; every row of one event, in every table, has the same value. |
 
 ## `deposits`
 
 | Column | Type | Nullable | Description |
 |---|---|---|---|
-| `block_num` | `UInt64` | no | Block number (Firehose block metadata). |
-| `block_id` | `Utf8` (hex) | no | Block id (hash), in the chain's byte encoding. |
-| `parent_num` | `UInt64` | no | Parent block number (Firehose block metadata). |
-| `parent_id` | `Utf8` (hex) | no | Parent block id, in the chain's byte encoding. |
-| `lib_num` | `UInt64` | no | Last irreversible block number reported with the block. |
-| `timestamp` | `Timestamp(Millisecond, "UTC")` | no | Block time, UTC, millisecond precision. |
-| `date` | `Date32` | no | UTC date of `timestamp`. |
-| `block_slot` | `UInt64` | no | |
-| `deposit_index` | `UInt32` | no | |
-| `pubkey` | `Utf8` (hex) | yes | |
-| `withdrawal_credentials` | `Utf8` (hex) | yes | |
-| `amount` | `UInt64` | yes | |
-| `signature` | `Utf8` (hex) | yes | |
-| `fork_step` | `Utf8` | no | **Non-final streams only** (`--final-blocks-only=false`): the Firehose fork step of the block, `NEW`, `UNDO` or `FINAL`. |
-| `stream_ordinal` | `UInt64` | no | **Non-final streams only** (`--final-blocks-only=false`): accepted-event ordinal of the stream event (`NEW`, `UNDO` or `FINAL`) that produced the row. Strictly increasing in delivery order and durable across reconnects and restarts; every row of one event, in every table, has the same value. |
+| `block_num` | `long` | no | Block number (Firehose block metadata). |
+| `block_id` | `string` (hex) | no | Block id (hash), in the chain's byte encoding. |
+| `parent_num` | `long` | no | Parent block number (Firehose block metadata). |
+| `parent_id` | `string` (hex) | no | Parent block id, in the chain's byte encoding. |
+| `lib_num` | `long` | no | Last irreversible block number reported with the block. |
+| `timestamp` | `timestamp` | no | Block time, UTC, millisecond precision (stored in microseconds). |
+| `date` | `date` (partition) | no | Partition column: the UTC date of the block time, stored in the Delta log (`partitionValues.date`) and the `date=YYYY-MM-DD` directory, not in the data files. |
+| `block_slot` | `long` | no | |
+| `deposit_index` | `long` | no | |
+| `pubkey` | `string` (hex) | yes | |
+| `withdrawal_credentials` | `string` (hex) | yes | |
+| `amount` | `decimal(20,0)` | yes | |
+| `signature` | `string` (hex) | yes | |
+| `fork_step` | `string` | no | **Non-final streams only** (`--final-blocks-only=false`): the Firehose fork step of the block, `NEW`, `UNDO` or `FINAL`. |
+| `stream_ordinal` | `long` | no | **Non-final streams only** (`--final-blocks-only=false`): accepted-event ordinal of the stream event (`NEW`, `UNDO` or `FINAL`) that produced the row. Strictly increasing in delivery order and durable across reconnects and restarts; every row of one event, in every table, has the same value. |
 
 ## `proposer_slashings`
 
 | Column | Type | Nullable | Description |
 |---|---|---|---|
-| `block_num` | `UInt64` | no | Block number (Firehose block metadata). |
-| `block_id` | `Utf8` (hex) | no | Block id (hash), in the chain's byte encoding. |
-| `parent_num` | `UInt64` | no | Parent block number (Firehose block metadata). |
-| `parent_id` | `Utf8` (hex) | no | Parent block id, in the chain's byte encoding. |
-| `lib_num` | `UInt64` | no | Last irreversible block number reported with the block. |
-| `timestamp` | `Timestamp(Millisecond, "UTC")` | no | Block time, UTC, millisecond precision. |
-| `date` | `Date32` | no | UTC date of `timestamp`. |
-| `block_slot` | `UInt64` | no | |
-| `slashing_index` | `UInt32` | no | |
-| `header_1_slot` | `UInt64` | yes | |
-| `header_1_proposer_index` | `UInt64` | yes | |
-| `header_1_parent_root` | `Utf8` (hex) | yes | |
-| `header_1_state_root` | `Utf8` (hex) | yes | |
-| `header_1_body_root` | `Utf8` (hex) | yes | |
-| `header_2_slot` | `UInt64` | yes | |
-| `header_2_proposer_index` | `UInt64` | yes | |
-| `header_2_parent_root` | `Utf8` (hex) | yes | |
-| `header_2_state_root` | `Utf8` (hex) | yes | |
-| `header_2_body_root` | `Utf8` (hex) | yes | |
-| `fork_step` | `Utf8` | no | **Non-final streams only** (`--final-blocks-only=false`): the Firehose fork step of the block, `NEW`, `UNDO` or `FINAL`. |
-| `stream_ordinal` | `UInt64` | no | **Non-final streams only** (`--final-blocks-only=false`): accepted-event ordinal of the stream event (`NEW`, `UNDO` or `FINAL`) that produced the row. Strictly increasing in delivery order and durable across reconnects and restarts; every row of one event, in every table, has the same value. |
+| `block_num` | `long` | no | Block number (Firehose block metadata). |
+| `block_id` | `string` (hex) | no | Block id (hash), in the chain's byte encoding. |
+| `parent_num` | `long` | no | Parent block number (Firehose block metadata). |
+| `parent_id` | `string` (hex) | no | Parent block id, in the chain's byte encoding. |
+| `lib_num` | `long` | no | Last irreversible block number reported with the block. |
+| `timestamp` | `timestamp` | no | Block time, UTC, millisecond precision (stored in microseconds). |
+| `date` | `date` (partition) | no | Partition column: the UTC date of the block time, stored in the Delta log (`partitionValues.date`) and the `date=YYYY-MM-DD` directory, not in the data files. |
+| `block_slot` | `long` | no | |
+| `slashing_index` | `long` | no | |
+| `header_1_slot` | `decimal(20,0)` | yes | |
+| `header_1_proposer_index` | `long` | yes | |
+| `header_1_parent_root` | `string` (hex) | yes | |
+| `header_1_state_root` | `string` (hex) | yes | |
+| `header_1_body_root` | `string` (hex) | yes | |
+| `header_2_slot` | `decimal(20,0)` | yes | |
+| `header_2_proposer_index` | `long` | yes | |
+| `header_2_parent_root` | `string` (hex) | yes | |
+| `header_2_state_root` | `string` (hex) | yes | |
+| `header_2_body_root` | `string` (hex) | yes | |
+| `fork_step` | `string` | no | **Non-final streams only** (`--final-blocks-only=false`): the Firehose fork step of the block, `NEW`, `UNDO` or `FINAL`. |
+| `stream_ordinal` | `long` | no | **Non-final streams only** (`--final-blocks-only=false`): accepted-event ordinal of the stream event (`NEW`, `UNDO` or `FINAL`) that produced the row. Strictly increasing in delivery order and durable across reconnects and restarts; every row of one event, in every table, has the same value. |
 
 ## `attester_slashings`
 
 | Column | Type | Nullable | Description |
 |---|---|---|---|
-| `block_num` | `UInt64` | no | Block number (Firehose block metadata). |
-| `block_id` | `Utf8` (hex) | no | Block id (hash), in the chain's byte encoding. |
-| `parent_num` | `UInt64` | no | Parent block number (Firehose block metadata). |
-| `parent_id` | `Utf8` (hex) | no | Parent block id, in the chain's byte encoding. |
-| `lib_num` | `UInt64` | no | Last irreversible block number reported with the block. |
-| `timestamp` | `Timestamp(Millisecond, "UTC")` | no | Block time, UTC, millisecond precision. |
-| `date` | `Date32` | no | UTC date of `timestamp`. |
-| `block_slot` | `UInt64` | no | |
-| `slashing_index` | `UInt32` | no | |
-| `attestation_1_slot` | `UInt64` | yes | |
-| `attestation_1_committee_index` | `UInt64` | yes | |
-| `attestation_1_beacon_block_root` | `Utf8` (hex) | yes | |
-| `attestation_1_source_epoch` | `UInt64` | yes | |
-| `attestation_1_source_root` | `Utf8` (hex) | yes | |
-| `attestation_1_target_epoch` | `UInt64` | yes | |
-| `attestation_1_target_root` | `Utf8` (hex) | yes | |
-| `attestation_2_slot` | `UInt64` | yes | |
-| `attestation_2_committee_index` | `UInt64` | yes | |
-| `attestation_2_beacon_block_root` | `Utf8` (hex) | yes | |
-| `attestation_2_source_epoch` | `UInt64` | yes | |
-| `attestation_2_source_root` | `Utf8` (hex) | yes | |
-| `attestation_2_target_epoch` | `UInt64` | yes | |
-| `attestation_2_target_root` | `Utf8` (hex) | yes | |
-| `attestation_1_attesting_indices` | `List<UInt64>` | yes | |
-| `attestation_2_attesting_indices` | `List<UInt64>` | yes | |
-| `fork_step` | `Utf8` | no | **Non-final streams only** (`--final-blocks-only=false`): the Firehose fork step of the block, `NEW`, `UNDO` or `FINAL`. |
-| `stream_ordinal` | `UInt64` | no | **Non-final streams only** (`--final-blocks-only=false`): accepted-event ordinal of the stream event (`NEW`, `UNDO` or `FINAL`) that produced the row. Strictly increasing in delivery order and durable across reconnects and restarts; every row of one event, in every table, has the same value. |
+| `block_num` | `long` | no | Block number (Firehose block metadata). |
+| `block_id` | `string` (hex) | no | Block id (hash), in the chain's byte encoding. |
+| `parent_num` | `long` | no | Parent block number (Firehose block metadata). |
+| `parent_id` | `string` (hex) | no | Parent block id, in the chain's byte encoding. |
+| `lib_num` | `long` | no | Last irreversible block number reported with the block. |
+| `timestamp` | `timestamp` | no | Block time, UTC, millisecond precision (stored in microseconds). |
+| `date` | `date` (partition) | no | Partition column: the UTC date of the block time, stored in the Delta log (`partitionValues.date`) and the `date=YYYY-MM-DD` directory, not in the data files. |
+| `block_slot` | `long` | no | |
+| `slashing_index` | `long` | no | |
+| `attestation_1_slot` | `decimal(20,0)` | yes | |
+| `attestation_1_committee_index` | `decimal(20,0)` | yes | |
+| `attestation_1_beacon_block_root` | `string` (hex) | yes | |
+| `attestation_1_source_epoch` | `decimal(20,0)` | yes | |
+| `attestation_1_source_root` | `string` (hex) | yes | |
+| `attestation_1_target_epoch` | `decimal(20,0)` | yes | |
+| `attestation_1_target_root` | `string` (hex) | yes | |
+| `attestation_2_slot` | `decimal(20,0)` | yes | |
+| `attestation_2_committee_index` | `decimal(20,0)` | yes | |
+| `attestation_2_beacon_block_root` | `string` (hex) | yes | |
+| `attestation_2_source_epoch` | `decimal(20,0)` | yes | |
+| `attestation_2_source_root` | `string` (hex) | yes | |
+| `attestation_2_target_epoch` | `decimal(20,0)` | yes | |
+| `attestation_2_target_root` | `string` (hex) | yes | |
+| `attestation_1_attesting_indices` | `array<long>` | yes | |
+| `attestation_2_attesting_indices` | `array<long>` | yes | |
+| `fork_step` | `string` | no | **Non-final streams only** (`--final-blocks-only=false`): the Firehose fork step of the block, `NEW`, `UNDO` or `FINAL`. |
+| `stream_ordinal` | `long` | no | **Non-final streams only** (`--final-blocks-only=false`): accepted-event ordinal of the stream event (`NEW`, `UNDO` or `FINAL`) that produced the row. Strictly increasing in delivery order and durable across reconnects and restarts; every row of one event, in every table, has the same value. |
 
 ## `voluntary_exits`
 
 | Column | Type | Nullable | Description |
 |---|---|---|---|
-| `block_num` | `UInt64` | no | Block number (Firehose block metadata). |
-| `block_id` | `Utf8` (hex) | no | Block id (hash), in the chain's byte encoding. |
-| `parent_num` | `UInt64` | no | Parent block number (Firehose block metadata). |
-| `parent_id` | `Utf8` (hex) | no | Parent block id, in the chain's byte encoding. |
-| `lib_num` | `UInt64` | no | Last irreversible block number reported with the block. |
-| `timestamp` | `Timestamp(Millisecond, "UTC")` | no | Block time, UTC, millisecond precision. |
-| `date` | `Date32` | no | UTC date of `timestamp`. |
-| `block_slot` | `UInt64` | no | |
-| `exit_index` | `UInt32` | no | |
-| `epoch` | `UInt64` | yes | |
-| `validator_index` | `UInt64` | yes | |
-| `signature` | `Utf8` (hex) | no | |
-| `fork_step` | `Utf8` | no | **Non-final streams only** (`--final-blocks-only=false`): the Firehose fork step of the block, `NEW`, `UNDO` or `FINAL`. |
-| `stream_ordinal` | `UInt64` | no | **Non-final streams only** (`--final-blocks-only=false`): accepted-event ordinal of the stream event (`NEW`, `UNDO` or `FINAL`) that produced the row. Strictly increasing in delivery order and durable across reconnects and restarts; every row of one event, in every table, has the same value. |
+| `block_num` | `long` | no | Block number (Firehose block metadata). |
+| `block_id` | `string` (hex) | no | Block id (hash), in the chain's byte encoding. |
+| `parent_num` | `long` | no | Parent block number (Firehose block metadata). |
+| `parent_id` | `string` (hex) | no | Parent block id, in the chain's byte encoding. |
+| `lib_num` | `long` | no | Last irreversible block number reported with the block. |
+| `timestamp` | `timestamp` | no | Block time, UTC, millisecond precision (stored in microseconds). |
+| `date` | `date` (partition) | no | Partition column: the UTC date of the block time, stored in the Delta log (`partitionValues.date`) and the `date=YYYY-MM-DD` directory, not in the data files. |
+| `block_slot` | `long` | no | |
+| `exit_index` | `long` | no | |
+| `epoch` | `long` | yes | |
+| `validator_index` | `long` | yes | |
+| `signature` | `string` (hex) | no | |
+| `fork_step` | `string` | no | **Non-final streams only** (`--final-blocks-only=false`): the Firehose fork step of the block, `NEW`, `UNDO` or `FINAL`. |
+| `stream_ordinal` | `long` | no | **Non-final streams only** (`--final-blocks-only=false`): accepted-event ordinal of the stream event (`NEW`, `UNDO` or `FINAL`) that produced the row. Strictly increasing in delivery order and durable across reconnects and restarts; every row of one event, in every table, has the same value. |
 
 ## `execution_payload`
 
 | Column | Type | Nullable | Description |
 |---|---|---|---|
-| `block_num` | `UInt64` | no | Block number (Firehose block metadata). |
-| `block_id` | `Utf8` (hex) | no | Block id (hash), in the chain's byte encoding. |
-| `parent_num` | `UInt64` | no | Parent block number (Firehose block metadata). |
-| `parent_id` | `Utf8` (hex) | no | Parent block id, in the chain's byte encoding. |
-| `lib_num` | `UInt64` | no | Last irreversible block number reported with the block. |
-| `timestamp` | `Timestamp(Millisecond, "UTC")` | no | Block time, UTC, millisecond precision. |
-| `date` | `Date32` | no | UTC date of `timestamp`. |
-| `block_slot` | `UInt64` | no | |
-| `parent_hash` | `Utf8` (hex) | no | |
-| `fee_recipient` | `Utf8` (hex) | no | |
-| `state_root` | `Utf8` (hex) | no | |
-| `receipts_root` | `Utf8` (hex) | no | |
-| `prev_randao` | `Utf8` (hex) | no | |
-| `block_number` | `UInt64` | no | |
-| `gas_limit` | `UInt64` | no | |
-| `gas_used` | `UInt64` | no | |
-| `payload_timestamp` | `Int64` | yes | |
-| `block_hash` | `Utf8` (hex) | no | |
-| `base_fee_per_gas` | `Utf8` | no | |
-| `blob_gas_used` | `UInt64` | yes | |
-| `excess_blob_gas` | `UInt64` | yes | |
-| `fork_step` | `Utf8` | no | **Non-final streams only** (`--final-blocks-only=false`): the Firehose fork step of the block, `NEW`, `UNDO` or `FINAL`. |
-| `stream_ordinal` | `UInt64` | no | **Non-final streams only** (`--final-blocks-only=false`): accepted-event ordinal of the stream event (`NEW`, `UNDO` or `FINAL`) that produced the row. Strictly increasing in delivery order and durable across reconnects and restarts; every row of one event, in every table, has the same value. |
+| `block_num` | `long` | no | Block number (Firehose block metadata). |
+| `block_id` | `string` (hex) | no | Block id (hash), in the chain's byte encoding. |
+| `parent_num` | `long` | no | Parent block number (Firehose block metadata). |
+| `parent_id` | `string` (hex) | no | Parent block id, in the chain's byte encoding. |
+| `lib_num` | `long` | no | Last irreversible block number reported with the block. |
+| `timestamp` | `timestamp` | no | Block time, UTC, millisecond precision (stored in microseconds). |
+| `date` | `date` (partition) | no | Partition column: the UTC date of the block time, stored in the Delta log (`partitionValues.date`) and the `date=YYYY-MM-DD` directory, not in the data files. |
+| `block_slot` | `long` | no | |
+| `parent_hash` | `string` (hex) | no | |
+| `fee_recipient` | `string` (hex) | no | |
+| `state_root` | `string` (hex) | no | |
+| `receipts_root` | `string` (hex) | no | |
+| `prev_randao` | `string` (hex) | no | |
+| `block_number` | `long` | no | |
+| `gas_limit` | `long` | no | |
+| `gas_used` | `long` | no | |
+| `payload_timestamp` | `long` | yes | |
+| `block_hash` | `string` (hex) | no | |
+| `base_fee_per_gas` | `string` | no | |
+| `blob_gas_used` | `long` | yes | |
+| `excess_blob_gas` | `long` | yes | |
+| `fork_step` | `string` | no | **Non-final streams only** (`--final-blocks-only=false`): the Firehose fork step of the block, `NEW`, `UNDO` or `FINAL`. |
+| `stream_ordinal` | `long` | no | **Non-final streams only** (`--final-blocks-only=false`): accepted-event ordinal of the stream event (`NEW`, `UNDO` or `FINAL`) that produced the row. Strictly increasing in delivery order and durable across reconnects and restarts; every row of one event, in every table, has the same value. |
 
 ## `blob_sidecars`
 
 | Column | Type | Nullable | Description |
 |---|---|---|---|
-| `block_num` | `UInt64` | no | Block number (Firehose block metadata). |
-| `block_id` | `Utf8` (hex) | no | Block id (hash), in the chain's byte encoding. |
-| `parent_num` | `UInt64` | no | Parent block number (Firehose block metadata). |
-| `parent_id` | `Utf8` (hex) | no | Parent block id, in the chain's byte encoding. |
-| `lib_num` | `UInt64` | no | Last irreversible block number reported with the block. |
-| `timestamp` | `Timestamp(Millisecond, "UTC")` | no | Block time, UTC, millisecond precision. |
-| `date` | `Date32` | no | UTC date of `timestamp`. |
-| `block_slot` | `UInt64` | no | |
-| `blob_index` | `UInt64` | no | |
-| `blob` | `Binary` | no | |
-| `kzg_commitment` | `Utf8` (hex) | no | |
-| `kzg_proof` | `Utf8` (hex) | no | |
-| `fork_step` | `Utf8` | no | **Non-final streams only** (`--final-blocks-only=false`): the Firehose fork step of the block, `NEW`, `UNDO` or `FINAL`. |
-| `stream_ordinal` | `UInt64` | no | **Non-final streams only** (`--final-blocks-only=false`): accepted-event ordinal of the stream event (`NEW`, `UNDO` or `FINAL`) that produced the row. Strictly increasing in delivery order and durable across reconnects and restarts; every row of one event, in every table, has the same value. |
+| `block_num` | `long` | no | Block number (Firehose block metadata). |
+| `block_id` | `string` (hex) | no | Block id (hash), in the chain's byte encoding. |
+| `parent_num` | `long` | no | Parent block number (Firehose block metadata). |
+| `parent_id` | `string` (hex) | no | Parent block id, in the chain's byte encoding. |
+| `lib_num` | `long` | no | Last irreversible block number reported with the block. |
+| `timestamp` | `timestamp` | no | Block time, UTC, millisecond precision (stored in microseconds). |
+| `date` | `date` (partition) | no | Partition column: the UTC date of the block time, stored in the Delta log (`partitionValues.date`) and the `date=YYYY-MM-DD` directory, not in the data files. |
+| `block_slot` | `long` | no | |
+| `blob_index` | `long` | no | |
+| `blob` | `binary` | no | |
+| `kzg_commitment` | `string` (hex) | no | |
+| `kzg_proof` | `string` (hex) | no | |
+| `fork_step` | `string` | no | **Non-final streams only** (`--final-blocks-only=false`): the Firehose fork step of the block, `NEW`, `UNDO` or `FINAL`. |
+| `stream_ordinal` | `long` | no | **Non-final streams only** (`--final-blocks-only=false`): accepted-event ordinal of the stream event (`NEW`, `UNDO` or `FINAL`) that produced the row. Strictly increasing in delivery order and durable across reconnects and restarts; every row of one event, in every table, has the same value. |
 
 ## `withdrawals`
 
@@ -227,20 +228,20 @@ Capella+: `execution_payload.withdrawals`, one row per withdrawal.
 
 | Column | Type | Nullable | Description |
 |---|---|---|---|
-| `block_num` | `UInt64` | no | Block number (Firehose block metadata). |
-| `block_id` | `Utf8` (hex) | no | Block id (hash), in the chain's byte encoding. |
-| `parent_num` | `UInt64` | no | Parent block number (Firehose block metadata). |
-| `parent_id` | `Utf8` (hex) | no | Parent block id, in the chain's byte encoding. |
-| `lib_num` | `UInt64` | no | Last irreversible block number reported with the block. |
-| `timestamp` | `Timestamp(Millisecond, "UTC")` | no | Block time, UTC, millisecond precision. |
-| `date` | `Date32` | no | UTC date of `timestamp`. |
-| `block_slot` | `UInt64` | no | |
-| `withdrawal_index` | `UInt64` | no | |
-| `validator_index` | `UInt64` | no | |
-| `address` | `Utf8` (hex) | no | |
-| `amount` | `UInt64` | no | |
-| `fork_step` | `Utf8` | no | **Non-final streams only** (`--final-blocks-only=false`): the Firehose fork step of the block, `NEW`, `UNDO` or `FINAL`. |
-| `stream_ordinal` | `UInt64` | no | **Non-final streams only** (`--final-blocks-only=false`): accepted-event ordinal of the stream event (`NEW`, `UNDO` or `FINAL`) that produced the row. Strictly increasing in delivery order and durable across reconnects and restarts; every row of one event, in every table, has the same value. |
+| `block_num` | `long` | no | Block number (Firehose block metadata). |
+| `block_id` | `string` (hex) | no | Block id (hash), in the chain's byte encoding. |
+| `parent_num` | `long` | no | Parent block number (Firehose block metadata). |
+| `parent_id` | `string` (hex) | no | Parent block id, in the chain's byte encoding. |
+| `lib_num` | `long` | no | Last irreversible block number reported with the block. |
+| `timestamp` | `timestamp` | no | Block time, UTC, millisecond precision (stored in microseconds). |
+| `date` | `date` (partition) | no | Partition column: the UTC date of the block time, stored in the Delta log (`partitionValues.date`) and the `date=YYYY-MM-DD` directory, not in the data files. |
+| `block_slot` | `long` | no | |
+| `withdrawal_index` | `long` | no | |
+| `validator_index` | `long` | no | |
+| `address` | `string` (hex) | no | |
+| `amount` | `decimal(20,0)` | no | |
+| `fork_step` | `string` | no | **Non-final streams only** (`--final-blocks-only=false`): the Firehose fork step of the block, `NEW`, `UNDO` or `FINAL`. |
+| `stream_ordinal` | `long` | no | **Non-final streams only** (`--final-blocks-only=false`): accepted-event ordinal of the stream event (`NEW`, `UNDO` or `FINAL`) that produced the row. Strictly increasing in delivery order and durable across reconnects and restarts; every row of one event, in every table, has the same value. |
 
 ## `bls_to_execution_changes`
 
@@ -248,21 +249,21 @@ Deneb+ (the Firehose Capella body does not carry them): signed BLS-to-execution 
 
 | Column | Type | Nullable | Description |
 |---|---|---|---|
-| `block_num` | `UInt64` | no | Block number (Firehose block metadata). |
-| `block_id` | `Utf8` (hex) | no | Block id (hash), in the chain's byte encoding. |
-| `parent_num` | `UInt64` | no | Parent block number (Firehose block metadata). |
-| `parent_id` | `Utf8` (hex) | no | Parent block id, in the chain's byte encoding. |
-| `lib_num` | `UInt64` | no | Last irreversible block number reported with the block. |
-| `timestamp` | `Timestamp(Millisecond, "UTC")` | no | Block time, UTC, millisecond precision. |
-| `date` | `Date32` | no | UTC date of `timestamp`. |
-| `block_slot` | `UInt64` | no | |
-| `change_index` | `UInt32` | no | |
-| `validator_index` | `UInt64` | yes | |
-| `from_bls_pubkey` | `Utf8` (hex) | yes | |
-| `to_execution_address` | `Utf8` (hex) | yes | |
-| `signature` | `Utf8` (hex) | no | |
-| `fork_step` | `Utf8` | no | **Non-final streams only** (`--final-blocks-only=false`): the Firehose fork step of the block, `NEW`, `UNDO` or `FINAL`. |
-| `stream_ordinal` | `UInt64` | no | **Non-final streams only** (`--final-blocks-only=false`): accepted-event ordinal of the stream event (`NEW`, `UNDO` or `FINAL`) that produced the row. Strictly increasing in delivery order and durable across reconnects and restarts; every row of one event, in every table, has the same value. |
+| `block_num` | `long` | no | Block number (Firehose block metadata). |
+| `block_id` | `string` (hex) | no | Block id (hash), in the chain's byte encoding. |
+| `parent_num` | `long` | no | Parent block number (Firehose block metadata). |
+| `parent_id` | `string` (hex) | no | Parent block id, in the chain's byte encoding. |
+| `lib_num` | `long` | no | Last irreversible block number reported with the block. |
+| `timestamp` | `timestamp` | no | Block time, UTC, millisecond precision (stored in microseconds). |
+| `date` | `date` (partition) | no | Partition column: the UTC date of the block time, stored in the Delta log (`partitionValues.date`) and the `date=YYYY-MM-DD` directory, not in the data files. |
+| `block_slot` | `long` | no | |
+| `change_index` | `long` | no | |
+| `validator_index` | `long` | yes | |
+| `from_bls_pubkey` | `string` (hex) | yes | |
+| `to_execution_address` | `string` (hex) | yes | |
+| `signature` | `string` (hex) | no | |
+| `fork_step` | `string` | no | **Non-final streams only** (`--final-blocks-only=false`): the Firehose fork step of the block, `NEW`, `UNDO` or `FINAL`. |
+| `stream_ordinal` | `long` | no | **Non-final streams only** (`--final-blocks-only=false`): accepted-event ordinal of the stream event (`NEW`, `UNDO` or `FINAL`) that produced the row. Strictly increasing in delivery order and durable across reconnects and restarts; every row of one event, in every table, has the same value. |
 
 ## `deposit_requests`
 
@@ -270,22 +271,22 @@ Electra+: EIP-6110 deposit requests from `execution_requests.deposits`.
 
 | Column | Type | Nullable | Description |
 |---|---|---|---|
-| `block_num` | `UInt64` | no | Block number (Firehose block metadata). |
-| `block_id` | `Utf8` (hex) | no | Block id (hash), in the chain's byte encoding. |
-| `parent_num` | `UInt64` | no | Parent block number (Firehose block metadata). |
-| `parent_id` | `Utf8` (hex) | no | Parent block id, in the chain's byte encoding. |
-| `lib_num` | `UInt64` | no | Last irreversible block number reported with the block. |
-| `timestamp` | `Timestamp(Millisecond, "UTC")` | no | Block time, UTC, millisecond precision. |
-| `date` | `Date32` | no | UTC date of `timestamp`. |
-| `block_slot` | `UInt64` | no | |
-| `request_index` | `UInt32` | no | |
-| `deposit_index` | `UInt64` | no | |
-| `pubkey` | `Utf8` (hex) | no | |
-| `withdrawal_credentials` | `Utf8` (hex) | no | |
-| `amount` | `UInt64` | no | |
-| `signature` | `Utf8` (hex) | no | |
-| `fork_step` | `Utf8` | no | **Non-final streams only** (`--final-blocks-only=false`): the Firehose fork step of the block, `NEW`, `UNDO` or `FINAL`. |
-| `stream_ordinal` | `UInt64` | no | **Non-final streams only** (`--final-blocks-only=false`): accepted-event ordinal of the stream event (`NEW`, `UNDO` or `FINAL`) that produced the row. Strictly increasing in delivery order and durable across reconnects and restarts; every row of one event, in every table, has the same value. |
+| `block_num` | `long` | no | Block number (Firehose block metadata). |
+| `block_id` | `string` (hex) | no | Block id (hash), in the chain's byte encoding. |
+| `parent_num` | `long` | no | Parent block number (Firehose block metadata). |
+| `parent_id` | `string` (hex) | no | Parent block id, in the chain's byte encoding. |
+| `lib_num` | `long` | no | Last irreversible block number reported with the block. |
+| `timestamp` | `timestamp` | no | Block time, UTC, millisecond precision (stored in microseconds). |
+| `date` | `date` (partition) | no | Partition column: the UTC date of the block time, stored in the Delta log (`partitionValues.date`) and the `date=YYYY-MM-DD` directory, not in the data files. |
+| `block_slot` | `long` | no | |
+| `request_index` | `long` | no | |
+| `deposit_index` | `long` | no | |
+| `pubkey` | `string` (hex) | no | |
+| `withdrawal_credentials` | `string` (hex) | no | |
+| `amount` | `decimal(20,0)` | no | |
+| `signature` | `string` (hex) | no | |
+| `fork_step` | `string` | no | **Non-final streams only** (`--final-blocks-only=false`): the Firehose fork step of the block, `NEW`, `UNDO` or `FINAL`. |
+| `stream_ordinal` | `long` | no | **Non-final streams only** (`--final-blocks-only=false`): accepted-event ordinal of the stream event (`NEW`, `UNDO` or `FINAL`) that produced the row. Strictly increasing in delivery order and durable across reconnects and restarts; every row of one event, in every table, has the same value. |
 
 ## `withdrawal_requests`
 
@@ -293,20 +294,20 @@ Electra+: EIP-7002 withdrawal requests from `execution_requests.withdrawals`.
 
 | Column | Type | Nullable | Description |
 |---|---|---|---|
-| `block_num` | `UInt64` | no | Block number (Firehose block metadata). |
-| `block_id` | `Utf8` (hex) | no | Block id (hash), in the chain's byte encoding. |
-| `parent_num` | `UInt64` | no | Parent block number (Firehose block metadata). |
-| `parent_id` | `Utf8` (hex) | no | Parent block id, in the chain's byte encoding. |
-| `lib_num` | `UInt64` | no | Last irreversible block number reported with the block. |
-| `timestamp` | `Timestamp(Millisecond, "UTC")` | no | Block time, UTC, millisecond precision. |
-| `date` | `Date32` | no | UTC date of `timestamp`. |
-| `block_slot` | `UInt64` | no | |
-| `request_index` | `UInt32` | no | |
-| `source_address` | `Utf8` (hex) | no | |
-| `validator_pubkey` | `Utf8` (hex) | no | |
-| `amount` | `UInt64` | no | |
-| `fork_step` | `Utf8` | no | **Non-final streams only** (`--final-blocks-only=false`): the Firehose fork step of the block, `NEW`, `UNDO` or `FINAL`. |
-| `stream_ordinal` | `UInt64` | no | **Non-final streams only** (`--final-blocks-only=false`): accepted-event ordinal of the stream event (`NEW`, `UNDO` or `FINAL`) that produced the row. Strictly increasing in delivery order and durable across reconnects and restarts; every row of one event, in every table, has the same value. |
+| `block_num` | `long` | no | Block number (Firehose block metadata). |
+| `block_id` | `string` (hex) | no | Block id (hash), in the chain's byte encoding. |
+| `parent_num` | `long` | no | Parent block number (Firehose block metadata). |
+| `parent_id` | `string` (hex) | no | Parent block id, in the chain's byte encoding. |
+| `lib_num` | `long` | no | Last irreversible block number reported with the block. |
+| `timestamp` | `timestamp` | no | Block time, UTC, millisecond precision (stored in microseconds). |
+| `date` | `date` (partition) | no | Partition column: the UTC date of the block time, stored in the Delta log (`partitionValues.date`) and the `date=YYYY-MM-DD` directory, not in the data files. |
+| `block_slot` | `long` | no | |
+| `request_index` | `long` | no | |
+| `source_address` | `string` (hex) | no | |
+| `validator_pubkey` | `string` (hex) | no | |
+| `amount` | `decimal(20,0)` | no | |
+| `fork_step` | `string` | no | **Non-final streams only** (`--final-blocks-only=false`): the Firehose fork step of the block, `NEW`, `UNDO` or `FINAL`. |
+| `stream_ordinal` | `long` | no | **Non-final streams only** (`--final-blocks-only=false`): accepted-event ordinal of the stream event (`NEW`, `UNDO` or `FINAL`) that produced the row. Strictly increasing in delivery order and durable across reconnects and restarts; every row of one event, in every table, has the same value. |
 
 ## `consolidation_requests`
 
@@ -314,17 +315,52 @@ Electra+: EIP-7251 consolidation requests from `execution_requests.consolidation
 
 | Column | Type | Nullable | Description |
 |---|---|---|---|
-| `block_num` | `UInt64` | no | Block number (Firehose block metadata). |
-| `block_id` | `Utf8` (hex) | no | Block id (hash), in the chain's byte encoding. |
-| `parent_num` | `UInt64` | no | Parent block number (Firehose block metadata). |
-| `parent_id` | `Utf8` (hex) | no | Parent block id, in the chain's byte encoding. |
-| `lib_num` | `UInt64` | no | Last irreversible block number reported with the block. |
-| `timestamp` | `Timestamp(Millisecond, "UTC")` | no | Block time, UTC, millisecond precision. |
-| `date` | `Date32` | no | UTC date of `timestamp`. |
-| `block_slot` | `UInt64` | no | |
-| `request_index` | `UInt32` | no | |
-| `source_address` | `Utf8` (hex) | no | |
-| `source_pubkey` | `Utf8` (hex) | no | |
-| `target_pubkey` | `Utf8` (hex) | no | |
-| `fork_step` | `Utf8` | no | **Non-final streams only** (`--final-blocks-only=false`): the Firehose fork step of the block, `NEW`, `UNDO` or `FINAL`. |
-| `stream_ordinal` | `UInt64` | no | **Non-final streams only** (`--final-blocks-only=false`): accepted-event ordinal of the stream event (`NEW`, `UNDO` or `FINAL`) that produced the row. Strictly increasing in delivery order and durable across reconnects and restarts; every row of one event, in every table, has the same value. |
+| `block_num` | `long` | no | Block number (Firehose block metadata). |
+| `block_id` | `string` (hex) | no | Block id (hash), in the chain's byte encoding. |
+| `parent_num` | `long` | no | Parent block number (Firehose block metadata). |
+| `parent_id` | `string` (hex) | no | Parent block id, in the chain's byte encoding. |
+| `lib_num` | `long` | no | Last irreversible block number reported with the block. |
+| `timestamp` | `timestamp` | no | Block time, UTC, millisecond precision (stored in microseconds). |
+| `date` | `date` (partition) | no | Partition column: the UTC date of the block time, stored in the Delta log (`partitionValues.date`) and the `date=YYYY-MM-DD` directory, not in the data files. |
+| `block_slot` | `long` | no | |
+| `request_index` | `long` | no | |
+| `source_address` | `string` (hex) | no | |
+| `source_pubkey` | `string` (hex) | no | |
+| `target_pubkey` | `string` (hex) | no | |
+| `fork_step` | `string` | no | **Non-final streams only** (`--final-blocks-only=false`): the Firehose fork step of the block, `NEW`, `UNDO` or `FINAL`. |
+| `stream_ordinal` | `long` | no | **Non-final streams only** (`--final-blocks-only=false`): accepted-event ordinal of the stream event (`NEW`, `UNDO` or `FINAL`) that produced the row. Strictly increasing in delivery order and durable across reconnects and restarts; every row of one event, in every table, has the same value. |
+
+## Delta type mapping
+
+The mapper builds Arrow types; every flush maps them onto the Delta types above once, with checked casts, before anything is written (#643, `firehose_parquet::delta::types`). Columns that are not listed are built with their Delta type. A column is listed with its tables unless every table has it (`stream_ordinal` on non-final streams only).
+
+| Mapper Arrow type | Delta type | Conversion | Columns |
+|---|---|---|---|
+| `UInt64` | `long` | checked: a value above 9,223,372,036,854,775,807 (`i64::MAX`) refuses the flush before anything is written | `block_num`; `parent_num`; `lib_num`; `slot` (`blocks`, `attestations`); `parent_slot` (`blocks`); `proposer_index` (`blocks`); `stream_ordinal`; `block_slot` (every table but `blocks`); `committee_index` (`attestations`); `source_epoch` (`attestations`); `target_epoch` (`attestations`); `header_1_proposer_index` (`proposer_slashings`); `header_2_proposer_index` (`proposer_slashings`); `epoch` (`voluntary_exits`); `validator_index` (`voluntary_exits`, `withdrawals`, `bls_to_execution_changes`); `block_number` (`execution_payload`); `gas_limit` (`execution_payload`); `gas_used` (`execution_payload`); `blob_gas_used` (`execution_payload`); `excess_blob_gas` (`execution_payload`); `blob_index` (`blob_sidecars`); `withdrawal_index` (`withdrawals`); `deposit_index` (`deposit_requests`) |
+| `List<UInt64>` | `array<long>` | checked: a value above 9,223,372,036,854,775,807 (`i64::MAX`) refuses the flush before anything is written | `attestation_1_attesting_indices` (`attester_slashings`); `attestation_2_attesting_indices` (`attester_slashings`) |
+| `UInt64` | `decimal(20,0)` | exact: every 64-bit unsigned value fits (currency amounts, and values a sender or signer chooses without a range check) | `amount` (`deposits`, `withdrawals`, `deposit_requests`, `withdrawal_requests`); `header_1_slot` (`proposer_slashings`); `header_2_slot` (`proposer_slashings`); `attestation_1_slot` (`attester_slashings`); `attestation_1_committee_index` (`attester_slashings`); `attestation_1_source_epoch` (`attester_slashings`); `attestation_1_target_epoch` (`attester_slashings`); `attestation_2_slot` (`attester_slashings`); `attestation_2_committee_index` (`attester_slashings`); `attestation_2_source_epoch` (`attester_slashings`); `attestation_2_target_epoch` (`attester_slashings`) |
+| `UInt32` | `long` | lossless | `attestation_index` (`attestations`); `deposit_index` (`deposits`); `slashing_index` (`proposer_slashings`, `attester_slashings`); `exit_index` (`voluntary_exits`); `change_index` (`bls_to_execution_changes`); `request_index` (`deposit_requests`, `withdrawal_requests`, `consolidation_requests`) |
+| `Dictionary(Int32, Utf8)` | `string` | the same labels; Parquet still dictionary-encodes the pages | `spec` (`blocks`) |
+| `Timestamp(Millisecond, "UTC")` | `timestamp` | the same instant, stored as `TIMESTAMP(MICROS, UTC)` (whole milliseconds) | `timestamp` |
+| `date` column (`Date32`) | partition column | stored in the Delta log (`partitionValues.date`) and the `date=YYYY-MM-DD` directory, not in the data files | `date` |
+
+### `decimal(20,0)` columns
+
+The `UInt64` columns stored as `decimal(20,0)` instead of a checked `long` (`ChainProfile::decimal_columns` in `blocks/src/chain.rs`). Every other `UInt64` column is bounded by its protocol.
+
+| Column | Why not a checked `long` |
+|---|---|
+| `deposits.amount` | Gwei: a currency amount |
+| `withdrawals.amount` | Gwei: a currency amount |
+| `deposit_requests.amount` | Gwei: a currency amount |
+| `withdrawal_requests.amount` | Gwei: a currency amount |
+| `proposer_slashings.header_1_slot` | slashing evidence: the protocol checks the signature over the header, not the range of the slot it names |
+| `proposer_slashings.header_2_slot` | slashing evidence: the protocol checks the signature over the header, not the range of the slot it names |
+| `attester_slashings.attestation_1_slot` | slashing evidence: the protocol checks the signature over the attestation, not the range of its data |
+| `attester_slashings.attestation_1_committee_index` | slashing evidence: the protocol checks the signature over the attestation, not the range of its data |
+| `attester_slashings.attestation_1_source_epoch` | slashing evidence: the protocol checks the signature over the attestation, not the range of its data |
+| `attester_slashings.attestation_1_target_epoch` | slashing evidence: the protocol checks the signature over the attestation, not the range of its data |
+| `attester_slashings.attestation_2_slot` | slashing evidence: the protocol checks the signature over the attestation, not the range of its data |
+| `attester_slashings.attestation_2_committee_index` | slashing evidence: the protocol checks the signature over the attestation, not the range of its data |
+| `attester_slashings.attestation_2_source_epoch` | slashing evidence: the protocol checks the signature over the attestation, not the range of its data |
+| `attester_slashings.attestation_2_target_epoch` | slashing evidence: the protocol checks the signature over the attestation, not the range of its data |

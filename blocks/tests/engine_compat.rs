@@ -1,15 +1,20 @@
 //! #652: real `fireparq build` output read by the supported engines, DuckDB
 //! and Polars, with Hive partitioning over the `date=YYYY-MM-DD` directories.
+//! Since #643 (L2) every part is a Delta data file; the Delta log arrives with
+//! the commit layer (L3), so this test still reads the plain files.
 //!
 //! A mock Firehose serves two UTC days of blocks. `build` writes EVM (final
-//! and non-final) and Solana (list, binary and dictionary columns) datasets,
-//! and each engine must read, for every checked table:
+//! and non-final) and Solana (list, binary, decimal and enum columns)
+//! datasets, and each engine must read, for every checked table:
 //!
-//! - `date` as a date, equal in every file to its directory, and a `date`
-//!   filter that returns exactly that day's rows and files;
-//! - unsigned integers (UInt64, UInt32, List<UInt8>) as unsigned types;
-//! - `timestamp` as a UTC timestamp in milliseconds;
-//! - dictionary-encoded, list and binary columns;
+//! - `date` only from the directory: the data files have no `date` column,
+//!   and a `date` filter returns exactly that day's rows and files;
+//! - Delta types: signed integers (`long`, `array<short>`) for the mapper's
+//!   unsigned ones, `decimal(20,0)` for the chain's decimal columns (an EVM
+//!   block nonce of `u64::MAX` exactly), and `string` for enums;
+//! - `timestamp` as a UTC timestamp stored in microseconds (Parquet
+//!   `TIMESTAMP(MICROS, UTC)`), holding whole milliseconds;
+//! - list and binary columns;
 //! - `stream_ordinal` in non-final output only;
 //! - no file under `_fireparq/` or a dot-prefixed path;
 //! - the row count the files hold, the same in both engines.
@@ -177,6 +182,13 @@ fn evm_block(number: u64, id: u8) -> Vec<u8> {
     eth::Block {
         number,
         hash: vec![id; 32].into(),
+        // A PoW nonce above i64::MAX: `blocks.nonce` is decimal(20,0).
+        header: Some(eth::BlockHeader {
+            number,
+            nonce: u64::MAX,
+            gas_used: 42_000,
+            ..Default::default()
+        }),
         transaction_traces: vec![transaction(0), transaction(1)],
         ..Default::default()
     }
@@ -252,21 +264,26 @@ struct Dataset {
 /// A checked table and the engine types of some of its columns.
 struct Table {
     name: &'static str,
-    /// `(column, DuckDB type, Polars type)`. Dictionary-encoded enum strings
-    /// read as `VARCHAR` in DuckDB and `Categorical` in Polars.
+    /// `(column, DuckDB type, Polars type)`. Enum columns are plain strings
+    /// in the files (their pages are still dictionary-encoded).
     columns: Vec<(&'static str, &'static str, &'static str)>,
+    /// `(column, exact minimum)`: both engines' `min`, as text.
+    minimums: Vec<(&'static str, &'static str)>,
 }
 
 /// Columns every table has: the canonical identity and the date key.
 const CANONICAL: [(&str, &str, &str); 3] = [
-    ("block_num", "UBIGINT", "UInt64"),
+    ("block_num", "BIGINT", "Int64"),
     (
         "timestamp",
         "TIMESTAMP WITH TIME ZONE",
-        "Datetime(time_unit='ms', time_zone='UTC')",
+        "Datetime(time_unit='us', time_zone='UTC')",
     ),
     ("date", "DATE", "Date"),
 ];
+
+/// Polars' spelling of a Delta `decimal(20,0)`.
+const POLARS_DECIMAL: &str = "Decimal(precision=20, scale=0)";
 
 fn datasets() -> Vec<Dataset> {
     let final_events: Vec<Event> = (100..104).map(|n| (n, 0xa0 + (n - 100) as u8, 3)).collect();
@@ -275,25 +292,31 @@ fn datasets() -> Vec<Dataset> {
             Table {
                 name: "blocks",
                 columns: vec![
-                    ("num_transactions", "UINTEGER", "UInt32"),
-                    ("detail_level", "VARCHAR", "Categorical"),
+                    ("num_transactions", "BIGINT", "Int64"),
+                    ("gas_used", "BIGINT", "Int64"),
+                    ("nonce", "DECIMAL(20,0)", POLARS_DECIMAL),
+                    ("detail_level", "VARCHAR", "String"),
                 ],
+                minimums: vec![("nonce", "18446744073709551615"), ("gas_used", "42000")],
             },
             Table {
                 name: "transactions",
                 columns: vec![
-                    ("index", "UINTEGER", "UInt32"),
-                    ("type", "VARCHAR", "Categorical"),
-                    ("status", "VARCHAR", "Categorical"),
+                    ("index", "BIGINT", "Int64"),
+                    ("type", "VARCHAR", "String"),
+                    ("status", "VARCHAR", "String"),
                 ],
+                minimums: vec![("gas_used", "21000")],
             },
             Table {
                 name: "logs",
-                columns: vec![("log_index", "UINTEGER", "UInt32")],
+                columns: vec![("log_index", "BIGINT", "Int64")],
+                minimums: vec![],
             },
             Table {
                 name: "access_lists",
                 columns: vec![("storage_keys", "VARCHAR[]", "List(String)")],
+                minimums: vec![],
             },
         ]
     };
@@ -332,21 +355,33 @@ fn datasets() -> Vec<Dataset> {
                 Table {
                     name: "transactions",
                     columns: vec![
-                        ("transaction_index", "UINTEGER", "UInt32"),
-                        ("pre_balances", "UBIGINT[]", "List(UInt64)"),
+                        ("transaction_index", "BIGINT", "Int64"),
+                        ("fee", "DECIMAL(20,0)", POLARS_DECIMAL),
+                        (
+                            "pre_balances",
+                            "DECIMAL(20,0)[]",
+                            "List(Decimal(precision=20, scale=0))",
+                        ),
+                        ("compute_units_consumed", "BIGINT", "Int64"),
                         ("return_data", "BLOB", "Binary"),
                     ],
+                    minimums: vec![("fee", "5000"), ("compute_units_consumed", "1234")],
                 },
                 Table {
                     name: "instructions",
                     columns: vec![
-                        ("accounts", "UTINYINT[]", "List(UInt8)"),
+                        ("accounts", "SMALLINT[]", "List(Int16)"),
                         ("data", "BLOB", "Binary"),
                     ],
+                    minimums: vec![],
                 },
                 Table {
                     name: "rewards",
-                    columns: vec![("reward_type", "VARCHAR", "Categorical")],
+                    columns: vec![
+                        ("reward_type", "VARCHAR", "String"),
+                        ("post_balance", "DECIMAL(20,0)", POLARS_DECIMAL),
+                    ],
+                    minimums: vec![("post_balance", "999")],
                 },
             ],
         },
@@ -584,9 +619,33 @@ fn check_duckdb(duckdb: &Path, cwd: &Path, root: &str, dataset: &Dataset, table:
     }
     assert_eq!(
         types.get("stream_ordinal").map(String::as_str),
-        (!dataset.final_only).then_some("UBIGINT"),
+        (!dataset.final_only).then_some("BIGINT"),
         "{context}"
     );
+    // The data files hold no `date` column: it is the partition value only.
+    let stored: Vec<String> = duckdb_rows(
+        duckdb,
+        cwd,
+        &format!("DESCRIBE SELECT * FROM read_parquet('{glob}', hive_partitioning = false)"),
+    )
+    .into_iter()
+    .map(|row| row["column_name"].as_str().unwrap().to_string())
+    .collect();
+    assert!(
+        !stored.iter().any(|column| column == "date") && stored.contains(&"block_num".into()),
+        "{context}: {stored:?}"
+    );
+    for (column, minimum) in &table.minimums {
+        let row = &duckdb_rows(
+            duckdb,
+            cwd,
+            &format!(
+                "SELECT CAST(min({column}) AS VARCHAR) AS minimum \
+                 FROM read_parquet('{glob}', hive_partitioning = true)"
+            ),
+        )[0];
+        assert_eq!(row["minimum"], json!(minimum), "{context}: min({column})");
+    }
     // The `date=` directory is the only partition column.
     assert!(
         !types.contains_key("year") && !types.contains_key("day"),
@@ -599,6 +658,7 @@ fn check_duckdb(duckdb: &Path, cwd: &Path, root: &str, dataset: &Dataset, table:
         &format!(
             "SELECT count(*) AS n, \
              epoch_ms(max(timestamp)) % 1000 AS millis, \
+             epoch_us(max(timestamp)) % 1000 AS micros, \
              count(*) FILTER (WHERE regexp_matches(replace(filename, '{root}/', ''), '(^|/)[._]')) \
                AS hidden, \
              (SELECT count(*) FROM read_parquet('{glob}', hive_partitioning = true) \
@@ -608,15 +668,20 @@ fn check_duckdb(duckdb: &Path, cwd: &Path, root: &str, dataset: &Dataset, table:
              (SELECT string_agg(DISTINCT filename, ',' ORDER BY filename) \
                FROM read_parquet('{glob}', hive_partitioning = true, filename = true) \
                WHERE date = DATE '{DAY}') AS files_on_day, \
-             (SELECT count(*) FROM read_parquet('{glob}', hive_partitioning = false, filename = true) \
+             (SELECT count(*) FROM read_parquet('{glob}', hive_partitioning = true, filename = true) \
                WHERE date IS DISTINCT FROM \
                  CAST(regexp_extract(filename, 'date=([0-9-]{{10}})/[^/]+$', 1) AS DATE)) \
-               AS stored_mismatches \
+               AS partition_mismatches \
              FROM read_parquet('{glob}', hive_partitioning = true, filename = true)"
         ),
     )[0];
     assert_eq!(number(&row["n"]), expected.rows, "{context}: {row}");
     assert_eq!(number(&row["millis"]), dataset.millis, "{context}: {row}");
+    assert_eq!(
+        number(&row["micros"]),
+        0,
+        "{context}: whole milliseconds: {row}"
+    );
     assert_eq!(number(&row["hidden"]), 0, "{context}: {row}");
     assert_eq!(
         number(&row["on_day"]),
@@ -633,9 +698,10 @@ fn check_duckdb(duckdb: &Path, cwd: &Path, root: &str, dataset: &Dataset, table:
         expected.files_on_day,
         "{context}"
     );
-    assert_eq!(number(&row["stored_mismatches"]), 0, "{context}: {row}");
+    assert_eq!(number(&row["partition_mismatches"]), 0, "{context}: {row}");
 
-    // The Parquet logical type is TIMESTAMP(MILLIS, UTC).
+    // The Parquet logical type is TIMESTAMP(MICROS, UTC), which Polars
+    // requires under a Delta `timestamp` column.
     let schema = duckdb_rows(
         duckdb,
         cwd,
@@ -650,8 +716,8 @@ fn check_duckdb(duckdb: &Path, cwd: &Path, root: &str, dataset: &Dataset, table:
         .unwrap_or_default()
         .to_uppercase();
     assert!(
-        schema[0]["converted_type"] == json!("TIMESTAMP_MILLIS")
-            || (logical.contains("MILLIS") && logical.contains("UTC=1")),
+        schema[0]["converted_type"] == json!("TIMESTAMP_MICROS")
+            || (logical.contains("MICROS") && logical.contains("UTC=1")),
         "{context}: {schema:?}"
     );
     expected.rows
@@ -663,6 +729,14 @@ fn check_polars(python: &Path, root: &str, dataset: &Dataset) -> BTreeMap<String
     let spec = json!({
         "root": root,
         "tables": dataset.tables.iter().map(|table| table.name).collect::<Vec<_>>(),
+        "minimums": dataset
+            .tables
+            .iter()
+            .map(|table| {
+                let columns: Vec<&str> = table.minimums.iter().map(|(column, _)| *column).collect();
+                (table.name, columns)
+            })
+            .collect::<BTreeMap<_, _>>(),
         "day": DAY,
     });
     let output = std::process::Command::new(python)
@@ -694,9 +768,21 @@ fn check_polars(python: &Path, root: &str, dataset: &Dataset) -> BTreeMap<String
         }
         assert_eq!(
             schema["stream_ordinal"].as_str(),
-            (!dataset.final_only).then_some("UInt64"),
+            (!dataset.final_only).then_some("Int64"),
             "{context}"
         );
+        let stored = seen["stored_columns"].as_array().unwrap();
+        assert!(
+            !stored.contains(&json!("date")) && stored.contains(&json!("block_num")),
+            "{context}: the data files hold no date column: {stored:?}"
+        );
+        for (column, minimum) in &table.minimums {
+            assert_eq!(
+                seen["minimums"][*column],
+                json!(minimum),
+                "{context}: min({column})"
+            );
+        }
         assert_eq!(number(&seen["rows"]), expected.rows, "{context}");
         assert_eq!(
             number(&seen["rows_on_day"]),
@@ -709,7 +795,7 @@ fn check_polars(python: &Path, root: &str, dataset: &Dataset) -> BTreeMap<String
             json!(expected.files_on_day),
             "{context}"
         );
-        assert_eq!(number(&seen["stored_date_mismatches"]), 0, "{context}");
+        assert_eq!(number(&seen["partition_mismatches"]), 0, "{context}");
         assert_eq!(
             number(&seen["max_timestamp_ms"]) % 1000,
             dataset.millis,

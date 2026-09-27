@@ -6,10 +6,15 @@ use sha2::{Digest as _, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 
 pub const FORMAT_VERSION: u32 = 1;
-/// Semantic mapper epoch. `v2` (#652): every table is written as
-/// `<table>/date=YYYY-MM-DD/`. A `v1` dataset used another layout
-/// (`year=/month=/day=/`, and other `--partition` modes), so it is refused.
-pub const MAPPER_EPOCH: &str = "fireparq-mapping-v2";
+/// Semantic mapper epoch. `v3` (#643): every part is a Delta data file. Its
+/// columns have Delta types (checked `long`, the chain's `decimal(20,0)`
+/// columns, `short`, `string` for enums, microsecond `timestamp`), and `date`
+/// is the partition column only, never a column of the file; a Solana row
+/// without a block time gets the routing day as its `date` instead of null.
+/// `v2` (#652) wrote the mapper's Arrow types with a `date` column, and `v1`
+/// another layout (`year=/month=/day=/`, and other `--partition` modes), so
+/// both are refused.
+pub const MAPPER_EPOCH: &str = "fireparq-mapping-v3";
 pub const SOLANA_GENESIS_ROUTING_SECONDS: i64 = 1_584_368_940;
 const MAX_CURSOR_BYTES: usize = 64 * 1024;
 const MAX_TABLES: usize = 256;
@@ -226,8 +231,9 @@ impl StreamDescriptor {
         if self.mapper_epoch != MAPPER_EPOCH {
             bail!(
                 "this protected dataset was created with semantic mapper epoch `{}`; this \
-                 fireparq writes `{MAPPER_EPOCH}`, where every table is partitioned as \
-                 <table>/date=YYYY-MM-DD/ (#652). It cannot append to or maintain it: build \
+                 fireparq writes `{MAPPER_EPOCH}`, where every part is a Delta data file with \
+                 Delta column types and `date` only as the partition of \
+                 <table>/date=YYYY-MM-DD/ (#643). It cannot append to or maintain it: build \
                  into a new, empty output root",
                 self.mapper_epoch.chars().take(64).collect::<String>()
             );
