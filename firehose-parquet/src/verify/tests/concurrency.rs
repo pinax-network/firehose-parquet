@@ -834,7 +834,6 @@ fn remote_protected_dataset_at_the_bucket_root_is_verified_beside_root_artifacts
     }
     // Readable block_num files: scanning any of them would add a partition.
     put_block_nums(store.as_ref(), "_fireparq/cursor.parquet", &[994]);
-    put_block_nums(store.as_ref(), "_fireparq/partitions.parquet", &[993]);
     put_block_nums(store.as_ref(), "_fireparq/merkle_roots.parquet", &[992]);
     put_block_nums(
         store.as_ref(),
@@ -843,7 +842,6 @@ fn remote_protected_dataset_at_the_bucket_root_is_verified_beside_root_artifacts
     );
     // Legacy root artifacts of a release before v1.0.0 stay reserved.
     put_block_nums(store.as_ref(), "cursor.parquet", &[999]);
-    put_block_nums(store.as_ref(), "partitions.parquet", &[998]);
     put_block_nums(store.as_ref(), "merkle_roots.parquet", &[997]);
     put_block_nums(store.as_ref(), "verify_runs/old/roots.parquet", &[996]);
     put_block_nums(

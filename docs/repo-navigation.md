@@ -10,9 +10,7 @@ Related docs:
 - `docs/verifiability-hash-strategy.md`: `merkle_v2` row encoding, normalization rules and golden values.
 - `docs/verifiability-artifact-runbook.md`: publishing, retaining and migrating verify artifacts (`_fireparq/merkle_roots.parquet`, `_fireparq/verify_runs/<run_id>/report.json`), including moving pre-v1.0.0 root artifacts into `_fireparq/`.
 - `docs/verify-report-contract.md`: the verify report JSON contract.
-- `docs/partition-vocabulary.md`: naming convention for partition-related CLI flags.
-- `docs/partitions-build-defaults.md`: inference and bounded-range rules for `fireparq partitions build`.
-- `docs/partitions-parquet-contract.md`: the v2 `_fireparq/partitions.parquet` file contract.
+- `docs/partition-vocabulary.md`: the single `date=YYYY-MM-DD` output key and the CLI terms that refer to it.
 - `docs/network-registry-integration.md`: how built-in `--network` aliases are generated, the provider policy, and the endpoint check.
 
 ## Workspace Layout
@@ -23,18 +21,17 @@ Related docs:
   - `src/lib.rs`: exposes the compiled modules and aliases (`firehose`, `eth`, `solana`, ...).
 - `firehose-parquet/`: core library crate used by the binary.
   - CLI (`src/cli.rs` and `src/cli/`):
-    - `cli.rs`: Clap definitions (`Cli`, `Commands`, `GlobalArgs`, `AwsArgs`, `CommonArgs`, `BuildArgs`, `PartitionsCommands`) and the stable public re-exports.
+    - `cli.rs`: Clap definitions (`Cli`, `Commands`, `GlobalArgs`, `AwsArgs`, `CommonArgs`, `BuildArgs`) and the stable public re-exports.
     - `cli/configuration.rs`: CLI-to-`Config` conversion, value parsers, working-directory `.env` / `--env-file` loading, logging and completions.
-    - `cli/paths.rs`: local/S3 input and output policy (explicit `s3://` for writes, `S3_BUCKET` shorthand for reads), credential preflight, the `--output` dataset-root resolver (`resolve_output_root`, `{chain}` expansion) and the template parser it shares with `--cursor-template`.
+    - `cli/paths.rs`: local/S3 input and output policy (explicit `s3://` for writes, `S3_BUCKET` shorthand for reads), credential preflight, and the `--output` dataset-root resolver (`resolve_output_root`, `{chain}` expansion, `{{`/`}}` escapes).
     - `cli/inspect.rs`, `cli/validate.rs`: read-only `scan` / `inspect` and canonical block `validate`.
-    - `cli/partitions/{mod,io,queries}.rs`: partition models and vocabulary, strict v2 index IO and publication, and resolution/listing/sharding/completeness.
     - `cli/{tests,validate_tests}.rs`: CLI and validation regressions.
   - Configuration and endpoints:
     - `src/config.rs`: pipeline `Config`, `Compression` (including `zstd:<level>`) and receive-transport defaults.
     - `src/date_partition.rs`: the `date=YYYY-MM-DD` partition key, the only output layout (#652): `DatePartition` formats it from a block time, parses it strictly, and gives its `Date32` value; `is_date_value_pattern` checks `truncate -p date=` globs.
     - `src/networks.rs`, `src/networks_generated.rs`: built-in `--network` aliases (generated; do not edit) and `FIREHOSE_ENDPOINT_*` overrides.
     - `src/auth.rs`: Firehose credential selection by resolved provider host, and explicit env-var selectors.
-    - `src/grpc.rs`, `src/grpc/{finality,finalized_range}.rs`: Firehose stream/fetch clients, shared authenticated transport, reconnect/back-off/timeouts, fatal-status classification, finalized-anchor proof and exact metadata traversal.
+    - `src/grpc.rs`: the Firehose stream client (EndpointInfo, healthcheck and the Stream RPC), shared authenticated transport, reconnect/back-off/timeouts and fatal-status classification.
   - Protected ingestion (`src/ingest/`), used by every non-dry-run `build`:
     - `session.rs`: `IngestionSession`, assembling storage identity, eligibility, recovery and the accepted frontier; `ingestion_mutation_scopes` derives build ownership.
     - `controller.rs`: all-table publication and restart decisions: journal each flush, publish parts, advance authority, reconcile the mirror.
@@ -42,7 +39,7 @@ Related docs:
     - `state.rs`: strict transaction identity and durable records (`PendingTransaction`, deterministic `part-v1-*` / `.fireparq-txn-*.tmp` names, `BlockFamily`, `MAPPER_EPOCH`).
     - `store.rs`, `parts.rs`: typed record transitions, and physical part ownership checks and cleanup.
     - `frontier.rs`: the accepted-event prefix; `binding.rs`: output and mirror identities from the actual storage configuration (`--cursor none` binds no mirror).
-    - `eligibility.rs`: new streams may only initialize empty destinations; legacy data and cursors are refused.
+    - `eligibility.rs`: new streams may only initialize empty destinations; legacy data, cursors and any other file are refused.
     - `mirror.rs`: the non-authoritative cursor mirror (default `_fireparq/cursor.parquet`), reconciled from authority.
     - `maintenance.rs`: protected-root discovery and recovery before maintenance commands; `observe.rs`: read-only authority observation for `verify`.
   - Writing Parquet:
@@ -65,13 +62,12 @@ Related docs:
     - `src/truncate.rs`: `truncate` planning (`date=` filters, `--yes`) and deletion.
     - `src/maintenance/compaction.rs`: shared schema/value-metadata checks, receipt stripping, streaming part writer and the merge encoder.
     - `src/maintenance/discovery.rs`: shared local walker policies, S3 listing and whole-object reads for maintenance, `verify`, `scan` and `validate`.
-    - `src/artifacts.rs`: the one place dataset artifact paths resolve: `DatasetArtifact` (`_fireparq/cursor.parquet`, `_fireparq/partitions.parquet`, `_fireparq/merkle_roots.parquet`, `_fireparq/verify_runs/`, plus their legacy root names) with local/S3 join helpers, `DEFAULT_CURSOR_MIRROR` (the clap default), the legacy-artifact refusal, and `is_reserved_artifact_path`, which every dataset walker uses to skip the whole `_fireparq/` subtree, the legacy root names and control state.
+    - `src/artifacts.rs`: the one place dataset artifact paths resolve: `DatasetArtifact` (`_fireparq/cursor.parquet`, `_fireparq/merkle_roots.parquet`, `_fireparq/verify_runs/`, plus their legacy root names) with local/S3 join helpers, `DEFAULT_CURSOR_MIRROR` (the clap default), the legacy-artifact refusal, and `is_reserved_artifact_path`, which every dataset walker uses to skip the whole `_fireparq/` subtree, the legacy root names and control state.
     - `src/verify.rs`, `src/verify/row_encoding.rs`, `src/verify/tests/`: `fireparq verify` (read-only scan, open partitions from the writer frontier, unchanged-snapshot check, atomic/conditional registry writes) and the `merkle_v2` row encoding.
-    - `src/partition_index.rs`, `src/partition_index/{builder,scan}.rs`: v2 finalized coverage, exact source-ordered spans, ancestry/routing context and the bounded scan.
     - `src/metrics.rs`: Prometheus registry, `/metrics`, `/health` and `/ready`.
   - `tests/`: Parquet compatibility and maintenance output-property integration tests.
 - `blocks/`: chain-specific mapping crate and the unified `fireparq` binary.
-  - `src/bin/main.rs`: `fireparq` entrypoint, command dispatch (`Commands::*`), shared ingestion helpers, `run_partitions_build`, and the `.env.example` drift test.
+  - `src/bin/main.rs`: `fireparq` entrypoint, command dispatch (`Commands::*`), shared ingestion helpers, and the `.env.example` drift test.
   - `src/bin/ingestion/mod.rs`: `run_ingestion`, the `fireparq build` orchestration; dataset ownership outlives the session and runtime.
   - `src/bin/ingestion/setup.rs`: endpoint preflight (EndpointInfo, block type, encodings), resumed configuration and metrics labels.
   - `src/bin/ingestion/runtime.rs`: ordered receive/filter/routing state and flush windows; only the borrowed session commits authority and mirrors.
@@ -82,7 +78,7 @@ Related docs:
   - `src/schema_contract_tests.rs`: every table of every chain, under every encoding and both `fork_step` settings, has unique names and round-trips through Parquet.
   - `src/mapping_bench.rs`: ignored whole-block mapping benchmarks.
   - `examples/`: replay, benchmark and golden-refresh tools (`replay_*`, `bench_*` including `bench_ingestion_concurrency`, `measure_flush_sizing`, `refresh_evm_golden`, `dump_schemas`).
-  - `tests/`: real-binary integration tests against a mock Firehose (`ingestion_transactions.rs`, `dataset_ownership.rs`, `endpoint_info_startup.rs`, `non_final_stream.rs`, `partition_coverage.rs`, `partition_probe_failures.rs`, `metrics_readiness.rs`, `shutdown_signals.rs`), the DuckDB and Polars engine test (`engine_compat.rs`, with `tests/engines/`), the maintenance crash-hook gating test (`maintenance_crash_hooks.rs`) and the offline EVM golden regression (`evm_golden.rs`, `tests/fixtures/`).
+  - `tests/`: real-binary integration tests against a mock Firehose (`ingestion_transactions.rs`, `dataset_ownership.rs`, `endpoint_info_startup.rs`, `non_final_stream.rs`, `metrics_readiness.rs`, `shutdown_signals.rs`), the DuckDB and Polars engine test (`engine_compat.rs`, with `tests/engines/`), the maintenance crash-hook gating test (`maintenance_crash_hooks.rs`) and the offline EVM golden regression (`evm_golden.rs`, `tests/fixtures/`).
 - `proto/`: source `.proto` files and Buf config, including `proto/core/*` dependencies.
 - `scripts/`: `generate_networks.rs` (the `generate-networks` bin that writes `firehose-parquet/src/networks_generated.rs`) and `check_network_endpoints.sh` (live check of every built-in endpoint).
 - `.env.example`: every environment variable the CLI reads, kept in sync by a test.
@@ -92,7 +88,7 @@ Related docs:
 ## Data-Flow Mental Model
 
 1. `blocks/src/bin/main.rs` parses the CLI (`firehose-parquet/src/cli.rs`), loads `.env` from the working directory or `--env-file`, and dispatches. `fireparq build` (`Commands::Build(BuildArgs)`) calls `ingestion::run_ingestion` in `blocks/src/bin/ingestion/mod.rs`.
-2. `ingestion/setup.rs` resolves the endpoint and provider-scoped credentials (`auth.rs`), requires EndpointInfo (`grpc.rs`), selects the `ChainKind` (`blocks/src/chain.rs`: from `--block-type`, the endpoint chain names, or the first payload's `type_url` in a dry run) and resolves the dataset root (`resolve_output`, which calls `firehose_parquet::cli::resolve_output_root`: `--output` as given, with an opt-in `{chain}` placeholder expanded to the EndpointInfo chain name; `partitions build` uses the same resolver) and cursor mirror.
+2. `ingestion/setup.rs` resolves the endpoint and provider-scoped credentials (`auth.rs`), requires EndpointInfo (`grpc.rs`), selects the `ChainKind` (`blocks/src/chain.rs`: from `--block-type`, the endpoint chain names, or the first payload's `type_url` in a dry run) and resolves the dataset root (`resolve_output`, which calls `firehose_parquet::cli::resolve_output_root`: `--output` as given, with an opt-in `{chain}` placeholder expanded to the EndpointInfo chain name) and cursor mirror.
 3. Mutating commands acquire dataset ownership first (`dataset_lock/`, `dataset_lock_s3.rs`). `ingest/session.rs` then recovers any pending transaction and opens the accepted frontier from the authority under `<dataset root>/.fireparq-ingest/` before any Blocks request.
 4. Stream messages come from `grpc.rs`. `ingestion/runtime.rs` filters, orders and routes them; the chain mapper (`blocks/src/<chain>/mapper.rs`) decodes protobuf blocks and appends Arrow columns using `schema.rs`.
 5. When a flush trigger fires (`flush.rs`, partition boundaries, completion), `ingest/controller.rs` journals the all-table transaction, `writer/protected.rs` publishes the deterministic parts (local via `writer/local.rs`, S3 via `s3/upload.rs`) and verifies them, and the controller advances authority, then the optional `_fireparq/cursor.parquet` mirror.
@@ -147,11 +143,6 @@ Related docs:
 - Change verify roots, row encoding or registry behavior:
   - `firehose-parquet/src/verify.rs`, `firehose-parquet/src/verify/row_encoding.rs`.
   - `docs/verifiability-hash-strategy.md` (spec and golden values; changing an existing encoding rule bumps `merkle_version`), `docs/verify-report-contract.md` and `docs/verifiability-artifact-runbook.md`.
-- Change partition index building/consumption:
-  - `firehose-parquet/src/partition_index{.rs,/}` (proof model, scan and span builder).
-  - `firehose-parquet/src/cli/partitions/{io,queries}.rs` (v2 IO and strict queries).
-  - `blocks/src/bin/main.rs` (`run_partitions_build` lifecycle and publication).
-  - `docs/partitions-parquet-contract.md`, `docs/partitions-build-defaults.md`.
 - Change merge/truncate behavior:
   - `firehose-parquet/src/merge.rs`, `merge/engine.rs`, `merge_journal.rs`, `merge/read.rs`.
   - `firehose-parquet/src/truncate.rs`.

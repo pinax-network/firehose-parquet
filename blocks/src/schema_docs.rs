@@ -981,8 +981,8 @@ fn render_index(references: &[ChainReference]) -> String {
          `build --output` as given (`<output>/<table>/`; with `--output '<prefix>/{chain}'` \
          it is `<prefix>/<chain_name>/<table>/`). The `_fireparq/` directory and the \
          dot-prefixed entries \
-         beside the tables hold fireparq's artifacts (cursor mirror, partition index, \
-         Merkle registry, verify reports) and control state, not tables. Engines that \
+         beside the tables hold fireparq's artifacts (cursor mirror, Merkle registry, \
+         verify reports) and control state, not tables. Engines that \
          skip `_` and `.` paths (Spark, Trino, Hive, Delta) ignore them; with DuckDB, \
          read one table with `<root>/<table>/**/*.parquet`.\n\
          - Every table starts with the canonical block identity columns `block_num`, \

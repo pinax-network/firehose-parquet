@@ -278,25 +278,14 @@ async fn roots_in_an_older_partition_layout_are_refused_before_any_stream() {
 }
 
 /// Ownership must guard exactly the mirror that authority binds, including an
-/// independent cursor bucket and a `--cursor-template` expansion, and must not
-/// add a mirror scope for `--cursor none`.
+/// independent cursor bucket and a literal brace in the path, and must not add
+/// a mirror scope for `--cursor none`.
 #[test]
 fn mutation_scopes_follow_the_recorded_mirror_binding() {
     let local = tempfile::tempdir().unwrap();
     let local_output = local.path().join("chain");
     let external = local.path().join("state").join("worker.parquet");
-    let template = crate::cli::resolve_cursor_template(
-        "mirrors/{{worker}}.parquet",
-        &crate::cli::CursorTemplateContext {
-            chain: None,
-            partition_type: None,
-            partition_value: None,
-            partition_from: None,
-            partition_to: None,
-        },
-    )
-    .unwrap();
-    assert_eq!(template, "mirrors/{worker}.parquet");
+    let braced = "mirrors/{worker}.parquet".to_string();
     let local_output = local_output.to_str().unwrap().to_string();
     let cases: Vec<(String, Option<String>, Option<MutationScope>)> = vec![
         (local_output.clone(), None, None),
@@ -316,8 +305,8 @@ fn mutation_scopes_follow_the_recorded_mirror_binding() {
         ),
         (
             local_output.clone(),
-            Some(template.clone()),
-            Some(MutationScope::file(format!("{local_output}/{template}"))),
+            Some(braced.clone()),
+            Some(MutationScope::file(format!("{local_output}/{braced}"))),
         ),
         (
             local_output.clone(),
@@ -337,8 +326,8 @@ fn mutation_scopes_follow_the_recorded_mirror_binding() {
         ),
         (
             "s3://data/chain".into(),
-            Some(template.clone()),
-            Some(MutationScope::file(format!("s3://data/chain/{template}"))),
+            Some(braced.clone()),
+            Some(MutationScope::file(format!("s3://data/chain/{braced}"))),
         ),
         (
             "s3://data".into(),

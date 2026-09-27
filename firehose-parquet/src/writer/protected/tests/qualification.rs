@@ -180,10 +180,7 @@ fn retained_evm_tables_spool_without_schema_or_value_drift() {
                 continue;
             }
             if path.extension().is_none_or(|e| e != "parquet")
-                || matches!(
-                    entry.file_name().to_str(),
-                    Some("cursor.parquet" | "partitions.parquet")
-                )
+                || matches!(entry.file_name().to_str(), Some("cursor.parquet"))
             {
                 continue;
             }

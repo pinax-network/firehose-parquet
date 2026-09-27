@@ -44,7 +44,7 @@ coordinator:
   concept and v1.x may break things), but make a protected build refuse,
   before Blocks, a root that holds old-layout partitions;
 - leave the `partitions` subcommands and their own `--partition` index flag
-  alone (removed in v1.1.0 by #653), making sure nothing in them depends on the
+  alone (removed by #653 in the same v1.0.0 launch release), making sure nothing in them depends on the
   removed output modes.
 
 ## Implementation

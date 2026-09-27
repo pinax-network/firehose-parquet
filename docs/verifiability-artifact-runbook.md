@@ -23,7 +23,6 @@ Spark, Trino, Hive and Delta skip like any path starting with `_` or `.`:
   .fireparq-ingest/                    authoritative ingestion state (build)
   _fireparq/
     cursor.parquet                     optional resume-state mirror (build)
-    partitions.parquet                 partition index (partitions build)
     merkle_roots.parquet               canonical root registry (verify)
     verify_runs/<run_id>/report.json   per-run reports (verify --publish-report)
 ```
@@ -39,7 +38,7 @@ Spark, Trino, Hive and Delta skip like any path starting with `_` or `.`:
 
 An explicit `--chain` or `--table` that differs from what the files say is an error, so a mislabeled run cannot write rows under the wrong key. `verify` also fails when the scanned files span more than one table directory or more than one `firehose-parquet.chain_name`; verify each table directory separately.
 
-Paths are matched by component, so `output/blocks-archive/mainnet/transactions` resolves to table `transactions`, not `blocks`. Reserved artifacts (anything under `_fireparq/`, the legacy root names `cursor.parquet`, `partitions.parquet` and `merkle_roots.parquet`, anything under `verify_runs/`, and the dot-prefixed control state) are never scanned as table data, wherever they sit under the verify path. Neither are the files this run writes: the `--registry-path`, `--report-json` and `--publish-report-path` files are skipped whatever their names (a local path is matched after resolving its directory, an S3 path by bucket and key). A report from an earlier run is skipped only if it is named `.json` (or passed to the same flag again), so keep reports out of table directories or give them a `.json` name.
+Paths are matched by component, so `output/blocks-archive/mainnet/transactions` resolves to table `transactions`, not `blocks`. Reserved artifacts (anything under `_fireparq/`, the legacy root names `cursor.parquet` and `merkle_roots.parquet`, anything under `verify_runs/`, and the dot-prefixed control state) are never scanned as table data, wherever they sit under the verify path. Neither are the files this run writes: the `--registry-path`, `--report-json` and `--publish-report-path` files are skipped whatever their names (a local path is matched after resolving its directory, an S3 path by bucket and key). A report from an earlier run is skipped only if it is named `.json` (or passed to the same flag again), so keep reports out of table directories or give them a `.json` name. `partitions.parquet` is no longer reserved (#653): delete a leftover root index before verifying its chain root.
 
 An explicit registry inside the table directory under a non-reserved name (for example `output/mainnet/blocks/roots.parquet`) is skipped by `verify`, which adds a warning: `merge` and `validate` still read it as table data. Keep the registry at the default `<chain_root>/_fireparq/merkle_roots.parquet`, or outside the table directories.
 
@@ -172,7 +171,7 @@ A partition is keyed by the `k=v` directories directly above its files, wherever
 
 ### Concurrency and Atomic Writes
 
-`verify` only reads table data. It takes no dataset ownership, so it runs while `build`, `merge`, `truncate` or `partitions build` owns the dataset, and it never recovers or deletes anything. Its roots stay sound because:
+`verify` only reads table data. It takes no dataset ownership, so it runs while `build`, `merge` or `truncate` owns the dataset, and it never recovers or deletes anything. Its roots stay sound because:
 
 - **Open partitions come from the writer frontier.** It is read before the scanned listing, and every row at or below it was published before it was recorded, so a closed partition's files are all in that listing (see [Open Partitions](#open-partitions)).
 - **Closed partitions must not change while they are read.** `verify` records the identity of every file it reads (local: device, inode, size and modification time of the handle it read; S3: the listed ETag, size and last-modified time, and version when the listing has one), and S3 reads are pinned to the listed ETag with `If-Match`. On a store whose listings omit ETags, reads are not pinned and identity rests on size and last-modified time. After the scan, `verify` lists the table again. If any partition it would compare or record gained, lost or replaced a file, or had a listed file that was removed or replaced before it could be read, the run fails with `the data changed while verify was reading it: ...` before anything is compared or written. Re-run it once the other command is done. Changes in open partitions are expected and ignored, including an uncommitted part that a restarted `build` rolls back. A change after this check is an ordinary later change, which the next run compares.
@@ -232,32 +231,33 @@ To keep using a registry at a custom location, pass `--registry-path` explicitly
 
 ### Moving Artifacts Into `_fireparq/`
 
-Releases before v1.0.0 wrote the registry, the partition index, the verify
-reports and the default cursor mirror directly in the chain root. They now live
+Releases before v1.0.0 wrote the registry, the verify reports and the default
+cursor mirror directly in the chain root. They now live
 in `<chain_root>/_fireparq/`. Nothing is migrated automatically, and nothing is
 silently shadowed:
 
 | Legacy root artifact | New location | Until it is moved |
 |---|---|---|
 | `<chain_root>/merkle_roots.parquet` | `<chain_root>/_fireparq/merkle_roots.parquet` | A `roots` run with the default registry fails before reading any row. Protocol-only runs and an explicit `--registry-path` are unaffected. |
-| `<chain_root>/partitions.parquet` | `<chain_root>/_fireparq/partitions.parquet` | Every `partitions build` mode fails before reading or writing an index, and `build` refuses to initialize a new dataset beside it. |
 | `<chain_root>/verify_runs/` | `<chain_root>/_fireparq/verify_runs/` | Nothing fails; new reports go to `_fireparq/verify_runs/`. Old reports can be moved or kept. |
 | `<chain_root>/cursor.parquet` (mirror bound at the old default) | stays where it is | Do not move it: the mirror location is bound when a dataset is created. Keep passing `--cursor cursor.parquet`; the new default is refused with that instruction. |
 
+A partition index (`partitions.parquet`, at the root or in `_fireparq/`) has no
+new location: the `partitions` subcommands and the index were removed in #653.
+Delete it. fireparq never reads it, and a new `build` root must not contain it.
+
 The legacy names stay reserved, so no command reads them as table data either
-way. To move the registry and the index, stop `verify` and `partitions build`
-runs for the dataset (neither needs `build` to stop), then:
+way. To move the registry, stop `verify` runs for the dataset (`build` need not
+stop), then:
 
 ```bash
 # Local
 mkdir -p <chain_root>/_fireparq
 mv <chain_root>/merkle_roots.parquet <chain_root>/_fireparq/
-mv <chain_root>/partitions.parquet <chain_root>/_fireparq/
 mv <chain_root>/verify_runs <chain_root>/_fireparq/     # optional
 
 # S3 (no directory to create)
 aws s3 mv s3://<bucket>/<prefix>/merkle_roots.parquet s3://<bucket>/<prefix>/_fireparq/merkle_roots.parquet
-aws s3 mv s3://<bucket>/<prefix>/partitions.parquet s3://<bucket>/<prefix>/_fireparq/partitions.parquet
 aws s3 mv --recursive s3://<bucket>/<prefix>/verify_runs/ s3://<bucket>/<prefix>/_fireparq/verify_runs/
 ```
 

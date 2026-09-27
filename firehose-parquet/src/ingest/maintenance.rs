@@ -76,7 +76,6 @@ impl MaintenanceTarget {
 pub(crate) enum MaintenancePolicy {
     Merge,
     Recover,
-    Artifacts,
     Truncate,
 }
 
@@ -125,9 +124,6 @@ pub(crate) async fn acquire(
                 return Ok((expanded, None));
             }
             let roots = load_roots(&ownership, &markers, runtime_aws).await?;
-            if matches!(policy, MaintenancePolicy::Artifacts) {
-                validate_artifact_destinations(&targets, &roots, runtime_aws)?;
-            }
             for root in &roots {
                 match &root.descriptor.mirror {
                     MirrorBinding::Disabled => {}

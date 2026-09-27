@@ -1,5 +1,7 @@
 # Validation follow-ups: partitions and validate (findings 10-15)
 
+> The partitions parts of this record are superseded by [#653](653-remove-partitions.md): `partitions.parquet` and the `partitions` subcommands are removed, replaced by Delta log metadata. The `validate` findings still apply.
+
 Part of the validation follow-ups recorded in
 [`validation-misc-followups.md`](validation-misc-followups.md) (#463). Related
 records: [#476](476-timestamp-validation.md) (timestamp validation),

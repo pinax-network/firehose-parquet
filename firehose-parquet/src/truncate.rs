@@ -486,9 +486,9 @@ mod tests {
     fn collect_local_parquet_targets_includes_root_level_artifacts() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().join("mainnet");
-        write_test_file(&root.join("partitions.parquet"), b"partitions");
+        write_test_file(&root.join("merkle_roots.parquet"), b"registry");
         write_test_file(&root.join("cursor.parquet"), b"cursor");
-        write_test_file(&root.join("_fireparq/partitions.parquet"), b"partitions");
+        write_test_file(&root.join("_fireparq/merkle_roots.parquet"), b"registry");
         write_test_file(
             &root.join("blocks/date=2024-01-15/part-0001.parquet"),
             b"blocks",
@@ -509,17 +509,17 @@ mod tests {
         assert_eq!(
             rel_paths,
             vec![
-                "_fireparq/partitions.parquet".to_string(),
+                "_fireparq/merkle_roots.parquet".to_string(),
                 "blocks/date=2024-01-15/part-0001.parquet".to_string(),
                 "cursor.parquet".to_string(),
-                "partitions.parquet".to_string(),
+                "merkle_roots.parquet".to_string(),
             ]
         );
         // Each artifact is labelled as not table data.
         for rel in [
-            "_fireparq/partitions.parquet",
+            "_fireparq/merkle_roots.parquet",
             "cursor.parquet",
-            "partitions.parquet",
+            "merkle_roots.parquet",
         ] {
             assert!(crate::artifacts::is_reserved_artifact_path(rel), "{rel}");
         }
@@ -529,7 +529,7 @@ mod tests {
     fn run_truncate_local_dry_run_counts_root_level_artifacts_without_deleting() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().join("mainnet");
-        write_test_file(&root.join("partitions.parquet"), b"partitions");
+        write_test_file(&root.join("merkle_roots.parquet"), b"registry");
         write_test_file(&root.join("cursor.parquet"), b"cursor");
         write_test_file(
             &root.join("blocks/date=2024-01-15/part-0001.parquet"),
@@ -539,7 +539,7 @@ mod tests {
         let result = run_truncate(&config(&root, &[], true, false)).unwrap();
 
         assert_eq!(result.files_deleted, 3);
-        assert!(root.join("partitions.parquet").exists());
+        assert!(root.join("merkle_roots.parquet").exists());
         assert!(root.join("cursor.parquet").exists());
         assert!(root
             .join("blocks/date=2024-01-15/part-0001.parquet")
@@ -550,17 +550,17 @@ mod tests {
     fn run_truncate_local_deletes_single_explicit_parquet_file() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().join("unichain");
-        let partitions = root.join("partitions.parquet");
+        let registry = root.join("merkle_roots.parquet");
         let cursor = root.join("cursor.parquet");
-        write_test_file(&partitions, b"partitions");
+        write_test_file(&registry, b"registry");
         write_test_file(&cursor, b"cursor");
 
-        let result = run_truncate(&config(&partitions, &[], false, true)).unwrap();
+        let result = run_truncate(&config(&registry, &[], false, true)).unwrap();
 
         assert_eq!(result.files_deleted, 1);
-        assert_eq!(result.bytes_freed, b"partitions".len() as u64);
+        assert_eq!(result.bytes_freed, b"registry".len() as u64);
         assert_eq!(result.dirs_removed, 0);
-        assert!(!partitions.exists());
+        assert!(!registry.exists());
         assert!(cursor.exists());
     }
 
@@ -600,9 +600,9 @@ mod tests {
     fn filters_never_match_root_artifacts() {
         for filter in ["date=2026-01-15", "date", "date=*"] {
             assert!(!matches("cursor.parquet", &[filter]), "{filter}");
-            assert!(!matches("partitions.parquet", &[filter]), "{filter}");
+            assert!(!matches("merkle_roots.parquet", &[filter]), "{filter}");
             assert!(
-                !matches("_fireparq/partitions.parquet", &[filter]),
+                !matches("_fireparq/merkle_roots.parquet", &[filter]),
                 "{filter}"
             );
             for artifact in [
@@ -856,14 +856,12 @@ mod tests {
         let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let artifacts = [
             "_fireparq/cursor.parquet",
-            "_fireparq/partitions.parquet",
             "_fireparq/merkle_roots.parquet",
             "_fireparq/verify_runs/run-1/roots.parquet",
             // A partition-shaped path inside `_fireparq/` still never matches
             // a partition filter.
             "_fireparq/date=2026-01-15/part-3.parquet",
             "cursor.parquet",
-            "partitions.parquet",
             "merkle_roots.parquet",
             "verify_runs/run-1/roots.parquet",
         ];
@@ -926,7 +924,7 @@ mod tests {
     fn local_and_s3_select_the_same_files_for_every_filter() {
         let tree = [
             ("cursor.parquet", 3usize),
-            ("partitions.parquet", 5),
+            ("merkle_roots.parquet", 5),
             ("blocks/date=2026-01-15/part-1.parquet", 7),
             ("blocks/date=2026-01-16/part-2.parquet", 11),
             ("blocks/date=2025-12-31/part-3.parquet", 13),

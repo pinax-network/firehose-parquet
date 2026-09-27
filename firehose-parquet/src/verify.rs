@@ -4177,7 +4177,6 @@ mod tests {
             // Reserved artifacts beside the table and inside the table directory.
             // The cursor is a finished bounded build, so nothing is open.
             save_cursor(&root.join(network), 99, Some(100));
-            write_block_nums(&root.join(network).join("partitions.parquet"), &[99]);
             write_block_nums(
                 &root
                     .join(network)
@@ -4191,7 +4190,6 @@ mod tests {
             );
             // Anything in the `_fireparq/` artifact directory is never data.
             for artifact in [
-                "_fireparq/partitions.parquet",
                 "_fireparq/cursor.parquet",
                 "_fireparq/verify_runs/run-0/roots.parquet",
                 "_fireparq/other.parquet",

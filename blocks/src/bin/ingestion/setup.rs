@@ -54,24 +54,6 @@ impl ResolvedEndpoint {
         }
 
         let mut config = build_config(&common)?;
-
-        if let Some(template) = args.common.cursor_template.as_deref() {
-            let context = CursorTemplateContext {
-                chain: None,
-                partition_type: None,
-                partition_value: None,
-                partition_from: None,
-                partition_to: None,
-            };
-            let resolved_cursor_path = resolve_cursor_template(template, &context)?;
-            config.cursor_path = Some(resolved_cursor_path.clone());
-            info!(
-                cursor_template = %template,
-                cursor_path = %resolved_cursor_path,
-                "resolved cursor path"
-            );
-        }
-
         validate_cursor_storage(&config)?;
 
         // Fetch endpoint info for auto-detection of encoding, the {chain}

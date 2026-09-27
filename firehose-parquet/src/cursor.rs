@@ -616,8 +616,7 @@ pub fn load_cursor_parquet(path: &Path) -> anyhow::Result<Option<CursorState>> {
 ///
 /// Protected `build` never writes through this type: its mirror is published by
 /// the ingestion session from output authority. The type remains for read-only
-/// consumers (dry runs, `partitions build` start inference) and path
-/// resolution. The former `save`, `save_with_retry` and
+/// consumers (dry runs) and path resolution. The former `save`, `save_with_retry` and
 /// `save_with_retry_blocking` writers had no production caller and were removed.
 #[derive(Debug, Clone)]
 pub enum CursorLocation {

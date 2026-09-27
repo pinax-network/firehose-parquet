@@ -54,20 +54,6 @@ impl tonic::server::UnaryService<firehose::InfoRequest> for Info {
     }
 }
 #[derive(Clone)]
-struct Fetch(Fixture);
-impl tonic::server::UnaryService<firehose::SingleBlockRequest> for Fetch {
-    type Response = firehose::SingleBlockResponse;
-    type Future = tonic::codegen::BoxFuture<tonic::Response<Self::Response>, tonic::Status>;
-    fn call(&mut self, _: tonic::Request<firehose::SingleBlockRequest>) -> Self::Future {
-        Box::pin(async {
-            Ok(tonic::Response::new(firehose::SingleBlockResponse {
-                metadata: response(100).metadata,
-                block: None,
-            }))
-        })
-    }
-}
-#[derive(Clone)]
 struct Stream(Fixture);
 impl tonic::server::ServerStreamingService<firehose::Request> for Stream {
     type Response = firehose::Response;
@@ -92,11 +78,7 @@ impl tonic::server::ServerStreamingService<firehose::Request> for Stream {
                     _ => panic!("unexpected retry"),
                 }
             } else {
-                vec![Ok(response(if request.start_block_num < 0 {
-                    10
-                } else {
-                    request.start_block_num as u64
-                }))]
+                vec![Ok(response(request.start_block_num as u64))]
             };
             Ok(tonic::Response::new(
                 futures::stream::iter(messages).boxed(),
@@ -149,7 +131,6 @@ macro_rules! service {
     };
 }
 service!(Info, "sf.firehose.v2.EndpointInfo", unary);
-service!(Fetch, "sf.firehose.v2.Fetch", unary);
 service!(Stream, "sf.firehose.v2.Stream", server_streaming);
 struct Server {
     endpoint: String,
@@ -169,7 +150,6 @@ async fn server(fixture: Fixture) -> Server {
     let task = tokio::spawn(async move {
         tonic::transport::Server::builder()
             .add_service(Info(fixture.clone()))
-            .add_service(Fetch(fixture.clone()))
             .add_service(Stream(fixture))
             .serve_with_incoming(incoming)
             .await
@@ -200,36 +180,10 @@ async fn every_rpc_path_automatically_attaches_only_configured_credentials() {
         .unwrap();
         let shutdown = CancellationToken::new();
         client.info().await.unwrap();
-        // Repeat Fetch to exercise the cached channel and new intercepted clients.
-        for _ in 0..2 {
-            assert_eq!(
-                client
-                    .fetch_block_identity(100, None)
-                    .await
-                    .unwrap()
-                    .unwrap()
-                    .block_num,
-                100
-            );
-        }
         client
             .stream_blocks(None, &shutdown, |_, _, _, _, _| Ok(()))
             .await
             .unwrap();
-        assert_eq!(
-            client
-                .finalized_anchor(Duration::from_secs(2), &shutdown)
-                .await
-                .unwrap()
-                .block_num,
-            8
-        );
-        let mut stream = client
-            .finalized_metadata_stream(100, 100, Duration::from_secs(2), &shutdown)
-            .await
-            .unwrap();
-        assert_eq!(stream.next().await.unwrap().unwrap().block_num, 100);
-        assert!(stream.next().await.unwrap().is_none());
         let expected = Headers {
             key: key
                 .map(str::trim)
@@ -241,7 +195,7 @@ async fn every_rpc_path_automatically_attaches_only_configured_credentials() {
                 .map(|s| format!("Bearer {s}")),
         };
         let headers = fixture.headers.lock().unwrap();
-        assert_eq!(headers.len(), 7);
+        assert_eq!(headers.len(), 2);
         for (route, actual) in headers.iter() {
             assert_eq!(actual, &expected, "{route}");
         }

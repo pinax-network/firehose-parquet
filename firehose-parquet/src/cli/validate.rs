@@ -333,9 +333,24 @@ impl ValidateResult {
 
 /// Render epoch milliseconds as UTC `YYYY-MM-DD HH:MM:SS.mmm`, falling back to the raw value.
 pub(in crate::cli) fn format_epoch_millis(timestamp_ms: i64) -> String {
-    format_partition_timestamp(timestamp_ms.div_euclid(1_000))
+    format_utc_seconds(timestamp_ms.div_euclid(1_000))
         .map(|seconds| format!("{seconds}.{:03}", timestamp_ms.rem_euclid(1_000)))
         .unwrap_or_else(|_| format!("{timestamp_ms}ms"))
+}
+
+/// Render epoch seconds as UTC `YYYY-MM-DD HH:MM:SS`.
+fn format_utc_seconds(timestamp: i64) -> anyhow::Result<String> {
+    let dt = time::OffsetDateTime::from_unix_timestamp(timestamp)
+        .map_err(|e| anyhow::anyhow!("invalid unix timestamp {timestamp}: {e}"))?;
+    Ok(format!(
+        "{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
+        dt.year(),
+        dt.month() as u8,
+        dt.day(),
+        dt.hour(),
+        dt.minute(),
+        dt.second()
+    ))
 }
 
 /// A block tuple: (block_num, block_id, parent_id, timestamp in epoch milliseconds).

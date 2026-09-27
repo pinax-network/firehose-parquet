@@ -1341,15 +1341,13 @@ mod tests {
     /// Legacy root artifacts first (the only root-level files), then the
     /// `_fireparq/` artifact directory, whose two same-schema files would
     /// merge together if it were treated as a partition.
-    const RESERVED: [&str; 10] = [
+    const RESERVED: [&str; 8] = [
         "cursor.parquet",
         "merkle_roots.parquet",
-        "partitions.parquet",
         "verify_runs/run-1/a.parquet",
         "verify_runs/run-1/b.parquet",
         "_fireparq/cursor.parquet",
         "_fireparq/merkle_roots.parquet",
-        "_fireparq/partitions.parquet",
         "_fireparq/other.parquet",
         "_fireparq/verify_runs/run-1/a.parquet",
     ];
@@ -1404,7 +1402,7 @@ mod tests {
         builder.metadata().file_metadata().num_rows() as usize
     }
 
-    /// Merging a network root used to merge `cursor.parquet`, `partitions.parquet`, and
+    /// Merging a network root used to merge `cursor.parquet` and
     /// `merkle_roots.parquet` into a root `part-000001.parquet` and delete them.
     #[test]
     fn test_merge_network_root_leaves_reserved_artifacts() {
@@ -1446,7 +1444,7 @@ mod tests {
             .map(|path| path.file_name().unwrap().to_string_lossy().into_owned())
             .collect();
         root_files.sort();
-        assert_eq!(root_files, RESERVED[..3].to_vec());
+        assert_eq!(root_files, RESERVED[..2].to_vec());
 
         let mut merged = Vec::new();
         collect_parquet_files_recursive(&partition, &mut merged).unwrap();
@@ -2401,8 +2399,8 @@ mod tests {
 
     /// `build --output s3://bucket` keeps a dataset at the
     /// bucket root, where the table prefixes sit beside the cursor mirror, the
-    /// partition index, the verify registry and reports, the ingestion
-    /// authority and the bucket-wide owner record. Merging the bucket root
+    /// verify registry and reports, the ingestion authority and the bucket-wide
+    /// owner record. Merging the bucket root
     /// compacts only table partitions and leaves every one of those alone.
     #[test]
     fn s3_bucket_root_dataset_merges_tables_and_leaves_root_artifacts() {
@@ -2424,11 +2422,9 @@ mod tests {
         // treated as one root partition of table data.
         let artifacts = [
             "_fireparq/cursor.parquet",
-            "_fireparq/partitions.parquet",
             "_fireparq/merkle_roots.parquet",
             "_fireparq/verify_runs/run/report.json",
             "cursor.parquet",
-            "partitions.parquet",
             "merkle_roots.parquet",
             "verify_runs/run/report.json",
             ".fireparq-ingest/state.json",

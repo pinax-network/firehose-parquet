@@ -1,5 +1,7 @@
 # Partition probe reliability (#485)
 
+> Superseded by [#653](653-remove-partitions.md): `partitions.parquet` and the `partitions` subcommands are removed, replaced by Delta log metadata. This record is kept as history.
+
 ## Recovery provenance
 
 The original stopped-agent worktree was preserved without edits:

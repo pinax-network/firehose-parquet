@@ -43,64 +43,6 @@ impl Service<http::Request<tonic::body::Body>> for Info {
     }
 }
 
-// Partition builds now preflight an explicit finality proof before acquiring
-// output ownership; provide that read-only protocol without serving any data range.
-#[derive(Clone)]
-struct Finality;
-impl tonic::server::NamedService for Finality {
-    const NAME: &'static str = "sf.firehose.v2.Stream";
-}
-impl tonic::server::ServerStreamingService<firehose::Request> for Finality {
-    type Response = firehose::Response;
-    type ResponseStream =
-        futures::stream::BoxStream<'static, Result<Self::Response, tonic::Status>>;
-    type Future = BoxFuture<tonic::Response<Self::ResponseStream>, tonic::Status>;
-    fn call(&mut self, request: tonic::Request<firehose::Request>) -> Self::Future {
-        use futures::StreamExt;
-        let request = request.into_inner();
-        assert!(request.start_block_num == -1 || request.start_block_num == 101);
-        let response = firehose::Response {
-            block: Some(prost_types::Any::default()),
-            step: if request.start_block_num == -1 { 1 } else { 3 },
-            metadata: Some(firehose::BlockMetadata {
-                num: if request.start_block_num == -1 {
-                    110
-                } else {
-                    101
-                },
-                id: "finality-id".into(),
-                lib_num: 101,
-                ..Default::default()
-            }),
-            ..Default::default()
-        };
-        Box::pin(async move {
-            Ok(tonic::Response::new(
-                futures::stream::iter([Ok(response)]).boxed(),
-            ))
-        })
-    }
-}
-impl Service<http::Request<tonic::body::Body>> for Finality {
-    type Response = http::Response<tonic::body::Body>;
-    type Error = std::convert::Infallible;
-    type Future = BoxFuture<Self::Response, Self::Error>;
-    fn poll_ready(
-        &mut self,
-        _: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<Result<(), Self::Error>> {
-        std::task::Poll::Ready(Ok(()))
-    }
-    fn call(&mut self, request: http::Request<tonic::body::Body>) -> Self::Future {
-        let service = self.clone();
-        Box::pin(async move {
-            Ok(tonic::server::Grpc::new(tonic_prost::ProstCodec::default())
-                .server_streaming(service, request)
-                .await)
-        })
-    }
-}
-
 async fn run(cwd: &std::path::Path, args: &[&str]) -> std::process::Output {
     let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_fireparq"));
     command
@@ -129,7 +71,7 @@ fn assert_ownership_conflict(result: std::process::Output) {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn build_partition_and_maintenance_commands_conflict_with_a_descendant_owner() {
+async fn build_and_maintenance_commands_conflict_with_a_descendant_owner() {
     let temp = tempfile::tempdir().unwrap();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let endpoint = format!("http://{}", listener.local_addr().unwrap());
@@ -141,7 +83,6 @@ async fn build_partition_and_maintenance_commands_conflict_with_a_descendant_own
     let server = tokio::spawn(async move {
         tonic::transport::Server::builder()
             .add_service(info)
-            .add_service(Finality)
             .serve_with_incoming(incoming)
             .await
             .unwrap();
@@ -171,22 +112,6 @@ async fn build_partition_and_maintenance_commands_conflict_with_a_descendant_own
             "--output",
             output,
         ],
-        vec![
-            "partitions",
-            "build",
-            "--endpoint",
-            &endpoint,
-            "--start-block",
-            "100",
-            "--stop-block",
-            "102",
-            "--partition",
-            "block_range",
-            "--block-range-size",
-            "2",
-            "--output",
-            output,
-        ],
         vec!["merge", root_str],
         vec!["truncate", root_str, "--yes"],
     ] {
@@ -199,8 +124,8 @@ async fn build_partition_and_maintenance_commands_conflict_with_a_descendant_own
     }
     assert_eq!(
         calls.load(Ordering::SeqCst),
-        2,
-        "build commands must resolve chain identity before acquiring its output root"
+        1,
+        "build must resolve chain identity before acquiring its output root"
     );
     drop(owner);
 
