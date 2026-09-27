@@ -1,0 +1,649 @@
+{
+  "issue": 516,
+  "stage": "A: bounded table work inside one controller commit",
+  "machine": {
+    "cpu": "Apple M1 Max, 10 cores",
+    "memory_bytes": 68719476736,
+    "os": "macOS 26.5.1",
+    "filesystem": "APFS on internal SSD (Rust sync_all issues F_FULLFSYNC)",
+    "rustc": "1.93.1",
+    "note": "shared with other concurrently building/testing agents; 1-minute load averages are recorded per run"
+  },
+  "input": {
+    "source": "one-time capture of finalized Ethereum mainnet blocks through the Pinax Firehose",
+    "range": [
+      26049575,
+      26049775
+    ],
+    "blocks": 200,
+    "raw_payload_bytes": 487880029,
+    "retained": "private local file only; opaque cursors are not committed"
+  },
+  "local_cli_replay": {
+    "driver": "blocks/examples/bench_ingestion_concurrency.rs replay (loopback Firehose, real fireparq build, fresh local root per run, runs interleaved)",
+    "base": "fireparq built from merge-base 050f9ec (before this change)",
+    "flags": "labels map to --flush-encode-concurrency/--flush-publish-concurrency[/--flush-inflight-bytes]; strict = 1/1/1 byte; default = 2/4/256 MiB",
+    "latency_definition": "flush trigger log line to committed-flush log line",
+    "results": {
+      "default_thresholds": {
+        "base": {
+          "flags": [],
+          "rounds": 5,
+          "flushes": 5,
+          "wall_seconds": {
+            "median": 9.509,
+            "min": 6.106,
+            "max": 18.563
+          },
+          "flush_seconds_total": {
+            "median": 8.111,
+            "min": 5.08,
+            "max": 16.722
+          },
+          "flush_ms_p50": {
+            "median": 1285.399,
+            "min": 1169.354,
+            "max": 3092.584
+          },
+          "user_seconds": {
+            "median": 3.3,
+            "min": 3.19,
+            "max": 3.85
+          },
+          "system_seconds": {
+            "median": 0.75,
+            "min": 0.67,
+            "max": 1.06
+          },
+          "max_rss_mib": {
+            "median": 923.172,
+            "min": 912.594,
+            "max": 999.578
+          },
+          "load_average_1m": [
+            8.93,
+            5.85,
+            3.86,
+            3.55,
+            3.77
+          ],
+          "parts": 70,
+          "part_bytes": 77783609,
+          "identical": true
+        },
+        "strict": {
+          "flags": [
+            "--flush-encode-concurrency",
+            "1",
+            "--flush-publish-concurrency",
+            "1",
+            "--flush-inflight-bytes",
+            "1"
+          ],
+          "rounds": 5,
+          "flushes": 5,
+          "wall_seconds": {
+            "median": 7.297,
+            "min": 6.373,
+            "max": 16.05
+          },
+          "flush_seconds_total": {
+            "median": 6.247,
+            "min": 5.327,
+            "max": 14.472
+          },
+          "flush_ms_p50": {
+            "median": 1319.902,
+            "min": 1160.855,
+            "max": 2792.226
+          },
+          "user_seconds": {
+            "median": 3.27,
+            "min": 3.2,
+            "max": 3.92
+          },
+          "system_seconds": {
+            "median": 0.7,
+            "min": 0.67,
+            "max": 1.01
+          },
+          "max_rss_mib": {
+            "median": 917.359,
+            "min": 908.422,
+            "max": 919.391
+          },
+          "load_average_1m": [
+            7.86,
+            5.19,
+            3.49,
+            3.53,
+            3.35
+          ],
+          "parts": 70,
+          "part_bytes": 77783609,
+          "identical": true
+        },
+        "p11": {
+          "flags": [
+            "--flush-encode-concurrency",
+            "1",
+            "--flush-publish-concurrency",
+            "1"
+          ],
+          "rounds": 5,
+          "flushes": 5,
+          "wall_seconds": {
+            "median": 9.382,
+            "min": 6.722,
+            "max": 14.561
+          },
+          "flush_seconds_total": {
+            "median": 8.299,
+            "min": 5.653,
+            "max": 13.194
+          },
+          "flush_ms_p50": {
+            "median": 1194.874,
+            "min": 1008.355,
+            "max": 2630.668
+          },
+          "user_seconds": {
+            "median": 3.27,
+            "min": 3.23,
+            "max": 3.7
+          },
+          "system_seconds": {
+            "median": 0.8,
+            "min": 0.75,
+            "max": 0.92
+          },
+          "max_rss_mib": {
+            "median": 950.141,
+            "min": 914.578,
+            "max": 973.031
+          },
+          "load_average_1m": [
+            7.19,
+            4.77,
+            3.37,
+            4.55,
+            3.26
+          ],
+          "parts": 70,
+          "part_bytes": 77783609,
+          "identical": true
+        },
+        "default": {
+          "flags": [],
+          "rounds": 5,
+          "flushes": 5,
+          "wall_seconds": {
+            "median": 9.182,
+            "min": 4.762,
+            "max": 18.245
+          },
+          "flush_seconds_total": {
+            "median": 7.625,
+            "min": 3.643,
+            "max": 16.04
+          },
+          "flush_ms_p50": {
+            "median": 1439.115,
+            "min": 653.571,
+            "max": 3256.518
+          },
+          "user_seconds": {
+            "median": 3.28,
+            "min": 3.26,
+            "max": 3.36
+          },
+          "system_seconds": {
+            "median": 1.05,
+            "min": 0.81,
+            "max": 1.33
+          },
+          "max_rss_mib": {
+            "median": 941.391,
+            "min": 926.938,
+            "max": 974.938
+          },
+          "load_average_1m": [
+            7.09,
+            4.39,
+            3.23,
+            3.96,
+            4.41
+          ],
+          "parts": 70,
+          "part_bytes": 77783609,
+          "identical": true
+        },
+        "p48": {
+          "flags": [
+            "--flush-encode-concurrency",
+            "4",
+            "--flush-publish-concurrency",
+            "8"
+          ],
+          "rounds": 5,
+          "flushes": 5,
+          "wall_seconds": {
+            "median": 7.666,
+            "min": 3.152,
+            "max": 9.48
+          },
+          "flush_seconds_total": {
+            "median": 6.1,
+            "min": 2.131,
+            "max": 7.643
+          },
+          "flush_ms_p50": {
+            "median": 657.363,
+            "min": 434.392,
+            "max": 1538.479
+          },
+          "user_seconds": {
+            "median": 3.35,
+            "min": 3.21,
+            "max": 3.48
+          },
+          "system_seconds": {
+            "median": 0.93,
+            "min": 0.75,
+            "max": 1.31
+          },
+          "max_rss_mib": {
+            "median": 975.828,
+            "min": 966.422,
+            "max": 1016.141
+          },
+          "load_average_1m": [
+            6.77,
+            4.39,
+            3.26,
+            4.21,
+            4.5
+          ],
+          "parts": 70,
+          "part_bytes": 77783609,
+          "identical": true
+        },
+        "p88": {
+          "flags": [
+            "--flush-encode-concurrency",
+            "8",
+            "--flush-publish-concurrency",
+            "8"
+          ],
+          "rounds": 5,
+          "flushes": 5,
+          "wall_seconds": {
+            "median": 6.256,
+            "min": 3.054,
+            "max": 10.271
+          },
+          "flush_seconds_total": {
+            "median": 4.893,
+            "min": 2.02,
+            "max": 8.183
+          },
+          "flush_ms_p50": {
+            "median": 534.08,
+            "min": 421.153,
+            "max": 1615.281
+          },
+          "user_seconds": {
+            "median": 3.32,
+            "min": 3.23,
+            "max": 3.33
+          },
+          "system_seconds": {
+            "median": 0.95,
+            "min": 0.78,
+            "max": 1.15
+          },
+          "max_rss_mib": {
+            "median": 1001.484,
+            "min": 983.156,
+            "max": 1022.891
+          },
+          "load_average_1m": [
+            6.54,
+            4.2,
+            3.66,
+            4.01,
+            4.3
+          ],
+          "parts": 70,
+          "part_bytes": 77783609,
+          "identical": true
+        }
+      },
+      "flush_blocks_20": {
+        "base": {
+          "flags": [],
+          "rounds": 5,
+          "flushes": 11,
+          "wall_seconds": {
+            "median": 11.752,
+            "min": 10.134,
+            "max": 29.224
+          },
+          "flush_seconds_total": {
+            "median": 10.665,
+            "min": 9.036,
+            "max": 27.616
+          },
+          "flush_ms_p50": {
+            "median": 977.718,
+            "min": 777.305,
+            "max": 2397.303
+          },
+          "user_seconds": {
+            "median": 3.66,
+            "min": 3.51,
+            "max": 4.97
+          },
+          "system_seconds": {
+            "median": 1.02,
+            "min": 0.97,
+            "max": 1.72
+          },
+          "max_rss_mib": {
+            "median": 502.969,
+            "min": 484.047,
+            "max": 524.641
+          },
+          "load_average_1m": [
+            4.63,
+            3.0,
+            4.03,
+            3.87,
+            5.46
+          ],
+          "parts": 154,
+          "part_bytes": 80162798,
+          "identical": true
+        },
+        "strict": {
+          "flags": [
+            "--flush-encode-concurrency",
+            "1",
+            "--flush-publish-concurrency",
+            "1",
+            "--flush-inflight-bytes",
+            "1"
+          ],
+          "rounds": 5,
+          "flushes": 11,
+          "wall_seconds": {
+            "median": 11.903,
+            "min": 10.832,
+            "max": 18.974
+          },
+          "flush_seconds_total": {
+            "median": 10.817,
+            "min": 9.784,
+            "max": 17.659
+          },
+          "flush_ms_p50": {
+            "median": 930.426,
+            "min": 798.965,
+            "max": 1621.52
+          },
+          "user_seconds": {
+            "median": 3.72,
+            "min": 3.54,
+            "max": 4.69
+          },
+          "system_seconds": {
+            "median": 1.03,
+            "min": 0.98,
+            "max": 1.44
+          },
+          "max_rss_mib": {
+            "median": 512.547,
+            "min": 487.188,
+            "max": 543.828
+          },
+          "load_average_1m": [
+            3.53,
+            2.78,
+            2.94,
+            3.66,
+            4.92
+          ],
+          "parts": 154,
+          "part_bytes": 80162798,
+          "identical": true
+        },
+        "default": {
+          "flags": [],
+          "rounds": 5,
+          "flushes": 11,
+          "wall_seconds": {
+            "median": 7.226,
+            "min": 6.709,
+            "max": 15.682
+          },
+          "flush_seconds_total": {
+            "median": 6.076,
+            "min": 5.56,
+            "max": 14.588
+          },
+          "flush_ms_p50": {
+            "median": 524.402,
+            "min": 493.029,
+            "max": 774.957
+          },
+          "user_seconds": {
+            "median": 3.72,
+            "min": 3.56,
+            "max": 3.77
+          },
+          "system_seconds": {
+            "median": 1.27,
+            "min": 1.17,
+            "max": 1.38
+          },
+          "max_rss_mib": {
+            "median": 554.484,
+            "min": 506.422,
+            "max": 576.469
+          },
+          "load_average_1m": [
+            3.21,
+            3.94,
+            2.87,
+            4.18,
+            4.61
+          ],
+          "parts": 154,
+          "part_bytes": 80162798,
+          "identical": true
+        },
+        "p48": {
+          "flags": [
+            "--flush-encode-concurrency",
+            "4",
+            "--flush-publish-concurrency",
+            "8"
+          ],
+          "rounds": 5,
+          "flushes": 11,
+          "wall_seconds": {
+            "median": 9.669,
+            "min": 5.638,
+            "max": 19.42
+          },
+          "flush_seconds_total": {
+            "median": 8.545,
+            "min": 4.518,
+            "max": 18.156
+          },
+          "flush_ms_p50": {
+            "median": 451.856,
+            "min": 407.305,
+            "max": 1874.249
+          },
+          "user_seconds": {
+            "median": 3.73,
+            "min": 3.62,
+            "max": 3.77
+          },
+          "system_seconds": {
+            "median": 1.52,
+            "min": 1.25,
+            "max": 1.96
+          },
+          "max_rss_mib": {
+            "median": 567.906,
+            "min": 541.562,
+            "max": 585.547
+          },
+          "load_average_1m": [
+            3.11,
+            5.47,
+            2.8,
+            5.99,
+            4.2
+          ],
+          "parts": 154,
+          "part_bytes": 80162798,
+          "identical": true
+        }
+      }
+    }
+  },
+  "s3_controller_replay": {
+    "driver": "firehose-parquet ingest::controller::tests::concurrency::s3_replay_benchmark (ignored), replaying the committed transactions of one local run",
+    "model": "in-memory object store; every request waits 25 ms plus size at 100 MB/s; not live S3",
+    "strict": "1:1:1 = one encoder, one publication, 1-byte in-flight budget (one part at a time, one receipt write per part, as before)",
+    "results": {
+      "model": {
+        "arrow_bytes": 959014254,
+        "latency_ms": 25,
+        "mbps": 100,
+        "parts": 70,
+        "transactions": 5
+      },
+      "settings": {
+        "1:1:1": {
+          "rounds": 3,
+          "total_seconds": {
+            "median": 24.503,
+            "min": 24.49,
+            "max": 24.542
+          },
+          "commit_ms_p50": {
+            "median": 5296.9,
+            "min": 5294.8
+          },
+          "part_puts": 70,
+          "journal_puts": [
+            85,
+            85,
+            85
+          ],
+          "peak_concurrent_part_puts": 1,
+          "peak_encoders": 1,
+          "peak_publications": 1,
+          "peak_inflight_bytes": 8388609,
+          "identical_objects": true
+        },
+        "1:1": {
+          "rounds": 3,
+          "total_seconds": {
+            "median": 15.05,
+            "min": 14.943,
+            "max": 15.071
+          },
+          "commit_ms_p50": {
+            "median": 3233.2,
+            "min": 3190.2
+          },
+          "part_puts": 70,
+          "journal_puts": [
+            36,
+            36,
+            36
+          ],
+          "peak_concurrent_part_puts": 1,
+          "peak_encoders": 1,
+          "peak_publications": 1,
+          "peak_inflight_bytes": 21255955,
+          "identical_objects": true
+        },
+        "2:4": {
+          "rounds": 3,
+          "total_seconds": {
+            "median": 6.759,
+            "min": 6.703,
+            "max": 6.766
+          },
+          "commit_ms_p50": {
+            "median": 1421.4,
+            "min": 1392.8
+          },
+          "part_puts": 70,
+          "journal_puts": [
+            31,
+            31,
+            31
+          ],
+          "peak_concurrent_part_puts": 4,
+          "peak_encoders": 2,
+          "peak_publications": 4,
+          "peak_inflight_bytes": 27959725,
+          "identical_objects": true
+        },
+        "4:4": {
+          "rounds": 3,
+          "total_seconds": {
+            "median": 6.895,
+            "min": 6.882,
+            "max": 6.914
+          },
+          "commit_ms_p50": {
+            "median": 1464.6,
+            "min": 1462.6
+          },
+          "part_puts": 70,
+          "journal_puts": [
+            28,
+            28,
+            28
+          ],
+          "peak_concurrent_part_puts": 4,
+          "peak_encoders": 4,
+          "peak_publications": 4,
+          "peak_inflight_bytes": 32519581,
+          "identical_objects": true
+        },
+        "8:8": {
+          "rounds": 3,
+          "total_seconds": {
+            "median": 5.692,
+            "min": 5.685,
+            "max": 5.743
+          },
+          "commit_ms_p50": {
+            "median": 1218.6,
+            "min": 1216.5
+          },
+          "part_puts": 70,
+          "journal_puts": [
+            28,
+            28,
+            28
+          ],
+          "peak_concurrent_part_puts": 8,
+          "peak_encoders": 8,
+          "peak_publications": 8,
+          "peak_inflight_bytes": 35467778,
+          "identical_objects": true
+        }
+      }
+    }
+  }
+}

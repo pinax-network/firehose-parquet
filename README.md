@@ -490,7 +490,7 @@ recovery knobs to dedicated advanced sections.
 | Resume | Rerun the same original range; output authority selects progress and repairs the bound optional cursor mirror |
 | Output | `--output <OUTPUT>`, `--partition <PARTITION>`, `--compression <COMPRESSION>` |
 | Chain | `--block-type <BLOCK_TYPE>` (default `auto`), plus chain-specific toggles like `--without-extended` or `--without-votes` only when needed |
-| Runtime | `--final-blocks-only[=true|false]` (default `true`), `--flush-bytes <FLUSH_BYTES>` (compressed file target, `0` disables), `--flush-memory-bytes <FLUSH_MEMORY_BYTES>` (summed mapper estimate), optional `--flush-rows` / `--flush-blocks` / `--flush-interval-secs` (`0` disables rows and interval) |
+| Runtime | `--final-blocks-only[=true|false]` (default `true`), `--flush-bytes <FLUSH_BYTES>` (compressed file target, `0` disables), `--flush-memory-bytes <FLUSH_MEMORY_BYTES>` (summed mapper estimate), optional `--flush-rows` / `--flush-blocks` / `--flush-interval-secs` (`0` disables rows and interval), `--flush-encode-concurrency` / `--flush-publish-concurrency` / `--flush-inflight-bytes` (bounded table work inside each flush) |
 
 ### Non-final streams and reorgs
 
@@ -668,6 +668,30 @@ target. `--flush-rows 0` and `--flush-interval-secs 0` disable those triggers,
 like `--flush-bytes 0`; `--flush-blocks` and `--flush-memory-bytes` must be positive. Highly compressible data may never reach 32 MiB before the memory
 threshold; increasing the file target does not bypass that threshold. `merge`
 and `rollup` use their own streaming writer and memory policies.
+
+Within one flush, tables are encoded and published concurrently but under
+explicit bounds. `--flush-encode-concurrency` (default 2, 1-64) caps Parquet
+encoders running at once; `--flush-publish-concurrency` (default 4, 1-64) caps
+part publications, and for local output also the threads that stage, publish and
+verify files. `--flush-inflight-bytes` (default 256 MiB) caps encoded parts that
+are encoding, staged or publishing: memory for local and generic S3 output,
+private disk spool for native S3 (whose readback verification can hold one more
+copy per publication). An encoder is admitted only when its initial reservation
+fits and grows it while writing; if the budget cannot grow it, the part is encoded
+again alone later. One part larger than the whole budget runs alone and logs an
+overshoot warning. Each active encoder additionally holds its table's encoder
+working memory, and mapper batches stay allocated until the flush commits.
+
+The transaction contract is unchanged: one Writing journal at a time, receipts
+journaled one at a time with each part's exact receipt durable before that part
+publishes, and authority and the mirror advance only after every part has
+published and every final verified. The first error stops new work, waits for
+work already started, and leaves the journal for recovery. Output bytes and part
+names do not depend on these settings. `1`/`1` still lets the next table encode
+while the previous one publishes; `--flush-inflight-bytes 1` makes table work
+strictly one part at a time. The committed-flush log reports `commit_ms` and the
+observed `peak_encoders`, `peak_publications` and `peak_inflight_bytes`. See
+[the qualification and benchmark](docs/audit/516-bounded-flush-concurrency.md).
 
 Runtime logs distinguish mapper batches from successfully materialized Parquet
 output. On graceful shutdown or failure, remaining mapper data is not written

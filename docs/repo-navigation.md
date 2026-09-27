@@ -36,6 +36,7 @@ Related design docs:
   - `src/ingest/`: versioned all-table transactions, authority, accepted frontier, cursor mirrors, recovery and maintenance policy.
   - `src/ingest/observe.rs`: read-only protected markers and authoritative state, for `verify`, which takes no ownership.
   - `src/verify.rs`, `src/verify/row_encoding.rs`: `fireparq verify` (read-only scan, open partitions from the writer frontier, unchanged-snapshot check, atomic/conditional registry writes) and the `merkle_v2` row encoding.
+  - `src/ingest/controller/{pipeline,lane}.rs`: bounded concurrent encode/stage/receipt/publish of one transaction's parts (#516 stage A) and the scoped blocking lane for local part I/O; `src/writer/protected/budget.rs` is the in-flight encoded-byte budget.
   - `src/cursor.rs`: compatible cursor Parquet encoding and legacy inspection.
   - `src/writer/protected.rs`: prepared complete parts and exact receipt/schema verification.
   - `src/dataset_lock/`, `src/dataset_lock_s3.rs`: common local directory and persistent S3 bucket ownership for mutating commands.
