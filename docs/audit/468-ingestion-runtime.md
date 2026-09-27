@@ -103,8 +103,10 @@ coverage does not prove tail finality or capture UNDO events arriving afterward.
 A first shutdown signal stops new work and discards uncommitted memory. An
 in-flight durable operation either completes or reports failure. A forced second
 signal may leave pending state; recovery reconciles it before restart. Remote
-ownership is retained on errors or ambiguous requests, and normal success releases
-it only after synchronous mutations have finished.
+ownership is retained after an ambiguous request, a forced second signal or a
+panic. Normal success, graceful shutdown and a failure whose requests all had a
+definite outcome release it after synchronous mutations have finished; see
+[s3-owner-safe-release.md](s3-owner-safe-release.md).
 
 Mapper gauges cover unflushed buffers. Writer gauges cover owned prepared batches.
 Rows/files/bytes and flush counters advance on successful logical commits. Cursor

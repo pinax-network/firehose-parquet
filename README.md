@@ -348,8 +348,10 @@ private spool before committing. Budget temporary disk for two encoded parts,
 in addition to mapper memory. Native ingestion requires an HTTPS endpoint and
 limits a part to 5,000,000,000 encoded bytes and its serialized footer to 32 MiB;
 resume verification applies the same limits. Connections have a 10-second timeout;
-upload and complete readback each have a 15-minute deadline. Failed or cancelled
-writes retain ownership for provider-quiescent recovery. Maintenance commands and
+upload and complete readback each have a 15-minute deadline. A write whose
+outcome is uncertain (timed out, cancelled, lost or unverifiable acknowledgement)
+retains ownership for provider-quiescent recovery; an HTTP 401/403 refusal is
+definite and does not. Maintenance commands and
 the generic `ParquetTableWriter::new_s3` API keep their existing buffering and
 endpoint policy. See [qualification and limits](docs/audit/520-bounded-s3-ingestion.md).
 
@@ -397,7 +399,11 @@ or artifact locations. Local ownership uses macOS/Linux directory locks; nested
 symlinks inside mutation trees are refused. S3 ownership covers the whole bucket
 and requires conditional-write support plus access to reserved control keys.
 Unresolved remote errors retain ownership without an expiry or automatic takeover.
-`fireparq recovery status <path>` reads a summary. Explicit remote release requires
+A failed `build` releases S3 ownership on exit when every request it sent had a
+definite outcome, including when its failed transaction is still pending: the
+next `build` recovers that transaction before streaming. When it keeps ownership,
+its error says why and prints the exact `recovery status` and `recovery release`
+commands. `fireparq recovery status <path>` reads a summary. Explicit remote release requires
 the exact owner/generation and evidence that both the writer and all prior remote
 requests are quiescent; stopping the process alone is insufficient. See the
 [ownership and recovery runbook](docs/audit/468-stage1-ownership.md).
@@ -437,12 +443,15 @@ A second SIGINT or SIGTERM exits immediately with code 130, without waiting for
 the current block. In-flight writes may be interrupted: a hidden temporary part
 may remain incomplete, or a cursor update may not finish its durability checks.
 A published local table part already has a complete footer. The next owned
-recovery reconciles its pending transaction before any source replay.
+recovery reconciles its pending transaction before any source replay. A first
+signal releases S3 bucket ownership on exit; a second signal keeps it, because
+an interrupted request may still complete.
 
 If a write (local disk or S3), a block mapping, or the stream fails, the
 pipeline also discards partial buffers and does not save the cursor, then exits
 non-zero. Recovery removes verified parts from an uncommitted transaction before
 replaying its window, or finishes a committed transaction without remapping it.
+S3 ownership is released on exit unless a request had an uncertain outcome.
 S3 recovery additionally requires explicit release after provider-confirmed
 request quiescence whenever the prior owner remains retained.
 
