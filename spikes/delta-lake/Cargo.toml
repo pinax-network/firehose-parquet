@@ -1,0 +1,25 @@
+[package]
+name = "delta-lake-spike"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+# Standalone on purpose: deltalake 1.0.0 needs Rust 1.94.1 and brings Arrow 59,
+# so the spike stays out of the fireparq workspace, its lockfile and toolchain.
+[workspace]
+
+[dependencies]
+# `default-features = false` alone does not compile: a TLS feature is required.
+# No `datafusion`, no `deltalake-aws` (AWS SDK): S3 goes through object_store.
+deltalake-core = { version = "=1.0.0", default-features = false, features = ["rustls"] }
+arrow = "60"
+parquet = { version = "60", default-features = false, features = ["arrow", "zstd"] }
+object_store = { version = "0.13.2", features = ["aws"] }
+tokio = { version = "1", features = ["full"] }
+serde_json = "1"
+url = "2"
+
+[dev-dependencies]
+bytes = "1"
+chrono = { version = "0.4", default-features = false }
+tempfile = "3"
