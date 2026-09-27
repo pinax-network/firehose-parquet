@@ -16,8 +16,8 @@ use deltalake_core::operations::create::CreateBuilder;
 use deltalake_core::protocol::SaveMode;
 use deltalake_core::{DeltaResult, DeltaTable, TableProperty};
 
-/// The partition column of every table.
-pub const PARTITION_COLUMN: &str = "date";
+/// The partition column of every table: the `date=YYYY-MM-DD` key.
+pub const PARTITION_COLUMN: &str = crate::date_partition::DATE_KEY;
 
 /// The protocol's `minReaderVersion`. No reader features are used.
 pub const MIN_READER_VERSION: i32 = 1;
