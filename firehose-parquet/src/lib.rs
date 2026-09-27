@@ -6,6 +6,7 @@ pub mod cursor;
 pub mod dataset_lock;
 pub mod dataset_lock_s3;
 pub mod date_partition;
+pub mod delta;
 pub mod durable_state;
 pub mod durable_state_s3;
 pub mod encode;
