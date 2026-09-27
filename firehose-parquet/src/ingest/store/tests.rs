@@ -197,3 +197,49 @@ async fn uncertain_remote_owner_prevents_further_state_mutation() {
     assert!(store.load().await.unwrap().pending.is_none());
     assert!(owner.release().await.is_err());
 }
+
+#[tokio::test]
+async fn batched_receipts_persist_together_and_keep_every_receipt_rule() {
+    let root = tempfile::tempdir().unwrap();
+    let owner = LocalOwnership::acquire(&[root.path().into()]).unwrap();
+    let store = TransactionStateStore::local(root.path(), &owner).unwrap();
+    let authority = store
+        .initialize(AuthorityState::initial(descriptor(RoutingPolicy::DirectV1)).unwrap())
+        .await
+        .unwrap();
+    let writing = store
+        .begin(&authority, plan(&authority.payload, 1))
+        .await
+        .unwrap();
+    let receipt = |seed: u64| PartReceipt {
+        byte_size: 100 + seed,
+        sha256: Digest::hash("bytes", &seed).unwrap(),
+    };
+    assert!(store
+        .record_receipts(&authority, &writing, Vec::new())
+        .await
+        .is_err());
+    // An invalid entry rejects the whole batch without writing any receipt.
+    assert!(store
+        .record_receipts(&authority, &writing, vec![(0, receipt(0)), (9, receipt(9))])
+        .await
+        .is_err());
+    let both = store
+        .record_receipts(&authority, &writing, vec![(0, receipt(0)), (1, receipt(1))])
+        .await
+        .unwrap();
+    // The previous version is now stale, and frozen receipts cannot change.
+    assert!(store
+        .record_receipts(&authority, &writing, vec![(0, receipt(0))])
+        .await
+        .is_err());
+    assert!(store
+        .record_receipts(&authority, &both, vec![(1, receipt(2))])
+        .await
+        .is_err());
+    let loaded = store.load().await.unwrap().pending.unwrap().payload;
+    assert!(loaded.parts.iter().all(|part| part.receipt.is_some()));
+    let committed = store.mark_committed(&authority, &both).await.unwrap();
+    let next = store.advance(&authority, &committed).await.unwrap();
+    store.clear(&next, &committed).await.unwrap();
+}

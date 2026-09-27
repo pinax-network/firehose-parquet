@@ -14,6 +14,7 @@ use std::fs;
 use std::path::Path;
 use std::sync::Arc;
 
+mod concurrency;
 mod native_upload;
 mod remote_deletion;
 
@@ -227,7 +228,7 @@ fn assert_rows(root: &Path) {
 
 #[tokio::test]
 async fn every_publication_boundary_recovers_to_one_complete_all_table_prefix() {
-    for stage in [
+    let stages = [
         Stage::WritingPersisted,
         Stage::Staged(0),
         Stage::ReceiptPersisted(0),
@@ -239,7 +240,17 @@ async fn every_publication_boundary_recovers_to_one_complete_all_table_prefix() 
         Stage::AuthorityAdvanced,
         Stage::MirrorReconciled,
         Stage::PendingCleared,
-    ] {
+    ];
+    // Every boundary in serial and in bounded concurrent table work (#516).
+    let parallel = FlushConcurrency {
+        encoders: 4,
+        publications: 3,
+        inflight_bytes: 64 * 1024 * 1024,
+    };
+    for (concurrency, stage) in [FlushConcurrency::SERIAL, parallel]
+        .into_iter()
+        .flat_map(|concurrency| stages.map(|stage| (concurrency, stage)))
+    {
         let root = tempfile::tempdir().unwrap();
         let descriptor = actual_descriptor(root.path());
         let mirror = Mirror::default();
@@ -248,6 +259,8 @@ async fn every_publication_boundary_recovers_to_one_complete_all_table_prefix() 
             initialize(root.path(), &owner, &descriptor).await;
             let mut controller = open(root.path(), &owner, &mirror, &descriptor)
                 .await
+                .unwrap()
+                .with_concurrency(concurrency)
                 .unwrap();
             let injected = fail(stage);
             assert!(commit(&mut controller).await.is_err(), "{stage:?}");
@@ -854,7 +867,21 @@ fn crash_child_helper() {
             let mirror = Mirror::default();
             let owner = LocalOwnership::acquire(&[root.into()]).unwrap();
             initialize(root, &owner, &descriptor).await;
-            let mut controller = open(root, &owner, &mirror, &descriptor).await.unwrap();
+            let concurrency = if std::env::var("FIREPARQ_468_CRASH_PARALLEL").as_deref() == Ok("1")
+            {
+                FlushConcurrency {
+                    encoders: 4,
+                    publications: 3,
+                    inflight_bytes: 64 * 1024 * 1024,
+                }
+            } else {
+                FlushConcurrency::SERIAL
+            };
+            let mut controller = open(root, &owner, &mirror, &descriptor)
+                .await
+                .unwrap()
+                .with_concurrency(concurrency)
+                .unwrap();
             commit(&mut controller).await.unwrap();
         });
     panic!("crash helper did not reach its requested boundary");
@@ -862,7 +889,13 @@ fn crash_child_helper() {
 
 #[test]
 fn abrupt_process_death_recovers_parts_and_checkpoint() {
-    for stage in [Stage::Published(0), Stage::CommittedPersisted] {
+    for (parallel, stage) in [
+        (false, Stage::Published(0)),
+        (false, Stage::CommittedPersisted),
+        // Bounded concurrent table work dies between parts too (#516).
+        (true, Stage::Published(0)),
+        (true, Stage::Published(1)),
+    ] {
         let parent = tempfile::tempdir().unwrap();
         let root = parent.path().join("dataset");
         fs::create_dir(&root).unwrap();
@@ -877,6 +910,10 @@ fn abrupt_process_death_recovers_parts_and_checkpoint() {
             .env("FIREPARQ_468_CRASH_ROOT", &root)
             .env("FIREPARQ_468_CRASH_MARKER", &marker)
             .env("FIREPARQ_468_CRASH_STAGE", format!("{stage:?}"))
+            .env(
+                "FIREPARQ_468_CRASH_PARALLEL",
+                if parallel { "1" } else { "" },
+            )
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .spawn()
@@ -905,7 +942,7 @@ fn abrupt_process_death_recovers_parts_and_checkpoint() {
                 let mirror = Mirror::default();
                 let owner = LocalOwnership::acquire(&[root.clone()]).unwrap();
                 let mut controller = open(&root, &owner, &mirror, &descriptor).await.unwrap();
-                if stage == Stage::Published(0) {
+                if matches!(stage, Stage::Published(_)) {
                     assert_eq!(controller.authority().checkpoint.ordinal, 0);
                     commit(&mut controller).await.unwrap();
                 }
