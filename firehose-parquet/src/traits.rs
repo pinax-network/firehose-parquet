@@ -399,7 +399,8 @@ impl ForkStepBuilder {
 }
 
 /// Append the `fork_step` field to a table schema when fork steps are
-/// included (non-final streams). It is always the last column.
+/// included (non-final streams). It follows each table's original columns;
+/// columns added later may be pushed after it, so it is not always last.
 pub fn push_fork_step_field(fields: &mut Vec<Field>, include: bool) {
     if include {
         fields.push(fork_step_field());
