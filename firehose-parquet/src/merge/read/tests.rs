@@ -262,7 +262,9 @@ async fn invalid_identities_or_ranges_make_no_request() {
         assert!(pinned_range(&client, &meta, 0..10).await.is_err());
     }
     assert!(pinned_range(&client, &original, 9..11).await.is_err());
-    assert!(pinned_range(&client, &original, 9..8).await.is_err());
+    // A deliberately inverted range (start after end) must also be refused.
+    let inverted = std::ops::Range { start: 9, end: 8 };
+    assert!(pinned_range(&client, &original, inverted).await.is_err());
     assert!(store.requests.lock().unwrap().is_empty());
 }
 
