@@ -5,6 +5,8 @@ pub mod chain;
 pub mod cosmos;
 pub mod evm;
 pub mod near;
+#[doc(hidden)]
+pub mod schema_docs;
 pub mod solana;
 pub mod tron;
 
