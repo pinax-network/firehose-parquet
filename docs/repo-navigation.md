@@ -51,7 +51,7 @@ Related docs:
     - `src/flush.rs`: adaptive compressed `--flush-bytes` targets and the summed `--flush-memory-bytes` trigger.
     - `src/cursor.rs`: cursor Parquet row format and legacy inspection.
     - `src/encode.rs`, `src/encode/fixed_base58.rs`: byte encodings (`hex`, `hex_no_prefix`, `base58`, `tron_base58`, `binary`) and the fixed-width Base58 fast path.
-    - `src/traits.rs`: `BlockMapper`, canonical identity columns, timestamp helpers, and the shared fork-step and enum helpers.
+    - `src/traits.rs`: `BlockMapper`, canonical identity columns, timestamp helpers, and the shared enum helpers and non-final event helpers (`StreamEvent`: the `fork_step` and `stream_ordinal` columns).
   - Ownership, durable state and S3:
     - `src/dataset_lock/{mod,local,operation,session}.rs`: local directory-inode ownership shared by all mutating commands; `DatasetOwnership::finish` ends `build` ownership (release after success or after a failure whose requests all had a definite outcome). `src/dataset_lock_s3.rs`: the persistent bucket-wide S3 owner (`.fireparq-owner-v1.json`) and its uncertainty latch.
     - `src/durable_state.rs`, `src/durable_state_s3.rs`: strict versioned local/remote control records and CAS tombstones.
@@ -111,7 +111,7 @@ Related docs:
   - A schema change changes the table digests bound by protected output, so existing roots refuse to resume: document it in `docs/releases/unreleased.md` as a rebuild-required change. Row or routing changes without a schema change must advance `MAPPER_EPOCH` in `firehose-parquet/src/ingest/state.rs`.
   - `blocks/src/schema_contract_tests.rs` covers every table; add fixture rows for a new table.
 - Add a new chain family:
-  - `blocks/src/<chain>/{mod,proto,schema,mapper}.rs` (exported from `blocks/src/lib.rs`); use the shared `firehose_parquet::traits` helpers (`push_fork_step_field`, `fork_step_builder`, `append_fork_step`, `finish_fork_step`, `enum_data_type`, `estimated_dictionary_index_bytes`, `strip_enum_prefix`) instead of per-chain copies.
+  - `blocks/src/<chain>/{mod,proto,schema,mapper}.rs` (exported from `blocks/src/lib.rs`); use the shared `firehose_parquet::traits` helpers (`push_fork_step_field`, `fork_step_builder`, `append_fork_step`, `finish_fork_step`, `est_fork_step`, `enum_data_type`, `estimated_dictionary_index_bytes`, `strip_enum_prefix`) instead of per-chain copies.
   - `blocks/src/chain.rs`: add a `ChainKind` variant (append it to `ChainKind::ALL`, which is also the `type_url` detection order), its `ChainProfile` in `ChainKind::profile` and its constructor in `ChainKind::create_mapper`. Add ordered `CHAIN_NAME_RULES` entries for endpoint-name inference. Fill `strict_chain_names` when the family has votes, nullable timestamps or unsupported extended output, because those flags are resolved before the first block.
   - `firehose-parquet/src/ingest/state.rs` (`BlockFamily`) and `ingest/mirror.rs`: add the protected family; its serde name must equal the profile label.
   - `blocks/src/bin/main.rs` (`BLOCK_TYPES`, the unsupported-type error list) and the `--block-type` help in `firehose-parquet/src/cli.rs` (`BuildArgs`). A test checks that `BLOCK_TYPES` matches `ChainKind::ALL`.
@@ -167,6 +167,7 @@ Related docs:
 - Format: `cargo fmt --all`
 - Real-path ingestion regressions: `blocks/tests/ingestion_transactions.rs` drives the built `fireparq` binary against a cursor-aware mock Firehose; prefer it over unit tests of helpers when a fix concerns what `build` commits
 - Regenerate the schema reference: `cargo run -p blocks --example dump_schemas`
+- README live-view SQL: `blocks/tests/non_final_stream.rs` runs the README "Non-final streams and reorgs" SQL in DuckDB when a CLI is found (`FIREPARQ_DUCKDB`, else `duckdb` on `PATH`); CI installs a pinned, checksum-verified CLI and sets `FIREPARQ_REQUIRE_DUCKDB`, so the check cannot be skipped there
 - Build release: `cargo build --release --workspace`
 - Run binary from source: `cargo run --bin fireparq -- --help`
 - Run ingestion (preferred form): `cargo run --bin fireparq -- build --network mainnet --start-block 100`

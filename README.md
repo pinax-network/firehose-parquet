@@ -19,9 +19,9 @@ A production-grade Rust toolkit that consumes [StreamingFast Firehose](https://f
 
 The generated [schema reference](docs/schemas/README.md) lists every table,
 column, Arrow type and nullability. The sections below explain semantics, joins
-and queries. Select columns by name, not position: `fork_step` is not always the
-last column, because later additions follow it on several Solana, Antelope,
-NEAR and Tron tables.
+and queries. Select columns by name, not position: the non-final `fork_step` and
+`stream_ordinal` are not always the last columns, because later additions follow
+them on several Solana, Antelope, NEAR and Tron tables.
 
 ## What's new in v1.0.0
 
@@ -75,7 +75,7 @@ the upgrade guide.
 - **S3-aware cursor** — cursor automatically stored alongside output (local or S3)
 - **Partitioning** — `none`, `block_range`, `date`, `hour`, `minute`, or `second` layouts
 - **File rollover** — flush by row count, byte size, or time interval
-- **Fork handling** — finalized output by default; `--final-blocks-only=false` preserves append-only `fork_step` events ([query semantics](#non-final-streams-and-reorgs))
+- **Fork handling** — finalized output by default; `--final-blocks-only=false` preserves append-only `fork_step` events numbered by a durable `stream_ordinal` ([canonical live view](#canonical-live-view))
 - **Failed transactions** — EVM includes failed/reverted txs by default with only their persistent state changes (`--exclude-failed-transactions` drops them); Solana, Tron, Antelope, Cosmos and NEAR exclude them unless `--include-failed-transactions` is set, and label child rows with their parent outcome ([details](#failed-transaction-filtering))
 - **Block-type-based encoding** — identifiers follow the resolved chain/profile defaults, recorded in Parquet metadata; opaque Solana payloads use Binary and account indices use UInt8 lists
 - **Compression** — zstd (default level 3), explicit `zstd:<level>`, snappy, gzip, or none
@@ -613,8 +613,9 @@ Whether a run is live (no `--stop-block`) is independent of whether blocks must
 be final.
 
 Non-final output is an **append-only event history**. Every mapped envelope adds
-rows to every table, with two extra columns that final-only output does not
-have, `stream_ordinal` directly after `fork_step`:
+its block's rows (to `blocks` and to every other table the block has rows in),
+with two extra columns that final-only output does not have, `stream_ordinal`
+directly after `fork_step`:
 
 - `fork_step` (`Utf8`): `NEW` adds a block, `UNDO` records its removal from the
   chain (the undone block's rows are written again, marked `UNDO`), and `FINAL`
@@ -627,9 +628,10 @@ have, `stream_ordinal` directly after `fork_step`:
   assigns it when the envelope is received and continues it from the output
   authority (`.fireparq-ingest/`) across reconnects and restarts, and each
   part's name records the window of ordinals its rows belong to
-  (`part-v1-<stream>-<first>-<last>-...`). An ordinal is only reassigned after
-  a crash to an event whose first attempt was never committed, once recovery
-  has removed that attempt's rows.
+  (`part-v1-<stream>-<first>-<last>-...`). After a crash, recovery either keeps
+  a transaction's rows with their ordinals or removes its rows before those
+  ordinals are assigned again, so no two committed events share an ordinal.
+  Ordinals can skip values (envelopes below `--start-block` write no rows).
 
 A block identity can return as `NEW` after an `UNDO`, and a replay or reconnect
 can deliver the same block again; every delivery is a new event with a new
@@ -805,10 +807,10 @@ parts are expired rather than compacted.
 **Expected objects per day.** Each flush writes one part per table that has rows
 in it.
 
-- Live: about (flushes per day) × (tables with rows). Flushes per day are
-  86,400 / `FLUSH_INTERVAL_SECS` when blocks arrive faster than the interval,
-  otherwise blocks per day / `FLUSH_BLOCKS`, plus 24 hour boundaries and any
-  size-triggered flushes. Ethereum (7,200 blocks a day) with
+- Live: about (flushes per day) × (tables with rows). Flushes per day are the
+  larger of 86,400 / `FLUSH_INTERVAL_SECS` (at most one per block) and blocks
+  per day / `FLUSH_BLOCKS`, plus 24 hour boundaries and any size-triggered
+  flushes. Ethereum (7,200 blocks a day) with
   `FLUSH_INTERVAL_SECS=60` makes about 1,460 flushes a day: with 15 tables with
   rows, about 22,000 objects a day. `FLUSH_BLOCKS=1` instead makes about 108,000.
   Because S3 rounds each expiry up to the next midnight UTC, a 48-hour rule
@@ -819,10 +821,10 @@ in it.
   (`merge --flush-bytes`).
 
 Every S3 `build` start lists the whole dataset root three times (for nested
-control markers and merge journals), each listing limited to 60 seconds. S3 returns 1,000 keys
-per list request, so keep the live bucket's retained objects in the low hundreds
-of thousands at most: prefer `FLUSH_INTERVAL_SECS` to a small `FLUSH_BLOCKS` on
-fast chains.
+control markers and merge journals), each listing limited to 60 seconds. S3
+returns 1,000 keys per list request, so keep the live bucket's retained objects
+in the low hundreds of thousands at most: prefer `FLUSH_INTERVAL_SECS` to a
+small `FLUSH_BLOCKS` on fast chains.
 
 **Lifecycle expiration.** S3 lifecycle filters select objects by prefix, tag or
 size and cannot exclude a path, so create one expiration rule per table prefix:
@@ -1646,9 +1648,9 @@ every table, column, Arrow type and nullability:
 
 The README keeps the semantics that a column list cannot show: failed-transaction
 rules, join keys, ordering and example queries. `fireparq inspect <file> --schema-only`
-prints the schema of an existing file. Select columns by name: `fork_step`
-(non-final streams only) is followed by later columns on several Solana,
-Antelope, NEAR and Tron tables.
+prints the schema of an existing file. Select columns by name: `fork_step` and
+`stream_ordinal` (non-final streams only) are followed by later columns on
+several Solana, Antelope, NEAR and Tron tables.
 
 ## Failed Transaction Filtering
 

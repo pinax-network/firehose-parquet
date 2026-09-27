@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
-"""Execute the README's finalized-intersection SQL against bounded local fixtures.
+"""Execute the #474 finalized-intersection SQL against bounded local fixtures.
 
 Requires DuckDB CLI; makes no network calls. The input rows intentionally have
-no order field, matching the public table's event-order limitation.
+no order field, matching the event-order limitation of the schema at #474.
+
+#648 added `stream_ordinal` and replaced this README query with the canonical
+live view, which `blocks/tests/non_final_stream.rs` runs against real output.
+The query below is the one this record validated, kept verbatim.
 """
 import json
 from pathlib import Path
-import re
 import subprocess
 import tempfile
 
@@ -15,9 +18,20 @@ def query(sql):
     return json.loads(subprocess.check_output(['duckdb', '-json', '-c', sql], text=True))
 
 
-readme = (Path(__file__).resolve().parents[2] / 'README.md').read_text()
-section = readme.split('### Non-final streams and reorgs\n', 1)[1].split('\n### ', 1)[0]
-sql = re.search(r'```sql\n(.*?)\n```', section, re.S).group(1)
+sql = """-- DuckDB: finality comes from the separate finalized-only capture.
+-- Returns one identity per finalized block also observed as NEW/FINAL.
+WITH finalized AS (
+  SELECT DISTINCT block_num, block_id
+  FROM read_parquet('finalized/mainnet/blocks/**/*.parquet')
+), observed AS (
+  SELECT DISTINCT block_num, block_id
+  FROM read_parquet('reversible/mainnet/blocks/**/*.parquet')
+  WHERE fork_step IN ('NEW', 'FINAL')
+)
+SELECT f.block_num, f.block_id
+FROM finalized f
+JOIN observed o USING (block_num, block_id)
+ORDER BY f.block_num, f.block_id;"""
 with tempfile.TemporaryDirectory(prefix='fireparq-474-query-') as scratch:
     root = Path(scratch)
     reference = root / 'finalized.parquet'

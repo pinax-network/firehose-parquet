@@ -155,6 +155,7 @@ Docker runs before a release.
 - [#470: exact S3 cursor buckets](470-s3-cursor-buckets.md)
 - [#473: responsive shutdown](473-responsive-shutdown.md)
 - [#474: append-only non-final streams and query limits](474-non-final-streams.md)
+- [#648: durable per-row `stream_ordinal`, the canonical live view and live bucket expiry](648-stream-ordinal.md)
 - [#475: bounded metrics and stream readiness](475-metrics-readiness.md)
 - [#476: timestamp and streamed identity validation](476-timestamp-validation.md)
 - [#477: single-partition writer contract](477-writer-partition-contract.md)
