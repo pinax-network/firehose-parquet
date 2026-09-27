@@ -139,6 +139,11 @@ Real binary (`blocks/tests/ingestion_transactions.rs`, retained real EVM block,
 - The existing storage-failure test pins `--flush-inflight-bytes 1` so its
   published-orphan scenario stays deterministic.
 
+Validation on the branch rebased onto main `df551b4`: `cargo fmt --all --check`
+and `cargo test --workspace --locked` passed **1,221 tests with 15 intentional
+ignores**; the CI example test and `cargo build --bin fireparq` (no warnings)
+also passed.
+
 ## Benchmark
 
 Input: 200 finalized Ethereum mainnet blocks `[26049575, 26049775)` (487.9 MB of
