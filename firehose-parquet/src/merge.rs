@@ -237,6 +237,9 @@ fn run_merge_local(config: &MergeConfig) -> Result<MergeResult> {
         merges_recovered: prepared.as_ref().map_or(0, |value| value.recovered_merges),
         ..MergeResult::default()
     };
+    if let Some(ownership) = ownership {
+        record_merge_intents(ownership, protected_roots)?;
+    }
     recover_local_merges(
         &root,
         lock.as_ref(),
@@ -245,6 +248,9 @@ fn run_merge_local(config: &MergeConfig) -> Result<MergeResult> {
         &mut result,
     )?;
     merge_local_partitions(&root, config, &run, ownership, protected_roots, &mut result)?;
+    if let Some(ownership) = ownership {
+        clear_merge_intents(ownership, protected_roots)?;
+    }
 
     if let Some(lock) = lock {
         lock.release()?;
@@ -253,6 +259,30 @@ fn run_merge_local(config: &MergeConfig) -> Result<MergeResult> {
         prepared.ownership.release_blocking()?;
     }
     Ok(result)
+}
+
+/// Before any partition journal: mark every protected root this run can write
+/// journals in, so `build` knows to look for them after a crash (#655).
+fn record_merge_intents(ownership: &DatasetOwnership, roots: &[ProtectedRoot]) -> Result<()> {
+    for root in roots {
+        block_on_async(crate::merge_journal::record_merge_intent(
+            &root.identity,
+            ownership,
+        ))?;
+    }
+    Ok(())
+}
+
+/// After a complete run every journal is gone, so the marks are cleared. A
+/// failed run keeps them for the next `build`, `merge` or `recovery recover`.
+fn clear_merge_intents(ownership: &DatasetOwnership, roots: &[ProtectedRoot]) -> Result<()> {
+    for root in roots {
+        block_on_async(crate::merge_journal::clear_merge_intent(
+            &root.identity,
+            ownership,
+        ))?;
+    }
+    Ok(())
 }
 
 /// A fresh id for one merge run, recorded in its journals and temporary file names.
@@ -574,6 +604,7 @@ fn run_merge_s3(config: &MergeConfig) -> Result<MergeResult> {
         .ownership
         .remote(&bucket)
         .context("merge bucket is not owned")?;
+    record_merge_intents(&prepared.ownership, &prepared.roots)?;
     let mut result = merge_s3_owned(
         config,
         owner.object_store(),
@@ -582,6 +613,7 @@ fn run_merge_s3(config: &MergeConfig) -> Result<MergeResult> {
         Some(owner),
         &prepared.roots,
     )?;
+    clear_merge_intents(&prepared.ownership, &prepared.roots)?;
     result.merges_recovered += prepared.recovered_merges;
     prepared.ownership.release_blocking()?;
     Ok(result)
@@ -2659,10 +2691,15 @@ mod tests {
 
 /// Finish protected compaction under the caller's already-held common owner.
 /// No file listing or recovery here grants permission to acquire another owner.
+///
+/// Discovery lists the whole dataset, with a timeout on each listing request
+/// and none on the listing (#655); its requests and time are added to `stats`.
+/// `build` calls this only for a dataset with a merge intent record.
 pub(crate) async fn recover_guarded_for_ingestion(
     output: &crate::ingest::state::StorageIdentity,
     ownership: &DatasetOwnership,
     protected: Option<&crate::ingest::state::Digest>,
+    stats: &crate::maintenance::discovery::ListingStats,
 ) -> Result<usize> {
     use crate::ingest::state::StorageIdentity;
     match output {
@@ -2677,7 +2714,16 @@ pub(crate) async fn recover_guarded_for_ingestion(
                 .context("merge recovery has no local owner")?;
 
             let mut paths = Vec::new();
-            discovery::collect_local(root, LocalPolicy::named(JOURNAL_FILE), &mut paths)?;
+            let started = std::time::Instant::now();
+            let mut reads = 0;
+            let walked = discovery::collect_local_counted(
+                root,
+                LocalPolicy::named(JOURNAL_FILE),
+                &mut paths,
+                &mut reads,
+            );
+            stats.record(reads, paths.len() as u64, started.elapsed());
+            walked?;
             paths.sort();
             if paths.is_empty() {
                 return Ok(0);
@@ -2718,22 +2764,47 @@ pub(crate) async fn recover_guarded_for_ingestion(
             let client = owner.object_store();
             let list_prefix =
                 (!prefix.is_empty()).then(|| object_store::path::Path::from(prefix.as_str()));
-            use futures::StreamExt;
-            let journals=tokio::time::timeout(std::time::Duration::from_secs(60),async {
-                let mut stream=client.list(list_prefix.as_ref()); let mut journals=Vec::new();
-                while let Some(object)=stream.next().await {
-                    let object=object.map_err(|_|anyhow::anyhow!("listing guarded merge journals failed"))?;
-                    let key=object.location.as_ref();
-                    if !(prefix.is_empty() || key==prefix || key.strip_prefix(prefix).is_some_and(|tail|tail.starts_with('/'))) {continue;}
-                    if object.location.filename()!=Some(JOURNAL_FILE) || crate::artifacts::is_control_path(key) {continue;}
-                    let journal=crate::merge_journal::read_remote_journal(client,&object.location).await?.context("merge journal disappeared under ownership")?;
-                    journal.validate_protection(protected)?;
-                    anyhow::ensure!(journal.lock==OWNER_KEY,"legacy S3 merge ownership cannot prove prior request quiescence; preserve its journal for explicit recovery");
-                    let directory=key.rsplit_once('/').map_or("",|(directory,_)|directory).to_owned();
-                    journals.push((directory,journal));
-                }
-                Ok::<_,anyhow::Error>(journals)
-            }).await.map_err(|_|anyhow::anyhow!("guarded merge journal discovery timed out"))??;
+            let mut locations = Vec::new();
+            discovery::visit_objects(
+                client.as_ref(),
+                list_prefix.as_ref(),
+                "listing guarded merge journals",
+                discovery::LIST_REQUEST_TIMEOUT,
+                stats,
+                |object| {
+                    let key = object.location.as_ref();
+                    let inside = prefix.is_empty()
+                        || key == prefix
+                        || key
+                            .strip_prefix(prefix.as_str())
+                            .is_some_and(|tail| tail.starts_with('/'));
+                    if inside
+                        && object.location.filename() == Some(JOURNAL_FILE)
+                        && !crate::artifacts::is_control_path(key)
+                    {
+                        locations.push(object.location);
+                    }
+                    Ok(std::ops::ControlFlow::<()>::Continue(()))
+                },
+            )
+            .await?;
+            let mut journals = Vec::new();
+            for location in locations {
+                let journal = crate::merge_journal::read_remote_journal(client, &location)
+                    .await?
+                    .context("merge journal disappeared under ownership")?;
+                journal.validate_protection(protected)?;
+                anyhow::ensure!(
+                    journal.lock == OWNER_KEY,
+                    "legacy S3 merge ownership cannot prove prior request quiescence; preserve its journal for explicit recovery"
+                );
+                let directory = location
+                    .as_ref()
+                    .rsplit_once('/')
+                    .map_or("", |(directory, _)| directory)
+                    .to_owned();
+                journals.push((directory, journal));
+            }
             if journals.is_empty() {
                 return Ok(0);
             }

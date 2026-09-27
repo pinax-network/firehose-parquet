@@ -416,6 +416,146 @@ pub(crate) async fn read_remote_record(
 }
 
 // ---------------------------------------------------------------------------
+// Merge intent in a protected root's control directory (#655)
+// ---------------------------------------------------------------------------
+
+/// The record, in a protected root's `.fireparq-ingest/merge-intent.json`, that
+/// a `merge` may have left partition journals in that dataset. `merge` writes it
+/// before creating its first journal in the root and clears it once no journal
+/// can remain there (after a complete run or a complete recovery). `build`
+/// looks for journals only while it is present, so a resume reads one control
+/// record instead of listing the whole dataset. Journals are created only by
+/// `merge`, under the same ownership, so a journal in a protected root always
+/// has this record beside it.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct MergeIntent {
+    version: u32,
+}
+
+const MERGE_INTENT_VERSION: u32 = 1;
+
+/// Whether `root` holds a merge intent. Reads one control record.
+pub(crate) async fn merge_intent_recorded(
+    root: &crate::ingest::state::StorageIdentity,
+    ownership: &crate::dataset_lock::DatasetOwnership,
+) -> Result<bool> {
+    use crate::durable_state::ControlKey;
+    use crate::ingest::state::StorageIdentity;
+    let present = match root {
+        StorageIdentity::Local { canonical_root } => crate::durable_state::LocalStateStore::new(
+            Path::new(canonical_root),
+            ownership
+                .local()
+                .context("merge intent root is not owned")?,
+        )?
+        .load::<MergeIntent>(ControlKey::MergeIntent)?
+        .is_some(),
+        StorageIdentity::S3 { bucket, prefix, .. } => crate::durable_state_s3::S3StateStore::new(
+            ownership
+                .remote(bucket)
+                .context("merge intent bucket is not owned")?,
+            prefix,
+        )?
+        .load::<MergeIntent>(ControlKey::MergeIntent)
+        .await?
+        .is_some(),
+    };
+    Ok(present)
+}
+
+/// Record a merge intent in `root` unless one is already there. Called before
+/// `merge` creates any partition journal in the root.
+pub(crate) async fn record_merge_intent(
+    root: &crate::ingest::state::StorageIdentity,
+    ownership: &crate::dataset_lock::DatasetOwnership,
+) -> Result<()> {
+    use crate::durable_state::ControlKey;
+    use crate::ingest::state::StorageIdentity;
+    let intent = MergeIntent {
+        version: MERGE_INTENT_VERSION,
+    };
+    match root {
+        StorageIdentity::Local { canonical_root } => {
+            let store = crate::durable_state::LocalStateStore::new(
+                Path::new(canonical_root),
+                ownership
+                    .local()
+                    .context("merge intent root is not owned")?,
+            )?;
+            if store
+                .load::<MergeIntent>(ControlKey::MergeIntent)?
+                .is_none()
+            {
+                store
+                    .create(ControlKey::MergeIntent, &intent)
+                    .context("recording the merge intent")?;
+            }
+        }
+        StorageIdentity::S3 { bucket, prefix, .. } => {
+            let store = crate::durable_state_s3::S3StateStore::new(
+                ownership
+                    .remote(bucket)
+                    .context("merge intent bucket is not owned")?,
+                prefix,
+            )?;
+            if store
+                .load::<MergeIntent>(ControlKey::MergeIntent)
+                .await?
+                .is_none()
+            {
+                store
+                    .create(ControlKey::MergeIntent, &intent)
+                    .await
+                    .context("recording the merge intent")?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Clear the merge intent of `root`, if any. Call only when no merge journal
+/// can remain in the root: after a merge run or a journal recovery covering
+/// the whole root completed. On S3 the record becomes a CAS tombstone.
+pub(crate) async fn clear_merge_intent(
+    root: &crate::ingest::state::StorageIdentity,
+    ownership: &crate::dataset_lock::DatasetOwnership,
+) -> Result<()> {
+    use crate::durable_state::ControlKey;
+    use crate::ingest::state::StorageIdentity;
+    match root {
+        StorageIdentity::Local { canonical_root } => {
+            let store = crate::durable_state::LocalStateStore::new(
+                Path::new(canonical_root),
+                ownership
+                    .local()
+                    .context("merge intent root is not owned")?,
+            )?;
+            if let Some(document) = store.load::<MergeIntent>(ControlKey::MergeIntent)? {
+                store
+                    .remove(ControlKey::MergeIntent, &document.version)
+                    .context("clearing the merge intent")?;
+            }
+        }
+        StorageIdentity::S3 { bucket, prefix, .. } => {
+            let store = crate::durable_state_s3::S3StateStore::new(
+                ownership
+                    .remote(bucket)
+                    .context("merge intent bucket is not owned")?,
+                prefix,
+            )?;
+            if let Some(document) = store.load::<MergeIntent>(ControlKey::MergeIntent).await? {
+                store
+                    .remove(ControlKey::MergeIntent, &document.version)
+                    .await
+                    .context("clearing the merge intent")?;
+            }
+        }
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // Local filesystem
 // ---------------------------------------------------------------------------
 

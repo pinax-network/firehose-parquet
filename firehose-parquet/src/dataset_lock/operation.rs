@@ -168,12 +168,20 @@ impl DatasetOwnership {
         scopes: Vec<MutationScope>,
         aws: Option<&AwsConfig>,
     ) -> Result<Self> {
-        Self::acquire_inner(operation, scopes, aws, None).await
+        Self::acquire_inner(operation, scopes, aws, None, TreeCheck::Walk).await
     }
 
     /// Protected CLI ingestion may stream large authenticated S3 parts. The
     /// output owner and its signer are constructed from the same native client.
     /// Ordinary maintenance and external cursor buckets retain existing policy.
+    ///
+    /// Unlike [`DatasetOwnership::acquire`], this does not walk the local
+    /// mutation tree for nested symlinks, so a local `build` start does not
+    /// read every directory of its dataset (#655). `build` refuses a symlink on
+    /// each path it touches instead, component by component: part staging and
+    /// publication, transaction recovery, the control records and the mirror.
+    /// A new root must be empty, and merge-journal recovery walks the tree
+    /// with its own symlink check.
     pub async fn acquire_for_ingestion(
         scopes: Vec<MutationScope>,
         aws: Option<&AwsConfig>,
@@ -184,7 +192,17 @@ impl DatasetOwnership {
         } else {
             None
         };
-        Self::acquire_inner("build", scopes, aws, bucket.as_deref()).await
+        Self::acquire_inner("build", scopes, aws, bucket.as_deref(), TreeCheck::Paths).await
+    }
+
+    /// The nested-symlink check [`DatasetOwnership::acquire`] runs, for a
+    /// command that acquired without it and is about to walk its tree.
+    /// Returns the number of directories read.
+    pub(crate) fn validate_local_trees(&self) -> Result<u64> {
+        match &self.local {
+            Some(local) => validate_local_mutation_trees(local),
+            None => Ok(0),
+        }
     }
 
     async fn acquire_inner(
@@ -192,6 +210,7 @@ impl DatasetOwnership {
         scopes: Vec<MutationScope>,
         aws: Option<&AwsConfig>,
         native_bucket: Option<&str>,
+        tree_check: TreeCheck,
     ) -> Result<Self> {
         let mut local = Vec::new();
         let mut remote: BTreeMap<String, Vec<String>> = BTreeMap::new();
@@ -251,7 +270,7 @@ impl DatasetOwnership {
         } else {
             Some(LocalOwnership::acquire_without_creation(&local)?)
         };
-        if let Some(local) = &local {
+        if let (Some(local), TreeCheck::Walk) = (&local, tree_check) {
             validate_local_mutation_trees(local)?;
         }
         let mut ownership = Self {
@@ -392,15 +411,27 @@ impl DatasetOwnership {
     }
 }
 
+/// How acquisition checks local mutation trees for nested symlinks.
+#[derive(Clone, Copy)]
+enum TreeCheck {
+    /// Walk every directory now: commands that read or delete across the tree.
+    Walk,
+    /// The command checks each path it touches instead (`build`, #655).
+    Paths,
+}
+
 /// Explicit scope aliases have already been canonicalized and locked. Nested
 /// aliases would escape that graph, so fail before any command data mutation.
 /// This directory-only walk does not read data file contents.
-fn validate_local_mutation_trees(ownership: &LocalOwnership) -> Result<()> {
+/// Returns the number of directories read.
+fn validate_local_mutation_trees(ownership: &LocalOwnership) -> Result<u64> {
     let mut pending = ownership.roots().to_vec();
+    let mut reads = 0;
     while let Some(directory) = pending.pop() {
         if !directory.exists() {
             continue;
         }
+        reads += 1;
         for entry in
             std::fs::read_dir(&directory).context("inspecting a guarded local mutation tree")?
         {
@@ -416,7 +447,7 @@ fn validate_local_mutation_trees(ownership: &LocalOwnership) -> Result<()> {
             }
         }
     }
-    Ok(())
+    Ok(reads)
 }
 
 /// This sync bridge never panics in a current-thread runtime. Async callers can

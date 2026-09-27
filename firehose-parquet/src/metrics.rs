@@ -144,6 +144,12 @@ pub struct PipelineMetrics {
     /// Block number from the last saved cursor.
     pub cursor_last_block_num: Gauge,
 
+    /// LIST requests (S3 pages of up to 1,000 keys, or local directory reads)
+    /// that `build` made while opening its dataset (#655).
+    pub startup_list_requests: Gauge,
+    /// Seconds those startup listings took.
+    pub startup_listing_seconds: Gauge<f64, AtomicU64>,
+
     /// Errors by kind.
     pub errors_total: Family<ErrorLabels, Counter>,
     /// Number of gRPC stream reconnections.
@@ -250,6 +256,9 @@ impl PipelineMetrics {
             cursor_save_failures_total: Counter::default(),
             cursor_last_success_timestamp_seconds: Gauge::default(),
             cursor_last_block_num: Gauge::default(),
+
+            startup_list_requests: Gauge::default(),
+            startup_listing_seconds: Gauge::default(),
 
             errors_total: Family::default(),
             grpc_reconnects_total: Counter::default(),
@@ -383,6 +392,17 @@ impl PipelineMetrics {
             "firehose_parquet_cursor_last_block_num",
             "Block number from the last saved cursor",
             metrics.cursor_last_block_num.clone(),
+        );
+
+        registry.register(
+            "firehose_parquet_startup_list_requests",
+            "LIST requests (S3 pages of up to 1,000 keys, or local directory reads) made while opening the dataset; a resume lists no data objects",
+            metrics.startup_list_requests.clone(),
+        );
+        registry.register(
+            "firehose_parquet_startup_listing_seconds",
+            "Seconds spent in the listings made while opening the dataset",
+            metrics.startup_listing_seconds.clone(),
         );
 
         registry.register(
