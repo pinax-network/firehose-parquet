@@ -1347,6 +1347,7 @@ async fn run_partitions_build(
         flush_bytes: 0,
         flush_memory_bytes: firehose_parquet::config::DEFAULT_FLUSH_MEMORY_BYTES,
         flush_interval_secs: None,
+        flush_concurrency: firehose_parquet::config::FlushConcurrency::default(),
         compression,
         final_blocks_only: true,
         dry_run: false,

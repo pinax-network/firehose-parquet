@@ -28,7 +28,8 @@ use std::path::{Component, Path, PathBuf};
 
 pub use crate::config::DEFAULT_FLUSH_BYTES;
 use crate::config::{
-    DEFAULT_FLUSH_MEMORY_BYTES, DEFAULT_GRPC_MAX_MESSAGE_BYTES, DEFAULT_GRPC_WINDOW_BYTES,
+    DEFAULT_FLUSH_ENCODE_CONCURRENCY, DEFAULT_FLUSH_INFLIGHT_BYTES, DEFAULT_FLUSH_MEMORY_BYTES,
+    DEFAULT_FLUSH_PUBLISH_CONCURRENCY, DEFAULT_GRPC_MAX_MESSAGE_BYTES, DEFAULT_GRPC_WINDOW_BYTES,
 };
 
 /// Transport options shared by ingestion and partition index construction.
@@ -317,6 +318,43 @@ pub struct CommonArgs {
         help_heading = "Flush"
     )]
     pub flush_interval_secs: Option<u64>,
+
+    /// Parquet encoders running at once within one flush (1-64; each also holds
+    /// its table's encoder working memory)
+    #[arg(
+        long,
+        env = "FLUSH_ENCODE_CONCURRENCY",
+        default_value_t = DEFAULT_FLUSH_ENCODE_CONCURRENCY,
+        value_parser = clap::builder::RangedU64ValueParser::<usize>::new().range(1..=64),
+        hide_env_values = true,
+        help_heading = "Flush"
+    )]
+    pub flush_encode_concurrency: usize,
+
+    /// Table parts published at once within one flush (1-64); for local output
+    /// also the threads that stage, publish and verify files. Each part still
+    /// publishes only after its receipt is journaled
+    #[arg(
+        long,
+        env = "FLUSH_PUBLISH_CONCURRENCY",
+        default_value_t = DEFAULT_FLUSH_PUBLISH_CONCURRENCY,
+        value_parser = clap::builder::RangedU64ValueParser::<usize>::new().range(1..=64),
+        hide_env_values = true,
+        help_heading = "Flush"
+    )]
+    pub flush_publish_concurrency: usize,
+
+    /// Budget for encoded parts in flight within one flush (memory, or private
+    /// disk spool for S3 output; at least 1). One larger part runs alone
+    #[arg(
+        long,
+        env = "FLUSH_INFLIGHT_BYTES",
+        default_value_t = DEFAULT_FLUSH_INFLIGHT_BYTES,
+        value_parser = clap::value_parser!(u64).range(1..),
+        hide_env_values = true,
+        help_heading = "Flush"
+    )]
+    pub flush_inflight_bytes: u64,
 
     /// Log level: trace, debug, info, warn, error
     #[arg(

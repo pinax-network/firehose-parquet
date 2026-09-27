@@ -366,6 +366,11 @@ pub fn build_config(args: &CommonArgs) -> anyhow::Result<Config> {
         flush_blocks: args.flush_blocks,
         flush_bytes: args.flush_bytes,
         flush_memory_bytes: args.flush_memory_bytes,
+        flush_concurrency: crate::config::FlushConcurrency {
+            encoders: args.flush_encode_concurrency,
+            publications: args.flush_publish_concurrency,
+            inflight_bytes: args.flush_inflight_bytes,
+        },
         flush_interval_secs: args.flush_interval_secs.filter(|secs| *secs > 0),
         compression: parse_compression(&args.compression)?,
         final_blocks_only: args.final_blocks_only,

@@ -118,6 +118,7 @@ impl<'a> TransactionStateStore<'a> {
         })
     }
 
+    #[cfg(test)]
     pub async fn record_receipt(
         &self,
         authority: &Versioned<AuthorityState>,
@@ -125,12 +126,28 @@ impl<'a> TransactionStateStore<'a> {
         entry_index: u32,
         receipt: PartReceipt,
     ) -> Result<Versioned<PendingTransaction>> {
+        self.record_receipts(authority, pending, vec![(entry_index, receipt)])
+            .await
+    }
+
+    /// Persist several exact receipts in one versioned replacement. None of
+    /// these parts may publish before this returns; each receipt is validated
+    /// exactly as by [`Self::record_receipt`].
+    pub async fn record_receipts(
+        &self,
+        authority: &Versioned<AuthorityState>,
+        pending: &Versioned<PendingTransaction>,
+        receipts: Vec<(u32, PartReceipt)>,
+    ) -> Result<Versioned<PendingTransaction>> {
+        if receipts.is_empty() {
+            bail!("a receipt transition must record at least one receipt");
+        }
         self.require(ControlKey::State, &authority.version).await?;
         authority.payload.validate_predecessor(&pending.payload)?;
-        let next =
-            pending
-                .payload
-                .with_receipt(entry_index, receipt, &authority.payload.descriptor)?;
+        let mut next = pending.payload.clone();
+        for (entry_index, receipt) in receipts {
+            next = next.with_receipt(entry_index, receipt, &authority.payload.descriptor)?;
+        }
         let version = self
             .replace(ControlKey::Pending, &pending.version, &next)
             .await?;

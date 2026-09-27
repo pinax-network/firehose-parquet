@@ -886,6 +886,28 @@ Both tables carry `receipt_index`, `tx_hash`, `shard_id` and `predecessor_id`, l
 
 ## Performance
 
+### Bounded concurrent table work inside each flush (#516, stage A)
+
+`build` now encodes and publishes one flush's tables concurrently under explicit
+bounds: `--flush-encode-concurrency` (default 2), `--flush-publish-concurrency`
+(default 4; for local output also the threads that stage, publish and verify
+files) and `--flush-inflight-bytes` (default 256 MiB of encoded parts, memory or
+native-S3 disk spool; one larger part runs alone with a warning). Environment:
+`FLUSH_ENCODE_CONCURRENCY`, `FLUSH_PUBLISH_CONCURRENCY`, `FLUSH_INFLIGHT_BYTES`.
+Receipts that are ready together are journaled in one write, each still durable
+before its part publishes; authority and the mirror still advance only after
+every part published and verified; the first error drains started work and
+keeps the journal. Output bytes and names are identical to serial mode. Protected
+S3 publications no longer hold the owner's control lock across the data request.
+On a 200-block Ethereum replay the defaults cut local flush time by about a
+third (best of five rounds on a shared machine; local flushes are fsync-bound)
+and commit time about 3.6x against a modeled 25 ms / 100 MB/s S3; these are
+offline measurements, not live-provider claims. The gRPC stream still pauses
+during each flush; decoupling it is stage B. Rust callers constructing `Config`
+with a struct literal must set the new public `flush_concurrency` field (or use
+`..Default::default()`). See
+[the contract, tests and benchmark](../audit/516-bounded-flush-concurrency.md).
+
 ### Projected dataset validation (#524)
 
 `validate` decodes only canonical ID/height/time columns, preserves full-schema

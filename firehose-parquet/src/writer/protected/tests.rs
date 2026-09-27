@@ -103,7 +103,7 @@ fn prepare(data: RecordBatch, partition: Partition, metadata: BlockMetadata) -> 
 }
 fn encoded() -> EncodedPart {
     prepare(data(), Partition::Date, metadata())
-        .encode(0)
+        .encode(0, None)
         .unwrap()
 }
 
@@ -247,8 +247,8 @@ fn preflight_rejects_invalid_later_table_and_inventory_or_identity_drift() {
 #[test]
 fn encoding_is_repeatable_retains_all_batches_and_roundtrips_negative_nullable_times() {
     let flush = prepare(data(), Partition::Date, metadata());
-    let one = flush.encode(0).unwrap();
-    let two = flush.encode(0).unwrap();
+    let one = flush.encode(0, None).unwrap();
+    let two = flush.encode(0, None).unwrap();
     assert_eq!(one.bytes, two.bytes);
     assert_eq!(one.receipt, two.receipt);
     assert_eq!(flush.batches["blocks"].num_rows(), 3);
@@ -281,7 +281,7 @@ fn encoding_is_repeatable_retains_all_batches_and_roundtrips_negative_nullable_t
         },
         metadata,
     );
-    assert!(numeric.encode(0).is_ok());
+    assert!(numeric.encode(0, None).is_ok());
 }
 
 #[test]
@@ -309,10 +309,10 @@ fn part_indices_include_declared_zero_row_tables_before_and_between_parts() {
         ParquetFileMetadata::new(),
     )
     .unwrap();
-    assert!(flush.encode(0).is_err());
-    assert!(flush.encode(2).is_err());
+    assert!(flush.encode(0, None).is_err());
+    assert!(flush.encode(2, None).is_err());
     for index in [1, 3] {
-        let encoded = flush.encode(index).unwrap();
+        let encoded = flush.encode(index, None).unwrap();
         assert_eq!(encoded.plan.entry_index, index);
         verify_bytes(&encoded.plan, &encoded.receipt, encoded.bytes).unwrap();
     }
@@ -364,7 +364,7 @@ fn historical_rich_arrow_schema_roundtrips_with_exact_digest_and_values() {
     let batches: Vec<_> = reader.map(|batch| batch.unwrap()).collect();
     let batch = arrow::compute::concat_batches(&batches[0].schema(), &batches).unwrap();
     let flush = prepare(batch.clone(), Partition::None, metadata());
-    let encoded = flush.encode(0).unwrap();
+    let encoded = flush.encode(0, None).unwrap();
     verify_bytes(&encoded.plan, &encoded.receipt, encoded.bytes.clone()).unwrap();
     let actual: Vec<_> = ParquetRecordBatchReaderBuilder::try_new(encoded.bytes)
         .unwrap()
@@ -409,7 +409,7 @@ fn multiple_and_nested_dictionary_fields_survive_physical_schema_verification() 
     )
     .unwrap();
     let encoded = prepare(batch.clone(), Partition::None, metadata())
-        .encode(0)
+        .encode(0, None)
         .unwrap();
     verify_bytes(&encoded.plan, &encoded.receipt, encoded.bytes.clone()).unwrap();
     let actual: Vec<_> = ParquetRecordBatchReaderBuilder::try_new(encoded.bytes)
@@ -845,7 +845,7 @@ fn protected_and_legacy_parts_share_lookup_metadata_without_changing_rows() {
         )
         .unwrap();
         let protected = prepare(batch.clone(), Partition::None, metadata())
-            .encode(0)
+            .encode(0, None)
             .unwrap();
         let directory = tempfile::tempdir().unwrap();
         let mut legacy =
@@ -893,8 +893,8 @@ fn protected_and_legacy_parts_share_lookup_metadata_without_changing_rows() {
 #[test]
 fn native_spool_preserves_small_part_bytes_schema_rows_and_receipt() {
     let prepared = prepare(data(), Partition::Date, metadata());
-    let memory = prepared.encode(0).unwrap();
-    let native = prepared.encode_spooled(0).unwrap();
+    let memory = prepared.encode(0, None).unwrap();
+    let native = prepared.encode_spooled(0, None).unwrap();
     assert!(native.bytes.is_empty());
     assert_eq!(memory.receipt, native.receipt);
     let mut file = native.spool.as_ref().unwrap().try_clone().unwrap();
@@ -923,7 +923,7 @@ fn native_spool_preserves_small_part_bytes_schema_rows_and_receipt() {
 #[test]
 fn native_spool_rejects_bad_receipt_and_bounded_footer_before_parsing() {
     let encoded = prepare(data(), Partition::Date, metadata())
-        .encode_spooled(0)
+        .encode_spooled(0, None)
         .unwrap();
     let file = encoded.spool.as_ref().unwrap();
     let mut receipt = encoded.receipt.clone();
@@ -943,7 +943,7 @@ fn native_spool_rejects_bad_receipt_and_bounded_footer_before_parsing() {
 
 #[test]
 fn native_spool_size_limit_does_not_accept_partial_overflow_write() {
-    let mut spool = SpoolWriter::new(8).unwrap();
+    let mut spool = SpoolWriter::new(8, None).unwrap();
     spool.write_all(b"1234").unwrap();
     assert!(spool.write_all(b"56789").is_err());
     assert_eq!(spool.size, 4);
@@ -978,7 +978,7 @@ fn native_spool_roundtrips_retained_parquet58_types_without_value_or_schema_chan
             max_timestamp: Some(1_700_000_002),
         },
     );
-    let encoded = prepared.encode_spooled(0).unwrap();
+    let encoded = prepared.encode_spooled(0, None).unwrap();
     let reader = ParquetRecordBatchReaderBuilder::try_new(encoded.spool.unwrap()).unwrap();
     // Default readers merge operational footer keys into schema metadata;
     // verify_file has already compared the complete embedded physical schema.

@@ -1,10 +1,10 @@
 # Issue #516: bounded concurrency contract sketch
 
-Status: proposed design only, reviewed against protected ingestion and #515.
-Concurrency is not implemented by this record or the accompanying #525 refactor,
-and #516 remains outstanding. Separate byte-admission and error/drain design
-review is required before implementing stage A. No new public flags, live
-requests or production writes are included.
+Status: stage A is implemented (bounded table work inside one controller
+commit); see [its contract, tests and benchmark](516-bounded-flush-concurrency.md).
+Stage B (decoupling receive/mapping from the writer) is not implemented; the
+[stage B follow-up](#stage-b-follow-up) below lists what it still needs. The
+original design text is kept for review context.
 
 ## The old issue proposal is not directly safe on the current API
 
@@ -134,3 +134,47 @@ policy without treating a timeout as proof of safe ownership release.
 Recommendation: implement and measure stage A first, then approve stage B's frozen
 FIFO API and memory/stop policy explicitly. Both are useful, but neither a detached
 writer nor join_all over all parts satisfies the current durability contract.
+
+## Stage B follow-up
+
+Stage A shortened each flush but the gRPC callback still waits for the whole
+commit, so reads and mapping stop for its duration and the HTTP/2 window fills.
+Stage B would overlap mapping of the next window with the commit of the previous
+one. It needs, at minimum:
+
+1. **A frozen-window session API.** `IngestionSession` gains a freeze operation
+   that snapshots an immutable accepted prefix (exact first/last ordinals, last
+   event, routing checkpoint and any unresolved lookahead or bootstrap
+   envelopes) and resets only the next window's accumulation. `acknowledge`
+   accepts only the oldest frozen prefix, after its transaction commits. The
+   durable base, advertised cursor and resume parameters never move for a
+   frozen-but-uncommitted window.
+2. **A bounded FIFO writer lane borrowing the session and ownership.** One
+   worker commits windows in order through the existing single-Writing
+   controller. Each queued item owns its batches, metadata, partition key,
+   schema inventory, file metadata, preflush sizing snapshot and trigger, never
+   a mapper. It is a structured future under the outer `DatasetOwnership`, not
+   a detached task or second guard. Default depth: one writing plus one queued.
+3. **Receive backpressure.** When the queue is full the callback blocks, so the
+   gRPC stream stops being read. Budgets cover the queue count and its Arrow
+   bytes separately from the #515 mapper threshold and the stage A in-flight
+   encoded-byte budget. Oversized windows need a stated policy (reject before
+   Writing, or admit one alone with a diagnostic), decided before exposure.
+4. **Ordered side effects.** `#515` sizing feedback, flush counters and cursor
+   gauges advance only when the oldest window's commit is acknowledged, in
+   order, never for encoded, uploaded-only or authority-without-mirror states.
+   Calibration lag for already queued windows is documented and measured.
+5. **Failure, shutdown and completion.** The first failure poisons the lane,
+   discards unstarted queued windows (replayed from authority) and drains the
+   running commit under ownership; no later window may commit after it.
+   The first shutdown signal stops admission without flushing a newly queued
+   partial window. Bounded completion still requires closed input, every
+   queued window acknowledged, no unresolved lookahead, and the exact
+   `stop - 1` proof.
+6. **Metrics and tests.** Gauges for queued windows and their Arrow bytes,
+   active encoders, publications and in-flight encoded bytes that reset on
+   teardown. Barrier tests for out-of-order encode/upload with FIFO
+   acknowledgement, failure of the earliest window blocking all later ones,
+   cancellation at each boundary, saturation of every budget, and before/after
+   measurements of time-to-durable-cursor and receive stalls on retained EVM,
+   Solana and Beacon input.

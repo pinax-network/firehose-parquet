@@ -1103,7 +1103,12 @@ async fn storage_failure_during_flush_keeps_authority_and_rerun_recovers_rows_on
     if !deny_writes(&blocked) {
         return;
     }
-    let output = run(command(&server, dir.path(), 100, 102)).await;
+    // A one-byte in-flight budget admits each part only after the previous
+    // one is published, so `blocks` deterministically publishes before the
+    // `transactions` staging failure. Parallel orderings are covered below.
+    let mut serial = command(&server, dir.path(), 100, 102);
+    serial.args(["--flush-inflight-bytes", "1"]);
+    let output = run(serial).await;
     allow_writes(&blocked);
     assert!(!output.status.success(), "{}", logs(&output));
     assert!(
@@ -1558,6 +1563,276 @@ async fn summed_memory_flushes_cli_when_each_table_is_below_the_limit() {
     server.assert_drained();
 }
 
+/// The retained real EVM block (5,049 rows over many tables) and a synthetic
+/// parent seed at `origin = number - 1`, with fixed public fixture cursors.
+fn retained_evm_fixture() -> (u64, u64, firehose::Response, firehose::Response) {
+    let fixture_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/evm-mainnet");
+    let metadata: Value =
+        serde_json::from_slice(&std::fs::read(fixture_dir.join("metadata.json")).unwrap()).unwrap();
+    let bytes = std::fs::read(fixture_dir.join("block.pb")).unwrap();
+    assert_eq!(
+        format!("{:x}", Sha256::digest(&bytes)),
+        metadata["sha256"].as_str().unwrap()
+    );
+    let identity = &metadata["identity"];
+    let number = identity["block_num"].as_u64().unwrap();
+    let origin = number - 1;
+    let mut seed = response(origin, 3);
+    let seed_metadata = seed.metadata.as_mut().unwrap();
+    seed_metadata.id = identity["parent_id"].as_str().unwrap().into();
+    seed_metadata.lib_num = identity["lib_num"].as_u64().unwrap();
+    seed_metadata.time.as_mut().unwrap().seconds = identity["timestamp"].as_i64().unwrap() - 12;
+    let retained = firehose::Response {
+        block: Some(prost_types::Any {
+            type_url: metadata["protobuf_type"].as_str().unwrap().into(),
+            value: bytes,
+        }),
+        step: 3,
+        cursor: format!("fixture-{number}"),
+        metadata: Some(firehose::BlockMetadata {
+            num: number,
+            id: identity["block_id"].as_str().unwrap().into(),
+            parent_num: identity["parent_num"].as_u64().unwrap(),
+            parent_id: identity["parent_id"].as_str().unwrap().into(),
+            lib_num: identity["lib_num"].as_u64().unwrap(),
+            time: Some(prost_types::Timestamp {
+                seconds: identity["timestamp"].as_i64().unwrap(),
+                nanos: identity["timestamp_nanos"].as_i64().unwrap() as i32,
+            }),
+            ..Default::default()
+        }),
+    };
+    (origin, number, seed, retained)
+}
+
+/// `--flush-inflight-bytes 1` admits each part only after the previous one is
+/// published: one table at a time, as before #516.
+const STRICT_SERIAL: [&str; 6] = [
+    "--flush-encode-concurrency",
+    "1",
+    "--flush-publish-concurrency",
+    "1",
+    "--flush-inflight-bytes",
+    "1",
+];
+const PARALLEL: [&str; 4] = [
+    "--flush-encode-concurrency",
+    "4",
+    "--flush-publish-concurrency",
+    "4",
+];
+
+fn table_rows(root: &Path) -> BTreeMap<String, usize> {
+    let mut rows = BTreeMap::new();
+    for path in parts(root).keys() {
+        let table = path.components().next().unwrap().as_os_str();
+        let count: usize = read_parquet(&root.join(path))
+            .unwrap()
+            .iter()
+            .map(|batch| batch.num_rows())
+            .sum();
+        *rows
+            .entry(table.to_string_lossy().into_owned())
+            .or_default() += count;
+    }
+    rows
+}
+
+/// Parse `key=value` from the committed flush log line.
+fn committed_field(logs: &str, key: &str) -> Vec<u64> {
+    logs.lines()
+        .filter(|line| line.contains("committed flush size observation"))
+        .filter_map(|line| {
+            let start = line.find(&format!(" {key}="))? + key.len() + 2;
+            line[start..].split_whitespace().next()?.parse().ok()
+        })
+        .collect()
+}
+
+/// Parallel table work is byte-for-byte the strict serial output: the same
+/// deterministic part names and bytes, authority and mirror row, on the real
+/// retained EVM block. The logged work peaks respect every limit.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn parallel_flush_matches_strict_serial_bytes_on_the_retained_evm_block() {
+    let (origin, number, seed, retained) = retained_evm_fixture();
+    let server = MockFirehose::start(
+        vec![seed, retained],
+        (0..4)
+            .map(|_| Plan::complete("", origin as i64, number))
+            .collect(),
+    )
+    .await;
+    let directory = tempfile::tempdir().unwrap();
+    let output = root(directory.path());
+    let run = |extra: &'static [&'static str]| {
+        let mut request = command_with_flush(&server, directory.path(), origin, number + 1, 1);
+        request.args(extra);
+        request
+    };
+
+    success(run(&STRICT_SERIAL)).await;
+    let expected_paths = parts(&output);
+    assert!(expected_paths.len() >= 10, "{}", expected_paths.len());
+    let expected_authority = authority(&output);
+    let expected_mirror = read_parquet(&output.join("cursor.parquet")).unwrap();
+
+    // Same canonical root, so the stream identity and names are identical.
+    for (extra, limits) in [
+        (&PARALLEL[..], Some((4, 4, None))),
+        (
+            &[
+                "--flush-encode-concurrency",
+                "3",
+                "--flush-publish-concurrency",
+                "2",
+                "--flush-inflight-bytes",
+                "600000",
+            ][..],
+            Some((3, 2, Some(600_000))),
+        ),
+        (&[][..], None),
+    ] {
+        std::fs::remove_dir_all(&output).unwrap();
+        let logged = plain_logs(&success(run(extra)).await);
+        assert_eq!(parts(&output), expected_paths, "{extra:?}");
+        assert_eq!(authority(&output), expected_authority, "{extra:?}");
+        let mirror = read_parquet(&output.join("cursor.parquet")).unwrap();
+        for (actual, expected) in mirror.iter().zip(&expected_mirror) {
+            for (index, field) in actual.schema().fields().iter().enumerate() {
+                if field.name() != "updated_at" {
+                    assert_eq!(actual.column(index), expected.column(index), "{extra:?}");
+                }
+            }
+        }
+        if let Some((encoders, publications, bytes)) = limits {
+            let peaks = committed_field(&logged, "peak_encoders");
+            assert!(!peaks.is_empty() && peaks.iter().all(|peak| *peak <= encoders));
+            assert!(peaks.iter().any(|peak| *peak > 1), "no overlap: {peaks:?}");
+            assert!(committed_field(&logged, "peak_publications")
+                .iter()
+                .all(|peak| *peak <= publications));
+            if let Some(bytes) = bytes {
+                // Local output keeps staged parts reserved until publication;
+                // no part of this block is larger than the budget.
+                assert!(committed_field(&logged, "peak_inflight_bytes")
+                    .iter()
+                    .all(|peak| *peak <= bytes));
+            }
+        }
+    }
+    assert_eq!(server.calls(), 4);
+    server.assert_drained();
+}
+
+/// Faults injected into bounded concurrent table work of the real binary
+/// (debug builds only): a failed encoder, a failed publication, a lost
+/// acknowledgement after publication, and an abrupt process death between
+/// parts. Each leaves authority and the mirror at the previous checkpoint, and
+/// the next ordinary run recovers every row exactly once.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn parallel_flush_faults_recover_every_row_exactly_once() {
+    let (origin, number, seed, retained) = retained_evm_fixture();
+    // Clean reference rows for the same range.
+    let reference = {
+        let server = MockFirehose::start(
+            vec![seed.clone(), retained.clone()],
+            vec![Plan::complete("", origin as i64, number)],
+        )
+        .await;
+        let directory = tempfile::tempdir().unwrap();
+        success(command_with_flush(
+            &server,
+            directory.path(),
+            origin,
+            number + 1,
+            1,
+        ))
+        .await;
+        table_rows(&root(directory.path()))
+    };
+    assert!(reference.len() >= 10, "{reference:?}");
+    for fault in [
+        "encode:transactions",
+        "publish:logs",
+        "lost-ack:calls",
+        "crash-after-publish:balance_changes",
+    ] {
+        let server = MockFirehose::start(
+            vec![seed.clone(), retained.clone()],
+            vec![
+                Plan::complete("", origin as i64, origin),
+                Plan::complete("fixture-26049574", origin as i64, number),
+                Plan::complete("fixture-26049574", origin as i64, number),
+            ],
+        )
+        .await;
+        let directory = tempfile::tempdir().unwrap();
+        let output = root(directory.path());
+        success(command_with_flush(
+            &server,
+            directory.path(),
+            origin,
+            number,
+            1,
+        ))
+        .await;
+        let before = (authority(&output), parts(&output));
+        let mirror_before = std::fs::read(output.join("cursor.parquet")).unwrap();
+
+        let mut faulted = command_with_flush(&server, directory.path(), origin, number + 1, 1);
+        faulted.args(PARALLEL).env("FIREPARQ_DEBUG_FAULT", fault);
+        let failed = run(faulted).await;
+        assert!(!failed.status.success(), "{fault}: {}", logs(&failed));
+        let (kind, table) = fault.split_once(':').unwrap();
+        if kind != "crash-after-publish" {
+            assert!(
+                logs(&failed).contains("injected debug fault"),
+                "{fault}: {}",
+                logs(&failed)
+            );
+            // Ordinary errors remove this transaction's staging names.
+            assert!(staged_temporaries(&output).is_empty(), "{fault}");
+        }
+        assert_eq!(authority(&output), before.0, "{fault}");
+        assert_eq!(
+            std::fs::read(output.join("cursor.parquet")).unwrap(),
+            mirror_before,
+            "{fault}"
+        );
+        assert_eq!(pending(&output).unwrap()["phase"], "writing", "{fault}");
+        let during = parts(&output);
+        for (path, digest) in &before.1 {
+            assert_eq!(during.get(path), Some(digest), "{fault}");
+        }
+        if matches!(kind, "lost-ack" | "crash-after-publish") {
+            // Published by the failed transaction, owned by its journal.
+            assert!(
+                during
+                    .keys()
+                    .any(|path| !before.1.contains_key(path) && path.starts_with(table)),
+                "{fault}"
+            );
+        }
+
+        success(command_with_flush(
+            &server,
+            directory.path(),
+            origin,
+            number + 1,
+            1,
+        ))
+        .await;
+        assert!(pending(&output).is_none(), "{fault}");
+        assert!(staged_temporaries(&output).is_empty(), "{fault}");
+        assert_eq!(table_rows(&output), reference, "{fault}");
+        let state = authority(&output);
+        assert_eq!(state["checkpoint"]["ordinal"], 2, "{fault}");
+        assert_eq!(state["checkpoint"]["completed_stop"], number + 1, "{fault}");
+        assert_eq!(server.calls(), 3, "{fault}");
+        server.assert_drained();
+    }
+}
+
 /// Opt-in cross-binary qualification: both runs start from the identical durable
 /// prefix at the same canonical output path. Source IDs, transaction IDs, footer
 /// metadata and file boundaries must therefore agree, including physical bytes.
@@ -1603,42 +1878,7 @@ async fn retained_evm_replay_matches_baseline_bytes_authority_and_mirror() {
             .expect("set FIREPARQ_BASELINE_BIN to a built, matching-main fireparq"),
     );
     assert!(baseline.is_absolute() && baseline.is_file());
-    let fixture_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/evm-mainnet");
-    let metadata: Value =
-        serde_json::from_slice(&std::fs::read(fixture_dir.join("metadata.json")).unwrap()).unwrap();
-    let bytes = std::fs::read(fixture_dir.join("block.pb")).unwrap();
-    assert_eq!(
-        format!("{:x}", Sha256::digest(&bytes)),
-        metadata["sha256"].as_str().unwrap()
-    );
-    let identity = &metadata["identity"];
-    let number = identity["block_num"].as_u64().unwrap();
-    let origin = number - 1;
-    let mut seed = response(origin, 3);
-    let seed_metadata = seed.metadata.as_mut().unwrap();
-    seed_metadata.id = identity["parent_id"].as_str().unwrap().into();
-    seed_metadata.lib_num = identity["lib_num"].as_u64().unwrap();
-    seed_metadata.time.as_mut().unwrap().seconds = identity["timestamp"].as_i64().unwrap() - 12;
-    let retained = firehose::Response {
-        block: Some(prost_types::Any {
-            type_url: metadata["protobuf_type"].as_str().unwrap().into(),
-            value: bytes,
-        }),
-        step: 3,
-        cursor: format!("fixture-{number}"),
-        metadata: Some(firehose::BlockMetadata {
-            num: number,
-            id: identity["block_id"].as_str().unwrap().into(),
-            parent_num: identity["parent_num"].as_u64().unwrap(),
-            parent_id: identity["parent_id"].as_str().unwrap().into(),
-            lib_num: identity["lib_num"].as_u64().unwrap(),
-            time: Some(prost_types::Timestamp {
-                seconds: identity["timestamp"].as_i64().unwrap(),
-                nanos: identity["timestamp_nanos"].as_i64().unwrap() as i32,
-            }),
-            ..Default::default()
-        }),
-    };
+    let (origin, number, seed, retained) = retained_evm_fixture();
     // Fixed public fixture cursor; never capture or print a provider cursor.
     assert_eq!(origin, 26_049_574);
     let server = MockFirehose::start(

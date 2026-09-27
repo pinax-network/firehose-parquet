@@ -25,7 +25,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
+mod budget;
 mod verification;
+pub(crate) use budget::{InflightBudget, Reservation};
 
 const SCHEMA_DOMAIN: &[u8] = b"fireparq-arrow-schema-json-v1\0";
 const FOOTER_PREFIX: &str = "fireparq.ingest.";
@@ -144,6 +146,28 @@ pub(crate) struct PreparedFlush {
     file_metadata: ParquetFileMetadata,
 }
 
+/// An encoder stopped because the in-flight budget could not grow its
+/// reservation. Nothing was staged or published; the caller may encode the
+/// same deterministic part again with an exclusive reservation.
+#[derive(Debug)]
+pub(crate) struct ReservationExceeded {
+    pub reservation: u64,
+}
+impl std::fmt::Display for ReservationExceeded {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "encoded part could not grow its {}-byte in-flight reservation",
+            self.reservation
+        )
+    }
+}
+impl std::error::Error for ReservationExceeded {}
+
+/// Initial reservation floor: small tables still carry a footer, schema hint
+/// and page headers that can exceed their Arrow buffers.
+const MIN_PART_RESERVATION: u64 = 256 * 1024;
+
 /// Complete bytes for one table only. No Debug implementation prints payloads.
 pub(crate) struct EncodedPart {
     plan: PlannedPart,
@@ -151,11 +175,17 @@ pub(crate) struct EncodedPart {
     bytes: Bytes,
     // Native S3 owns a private disk spool instead of compressed heap bytes.
     spool: Option<File>,
+    // Held only for its Drop: released after publication or on any failure.
+    _reservation: Option<Reservation>,
 }
 
 impl EncodedPart {
     pub(crate) fn receipt(&self) -> &PartReceipt {
         &self.receipt
+    }
+    /// Encoded bytes held in memory or in the private spool.
+    pub(crate) fn encoded_bytes(&self) -> u64 {
+        self.receipt.byte_size
     }
     pub(crate) fn plan(&self) -> &PlannedPart {
         &self.plan
@@ -262,7 +292,30 @@ impl PreparedFlush {
         &self.parts
     }
 
-    pub(crate) fn encode_spooled(&self, entry_index: u32) -> Result<EncodedPart> {
+    /// Initial reservation for one part: the codec's typical compressed share
+    /// of the batch's Arrow buffers plus a footer floor. Encoders grow it while
+    /// writing; one whose growth the budget refuses stops with
+    /// [`ReservationExceeded`] instead of exceeding the budget.
+    pub(crate) fn estimated_part_bytes(&self, entry_index: u32) -> Result<u64> {
+        let plan = self
+            .parts
+            .iter()
+            .find(|part| part.entry_index == entry_index)
+            .context("unknown protected part index")?;
+        let batch = self
+            .batches
+            .get(&plan.table)
+            .context("prepared batch is missing")?;
+        let arrow = batch.get_array_memory_size() as f64;
+        let ratio = super::compression_ratio(&self.compression);
+        Ok(((arrow * ratio) as u64).saturating_add(MIN_PART_RESERVATION))
+    }
+
+    pub(crate) fn encode_spooled(
+        &self,
+        entry_index: u32,
+        reservation: Option<Reservation>,
+    ) -> Result<EncodedPart> {
         let plan = self
             .parts
             .iter()
@@ -277,21 +330,34 @@ impl PreparedFlush {
         let mut properties =
             ParquetTableWriter::new(PathBuf::new(), Partition::None, self.compression);
         properties.set_file_metadata(metadata);
-        let mut spool = SpoolWriter::new(crate::s3::upload::MAX_PART_BYTES)?;
-        let mut parquet = ArrowWriter::try_new(
-            &mut spool,
-            batch.schema(),
-            Some(properties.writer_properties(batch)?),
-        )?;
-        // A slice shares the already-owned mapper allocation. The separate row
-        // group trigger bounds encoder accumulation without creating extra parts.
-        for offset in (0..batch.num_rows()).step_by(4096) {
-            parquet.write(&batch.slice(offset, (batch.num_rows() - offset).min(4096)))?;
-            if parquet.memory_size() >= ROW_GROUP_MEMORY_BYTES {
-                parquet.flush()?;
+        let mut spool = SpoolWriter::new(crate::s3::upload::MAX_PART_BYTES, reservation)?;
+        let encoded = (|| -> Result<()> {
+            let mut parquet = ArrowWriter::try_new(
+                &mut spool,
+                batch.schema(),
+                Some(properties.writer_properties(batch)?),
+            )?;
+            // A slice shares the already-owned mapper allocation. The separate row
+            // group trigger bounds encoder accumulation without creating extra parts.
+            for offset in (0..batch.num_rows()).step_by(4096) {
+                parquet.write(&batch.slice(offset, (batch.num_rows() - offset).min(4096)))?;
+                if parquet.memory_size() >= ROW_GROUP_MEMORY_BYTES {
+                    parquet.flush()?;
+                }
             }
+            parquet.close()?;
+            Ok(())
+        })();
+        if let Err(error) = encoded {
+            if let Some(reservation) = spool.reservation_exceeded {
+                return Err(anyhow::Error::new(ReservationExceeded { reservation }));
+            }
+            return Err(error);
         }
-        parquet.close()?;
+        let mut reservation = spool.reservation.take();
+        if let Some(reservation) = &mut reservation {
+            reservation.shrink_to(spool.size);
+        }
         let receipt = PartReceipt {
             byte_size: spool.size,
             sha256: hex::encode(spool.hash.finalize()),
@@ -304,10 +370,15 @@ impl PreparedFlush {
             receipt,
             bytes: Bytes::new(),
             spool: Some(spool.file),
+            _reservation: reservation,
         })
     }
 
-    pub(crate) fn encode(&self, entry_index: u32) -> Result<EncodedPart> {
+    pub(crate) fn encode(
+        &self,
+        entry_index: u32,
+        reservation: Option<Reservation>,
+    ) -> Result<EncodedPart> {
         let plan = self
             .parts
             .iter()
@@ -321,14 +392,35 @@ impl PreparedFlush {
         metadata.entries.extend(footer_identity(plan));
         let mut writer = ParquetTableWriter::new(PathBuf::new(), Partition::None, self.compression);
         writer.set_file_metadata(metadata);
-        let mut bytes = Vec::new();
-        let mut parquet = ArrowWriter::try_new(
-            &mut bytes,
-            batch.schema(),
-            Some(writer.writer_properties(batch)?),
-        )?;
-        parquet.write(batch)?;
-        parquet.close()?;
+        let mut output = CappedBuffer {
+            bytes: Vec::new(),
+            reservation,
+            exceeded: None,
+        };
+        let encoded = (|| -> Result<()> {
+            let mut parquet = ArrowWriter::try_new(
+                &mut output,
+                batch.schema(),
+                Some(writer.writer_properties(batch)?),
+            )?;
+            parquet.write(batch)?;
+            parquet.close()?;
+            Ok(())
+        })();
+        if let Err(error) = encoded {
+            if let Some(reservation) = output.exceeded {
+                return Err(anyhow::Error::new(ReservationExceeded { reservation }));
+            }
+            return Err(error);
+        }
+        let CappedBuffer {
+            bytes,
+            mut reservation,
+            ..
+        } = output;
+        if let Some(reservation) = &mut reservation {
+            reservation.shrink_to(bytes.len() as u64);
+        }
         let receipt = PartReceipt {
             byte_size: u64::try_from(bytes.len())?,
             sha256: hex::encode(Sha256::digest(&bytes)),
@@ -340,6 +432,7 @@ impl PreparedFlush {
             receipt,
             bytes: Bytes::from(bytes),
             spool: None,
+            _reservation: reservation,
         })
     }
 }
@@ -493,6 +586,19 @@ fn verify_footer(
     Ok(())
 }
 
+/// Hash and footer verification of complete in-memory bytes runs on a blocking
+/// worker, so concurrent remote publications are not stalled behind it.
+async fn verify_bytes_off_thread(
+    plan: &PlannedPart,
+    receipt: &PartReceipt,
+    bytes: Bytes,
+) -> Result<()> {
+    let (plan, receipt) = (plan.clone(), receipt.clone());
+    tokio::task::spawn_blocking(move || verify_bytes(&plan, &receipt, bytes))
+        .await
+        .context("protected verification worker failed")?
+}
+
 /// The new footer bound applies to native S3 recovery as well as new encoding.
 /// Hashing and parsing use disk-backed reads, never a complete object Vec.
 fn verify_file(plan: &PlannedPart, receipt: &PartReceipt, source: &File) -> Result<()> {
@@ -566,18 +672,57 @@ fn verify_file_checked(
     verify_footer(plan, reader.metadata())
 }
 
+/// Grow `reservation` to cover `total` bytes, recording a refusal.
+fn grow_reservation(
+    reservation: &mut Option<Reservation>,
+    total: u64,
+    exceeded: &mut Option<u64>,
+) -> std::io::Result<()> {
+    if let Some(reservation) = reservation {
+        if !reservation.grow_to(total) {
+            *exceeded = Some(reservation.held());
+            return Err(std::io::Error::other(
+                "encoded part could not grow its in-flight reservation",
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// In-memory encoder output whose growth is admitted by its reservation.
+struct CappedBuffer {
+    bytes: Vec<u8>,
+    reservation: Option<Reservation>,
+    exceeded: Option<u64>,
+}
+impl Write for CappedBuffer {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        let total = (self.bytes.len() as u64).saturating_add(bytes.len() as u64);
+        grow_reservation(&mut self.reservation, total, &mut self.exceeded)?;
+        self.bytes.extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
 struct SpoolWriter {
     file: File,
     size: u64,
     limit: u64,
+    reservation: Option<Reservation>,
+    reservation_exceeded: Option<u64>,
     hash: Sha256,
 }
 impl SpoolWriter {
-    fn new(limit: u64) -> Result<Self> {
+    fn new(limit: u64, reservation: Option<Reservation>) -> Result<Self> {
         Ok(Self {
             file: tempfile::tempfile().context("creating private S3 spool")?,
             size: 0,
             limit,
+            reservation,
+            reservation_exceeded: None,
             hash: Sha256::new(),
         })
     }
@@ -589,6 +734,11 @@ impl Write for SpoolWriter {
                 "native S3 part exceeds the single-PUT size limit",
             ));
         }
+        grow_reservation(
+            &mut self.reservation,
+            self.size.saturating_add(bytes.len() as u64),
+            &mut self.reservation_exceeded,
+        )?;
         let written = self.file.write(bytes)?;
         self.size += written as u64;
         self.hash.update(&bytes[..written]);
@@ -654,12 +804,20 @@ impl<'a> LocalPartStore<'a> {
         Ok(path)
     }
 
+    /// Resolve an owned path under the control lock. File I/O on the distinct
+    /// transaction-owned names afterward runs without it, so parts of one
+    /// transaction can stage, publish and verify concurrently; control records
+    /// keep their own locked version check.
+    fn locked_path(&self, relative: &str) -> Result<PathBuf> {
+        let _mutation = self.ownership.lock_control_mutation()?;
+        self.path(relative)
+    }
+
     /// Creates only the predetermined temporary name; a collision is an error.
     /// No implicit cleanup on failure: Writing owns this path for reconciliation.
     pub(crate) fn stage(&self, encoded: &EncodedPart) -> Result<()> {
-        let _mutation = self.ownership.lock_control_mutation()?;
         verify_bytes(&encoded.plan, &encoded.receipt, encoded.bytes.clone())?;
-        let path = self.path(&encoded.plan.temporary_relative_path)?;
+        let path = self.locked_path(&encoded.plan.temporary_relative_path)?;
         local::create_dir_all_durable(path.parent().context("missing staging parent")?)?;
         let mut file = OpenOptions::new()
             .write(true)
@@ -682,9 +840,8 @@ impl<'a> LocalPartStore<'a> {
     /// The controller must durably record this exact receipt before calling.
     /// A complete final file remains after an unlink/directory-sync error.
     pub(crate) fn publish(&self, plan: &PlannedPart, receipt: &PartReceipt) -> Result<()> {
-        let _mutation = self.ownership.lock_control_mutation()?;
-        let temporary = self.path(&plan.temporary_relative_path)?;
-        let final_path = self.path(&plan.final_relative_path)?;
+        let temporary = self.locked_path(&plan.temporary_relative_path)?;
+        let final_path = self.locked_path(&plan.final_relative_path)?;
         verify_bytes(
             plan,
             receipt,
@@ -709,9 +866,8 @@ impl<'a> LocalPartStore<'a> {
         receipt: &PartReceipt,
         staged: bool,
     ) -> Result<PartPresence> {
-        let _mutation = self.ownership.lock_control_mutation()?;
         validate_receipt(plan, receipt)?;
-        let path = self.path(if staged {
+        let path = self.locked_path(if staged {
             &plan.temporary_relative_path
         } else {
             &plan.final_relative_path
@@ -791,6 +947,36 @@ impl<'a> S3PartStore<'a> {
             format!("{}/{}", self.prefix, plan.final_relative_path)
         }))
     }
+    /// Checked immediately before each data mutation: the persistent owner
+    /// record must still be ours and no earlier attempt may be unresolved. The
+    /// control lock orders the uncertainty check against in-process control
+    /// mutations but is not held across the owner read or the data request, so
+    /// several parts of one transaction can publish concurrently. Any unresolved
+    /// attempt marks the owner uncertain and every later gate refuses to start.
+    /// Only acquisition and release rewrite the owner record, and release needs
+    /// exclusive ownership of the guard these publications borrow.
+    async fn publication_gate(&self) -> Result<()> {
+        {
+            let _mutation = self.ownership.lock_control_mutation().await;
+            ensure!(
+                !self.ownership.is_mutation_uncertain(),
+                "unresolved remote mutation requires quiescent recovery"
+            );
+        }
+        ensure!(
+            S3Ownership::status(self.ownership.object_store())
+                .await?
+                .as_ref()
+                == Some(self.ownership.record()),
+            "remote ownership changed before part publication"
+        );
+        ensure!(
+            !self.ownership.is_mutation_uncertain(),
+            "unresolved remote mutation requires quiescent recovery"
+        );
+        Ok(())
+    }
+
     /// Single Create attempt. Even an acknowledged object must match exact bytes,
     /// version and footer before the attempt is resolved. Any error/cancellation
     /// permanently retains Owned; only provider-quiescent recovery can retry.
@@ -802,20 +988,13 @@ impl<'a> S3PartStore<'a> {
             encoded.spool.is_none(),
             "spooled part requires its native upload capability"
         );
-        let _mutation = self.ownership.lock_control_mutation().await;
         ensure!(
             !self.ownership.is_mutation_uncertain(),
             "unresolved remote mutation requires quiescent recovery"
         );
-        verify_bytes(&encoded.plan, &encoded.receipt, encoded.bytes.clone())?;
+        verify_bytes_off_thread(&encoded.plan, &encoded.receipt, encoded.bytes.clone()).await?;
         let key = self.key(&encoded.plan)?;
-        ensure!(
-            S3Ownership::status(self.ownership.object_store())
-                .await?
-                .as_ref()
-                == Some(self.ownership.record()),
-            "remote ownership changed before part publication"
-        );
+        self.publication_gate().await?;
         let mut attempt = MutationAttempt {
             ownership: self.ownership,
             resolved: false,
@@ -846,16 +1025,17 @@ impl<'a> S3PartStore<'a> {
             version == observed,
             "protected part version changed during publication"
         );
-        verify_bytes(&encoded.plan, &encoded.receipt, bytes)?;
+        verify_bytes_off_thread(&encoded.plan, &encoded.receipt, bytes).await?;
         attempt.resolved = true;
         Ok(())
     }
+    /// Read-only; it takes no control lock so final verification of a
+    /// transaction's parts can overlap.
     pub(crate) async fn verify(
         &self,
         plan: &PlannedPart,
         receipt: &PartReceipt,
     ) -> Result<PartPresence> {
-        let _mutation = self.ownership.lock_control_mutation().await;
         validate_receipt(plan, receipt)?;
         if self.ownership.native_upload().is_some() {
             return self.verify_native(plan, receipt, None).await;
@@ -863,7 +1043,7 @@ impl<'a> S3PartStore<'a> {
         let Some((bytes, _)) = self.read(&self.key(plan)?, receipt).await? else {
             return Ok(PartPresence::Missing);
         };
-        verify_bytes(plan, receipt, bytes)?;
+        verify_bytes_off_thread(plan, receipt, bytes).await?;
         Ok(PartPresence::Present)
     }
     async fn publish_native(
@@ -871,7 +1051,6 @@ impl<'a> S3PartStore<'a> {
         native: &crate::s3::upload::NativeS3Upload,
         encoded: &EncodedPart,
     ) -> Result<()> {
-        let _mutation = self.ownership.lock_control_mutation().await;
         ensure!(
             !self.ownership.is_mutation_uncertain(),
             "unresolved remote mutation requires quiescent recovery"
@@ -891,13 +1070,7 @@ impl<'a> S3PartStore<'a> {
         .await
         .map_err(|_| anyhow::anyhow!("verifying native upload spool timed out"))??;
         let key = self.key(&encoded.plan)?;
-        ensure!(
-            S3Ownership::status(self.ownership.object_store())
-                .await?
-                .as_ref()
-                == Some(self.ownership.record()),
-            "remote ownership changed before part publication"
-        );
+        self.publication_gate().await?;
         let upload = native
             .prepare(
                 &key,

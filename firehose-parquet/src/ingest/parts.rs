@@ -71,17 +71,36 @@ impl<'a> TransactionParts<'a> {
         Ok(())
     }
 
-    pub fn encode(
-        &self,
-        prepared: &protected::PreparedFlush,
-        entry_index: u32,
-    ) -> Result<EncodedPart> {
+    /// Local parts are published by blocking file I/O.
+    pub fn is_local(&self) -> bool {
+        matches!(self, Self::Local { .. })
+    }
+
+    /// Blocking local publication, for the controller's supervised I/O lane.
+    pub fn publish_local(&self, encoded: &EncodedPart) -> Result<()> {
         match self {
-            Self::S3 { owner, .. } if owner.native_upload().is_some() => {
-                prepared.encode_spooled(entry_index)
-            }
-            _ => prepared.encode(entry_index),
+            Self::Local { store, .. } => store.publish(encoded.plan(), encoded.receipt()),
+            Self::S3 { .. } => bail!("remote parts publish asynchronously"),
         }
+    }
+
+    /// Blocking local final verification, for the supervised I/O lane.
+    pub fn verify_final_local(
+        &self,
+        pending: &PendingTransaction,
+        part: &PlannedPart,
+    ) -> Result<PartPresence> {
+        match self {
+            Self::Local { store, .. } => {
+                store.verify(&writer_plan(pending, part), &writer_receipt(part)?, false)
+            }
+            Self::S3 { .. } => bail!("remote parts verify asynchronously"),
+        }
+    }
+
+    /// Native S3 parts encode into a private disk spool; others into memory.
+    pub fn encodes_spooled(&self) -> bool {
+        matches!(self, Self::S3 { owner, .. } if owner.native_upload().is_some())
     }
 
     pub fn stage(&self, encoded: &EncodedPart) -> Result<()> {
@@ -97,13 +116,22 @@ impl<'a> TransactionParts<'a> {
         }
     }
 
-    pub async fn verify_all_finals(&self, pending: &PendingTransaction) -> Result<()> {
-        for part in &pending.parts {
-            if self.verify_final(pending, part).await? != PartPresence::Present {
-                bail!("committed transaction is missing a required final part");
-            }
-        }
-        Ok(())
+    /// Verify every final part, at most `concurrency` at a time. These are
+    /// read-only checks; the first failure stops and drops the remaining reads.
+    pub async fn verify_all_finals(
+        &self,
+        pending: &PendingTransaction,
+        concurrency: usize,
+    ) -> Result<()> {
+        use futures::TryStreamExt;
+        futures::stream::iter(pending.parts.iter().map(Ok))
+            .try_for_each_concurrent(concurrency.max(1), |part| async move {
+                if self.verify_final(pending, part).await? != PartPresence::Present {
+                    bail!("committed transaction is missing a required final part");
+                }
+                Ok(())
+            })
+            .await
     }
 
     pub async fn rollback_writing(&self, pending: &PendingTransaction) -> Result<()> {

@@ -118,9 +118,9 @@ fn native_spool_process_qualification() {
                 },
             );
             let encoded = if mode == "encode-memory" {
-                prepared.encode(0).unwrap()
+                prepared.encode(0, None).unwrap()
             } else {
-                prepared.encode_spooled(0).unwrap()
+                prepared.encode_spooled(0, None).unwrap()
             };
             println!(
                 "QUALIFICATION {}",
@@ -135,6 +135,7 @@ fn native_spool_process_qualification() {
                 receipt,
                 bytes: Bytes::new(),
                 spool: Some(File::open(path).unwrap()),
+                _reservation: None,
             };
             tokio::runtime::Builder::new_multi_thread()
                 .worker_threads(2)
@@ -213,7 +214,7 @@ fn retained_evm_tables_spool_without_schema_or_value_drift() {
                 max_timestamp: None,
             };
             let prepared = prepare(input.clone(), Partition::None, metadata);
-            let encoded = prepared.encode_spooled(0).unwrap();
+            let encoded = prepared.encode_spooled(0, None).unwrap();
             let reader = ParquetRecordBatchReaderBuilder::try_new(encoded.spool.unwrap()).unwrap();
             assert_eq!(reader.schema().fields(), schema.fields());
             let actual = concat_batches(
