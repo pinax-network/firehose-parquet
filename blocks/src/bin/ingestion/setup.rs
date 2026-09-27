@@ -74,8 +74,8 @@ impl ResolvedEndpoint {
 
         validate_cursor_storage(&config)?;
 
-        // Fetch endpoint info for auto-detection of encoding, chain_name-based
-        // output directory, and feature capability logging.
+        // Fetch endpoint info for auto-detection of encoding, the {chain}
+        // output placeholder, and feature capability logging.
         let client = FirehoseClient::new(config.clone())?;
         // A signal during endpoint startup stops before anything is written.
         // Preserve the required Info result; cancellation does not restore fallback
@@ -95,10 +95,18 @@ impl ResolvedEndpoint {
         };
         debug!(endpoint_info = ?endpoint_info, "fetched endpoint metadata");
 
-        // Use chain_name as a subdirectory under the output path, unless
-        // --without-chain-dir selects the output root itself. The cursor
-        // mirror, authority, ownership and recovery all follow this root.
-        config.output = resolve_output(&config.output, &endpoint_info, args.without_chain_dir)?;
+        // --output is the dataset root, with any {chain} expanded to the
+        // endpoint's chain_name. The cursor mirror, authority, ownership and
+        // recovery all follow this root.
+        let output_template = std::mem::take(&mut config.output);
+        config.output = resolve_output(&output_template, &endpoint_info)?;
+        if config.output != output_template {
+            info!(
+                output_template = %output_template.display(),
+                output = %config.output.display(),
+                "resolved --output template"
+            );
+        }
 
         // Protected authority must bind the actual mapper before opening Blocks.
         // Unknown custom endpoint metadata therefore requires an explicit family.

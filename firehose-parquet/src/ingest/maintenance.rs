@@ -23,9 +23,9 @@ use crate::durable_state::{ControlKey, LocalStateStore, CONTROL_DIRECTORY};
 use crate::durable_state_s3::S3StateStore;
 
 /// A protected dataset encloses, or is nested in, the selected ingestion root.
-/// Switching `--without-chain-dir` on an existing dataset always lands here:
-/// `<output>` and `<output>/<chain_name>` overlap. No path is echoed.
-const OVERLAPPING_INGESTION_ROOT: &str = "selected ingestion output overlaps another protected root: an enclosing or nested directory already holds a protected dataset. `build` writes to <output>/<chain_name>, or to <output> itself with --without-chain-dir; rerun with the choice the existing dataset was created with, or use a separate output root";
+/// Adding or dropping a `{chain}` segment in `--output` of an existing dataset
+/// always lands here: `s3://b` and `s3://b/{chain}` overlap. No path is echoed.
+const OVERLAPPING_INGESTION_ROOT: &str = "selected ingestion output overlaps another protected root: an enclosing or nested directory already holds a protected dataset. `build` writes to --output exactly as given, with {chain} expanded to the endpoint's chain_name; rerun with the --output the existing dataset was created with, or use a separate output root";
 
 const MAX_ROOTS: usize = 256;
 const MAX_EXPANSIONS: usize = 8;

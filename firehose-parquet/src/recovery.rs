@@ -404,7 +404,7 @@ mod tests {
     }
 
     /// `recovery status s3://bucket` reads a dataset written with
-    /// `build --without-chain-dir` at the bucket root; its control records are
+    /// `build --output s3://bucket` at the bucket root; its control records are
     /// not visible from a chain directory below it.
     #[tokio::test]
     async fn remote_status_reads_the_control_records_of_a_bucket_root_dataset() {

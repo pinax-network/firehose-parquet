@@ -794,7 +794,7 @@ fn remote_protected_frontier_is_read_without_ownership() {
         .any(|w| w.contains("s3://bucket/mainnet") && w.contains("block 110")));
 }
 
-/// `build --without-chain-dir --output s3://bucket` puts the protected
+/// `build --output s3://bucket` puts the protected
 /// dataset at the bucket root, next to the bucket-wide owner record and the
 /// root artifacts of other commands. verify reads the authority at the bucket
 /// root and never scans those artifacts, whether it is given the table prefix

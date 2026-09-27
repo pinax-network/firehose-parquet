@@ -2458,7 +2458,7 @@ mod tests {
         assert_eq!(s3_values(&store, ""), (0..30).collect::<Vec<_>>());
     }
 
-    /// `build --without-chain-dir --output s3://bucket` keeps a dataset at the
+    /// `build --output s3://bucket` keeps a dataset at the
     /// bucket root, where the table prefixes sit beside the cursor mirror, the
     /// partition index, the verify registry and reports, the ingestion
     /// authority and the bucket-wide owner record. Merging the bucket root

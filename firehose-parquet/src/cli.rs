@@ -193,8 +193,8 @@ pub struct CommonArgs {
     ///
     /// `build` always resumes from the output's mandatory authority under
     /// `.fireparq-ingest/`; this file is a derived compatibility copy. A
-    /// relative path resolves against the dataset root (`<output>/<chain_name>`,
-    /// or `<output>` with `--without-chain-dir`), so the default is
+    /// relative path resolves against the dataset root (`--output`, with any
+    /// `{chain}` expanded), so the default is
     /// `<dataset root>/_fireparq/cursor.parquet`; an absolute local path or an
     /// `s3://bucket/key` URI is used as given. The choice is bound when a
     /// dataset is created: later runs must pass the same value, including `none`.
@@ -233,7 +233,14 @@ pub struct CommonArgs {
     )]
     pub final_blocks_only: bool,
 
-    /// Output directory, or an explicit s3://bucket/prefix URI for S3 output
+    /// Dataset root: a directory, or an explicit s3://bucket/prefix URI for S3 output.
+    ///
+    /// Used exactly as given: the table directories, `_fireparq/` and the
+    /// `.fireparq-ingest/` state sit directly in it. `{chain}` expands to the
+    /// endpoint's chain_name anywhere in the path or S3 key prefix (not in the
+    /// bucket name), for example `s3://datasets/{chain}`; write `{{` and `}}`
+    /// for literal braces. The resolved root is bound when a dataset is
+    /// created, so later runs must resolve to the same root.
     #[arg(
         long,
         env = "OUTPUT",
@@ -472,10 +479,14 @@ Examples:
   # Create an output without the _fireparq/cursor.parquet mirror (bound at creation)
   fireparq build --network mainnet --partition date --cursor none
 
-  # One bucket per network: write the dataset at the bucket root instead of
-  # s3://ethereum-mainnet/mainnet/ (bound at creation)
+  # One bucket per network: --output is the dataset root, here the bucket root
   fireparq build --network mainnet --partition date \\
-    --output s3://ethereum-mainnet --without-chain-dir
+    --output s3://ethereum-mainnet
+
+  # Several networks in one bucket: {chain} expands to the endpoint's
+  # chain_name, here s3://datasets/v1/mainnet (bound at creation)
+  fireparq build --network mainnet --partition date \\
+    --output 's3://datasets/v1/{chain}'
 ")]
 pub struct BuildArgs {
     #[command(flatten)]
@@ -526,22 +537,6 @@ pub struct BuildArgs {
         help_heading = "Chain"
     )]
     pub without_votes: bool,
-
-    /// Write the dataset directly into `--output` instead of `<output>/<chain_name>`.
-    ///
-    /// For one bucket or directory per network, for example
-    /// `--output s3://ethereum-mainnet --without-chain-dir`. EndpointInfo must
-    /// still report a chain name; it stays in file metadata and in the
-    /// protected dataset identity. The resolved root is bound when the dataset
-    /// is created, so later runs must pass the same value: switching it points
-    /// at a directory that overlaps the existing dataset and is refused.
-    #[arg(
-        long,
-        env = "WITHOUT_CHAIN_DIR",
-        hide_env_values = true,
-        help_heading = "Output"
-    )]
-    pub without_chain_dir: bool,
 
     /// Include failed/reverted transactions on non-EVM chains (default: false).
     /// Deprecated for EVM, which includes them by default; it has no effect there.
@@ -729,16 +724,18 @@ Lookup order:
     },
     /// Verify deterministic partition merkle roots for table parquet data.
     ///
-    /// Reads one table directory of `build` output (`<output>/<chain_name>/<table>`),
+    /// Reads one table directory of `build` output (`<root>/<table>`, where
+    /// `<root>` is the dataset root that `build --output` resolved to),
     /// computes partition-level `merkle_v2` roots, compares them to
-    /// `<output>/<chain_name>/_fireparq/merkle_roots.parquet`, and optionally writes
+    /// `<root>/_fireparq/merkle_roots.parquet`, and optionally writes
     /// missing/updated entries. The chain and table are inferred from the file
     /// metadata and the directory layout. It only reads table data, so it can
     /// run while `build` writes the network: partitions `build` may still write
     /// are reported as `open` and are neither compared nor recorded.
     #[command(after_long_help = "\
 Examples:
-  # Verify ETH mainnet blocks (chain and table are inferred) and fill missing registry roots
+  # Verify ETH mainnet blocks built with --output './output/{chain}' (chain and
+  # table are inferred) and fill missing registry roots
   fireparq verify ./output/mainnet/blocks
 
   # Quick profile (roots only)
@@ -750,7 +747,7 @@ Examples:
   # Continue scanning all partitions (no fail-fast) and emit JSON report
   fireparq verify ./output/mainnet/blocks --no-fail-fast --report-json verify-report.json
 
-  # Publish the report to <output>/<chain_name>/_fireparq/verify_runs/<run_id>/report.json
+  # Publish the report to <root>/_fireparq/verify_runs/<run_id>/report.json
   fireparq verify ./output/mainnet/blocks --publish-report
 
   # Publish the report to an explicit S3 location
@@ -1241,25 +1238,18 @@ Examples:
         /// Compression codec for the written `_fireparq/partitions.parquet`: zstd (level 3), zstd:<level>, snappy, gzip, none
         #[arg(long, default_value = "zstd", help_heading = "Output")]
         compression: String,
-        /// Output root path: a local directory or an explicit s3://bucket/prefix URI (required).
+        /// Dataset root: a local directory or an explicit s3://bucket/prefix URI (required).
         ///
+        /// Resolved exactly like `build --output`: used as given, with
+        /// `{chain}` expanded to the endpoint's chain_name (for example
+        /// `s3://datasets/{chain}`). The index goes to
+        /// `<root>/_fireparq/partitions.parquet`, and the default cursor
+        /// mirror `<root>/_fireparq/cursor.parquet` is read from the same root.
         /// S3 writes need an explicit `s3://` URI. When `--s3-bucket` /
         /// `S3_BUCKET` is set, a relative output is rejected as ambiguous; use
         /// `./path` or an absolute path for local output.
         #[arg(long, required = true, help_heading = "Output")]
         output: Option<String>,
-        /// Write `_fireparq/partitions.parquet` directly into `--output` instead of `<output>/<chain_name>/`.
-        ///
-        /// Use it with a dataset that `build --without-chain-dir` writes into
-        /// the same output root; the default cursor mirror
-        /// `_fireparq/cursor.parquet` is then read from that root too.
-        #[arg(
-            long,
-            env = "WITHOUT_CHAIN_DIR",
-            hide_env_values = true,
-            help_heading = "Output"
-        )]
-        without_chain_dir: bool,
         /// Optional check that an explicit s3:// output uses this bucket; never expands relative paths
         #[arg(
             long,

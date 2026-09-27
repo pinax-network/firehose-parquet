@@ -462,8 +462,8 @@ mod tests {
             .unwrap();
         assert!(remote_contents(&store, "", "s3://data").await.is_err());
     }
-    /// `partitions build --without-chain-dir --output s3://data` can run
-    /// before the first `build --without-chain-dir` into the same bucket: the
+    /// `partitions build --output s3://data` can run
+    /// before the first `build --output s3://data` into the same bucket: the
     /// bucket root then holds only the owner record and a same-chain index,
     /// and stays eligible. Another chain's index or any other object is not.
     #[tokio::test(flavor = "current_thread")]

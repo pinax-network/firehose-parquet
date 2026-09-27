@@ -188,10 +188,10 @@ async fn remote_discovery_uses_components_and_includes_ancestors_descendants() {
     owner.release().await.unwrap();
 }
 
-/// A dataset written with `--without-chain-dir` to `s3://bucket` has its
+/// A dataset written with `--output s3://bucket` has its
 /// marker at the bucket root. A table or partition below it resolves to the
-/// bucket root, and a second dataset nested in it (for example the default
-/// `s3://bucket/<chain>` layout) is refused as conflicting authority.
+/// bucket root, and a second dataset nested in it (for example
+/// `--output 's3://bucket/{chain}'`) is refused as conflicting authority.
 #[tokio::test]
 async fn remote_discovery_finds_a_protected_bucket_root_and_refuses_nesting() {
     use crate::dataset_lock_s3::S3Ownership;
@@ -686,7 +686,7 @@ async fn native_remote_merge_recovery_works_with_current_thread_and_borrowed_ses
     remote_merge_recovery_at("data").await;
 }
 
-/// `build --without-chain-dir --output s3://bucket` puts the protected root at
+/// `build --output s3://bucket` puts the protected root at
 /// the bucket root: its authority, marker discovery and merge recovery use the
 /// empty prefix exactly like a chain directory.
 #[tokio::test]

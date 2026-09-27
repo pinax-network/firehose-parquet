@@ -973,7 +973,7 @@ mod tests {
         );
     }
 
-    /// A dataset written with `--without-chain-dir` to a bucket root shares
+    /// A dataset written with `--output s3://<bucket>` to a bucket root shares
     /// the root with the dataset artifacts and the bucket-wide owner record.
     /// A partition filter at the bucket root deletes only matching table
     /// parts; even an unfiltered run, which also removes the dataset

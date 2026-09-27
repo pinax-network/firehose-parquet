@@ -3,14 +3,13 @@ use arrow::record_batch::RecordBatch;
 use clap::{Args, Parser};
 use firehose_parquet::cli::{
     build_config, init_tracing, list_partitions_from_index, load_env_file,
-    output_root_without_chain_dir, parse_partition_build_types, parse_partition_shard_strategy,
-    partitions_index_path_in, read_verified_partitions_index_at, resolve_cursor_template,
-    resolve_partition_command, resolve_partitions_output_root, resolve_s3_output_root,
-    shard_partitions_from_index, validate_partitions_index, validate_s3_output_credentials,
-    write_verified_partitions_index, AwsConfig, BuildArgs, Commands, CursorTemplateContext,
-    PartitionBoundsRequest, PartitionBuildResult, PartitionBuildRow, PartitionBuildType,
-    PartitionListRequest, PartitionResolveOptions, PartitionShardRequest, PartitionValidateRequest,
-    PartitionsCommands,
+    parse_partition_build_types, parse_partition_shard_strategy, partitions_index_path_in,
+    read_verified_partitions_index_at, resolve_cursor_template, resolve_output_root,
+    resolve_partition_command, resolve_s3_output_root, shard_partitions_from_index,
+    validate_partitions_index, validate_s3_output_credentials, write_verified_partitions_index,
+    AwsConfig, BuildArgs, Commands, CursorTemplateContext, PartitionBoundsRequest,
+    PartitionBuildResult, PartitionBuildRow, PartitionBuildType, PartitionListRequest,
+    PartitionResolveOptions, PartitionShardRequest, PartitionValidateRequest, PartitionsCommands,
 };
 use firehose_parquet::config::{BlockMetadata, Compression, Config, Partition};
 use firehose_parquet::cursor::{CursorLocation, CursorState};
@@ -1056,23 +1055,16 @@ fn encode_bytes_from_block_id_encoding(encoding: i32) -> Option<EncodeBytes> {
 /// Resolve the output only after a successful metadata lookup. Neither a
 /// network alias nor a block family proves the endpoint's canonical suffix.
 ///
-/// The dataset root is `<output>/<chain_name>`, or `<output>` itself with
-/// `--without-chain-dir`. Both require the same nonempty `chain_name`, which
-/// stays in file metadata and in the protected dataset identity.
-fn resolve_output(
-    base: &Path,
-    endpoint_info: &Option<EndpointInfo>,
-    without_chain_dir: bool,
-) -> Result<PathBuf> {
-    let info = endpoint_info.as_ref().filter(|info| !info.chain_name.trim().is_empty())
-        .ok_or_else(|| anyhow!("EndpointInfo with a nonempty chain_name is required before resolving output and cursor paths"))?;
-    if !without_chain_dir {
-        return Ok(base.join(&info.chain_name));
-    }
-    Ok(match base.to_str() {
-        Some(uri) if uri.starts_with("s3://") => PathBuf::from(output_root_without_chain_dir(uri)),
-        _ => base.to_path_buf(),
-    })
+/// The dataset root is `--output` as given, with `{chain}` expanded to the
+/// endpoint's `chain_name` ([`resolve_output_root`]). A nonempty `chain_name`
+/// is required either way: it stays in file metadata and in the protected
+/// dataset identity.
+fn resolve_output(output: &Path, endpoint_info: &Option<EndpointInfo>) -> Result<PathBuf> {
+    let chain_name = endpoint_info
+        .as_ref()
+        .map_or("", |info| info.chain_name.as_str());
+    let output = output.to_str().context("--output must be valid UTF-8")?;
+    Ok(PathBuf::from(resolve_output_root(output, chain_name)?))
 }
 
 async fn ensure_endpoint_available(
@@ -1306,7 +1298,6 @@ async fn run_partitions_build(
     block_range_size: Option<u64>,
     compression: Compression,
     output: Option<&str>,
-    without_chain_dir: bool,
     s3_bucket: Option<&str>,
     resume: bool,
     overwrite: bool,
@@ -1409,11 +1400,11 @@ async fn run_partitions_build(
         &endpoint_info,
         block_range_size,
     );
-    // `<output>/<chain>`, or `<output>` itself with --without-chain-dir: the
-    // index and the default cursor mirror used to infer --start-block both
-    // live in its `_fireparq/` directory.
-    let chain_output_root = resolve_partitions_output_root(&output_root, &chain, without_chain_dir);
-    let partitions_index = partitions_index_path_in(&chain_output_root);
+    // The same dataset root as `build --output`: the index and the default
+    // cursor mirror used to infer --start-block both live in its `_fireparq/`
+    // directory.
+    let dataset_root = resolve_output_root(&output_root, &chain)?;
+    let partitions_index = partitions_index_path_in(&dataset_root);
 
     // Prove the requested bound before acquiring remote ownership or reading
     // an existing index. No failed probe can create or replace an index.
@@ -1428,11 +1419,11 @@ async fn run_partitions_build(
         );
     }
     info!(
+        output = %firehose_parquet::cli::display_destination(&dataset_root),
         partitions_index = %firehose_parquet::cli::display_destination(&partitions_index),
         "resolved partition index destination"
     );
-    let ownership =
-        prepare_partitions_index_write(&chain_output_root, &partitions_index, aws).await?;
+    let ownership = prepare_partitions_index_write(&dataset_root, &partitions_index, aws).await?;
     let mut snapshot = load_existing_verified_partitions_index(&partitions_index, aws, overwrite)?;
     let existing_rows = snapshot
         .as_ref()
@@ -1480,7 +1471,7 @@ async fn run_partitions_build(
         live,
         || {
             let cursor = CursorLocation::resolve(
-                &chain_output_root,
+                &dataset_root,
                 firehose_parquet::artifacts::DEFAULT_CURSOR_MIRROR,
                 |bucket| Ok(Arc::new(aws.build_read_client(bucket)?)),
             )?;
@@ -2468,7 +2459,6 @@ async fn main() -> Result<()> {
                     block_range_size,
                     compression,
                     output,
-                    without_chain_dir,
                     s3_bucket,
                     resume,
                     overwrite,
@@ -2501,7 +2491,6 @@ async fn main() -> Result<()> {
                         *block_range_size,
                         compression,
                         output.as_deref(),
-                        *without_chain_dir,
                         s3_bucket.as_deref(),
                         *resume,
                         *overwrite,
@@ -3701,28 +3690,35 @@ mod tests {
             .contains("S3 output bucket `data` disagrees"));
     }
 
+    /// The default mirror follows the resolved dataset root: `--output` as
+    /// given, or with `{chain}` expanded.
     #[test]
-    fn test_resolve_cursor_location_places_default_local_cursor_under_chain_output_root() {
-        let config = Config {
-            output: std::path::PathBuf::from("./output/mainnet"),
-            cursor_path: Some(firehose_parquet::artifacts::DEFAULT_CURSOR_MIRROR.to_string()),
-            s3_bucket: Some("my-bucket".to_string()),
-            aws_access_key_id: Some("AKID123".to_string()),
-            aws_secret_access_key: Some("secret456".to_string()),
-            aws_region: Some("auto".to_string()),
-            aws_endpoint_url: Some("https://storage.example.com".to_string()),
-            ..Config::default()
-        };
+    fn test_resolve_cursor_location_places_default_local_cursor_under_the_dataset_root() {
+        for (output, cursor) in [
+            ("./output", "./output/_fireparq/cursor.parquet"),
+            (
+                "./output/{chain}",
+                "./output/mainnet/_fireparq/cursor.parquet",
+            ),
+        ] {
+            let config = Config {
+                output: resolve_output(Path::new(output), &endpoint_info_named("mainnet")).unwrap(),
+                cursor_path: Some(firehose_parquet::artifacts::DEFAULT_CURSOR_MIRROR.to_string()),
+                s3_bucket: Some("my-bucket".to_string()),
+                aws_access_key_id: Some("AKID123".to_string()),
+                aws_secret_access_key: Some("secret456".to_string()),
+                aws_region: Some("auto".to_string()),
+                aws_endpoint_url: Some("https://storage.example.com".to_string()),
+                ..Config::default()
+            };
 
-        let cursor_location = resolve_cursor_location(&config).expect("cursor location");
-        match cursor_location {
-            Some(CursorLocation::Local(path)) => {
-                assert_eq!(
-                    path,
-                    std::path::PathBuf::from("./output/mainnet/_fireparq/cursor.parquet")
-                );
+            let cursor_location = resolve_cursor_location(&config).expect("cursor location");
+            match cursor_location {
+                Some(CursorLocation::Local(path)) => {
+                    assert_eq!(path, std::path::PathBuf::from(cursor));
+                }
+                other => panic!("expected local cursor location, got {other:?}"),
             }
-            other => panic!("expected local cursor location, got {other:?}"),
         }
     }
 
@@ -4094,75 +4090,45 @@ mod tests {
         assert!(!help.contains("--skip-missing-blocks"));
     }
 
-    /// `--without-chain-dir` is an opt-in flag on `build` and `partitions
-    /// build` (default false, so the chain directory stays appended), read
-    /// from `WITHOUT_CHAIN_DIR` like the other `--without-*` toggles.
+    /// `--output` is the only layout control of `build` and `partitions
+    /// build`: neither has a chain-directory flag or env var, and both help
+    /// texts document the opt-in `{chain}` placeholder with an example.
     #[test]
-    fn test_without_chain_dir_parses_on_build_and_partitions_build() {
-        let build = |extra: &[&str]| {
-            let mut args = vec![
-                "fireparq",
-                "build",
-                "--network",
-                "mainnet",
-                "--start-block",
-                "100",
-                "--stop-block",
-                "200",
-            ];
-            args.extend_from_slice(extra);
-            match Cli::try_parse_from(args).unwrap().command {
-                Some(Commands::Build(build_args)) => build_args.without_chain_dir,
-                _ => panic!("expected Commands::Build"),
+    fn test_output_is_the_only_layout_control_and_help_documents_chain() {
+        for name in ["build", "partitions"] {
+            let mut command = Cli::command();
+            let mut subcommand = command.find_subcommand_mut(name).unwrap().clone();
+            if name == "partitions" {
+                subcommand = subcommand.find_subcommand("build").unwrap().clone();
             }
-        };
-        assert!(!build(&[]));
-        assert!(build(&["--without-chain-dir"]));
-        assert!(build(&["--without-chain-dir", "--without-extended"]));
-
-        let partitions = |extra: &[&str]| {
-            let mut args = vec![
-                "fireparq",
-                "partitions",
-                "build",
-                "--network",
-                "mainnet",
-                "--stop-block",
-                "200",
-                "--partition",
-                "date",
-                "--output",
-                "./output",
-            ];
-            args.extend_from_slice(extra);
-            match Cli::try_parse_from(args).unwrap().command {
-                Some(Commands::Partitions(PartitionsCommands::Build {
-                    without_chain_dir, ..
-                })) => without_chain_dir,
-                _ => panic!("expected partitions build"),
+            for argument in subcommand.get_arguments() {
+                let long = argument.get_long().unwrap_or_default();
+                let env = argument
+                    .get_env()
+                    .map(|env| env.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                assert!(
+                    !long.contains("chain-dir") && !env.contains("CHAIN_DIR"),
+                    "{name}: {long} {env}"
+                );
             }
-        };
-        assert!(!partitions(&[]));
-        assert!(partitions(&["--without-chain-dir"]));
-
-        // A flag takes no value; `--without-chain-dir=false` is not a spelling.
-        let error = Cli::try_parse_from([
-            "fireparq",
-            "build",
-            "--network",
-            "mainnet",
-            "--without-chain-dir=false",
-        ])
-        .unwrap_err();
-        assert_eq!(error.kind(), clap::error::ErrorKind::TooManyValues);
-
-        for args in [
-            &["fireparq", "build", "--help"][..],
-            &["fireparq", "partitions", "build", "--help"][..],
+        }
+        let build = command_help(&["fireparq", "build", "--help"]);
+        for snippet in [
+            "Used exactly as given",
+            "`{chain}` expands to the endpoint's chain_name",
+            "--output 's3://datasets/v1/{chain}'",
+            "--output s3://ethereum-mainnet",
         ] {
-            let help = command_help(args);
-            assert!(help.contains("--without-chain-dir"), "{help}");
-            assert!(help.contains("WITHOUT_CHAIN_DIR"), "{help}");
+            assert!(build.contains(snippet), "{snippet}: {build}");
+        }
+        let partitions = command_help(&["fireparq", "partitions", "build", "--help"]);
+        for snippet in [
+            "Resolved exactly like `build --output`",
+            "`s3://datasets/{chain}`",
+            "<root>/_fireparq/partitions.parquet",
+        ] {
+            assert!(partitions.contains(snippet), "{snippet}: {partitions}");
         }
     }
 
@@ -4990,73 +4956,79 @@ mod tests {
         })
     }
 
+    /// The dataset root is `--output` byte for byte, for local paths and S3
+    /// URIs alike (only S3 trailing `/` separators are dropped): no
+    /// `<chain_name>` directory is appended.
     #[test]
-    fn test_resolve_output_with_chain_name() {
-        let base = PathBuf::from(".");
+    fn test_resolve_output_uses_the_output_exactly_as_given() {
         let ei = endpoint_info_named("mainnet");
-        assert_eq!(
-            resolve_output(&base, &ei, false).unwrap(),
-            PathBuf::from("./mainnet")
-        );
-    }
-
-    /// The default keeps appending `<chain_name>` exactly as before
-    /// `--without-chain-dir` existed, for local paths and S3 URIs alike.
-    #[test]
-    fn test_resolve_output_default_appends_chain_name_unchanged() {
-        let ei = endpoint_info_named("mainnet");
-        for (base, expected) in [
-            (".", "./mainnet"),
-            ("./output", "./output/mainnet"),
-            ("./output/", "./output/mainnet"),
-            ("/data/output", "/data/output/mainnet"),
-            ("s3://ethereum-mainnet", "s3://ethereum-mainnet/mainnet"),
-            ("s3://ethereum-mainnet/", "s3://ethereum-mainnet/mainnet"),
-            ("s3://bucket/v1", "s3://bucket/v1/mainnet"),
+        for base in [
+            ".",
+            "./output",
+            "./output/",
+            "/data/output",
+            "s3://ethereum-mainnet",
+            "s3://bucket/v1",
         ] {
-            let resolved = resolve_output(&PathBuf::from(base), &ei, false).unwrap();
-            assert_eq!(resolved.to_str(), Some(expected), "{base}");
-            assert_eq!(resolved, PathBuf::from(base).join("mainnet"), "{base}");
+            let resolved = resolve_output(&PathBuf::from(base), &ei).unwrap();
+            assert_eq!(resolved.to_str(), Some(base), "{base}");
+            assert_eq!(resolved, PathBuf::from(base), "{base}");
         }
-    }
-
-    #[test]
-    fn test_resolve_output_without_chain_dir_uses_the_output_root() {
-        let ei = endpoint_info_named("mainnet");
         for (base, expected) in [
-            (".", "."),
-            ("./output", "./output"),
-            ("./output/", "./output/"),
-            ("/data/output", "/data/output"),
-            ("s3://ethereum-mainnet", "s3://ethereum-mainnet"),
             ("s3://ethereum-mainnet/", "s3://ethereum-mainnet"),
-            ("s3://bucket/v1", "s3://bucket/v1"),
             ("s3://bucket/v1/", "s3://bucket/v1"),
         ] {
-            let resolved = resolve_output(&PathBuf::from(base), &ei, true).unwrap();
+            let resolved = resolve_output(&PathBuf::from(base), &ei).unwrap();
             assert_eq!(resolved.to_str(), Some(expected), "{base}");
         }
+    }
+
+    /// `{chain}` is the opt-in way to name a directory after the endpoint's
+    /// canonical chain name; v0.7.x's `<output>/<chain_name>` layout is
+    /// `<output>/{chain}`.
+    #[test]
+    fn test_resolve_output_expands_the_chain_placeholder() {
+        let ei = endpoint_info_named("mainnet");
+        for (base, expected) in [
+            ("./{chain}", "./mainnet"),
+            ("./output/{chain}", "./output/mainnet"),
+            ("/data/{chain}/raw", "/data/mainnet/raw"),
+            ("s3://datasets/{chain}", "s3://datasets/mainnet"),
+            (
+                "s3://datasets/v1/{chain}/raw",
+                "s3://datasets/v1/mainnet/raw",
+            ),
+            ("s3://datasets/{chain}/", "s3://datasets/mainnet"),
+        ] {
+            let resolved = resolve_output(&PathBuf::from(base), &ei).unwrap();
+            assert_eq!(resolved.to_str(), Some(expected), "{base}");
+        }
+        let error = resolve_output(&PathBuf::from("s3://{chain}/raw"), &ei)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("S3 bucket name"), "{error}");
     }
 
     #[test]
     fn test_resolve_output_without_endpoint_info() {
-        let base = PathBuf::from(".");
-        for without_chain_dir in [false, true] {
-            assert!(resolve_output(&base, &None, without_chain_dir).is_err());
+        for base in [".", "./output/{chain}"] {
+            let error = resolve_output(&PathBuf::from(base), &None)
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains("nonempty chain_name"), "{error}");
         }
     }
 
-    /// `--without-chain-dir` only drops the directory suffix: EndpointInfo
-    /// with a nonempty chain name stays mandatory.
+    /// EndpointInfo with a nonempty chain name stays mandatory even when
+    /// `--output` does not use `{chain}`: the name is still recorded in file
+    /// metadata and in the protected dataset identity.
     #[test]
     fn test_resolve_output_empty_chain_name() {
-        let base = PathBuf::from(".");
-        for chain_name in ["", "   "] {
-            for without_chain_dir in [false, true] {
-                let error =
-                    resolve_output(&base, &endpoint_info_named(chain_name), without_chain_dir)
-                        .unwrap_err()
-                        .to_string();
+        for base in [".", "./output/{chain}", "s3://bucket"] {
+            for chain_name in ["", "   "] {
+                let error = resolve_output(&PathBuf::from(base), &endpoint_info_named(chain_name))
+                    .unwrap_err()
+                    .to_string();
                 assert!(error.contains("nonempty chain_name"), "{error}");
             }
         }

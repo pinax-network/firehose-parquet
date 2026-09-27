@@ -153,7 +153,9 @@ async fn build_partition_and_maintenance_commands_conflict_with_a_descendant_own
     let cursor = root.join("_fireparq/cursor.parquet");
     std::fs::create_dir_all(cursor.parent().unwrap()).unwrap();
     std::fs::write(&cursor, b"unchanged-private-checkpoint").unwrap();
-    let output = temp.path().join("output");
+    // `{chain}` resolves to `output/test-chain`, the root that holds the
+    // owned table, only once EndpointInfo names the chain.
+    let output = temp.path().join("output/{chain}");
     let output = output.to_str().unwrap();
     let root_str = root.to_str().unwrap();
     let rolled = temp.path().join("rolled");

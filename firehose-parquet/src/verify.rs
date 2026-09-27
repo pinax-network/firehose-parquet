@@ -1711,9 +1711,9 @@ struct Target {
     table: String,
     /// Network (`firehose-parquet.chain_name`, else the chain root directory name).
     network: Option<String>,
-    /// `<output>/<chain_name>` directory, or `<output>` with
-    /// `--without-chain-dir` (local path or `s3://bucket/prefix`), holding the
-    /// table directories and `_fireparq/` (`merkle_roots.parquet`, `verify_runs/`).
+    /// The dataset root that `build --output` resolved to (local path or
+    /// `s3://bucket[/prefix]`, up to a whole bucket), holding the table
+    /// directories and `_fireparq/` (`merkle_roots.parquet`, `verify_runs/`).
     chain_root: String,
     hash_strategy: HashStrategy,
 }
@@ -3980,9 +3980,9 @@ mod tests {
         );
     }
 
-    /// `build --without-chain-dir` makes the output root itself the chain
-    /// root, up to a whole bucket. The layout still yields the table and the
-    /// artifact locations, and the network comes from file metadata.
+    /// `build --output s3://ethereum-mainnet` makes the bucket root the chain
+    /// root. The layout still yields the table and the artifact locations, and
+    /// the network comes from file metadata.
     #[test]
     fn file_layout_of_a_root_written_without_a_chain_directory() {
         let bucket = "s3://ethereum-mainnet/blocks/year=2023/month=11/day=14/part-v1-a.parquet";
@@ -4407,8 +4407,8 @@ mod tests {
     /// shadowed by a new `_fireparq/merkle_roots.parquet`: a default-registry
     /// roots run fails before reading any row and names the move. It runs again
     /// once the file is moved, and an explicit `--registry-path` or a
-    /// protocol-only run is unaffected. Covers `--without-chain-dir` roots too,
-    /// where the chain root is the output root itself.
+    /// protocol-only run is unaffected. Covers a root named after the chain
+    /// (`--output './output/{chain}'`) and one that is not.
     #[test]
     fn a_legacy_root_registry_is_refused_instead_of_shadowed() {
         let dir = tempfile::TempDir::new().unwrap();

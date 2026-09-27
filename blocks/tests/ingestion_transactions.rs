@@ -438,8 +438,9 @@ fn footer_value<'a>(footer: &'a str, key: &str) -> &'a str {
         .find_map(|line| line.trim_start().strip_prefix(key).map(str::trim))
         .unwrap_or_else(|| panic!("footer lacks {key}"))
 }
+/// The dataset root of [`command`]: `--output` itself.
 fn root(dir: &Path) -> PathBuf {
-    dir.join("output").join(CHAIN)
+    dir.join("output")
 }
 fn authority(root: &Path) -> Value {
     let bytes = std::fs::read(
@@ -576,7 +577,7 @@ async fn parent_env_file_is_ignored_and_bucket_never_redirects_relative_output()
     .await;
     let logs = plain_logs(&output);
     assert!(logs.contains("no env file loaded"), "{logs}");
-    let local_root = worktree_abs.join("target/out").join(CHAIN);
+    let local_root = worktree_abs.join("target/out");
     assert!(
         logs.contains(&format!("output={}", local_root.display())),
         "{logs}"
@@ -620,7 +621,7 @@ async fn parent_env_file_is_ignored_and_bucket_never_redirects_relative_output()
 
     // 3. --env-file selects the only file to load, so ./.env is ignored.
     let explicit = dir.path().join("explicit.env");
-    std::fs::write(&explicit, "OUTPUT=./target/explicit\n").unwrap();
+    std::fs::write(&explicit, "OUTPUT=./target/explicit/{chain}\n").unwrap();
     let output = success(relative_output_build(
         &server,
         &worktree,
@@ -2490,13 +2491,11 @@ async fn fireparq_output(dir: &Path, args: &[&str]) -> Output {
     run(command).await
 }
 
-/// `--without-chain-dir` writes the dataset directly into `--output` (one
-/// bucket or directory per network) instead of `<output>/<chain_name>/`. The
-/// chain name is still required and recorded, every downstream command
-/// resolves the chain-dir-less root, and switching the flag off on the
-/// existing dataset is refused before any Blocks request.
+/// `--output` is the dataset root (one bucket or directory per network): no
+/// `<chain_name>` directory is appended. The chain name is still required and
+/// recorded, and every downstream command works on that root.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn without_chain_dir_builds_at_the_output_root_and_every_command_follows_it() {
+async fn output_is_the_dataset_root_and_every_command_follows_it() {
     // 2023-11-14 22:13:20 UTC. Blocks 101 and 102 share hour 23, so the two
     // runs leave two parts there for merge; 104 is the finalized head that
     // `partitions build` proves.
@@ -2523,9 +2522,7 @@ async fn without_chain_dir_builds_at_the_output_root_and_every_command_follows_i
     );
 
     // build: data and authority sit at the root, the mirror in `_fireparq/`.
-    let mut first = hourly_build(&server, dir.path(), 102);
-    first.arg("--without-chain-dir");
-    let logs_first = plain_logs(&success(first).await);
+    let logs_first = plain_logs(&success(hourly_build(&server, dir.path(), 102)).await);
     assert!(
         logs_first.contains(&format!(
             "resolved write destinations output={} cursor={}",
@@ -2564,32 +2561,8 @@ async fn without_chain_dir_builds_at_the_output_root_and_every_command_follows_i
     let footer = inspect_footer(&root.join(blocks_part)).await;
     assert_eq!(footer_value(&footer, "firehose-parquet.chain_name"), CHAIN);
 
-    // Without the flag (or with WITHOUT_CHAIN_DIR=false) the same command
-    // resolves <output>/<chain_name>, inside the existing dataset: refused
-    // before Blocks, and nothing is written anywhere.
-    for env in [None, Some("false")] {
-        let before = tree_digests(&root);
-        let mut command = hourly_build(&server, dir.path(), 104);
-        if let Some(value) = env {
-            command.env("WITHOUT_CHAIN_DIR", value);
-        }
-        let output = run(command).await;
-        assert!(!output.status.success(), "{}", logs(&output));
-        assert!(
-            logs(&output).contains("overlaps another protected root")
-                && logs(&output).contains("--without-chain-dir"),
-            "{}",
-            logs(&output)
-        );
-        assert_eq!(server.calls(), 1);
-        assert!(!root.join(CHAIN).exists());
-        assert_eq!(tree_digests(&root), before);
-    }
-
-    // WITHOUT_CHAIN_DIR=true resumes the same root from its authority.
-    let mut resumed = hourly_build(&server, dir.path(), 104);
-    resumed.env("WITHOUT_CHAIN_DIR", "true");
-    success(resumed).await;
+    // The same command resumes the root from its authority.
+    success(hourly_build(&server, dir.path(), 104)).await;
     assert_eq!(server.calls(), 2);
     assert_checkpoint(&root, 4, 103, 104);
     assert_eq!(block_numbers(&root), [100, 101, 102, 103]);
@@ -2763,7 +2736,7 @@ async fn without_chain_dir_builds_at_the_output_root_and_every_command_follows_i
         assert_eq!(tree_digests(&root), before);
     }
 
-    // partitions build --without-chain-dir writes
+    // partitions build --output output writes
     // <output>/_fireparq/partitions.parquet and infers --start-block from the
     // default mirror <output>/_fireparq/cursor.parquet (block 103 + 1).
     let partitions_build = |extra: &[&str]| {
@@ -2778,7 +2751,6 @@ async fn without_chain_dir_builds_at_the_output_root_and_every_command_follows_i
                 &server.endpoint,
                 "--output",
                 "output",
-                "--without-chain-dir",
                 "--partition",
                 "block_range",
                 "--json",
@@ -2951,75 +2923,288 @@ async fn without_chain_dir_builds_at_the_output_root_and_every_command_follows_i
     assert!(output.status.success(), "{}", logs(&output));
 
     // A completed range at the root is still an authority-backed no-op.
-    let mut repeated = hourly_build(&server, dir.path(), 104);
-    repeated.arg("--without-chain-dir");
+    let repeated = hourly_build(&server, dir.path(), 104);
     assert!(logs(&success(repeated).await).contains("without opening Blocks"));
     assert_eq!(server.calls(), 2);
     assert!(!root.join(CHAIN).exists());
     server.assert_drained();
 }
 
-/// The default layout is unchanged (`<output>/<chain_name>/`), and turning
-/// `--without-chain-dir` on for that output afterwards points at the parent of
-/// the existing dataset, which is refused before Blocks as well.
+/// `build` with `--output <output>` (or `OUTPUT=<output>`), relative to `dir`,
+/// instead of [`command`]'s `<dir>/output`.
+fn command_at(
+    server: &MockFirehose,
+    dir: &Path,
+    origin: u64,
+    stop: u64,
+    output: &str,
+    from_env: bool,
+) -> tokio::process::Command {
+    let mut child = fireparq(dir);
+    child.args([
+        "build",
+        "--endpoint",
+        &server.endpoint,
+        "--block-type",
+        "evm",
+        "--start-block",
+        &origin.to_string(),
+        "--stop-block",
+        &stop.to_string(),
+        "--flush-interval-secs",
+        "1000000000",
+        "--stream-idle-timeout-secs",
+        "0",
+    ]);
+    if from_env {
+        child.env("OUTPUT", output);
+    } else {
+        child.args(["--output", output]);
+    }
+    child
+}
+
+/// `--output` is used exactly as given, and `{chain}` is the opt-in chain
+/// directory. The protected descriptor binds the resolved root, so a changed
+/// template that resolves to another root is refused before any Blocks
+/// request and changes no byte: a dataset created at `output` cannot be
+/// resumed as `output/{chain}` (nested in it), and one created at
+/// `output/{chain}` cannot be resumed as `output` (enclosing it). Spellings
+/// of the same root (`output/`, the expanded chain name) resume it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn default_layout_is_unchanged_and_cannot_switch_to_without_chain_dir() {
+async fn a_changed_output_template_is_refused_before_blocks() {
     let server = MockFirehose::start(
         (100..103).map(|n| response(n, 3)).collect(),
-        vec![Plan::complete("", 100, 101)],
+        vec![Plan::complete("", 100, 101), Plan::complete("", 100, 101)],
     )
     .await;
-    let dir = tempfile::tempdir().unwrap();
-    let output_dir = dir.path().join("output");
-    let chain_root = root(dir.path());
-    let logs_first = plain_logs(&success(command(&server, dir.path(), 100, 102)).await);
+
+    // 1. Created at `output`: the tables sit directly in it.
+    let plain = tempfile::tempdir().unwrap();
+    let root = plain.path().join("output");
+    success(command_at(&server, plain.path(), 100, 102, "output", false)).await;
+    assert_eq!(server.calls(), 1);
+    assert_checkpoint(&root, 2, 101, 102);
+    assert!(!root.join(CHAIN).exists());
+    assert_eq!(authority(&root)["descriptor"]["chain"], CHAIN);
+    let before = tree_digests(plain.path());
+    for from_env in [false, true] {
+        let output = run(command_at(
+            &server,
+            plain.path(),
+            100,
+            102,
+            "output/{chain}",
+            from_env,
+        ))
+        .await;
+        assert!(!output.status.success(), "{}", logs(&output));
+        assert!(
+            logs(&output).contains("overlaps another protected root")
+                && logs(&output).contains("--output"),
+            "{}",
+            logs(&output)
+        );
+        assert_eq!(server.calls(), 1);
+        assert_eq!(tree_digests(plain.path()), before);
+        assert!(!root.join(CHAIN).exists());
+    }
+    for same_root in ["output/", "./output"] {
+        let output = success(command_at(
+            &server,
+            plain.path(),
+            100,
+            102,
+            same_root,
+            false,
+        ))
+        .await;
+        assert!(logs(&output).contains("without opening Blocks"));
+    }
+    assert_eq!(server.calls(), 1);
+
+    // 2. Created at `output/{chain}`: the v0.7.x layout, by opt-in.
+    let templated = tempfile::tempdir().unwrap();
+    let parent = templated.path().join("output");
+    let chain_root = parent.join(CHAIN);
+    let first = success(command_at(
+        &server,
+        templated.path(),
+        100,
+        102,
+        "output/{chain}",
+        true,
+    ))
+    .await;
     assert!(
-        logs_first.contains(&format!(
-            "resolved write destinations output={} cursor={}",
-            chain_root.display(),
-            chain_root.join(MIRROR).display()
+        plain_logs(&first).contains(&format!(
+            "resolved --output template output_template=output/{{chain}} output=output/{CHAIN}"
         )),
-        "{logs_first}"
+        "{}",
+        logs(&first)
     );
+    assert!(
+        plain_logs(&first).contains(&format!(
+            "resolved write destinations output={} cursor={}",
+            templated
+                .path()
+                .canonicalize()
+                .unwrap()
+                .join("output")
+                .join(CHAIN)
+                .display(),
+            templated
+                .path()
+                .canonicalize()
+                .unwrap()
+                .join("output")
+                .join(CHAIN)
+                .join(MIRROR)
+                .display()
+        )),
+        "{}",
+        logs(&first)
+    );
+    assert_eq!(server.calls(), 2);
     assert_checkpoint(&chain_root, 2, 101, 102);
     assert_eq!(
-        std::fs::read_dir(&output_dir)
+        std::fs::read_dir(&parent)
             .unwrap()
             .map(|entry| entry.unwrap().file_name())
             .collect::<Vec<_>>(),
         [std::ffi::OsString::from(CHAIN)]
     );
-    assert!(!chain_root.join("cursor.parquet").exists());
-    let tables: Vec<String> = std::fs::read_dir(&chain_root)
-        .unwrap()
-        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
-        .filter(|name| !name.starts_with('_') && !name.starts_with('.'))
-        .collect();
-    assert!(tables.iter().any(|table| table == "blocks"), "{tables:?}");
-    assert_dataset_root_layout(
-        &chain_root,
-        &tables.iter().map(String::as_str).collect::<Vec<_>>(),
-        &["cursor.parquet"],
-    );
-
-    let before = tree_digests(&output_dir);
+    let before = tree_digests(templated.path());
     for from_env in [false, true] {
-        let mut request = command(&server, dir.path(), 100, 103);
-        if from_env {
-            request.env("WITHOUT_CHAIN_DIR", "true");
-        } else {
-            request.arg("--without-chain-dir");
-        }
-        let output = run(request).await;
+        let output = run(command_at(
+            &server,
+            templated.path(),
+            100,
+            102,
+            "output",
+            from_env,
+        ))
+        .await;
         assert!(!output.status.success(), "{}", logs(&output));
         assert!(
             logs(&output).contains("overlaps another protected root"),
             "{}",
             logs(&output)
         );
-        assert_eq!(server.calls(), 1);
-        assert_eq!(tree_digests(&output_dir), before);
-        assert!(!output_dir.join(CONTROL_DIRECTORY).exists());
+        assert_eq!(server.calls(), 2);
+        assert_eq!(tree_digests(templated.path()), before);
+        assert!(!parent.join(CONTROL_DIRECTORY).exists());
     }
+    let literal = format!("output/{CHAIN}");
+    for same_root in ["output/{chain}", literal.as_str()] {
+        let output = success(command_at(
+            &server,
+            templated.path(),
+            100,
+            102,
+            same_root,
+            false,
+        ))
+        .await;
+        assert!(logs(&output).contains("without opening Blocks"));
+    }
+    assert_eq!(server.calls(), 2);
+    server.assert_drained();
+}
+
+/// Template errors (unknown variable, unterminated or unmatched brace, a
+/// placeholder in the S3 bucket name) are refused while parsing the
+/// configuration, before the endpoint is contacted: the endpoint here is a
+/// closed port, and nothing is created.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn invalid_output_templates_are_refused_before_the_endpoint_is_contacted() {
+    let dir = tempfile::tempdir().unwrap();
+    for (output, expected) in [
+        ("output/{network}", "unknown --output variable {network}"),
+        ("output/{chain", "unterminated --output variable"),
+        ("output/chain}", "unmatched } in --output"),
+        ("s3://{chain}/datasets", "S3 bucket name"),
+    ] {
+        for arguments in [
+            &["partitions", "build", "--partition", "date"][..],
+            &["build"],
+        ] {
+            let mut command = fireparq(dir.path());
+            command
+                .args(arguments)
+                .args(["--endpoint", "http://127.0.0.1:9", "--stop-block", "200"])
+                .args(["--output", output])
+                .env("AWS_ACCESS_KEY_ID", "test")
+                .env("AWS_SECRET_ACCESS_KEY", "test");
+            let result = run(command).await;
+            assert!(!result.status.success(), "{}", logs(&result));
+            assert!(
+                logs(&result).contains(expected),
+                "{output}: {}",
+                logs(&result)
+            );
+            assert!(!logs(&result).contains("unavailable"), "{}", logs(&result));
+        }
+    }
+    assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+}
+
+/// Without `--output` the dataset root is the working directory itself (the
+/// default `.`, used as given). A working directory that already holds
+/// unrelated files is refused before any Blocks request and gains no entry;
+/// an empty one becomes the dataset root.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_default_output_is_the_working_directory_itself() {
+    let server = MockFirehose::start(
+        (100..102).map(|n| response(n, 3)).collect(),
+        vec![Plan::complete("", 100, 101)],
+    )
+    .await;
+    let default_build = |dir: &Path| {
+        let mut command = fireparq(dir);
+        command.args([
+            "build",
+            "--endpoint",
+            &server.endpoint,
+            "--block-type",
+            "evm",
+            "--start-block",
+            "100",
+            "--stop-block",
+            "102",
+            "--flush-interval-secs",
+            "1000000000",
+            "--stream-idle-timeout-secs",
+            "0",
+        ]);
+        command
+    };
+    let entries = |dir: &Path| -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .collect();
+        names.sort();
+        names
+    };
+
+    let busy = tempfile::tempdir().unwrap();
+    std::fs::write(busy.path().join("Cargo.toml"), b"[workspace]\n").unwrap();
+    let output = run(default_build(busy.path())).await;
+    assert!(!output.status.success(), "{}", logs(&output));
+    assert!(
+        logs(&output).contains("unrelated files"),
+        "{}",
+        logs(&output)
+    );
+    assert_eq!(server.calls(), 0);
+    assert_eq!(entries(busy.path()), ["Cargo.toml"]);
+
+    let empty = tempfile::tempdir().unwrap();
+    success(default_build(empty.path())).await;
+    assert_eq!(server.calls(), 1);
+    assert_checkpoint(empty.path(), 2, 101, 102);
+    assert_eq!(block_numbers(empty.path()), [100, 101]);
+    assert!(!empty.path().join(CHAIN).exists());
     server.assert_drained();
 }

@@ -9,15 +9,16 @@ It complements:
 
 ## Dataset Layout and Resolution
 
-`fireparq build` writes one directory per network, the **chain root**. With
-`--without-chain-dir` the output root itself is the chain root (for example a
-bucket per network, `s3://ethereum-mainnet/blocks/...`), and the tree below
-sits directly in it. fireparq's own artifacts live in the chain root's
-`_fireparq/` directory, which Spark, Trino, Hive and Delta skip like any path
-starting with `_` or `.`:
+`fireparq build` writes one network's dataset into the directory that
+`--output` names, the **chain root**. `--output` is used as given: a bucket per
+network puts the chain root at the bucket root (`s3://ethereum-mainnet/blocks/...`),
+and `--output 's3://datasets/{chain}'` or `--output './output/{chain}'` names a
+directory after the endpoint's chain name (`output/mainnet`, `output/sepolia`).
+fireparq's own artifacts live in the chain root's `_fireparq/` directory, which
+Spark, Trino, Hive and Delta skip like any path starting with `_` or `.`:
 
 ```
-<output>/<chain_name>/                 chain root (for example output/mainnet, output/sepolia)
+<root>/                                chain root (for example output/mainnet, or a bucket root)
   <table>/<partition dirs>/*.parquet   table data (blocks/, transactions/, ...)
   .fireparq-ingest/                    authoritative ingestion state (build)
   _fireparq/
@@ -310,15 +311,15 @@ Current recommendation:
 
 ### Bucket Layout
 
-Recommended layout (the defaults for data written by `fireparq build --output s3://<bucket>`):
-
-- `s3://<bucket>/<chain_name>/_fireparq/merkle_roots.parquet`
-- `s3://<bucket>/<chain_name>/_fireparq/verify_runs/<run_id>/report.json`
-
-For a bucket per network written with `fireparq build --output s3://<bucket> --without-chain-dir`:
+Recommended layout for a bucket per network, the defaults for data written by `fireparq build --output s3://<bucket>`:
 
 - `s3://<bucket>/_fireparq/merkle_roots.parquet`
 - `s3://<bucket>/_fireparq/verify_runs/<run_id>/report.json`
+
+For several networks in one bucket, written with `fireparq build --output 's3://<bucket>/{chain}'`:
+
+- `s3://<bucket>/<chain_name>/_fireparq/merkle_roots.parquet`
+- `s3://<bucket>/<chain_name>/_fireparq/verify_runs/<run_id>/report.json`
 
 ### Retention
 

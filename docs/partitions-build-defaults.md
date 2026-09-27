@@ -1,10 +1,11 @@
 # Partitions Build Defaults
 
 `fireparq partitions build` creates one verified v2 snapshot in
-`<output>/<chain>/_fireparq/partitions.parquet`, or in
-`<output>/_fireparq/partitions.parquet` with `--without-chain-dir` (the root that
-`build --without-chain-dir` writes, whose default cursor mirror
-`_fireparq/cursor.parquet` then supplies a missing `--start-block`). It does not
+`<root>/_fireparq/partitions.parquet`. `<root>` is resolved exactly as for
+`build`: `--output` as given, with an opt-in `{chain}` placeholder expanded to
+the endpoint's chain name, so the same `--output` value names the dataset whose
+default cursor mirror `<root>/_fireparq/cursor.parquet` supplies a missing
+`--start-block`. It does not
 change normal ingestion or writer timestamp routing. See [the file contract](partitions-parquet-contract.md)
 and [the correctness decision and tests](audit/486-partition-index-design.md).
 
