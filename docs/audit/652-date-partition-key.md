@@ -1,5 +1,7 @@
 # One `date=YYYY-MM-DD` partition key (#652)
 
+PR: [#660](https://github.com/pinax-network/firehose-parquet/pull/660).
+
 ## Diagnosis
 
 Time-partitioned output used three Hive keys, `year=YYYY/month=MM/day=DD/`,
