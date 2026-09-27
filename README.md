@@ -400,10 +400,12 @@ Relative cursor paths inherit the resolved output bucket and prefix, and
 absolute local cursor paths remain absolute for local output.
 
 **S3 writes require an explicit `s3://bucket/prefix` output** (#617). `build`
-and `partitions build` never expand a relative `--output` / `OUTPUT` into
-`--s3-bucket` / `S3_BUCKET`. When a bucket option is set, a relative output
-(including the default `.`) or, for `partitions build`, a missing output is
-rejected before contacting Firehose or storage, with the explicit URI suggested.
+(`--output` / `OUTPUT`) and `partitions build` (`--output`, required, no
+environment variable) never expand a relative output into `--s3-bucket` /
+`S3_BUCKET`. When a bucket option is set, a relative output (including the
+`build` default `.`) is rejected before contacting Firehose or storage, with the
+explicit URI suggested; a missing `partitions build --output` fails at parse
+time.
 Without a bucket option a relative output is a local path. Explicit local paths
 (`./output`, `../output`, or an absolute path) are always local. When `--output`
 is an S3 URI, `--s3-bucket` / `S3_BUCKET`, if set, must name the same bucket; this
